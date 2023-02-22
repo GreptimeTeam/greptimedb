@@ -40,12 +40,6 @@ pub enum Error {
         source: api::error::Error,
     },
 
-    #[snafu(display("Failed to create schema when creating table, source: {}", source))]
-    CreateSchema {
-        #[snafu(backtrace)]
-        source: datatypes::error::Error,
-    },
-
     #[snafu(display(
         "Duplicated timestamp column in gRPC requests, exists {}, duplicated: {}",
         exists,
@@ -90,6 +84,12 @@ pub enum Error {
         #[snafu(backtrace)]
         source: api::error::Error,
     },
+
+    #[snafu(display("Unrecognized table option: {}", source))]
+    UnrecognizedTableOption {
+        #[snafu(backtrace)]
+        source: table::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -102,14 +102,15 @@ impl ErrorExt for Error {
                 StatusCode::InvalidArguments
             }
             Error::ColumnDataType { .. } => StatusCode::Internal,
-            Error::CreateSchema { .. }
-            | Error::DuplicatedTimestampColumn { .. }
-            | Error::MissingTimestampColumn { .. } => StatusCode::InvalidArguments,
+            Error::DuplicatedTimestampColumn { .. } | Error::MissingTimestampColumn { .. } => {
+                StatusCode::InvalidArguments
+            }
             Error::InvalidColumnProto { .. } => StatusCode::InvalidArguments,
             Error::CreateVector { .. } => StatusCode::InvalidArguments,
             Error::MissingField { .. } => StatusCode::InvalidArguments,
             Error::ColumnDefaultConstraint { source, .. } => source.status_code(),
             Error::InvalidColumnDef { source, .. } => source.status_code(),
+            Error::UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
         }
     }
     fn backtrace_opt(&self) -> Option<&Backtrace> {

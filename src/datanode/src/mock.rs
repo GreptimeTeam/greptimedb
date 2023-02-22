@@ -24,6 +24,7 @@ use mito::config::EngineConfig as TableEngineConfig;
 use query::QueryEngineFactory;
 use servers::Mode;
 use snafu::ResultExt;
+use storage::compaction::noop::NoopCompactionScheduler;
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
 use table::metadata::TableId;
@@ -46,12 +47,14 @@ impl Instance {
         let object_store = new_object_store(&opts.storage).await?;
         let logstore = Arc::new(create_log_store(&opts.wal).await?);
         let meta_client = Arc::new(mock_meta_client(meta_srv, opts.node_id.unwrap_or(42)).await);
+        let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
         let table_engine = Arc::new(DefaultEngine::new(
             TableEngineConfig::default(),
             EngineImpl::new(
                 StorageEngineConfig::default(),
                 logstore.clone(),
                 object_store.clone(),
+                compaction_scheduler,
             ),
             object_store,
         ));

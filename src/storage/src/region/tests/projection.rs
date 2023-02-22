@@ -158,6 +158,7 @@ impl<S: LogStore> ProjectionTester<S> {
 
         let mut dst = Vec::new();
         while let Some(chunk) = reader.next_chunk().await.unwrap() {
+            let chunk = reader.project_chunk(chunk);
             append_chunk_to(&chunk, &mut dst);
         }
 

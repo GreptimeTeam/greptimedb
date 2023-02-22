@@ -8,6 +8,7 @@ license.workspace = true
 arc-swap = "1.0"
 async-trait = "0.1"
 catalog = { path = "../catalog" }
+chrono.workspace = true
 common-base = { path = "../common/base" }
 common-catalog = { path = "../common/catalog" }
 common-error = { path = "../common/error" }
@@ -28,7 +29,7 @@ futures-util.workspace = true
 metrics = "0.20"
 once_cell = "1.10"
 promql = { path = "../promql" }
-promql-parser = { git = "https://github.com/GreptimeTeam/promql-parser.git", rev = "fa186978a1234baf5a3e372da03aa663d859cdd2" }
+promql-parser = "0.1.0"
 serde.workspace = true
 serde_json = "1.0"
 session = { path = "../session" }
@@ -45,7 +46,7 @@ num = "0.4"
 num-traits = "0.2"
 paste = "1.0"
 rand = "0.8"
-statrs = "0.15"
+statrs = "0.16"
 stats-cli = "3.0"
 streaming-stats = "0.2"
 tokio-stream = "0.1"

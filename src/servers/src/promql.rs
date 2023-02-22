@@ -19,23 +19,36 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use axum::body::BoxBody;
 use axum::extract::{Query, State};
-use axum::{routing, Json, Router};
+use axum::{routing, Form, Json, Router};
 use common_error::prelude::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::info;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::scalars::ScalarVector;
+use datatypes::vectors::{Float64Vector, StringVector, TimestampMillisecondVector};
 use futures::FutureExt;
+use promql_parser::label::METRIC_NAME;
+use promql_parser::parser::{
+    AggregateExpr, BinaryExpr, Call, Expr as PromqlExpr, MatrixSelector, ParenExpr, SubqueryExpr,
+    UnaryExpr, VectorSelector,
+};
+use query::parser::PromQuery;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::oneshot::Sender;
 use tokio::sync::{oneshot, Mutex};
 use tower::ServiceBuilder;
 use tower_http::auth::AsyncRequireAuthorizationLayer;
+use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::auth::UserProviderRef;
-use crate::error::{AlreadyStartedSnafu, CollectRecordbatchSnafu, Result, StartHttpSnafu};
+use crate::error::{
+    AlreadyStartedSnafu, CollectRecordbatchSnafu, InternalSnafu, Result, StartHttpSnafu,
+};
 use crate::http::authorize::HttpAuth;
 use crate::server::Server;
 
@@ -45,7 +58,7 @@ pub type PromqlHandlerRef = Arc<dyn PromqlHandler + Send + Sync>;
 
 #[async_trait]
 pub trait PromqlHandler {
-    async fn do_query(&self, query: &str) -> Result<Output>;
+    async fn do_query(&self, query: &PromQuery) -> Result<Output>;
 }
 
 pub struct PromqlServer {
@@ -73,15 +86,16 @@ impl PromqlServer {
 
         let router = Router::new()
             .route("/query", routing::post(instant_query).get(instant_query))
-            .route("/range_query", routing::post(range_query).get(range_query))
+            .route("/query_range", routing::post(range_query).get(range_query))
             .with_state(self.query_handler.clone());
 
         Router::new()
-            .nest(&format!("/{PROMQL_API_VERSION}"), router)
+            .nest(&format!("/api/{PROMQL_API_VERSION}"), router)
             // middlewares
             .layer(
                 ServiceBuilder::new()
                     .layer(TraceLayer::new_for_http())
+                    .layer(CompressionLayer::new())
                     // custom layer
                     .layer(AsyncRequireAuthorizationLayer::new(
                         HttpAuth::<BoxBody>::new(self.user_provider.clone()),
@@ -133,7 +147,7 @@ impl Server for PromqlServer {
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct PromqlSeries {
     metric: HashMap<String, String>,
-    values: Vec<(i64, String)>,
+    values: Vec<(f64, String)>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
@@ -147,8 +161,12 @@ pub struct PromqlData {
 pub struct PromqlJsonResponse {
     status: String,
     data: PromqlData,
+    #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "errorType")]
     error_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     warnings: Option<Vec<String>>,
 }
 
@@ -178,17 +196,17 @@ impl PromqlJsonResponse {
     }
 
     /// Convert from `Result<Output>`
-    pub async fn from_query_result(result: Result<Output>) -> Json<Self> {
+    pub async fn from_query_result(result: Result<Output>, metric_name: String) -> Json<Self> {
         let response: Result<Json<Self>> = try {
             let json = match result? {
                 Output::RecordBatches(batches) => {
-                    Self::success(Self::record_batches_to_data(batches)?)
+                    Self::success(Self::record_batches_to_data(batches, metric_name)?)
                 }
                 Output::Stream(stream) => {
                     let record_batches = RecordBatches::try_collect(stream)
                         .await
                         .context(CollectRecordbatchSnafu)?;
-                    Self::success(Self::record_batches_to_data(record_batches)?)
+                    Self::success(Self::record_batches_to_data(record_batches, metric_name)?)
                 }
                 Output::AffectedRows(_) => Self::error(
                     "unexpected result",
@@ -199,19 +217,120 @@ impl PromqlJsonResponse {
             json
         };
 
-        response.unwrap_or_else(|err| Self::error(err.status_code().to_string(), err.to_string()))
+        match response {
+            Ok(resp) => resp,
+            Err(err) => {
+                // Prometheus won't report error if querying nonexist label and metric
+                if err.status_code() == StatusCode::TableNotFound
+                    || err.status_code() == StatusCode::TableColumnNotFound
+                {
+                    Self::success(PromqlData {
+                        result_type: "matrix".to_string(),
+                        ..Default::default()
+                    })
+                } else {
+                    Self::error(err.status_code().to_string(), err.to_string())
+                }
+            }
+        }
     }
 
-    /// TODO(ruihang): implement this conversion method
-    fn record_batches_to_data(_: RecordBatches) -> Result<PromqlData> {
+    fn record_batches_to_data(batches: RecordBatches, metric_name: String) -> Result<PromqlData> {
+        // infer semantic type of each column from schema.
+        // TODO(ruihang): wish there is a better way to do this.
+        let mut timestamp_column_index = None;
+        let mut tag_column_indices = Vec::new();
+        let mut first_value_column_index = None;
+
+        for (i, column) in batches.schema().column_schemas().iter().enumerate() {
+            match column.data_type {
+                ConcreteDataType::Timestamp(datatypes::types::TimestampType::Millisecond(_)) => {
+                    if timestamp_column_index.is_none() {
+                        timestamp_column_index = Some(i);
+                    }
+                }
+                ConcreteDataType::Float64(_) => {
+                    if first_value_column_index.is_none() {
+                        first_value_column_index = Some(i);
+                    }
+                }
+                ConcreteDataType::String(_) => {
+                    tag_column_indices.push(i);
+                }
+                _ => {}
+            }
+        }
+
+        let timestamp_column_index = timestamp_column_index.context(InternalSnafu {
+            err_msg: "no timestamp column found".to_string(),
+        })?;
+        let first_value_column_index = first_value_column_index.context(InternalSnafu {
+            err_msg: "no value column found".to_string(),
+        })?;
+
+        let metric_name = (METRIC_NAME.to_string(), metric_name);
+        let mut buffer = HashMap::<Vec<(String, String)>, Vec<(f64, String)>>::new();
+
+        for batch in batches.iter() {
+            // prepare things...
+            let tag_columns = tag_column_indices
+                .iter()
+                .map(|i| {
+                    batch
+                        .column(*i)
+                        .as_any()
+                        .downcast_ref::<StringVector>()
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            let tag_names = tag_column_indices
+                .iter()
+                .map(|c| batches.schema().column_name_by_index(*c).to_string())
+                .collect::<Vec<_>>();
+            let timestamp_column = batch
+                .column(timestamp_column_index)
+                .as_any()
+                .downcast_ref::<TimestampMillisecondVector>()
+                .unwrap();
+            let value_column = batch
+                .column(first_value_column_index)
+                .as_any()
+                .downcast_ref::<Float64Vector>()
+                .unwrap();
+
+            // assemble rows
+            for row_index in 0..batch.num_rows() {
+                // retrieve tags
+                // TODO(ruihang): push table name `__metric__`
+                let mut tags = vec![metric_name.clone()];
+                for (tag_column, tag_name) in tag_columns.iter().zip(tag_names.iter()) {
+                    let tag_value = tag_column.get_data(row_index).unwrap().to_string();
+                    tags.push((tag_name.to_string(), tag_value));
+                }
+
+                // retrieve timestamp
+                let timestamp_millis: i64 = timestamp_column.get_data(row_index).unwrap().into();
+                let timestamp = timestamp_millis as f64 / 1000.0;
+
+                // retrieve value
+                let value =
+                    Into::<f64>::into(value_column.get_data(row_index).unwrap()).to_string();
+
+                buffer.entry(tags).or_default().push((timestamp, value));
+            }
+        }
+
+        let result = buffer
+            .into_iter()
+            .map(|(tags, values)| PromqlSeries {
+                metric: tags.into_iter().collect(),
+                values,
+            })
+            .collect();
+
         let data = PromqlData {
             result_type: "matrix".to_string(),
-            result: vec![PromqlSeries {
-                metric: vec![("__name__".to_string(), "foo".to_string())]
-                    .into_iter()
-                    .collect(),
-                values: vec![(1, "123.45".to_string())],
-            }],
+            result,
         };
 
         Ok(data)
@@ -232,16 +351,16 @@ pub async fn instant_query(
 ) -> Json<PromqlJsonResponse> {
     PromqlJsonResponse::error(
         "not implemented",
-        "instant query api `/query` is not implemented. Use `/range_query` instead.",
+        "instant query api `/query` is not implemented. Use `/query_range` instead.",
     )
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct RangeQuery {
-    query: String,
-    start: String,
-    end: String,
-    step: String,
+    query: Option<String>,
+    start: Option<String>,
+    end: Option<String>,
+    step: Option<String>,
     timeout: Option<String>,
 }
 
@@ -249,7 +368,47 @@ pub struct RangeQuery {
 pub async fn range_query(
     State(handler): State<PromqlHandlerRef>,
     Query(params): Query<RangeQuery>,
+    Form(form_params): Form<RangeQuery>,
 ) -> Json<PromqlJsonResponse> {
-    let result = handler.do_query(&params.query).await;
-    PromqlJsonResponse::from_query_result(result).await
+    let prom_query = PromQuery {
+        query: params.query.or(form_params.query).unwrap_or_default(),
+        start: params.start.or(form_params.start).unwrap_or_default(),
+        end: params.end.or(form_params.end).unwrap_or_default(),
+        step: params.step.or(form_params.step).unwrap_or_default(),
+    };
+    let result = handler.do_query(&prom_query).await;
+    let metric_name = retrieve_metric_name(&prom_query.query).unwrap_or_default();
+    PromqlJsonResponse::from_query_result(result, metric_name).await
+}
+
+fn retrieve_metric_name(promql: &str) -> Option<String> {
+    let promql_expr = promql_parser::parser::parse(promql).ok()?;
+    promql_expr_to_metric_name(promql_expr)
+}
+
+fn promql_expr_to_metric_name(expr: PromqlExpr) -> Option<String> {
+    match expr {
+        PromqlExpr::Aggregate(AggregateExpr { expr, .. }) => promql_expr_to_metric_name(*expr),
+        PromqlExpr::Unary(UnaryExpr { expr }) => promql_expr_to_metric_name(*expr),
+        PromqlExpr::Binary(BinaryExpr { lhs, rhs, .. }) => {
+            promql_expr_to_metric_name(*lhs).or(promql_expr_to_metric_name(*rhs))
+        }
+        PromqlExpr::Paren(ParenExpr { expr }) => promql_expr_to_metric_name(*expr),
+        PromqlExpr::Subquery(SubqueryExpr { expr, .. }) => promql_expr_to_metric_name(*expr),
+        PromqlExpr::NumberLiteral(_) => None,
+        PromqlExpr::StringLiteral(_) => None,
+        PromqlExpr::VectorSelector(VectorSelector { matchers, .. }) => {
+            matchers.find_matchers(METRIC_NAME).pop().cloned()
+        }
+        PromqlExpr::MatrixSelector(MatrixSelector {
+            vector_selector, ..
+        }) => {
+            let VectorSelector { matchers, .. } = vector_selector;
+            matchers.find_matchers(METRIC_NAME).pop().cloned()
+        }
+        PromqlExpr::Call(Call { args, .. }) => args
+            .args
+            .into_iter()
+            .find_map(|e| promql_expr_to_metric_name(*e)),
+    }
 }

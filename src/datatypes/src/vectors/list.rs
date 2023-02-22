@@ -258,14 +258,11 @@ impl ListVectorBuilder {
         self.null_buffer_builder.append(is_valid);
     }
 
-    fn push_null(&mut self) {
-        self.finish_list(false);
-    }
-
     fn push_list_value(&mut self, list_value: &ListValue) -> Result<()> {
         if let Some(items) = list_value.items() {
             for item in &**items {
-                self.values_builder.push_value_ref(item.as_value_ref())?;
+                self.values_builder
+                    .try_push_value_ref(item.as_value_ref())?;
             }
         }
 
@@ -295,7 +292,7 @@ impl MutableVector for ListVectorBuilder {
         Arc::new(self.finish())
     }
 
-    fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
+    fn try_push_value_ref(&mut self, value: ValueRef) -> Result<()> {
         if let Some(list_ref) = value.as_list()? {
             match list_ref {
                 ListValueRef::Indexed { vector, idx } => match vector.get(idx).as_list()? {
@@ -314,10 +311,14 @@ impl MutableVector for ListVectorBuilder {
     fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
         for idx in offset..offset + length {
             let value = vector.get_ref(idx);
-            self.push_value_ref(value)?;
+            self.try_push_value_ref(value)?;
         }
 
         Ok(())
+    }
+
+    fn push_null(&mut self) {
+        self.finish_list(false);
     }
 }
 
@@ -332,7 +333,7 @@ impl ScalarVectorBuilder for ListVectorBuilder {
         // We expect the input ListValue has the same inner type as the builder when using
         // push(), so just panic if `push_value_ref()` returns error, which indicate an
         // invalid input value type.
-        self.push_value_ref(value.into()).unwrap_or_else(|e| {
+        self.try_push_value_ref(value.into()).unwrap_or_else(|e| {
             panic!(
                 "Failed to push value, expect value type {:?}, err:{}",
                 self.item_type, e
@@ -653,19 +654,17 @@ pub mod tests {
     fn test_list_vector_builder() {
         let mut builder =
             ListType::new(ConcreteDataType::int32_datatype()).create_mutable_vector(3);
-        builder
-            .push_value_ref(ValueRef::List(ListValueRef::Ref {
-                val: &ListValue::new(
-                    Some(Box::new(vec![
-                        Value::Int32(4),
-                        Value::Null,
-                        Value::Int32(6),
-                    ])),
-                    ConcreteDataType::int32_datatype(),
-                ),
-            }))
-            .unwrap();
-        assert!(builder.push_value_ref(ValueRef::Int32(123)).is_err());
+        builder.push_value_ref(ValueRef::List(ListValueRef::Ref {
+            val: &ListValue::new(
+                Some(Box::new(vec![
+                    Value::Int32(4),
+                    Value::Null,
+                    Value::Int32(6),
+                ])),
+                ConcreteDataType::int32_datatype(),
+            ),
+        }));
+        assert!(builder.try_push_value_ref(ValueRef::Int32(123)).is_err());
 
         let data = vec![
             Some(vec![Some(1), Some(2), Some(3)]),

@@ -48,12 +48,13 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 arrow = "29.0"
+arrow-array = "29.0"
 arrow-flight = "29.0"
 arrow-schema = { version = "29.0", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
-# TODO(LFC): Use released Datafusion when it officially dpendent on Arrow 29.0
+# TODO(LFC): Use released Datafusion when it officially dependent on Arrow 29.0
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", rev = "4917235a398ae20145c87d20984e6367dc1a0c1e" }
 datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", rev = "4917235a398ae20145c87d20984e6367dc1a0c1e" }
 datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "4917235a398ae20145c87d20984e6367dc1a0c1e" }
@@ -71,7 +72,7 @@ snafu = { version = "0.7", features = ["backtraces"] }
 sqlparser = "0.28"
 tokio = { version = "1.24.2", features = ["full"] }
 tokio-util = "0.7"
-tonic = "0.8"
+tonic = { version = "0.8", features = ["tls"] }
 uuid = { version = "1", features = ["serde", "v4", "fast-rng"] }
 
 [profile.release]

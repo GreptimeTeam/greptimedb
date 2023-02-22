@@ -13,9 +13,11 @@ futures.workspace = true
 object-store = { path = "../../object-store" }
 serde.workspace = true
 serde_json = "1.0"
+smallvec = "1"
 snafu.workspace = true
 tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+futures-util.workspace = true
 tempdir = "0.3"

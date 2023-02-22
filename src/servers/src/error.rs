@@ -22,7 +22,6 @@ use axum::Json;
 use base64::DecodeError;
 use catalog;
 use common_error::prelude::*;
-use hyper::header::ToStrError;
 use serde_json::json;
 use tonic::codegen::http::{HeaderMap, HeaderValue};
 use tonic::metadata::MetadataMap;
@@ -43,12 +42,6 @@ pub enum Error {
     TokioIo {
         err_msg: String,
         source: std::io::Error,
-    },
-
-    #[snafu(display("Failed to convert vector, source: {}", source))]
-    VectorConversion {
-        #[snafu(backtrace)]
-        source: datatypes::error::Error,
     },
 
     #[snafu(display("Failed to collect recordbatch, source: {}", source))]
@@ -156,7 +149,7 @@ pub enum Error {
 
     #[snafu(display("Invalid OpenTSDB line, source: {}", source))]
     InvalidOpentsdbLine {
-        source: std::string::FromUtf8Error,
+        source: FromUtf8Error,
         backtrace: Backtrace,
     },
 
@@ -222,12 +215,15 @@ pub enum Error {
         source: auth::Error,
     },
 
-    #[snafu(display("Not found http authorization header"))]
+    #[snafu(display("Not found http or grpc authorization header"))]
     NotFoundAuthHeader {},
+
+    #[snafu(display("Not found influx http authorization info"))]
+    NotFoundInfluxAuth {},
 
     #[snafu(display("Invalid visibility ASCII chars, source: {}", source))]
     InvisibleASCII {
-        source: ToStrError,
+        source: hyper::header::ToStrError,
         backtrace: Backtrace,
     },
 
@@ -271,7 +267,6 @@ impl ErrorExt for Error {
             Internal { .. }
             | InternalIo { .. }
             | TokioIo { .. }
-            | VectorConversion { .. }
             | CollectRecordbatch { .. }
             | StartHttp { .. }
             | StartGrpc { .. }
@@ -312,7 +307,7 @@ impl ErrorExt for Error {
             Auth { source, .. } => source.status_code(),
             DescribeStatement { source } => source.status_code(),
 
-            NotFoundAuthHeader { .. } => StatusCode::AuthHeaderNotFound,
+            NotFoundAuthHeader { .. } | NotFoundInfluxAuth { .. } => StatusCode::AuthHeaderNotFound,
             InvisibleASCII { .. }
             | UnsupportedAuthScheme { .. }
             | InvalidAuthorizationHeader { .. }

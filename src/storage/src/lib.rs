@@ -17,7 +17,7 @@
 mod background;
 mod chunk;
 pub mod codec;
-mod compaction;
+pub mod compaction;
 pub mod config;
 mod engine;
 pub mod error;
@@ -28,6 +28,7 @@ pub mod metadata;
 pub mod proto;
 pub mod read;
 pub mod region;
+pub mod scheduler;
 pub mod schema;
 mod snapshot;
 mod sst;
@@ -39,3 +40,4 @@ mod wal;
 pub mod write_batch;
 
 pub use engine::EngineImpl;
+mod file_purger;

@@ -163,7 +163,7 @@ impl MutableVector for NullVectorBuilder {
         vector
     }
 
-    fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
+    fn try_push_value_ref(&mut self, value: ValueRef) -> Result<()> {
         ensure!(
             value.is_null(),
             error::CastTypeSnafu {
@@ -195,6 +195,10 @@ impl MutableVector for NullVectorBuilder {
 
         self.length += length;
         Ok(())
+    }
+
+    fn push_null(&mut self) {
+        self.length += 1;
     }
 }
 
@@ -266,8 +270,8 @@ mod tests {
     #[test]
     fn test_null_vector_builder() {
         let mut builder = NullType::default().create_mutable_vector(3);
-        builder.push_value_ref(ValueRef::Null).unwrap();
-        assert!(builder.push_value_ref(ValueRef::Int32(123)).is_err());
+        builder.push_null();
+        assert!(builder.try_push_value_ref(ValueRef::Int32(123)).is_err());
 
         let input = NullVector::new(3);
         builder.extend_slice_of(&input, 1, 2).unwrap();

@@ -23,11 +23,13 @@ use crate::statements::statement::Statement;
 
 impl<'a> ParserContext<'a> {
     pub(crate) fn parse_alter(&mut self) -> Result<Statement> {
-        let alter_table = self.parse().context(error::SyntaxSnafu { sql: self.sql })?;
+        let alter_table = self
+            .parse_alter_table()
+            .context(error::SyntaxSnafu { sql: self.sql })?;
         Ok(Statement::Alter(alter_table))
     }
 
-    fn parse(&mut self) -> std::result::Result<AlterTable, ParserError> {
+    fn parse_alter_table(&mut self) -> std::result::Result<AlterTable, ParserError> {
         let parser = &mut self.parser;
         parser.expect_keywords(&[Keyword::ALTER, Keyword::TABLE])?;
 

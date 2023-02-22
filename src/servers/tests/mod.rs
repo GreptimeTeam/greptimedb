@@ -15,30 +15,37 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use api::v1::greptime_request::{Request as GreptimeRequest, Request};
+use api::v1::query_request::Query;
 use async_trait::async_trait;
 use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
 use catalog::{CatalogList, CatalogProvider, SchemaProvider};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use datatypes::schema::Schema;
-use query::parser::{QueryLanguageParser, QueryStatement};
+use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::{QueryEngineFactory, QueryEngineRef};
 use script::engine::{CompileContext, EvalContext, Script, ScriptEngine};
 use script::python::{PyEngine, PyScript};
-use servers::error::{Error, Result};
+use servers::error::{Error, NotSupportedSnafu, Result};
+use servers::query_handler::grpc::{GrpcQueryHandler, ServerGrpcQueryHandlerRef};
 use servers::query_handler::sql::{ServerSqlQueryHandlerRef, SqlQueryHandler};
 use servers::query_handler::{ScriptHandler, ScriptHandlerRef};
 use session::context::QueryContextRef;
+use snafu::ensure;
 use sql::statements::statement::Statement;
 use table::test_util::MemTable;
 
 mod auth;
+mod grpc;
 mod http;
 mod interceptor;
 mod mysql;
 mod opentsdb;
 mod postgres;
 mod py_script;
+
+const LOCALHOST_WITH_0: &str = "127.0.0.1:0";
 
 struct DummyInstance {
     query_engine: QueryEngineRef,
@@ -72,7 +79,7 @@ impl SqlQueryHandler for DummyInstance {
 
     async fn do_promql_query(
         &self,
-        _: &str,
+        _: &PromQuery,
         _: QueryContextRef,
     ) -> Vec<std::result::Result<Output, Self::Error>> {
         unimplemented!()
@@ -80,7 +87,7 @@ impl SqlQueryHandler for DummyInstance {
 
     async fn do_statement_query(
         &self,
-        _stmt: sql::statements::statement::Statement,
+        _stmt: Statement,
         _query_ctx: QueryContextRef,
     ) -> Result<Output> {
         unimplemented!()
@@ -120,12 +127,53 @@ impl ScriptHandler for DummyInstance {
         Ok(())
     }
 
-    async fn execute_script(&self, schema: &str, name: &str) -> Result<Output> {
+    async fn execute_script(
+        &self,
+        schema: &str,
+        name: &str,
+        params: HashMap<String, String>,
+    ) -> Result<Output> {
         let key = format!("{schema}_{name}");
 
         let py_script = self.scripts.read().unwrap().get(&key).unwrap().clone();
 
-        Ok(py_script.execute(EvalContext::default()).await.unwrap())
+        Ok(py_script
+            .execute(params, EvalContext::default())
+            .await
+            .unwrap())
+    }
+}
+
+#[async_trait]
+impl GrpcQueryHandler for DummyInstance {
+    type Error = Error;
+
+    async fn do_query(
+        &self,
+        request: GreptimeRequest,
+        ctx: QueryContextRef,
+    ) -> std::result::Result<Output, Self::Error> {
+        let output = match request {
+            Request::Insert(_) => unimplemented!(),
+            Request::Query(query_request) => {
+                let query = query_request.query.unwrap();
+                match query {
+                    Query::Sql(sql) => {
+                        let mut result = SqlQueryHandler::do_query(self, &sql, ctx).await;
+                        ensure!(
+                            result.len() == 1,
+                            NotSupportedSnafu {
+                                feat: "execute multiple statements in SQL query string through GRPC interface"
+                            }
+                        );
+                        result.remove(0)?
+                    }
+                    Query::LogicalPlan(_) => unimplemented!(),
+                }
+            }
+            Request::Ddl(_) => unimplemented!(),
+        };
+        Ok(output)
     }
 }
 
@@ -154,5 +202,9 @@ fn create_testing_script_handler(table: MemTable) -> ScriptHandlerRef {
 }
 
 fn create_testing_sql_query_handler(table: MemTable) -> ServerSqlQueryHandlerRef {
+    Arc::new(create_testing_instance(table)) as _
+}
+
+fn create_testing_grpc_query_handler(table: MemTable) -> ServerGrpcQueryHandlerRef {
     Arc::new(create_testing_instance(table)) as _
 }

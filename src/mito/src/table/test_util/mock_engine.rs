@@ -43,7 +43,7 @@ pub struct MockChunkReader {
 impl ChunkReader for MockChunkReader {
     type Error = MockError;
 
-    fn schema(&self) -> &SchemaRef {
+    fn user_schema(&self) -> &SchemaRef {
         &self.schema
     }
 
@@ -60,7 +60,7 @@ impl ChunkReader for MockChunkReader {
                 let data = self.memtable.get(&column_schema.name).unwrap();
                 let mut builder = column_schema.data_type.create_mutable_vector(data.len());
                 for v in data {
-                    builder.push_value_ref(v.as_value_ref()).unwrap();
+                    builder.push_value_ref(v.as_value_ref());
                 }
                 builder.to_vector()
             })
@@ -68,6 +68,10 @@ impl ChunkReader for MockChunkReader {
         self.read = true;
 
         Ok(Some(Chunk::new(columns)))
+    }
+
+    fn project_chunk(&self, chunk: Chunk) -> Chunk {
+        chunk
     }
 }
 
@@ -188,6 +192,10 @@ impl Region for MockRegion {
 
         Ok(())
     }
+
+    async fn close(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 impl MockRegionInner {
@@ -275,8 +283,8 @@ impl StorageEngine for MockEngine {
         return Ok(None);
     }
 
-    async fn close_region(&self, _ctx: &EngineContext, _region: MockRegion) -> Result<()> {
-        unimplemented!()
+    async fn close_region(&self, _ctx: &EngineContext, region: MockRegion) -> Result<()> {
+        region.close().await
     }
 
     async fn create_region(

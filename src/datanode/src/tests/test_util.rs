@@ -12,21 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use common_query::Output;
 use common_recordbatch::util;
 use datatypes::data_type::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, SchemaBuilder};
+use datatypes::schema::{ColumnSchema, RawSchema};
 use mito::config::EngineConfig;
 use mito::table::test_util::{new_test_object_store, MockEngine, MockMitoEngine};
 use query::QueryEngineFactory;
 use servers::Mode;
 use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineRef};
-use table::requests::CreateTableRequest;
+use table::requests::{CreateTableRequest, TableOptions};
 use tempdir::TempDir;
 
 use crate::datanode::{DatanodeOptions, FileConfig, ObjectStoreConfig, WalConfig};
@@ -104,15 +103,10 @@ pub(crate) async fn create_test_table(
                 schema_name: "public".to_string(),
                 table_name: table_name.to_string(),
                 desc: Some(" a test table".to_string()),
-                schema: Arc::new(
-                    SchemaBuilder::try_from(column_schemas)
-                        .unwrap()
-                        .build()
-                        .expect("ts is expected to be timestamp column"),
-                ),
+                schema: RawSchema::new(column_schemas),
                 create_if_not_exists: true,
                 primary_key_indices: vec![0], // "host" is in primary keys
-                table_options: HashMap::new(),
+                table_options: TableOptions::default(),
                 region_numbers: vec![0],
             },
         )
@@ -150,16 +144,7 @@ pub async fn create_mock_sql_handler() -> SqlHandler {
 }
 
 pub(crate) async fn setup_test_instance(test_name: &str) -> MockInstance {
-    let instance = MockInstance::new(test_name).await;
-
-    create_test_table(
-        instance.inner(),
-        ConcreteDataType::timestamp_millisecond_datatype(),
-    )
-    .await
-    .unwrap();
-
-    instance
+    MockInstance::new(test_name).await
 }
 
 pub async fn check_output_stream(output: Output, expected: String) {
@@ -169,5 +154,27 @@ pub async fn check_output_stream(output: Output, expected: String) {
         _ => unreachable!(),
     };
     let pretty_print = recordbatches.pretty_print().unwrap();
+    assert_eq!(pretty_print, expected, "{}", pretty_print);
+}
+
+pub async fn check_unordered_output_stream(output: Output, expected: String) {
+    let sort_table = |table: String| -> String {
+        let replaced = table.replace("\\n", "\n");
+        let mut lines = replaced.split('\n').collect::<Vec<_>>();
+        lines.sort();
+        lines
+            .into_iter()
+            .map(|s| s.to_string())
+            .reduce(|acc, e| format!("{acc}\\n{e}"))
+            .unwrap()
+    };
+
+    let recordbatches = match output {
+        Output::Stream(stream) => util::collect_batches(stream).await.unwrap(),
+        Output::RecordBatches(recordbatches) => recordbatches,
+        _ => unreachable!(),
+    };
+    let pretty_print = sort_table(recordbatches.pretty_print().unwrap());
+    let expected = sort_table(expected);
     assert_eq!(pretty_print, expected);
 }

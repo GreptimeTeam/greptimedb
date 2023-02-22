@@ -22,13 +22,15 @@ use datanode::instance::sql::table_idents_to_full_name;
 use datatypes::schema::ColumnSchema;
 use session::context::QueryContextRef;
 use snafu::{ensure, ResultExt};
-use sql::ast::{ColumnDef, TableConstraint};
+use sql::ast::{ColumnDef, ColumnOption, SqlOption, TableConstraint, Value};
 use sql::statements::column_def_to_schema;
 use sql::statements::create::{CreateTable, TIME_INDEX};
+use table::requests::TableOptions;
 
 use crate::error::{
     self, BuildCreateExprOnInsertionSnafu, ColumnDataTypeSnafu,
-    ConvertColumnDefaultConstraintSnafu, InvalidSqlSnafu, ParseSqlSnafu, Result,
+    ConvertColumnDefaultConstraintSnafu, IllegalPrimaryKeysDefSnafu, InvalidSqlSnafu,
+    ParseSqlSnafu, Result, UnrecognizedTableOptionSnafu,
 };
 
 pub type CreateExprFactoryRef = Arc<dyn CreateExprFactory + Send + Sync>;
@@ -81,6 +83,7 @@ pub(crate) fn create_to_expr(
             .context(error::ExternalSnafu)?;
 
     let time_index = find_time_index(&create.constraints)?;
+    let table_options = HashMap::from(&stmt_options_to_table_options(&create.options)?);
     let expr = CreateTableExpr {
         catalog_name,
         schema_name,
@@ -88,18 +91,41 @@ pub(crate) fn create_to_expr(
         desc: "".to_string(),
         column_defs: columns_to_expr(&create.columns, &time_index)?,
         time_index,
-        primary_keys: find_primary_keys(&create.constraints)?,
+        primary_keys: find_primary_keys(&create.columns, &create.constraints)?,
         create_if_not_exists: create.if_not_exists,
-        // TODO(LFC): Fill in other table options.
-        table_options: HashMap::from([("engine".to_string(), create.engine.clone())]),
+        table_options,
         table_id: None,
         region_ids: vec![],
     };
     Ok(expr)
 }
 
-fn find_primary_keys(constraints: &[TableConstraint]) -> Result<Vec<String>> {
-    let primary_keys = constraints
+fn find_primary_keys(
+    columns: &[ColumnDef],
+    constraints: &[TableConstraint],
+) -> Result<Vec<String>> {
+    let columns_pk = columns
+        .iter()
+        .filter_map(|x| {
+            if x.options
+                .iter()
+                .any(|o| matches!(o.option, ColumnOption::Unique { is_primary: true }))
+            {
+                Some(x.name.value.clone())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<String>>();
+
+    ensure!(
+        columns_pk.len() <= 1,
+        IllegalPrimaryKeysDefSnafu {
+            msg: "not allowed to inline multiple primary keys in columns options"
+        }
+    );
+
+    let constraints_pk = constraints
         .iter()
         .filter_map(|constraint| match constraint {
             TableConstraint::Unique {
@@ -111,6 +137,17 @@ fn find_primary_keys(constraints: &[TableConstraint]) -> Result<Vec<String>> {
         })
         .flatten()
         .collect::<Vec<String>>();
+
+    ensure!(
+        columns_pk.is_empty() || constraints_pk.is_empty(),
+        IllegalPrimaryKeysDefSnafu {
+            msg: "found definitions of primary keys in multiple places"
+        }
+    );
+
+    let mut primary_keys = Vec::with_capacity(columns_pk.len() + constraints_pk.len());
+    primary_keys.extend(columns_pk);
+    primary_keys.extend(constraints_pk);
     Ok(primary_keys)
 }
 
@@ -181,4 +218,47 @@ fn columns_to_expr(
             })
         })
         .collect()
+}
+
+// TODO(hl): This function is intentionally duplicated with that one in src/datanode/src/sql/create.rs:261
+// since we are going to remove the statement parsing stuff from datanode.
+// Refer: https://github.com/GreptimeTeam/greptimedb/issues/1010
+fn stmt_options_to_table_options(opts: &[SqlOption]) -> error::Result<TableOptions> {
+    let mut map = HashMap::with_capacity(opts.len());
+    for SqlOption { name, value } in opts {
+        let value_str = match value {
+            Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => s.clone(),
+            _ => value.to_string(),
+        };
+        map.insert(name.value.clone(), value_str);
+    }
+    let options = TableOptions::try_from(&map).context(UnrecognizedTableOptionSnafu)?;
+    Ok(options)
+}
+
+#[cfg(test)]
+mod tests {
+    use session::context::QueryContext;
+    use sql::dialect::GenericDialect;
+    use sql::parser::ParserContext;
+    use sql::statements::statement::Statement;
+
+    use super::*;
+
+    #[test]
+    fn test_create_to_expr() {
+        let sql = "CREATE TABLE monitor (host STRING,ts TIMESTAMP,TIME INDEX (ts),PRIMARY KEY(host)) ENGINE=mito WITH(regions=1, ttl='3days', write_buffer_size='1024KB');";
+        let stmt = ParserContext::create_with_dialect(sql, &GenericDialect {})
+            .unwrap()
+            .pop()
+            .unwrap();
+
+        let Statement::CreateTable(create_table) = stmt else { unreachable!() };
+        let expr = create_to_expr(&create_table, Arc::new(QueryContext::default())).unwrap();
+        assert_eq!("3days", expr.table_options.get("ttl").unwrap());
+        assert_eq!(
+            "1.0MiB",
+            expr.table_options.get("write_buffer_size").unwrap()
+        );
+    }
 }

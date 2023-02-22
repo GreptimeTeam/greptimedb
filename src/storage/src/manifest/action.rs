@@ -73,7 +73,7 @@ pub struct RegionRemove {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionEdit {
     pub region_version: VersionNumber,
-    pub flushed_sequence: SequenceNumber,
+    pub flushed_sequence: Option<SequenceNumber>,
     pub files_to_add: Vec<FileMeta>,
     pub files_to_remove: Vec<FileMeta>,
 }

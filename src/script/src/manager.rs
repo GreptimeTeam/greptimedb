@@ -76,7 +76,12 @@ impl ScriptManager {
         Ok(compiled_script)
     }
 
-    pub async fn execute(&self, schema: &str, name: &str) -> Result<Output> {
+    pub async fn execute(
+        &self,
+        schema: &str,
+        name: &str,
+        params: HashMap<String, String>,
+    ) -> Result<Output> {
         let script = {
             let s = self.compiled.read().unwrap().get(name).cloned();
 
@@ -90,7 +95,7 @@ impl ScriptManager {
         let script = script.context(ScriptNotFoundSnafu { name })?;
 
         script
-            .execute(EvalContext::default())
+            .execute(params, EvalContext::default())
             .await
             .context(ExecutePythonSnafu { name })
     }
@@ -118,6 +123,7 @@ mod tests {
     use log_store::raft_engine::log_store::RaftEngineLogStore;
     use log_store::LogConfig;
     use mito::engine::MitoEngine;
+    use storage::compaction::noop::NoopCompactionScheduler;
     use storage::config::EngineConfig as StorageEngineConfig;
     use storage::EngineImpl;
     use tempdir::TempDir;
@@ -135,12 +141,14 @@ mod tests {
         };
 
         let log_store = RaftEngineLogStore::try_new(log_config).await.unwrap();
+        let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
         let mock_engine = Arc::new(DefaultEngine::new(
             TableEngineConfig::default(),
             EngineImpl::new(
                 StorageEngineConfig::default(),
                 Arc::new(log_store),
                 object_store.clone(),
+                compaction_scheduler,
             ),
             object_store,
         ));

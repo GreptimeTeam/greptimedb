@@ -24,15 +24,16 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use common_telemetry::info;
 use store_api::manifest::ManifestVersion;
 use store_api::storage::{SchemaRef, SequenceNumber};
 
+use crate::file_purger::FilePurgerRef;
 use crate::memtable::{MemtableId, MemtableRef, MemtableVersion};
 use crate::metadata::RegionMetadataRef;
 use crate::schema::RegionSchemaRef;
-use crate::sst::{FileHandle, FileMeta, LevelMetas};
+use crate::sst::{AccessLayerRef, FileMeta, LevelMetas};
 use crate::sync::CowCell;
-
 pub const INIT_COMMITTED_SEQUENCE: u64 = 0;
 
 /// Controls version of in memory state for a region.
@@ -129,6 +130,7 @@ impl VersionControl {
 #[derive(Debug)]
 pub struct VersionEdit {
     pub files_to_add: Vec<FileMeta>,
+    pub files_to_remove: Vec<FileMeta>,
     pub flushed_sequence: Option<SequenceNumber>,
     pub manifest_version: ManifestVersion,
     pub max_memtable_id: Option<MemtableId>,
@@ -165,7 +167,12 @@ impl Version {
     /// Create a new `Version` with given `metadata`.
     #[cfg(test)]
     pub fn new(metadata: RegionMetadataRef, memtable: MemtableRef) -> Version {
-        Version::with_manifest_version(metadata, 0, memtable)
+        let sst_layer = Arc::new(crate::test_util::access_layer_util::MockAccessLayer) as Arc<_>;
+        let file_purger = Arc::new(crate::scheduler::LocalScheduler::new(
+            crate::scheduler::SchedulerConfig::default(),
+            crate::file_purger::noop::NoopFilePurgeHandler,
+        ));
+        Version::with_manifest_version(metadata, 0, memtable, sst_layer, file_purger)
     }
 
     /// Create a new `Version` with given `metadata` and initial `manifest_version`.
@@ -173,11 +180,13 @@ impl Version {
         metadata: RegionMetadataRef,
         manifest_version: ManifestVersion,
         mutable_memtable: MemtableRef,
+        sst_layer: AccessLayerRef,
+        file_purger: FilePurgerRef,
     ) -> Version {
         Version {
             metadata,
             memtables: Arc::new(MemtableVersion::new(mutable_memtable)),
-            ssts: Arc::new(LevelMetas::new()),
+            ssts: Arc::new(LevelMetas::new(sst_layer, file_purger)),
             flushed_sequence: 0,
             manifest_version,
         }
@@ -234,9 +243,16 @@ impl Version {
             self.memtables = Arc::new(removed);
         }
 
-        let handles_to_add = edit.files_to_add.into_iter().map(FileHandle::new);
-        let merged_ssts = self.ssts.merge(handles_to_add);
+        let handles_to_add = edit.files_to_add.into_iter();
+        let merged_ssts = self
+            .ssts
+            .merge(handles_to_add, edit.files_to_remove.into_iter());
 
+        info!(
+            "After apply edit, region: {}, SST files: {:?}",
+            self.metadata.id(),
+            merged_ssts
+        );
         self.ssts = Arc::new(merged_ssts);
     }
 

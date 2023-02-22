@@ -12,20 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod parquet;
+pub(crate) mod parquet;
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_telemetry::{error, info};
+use common_time::range::TimestampRange;
 use common_time::Timestamp;
 use object_store::{util, ObjectStore};
 use serde::{Deserialize, Serialize};
+use snafu::ResultExt;
+use store_api::storage::{ChunkReader, RegionId};
 use table::predicate::Predicate;
 
-use crate::error::Result;
+use crate::chunk::ChunkReaderImpl;
+use crate::error::{DeleteSstSnafu, Result};
+use crate::file_purger::{FilePurgeRequest, FilePurgerRef};
 use crate::memtable::BoxedBatchIterator;
-use crate::read::BoxedBatchReader;
+use crate::read::{Batch, BoxedBatchReader};
+use crate::scheduler::Scheduler;
 use crate::schema::ProjectedSchemaRef;
 use crate::sst::parquet::{ParquetReader, ParquetWriter};
 
@@ -38,27 +46,23 @@ pub type Level = u8;
 // detail of LevelMetaVec should not be exposed to the user of [LevelMetas].
 type LevelMetaVec = [LevelMeta; MAX_LEVEL as usize];
 
-/// Visitor to access file in each level.
-pub trait Visitor {
-    /// Visit all `files` in `level`.
-    ///
-    /// Now the input `files` are unordered.
-    fn visit(&mut self, level: usize, files: &[FileHandle]) -> Result<()>;
-}
-
 /// Metadata of all SSTs under a region.
 ///
 /// Files are organized into multiple level, though there may be only one level.
 #[derive(Debug, Clone)]
 pub struct LevelMetas {
     levels: LevelMetaVec,
+    sst_layer: AccessLayerRef,
+    file_purger: FilePurgerRef,
 }
 
 impl LevelMetas {
     /// Create a new LevelMetas and initialized each level.
-    pub fn new() -> LevelMetas {
+    pub fn new(sst_layer: AccessLayerRef, file_purger: FilePurgerRef) -> LevelMetas {
         LevelMetas {
             levels: new_level_meta_vec(),
+            sst_layer,
+            file_purger,
         }
     }
 
@@ -77,40 +81,29 @@ impl LevelMetas {
     ///
     /// # Panics
     /// Panics if level of [FileHandle] is greater than [MAX_LEVEL].
-    pub fn merge(&self, files_to_add: impl Iterator<Item = FileHandle>) -> LevelMetas {
+    pub fn merge(
+        &self,
+        files_to_add: impl Iterator<Item = FileMeta>,
+        files_to_remove: impl Iterator<Item = FileMeta>,
+    ) -> LevelMetas {
         let mut merged = self.clone();
         for file in files_to_add {
-            let level = file.level_index();
-
-            merged.levels[level].add_file(file);
+            let level = file.level;
+            let handle = FileHandle::new(file, self.sst_layer.clone(), self.file_purger.clone());
+            merged.levels[level as usize].add_file(handle);
         }
 
-        // TODO(yingwen): Support file removal.
-
+        for file in files_to_remove {
+            let level = file.level;
+            if let Some(removed_file) = merged.levels[level as usize].remove_file(&file.file_name) {
+                removed_file.mark_deleted();
+            }
+        }
         merged
     }
 
-    /// Visit all SST files.
-    ///
-    /// Stop visiting remaining files if the visitor returns `Err`, and the `Err`
-    /// will be returned to caller.
-    pub fn visit_levels<V: Visitor>(&self, visitor: &mut V) -> Result<()> {
-        for level in &self.levels {
-            level.visit_level(visitor)?;
-        }
-
-        Ok(())
-    }
-
-    #[cfg(test)]
     pub fn levels(&self) -> &[LevelMeta] {
         &self.levels
-    }
-}
-
-impl Default for LevelMetas {
-    fn default() -> LevelMetas {
-        LevelMetas::new()
     }
 }
 
@@ -121,23 +114,23 @@ pub struct LevelMeta {
     /// Handles to the files in this level.
     // TODO(yingwen): Now for simplicity, files are unordered, maybe sort the files by time range
     // or use another structure to hold them.
-    files: Vec<FileHandle>,
+    files: HashMap<String, FileHandle>,
 }
 
 impl LevelMeta {
-    pub fn new_empty(level: Level) -> Self {
+    pub fn new(level: Level) -> Self {
         Self {
             level,
-            files: vec![],
+            files: HashMap::new(),
         }
     }
 
     fn add_file(&mut self, file: FileHandle) {
-        self.files.push(file);
+        self.files.insert(file.file_name().to_string(), file);
     }
 
-    pub fn visit_level<V: Visitor>(&self, visitor: &mut V) -> Result<()> {
-        visitor.visit(self.level.into(), &self.files)
+    fn remove_file(&mut self, file_to_remove: &str) -> Option<FileHandle> {
+        self.files.remove(file_to_remove)
     }
 
     /// Returns the level of level meta.
@@ -146,15 +139,20 @@ impl LevelMeta {
         self.level
     }
 
-    pub fn files(&self) -> &[FileHandle] {
-        &self.files
+    /// Returns number of SST files in level.
+    #[inline]
+    pub fn file_num(&self) -> usize {
+        self.files.len()
+    }
+
+    pub fn files(&self) -> impl Iterator<Item = &FileHandle> {
+        self.files.values()
     }
 }
 
 fn new_level_meta_vec() -> LevelMetaVec {
     (0u8..MAX_LEVEL)
-        .into_iter()
-        .map(LevelMeta::new_empty)
+        .map(LevelMeta::new)
         .collect::<Vec<_>>()
         .try_into()
         .unwrap() // safety: LevelMetaVec is a fixed length array with length MAX_LEVEL
@@ -167,16 +165,20 @@ pub struct FileHandle {
 }
 
 impl FileHandle {
-    pub fn new(meta: FileMeta) -> FileHandle {
+    pub fn new(
+        meta: FileMeta,
+        sst_layer: AccessLayerRef,
+        file_purger: FilePurgerRef,
+    ) -> FileHandle {
         FileHandle {
-            inner: Arc::new(FileHandleInner::new(meta)),
+            inner: Arc::new(FileHandleInner::new(meta, sst_layer, file_purger)),
         }
     }
 
     /// Returns level as usize so it can be used as index.
     #[inline]
-    pub fn level_index(&self) -> usize {
-        self.inner.meta.level.into()
+    pub fn level(&self) -> Level {
+        self.inner.meta.level
     }
 
     #[inline]
@@ -194,6 +196,22 @@ impl FileHandle {
     pub fn compacting(&self) -> bool {
         self.inner.compacting.load(Ordering::Relaxed)
     }
+
+    /// Sets the compacting flag.
+    #[inline]
+    pub fn mark_compacting(&self, compacting: bool) {
+        self.inner.compacting.store(compacting, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn deleted(&self) -> bool {
+        self.inner.deleted.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn mark_deleted(&self) {
+        self.inner.deleted.store(true, Ordering::Relaxed);
+    }
 }
 
 /// Actually data of [FileHandle].
@@ -203,21 +221,58 @@ impl FileHandle {
 struct FileHandleInner {
     meta: FileMeta,
     compacting: AtomicBool,
+    deleted: AtomicBool,
+    sst_layer: AccessLayerRef,
+    file_purger: FilePurgerRef,
+}
+
+impl Drop for FileHandleInner {
+    fn drop(&mut self) {
+        if self.deleted.load(Ordering::Relaxed) {
+            let request = FilePurgeRequest {
+                sst_layer: self.sst_layer.clone(),
+                file_name: self.meta.file_name.clone(),
+                region_id: self.meta.region_id,
+            };
+            match self.file_purger.schedule(request) {
+                Ok(res) => {
+                    info!(
+                        "Scheduled SST purge task, region: {}, name: {}, res: {}",
+                        self.meta.region_id, self.meta.file_name, res
+                    );
+                }
+                Err(e) => {
+                    error!(e; "Failed to schedule SST purge task, region: {}, name: {}", self.meta.region_id, self.meta.file_name);
+                }
+            }
+        }
+    }
 }
 
 impl FileHandleInner {
-    fn new(meta: FileMeta) -> FileHandleInner {
+    fn new(
+        meta: FileMeta,
+        sst_layer: AccessLayerRef,
+        file_purger: FilePurgerRef,
+    ) -> FileHandleInner {
         FileHandleInner {
             meta,
             compacting: AtomicBool::new(false),
+            deleted: AtomicBool::new(false),
+            sst_layer,
+            file_purger,
         }
     }
 }
 
 /// Immutable metadata of a sst file.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FileMeta {
+    /// Region of file.
+    pub region_id: RegionId,
+    /// File name
     pub file_name: String,
+    /// Timestamp range of file.
     pub time_range: Option<(Timestamp, Timestamp)>,
     /// SST level of the file.
     pub level: Level,
@@ -236,9 +291,10 @@ pub struct ReadOptions {
     pub projected_schema: ProjectedSchemaRef,
 
     pub predicate: Predicate,
+    pub time_range: TimestampRange,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct SstInfo {
     pub time_range: Option<(Timestamp, Timestamp)>,
 }
@@ -250,15 +306,45 @@ pub trait AccessLayer: Send + Sync + std::fmt::Debug {
     async fn write_sst(
         &self,
         file_name: &str,
-        iter: BoxedBatchIterator,
+        source: Source,
         opts: &WriteOptions,
     ) -> Result<SstInfo>;
 
     /// Read SST file with given `file_name` and schema.
     async fn read_sst(&self, file_name: &str, opts: &ReadOptions) -> Result<BoxedBatchReader>;
+
+    /// Deletes a SST file with given name.
+    async fn delete_sst(&self, file_name: &str) -> Result<()>;
 }
 
 pub type AccessLayerRef = Arc<dyn AccessLayer>;
+
+/// Parquet writer data source.
+pub enum Source {
+    /// Writes rows from memtable to parquet
+    Iter(BoxedBatchIterator),
+    /// Writes row from ChunkReaderImpl (maybe a set of SSTs) to parquet.
+    Reader(ChunkReaderImpl),
+}
+
+impl Source {
+    async fn next_batch(&mut self) -> Result<Option<Batch>> {
+        match self {
+            Source::Iter(iter) => iter.next().transpose(),
+            Source::Reader(reader) => reader
+                .next_chunk()
+                .await
+                .map(|p| p.map(|chunk| Batch::new(chunk.columns))),
+        }
+    }
+
+    fn projected_schema(&self) -> ProjectedSchemaRef {
+        match self {
+            Source::Iter(iter) => iter.schema(),
+            Source::Reader(reader) => reader.projected_schema().clone(),
+        }
+    }
+}
 
 /// Sst access layer based on local file system.
 #[derive(Debug)]
@@ -286,13 +372,13 @@ impl AccessLayer for FsAccessLayer {
     async fn write_sst(
         &self,
         file_name: &str,
-        iter: BoxedBatchIterator,
+        source: Source,
         opts: &WriteOptions,
     ) -> Result<SstInfo> {
         // Now we only supports parquet format. We may allow caller to specific SST format in
         // WriteOptions in the future.
         let file_path = self.sst_file_path(file_name);
-        let writer = ParquetWriter::new(&file_path, iter, self.object_store.clone());
+        let writer = ParquetWriter::new(&file_path, source, self.object_store.clone());
         writer.write_sst(opts).await
     }
 
@@ -303,9 +389,123 @@ impl AccessLayer for FsAccessLayer {
             self.object_store.clone(),
             opts.projected_schema.clone(),
             opts.predicate.clone(),
+            opts.time_range,
         );
 
         let stream = reader.chunk_stream().await?;
         Ok(Box::new(stream))
+    }
+
+    async fn delete_sst(&self, file_name: &str) -> Result<()> {
+        let path = self.sst_file_path(file_name);
+        let object = self.object_store.object(&path);
+        object.delete().await.context(DeleteSstSnafu)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+    use crate::file_purger::noop::NoopFilePurgeHandler;
+    use crate::scheduler::{LocalScheduler, SchedulerConfig};
+
+    fn create_file_meta(name: &str, level: Level) -> FileMeta {
+        FileMeta {
+            region_id: 0,
+            file_name: name.to_string(),
+            time_range: None,
+            level,
+        }
+    }
+
+    #[test]
+    fn test_level_metas_add_and_remove() {
+        let layer = Arc::new(crate::test_util::access_layer_util::MockAccessLayer {});
+        let purger = Arc::new(LocalScheduler::new(
+            SchedulerConfig::default(),
+            NoopFilePurgeHandler,
+        ));
+        let metas = LevelMetas::new(layer, purger);
+        let merged = metas.merge(
+            vec![create_file_meta("a", 0), create_file_meta("b", 0)].into_iter(),
+            vec![].into_iter(),
+        );
+
+        assert_eq!(
+            HashSet::from(["a".to_string(), "b".to_string()]),
+            merged
+                .level(0)
+                .files()
+                .map(|f| f.file_name().to_string())
+                .collect()
+        );
+
+        let merged1 = merged.merge(
+            vec![create_file_meta("c", 1), create_file_meta("d", 1)].into_iter(),
+            vec![].into_iter(),
+        );
+        assert_eq!(
+            HashSet::from(["a".to_string(), "b".to_string()]),
+            merged1
+                .level(0)
+                .files()
+                .map(|f| f.file_name().to_string())
+                .collect()
+        );
+
+        assert_eq!(
+            HashSet::from(["c".to_string(), "d".to_string()]),
+            merged1
+                .level(1)
+                .files()
+                .map(|f| f.file_name().to_string())
+                .collect()
+        );
+
+        let removed1 = merged1.merge(
+            vec![].into_iter(),
+            vec![create_file_meta("a", 0), create_file_meta("c", 0)].into_iter(),
+        );
+        assert_eq!(
+            HashSet::from(["b".to_string()]),
+            removed1
+                .level(0)
+                .files()
+                .map(|f| f.file_name().to_string())
+                .collect()
+        );
+
+        assert_eq!(
+            HashSet::from(["c".to_string(), "d".to_string()]),
+            removed1
+                .level(1)
+                .files()
+                .map(|f| f.file_name().to_string())
+                .collect()
+        );
+
+        let removed2 = removed1.merge(
+            vec![].into_iter(),
+            vec![create_file_meta("c", 1), create_file_meta("d", 1)].into_iter(),
+        );
+        assert_eq!(
+            HashSet::from(["b".to_string()]),
+            removed2
+                .level(0)
+                .files()
+                .map(|f| f.file_name().to_string())
+                .collect()
+        );
+
+        assert_eq!(
+            HashSet::new(),
+            removed2
+                .level(1)
+                .files()
+                .map(|f| f.file_name().to_string())
+                .collect()
+        );
     }
 }

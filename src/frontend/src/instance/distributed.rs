@@ -38,11 +38,11 @@ use datatypes::schema::{RawSchema, Schema};
 use meta_client::client::MetaClient;
 use meta_client::rpc::router::DeleteRequest as MetaDeleteRequest;
 use meta_client::rpc::{
-    CreateRequest as MetaCreateRequest, Partition as MetaPartition, PutRequest, RouteResponse,
-    TableName,
+    CompareAndPutRequest, CreateRequest as MetaCreateRequest, Partition as MetaPartition,
+    RouteResponse, TableName,
 };
 use partition::partition::{PartitionBound, PartitionDef};
-use query::parser::QueryStatement;
+use query::parser::{PromQuery, QueryStatement};
 use query::sql::{describe_table, explain, show_databases, show_tables};
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::query_handler::sql::SqlQueryHandler;
@@ -53,6 +53,7 @@ use sql::statements::create::Partitions;
 use sql::statements::sql_value_to_value;
 use sql::statements::statement::Statement;
 use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
+use table::requests::TableOptions;
 use table::table::AlterContext;
 
 use crate::catalog::FrontendCatalogManager;
@@ -60,8 +61,9 @@ use crate::datanode::DatanodeClients;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogEntrySerdeSnafu, CatalogNotFoundSnafu, CatalogSnafu,
     ColumnDataTypeSnafu, DeserializePartitionSnafu, ParseSqlSnafu, PrimaryKeyNotFoundSnafu,
-    RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaNotFoundSnafu, StartMetaClientSnafu,
-    TableNotFoundSnafu, TableSnafu, ToTableInsertRequestSnafu,
+    RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaExistsSnafu, SchemaNotFoundSnafu,
+    StartMetaClientSnafu, TableAlreadyExistSnafu, TableNotFoundSnafu, TableSnafu,
+    ToTableInsertRequestSnafu, UnrecognizedTableOptionSnafu,
 };
 use crate::expr_factory;
 use crate::instance::parse_stmt;
@@ -104,6 +106,26 @@ impl DistInstance {
             &create_table.schema_name,
             &create_table.table_name,
         );
+
+        if self
+            .catalog_manager
+            .table(
+                &table_name.catalog_name,
+                &table_name.schema_name,
+                &table_name.table_name,
+            )
+            .context(CatalogSnafu)?
+            .is_some()
+        {
+            return if create_table.create_if_not_exists {
+                Ok(Output::AffectedRows(0))
+            } else {
+                TableAlreadyExistSnafu {
+                    table: table_name.to_string(),
+                }
+                .fail()
+            };
+        }
 
         let mut table_info = create_table_info(create_table)?;
 
@@ -157,7 +179,7 @@ impl DistInstance {
                 .register_table(request)
                 .await
                 .context(CatalogSnafu)?,
-            error::TableAlreadyExistSnafu {
+            TableAlreadyExistSnafu {
                 table: table_name.to_string()
             }
         );
@@ -260,11 +282,15 @@ impl DistInstance {
                     database_name: stmt.name.to_string(),
                     create_if_not_exists: stmt.if_not_exists,
                 };
-                Ok(self.handle_create_database(expr).await?)
+                return self.handle_create_database(expr, query_ctx).await;
             }
             Statement::CreateTable(stmt) => {
                 let create_expr = &mut expr_factory::create_to_expr(&stmt, query_ctx)?;
                 Ok(self.create_table(create_expr, stmt.partitions).await?)
+            }
+            Statement::Alter(alter_table) => {
+                let expr = grpc::to_alter_expr(alter_table, query_ctx)?;
+                return self.handle_alter_table(expr).await;
             }
             Statement::DropTable(stmt) => {
                 let (catalog, schema, table) =
@@ -346,10 +372,30 @@ impl DistInstance {
     }
 
     /// Handles distributed database creation
-    async fn handle_create_database(&self, expr: CreateDatabaseExpr) -> Result<Output> {
+    async fn handle_create_database(
+        &self,
+        expr: CreateDatabaseExpr,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let catalog = query_ctx.current_catalog();
+        if self
+            .catalog_manager
+            .schema(&catalog, &expr.database_name)
+            .context(CatalogSnafu)?
+            .is_some()
+        {
+            return if expr.create_if_not_exists {
+                Ok(Output::AffectedRows(1))
+            } else {
+                SchemaExistsSnafu {
+                    name: &expr.database_name,
+                }
+                .fail()
+            };
+        }
+
         let key = SchemaKey {
-            // TODO(sunng87): custom catalog
-            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            catalog_name: catalog,
             schema_name: expr.database_name,
         };
         let value = SchemaValue {};
@@ -358,10 +404,19 @@ impl DistInstance {
             .store_client()
             .context(StartMetaClientSnafu)?;
 
-        let request = PutRequest::default()
+        let request = CompareAndPutRequest::new()
             .with_key(key.to_string())
             .with_value(value.as_bytes().context(CatalogEntrySerdeSnafu)?);
-        client.put(request.into()).await.context(RequestMetaSnafu)?;
+        let response = client
+            .compare_and_put(request.into())
+            .await
+            .context(RequestMetaSnafu)?;
+        ensure!(
+            response.success,
+            SchemaExistsSnafu {
+                name: key.schema_name
+            }
+        );
 
         Ok(Output::AffectedRows(1))
     }
@@ -474,7 +529,7 @@ impl SqlQueryHandler for DistInstance {
 
     async fn do_promql_query(
         &self,
-        _: &str,
+        _: &PromQuery,
         _: QueryContextRef,
     ) -> Vec<std::result::Result<Output, Self::Error>> {
         unimplemented!()
@@ -551,7 +606,8 @@ fn create_table_info(create_table: &CreateTableExpr) -> Result<RawTableInfo> {
         next_column_id: column_schemas.len() as u32,
         region_numbers: vec![],
         engine_options: HashMap::new(),
-        options: HashMap::new(),
+        options: TableOptions::try_from(&create_table.table_options)
+            .context(UnrecognizedTableOptionSnafu)?,
         created_on: DateTime::default(),
     };
 

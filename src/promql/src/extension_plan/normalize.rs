@@ -17,6 +17,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use datafusion::arrow::array::{BooleanArray, Float64Array};
 use datafusion::arrow::compute;
 use datafusion::common::{DFSchemaRef, Result as DataFusionResult, Statistics};
 use datafusion::execution::context::TaskContext;
@@ -40,6 +41,7 @@ use crate::extension_plan::Millisecond;
 /// Roughly speaking, this method does these things:
 /// - bias sample's timestamp by offset
 /// - sort the record batch based on timestamp column
+/// - remove NaN values
 #[derive(Debug)]
 pub struct SeriesNormalize {
     offset: Millisecond,
@@ -237,7 +239,23 @@ impl SeriesNormalizeStream {
             .iter()
             .map(|array| compute::take(array, &ordered_indices, None))
             .collect::<ArrowResult<Vec<_>>>()?;
-        RecordBatch::try_new(input.schema(), ordered_columns)
+        let ordered_batch = RecordBatch::try_new(input.schema(), ordered_columns)?;
+
+        // TODO(ruihang): consider the "special NaN"
+        // filter out NaN
+        let mut filter = vec![true; input.num_rows()];
+        for column in ordered_batch.columns() {
+            if let Some(float_column) = column.as_any().downcast_ref::<Float64Array>() {
+                for (i, flag) in filter.iter_mut().enumerate() {
+                    if float_column.value(i).is_nan() {
+                        *flag = false;
+                    }
+                }
+            }
+        }
+
+        let result = compute::filter_record_batch(&ordered_batch, &BooleanArray::from(filter))?;
+        Ok(result)
     }
 }
 

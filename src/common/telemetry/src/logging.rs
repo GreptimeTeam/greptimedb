@@ -26,6 +26,7 @@ use tracing_bunyan_formatter::{BunyanFormattingLayer, JsonStorageLayer};
 use tracing_log::LogTracer;
 use tracing_subscriber::fmt::Layer;
 use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::prelude::*;
 use tracing_subscriber::{filter, EnvFilter, Registry};
 
 pub use crate::{debug, error, info, log, trace, warn};
@@ -77,6 +78,15 @@ pub fn init_global_logging(
     let file_logging_layer = BunyanFormattingLayer::new(app_name.to_string(), rolling_writer);
     guards.push(rolling_writer_guard);
 
+    // error JSON log layer.
+    let err_rolling_appender =
+        RollingFileAppender::new(Rotation::HOURLY, dir, format!("{}-{}", app_name, "err"));
+    let (err_rolling_writer, err_rolling_writer_guard) =
+        tracing_appender::non_blocking(err_rolling_appender);
+    let err_file_logging_layer =
+        BunyanFormattingLayer::new(app_name.to_string(), err_rolling_writer);
+    guards.push(err_rolling_writer_guard);
+
     // Use env RUST_LOG to initialize log if present.
     // Otherwise use the specified level.
     let directives = env::var(EnvFilter::DEFAULT_ENV).unwrap_or_else(|_x| level.to_string());
@@ -99,7 +109,8 @@ pub fn init_global_logging(
         .with(filter)
         .with(JsonStorageLayer)
         .with(stdout_logging_layer)
-        .with(file_logging_layer);
+        .with(file_logging_layer)
+        .with(err_file_logging_layer.with_filter(filter::LevelFilter::ERROR));
 
     // Must enable 'tokio_unstable' cfg, https://github.com/tokio-rs/console
     #[cfg(feature = "console")]

@@ -17,7 +17,8 @@ mod stream;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use api::v1::{GreptimeRequest, RequestHeader};
+use api::v1::auth_header::AuthScheme;
+use api::v1::{Basic, GreptimeRequest, RequestHeader};
 use arrow_flight::flight_service_server::FlightService;
 use arrow_flight::{
     Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo,
@@ -31,24 +32,35 @@ use futures::Stream;
 use prost::Message;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
-use tokio::sync::oneshot;
 use tonic::{Request, Response, Status, Streaming};
 
+use crate::auth::{Identity, UserProviderRef};
 use crate::error;
+use crate::error::Error::Auth;
+use crate::error::{NotFoundAuthHeaderSnafu, UnsupportedAuthSchemeSnafu};
 use crate::grpc::flight::stream::FlightRecordBatchStream;
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 
 type TonicResult<T> = Result<T, Status>;
 type TonicStream<T> = Pin<Box<dyn Stream<Item = TonicResult<T>> + Send + Sync + 'static>>;
 
-pub(crate) struct FlightHandler {
+pub struct FlightHandler {
     handler: ServerGrpcQueryHandlerRef,
+    user_provider: Option<UserProviderRef>,
     runtime: Arc<Runtime>,
 }
 
 impl FlightHandler {
-    pub(crate) fn new(handler: ServerGrpcQueryHandlerRef, runtime: Arc<Runtime>) -> Self {
-        Self { handler, runtime }
+    pub fn new(
+        handler: ServerGrpcQueryHandlerRef,
+        user_provider: Option<UserProviderRef>,
+        runtime: Arc<Runtime>,
+    ) -> Self {
+        Self {
+            handler,
+            user_provider,
+            runtime,
+        }
     }
 }
 
@@ -98,24 +110,35 @@ impl FlightService for FlightHandler {
         })?;
         let query_ctx = create_query_context(request.header.as_ref());
 
-        let (tx, rx) = oneshot::channel();
+        auth(
+            self.user_provider.as_ref(),
+            request.header.as_ref(),
+            &query_ctx,
+        )
+        .await?;
+
         let handler = self.handler.clone();
 
         // Executes requests in another runtime to
         // 1. prevent the execution from being cancelled unexpected by Tonic runtime;
+        //   - Refer to our blog for the rational behind it:
+        //     https://www.greptime.com/blogs/2023-01-12-hidden-control-flow.html
+        //   - Obtaining a `JoinHandle` to get the panic message (if there's any).
+        //     From its docs, `JoinHandle` is cancel safe. The task keeps running even it's handle been dropped.
         // 2. avoid the handler blocks the gRPC runtime incidentally.
-        self.runtime.spawn(async move {
-            let result = handler.do_query(query, query_ctx).await;
+        let handle = self
+            .runtime
+            .spawn(async move { handler.do_query(query, query_ctx).await });
 
-            // Ignore the sending result.
-            // Usually an error indicates the rx at Tonic side is dropped (due to request timeout).
-            let _ = tx.send(result);
-        });
-
-        // Safety: An early-dropped tx usually indicates a serious problem (like panic).
-        // This unwrap is used to poison the upper layer.
-        let output = rx.await.unwrap()?;
-
+        let output = handle.await.map_err(|e| {
+            if e.is_cancelled() {
+                Status::cancelled(e.to_string())
+            } else if e.is_panic() {
+                Status::internal(format!("{:?}", e.into_panic()))
+            } else {
+                Status::unknown(e.to_string())
+            }
+        })??;
         let stream = to_flight_data_stream(output);
         Ok(Response::new(stream))
     }
@@ -185,4 +208,43 @@ fn create_query_context(header: Option<&RequestHeader>) -> QueryContextRef {
         }
     };
     ctx
+}
+
+async fn auth(
+    user_provider: Option<&UserProviderRef>,
+    request_header: Option<&RequestHeader>,
+    query_ctx: &QueryContextRef,
+) -> TonicResult<()> {
+    let Some(user_provider) = user_provider else { return Ok(()) };
+
+    let user_info = match request_header
+        .context(NotFoundAuthHeaderSnafu)?
+        .clone()
+        .authorization
+        .context(NotFoundAuthHeaderSnafu)?
+        .auth_scheme
+        .context(NotFoundAuthHeaderSnafu)?
+    {
+        AuthScheme::Basic(Basic { username, password }) => user_provider
+            .authenticate(
+                Identity::UserId(&username, None),
+                crate::auth::Password::PlainText(&password),
+            )
+            .await
+            .map_err(|e| Auth { source: e }),
+        AuthScheme::Token(_) => UnsupportedAuthSchemeSnafu {
+            name: "Token AuthScheme",
+        }
+        .fail(),
+    }
+    .map_err(|e| Status::unauthenticated(e.to_string()))?;
+
+    user_provider
+        .authorize(
+            &query_ctx.current_catalog(),
+            &query_ctx.current_schema(),
+            &user_info,
+        )
+        .await
+        .map_err(|e| Status::permission_denied(e.to_string()))
 }

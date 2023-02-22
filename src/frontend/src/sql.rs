@@ -38,7 +38,10 @@ pub(crate) fn insert_to_request(
     query_ctx: QueryContextRef,
 ) -> Result<InsertRequest> {
     let columns = stmt.columns();
-    let values = stmt.values().context(error::ParseSqlSnafu)?;
+    let values = stmt
+        .values_body()
+        .context(error::ParseSqlSnafu)?
+        .context(error::MissingInsertValuesSnafu)?;
 
     let (catalog_name, schema_name, table_name) =
         table_idents_to_full_name(stmt.table_name(), query_ctx)
@@ -118,7 +121,7 @@ fn add_row_to_vector(
         statements::sql_value_to_value(&column_schema.name, &column_schema.data_type, sql_val)
             .context(error::ParseSqlSnafu)?
     };
-    builder.push_value_ref(value.as_value_ref()).unwrap();
+    builder.push_value_ref(value.as_value_ref());
     Ok(())
 }
 

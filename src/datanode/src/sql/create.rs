@@ -13,16 +13,15 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use catalog::{RegisterSchemaRequest, RegisterTableRequest};
-use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_query::Output;
 use common_telemetry::tracing::info;
 use common_telemetry::tracing::log::error;
-use datatypes::schema::SchemaBuilder;
+use datatypes::schema::RawSchema;
+use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
-use sql::ast::{ColumnOption, TableConstraint};
+use sql::ast::{ColumnOption, SqlOption, TableConstraint, Value};
 use sql::statements::column_def_to_schema;
 use sql::statements::create::CreateTable;
 use store_api::storage::consts::TIME_INDEX_NAME;
@@ -31,31 +30,42 @@ use table::metadata::TableId;
 use table::requests::*;
 
 use crate::error::{
-    self, CatalogNotFoundSnafu, CatalogSnafu, ConstraintNotSupportedSnafu, CreateSchemaSnafu,
-    CreateTableSnafu, InsertSystemCatalogSnafu, InvalidPrimaryKeySnafu, KeyColumnNotFoundSnafu,
+    self, CatalogNotFoundSnafu, CatalogSnafu, ConstraintNotSupportedSnafu, CreateTableSnafu,
+    IllegalPrimaryKeysDefSnafu, InsertSystemCatalogSnafu, KeyColumnNotFoundSnafu,
     RegisterSchemaSnafu, Result, SchemaExistsSnafu, SchemaNotFoundSnafu,
+    UnrecognizedTableOptionSnafu,
 };
 use crate::sql::SqlHandler;
 
 impl SqlHandler {
-    pub(crate) async fn create_database(&self, req: CreateDatabaseRequest) -> Result<Output> {
+    pub(crate) async fn create_database(
+        &self,
+        req: CreateDatabaseRequest,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let catalog = query_ctx.current_catalog();
         let schema = req.db_name;
+        if self
+            .catalog_manager
+            .schema(&catalog, &schema)
+            .context(CatalogSnafu)?
+            .is_some()
+        {
+            return if req.create_if_not_exists {
+                Ok(Output::AffectedRows(1))
+            } else {
+                SchemaExistsSnafu { name: schema }.fail()
+            };
+        }
+
         let reg_req = RegisterSchemaRequest {
-            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            catalog,
             schema: schema.clone(),
         };
-        let success = self
-            .catalog_manager
+        self.catalog_manager
             .register_schema(reg_req)
             .await
             .context(RegisterSchemaSnafu)?;
-
-        // FIXME(dennis): looks like register_schema always returns true even
-        // even when the schema already exists.
-        ensure!(
-            success || req.create_if_not_exists,
-            SchemaExistsSnafu { name: schema }
-        );
 
         info!("Successfully created database: {:?}", schema);
         Ok(Output::AffectedRows(1))
@@ -149,8 +159,8 @@ impl SqlHandler {
 
         ensure!(
             pk_map.len() < 2,
-            InvalidPrimaryKeySnafu {
-                msg: "Multiple definitions of primary key found"
+            IllegalPrimaryKeysDefSnafu {
+                msg: "not allowed to inline multiple primary keys in columns options"
             }
         );
 
@@ -181,8 +191,8 @@ impl SqlHandler {
                         }
                     } else if is_primary {
                         if !primary_keys.is_empty() {
-                            return InvalidPrimaryKeySnafu {
-                                msg: "Multiple definitions of primary key found",
+                            return IllegalPrimaryKeysDefSnafu {
+                                msg: "found definitions of primary keys in multiple places",
                             }
                             .fail();
                         }
@@ -213,7 +223,7 @@ impl SqlHandler {
 
         ensure!(
             !primary_keys.iter().any(|index| *index == ts_index),
-            InvalidPrimaryKeySnafu {
+            IllegalPrimaryKeysDefSnafu {
                 msg: "time index column can't be included in primary key"
             }
         );
@@ -229,13 +239,8 @@ impl SqlHandler {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let schema = Arc::new(
-            SchemaBuilder::try_from(columns_schemas)
-                .context(CreateSchemaSnafu)?
-                .build()
-                .context(CreateSchemaSnafu)?,
-        );
-
+        let table_options = stmt_options_to_table_options(&stmt.options)?;
+        let schema = RawSchema::new(columns_schemas);
         let request = CreateTableRequest {
             id: table_id,
             catalog_name: table_ref.catalog.to_string(),
@@ -246,17 +251,34 @@ impl SqlHandler {
             region_numbers: vec![0],
             primary_key_indices: primary_keys,
             create_if_not_exists: stmt.if_not_exists,
-            table_options: HashMap::new(),
+            table_options,
         };
         Ok(request)
     }
 }
 
+fn stmt_options_to_table_options(opts: &[SqlOption]) -> error::Result<TableOptions> {
+    let mut map = HashMap::with_capacity(opts.len());
+    for SqlOption { name, value } in opts {
+        let value_str = match value {
+            Value::SingleQuotedString(s) => s.clone(),
+            Value::DoubleQuotedString(s) => s.clone(),
+            _ => value.to_string(),
+        };
+        map.insert(name.value.clone(), value_str);
+    }
+    let options = TableOptions::try_from(&map).context(UnrecognizedTableOptionSnafu)?;
+    Ok(options)
+}
+
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
+    use std::time::Duration;
 
+    use common_base::readable_size::ReadableSize;
     use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::Schema;
     use sql::dialect::GenericDialect;
     use sql::parser::ParserContext;
     use sql::statements::statement::Statement;
@@ -274,6 +296,23 @@ mod tests {
                 panic!("Unexpected statement!")
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_create_table_with_options() {
+        let sql = r#"CREATE TABLE demo_table (timestamp BIGINT TIME INDEX, value DOUBLE, host STRING PRIMARY KEY) engine=mito with(regions=1, ttl='7days',write_buffer_size='32MB',some='other');"#;
+        let parsed_stmt = sql_to_statement(sql);
+        let handler = create_mock_sql_handler().await;
+        let c = handler
+            .create_to_request(42, parsed_stmt, &TableReference::bare("demo_table"))
+            .unwrap();
+
+        assert_eq!(Some(Duration::from_secs(604800)), c.table_options.ttl);
+        assert_eq!(
+            Some(ReadableSize::mb(32)),
+            c.table_options.write_buffer_size
+        );
+        assert_eq!("other", c.table_options.extra_options.get("some").unwrap());
     }
 
     #[tokio::test]
@@ -310,8 +349,8 @@ mod tests {
         assert_eq!(42, c.id);
         assert!(!c.create_if_not_exists);
         assert_eq!(vec![0], c.primary_key_indices);
-        assert_eq!(1, c.schema.timestamp_index().unwrap());
-        assert_eq!(4, c.schema.column_schemas().len());
+        assert_eq!(1, c.schema.timestamp_index.unwrap());
+        assert_eq!(4, c.schema.column_schemas.len());
     }
 
     #[tokio::test]
@@ -327,7 +366,7 @@ mod tests {
         let error = handler
             .create_to_request(42, parsed_stmt, &TableReference::bare("demo_table"))
             .unwrap_err();
-        assert_matches!(error, Error::InvalidPrimaryKey { .. });
+        assert_matches!(error, Error::IllegalPrimaryKeysDef { .. });
     }
 
     #[tokio::test]
@@ -342,7 +381,7 @@ mod tests {
         let error = handler
             .create_to_request(42, parsed_stmt, &TableReference::bare("demo_table"))
             .unwrap_err();
-        assert_matches!(error, Error::InvalidPrimaryKey { .. });
+        assert_matches!(error, Error::IllegalPrimaryKeysDef { .. });
     }
 
     #[tokio::test]
@@ -361,7 +400,7 @@ mod tests {
             .create_to_request(42, parsed_stmt, &TableReference::bare("demo_table"))
             .unwrap();
         assert!(c.primary_key_indices.is_empty());
-        assert_eq!(c.schema.timestamp_index(), Some(1));
+        assert_eq!(c.schema.timestamp_index, Some(1));
     }
 
     /// Constraints specified, not column cannot be found.
@@ -400,7 +439,7 @@ mod tests {
         let error = handler
             .create_to_request(42, create_table, &TableReference::full("c", "s", "demo"))
             .unwrap_err();
-        assert_matches!(error, Error::InvalidPrimaryKey { .. });
+        assert_matches!(error, Error::IllegalPrimaryKeysDef { .. });
     }
 
     #[tokio::test]
@@ -428,40 +467,25 @@ mod tests {
         assert_eq!("s".to_string(), request.schema_name);
         assert_eq!("demo".to_string(), request.table_name);
         assert!(!request.create_if_not_exists);
-        assert_eq!(4, request.schema.column_schemas().len());
+        assert_eq!(4, request.schema.column_schemas.len());
 
         assert_eq!(vec![0], request.primary_key_indices);
+        let schema = Schema::try_from(request.schema).unwrap();
         assert_eq!(
             ConcreteDataType::string_datatype(),
-            request
-                .schema
-                .column_schema_by_name("host")
-                .unwrap()
-                .data_type
+            schema.column_schema_by_name("host").unwrap().data_type
         );
         assert_eq!(
             ConcreteDataType::timestamp_millisecond_datatype(),
-            request
-                .schema
-                .column_schema_by_name("ts")
-                .unwrap()
-                .data_type
+            schema.column_schema_by_name("ts").unwrap().data_type
         );
         assert_eq!(
             ConcreteDataType::float64_datatype(),
-            request
-                .schema
-                .column_schema_by_name("cpu")
-                .unwrap()
-                .data_type
+            schema.column_schema_by_name("cpu").unwrap().data_type
         );
         assert_eq!(
             ConcreteDataType::float64_datatype(),
-            request
-                .schema
-                .column_schema_by_name("memory")
-                .unwrap()
-                .data_type
+            schema.column_schema_by_name("memory").unwrap().data_type
         );
     }
 }

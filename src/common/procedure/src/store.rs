@@ -14,9 +14,11 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
 use common_telemetry::logging;
 use futures::TryStreamExt;
+use object_store::ObjectStore;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
@@ -27,7 +29,7 @@ use crate::{BoxedProcedure, ProcedureId};
 mod state_store;
 
 /// Serialized data of a procedure.
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcedureMessage {
     /// Type name of the procedure. The procedure framework also use the type name to
     /// find a loader to load the procedure.
@@ -36,6 +38,8 @@ pub struct ProcedureMessage {
     pub data: String,
     /// Parent procedure id.
     pub parent_id: Option<ProcedureId>,
+    /// Current step.
+    pub step: u32,
 }
 
 /// Procedure storage layer.
@@ -49,7 +53,7 @@ impl ProcedureStore {
     }
 
     /// Dump the `procedure` to the storage.
-    async fn store_procedure(
+    pub(crate) async fn store_procedure(
         &self,
         procedure_id: ProcedureId,
         step: u32,
@@ -63,11 +67,12 @@ impl ProcedureStore {
             type_name: type_name.to_string(),
             data,
             parent_id,
+            step,
         };
         let key = ParsedKey {
             procedure_id,
             step,
-            is_committed: false,
+            key_type: KeyType::Step,
         }
         .to_string();
         let value = serde_json::to_string(&message).context(ToJsonSnafu)?;
@@ -78,11 +83,32 @@ impl ProcedureStore {
     }
 
     /// Write commit flag to the storage.
-    async fn commit_procedure(&self, procedure_id: ProcedureId, step: u32) -> Result<()> {
+    pub(crate) async fn commit_procedure(
+        &self,
+        procedure_id: ProcedureId,
+        step: u32,
+    ) -> Result<()> {
         let key = ParsedKey {
             procedure_id,
             step,
-            is_committed: true,
+            key_type: KeyType::Commit,
+        }
+        .to_string();
+        self.0.put(&key, Vec::new()).await?;
+
+        Ok(())
+    }
+
+    /// Write rollback flag to the storage.
+    pub(crate) async fn rollback_procedure(
+        &self,
+        procedure_id: ProcedureId,
+        step: u32,
+    ) -> Result<()> {
+        let key = ParsedKey {
+            procedure_id,
+            step,
+            key_type: KeyType::Rollback,
         }
         .to_string();
         self.0.put(&key, Vec::new()).await?;
@@ -91,7 +117,7 @@ impl ProcedureStore {
     }
 
     /// Load uncommitted procedures from the storage.
-    async fn load_messages(&self) -> Result<HashMap<ProcedureId, ProcedureMessage>> {
+    pub(crate) async fn load_messages(&self) -> Result<HashMap<ProcedureId, ProcedureMessage>> {
         let mut messages = HashMap::new();
         // Track the key-value pair by procedure id.
         let mut procedure_key_values: HashMap<_, (ParsedKey, Vec<u8>)> = HashMap::new();
@@ -115,7 +141,7 @@ impl ProcedureStore {
         }
 
         for (procedure_id, (parsed_key, value)) in procedure_key_values {
-            if !parsed_key.is_committed {
+            if parsed_key.key_type == KeyType::Step {
                 let Some(message) = self.load_one_message(&parsed_key, &value) else {
                     // We don't abort the loading process and just ignore errors to ensure all remaining
                     // procedures are loaded.
@@ -139,12 +165,47 @@ impl ProcedureStore {
     }
 }
 
+impl From<ObjectStore> for ProcedureStore {
+    fn from(store: ObjectStore) -> ProcedureStore {
+        let state_store = ObjectStateStore::new(store);
+
+        ProcedureStore::new(Arc::new(state_store))
+    }
+}
+
+/// Suffix type of the key.
+#[derive(Debug, PartialEq, Eq)]
+enum KeyType {
+    Step,
+    Commit,
+    Rollback,
+}
+
+impl KeyType {
+    fn as_str(&self) -> &'static str {
+        match self {
+            KeyType::Step => "step",
+            KeyType::Commit => "commit",
+            KeyType::Rollback => "rollback",
+        }
+    }
+
+    fn from_str(s: &str) -> Option<KeyType> {
+        match s {
+            "step" => Some(KeyType::Step),
+            "commit" => Some(KeyType::Commit),
+            "rollback" => Some(KeyType::Rollback),
+            _ => None,
+        }
+    }
+}
+
 /// Key to refer the procedure in the [ProcedureStore].
 #[derive(Debug, PartialEq, Eq)]
 struct ParsedKey {
     procedure_id: ProcedureId,
     step: u32,
-    is_committed: bool,
+    key_type: KeyType,
 }
 
 impl fmt::Display for ParsedKey {
@@ -154,7 +215,7 @@ impl fmt::Display for ParsedKey {
             "{}/{:010}.{}",
             self.procedure_id,
             self.step,
-            if self.is_committed { "commit" } else { "step" }
+            self.key_type.as_str(),
         )
     }
 }
@@ -171,33 +232,33 @@ impl ParsedKey {
         let mut parts = name.split('.');
         let step_str = parts.next()?;
         let suffix = parts.next()?;
-        let is_committed = match suffix {
-            "commit" => true,
-            "step" => false,
-            _ => return None,
-        };
+        let key_type = KeyType::from_str(suffix)?;
         let step = step_str.parse().ok()?;
 
         Some(ParsedKey {
             procedure_id,
             step,
-            is_committed,
+            key_type,
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use async_trait::async_trait;
     use object_store::services::fs::Builder;
-    use object_store::ObjectStore;
     use tempdir::TempDir;
 
     use super::*;
-    use crate::store::state_store::ObjectStateStore;
     use crate::{Context, LockKey, Procedure, Status};
+
+    fn procedure_store_for_test(dir: &TempDir) -> ProcedureStore {
+        let store_dir = dir.path().to_str().unwrap();
+        let accessor = Builder::default().root(store_dir).build().unwrap();
+        let object_store = ObjectStore::new(accessor);
+
+        ProcedureStore::from(object_store)
+    }
 
     #[test]
     fn test_parsed_key() {
@@ -205,7 +266,7 @@ mod tests {
         let key = ParsedKey {
             procedure_id,
             step: 2,
-            is_committed: false,
+            key_type: KeyType::Step,
         };
         assert_eq!(format!("{procedure_id}/0000000002.step"), key.to_string());
         assert_eq!(key, ParsedKey::parse_str(&key.to_string()).unwrap());
@@ -213,9 +274,20 @@ mod tests {
         let key = ParsedKey {
             procedure_id,
             step: 2,
-            is_committed: true,
+            key_type: KeyType::Commit,
         };
         assert_eq!(format!("{procedure_id}/0000000002.commit"), key.to_string());
+        assert_eq!(key, ParsedKey::parse_str(&key.to_string()).unwrap());
+
+        let key = ParsedKey {
+            procedure_id,
+            step: 2,
+            key_type: KeyType::Rollback,
+        };
+        assert_eq!(
+            format!("{procedure_id}/0000000002.rollback"),
+            key.to_string()
+        );
         assert_eq!(key, ParsedKey::parse_str(&key.to_string()).unwrap());
     }
 
@@ -251,12 +323,13 @@ mod tests {
             type_name: "TestMessage".to_string(),
             data: "no parent id".to_string(),
             parent_id: None,
+            step: 4,
         };
 
         let json = serde_json::to_string(&message).unwrap();
         assert_eq!(
             json,
-            r#"{"type_name":"TestMessage","data":"no parent id","parent_id":null}"#
+            r#"{"type_name":"TestMessage","data":"no parent id","parent_id":null,"step":4}"#
         );
 
         let procedure_id = ProcedureId::parse_str("9f805a1f-05f7-490c-9f91-bd56e3cc54c1").unwrap();
@@ -264,7 +337,7 @@ mod tests {
         let json = serde_json::to_string(&message).unwrap();
         assert_eq!(
             json,
-            r#"{"type_name":"TestMessage","data":"no parent id","parent_id":"9f805a1f-05f7-490c-9f91-bd56e3cc54c1"}"#
+            r#"{"type_name":"TestMessage","data":"no parent id","parent_id":"9f805a1f-05f7-490c-9f91-bd56e3cc54c1","step":4}"#
         );
     }
 
@@ -292,24 +365,15 @@ mod tests {
             Ok(self.data.clone())
         }
 
-        fn lock_key(&self) -> Option<LockKey> {
-            None
+        fn lock_key(&self) -> LockKey {
+            LockKey::default()
         }
-    }
-
-    fn new_procedure_store(dir: &TempDir) -> ProcedureStore {
-        let store_dir = dir.path().to_str().unwrap();
-        let accessor = Builder::default().root(store_dir).build().unwrap();
-        let object_store = ObjectStore::new(accessor);
-        let state_store = ObjectStateStore::new(object_store);
-
-        ProcedureStore(Arc::new(state_store))
     }
 
     #[tokio::test]
     async fn test_store_procedure() {
         let dir = TempDir::new("store_procedure").unwrap();
-        let store = new_procedure_store(&dir);
+        let store = procedure_store_for_test(&dir);
 
         let procedure_id = ProcedureId::random();
         let procedure: BoxedProcedure = Box::new(MockProcedure::new("test store procedure"));
@@ -326,6 +390,7 @@ mod tests {
             type_name: "MockProcedure".to_string(),
             data: "test store procedure".to_string(),
             parent_id: None,
+            step: 0,
         };
         assert_eq!(expect, *msg);
     }
@@ -333,7 +398,7 @@ mod tests {
     #[tokio::test]
     async fn test_commit_procedure() {
         let dir = TempDir::new("commit_procedure").unwrap();
-        let store = new_procedure_store(&dir);
+        let store = procedure_store_for_test(&dir);
 
         let procedure_id = ProcedureId::random();
         let procedure: BoxedProcedure = Box::new(MockProcedure::new("test store procedure"));
@@ -349,9 +414,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_rollback_procedure() {
+        let dir = TempDir::new("rollback_procedure").unwrap();
+        let store = procedure_store_for_test(&dir);
+
+        let procedure_id = ProcedureId::random();
+        let procedure: BoxedProcedure = Box::new(MockProcedure::new("test store procedure"));
+
+        store
+            .store_procedure(procedure_id, 0, &procedure, None)
+            .await
+            .unwrap();
+        store.rollback_procedure(procedure_id, 1).await.unwrap();
+
+        let messages = store.load_messages().await.unwrap();
+        assert!(messages.is_empty());
+    }
+
+    #[tokio::test]
     async fn test_load_messages() {
         let dir = TempDir::new("load_messages").unwrap();
-        let store = new_procedure_store(&dir);
+        let store = procedure_store_for_test(&dir);
 
         // store 3 steps
         let id0 = ProcedureId::random();

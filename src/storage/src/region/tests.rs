@@ -16,10 +16,11 @@
 
 mod alter;
 mod basic;
+mod close;
 mod flush;
 mod projection;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use common_telemetry::logging;
 use datatypes::prelude::{ScalarVector, WrapperType};
@@ -36,9 +37,12 @@ use store_api::storage::{
 use tempdir::TempDir;
 
 use super::*;
+use crate::file_purger::noop::NoopFilePurgeHandler;
 use crate::manifest::action::{RegionChange, RegionMetaActionList};
 use crate::manifest::test_utils::*;
 use crate::memtable::DefaultMemtableBuilder;
+use crate::scheduler::{LocalScheduler, SchedulerConfig};
+use crate::sst::FsAccessLayer;
 use crate::test_util::descriptor_util::RegionDescBuilder;
 use crate::test_util::{self, config_util, schema_util, write_batch_util};
 
@@ -75,6 +79,13 @@ impl<S: LogStore> TesterBase<S> {
     ///
     /// Format of data: (timestamp, v0), timestamp is key, v0 is value.
     pub async fn put(&self, data: &[(i64, Option<i64>)]) -> WriteResponse {
+        self.try_put(data).await.unwrap()
+    }
+
+    /// Put without version specified, returns [`Result<WriteResponse>`]
+    ///
+    /// Format of data: (timestamp, v0), timestamp is key, v0 is value.
+    pub async fn try_put(&self, data: &[(i64, Option<i64>)]) -> Result<WriteResponse> {
         let data: Vec<(TimestampMillisecond, Option<i64>)> =
             data.iter().map(|(l, r)| ((*l).into(), *r)).collect();
         // Build a batch without version.
@@ -82,7 +93,7 @@ impl<S: LogStore> TesterBase<S> {
         let put_data = new_put_data(&data);
         batch.put(put_data).unwrap();
 
-        self.region.write(&self.write_ctx, batch).await.unwrap()
+        self.region.write(&self.write_ctx, batch).await
     }
 
     /// Put without version specified directly to inner writer.
@@ -115,10 +126,11 @@ impl<S: LogStore> TesterBase<S> {
         let mut reader = resp.reader;
 
         let metadata = self.region.in_memory_metadata();
-        assert_eq!(metadata.schema(), reader.schema());
+        assert_eq!(metadata.schema(), reader.user_schema());
 
         let mut dst = Vec::new();
         while let Some(chunk) = reader.next_chunk().await.unwrap() {
+            let chunk = reader.project_chunk(chunk);
             append_chunk_to(&chunk, &mut dst);
         }
 
@@ -276,17 +288,25 @@ async fn test_recover_region_manifets() {
             .unwrap(),
     );
 
-    let manifest = RegionManifest::new("/manifest/", object_store);
+    let manifest = RegionManifest::new("/manifest/", object_store.clone());
     let region_meta = Arc::new(build_region_meta());
 
+    let sst_layer = Arc::new(FsAccessLayer::new("sst", object_store)) as _;
+    let file_purger = Arc::new(LocalScheduler::new(
+        SchedulerConfig::default(),
+        NoopFilePurgeHandler,
+    ));
     // Recover from empty
-    assert!(
-        RegionImpl::<NoopLogStore>::recover_from_manifest(&manifest, &memtable_builder)
-            .await
-            .unwrap()
-            .0
-            .is_none()
-    );
+    assert!(RegionImpl::<NoopLogStore>::recover_from_manifest(
+        &manifest,
+        &memtable_builder,
+        &sst_layer,
+        &file_purger
+    )
+    .await
+    .unwrap()
+    .0
+    .is_none());
 
     {
         // save some actions into region_meta
@@ -320,10 +340,14 @@ async fn test_recover_region_manifets() {
     }
 
     // try to recover
-    let (version, recovered_metadata) =
-        RegionImpl::<NoopLogStore>::recover_from_manifest(&manifest, &memtable_builder)
-            .await
-            .unwrap();
+    let (version, recovered_metadata) = RegionImpl::<NoopLogStore>::recover_from_manifest(
+        &manifest,
+        &memtable_builder,
+        &sst_layer,
+        &file_purger,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(42, *recovered_metadata.first_key_value().unwrap().0);
     let version = version.unwrap();
@@ -331,11 +355,15 @@ async fn test_recover_region_manifets() {
     assert_eq!(version.flushed_sequence(), 2);
     assert_eq!(version.manifest_version(), 1);
     let ssts = version.ssts();
-    let files = ssts.levels()[0].files();
+    let files = ssts.levels()[0]
+        .files()
+        .map(|f| f.file_name().to_string())
+        .collect::<HashSet<_>>();
     assert_eq!(3, files.len());
-    for (i, file) in files.iter().enumerate() {
-        assert_eq!(format!("f{}", i + 1), file.file_name());
-    }
+    assert_eq!(
+        HashSet::from(["f1".to_string(), "f2".to_string(), "f3".to_string()]),
+        files
+    );
 
     // check manifest state
     assert_eq!(3, manifest.last_version());

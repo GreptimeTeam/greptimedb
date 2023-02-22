@@ -53,7 +53,8 @@ macro_rules! http_tests {
                 $service,
 
                 test_sql_api,
-                test_promql_api,
+                test_prometheus_promql_api,
+                test_promql_http_api,
                 test_metrics_api,
                 test_scripts_api,
                 test_health_api,
@@ -265,24 +266,43 @@ pub async fn test_sql_api(store_type: StorageType) {
     guard.remove_all().await;
 }
 
-pub async fn test_promql_api(store_type: StorageType) {
+pub async fn test_prometheus_promql_api(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "sql_api").await;
+    let client = TestClient::new(app);
+
+    let res = client
+        .get("/v1/promql?query=abs(demo{host=\"Hangzhou\"})&start=0&end=100&step=5s")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
+    assert!(body.success());
+    assert!(body.execution_time_ms().is_some());
+
+    guard.remove_all().await;
+}
+
+pub async fn test_promql_http_api(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) = setup_test_promql_app_with_frontend(store_type, "promql_api").await;
     let client = TestClient::new(app);
 
     // instant query
-    let res = client.get("/v1/query?query=up").send().await;
+    let res = client.get("/api/v1/query?query=up").send().await;
     assert_eq!(res.status(), StatusCode::OK);
-    let res = client.post("/v1/query?query=up").send().await;
+    let res = client.post("/api/v1/query?query=up").send().await;
     assert_eq!(res.status(), StatusCode::OK);
 
     let res = client
-        .get("/v1/range_query?query=up&start=1&end=100&step=5")
+        .get("/api/v1/query_range?query=up&start=1&end=100&step=5")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
     let res = client
-        .post("/v1/range_query?query=up&start=1&end=100&step=5")
+        .post("/api/v1/query_range?query=up&start=1&end=100&step=5")
+        .header("Content-Type", "application/x-www-form-urlencoded")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -317,7 +337,7 @@ pub async fn test_scripts_api(store_type: StorageType) {
     let client = TestClient::new(app);
 
     let res = client
-        .post("/v1/scripts?schema=schema_test&name=test")
+        .post("/v1/scripts?db=schema_test&name=test")
         .body(
             r#"
 @copr(sql='select number from numbers limit 10', args=['number'], returns=['n'])
@@ -335,7 +355,7 @@ def test(n):
 
     // call script
     let res = client
-        .post("/v1/run-script?schema=schema_test&name=test")
+        .post("/v1/run-script?db=schema_test&name=test")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);

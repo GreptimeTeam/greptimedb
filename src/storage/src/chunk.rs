@@ -24,9 +24,9 @@ use table::predicate::{Predicate, TimeRangePredicateBuilder};
 
 use crate::error::{self, Error, Result};
 use crate::memtable::{IterContext, MemtableRef};
-use crate::read::{BoxedBatchReader, DedupReader, MergeReaderBuilder};
+use crate::read::{Batch, BoxedBatchReader, DedupReader, MergeReaderBuilder};
 use crate::schema::{ProjectedSchema, ProjectedSchemaRef, RegionSchemaRef};
-use crate::sst::{AccessLayerRef, FileHandle, LevelMetas, ReadOptions, Visitor};
+use crate::sst::{AccessLayerRef, FileHandle, LevelMetas, ReadOptions};
 
 /// Chunk reader implementation.
 // Now we use async-trait to implement the chunk reader, which is easier to implement than
@@ -41,7 +41,7 @@ pub struct ChunkReaderImpl {
 impl ChunkReader for ChunkReaderImpl {
     type Error = Error;
 
-    fn schema(&self) -> &SchemaRef {
+    fn user_schema(&self) -> &SchemaRef {
         self.schema.projected_user_schema()
     }
 
@@ -50,10 +50,14 @@ impl ChunkReader for ChunkReaderImpl {
             Some(b) => b,
             None => return Ok(None),
         };
+        Ok(Some(Chunk::new(batch.columns)))
+    }
 
-        let chunk = self.schema.batch_to_chunk(&batch);
-
-        Ok(Some(chunk))
+    fn project_chunk(&self, chunk: Chunk) -> Chunk {
+        let batch = Batch {
+            columns: chunk.columns,
+        };
+        self.schema.batch_to_chunk(&batch)
     }
 }
 
@@ -63,6 +67,11 @@ impl ChunkReaderImpl {
             schema,
             batch_reader,
         }
+    }
+
+    #[inline]
+    pub fn projected_schema(&self) -> &ProjectedSchemaRef {
+        &self.schema
     }
 }
 
@@ -121,14 +130,34 @@ impl ChunkReaderBuilder {
         self
     }
 
-    pub fn pick_ssts(mut self, ssts: &LevelMetas) -> Result<Self> {
-        ssts.visit_levels(&mut self)?;
-
+    /// Picks all SSTs in all levels
+    pub fn pick_all_ssts(mut self, ssts: &LevelMetas) -> Result<Self> {
+        let files = ssts.levels().iter().flat_map(|level| level.files());
+        // Now we read all files, so just reserve enough space to hold all files.
+        self.files_to_read.reserve(files.size_hint().0);
+        for file in files {
+            // We can't invoke async functions here, so we collects all files first, and
+            // create the batch reader later in `ChunkReaderBuilder`.
+            self.files_to_read.push(file.clone());
+        }
         Ok(self)
+    }
+
+    /// Picks given SSTs to read.
+    pub fn pick_ssts(mut self, ssts: &[FileHandle]) -> Self {
+        for file in ssts {
+            self.files_to_read.push(file.clone());
+        }
+        self
     }
 
     pub async fn build(mut self) -> Result<ChunkReaderImpl> {
         let time_range_predicate = self.build_time_range_predicate();
+        debug!(
+            "Time range predicate for chunk reader: {:?}",
+            time_range_predicate
+        );
+
         let schema = Arc::new(
             ProjectedSchema::new(self.schema, self.projection)
                 .context(error::InvalidProjectionSnafu)?,
@@ -148,6 +177,7 @@ impl ChunkReaderBuilder {
             batch_size: self.iter_ctx.batch_size,
             projected_schema: schema.clone(),
             predicate: Predicate::new(self.filters),
+            time_range: time_range_predicate,
         };
         for file in &self.files_to_read {
             if !Self::file_in_range(file, time_range_predicate) {
@@ -187,21 +217,5 @@ impl ChunkReaderBuilder {
         let Some((start, end)) = *file.time_range() else { return true; };
         let file_ts_range = TimestampRange::new_inclusive(Some(start), Some(end));
         file_ts_range.intersects(&predicate)
-    }
-}
-
-impl Visitor for ChunkReaderBuilder {
-    fn visit(&mut self, _level: usize, files: &[FileHandle]) -> Result<()> {
-        // TODO(yingwen): Filter files by time range.
-
-        // Now we read all files, so just reserve enough space to hold all files.
-        self.files_to_read.reserve(files.len());
-        for file in files {
-            // We can't invoke async functions here, so we collects all files first, and
-            // create the batch reader later in `ChunkReaderBuilder`.
-            self.files_to_read.push(file.clone());
-        }
-
-        Ok(())
     }
 }

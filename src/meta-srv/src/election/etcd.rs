@@ -38,10 +38,18 @@ impl EtcdElection {
         E: AsRef<str>,
         S: AsRef<[E]>,
     {
-        let leader_value = leader_value.as_ref().into();
         let client = Client::connect(endpoints, None)
             .await
             .context(error::ConnectEtcdSnafu)?;
+
+        Self::with_etcd_client(leader_value, client)
+    }
+
+    pub fn with_etcd_client<E>(leader_value: E, client: Client) -> Result<ElectionRef>
+    where
+        E: AsRef<str>,
+    {
+        let leader_value = leader_value.as_ref().into();
 
         Ok(Arc::new(Self {
             leader_value,

@@ -16,7 +16,6 @@ use std::any::Any;
 
 use common_error::prelude::*;
 use datafusion::error::DataFusionError;
-use promql_parser::label::Label;
 use promql_parser::parser::{Expr as PromExpr, TokenType};
 
 #[derive(Debug, Snafu)]
@@ -25,7 +24,7 @@ pub enum Error {
     #[snafu(display("Unsupported expr type: {}", name))]
     UnsupportedExpr { name: String, backtrace: Backtrace },
 
-    #[snafu(display("Unexpected token: {}", token))]
+    #[snafu(display("Unexpected token: {:?}", token))]
     UnexpectedToken {
         token: TokenType,
         backtrace: Backtrace,
@@ -48,13 +47,6 @@ pub enum Error {
 
     #[snafu(display("Cannot find value columns in table {}", table))]
     ValueNotFound { table: String, backtrace: Backtrace },
-
-    #[snafu(display("Cannot find label {} in table {}", label, table,))]
-    LabelNotFound {
-        table: String,
-        label: Label,
-        backtrace: Backtrace,
-    },
 
     #[snafu(display("Cannot find the table {}", table))]
     TableNotFound {
@@ -107,15 +99,15 @@ impl ErrorExt for Error {
             | UnsupportedExpr { .. }
             | UnexpectedToken { .. }
             | MultipleVector { .. }
-            | LabelNotFound { .. }
             | ExpectExpr { .. } => StatusCode::InvalidArguments,
+
             UnknownTable { .. }
-            | TableNotFound { .. }
             | DataFusionPlanning { .. }
             | UnexpectedPlanExpr { .. }
             | IllegalRange { .. }
-            | EmptyRange { .. }
-            | TableNameNotFound { .. } => StatusCode::Internal,
+            | EmptyRange { .. } => StatusCode::Internal,
+
+            TableNotFound { .. } | TableNameNotFound { .. } => StatusCode::TableNotFound,
         }
     }
     fn backtrace_opt(&self) -> Option<&Backtrace> {

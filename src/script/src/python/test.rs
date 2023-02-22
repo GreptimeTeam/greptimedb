@@ -126,7 +126,7 @@ fn run_ron_testcases() {
             }
             Predicate::ExecIsOk { fields, columns } => {
                 let rb = create_sample_recordbatch();
-                let res = coprocessor::exec_coprocessor(&testcase.code, &rb).unwrap();
+                let res = coprocessor::exec_coprocessor(&testcase.code, &Some(rb)).unwrap();
                 fields
                     .iter()
                     .zip(res.schema.column_schemas())
@@ -152,7 +152,7 @@ fn run_ron_testcases() {
                 reason: part_reason,
             } => {
                 let rb = create_sample_recordbatch();
-                let res = coprocessor::exec_coprocessor(&testcase.code, &rb);
+                let res = coprocessor::exec_coprocessor(&testcase.code, &Some(rb));
                 assert!(res.is_err(), "{res:#?}\nExpect Err(...), actual Ok(...)");
                 if let Err(res) = res {
                     error!(
@@ -254,7 +254,7 @@ def calc_rvs(open_time, close):
         ],
     )
     .unwrap();
-    let ret = coprocessor::exec_coprocessor(python_source, &rb);
+    let ret = coprocessor::exec_coprocessor(python_source, &Some(rb));
     if let Err(Error::PyParse {
         backtrace: _,
         source,
@@ -304,7 +304,7 @@ def a(cpu, mem):
         ],
     )
     .unwrap();
-    let ret = coprocessor::exec_coprocessor(python_source, &rb);
+    let ret = coprocessor::exec_coprocessor(python_source, &Some(rb));
     if let Err(Error::PyParse {
         backtrace: _,
         source,

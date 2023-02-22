@@ -96,9 +96,7 @@ pub fn column_to_vector(column: &Column, rows: u32) -> Result<VectorRef> {
 
         for i in 0..rows {
             if let Some(true) = nulls_iter.next() {
-                vector
-                    .push_value_ref(ValueRef::Null)
-                    .context(CreateVectorSnafu)?;
+                vector.push_null();
             } else {
                 let value_ref = values_iter
                     .next()
@@ -109,16 +107,12 @@ pub fn column_to_vector(column: &Column, rows: u32) -> Result<VectorRef> {
                         ),
                     })?;
                 vector
-                    .push_value_ref(value_ref)
+                    .try_push_value_ref(value_ref)
                     .context(CreateVectorSnafu)?;
             }
         }
     } else {
-        (0..rows).try_for_each(|_| {
-            vector
-                .push_value_ref(ValueRef::Null)
-                .context(CreateVectorSnafu)
-        })?;
+        (0..rows).for_each(|_| vector.push_null());
     }
     Ok(vector.to_vector())
 }
@@ -324,7 +318,7 @@ fn add_values_to_builder(
 
         values.iter().try_for_each(|value| {
             builder
-                .push_value_ref(value.as_value_ref())
+                .try_push_value_ref(value.as_value_ref())
                 .context(CreateVectorSnafu)
         })?;
     } else {
@@ -337,12 +331,10 @@ fn add_values_to_builder(
         let mut idx_of_values = 0;
         for idx in 0..row_count {
             match is_null(&null_mask, idx) {
-                Some(true) => builder
-                    .push_value_ref(ValueRef::Null)
-                    .context(CreateVectorSnafu)?,
+                Some(true) => builder.push_null(),
                 _ => {
                     builder
-                        .push_value_ref(values[idx_of_values].as_value_ref())
+                        .try_push_value_ref(values[idx_of_values].as_value_ref())
                         .context(CreateVectorSnafu)?;
                     idx_of_values += 1
                 }

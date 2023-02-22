@@ -28,7 +28,7 @@ mod tests {
     };
     use catalog::{CatalogList, CatalogManager, RegisterTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use datatypes::schema::Schema;
+    use datatypes::schema::RawSchema;
     use futures_util::StreamExt;
     use table::engine::{EngineContext, TableEngineRef};
     use table::requests::CreateTableRequest;
@@ -116,7 +116,7 @@ mod tests {
         let schema_name = "nonexistent_schema".to_string();
         let table_name = "fail_table".to_string();
         // this schema has no effect
-        let table_schema = Arc::new(Schema::new(vec![]));
+        let table_schema = RawSchema::new(vec![]);
         let table = table_engine
             .create_table(
                 &EngineContext {},
@@ -126,7 +126,7 @@ mod tests {
                     schema_name: schema_name.clone(),
                     table_name: table_name.clone(),
                     desc: None,
-                    schema: table_schema.clone(),
+                    schema: table_schema,
                     region_numbers: vec![0],
                     primary_key_indices: vec![],
                     create_if_not_exists: false,
@@ -176,7 +176,7 @@ mod tests {
         let table_name = "test_table".to_string();
         let table_id = 1;
         // this schema has no effect
-        let table_schema = Arc::new(Schema::new(vec![]));
+        let table_schema = RawSchema::new(vec![]);
         let table = table_engine
             .create_table(
                 &EngineContext {},
@@ -186,7 +186,7 @@ mod tests {
                     schema_name: schema_name.clone(),
                     table_name: table_name.clone(),
                     desc: None,
-                    schema: table_schema.clone(),
+                    schema: table_schema,
                     region_numbers: vec![0],
                     primary_key_indices: vec![],
                     create_if_not_exists: false,
@@ -246,7 +246,7 @@ mod tests {
                     schema_name: schema_name.clone(),
                     table_name: "".to_string(),
                     desc: None,
-                    schema: Arc::new(Schema::new(vec![])),
+                    schema: RawSchema::new(vec![]),
                     region_numbers: vec![0],
                     primary_key_indices: vec![],
                     create_if_not_exists: false,

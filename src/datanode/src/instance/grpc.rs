@@ -30,12 +30,16 @@ use crate::error::{self, DecodeLogicalPlanSnafu, ExecuteSqlSnafu, Result};
 use crate::instance::Instance;
 
 impl Instance {
-    pub(crate) async fn handle_create_database(&self, expr: CreateDatabaseExpr) -> Result<Output> {
+    pub(crate) async fn handle_create_database(
+        &self,
+        expr: CreateDatabaseExpr,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
         let req = CreateDatabaseRequest {
             db_name: expr.database_name,
             create_if_not_exists: expr.create_if_not_exists,
         };
-        self.sql_handler().create_database(req).await
+        self.sql_handler.create_database(req, query_ctx).await
     }
 
     pub(crate) async fn execute_logical(&self, plan_bytes: Vec<u8>) -> Result<Output> {
@@ -83,14 +87,14 @@ impl Instance {
         Ok(Output::AffectedRows(affected_rows))
     }
 
-    async fn handle_ddl(&self, request: DdlRequest) -> Result<Output> {
+    async fn handle_ddl(&self, request: DdlRequest, query_ctx: QueryContextRef) -> Result<Output> {
         let expr = request.expr.context(error::MissingRequiredFieldSnafu {
             name: "DdlRequest.expr",
         })?;
         match expr {
             DdlExpr::CreateTable(expr) => self.handle_create(expr).await,
             DdlExpr::Alter(expr) => self.handle_alter(expr).await,
-            DdlExpr::CreateDatabase(expr) => self.handle_create_database(expr).await,
+            DdlExpr::CreateDatabase(expr) => self.handle_create_database(expr, query_ctx).await,
             DdlExpr::DropTable(expr) => self.handle_drop_table(expr).await,
         }
     }
@@ -111,7 +115,7 @@ impl GrpcQueryHandler for Instance {
                     })?;
                 self.handle_query(query, ctx).await
             }
-            GrpcRequest::Ddl(request) => self.handle_ddl(request).await,
+            GrpcRequest::Ddl(request) => self.handle_ddl(request, ctx).await,
         }
     }
 }

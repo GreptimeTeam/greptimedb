@@ -12,14 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod procedure;
+
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
+use common_procedure::{BoxedProcedure, ProcedureManager};
 use common_telemetry::tracing::log::info;
 use common_telemetry::{debug, logging};
-use datatypes::schema::SchemaRef;
+use datatypes::schema::Schema;
 use object_store::ObjectStore;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{
@@ -27,7 +30,7 @@ use store_api::storage::{
     CreateOptions, EngineContext as StorageEngineContext, OpenOptions, Region,
     RegionDescriptorBuilder, RegionId, RowKeyDescriptor, RowKeyDescriptorBuilder, StorageEngine,
 };
-use table::engine::{EngineContext, TableEngine, TableReference};
+use table::engine::{EngineContext, TableEngine, TableEngineProcedure, TableReference};
 use table::error::TableOperationSnafu;
 use table::metadata::{
     TableId, TableInfo, TableInfoBuilder, TableMetaBuilder, TableType, TableVersion,
@@ -40,10 +43,11 @@ use table::{error as table_error, Result as TableResult, Table};
 use tokio::sync::Mutex;
 
 use crate::config::EngineConfig;
+use crate::engine::procedure::CreateMitoTable;
 use crate::error::{
     self, BuildColumnDescriptorSnafu, BuildColumnFamilyDescriptorSnafu, BuildRegionDescriptorSnafu,
-    BuildRowKeyDescriptorSnafu, InvalidPrimaryKeySnafu, MissingTimestampIndexSnafu,
-    RegionNotFoundSnafu, Result, TableExistsSnafu,
+    BuildRowKeyDescriptorSnafu, InvalidPrimaryKeySnafu, InvalidRawSchemaSnafu,
+    MissingTimestampIndexSnafu, RegionNotFoundSnafu, Result, TableExistsSnafu,
 };
 use crate::manifest::TableManifest;
 use crate::table::MitoTable;
@@ -64,8 +68,8 @@ fn region_id(table_id: TableId, n: u32) -> RegionId {
 }
 
 #[inline]
-fn table_dir(schema_name: &str, table_id: TableId) -> String {
-    format!("{schema_name}/{table_id}/")
+fn table_dir(catalog_name: &str, schema_name: &str, table_id: TableId) -> String {
+    format!("{catalog_name}/{schema_name}/{table_id}/")
 }
 
 /// [TableEngine] implementation.
@@ -82,6 +86,14 @@ impl<S: StorageEngine> MitoEngine<S> {
         Self {
             inner: Arc::new(MitoEngineInner::new(config, storage_engine, object_store)),
         }
+    }
+
+    /// Register all procedure loaders to the procedure manager.
+    ///
+    /// # Panics
+    /// Panics on error.
+    pub fn register_procedure_loaders(&self, procedure_manager: &dyn ProcedureManager) {
+        procedure::register_procedure_loaders(self.inner.clone(), procedure_manager);
     }
 }
 
@@ -152,7 +164,22 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
     }
 }
 
-struct MitoEngineInner<S: StorageEngine> {
+impl<S: StorageEngine> TableEngineProcedure for MitoEngine<S> {
+    fn create_table_procedure(
+        &self,
+        _ctx: &EngineContext,
+        request: CreateTableRequest,
+    ) -> TableResult<BoxedProcedure> {
+        validate_create_table_request(&request)
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)?;
+
+        let procedure = Box::new(CreateMitoTable::new(request, self.inner.clone()));
+        Ok(procedure)
+    }
+}
+
+pub(crate) struct MitoEngineInner<S: StorageEngine> {
     /// All tables opened by the engine. Map key is formatted [TableReference].
     ///
     /// Writing to `tables` should also hold the `table_mutex`.
@@ -167,7 +194,7 @@ struct MitoEngineInner<S: StorageEngine> {
 fn build_row_key_desc(
     mut column_id: ColumnId,
     table_name: &str,
-    table_schema: &SchemaRef,
+    table_schema: &Schema,
     primary_key_indices: &Vec<usize>,
 ) -> Result<(ColumnId, RowKeyDescriptor)> {
     let ts_column_schema = table_schema
@@ -231,7 +258,7 @@ fn build_row_key_desc(
 fn build_column_family(
     mut column_id: ColumnId,
     table_name: &str,
-    table_schema: &SchemaRef,
+    table_schema: &Schema,
     primary_key_indices: &[usize],
 ) -> Result<(ColumnId, ColumnFamilyDescriptor)> {
     let mut builder = ColumnFamilyDescriptorBuilder::default();
@@ -274,7 +301,7 @@ fn build_column_family(
 fn validate_create_table_request(request: &CreateTableRequest) -> Result<()> {
     let ts_index = request
         .schema
-        .timestamp_index()
+        .timestamp_index
         .context(MissingTimestampIndexSnafu {
             table_name: &request.table_name,
         })?;
@@ -320,23 +347,24 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             }
         }
 
-        let table_schema = &request.schema;
+        let table_schema =
+            Arc::new(Schema::try_from(request.schema).context(InvalidRawSchemaSnafu)?);
         let primary_key_indices = &request.primary_key_indices;
         let (next_column_id, default_cf) = build_column_family(
             INIT_COLUMN_ID,
             table_name,
-            table_schema,
+            &table_schema,
             primary_key_indices,
         )?;
         let (next_column_id, row_key) = build_row_key_desc(
             next_column_id,
             table_name,
-            table_schema,
+            &table_schema,
             primary_key_indices,
         )?;
 
         let table_id = request.id;
-        let table_dir = table_dir(schema_name, table_id);
+        let table_dir = table_dir(catalog_name, schema_name, table_id);
         let mut regions = HashMap::with_capacity(request.region_numbers.len());
 
         let _lock = self.table_mutex.lock().await;
@@ -365,6 +393,11 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 })?;
             let opts = CreateOptions {
                 parent_dir: table_dir.clone(),
+                write_buffer_size: request
+                    .table_options
+                    .write_buffer_size
+                    .map(|size| size.0 as usize),
+                ttl: request.table_options.ttl,
             };
 
             let region = self
@@ -378,10 +411,11 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         }
 
         let table_meta = TableMetaBuilder::default()
-            .schema(request.schema)
+            .schema(table_schema)
             .engine(MITO_ENGINE)
             .next_column_id(next_column_id)
             .primary_key_indices(request.primary_key_indices.clone())
+            .options(request.table_options)
             .region_numbers(request.region_numbers)
             .build()
             .context(error::BuildTableMetaSnafu { table_name })?;
@@ -446,14 +480,22 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
             let table_id = request.table_id;
             let engine_ctx = StorageEngineContext::default();
-            let table_dir = table_dir(schema_name, table_id);
-            let opts = OpenOptions {
-                parent_dir: table_dir.to_string(),
-            };
+            let table_dir = table_dir(catalog_name, schema_name, table_id);
 
             let Some((manifest, table_info)) = self
                 .recover_table_manifest_and_info(table_name, &table_dir)
-                .await? else { return Ok(None) };
+                .await.map_err(BoxedError::new)
+                .context(TableOperationSnafu)? else { return Ok(None) };
+
+            let opts = OpenOptions {
+                parent_dir: table_dir.to_string(),
+                write_buffer_size: table_info
+                    .meta
+                    .options
+                    .write_buffer_size
+                    .map(|s| s.0 as usize),
+                ttl: table_info.meta.options.ttl,
+            };
 
             debug!(
                 "Opening table {}, table info recovered: {:?}",
@@ -499,16 +541,14 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         &self,
         table_name: &str,
         table_dir: &str,
-    ) -> TableResult<Option<(TableManifest, TableInfo)>> {
+    ) -> Result<Option<(TableManifest, TableInfo)>> {
         let manifest = MitoTable::<<S as StorageEngine>::Region>::build_manifest(
             table_dir,
             self.object_store.clone(),
         );
         let  Some(table_info) =
             MitoTable::<<S as StorageEngine>::Region>::recover_table_info(table_name, &manifest)
-                .await
-                .map_err(BoxedError::new)
-                .context(TableOperationSnafu)? else { return Ok(None) };
+                .await? else { return Ok(None) };
 
         Ok(Some((manifest, table_info)))
     }
@@ -599,18 +639,19 @@ mod tests {
     use common_query::physical_plan::SessionContext;
     use common_recordbatch::util;
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, SchemaBuilder};
+    use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, RawSchema};
     use datatypes::value::Value;
     use datatypes::vectors::{
         Float64Vector, Int32Vector, StringVector, TimestampMillisecondVector, VectorRef,
     };
     use log_store::NoopLogStore;
+    use storage::compaction::noop::NoopCompactionScheduler;
     use storage::config::EngineConfig as StorageEngineConfig;
     use storage::region::RegionImpl;
     use storage::EngineImpl;
     use store_api::manifest::Manifest;
     use store_api::storage::ReadContext;
-    use table::requests::{AddColumnRequest, AlterKind, DeleteRequest};
+    use table::requests::{AddColumnRequest, AlterKind, DeleteRequest, TableOptions};
     use tempdir::TempDir;
 
     use super::*;
@@ -634,22 +675,18 @@ mod tests {
             .with_time_index(true),
         ];
 
-        let schema = Arc::new(
-            SchemaBuilder::try_from(column_schemas)
-                .unwrap()
-                .build()
-                .expect("ts must be timestamp column"),
-        );
+        let schema = RawSchema::new(column_schemas);
 
         let (dir, object_store) =
             test_util::new_test_object_store("test_insert_with_column_default_constraint").await;
-
+        let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
         let table_engine = MitoEngine::new(
             EngineConfig::default(),
             EngineImpl::new(
                 StorageEngineConfig::default(),
                 Arc::new(NoopLogStore::default()),
                 object_store.clone(),
+                compaction_scheduler,
             ),
             object_store,
         );
@@ -663,10 +700,10 @@ mod tests {
                     schema_name: "public".to_string(),
                     table_name: table_name.to_string(),
                     desc: Some("a test table".to_string()),
-                    schema: schema.clone(),
+                    schema,
                     create_if_not_exists: true,
                     primary_key_indices: Vec::default(),
-                    table_options: HashMap::new(),
+                    table_options: TableOptions::default(),
                     region_numbers: vec![0],
                 },
             )
@@ -745,8 +782,14 @@ mod tests {
 
     #[test]
     fn test_table_dir() {
-        assert_eq!("public/1024/", table_dir("public", 1024));
-        assert_eq!("prometheus/1024/", table_dir("prometheus", 1024));
+        assert_eq!(
+            "greptime/public/1024/",
+            table_dir("greptime", "public", 1024)
+        );
+        assert_eq!(
+            "0x4354a1/prometheus/1024/",
+            table_dir("0x4354a1", "prometheus", 1024)
+        );
     }
 
     #[test]
@@ -762,12 +805,7 @@ mod tests {
             .with_time_index(true),
         ];
 
-        let schema = Arc::new(
-            SchemaBuilder::try_from(column_schemas)
-                .unwrap()
-                .build()
-                .expect("ts must be timestamp column"),
-        );
+        let schema = RawSchema::new(column_schemas);
 
         let mut request = CreateTableRequest {
             id: 1,
@@ -779,7 +817,7 @@ mod tests {
             create_if_not_exists: true,
             // put ts into primary keys
             primary_key_indices: vec![0, 1],
-            table_options: HashMap::new(),
+            table_options: TableOptions::default(),
             region_numbers: vec![0],
         };
 
@@ -936,11 +974,11 @@ mod tests {
             catalog_name: "greptime".to_string(),
             schema_name: "public".to_string(),
             table_name: table_info.name.to_string(),
-            schema: table_info.meta.schema.clone(),
+            schema: RawSchema::from(&*table_info.meta.schema),
             create_if_not_exists: true,
             desc: None,
             primary_key_indices: Vec::default(),
-            table_options: HashMap::new(),
+            table_options: TableOptions::default(),
             region_numbers: vec![0],
         };
 
@@ -953,11 +991,11 @@ mod tests {
             catalog_name: "greptime".to_string(),
             schema_name: "public".to_string(),
             table_name: table_info.name.to_string(),
-            schema: table_info.meta.schema.clone(),
+            schema: RawSchema::from(&*table_info.meta.schema),
             create_if_not_exists: false,
             desc: None,
             primary_key_indices: Vec::default(),
-            table_options: HashMap::new(),
+            table_options: TableOptions::default(),
             region_numbers: vec![0],
         };
 
@@ -1162,11 +1200,11 @@ mod tests {
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: another_name.to_string(),
             desc: Some("another test table".to_string()),
-            schema: Arc::new(schema_for_test()),
+            schema: RawSchema::from(&schema_for_test()),
             region_numbers: vec![0],
             primary_key_indices: vec![0],
             create_if_not_exists: true,
-            table_options: HashMap::new(),
+            table_options: TableOptions::default(),
         };
         table_engine
             .create_table(&ctx, req)
@@ -1245,11 +1283,11 @@ mod tests {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: table_info.name.to_string(),
-            schema: table_info.meta.schema.clone(),
+            schema: RawSchema::from(&*table_info.meta.schema),
             create_if_not_exists: true,
             desc: None,
             primary_key_indices: Vec::default(),
-            table_options: HashMap::new(),
+            table_options: TableOptions::default(),
             region_numbers: vec![0],
         };
 
@@ -1278,11 +1316,11 @@ mod tests {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: table_info.name.to_string(),
-            schema: table_info.meta.schema.clone(),
+            schema: RawSchema::from(&*table_info.meta.schema),
             create_if_not_exists: false,
             desc: None,
             primary_key_indices: Vec::default(),
-            table_options: HashMap::new(),
+            table_options: TableOptions::default(),
             region_numbers: vec![0],
         };
         table_engine.create_table(&ctx, request).await.unwrap();

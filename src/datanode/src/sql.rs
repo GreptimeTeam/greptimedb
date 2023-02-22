@@ -19,6 +19,7 @@ use query::query_engine::QueryEngineRef;
 use query::sql::{describe_table, explain, show_databases, show_tables};
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
+use sql::statements::delete::Delete;
 use sql::statements::describe::DescribeTable;
 use sql::statements::explain::Explain;
 use sql::statements::show::{ShowDatabases, ShowTables};
@@ -30,9 +31,11 @@ use crate::error::{self, ExecuteSqlSnafu, GetTableSnafu, Result, TableNotFoundSn
 use crate::instance::sql::table_idents_to_full_name;
 
 mod alter;
+mod copy_table;
 mod create;
+mod delete;
 mod drop_table;
-mod insert;
+pub(crate) mod insert;
 
 #[derive(Debug)]
 pub enum SqlRequest {
@@ -45,6 +48,8 @@ pub enum SqlRequest {
     ShowTables(ShowTables),
     DescribeTable(DescribeTable),
     Explain(Box<Explain>),
+    Delete(Delete),
+    CopyTable(CopyTableRequest),
 }
 
 // Handler to execute SQL except query
@@ -75,33 +80,33 @@ impl SqlHandler {
         let result = match request {
             SqlRequest::Insert(req) => self.insert(req).await,
             SqlRequest::CreateTable(req) => self.create_table(req).await,
-            SqlRequest::CreateDatabase(req) => self.create_database(req).await,
+            SqlRequest::CreateDatabase(req) => self.create_database(req, query_ctx.clone()).await,
             SqlRequest::Alter(req) => self.alter(req).await,
             SqlRequest::DropTable(req) => self.drop_table(req).await,
-            SqlRequest::ShowDatabases(stmt) => {
-                show_databases(stmt, self.catalog_manager.clone()).context(ExecuteSqlSnafu)
+            SqlRequest::Delete(req) => self.delete(query_ctx.clone(), req).await,
+            SqlRequest::CopyTable(req) => self.copy_table(req).await,
+            SqlRequest::ShowDatabases(req) => {
+                show_databases(req, self.catalog_manager.clone()).context(ExecuteSqlSnafu)
             }
-            SqlRequest::ShowTables(stmt) => {
-                show_tables(stmt, self.catalog_manager.clone(), query_ctx.clone())
+            SqlRequest::ShowTables(req) => {
+                show_tables(req, self.catalog_manager.clone(), query_ctx.clone())
                     .context(ExecuteSqlSnafu)
             }
-            SqlRequest::DescribeTable(stmt) => {
+            SqlRequest::DescribeTable(req) => {
                 let (catalog, schema, table) =
-                    table_idents_to_full_name(stmt.name(), query_ctx.clone())?;
+                    table_idents_to_full_name(req.name(), query_ctx.clone())?;
                 let table = self
                     .catalog_manager
                     .table(&catalog, &schema, &table)
                     .context(error::CatalogSnafu)?
                     .with_context(|| TableNotFoundSnafu {
-                        table_name: stmt.name().to_string(),
+                        table_name: req.name().to_string(),
                     })?;
                 describe_table(table).context(ExecuteSqlSnafu)
             }
-            SqlRequest::Explain(stmt) => {
-                explain(stmt, self.query_engine.clone(), query_ctx.clone())
-                    .await
-                    .context(ExecuteSqlSnafu)
-            }
+            SqlRequest::Explain(req) => explain(req, self.query_engine.clone(), query_ctx.clone())
+                .await
+                .context(ExecuteSqlSnafu),
         };
         if let Err(e) = &result {
             error!(e; "{query_ctx}");
@@ -138,6 +143,7 @@ mod tests {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
     use datatypes::value::Value;
+    use futures::StreamExt;
     use log_store::NoopLogStore;
     use mito::config::EngineConfig as TableEngineConfig;
     use mito::engine::MitoEngine;
@@ -145,7 +151,9 @@ mod tests {
     use object_store::ObjectStore;
     use query::parser::{QueryLanguageParser, QueryStatement};
     use query::QueryEngineFactory;
+    use session::context::QueryContext;
     use sql::statements::statement::Statement;
+    use storage::compaction::noop::NoopCompactionScheduler;
     use storage::config::EngineConfig as StorageEngineConfig;
     use storage::EngineImpl;
     use table::error::Result as TableResult;
@@ -154,6 +162,8 @@ mod tests {
     use tempdir::TempDir;
 
     use super::*;
+    use crate::error::Error;
+    use crate::sql::insert::InsertRequests;
 
     struct DemoTable;
 
@@ -204,7 +214,7 @@ mod tests {
         let store_dir = dir.path().to_string_lossy();
         let accessor = Builder::default().root(&store_dir).build().unwrap();
         let object_store = ObjectStore::new(accessor);
-
+        let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
         let sql = r#"insert into demo(host, cpu, memory, ts) values
                            ('host1', 66.6, 1024, 1655276557000),
                            ('host2', 88.8,  333.3, 1655276558000)
@@ -216,6 +226,7 @@ mod tests {
                 StorageEngineConfig::default(),
                 Arc::new(NoopLogStore::default()),
                 object_store.clone(),
+                compaction_scheduler,
             ),
             object_store,
         ));
@@ -248,11 +259,12 @@ mod tests {
             }
         };
         let request = sql_handler
-            .insert_to_request(catalog_list.clone(), *stmt, TableReference::bare("demo"))
+            .insert_to_requests(catalog_list.clone(), *stmt, QueryContext::arc())
+            .await
             .unwrap();
 
         match request {
-            SqlRequest::Insert(req) => {
+            InsertRequests::Request(SqlRequest::Insert(req)) => {
                 assert_eq!(req.table_name, "demo");
                 let columns_values = req.columns_values;
                 assert_eq!(4, columns_values.len());
@@ -286,6 +298,64 @@ mod tests {
             _ => {
                 panic!("Not supposed to reach here")
             }
+        }
+
+        // test inert into select
+
+        // type mismatch
+        let sql = "insert into demo(ts) select number from numbers limit 3";
+
+        let stmt = match QueryLanguageParser::parse_sql(sql).unwrap() {
+            QueryStatement::Sql(Statement::Insert(i)) => i,
+            _ => {
+                unreachable!()
+            }
+        };
+        let request = sql_handler
+            .insert_to_requests(catalog_list.clone(), *stmt, QueryContext::arc())
+            .await
+            .unwrap();
+
+        match request {
+            InsertRequests::Stream(mut stream) => {
+                assert!(matches!(
+                    stream.next().await.unwrap().unwrap_err(),
+                    Error::ColumnTypeMismatch { .. }
+                ));
+            }
+            _ => unreachable!(),
+        }
+
+        let sql = "insert into demo(cpu) select cast(number as double) from numbers limit 3";
+        let stmt = match QueryLanguageParser::parse_sql(sql).unwrap() {
+            QueryStatement::Sql(Statement::Insert(i)) => i,
+            _ => {
+                unreachable!()
+            }
+        };
+        let request = sql_handler
+            .insert_to_requests(catalog_list.clone(), *stmt, QueryContext::arc())
+            .await
+            .unwrap();
+
+        match request {
+            InsertRequests::Stream(mut stream) => {
+                let mut times = 0;
+                while let Some(Ok(SqlRequest::Insert(req))) = stream.next().await {
+                    times += 1;
+                    assert_eq!(req.table_name, "demo");
+                    let columns_values = req.columns_values;
+                    assert_eq!(1, columns_values.len());
+
+                    let memories = &columns_values["cpu"];
+                    assert_eq!(3, memories.len());
+                    assert_eq!(Value::from(0.0f64), memories.get(0));
+                    assert_eq!(Value::from(1.0f64), memories.get(1));
+                    assert_eq!(Value::from(2.0f64), memories.get(2));
+                }
+                assert_eq!(1, times);
+            }
+            _ => unreachable!(),
         }
     }
 }

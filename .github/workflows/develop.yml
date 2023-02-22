@@ -24,15 +24,15 @@ on:
 name: CI
 
 env:
-  RUST_TOOLCHAIN: nightly-2022-12-20
+  RUST_TOOLCHAIN: nightly-2023-02-14
 
 jobs:
   typos:
     name: Spell Check with Typos
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-      - uses: crate-ci/typos@v1.0.4
+      - uses: actions/checkout@v3
+      - uses: crate-ci/typos@v1.13.10
 
   check:
     name: Check
@@ -223,5 +223,5 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./lcov.info
           flags: rust
-          fail_ci_if_error: true
+          fail_ci_if_error: false
           verbose: true

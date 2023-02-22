@@ -119,14 +119,12 @@ impl QueryEngine for DatafusionQueryEngine {
         let physical_plan = self.create_physical_plan(&mut ctx, &logical_plan).await?;
         let physical_plan = self.optimize_physical_plan(&mut ctx, physical_plan)?;
 
-        Ok(Output::Stream(
-            self.execute_stream(&ctx, &physical_plan).await?,
-        ))
+        Ok(Output::Stream(self.execute_stream(&ctx, &physical_plan)?))
     }
 
     async fn execute_physical(&self, plan: &Arc<dyn PhysicalPlan>) -> Result<Output> {
         let ctx = QueryEngineContext::new(self.state.clone());
-        Ok(Output::Stream(self.execute_stream(&ctx, plan).await?))
+        Ok(Output::Stream(self.execute_stream(&ctx, plan)?))
     }
 
     fn register_udf(&self, udf: ScalarUdf) {
@@ -237,9 +235,8 @@ impl PhysicalOptimizer for DatafusionQueryEngine {
     }
 }
 
-#[async_trait::async_trait]
 impl QueryExecutor for DatafusionQueryEngine {
-    async fn execute_stream(
+    fn execute_stream(
         &self,
         ctx: &QueryEngineContext,
         plan: &Arc<dyn PhysicalPlan>,

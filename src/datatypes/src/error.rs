@@ -52,6 +52,13 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
+    #[snafu(display("Unsupported operation: {} for vector: {}", op, vector_type))]
+    UnsupportedOperation {
+        op: String,
+        vector_type: String,
+        backtrace: Backtrace,
+    },
+
     #[snafu(display("Timestamp column {} not found", name,))]
     TimestampNotFound { name: String, backtrace: Backtrace },
 

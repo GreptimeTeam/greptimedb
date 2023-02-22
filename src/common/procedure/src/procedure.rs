@@ -18,12 +18,15 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use smallvec::{smallvec, SmallVec};
 use snafu::{ResultExt, Snafu};
+use tokio::sync::watch::Receiver;
 use uuid::Uuid;
 
 use crate::error::Result;
 
 /// Procedure execution status.
+#[derive(Debug)]
 pub enum Status {
     /// The procedure is still executing.
     Executing {
@@ -57,11 +60,23 @@ impl Status {
     }
 }
 
+/// [ContextProvider] provides information about procedures in the [ProcedureManager].
+#[async_trait]
+pub trait ContextProvider: Send + Sync {
+    /// Query the procedure state.
+    async fn procedure_state(&self, procedure_id: ProcedureId) -> Result<Option<ProcedureState>>;
+}
+
+/// Reference-counted pointer to [ContextProvider].
+pub type ContextProviderRef = Arc<dyn ContextProvider>;
+
 /// Procedure execution context.
-#[derive(Debug)]
+#[derive(Clone)]
 pub struct Context {
     /// Id of the procedure.
     pub procedure_id: ProcedureId,
+    /// [ProcedureManager] context provider.
+    pub provider: ContextProviderRef,
 }
 
 /// A `Procedure` represents an operation or a set of operations to be performed step-by-step.
@@ -78,25 +93,41 @@ pub trait Procedure: Send + Sync {
     /// Dump the state of the procedure to a string.
     fn dump(&self) -> Result<String>;
 
-    /// Returns the [LockKey] if this procedure needs to acquire lock.
-    fn lock_key(&self) -> Option<LockKey>;
+    /// Returns the [LockKey] that this procedure needs to acquire.
+    fn lock_key(&self) -> LockKey;
 }
 
-/// A key to identify the lock.
-// We might hold multiple keys in this struct. When there are multiple keys, we need to sort the
-// keys lock all the keys in order to avoid dead lock.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LockKey(String);
+/// Keys to identify required locks.
+///
+/// [LockKey] always sorts keys lexicographically so that they can be acquired
+/// in the same order.
+// Most procedures should only acquire 1 ~ 2 locks so we use smallvec to hold keys.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LockKey(SmallVec<[String; 2]>);
 
 impl LockKey {
-    /// Returns a new [LockKey].
-    pub fn new(key: impl Into<String>) -> LockKey {
-        LockKey(key.into())
+    /// Returns a new [LockKey] with only one key.
+    pub fn single(key: impl Into<String>) -> LockKey {
+        LockKey(smallvec![key.into()])
     }
 
-    /// Returns the lock key.
-    pub fn key(&self) -> &str {
-        &self.0
+    /// Returns a new [LockKey] with keys from specific `iter`.
+    pub fn new(iter: impl IntoIterator<Item = String>) -> LockKey {
+        let mut vec: SmallVec<_> = iter.into_iter().collect();
+        vec.sort();
+        // Dedup keys to avoid acquiring the same key multiple times.
+        vec.dedup();
+        LockKey(vec)
+    }
+
+    /// Returns the keys to lock.
+    pub fn keys_to_lock(&self) -> impl Iterator<Item = &String> {
+        self.0.iter()
+    }
+
+    /// Returns the keys to unlock.
+    pub fn keys_to_unlock(&self) -> impl Iterator<Item = &String> {
+        self.0.iter().rev()
     }
 }
 
@@ -118,6 +149,12 @@ impl ProcedureWithId {
             id: ProcedureId::random(),
             procedure,
         }
+    }
+}
+
+impl fmt::Debug for ProcedureWithId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}-{}", self.procedure.type_name(), self.id)
     }
 }
 
@@ -173,6 +210,9 @@ pub enum ProcedureState {
     Failed,
 }
 
+/// Watcher to watch procedure state.
+pub type Watcher = Receiver<ProcedureState>;
+
 // TODO(yingwen): Shutdown
 /// `ProcedureManager` executes [Procedure] submitted to it.
 #[async_trait]
@@ -181,7 +221,9 @@ pub trait ProcedureManager: Send + Sync + 'static {
     fn register_loader(&self, name: &str, loader: BoxedProcedureLoader) -> Result<()>;
 
     /// Submits a procedure to execute.
-    async fn submit(&self, procedure: ProcedureWithId) -> Result<()>;
+    ///
+    /// Returns a [Watcher] to watch the created procedure.
+    async fn submit(&self, procedure: ProcedureWithId) -> Result<Watcher>;
 
     /// Recovers unfinished procedures and reruns them.
     ///
@@ -192,6 +234,9 @@ pub trait ProcedureManager: Send + Sync + 'static {
     ///
     /// Returns `Ok(None)` if the procedure doesn't exist.
     async fn procedure_state(&self, procedure_id: ProcedureId) -> Result<Option<ProcedureState>>;
+
+    /// Returns a [Watcher] to watch [ProcedureState] of specific procedure.
+    fn procedure_watcher(&self, procedure_id: ProcedureId) -> Option<Watcher>;
 }
 
 /// Ref-counted pointer to the [ProcedureManager].
@@ -228,8 +273,21 @@ mod tests {
     #[test]
     fn test_lock_key() {
         let entity = "catalog.schema.my_table";
-        let key = LockKey::new(entity);
-        assert_eq!(entity, key.key());
+        let key = LockKey::single(entity);
+        assert_eq!(vec![entity], key.keys_to_lock().collect::<Vec<_>>());
+        assert_eq!(vec![entity], key.keys_to_unlock().collect::<Vec<_>>());
+
+        let key = LockKey::new([
+            "b".to_string(),
+            "c".to_string(),
+            "a".to_string(),
+            "c".to_string(),
+        ]);
+        assert_eq!(vec!["a", "b", "c"], key.keys_to_lock().collect::<Vec<_>>());
+        assert_eq!(
+            vec!["c", "b", "a"],
+            key.keys_to_unlock().collect::<Vec<_>>()
+        );
     }
 
     #[test]

@@ -72,6 +72,8 @@ pub trait Region: Send + Sync + Clone + std::fmt::Debug + 'static {
     fn write_request(&self) -> Self::WriteRequest;
 
     async fn alter(&self, request: AlterRequest) -> Result<(), Self::Error>;
+
+    async fn close(&self) -> Result<(), Self::Error>;
 }
 
 /// Context for write operations.

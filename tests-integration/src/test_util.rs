@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -30,7 +29,7 @@ use datanode::error::{CreateTableSnafu, Result};
 use datanode::instance::{Instance, InstanceRef};
 use datanode::sql::SqlHandler;
 use datatypes::data_type::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, SchemaBuilder};
+use datatypes::schema::{ColumnSchema, RawSchema};
 use frontend::instance::Instance as FeInstance;
 use object_store::backend::{oss, s3};
 use object_store::test_util::TempFolder;
@@ -46,7 +45,7 @@ use servers::server::Server;
 use servers::Mode;
 use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineRef};
-use table::requests::CreateTableRequest;
+use table::requests::{CreateTableRequest, TableOptions};
 use tempdir::TempDir;
 
 static PORTS: OnceCell<AtomicUsize> = OnceCell::new();
@@ -235,15 +234,10 @@ pub async fn create_test_table(
                 schema_name: "public".to_string(),
                 table_name: table_name.to_string(),
                 desc: Some(" a test table".to_string()),
-                schema: Arc::new(
-                    SchemaBuilder::try_from(column_schemas)
-                        .unwrap()
-                        .build()
-                        .expect("ts is expected to be timestamp column"),
-                ),
+                schema: RawSchema::new(column_schemas),
                 create_if_not_exists: true,
                 primary_key_indices: vec![0], // "host" is in primary keys
-                table_options: HashMap::new(),
+                table_options: TableOptions::default(),
                 region_numbers: vec![0],
             },
         )
@@ -355,6 +349,7 @@ pub async fn setup_grpc_server(
     let fe_instance_ref = Arc::new(fe_instance);
     let fe_grpc_server = Arc::new(GrpcServer::new(
         ServerGrpcQueryHandlerAdaptor::arc(fe_instance_ref),
+        None,
         runtime,
     ));
     let grpc_server_clone = fe_grpc_server.clone();

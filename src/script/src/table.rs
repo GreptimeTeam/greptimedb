@@ -24,13 +24,13 @@ use common_recordbatch::util as record_util;
 use common_telemetry::logging;
 use common_time::util;
 use datatypes::prelude::{ConcreteDataType, ScalarVector};
-use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder};
+use datatypes::schema::{ColumnSchema, RawSchema};
 use datatypes::vectors::{StringVector, TimestampMillisecondVector, Vector, VectorRef};
 use query::parser::QueryLanguageParser;
 use query::QueryEngineRef;
 use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
-use table::requests::{CreateTableRequest, InsertRequest};
+use table::requests::{CreateTableRequest, InsertRequest, TableOptions};
 
 use crate::error::{
     CastTypeSnafu, CollectRecordsSnafu, FindScriptSnafu, FindScriptsTableSnafu, InsertScriptSnafu,
@@ -50,7 +50,7 @@ impl ScriptsTable {
         catalog_manager: CatalogManagerRef,
         query_engine: QueryEngineRef,
     ) -> Result<Self> {
-        let schema = Arc::new(build_scripts_schema());
+        let schema = build_scripts_schema();
         // TODO(dennis): we put scripts table into default catalog and schema.
         // maybe put into system catalog?
         let request = CreateTableRequest {
@@ -64,7 +64,7 @@ impl ScriptsTable {
             //schema and name as primary key
             primary_key_indices: vec![0, 1],
             create_if_not_exists: true,
-            table_options: HashMap::default(),
+            table_options: TableOptions::default(),
         };
 
         catalog_manager
@@ -202,7 +202,7 @@ impl ScriptsTable {
 }
 
 /// Build scripts table
-fn build_scripts_schema() -> Schema {
+fn build_scripts_schema() -> RawSchema {
     let cols = vec![
         ColumnSchema::new(
             "schema".to_string(),
@@ -242,6 +242,5 @@ fn build_scripts_schema() -> Schema {
         ),
     ];
 
-    // Schema is always valid here
-    SchemaBuilder::try_from(cols).unwrap().build().unwrap()
+    RawSchema::new(cols)
 }

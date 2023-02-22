@@ -1516,9 +1516,11 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "futures",
+ "futures-util",
  "object-store",
  "serde",
  "serde_json",
+ "smallvec",
  "snafu",
  "tempdir",
  "tokio",
@@ -2178,6 +2180,7 @@ dependencies = [
  "common-time",
  "datafusion",
  "datafusion-common",
+ "datafusion-expr",
  "datatypes",
  "futures",
  "humantime-serde",
@@ -2968,7 +2971,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=966161508646f575801bcf05f47ed283ec231d68#966161508646f575801bcf05f47ed283ec231d68"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=1599ae2a0d1d8f42ee23ed26e4ad7a7b34134c60#1599ae2a0d1d8f42ee23ed26e4ad7a7b34134c60"
 dependencies = [
  "prost 0.11.6",
  "tonic",
@@ -3893,6 +3896,7 @@ dependencies = [
  "common-telemetry",
  "common-time",
  "dashmap",
+ "derive_builder 0.12.0",
  "etcd-client",
  "futures",
  "h2",
@@ -4022,6 +4026,7 @@ dependencies = [
  "chrono",
  "common-catalog",
  "common-error",
+ "common-procedure",
  "common-query",
  "common-recordbatch",
  "common-telemetry",
@@ -4179,9 +4184,9 @@ dependencies = [
 
 [[package]]
 name = "nalgebra"
-version = "0.27.1"
+version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "462fffe4002f4f2e1f6a9dcf12cc1a6fc0e15989014efc02a941d3e0f5dc2120"
+checksum = "d506eb7e08d6329505faa8a3a00a5dcc6de9f76e0c77e4b75763ae3c770831ff"
 dependencies = [
  "approx",
  "matrixmultiply",
@@ -5136,6 +5141,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "73d946ec7d256b04dfadc4e6a3292324e6f417124750fc5c0950f981b703a0f1"
 dependencies = [
  "bytes",
+ "chrono",
  "fallible-iterator",
  "postgres-protocol",
 ]
@@ -5304,8 +5310,9 @@ dependencies = [
 
 [[package]]
 name = "promql-parser"
-version = "0.0.1"
-source = "git+https://github.com/GreptimeTeam/promql-parser.git?rev=fa186978a1234baf5a3e372da03aa663d859cdd2#fa186978a1234baf5a3e372da03aa663d859cdd2"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "24766dbb98852e704a98fc2c003d2b3ffa48317ab09b4ae184925f0e60385764"
 dependencies = [
  "cfgrammar",
  "lazy_static",
@@ -5513,6 +5520,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "catalog",
+ "chrono",
  "common-base",
  "common-catalog",
  "common-error",
@@ -6449,6 +6457,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "safe_arch"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "794821e4ccb0d9f979512f9c1973480123f9bd62a90d74ab0f9426fcf8f4a529"
+dependencies = [
+ "bytemuck",
+]
+
+[[package]]
 name = "same-file"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6736,6 +6753,8 @@ dependencies = [
  "base64 0.13.1",
  "bytes",
  "catalog",
+ "chrono",
+ "client",
  "common-base",
  "common-catalog",
  "common-error",
@@ -6763,6 +6782,8 @@ dependencies = [
  "opensrv-mysql",
  "pgwire",
  "pin-project",
+ "postgres-types",
+ "promql-parser",
  "prost 0.11.6",
  "query",
  "rand 0.8.5",
@@ -6881,14 +6902,15 @@ dependencies = [
 
 [[package]]
 name = "simba"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e82063457853d00243beda9952e910b82593e4b07ae9f721b9278a99a0d3d5c"
+checksum = "f0b7840f121a46d63066ee7a99fc81dcabbc6105e437cae43528cea199b5a05f"
 dependencies = [
  "approx",
  "num-complex",
  "num-traits",
  "paste",
+ "wide",
 ]
 
 [[package]]
@@ -7044,9 +7066,8 @@ dependencies = [
 
 [[package]]
 name = "sqlness"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16a494ea677f9de93e8c25ec33b1073f8f72d61466d4595ecf1462ba877fe924"
+version = "0.3.0"
+source = "git+https://github.com/CeresDB/sqlness.git?rev=e6d602ed7d894ffb806580f17f4a6f1283abbf1f#e6d602ed7d894ffb806580f17f4a6f1283abbf1f"
 dependencies = [
  "async-trait",
  "derive_builder 0.11.2",
@@ -7103,9 +7124,9 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "statrs"
-version = "0.15.0"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "05bdbb8e4e78216a85785a85d3ec3183144f98d0097b9281802c019bb07a6f05"
+checksum = "2d08e5e1748192713cc281da8b16924fb46be7b0c2431854eadc785823e5696e"
 dependencies = [
  "approx",
  "lazy_static",
@@ -7129,6 +7150,8 @@ name = "storage"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "arrow",
+ "arrow-array",
  "async-compat",
  "async-stream",
  "async-trait",
@@ -7142,6 +7165,8 @@ dependencies = [
  "common-telemetry",
  "common-time",
  "criterion 0.3.6",
+ "datafusion-common",
+ "datafusion-expr",
  "datatypes",
  "futures",
  "futures-util",
@@ -7392,8 +7417,10 @@ dependencies = [
  "anymap",
  "async-trait",
  "chrono",
+ "common-base",
  "common-catalog",
  "common-error",
+ "common-procedure",
  "common-query",
  "common-recordbatch",
  "common-telemetry",
@@ -7404,10 +7431,13 @@ dependencies = [
  "datatypes",
  "derive_builder 0.11.2",
  "futures",
+ "humantime",
+ "humantime-serde",
  "parquet",
  "parquet-format-async-temp",
  "paste",
  "serde",
+ "serde_json",
  "snafu",
  "store-api",
  "tempdir",
@@ -7865,7 +7895,9 @@ dependencies = [
  "pin-project",
  "prost 0.11.6",
  "prost-derive 0.11.6",
+ "rustls-pemfile",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tokio-util",
  "tower",
@@ -8591,6 +8623,16 @@ dependencies = [
  "either",
  "libc",
  "once_cell",
+]
+
+[[package]]
+name = "wide"
+version = "0.7.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "feff0a412894d67223777b6cc8d68c0dab06d52d95e9890d5f2d47f10dd9366c"
+dependencies = [
+ "bytemuck",
+ "safe_arch",
 ]
 
 [[package]]

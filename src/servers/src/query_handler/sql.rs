@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use common_error::prelude::*;
 use common_query::Output;
 use datatypes::schema::Schema;
+use query::parser::PromQuery;
 use session::context::QueryContextRef;
 use sql::statements::statement::Statement;
 
@@ -38,7 +39,7 @@ pub trait SqlQueryHandler {
 
     async fn do_promql_query(
         &self,
-        query: &str,
+        query: &PromQuery,
         query_ctx: QueryContextRef,
     ) -> Vec<std::result::Result<Output, Self::Error>>;
 
@@ -91,7 +92,7 @@ where
 
     async fn do_promql_query(
         &self,
-        query: &str,
+        query: &PromQuery,
         query_ctx: QueryContextRef,
     ) -> Vec<Result<Output>> {
         self.0
@@ -99,8 +100,12 @@ where
             .await
             .into_iter()
             .map(|x| {
-                x.map_err(BoxedError::new)
-                    .context(error::ExecuteQuerySnafu { query })
+                x.map_err(BoxedError::new).with_context(|_| {
+                    let query_literal = format!("{query:?}");
+                    error::ExecuteQuerySnafu {
+                        query: query_literal,
+                    }
+                })
             })
             .collect()
     }

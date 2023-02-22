@@ -69,6 +69,12 @@ pub enum Error {
         key: String,
         source: object_store::Error,
     },
+
+    #[snafu(display("Failed to deserialize from json, source: {}", source))]
+    FromJson {
+        source: serde_json::Error,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -81,7 +87,8 @@ impl ErrorExt for Error {
             | Error::PutState { .. }
             | Error::DeleteState { .. }
             | Error::ListState { .. }
-            | Error::ReadState { .. } => StatusCode::Internal,
+            | Error::ReadState { .. }
+            | Error::FromJson { .. } => StatusCode::Internal,
             Error::LoaderConflict { .. } | Error::DuplicateProcedure { .. } => {
                 StatusCode::InvalidArguments
             }

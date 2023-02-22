@@ -159,7 +159,7 @@ impl PyVector {
                     )));
                 };
                 // Safety: `pyobj_try_to_typed_val()` has checked the data type.
-                buf.push_value_ref(val.as_value_ref()).unwrap();
+                buf.push_value_ref(val.as_value_ref());
             }
 
             Ok(PyVector {
@@ -490,6 +490,21 @@ impl PyVector {
         self.as_vector_ref().len()
     }
 
+    #[pymethod(name = "concat")]
+    fn concat(&self, other: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+        let left = self.to_arrow_array();
+        let right = other.to_arrow_array();
+
+        let res = compute::concat(&[left.as_ref(), right.as_ref()]);
+        let res = res.map_err(|err| vm.new_runtime_error(format!("Arrow Error: {err:#?}")))?;
+        let ret = Helper::try_into_vector(res.clone()).map_err(|e| {
+            vm.new_type_error(format!(
+                "Can't cast result into vector, result: {res:?}, err: {e:?}",
+            ))
+        })?;
+        Ok(ret.into())
+    }
+
     /// take a boolean array and filters the Array, returning elements matching the filter (i.e. where the values are true).
     #[pymethod(name = "filter")]
     fn filter(&self, other: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
@@ -549,7 +564,7 @@ impl PyVector {
         // in the newest version of rustpython_vm, wrapped_at for isize is replace by wrap_index(i, len)
         let i = i
             .wrapped_at(self.len())
-            .ok_or_else(|| vm.new_index_error("PyVector index out of range".to_owned()))?;
+            .ok_or_else(|| vm.new_index_error("PyVector index out of range".to_string()))?;
         Ok(val_to_pyobj(self.as_vector_ref().get(i), vm))
     }
 
@@ -574,14 +589,14 @@ impl PyVector {
             // Negative step require special treatment
             for i in range.rev().step_by(step.unsigned_abs()) {
                 // Safety: This mutable vector is created from the vector's data type.
-                buf.push_value_ref(vector.get_ref(i)).unwrap();
+                buf.push_value_ref(vector.get_ref(i));
             }
             let v: PyVector = buf.to_vector().into();
             Ok(v.into_pyobject(vm))
         } else {
             for i in range.step_by(step.unsigned_abs()) {
                 // Safety: This mutable vector is created from the vector's data type.
-                buf.push_value_ref(vector.get_ref(i)).unwrap();
+                buf.push_value_ref(vector.get_ref(i));
             }
             let v: PyVector = buf.to_vector().into();
             Ok(v.into_pyobject(vm))
@@ -912,7 +927,7 @@ impl AsSequence for PyVector {
                 zelf.getitem_by_index(i, vm)
             }),
             ass_item: atomic_func!(|_seq, _i, _value, vm| {
-                Err(vm.new_type_error("PyVector object doesn't support item assigns".to_owned()))
+                Err(vm.new_type_error("PyVector object doesn't support item assigns".to_string()))
             }),
             ..PySequenceMethods::NOT_IMPLEMENTED
         });
@@ -1080,7 +1095,7 @@ pub mod tests {
                     .compile(
                         script,
                         rustpython_compiler_core::Mode::BlockExpr,
-                        "<embedded>".to_owned(),
+                        "<embedded>".to_string(),
                     )
                     .map_err(|err| vm.new_syntax_error(&err))?;
                 let ret = vm.run_code_obj(code_obj, scope);

@@ -43,6 +43,10 @@ impl EtcdStore {
             .await
             .context(error::ConnectEtcdSnafu)?;
 
+        Self::with_etcd_client(client)
+    }
+
+    pub fn with_etcd_client(client: Client) -> Result<KvStoreRef> {
         Ok(Arc::new(Self { client }))
     }
 }

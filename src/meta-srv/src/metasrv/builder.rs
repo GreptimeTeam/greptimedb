@@ -20,21 +20,23 @@ use crate::handler::{
     CheckLeaderHandler, CollectStatsHandler, HeartbeatHandlerGroup, KeepLeaseHandler,
     OnLeaderStartHandler, PersistStatsHandler, ResponseHeaderHandler,
 };
+use crate::lock::DistLockRef;
 use crate::metasrv::{ElectionRef, MetaSrv, MetaSrvOptions, SelectorRef, TABLE_ID_SEQ};
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::sequence::Sequence;
-use crate::service::store::kv::{KvStoreRef, ResetableKvStoreRef};
+use crate::service::store::kv::{KvStoreRef, ResettableKvStoreRef};
 use crate::service::store::memory::MemStore;
 
 // TODO(fys): try use derive_builder macro
 pub struct MetaSrvBuilder {
     options: Option<MetaSrvOptions>,
     kv_store: Option<KvStoreRef>,
-    in_memory: Option<ResetableKvStoreRef>,
+    in_memory: Option<ResettableKvStoreRef>,
     selector: Option<SelectorRef>,
     handler_group: Option<HeartbeatHandlerGroup>,
     election: Option<ElectionRef>,
     meta_peer_client: Option<MetaPeerClient>,
+    lock: Option<DistLockRef>,
 }
 
 impl MetaSrvBuilder {
@@ -47,6 +49,7 @@ impl MetaSrvBuilder {
             meta_peer_client: None,
             election: None,
             options: None,
+            lock: None,
         }
     }
 
@@ -60,7 +63,7 @@ impl MetaSrvBuilder {
         self
     }
 
-    pub fn in_memory(mut self, in_memory: ResetableKvStoreRef) -> Self {
+    pub fn in_memory(mut self, in_memory: ResettableKvStoreRef) -> Self {
         self.in_memory = Some(in_memory);
         self
     }
@@ -85,6 +88,11 @@ impl MetaSrvBuilder {
         self
     }
 
+    pub fn lock(mut self, lock: Option<DistLockRef>) -> Self {
+        self.lock = lock;
+        self
+    }
+
     pub async fn build(self) -> MetaSrv {
         let started = Arc::new(AtomicBool::new(false));
 
@@ -96,6 +104,7 @@ impl MetaSrvBuilder {
             in_memory,
             selector,
             handler_group,
+            lock,
         } = self;
 
         let options = options.unwrap_or_default();
@@ -136,6 +145,7 @@ impl MetaSrvBuilder {
             handler_group,
             election,
             meta_peer_client,
+            lock,
         }
     }
 }

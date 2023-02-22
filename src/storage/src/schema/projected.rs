@@ -543,6 +543,21 @@ mod tests {
     }
 
     #[test]
+    fn test_find_unique_with_op() {
+        let schema = read_util::new_projected_schema();
+        let mut selected = BitVec::repeat(false, 3);
+        let batch = read_util::new_full_kv_batch(&[
+            (1001, 1, 3, OpType::Put),
+            (1000, 1, 2, OpType::Delete),
+            (1000, 1, 1, OpType::Put),
+        ]);
+        schema.find_unique(&batch, &mut selected, None);
+        assert!(selected[0]);
+        assert!(selected[1]);
+        assert!(!selected[2]);
+    }
+
+    #[test]
     fn test_filter_batch() {
         let schema = read_util::new_projected_schema();
         let batch = read_util::new_kv_batch(&[(1000, Some(1)), (2000, Some(2)), (3000, Some(3))]);

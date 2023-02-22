@@ -85,6 +85,21 @@ impl Timestamp {
         }
     }
 
+    /// Convert a timestamp to given time unit.
+    /// Conversion from a timestamp with smaller unit to a larger unit will round the value
+    /// to ceil (positive infinity).
+    /// Return `None` if conversion causes overflow.
+    pub fn convert_to_ceil(&self, unit: TimeUnit) -> Option<Timestamp> {
+        if self.unit().factor() >= unit.factor() {
+            let mul = self.unit().factor() / unit.factor();
+            let value = self.value.checked_mul(mul)?;
+            Some(Timestamp::new(value, unit))
+        } else {
+            let mul = unit.factor() / self.unit().factor();
+            Some(Timestamp::new(self.value.div_ceil(mul), unit))
+        }
+    }
+
     /// Split a [Timestamp] into seconds part and nanoseconds part.
     /// Notice the seconds part of split result is always rounded down to floor.
     fn split(&self) -> (i64, i64) {
@@ -99,8 +114,15 @@ impl Timestamp {
     /// Format timestamp to ISO8601 string. If the timestamp exceeds what chrono timestamp can
     /// represent, this function simply print the timestamp unit and value in plain string.
     pub fn to_iso8601_string(&self) -> String {
-        let nano_factor = TimeUnit::Second.factor() / TimeUnit::Nanosecond.factor();
+        if let LocalResult::Single(datetime) = self.to_chrono_datetime() {
+            format!("{}", datetime.format("%Y-%m-%d %H:%M:%S%.f%z"))
+        } else {
+            format!("[Timestamp{}: {}]", self.unit, self.value)
+        }
+    }
 
+    pub fn to_chrono_datetime(&self) -> LocalResult<DateTime<Utc>> {
+        let nano_factor = TimeUnit::Second.factor() / TimeUnit::Nanosecond.factor();
         let (mut secs, mut nsecs) = self.split();
 
         if nsecs < 0 {
@@ -108,11 +130,7 @@ impl Timestamp {
             nsecs += nano_factor;
         }
 
-        if let LocalResult::Single(datetime) = Utc.timestamp_opt(secs, nsecs as u32) {
-            format!("{}", datetime.format("%Y-%m-%d %H:%M:%S%.f%z"))
-        } else {
-            format!("[Timestamp{}: {}]", self.unit, self.value)
-        }
+        Utc.timestamp_opt(secs, nsecs as u32)
     }
 }
 
@@ -716,6 +734,59 @@ mod tests {
         assert_eq!(
             (i64::MAX, 0),
             Timestamp::new(i64::MAX, TimeUnit::Second).split()
+        );
+    }
+
+    #[test]
+    fn test_convert_to_ceil() {
+        assert_eq!(
+            Timestamp::new(1, TimeUnit::Second),
+            Timestamp::new(1000, TimeUnit::Millisecond)
+                .convert_to_ceil(TimeUnit::Second)
+                .unwrap()
+        );
+
+        // These two cases shows how `Timestamp::convert_to_ceil` behaves differently
+        // from `Timestamp::convert_to` when converting larger unit to smaller unit.
+        assert_eq!(
+            Timestamp::new(1, TimeUnit::Second),
+            Timestamp::new(1001, TimeUnit::Millisecond)
+                .convert_to(TimeUnit::Second)
+                .unwrap()
+        );
+        assert_eq!(
+            Timestamp::new(2, TimeUnit::Second),
+            Timestamp::new(1001, TimeUnit::Millisecond)
+                .convert_to_ceil(TimeUnit::Second)
+                .unwrap()
+        );
+
+        assert_eq!(
+            Timestamp::new(-1, TimeUnit::Second),
+            Timestamp::new(-1, TimeUnit::Millisecond)
+                .convert_to(TimeUnit::Second)
+                .unwrap()
+        );
+        assert_eq!(
+            Timestamp::new(0, TimeUnit::Second),
+            Timestamp::new(-1, TimeUnit::Millisecond)
+                .convert_to_ceil(TimeUnit::Second)
+                .unwrap()
+        );
+
+        // When converting large unit to smaller unit, there will be no rounding error,
+        // so `Timestamp::convert_to_ceil` behaves just like `Timestamp::convert_to`
+        assert_eq!(
+            Timestamp::new(-1, TimeUnit::Second).convert_to(TimeUnit::Millisecond),
+            Timestamp::new(-1, TimeUnit::Second).convert_to_ceil(TimeUnit::Millisecond)
+        );
+        assert_eq!(
+            Timestamp::new(1000, TimeUnit::Second).convert_to(TimeUnit::Millisecond),
+            Timestamp::new(1000, TimeUnit::Second).convert_to_ceil(TimeUnit::Millisecond)
+        );
+        assert_eq!(
+            Timestamp::new(1, TimeUnit::Second).convert_to(TimeUnit::Millisecond),
+            Timestamp::new(1, TimeUnit::Second).convert_to_ceil(TimeUnit::Millisecond)
         );
     }
 }

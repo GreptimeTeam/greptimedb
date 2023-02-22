@@ -21,17 +21,20 @@ use object_store::{util, ObjectStore};
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::storage::{
-    CreateOptions, EngineContext, OpenOptions, RegionDescriptor, StorageEngine,
+    CreateOptions, EngineContext, OpenOptions, Region, RegionDescriptor, StorageEngine,
 };
 
 use crate::background::JobPoolImpl;
+use crate::compaction::CompactionSchedulerRef;
 use crate::config::EngineConfig;
 use crate::error::{self, Error, Result};
+use crate::file_purger::{FilePurgeHandler, FilePurgerRef};
 use crate::flush::{FlushSchedulerImpl, FlushSchedulerRef, FlushStrategyRef, SizeBasedStrategy};
 use crate::manifest::region::RegionManifest;
 use crate::memtable::{DefaultMemtableBuilder, MemtableBuilderRef};
 use crate::metadata::RegionMetadata;
 use crate::region::{RegionImpl, StoreConfig};
+use crate::scheduler::{LocalScheduler, SchedulerConfig};
 use crate::sst::FsAccessLayer;
 
 /// [StorageEngine] implementation.
@@ -61,8 +64,8 @@ impl<S: LogStore> StorageEngine for EngineImpl<S> {
         self.inner.open_region(name, opts).await
     }
 
-    async fn close_region(&self, _ctx: &EngineContext, _region: Self::Region) -> Result<()> {
-        unimplemented!()
+    async fn close_region(&self, _ctx: &EngineContext, region: Self::Region) -> Result<()> {
+        region.close().await
     }
 
     async fn create_region(
@@ -84,9 +87,19 @@ impl<S: LogStore> StorageEngine for EngineImpl<S> {
 }
 
 impl<S: LogStore> EngineImpl<S> {
-    pub fn new(config: EngineConfig, log_store: Arc<S>, object_store: ObjectStore) -> Self {
+    pub fn new(
+        config: EngineConfig,
+        log_store: Arc<S>,
+        object_store: ObjectStore,
+        compaction_scheduler: CompactionSchedulerRef<S>,
+    ) -> Self {
         Self {
-            inner: Arc::new(EngineInner::new(config, log_store, object_store)),
+            inner: Arc::new(EngineInner::new(
+                config,
+                log_store,
+                object_store,
+                compaction_scheduler,
+            )),
         }
     }
 }
@@ -210,13 +223,27 @@ struct EngineInner<S: LogStore> {
     memtable_builder: MemtableBuilderRef,
     flush_scheduler: FlushSchedulerRef,
     flush_strategy: FlushStrategyRef,
+    compaction_scheduler: CompactionSchedulerRef<S>,
+    file_purger: FilePurgerRef,
+    config: Arc<EngineConfig>,
 }
 
 impl<S: LogStore> EngineInner<S> {
-    pub fn new(_config: EngineConfig, log_store: Arc<S>, object_store: ObjectStore) -> Self {
+    pub fn new(
+        config: EngineConfig,
+        log_store: Arc<S>,
+        object_store: ObjectStore,
+        compaction_scheduler: CompactionSchedulerRef<S>,
+    ) -> Self {
         let job_pool = Arc::new(JobPoolImpl {});
         let flush_scheduler = Arc::new(FlushSchedulerImpl::new(job_pool));
 
+        let file_purger = Arc::new(LocalScheduler::new(
+            SchedulerConfig {
+                max_inflight_tasks: config.max_purge_tasks,
+            },
+            FilePurgeHandler,
+        ));
         Self {
             object_store,
             log_store,
@@ -224,6 +251,9 @@ impl<S: LogStore> EngineInner<S> {
             memtable_builder: Arc::new(DefaultMemtableBuilder::default()),
             flush_scheduler,
             flush_strategy: Arc::new(SizeBasedStrategy::default()),
+            compaction_scheduler,
+            file_purger,
+            config: Arc::new(config),
         }
     }
 
@@ -259,7 +289,7 @@ impl<S: LogStore> EngineInner<S> {
 
         let mut guard = SlotGuard::new(name, &self.regions);
 
-        let store_config = self.region_store_config(&opts.parent_dir, name);
+        let store_config = self.region_store_config(&opts.parent_dir, opts.write_buffer_size, name);
 
         let region = match RegionImpl::open(name.to_string(), store_config, opts).await? {
             None => return Ok(None),
@@ -289,7 +319,8 @@ impl<S: LogStore> EngineInner<S> {
                 .context(error::InvalidRegionDescSnafu {
                     region: &region_name,
                 })?;
-        let store_config = self.region_store_config(&opts.parent_dir, &region_name);
+        let store_config =
+            self.region_store_config(&opts.parent_dir, opts.write_buffer_size, &region_name);
 
         let region = RegionImpl::create(metadata, store_config).await?;
 
@@ -305,7 +336,12 @@ impl<S: LogStore> EngineInner<S> {
         slot.get_ready_region()
     }
 
-    fn region_store_config(&self, parent_dir: &str, region_name: &str) -> StoreConfig<S> {
+    fn region_store_config(
+        &self,
+        parent_dir: &str,
+        write_buffer_size: Option<usize>,
+        region_name: &str,
+    ) -> StoreConfig<S> {
         let parent_dir = util::normalize_dir(parent_dir);
 
         let sst_dir = &region_sst_dir(&parent_dir, region_name);
@@ -313,13 +349,20 @@ impl<S: LogStore> EngineInner<S> {
         let manifest_dir = region_manifest_dir(&parent_dir, region_name);
         let manifest = RegionManifest::new(&manifest_dir, self.object_store.clone());
 
+        let flush_strategy = write_buffer_size
+            .map(|size| Arc::new(SizeBasedStrategy::new(size)) as Arc<_>)
+            .unwrap_or_else(|| self.flush_strategy.clone());
+
         StoreConfig {
             log_store: self.log_store.clone(),
             sst_layer,
             manifest,
             memtable_builder: self.memtable_builder.clone(),
             flush_scheduler: self.flush_scheduler.clone(),
-            flush_strategy: self.flush_strategy.clone(),
+            flush_strategy,
+            compaction_scheduler: self.compaction_scheduler.clone(),
+            engine_config: self.config.clone(),
+            file_purger: self.file_purger.clone(),
         }
     }
 }
@@ -333,6 +376,7 @@ mod tests {
     use tempdir::TempDir;
 
     use super::*;
+    use crate::compaction::noop::NoopCompactionScheduler;
     use crate::test_util::descriptor_util::RegionDescBuilder;
 
     #[tokio::test]
@@ -347,7 +391,14 @@ mod tests {
 
         let config = EngineConfig::default();
 
-        let engine = EngineImpl::new(config, Arc::new(log_store), object_store);
+        let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
+
+        let engine = EngineImpl::new(
+            config,
+            Arc::new(log_store),
+            object_store,
+            compaction_scheduler,
+        );
 
         let region_name = "region-0";
         let desc = RegionDescBuilder::new(region_name)

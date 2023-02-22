@@ -240,10 +240,7 @@ impl PyValue {
                     .as_any()
                     .downcast_ref::<Float64Array>()
                     .ok_or(format!("Can't cast {vec_f64:#?} to Float64Array!"))?;
-                let ret = vec_f64
-                    .into_iter()
-                    .map(|v| v.map(|inner| inner.to_owned()))
-                    .collect::<Vec<_>>();
+                let ret = vec_f64.into_iter().collect::<Vec<_>>();
                 if ret.iter().all(|x| x.is_some()) {
                     Ok(Self::FloatVec(
                         ret.into_iter().map(|i| i.unwrap()).collect(),
@@ -266,7 +263,6 @@ impl PyValue {
                         v.ok_or(format!(
                             "No null element expected, found one in {idx} position"
                         ))
-                        .map(|v| v.to_owned())
                     })
                     .collect::<Result<_, String>>()?;
                 Ok(Self::IntVec(ret))
@@ -275,13 +271,13 @@ impl PyValue {
             }
         } else if is_instance::<PyInt>(obj, vm) {
             let res = obj
-                .to_owned()
+                .clone()
                 .try_into_value::<i64>(vm)
                 .map_err(|err| format_py_error(err, vm).to_string())?;
             Ok(Self::Int(res))
         } else if is_instance::<PyFloat>(obj, vm) {
             let res = obj
-                .to_owned()
+                .clone()
                 .try_into_value::<f64>(vm)
                 .map_err(|err| format_py_error(err, vm).to_string())?;
             Ok(Self::Float(res))
@@ -338,7 +334,7 @@ fn run_builtin_fn_testcases() {
                 .compile(
                     &case.script,
                     rustpython_compiler_core::Mode::BlockExpr,
-                    "<embedded>".to_owned(),
+                    "<embedded>".to_string(),
                 )
                 .map_err(|err| vm.new_syntax_error(&err))
                 .unwrap();
@@ -389,7 +385,7 @@ fn set_item_into_scope(
     scope
         .locals
         .as_object()
-        .set_item(&name.to_owned(), vm.new_pyobj(value), vm)
+        .set_item(&name.to_string(), vm.new_pyobj(value), vm)
         .map_err(|err| {
             format!(
                 "Error in setting var {name} in scope: \n{}",
@@ -408,7 +404,7 @@ fn set_lst_of_vecs_in_scope(
         scope
             .locals
             .as_object()
-            .set_item(name.to_owned(), vm.new_pyobj(vector), vm)
+            .set_item(&name.to_string(), vm.new_pyobj(vector), vm)
             .map_err(|err| {
                 format!(
                     "Error in setting var {name} in scope: \n{}",
@@ -447,7 +443,7 @@ fn test_vm() {
 from udf_builtins import *
 sin(values)"#,
                 rustpython_compiler_core::Mode::BlockExpr,
-                "<embedded>".to_owned(),
+                "<embedded>".to_string(),
             )
             .map_err(|err| vm.new_syntax_error(&err))
             .unwrap();

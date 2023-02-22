@@ -114,7 +114,7 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
                         if let Some((k, _v)) = r {
                             let _ = self.cache.delete(&k, OpDelete::new()).await;
                         }
-                        Ok((rp, Box::new(reader) as output::Reader))
+                        return Ok((rp, Box::new(reader) as output::Reader));
                     }
                     Err(_) => {
                         return self

@@ -421,7 +421,7 @@ mod tests {
             let vec = r.unwrap();
             entries.extend(vec.into_iter().map(|e| e.id));
         }
-        assert_eq!((0..cnt).into_iter().collect::<HashSet<_>>(), entries);
+        assert_eq!((0..cnt).collect::<HashSet<_>>(), entries);
     }
 
     async fn collect_entries(mut s: SendableEntryStream<'_, Entry, Error>) -> Vec<Entry> {

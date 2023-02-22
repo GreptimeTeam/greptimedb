@@ -72,7 +72,7 @@ impl SqlHandler {
         alter_table: AlterTable,
         table_ref: TableReference,
     ) -> Result<AlterTableRequest> {
-        let alter_kind = match alter_table.alter_operation() {
+        let alter_kind = match &alter_table.alter_operation() {
             AlterTableOperation::AddConstraint(table_constraint) => {
                 return error::InvalidSqlSnafu {
                     msg: format!("unsupported table constraint {table_constraint}"),

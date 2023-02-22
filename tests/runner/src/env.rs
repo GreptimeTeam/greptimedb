@@ -123,11 +123,9 @@ impl Env {
     fn generate_standalone_config_file() -> String {
         let mut tt = TinyTemplate::new();
 
-        let mut template_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        template_file.push("../conf/standalone-test.toml.template");
-        let path = template_file.as_path();
-        let template = std::fs::read_to_string(path)
-            .unwrap_or_else(|_| panic!("Failed to read template config file: {}", path.display()));
+        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("../conf/standalone-test.toml.template");
+        let template = std::fs::read_to_string(path).unwrap();
         tt.add_template("standalone", &template).unwrap();
 
         #[derive(Serialize)]
@@ -211,18 +209,15 @@ impl Env {
             .open(log_file_name)
             .unwrap_or_else(|_| panic!("Cannot open log file at {log_file_name}"));
 
-        let mut args = vec![subcommand, "start"];
+        let mut args = vec![subcommand.to_string(), "start".to_string()];
         if subcommand == "frontend" {
-            args.push("--metasrv-addr=0.0.0.0:3002");
+            args.push("--metasrv-addr=0.0.0.0:3002".to_string())
         } else if subcommand == "datanode" {
-            args.push("--rpc-addr=0.0.0.0:4100");
-            args.push("--metasrv-addr=0.0.0.0:3002");
-            args.push("--node-id=1");
-            args.push("--data-dir=/tmp/greptimedb_node_1/data");
-            args.push("--wal-dir=/tmp/greptimedb_node_1/wal");
+            args.push("-c".to_string());
+            args.push(Self::generate_datanode_config_file());
         } else if subcommand == "metasrv" {
-            args.push("--use-memory-store");
-        }
+            args.push("--use-memory-store".to_string());
+        };
 
         let process = Command::new("./greptime")
             .current_dir(util::get_binary_dir("debug"))
@@ -231,6 +226,35 @@ impl Env {
             .spawn()
             .expect("Failed to start the DB");
         process
+    }
+
+    fn generate_datanode_config_file() -> String {
+        let mut tt = TinyTemplate::new();
+
+        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("../conf/datanode-test.toml.template");
+        let template = std::fs::read_to_string(path).unwrap();
+        tt.add_template("datanode", &template).unwrap();
+
+        #[derive(Serialize)]
+        struct Context {
+            wal_dir: String,
+            data_dir: String,
+        }
+
+        let current_time = common_time::util::current_time_millis();
+        let greptimedb_dir = format!("/tmp/greptimedb-datanode-{current_time}/");
+        let ctx = Context {
+            wal_dir: format!("{greptimedb_dir}/wal/"),
+            data_dir: format!("{greptimedb_dir}/data/"),
+        };
+        let rendered = tt.render("datanode", &ctx).unwrap();
+
+        let conf_file = format!("/tmp/datanode-{current_time}.toml");
+        println!("Generating datanode config file in {conf_file}, full content:\n{rendered}");
+        std::fs::write(&conf_file, rendered).unwrap();
+
+        conf_file
     }
 }
 

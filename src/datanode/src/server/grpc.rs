@@ -86,13 +86,11 @@ impl Instance {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use api::v1::{column_def, ColumnDataType, ColumnDef, TableId};
     use common_catalog::consts::MIN_USER_TABLE_ID;
     use common_grpc_expr::create_table_schema;
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, SchemaBuilder, SchemaRef};
+    use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, RawSchema};
     use datatypes::value::Value;
 
     use super::*;
@@ -224,7 +222,7 @@ mod tests {
         }
     }
 
-    fn expected_table_schema() -> SchemaRef {
+    fn expected_table_schema() -> RawSchema {
         let column_schemas = vec![
             ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(
@@ -236,11 +234,7 @@ mod tests {
             ColumnSchema::new("cpu", ConcreteDataType::float32_datatype(), true),
             ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
         ];
-        Arc::new(
-            SchemaBuilder::try_from(column_schemas)
-                .unwrap()
-                .build()
-                .unwrap(),
-        )
+
+        RawSchema::new(column_schemas)
     }
 }

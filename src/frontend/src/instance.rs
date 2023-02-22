@@ -19,6 +19,7 @@ mod opentsdb;
 mod prometheus;
 mod standalone;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -36,7 +37,6 @@ use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::logging::{debug, info};
 use datafusion::sql::sqlparser::ast::ObjectName;
-use datafusion_common::TableReference;
 use datanode::instance::sql::table_idents_to_full_name;
 use datanode::instance::InstanceRef as DnInstanceRef;
 use datatypes::schema::Schema;
@@ -45,7 +45,8 @@ use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOpts;
 use partition::manager::PartitionRuleManager;
 use partition::route::TableRoutes;
-use query::query_engine::options::QueryOptions;
+use query::parser::PromQuery;
+use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
 use servers::error as server_error;
 use servers::interceptor::{SqlQueryInterceptor, SqlQueryInterceptorRef};
 use servers::promql::{PromqlHandler, PromqlHandlerRef};
@@ -393,10 +394,13 @@ impl Instance {
             | Statement::Explain(_)
             | Statement::Query(_)
             | Statement::Insert(_)
+            | Statement::Delete(_)
             | Statement::Alter(_)
-            | Statement::DropTable(_) => self.sql_handler.do_statement_query(stmt, query_ctx).await,
+            | Statement::DropTable(_)
+            | Statement::Tql(_)
+            | Statement::Copy(_) => self.sql_handler.do_statement_query(stmt, query_ctx).await,
             Statement::Use(db) => self.handle_use(db, query_ctx),
-            _ => NotSupportedSnafu {
+            Statement::ShowCreateTable(_) => NotSupportedSnafu {
                 feat: format!("{stmt:?}"),
             }
             .fail(),
@@ -448,12 +452,14 @@ impl SqlQueryHandler for Instance {
         }
     }
 
-    async fn do_promql_query(&self, query: &str, _: QueryContextRef) -> Vec<Result<Output>> {
+    async fn do_promql_query(&self, query: &PromQuery, _: QueryContextRef) -> Vec<Result<Output>> {
         if let Some(handler) = &self.promql_handler {
-            let result = handler
-                .do_query(query)
-                .await
-                .context(ExecutePromqlSnafu { query });
+            let result = handler.do_query(query).await.with_context(|_| {
+                let query_literal = format!("{query:?}");
+                ExecutePromqlSnafu {
+                    query: query_literal,
+                }
+            });
             vec![result]
         } else {
             vec![Err(NotSupportedSnafu {
@@ -509,9 +515,14 @@ impl ScriptHandler for Instance {
         }
     }
 
-    async fn execute_script(&self, schema: &str, script: &str) -> server_error::Result<Output> {
+    async fn execute_script(
+        &self,
+        schema: &str,
+        script: &str,
+        params: HashMap<String, String>,
+    ) -> server_error::Result<Output> {
         if let Some(handler) = &self.script_handler {
-            handler.execute_script(schema, script).await
+            handler.execute_script(schema, script, params).await
         } else {
             server_error::NotSupportedSnafu {
                 feat: "Script execution in Frontend",
@@ -523,7 +534,7 @@ impl ScriptHandler for Instance {
 
 #[async_trait]
 impl PromqlHandler for Instance {
-    async fn do_query(&self, query: &str) -> server_error::Result<Output> {
+    async fn do_query(&self, query: &PromQuery) -> server_error::Result<Output> {
         if let Some(promql_handler) = &self.promql_handler {
             promql_handler.do_query(query).await
         } else {
@@ -550,72 +561,48 @@ pub fn check_permission(
     }
 
     match stmt {
-        // query and explain will be checked in QueryEngineState
-        Statement::Query(_) | Statement::Explain(_) => {}
+        // query,explain and tql will be checked in QueryEngineState
+        Statement::Query(_) | Statement::Explain(_) | Statement::Tql(_) => {}
         // database ops won't be checked
         Statement::CreateDatabase(_) | Statement::ShowDatabases(_) | Statement::Use(_) => {}
         // show create table and alter are not supported yet
         Statement::ShowCreateTable(_) | Statement::Alter(_) => {}
 
         Statement::Insert(insert) => {
-            let (catalog, schema, _) =
-                table_idents_to_full_name(insert.table_name(), query_ctx.clone())
-                    .map_err(BoxedError::new)
-                    .context(ExternalSnafu)?;
-
-            validate_param(&catalog, &schema, query_ctx)?;
+            validate_param(insert.table_name(), query_ctx)?;
         }
         Statement::CreateTable(stmt) => {
-            let tab_ref = obj_name_to_tab_ref(&stmt.name)?;
-            validate_tab_ref(tab_ref, query_ctx)?;
+            validate_param(&stmt.name, query_ctx)?;
         }
         Statement::DropTable(drop_stmt) => {
-            let tab_ref = obj_name_to_tab_ref(drop_stmt.table_name())?;
-            validate_tab_ref(tab_ref, query_ctx)?;
+            validate_param(drop_stmt.table_name(), query_ctx)?;
         }
         Statement::ShowTables(stmt) => {
             if let Some(database) = &stmt.database {
-                validate_param(&query_ctx.current_catalog(), database, query_ctx)?;
+                validate_catalog_and_schema(&query_ctx.current_catalog(), database, query_ctx)
+                    .map_err(BoxedError::new)
+                    .context(SqlExecInterceptedSnafu)?;
             }
         }
         Statement::DescribeTable(stmt) => {
-            let tab_ref = obj_name_to_tab_ref(stmt.name())?;
-            validate_tab_ref(tab_ref, query_ctx)?;
+            validate_param(stmt.name(), query_ctx)?;
+        }
+        Statement::Delete(delete) => {
+            validate_param(delete.table_name(), query_ctx)?;
+        }
+        Statement::Copy(stmd) => {
+            validate_param(stmd.table_name(), query_ctx)?;
         }
     }
     Ok(())
 }
 
-fn obj_name_to_tab_ref(obj: &ObjectName) -> Result<TableReference> {
-    match &obj.0[..] {
-        [table] => Ok(TableReference::Bare {
-            table: &table.value,
-        }),
-        [schema, table] => Ok(TableReference::Partial {
-            schema: &schema.value,
-            table: &table.value,
-        }),
-        [catalog, schema, table] => Ok(TableReference::Full {
-            catalog: &catalog.value,
-            schema: &schema.value,
-            table: &table.value,
-        }),
-        _ => error::InvalidSqlSnafu {
-            err_msg: format!(
-                "expect table name to be <catalog>.<schema>.<table>, <schema>.<table> or <table>, actual: {obj}",
-            ),
-        }.fail(),
-    }
-}
-
-fn validate_tab_ref(tab_ref: TableReference, query_ctx: &QueryContextRef) -> Result<()> {
-    query::query_engine::options::validate_table_references(tab_ref, query_ctx)
+fn validate_param(name: &ObjectName, query_ctx: &QueryContextRef) -> Result<()> {
+    let (catalog, schema, _) = table_idents_to_full_name(name, query_ctx.clone())
         .map_err(BoxedError::new)
-        .context(SqlExecInterceptedSnafu)
-}
+        .context(ExternalSnafu)?;
 
-fn validate_param(catalog: &str, schema: &str, query_ctx: &QueryContextRef) -> Result<()> {
-    query::query_engine::options::validate_catalog_and_schema(catalog, schema, query_ctx)
+    validate_catalog_and_schema(&catalog, &schema, query_ctx)
         .map_err(BoxedError::new)
         .context(SqlExecInterceptedSnafu)
 }

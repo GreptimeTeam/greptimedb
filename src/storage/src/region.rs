@@ -15,7 +15,9 @@
 #[cfg(test)]
 mod tests;
 mod writer;
+
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -28,7 +30,10 @@ use store_api::storage::{
     WriteResponse,
 };
 
+use crate::compaction::CompactionSchedulerRef;
+use crate::config::EngineConfig;
 use crate::error::{self, Error, Result};
+use crate::file_purger::FilePurgerRef;
 use crate::flush::{FlushSchedulerRef, FlushStrategyRef};
 use crate::manifest::action::{
     RawRegionMetadata, RegionChange, RegionMetaAction, RegionMetaActionList,
@@ -47,7 +52,6 @@ use crate::wal::Wal;
 use crate::write_batch::WriteBatch;
 
 /// [Region] implementation.
-#[derive(Debug)]
 pub struct RegionImpl<S: LogStore> {
     inner: Arc<RegionInner<S>>,
 }
@@ -57,6 +61,21 @@ impl<S: LogStore> Clone for RegionImpl<S> {
         Self {
             inner: self.inner.clone(),
         }
+    }
+}
+
+impl<S: LogStore> fmt::Debug for RegionImpl<S> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("RegionImpl")
+            .field("id", &self.inner.shared.id)
+            .field("name", &self.inner.shared.name)
+            .field("wal", &self.inner.wal)
+            .field("flush_strategy", &self.inner.flush_strategy)
+            .field("flush_scheduler", &self.inner.flush_scheduler)
+            .field("compaction_scheduler", &self.inner.compaction_scheduler)
+            .field("sst_layer", &self.inner.sst_layer)
+            .field("manifest", &self.inner.manifest)
+            .finish()
     }
 }
 
@@ -101,19 +120,26 @@ impl<S: LogStore> Region for RegionImpl<S> {
     async fn alter(&self, request: AlterRequest) -> Result<()> {
         self.inner.alter(request).await
     }
+
+    async fn close(&self) -> Result<()> {
+        self.inner.close().await
+    }
 }
 
 /// Storage related config for region.
 ///
 /// Contains all necessary storage related components needed by the region, such as logstore,
 /// manifest, memtable builder.
-pub struct StoreConfig<S> {
+pub struct StoreConfig<S: LogStore> {
     pub log_store: Arc<S>,
     pub sst_layer: AccessLayerRef,
     pub manifest: RegionManifest,
     pub memtable_builder: MemtableBuilderRef,
     pub flush_scheduler: FlushSchedulerRef,
     pub flush_strategy: FlushStrategyRef,
+    pub compaction_scheduler: CompactionSchedulerRef<S>,
+    pub engine_config: Arc<EngineConfig>,
+    pub file_purger: FilePurgerRef,
 }
 
 pub type RecoverdMetadata = (SequenceNumber, (ManifestVersion, RawRegionMetadata));
@@ -143,7 +169,13 @@ impl<S: LogStore> RegionImpl<S> {
         let mutable_memtable = store_config
             .memtable_builder
             .build(metadata.schema().clone());
-        let version = Version::with_manifest_version(metadata, manifest_version, mutable_memtable);
+        let version = Version::with_manifest_version(
+            metadata,
+            manifest_version,
+            mutable_memtable,
+            store_config.sst_layer.clone(),
+            store_config.file_purger.clone(),
+        );
         let region = RegionImpl::new(version, store_config);
 
         Ok(region)
@@ -163,10 +195,14 @@ impl<S: LogStore> RegionImpl<S> {
                 name,
                 version_control: Arc::new(version_control),
             }),
-            writer: Arc::new(RegionWriter::new(store_config.memtable_builder)),
+            writer: Arc::new(RegionWriter::new(
+                store_config.memtable_builder,
+                store_config.engine_config.clone(),
+            )),
             wal,
             flush_strategy: store_config.flush_strategy,
             flush_scheduler: store_config.flush_scheduler,
+            compaction_scheduler: store_config.compaction_scheduler,
             sst_layer: store_config.sst_layer,
             manifest: store_config.manifest,
         });
@@ -186,6 +222,8 @@ impl<S: LogStore> RegionImpl<S> {
         let (version, mut recovered_metadata) = match Self::recover_from_manifest(
             &store_config.manifest,
             &store_config.memtable_builder,
+            &store_config.sst_layer,
+            &store_config.file_purger,
         )
         .await?
         {
@@ -236,11 +274,15 @@ impl<S: LogStore> RegionImpl<S> {
             version_control,
         });
 
-        let writer = Arc::new(RegionWriter::new(store_config.memtable_builder));
+        let writer = Arc::new(RegionWriter::new(
+            store_config.memtable_builder,
+            store_config.engine_config.clone(),
+        ));
         let writer_ctx = WriterContext {
             shared: &shared,
             flush_strategy: &store_config.flush_strategy,
             flush_scheduler: &store_config.flush_scheduler,
+            compaction_scheduler: &store_config.compaction_scheduler,
             sst_layer: &store_config.sst_layer,
             wal: &wal,
             writer: &writer,
@@ -257,6 +299,7 @@ impl<S: LogStore> RegionImpl<S> {
             wal,
             flush_strategy: store_config.flush_strategy,
             flush_scheduler: store_config.flush_scheduler,
+            compaction_scheduler: store_config.compaction_scheduler,
             sst_layer: store_config.sst_layer,
             manifest: store_config.manifest,
         });
@@ -272,6 +315,8 @@ impl<S: LogStore> RegionImpl<S> {
     async fn recover_from_manifest(
         manifest: &RegionManifest,
         memtable_builder: &MemtableBuilderRef,
+        sst_layer: &AccessLayerRef,
+        file_purger: &FilePurgerRef,
     ) -> Result<(Option<Version>, RecoveredMetadataMap)> {
         let (start, end) = Self::manifest_scan_range();
         let mut iter = manifest.scan(start, end).await?;
@@ -299,6 +344,8 @@ impl<S: LogStore> RegionImpl<S> {
                             Arc::new(region_metadata),
                             last_manifest_version,
                             memtable,
+                            sst_layer.clone(),
+                            file_purger.clone(),
                         ));
                         for (manifest_version, action) in actions.drain(..) {
                             version = Self::replay_edit(manifest_version, action, version);
@@ -344,7 +391,8 @@ impl<S: LogStore> RegionImpl<S> {
         if let RegionMetaAction::Edit(e) = action {
             let edit = VersionEdit {
                 files_to_add: e.files_to_add,
-                flushed_sequence: Some(e.flushed_sequence),
+                files_to_remove: e.files_to_remove,
+                flushed_sequence: e.flushed_sequence,
                 manifest_version,
                 max_memtable_id: None,
             };
@@ -386,6 +434,7 @@ impl<S: LogStore> RegionImpl<S> {
             shared: &inner.shared,
             flush_strategy: &inner.flush_strategy,
             flush_scheduler: &inner.flush_scheduler,
+            compaction_scheduler: &inner.compaction_scheduler,
             sst_layer: &inner.sst_layer,
             wal: &inner.wal,
             writer: &inner.writer,
@@ -421,13 +470,13 @@ impl SharedData {
 
 pub type SharedDataRef = Arc<SharedData>;
 
-#[derive(Debug)]
 struct RegionInner<S: LogStore> {
     shared: SharedDataRef,
     writer: RegionWriterRef,
     wal: Wal<S>,
     flush_strategy: FlushStrategyRef,
     flush_scheduler: FlushSchedulerRef,
+    compaction_scheduler: CompactionSchedulerRef<S>,
     sst_layer: AccessLayerRef,
     manifest: RegionManifest,
 }
@@ -466,6 +515,7 @@ impl<S: LogStore> RegionInner<S> {
             shared: &self.shared,
             flush_strategy: &self.flush_strategy,
             flush_scheduler: &self.flush_scheduler,
+            compaction_scheduler: &self.compaction_scheduler,
             sst_layer: &self.sst_layer,
             wal: &self.wal,
             writer: &self.writer,
@@ -491,5 +541,9 @@ impl<S: LogStore> RegionInner<S> {
         };
 
         self.writer.alter(alter_ctx, request).await
+    }
+
+    async fn close(&self) -> Result<()> {
+        self.writer.close().await
     }
 }

@@ -93,7 +93,10 @@ where
         match statement {
             Statement::Query(qb) => self.query_to_plan(qb),
             Statement::Explain(explain) => self.explain_to_plan(explain),
+            // The TQL has it's a dedicated planner
+            Statement::Tql(_tql) => unreachable!(),
             Statement::ShowTables(_)
+            | Statement::Delete(_)
             | Statement::ShowDatabases(_)
             | Statement::ShowCreateTable(_)
             | Statement::DescribeTable(_)
@@ -102,7 +105,8 @@ where
             | Statement::Alter(_)
             | Statement::Insert(_)
             | Statement::DropTable(_)
-            | Statement::Use(_) => unreachable!(),
+            | Statement::Use(_)
+            | Statement::Copy(_) => unreachable!(),
         }
     }
 }

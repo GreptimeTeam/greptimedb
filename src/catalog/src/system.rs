@@ -26,13 +26,15 @@ use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::debug;
 use common_time::util;
 use datatypes::prelude::{ConcreteDataType, ScalarVector, VectorRef};
-use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder, SchemaRef};
+use datatypes::schema::{ColumnSchema, RawSchema, SchemaRef};
 use datatypes::vectors::{BinaryVector, TimestampMillisecondVector, UInt8Vector};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::engine::{EngineContext, TableEngineRef};
 use table::metadata::{TableId, TableInfoRef};
-use table::requests::{CreateTableRequest, DeleteRequest, InsertRequest, OpenTableRequest};
+use table::requests::{
+    CreateTableRequest, DeleteRequest, InsertRequest, OpenTableRequest, TableOptions,
+};
 use table::{Table, TableRef};
 
 use crate::error::{
@@ -88,7 +90,7 @@ impl SystemCatalogTable {
             table_name: SYSTEM_CATALOG_TABLE_NAME.to_string(),
             table_id: SYSTEM_CATALOG_TABLE_ID,
         };
-        let schema = Arc::new(build_system_catalog_schema());
+        let schema = build_system_catalog_schema();
         let ctx = EngineContext::default();
 
         if let Some(table) = engine
@@ -105,11 +107,11 @@ impl SystemCatalogTable {
                 schema_name: INFORMATION_SCHEMA_NAME.to_string(),
                 table_name: SYSTEM_CATALOG_TABLE_NAME.to_string(),
                 desc: Some("System catalog table".to_string()),
-                schema: schema.clone(),
+                schema,
                 region_numbers: vec![0],
                 primary_key_indices: vec![ENTRY_TYPE_INDEX, KEY_INDEX],
                 create_if_not_exists: true,
-                table_options: HashMap::new(),
+                table_options: TableOptions::default(),
             };
 
             let table = engine
@@ -143,7 +145,7 @@ impl SystemCatalogTable {
 /// - value: JSON-encoded value of entry's metadata.
 /// - gmt_created: create time of this metadata.
 /// - gmt_modified: last updated time of this metadata.
-fn build_system_catalog_schema() -> Schema {
+fn build_system_catalog_schema() -> RawSchema {
     let cols = vec![
         ColumnSchema::new(
             "entry_type".to_string(),
@@ -178,8 +180,7 @@ fn build_system_catalog_schema() -> Schema {
         ),
     ];
 
-    // The schema of this table must be valid.
-    SchemaBuilder::try_from(cols).unwrap().build().unwrap()
+    RawSchema::new(cols)
 }
 
 /// Formats key string for table entry in system catalog
@@ -399,6 +400,7 @@ mod tests {
     use mito::config::EngineConfig;
     use mito::engine::MitoEngine;
     use object_store::ObjectStore;
+    use storage::compaction::noop::NoopCompactionScheduler;
     use storage::config::EngineConfig as StorageEngineConfig;
     use storage::EngineImpl;
     use table::metadata::TableType;
@@ -485,12 +487,14 @@ mod tests {
             .build()
             .unwrap();
         let object_store = ObjectStore::new(accessor);
+        let noop_compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
         let table_engine = Arc::new(MitoEngine::new(
             EngineConfig::default(),
             EngineImpl::new(
                 StorageEngineConfig::default(),
                 Arc::new(NoopLogStore::default()),
                 object_store.clone(),
+                noop_compaction_scheduler,
             ),
             object_store,
         ));

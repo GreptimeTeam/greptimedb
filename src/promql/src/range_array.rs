@@ -50,7 +50,7 @@ pub type RangeTuple = (u32, u32);
 /// └───────────────┼───────────────┘
 /// ```
 ///
-/// Then the [DictionaryArray] can be expanded to serveral ranges like this:
+/// Then the [DictionaryArray] can be expanded to several ranges like this:
 ///
 /// ```text
 /// Keys
@@ -96,7 +96,7 @@ impl RangeArray {
         unsafe { Ok(Self::from_ranges_unchecked(values, ranges)) }
     }
 
-    /// Construct [RangeArray] from given range without checking its validaty.
+    /// Construct [RangeArray] from given range without checking its validity.
     ///
     /// # Safety
     ///
@@ -194,7 +194,7 @@ impl RangeArray {
         )
     }
 
-    /// Build datatype of wrappered [RangeArray] on given value type.
+    /// Build datatype of wrapped [RangeArray] on given value type.
     pub fn convert_data_type(value_type: DataType) -> DataType {
         DataType::Dictionary(Box::new(Self::key_type()), Box::new(value_type))
     }

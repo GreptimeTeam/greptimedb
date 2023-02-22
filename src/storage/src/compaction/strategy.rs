@@ -43,13 +43,14 @@ impl Strategy for SimpleTimeWindowStrategy {
             return vec![];
         }
         let files = find_compactable_files(level);
+        debug!("Compactable files found: {:?}", files);
         if files.is_empty() {
             return vec![];
         }
 
         let time_bucket = infer_time_bucket(&files);
         let buckets = calculate_time_buckets(time_bucket, &files);
-        debug!("File buckets: {:?}", buckets);
+        debug!("File bucket:{}, file groups: {:?}", time_bucket, buckets);
         buckets
             .into_iter()
             .map(|(bound, files)| CompactionOutput {
@@ -66,12 +67,7 @@ impl Strategy for SimpleTimeWindowStrategy {
 /// Currently they're files that is not currently under compaction.
 #[inline]
 fn find_compactable_files(level: &LevelMeta) -> Vec<FileHandle> {
-    level
-        .files()
-        .iter()
-        .filter(|f| !f.compacting())
-        .cloned()
-        .collect()
+    level.files().filter(|f| !f.compacting()).cloned().collect()
 }
 
 /// Calculates buckets for files. If file does not contain a time range in metadata, it will be
@@ -94,12 +90,7 @@ fn calculate_time_buckets(bucket_sec: i64, files: &[FileHandle]) -> HashMap<i64,
                     .push(file.clone());
             }
         } else {
-            // Files without timestamp range is assign to a special bucket `i64::MAX`,
-            // so that they can be compacted together.
-            buckets
-                .entry(i64::MAX)
-                .or_insert_with(Vec::new)
-                .push(file.clone());
+            warn!("Found corrupted SST without timestamp bounds: {:?}", file);
         }
     }
     buckets
@@ -174,9 +165,10 @@ fn fit_time_bucket(span_sec: i64) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     use super::*;
+    use crate::file_purger::noop::new_noop_file_purger;
     use crate::sst::FileMeta;
 
     #[test]
@@ -236,14 +228,21 @@ mod tests {
     }
 
     fn new_file_handle(name: &str, start_ts_millis: i64, end_ts_millis: i64) -> FileHandle {
-        FileHandle::new(FileMeta {
-            file_name: name.to_string(),
-            time_range: Some((
-                Timestamp::new_millisecond(start_ts_millis),
-                Timestamp::new_millisecond(end_ts_millis),
-            )),
-            level: 0,
-        })
+        let file_purger = new_noop_file_purger();
+        let layer = Arc::new(crate::test_util::access_layer_util::MockAccessLayer {});
+        FileHandle::new(
+            FileMeta {
+                region_id: 0,
+                file_name: name.to_string(),
+                time_range: Some((
+                    Timestamp::new_millisecond(start_ts_millis),
+                    Timestamp::new_millisecond(end_ts_millis),
+                )),
+                level: 0,
+            },
+            layer,
+            file_purger,
+        )
     }
 
     fn new_file_handles(input: &[(&str, i64, i64)]) -> Vec<FileHandle> {
@@ -308,21 +307,8 @@ mod tests {
             &[(0, &["a"]), (10, &["a"])],
         );
 
-        // files without timestamp are align to a special bucket: i64::MAX
-        check_bucket_calculation(
-            10,
-            vec![FileHandle::new(FileMeta {
-                file_name: "a".to_string(),
-                time_range: None,
-                level: 0,
-            })],
-            &[(i64::MAX, &["a"])],
-        );
-
         // file with an large time range
-
         let expected = (0..(TIME_BUCKETS[4] / TIME_BUCKETS[0]))
-            .into_iter()
             .map(|b| (b * TIME_BUCKETS[0], &["a"] as _))
             .collect::<Vec<_>>();
         check_bucket_calculation(

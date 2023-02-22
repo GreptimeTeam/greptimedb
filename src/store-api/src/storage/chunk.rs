@@ -37,8 +37,12 @@ pub trait ChunkReader: Send {
     type Error: ErrorExt + Send + Sync;
 
     /// Schema of the chunks returned by this reader.
-    fn schema(&self) -> &SchemaRef;
+    /// This schema does not contain internal columns.
+    fn user_schema(&self) -> &SchemaRef;
 
     /// Fetch next chunk from the reader.
     async fn next_chunk(&mut self) -> Result<Option<Chunk>, Self::Error>;
+
+    // project the chunk according to required projection.
+    fn project_chunk(&self, chunk: Chunk) -> Chunk;
 }

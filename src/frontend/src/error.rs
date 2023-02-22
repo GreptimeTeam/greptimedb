@@ -56,6 +56,9 @@ pub enum Error {
         source: sql::error::Error,
     },
 
+    #[snafu(display("Missing insert values"))]
+    MissingInsertValues { backtrace: Backtrace },
+
     #[snafu(display("Column datatype error, source: {}", source))]
     ColumnDataType {
         #[snafu(backtrace)]
@@ -114,7 +117,7 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Table not found: {}", table_name))]
+    #[snafu(display("Table `{}` not exist", table_name))]
     TableNotFound {
         table_name: String,
         backtrace: Backtrace,
@@ -213,6 +216,9 @@ pub enum Error {
         schema_info: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Schema {} already exists", name))]
+    SchemaExists { name: String, backtrace: Backtrace },
 
     #[snafu(display("Table occurs error, source: {}", source))]
     Table {
@@ -339,6 +345,15 @@ pub enum Error {
         #[snafu(backtrace)]
         source: query::error::Error,
     },
+
+    #[snafu(display("Illegal primary keys definition: {}", msg))]
+    IllegalPrimaryKeysDef { msg: String, backtrace: Backtrace },
+
+    #[snafu(display("Unrecognized table option: {}", source))]
+    UnrecognizedTableOption {
+        #[snafu(backtrace)]
+        source: table::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -349,7 +364,15 @@ impl ErrorExt for Error {
             Error::ParseAddr { .. }
             | Error::InvalidSql { .. }
             | Error::InvalidInsertRequest { .. }
-            | Error::ColumnValuesNumberMismatch { .. } => StatusCode::InvalidArguments,
+            | Error::ColumnValuesNumberMismatch { .. }
+            | Error::IllegalPrimaryKeysDef { .. }
+            | Error::CatalogNotFound { .. }
+            | Error::SchemaNotFound { .. }
+            | Error::SchemaExists { .. }
+            | Error::MissingInsertValues { .. }
+            | Error::PrimaryKeyNotFound { .. }
+            | Error::MissingMetasrvOpts { .. }
+            | Error::ColumnNoneDefaultValue { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
 
@@ -392,29 +415,25 @@ impl ErrorExt for Error {
             Error::StartMetaClient { source } | Error::RequestMeta { source } => {
                 source.status_code()
             }
-            Error::SchemaNotFound { .. } => StatusCode::InvalidArguments,
-            Error::CatalogNotFound { .. } => StatusCode::InvalidArguments,
-
             Error::BuildCreateExprOnInsertion { source }
             | Error::ToTableInsertRequest { source }
             | Error::FindNewColumnsOnInsertion { source } => source.status_code(),
 
-            Error::PrimaryKeyNotFound { .. } => StatusCode::InvalidArguments,
             Error::ExecuteStatement { source, .. } | Error::DescribeStatement { source } => {
                 source.status_code()
             }
-            Error::MissingMetasrvOpts { .. } => StatusCode::InvalidArguments,
             Error::AlterExprToRequest { source, .. } => source.status_code(),
             Error::LeaderNotFound { .. } => StatusCode::StorageUnavailable,
             Error::TableAlreadyExist { .. } => StatusCode::TableAlreadyExists,
             Error::EncodeSubstraitLogicalPlan { source } => source.status_code(),
             Error::InvokeDatanode { source } => source.status_code(),
             Error::ColumnDefaultValue { source, .. } => source.status_code(),
-            Error::ColumnNoneDefaultValue { .. } => StatusCode::InvalidArguments,
+
             Error::External { source } => source.status_code(),
             Error::DeserializePartition { source, .. } | Error::FindTableRoute { source, .. } => {
                 source.status_code()
             }
+            Error::UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
         }
     }
 

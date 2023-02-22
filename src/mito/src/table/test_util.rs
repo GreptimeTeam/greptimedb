@@ -18,16 +18,17 @@ use std::sync::Arc;
 
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder, SchemaRef};
+use datatypes::schema::{ColumnSchema, RawSchema, Schema, SchemaBuilder, SchemaRef};
 use datatypes::vectors::VectorRef;
 use log_store::NoopLogStore;
 use object_store::services::Fs as Builder;
 use object_store::{ObjectStore, ObjectStoreBuilder};
+use storage::compaction::noop::NoopCompactionScheduler;
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
 use table::engine::{EngineContext, TableEngine};
 use table::metadata::{TableInfo, TableInfoBuilder, TableMetaBuilder, TableType};
-use table::requests::{CreateTableRequest, InsertRequest};
+use table::requests::{CreateTableRequest, InsertRequest, TableOptions};
 use table::TableRef;
 use tempdir::TempDir;
 
@@ -101,18 +102,18 @@ pub async fn new_test_object_store(prefix: &str) -> (TempDir, ObjectStore) {
     (dir, ObjectStore::new(accessor).finish())
 }
 
-fn new_create_request(schema: SchemaRef) -> CreateTableRequest {
+pub fn new_create_request(schema: SchemaRef) -> CreateTableRequest {
     CreateTableRequest {
         id: 1,
         catalog_name: "greptime".to_string(),
         schema_name: "public".to_string(),
         table_name: TABLE_NAME.to_string(),
         desc: Some("a test table".to_string()),
-        schema,
+        schema: RawSchema::from(&*schema),
         region_numbers: vec![0],
         create_if_not_exists: true,
         primary_key_indices: vec![0],
-        table_options: HashMap::new(),
+        table_options: TableOptions::default(),
     }
 }
 
@@ -127,11 +128,12 @@ pub struct TestEngineComponents {
 
 pub async fn setup_test_engine_and_table() -> TestEngineComponents {
     let (dir, object_store) = new_test_object_store("setup_test_engine_and_table").await;
-
+    let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
     let storage_engine = EngineImpl::new(
         StorageEngineConfig::default(),
         Arc::new(NoopLogStore::default()),
         object_store.clone(),
+        compaction_scheduler,
     );
     let table_engine = MitoEngine::new(
         EngineConfig::default(),

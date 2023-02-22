@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 // Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,6 +11,8 @@ use std::collections::HashMap;
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+use std::collections::HashMap;
 use std::marker::PhantomData;
 
 use axum::http::{self, Request, StatusCode};
@@ -20,12 +21,17 @@ use common_telemetry::error;
 use futures::future::BoxFuture;
 use http_body::Body;
 use session::context::UserInfo;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use tower_http::auth::AsyncAuthorizeRequest;
 
+use super::PUBLIC_APIS;
 use crate::auth::Error::IllegalParam;
 use crate::auth::{Identity, IllegalParamSnafu, InternalStateSnafu, UserProviderRef};
-use crate::error::{self, Result};
+use crate::error::Error::Auth;
+use crate::error::{
+    self, InvalidAuthorizationHeaderSnafu, InvisibleASCIISnafu, NotFoundInfluxAuthSnafu, Result,
+    UnsupportedAuthSchemeSnafu,
+};
 use crate::http::HTTP_API_PREFIX;
 
 pub struct HttpAuth<RespBody> {
@@ -63,7 +69,8 @@ where
     fn authorize(&mut self, mut request: Request<B>) -> Self::Future {
         let user_provider = self.user_provider.clone();
         Box::pin(async move {
-            let need_auth = request.uri().path().starts_with(HTTP_API_PREFIX);
+            let need_auth = need_auth(&request);
+
             let user_provider = if let Some(user_provider) = user_provider.filter(|_| need_auth) {
                 user_provider
             } else {
@@ -125,28 +132,80 @@ async fn authorize<B: Send + Sync + 'static>(
     user_provider.authorize(catalog, database, user_info).await
 }
 
+fn get_influxdb_credentials<B: Send + Sync + 'static>(
+    request: &Request<B>,
+) -> Result<Option<(Username, Password)>> {
+    // compat with influxdb v2 and v1
+    if let Some(header) = request.headers().get(http::header::AUTHORIZATION) {
+        // try v2 first
+        let (auth_scheme, credential) = header
+            .to_str()
+            .context(InvisibleASCIISnafu)?
+            .split_once(' ')
+            .context(InvalidAuthorizationHeaderSnafu)?;
+        ensure!(
+            auth_scheme.to_lowercase() == "token",
+            UnsupportedAuthSchemeSnafu { name: auth_scheme }
+        );
+
+        let (username, password) = credential
+            .split_once(':')
+            .context(InvalidAuthorizationHeaderSnafu)?;
+
+        Ok(Some((username.to_string(), password.to_string())))
+    } else {
+        // try v1
+        let Some(query_str) = request.uri().query() else { return Ok(None) };
+
+        // TODO(shuiyisong): remove this for performance optimization
+        // `authorize` would deserialize query from urlencoded again
+        let query = match serde_urlencoded::from_str::<HashMap<String, String>>(query_str) {
+            Ok(query_map) => query_map,
+            Err(e) => IllegalParamSnafu {
+                msg: format!("fail to parse http query: {e}"),
+            }
+            .fail()?,
+        };
+
+        let username = query.get("u");
+        let password = query.get("p");
+
+        match (username, password) {
+            (None, None) => Ok(None),
+            (Some(username), Some(password)) => {
+                Ok(Some((username.to_string(), password.to_string())))
+            }
+            _ => Err(Auth {
+                source: IllegalParam {
+                    msg: "influxdb auth: username and password must be provided together"
+                        .to_string(),
+                },
+            }),
+        }
+    }
+}
+
 async fn authenticate<B: Send + Sync + 'static>(
     user_provider: &UserProviderRef,
     request: &Request<B>,
-) -> crate::auth::Result<UserInfo> {
-    let (scheme, credential) = auth_header(request).map_err(|e| IllegalParam {
-        msg: format!("failed to get http authorize header, err: {e:?}"),
-    })?;
-
-    match scheme {
-        AuthScheme::Basic => {
-            let (username, password) = decode_basic(credential).map_err(|e| IllegalParam {
-                msg: format!("failed to decode basic authorize, err: {e:?}"),
-            })?;
-
-            Ok(user_provider
-                .authenticate(
-                    Identity::UserId(&username, None),
-                    crate::auth::Password::PlainText(&password),
-                )
-                .await?)
+) -> Result<UserInfo> {
+    let (username, password) = if request.uri().path().contains("influxdb") {
+        // compatible with influxdb auth
+        get_influxdb_credentials(request)?.context(NotFoundInfluxAuthSnafu)?
+    } else {
+        // normal http auth
+        let scheme = auth_header(request)?;
+        match scheme {
+            AuthScheme::Basic(username, password) => (username, password),
         }
-    }
+    };
+
+    Ok(user_provider
+        .authenticate(
+            Identity::UserId(&username, None),
+            crate::auth::Password::PlainText(&password),
+        )
+        .await?)
 }
 
 fn unauthorized_resp<RespBody>() -> Response<RespBody>
@@ -160,43 +219,44 @@ where
 
 #[derive(Debug)]
 pub enum AuthScheme {
-    Basic,
+    Basic(Username, Password),
 }
+
+type Username = String;
+type Password = String;
 
 impl TryFrom<&str> for AuthScheme {
     type Error = error::Error;
 
     fn try_from(value: &str) -> Result<Self> {
-        match value.to_lowercase().as_str() {
-            "basic" => Ok(AuthScheme::Basic),
-            other => error::UnsupportedAuthSchemeSnafu { name: other }.fail(),
+        let (scheme, encoded_credentials) = value
+            .split_once(' ')
+            .context(InvalidAuthorizationHeaderSnafu)?;
+        ensure!(
+            !encoded_credentials.contains(' '),
+            InvalidAuthorizationHeaderSnafu
+        );
+
+        match scheme.to_lowercase().as_str() {
+            "basic" => decode_basic(encoded_credentials)
+                .map(|(username, password)| AuthScheme::Basic(username, password)),
+            other => UnsupportedAuthSchemeSnafu { name: other }.fail(),
         }
     }
 }
 
 type Credential<'a> = &'a str;
 
-fn auth_header<B>(req: &Request<B>) -> Result<(AuthScheme, Credential)> {
+fn auth_header<B>(req: &Request<B>) -> Result<AuthScheme> {
     let auth_header = req
         .headers()
         .get(http::header::AUTHORIZATION)
         .context(error::NotFoundAuthHeaderSnafu)?
         .to_str()
-        .context(error::InvisibleASCIISnafu)?;
+        .context(InvisibleASCIISnafu)?;
 
-    let (auth_scheme, encoded_credentials) = auth_header
-        .split_once(' ')
-        .context(error::InvalidAuthorizationHeaderSnafu)?;
-
-    if encoded_credentials.contains(' ') {
-        return error::InvalidAuthorizationHeaderSnafu {}.fail();
-    }
-
-    Ok((auth_scheme.try_into()?, encoded_credentials))
+    auth_header.try_into()
 }
-
-type Username = String;
-type Password = String;
 
 fn decode_basic(credential: Credential) -> Result<(Username, Password)> {
     let decoded = base64::decode(credential).context(error::InvalidBase64ValueSnafu)?;
@@ -206,12 +266,48 @@ fn decode_basic(credential: Credential) -> Result<(Username, Password)> {
         return Ok((user_id.to_string(), password.to_string()));
     }
 
-    error::InvalidAuthorizationHeaderSnafu {}.fail()
+    InvalidAuthorizationHeaderSnafu {}.fail()
+}
+
+fn need_auth<B>(req: &Request<B>) -> bool {
+    let path = req.uri().path();
+
+    for api in PUBLIC_APIS {
+        if path.starts_with(api) {
+            return false;
+        }
+    }
+
+    path.starts_with(HTTP_API_PREFIX)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_need_auth() {
+        let req = Request::builder()
+            .uri("http://127.0.0.1/v1/influxdb/ping")
+            .body(())
+            .unwrap();
+
+        assert!(!need_auth(&req));
+
+        let req = Request::builder()
+            .uri("http://127.0.0.1/v1/influxdb/health")
+            .body(())
+            .unwrap();
+
+        assert!(!need_auth(&req));
+
+        let req = Request::builder()
+            .uri("http://127.0.0.1/v1/influxdb/write")
+            .body(())
+            .unwrap();
+
+        assert!(need_auth(&req));
+    }
 
     #[test]
     fn test_decode_basic() {
@@ -229,8 +325,12 @@ mod tests {
     #[test]
     fn test_try_into_auth_scheme() {
         let auth_scheme_str = "basic";
-        let auth_scheme: AuthScheme = auth_scheme_str.try_into().unwrap();
-        matches!(auth_scheme, AuthScheme::Basic);
+        let re: Result<AuthScheme> = auth_scheme_str.try_into();
+        assert!(re.is_err());
+
+        let auth_scheme_str = "basic dGVzdDp0ZXN0";
+        let scheme: AuthScheme = auth_scheme_str.try_into().unwrap();
+        matches!(scheme, AuthScheme::Basic(username, pwd) if username == "test" && pwd == "test");
 
         let unsupported = "digest";
         let auth_scheme: Result<AuthScheme> = unsupported.try_into();
@@ -242,9 +342,8 @@ mod tests {
         // base64encode("username:password") == "dXNlcm5hbWU6cGFzc3dvcmQ="
         let req = mock_http_request(Some("Basic dXNlcm5hbWU6cGFzc3dvcmQ="), None).unwrap();
 
-        let (auth_scheme, credential) = auth_header(&req).unwrap();
-        matches!(auth_scheme, AuthScheme::Basic);
-        assert_eq!("dXNlcm5hbWU6cGFzc3dvcmQ=", credential);
+        let auth_scheme = auth_header(&req).unwrap();
+        matches!(auth_scheme, AuthScheme::Basic(username, pwd) if username == "username" && pwd == "password");
 
         let wrong_req = mock_http_request(Some("Basic dXNlcm5hbWU6 cGFzc3dvcmQ="), None).unwrap();
         let res = auth_header(&wrong_req);

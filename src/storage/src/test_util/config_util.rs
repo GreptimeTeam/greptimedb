@@ -20,11 +20,14 @@ use object_store::backend::fs::Builder;
 use object_store::ObjectStore;
 
 use crate::background::JobPoolImpl;
+use crate::compaction::noop::NoopCompactionScheduler;
 use crate::engine;
+use crate::file_purger::noop::NoopFilePurgeHandler;
 use crate::flush::{FlushSchedulerImpl, SizeBasedStrategy};
 use crate::manifest::region::RegionManifest;
 use crate::memtable::DefaultMemtableBuilder;
 use crate::region::StoreConfig;
+use crate::scheduler::{LocalScheduler, SchedulerConfig};
 use crate::sst::FsAccessLayer;
 
 fn log_store_dir(store_dir: &str) -> String {
@@ -51,7 +54,11 @@ pub async fn new_store_config(
         ..Default::default()
     };
     let log_store = Arc::new(RaftEngineLogStore::try_new(log_config).await.unwrap());
-
+    let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
+    let file_purger = Arc::new(LocalScheduler::new(
+        SchedulerConfig::default(),
+        NoopFilePurgeHandler,
+    ));
     StoreConfig {
         log_store,
         sst_layer,
@@ -59,5 +66,8 @@ pub async fn new_store_config(
         memtable_builder: Arc::new(DefaultMemtableBuilder::default()),
         flush_scheduler,
         flush_strategy: Arc::new(SizeBasedStrategy::default()),
+        compaction_scheduler,
+        engine_config: Default::default(),
+        file_purger,
     }
 }

@@ -44,12 +44,6 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to write columns, source: {}", source))]
-    FlushIo {
-        source: object_store::Error,
-        backtrace: Backtrace,
-    },
-
     #[snafu(display("Failed to write parquet file, source: {}", source))]
     WriteParquet {
         source: parquet::errors::ParquetError,
@@ -147,6 +141,12 @@ pub enum Error {
     #[snafu(display("Task already cancelled"))]
     Cancelled { backtrace: Backtrace },
 
+    #[snafu(display("Failed to cancel flush, source: {}", source))]
+    CancelFlush {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
+
     #[snafu(display(
         "Manifest protocol forbid to read, min_version: {}, supported_version: {}",
         min_version,
@@ -237,6 +237,9 @@ pub enum Error {
         #[snafu(backtrace)]
         source: MetadataError,
     },
+
+    #[snafu(display("Try to write the closed region"))]
+    ClosedRegion { backtrace: Backtrace },
 
     #[snafu(display("Invalid projection, source: {}", source))]
     InvalidProjection {
@@ -414,12 +417,21 @@ pub enum Error {
     #[snafu(display("Failed to decode parquet file time range, msg: {}", msg))]
     DecodeParquetTimeRange { msg: String, backtrace: Backtrace },
 
-    #[snafu(display("Compaction rate limited, msg: {}", msg))]
-    CompactionRateLimited { msg: String, backtrace: Backtrace },
+    #[snafu(display("Scheduler rate limited, msg: {}", msg))]
+    RateLimited { msg: String, backtrace: Backtrace },
 
-    #[snafu(display("Failed to stop compaction scheduler, source: {:?}", source))]
-    StopCompactionScheduler {
+    #[snafu(display("Cannot schedule request, scheduler's already stopped"))]
+    IllegalSchedulerState { backtrace: Backtrace },
+
+    #[snafu(display("Failed to stop scheduler, source: {}", source))]
+    StopScheduler {
         source: JoinError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to delete SST file, source: {}", source))]
+    DeleteSst {
+        source: object_store::Error,
         backtrace: Backtrace,
     },
 }
@@ -449,12 +461,14 @@ impl ErrorExt for Error {
             | DecodeJson { .. }
             | JoinTask { .. }
             | Cancelled { .. }
+            | CancelFlush { .. }
             | DecodeMetaActionList { .. }
             | Readline { .. }
             | WalDataCorrupted { .. }
             | SequenceNotMonotonic { .. }
             | ConvertStoreSchema { .. }
             | InvalidRawRegion { .. }
+            | ClosedRegion { .. }
             | FilterColumn { .. }
             | AlterMetadata { .. }
             | CompatRead { .. }
@@ -466,8 +480,7 @@ impl ErrorExt for Error {
             | EncodeArrow { .. }
             | ParseSchema { .. } => StatusCode::Unexpected,
 
-            FlushIo { .. }
-            | WriteParquet { .. }
+            WriteParquet { .. }
             | ReadObject { .. }
             | WriteObject { .. }
             | ListObjects { .. }
@@ -491,8 +504,10 @@ impl ErrorExt for Error {
             ConvertChunk { source, .. } => source.status_code(),
             MarkWalObsolete { source, .. } => source.status_code(),
             DecodeParquetTimeRange { .. } => StatusCode::Unexpected,
-            CompactionRateLimited { .. } => StatusCode::Internal,
-            StopCompactionScheduler { .. } => StatusCode::Internal,
+            RateLimited { .. } => StatusCode::Internal,
+            StopScheduler { .. } => StatusCode::Internal,
+            DeleteSst { .. } => StatusCode::StorageUnavailable,
+            IllegalSchedulerState { .. } => StatusCode::Unexpected,
         }
     }
 
@@ -528,27 +543,6 @@ mod tests {
 
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
         assert!(err.backtrace_opt().is_some());
-    }
-
-    #[test]
-    pub fn test_flush_error() {
-        fn throw_io_error() -> std::result::Result<(), std::io::Error> {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "writer is closed",
-            ))
-        }
-
-        let error = throw_io_error()
-            .map_err(|err| {
-                object_store::Error::new(object_store::ErrorKind::Unexpected, "writer close failed")
-                    .set_source(err)
-            })
-            .context(FlushIoSnafu)
-            .err()
-            .unwrap();
-        assert_eq!(StatusCode::StorageUnavailable, error.status_code());
-        assert!(error.backtrace_opt().is_some());
     }
 
     #[test]

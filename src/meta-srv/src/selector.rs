@@ -30,16 +30,11 @@ pub trait Selector: Send + Sync {
     async fn select(&self, ns: Namespace, ctx: &Self::Context) -> Result<Self::Output>;
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SelectorType {
     LoadBased,
+    #[default]
     LeaseBased,
-}
-
-impl Default for SelectorType {
-    fn default() -> Self {
-        SelectorType::LeaseBased
-    }
 }
 
 impl TryFrom<&str> for SelectorType {

@@ -20,6 +20,7 @@ use static_assertions::{assert_fields, assert_impl_all};
 struct Foo {}
 
 #[test]
+#[allow(clippy::extra_unused_type_parameters)]
 fn test_derive() {
     Foo::default();
     assert_fields!(Foo: input_types);
