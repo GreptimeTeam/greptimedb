@@ -118,7 +118,8 @@ impl StateStore for ObjectStateStore {
 
 #[cfg(test)]
 mod tests {
-    use object_store::services::fs::Builder;
+    use object_store::services::Fs as Builder;
+    use object_store::ObjectStoreBuilder;
     use tempdir::TempDir;
 
     use super::*;
@@ -128,7 +129,7 @@ mod tests {
         let dir = TempDir::new("state_store").unwrap();
         let store_dir = dir.path().to_str().unwrap();
         let accessor = Builder::default().root(store_dir).build().unwrap();
-        let object_store = ObjectStore::new(accessor);
+        let object_store = ObjectStore::new(accessor).finish();
         let state_store = ObjectStateStore::new(object_store);
 
         let data: Vec<_> = state_store

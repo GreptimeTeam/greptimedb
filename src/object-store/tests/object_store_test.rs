@@ -13,15 +13,15 @@
 // limitations under the License.
 
 use std::env;
+use std::sync::Arc;
 
 use anyhow::Result;
 use common_telemetry::logging;
 use object_store::backend::{fs, s3};
-use object_store::cache_policy::{LruCacheAccessor, LruCacheLayer};
+use object_store::cache_policy::LruCacheLayer;
 use object_store::test_util::TempFolder;
-use object_store::{util, Object, ObjectLister, ObjectMode, ObjectStore};
-use opendal::layers::CacheLayer;
-use opendal::services::oss;
+use object_store::{util, Object, ObjectLister, ObjectMode, ObjectStore, ObjectStoreBuilder};
+use opendal::services::Oss;
 use opendal::Operator;
 use tempdir::TempDir;
 
@@ -100,7 +100,8 @@ async fn test_fs_backend() -> Result<()> {
             .root(&data_dir.path().to_string_lossy())
             .atomic_write_dir(&tmp_dir.path().to_string_lossy())
             .build()?,
-    );
+    )
+    .finish();
 
     test_object_crud(&store).await?;
     test_object_list(&store).await?;
@@ -124,7 +125,7 @@ async fn test_s3_backend() -> Result<()> {
                 .bucket(&bucket)
                 .build()?;
 
-            let store = ObjectStore::new(accessor);
+            let store = ObjectStore::new(accessor).finish();
 
             let mut guard = TempFolder::new(&store, "/");
             test_object_crud(&store).await?;
@@ -145,14 +146,14 @@ async fn test_oss_backend() -> Result<()> {
 
             let root = uuid::Uuid::new_v4().to_string();
 
-            let accessor = oss::Builder::default()
+            let accessor = Oss::default()
                 .root(&root)
                 .access_key_id(&env::var("GT_OSS_ACCESS_KEY_ID")?)
                 .access_key_secret(&env::var("GT_OSS_ACCESS_KEY")?)
                 .bucket(&bucket)
                 .build()?;
 
-            let store = ObjectStore::new(accessor);
+            let store = ObjectStore::new(accessor).finish();
 
             let mut guard = TempFolder::new(&store, "/");
             test_object_crud(&store).await?;
@@ -204,16 +205,15 @@ async fn test_object_store_cache_policy() -> Result<()> {
 
     // create file cache layer
     let cache_dir = TempDir::new("test_fs_cache")?;
-    let cache_op = ObjectStore::new(
-        fs::Builder::default()
-            .root(&cache_dir.path().to_string_lossy())
-            .atomic_write_dir(&cache_dir.path().to_string_lossy())
-            .build()?,
-    );
+    let cache_acc = fs::Builder::default()
+        .root(&cache_dir.path().to_string_lossy())
+        .atomic_write_dir(&cache_dir.path().to_string_lossy())
+        .build()?;
+    let cache_store = ObjectStore::new(cache_acc.clone()).finish();
     // create operator for cache dir to verify cache file
-    let cache_store = ObjectStore::from(cache_op.inner());
-    let policy = LruCacheAccessor::new(3);
-    let store = store.layer(LruCacheLayer::new(cache_op, policy));
+    let store = store
+        .layer(LruCacheLayer::new(Arc::new(cache_acc), 3))
+        .finish();
 
     // create several object handler.
     let o1 = store.object("test_file1");
