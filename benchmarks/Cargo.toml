@@ -7,7 +7,6 @@ license.workspace = true
 [dependencies]
 arrow.workspace = true
 clap = { version = "4.0", features = ["derive"] }
-common-catalog = { path = "../src/common/catalog" }
 client = { path = "../src/client" }
 indicatif = "0.17.1"
 itertools = "0.10.5"

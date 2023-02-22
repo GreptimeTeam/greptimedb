@@ -19,7 +19,7 @@ use api::v1::auth_header::AuthScheme;
 use api::v1::Basic;
 use arrow_flight::flight_service_server::{FlightService, FlightServiceServer};
 use async_trait::async_trait;
-use client::{Client, Database};
+use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_runtime::{Builder as RuntimeBuilder, Runtime};
 use servers::auth::UserProviderRef;
 use servers::error::{Result, StartGrpcSnafu, TcpBindSnafu};
@@ -126,7 +126,7 @@ async fn test_grpc_query() {
     assert!(re.is_ok());
 
     let grpc_client = Client::with_urls(vec![re.unwrap().to_string()]);
-    let mut db = Database::with_client(grpc_client);
+    let mut db = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, grpc_client);
 
     let re = db.sql("select * from numbers").await;
     assert!(re.is_err());

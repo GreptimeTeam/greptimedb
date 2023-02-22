@@ -17,8 +17,8 @@ use api::v1::{
     column, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef, CreateTableExpr,
     InsertRequest, TableId,
 };
-use client::{Client, Database};
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
+use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_query::Output;
 use servers::server::Server;
 use tests_integration::test_util::{setup_grpc_server, StorageType};

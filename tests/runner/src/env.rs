@@ -19,8 +19,9 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use client::{Client, Database as DB, Error as ClientError};
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use client::{
+    Client, Database as DB, Error as ClientError, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
+};
 use common_error::ext::ErrorExt;
 use common_error::snafu::ErrorCompat;
 use common_query::Output;
