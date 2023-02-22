@@ -15,6 +15,8 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use api::v1::auth_header::AuthScheme;
+use api::v1::Basic;
 use arrow_flight::flight_service_server::{FlightService, FlightServiceServer};
 use async_trait::async_trait;
 use client::{Client, Database};
@@ -124,10 +126,16 @@ async fn test_grpc_query() {
     assert!(re.is_ok());
 
     let grpc_client = Client::with_urls(vec![re.unwrap().to_string()]);
-    let db = Database::with_client(grpc_client);
+    let mut db = Database::with_client(grpc_client);
 
     let re = db.sql("select * from numbers").await;
     assert!(re.is_err());
 
-    // TODO(shuiyisong): add test here
+    let greptime = "greptime".to_string();
+    db.set_auth(AuthScheme::Basic(Basic {
+        username: greptime.clone(),
+        password: greptime.clone(),
+    }));
+    let re = db.sql("select * from numbers").await;
+    assert!(re.is_ok());
 }
