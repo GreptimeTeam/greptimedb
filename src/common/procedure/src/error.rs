@@ -77,7 +77,10 @@ pub enum Error {
     },
 
     #[snafu(display("Procedure exec failed, source: {}", source))]
-    RetryLater { source: BoxedError },
+    RetryLater {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
