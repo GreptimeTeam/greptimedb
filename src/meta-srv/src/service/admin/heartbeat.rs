@@ -29,14 +29,22 @@ pub struct HeartBeatHandler {
 
 #[async_trait::async_trait]
 impl HttpHandler for HeartBeatHandler {
-    async fn handle(&self, _: &str, _: &HashMap<String, String>) -> Result<http::Response<String>> {
+    async fn handle(
+        &self,
+        _: &str,
+        params: &HashMap<String, String>,
+    ) -> Result<http::Response<String>> {
         let meta_peer_client = self
             .meta_peer_client
             .as_ref()
             .context(error::NoMetaPeerClientSnafu)?;
 
         let stat_kvs = meta_peer_client.get_all_dn_stat_kvs().await?;
-        let stat_vals: Vec<StatValue> = stat_kvs.into_values().collect();
+        let mut stat_vals: Vec<StatValue> = stat_kvs.into_values().collect();
+
+        if let Some(addr) = params.get("addr") {
+            stat_vals = filter_by_addr(stat_vals, addr);
+        }
         let result = StatValues { stat_vals }.try_into()?;
 
         http::Response::builder()
@@ -59,5 +67,72 @@ impl TryFrom<StatValues> for String {
         serde_json::to_string(&vals).context(error::SerializeToJsonSnafu {
             input: format!("{vals:?}"),
         })
+    }
+}
+
+fn filter_by_addr(stat_vals: Vec<StatValue>, addr: &str) -> Vec<StatValue> {
+    stat_vals
+        .into_iter()
+        .filter(|stat_val| stat_val.stats.iter().any(|stat| stat.addr == addr))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::handler::node_stat::Stat;
+    use crate::keys::StatValue;
+    use crate::service::admin::heartbeat::filter_by_addr;
+
+    #[tokio::test]
+    async fn test_filter_by_addr() {
+        let stat_value1 = StatValue {
+            stats: vec![
+                Stat {
+                    addr: "127.0.0.1:3001".to_string(),
+                    timestamp_millis: 1,
+                    ..Default::default()
+                },
+                Stat {
+                    addr: "127.0.0.1:3001".to_string(),
+                    timestamp_millis: 2,
+                    ..Default::default()
+                },
+            ],
+        };
+
+        let stat_value2 = StatValue {
+            stats: vec![
+                Stat {
+                    addr: "127.0.0.1:3002".to_string(),
+                    timestamp_millis: 3,
+                    ..Default::default()
+                },
+                Stat {
+                    addr: "127.0.0.1:3002".to_string(),
+                    timestamp_millis: 4,
+                    ..Default::default()
+                },
+                Stat {
+                    addr: "127.0.0.1:3002".to_string(),
+                    timestamp_millis: 5,
+                    ..Default::default()
+                },
+            ],
+        };
+
+        let mut stat_vals = vec![stat_value1, stat_value2];
+        stat_vals = filter_by_addr(stat_vals, "127.0.0.1:3002");
+        assert_eq!(stat_vals.len(), 1);
+        assert_eq!(stat_vals.get(0).unwrap().stats.len(), 3);
+        assert_eq!(
+            stat_vals
+                .get(0)
+                .unwrap()
+                .stats
+                .get(0)
+                .unwrap()
+                .timestamp_millis,
+            3
+        );
     }
 }
