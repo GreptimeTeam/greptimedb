@@ -722,7 +722,7 @@ mod tests {
                     Ok(Status::Done)
                 }
             }
-                .boxed()
+            .boxed()
         };
 
         let retry_later = ProcedureAdapter {
