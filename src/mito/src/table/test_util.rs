@@ -21,8 +21,8 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder, SchemaRef};
 use datatypes::vectors::VectorRef;
 use log_store::NoopLogStore;
-use object_store::services::fs::Builder;
-use object_store::ObjectStore;
+use object_store::services::Fs as Builder;
+use object_store::{ObjectStore, ObjectStoreBuilder};
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
 use table::engine::{EngineContext, TableEngine};
@@ -98,7 +98,7 @@ pub async fn new_test_object_store(prefix: &str) -> (TempDir, ObjectStore) {
     let dir = TempDir::new(prefix).unwrap();
     let store_dir = dir.path().to_string_lossy();
     let accessor = Builder::default().root(&store_dir).build().unwrap();
-    (dir, ObjectStore::new(accessor))
+    (dir, ObjectStore::new(accessor).finish())
 }
 
 fn new_create_request(schema: SchemaRef) -> CreateTableRequest {

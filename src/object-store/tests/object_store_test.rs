@@ -17,7 +17,7 @@ use std::env;
 use anyhow::Result;
 use common_telemetry::logging;
 use object_store::backend::{fs, s3};
-use object_store::cache_policy::LruCachePolicy;
+use object_store::cache_policy::{LruCacheAccessor, LruCacheLayer};
 use object_store::test_util::TempFolder;
 use object_store::{util, Object, ObjectLister, ObjectMode, ObjectStore};
 use opendal::layers::CacheLayer;
@@ -212,8 +212,8 @@ async fn test_object_store_cache_policy() -> Result<()> {
     );
     // create operator for cache dir to verify cache file
     let cache_store = ObjectStore::from(cache_op.inner());
-    let policy = LruCachePolicy::new(3);
-    let store = store.layer(CacheLayer::new(cache_op).with_policy(policy));
+    let policy = LruCacheAccessor::new(3);
+    let store = store.layer(LruCacheLayer::new(cache_op, policy));
 
     // create several object handler.
     let o1 = store.object("test_file1");
