@@ -17,7 +17,7 @@ use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::str::FromStr;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::Duration;
 
 use chrono::offset::Local;
 use chrono::{DateTime, LocalResult, NaiveDateTime, TimeZone, Utc};
@@ -25,10 +25,7 @@ use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
 use crate::error;
-use crate::error::{
-    ArithmeticOverflowSnafu, Error, ParseTimestampSnafu, TimestampNonMonotonicSnafu,
-    TimestampOverflowSnafu,
-};
+use crate::error::{ArithmeticOverflowSnafu, Error, ParseTimestampSnafu, TimestampOverflowSnafu};
 #[derive(Debug, Clone, Default, Copy, Serialize, Deserialize)]
 pub struct Timestamp {
     value: i64,
@@ -38,15 +35,8 @@ pub struct Timestamp {
 impl Timestamp {
     /// Creates current timestamp in millisecond.
     pub fn current_millis() -> error::Result<Self> {
-        let ts_millis = i64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .context(TimestampNonMonotonicSnafu)?
-                .as_millis(),
-        )
-        .context(TimestampOverflowSnafu)?;
         Ok(Self {
-            value: ts_millis,
+            value: chrono::Utc::now().timestamp_millis(),
             unit: TimeUnit::Millisecond,
         })
     }
@@ -843,14 +833,14 @@ mod tests {
 
     #[test]
     fn test_split_overflow() {
-        let _ = Timestamp::new(i64::MAX, TimeUnit::Second).split();
-        let _ = Timestamp::new(i64::MIN, TimeUnit::Second).split();
-        let _ = Timestamp::new(i64::MAX, TimeUnit::Millisecond).split();
-        let _ = Timestamp::new(i64::MIN, TimeUnit::Millisecond).split();
-        let _ = Timestamp::new(i64::MAX, TimeUnit::Microsecond).split();
-        let _ = Timestamp::new(i64::MIN, TimeUnit::Microsecond).split();
-        let _ = Timestamp::new(i64::MAX, TimeUnit::Nanosecond).split();
-        let _ = Timestamp::new(i64::MIN, TimeUnit::Nanosecond).split();
+        Timestamp::new(i64::MAX, TimeUnit::Second).split();
+        Timestamp::new(i64::MIN, TimeUnit::Second).split();
+        Timestamp::new(i64::MAX, TimeUnit::Millisecond).split();
+        Timestamp::new(i64::MIN, TimeUnit::Millisecond).split();
+        Timestamp::new(i64::MAX, TimeUnit::Microsecond).split();
+        Timestamp::new(i64::MIN, TimeUnit::Microsecond).split();
+        Timestamp::new(i64::MAX, TimeUnit::Nanosecond).split();
+        Timestamp::new(i64::MIN, TimeUnit::Nanosecond).split();
         let (sec, nsec) = Timestamp::new(i64::MIN, TimeUnit::Nanosecond).split();
         let time = NaiveDateTime::from_timestamp_opt(sec, nsec).unwrap();
         assert_eq!(sec, time.timestamp());
