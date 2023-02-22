@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod flight;
+pub mod flight;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -28,6 +28,7 @@ use tokio::sync::oneshot::{self, Sender};
 use tokio::sync::Mutex;
 use tokio_stream::wrappers::TcpListenerStream;
 
+use crate::auth::UserProviderRef;
 use crate::error::{AlreadyStartedSnafu, Result, StartGrpcSnafu, TcpBindSnafu};
 use crate::grpc::flight::FlightHandler;
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
@@ -35,21 +36,31 @@ use crate::server::Server;
 
 pub struct GrpcServer {
     query_handler: ServerGrpcQueryHandlerRef,
+    user_provider: Option<UserProviderRef>,
     shutdown_tx: Mutex<Option<Sender<()>>>,
     runtime: Arc<Runtime>,
 }
 
 impl GrpcServer {
-    pub fn new(query_handler: ServerGrpcQueryHandlerRef, runtime: Arc<Runtime>) -> Self {
+    pub fn new(
+        query_handler: ServerGrpcQueryHandlerRef,
+        user_provider: Option<UserProviderRef>,
+        runtime: Arc<Runtime>,
+    ) -> Self {
         Self {
             query_handler,
+            user_provider,
             shutdown_tx: Mutex::new(None),
             runtime,
         }
     }
 
     pub fn create_service(&self) -> FlightServiceServer<impl FlightService> {
-        let service = FlightHandler::new(self.query_handler.clone(), self.runtime.clone());
+        let service = FlightHandler::new(
+            self.query_handler.clone(),
+            self.user_provider.clone(),
+            self.runtime.clone(),
+        );
         FlightServiceServer::new(service)
     }
 }

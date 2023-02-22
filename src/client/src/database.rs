@@ -14,12 +14,13 @@
 
 use std::str::FromStr;
 
+use api::v1::auth_header::AuthScheme;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{
-    AlterExpr, CreateTableExpr, DdlRequest, DropTableExpr, GreptimeRequest, InsertRequest,
-    QueryRequest, RequestHeader,
+    AlterExpr, AuthHeader, CreateTableExpr, DdlRequest, DropTableExpr, GreptimeRequest,
+    InsertRequest, QueryRequest, RequestHeader,
 };
 use arrow_flight::{FlightData, Ticket};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -42,6 +43,7 @@ pub struct Database {
     schema: String,
 
     client: Client,
+    ctx: FlightContext,
 }
 
 impl Database {
@@ -50,6 +52,7 @@ impl Database {
             catalog: catalog.into(),
             schema: schema.into(),
             client,
+            ctx: FlightContext::default(),
         }
     }
 
@@ -59,6 +62,12 @@ impl Database {
 
     pub fn set_schema(&mut self, schema: impl Into<String>) {
         self.schema = schema.into();
+    }
+
+    pub fn set_auth(&mut self, auth: AuthScheme) {
+        self.ctx.auth_header = Some(AuthHeader {
+            auth_scheme: Some(auth),
+        });
     }
 
     pub async fn insert(&self, request: InsertRequest) -> Result<Output> {
@@ -105,6 +114,7 @@ impl Database {
             header: Some(RequestHeader {
                 catalog: self.catalog.clone(),
                 schema: self.schema.clone(),
+                authorization: self.ctx.auth_header.clone(),
             }),
             request: Some(request),
         };
@@ -164,12 +174,18 @@ fn get_metadata_value(e: &tonic::Status, key: &str) -> Option<String> {
         .and_then(|v| String::from_utf8(v.as_bytes().to_vec()).ok())
 }
 
+#[derive(Default, Debug, Clone)]
+pub struct FlightContext {
+    auth_header: Option<AuthHeader>,
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use api::helper::ColumnDataTypeWrapper;
-    use api::v1::Column;
+    use api::v1::auth_header::AuthScheme;
+    use api::v1::{AuthHeader, Basic, Column};
     use common_grpc::select::{null_mask, values};
     use common_grpc_expr::column_to_vector;
     use datatypes::prelude::{Vector, VectorRef};
@@ -178,6 +194,8 @@ mod tests {
         Int16Vector, Int32Vector, Int64Vector, Int8Vector, StringVector, UInt16Vector,
         UInt32Vector, UInt64Vector, UInt8Vector,
     };
+
+    use crate::database::FlightContext;
 
     #[test]
     fn test_column_to_vector() {
@@ -261,5 +279,27 @@ mod tests {
             null_mask: null_mask(&[vector.clone()], vector.len()),
             datatype: wrapper.datatype() as i32,
         }
+    }
+
+    #[test]
+    fn test_flight_ctx() {
+        let mut ctx = FlightContext::default();
+        assert!(ctx.auth_header.is_none());
+
+        let basic = AuthScheme::Basic(Basic {
+            username: "u".to_string(),
+            password: "p".to_string(),
+        });
+
+        ctx.auth_header = Some(AuthHeader {
+            auth_scheme: Some(basic),
+        });
+
+        assert!(matches!(
+            ctx.auth_header,
+            Some(AuthHeader {
+                auth_scheme: Some(AuthScheme::Basic(_)),
+            })
+        ))
     }
 }

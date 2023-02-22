@@ -17,7 +17,8 @@ mod stream;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use api::v1::{GreptimeRequest, RequestHeader};
+use api::v1::auth_header::AuthScheme;
+use api::v1::{Basic, GreptimeRequest, RequestHeader};
 use arrow_flight::flight_service_server::FlightService;
 use arrow_flight::{
     Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo,
@@ -33,21 +34,33 @@ use session::context::{QueryContext, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 use tonic::{Request, Response, Status, Streaming};
 
+use crate::auth::{Identity, UserProviderRef};
 use crate::error;
+use crate::error::Error::Auth;
+use crate::error::{NotFoundAuthHeaderSnafu, UnsupportedAuthSchemeSnafu};
 use crate::grpc::flight::stream::FlightRecordBatchStream;
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 
 type TonicResult<T> = Result<T, Status>;
 type TonicStream<T> = Pin<Box<dyn Stream<Item = TonicResult<T>> + Send + Sync + 'static>>;
 
-pub(crate) struct FlightHandler {
+pub struct FlightHandler {
     handler: ServerGrpcQueryHandlerRef,
+    user_provider: Option<UserProviderRef>,
     runtime: Arc<Runtime>,
 }
 
 impl FlightHandler {
-    pub(crate) fn new(handler: ServerGrpcQueryHandlerRef, runtime: Arc<Runtime>) -> Self {
-        Self { handler, runtime }
+    pub fn new(
+        handler: ServerGrpcQueryHandlerRef,
+        user_provider: Option<UserProviderRef>,
+        runtime: Arc<Runtime>,
+    ) -> Self {
+        Self {
+            handler,
+            user_provider,
+            runtime,
+        }
     }
 }
 
@@ -96,6 +109,13 @@ impl FlightService for FlightHandler {
             reason: "Expecting non-empty GreptimeRequest.",
         })?;
         let query_ctx = create_query_context(request.header.as_ref());
+
+        auth(
+            self.user_provider.as_ref(),
+            request.header.as_ref(),
+            &query_ctx,
+        )
+        .await?;
 
         let handler = self.handler.clone();
 
@@ -188,4 +208,43 @@ fn create_query_context(header: Option<&RequestHeader>) -> QueryContextRef {
         }
     };
     ctx
+}
+
+async fn auth(
+    user_provider: Option<&UserProviderRef>,
+    request_header: Option<&RequestHeader>,
+    query_ctx: &QueryContextRef,
+) -> TonicResult<()> {
+    let Some(user_provider) = user_provider else { return Ok(()) };
+
+    let user_info = match request_header
+        .context(NotFoundAuthHeaderSnafu)?
+        .clone()
+        .authorization
+        .context(NotFoundAuthHeaderSnafu)?
+        .auth_scheme
+        .context(NotFoundAuthHeaderSnafu)?
+    {
+        AuthScheme::Basic(Basic { username, password }) => user_provider
+            .authenticate(
+                Identity::UserId(&username, None),
+                crate::auth::Password::PlainText(&password),
+            )
+            .await
+            .map_err(|e| Auth { source: e }),
+        AuthScheme::Token(_) => UnsupportedAuthSchemeSnafu {
+            name: "Token AuthScheme",
+        }
+        .fail(),
+    }
+    .map_err(|e| Status::unauthenticated(e.to_string()))?;
+
+    user_provider
+        .authorize(
+            &query_ctx.current_catalog(),
+            &query_ctx.current_schema(),
+            &user_info,
+        )
+        .await
+        .map_err(|e| Status::permission_denied(e.to_string()))
 }
