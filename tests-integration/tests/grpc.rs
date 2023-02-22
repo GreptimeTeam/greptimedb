@@ -65,7 +65,7 @@ pub async fn test_auto_create_table(store_type: StorageType) {
         setup_grpc_server(store_type, "auto_create_table").await;
 
     let grpc_client = Client::with_urls(vec![addr]);
-    let db = Database::with_client(grpc_client);
+    let db = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, grpc_client);
     insert_and_assert(&db).await;
     let _ = fe_grpc_server.shutdown().await;
     guard.remove_all().await;
@@ -131,7 +131,7 @@ pub async fn test_insert_and_select(store_type: StorageType) {
         setup_grpc_server(store_type, "insert_and_select").await;
 
     let grpc_client = Client::with_urls(vec![addr]);
-    let db = Database::with_client(grpc_client);
+    let db = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, grpc_client);
 
     // create
     let expr = testing_create_expr();

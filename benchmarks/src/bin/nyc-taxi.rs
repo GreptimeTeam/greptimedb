@@ -28,6 +28,7 @@ use clap::Parser;
 use client::api::v1::column::Values;
 use client::api::v1::{Column, ColumnDataType, ColumnDef, CreateTableExpr, InsertRequest, TableId};
 use client::{Client, Database};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use tokio::task::JoinSet;
@@ -422,7 +423,7 @@ fn main() {
         .unwrap()
         .block_on(async {
             let client = Client::with_urls(vec![&args.endpoint]);
-            let db = Database::with_client(client);
+            let db = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
 
             if !args.skip_write {
                 do_write(&args, &db).await;

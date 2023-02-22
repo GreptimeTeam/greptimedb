@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use client::{Client, Database as DB, Error as ClientError};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::ErrorExt;
 use common_error::snafu::ErrorCompat;
 use common_query::Output;
@@ -110,7 +111,7 @@ impl Env {
         println!("Started, going to test. Log will be write to {SERVER_LOG_FILE}");
 
         let client = Client::with_urls(vec![SERVER_ADDR]);
-        let db = DB::with_client(client);
+        let db = DB::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
 
         GreptimeDB {
             server_process,
@@ -180,7 +181,7 @@ impl Env {
         }
 
         let client = Client::with_urls(vec![SERVER_ADDR]);
-        let db = DB::with_client(client);
+        let db = DB::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
 
         GreptimeDB {
             server_process: frontend,

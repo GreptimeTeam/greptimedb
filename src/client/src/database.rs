@@ -23,7 +23,6 @@ use api::v1::{
     InsertRequest, QueryRequest, RequestHeader,
 };
 use arrow_flight::{FlightData, Ticket};
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::*;
 use common_grpc::flight::{flight_messages_to_recordbatches, FlightDecoder, FlightMessage};
 use common_query::Output;
@@ -56,8 +55,8 @@ impl Database {
         }
     }
 
-    pub fn with_client(client: Client) -> Self {
-        Self::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client)
+    pub fn set_catalog(&mut self, catalog: impl Into<String>) {
+        self.catalog = catalog.into();
     }
 
     pub fn set_schema(&mut self, schema: impl Into<String>) {
