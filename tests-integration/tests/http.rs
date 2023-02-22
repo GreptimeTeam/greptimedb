@@ -296,12 +296,12 @@ pub async fn test_promql_http_api(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK);
 
     let res = client
-        .get("/v1/range_query?query=up&start=1&end=100&step=5")
+        .get("/v1/query_range?query=up&start=1&end=100&step=5")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
     let res = client
-        .post("/v1/range_query?query=up&start=1&end=100&step=5")
+        .post("/v1/query_range?query=up&start=1&end=100&step=5")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);

@@ -74,7 +74,7 @@ impl PromqlServer {
 
         let router = Router::new()
             .route("/query", routing::post(instant_query).get(instant_query))
-            .route("/range_query", routing::post(range_query).get(range_query))
+            .route("/query_range", routing::post(range_query).get(range_query))
             .with_state(self.query_handler.clone());
 
         Router::new()
@@ -233,7 +233,7 @@ pub async fn instant_query(
 ) -> Json<PromqlJsonResponse> {
     PromqlJsonResponse::error(
         "not implemented",
-        "instant query api `/query` is not implemented. Use `/range_query` instead.",
+        "instant query api `/query` is not implemented. Use `/query_range` instead.",
     )
 }
 
