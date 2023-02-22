@@ -70,8 +70,8 @@ pub(crate) fn arrow_rtruediv(arr: &dyn Array, val: &dyn Array) -> Result<ArrayRe
 /// Performs `val / arr`, but cast to i64.
 pub(crate) fn arrow_rfloordiv(arr: &dyn Array, val: &dyn Array) -> Result<ArrayRef, String> {
     let array =
-        arithmetic::divide_dyn(val, arr).map_err(|e| format!("rtruediv divide error: {e}"))?;
-    compute::cast(&array, &ArrowDataType::Int64).map_err(|e| format!("rtruediv cast error: {e}"))
+        arithmetic::divide_dyn(val, arr).map_err(|e| format!("rfloordiv divide error: {e}"))?;
+    compute::cast(&array, &ArrowDataType::Int64).map_err(|e| format!("rfloordiv cast error: {e}"))
 }
 
 pub(crate) fn wrap_result<F>(f: F) -> impl Fn(&dyn Array, &dyn Array) -> Result<ArrayRef, String>
@@ -88,11 +88,12 @@ where
     F: Fn(&dyn Array, &dyn Array) -> ArrowResult<BooleanArray>,
 {
     move |a: &dyn Array, b: &dyn Array| -> Result<ArrayRef, String> {
-        let array = op_bool_arr(a, b).map_err(|e| format!("scalar op error: {e}"))?;
+        let array = op_bool_arr(a, b).map_err(|e| format!("logical op error: {e}"))?;
         Ok(Arc::new(array))
     }
 }
 
+#[inline]
 fn is_float(datatype: &ArrowDataType) -> bool {
     matches!(
         datatype,
@@ -100,6 +101,7 @@ fn is_float(datatype: &ArrowDataType) -> bool {
     )
 }
 
+#[inline]
 fn is_signed(datatype: &ArrowDataType) -> bool {
     matches!(
         datatype,
@@ -107,6 +109,7 @@ fn is_signed(datatype: &ArrowDataType) -> bool {
     )
 }
 
+#[inline]
 fn is_unsigned(datatype: &ArrowDataType) -> bool {
     matches!(
         datatype,
@@ -138,9 +141,10 @@ impl PyVector {
         let right = right
             .as_any()
             .downcast_ref::<BooleanArray>()
-            .ok_or_else(|| format!("Can't cast {left:#?} as a Boolean Array"))?;
-        let res = compute::kernels::boolean::and(left, right).map_err(|err| err.to_string())?;
-        let res = Arc::new(res) as ArrayRef;
+            .ok_or_else(|| format!("Can't cast {right:#?} as a Boolean Array"))?;
+        let res =
+            Arc::new(compute::kernels::boolean::and(left, right).map_err(|err| err.to_string())?)
+                as ArrayRef;
         let ret = Helper::try_into_vector(res.clone()).map_err(|err| err.to_string())?;
         Ok(ret.into())
     }
@@ -154,9 +158,10 @@ impl PyVector {
         let right = right
             .as_any()
             .downcast_ref::<BooleanArray>()
-            .ok_or_else(|| format!("Can't cast {left:#?} as a Boolean Array"))?;
-        let res = compute::kernels::boolean::or(left, right).map_err(|err| err.to_string())?;
-        let res = Arc::new(res) as ArrayRef;
+            .ok_or_else(|| format!("Can't cast {right:#?} as a Boolean Array"))?;
+        let res =
+            Arc::new(compute::kernels::boolean::or(left, right).map_err(|err| err.to_string())?)
+                as ArrayRef;
         let ret = Helper::try_into_vector(res.clone()).map_err(|err| err.to_string())?;
         Ok(ret.into())
     }
@@ -166,8 +171,8 @@ impl PyVector {
             .as_any()
             .downcast_ref::<BooleanArray>()
             .ok_or_else(|| format!("Can't cast {left:#?} as a Boolean Array"))?;
-        let res = compute::kernels::boolean::not(zelf).map_err(|err| err.to_string())?;
-        let res = Arc::new(res) as ArrayRef;
+        let res = Arc::new(compute::kernels::boolean::not(zelf).map_err(|err| err.to_string())?)
+            as ArrayRef;
         let ret = Helper::try_into_vector(res.clone()).map_err(|err| err.to_string())?;
         Ok(ret.into())
     }
@@ -197,16 +202,7 @@ impl PyVector {
 
         let left_type = left.data_type();
         let right_type = &right_type;
-        // TODO(discord9): found better way to cast between signed and unsigned type
-        let target_type = target_type.unwrap_or_else(|| {
-            if is_signed(left_type) && is_signed(right_type) {
-                ArrowDataType::Int64
-            } else if is_unsigned(left_type) && is_unsigned(right_type) {
-                ArrowDataType::UInt64
-            } else {
-                ArrowDataType::Float64
-            }
-        });
+        let target_type = Self::coerce_types(left_type, right_type, &target_type);
         let left = cast(left, &target_type)?;
         let left_len = left.len();
 
@@ -277,6 +273,24 @@ impl PyVector {
             .map_err(to_type_error(vm))
     }
 
+    /// Returns the type that should be used for the result of an arithmetic operation
+    fn coerce_types(
+        left_type: &ArrowDataType,
+        right_type: &ArrowDataType,
+        target_type: &Option<ArrowDataType>,
+    ) -> ArrowDataType {
+        // TODO(discord9): found better way to cast between signed and unsigned types
+        target_type.clone().unwrap_or_else(|| {
+            if is_signed(left_type) && is_signed(right_type) {
+                ArrowDataType::Int64
+            } else if is_unsigned(left_type) && is_unsigned(right_type) {
+                ArrowDataType::UInt64
+            } else {
+                ArrowDataType::Float64
+            }
+        })
+    }
+
     pub(crate) fn vector_arith_op<F>(
         &self,
         right: &Self,
@@ -292,15 +306,7 @@ impl PyVector {
         let left_type = &left.data_type();
         let right_type = &right.data_type();
 
-        let target_type = target_type.unwrap_or_else(|| {
-            if is_signed(left_type) && is_signed(right_type) {
-                ArrowDataType::Int64
-            } else if is_unsigned(left_type) && is_unsigned(right_type) {
-                ArrowDataType::UInt64
-            } else {
-                ArrowDataType::Float64
-            }
-        });
+        let target_type = Self::coerce_types(left_type, right_type, &target_type);
 
         let left = cast(left, &target_type)?;
         let right = cast(right, &target_type)?;
@@ -359,7 +365,7 @@ impl PyVector {
         // in the newest version of rustpython_vm, wrapped_at for isize is replace by wrap_index(i, len)
         let i = i
             .wrapped_at(self.len())
-            .ok_or_else(|| vm.new_index_error("PyVector index out of range".to_owned()))?;
+            .ok_or_else(|| vm.new_index_error(format!("PyVector index {i} out of range {}", self.len())))?;
         Ok(val_to_pyobj(self.as_vector_ref().get(i), vm))
     }
 

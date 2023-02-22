@@ -61,6 +61,12 @@ To compile GreptimeDB from source, you'll need:
   find an installation instructions [here](https://grpc.io/docs/protoc-installation/).
   **Note that `protoc` version needs to be >= 3.15** because we have used the `optional`
   keyword. You can check it with `protoc --version`.
+- python3-dev or python3-devel: required for running python scripting engine.
+  This is available as `python3-dev` on ubuntu, you can install it with `sudo apt install python3-dev`, or `python3-devel` on RPM based distributions (e.g. Fedora, Red Hat, SuSE).
+
+Then, you can build GreptimeDB from source code:
+
+```
 
 #### Build with Docker
 

@@ -237,7 +237,7 @@ pub(crate) fn check_args_anno_real_type(
         let is_nullable: bool = rb.schema.column_schemas()[idx].is_nullable();
         ensure!(
             anno_ty
-                .to_owned()
+                .clone()
                 .map(|v| v.datatype.is_none() // like a vector[_]
                      || v.datatype == Some(real_ty.clone()) && v.is_nullable == is_nullable)
                 .unwrap_or(true),
@@ -457,7 +457,7 @@ def add(a, b):
 @copr(args=["a", "b", "c"], returns = ["r"], sql="select number as a,number as b,number as c from numbers limit 100")
 def test(a, b, c, **params):
     import greptime as g
-    return (a+b) / g.sqrt(c)
+    return ( a + b ) / g.sqrt(c)
 "#;
 
         let copr = parse_and_compile_copr(script, None).unwrap();

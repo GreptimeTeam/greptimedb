@@ -22,6 +22,10 @@ pub fn new_item_field(data_type: ArrowDataType) -> Field {
     Field::new("item", data_type, false)
 }
 
+/// Generate friendly error message when the type of the input `values` is different than `ty`
+/// # Example
+/// `values` is [Int64(1), Float64(1.0), Int64(2)] and `ty` is Int64
+/// then the error message will be: " Float64 at 2th location\n"
 pub(crate) fn collect_diff_types_string(values: &[ScalarValue], ty: &ArrowDataType) -> String {
     values
         .iter()
