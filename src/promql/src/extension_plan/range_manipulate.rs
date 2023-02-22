@@ -18,7 +18,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use datafusion::arrow::array::{Array, Int64Array, TimestampMillisecondArray};
+use datafusion::arrow::array::{Array, ArrayRef, Int64Array, TimestampMillisecondArray};
 use datafusion::arrow::compute;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::error::ArrowError;
@@ -80,6 +80,14 @@ impl RangeManipulate {
         })
     }
 
+    pub fn range_timestamp_name(&self) -> String {
+        Self::build_timestamp_range_name(&self.time_index)
+    }
+
+    fn build_timestamp_range_name(time_index: &str) -> String {
+        format!("{time_index}_range")
+    }
+
     fn calculate_output_schema(
         input_schema: &DFSchemaRef,
         time_index: &str,
@@ -88,8 +96,15 @@ impl RangeManipulate {
         let mut columns = input_schema.fields().clone();
 
         // process time index column
+        // the raw timestamp field is preserved. And a new timestamp_range field is appended to the last.
         let index = input_schema.index_of_column_by_name(None, time_index)?;
-        columns[index] = DFField::from(RangeArray::convert_field(columns[index].field()));
+        let timestamp_range_field = columns[index]
+            .field()
+            .clone()
+            .with_name(Self::build_timestamp_range_name(time_index));
+        columns.push(DFField::from(RangeArray::convert_field(
+            &timestamp_range_field,
+        )));
 
         // process value columns
         for name in value_columns {
@@ -110,6 +125,7 @@ impl RangeManipulate {
             interval: self.interval,
             range: self.range,
             time_index_column: self.time_index.clone(),
+            time_range_column: self.range_timestamp_name(),
             value_columns: self.value_columns.clone(),
             input: exec_input,
             output_schema: SchemaRef::new(self.output_schema.as_ref().into()),
@@ -170,6 +186,7 @@ pub struct RangeManipulateExec {
     interval: Millisecond,
     range: Millisecond,
     time_index_column: String,
+    time_range_column: String,
     value_columns: Vec<String>,
 
     input: Arc<dyn ExecutionPlan>,
@@ -213,6 +230,7 @@ impl ExecutionPlan for RangeManipulateExec {
             interval: self.interval,
             range: self.range,
             time_index_column: self.time_index_column.clone(),
+            time_range_column: self.time_range_column.clone(),
             value_columns: self.value_columns.clone(),
             output_schema: self.output_schema.clone(),
             input: children[0].clone(),
@@ -333,10 +351,11 @@ impl RangeManipulateStream {
     pub fn manipulate(&self, input: RecordBatch) -> ArrowResult<RecordBatch> {
         let mut other_columns = (0..input.columns().len()).collect::<HashSet<_>>();
         // calculate the range
-        let ranges = self.calculate_range(&input);
+        let (aligned_ts, ranges) = self.calculate_range(&input);
+
         // transform columns
         let mut new_columns = input.columns().to_vec();
-        for index in self.value_columns.iter().chain([self.time_index].iter()) {
+        for index in self.value_columns.iter() {
             other_columns.remove(index);
             let column = input.column(*index);
             let new_column = Arc::new(
@@ -347,26 +366,37 @@ impl RangeManipulateStream {
             new_columns[*index] = new_column;
         }
 
+        // push timestamp range column
+        let ts_range_column =
+            RangeArray::from_ranges(input.column(self.time_index).clone(), ranges.clone())
+                .map_err(|e| ArrowError::InvalidArgumentError(e.to_string()))?
+                .into_dict();
+        new_columns.push(Arc::new(ts_range_column));
+
         // truncate other columns
         let take_indices = Int64Array::from(vec![0; ranges.len()]);
         for index in other_columns.into_iter() {
             new_columns[index] = compute::take(&input.column(index), &take_indices, None)?;
         }
+        // replace timestamp with the aligned one
+        new_columns[self.time_index] = aligned_ts;
 
         RecordBatch::try_new(self.output_schema.clone(), new_columns)
     }
 
-    fn calculate_range(&self, input: &RecordBatch) -> Vec<(u32, u32)> {
+    fn calculate_range(&self, input: &RecordBatch) -> (ArrayRef, Vec<(u32, u32)>) {
         let ts_column = input
             .column(self.time_index)
             .as_any()
             .downcast_ref::<TimestampMillisecondArray>()
             .unwrap();
 
-        let mut result = vec![];
+        let mut aligned_ts = vec![];
+        let mut ranges = vec![];
 
         // calculate for every aligned timestamp (`curr_ts`), assume the ts column is ordered.
         for curr_ts in (self.start..=self.end).step_by(self.interval as _) {
+            aligned_ts.push(curr_ts);
             let mut range_start = ts_column.len();
             let mut range_end = 0;
             for (index, ts) in ts_column.values().iter().enumerate() {
@@ -380,13 +410,15 @@ impl RangeManipulateStream {
                 }
             }
             if range_start > range_end {
-                result.push((0, 0));
+                ranges.push((0, 0));
             } else {
-                result.push((range_start as _, (range_end + 1 - range_start) as _));
+                ranges.push((range_start as _, (range_end + 1 - range_start) as _));
             }
         }
 
-        result
+        let aligned_ts_array = Arc::new(TimestampMillisecondArray::from(aligned_ts)) as _;
+
+        (aligned_ts_array, ranges)
     }
 }
 
@@ -461,6 +493,7 @@ mod test {
             range,
             value_columns,
             output_schema: manipulate_output_schema,
+            time_range_column: RangeManipulate::build_timestamp_range_name(&time_index),
             time_index_column: time_index,
             input: memory_exec,
             metric: ExecutionPlanMetricsSet::new(),

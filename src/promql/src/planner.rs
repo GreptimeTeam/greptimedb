@@ -594,9 +594,9 @@ impl<S: ContextProvider> PromPlanner<S> {
         // TODO(ruihang): set this according to in-param list
         let value_column_pos = 0;
         let scalar_func = match func.name {
-            "increase" => ScalarFunc::UDF(Increase::scalar_udf()),
-            "idelta" => ScalarFunc::UDF(IDelta::<false>::scalar_udf()),
-            "irate" => ScalarFunc::UDF(IDelta::<true>::scalar_udf()),
+            "increase" => ScalarFunc::Udf(Increase::scalar_udf()),
+            "idelta" => ScalarFunc::Udf(IDelta::<false>::scalar_udf()),
+            "irate" => ScalarFunc::Udf(IDelta::<true>::scalar_udf()),
             _ => ScalarFunc::DataFusionBuiltin(
                 BuiltinScalarFunction::from_str(func.name).map_err(|_| {
                     UnsupportedExprSnafu {
@@ -617,7 +617,7 @@ impl<S: ContextProvider> PromPlanner<S> {
                     fun,
                     args: other_input_exprs.clone(),
                 },
-                ScalarFunc::UDF(fun) => DfExpr::ScalarUDF {
+                ScalarFunc::Udf(fun) => DfExpr::ScalarUDF {
                     fun: Arc::new(fun),
                     args: other_input_exprs.clone(),
                 },
@@ -890,7 +890,7 @@ struct FunctionArgs {
 #[derive(Debug, Clone)]
 enum ScalarFunc {
     DataFusionBuiltin(BuiltinScalarFunction),
-    UDF(ScalarUDF),
+    Udf(ScalarUDF),
 }
 
 #[cfg(test)]
@@ -1444,6 +1444,23 @@ mod test {
             \n        Sort: some_metric.tag_0 DESC NULLS LAST, some_metric.timestamp DESC NULLS LAST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n          Filter: some_metric.timestamp >= TimestampMillisecond(-1000, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n            TableScan: some_metric, unsupported_filters=[timestamp >= TimestampMillisecond(-1000, None), timestamp <= TimestampMillisecond(100000000, None)] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
+        );
+
+        indie_query_plan_compare(query, expected).await;
+    }
+
+    #[tokio::test]
+    async fn increase_aggr() {
+        let query = "increase(some_metric[5m])";
+        let expected = String::from(
+            "Filter: field_0 IS NOT NULL [timestamp:Timestamp(Millisecond, None), prom_increase(field_0):Float64;N, tag_0:Utf8]\
+            \n  Projection: some_metric.timestamp, prom_increase(field_0), some_metric.tag_0 [timestamp:Timestamp(Millisecond, None), prom_increase(field_0):Float64;N, tag_0:Utf8]\
+            \n    PromRangeManipulate: req range=[0..100000000], interval=[5000], eval range=[300000], time index=[timestamp], values=[\"field_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Dictionary(Int64, Float64);N, timestamp_range:Dictionary(Int64, Timestamp(Millisecond, None))]\
+            \n      PromSeriesNormalize: offset=[0], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n        PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n          Sort: some_metric.tag_0 DESC NULLS LAST, some_metric.timestamp DESC NULLS LAST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n            Filter: some_metric.timestamp >= TimestampMillisecond(-1000, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n              TableScan: some_metric, unsupported_filters=[timestamp >= TimestampMillisecond(-1000, None), timestamp <= TimestampMillisecond(100000000, None)] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
         );
 
         indie_query_plan_compare(query, expected).await;
