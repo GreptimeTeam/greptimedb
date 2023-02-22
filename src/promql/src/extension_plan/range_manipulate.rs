@@ -84,7 +84,7 @@ impl RangeManipulate {
         Self::build_timestamp_range_name(&self.time_index)
     }
 
-    fn build_timestamp_range_name(time_index: &str) -> String {
+    pub fn build_timestamp_range_name(time_index: &str) -> String {
         format!("{time_index}_range")
     }
 

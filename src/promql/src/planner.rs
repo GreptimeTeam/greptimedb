@@ -584,8 +584,11 @@ impl<S: ContextProvider> PromPlanner<S> {
         Ok(result)
     }
 
+    /// # Side Effects
+    ///
+    /// This method will update [PromPlannerContext]'s value fields.
     fn create_function_expr(
-        &self,
+        &mut self,
         func: &Function,
         mut other_input_exprs: Vec<DfExpr>,
     ) -> Result<Vec<DfExpr>> {
@@ -611,20 +614,43 @@ impl<S: ContextProvider> PromPlanner<S> {
         let mut exprs = Vec::with_capacity(self.ctx.value_columns.len());
         for value in &self.ctx.value_columns {
             let col_expr = DfExpr::Column(Column::from_name(value));
-            other_input_exprs.insert(value_column_pos, col_expr);
-            let fn_expr = match scalar_func.clone() {
-                ScalarFunc::DataFusionBuiltin(fun) => DfExpr::ScalarFunction {
-                    fun,
-                    args: other_input_exprs.clone(),
-                },
-                ScalarFunc::Udf(fun) => DfExpr::ScalarUDF {
-                    fun: Arc::new(fun),
-                    args: other_input_exprs.clone(),
-                },
-            };
-            exprs.push(fn_expr);
-            other_input_exprs.remove(value_column_pos);
+
+            match scalar_func.clone() {
+                ScalarFunc::DataFusionBuiltin(fun) => {
+                    other_input_exprs.insert(value_column_pos, col_expr);
+                    let fn_expr = DfExpr::ScalarFunction {
+                        fun,
+                        args: other_input_exprs.clone(),
+                    };
+                    exprs.push(fn_expr);
+                    other_input_exprs.remove(value_column_pos);
+                }
+                ScalarFunc::Udf(fun) => {
+                    let ts_range_expr = DfExpr::Column(Column::from_name(
+                        RangeManipulate::build_timestamp_range_name(
+                            self.ctx.time_index_column.as_ref().unwrap(),
+                        ),
+                    ));
+                    other_input_exprs.insert(value_column_pos, ts_range_expr);
+                    other_input_exprs.insert(value_column_pos + 1, col_expr);
+                    let fn_expr = DfExpr::ScalarUDF {
+                        fun: Arc::new(fun),
+                        args: other_input_exprs.clone(),
+                    };
+                    exprs.push(fn_expr);
+                    other_input_exprs.remove(value_column_pos + 1);
+                    other_input_exprs.remove(value_column_pos);
+                }
+            }
         }
+
+        // update value columns' name
+        let new_value_columns = exprs
+            .iter()
+            .map(|expr| expr.display_name())
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context(DataFusionPlanningSnafu)?;
+        self.ctx.value_columns = new_value_columns;
 
         Ok(exprs)
     }
