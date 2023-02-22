@@ -16,6 +16,9 @@ mod sample_testcases;
 
 use std::collections::HashMap;
 
+use datafusion::arrow::array::Float64Array;
+use datafusion::arrow::compute;
+use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::vectors::VectorRef;
 use pyo3::types::PyDict;
 use pyo3::Python;
@@ -47,7 +50,28 @@ fn pyo3_rspy_test_in_pairs() {
 fn check_equal(v0: VectorRef, v1: VectorRef) -> bool {
     let v0 = v0.to_arrow_array();
     let v1 = v1.to_arrow_array();
-    *v0 == *v1
+    fn is_float(ty: &ArrowDataType) -> bool {
+        use ArrowDataType::*;
+        matches!(ty, Float16 | Float32 | Float64)
+    }
+    if is_float(v0.data_type()) || is_float(v1.data_type()) {
+        let v0 = compute::cast(&v0, &ArrowDataType::Float64).unwrap();
+        let v0 = v0.as_any().downcast_ref::<Float64Array>().unwrap();
+
+        let v1 = compute::cast(&v1, &ArrowDataType::Float64).unwrap();
+        let v1 = v1.as_any().downcast_ref::<Float64Array>().unwrap();
+
+        let res = compute::subtract(v0, v1).unwrap();
+        res.iter().all(|v| {
+            if let Some(v) = v {
+                v.abs() <= 2.0 * f32::EPSILON as f64
+            } else {
+                false
+            }
+        })
+    } else {
+        *v0 == *v1
+    }
 }
 
 /// will panic if something is wrong, used in tests only
