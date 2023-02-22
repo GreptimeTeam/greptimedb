@@ -69,5 +69,6 @@ pub async fn new_store_config(
         compaction_scheduler,
         engine_config: Default::default(),
         file_purger,
+        ttl: None,
     }
 }

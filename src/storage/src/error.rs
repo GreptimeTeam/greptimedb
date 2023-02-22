@@ -434,6 +434,12 @@ pub enum Error {
         source: object_store::Error,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to calculate SST expire time, source: {}", source))]
+    TtlCalculation {
+        #[snafu(backtrace)]
+        source: common_time::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -508,6 +514,7 @@ impl ErrorExt for Error {
             StopScheduler { .. } => StatusCode::Internal,
             DeleteSst { .. } => StatusCode::StorageUnavailable,
             IllegalSchedulerState { .. } => StatusCode::Unexpected,
+            TtlCalculation { source, .. } => source.status_code(),
         }
     }
 

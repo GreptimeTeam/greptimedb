@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use common_telemetry::{debug, error, info};
 use store_api::logstore::LogStore;
@@ -48,6 +49,7 @@ pub struct CompactionRequestImpl<S: LogStore> {
     pub shared: SharedDataRef,
     pub manifest: RegionManifest,
     pub wal: Wal<S>,
+    pub ttl: Option<Duration>,
 }
 
 impl<S: LogStore> CompactionRequestImpl<S> {
