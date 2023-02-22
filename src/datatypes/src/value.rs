@@ -516,7 +516,7 @@ impl Ord for ListValue {
     }
 }
 
-// TODO(ruihang): Implemente this type
+// TODO(ruihang): Implement this type
 /// Dictionary value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DictionaryValue {
