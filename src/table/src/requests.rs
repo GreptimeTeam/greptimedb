@@ -59,6 +59,7 @@ pub struct CreateTableRequest {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct TableOptions {
     /// Memtable size of memtable.
     pub write_buffer_size: Option<ReadableSize>,
