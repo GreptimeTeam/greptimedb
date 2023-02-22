@@ -644,12 +644,23 @@ impl<S: ContextProvider> PromPlanner<S> {
             }
         }
 
-        // update value columns' name
-        let new_value_columns = exprs
-            .iter()
-            .map(|expr| expr.display_name())
+        // update value columns' name, and alise them to remove qualifiers
+        let mut new_value_columns = Vec::with_capacity(exprs.len());
+        exprs = exprs
+            .into_iter()
+            .map(|expr| {
+                let display_name = expr.display_name()?;
+                new_value_columns.push(display_name.clone());
+                Ok(expr.alias(display_name))
+            })
             .collect::<std::result::Result<Vec<_>, _>>()
             .context(DataFusionPlanningSnafu)?;
+
+        // let new_value_columns = exprs
+        //     .iter()
+        //     .map(|expr| expr.display_name())
+        //     .collect::<std::result::Result<Vec<_>, _>>()
+        //     .context(DataFusionPlanningSnafu)?;
         self.ctx.value_columns = new_value_columns;
 
         Ok(exprs)
@@ -1028,8 +1039,8 @@ mod test {
         let plan = PromPlanner::stmt_to_plan(eval_stmt, context_provider).unwrap();
 
         let expected = String::from(
-            "Filter: some_metric.field_0 IS NOT NULL [timestamp:Timestamp(Millisecond, None), TEMPLATE(some_metric.field_0):Float64;N, tag_0:Utf8]\
-            \n  Projection: some_metric.timestamp, TEMPLATE(some_metric.field_0), some_metric.tag_0 [timestamp:Timestamp(Millisecond, None), TEMPLATE(some_metric.field_0):Float64;N, tag_0:Utf8]\
+            "Filter: TEMPLATE(field_0) IS NOT NULL [timestamp:Timestamp(Millisecond, None), TEMPLATE(field_0):Float64;N, tag_0:Utf8]\
+            \n  Projection: some_metric.timestamp, TEMPLATE(some_metric.field_0) AS TEMPLATE(field_0), some_metric.tag_0 [timestamp:Timestamp(Millisecond, None), TEMPLATE(field_0):Float64;N, tag_0:Utf8]\
             \n    PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n      PromSeriesNormalize: offset=[0], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n        PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
@@ -1211,9 +1222,11 @@ mod test {
     //         },
     //     },
     // },
-    async fn do_aggregate_expr_plan(name: &str) {
-        let prom_expr =
-            parser::parse(&format!("{name} by (tag_1)(some_metric{{tag_0!=\"bar\"}})",)).unwrap();
+    async fn do_aggregate_expr_plan(fn_name: &str, plan_name: &str) {
+        let prom_expr = parser::parse(&format!(
+            "{fn_name} by (tag_1)(some_metric{{tag_0!=\"bar\"}})",
+        ))
+        .unwrap();
         let mut eval_stmt = EvalStmt {
             expr: prom_expr,
             start: UNIX_EPOCH,
@@ -1236,7 +1249,7 @@ mod test {
             \n          Sort: some_metric.tag_0 DESC NULLS LAST, some_metric.tag_1 DESC NULLS LAST, some_metric.timestamp DESC NULLS LAST [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N]\
             \n            Filter: some_metric.tag_0 != Utf8(\"bar\") AND some_metric.timestamp >= TimestampMillisecond(-1000, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N]\
             \n              TableScan: some_metric, unsupported_filters=[tag_0 != Utf8(\"bar\"), timestamp >= TimestampMillisecond(-1000, None), timestamp <= TimestampMillisecond(100000000, None)] [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N]"
-        ).replace("TEMPLATE", name);
+        ).replace("TEMPLATE", plan_name);
         assert_eq!(
             plan.display_indent_schema().to_string(),
             expected_no_without
@@ -1259,75 +1272,74 @@ mod test {
             \n          Sort: some_metric.tag_0 DESC NULLS LAST, some_metric.tag_1 DESC NULLS LAST, some_metric.timestamp DESC NULLS LAST [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N]\
             \n            Filter: some_metric.tag_0 != Utf8(\"bar\") AND some_metric.timestamp >= TimestampMillisecond(-1000, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N]\
             \n              TableScan: some_metric, unsupported_filters=[tag_0 != Utf8(\"bar\"), timestamp >= TimestampMillisecond(-1000, None), timestamp <= TimestampMillisecond(100000000, None)] [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N]"
-        ).replace("TEMPLATE", name);
+        ).replace("TEMPLATE", plan_name);
         assert_eq!(plan.display_indent_schema().to_string(), expected_without);
     }
 
     #[tokio::test]
     async fn aggregate_sum() {
-        do_aggregate_expr_plan("SUM").await;
+        do_aggregate_expr_plan("sum", "SUM").await;
     }
 
     #[tokio::test]
     async fn aggregate_avg() {
-        do_aggregate_expr_plan("AVG").await;
+        do_aggregate_expr_plan("avg", "AVG").await;
     }
 
     #[tokio::test]
     #[should_panic] // output type doesn't match
     async fn aggregate_count() {
-        do_aggregate_expr_plan("COUNT").await;
+        do_aggregate_expr_plan("count", "COUNT").await;
     }
 
     #[tokio::test]
     async fn aggregate_min() {
-        do_aggregate_expr_plan("MIN").await;
+        do_aggregate_expr_plan("min", "MIN").await;
     }
 
     #[tokio::test]
     async fn aggregate_max() {
-        do_aggregate_expr_plan("MAX").await;
+        do_aggregate_expr_plan("max", "MAX").await;
     }
 
     #[tokio::test]
     #[should_panic] // output type doesn't match
     async fn aggregate_group() {
-        do_aggregate_expr_plan("GROUPING").await;
+        do_aggregate_expr_plan("grouping", "GROUPING").await;
     }
 
     #[tokio::test]
     async fn aggregate_stddev() {
-        do_aggregate_expr_plan("STDDEV").await;
+        do_aggregate_expr_plan("stddev", "STDDEVPOP").await;
     }
 
     #[tokio::test]
-    #[should_panic] // schema doesn't match
     async fn aggregate_stdvar() {
-        do_aggregate_expr_plan("STDVAR").await;
+        do_aggregate_expr_plan("stdvar", "VARIANCEPOP").await;
     }
 
     #[tokio::test]
     #[should_panic]
     async fn aggregate_top_k() {
-        do_aggregate_expr_plan("").await;
+        do_aggregate_expr_plan("topk", "").await;
     }
 
     #[tokio::test]
     #[should_panic]
     async fn aggregate_bottom_k() {
-        do_aggregate_expr_plan("").await;
+        do_aggregate_expr_plan("bottomk", "").await;
     }
 
     #[tokio::test]
     #[should_panic]
     async fn aggregate_count_values() {
-        do_aggregate_expr_plan("").await;
+        do_aggregate_expr_plan("count_values", "").await;
     }
 
     #[tokio::test]
     #[should_panic]
     async fn aggregate_quantile() {
-        do_aggregate_expr_plan("").await;
+        do_aggregate_expr_plan("quantile", "").await;
     }
 
     // TODO(ruihang): add range fn tests once exprs are ready.
@@ -1479,8 +1491,8 @@ mod test {
     async fn increase_aggr() {
         let query = "increase(some_metric[5m])";
         let expected = String::from(
-            "Filter: field_0 IS NOT NULL [timestamp:Timestamp(Millisecond, None), prom_increase(field_0):Float64;N, tag_0:Utf8]\
-            \n  Projection: some_metric.timestamp, prom_increase(field_0), some_metric.tag_0 [timestamp:Timestamp(Millisecond, None), prom_increase(field_0):Float64;N, tag_0:Utf8]\
+            "Filter: prom_increase(timestamp_range,field_0) IS NOT NULL [timestamp:Timestamp(Millisecond, None), prom_increase(timestamp_range,field_0):Float64;N, tag_0:Utf8]\
+            \n  Projection: some_metric.timestamp, prom_increase(timestamp_range, field_0) AS prom_increase(timestamp_range,field_0), some_metric.tag_0 [timestamp:Timestamp(Millisecond, None), prom_increase(timestamp_range,field_0):Float64;N, tag_0:Utf8]\
             \n    PromRangeManipulate: req range=[0..100000000], interval=[5000], eval range=[300000], time index=[timestamp], values=[\"field_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Dictionary(Int64, Float64);N, timestamp_range:Dictionary(Int64, Timestamp(Millisecond, None))]\
             \n      PromSeriesNormalize: offset=[0], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n        PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
