@@ -77,9 +77,7 @@ pub enum Error {
     },
 
     #[snafu(display("Procedure exec failed, source: {}", source))]
-    RetryLater {
-        source:BoxedError
-    },
+    RetryLater { source: BoxedError },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -94,7 +92,7 @@ impl ErrorExt for Error {
             | Error::ListState { .. }
             | Error::ReadState { .. }
             | Error::FromJson { .. }
-            | Error::RetryLater {..} => StatusCode::Internal,
+            | Error::RetryLater { .. } => StatusCode::Internal,
             Error::LoaderConflict { .. } | Error::DuplicateProcedure { .. } => {
                 StatusCode::InvalidArguments
             }
@@ -120,7 +118,7 @@ impl Error {
 
     /// Creates a new [Error::RetryLater] error from source `err`.
     pub fn retry_later<E: ErrorExt + Send + Sync + 'static>(err: E) -> Error {
-        Error::RetryLater{
+        Error::RetryLater {
             source: BoxedError::new(err),
         }
     }
