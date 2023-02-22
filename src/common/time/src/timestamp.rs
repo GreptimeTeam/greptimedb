@@ -34,11 +34,11 @@ pub struct Timestamp {
 
 impl Timestamp {
     /// Creates current timestamp in millisecond.
-    pub fn current_millis() -> error::Result<Self> {
-        Ok(Self {
-            value: chrono::Utc::now().timestamp_millis(),
+    pub fn current_millis() -> Self {
+        Self {
+            value: crate::util::current_time_millis(),
             unit: TimeUnit::Millisecond,
-        })
+        }
     }
 
     /// Subtracts a duration from timestamp.
