@@ -48,7 +48,7 @@ impl DatanodeInstance {
     }
 
     pub(crate) async fn grpc_insert(&self, request: InsertRequest) -> client::Result<Output> {
-        self.db.insert(request, Default::default()).await
+        self.db.insert(request).await
     }
 
     pub(crate) async fn grpc_table_scan(&self, plan: TableScanPlan) -> Result<RecordBatches> {
@@ -60,7 +60,7 @@ impl DatanodeInstance {
 
         let result = self
             .db
-            .logical_plan(substrait_plan.to_vec(), Default::default())
+            .logical_plan(substrait_plan.to_vec())
             .await
             .context(error::RequestDatanodeSnafu)?;
         let Output::RecordBatches(recordbatches) = result else { unreachable!() };

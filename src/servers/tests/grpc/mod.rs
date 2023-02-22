@@ -17,9 +17,8 @@ use std::sync::Arc;
 
 use arrow_flight::flight_service_server::{FlightService, FlightServiceServer};
 use async_trait::async_trait;
-use client::{Client, Database, FlightContext};
+use client::{Client, Database};
 use common_runtime::{Builder as RuntimeBuilder, Runtime};
-use hyper::http;
 use servers::auth::UserProviderRef;
 use servers::error::{Result, StartGrpcSnafu, TcpBindSnafu};
 use servers::grpc::flight::FlightHandler;
@@ -127,15 +126,8 @@ async fn test_grpc_query() {
     let grpc_client = Client::with_urls(vec![re.unwrap().to_string()]);
     let db = Database::with_client(grpc_client);
 
-    let re = db.sql("select * from numbers", Default::default()).await;
+    let re = db.sql("select * from numbers").await;
     assert!(re.is_err());
 
-    let mut ctx = FlightContext::new();
-    ctx.insert(
-        http::header::AUTHORIZATION.to_string(),
-        "Basic Z3JlcHRpbWU6Z3JlcHRpbWU=".to_string(),
-    );
-
-    let re = db.sql("select * from numbers", ctx).await;
-    assert!(re.is_ok());
+    // TODO(shuiyisong): add test here
 }

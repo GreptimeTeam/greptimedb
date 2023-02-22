@@ -135,7 +135,7 @@ pub async fn test_insert_and_select(store_type: StorageType) {
 
     // create
     let expr = testing_create_expr();
-    let result = db.create(expr, Default::default()).await.unwrap();
+    let result = db.create(expr).await.unwrap();
     assert!(matches!(result, Output::AffectedRows(0)));
 
     //alter
@@ -157,7 +157,7 @@ pub async fn test_insert_and_select(store_type: StorageType) {
         table_name: "demo".to_string(),
         kind: Some(kind),
     };
-    let result = db.alter(expr, Default::default()).await.unwrap();
+    let result = db.alter(expr).await.unwrap();
     assert!(matches!(result, Output::AffectedRows(0)));
 
     // insert
@@ -182,7 +182,7 @@ async fn insert_and_assert(db: &Database) {
         ],
         row_count: 4,
     };
-    let result = db.insert(request, Default::default()).await;
+    let result = db.insert(request).await;
     result.unwrap();
 
     let result = db
@@ -190,7 +190,6 @@ async fn insert_and_assert(db: &Database) {
             "INSERT INTO demo(host, cpu, memory, ts) VALUES \
             ('host5', 66.6, 1024, 1672201027000),\
             ('host6', 88.8, 333.3, 1672201028000)",
-            Default::default(),
         )
         .await
         .unwrap();
@@ -198,7 +197,7 @@ async fn insert_and_assert(db: &Database) {
 
     // select
     let result = db
-        .sql("SELECT host, cpu, memory, ts FROM demo", Default::default())
+        .sql("SELECT host, cpu, memory, ts FROM demo")
         .await
         .unwrap();
     match result {

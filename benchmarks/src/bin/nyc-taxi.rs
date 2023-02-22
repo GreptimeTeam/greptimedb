@@ -105,7 +105,7 @@ async fn write_data(
             row_count,
         };
         let now = Instant::now();
-        db.insert(request, Default::default()).await.unwrap();
+        db.insert(request).await.unwrap();
         let elapsed = now.elapsed();
         total_rpc_elapsed_ms += elapsed.as_millis();
         progress_bar.inc(row_count as _);
@@ -363,7 +363,7 @@ async fn do_write(args: &Args, db: &Database) {
     let mut file_list = get_file_list(args.path.clone().expect("Specify data path in argument"));
     let mut write_jobs = JoinSet::new();
 
-    let create_table_result = db.create(create_table_expr(), Default::default()).await;
+    let create_table_result = db.create(create_table_expr()).await;
     println!("Create table result: {create_table_result:?}");
 
     let progress_bar_style = ProgressStyle::with_template(
@@ -400,7 +400,7 @@ async fn do_query(num_iter: usize, db: &Database) {
         println!("Running query: {query}");
         for i in 0..num_iter {
             let now = Instant::now();
-            let _res = db.sql(&query, Default::default()).await.unwrap();
+            let _res = db.sql(&query).await.unwrap();
             let elapsed = now.elapsed();
             println!(
                 "query {}, iteration {}: {}ms",

@@ -198,7 +198,7 @@ impl DistInstance {
             );
 
             client
-                .create(create_expr_for_region, Default::default())
+                .create(create_expr_for_region)
                 .await
                 .context(RequestDatanodeSnafu)?;
         }
@@ -255,7 +255,7 @@ impl DistInstance {
                 let client = self.datanode_clients.get_client(&datanode).await;
                 let client = Database::new(&expr.catalog_name, &expr.schema_name, client);
                 client
-                    .drop_table(expr.clone(), Default::default())
+                    .drop_table(expr.clone())
                     .await
                     .context(RequestDatanodeSnafu)?;
             }

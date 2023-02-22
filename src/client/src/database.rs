@@ -12,15 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::str::FromStr;
 
+use api::v1::auth_header::AuthScheme;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{
-    AlterExpr, CreateTableExpr, DdlRequest, DropTableExpr, GreptimeRequest, InsertRequest,
-    QueryRequest, RequestHeader,
+    AlterExpr, AuthHeader, CreateTableExpr, DdlRequest, DropTableExpr, GreptimeRequest,
+    InsertRequest, QueryRequest, RequestHeader,
 };
 use arrow_flight::{FlightData, Ticket};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -30,12 +30,8 @@ use common_query::Output;
 use futures_util::{TryFutureExt, TryStreamExt};
 use prost::Message;
 use snafu::{ensure, ResultExt};
-use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue};
 
-use crate::error::{
-    ConvertFlightDataSnafu, IllegalFlightMessagesSnafu, InvalidTonicMetaKeySnafu,
-    InvalidTonicMetaValueSnafu,
-};
+use crate::error::{ConvertFlightDataSnafu, IllegalFlightMessagesSnafu};
 use crate::{error, Client, Result};
 
 #[derive(Clone, Debug)]
@@ -47,6 +43,7 @@ pub struct Database {
     schema: String,
 
     client: Client,
+    ctx: FlightContext,
 }
 
 impl Database {
@@ -55,6 +52,7 @@ impl Database {
             catalog: catalog.into(),
             schema: schema.into(),
             client,
+            ctx: FlightContext::default(),
         }
     }
 
@@ -66,79 +64,63 @@ impl Database {
         self.schema = schema.into();
     }
 
-    pub async fn insert(&self, request: InsertRequest, ctx: FlightContext) -> Result<Output> {
-        self.do_get(Request::Insert(request), ctx).await
+    pub fn set_auth(&mut self, auth: AuthScheme) {
+        self.ctx.auth_header = Some(AuthHeader {
+            auth_scheme: Some(auth),
+        });
     }
 
-    pub async fn sql(&self, sql: &str, ctx: FlightContext) -> Result<Output> {
-        self.do_get(
-            Request::Query(QueryRequest {
-                query: Some(Query::Sql(sql.to_string())),
-            }),
-            ctx,
-        )
+    pub async fn insert(&self, request: InsertRequest) -> Result<Output> {
+        self.do_get(Request::Insert(request)).await
+    }
+
+    pub async fn sql(&self, sql: &str) -> Result<Output> {
+        self.do_get(Request::Query(QueryRequest {
+            query: Some(Query::Sql(sql.to_string())),
+        }))
         .await
     }
 
-    pub async fn logical_plan(&self, logical_plan: Vec<u8>, ctx: FlightContext) -> Result<Output> {
-        self.do_get(
-            Request::Query(QueryRequest {
-                query: Some(Query::LogicalPlan(logical_plan)),
-            }),
-            ctx,
-        )
+    pub async fn logical_plan(&self, logical_plan: Vec<u8>) -> Result<Output> {
+        self.do_get(Request::Query(QueryRequest {
+            query: Some(Query::LogicalPlan(logical_plan)),
+        }))
         .await
     }
 
-    pub async fn create(&self, expr: CreateTableExpr, ctx: FlightContext) -> Result<Output> {
-        self.do_get(
-            Request::Ddl(DdlRequest {
-                expr: Some(DdlExpr::CreateTable(expr)),
-            }),
-            ctx,
-        )
+    pub async fn create(&self, expr: CreateTableExpr) -> Result<Output> {
+        self.do_get(Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::CreateTable(expr)),
+        }))
         .await
     }
 
-    pub async fn alter(&self, expr: AlterExpr, ctx: FlightContext) -> Result<Output> {
-        self.do_get(
-            Request::Ddl(DdlRequest {
-                expr: Some(DdlExpr::Alter(expr)),
-            }),
-            ctx,
-        )
+    pub async fn alter(&self, expr: AlterExpr) -> Result<Output> {
+        self.do_get(Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::Alter(expr)),
+        }))
         .await
     }
 
-    pub async fn drop_table(&self, expr: DropTableExpr, ctx: FlightContext) -> Result<Output> {
-        self.do_get(
-            Request::Ddl(DdlRequest {
-                expr: Some(DdlExpr::DropTable(expr)),
-            }),
-            ctx,
-        )
+    pub async fn drop_table(&self, expr: DropTableExpr) -> Result<Output> {
+        self.do_get(Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::DropTable(expr)),
+        }))
         .await
     }
 
-    async fn do_get(&self, request: Request, ctx: FlightContext) -> Result<Output> {
+    async fn do_get(&self, request: Request) -> Result<Output> {
         let request = GreptimeRequest {
             header: Some(RequestHeader {
                 catalog: self.catalog.clone(),
                 schema: self.schema.clone(),
+                authorization: self.ctx.auth_header.clone(),
             }),
             request: Some(request),
         };
         let request = Ticket {
             ticket: request.encode_to_vec(),
         };
-        let mut request = tonic::Request::new(request);
-        // insert metadata
-        for (key, value) in ctx.ctx {
-            request.metadata_mut().insert(
-                AsciiMetadataKey::from_str(key.as_str()).context(InvalidTonicMetaKeySnafu)?,
-                AsciiMetadataValue::try_from(value).context(InvalidTonicMetaValueSnafu)?,
-            );
-        }
 
         let mut client = self.client.make_client()?;
 
@@ -192,25 +174,9 @@ fn get_metadata_value(e: &tonic::Status, key: &str) -> Option<String> {
         .and_then(|v| String::from_utf8(v.as_bytes().to_vec()).ok())
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Debug, Clone)]
 pub struct FlightContext {
-    ctx: HashMap<String, String>,
-}
-
-impl FlightContext {
-    pub fn new() -> Self {
-        Self {
-            ctx: HashMap::new(),
-        }
-    }
-
-    pub fn insert(&mut self, key: String, value: String) {
-        self.ctx.insert(key, value);
-    }
-
-    pub fn get(&self, key: &str) -> Option<&String> {
-        self.ctx.get(key)
-    }
+    auth_header: Option<AuthHeader>,
 }
 
 #[cfg(test)]
@@ -218,7 +184,8 @@ mod tests {
     use std::sync::Arc;
 
     use api::helper::ColumnDataTypeWrapper;
-    use api::v1::Column;
+    use api::v1::auth_header::AuthScheme;
+    use api::v1::{AuthHeader, Basic, Column};
     use common_grpc::select::{null_mask, values};
     use common_grpc_expr::column_to_vector;
     use datatypes::prelude::{Vector, VectorRef};
@@ -228,7 +195,7 @@ mod tests {
         UInt32Vector, UInt64Vector, UInt8Vector,
     };
 
-    use crate::FlightContext;
+    use crate::database::FlightContext;
 
     #[test]
     fn test_column_to_vector() {
@@ -316,9 +283,23 @@ mod tests {
 
     #[test]
     fn test_flight_ctx() {
-        let mut ctx = FlightContext::new();
-        ctx.insert("a".to_string(), "b".to_string());
-        assert_eq!(ctx.ctx.len(), 1);
-        assert_eq!(ctx.get("a"), Some(&"b".to_string()));
+        let mut ctx = FlightContext::default();
+        assert!(ctx.auth_header.is_none());
+
+        let basic = AuthScheme::Basic(Basic {
+            username: "u".to_string(),
+            password: "p".to_string(),
+        });
+
+        ctx.auth_header = Some(AuthHeader {
+            auth_scheme: Some(basic),
+        });
+
+        assert!(matches!(
+            ctx.auth_header,
+            Some(AuthHeader {
+                auth_scheme: Some(AuthScheme::Basic(_)),
+            })
+        ))
     }
 }

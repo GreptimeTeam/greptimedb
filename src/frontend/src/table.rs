@@ -261,7 +261,7 @@ impl DistTable {
             let db = Database::with_client(client);
             debug!("Sending {:?} to {:?}", expr, db);
             let result = db
-                .alter(expr.clone(), Default::default())
+                .alter(expr.clone())
                 .await
                 .context(error::RequestDatanodeSnafu)?;
             debug!("Alter table result: {:?}", result);

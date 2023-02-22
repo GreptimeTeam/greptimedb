@@ -66,15 +66,12 @@ async fn run() {
     };
 
     let db = Database::with_client(client);
-    let result = db
-        .create(create_table_expr, Default::default())
-        .await
-        .unwrap();
+    let result = db.create(create_table_expr).await.unwrap();
     event!(Level::INFO, "create table result: {:#?}", result);
 
     let logical = mock_logical_plan();
     event!(Level::INFO, "plan size: {:#?}", logical.len());
-    let result = db.logical_plan(logical, Default::default()).await.unwrap();
+    let result = db.logical_plan(logical).await.unwrap();
 
     event!(Level::INFO, "result: {:#?}", result);
 }

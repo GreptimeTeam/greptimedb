@@ -278,7 +278,7 @@ impl Database for GreptimeDB {
             client.set_schema(database);
         }
 
-        let result = client.sql(&query, Default::default()).await;
+        let result = client.sql(&query).await;
         Box::new(ResultDisplayer { result }) as _
     }
 }

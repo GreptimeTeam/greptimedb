@@ -149,7 +149,7 @@ pub enum Error {
 
     #[snafu(display("Invalid OpenTSDB line, source: {}", source))]
     InvalidOpentsdbLine {
-        source: std::string::FromUtf8Error,
+        source: FromUtf8Error,
         backtrace: Backtrace,
     },
 
@@ -215,7 +215,7 @@ pub enum Error {
         source: auth::Error,
     },
 
-    #[snafu(display("Not found http authorization header"))]
+    #[snafu(display("Not found http or grpc authorization header"))]
     NotFoundAuthHeader {},
 
     #[snafu(display("Not found influx http authorization info"))]
@@ -224,12 +224,6 @@ pub enum Error {
     #[snafu(display("Invalid visibility ASCII chars, source: {}", source))]
     HttpInvisibleASCII {
         source: hyper::header::ToStrError,
-        backtrace: Backtrace,
-    },
-
-    #[snafu(display("Invalid visibility ASCII chars, source: {}", source))]
-    TonicInvisibleASCII {
-        source: tonic::metadata::errors::ToStrError,
         backtrace: Backtrace,
     },
 
@@ -315,7 +309,6 @@ impl ErrorExt for Error {
 
             NotFoundAuthHeader { .. } | NotFoundInfluxAuth { .. } => StatusCode::AuthHeaderNotFound,
             HttpInvisibleASCII { .. }
-            | TonicInvisibleASCII { .. }
             | UnsupportedAuthScheme { .. }
             | InvalidAuthorizationHeader { .. }
             | InvalidBase64Value { .. }

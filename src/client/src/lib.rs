@@ -20,5 +20,5 @@ pub mod load_balance;
 pub use api;
 
 pub use self::client::Client;
-pub use self::database::{Database, FlightContext};
+pub use self::database::Database;
 pub use self::error::{Error, Result};
