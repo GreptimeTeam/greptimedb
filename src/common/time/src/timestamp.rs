@@ -26,6 +26,7 @@ use snafu::{OptionExt, ResultExt};
 
 use crate::error;
 use crate::error::{ArithmeticOverflowSnafu, Error, ParseTimestampSnafu, TimestampOverflowSnafu};
+
 #[derive(Debug, Clone, Default, Copy, Serialize, Deserialize)]
 pub struct Timestamp {
     value: i64,

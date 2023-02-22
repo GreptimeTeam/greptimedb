@@ -99,7 +99,7 @@ impl<S: LogStore> Picker for SimplePicker<S> {
                 error!(e;"Failed to get region expired SST files, region: {}, ttl: {:?}", req.region_id, req.ttl);
                 e
             })
-            .unwrap_or(vec![]);
+            .unwrap_or_default();
 
         if !expired_ssts.is_empty() {
             info!(
