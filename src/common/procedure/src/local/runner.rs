@@ -43,6 +43,10 @@ impl ExecResult {
         matches!(self, ExecResult::Done)
     }
 
+    fn is_retry_later(&self) -> bool {
+        matches!(self, ExecResult::RetryLater)
+    }
+
     fn is_failed(&self) -> bool {
         matches!(self, ExecResult::Failed(_))
     }
@@ -212,6 +216,10 @@ impl Runner {
                     self.procedure.type_name(),
                     self.meta.id
                 );
+
+                if let Error::RetryLater { .. } = e {
+                    return ExecResult::RetryLater;
+                }
 
                 self.meta.set_state(ProcedureState::Failed);
 
@@ -699,6 +707,45 @@ mod tests {
         assert!(res.is_failed(), "{res:?}");
         assert_eq!(ProcedureState::Failed, meta.state());
         check_files(&object_store, ctx.procedure_id, &["0000000000.rollback"]).await;
+    }
+
+    #[tokio::test]
+    async fn test_execute_on_retry_later_error() {
+        let mut times = 0;
+
+        let exec_fn = move |_| {
+            times += 1;
+            async move {
+                if times == 1 {
+                    Err(Error::retry_later(MockError::new(StatusCode::Unexpected)))
+                } else {
+                    Ok(Status::Done)
+                }
+            }
+                .boxed()
+        };
+
+        let retry_later = ProcedureAdapter {
+            data: "retry_later".to_string(),
+            lock_key: LockKey::single("catalog.schema.table"),
+            exec_fn,
+        };
+
+        let dir = TempDir::new("retry_later").unwrap();
+        let meta = retry_later.new_meta(ROOT_ID);
+        let ctx = context_without_provider(meta.id);
+        let object_store = test_util::new_object_store(&dir);
+        let procedure_store = ProcedureStore::from(object_store.clone());
+        let mut runner = new_runner(meta.clone(), Box::new(retry_later), procedure_store);
+
+        let res = runner.execute_once(&ctx).await;
+        assert!(res.is_retry_later(), "{res:?}");
+        assert_eq!(ProcedureState::Running, meta.state());
+
+        let res = runner.execute_once(&ctx).await;
+        assert!(res.is_done(), "{res:?}");
+        assert_eq!(ProcedureState::Done, meta.state());
+        check_files(&object_store, ctx.procedure_id, &["0000000000.commit"]).await;
     }
 
     #[tokio::test]

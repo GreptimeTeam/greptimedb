@@ -75,6 +75,11 @@ pub enum Error {
         source: serde_json::Error,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Procedure exec failed, source: {}", source))]
+    RetryLater {
+        source:BoxedError
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -88,7 +93,8 @@ impl ErrorExt for Error {
             | Error::DeleteState { .. }
             | Error::ListState { .. }
             | Error::ReadState { .. }
-            | Error::FromJson { .. } => StatusCode::Internal,
+            | Error::FromJson { .. }
+            | Error::RetryLater {..} => StatusCode::Internal,
             Error::LoaderConflict { .. } | Error::DuplicateProcedure { .. } => {
                 StatusCode::InvalidArguments
             }
@@ -108,6 +114,13 @@ impl Error {
     /// Creates a new [Error::External] error from source `err`.
     pub fn external<E: ErrorExt + Send + Sync + 'static>(err: E) -> Error {
         Error::External {
+            source: BoxedError::new(err),
+        }
+    }
+
+    /// Creates a new [Error::RetryLater] error from source `err`.
+    pub fn retry_later<E: ErrorExt + Send + Sync + 'static>(err: E) -> Error {
+        Error::RetryLater{
             source: BoxedError::new(err),
         }
     }
