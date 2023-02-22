@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 use catalog::{RegisterSchemaRequest, RegisterTableRequest};
-use common_procedure::{ProcedureManagerRef, ProcedureWithId, StateKind};
+use common_procedure::{watcher, ProcedureManagerRef, ProcedureWithId};
 use common_query::Output;
 use common_telemetry::tracing::{error, info};
 use datatypes::schema::RawSchema;
@@ -33,8 +33,8 @@ use table_procedure::CreateTableProcedure;
 use crate::error::{
     self, CatalogNotFoundSnafu, CatalogSnafu, ConstraintNotSupportedSnafu, CreateTableSnafu,
     IllegalPrimaryKeysDefSnafu, InsertSystemCatalogSnafu, KeyColumnNotFoundSnafu,
-    ProcedureExecSnafu, RegisterSchemaSnafu, Result, SchemaExistsSnafu, SchemaNotFoundSnafu,
-    SubmitProcedureSnafu, UnrecognizedTableOptionSnafu, WaitProcedureSnafu,
+    RegisterSchemaSnafu, Result, SchemaExistsSnafu, SchemaNotFoundSnafu, SubmitProcedureSnafu,
+    UnrecognizedTableOptionSnafu, WaitProcedureSnafu,
 };
 use crate::sql::SqlHandler;
 
@@ -152,21 +152,13 @@ impl SqlHandler {
         let mut watcher = procedure_manager
             .submit(procedure_with_id)
             .await
-            .context(SubmitProcedureSnafu)?;
+            .context(SubmitProcedureSnafu { procedure_id })?;
 
-        // TODO(yingwen): Wrap this into a function and add error to StateKind::Failed.
-        loop {
-            watcher.changed().await.context(WaitProcedureSnafu)?;
-            match watcher.borrow().kind() {
-                StateKind::Running => (),
-                StateKind::Done => {
-                    return Ok(Output::AffectedRows(0));
-                }
-                ProcedureState::Failed => {
-                    return ProcedureExecSnafu { procedure_id }.fail();
-                }
-            }
-        }
+        watcher::wait(&mut watcher)
+            .await
+            .context(WaitProcedureSnafu { procedure_id })?;
+
+        Ok(Output::AffectedRows(0))
     }
 
     /// Converts [CreateTable] to [SqlRequest::CreateTable].

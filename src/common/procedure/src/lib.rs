@@ -18,9 +18,11 @@ pub mod error;
 pub mod local;
 mod procedure;
 mod store;
+pub mod watcher;
 
 pub use crate::error::{Error, Result};
 pub use crate::procedure::{
     BoxedProcedure, Context, ContextProvider, LockKey, Procedure, ProcedureId, ProcedureManager,
-    ProcedureManagerRef, ProcedureState, ProcedureWithId, StateKind, Status, Watcher,
+    ProcedureManagerRef, ProcedureState, ProcedureWithId, Status,
 };
+pub use crate::watcher::Watcher;

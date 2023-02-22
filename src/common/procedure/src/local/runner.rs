@@ -18,7 +18,7 @@ use std::time::Duration;
 use common_telemetry::logging;
 use tokio::time;
 
-use crate::error::Result;
+use crate::error::{ProcedurePanicSnafu, Result};
 use crate::local::{ManagerContext, ProcedureMeta, ProcedureMetaRef};
 use crate::store::ProcedureStore;
 use crate::{BoxedProcedure, Context, ProcedureId, ProcedureState, ProcedureWithId, Status};
@@ -83,7 +83,11 @@ impl Drop for ProcedureGuard {
             // Set state to failed. This is useful in test as runtime may not abort when the runner task panics.
             // See https://github.com/tokio-rs/tokio/issues/2002 .
             // We set set_panic_hook() in the application's main function. But our tests don't have this panic hook.
-            self.meta.set_state(ProcedureState::failed());
+            let err = ProcedurePanicSnafu {
+                procedure_id: self.meta.id,
+            }
+            .build();
+            self.meta.set_state(ProcedureState::failed(Arc::new(err)));
         }
 
         // Notify parent procedure.
@@ -216,8 +220,7 @@ impl Runner {
                     return ExecResult::RetryLater;
                 }
 
-                self.meta
-                    .set_state(ProcedureState::failed().with_error(Arc::new(e)));
+                self.meta.set_state(ProcedureState::failed(Arc::new(e)));
 
                 // Write rollback key so we can skip this procedure while recovering procedures.
                 if self.rollback_procedure().await.is_err() {
@@ -380,7 +383,7 @@ impl Runner {
         );
 
         // Mark the state of this procedure to done.
-        self.meta.set_state(ProcedureState::done());
+        self.meta.set_state(ProcedureState::Done);
     }
 }
 
@@ -399,7 +402,7 @@ mod tests {
 
     use super::*;
     use crate::local::test_util;
-    use crate::{ContextProvider, Error, LockKey, Procedure, StateKind};
+    use crate::{ContextProvider, Error, LockKey, Procedure};
 
     const ROOT_ID: &str = "9f805a1f-05f7-490c-9f91-bd56e3cc54c1";
 
@@ -625,14 +628,14 @@ mod tests {
                     // Wait for subprocedures.
                     let mut all_child_done = true;
                     for id in children_ids {
-                        if ctx
+                        let is_not_done = ctx
                             .provider
                             .procedure_state(id)
                             .await
                             .unwrap()
-                            .map(|s| s.kind())
-                            != Some(StateKind::Done)
-                        {
+                            .map(|s| !s.is_done())
+                            .unwrap_or(true);
+                        if is_not_done {
                             all_child_done = false;
                         }
                     }
@@ -706,7 +709,7 @@ mod tests {
 
         let res = runner.execute_once(&ctx).await;
         assert!(res.is_failed(), "{res:?}");
-        assert_eq!(StateKind::Failed, meta.state().kind());
+        assert!(meta.state().is_failed());
         check_files(&object_store, ctx.procedure_id, &["0000000000.rollback"]).await;
     }
 

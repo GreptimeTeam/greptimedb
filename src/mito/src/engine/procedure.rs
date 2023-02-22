@@ -58,7 +58,7 @@ mod procedure_test_util {
             &self,
             _procedure_id: ProcedureId,
         ) -> Result<Option<ProcedureState>> {
-            Ok(Some(ProcedureState::done()))
+            Ok(Some(ProcedureState::Done))
         }
     }
 

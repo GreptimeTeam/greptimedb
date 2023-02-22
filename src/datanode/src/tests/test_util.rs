@@ -28,7 +28,7 @@ use table::engine::{EngineContext, TableEngineRef};
 use table::requests::{CreateTableRequest, TableOptions};
 use tempdir::TempDir;
 
-use crate::datanode::{DatanodeOptions, FileConfig, ProcedureConfig, ObjectStoreConfig, WalConfig};
+use crate::datanode::{DatanodeOptions, FileConfig, ObjectStoreConfig, ProcedureConfig, WalConfig};
 use crate::error::{CreateTableSnafu, Result};
 use crate::instance::Instance;
 use crate::sql::SqlHandler;
@@ -46,7 +46,11 @@ impl MockInstance {
         let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
         instance.start().await.unwrap();
 
-        MockInstance { instance, _guard, procedure_dir: None }
+        MockInstance {
+            instance,
+            _guard,
+            procedure_dir: None,
+        }
     }
 
     pub(crate) async fn with_procedure_enabled(name: &str) -> Self {
@@ -61,7 +65,11 @@ impl MockInstance {
         let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
         instance.start().await.unwrap();
 
-        MockInstance { instance, _guard, procedure_dir: None }
+        MockInstance {
+            instance,
+            _guard,
+            procedure_dir: None,
+        }
     }
 
     pub(crate) fn inner(&self) -> &Instance {
