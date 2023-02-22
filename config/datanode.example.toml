@@ -29,3 +29,7 @@ tcp_nodelay = false
 max_inflight_tasks = 4
 max_files_in_level0 = 16
 max_purge_tasks = 32
+
+[procedure.store]
+type = 'File'
+data_dir = '/tmp/greptimedb/procedure/'

@@ -21,8 +21,8 @@ use common_procedure::ProcedureManagerRef;
 use log_store::NoopLogStore;
 use mito::config::EngineConfig;
 use mito::engine::MitoEngine;
-use object_store::services::fs::Builder;
-use object_store::ObjectStore;
+use object_store::services::Fs;
+use object_store::{ObjectStore, ObjectStoreBuilder};
 use storage::compaction::noop::NoopCompactionScheduler;
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
@@ -39,8 +39,8 @@ impl TestEnv {
     pub fn new(prefix: &str) -> TestEnv {
         let dir = TempDir::new(prefix).unwrap();
         let store_dir = format!("{}/db", dir.path().to_string_lossy());
-        let accessor = Builder::default().root(&store_dir).build().unwrap();
-        let object_store = ObjectStore::new(accessor);
+        let accessor = Fs::default().root(&store_dir).build().unwrap();
+        let object_store = ObjectStore::new(accessor).finish();
 
         let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
         let storage_engine = EngineImpl::new(
@@ -56,8 +56,8 @@ impl TestEnv {
         ));
 
         let procedure_dir = format!("{}/procedure", dir.path().to_string_lossy());
-        let accessor = Builder::default().root(&procedure_dir).build().unwrap();
-        let object_store = ObjectStore::new(accessor);
+        let accessor = Fs::default().root(&procedure_dir).build().unwrap();
+        let object_store = ObjectStore::new(accessor).finish();
 
         let procedure_manager = Arc::new(LocalManager::new(ManagerConfig { object_store }));
 

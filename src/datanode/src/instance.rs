@@ -426,6 +426,11 @@ async fn create_procedure_manager(
         return Ok(None);
     };
 
+    info!(
+        "Creating procedure manager with config: {:?}",
+        procedure_config
+    );
+
     let object_store = new_object_store(&procedure_config.store).await?;
     let manager_config = ManagerConfig { object_store };
 
