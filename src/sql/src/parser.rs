@@ -21,6 +21,7 @@ use sqlparser::tokenizer::{Token, Tokenizer};
 use crate::error::{
     self, InvalidDatabaseNameSnafu, InvalidTableNameSnafu, Result, SyntaxSnafu, TokenizerSnafu,
 };
+use crate::parsers::tql_parser;
 use crate::statements::describe::DescribeTable;
 use crate::statements::drop::DropTable;
 use crate::statements::explain::Explain;
@@ -118,6 +119,12 @@ impl<'a> ParserContext<'a> {
                     }
 
                     Keyword::COPY => self.parse_copy(),
+
+                    Keyword::NoKeyword
+                        if w.value.to_uppercase() == tql_parser::TQL && w.quote_style.is_none() =>
+                    {
+                        self.parse_tql()
+                    }
 
                     // todo(hl) support more statements.
                     _ => self.unsupported(self.peek_token_as_string()),

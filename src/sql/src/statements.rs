@@ -23,6 +23,7 @@ pub mod insert;
 pub mod query;
 pub mod show;
 pub mod statement;
+pub mod tql;
 
 use std::str::FromStr;
 

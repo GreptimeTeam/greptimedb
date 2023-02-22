@@ -11,11 +11,21 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Tql {
+    Eval(TqlEval),
+    Explain(TqlExplain),
+}
 
-mod alter_parser;
-pub(crate) mod copy_parser;
-pub(crate) mod create_parser;
-pub(crate) mod delete_parser;
-pub(crate) mod insert_parser;
-pub(crate) mod query_parser;
-pub(crate) mod tql_parser;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TqlEval {
+    pub start: String,
+    pub end: String,
+    pub step: String,
+    pub query: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TqlExplain {
+    pub query: String,
+}
