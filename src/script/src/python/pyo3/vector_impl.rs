@@ -16,7 +16,7 @@ use datafusion::arrow::compute::kernels::{arithmetic, comparison};
 use datatypes::arrow::array::{Array, ArrayRef};
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::prelude::{ConcreteDataType, DataType};
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::pyclass::CompareOp;
 use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyString};
@@ -179,15 +179,15 @@ impl PyVector {
     }
     #[allow(unused)]
     fn __rtruediv__(&self, py: Python<'_>, other: PyObject) -> PyResult<Self> {
-        todo!()
+        Err(PyNotImplementedError::new_err(()))
     }
     #[allow(unused)]
     fn __floordiv__(&self, py: Python<'_>, other: PyObject) -> PyResult<Self> {
-        todo!()
+        Err(PyNotImplementedError::new_err(()))
     }
     #[allow(unused)]
     fn __rfloordiv__(&self, py: Python<'_>, other: PyObject) -> PyResult<Self> {
-        todo!()
+        Err(PyNotImplementedError::new_err(()))
     }
     fn __and__(&self, other: &Self) -> PyResult<Self> {
         Self::vector_and(self, other).map_err(PyValueError::new_err)
@@ -205,7 +205,7 @@ impl PyVector {
         Ok("PyVector is like a Python array, a compact array of elem of same datatype, but Readonly for now".to_string())
     }
     fn __repr__(&self) -> PyResult<String> {
-        Ok(format!("{self:?}"))
+        Ok(format!("{self:#?}"))
     }
 }
 

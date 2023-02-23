@@ -68,6 +68,12 @@ pub fn val_to_py_any(py: Python<'_>, val: Value) -> PyResult<PyObject> {
                 .collect::<PyResult<Vec<_>>>()?;
             list.to_object(py)
         }
+        #[allow(unreachable_patterns)]
+        _ => {
+            return Err(PyValueError::new_err(format!(
+                "Convert from {val:?} is not supported yet"
+            )))
+        }
     })
 }
 
@@ -199,7 +205,7 @@ pub fn scalar_value_to_py_any(py: Python<'_>, val: ScalarValue) -> PyResult<PyOb
         val,
         [
             Boolean, Float32, Float64, Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64,
-            Utf8
+            Utf8, LargeUtf8
         ]
     )
 }

@@ -29,7 +29,7 @@ use datatypes::prelude::Value;
 use datatypes::value::{self, OrderedFloat};
 use datatypes::vectors::{Helper, NullVector, VectorRef};
 use pyo3::pyclass as pyo3class;
-use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyNone};
+use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyNone, PyStr};
 use rustpython_vm::sliceable::{SaturatedSlice, SequenceIndex, SequenceIndexOp};
 use rustpython_vm::types::PyComparisonOp;
 use rustpython_vm::{
@@ -363,10 +363,10 @@ impl PyVector {
 
     pub(crate) fn getitem_by_index(&self, i: isize, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         // in the newest version of rustpython_vm, wrapped_at for isize is replace by wrap_index(i, len)
-        let i = i
-            .wrapped_at(self.len())
-            .ok_or_else(|| vm.new_index_error(format!("PyVector index {i} out of range {}", self.len())))?;
-        Ok(val_to_pyobj(self.as_vector_ref().get(i), vm))
+        let i = i.wrapped_at(self.len()).ok_or_else(|| {
+            vm.new_index_error(format!("PyVector index {i} out of range {}", self.len()))
+        })?;
+        val_to_pyobj(self.as_vector_ref().get(i), vm)
     }
 
     /// Return a `PyVector` in `PyObjectRef`
@@ -480,14 +480,15 @@ pub(crate) fn rspy_is_pyobj_scalar(obj: &PyObjectRef, vm: &VirtualMachine) -> bo
         || is_instance::<PyInt>(obj, vm)
         || is_instance::<PyFloat>(obj, vm)
         || is_instance::<PyBool>(obj, vm)
+        || is_instance::<PyStr>(obj, vm)
 }
 
 /// convert a DataType `Value` into a `PyObjectRef`
-pub fn val_to_pyobj(val: value::Value, vm: &VirtualMachine) -> PyObjectRef {
-    match val {
+pub fn val_to_pyobj(val: value::Value, vm: &VirtualMachine) -> PyResult {
+    Ok(match val {
         // This comes from:https://github.com/RustPython/RustPython/blob/8ab4e770351d451cfdff5dc2bf8cce8df76a60ab/vm/src/builtins/singletons.rs#L37
         // None in Python is universally singleton so
-        // use `vm.ctx.new_int` and `new_***` is more idomtic for there are cerntain optimize can be use in this way(small int pool etc.)
+        // use `vm.ctx.new_int` and `new_***` is more idiomatic for there are certain optimize can be used in this way(small int pool etc.)
         value::Value::Null => vm.ctx.none(),
         value::Value::Boolean(v) => vm.ctx.new_bool(v).into(),
         value::Value::UInt8(v) => vm.ctx.new_int(v).into(),
@@ -512,13 +513,18 @@ pub fn val_to_pyobj(val: value::Value, vm: &VirtualMachine) -> PyObjectRef {
             let list = list.items().as_ref();
             match list {
                 Some(list) => {
-                    let list: Vec<_> = list.iter().map(|v| val_to_pyobj(v.clone(), vm)).collect();
+                    let list: Vec<_> = list
+                        .iter()
+                        .map(|v| val_to_pyobj(v.clone(), vm))
+                        .collect::<Result<_, _>>()?;
                     vm.ctx.new_list(list).into()
                 }
                 None => vm.ctx.new_list(Vec::new()).into(),
             }
         }
-    }
+        #[allow(unreachable_patterns)]
+        _ => return Err(vm.new_type_error(format!("Convert from {val:?} is not supported yet"))),
+    })
 }
 
 impl Default for PyVector {

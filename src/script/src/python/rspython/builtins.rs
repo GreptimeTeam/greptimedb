@@ -363,7 +363,7 @@ pub(crate) mod greptime_builtin {
                 return Err(vm.new_runtime_error(format!("Failed to evaluate accumulator: {err}")))
             }
         };
-        let res = val_to_pyobj(res, vm);
+        let res = val_to_pyobj(res, vm)?;
         Ok(res)
     }
 
