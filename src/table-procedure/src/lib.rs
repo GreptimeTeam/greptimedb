@@ -19,4 +19,25 @@ pub mod error;
 #[cfg(test)]
 mod test_util;
 
+use catalog::CatalogManagerRef;
+use common_procedure::ProcedureManager;
 pub use create::CreateTableProcedure;
+use table::engine::{TableEngineProcedureRef, TableEngineRef};
+
+/// Register all procedure loaders to the procedure manager.
+///
+/// # Panics
+/// Panics on error.
+pub fn register_procedure_loaders(
+    catalog_manager: CatalogManagerRef,
+    engine_procedure: TableEngineProcedureRef,
+    table_engine: TableEngineRef,
+    procedure_manager: &dyn ProcedureManager,
+) {
+    CreateTableProcedure::register_loader(
+        catalog_manager,
+        engine_procedure,
+        table_engine,
+        procedure_manager,
+    );
+}

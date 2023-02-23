@@ -107,11 +107,6 @@ impl Instance {
             object_store,
         ));
 
-        let procedure_manager = create_procedure_manager(&opts.procedure).await?;
-        if let Some(procedure_manager) = &procedure_manager {
-            table_engine.register_procedure_loaders(&**procedure_manager);
-        }
-
         // create remote catalog manager
         let (catalog_manager, factory, table_id_provider) = match opts.mode {
             Mode::Standalone => {
@@ -181,8 +176,17 @@ impl Instance {
             )),
         };
 
+        let procedure_manager = create_procedure_manager(&opts.procedure).await?;
         // Recover procedures.
         if let Some(procedure_manager) = &procedure_manager {
+            table_engine.register_procedure_loaders(&**procedure_manager);
+            table_procedure::register_procedure_loaders(
+                catalog_manager.clone(),
+                table_engine.clone(),
+                table_engine.clone(),
+                &**procedure_manager,
+            );
+
             procedure_manager
                 .recover()
                 .await

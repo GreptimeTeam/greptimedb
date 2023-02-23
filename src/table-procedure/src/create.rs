@@ -17,7 +17,7 @@
 use async_trait::async_trait;
 use catalog::{CatalogManagerRef, RegisterTableRequest};
 use common_procedure::{
-    Context, Error, LockKey, Procedure, ProcedureId, ProcedureManagerRef, ProcedureState,
+    Context, Error, LockKey, Procedure, ProcedureId, ProcedureManager, ProcedureState,
     ProcedureWithId, Result, Status,
 };
 use common_telemetry::logging;
@@ -95,7 +95,7 @@ impl CreateTableProcedure {
         catalog_manager: CatalogManagerRef,
         engine_procedure: TableEngineProcedureRef,
         table_engine: TableEngineRef,
-        procedure_manager: ProcedureManagerRef,
+        procedure_manager: &dyn ProcedureManager,
     ) {
         procedure_manager
             .register_loader(
