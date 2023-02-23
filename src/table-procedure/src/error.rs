@@ -15,6 +15,7 @@
 use std::any::Any;
 
 use common_error::prelude::*;
+use common_procedure::ProcedureId;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
@@ -48,6 +49,12 @@ pub enum Error {
 
     #[snafu(display("Schema {} not found", name))]
     SchemaNotFound { name: String },
+
+    #[snafu(display("Subprocedure {} failed", subprocedure_id))]
+    SubprocedureFailed {
+        subprocedure_id: ProcedureId,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -57,7 +64,9 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            SerializeProcedure { .. } | DeserializeProcedure { .. } => StatusCode::Internal,
+            SerializeProcedure { .. } | DeserializeProcedure { .. } | SubprocedureFailed { .. } => {
+                StatusCode::Internal
+            }
             InvalidRawSchema { source, .. } => source.status_code(),
             AccessCatalog { source } => source.status_code(),
             CatalogNotFound { .. } | SchemaNotFound { .. } => StatusCode::InvalidArguments,

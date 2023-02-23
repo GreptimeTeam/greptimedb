@@ -28,7 +28,7 @@ use table::requests::CreateTableRequest;
 
 use crate::error::{
     AccessCatalogSnafu, CatalogNotFoundSnafu, DeserializeProcedureSnafu, SchemaNotFoundSnafu,
-    SerializeProcedureSnafu,
+    SerializeProcedureSnafu, SubprocedureFailedSnafu,
 };
 
 /// Procedure to create a table.
@@ -79,7 +79,7 @@ impl CreateTableProcedure {
             data: CreateTableData {
                 state: CreateTableState::Prepare,
                 request,
-                sub_procedure_id: None,
+                subprocedure_id: None,
             },
             catalog_manager,
             table_engine,
@@ -161,53 +161,20 @@ impl CreateTableProcedure {
 
         self.data.state = CreateTableState::EngineCreateTable;
         // Assign procedure id to the subprocedure.
-        self.data.sub_procedure_id = Some(ProcedureId::random());
+        self.data.subprocedure_id = Some(ProcedureId::random());
 
         Ok(Status::executing(true))
     }
 
     async fn on_engine_create_table(&mut self, ctx: &Context) -> Result<Status> {
         // Safety: subprocedure id is always set in this state.
-        let sub_id = self.data.sub_procedure_id.unwrap();
+        let sub_id = self.data.subprocedure_id.unwrap();
 
-        // Check procedure state.
-        if let Some(sub_state) = ctx.provider.procedure_state(sub_id).await? {
-            match sub_state {
-                ProcedureState::Running => Ok(Status::Suspended {
-                    subprocedures: Vec::new(),
-                    persist: false,
-                }),
-                ProcedureState::Done => {
-                    logging::info!(
-                        "On engine create table {}, done, sub_id: {}",
-                        self.data.request.table_name,
-                        sub_id
-                    );
-                    // The sub procedure is done, we can execute next step.
-                    self.data.state = CreateTableState::RegisterCatalog;
-                    Ok(Status::executing(true))
-                }
-                ProcedureState::Failed => {
-                    // If failed, try to create a new procedure to create table.
-                    let engine_ctx = EngineContext::default();
-                    let procedure = self
-                        .engine_procedure
-                        .create_table_procedure(&engine_ctx, self.data.request.clone())
-                        .map_err(Error::external)?;
-                    let sub_id = ProcedureId::random();
-                    // Store the procedure id.
-                    self.data.sub_procedure_id = Some(sub_id);
-
-                    Ok(Status::Suspended {
-                        subprocedures: vec![ProcedureWithId {
-                            id: sub_id,
-                            procedure,
-                        }],
-                        persist: true,
-                    })
-                }
-            }
-        } else {
+        // Query subprocedure state.
+        let Some(sub_state) = ctx.provider.procedure_state(sub_id).await? else {
+            // We need to submit the subprocedure if it doesn't exist. We always need to
+            // do this check as we might not submitted the subprocedure yet when the manager
+            // recover this procedure from procedure store.
             logging::info!(
                 "On engine create table {}, not found, sub_id: {}",
                 self.data.request.table_name,
@@ -220,13 +187,37 @@ impl CreateTableProcedure {
                 .engine_procedure
                 .create_table_procedure(&engine_ctx, self.data.request.clone())
                 .map_err(Error::external)?;
-            Ok(Status::Suspended {
+            return Ok(Status::Suspended {
                 subprocedures: vec![ProcedureWithId {
                     id: sub_id,
                     procedure,
                 }],
                 persist: true,
-            })
+            });
+        };
+
+        match sub_state {
+            ProcedureState::Running => Ok(Status::Suspended {
+                subprocedures: Vec::new(),
+                persist: false,
+            }),
+            ProcedureState::Done => {
+                logging::info!(
+                    "On engine create table {}, done, sub_id: {}",
+                    self.data.request.table_name,
+                    sub_id
+                );
+                // The sub procedure is done, we can execute next step.
+                self.data.state = CreateTableState::RegisterCatalog;
+                Ok(Status::executing(true))
+            }
+            ProcedureState::Failed => {
+                // Return error if the subprocedure is failed.
+                SubprocedureFailedSnafu {
+                    subprocedure_id: sub_id,
+                }
+                .fail()?
+            }
         }
     }
 
@@ -300,7 +291,7 @@ struct CreateTableData {
     ///
     /// This id is `Some` while the procedure is in [CreateTableState::EngineCreateTable]
     /// state.
-    sub_procedure_id: Option<ProcedureId>,
+    subprocedure_id: Option<ProcedureId>,
 }
 
 impl CreateTableData {
