@@ -86,4 +86,34 @@ pub fn last_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> O
     values.values().last().copied()
 }
 
-// TODO(ruihang): support quantile_over_time, stddev_over_time, stdvar_over_time and present_over_time
+/// absent_over_time returns an empty vector if the range vector passed to it has any
+/// elements (floats or native histograms) and a 1-element vector with the value 1 if
+/// the range vector passed to it has no elements.
+#[range_fn(
+    name = "AbsentOverTime",
+    ret = "Float64Array",
+    display_name = "prom_absent_over_time"
+)]
+pub fn absent_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
+    if values.len() == 0 {
+        Some(1.0)
+    } else {
+        None
+    }
+}
+
+/// the value 1 for any series in the specified interval.
+#[range_fn(
+    name = "PresentOverTime",
+    ret = "Float64Array",
+    display_name = "prom_present_over_time"
+)]
+pub fn present_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
+    if values.len() == 0 {
+        None
+    } else {
+        Some(1.0)
+    }
+}
+
+// TODO(ruihang): support quantile_over_time, stddev_over_time, and stdvar_over_time
