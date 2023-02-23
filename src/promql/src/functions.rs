@@ -16,6 +16,10 @@ mod aggr_over_time;
 mod idelta;
 mod increase;
 
+pub use aggr_over_time::{
+    AbsentOverTime, AvgOverTime, CountOverTime, LastOverTime, MaxOverTime, MinOverTime,
+    PresentOverTime, SumOverTime,
+};
 use datafusion::arrow::array::ArrayRef;
 use datafusion::error::DataFusionError;
 use datafusion::physical_plan::ColumnarValue;

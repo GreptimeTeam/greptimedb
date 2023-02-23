@@ -22,7 +22,7 @@ use syn::spanned::Spanned;
 use syn::token::Comma;
 use syn::{
     parse_macro_input, Attribute, AttributeArgs, FnArg, Ident, ItemFn, Meta, MetaNameValue,
-    NestedMeta, Signature, Type, Visibility,
+    NestedMeta, Signature, Type, TypeReference, Visibility,
 };
 
 macro_rules! ok {
@@ -156,7 +156,7 @@ fn build_struct(
             // time index column and value column
             fn input_type() -> Vec<DataType> {
                 vec![
-                    RangeArray::convert_data_type(DataType::Int64),
+                    RangeArray::convert_data_type(DataType::Timestamp(TimeUnit::Millisecond, None)),
                     RangeArray::convert_data_type(DataType::Float64),
                 ]
             }
@@ -181,6 +181,16 @@ fn build_calc_fn(
         .enumerate()
         .map(|(i, ty)| Ident::new(&format!("param_{}", i), ty.span()))
         .collect::<Vec<_>>();
+    let unref_param_types = param_types
+        .iter()
+        .map(|ty| {
+            if let Type::Reference(TypeReference { elem, .. }) = ty {
+                elem.as_ref().clone()
+            } else {
+                ty.clone()
+            }
+        })
+        .collect::<Vec<_>>();
     let num_params = param_types.len();
     let param_numbers = (0..num_params).collect::<Vec<_>>();
     let range_array_names = param_names
@@ -200,11 +210,11 @@ fn build_calc_fn(
 
                 let mut result_array = Vec::new();
                 for index in 0..#first_range_array_name.len(){
-                    #( let #param_names = *#range_array_names.get(index).unwrap().as_any().downcast_ref::<#param_types>().unwrap(); )*
+                    #( let #param_names = #range_array_names.get(index).unwrap().as_any().downcast_ref::<#unref_param_types>().unwrap().clone(); )*
 
                     // TODO(ruihang): add ensure!() to check length
 
-                    let result = #fn_name(#( #param_names, )*);
+                    let result = #fn_name(#( &#param_names, )*);
                     result_array.push(result);
                 }
 

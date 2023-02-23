@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use common_function_macro::range_fn;
 use datafusion::arrow::array::{Float64Array, TimestampMillisecondArray};
+use datafusion::arrow::datatypes::TimeUnit;
 use datafusion::common::DataFusionError;
 use datafusion::logical_expr::{ScalarUDF, Signature, TypeSignature, Volatility};
 use datafusion::physical_plan::ColumnarValue;
@@ -73,7 +74,9 @@ pub fn sum_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Op
     display_name = "prom_count_over_time"
 )]
 pub fn count_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> f64 {
-    values.len() as f64
+    let result = values.len() as f64;
+    println!("count over time result: {}", result);
+    result
 }
 
 /// The most recent point value in specified interval.
