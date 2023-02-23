@@ -131,19 +131,6 @@ fn build_struct(
 ) -> TokenStream {
     let display_name = display_name_ident.to_string();
     quote! {
-        use std::fmt::Display;
-        use std::sync::Arc;
-
-        use datafusion::arrow::array::{Float64Array, Int64Array};
-        use datafusion::common::DataFusionError;
-        use datafusion::logical_expr::{ScalarUDF, Signature, TypeSignature, Volatility};
-        use datafusion::physical_plan::ColumnarValue;
-        use datatypes::arrow::array::{Array, PrimitiveArray};
-        use datatypes::arrow::datatypes::DataType;
-
-        use crate::range_array::RangeArray;
-        use crate::functions::extract_array;
-
         #(#attrs)*
         #[derive(Debug)]
         #vis struct #name {}

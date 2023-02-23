@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod aggr_over_time;
 mod idelta;
 mod increase;
-mod simple;
 
 use datafusion::arrow::array::ArrayRef;
 use datafusion::error::DataFusionError;
