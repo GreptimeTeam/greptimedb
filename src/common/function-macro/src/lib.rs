@@ -12,8 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod range_fn;
+
 use proc_macro::TokenStream;
 use quote::{quote, quote_spanned};
+use range_fn::process_range_fn;
 use syn::parse::Parser;
 use syn::spanned::Spanned;
 use syn::{parse_macro_input, DeriveInput, ItemStruct};
@@ -82,4 +85,9 @@ pub fn as_aggr_func_creator(_args: TokenStream, input: TokenStream) -> TokenStre
         #item_struct
     }
     .into()
+}
+
+#[proc_macro_attribute]
+pub fn range_fn(args: TokenStream, input: TokenStream) -> TokenStream {
+    process_range_fn(args, input)
 }

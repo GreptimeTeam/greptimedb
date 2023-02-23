@@ -12,22 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod idelta;
-mod increase;
-mod simple;
+use common_function_macro::range_fn;
+use datafusion::arrow::array::TimestampMillisecondArray;
 
-use datafusion::arrow::array::ArrayRef;
-use datafusion::error::DataFusionError;
-use datafusion::physical_plan::ColumnarValue;
-pub use idelta::IDelta;
-pub use increase::Increase;
-
-pub(crate) fn extract_array(columnar_value: &ColumnarValue) -> Result<ArrayRef, DataFusionError> {
-    if let ColumnarValue::Array(array) = columnar_value {
-        Ok(array.clone())
+/// This is docstring of `IDelta` function.
+#[range_fn(name = "IDelta", ret = "Float64Array", display_name = "prom_idelta")]
+fn compute(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
+    let len = values.len();
+    let values = values.values();
+    if len < 2 {
+        None
     } else {
-        Err(DataFusionError::Execution(
-            "expect array as input, found scalar value".to_string(),
-        ))
+        Some(values[len - 1] - values[len - 2])
     }
 }
