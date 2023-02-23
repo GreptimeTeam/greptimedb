@@ -2208,6 +2208,7 @@ dependencies = [
  "tempdir",
  "tokio",
  "tokio-stream",
+ "toml",
  "tonic",
  "tower",
  "tower-http",

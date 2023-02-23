@@ -64,3 +64,4 @@ client = { path = "../client" }
 common-query = { path = "../common/query" }
 datafusion-common.workspace = true
 tempdir = "0.3"
+toml = "0.5"

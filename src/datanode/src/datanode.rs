@@ -147,6 +147,8 @@ impl From<&DatanodeOptions> for StorageEngineConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DatanodeOptions {
+    pub mode: Mode,
+    pub enable_memory_catalog: bool,
     pub node_id: Option<u64>,
     pub rpc_addr: String,
     pub rpc_hostname: Option<String>,
@@ -156,14 +158,14 @@ pub struct DatanodeOptions {
     pub meta_client_opts: Option<MetaClientOpts>,
     pub wal: WalConfig,
     pub storage: ObjectStoreConfig,
-    pub enable_memory_catalog: bool,
     pub compaction: CompactionConfig,
-    pub mode: Mode,
 }
 
 impl Default for DatanodeOptions {
     fn default() -> Self {
         Self {
+            mode: Mode::Standalone,
+            enable_memory_catalog: false,
             node_id: None,
             rpc_addr: "127.0.0.1:3001".to_string(),
             rpc_hostname: None,
@@ -173,9 +175,7 @@ impl Default for DatanodeOptions {
             meta_client_opts: None,
             wal: WalConfig::default(),
             storage: ObjectStoreConfig::default(),
-            enable_memory_catalog: false,
             compaction: CompactionConfig::default(),
-            mode: Mode::Standalone,
         }
     }
 }
@@ -216,5 +216,17 @@ impl Datanode {
 
     pub fn get_instance(&self) -> InstanceRef {
         self.instance.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_toml() {
+        let opts = DatanodeOptions::default();
+        let toml_string = toml::to_string(&opts).unwrap();
+        let _parsed: DatanodeOptions = toml::from_str(&toml_string).unwrap();
     }
 }
