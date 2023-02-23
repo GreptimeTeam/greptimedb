@@ -399,7 +399,7 @@ mod tests {
     use log_store::NoopLogStore;
     use mito::config::EngineConfig;
     use mito::engine::MitoEngine;
-    use object_store::ObjectStore;
+    use object_store::{ObjectStore, ObjectStoreBuilder};
     use storage::compaction::noop::NoopCompactionScheduler;
     use storage::config::EngineConfig as StorageEngineConfig;
     use storage::EngineImpl;
@@ -486,7 +486,7 @@ mod tests {
             .root(&store_dir)
             .build()
             .unwrap();
-        let object_store = ObjectStore::new(accessor);
+        let object_store = ObjectStore::new(accessor).finish();
         let noop_compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
         let table_engine = Arc::new(MitoEngine::new(
             EngineConfig::default(),

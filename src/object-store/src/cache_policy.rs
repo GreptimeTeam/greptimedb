@@ -12,112 +12,177 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::io;
 use std::num::NonZeroUsize;
 use std::ops::DerefMut;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use async_trait::async_trait;
-use futures::future::BoxFuture;
+use futures::AsyncRead;
 use lru::LruCache;
-use opendal::layers::CachePolicy;
-use opendal::raw::output::Reader;
-use opendal::raw::{Accessor, RpDelete, RpRead};
-use opendal::{ErrorKind, OpDelete, OpRead, OpWrite, Result};
+use opendal::ops::*;
+use opendal::raw::*;
+use opendal::{ErrorKind, Result};
 use tokio::sync::Mutex;
 
-#[derive(Debug)]
-pub struct LruCachePolicy {
+pub struct LruCacheLayer<C> {
+    cache: Arc<C>,
     lru_cache: Arc<Mutex<LruCache<String, ()>>>,
 }
 
-impl LruCachePolicy {
-    pub fn new(capacity: usize) -> Self {
+impl<C: Accessor> LruCacheLayer<C> {
+    pub fn new(cache: Arc<C>, capacity: usize) -> Self {
         Self {
+            cache,
             lru_cache: Arc::new(Mutex::new(LruCache::new(
                 NonZeroUsize::new(capacity).unwrap(),
             ))),
         }
     }
+}
 
+impl<I: Accessor, C: Accessor> Layer<I> for LruCacheLayer<C> {
+    type LayeredAccessor = LruCacheAccessor<I, C>;
+
+    fn layer(&self, inner: I) -> Self::LayeredAccessor {
+        LruCacheAccessor {
+            inner: Arc::new(inner),
+            cache: self.cache.clone(),
+            lru_cache: self.lru_cache.clone(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct LruCacheAccessor<I, C> {
+    inner: Arc<I>,
+    cache: Arc<C>,
+    lru_cache: Arc<Mutex<LruCache<String, ()>>>,
+}
+
+impl<I, C> LruCacheAccessor<I, C> {
     fn cache_path(&self, path: &str, args: &OpRead) -> String {
         format!("{}.cache-{}", path, args.range().to_header())
     }
 }
 
 #[async_trait]
-impl CachePolicy for LruCachePolicy {
-    fn on_read(
-        &self,
-        inner: Arc<dyn Accessor>,
-        cache: Arc<dyn Accessor>,
-        path: &str,
-        args: OpRead,
-    ) -> BoxFuture<'static, Result<(RpRead, Reader)>> {
+impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
+    type Inner = I;
+    type Reader = output::Reader;
+    type BlockingReader = I::BlockingReader;
+    type Pager = I::Pager;
+    type BlockingPager = I::BlockingPager;
+
+    fn inner(&self) -> &Self::Inner {
+        &self.inner
+    }
+
+    async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
         let path = path.to_string();
         let cache_path = self.cache_path(&path, &args);
         let lru_cache = self.lru_cache.clone();
-        Box::pin(async move {
-            match cache.read(&cache_path, OpRead::default()).await {
-                Ok(v) => {
-                    // update lru when cache hit
-                    let mut lru_cache = lru_cache.lock().await;
-                    lru_cache.get_or_insert(cache_path.clone(), || ());
-                    Ok(v)
-                }
-                Err(err) if err.kind() == ErrorKind::ObjectNotFound => {
-                    let (rp, reader) = inner.read(&path, args.clone()).await?;
-                    let size = rp.clone().into_metadata().content_length();
-                    let _ = cache
-                        .write(&cache_path, OpWrite::new(size), Box::new(reader))
-                        .await?;
-                    match cache.read(&cache_path, OpRead::default()).await {
-                        Ok(v) => {
-                            let r = {
-                                // push new cache file name to lru
-                                let mut lru_cache = lru_cache.lock().await;
-                                lru_cache.push(cache_path.clone(), ())
-                            };
-                            // delete the evicted cache file
-                            if let Some((k, _v)) = r {
-                                let _ = cache.delete(&k, OpDelete::new()).await;
-                            }
-                            Ok(v)
-                        }
-                        Err(_) => inner.read(&path, args).await,
-                    }
-                }
-                Err(_) => inner.read(&path, args).await,
+
+        match self.cache.read(&cache_path, OpRead::default()).await {
+            Ok((rp, r)) => {
+                // update lru when cache hit
+                let mut lru_cache = lru_cache.lock().await;
+                lru_cache.get_or_insert(cache_path.clone(), || ());
+                Ok(to_output_reader((rp, r)))
             }
-        })
+            Err(err) if err.kind() == ErrorKind::ObjectNotFound => {
+                let (rp, reader) = self.inner.read(&path, args.clone()).await?;
+                let size = rp.clone().into_metadata().content_length();
+                let _ = self
+                    .cache
+                    .write(
+                        &cache_path,
+                        OpWrite::new(size),
+                        Box::new(ReadWrapper(reader)),
+                    )
+                    .await?;
+                match self.cache.read(&cache_path, OpRead::default()).await {
+                    Ok((rp, reader)) => {
+                        let r = {
+                            // push new cache file name to lru
+                            let mut lru_cache = lru_cache.lock().await;
+                            lru_cache.push(cache_path.clone(), ())
+                        };
+                        // delete the evicted cache file
+                        if let Some((k, _v)) = r {
+                            let _ = self.cache.delete(&k, OpDelete::new()).await;
+                        }
+                        return Ok(to_output_reader((rp, reader)));
+                    }
+                    Err(_) => return self.inner.read(&path, args).await.map(to_output_reader),
+                }
+            }
+            Err(_) => return self.inner.read(&path, args).await.map(to_output_reader),
+        }
     }
 
-    fn on_delete(
-        &self,
-        inner: Arc<dyn Accessor>,
-        cache: Arc<dyn Accessor>,
-        path: &str,
-        args: OpDelete,
-    ) -> BoxFuture<'static, Result<RpDelete>> {
+    fn blocking_read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::BlockingReader)> {
+        self.inner.blocking_read(path, args)
+    }
+
+    async fn delete(&self, path: &str, args: OpDelete) -> Result<RpDelete> {
         let path = path.to_string();
         let lru_cache = self.lru_cache.clone();
-        Box::pin(async move {
-            let cache_files: Vec<String> = {
-                let mut guard = lru_cache.lock().await;
-                let lru = guard.deref_mut();
-                let cache_files = lru
-                    .iter()
-                    .filter(|(k, _v)| k.starts_with(format!("{path}.cache-").as_str()))
-                    .map(|(k, _v)| k.clone())
-                    .collect::<Vec<_>>();
-                for k in &cache_files {
-                    lru.pop(k);
-                }
-                cache_files
-            };
-            for file in cache_files {
-                let _ = cache.delete(&file, OpDelete::new()).await;
+
+        let cache_files: Vec<String> = {
+            let mut guard = lru_cache.lock().await;
+            let lru = guard.deref_mut();
+            let cache_files = lru
+                .iter()
+                .filter(|(k, _v)| k.starts_with(format!("{path}.cache-").as_str()))
+                .map(|(k, _v)| k.clone())
+                .collect::<Vec<_>>();
+            for k in &cache_files {
+                lru.pop(k);
             }
-            inner.delete(&path, args).await
-        })
+            cache_files
+        };
+        for file in cache_files {
+            let _ = self.cache.delete(&file, OpDelete::new()).await;
+        }
+        return self.inner.delete(&path, args).await;
     }
+
+    async fn list(&self, path: &str, args: OpList) -> Result<(RpList, Self::Pager)> {
+        self.inner.list(path, args).await
+    }
+
+    async fn scan(&self, path: &str, args: OpScan) -> Result<(RpScan, Self::Pager)> {
+        self.inner.scan(path, args).await
+    }
+
+    fn blocking_list(&self, path: &str, args: OpList) -> Result<(RpList, Self::BlockingPager)> {
+        self.inner.blocking_list(path, args)
+    }
+
+    fn blocking_scan(&self, path: &str, args: OpScan) -> Result<(RpScan, Self::BlockingPager)> {
+        self.inner.blocking_scan(path, args)
+    }
+}
+
+/// TODO: Workaround for output::Read doesn't implement input::Read
+///
+/// Should be remove after opendal fixed it.
+struct ReadWrapper<R>(R);
+
+impl<R: output::Read> AsyncRead for ReadWrapper<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        self.0.poll_read(cx, buf)
+    }
+}
+
+#[inline]
+fn to_output_reader<R: output::Read + 'static>(input: (RpRead, R)) -> (RpRead, output::Reader) {
+    (input.0, Box::new(input.1))
 }

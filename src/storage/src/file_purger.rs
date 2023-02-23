@@ -107,7 +107,7 @@ pub mod noop {
 #[cfg(test)]
 mod tests {
     use object_store::backend::fs::Builder;
-    use object_store::ObjectStore;
+    use object_store::{ObjectStore, ObjectStoreBuilder};
     use store_api::storage::OpType;
     use tempdir::TempDir;
 
@@ -172,7 +172,8 @@ mod tests {
                 .root(dir.path().to_str().unwrap())
                 .build()
                 .unwrap(),
-        );
+        )
+        .finish();
         let sst_file_name = "test-file-purge-handler.parquet";
 
         let noop_file_purger = Arc::new(LocalScheduler::new(
@@ -209,7 +210,8 @@ mod tests {
                 .root(dir.path().to_str().unwrap())
                 .build()
                 .unwrap(),
-        );
+        )
+        .finish();
         let sst_file_name = "test-file-purger.parquet";
         let scheduler = Arc::new(LocalScheduler::new(
             SchedulerConfig::default(),

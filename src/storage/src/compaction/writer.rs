@@ -92,7 +92,7 @@ mod tests {
         TimestampMillisecondVector, TimestampMillisecondVectorBuilder, UInt64VectorBuilder,
     };
     use object_store::backend::fs::Builder;
-    use object_store::ObjectStore;
+    use object_store::{ObjectStore, ObjectStoreBuilder};
     use store_api::storage::{ChunkReader, OpType, SequenceNumber};
     use tempdir::TempDir;
 
@@ -273,7 +273,7 @@ mod tests {
         let dir = TempDir::new("write_parquet").unwrap();
         let path = dir.path().to_str().unwrap();
         let backend = Builder::default().root(path).build().unwrap();
-        let object_store = ObjectStore::new(backend);
+        let object_store = ObjectStore::new(backend).finish();
 
         let seq = AtomicU64::new(0);
         let schema = schema_for_test();
@@ -350,7 +350,7 @@ mod tests {
         let dir = TempDir::new("write_parquet").unwrap();
         let path = dir.path().to_str().unwrap();
         let backend = Builder::default().root(path).build().unwrap();
-        let object_store = ObjectStore::new(backend);
+        let object_store = ObjectStore::new(backend).finish();
 
         let schema = schema_for_test();
         let seq = AtomicU64::new(0);

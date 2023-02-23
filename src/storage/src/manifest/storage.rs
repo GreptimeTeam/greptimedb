@@ -278,7 +278,7 @@ impl ManifestLogStorage for ManifestObjectStore {
 #[cfg(test)]
 mod tests {
     use object_store::backend::fs;
-    use object_store::ObjectStore;
+    use object_store::{ObjectStore, ObjectStoreBuilder};
     use tempdir::TempDir;
 
     use super::*;
@@ -292,7 +292,8 @@ mod tests {
                 .root(&tmp_dir.path().to_string_lossy())
                 .build()
                 .unwrap(),
-        );
+        )
+        .finish();
 
         let log_store = ManifestObjectStore::new("/", object_store);
 
