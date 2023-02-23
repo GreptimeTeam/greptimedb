@@ -145,11 +145,9 @@ impl SqlHandler {
             self.engine_procedure.clone(),
         );
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        let procedure_id = procedure_with_id.id;
 
-        info!(
-            "Create table {} by procedure {}",
-            table_name, procedure_with_id.id
-        );
+        info!("Create table {} by procedure {}", table_name, procedure_id);
 
         let mut watcher = procedure_manager
             .submit(procedure_with_id)
@@ -165,7 +163,7 @@ impl SqlHandler {
                     return Ok(Output::AffectedRows(0));
                 }
                 ProcedureState::Failed => {
-                    return ProcedureExecSnafu {}.fail();
+                    return ProcedureExecSnafu { procedure_id }.fail();
                 }
             }
         }

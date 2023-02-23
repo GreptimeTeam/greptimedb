@@ -15,6 +15,7 @@
 use std::any::Any;
 
 use common_error::prelude::*;
+use common_procedure::ProcedureId;
 use common_recordbatch::error::Error as RecordBatchError;
 use datafusion::parquet;
 use datatypes::prelude::ConcreteDataType;
@@ -414,8 +415,11 @@ pub enum Error {
     },
 
     // TODO(yingwen): Use procedure's error.
-    #[snafu(display("Failed to execute procedure"))]
-    ProcedureExec {},
+    #[snafu(display("Failed to execute procedure, procedure_id: {}", procedure_id))]
+    ProcedureExec {
+        procedure_id: ProcedureId,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
