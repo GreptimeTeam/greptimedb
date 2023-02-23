@@ -6,7 +6,7 @@ license.workspace = true
 
 [build-dependencies]
 protobuf-build = { version = "0.14", default-features = false, features = [
-    "protobuf-codec",
+  "protobuf-codec",
 ] }
 
 [dependencies]
