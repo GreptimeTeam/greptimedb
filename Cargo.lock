@@ -2708,6 +2708,7 @@ dependencies = [
  "table",
  "tempdir",
  "tokio",
+ "toml",
  "tonic",
  "tower",
 ]
