@@ -106,7 +106,7 @@ pub mod noop {
 
 #[cfg(test)]
 mod tests {
-    use object_store::backend::fs::Builder;
+    use object_store::services::Fs;
     use object_store::{ObjectStore, ObjectStoreBuilder};
     use store_api::storage::OpType;
     use tempdir::TempDir;
@@ -168,7 +168,7 @@ mod tests {
     async fn test_file_purger_handler() {
         let dir = TempDir::new("file-purge").unwrap();
         let object_store = ObjectStore::new(
-            Builder::default()
+            Fs::default()
                 .root(dir.path().to_str().unwrap())
                 .build()
                 .unwrap(),
@@ -206,7 +206,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         let dir = TempDir::new("file-purge").unwrap();
         let object_store = ObjectStore::new(
-            Builder::default()
+            Fs::default()
                 .root(dir.path().to_str().unwrap())
                 .build()
                 .unwrap(),

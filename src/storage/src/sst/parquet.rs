@@ -523,7 +523,7 @@ mod tests {
     use datatypes::prelude::{ScalarVector, Vector};
     use datatypes::types::{TimestampMillisecondType, TimestampType};
     use datatypes::vectors::TimestampMillisecondVector;
-    use object_store::backend::fs::Builder;
+    use object_store::services::Fs;
     use object_store::ObjectStoreBuilder;
     use store_api::storage::OpType;
     use tempdir::TempDir;
@@ -563,7 +563,7 @@ mod tests {
 
         let dir = TempDir::new("write_parquet").unwrap();
         let path = dir.path().to_str().unwrap();
-        let backend = Builder::default().root(path).build().unwrap();
+        let backend = Fs::default().root(path).build().unwrap();
         let object_store = ObjectStore::new(backend).finish();
         let sst_file_name = "test-flush.parquet";
         let iter = memtable.iter(&IterContext::default()).unwrap();
@@ -661,7 +661,7 @@ mod tests {
 
         let dir = TempDir::new("write_parquet").unwrap();
         let path = dir.path().to_str().unwrap();
-        let backend = Builder::default().root(path).build().unwrap();
+        let backend = Fs::default().root(path).build().unwrap();
         let object_store = ObjectStore::new(backend).finish();
         let sst_file_name = "test-read-large.parquet";
         let iter = memtable.iter(&IterContext::default()).unwrap();
@@ -680,7 +680,7 @@ mod tests {
             time_range
         );
         let operator = ObjectStore::new(
-            object_store::backend::fs::Builder::default()
+            Fs::default()
                 .root(dir.path().to_str().unwrap())
                 .build()
                 .unwrap(),
@@ -734,7 +734,7 @@ mod tests {
 
         let dir = TempDir::new("write_parquet").unwrap();
         let path = dir.path().to_str().unwrap();
-        let backend = Builder::default().root(path).build().unwrap();
+        let backend = Fs::default().root(path).build().unwrap();
         let object_store = ObjectStore::new(backend).finish();
         let sst_file_name = "test-read.parquet";
         let iter = memtable.iter(&IterContext::default()).unwrap();
@@ -753,7 +753,7 @@ mod tests {
             time_range
         );
         let operator = ObjectStore::new(
-            object_store::backend::fs::Builder::default()
+            Fs::default()
                 .root(dir.path().to_str().unwrap())
                 .build()
                 .unwrap(),
@@ -847,7 +847,7 @@ mod tests {
 
         let dir = TempDir::new("read-parquet-by-range").unwrap();
         let path = dir.path().to_str().unwrap();
-        let backend = Builder::default().root(path).build().unwrap();
+        let backend = Fs::default().root(path).build().unwrap();
         let object_store = ObjectStore::new(backend).finish();
         let sst_file_name = "test-read.parquet";
         let iter = memtable.iter(&IterContext::default()).unwrap();

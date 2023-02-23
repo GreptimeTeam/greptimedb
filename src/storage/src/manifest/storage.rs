@@ -277,7 +277,7 @@ impl ManifestLogStorage for ManifestObjectStore {
 
 #[cfg(test)]
 mod tests {
-    use object_store::backend::fs;
+    use object_store::services::Fs;
     use object_store::{ObjectStore, ObjectStoreBuilder};
     use tempdir::TempDir;
 
@@ -288,7 +288,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         let tmp_dir = TempDir::new("test_manifest_log_store").unwrap();
         let object_store = ObjectStore::new(
-            fs::Builder::default()
+            Fs::default()
                 .root(&tmp_dir.path().to_string_lossy())
                 .build()
                 .unwrap(),
