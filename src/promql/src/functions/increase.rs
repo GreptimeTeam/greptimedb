@@ -19,7 +19,7 @@ use datafusion::arrow::array::Float64Array;
 use datafusion::common::DataFusionError;
 use datafusion::logical_expr::{ScalarUDF, Signature, TypeSignature, Volatility};
 use datafusion::physical_plan::ColumnarValue;
-use datatypes::arrow::array::{Array, PrimitiveArray};
+use datatypes::arrow::array::Array;
 use datatypes::arrow::datatypes::DataType;
 
 use crate::functions::extract_array;
@@ -61,7 +61,7 @@ impl Increase {
                 .values();
 
             if range.len() < 2 {
-                result_array.push(0.0);
+                result_array.push(None);
                 continue;
             }
 
@@ -75,10 +75,10 @@ impl Increase {
                 }
             }
 
-            result_array.push(result_value);
+            result_array.push(Some(result_value));
         }
 
-        let result = ColumnarValue::Array(Arc::new(PrimitiveArray::from_iter(result_array)));
+        let result = ColumnarValue::Array(Arc::new(Float64Array::from_iter(result_array)));
         Ok(result)
     }
 
