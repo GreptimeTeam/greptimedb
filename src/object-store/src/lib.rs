@@ -13,10 +13,9 @@
 // limitations under the License.
 
 pub use opendal::{
-    layers, services, Error, ErrorKind, Layer, Object, ObjectLister, ObjectMetadata, ObjectMode,
-    Operator as ObjectStore, Result,
+    layers, services, Builder as ObjectStoreBuilder, Error, ErrorKind, Object, ObjectLister,
+    ObjectMetadata, ObjectMode, Operator as ObjectStore, Result,
 };
-pub mod backend;
 pub mod cache_policy;
 pub mod test_util;
 pub mod util;

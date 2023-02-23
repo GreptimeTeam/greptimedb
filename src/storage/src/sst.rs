@@ -145,6 +145,21 @@ impl LevelMeta {
         self.files.len()
     }
 
+    /// Returns expired SSTs from current level.
+    pub fn get_expired_files(&self, expire_time: &Timestamp) -> Vec<FileHandle> {
+        self.files
+            .iter()
+            .filter_map(|(_, v)| {
+                let Some((_, end)) = v.time_range() else { return None; };
+                if end < expire_time {
+                    Some(v.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     pub fn files(&self) -> impl Iterator<Item = &FileHandle> {
         self.files.values()
     }
@@ -211,6 +226,11 @@ impl FileHandle {
     #[inline]
     pub fn mark_deleted(&self) {
         self.inner.deleted.store(true, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn meta(&self) -> FileMeta {
+        self.inner.meta.clone()
     }
 }
 

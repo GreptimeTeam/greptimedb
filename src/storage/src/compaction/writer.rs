@@ -91,8 +91,8 @@ mod tests {
     use datatypes::vectors::{
         TimestampMillisecondVector, TimestampMillisecondVectorBuilder, UInt64VectorBuilder,
     };
-    use object_store::backend::fs::Builder;
-    use object_store::ObjectStore;
+    use object_store::services::Fs;
+    use object_store::{ObjectStore, ObjectStoreBuilder};
     use store_api::storage::{ChunkReader, OpType, SequenceNumber};
     use tempdir::TempDir;
 
@@ -272,8 +272,8 @@ mod tests {
     async fn test_sst_reader() {
         let dir = TempDir::new("write_parquet").unwrap();
         let path = dir.path().to_str().unwrap();
-        let backend = Builder::default().root(path).build().unwrap();
-        let object_store = ObjectStore::new(backend);
+        let backend = Fs::default().root(path).build().unwrap();
+        let object_store = ObjectStore::new(backend).finish();
 
         let seq = AtomicU64::new(0);
         let schema = schema_for_test();
@@ -349,8 +349,8 @@ mod tests {
     async fn test_sst_split() {
         let dir = TempDir::new("write_parquet").unwrap();
         let path = dir.path().to_str().unwrap();
-        let backend = Builder::default().root(path).build().unwrap();
-        let object_store = ObjectStore::new(backend);
+        let backend = Fs::default().root(path).build().unwrap();
+        let object_store = ObjectStore::new(backend).finish();
 
         let schema = schema_for_test();
         let seq = AtomicU64::new(0);

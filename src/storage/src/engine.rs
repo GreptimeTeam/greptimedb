@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use common_telemetry::logging::info;
@@ -289,7 +290,8 @@ impl<S: LogStore> EngineInner<S> {
 
         let mut guard = SlotGuard::new(name, &self.regions);
 
-        let store_config = self.region_store_config(&opts.parent_dir, opts.write_buffer_size, name);
+        let store_config =
+            self.region_store_config(&opts.parent_dir, opts.write_buffer_size, name, opts.ttl);
 
         let region = match RegionImpl::open(name.to_string(), store_config, opts).await? {
             None => return Ok(None),
@@ -319,8 +321,12 @@ impl<S: LogStore> EngineInner<S> {
                 .context(error::InvalidRegionDescSnafu {
                     region: &region_name,
                 })?;
-        let store_config =
-            self.region_store_config(&opts.parent_dir, opts.write_buffer_size, &region_name);
+        let store_config = self.region_store_config(
+            &opts.parent_dir,
+            opts.write_buffer_size,
+            &region_name,
+            opts.ttl,
+        );
 
         let region = RegionImpl::create(metadata, store_config).await?;
 
@@ -341,6 +347,7 @@ impl<S: LogStore> EngineInner<S> {
         parent_dir: &str,
         write_buffer_size: Option<usize>,
         region_name: &str,
+        ttl: Option<Duration>,
     ) -> StoreConfig<S> {
         let parent_dir = util::normalize_dir(parent_dir);
 
@@ -363,6 +370,7 @@ impl<S: LogStore> EngineInner<S> {
             compaction_scheduler: self.compaction_scheduler.clone(),
             engine_config: self.config.clone(),
             file_purger: self.file_purger.clone(),
+            ttl,
         }
     }
 }
@@ -371,7 +379,8 @@ impl<S: LogStore> EngineInner<S> {
 mod tests {
     use datatypes::type_id::LogicalTypeId;
     use log_store::test_util::log_store_util;
-    use object_store::backend::fs::Builder;
+    use object_store::services::Fs;
+    use object_store::ObjectStoreBuilder;
     use store_api::storage::Region;
     use tempdir::TempDir;
 
@@ -386,8 +395,8 @@ mod tests {
         let dir = TempDir::new("test_create_new_region").unwrap();
         let store_dir = dir.path().to_string_lossy();
 
-        let accessor = Builder::default().root(&store_dir).build().unwrap();
-        let object_store = ObjectStore::new(accessor);
+        let accessor = Fs::default().root(&store_dir).build().unwrap();
+        let object_store = ObjectStore::new(accessor).finish();
 
         let config = EngineConfig::default();
 

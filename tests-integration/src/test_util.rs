@@ -31,10 +31,9 @@ use datanode::sql::SqlHandler;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema};
 use frontend::instance::Instance as FeInstance;
-use object_store::backend::s3;
-use object_store::services::oss;
+use object_store::services::{Oss, S3};
 use object_store::test_util::TempFolder;
-use object_store::ObjectStore;
+use object_store::{ObjectStore, ObjectStoreBuilder};
 use once_cell::sync::OnceCell;
 use rand::Rng;
 use servers::grpc::GrpcServer;
@@ -105,7 +104,7 @@ fn get_test_store_config(
                 cache_capacity: None,
             };
 
-            let accessor = oss::Builder::default()
+            let accessor = Oss::default()
                 .root(&oss_config.root)
                 .endpoint(&oss_config.endpoint)
                 .access_key_id(&oss_config.access_key_id)
@@ -116,7 +115,7 @@ fn get_test_store_config(
 
             let config = ObjectStoreConfig::Oss(oss_config);
 
-            let store = ObjectStore::new(accessor);
+            let store = ObjectStore::new(accessor).finish();
 
             (
                 config,
@@ -135,7 +134,7 @@ fn get_test_store_config(
                 cache_capacity: None,
             };
 
-            let accessor = s3::Builder::default()
+            let accessor = S3::default()
                 .root(&s3_config.root)
                 .access_key_id(&s3_config.access_key_id)
                 .secret_access_key(&s3_config.secret_access_key)
@@ -145,7 +144,7 @@ fn get_test_store_config(
 
             let config = ObjectStoreConfig::S3(s3_config);
 
-            let store = ObjectStore::new(accessor);
+            let store = ObjectStore::new(accessor).finish();
 
             (config, Some(TempDirGuard::S3(TempFolder::new(&store, "/"))))
         }
@@ -350,6 +349,7 @@ pub async fn setup_grpc_server(
     let fe_instance_ref = Arc::new(fe_instance);
     let fe_grpc_server = Arc::new(GrpcServer::new(
         ServerGrpcQueryHandlerAdaptor::arc(fe_instance_ref),
+        None,
         runtime,
     ));
     let grpc_server_clone = fe_grpc_server.clone();

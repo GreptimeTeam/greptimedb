@@ -147,8 +147,8 @@ mod tests {
     use log_store::NoopLogStore;
     use mito::config::EngineConfig as TableEngineConfig;
     use mito::engine::MitoEngine;
-    use object_store::services::fs::Builder;
-    use object_store::ObjectStore;
+    use object_store::services::Fs as Builder;
+    use object_store::{ObjectStore, ObjectStoreBuilder};
     use query::parser::{QueryLanguageParser, QueryStatement};
     use query::QueryEngineFactory;
     use session::context::QueryContext;
@@ -213,7 +213,7 @@ mod tests {
         let dir = TempDir::new("setup_test_engine_and_table").unwrap();
         let store_dir = dir.path().to_string_lossy();
         let accessor = Builder::default().root(&store_dir).build().unwrap();
-        let object_store = ObjectStore::new(accessor);
+        let object_store = ObjectStore::new(accessor).finish();
         let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
         let sql = r#"insert into demo(host, cpu, memory, ts) values
                            ('host1', 66.6, 1024, 1655276557000),

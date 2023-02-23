@@ -42,6 +42,7 @@ pub struct CompactionTaskImpl<S: LogStore> {
     pub shared_data: SharedDataRef,
     pub wal: Wal<S>,
     pub manifest: RegionManifest,
+    pub expired_ssts: Vec<FileHandle>,
 }
 
 impl<S: LogStore> Debug for CompactionTaskImpl<S> {
@@ -60,19 +61,14 @@ impl<S: LogStore> Drop for CompactionTaskImpl<S> {
 
 impl<S: LogStore> CompactionTaskImpl<S> {
     /// Compacts inputs SSTs, returns `(output file, compacted input file)`.
-    async fn merge_ssts(&mut self) -> Result<(Vec<FileMeta>, Vec<FileMeta>)> {
+    async fn merge_ssts(&mut self) -> Result<(HashSet<FileMeta>, HashSet<FileMeta>)> {
         let mut futs = Vec::with_capacity(self.outputs.len());
         let mut compacted_inputs = HashSet::new();
         let region_id = self.shared_data.id();
         for output in self.outputs.drain(..) {
             let schema = self.schema.clone();
             let sst_layer = self.sst_layer.clone();
-            compacted_inputs.extend(output.inputs.iter().map(|f| FileMeta {
-                region_id,
-                file_name: f.file_name().to_string(),
-                time_range: *f.time_range(),
-                level: f.level(),
-            }));
+            compacted_inputs.extend(output.inputs.iter().map(FileHandle::meta));
 
             // TODO(hl): Maybe spawn to runtime to exploit in-job parallelism.
             futs.push(async move {
@@ -94,8 +90,8 @@ impl<S: LogStore> CompactionTaskImpl<S> {
     /// Writes updated SST info into manifest.
     async fn write_manifest_and_apply(
         &self,
-        output: Vec<FileMeta>,
-        input: Vec<FileMeta>,
+        output: HashSet<FileMeta>,
+        input: HashSet<FileMeta>,
     ) -> Result<()> {
         let version = &self.shared_data.version_control;
         let region_version = version.metadata().version();
@@ -103,8 +99,8 @@ impl<S: LogStore> CompactionTaskImpl<S> {
         let edit = RegionEdit {
             region_version,
             flushed_sequence: None,
-            files_to_add: output,
-            files_to_remove: input,
+            files_to_add: Vec::from_iter(output.into_iter()),
+            files_to_remove: Vec::from_iter(input.into_iter()),
         };
         info!(
             "Compacted region: {}, region edit: {:?}",
@@ -131,10 +127,11 @@ impl<S: LogStore> CompactionTask for CompactionTaskImpl<S> {
     async fn run(mut self) -> Result<()> {
         self.mark_files_compacting(true);
 
-        let (output, compacted) = self.merge_ssts().await.map_err(|e| {
+        let (output, mut compacted) = self.merge_ssts().await.map_err(|e| {
             error!(e; "Failed to compact region: {}", self.shared_data.name());
             e
         })?;
+        compacted.extend(self.expired_ssts.iter().map(FileHandle::meta));
         self.write_manifest_and_apply(output, compacted)
             .await
             .map_err(|e| {

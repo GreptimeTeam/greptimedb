@@ -17,12 +17,15 @@ use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::str::FromStr;
+use std::time::Duration;
 
 use chrono::offset::Local;
 use chrono::{DateTime, LocalResult, NaiveDateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
+use snafu::{OptionExt, ResultExt};
 
-use crate::error::{Error, ParseTimestampSnafu};
+use crate::error;
+use crate::error::{ArithmeticOverflowSnafu, Error, ParseTimestampSnafu, TimestampOverflowSnafu};
 
 #[derive(Debug, Clone, Default, Copy, Serialize, Deserialize)]
 pub struct Timestamp {
@@ -31,6 +34,50 @@ pub struct Timestamp {
 }
 
 impl Timestamp {
+    /// Creates current timestamp in millisecond.
+    pub fn current_millis() -> Self {
+        Self {
+            value: crate::util::current_time_millis(),
+            unit: TimeUnit::Millisecond,
+        }
+    }
+
+    /// Subtracts a duration from timestamp.
+    /// # Note
+    /// The result time unit remains unchanged even if `duration` has a different unit with `self`.
+    /// For example, a timestamp with value 1 and time unit second, subtracted by 1 millisecond
+    /// and the result is still 1 second.
+    pub fn sub(&self, duration: Duration) -> error::Result<Self> {
+        let duration: i64 = match self.unit {
+            TimeUnit::Second => {
+                i64::try_from(duration.as_secs()).context(TimestampOverflowSnafu)?
+            }
+            TimeUnit::Millisecond => {
+                i64::try_from(duration.as_millis()).context(TimestampOverflowSnafu)?
+            }
+            TimeUnit::Microsecond => {
+                i64::try_from(duration.as_micros()).context(TimestampOverflowSnafu)?
+            }
+            TimeUnit::Nanosecond => {
+                i64::try_from(duration.as_nanos()).context(TimestampOverflowSnafu)?
+            }
+        };
+
+        let value = self
+            .value
+            .checked_sub(duration)
+            .with_context(|| ArithmeticOverflowSnafu {
+                msg: format!(
+                    "Try to subtract timestamp: {:?} with duration: {:?}",
+                    self, duration
+                ),
+            })?;
+        Ok(Timestamp {
+            value,
+            unit: self.unit,
+        })
+    }
+
     pub fn new(value: i64, unit: TimeUnit) -> Self {
         Self { unit, value }
     }
@@ -77,11 +124,11 @@ impl Timestamp {
     pub fn convert_to(&self, unit: TimeUnit) -> Option<Timestamp> {
         if self.unit().factor() >= unit.factor() {
             let mul = self.unit().factor() / unit.factor();
-            let value = self.value.checked_mul(mul)?;
+            let value = self.value.checked_mul(mul as i64)?;
             Some(Timestamp::new(value, unit))
         } else {
             let mul = unit.factor() / self.unit().factor();
-            Some(Timestamp::new(self.value.div_euclid(mul), unit))
+            Some(Timestamp::new(self.value.div_euclid(mul as i64), unit))
         }
     }
 
@@ -92,23 +139,25 @@ impl Timestamp {
     pub fn convert_to_ceil(&self, unit: TimeUnit) -> Option<Timestamp> {
         if self.unit().factor() >= unit.factor() {
             let mul = self.unit().factor() / unit.factor();
-            let value = self.value.checked_mul(mul)?;
+            let value = self.value.checked_mul(mul as i64)?;
             Some(Timestamp::new(value, unit))
         } else {
             let mul = unit.factor() / self.unit().factor();
-            Some(Timestamp::new(self.value.div_ceil(mul), unit))
+            Some(Timestamp::new(self.value.div_ceil(mul as i64), unit))
         }
     }
 
     /// Split a [Timestamp] into seconds part and nanoseconds part.
     /// Notice the seconds part of split result is always rounded down to floor.
-    fn split(&self) -> (i64, i64) {
-        let sec_mul = TimeUnit::Second.factor() / self.unit.factor();
-        let nsec_mul = self.unit.factor() / TimeUnit::Nanosecond.factor();
+    fn split(&self) -> (i64, u32) {
+        let sec_mul = (TimeUnit::Second.factor() / self.unit.factor()) as i64;
+        let nsec_mul = (self.unit.factor() / TimeUnit::Nanosecond.factor()) as i64;
 
         let sec_div = self.value.div_euclid(sec_mul);
         let sec_mod = self.value.rem_euclid(sec_mul);
-        (sec_div, sec_mod * nsec_mul)
+        // safety:  the max possible value of `sec_mod` is 999,999,999
+        let nsec = u32::try_from(sec_mod * nsec_mul).unwrap();
+        (sec_div, nsec)
     }
 
     /// Format timestamp to ISO8601 string. If the timestamp exceeds what chrono timestamp can
@@ -122,15 +171,8 @@ impl Timestamp {
     }
 
     pub fn to_chrono_datetime(&self) -> LocalResult<DateTime<Utc>> {
-        let nano_factor = TimeUnit::Second.factor() / TimeUnit::Nanosecond.factor();
-        let (mut secs, mut nsecs) = self.split();
-
-        if nsecs < 0 {
-            secs -= 1;
-            nsecs += nano_factor;
-        }
-
-        Utc.timestamp_opt(secs, nsecs as u32)
+        let (sec, nsec) = self.split();
+        Utc.timestamp_opt(sec, nsec)
     }
 }
 
@@ -252,7 +294,7 @@ impl Display for TimeUnit {
 }
 
 impl TimeUnit {
-    pub fn factor(&self) -> i64 {
+    pub fn factor(&self) -> u32 {
         match self {
             TimeUnit::Second => 1_000_000_000,
             TimeUnit::Millisecond => 1_000_000,
@@ -300,7 +342,7 @@ impl Hash for Timestamp {
     fn hash<H: Hasher>(&self, state: &mut H) {
         let (sec, nsec) = self.split();
         state.write_i64(sec);
-        state.write_i64(nsec);
+        state.write_u32(nsec);
     }
 }
 
@@ -788,5 +830,42 @@ mod tests {
             Timestamp::new(1, TimeUnit::Second).convert_to(TimeUnit::Millisecond),
             Timestamp::new(1, TimeUnit::Second).convert_to_ceil(TimeUnit::Millisecond)
         );
+    }
+
+    #[test]
+    fn test_split_overflow() {
+        Timestamp::new(i64::MAX, TimeUnit::Second).split();
+        Timestamp::new(i64::MIN, TimeUnit::Second).split();
+        Timestamp::new(i64::MAX, TimeUnit::Millisecond).split();
+        Timestamp::new(i64::MIN, TimeUnit::Millisecond).split();
+        Timestamp::new(i64::MAX, TimeUnit::Microsecond).split();
+        Timestamp::new(i64::MIN, TimeUnit::Microsecond).split();
+        Timestamp::new(i64::MAX, TimeUnit::Nanosecond).split();
+        Timestamp::new(i64::MIN, TimeUnit::Nanosecond).split();
+        let (sec, nsec) = Timestamp::new(i64::MIN, TimeUnit::Nanosecond).split();
+        let time = NaiveDateTime::from_timestamp_opt(sec, nsec).unwrap();
+        assert_eq!(sec, time.timestamp());
+        assert_eq!(nsec, time.timestamp_subsec_nanos());
+    }
+
+    #[test]
+    fn test_timestamp_sub() {
+        let res = Timestamp::new(1, TimeUnit::Second)
+            .sub(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(0, res.value);
+        assert_eq!(TimeUnit::Second, res.unit);
+
+        let res = Timestamp::new(0, TimeUnit::Second)
+            .sub(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(-1, res.value);
+        assert_eq!(TimeUnit::Second, res.unit);
+
+        let res = Timestamp::new(1, TimeUnit::Second)
+            .sub(Duration::from_millis(1))
+            .unwrap();
+        assert_eq!(1, res.value);
+        assert_eq!(TimeUnit::Second, res.unit);
     }
 }

@@ -17,7 +17,9 @@ use std::sync::Arc;
 use clap::Parser;
 use common_base::Plugins;
 use common_telemetry::info;
-use datanode::datanode::{Datanode, DatanodeOptions, ObjectStoreConfig, WalConfig};
+use datanode::datanode::{
+    CompactionConfig, Datanode, DatanodeOptions, ObjectStoreConfig, WalConfig,
+};
 use datanode::instance::InstanceRef;
 use frontend::frontend::{Frontend, FrontendOptions};
 use frontend::grpc::GrpcOptions;
@@ -77,6 +79,7 @@ pub struct StandaloneOptions {
     pub mode: Mode,
     pub wal: WalConfig,
     pub storage: ObjectStoreConfig,
+    pub compaction: CompactionConfig,
     pub enable_memory_catalog: bool,
 }
 
@@ -94,6 +97,7 @@ impl Default for StandaloneOptions {
             mode: Mode::Standalone,
             wal: WalConfig::default(),
             storage: ObjectStoreConfig::default(),
+            compaction: CompactionConfig::default(),
             enable_memory_catalog: false,
         }
     }
@@ -120,6 +124,7 @@ impl StandaloneOptions {
             wal: self.wal,
             storage: self.storage,
             enable_memory_catalog: self.enable_memory_catalog,
+            compaction: self.compaction,
             ..Default::default()
         }
     }
