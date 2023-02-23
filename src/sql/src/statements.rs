@@ -320,10 +320,9 @@ mod tests {
     use common_time::timestamp::TimeUnit;
     use datatypes::types::BooleanType;
     use datatypes::value::OrderedFloat;
-    use sqlparser::ast::ObjectName;
 
     use super::*;
-    use crate::ast::{Ident, TimezoneInfo};
+    use crate::ast::TimezoneInfo;
     use crate::statements::ColumnOption;
 
     fn check_type(sql_type: SqlDataType, data_type: ConcreteDataType) {
@@ -362,10 +361,6 @@ mod tests {
         check_type(SqlDataType::Double, ConcreteDataType::float64_datatype());
         check_type(SqlDataType::Boolean, ConcreteDataType::boolean_datatype());
         check_type(SqlDataType::Date, ConcreteDataType::date_datatype());
-        check_type(
-            SqlDataType::Custom(ObjectName(vec![Ident::new("datetime")]), vec![]),
-            ConcreteDataType::datetime_datatype(),
-        );
         check_type(
             SqlDataType::Timestamp(None, TimezoneInfo::None),
             ConcreteDataType::timestamp_millisecond_datatype(),
