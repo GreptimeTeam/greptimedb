@@ -22,7 +22,7 @@ pub type RegionManifest = ManifestImpl<RegionMetaActionList>;
 mod tests {
     use std::sync::Arc;
 
-    use object_store::backend::fs;
+    use object_store::services::Fs;
     use object_store::{ObjectStore, ObjectStoreBuilder};
     use store_api::manifest::action::ProtocolAction;
     use store_api::manifest::{Manifest, MetaActionIterator, MAX_VERSION};
@@ -37,7 +37,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         let tmp_dir = TempDir::new("test_region_manifest").unwrap();
         let object_store = ObjectStore::new(
-            fs::Builder::default()
+            Fs::default()
                 .root(&tmp_dir.path().to_string_lossy())
                 .build()
                 .unwrap(),

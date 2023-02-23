@@ -31,7 +31,7 @@ use datanode::sql::SqlHandler;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema};
 use frontend::instance::Instance as FeInstance;
-use object_store::backend::{oss, s3};
+use object_store::services::{Oss, S3};
 use object_store::test_util::TempFolder;
 use object_store::{ObjectStore, ObjectStoreBuilder};
 use once_cell::sync::OnceCell;
@@ -104,7 +104,7 @@ fn get_test_store_config(
                 cache_capacity: None,
             };
 
-            let accessor = oss::Builder::default()
+            let accessor = Oss::default()
                 .root(&oss_config.root)
                 .endpoint(&oss_config.endpoint)
                 .access_key_id(&oss_config.access_key_id)
@@ -134,7 +134,7 @@ fn get_test_store_config(
                 cache_capacity: None,
             };
 
-            let accessor = s3::Builder::default()
+            let accessor = S3::default()
                 .root(&s3_config.root)
                 .access_key_id(&s3_config.access_key_id)
                 .secret_access_key(&s3_config.secret_access_key)
