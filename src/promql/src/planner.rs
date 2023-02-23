@@ -655,12 +655,6 @@ impl<S: ContextProvider> PromPlanner<S> {
             })
             .collect::<std::result::Result<Vec<_>, _>>()
             .context(DataFusionPlanningSnafu)?;
-
-        // let new_value_columns = exprs
-        //     .iter()
-        //     .map(|expr| expr.display_name())
-        //     .collect::<std::result::Result<Vec<_>, _>>()
-        //     .context(DataFusionPlanningSnafu)?;
         self.ctx.value_columns = new_value_columns;
 
         Ok(exprs)

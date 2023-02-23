@@ -20,10 +20,10 @@ use crate::type_id::LogicalTypeId;
 use crate::value::Value;
 use crate::vectors::MutableVector;
 
-/// Used to represent the List datatype.
+/// Used to represent the Dictionary datatype.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DictionaryType {
-    // Use Box to avoid recursive dependency, as enum ConcreteDataType depends on ListType.
+    // Use Box to avoid recursive dependency, as enum ConcreteDataType depends on DictionaryType.
     /// The type of Dictionary key.
     key_type: Box<ConcreteDataType>,
     /// The type of Dictionary value.
