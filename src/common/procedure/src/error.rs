@@ -126,6 +126,7 @@ impl Error {
         }
     }
 
+    /// Creates a new [Error::RetryLater] or [Error::External] error from source `ErrorExt`.
     pub fn from_error_ext<E: ErrorExt + Send + Sync + 'static>(err: E) -> Self {
         match err.status_code() {
             StatusCode::StorageUnavailable
