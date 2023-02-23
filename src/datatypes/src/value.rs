@@ -273,9 +273,10 @@ fn to_null_value(output_type: &ConcreteDataType) -> ScalarValue {
         ConcreteDataType::List(_) => {
             ScalarValue::List(None, Box::new(new_item_field(output_type.as_arrow_type())))
         }
-        ConcreteDataType::Dictionary(_) => {
-            unimplemented!()
-        }
+        ConcreteDataType::Dictionary(dict) => ScalarValue::Dictionary(
+            Box::new(dict.key_type().as_arrow_type()),
+            Box::new(to_null_value(dict.value_type())),
+        ),
     }
 }
 

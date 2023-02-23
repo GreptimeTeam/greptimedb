@@ -644,7 +644,7 @@ impl<S: ContextProvider> PromPlanner<S> {
             }
         }
 
-        // update value columns' name, and alise them to remove qualifiers
+        // update value columns' name, and alias them to remove qualifiers
         let mut new_value_columns = Vec::with_capacity(exprs.len());
         exprs = exprs
             .into_iter()
