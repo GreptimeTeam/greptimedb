@@ -100,7 +100,7 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
                     .write(
                         &cache_path,
                         OpWrite::new(size),
-                        Box::new(ReadWrppaer(reader)),
+                        Box::new(ReadWrapper(reader)),
                     )
                     .await?;
                 match self.cache.read(&cache_path, OpRead::default()).await {
@@ -179,12 +179,12 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
     }
 }
 
-/// Workaround for output::Read doesn't implement input::Read
+/// TODO: Workaround for output::Read doesn't implement input::Read
 ///
 /// Should be remove after opendal fixed it.
-struct ReadWrppaer<R>(R);
+struct ReadWrapper<R>(R);
 
-impl<R: output::Read> AsyncRead for ReadWrppaer<R> {
+impl<R: output::Read> AsyncRead for ReadWrapper<R> {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,

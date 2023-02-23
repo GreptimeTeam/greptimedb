@@ -81,9 +81,6 @@ impl StateStore for ObjectStateStore {
                 source: e,
             })?;
 
-        // Note that there is no guarantee about the order between files and dirs
-        // at the same level.
-        // See https://docs.rs/opendal/0.25.2/opendal/raw/struct.TopDownWalker.html#note
         let stream = lister
             .try_filter_map(|entry| async move {
                 let key = entry.path();
