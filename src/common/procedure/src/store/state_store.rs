@@ -20,9 +20,7 @@ use futures::{Stream, TryStreamExt};
 use object_store::{ObjectMode, ObjectStore};
 use snafu::ResultExt;
 
-use crate::error::{
-    DeleteStateSnafu, Error, ListStateSnafu, PutStateSnafu, ReadStateSnafu, Result,
-};
+use crate::error::{DeleteStateSnafu, Error, PutStateSnafu, Result};
 
 /// Key value from state store.
 type KeyValue = (String, Vec<u8>);
@@ -72,22 +70,23 @@ impl StateStore for ObjectStateStore {
 
     async fn walk_top_down(&self, path: &str) -> Result<KeyValueStream> {
         let path_string = path.to_string();
-        let op = self.store.batch();
-        // Note that there is no guarantee about the order between files and dirs
-        // at the same level.
-        // See https://docs.rs/opendal/0.25.2/opendal/raw/struct.TopDownWalker.html#note
-        let stream = op
-            .walk_top_down(path)
-            .context(ListStateSnafu { path })?
-            .map_err(move |e| Error::ListState {
+
+        let lister = self
+            .store
+            .object(path)
+            .scan()
+            .await
+            .map_err(|e| Error::ListState {
                 path: path_string.clone(),
                 source: e,
-            })
+            })?;
+
+        let stream = lister
             .try_filter_map(|entry| async move {
                 let key = entry.path();
-                let key_value = match entry.mode().await.context(ReadStateSnafu { key })? {
+                let key_value = match entry.mode().await? {
                     ObjectMode::FILE => {
-                        let value = entry.read().await.context(ReadStateSnafu { key })?;
+                        let value = entry.read().await?;
 
                         Some((key.to_string(), value))
                     }
@@ -95,6 +94,10 @@ impl StateStore for ObjectStateStore {
                 };
 
                 Ok(key_value)
+            })
+            .map_err(move |e| Error::ListState {
+                path: path_string.clone(),
+                source: e,
             });
 
         Ok(Box::pin(stream))
@@ -112,7 +115,8 @@ impl StateStore for ObjectStateStore {
 
 #[cfg(test)]
 mod tests {
-    use object_store::services::fs::Builder;
+    use object_store::services::Fs as Builder;
+    use object_store::ObjectStoreBuilder;
     use tempdir::TempDir;
 
     use super::*;
@@ -122,7 +126,7 @@ mod tests {
         let dir = TempDir::new("state_store").unwrap();
         let store_dir = dir.path().to_str().unwrap();
         let accessor = Builder::default().root(store_dir).build().unwrap();
-        let object_store = ObjectStore::new(accessor);
+        let object_store = ObjectStore::new(accessor).finish();
         let state_store = ObjectStateStore::new(object_store);
 
         let data: Vec<_> = state_store

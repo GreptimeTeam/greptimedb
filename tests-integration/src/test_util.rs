@@ -31,10 +31,9 @@ use datanode::sql::SqlHandler;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema};
 use frontend::instance::Instance as FeInstance;
-use object_store::backend::s3;
-use object_store::services::oss;
+use object_store::backend::{oss, s3};
 use object_store::test_util::TempFolder;
-use object_store::ObjectStore;
+use object_store::{ObjectStore, ObjectStoreBuilder};
 use once_cell::sync::OnceCell;
 use rand::Rng;
 use servers::grpc::GrpcServer;
@@ -116,7 +115,7 @@ fn get_test_store_config(
 
             let config = ObjectStoreConfig::Oss(oss_config);
 
-            let store = ObjectStore::new(accessor);
+            let store = ObjectStore::new(accessor).finish();
 
             (
                 config,
@@ -145,7 +144,7 @@ fn get_test_store_config(
 
             let config = ObjectStoreConfig::S3(s3_config);
 
-            let store = ObjectStore::new(accessor);
+            let store = ObjectStore::new(accessor).finish();
 
             (config, Some(TempDirGuard::S3(TempFolder::new(&store, "/"))))
         }

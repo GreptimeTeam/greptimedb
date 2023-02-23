@@ -246,7 +246,8 @@ impl ParsedKey {
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
-    use object_store::services::fs::Builder;
+    use object_store::services::Fs as Builder;
+    use object_store::ObjectStoreBuilder;
     use tempdir::TempDir;
 
     use super::*;
@@ -255,7 +256,7 @@ mod tests {
     fn procedure_store_for_test(dir: &TempDir) -> ProcedureStore {
         let store_dir = dir.path().to_str().unwrap();
         let accessor = Builder::default().root(store_dir).build().unwrap();
-        let object_store = ObjectStore::new(accessor);
+        let object_store = ObjectStore::new(accessor).finish();
 
         ProcedureStore::from(object_store)
     }

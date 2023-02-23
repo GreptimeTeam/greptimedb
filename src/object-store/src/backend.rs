@@ -15,4 +15,5 @@
 pub mod azblob;
 pub mod fs;
 pub mod memory;
+pub mod oss;
 pub mod s3;

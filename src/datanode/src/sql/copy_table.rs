@@ -22,8 +22,8 @@ use datafusion::parquet::basic::{Compression, Encoding};
 use datafusion::parquet::file::properties::WriterProperties;
 use datafusion::physical_plan::RecordBatchStream;
 use futures::TryStreamExt;
-use object_store::services::fs::Builder;
-use object_store::ObjectStore;
+use object_store::services::Fs as Builder;
+use object_store::{ObjectStore, ObjectStoreBuilder};
 use snafu::ResultExt;
 use table::engine::TableReference;
 use table::requests::CopyTableRequest;
@@ -53,7 +53,7 @@ impl SqlHandler {
         let stream = Box::pin(DfRecordBatchStreamAdapter::new(stream));
 
         let accessor = Builder::default().build().unwrap();
-        let object_store = ObjectStore::new(accessor);
+        let object_store = ObjectStore::new(accessor).finish();
 
         let mut parquet_writer = ParquetWriter::new(req.file_name, stream, object_store);
         // TODO(jiachun):

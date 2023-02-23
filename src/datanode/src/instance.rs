@@ -16,7 +16,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{fs, path};
 
-use backon::ExponentialBackoff;
 use catalog::remote::MetaKvBackend;
 use catalog::{CatalogManager, CatalogManagerRef, RegisterTableRequest};
 use common_base::readable_size::ReadableSize;
@@ -29,12 +28,10 @@ use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOpts;
 use mito::config::EngineConfig as TableEngineConfig;
 use mito::engine::MitoEngine;
-use object_store::cache_policy::LruCachePolicy;
-use object_store::layers::{CacheLayer, LoggingLayer, MetricsLayer, RetryLayer, TracingLayer};
-use object_store::services::fs::Builder as FsBuilder;
-use object_store::services::oss::Builder as OSSBuilder;
-use object_store::services::s3::Builder as S3Builder;
-use object_store::{util, ObjectStore};
+use object_store::cache_policy::LruCacheLayer;
+use object_store::layers::{LoggingLayer, MetricsLayer, RetryLayer, TracingLayer};
+use object_store::services::{Fs as FsBuilder, Oss as OSSBuilder, S3 as S3Builder};
+use object_store::{util, ObjectStore, ObjectStoreBuilder};
 use query::query_engine::{QueryEngineFactory, QueryEngineRef};
 use servers::Mode;
 use snafu::prelude::*;
@@ -227,7 +224,7 @@ pub(crate) async fn new_object_store(store_config: &ObjectStoreConfig) -> Result
 
     object_store.map(|object_store| {
         object_store
-            .layer(RetryLayer::new(ExponentialBackoff::default().with_jitter()))
+            .layer(RetryLayer::new().with_jitter())
             .layer(MetricsLayer)
             .layer(LoggingLayer::default())
             .layer(TracingLayer)
@@ -258,7 +255,7 @@ pub(crate) async fn new_oss_object_store(store_config: &ObjectStoreConfig) -> Re
         config: store_config.clone(),
     })?;
 
-    create_object_store_with_cache(ObjectStore::new(accessor), store_config)
+    create_object_store_with_cache(ObjectStore::new(accessor).finish(), store_config)
 }
 
 fn create_object_store_with_cache(
@@ -285,13 +282,13 @@ fn create_object_store_with_cache(
 
     if let Some(path) = cache_path {
         let cache_store =
-            ObjectStore::new(FsBuilder::default().root(path).build().with_context(|_| {
-                error::InitBackendSnafu {
+            FsBuilder::default()
+                .root(path)
+                .build()
+                .with_context(|_| error::InitBackendSnafu {
                     config: store_config.clone(),
-                }
-            })?);
-        let policy = LruCachePolicy::new(cache_capacity.0 as usize);
-        let cache_layer = CacheLayer::new(cache_store).with_policy(policy);
+                })?;
+        let cache_layer = LruCacheLayer::new(Arc::new(cache_store), cache_capacity.0 as usize);
         Ok(object_store.layer(cache_layer))
     } else {
         Ok(object_store)
@@ -328,7 +325,7 @@ pub(crate) async fn new_s3_object_store(store_config: &ObjectStoreConfig) -> Res
         config: store_config.clone(),
     })?;
 
-    create_object_store_with_cache(ObjectStore::new(accessor), store_config)
+    create_object_store_with_cache(ObjectStore::new(accessor).finish(), store_config)
 }
 
 pub(crate) async fn new_fs_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {
@@ -351,7 +348,7 @@ pub(crate) async fn new_fs_object_store(store_config: &ObjectStoreConfig) -> Res
             config: store_config.clone(),
         })?;
 
-    Ok(ObjectStore::new(accessor))
+    Ok(ObjectStore::new(accessor).finish())
 }
 
 /// Create metasrv client instance and spawn heartbeat loop.

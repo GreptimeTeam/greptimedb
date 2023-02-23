@@ -411,7 +411,8 @@ impl ProcedureManager for LocalManager {
 /// Create a new [ProcedureMeta] for test purpose.
 #[cfg(test)]
 mod test_util {
-    use object_store::services::fs::Builder;
+    use object_store::services::Fs as Builder;
+    use object_store::ObjectStoreBuilder;
     use tempdir::TempDir;
 
     use super::*;
@@ -423,7 +424,7 @@ mod test_util {
     pub(crate) fn new_object_store(dir: &TempDir) -> ObjectStore {
         let store_dir = dir.path().to_str().unwrap();
         let accessor = Builder::default().root(store_dir).build().unwrap();
-        ObjectStore::new(accessor)
+        ObjectStore::new(accessor).finish()
     }
 }
 
