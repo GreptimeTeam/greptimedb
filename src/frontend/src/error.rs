@@ -253,7 +253,7 @@ pub enum Error {
         source: datanode::error::Error,
     },
 
-    #[snafu(display("Missing meta_client_opts section in config"))]
+    #[snafu(display("Missing meta_client_options section in config"))]
     MissingMetasrvOpts { backtrace: Backtrace },
 
     #[snafu(display("Failed to convert AlterExpr to AlterRequest, source: {}", source))]

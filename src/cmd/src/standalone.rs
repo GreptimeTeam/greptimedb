@@ -115,7 +115,7 @@ impl StandaloneOptions {
             influxdb_options: self.influxdb_options,
             prometheus_options: self.prometheus_options,
             promql_options: self.promql_options,
-            meta_client_opts: None,
+            meta_client_options: None,
         }
     }
 

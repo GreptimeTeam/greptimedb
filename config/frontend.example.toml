@@ -5,7 +5,7 @@ datanode_rpc_addr = '127.0.0.1:3001'
 addr = '127.0.0.1:4000'
 timeout = "30s"
 
-[meta_client_opts]
+[meta_client_options]
 metasrv_addrs = ['127.0.0.1:3002']
 timeout_millis = 3000
 connect_timeout_millis = 5000

@@ -42,7 +42,7 @@ use datanode::instance::InstanceRef as DnInstanceRef;
 use datatypes::schema::Schema;
 use distributed::DistInstance;
 use meta_client::client::{MetaClient, MetaClientBuilder};
-use meta_client::MetaClientOpts;
+use meta_client::MetaClientOptions;
 use partition::manager::PartitionRuleManager;
 use partition::route::TableRoutes;
 use query::parser::PromQuery;
@@ -148,7 +148,7 @@ impl Instance {
 
     async fn create_meta_client(opts: &FrontendOptions) -> Result<Arc<MetaClient>> {
         let metasrv_addr = &opts
-            .meta_client_opts
+            .meta_client_options
             .as_ref()
             .context(MissingMetasrvOptsSnafu)?
             .metasrv_addrs;
@@ -157,7 +157,7 @@ impl Instance {
             metasrv_addr
         );
 
-        let meta_config = MetaClientOpts::default();
+        let meta_config = MetaClientOptions::default();
         let channel_config = ChannelConfig::new()
             .timeout(Duration::from_millis(meta_config.timeout_millis))
             .connect_timeout(Duration::from_millis(meta_config.connect_timeout_millis))

@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
 use common_telemetry::info;
-use meta_client::MetaClientOpts;
+use meta_client::MetaClientOptions;
 use serde::{Deserialize, Serialize};
 use servers::Mode;
 use storage::config::EngineConfig as StorageEngineConfig;
@@ -155,7 +155,7 @@ pub struct DatanodeOptions {
     pub rpc_runtime_size: usize,
     pub mysql_addr: String,
     pub mysql_runtime_size: usize,
-    pub meta_client_opts: Option<MetaClientOpts>,
+    pub meta_client_options: Option<MetaClientOptions>,
     pub wal: WalConfig,
     pub storage: ObjectStoreConfig,
     pub compaction: CompactionConfig,
@@ -172,7 +172,7 @@ impl Default for DatanodeOptions {
             rpc_runtime_size: 8,
             mysql_addr: "127.0.0.1:4406".to_string(),
             mysql_runtime_size: 2,
-            meta_client_opts: None,
+            meta_client_options: None,
             wal: WalConfig::default(),
             storage: ObjectStoreConfig::default(),
             compaction: CompactionConfig::default(),

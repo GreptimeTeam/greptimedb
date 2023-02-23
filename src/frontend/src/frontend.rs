@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use common_base::Plugins;
-use meta_client::MetaClientOpts;
+use meta_client::MetaClientOptions;
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
 use servers::Mode;
@@ -44,7 +44,7 @@ pub struct FrontendOptions {
     pub influxdb_options: Option<InfluxdbOptions>,
     pub prometheus_options: Option<PrometheusOptions>,
     pub promql_options: Option<PromqlOptions>,
-    pub meta_client_opts: Option<MetaClientOpts>,
+    pub meta_client_options: Option<MetaClientOptions>,
 }
 
 impl Default for FrontendOptions {
@@ -59,7 +59,7 @@ impl Default for FrontendOptions {
             influxdb_options: Some(InfluxdbOptions::default()),
             prometheus_options: Some(PrometheusOptions::default()),
             promql_options: Some(PromqlOptions::default()),
-            meta_client_opts: None,
+            meta_client_options: None,
         }
     }
 }

@@ -25,7 +25,7 @@ use common_telemetry::logging::info;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::LogConfig;
 use meta_client::client::{MetaClient, MetaClientBuilder};
-use meta_client::MetaClientOpts;
+use meta_client::MetaClientOptions;
 use mito::config::EngineConfig as TableEngineConfig;
 use mito::engine::MitoEngine;
 use object_store::cache_policy::LruCacheLayer;
@@ -83,7 +83,7 @@ impl Instance {
             Mode::Distributed => {
                 let meta_client = new_metasrv_client(
                     opts.node_id.context(MissingNodeIdSnafu)?,
-                    opts.meta_client_opts
+                    opts.meta_client_options
                         .as_ref()
                         .context(MissingMetasrvOptsSnafu)?,
                 )
@@ -352,7 +352,7 @@ pub(crate) async fn new_fs_object_store(store_config: &ObjectStoreConfig) -> Res
 }
 
 /// Create metasrv client instance and spawn heartbeat loop.
-async fn new_metasrv_client(node_id: u64, meta_config: &MetaClientOpts) -> Result<MetaClient> {
+async fn new_metasrv_client(node_id: u64, meta_config: &MetaClientOptions) -> Result<MetaClient> {
     let cluster_id = 0; // TODO(hl): read from config
     let member_id = node_id;
 
