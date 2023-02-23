@@ -90,7 +90,7 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
                 // update lru when cache hit
                 let mut lru_cache = lru_cache.lock().await;
                 lru_cache.get_or_insert(cache_path.clone(), || ());
-                Ok((rp, Box::new(r) as output::Reader))
+                Ok(to_output_reader((rp, r)))
             }
             Err(err) if err.kind() == ErrorKind::ObjectNotFound => {
                 let (rp, reader) = self.inner.read(&path, args.clone()).await?;
@@ -114,24 +114,12 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
                         if let Some((k, _v)) = r {
                             let _ = self.cache.delete(&k, OpDelete::new()).await;
                         }
-                        return Ok((rp, Box::new(reader) as output::Reader));
+                        return Ok(to_output_reader((rp, reader)));
                     }
-                    Err(_) => {
-                        return self
-                            .inner
-                            .read(&path, args)
-                            .await
-                            .map(|(rp, r)| (rp, Box::new(r) as output::Reader))
-                    }
+                    Err(_) => return self.inner.read(&path, args).await.map(to_output_reader),
                 }
             }
-            Err(_) => {
-                return self
-                    .inner
-                    .read(&path, args)
-                    .await
-                    .map(|(rp, r)| (rp, Box::new(r) as output::Reader))
-            }
+            Err(_) => return self.inner.read(&path, args).await.map(to_output_reader),
         }
     }
 
@@ -192,4 +180,9 @@ impl<R: output::Read> AsyncRead for ReadWrapper<R> {
     ) -> Poll<io::Result<usize>> {
         self.0.poll_read(cx, buf)
     }
+}
+
+#[inline]
+fn to_output_reader<R: output::Read + 'static>(input: (RpRead, R)) -> (RpRead, output::Reader) {
+    (input.0, Box::new(input.1))
 }
