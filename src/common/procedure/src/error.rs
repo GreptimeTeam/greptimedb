@@ -125,4 +125,32 @@ impl Error {
             source: BoxedError::new(err),
         }
     }
+
+    pub fn from_error_ext<E: ErrorExt + Send + Sync + 'static>(err: E) -> Self {
+        match err.status_code() {
+            StatusCode::StorageUnavailable
+            | StatusCode::RuntimeResourcesExhausted
+            | StatusCode::Internal => Error::retry_later(err),
+
+            StatusCode::Success
+            | StatusCode::Unknown
+            | StatusCode::Unsupported
+            | StatusCode::Unexpected
+            | StatusCode::InvalidArguments
+            | StatusCode::InvalidSyntax
+            | StatusCode::PlanQuery
+            | StatusCode::EngineExecuteQuery
+            | StatusCode::TableAlreadyExists
+            | StatusCode::TableNotFound
+            | StatusCode::TableColumnNotFound
+            | StatusCode::TableColumnExists
+            | StatusCode::DatabaseNotFound
+            | StatusCode::UserNotFound
+            | StatusCode::UnsupportedPasswordType
+            | StatusCode::UserPasswordMismatch
+            | StatusCode::AuthHeaderNotFound
+            | StatusCode::InvalidAuthHeader
+            | StatusCode::AccessDenied => Error::external(err),
+        }
+    }
 }

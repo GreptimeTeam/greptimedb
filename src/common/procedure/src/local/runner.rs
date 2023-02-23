@@ -780,7 +780,7 @@ mod tests {
                     let state = ctx.provider.procedure_state(child_id).await.unwrap();
                     if state == Some(ProcedureState::Failed) {
                         // The parent procedure to abort itself if child procedure is failed.
-                        Err(Error::external(PlainError::new(
+                        Err(Error::from_error_ext(PlainError::new(
                             "subprocedure failed".to_string(),
                             StatusCode::Unexpected,
                         )))
