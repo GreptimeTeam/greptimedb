@@ -30,7 +30,7 @@ use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, VectorRef};
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::NoopLogStore;
 use object_store::backend::fs;
-use object_store::ObjectStore;
+use object_store::{ObjectStore, ObjectStoreBuilder};
 use store_api::storage::{
     consts, Chunk, ChunkReader, RegionMeta, ScanRequest, SequenceNumber, Snapshot, WriteRequest,
 };
@@ -286,7 +286,8 @@ async fn test_recover_region_manifets() {
             .root(&tmp_dir.path().to_string_lossy())
             .build()
             .unwrap(),
-    );
+    )
+    .finish();
 
     let manifest = RegionManifest::new("/manifest/", object_store.clone());
     let region_meta = Arc::new(build_region_meta());

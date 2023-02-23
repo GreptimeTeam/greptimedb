@@ -23,7 +23,7 @@ mod tests {
     use std::sync::Arc;
 
     use object_store::backend::fs;
-    use object_store::ObjectStore;
+    use object_store::{ObjectStore, ObjectStoreBuilder};
     use store_api::manifest::action::ProtocolAction;
     use store_api::manifest::{Manifest, MetaActionIterator, MAX_VERSION};
     use tempdir::TempDir;
@@ -41,7 +41,8 @@ mod tests {
                 .root(&tmp_dir.path().to_string_lossy())
                 .build()
                 .unwrap(),
-        );
+        )
+        .finish();
 
         let manifest = RegionManifest::new("/manifest/", object_store);
 

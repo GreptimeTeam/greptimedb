@@ -380,6 +380,7 @@ mod tests {
     use datatypes::type_id::LogicalTypeId;
     use log_store::test_util::log_store_util;
     use object_store::backend::fs::Builder;
+    use object_store::ObjectStoreBuilder;
     use store_api::storage::Region;
     use tempdir::TempDir;
 
@@ -395,7 +396,7 @@ mod tests {
         let store_dir = dir.path().to_string_lossy();
 
         let accessor = Builder::default().root(&store_dir).build().unwrap();
-        let object_store = ObjectStore::new(accessor);
+        let object_store = ObjectStore::new(accessor).finish();
 
         let config = EngineConfig::default();
 
