@@ -30,10 +30,8 @@ use std::str::FromStr;
 use api::helper::ColumnDataTypeWrapper;
 use common_base::bytes::Bytes;
 use common_time::Timestamp;
-use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
-use datatypes::types::DateTimeType;
 use datatypes::value::Value;
 use snafu::{ensure, OptionExt, ResultExt};
 
@@ -305,25 +303,7 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
         SqlDataType::Boolean => Ok(ConcreteDataType::boolean_datatype()),
         SqlDataType::Date => Ok(ConcreteDataType::date_datatype()),
         SqlDataType::Varbinary(_) => Ok(ConcreteDataType::binary_datatype()),
-        SqlDataType::Custom(obj_name, _) => match &obj_name.0[..] {
-            [type_name] => {
-                if type_name
-                    .value
-                    .eq_ignore_ascii_case(DateTimeType::default().name())
-                {
-                    Ok(ConcreteDataType::datetime_datatype())
-                } else {
-                    error::SqlTypeNotSupportedSnafu {
-                        t: data_type.clone(),
-                    }
-                    .fail()
-                }
-            }
-            _ => error::SqlTypeNotSupportedSnafu {
-                t: data_type.clone(),
-            }
-            .fail(),
-        },
+        SqlDataType::Datetime(_) => Ok(ConcreteDataType::datetime_datatype()),
         SqlDataType::Timestamp(_, _) => Ok(ConcreteDataType::timestamp_millisecond_datatype()),
         _ => error::SqlTypeNotSupportedSnafu {
             t: data_type.clone(),
@@ -410,6 +390,10 @@ mod tests {
             SqlDataType::UnsignedTinyInt(None),
             ConcreteDataType::uint8_datatype(),
         );
+        check_type(
+            SqlDataType::Datetime(None),
+            ConcreteDataType::datetime_datatype(),
+        )
     }
 
     #[test]
