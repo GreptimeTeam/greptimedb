@@ -18,6 +18,7 @@ mod error;
 pub mod load_balance;
 
 pub use api;
+pub use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 
 pub use self::client::Client;
 pub use self::database::Database;
