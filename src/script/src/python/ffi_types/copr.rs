@@ -53,7 +53,8 @@ pub struct AnnotationInfo {
     pub is_nullable: bool,
 }
 
-#[derive(Debug, Default, Clone)]
+#[cfg_attr(test, derive(Deserialize))]
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub enum BackendType {
     #[default]
     RustPython,
@@ -415,7 +416,7 @@ pub fn exec_parsed(
         BackendType::CPython => {
             #[cfg(feature = "pyo3")]
             if let Some(rb) = rb {
-                pyo3_exec_parsed(copr, rb)
+                pyo3_exec_parsed(copr, rb, params)
             } else {
                 OtherSnafu {
                     reason: "CPython doesn't support params yet".to_string(),

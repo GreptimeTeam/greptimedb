@@ -258,7 +258,7 @@ impl PyExpr {
     fn __invert__(&self) -> PyResult<PyExpr> {
         Ok(self.inner.clone().not().into())
     }
-    fn sort(&self, asc:bool, nulls_first: bool) -> PyExpr {
+    fn sort(&self, asc: bool, nulls_first: bool) -> PyExpr {
         self.inner.clone().sort(asc, nulls_first).into()
     }
 }

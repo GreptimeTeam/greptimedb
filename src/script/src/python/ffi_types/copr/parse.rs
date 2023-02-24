@@ -24,16 +24,15 @@ use serde::Deserialize;
 use snafu::{OptionExt, ResultExt};
 
 use crate::python::error::{ensure, CoprParseSnafu, PyParseSnafu, Result};
-use crate::python::ffi_types::copr::{compile, AnnotationInfo, Coprocessor};
-
+use crate::python::ffi_types::copr::{compile, AnnotationInfo, BackendType, Coprocessor};
 #[cfg_attr(test, derive(Deserialize))]
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct DecoratorArgs {
     pub arg_names: Option<Vec<String>>,
     pub ret_names: Vec<String>,
     pub sql: Option<String>,
-    // maybe add a URL for connecting or what?
-    // also predicate for timed triggered or conditional triggered?
+    pub backend: BackendType, // maybe add a URL for connecting or what?
+                              // also predicate for timed triggered or conditional triggered?
 }
 
 /// Return a CoprParseSnafu for you to chain fail() to return correct err Result type
@@ -259,8 +258,8 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
 /// parse a list of keyword and return args and returns list from keywords
 fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<DecoratorArgs> {
     // more keys maybe add to this list of `avail_key`(like `sql` for querying and maybe config for connecting to database?), for better extension using a `HashSet` in here
-    let avail_key = HashSet::from(["args", "returns", "sql"]);
-    let opt_keys = HashSet::from(["sql", "args"]);
+    let avail_key = HashSet::from(["args", "returns", "sql", "backend"]);
+    let opt_keys = HashSet::from(["sql", "args", "backend"]);
     let mut visited_key = HashSet::new();
     let len_min = avail_key.len() - opt_keys.len();
     let len_max = avail_key.len();
@@ -298,6 +297,23 @@ fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<DecoratorArgs> {
                     "args" => ret_args.arg_names = Some(pylist_to_vec(&kw.node.value)?),
                     "returns" => ret_args.ret_names = pylist_to_vec(&kw.node.value)?,
                     "sql" => ret_args.sql = Some(py_str_to_string(&kw.node.value)?),
+                    "backend" => {
+                        let value = py_str_to_string(&kw.node.value)?;
+                        match value.as_str() {
+                            // although this is default option to use RustPython for interpreter
+                            // but that could change in the future
+                            "rspy" => ret_args.backend = BackendType::RustPython,
+                            "pyo3" => ret_args.backend = BackendType::CPython,
+                            _ => {
+                                return fail_parse_error!(
+                                    format!(
+                                    "backend type can only be of `rspy` and `pyo3`, found {value}"
+                                ),
+                                    Some(kw.location),
+                                )
+                            }
+                        }
+                    }
                     _ => unreachable!(),
                 }
             }
@@ -497,6 +513,8 @@ pub fn parse_and_compile_copr(
                         loc: None
                     }
                 );
+
+                let backend = deco_args.backend.clone();
                 let kwarg = fn_args.kwarg.as_ref().map(|arg| arg.node.arg.clone());
                 coprocessor = Some(Coprocessor {
                     code_obj: Some(compile::compile_script(name, &deco_args, &kwarg, script)?),
@@ -507,7 +525,7 @@ pub fn parse_and_compile_copr(
                     kwarg,
                     script: script.to_string(),
                     query_engine: query_engine.as_ref().map(|e| Arc::downgrade(e).into()),
-                    backend: Default::default(),
+                    backend,
                 });
             }
         } else if matches!(

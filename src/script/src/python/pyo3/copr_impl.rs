@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use common_recordbatch::RecordBatch;
 use datatypes::vectors::{Helper, VectorRef};
 use pyo3::exceptions::PyValueError;
@@ -51,11 +53,14 @@ impl PyQueryEngine {
             crate::python::ffi_types::copr::Either::AffectedRows(count) => Ok(count.to_object(py)),
         }
     }
-
     // TODO: put this into greptime module
 }
 /// Execute a `Coprocessor` with given `RecordBatch`
-pub(crate) fn pyo3_exec_parsed(copr: &Coprocessor, rb: &RecordBatch) -> Result<RecordBatch> {
+pub(crate) fn pyo3_exec_parsed(
+    copr: &Coprocessor,
+    rb: &RecordBatch,
+    params: &HashMap<String, String>,
+) -> Result<RecordBatch> {
     let arg_names = if let Some(names) = &copr.deco_args.arg_names {
         names
     } else {
@@ -70,15 +75,37 @@ pub(crate) fn pyo3_exec_parsed(copr: &Coprocessor, rb: &RecordBatch) -> Result<R
     init_cpython_interpreter();
     Python::with_gil(|py| -> Result<_> {
         let mut cols = (|| -> PyResult<_> {
-            let module = PyModule::from_code(py, &copr.script, "<embedded>", "<mod_embed>")?;
+            let dummy_decorator = "
+# A dummy decorator, actual implementation is in Rust code
+def copr(*dummy, **kwdummy):
+    def inner(func):
+        return func
+    return inner
+coprocessor = copr
+";
+            let script = format!("{}{}", dummy_decorator, copr.script);
+            let module = PyModule::from_code(py, &script, "<embedded>", "<mod_embed>")?;
             let fun = module.getattr(copr.name.as_str())?;
+
+            let args = args
+                .clone()
+                .into_iter()
+                .map(|v| PyCell::new(py, v))
+                .collect::<PyResult<Vec<_>>>()?;
+            let args = PyTuple::new(py, args);
+
             let kwargs = PyDict::new(py);
-            for (k, v) in copr.deco_args.arg_names.iter().zip(args.into_iter()) {
-                let v = PyCell::new(py, v)?;
-                kwargs.set_item(k, v)?;
+            if let Some(_copr_kwargs) = &copr.kwarg {
+                for (k, v) in params {
+                    kwargs.set_item(k, v)?;
+                }
             }
+
+            // TODO(discord9): set `dataframe` and `query` in scope/ or set it into module
+            // idea: dynamically change `greptime` module
+            // by insert instantiated `dataframe` and `query` into it
             // Expect either: a PyVector Or a List/Tuple of PyVector
-            let result = fun.call((), Some(kwargs))?;
+            let result = fun.call(args, Some(kwargs))?;
             let col_len = rb.num_rows();
             py_any_to_vec(result, col_len)
         })()
@@ -133,5 +160,54 @@ fn py_obj_broadcast_to_vec(obj: &PyAny, col_len: usize) -> PyResult<VectorRef> {
         )
         .map_err(handler)?;
         Ok(v)
+    }
+}
+
+#[cfg(test)]
+mod copr_test {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use common_recordbatch::RecordBatch;
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::vectors::{Float32Vector, Float64Vector, VectorRef};
+
+    use crate::python::ffi_types::copr::{exec_parsed, parse};
+
+    #[test]
+    #[allow(unused_must_use)]
+    fn simple_test_pyo3_copr() {
+        let python_source = r#"
+@copr(args=["cpu", "mem"], returns=["ref"], backend="pyo3")
+def a(cpu, mem, **kwargs):
+    import greptime as gt
+    from greptime import vector, log2, sum, pow
+    for k, v in kwargs.items():
+        print("%s == %s" % (k, v))
+    return (0.5 < cpu) & ~( cpu >= 0.75)
+    "#;
+        let cpu_array = Float32Vector::from_slice([0.9f32, 0.8, 0.7, 0.3]);
+        let mem_array = Float64Vector::from_slice([0.1f64, 0.2, 0.3, 0.4]);
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("cpu", ConcreteDataType::float32_datatype(), false),
+            ColumnSchema::new("mem", ConcreteDataType::float64_datatype(), false),
+        ]));
+        let rb = RecordBatch::new(
+            schema,
+            [
+                Arc::new(cpu_array) as VectorRef,
+                Arc::new(mem_array) as VectorRef,
+            ],
+        )
+        .unwrap();
+        let copr = parse::parse_and_compile_copr(python_source, None).unwrap();
+        dbg!(&copr);
+        let ret = exec_parsed(
+            &copr,
+            &Some(rb),
+            &HashMap::from([("a".to_string(), "1".to_string())]),
+        );
+        dbg!(ret);
     }
 }
