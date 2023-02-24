@@ -186,7 +186,7 @@ impl DistInstance {
 
         for datanode in table_route.find_leaders() {
             let client = self.datanode_clients.get_client(&datanode).await;
-            let client = Database::with_client(client);
+            let client = Database::new(&table_name.catalog_name, &table_name.schema_name, client);
 
             let regions = table_route.find_leader_regions(&datanode);
             let mut create_expr_for_region = create_table.clone();

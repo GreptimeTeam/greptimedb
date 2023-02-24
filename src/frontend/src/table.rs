@@ -258,7 +258,7 @@ impl DistTable {
         );
         for datanode in leaders {
             let client = self.datanode_clients.get_client(&datanode).await;
-            let db = Database::with_client(client);
+            let db = Database::new(&expr.catalog_name, &expr.schema_name, client);
             debug!("Sending {:?} to {:?}", expr, db);
             let result = db
                 .alter(expr.clone())

@@ -38,7 +38,7 @@ metrics = "0.20"
 num_cpus = "1.13"
 once_cell = "1.16"
 openmetrics-parser = "0.4"
-opensrv-mysql = { git = "https://github.com/datafuselabs/opensrv", rev = "b44c9d1360da297b305abf33aecfa94888e1554c" }
+opensrv-mysql = { git = "https://github.com/sunng87/opensrv", branch = "fix/buffer-overread" }
 pgwire = "0.10"
 pin-project = "1.0"
 postgres-types = { version = "0.2", features = ["with-chrono-0_4"] }

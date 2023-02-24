@@ -14,6 +14,7 @@
 
 use api::v1::{ColumnDataType, ColumnDef, CreateTableExpr, TableId};
 use client::{Client, Database};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use prost_09::Message;
 use substrait_proto::protobuf::plan_rel::RelType as PlanRelType;
 use substrait_proto::protobuf::read_rel::{NamedTable, ReadType};
@@ -65,7 +66,7 @@ async fn run() {
         region_ids: vec![0],
     };
 
-    let db = Database::with_client(client);
+    let db = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
     let result = db.create(create_table_expr).await.unwrap();
     event!(Level::INFO, "create table result: {:#?}", result);
 
