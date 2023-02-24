@@ -42,8 +42,7 @@ pub(crate) fn process_range_fn(args: TokenStream, input: TokenStream) -> TokenSt
     let arg_map = ok!(extract_arg_map(arg_pairs));
 
     // decompose the fn block
-    let item_fn = input.clone();
-    let compute_fn = parse_macro_input!(item_fn as ItemFn);
+    let compute_fn = parse_macro_input!(input as ItemFn);
     let ItemFn {
         attrs,
         vis,
@@ -74,7 +73,6 @@ pub(crate) fn process_range_fn(args: TokenStream, input: TokenStream) -> TokenSt
     );
     // preserve this fn, but remove its `pub` modifier
     let input_fn_code: TokenStream = quote! {
-        #[allow(dead_code)]
         #sig { #block }
     }
     .into();
@@ -88,8 +86,7 @@ pub(crate) fn process_range_fn(args: TokenStream, input: TokenStream) -> TokenSt
 
 /// Extract a String <-> Ident map from the attribute args.
 fn extract_arg_map(args: Vec<NestedMeta>) -> Result<HashMap<String, Ident>, syn::Error> {
-    args.clone()
-        .into_iter()
+    args.into_iter()
         .map(|meta| {
             if let NestedMeta::Meta(Meta::NameValue(MetaNameValue { path, lit, .. })) = meta {
                 let name = path.get_ident().unwrap().to_string();
@@ -118,7 +115,7 @@ fn get_ident(map: &HashMap<String, Ident>, key: &str, span: Span) -> Result<Iden
         .ok_or_else(|| syn::Error::new(span, format!("Expect attribute {key} but not found")))
 }
 
-/// Extract the agrument list from the annotated function.
+/// Extract the argument list from the annotated function.
 fn extract_input_types(inputs: &Punctuated<FnArg, Comma>) -> Result<Vec<Type>, syn::Error> {
     inputs
         .iter()

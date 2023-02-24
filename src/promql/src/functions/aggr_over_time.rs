@@ -96,7 +96,7 @@ pub fn last_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> O
     display_name = "prom_absent_over_time"
 )]
 pub fn absent_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
-    if values.len() == 0 {
+    if values.is_empty() {
         Some(1.0)
     } else {
         None
@@ -110,7 +110,7 @@ pub fn absent_over_time(_: &TimestampMillisecondArray, values: &Float64Array) ->
     display_name = "prom_present_over_time"
 )]
 pub fn present_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
-    if values.len() == 0 {
+    if values.is_empty() {
         None
     } else {
         Some(1.0)
