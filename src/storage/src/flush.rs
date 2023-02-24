@@ -178,6 +178,7 @@ pub struct FlushJob<S: LogStore> {
 }
 
 impl<S: LogStore> FlushJob<S> {
+    // wbh attention
     async fn write_memtables_to_layer(&mut self, ctx: &Context) -> Result<Vec<FileMeta>> {
         if ctx.is_cancelled() {
             return CancelledSnafu {}.fail();
@@ -197,7 +198,8 @@ impl<S: LogStore> FlushJob<S> {
                 continue;
             }
 
-            let file_name = Self::generate_sst_file_name();
+            // WBH here's the sst_table
+            let file_id = Self::generate_sst_file_name();
             // TODO(hl): Check if random file name already exists in meta.
             let iter = m.iter(&iter_ctx)?;
             let sst_layer = self.sst_layer.clone();
@@ -209,7 +211,7 @@ impl<S: LogStore> FlushJob<S> {
 
                 Ok(FileMeta {
                     region_id,
-                    file_name,
+                    file_id,
                     time_range,
                     level: 0,
                 })
@@ -248,8 +250,10 @@ impl<S: LogStore> FlushJob<S> {
     }
 
     /// Generates random SST file name in format: `^[a-f\d]{8}(-[a-f\d]{4}){3}-[a-f\d]{12}.parquet$`
-    fn generate_sst_file_name() -> String {
-        format!("{}.parquet", Uuid::new_v4().hyphenated())
+    fn generate_sst_file_name() -> SST_file_id {
+        SST_file_id::new()
+        // Uuid::new_v4()
+        // format!("{}.parquet", Uuid::new_v4().hyphenated())
     }
 }
 

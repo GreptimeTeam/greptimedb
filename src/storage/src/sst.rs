@@ -15,6 +15,7 @@
 pub(crate) mod parquet;
 
 use std::collections::HashMap;
+use std::string;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -27,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::storage::{ChunkReader, RegionId};
 use table::predicate::Predicate;
+use uuid::Uuid;
 
 use crate::chunk::ChunkReaderImpl;
 use crate::error::{DeleteSstSnafu, Result};
@@ -129,8 +131,9 @@ impl LevelMeta {
         self.files.insert(file.file_name().to_string(), file);
     }
 
-    fn remove_file(&mut self, file_to_remove: &str) -> Option<FileHandle> {
-        self.files.remove(file_to_remove)
+    fn remove_file(&mut self, file_to_remove: &Uuid) -> Option<FileHandle> {
+        let astr = format!("{}.parquet", file_to_remove.hyphenated());
+        self.files.remove(&astr)
     }
 
     /// Returns the level of level meta.
@@ -197,7 +200,7 @@ impl FileHandle {
     }
 
     #[inline]
-    pub fn file_name(&self) -> &str {
+    pub fn file_name(&self) -> &Uuid {
         &self.inner.meta.file_name
     }
 
@@ -251,7 +254,7 @@ impl Drop for FileHandleInner {
         if self.deleted.load(Ordering::Relaxed) {
             let request = FilePurgeRequest {
                 sst_layer: self.sst_layer.clone(),
-                file_name: self.meta.file_name.clone(),
+                file_name: self.meta.file_name,
                 region_id: self.meta.region_id,
             };
             match self.file_purger.schedule(request) {
@@ -285,13 +288,30 @@ impl FileHandleInner {
     }
 }
 
+struct SST_file_id(Uuid);
+
+impl SST_file_id {
+    fn new() -> SST_file_id {
+        SST_file_id(uuid::v4())
+    }
+    fn new(id: uuid) {
+        SST_file_id(id)
+    }
+    fn new(id: &str) {
+        SST_file_id(Uuid!(id))
+    }
+    fn file_name_with_extension(&self) -> string {
+        format!("{}.parquet", Uuid::new_v4().hyphenated())
+    }
+}
+
 /// Immutable metadata of a sst file.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FileMeta {
     /// Region of file.
     pub region_id: RegionId,
-    /// File name
-    pub file_name: String,
+    /// File name without extension such as .parquet
+    pub file_id: SST_file_id,
     /// Timestamp range of file.
     pub time_range: Option<(Timestamp, Timestamp)>,
     /// SST level of the file.
@@ -325,16 +345,16 @@ pub trait AccessLayer: Send + Sync + std::fmt::Debug {
     /// Writes SST file with given `file_name`.
     async fn write_sst(
         &self,
-        file_name: &str,
+        file_name: &Uuid,
         source: Source,
         opts: &WriteOptions,
     ) -> Result<SstInfo>;
 
     /// Read SST file with given `file_name` and schema.
-    async fn read_sst(&self, file_name: &str, opts: &ReadOptions) -> Result<BoxedBatchReader>;
+    async fn read_sst(&self, file_name: &Uuid, opts: &ReadOptions) -> Result<BoxedBatchReader>;
 
     /// Deletes a SST file with given name.
-    async fn delete_sst(&self, file_name: &str) -> Result<()>;
+    async fn delete_sst(&self, file_name: &Uuid) -> Result<()>;
 }
 
 pub type AccessLayerRef = Arc<dyn AccessLayer>;
@@ -382,8 +402,12 @@ impl FsAccessLayer {
     }
 
     #[inline]
-    fn sst_file_path(&self, file_name: &str) -> String {
-        format!("{}{}", self.sst_dir, file_name)
+    fn sst_file_path(&self, file_name: &Uuid) -> String {
+        format!(
+            "{}{}",
+            self.sst_dir,
+            format!("{}.parquet", file_name.hyphenated())
+        )
     }
 }
 
@@ -391,7 +415,7 @@ impl FsAccessLayer {
 impl AccessLayer for FsAccessLayer {
     async fn write_sst(
         &self,
-        file_name: &str,
+        file_id: &SST_file_id,
         source: Source,
         opts: &WriteOptions,
     ) -> Result<SstInfo> {
@@ -402,7 +426,7 @@ impl AccessLayer for FsAccessLayer {
         writer.write_sst(opts).await
     }
 
-    async fn read_sst(&self, file_name: &str, opts: &ReadOptions) -> Result<BoxedBatchReader> {
+    async fn read_sst(&self, file_name: &Uuid, opts: &ReadOptions) -> Result<BoxedBatchReader> {
         let file_path = self.sst_file_path(file_name);
         let reader = ParquetReader::new(
             &file_path,
@@ -416,7 +440,7 @@ impl AccessLayer for FsAccessLayer {
         Ok(Box::new(stream))
     }
 
-    async fn delete_sst(&self, file_name: &str) -> Result<()> {
+    async fn delete_sst(&self, file_name: &Uuid) -> Result<()> {
         let path = self.sst_file_path(file_name);
         let object = self.object_store.object(&path);
         object.delete().await.context(DeleteSstSnafu)
@@ -431,10 +455,10 @@ mod tests {
     use crate::file_purger::noop::NoopFilePurgeHandler;
     use crate::scheduler::{LocalScheduler, SchedulerConfig};
 
-    fn create_file_meta(name: &str, level: Level) -> FileMeta {
+    fn create_file_meta(file_id: &str, level: Level) -> FileMeta {
         FileMeta {
             region_id: 0,
-            file_name: name.to_string(),
+            file_id: SST_file_id::new(file_id),
             time_range: None,
             level,
         }

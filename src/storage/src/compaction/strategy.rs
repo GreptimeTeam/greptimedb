@@ -221,19 +221,19 @@ mod tests {
         assert_eq!(
             TIME_BUCKETS[0],
             infer_time_bucket(&[
-                new_file_handle("a", 0, TIME_BUCKETS[0] * 1000 - 1),
-                new_file_handle("b", 1, 10_000)
+                new_file_handle(SST_file_id::new(Uuid!("a")), 0, TIME_BUCKETS[0] * 1000 - 1),
+                new_file_handle(SST_file_id::new(Uuid!("b")), 1, 10_000)
             ])
         );
     }
 
-    fn new_file_handle(name: &str, start_ts_millis: i64, end_ts_millis: i64) -> FileHandle {
+    fn new_file_handle(file_id: SST_file_id, start_ts_millis: i64, end_ts_millis: i64) -> FileHandle {
         let file_purger = new_noop_file_purger();
         let layer = Arc::new(crate::test_util::access_layer_util::MockAccessLayer {});
         FileHandle::new(
             FileMeta {
                 region_id: 0,
-                file_name: name.to_string(),
+                file_id,
                 time_range: Some((
                     Timestamp::new_millisecond(start_ts_millis),
                     Timestamp::new_millisecond(end_ts_millis),
@@ -245,10 +245,10 @@ mod tests {
         )
     }
 
-    fn new_file_handles(input: &[(&str, i64, i64)]) -> Vec<FileHandle> {
+    fn new_file_handles(input: &[(SST_file_id, i64, i64)]) -> Vec<FileHandle> {
         input
             .iter()
-            .map(|(name, start, end)| new_file_handle(name, *start, *end))
+            .map(|(file_id, start, end)| new_file_handle(file_id, *start, *end))
             .collect()
     }
 
@@ -291,19 +291,19 @@ mod tests {
         // simple case, files with disjoint
         check_bucket_calculation(
             10,
-            new_file_handles(&[("a", 0, 9000), ("b", 10000, 19000)]),
+            new_file_handles(&[(SST_file_id::new(Uuid!("a")), 0, 9000), (SST_file_id::new(Uuid!("b")), 10000, 19000)]),
             &[(0, &["a"]), (10, &["b"])],
         );
 
         // files across buckets
         check_bucket_calculation(
             10,
-            new_file_handles(&[("a", 0, 10001), ("b", 10000, 19000)]),
+            new_file_handles(&[SST_file_id::new((Uuid!("a")), 0, 10001), (SST_file_id::new(Uuid!("b")), 10000, 19000)]),
             &[(0, &["a"]), (10, &["a", "b"])],
         );
         check_bucket_calculation(
             10,
-            new_file_handles(&[("a", 0, 10000)]),
+            new_file_handles(&[(SST_file_id::new(Uuid!("a")), 0, 10000)]),
             &[(0, &["a"]), (10, &["a"])],
         );
 
@@ -313,7 +313,7 @@ mod tests {
             .collect::<Vec<_>>();
         check_bucket_calculation(
             TIME_BUCKETS[0],
-            new_file_handles(&[("a", 0, TIME_BUCKETS[4] * 1000)]),
+            new_file_handles(&[(SST_file_id::new(Uuid!("a")), 0, TIME_BUCKETS[4] * 1000)]),
             &expected,
         );
     }

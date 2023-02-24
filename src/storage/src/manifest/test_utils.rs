@@ -32,8 +32,8 @@ pub fn build_region_meta() -> RegionMetadata {
 
 pub fn build_region_edit(
     sequence: SequenceNumber,
-    files_to_add: &[&str],
-    files_to_remove: &[&str],
+    files_to_add: &[SST_file_id],
+    files_to_remove: &[SST_file_id],
 ) -> RegionEdit {
     RegionEdit {
         region_version: 0,
@@ -42,7 +42,7 @@ pub fn build_region_edit(
             .iter()
             .map(|f| FileMeta {
                 region_id: 0,
-                file_name: f.to_string(),
+                file_id: f,
                 time_range: None,
                 level: 0,
             })
@@ -51,7 +51,7 @@ pub fn build_region_edit(
             .iter()
             .map(|f| FileMeta {
                 region_id: 0,
-                file_name: f.to_string(),
+                file_id: f,
                 time_range: None,
                 level: 0,
             })

@@ -17,6 +17,7 @@ use std::sync::Arc;
 use common_telemetry::{debug, error};
 use store_api::storage::RegionId;
 use tokio::sync::Notify;
+use uuid::Uuid;
 
 use crate::scheduler::rate_limit::{BoxedRateLimitToken, RateLimitToken};
 use crate::scheduler::{Handler, LocalScheduler, Request};
@@ -24,7 +25,7 @@ use crate::sst::AccessLayerRef;
 
 pub struct FilePurgeRequest {
     pub region_id: RegionId,
-    pub file_name: String,
+    pub file_name: Uuid,
     pub sst_layer: AccessLayerRef,
 }
 
@@ -32,7 +33,7 @@ impl Request for FilePurgeRequest {
     type Key = String;
 
     fn key(&self) -> Self::Key {
-        format!("{}/{}", self.region_id, self.file_name)
+        format!("{}/{}", self.region_id, format!("{}.parquet", self.file_name.hyphenated()))
     }
 }
 
@@ -126,7 +127,7 @@ mod tests {
 
     async fn create_sst_file(
         os: ObjectStore,
-        sst_file_name: &str,
+        sst_file_id: SST_file_id,
         file_purger: FilePurgerRef,
     ) -> (FileHandle, String, AccessLayerRef) {
         let schema = schema_for_test();
@@ -144,7 +145,7 @@ mod tests {
         let sst_path = "table1";
         let layer = Arc::new(FsAccessLayer::new(sst_path, os.clone()));
         let _sst_info = layer
-            .write_sst(sst_file_name, Source::Iter(iter), &WriteOptions {})
+            .write_sst(sst_file_id.file_name_with_extension(), Source::Iter(iter), &WriteOptions {})
             .await
             .unwrap();
 
@@ -152,7 +153,7 @@ mod tests {
             FileHandle::new(
                 FileMeta {
                     region_id: 0,
-                    file_name: sst_file_name.to_string(),
+                    file_id: sst_file_id,
                     time_range: None,
                     level: 0,
                 },
