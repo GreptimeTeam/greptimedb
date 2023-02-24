@@ -107,6 +107,9 @@ coprocessor = copr
                 }
             }
 
+            let py_main = PyModule::import(py, "__main__")?;
+            let globals = py_main.dict();
+
             let locals = PyDict::new(py);
             let greptime = PyModule::new(py, "greptime")?;
             greptime_builtins(py, greptime)?;
@@ -115,7 +118,7 @@ coprocessor = copr
             if let Some(engine) = &copr.query_engine {
                 let query_engine = PyQueryEngine::from_weakref(engine.clone());
                 let query_engine = PyCell::new(py, query_engine)?;
-                locals.set_item("query", query_engine)?;
+                globals.set_item("query", query_engine)?;
             }
 
             // TODO(discord9): find out why `dataframe` is not in scope
@@ -128,7 +131,7 @@ coprocessor = copr
                     )
                 )?;
                 let dataframe = PyCell::new(py, dataframe)?;
-                locals.set_item("dataframe", dataframe)?;
+                globals.set_item("dataframe", dataframe)?;
             }
 
 
@@ -139,7 +142,7 @@ coprocessor = copr
             // set `dataframe` and `query` in scope/ or set it into module
             // could generate a call in python code and use Python::run to run it, just like in RustPython
             // Expect either: a PyVector Or a List/Tuple of PyVector
-            py.run(&script, None, Some(locals))?;
+            py.run(&script, Some(globals), Some(locals))?;
             let result = locals.get_item("_return_from_coprocessor").ok_or(PyValueError::new_err("Can't find return value of coprocessor function"))?;
 
             let col_len = rb.as_ref().map(|rb| rb.num_rows()).unwrap_or(1);
@@ -218,10 +221,10 @@ mod copr_test {
 @copr(args=["cpu", "mem"], returns=["ref"], backend="pyo3")
 def a(cpu, mem, **kwargs):
     import greptime as gt
-    from greptime import vector, log2, sum, pow
+    from greptime import vector, log2, sum, pow, col
     for k, v in kwargs.items():
         print("%s == %s" % (k, v))
-    # print(dataframe.select(["cpu"]).collect())
+    print(dataframe.select([col("cpu")]).collect())
     return (0.5 < cpu) & ~( cpu >= 0.75)
     "#;
         let cpu_array = Float32Vector::from_slice([0.9f32, 0.8, 0.7, 0.3]);
