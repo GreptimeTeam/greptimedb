@@ -15,7 +15,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use client::{Client, Database};
+use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::ErrorExt;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
@@ -67,7 +67,7 @@ impl Repl {
         }
 
         let client = Client::with_urls([&cmd.grpc_addr]);
-        let database = Database::with_client(client);
+        let database = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
 
         Ok(Self {
             rl,
