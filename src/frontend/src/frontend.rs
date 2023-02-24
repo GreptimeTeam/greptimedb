@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use common_base::Plugins;
-use meta_client::MetaClientOpts;
+use meta_client::MetaClientOptions;
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
 use servers::Mode;
@@ -35,6 +35,7 @@ use crate::server::Services;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FrontendOptions {
+    pub mode: Mode,
     pub http_options: Option<HttpOptions>,
     pub grpc_options: Option<GrpcOptions>,
     pub mysql_options: Option<MysqlOptions>,
@@ -43,13 +44,13 @@ pub struct FrontendOptions {
     pub influxdb_options: Option<InfluxdbOptions>,
     pub prometheus_options: Option<PrometheusOptions>,
     pub promql_options: Option<PromqlOptions>,
-    pub mode: Mode,
-    pub meta_client_opts: Option<MetaClientOpts>,
+    pub meta_client_options: Option<MetaClientOptions>,
 }
 
 impl Default for FrontendOptions {
     fn default() -> Self {
         Self {
+            mode: Mode::Standalone,
             http_options: Some(HttpOptions::default()),
             grpc_options: Some(GrpcOptions::default()),
             mysql_options: Some(MysqlOptions::default()),
@@ -58,8 +59,7 @@ impl Default for FrontendOptions {
             influxdb_options: Some(InfluxdbOptions::default()),
             prometheus_options: Some(PrometheusOptions::default()),
             promql_options: Some(PromqlOptions::default()),
-            mode: Mode::Standalone,
-            meta_client_opts: None,
+            meta_client_options: None,
         }
     }
 }
@@ -95,5 +95,17 @@ impl<T: FrontendInstance> Frontend<T> {
 
         // TODO(sunng87): merge this into instance
         Services::start(&self.opts, instance, self.plugins.clone()).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_toml() {
+        let opts = FrontendOptions::default();
+        let toml_string = toml::to_string(&opts).unwrap();
+        let _parsed: FrontendOptions = toml::from_str(&toml_string).unwrap();
     }
 }
