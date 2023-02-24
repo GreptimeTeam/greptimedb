@@ -413,6 +413,7 @@ pub fn exec_parsed(
     match copr.backend {
         BackendType::RustPython => rspy_exec_parsed(copr, rb, params),
         BackendType::CPython => {
+            #[cfg(feature = "pyo3")]
             if let Some(rb) = rb {
                 pyo3_exec_parsed(copr, rb)
             } else {
@@ -421,6 +422,12 @@ pub fn exec_parsed(
                 }
                 .fail()
             }
+            #[cfg(not(feature = "pyo3"))]
+            OtherSnafu {
+                reason: "`pyo3` feature is disabled, therefore can't run scripts in cpython"
+                    .to_string(),
+            }
+            .fail()
         }
     }
 }

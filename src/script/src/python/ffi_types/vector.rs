@@ -42,6 +42,7 @@ use crate::python::utils::is_instance;
 /// The Main FFI type `PyVector` that is used both in RustPython and PyO3
 #[pyo3class(name = "vector")]
 #[rspyclass(module = false, name = "vector")]
+#[repr(transparent)]
 #[derive(PyPayload, Debug, Clone)]
 pub struct PyVector {
     pub(crate) vector: VectorRef,

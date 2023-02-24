@@ -14,6 +14,7 @@
 
 use std::sync::Mutex;
 
+use common_telemetry::info;
 use datafusion_common::ScalarValue;
 use datafusion_expr::ColumnarValue;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
@@ -23,7 +24,7 @@ use datatypes::vectors::Helper;
 use once_cell::sync::Lazy;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyFloat, PyInt, PyList};
+use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyTuple};
 
 use crate::python::ffi_types::utils::{collect_diff_types_string, new_item_field};
 use crate::python::ffi_types::PyVector;
@@ -38,6 +39,7 @@ pub(crate) fn init_cpython_interpreter() {
         pyo3::append_to_inittab!(greptime_builtins);
         pyo3::prepare_freethreaded_python();
         *start = true;
+        info!("Started CPython Interpreter");
     }
 }
 
@@ -154,6 +156,8 @@ pub(crate) fn pyo3_obj_try_to_typed_val(
             num.extract::<f64>()
                 .map(|v| Value::Float64(OrderedFloat(v)))
         }
+    } else if let Ok(s) = obj.extract::<String>() {
+        Ok(Value::String(s.into()))
     } else {
         Err(PyValueError::new_err(format!(
             "Can't cast {obj} to {dtype:?}"
@@ -166,7 +170,7 @@ pub(crate) fn pyo3_obj_try_to_typed_val(
 /// | Rust   | Python          |
 /// | ------ | --------------- |
 /// | Array  | PyVector        |
-/// | Scalar | int/float/bool  |
+/// | Scalar | int/float/bool/str  |
 pub fn columnar_value_to_py_any(py: Python<'_>, val: ColumnarValue) -> PyResult<PyObject> {
     match val {
         ColumnarValue::Array(arr) => {
@@ -225,16 +229,34 @@ pub fn try_into_columnar_value(py: Python<'_>, obj: PyObject) -> PyResult<Column
     }
     if let Ok(v) = obj.extract::<PyVector>(py) {
         Ok(ColumnarValue::Array(v.to_arrow_array()))
-    } else if let Ok(val) = obj.downcast::<PyList>(py) {
-        let ret: Vec<ScalarValue> = val.iter().map(|v|->PyResult<ScalarValue>{
-            let val = try_into_columnar_value(py, v.into())?;
-            match val{
-                ColumnarValue::Array(arr) => Err(PyValueError::new_err(format!(
-                    "Expect only scalar value in a list, found a vector of type {:?} nested in list", arr.data_type()
-                ))),
-                ColumnarValue::Scalar(val) => Ok(val),
+    } else if obj.as_ref(py).is_instance_of::<PyList>()?
+        || obj.as_ref(py).is_instance_of::<PyTuple>()?
+    {
+        let ret: Vec<ScalarValue> = {
+            if let Ok(val) = obj.downcast::<PyList>(py) {
+                val.iter().map(|v|->PyResult<ScalarValue>{
+                    let val = try_into_columnar_value(py, v.into())?;
+                    match val{
+                        ColumnarValue::Array(arr) => Err(PyValueError::new_err(format!(
+                            "Expect only scalar value in a list, found a vector of type {:?} nested in list", arr.data_type()
+                        ))),
+                        ColumnarValue::Scalar(val) => Ok(val),
+                    }
+            }).collect::<PyResult<_>>()?
+            } else if let Ok(val) = obj.downcast::<PyTuple>(py) {
+                val.iter().map(|v|->PyResult<ScalarValue>{
+                    let val = try_into_columnar_value(py, v.into())?;
+                    match val{
+                        ColumnarValue::Array(arr) => Err(PyValueError::new_err(format!(
+                            "Expect only scalar value in a tuple, found a vector of type {:?} nested in tuple", arr.data_type()
+                        ))),
+                        ColumnarValue::Scalar(val) => Ok(val),
+                    }
+            }).collect::<PyResult<_>>()?
+            } else {
+                unreachable!()
             }
-        }).collect::<PyResult<_>>()?;
+        };
 
         if ret.is_empty() {
             return Ok(ColumnarValue::Scalar(ScalarValue::List(
