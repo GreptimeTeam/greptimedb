@@ -40,13 +40,13 @@ pub use crate::query_engine::state::QueryEngineState;
 pub trait QueryEngine: Send + Sync {
     fn name(&self) -> &str;
 
-    fn statement_to_plan(
+    async fn statement_to_plan(
         &self,
         stmt: QueryStatement,
         query_ctx: QueryContextRef,
     ) -> Result<LogicalPlan>;
 
-    fn describe(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<Schema>;
+    async fn describe(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<Schema>;
 
     async fn execute(&self, plan: &LogicalPlan) -> Result<Output>;
 

@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
+use async_trait::async_trait;
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_telemetry::error;
 use snafu::{ensure, OptionExt};
@@ -155,16 +156,20 @@ impl CatalogManager for MemoryCatalogManager {
         }
     }
 
-    fn table(&self, catalog: &str, schema: &str, table_name: &str) -> Result<Option<TableRef>> {
-        let c = self.catalogs.read().unwrap();
-        let catalog = if let Some(c) = c.get(catalog) {
+    async fn table(
+        &self,
+        catalog: &str,
+        schema: &str,
+        table_name: &str,
+    ) -> Result<Option<TableRef>> {
+        let catalog = {
+            let c = self.catalogs.read().unwrap();
+            let Some(c) = c.get(catalog) else { return Ok(None) };
             c.clone()
-        } else {
-            return Ok(None);
         };
         match catalog.schema(schema)? {
             None => Ok(None),
-            Some(s) => s.table(table_name),
+            Some(s) => s.table(table_name).await,
         }
     }
 }
@@ -283,6 +288,7 @@ impl Default for MemorySchemaProvider {
     }
 }
 
+#[async_trait]
 impl SchemaProvider for MemorySchemaProvider {
     fn as_any(&self) -> &dyn Any {
         self
@@ -293,7 +299,7 @@ impl SchemaProvider for MemorySchemaProvider {
         Ok(tables.keys().cloned().collect())
     }
 
-    fn table(&self, name: &str) -> Result<Option<TableRef>> {
+    async fn table(&self, name: &str) -> Result<Option<TableRef>> {
         let tables = self.tables.read().unwrap();
         Ok(tables.get(name).cloned())
     }
@@ -355,8 +361,8 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn test_new_memory_catalog_list() {
+    #[tokio::test]
+    async fn test_new_memory_catalog_list() {
         let catalog_list = new_memory_catalog_list().unwrap();
         let default_catalog = catalog_list.catalog(DEFAULT_CATALOG_NAME).unwrap().unwrap();
 
@@ -369,9 +375,9 @@ mod tests {
             .register_table("numbers".to_string(), Arc::new(NumbersTable::default()))
             .unwrap();
 
-        let table = default_schema.table("numbers").unwrap();
+        let table = default_schema.table("numbers").await.unwrap();
         assert!(table.is_some());
-        assert!(default_schema.table("not_exists").unwrap().is_none());
+        assert!(default_schema.table("not_exists").await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -419,7 +425,7 @@ mod tests {
 
         // test new table name exists
         assert!(provider.table_exist(new_table_name).unwrap());
-        let registered_table = provider.table(new_table_name).unwrap().unwrap();
+        let registered_table = provider.table(new_table_name).await.unwrap().unwrap();
         assert_eq!(
             registered_table.table_info().ident.table_id,
             test_table.table_info().ident.table_id
@@ -468,6 +474,7 @@ mod tests {
 
         let registered_table = catalog
             .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, new_table_name)
+            .await
             .unwrap()
             .unwrap();
         assert_eq!(registered_table.table_info().ident.table_id, table_id);

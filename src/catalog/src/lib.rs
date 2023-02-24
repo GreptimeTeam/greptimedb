@@ -34,6 +34,7 @@ pub mod local;
 pub mod remote;
 pub mod schema;
 pub mod system;
+pub mod table_source;
 pub mod tables;
 
 /// Represent a list of named catalogs
@@ -107,7 +108,12 @@ pub trait CatalogManager: CatalogList {
     fn schema(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>>;
 
     /// Returns the table by catalog, schema and table name.
-    fn table(&self, catalog: &str, schema: &str, table_name: &str) -> Result<Option<TableRef>>;
+    async fn table(
+        &self,
+        catalog: &str,
+        schema: &str,
+        table_name: &str,
+    ) -> Result<Option<TableRef>>;
 }
 
 pub type CatalogManagerRef = Arc<dyn CatalogManager>;
@@ -186,7 +192,8 @@ pub(crate) async fn handle_system_table_request<'a, M: CatalogManager>(
         let table_name = &req.create_table_request.table_name;
         let table_id = req.create_table_request.id;
 
-        let table = if let Some(table) = manager.table(catalog_name, schema_name, table_name)? {
+        let table = manager.table(catalog_name, schema_name, table_name).await?;
+        let table = if let Some(table) = table {
             table
         } else {
             let table = engine
@@ -219,7 +226,7 @@ pub(crate) async fn handle_system_table_request<'a, M: CatalogManager>(
 }
 
 /// The number of regions in the datanode node.
-pub fn region_number(catalog_manager: &CatalogManagerRef) -> Result<u64> {
+pub async fn region_number(catalog_manager: &CatalogManagerRef) -> Result<u64> {
     let mut region_number: u64 = 0;
 
     for catalog_name in catalog_manager.catalog_names()? {
@@ -239,11 +246,13 @@ pub fn region_number(catalog_manager: &CatalogManagerRef) -> Result<u64> {
                 })?;
 
             for table_name in schema.table_names()? {
-                let table = schema
-                    .table(&table_name)?
-                    .context(error::TableNotFoundSnafu {
-                        table_info: &table_name,
-                    })?;
+                let table =
+                    schema
+                        .table(&table_name)
+                        .await?
+                        .context(error::TableNotFoundSnafu {
+                            table_info: &table_name,
+                        })?;
 
                 let region_numbers = &table.table_info().meta.region_numbers;
                 region_number += region_numbers.len() as u64;

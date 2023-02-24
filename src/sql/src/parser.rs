@@ -16,11 +16,9 @@ use snafu::{ensure, ResultExt};
 use sqlparser::dialect::Dialect;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::{Parser, ParserError};
-use sqlparser::tokenizer::{Token, Tokenizer};
+use sqlparser::tokenizer::{Token, TokenWithLocation};
 
-use crate::error::{
-    self, InvalidDatabaseNameSnafu, InvalidTableNameSnafu, Result, SyntaxSnafu, TokenizerSnafu,
-};
+use crate::error::{self, InvalidDatabaseNameSnafu, InvalidTableNameSnafu, Result, SyntaxSnafu};
 use crate::parsers::tql_parser;
 use crate::statements::describe::DescribeTable;
 use crate::statements::drop::DropTable;
@@ -38,14 +36,11 @@ impl<'a> ParserContext<'a> {
     /// Parses SQL with given dialect
     pub fn create_with_dialect(sql: &'a str, dialect: &dyn Dialect) -> Result<Vec<Statement>> {
         let mut stmts: Vec<Statement> = Vec::new();
-        let mut tokenizer = Tokenizer::new(dialect, sql);
 
-        let tokens: Vec<Token> = tokenizer.tokenize().context(TokenizerSnafu { sql })?;
-
-        let mut parser_ctx = ParserContext {
-            sql,
-            parser: Parser::new(tokens, dialect),
-        };
+        let parser = Parser::new(dialect)
+            .try_with_sql(sql)
+            .context(SyntaxSnafu { sql })?;
+        let mut parser_ctx = ParserContext { sql, parser };
 
         let mut expecting_statement_delimiter = false;
         loop {
@@ -71,7 +66,7 @@ impl<'a> ParserContext<'a> {
 
     /// Parses parser context to a set of statements.
     pub fn parse_statement(&mut self) -> Result<Statement> {
-        match self.parser.peek_token() {
+        match self.parser.peek_token().token {
             Token::Word(w) => {
                 match w.keyword {
                     Keyword::CREATE => {
@@ -185,7 +180,7 @@ impl<'a> ParserContext<'a> {
     }
 
     fn parse_show_tables(&mut self) -> Result<Statement> {
-        let database = match self.parser.peek_token() {
+        let database = match self.parser.peek_token().token {
             Token::EOF | Token::SemiColon => {
                 return Ok(Statement::ShowTables(ShowTables {
                     kind: ShowKind::All,
@@ -220,7 +215,7 @@ impl<'a> ParserContext<'a> {
             _ => None,
         };
 
-        let kind = match self.parser.peek_token() {
+        let kind = match self.parser.peek_token().token {
             Token::EOF | Token::SemiColon => ShowKind::All,
             // SHOW TABLES [WHERE | LIKE] [EXPR]
             Token::Word(w) => match w.keyword {
@@ -319,7 +314,7 @@ impl<'a> ParserContext<'a> {
     }
 
     // Report unexpected token
-    pub(crate) fn expected<T>(&self, expected: &str, found: Token) -> Result<T> {
+    pub(crate) fn expected<T>(&self, expected: &str, found: TokenWithLocation) -> Result<T> {
         Err(ParserError::ParserError(format!(
             "Expected {expected}, found: {found}",
         )))
@@ -327,7 +322,7 @@ impl<'a> ParserContext<'a> {
     }
 
     pub fn matches_keyword(&mut self, expected: Keyword) -> bool {
-        match self.parser.peek_token() {
+        match self.parser.peek_token().token {
             Token::Word(w) => w.keyword == expected,
             _ => false,
         }
@@ -349,7 +344,7 @@ impl<'a> ParserContext<'a> {
 
     /// Parses `SHOW DATABASES` statement.
     pub fn parse_show_databases(&mut self) -> Result<Statement> {
-        let tok = self.parser.next_token();
+        let tok = self.parser.next_token().token;
         match &tok {
             Token::EOF | Token::SemiColon => {
                 Ok(Statement::ShowDatabases(ShowDatabases::new(ShowKind::All)))
@@ -563,7 +558,7 @@ mod tests {
             limit: None,
             offset: None,
             fetch: None,
-            lock: None,
+            locks: vec![],
         }));
 
         let explain = Explain::try_from(SpStatement::Explain {

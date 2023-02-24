@@ -239,6 +239,7 @@ impl SqlHandler {
                 QueryStatement::Sql(Statement::Query(Box::new(query))),
                 query_ctx.clone(),
             )
+            .await
             .context(ExecuteSqlSnafu)?;
 
         let output = self
@@ -284,9 +285,10 @@ impl SqlHandler {
 
         let table = catalog_manager
             .table(&catalog_name, &schema_name, &table_name)
+            .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {
-                table_name: table_name.clone(),
+                table_name: format!("{catalog_name}.{schema_name}.{table_name}"),
             })?;
 
         if stmt.is_insert_select() {

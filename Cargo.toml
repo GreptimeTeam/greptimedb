@@ -48,29 +48,28 @@ edition = "2021"
 license = "Apache-2.0"
 
 [workspace.dependencies]
-arrow = "29.0"
-arrow-array = "29.0"
-arrow-flight = "29.0"
-arrow-schema = { version = "29.0", features = ["serde"] }
+arrow = "33.0"
+arrow-array = "33.0"
+arrow-flight = "33.0"
+arrow-schema = { version = "33.0", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
-# TODO(LFC): Use released Datafusion when it officially dependent on Arrow 29.0
-datafusion = { git = "https://github.com/apache/arrow-datafusion.git", rev = "4917235a398ae20145c87d20984e6367dc1a0c1e" }
-datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", rev = "4917235a398ae20145c87d20984e6367dc1a0c1e" }
-datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "4917235a398ae20145c87d20984e6367dc1a0c1e" }
-datafusion-optimizer = { git = "https://github.com/apache/arrow-datafusion.git", rev = "4917235a398ae20145c87d20984e6367dc1a0c1e" }
-datafusion-physical-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "4917235a398ae20145c87d20984e6367dc1a0c1e" }
-datafusion-sql = { git = "https://github.com/apache/arrow-datafusion.git", rev = "4917235a398ae20145c87d20984e6367dc1a0c1e" }
+datafusion = { git = "https://github.com/apache/arrow-datafusion.git", rev = "fad360df0132a2fcb264a7c07b2b02f0b1dfc644" }
+datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", rev = "fad360df0132a2fcb264a7c07b2b02f0b1dfc644" }
+datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "fad360df0132a2fcb264a7c07b2b02f0b1dfc644" }
+datafusion-optimizer = { git = "https://github.com/apache/arrow-datafusion.git", rev = "fad360df0132a2fcb264a7c07b2b02f0b1dfc644" }
+datafusion-physical-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "fad360df0132a2fcb264a7c07b2b02f0b1dfc644" }
+datafusion-sql = { git = "https://github.com/apache/arrow-datafusion.git", rev = "fad360df0132a2fcb264a7c07b2b02f0b1dfc644" }
 futures = "0.3"
 futures-util = "0.3"
-parquet = "29.0"
+parquet = "33.0"
 paste = "1.0"
 prost = "0.11"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 snafu = { version = "0.7", features = ["backtraces"] }
-sqlparser = "0.28"
+sqlparser = "0.30"
 tokio = { version = "1.24.2", features = ["full"] }
 tokio-util = "0.7"
 tonic = { version = "0.8", features = ["tls"] }

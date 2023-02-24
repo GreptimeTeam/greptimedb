@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use async_stream::stream;
+use async_trait::async_trait;
 use common_catalog::consts::{INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_TABLE_NAME};
 use common_error::ext::BoxedError;
 use common_query::logical_plan::Expr;
@@ -200,6 +201,7 @@ pub struct InformationSchema {
     pub system: Arc<SystemCatalogTable>,
 }
 
+#[async_trait]
 impl SchemaProvider for InformationSchema {
     fn as_any(&self) -> &dyn Any {
         self
@@ -212,7 +214,7 @@ impl SchemaProvider for InformationSchema {
         ])
     }
 
-    fn table(&self, name: &str) -> Result<Option<TableRef>, Error> {
+    async fn table(&self, name: &str) -> Result<Option<TableRef>, Error> {
         if name.eq_ignore_ascii_case("tables") {
             Ok(Some(self.tables.clone()))
         } else if name.eq_ignore_ascii_case(SYSTEM_CATALOG_TABLE_NAME) {

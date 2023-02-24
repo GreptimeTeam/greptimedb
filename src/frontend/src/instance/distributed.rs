@@ -24,7 +24,7 @@ use api::v1::{
 };
 use async_trait::async_trait;
 use catalog::helper::{SchemaKey, SchemaValue};
-use catalog::{CatalogList, CatalogManager, DeregisterTableRequest, RegisterTableRequest};
+use catalog::{CatalogManager, DeregisterTableRequest, RegisterTableRequest};
 use chrono::DateTime;
 use client::Database;
 use common_base::Plugins;
@@ -59,11 +59,10 @@ use table::table::AlterContext;
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
-    self, AlterExprToRequestSnafu, CatalogEntrySerdeSnafu, CatalogNotFoundSnafu, CatalogSnafu,
-    ColumnDataTypeSnafu, DeserializePartitionSnafu, ParseSqlSnafu, PrimaryKeyNotFoundSnafu,
-    RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaExistsSnafu, SchemaNotFoundSnafu,
-    StartMetaClientSnafu, TableAlreadyExistSnafu, TableNotFoundSnafu, TableSnafu,
-    ToTableInsertRequestSnafu, UnrecognizedTableOptionSnafu,
+    self, AlterExprToRequestSnafu, CatalogEntrySerdeSnafu, CatalogSnafu, ColumnDataTypeSnafu,
+    DeserializePartitionSnafu, ParseSqlSnafu, PrimaryKeyNotFoundSnafu, RequestDatanodeSnafu,
+    RequestMetaSnafu, Result, SchemaExistsSnafu, StartMetaClientSnafu, TableAlreadyExistSnafu,
+    TableNotFoundSnafu, TableSnafu, ToTableInsertRequestSnafu, UnrecognizedTableOptionSnafu,
 };
 use crate::expr_factory;
 use crate::instance::parse_stmt;
@@ -114,6 +113,7 @@ impl DistInstance {
                 &table_name.schema_name,
                 &table_name.table_name,
             )
+            .await
             .context(CatalogSnafu)?
             .is_some()
         {
@@ -215,6 +215,7 @@ impl DistInstance {
                 &table_name.schema_name,
                 &table_name.table_name,
             )
+            .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {
                 table_name: table_name.to_string(),
@@ -274,6 +275,7 @@ impl DistInstance {
                 let plan = self
                     .query_engine
                     .statement_to_plan(QueryStatement::Sql(stmt), query_ctx)
+                    .await
                     .context(error::ExecuteStatementSnafu {})?;
                 self.query_engine.execute(&plan).await
             }
@@ -311,6 +313,7 @@ impl DistInstance {
                 let table = self
                     .catalog_manager
                     .table(&catalog, &schema, &table)
+                    .await
                     .context(CatalogSnafu)?
                     .with_context(|| TableNotFoundSnafu {
                         table_name: stmt.name().to_string(),
@@ -329,6 +332,7 @@ impl DistInstance {
                 let table = self
                     .catalog_manager
                     .table(&catalog, &schema, &table)
+                    .await
                     .context(CatalogSnafu)?
                     .context(TableNotFoundSnafu { table_name: table })?;
 
@@ -435,15 +439,8 @@ impl DistInstance {
         let table_name = expr.table_name.as_str();
         let table = self
             .catalog_manager
-            .catalog(catalog_name)
-            .context(CatalogSnafu)?
-            .context(CatalogNotFoundSnafu { catalog_name })?
-            .schema(schema_name)
-            .context(CatalogSnafu)?
-            .context(SchemaNotFoundSnafu {
-                schema_info: format!("{catalog_name}.{schema_name}"),
-            })?
-            .table(table_name)
+            .table(catalog_name, schema_name, table_name)
+            .await
             .context(CatalogSnafu)?
             .context(TableNotFoundSnafu {
                 table_name: format!("{catalog_name}.{schema_name}.{table_name}"),
@@ -503,6 +500,7 @@ impl DistInstance {
         let table = self
             .catalog_manager
             .table(catalog, schema, table_name)
+            .await
             .context(CatalogSnafu)?
             .context(TableNotFoundSnafu { table_name })?;
 
@@ -543,10 +541,15 @@ impl SqlQueryHandler for DistInstance {
         self.handle_statement(stmt, query_ctx).await
     }
 
-    fn do_describe(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Option<Schema>> {
+    async fn do_describe(
+        &self,
+        stmt: Statement,
+        query_ctx: QueryContextRef,
+    ) -> Result<Option<Schema>> {
         if let Statement::Query(_) = stmt {
             self.query_engine
                 .describe(QueryStatement::Sql(stmt), query_ctx)
+                .await
                 .map(Some)
                 .context(error::DescribeStatementSnafu)
         } else {

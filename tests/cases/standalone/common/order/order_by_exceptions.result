@@ -12,7 +12,7 @@ Error: 3000(PlanQuery), Error during planning: Order by column out of bounds, sp
 
 SELECT a FROM test ORDER BY 'hello', a;
 
-Error: 1003(Internal), External error: Arrow error: External error: Error during planning: Sort operation is not applicable to scalar value hello
+Error: 1003(Internal), Error during planning: Sort operation is not applicable to scalar value hello
 
 SELECT a AS k, b FROM test UNION SELECT a, b AS k FROM test ORDER BY k;
 
@@ -36,11 +36,11 @@ SELECT a AS k, b FROM test UNION SELECT a AS k, b FROM test ORDER BY k;
 
 SELECT a % 2, b FROM test UNION SELECT b, a % 2 AS k ORDER BY a % 2;
 
-Error: 3000(PlanQuery), Schema error: No field named 'b'. Valid fields are .
+Error: 3000(PlanQuery), No field named 'b'.
 
 SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY a % 2;
 
-Error: 3000(PlanQuery), Schema error: No field named 'a'. Valid fields are 'test.a % Int64(2)', 'b'.
+Error: 3000(PlanQuery), Error during planning: For SELECT DISTINCT, ORDER BY expressions a must appear in select list
 
 SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY 3;
 
@@ -48,7 +48,7 @@ Error: 3000(PlanQuery), Error during planning: Order by column out of bounds, sp
 
 SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY -1;
 
-Error: 1003(Internal), External error: Arrow error: External error: Error during planning: Sort operation is not applicable to scalar value -1
+Error: 1003(Internal), Error during planning: Sort operation is not applicable to scalar value -1
 
 SELECT a % 2, b FROM test UNION SELECT a % 2 AS k FROM test ORDER BY -1;
 

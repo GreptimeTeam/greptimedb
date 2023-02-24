@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 arc-swap = "1.0"
+arrow-schema.workspace = true
 async-trait = "0.1"
 catalog = { path = "../catalog" }
 chrono.workspace = true

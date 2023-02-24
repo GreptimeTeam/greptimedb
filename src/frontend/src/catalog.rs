@@ -16,6 +16,7 @@ use std::any::Any;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use catalog::error::{self as catalog_err, InvalidCatalogValueSnafu, Result as CatalogResult};
 use catalog::helper::{
     build_catalog_prefix, build_schema_prefix, build_table_global_prefix, CatalogKey, SchemaKey,
@@ -121,7 +122,7 @@ impl CatalogManager for FrontendCatalogManager {
             .schema(schema)
     }
 
-    fn table(
+    async fn table(
         &self,
         catalog: &str,
         schema: &str,
@@ -130,6 +131,7 @@ impl CatalogManager for FrontendCatalogManager {
         self.schema(catalog, schema)?
             .context(catalog::error::SchemaNotFoundSnafu { catalog, schema })?
             .table(table_name)
+            .await
     }
 }
 
@@ -250,6 +252,7 @@ pub struct FrontendSchemaProvider {
     datanode_clients: Arc<DatanodeClients>,
 }
 
+#[async_trait]
 impl SchemaProvider for FrontendSchemaProvider {
     fn as_any(&self) -> &dyn Any {
         self
@@ -279,44 +282,27 @@ impl SchemaProvider for FrontendSchemaProvider {
         .unwrap()
     }
 
-    fn table(&self, name: &str) -> catalog::error::Result<Option<TableRef>> {
+    async fn table(&self, name: &str) -> catalog::error::Result<Option<TableRef>> {
         let table_global_key = TableGlobalKey {
             catalog_name: self.catalog_name.clone(),
             schema_name: self.schema_name.clone(),
             table_name: name.to_string(),
         };
-
-        let backend = self.backend.clone();
-        let partition_manager = self.partition_manager.clone();
-        let datanode_clients = self.datanode_clients.clone();
-        let table_name = TableName::new(&self.catalog_name, &self.schema_name, name);
-        let result: CatalogResult<Option<TableRef>> = std::thread::spawn(|| {
-            common_runtime::block_on_read(async move {
-                let res = match backend.get(table_global_key.to_string().as_bytes()).await? {
-                    None => {
-                        return Ok(None);
-                    }
-                    Some(r) => r,
-                };
-                let val = TableGlobalValue::from_bytes(res.1).context(InvalidCatalogValueSnafu)?;
-
-                let table = Arc::new(DistTable::new(
-                    table_name,
-                    Arc::new(
-                        val.table_info
-                            .try_into()
-                            .context(catalog_err::InvalidTableInfoInCatalogSnafu)?,
-                    ),
-                    partition_manager,
-                    datanode_clients,
-                    backend,
-                ));
-                Ok(Some(table as _))
-            })
-        })
-        .join()
-        .unwrap();
-        result
+        let Some(kv) = self.backend.get(table_global_key.to_string().as_bytes()).await? else { return Ok(None) };
+        let v = TableGlobalValue::from_bytes(kv.1).context(InvalidCatalogValueSnafu)?;
+        let table_info = Arc::new(
+            v.table_info
+                .try_into()
+                .context(catalog_err::InvalidTableInfoInCatalogSnafu)?,
+        );
+        let table = Arc::new(DistTable::new(
+            TableName::new(&self.catalog_name, &self.schema_name, name),
+            table_info,
+            self.partition_manager.clone(),
+            self.datanode_clients.clone(),
+            self.backend.clone(),
+        ));
+        Ok(Some(table))
     }
 
     fn register_table(

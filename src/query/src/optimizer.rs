@@ -45,8 +45,8 @@ impl OptimizerRule for TypeConversionRule {
 
         match plan {
             LogicalPlan::Filter(filter) => {
-                let rewritten = filter.predicate().clone().rewrite(&mut converter)?;
-                let Some(plan) = self.try_optimize(filter.input(), _config)? else { return Ok(None) };
+                let rewritten = filter.predicate.clone().rewrite(&mut converter)?;
+                let Some(plan) = self.try_optimize(&filter.input, _config)? else { return Ok(None) };
                 Ok(Some(LogicalPlan::Filter(Filter::try_new(
                     rewritten,
                     Arc::new(plan),
@@ -115,7 +115,10 @@ impl OptimizerRule for TypeConversionRule {
             | LogicalPlan::CreateCatalogSchema { .. }
             | LogicalPlan::CreateCatalog { .. }
             | LogicalPlan::EmptyRelation(_)
-            | LogicalPlan::Prepare(_) => Ok(Some(plan.clone())),
+            | LogicalPlan::Prepare(_)
+            | LogicalPlan::Dml(_)
+            | LogicalPlan::DescribeTable(_)
+            | LogicalPlan::Unnest(_) => Ok(Some(plan.clone())),
         }
     }
 

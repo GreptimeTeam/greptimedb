@@ -12,127 +12,103 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use common_error::prelude::BoxedError;
+use arrow_schema::DataType;
+use catalog::table_source::DfTableSourceProvider;
 use common_query::logical_plan::create_aggregate_function;
 use datafusion::catalog::TableReference;
 use datafusion::error::Result as DfResult;
+use datafusion::execution::context::SessionState;
 use datafusion::physical_plan::udaf::AggregateUDF;
 use datafusion::physical_plan::udf::ScalarUDF;
-use datafusion::sql::planner::{ContextProvider, PlannerContext, SqlToRel};
-use datafusion_common::ScalarValue;
+use datafusion::sql::planner::ContextProvider;
+use datafusion_common::config::ConfigOptions;
+use datafusion_common::{DataFusionError, OwnedTableReference};
 use datafusion_expr::TableSource;
-use datatypes::arrow::datatypes::DataType;
-use datatypes::prelude::DataType as DataTypeTrait;
+use datafusion_physical_expr::var_provider::{is_system_variables, VarType};
+use datafusion_sql::parser::Statement as DfStatement;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
-use sql::statements::explain::Explain;
-use sql::statements::query::Query;
-use sql::statements::statement::Statement;
 
-use crate::datafusion::error;
-use crate::error::{QueryPlanSnafu, Result};
-use crate::plan::LogicalPlan;
-use crate::planner::Planner;
+use crate::error::{CatalogSnafu, DataFusionSnafu, Result};
 use crate::query_engine::QueryEngineState;
 
-pub struct DfPlanner<'a, S: ContextProvider> {
-    sql_to_rel: SqlToRel<'a, S>,
-}
-
-impl<'a, S: ContextProvider + Send + Sync> DfPlanner<'a, S> {
-    /// Creates a DataFusion planner instance
-    pub fn new(schema_provider: &'a S) -> Self {
-        let rel = SqlToRel::new(schema_provider);
-        Self { sql_to_rel: rel }
-    }
-
-    /// Converts QUERY statement to logical plan.
-    pub fn query_to_plan(&self, query: Box<Query>) -> Result<LogicalPlan> {
-        // todo(hl): original SQL should be provided as an argument
-        let sql = query.inner.to_string();
-        let mut context = PlannerContext::new_with_prepare_param_data_types(
-            query
-                .param_types()
-                .iter()
-                .map(|v| v.as_arrow_type())
-                .collect(),
-        );
-        let result = self
-            .sql_to_rel
-            .query_to_plan(query.inner, &mut context)
-            .context(error::PlanSqlSnafu { sql })
-            .map_err(BoxedError::new)
-            .context(QueryPlanSnafu)?;
-
-        Ok(LogicalPlan::DfPlan(result))
-    }
-
-    /// Converts EXPLAIN statement to logical plan.
-    pub fn explain_to_plan(&self, explain: Explain) -> Result<LogicalPlan> {
-        let result = self
-            .sql_to_rel
-            .sql_statement_to_plan(explain.inner.clone())
-            .context(error::PlanSqlSnafu {
-                sql: explain.to_string(),
-            })
-            .map_err(BoxedError::new)
-            .context(QueryPlanSnafu)?;
-
-        Ok(LogicalPlan::DfPlan(result))
-    }
-}
-
-impl<'a, S> Planner for DfPlanner<'a, S>
-where
-    S: ContextProvider + Send + Sync,
-{
-    /// Converts statement to logical plan using datafusion planner
-    fn statement_to_plan(&self, statement: Statement) -> Result<LogicalPlan> {
-        match statement {
-            Statement::Query(qb) => self.query_to_plan(qb),
-            Statement::Explain(explain) => self.explain_to_plan(explain),
-            // The TQL has it's a dedicated planner
-            Statement::Tql(_tql) => unreachable!(),
-            Statement::ShowTables(_)
-            | Statement::Delete(_)
-            | Statement::ShowDatabases(_)
-            | Statement::ShowCreateTable(_)
-            | Statement::DescribeTable(_)
-            | Statement::CreateTable(_)
-            | Statement::CreateDatabase(_)
-            | Statement::Alter(_)
-            | Statement::Insert(_)
-            | Statement::DropTable(_)
-            | Statement::Use(_)
-            | Statement::Copy(_) => unreachable!(),
-        }
-    }
-}
-
 pub struct DfContextProviderAdapter {
-    state: QueryEngineState,
-    query_ctx: QueryContextRef,
+    engine_state: QueryEngineState,
+    session_state: SessionState,
+    tables: HashMap<String, Arc<dyn TableSource>>,
+    table_provider: DfTableSourceProvider,
 }
 
 impl DfContextProviderAdapter {
-    pub fn new(state: QueryEngineState, query_ctx: QueryContextRef) -> Self {
-        Self { state, query_ctx }
+    pub(crate) async fn try_new(
+        engine_state: QueryEngineState,
+        session_state: SessionState,
+        df_stmt: &DfStatement,
+        query_ctx: QueryContextRef,
+    ) -> Result<Self> {
+        let table_names = session_state
+            .resolve_table_references(df_stmt)
+            .context(DataFusionSnafu)?;
+
+        let mut table_provider = DfTableSourceProvider::new(
+            engine_state.catalog_list().clone(),
+            engine_state.disallow_cross_schema_query(),
+            query_ctx.as_ref(),
+        );
+
+        let tables = resolve_tables(table_names, &mut table_provider).await?;
+
+        Ok(Self {
+            engine_state,
+            session_state,
+            tables,
+            table_provider,
+        })
     }
+}
+
+async fn resolve_tables(
+    table_names: Vec<OwnedTableReference>,
+    table_provider: &mut DfTableSourceProvider,
+) -> Result<HashMap<String, Arc<dyn TableSource>>> {
+    let mut tables = HashMap::with_capacity(table_names.len());
+
+    for table_name in table_names {
+        let resolved_name = table_provider
+            .resolve_table_ref(table_name.as_table_reference())
+            .context(CatalogSnafu)?;
+
+        if let Entry::Vacant(v) = tables.entry(resolved_name.to_string()) {
+            let table = table_provider
+                .resolve_table(table_name)
+                .await
+                .context(CatalogSnafu)?;
+
+            v.insert(table);
+        }
+    }
+    Ok(tables)
 }
 
 impl ContextProvider for DfContextProviderAdapter {
     fn get_table_provider(&self, name: TableReference) -> DfResult<Arc<dyn TableSource>> {
-        self.state.get_table_provider(self.query_ctx.clone(), name)
+        let table_ref = self.table_provider.resolve_table_ref(name)?;
+        self.tables
+            .get(&table_ref.to_string())
+            .cloned()
+            .ok_or_else(|| DataFusionError::Plan(format!("table '{}' not found", table_ref)))
     }
 
     fn get_function_meta(&self, name: &str) -> Option<Arc<ScalarUDF>> {
-        self.state.get_function_meta(name)
+        self.session_state.scalar_functions().get(name).cloned()
     }
 
     fn get_aggregate_meta(&self, name: &str) -> Option<Arc<AggregateUDF>> {
-        self.state.aggregate_function(name).map(|func| {
+        self.engine_state.aggregate_function(name).map(|func| {
             Arc::new(
                 create_aggregate_function(func.name(), func.args_count(), func.create()).into(),
             )
@@ -140,10 +116,24 @@ impl ContextProvider for DfContextProviderAdapter {
     }
 
     fn get_variable_type(&self, variable_names: &[String]) -> Option<DataType> {
-        self.state.get_variable_type(variable_names)
+        if variable_names.is_empty() {
+            return None;
+        }
+
+        let provider_type = if is_system_variables(variable_names) {
+            VarType::System
+        } else {
+            VarType::UserDefined
+        };
+
+        self.session_state
+            .execution_props()
+            .var_providers
+            .as_ref()
+            .and_then(|provider| provider.get(&provider_type)?.get_type(variable_names))
     }
 
-    fn get_config_option(&self, variable: &str) -> Option<ScalarValue> {
-        self.state.get_config_option(variable)
+    fn options(&self) -> &ConfigOptions {
+        self.session_state.config_options()
     }
 }

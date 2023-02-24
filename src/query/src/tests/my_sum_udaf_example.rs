@@ -177,7 +177,7 @@ async fn test_my_sum() -> Result<()> {
         r#"+--------+
 | my_sum |
 +--------+
-| 9      |
+| 9.0    |
 +--------+"#,
     )
     .await?;
@@ -223,6 +223,7 @@ where
     let stmt = QueryLanguageParser::parse_sql(&sql).unwrap();
     let plan = engine
         .statement_to_plan(stmt, Arc::new(QueryContext::new()))
+        .await
         .unwrap();
 
     let output = engine.execute(&plan).await?;

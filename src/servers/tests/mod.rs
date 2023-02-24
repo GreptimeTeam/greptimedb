@@ -72,6 +72,7 @@ impl SqlQueryHandler for DummyInstance {
         let plan = self
             .query_engine
             .statement_to_plan(stmt, query_ctx)
+            .await
             .unwrap();
         let output = self.query_engine.execute(&plan).await.unwrap();
         vec![Ok(output)]
@@ -93,11 +94,16 @@ impl SqlQueryHandler for DummyInstance {
         unimplemented!()
     }
 
-    fn do_describe(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Option<Schema>> {
+    async fn do_describe(
+        &self,
+        stmt: Statement,
+        query_ctx: QueryContextRef,
+    ) -> Result<Option<Schema>> {
         if let Statement::Query(_) = stmt {
             let schema = self
                 .query_engine
                 .describe(QueryStatement::Sql(stmt), query_ctx)
+                .await
                 .unwrap();
             Ok(Some(schema))
         } else {

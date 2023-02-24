@@ -162,7 +162,8 @@ pub async fn explain(
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
     let plan = query_engine
-        .statement_to_plan(QueryStatement::Sql(Statement::Explain(*stmt)), query_ctx)?;
+        .statement_to_plan(QueryStatement::Sql(Statement::Explain(*stmt)), query_ctx)
+        .await?;
     query_engine.execute(&plan).await
 }
 

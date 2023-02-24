@@ -31,7 +31,6 @@ use datafusion::physical_plan::{
     Statistics,
 };
 use datatypes::arrow::compute;
-use datatypes::arrow::error::Result as ArrowResult;
 use futures::{ready, Stream, StreamExt};
 
 #[derive(Debug)]
@@ -113,8 +112,8 @@ impl ExecutionPlan for SeriesDivideExec {
         self.input.output_ordering()
     }
 
-    fn maintains_input_order(&self) -> bool {
-        true
+    fn maintains_input_order(&self) -> Vec<bool> {
+        vec![true; self.children().len()]
     }
 
     fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
@@ -200,7 +199,7 @@ impl RecordBatchStream for SeriesDivideStream {
 }
 
 impl Stream for SeriesDivideStream {
-    type Item = ArrowResult<RecordBatch>;
+    type Item = DataFusionResult<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
@@ -242,7 +241,7 @@ impl SeriesDivideStream {
     fn fetch_next_batch(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<ArrowResult<RecordBatch>>> {
+    ) -> Poll<Option<DataFusionResult<RecordBatch>>> {
         let poll = match self.input.poll_next_unpin(cx) {
             Poll::Ready(batch) => {
                 let _timer = self.metric.elapsed_compute().timer();

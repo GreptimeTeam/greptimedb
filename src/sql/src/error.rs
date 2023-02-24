@@ -138,6 +138,12 @@ pub enum Error {
 
     #[snafu(display("Unsupported format option: {}", name))]
     UnsupportedCopyFormatOption { name: String },
+
+    #[snafu(display("Unable to convert statement {:?} to DataFusion statement", statement))]
+    ConvertToDfStatement {
+        statement: String,
+        backtrace: Backtrace,
+    },
 }
 
 impl ErrorExt for Error {
@@ -167,6 +173,7 @@ impl ErrorExt for Error {
             UnsupportedAlterTableStatement { .. } => StatusCode::InvalidSyntax,
             SerializeColumnDefaultConstraint { source, .. } => source.status_code(),
             ConvertToGrpcDataType { source, .. } => source.status_code(),
+            ConvertToDfStatement { .. } => StatusCode::Internal,
         }
     }
 

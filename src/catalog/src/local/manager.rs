@@ -345,7 +345,7 @@ impl CatalogManager for LocalCatalogManager {
 
         {
             let _lock = self.register_lock.lock().await;
-            if let Some(existing) = schema.table(&request.table_name)? {
+            if let Some(existing) = schema.table(&request.table_name).await? {
                 if existing.table_info().ident.table_id != request.table_id {
                     error!(
                         "Unexpected table register request: {:?}, existing: {:?}",
@@ -434,7 +434,8 @@ impl CatalogManager for LocalCatalogManager {
             } = &request;
             let table_id = self
                 .catalogs
-                .table(catalog, schema, table_name)?
+                .table(catalog, schema, table_name)
+                .await?
                 .with_context(|| error::TableNotExistSnafu {
                     table: format!("{catalog}.{schema}.{table_name}"),
                 })?
@@ -505,7 +506,7 @@ impl CatalogManager for LocalCatalogManager {
             .schema(schema)
     }
 
-    fn table(
+    async fn table(
         &self,
         catalog_name: &str,
         schema_name: &str,
@@ -521,7 +522,7 @@ impl CatalogManager for LocalCatalogManager {
                 catalog: catalog_name,
                 schema: schema_name,
             })?;
-        schema.table(table_name)
+        schema.table(table_name).await
     }
 }
 

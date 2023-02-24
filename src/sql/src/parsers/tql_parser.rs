@@ -35,7 +35,7 @@ impl<'a> ParserContext<'a> {
     pub(crate) fn parse_tql(&mut self) -> Result<Statement> {
         self.parser.next_token();
 
-        match self.parser.peek_token() {
+        match self.parser.peek_token().token {
             Token::Word(w) => {
                 let uppercase = w.value.to_uppercase();
                 match w.keyword {
@@ -80,7 +80,7 @@ impl<'a> ParserContext<'a> {
         parser: &mut Parser,
         token: Token,
     ) -> std::result::Result<String, ParserError> {
-        let value = match parser.next_token() {
+        let value = match parser.next_token().token {
             Token::Number(n, _) => n,
             Token::DoubleQuotedString(s) | Token::SingleQuotedString(s) => s,
             unexpected => {

@@ -264,7 +264,8 @@ impl Helper {
             | ArrowDataType::Dictionary(_, _)
             | ArrowDataType::Decimal128(_, _)
             | ArrowDataType::Decimal256(_, _)
-            | ArrowDataType::Map(_, _) => {
+            | ArrowDataType::Map(_, _)
+            | ArrowDataType::RunEndEncoded(_, _) => {
                 unimplemented!("Arrow array datatype: {:?}", array.as_ref().data_type())
             }
         })

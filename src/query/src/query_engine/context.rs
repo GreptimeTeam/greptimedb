@@ -12,21 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-/// Query engine execution context
-use crate::query_engine::state::QueryEngineState;
+use datafusion::execution::context::SessionState;
 
 #[derive(Debug)]
 pub struct QueryEngineContext {
-    state: QueryEngineState,
+    state: SessionState,
 }
 
 impl QueryEngineContext {
-    pub fn new(state: QueryEngineState) -> Self {
+    pub fn new(state: SessionState) -> Self {
         Self { state }
     }
 
     #[inline]
-    pub fn state(&self) -> &QueryEngineState {
+    pub fn state(&self) -> &SessionState {
         &self.state
     }
 }
