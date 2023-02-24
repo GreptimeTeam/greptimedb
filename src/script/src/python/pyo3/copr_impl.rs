@@ -102,8 +102,7 @@ coprocessor = copr
             }
 
             // TODO(discord9): set `dataframe` and `query` in scope/ or set it into module
-            // idea: dynamically change `greptime` module
-            // by insert instantiated `dataframe` and `query` into it
+            // could generate a call in python code and use Python::run to run it, just like in RustPython
             // Expect either: a PyVector Or a List/Tuple of PyVector
             let result = fun.call(args, Some(kwargs))?;
             let col_len = rb.num_rows();
@@ -173,7 +172,7 @@ mod copr_test {
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{Float32Vector, Float64Vector, VectorRef};
 
-    use crate::python::ffi_types::copr::{exec_parsed, parse};
+    use crate::python::ffi_types::copr::{exec_parsed, parse, BackendType};
 
     #[test]
     #[allow(unused_must_use)]
@@ -202,12 +201,12 @@ def a(cpu, mem, **kwargs):
         )
         .unwrap();
         let copr = parse::parse_and_compile_copr(python_source, None).unwrap();
-        dbg!(&copr);
+        assert_eq!(copr.backend, BackendType::CPython);
         let ret = exec_parsed(
             &copr,
             &Some(rb),
             &HashMap::from([("a".to_string(), "1".to_string())]),
         );
-        dbg!(ret);
+        assert!(ret.is_ok());
     }
 }
