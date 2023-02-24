@@ -20,9 +20,9 @@
 
 use datafusion::scalar::ScalarValue;
 use datatypes::prelude::ConcreteDataType;
-use substrait_proto::protobuf::expression::literal::LiteralType;
-use substrait_proto::protobuf::r#type::{self as s_type, Kind, Nullability};
-use substrait_proto::protobuf::{Type as SType, Type};
+use substrait_proto::proto::expression::literal::LiteralType;
+use substrait_proto::proto::r#type::{self as s_type, Kind, Nullability};
+use substrait_proto::proto::{Type as SType, Type};
 
 use crate::error::{self, Result, UnsupportedConcreteTypeSnafu, UnsupportedSubstraitTypeSnafu};
 
@@ -86,6 +86,7 @@ pub fn to_concrete_type(ty: &SType) -> Result<(ConcreteDataType, bool)> {
         | Kind::Struct(_)
         | Kind::List(_)
         | Kind::Map(_)
+        | Kind::UserDefined(_)
         | Kind::UserDefinedTypeReference(_) => UnsupportedSubstraitTypeSnafu {
             ty: format!("{kind:?}"),
         }

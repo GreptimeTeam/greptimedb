@@ -25,13 +25,13 @@ use datafusion::physical_plan::project_schema;
 use datafusion_expr::{Filter, LogicalPlan, TableScan, TableSource};
 use prost::Message;
 use snafu::{ensure, OptionExt, ResultExt};
-use substrait_proto::protobuf::expression::mask_expression::{StructItem, StructSelect};
-use substrait_proto::protobuf::expression::MaskExpression;
-use substrait_proto::protobuf::extensions::simple_extension_declaration::MappingType;
-use substrait_proto::protobuf::plan_rel::RelType as PlanRelType;
-use substrait_proto::protobuf::read_rel::{NamedTable, ReadType};
-use substrait_proto::protobuf::rel::RelType;
-use substrait_proto::protobuf::{FilterRel, Plan, PlanRel, ReadRel, Rel};
+use substrait_proto::proto::expression::mask_expression::{StructItem, StructSelect};
+use substrait_proto::proto::expression::MaskExpression;
+use substrait_proto::proto::extensions::simple_extension_declaration::MappingType;
+use substrait_proto::proto::plan_rel::RelType as PlanRelType;
+use substrait_proto::proto::read_rel::{NamedTable, ReadType};
+use substrait_proto::proto::rel::RelType;
+use substrait_proto::proto::{FilterRel, Plan, PlanRel, ReadRel, Rel};
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::context::ConvertorContext;
@@ -424,6 +424,7 @@ impl DFLogicalSubstraitConvertor {
             relations: vec![plan_rel],
             advanced_extensions: None,
             expected_type_urls: vec![],
+            ..Default::default()
         })
     }
 
@@ -485,6 +486,7 @@ impl DFLogicalSubstraitConvertor {
             projection,
             advanced_extension: None,
             read_type: Some(read_type),
+            ..Default::default()
         };
 
         Ok(read_rel)

@@ -20,15 +20,15 @@ use datafusion_expr::expr::Sort;
 use datafusion_expr::{expr_fn, lit, Between, BinaryExpr, BuiltinScalarFunction, Expr, Operator};
 use datatypes::schema::Schema;
 use snafu::{ensure, OptionExt};
-use substrait_proto::protobuf::expression::field_reference::ReferenceType as FieldReferenceType;
-use substrait_proto::protobuf::expression::reference_segment::{
+use substrait_proto::proto::expression::field_reference::ReferenceType as FieldReferenceType;
+use substrait_proto::proto::expression::reference_segment::{
     ReferenceType as SegReferenceType, StructField,
 };
-use substrait_proto::protobuf::expression::{
+use substrait_proto::proto::expression::{
     FieldReference, Literal, ReferenceSegment, RexType, ScalarFunction,
 };
-use substrait_proto::protobuf::function_argument::ArgType;
-use substrait_proto::protobuf::Expression;
+use substrait_proto::proto::function_argument::ArgType;
+use substrait_proto::proto::Expression;
 
 use crate::context::ConvertorContext;
 use crate::error::{
@@ -61,6 +61,7 @@ pub(crate) fn to_df_expr(
         | RexType::MultiOrList(_)
         | RexType::Cast(_)
         | RexType::Subquery(_)
+        | RexType::Nested(_)
         | RexType::Enum(_) => UnsupportedExprSnafu {
             name: format!("substrait expression {expr_rex_type:?}"),
         }
@@ -615,9 +616,9 @@ pub fn convert_column(column: &Column, schema: &Schema) -> Result<FieldReference
 /// Some utils special for this `DataFusion::Expr` and `Substrait::Expression` conversion.
 mod utils {
     use datafusion_expr::{BuiltinScalarFunction, Operator};
-    use substrait_proto::protobuf::expression::{RexType, ScalarFunction};
-    use substrait_proto::protobuf::function_argument::ArgType;
-    use substrait_proto::protobuf::{Expression, FunctionArgument};
+    use substrait_proto::proto::expression::{RexType, ScalarFunction};
+    use substrait_proto::proto::function_argument::ArgType;
+    use substrait_proto::proto::{Expression, FunctionArgument};
 
     pub(crate) fn name_df_operator(op: &Operator) -> &str {
         match op {
