@@ -25,6 +25,7 @@ use syn::{
     NestedMeta, Signature, Type, TypeReference, Visibility,
 };
 
+/// Internal util macro to early return on error.
 macro_rules! ok {
     ($item:expr) => {
         match $item {
@@ -50,7 +51,7 @@ pub(crate) fn process_range_fn(args: TokenStream, input: TokenStream) -> TokenSt
         block,
     } = compute_fn;
 
-    // extract arg list
+    // extract fn arg list
     let Signature {
         inputs,
         ident: fn_name,
@@ -58,6 +59,7 @@ pub(crate) fn process_range_fn(args: TokenStream, input: TokenStream) -> TokenSt
     } = &sig;
     let arg_types = ok!(extract_input_types(inputs));
 
+    // build the struct and its impl block
     let struct_code = build_struct(
         attrs,
         vis,
@@ -70,6 +72,7 @@ pub(crate) fn process_range_fn(args: TokenStream, input: TokenStream) -> TokenSt
         fn_name.clone(),
         ok!(get_ident(&arg_map, "ret", arg_span)),
     );
+    // preserve this fn, but remove its `pub` modifier
     let input_fn_code: TokenStream = quote! {
         #[allow(dead_code)]
         #sig { #block }
@@ -83,6 +86,7 @@ pub(crate) fn process_range_fn(args: TokenStream, input: TokenStream) -> TokenSt
     result
 }
 
+/// Extract a String <-> Ident map from the attribute args.
 fn extract_arg_map(args: Vec<NestedMeta>) -> Result<HashMap<String, Ident>, syn::Error> {
     args.clone()
         .into_iter()
@@ -107,6 +111,14 @@ fn extract_arg_map(args: Vec<NestedMeta>) -> Result<HashMap<String, Ident>, syn:
         .collect::<Result<HashMap<String, Ident>, syn::Error>>()
 }
 
+/// Helper function to get an Ident from the previous arg map.
+fn get_ident(map: &HashMap<String, Ident>, key: &str, span: Span) -> Result<Ident, syn::Error> {
+    map.get(key)
+        .cloned()
+        .ok_or_else(|| syn::Error::new(span, format!("Expect attribute {key} but not found")))
+}
+
+/// Extract the agrument list from the annotated function.
 fn extract_input_types(inputs: &Punctuated<FnArg, Comma>) -> Result<Vec<Type>, syn::Error> {
     inputs
         .iter()
@@ -115,12 +127,6 @@ fn extract_input_types(inputs: &Punctuated<FnArg, Comma>) -> Result<Vec<Type>, s
             FnArg::Typed(pat_type) => Ok(*pat_type.ty.clone()),
         })
         .collect()
-}
-
-fn get_ident(map: &HashMap<String, Ident>, key: &str, span: Span) -> Result<Ident, syn::Error> {
-    map.get(key)
-        .cloned()
-        .ok_or_else(|| syn::Error::new(span, format!("Expect attribute {key} but not found")))
 }
 
 fn build_struct(

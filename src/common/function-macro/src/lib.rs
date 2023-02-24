@@ -87,6 +87,29 @@ pub fn as_aggr_func_creator(_args: TokenStream, input: TokenStream) -> TokenStre
     .into()
 }
 
+/// Attribute macro to convert an arithimetic function to a range function. The annotated function
+/// should accept servaral arrays as input and return a single value as output. This procedure
+/// macro can works on any number of input parameters. Return type can be either primitive type
+/// or wrapped in `Option`.
+///
+/// # Example
+/// Take `count_over_time()` in PromQL as an example:
+/// ```rust, ignore
+/// /// The count of all values in the specified interval.
+/// #[range_fn(
+///     name = "CountOverTime",
+///     ret = "Float64Array",
+///     display_name = "prom_count_over_time"
+/// )]
+/// pub fn count_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> f64 {
+///      values.len() as f64
+/// }
+/// ```
+///
+/// # Arguments
+/// - `name`: The name of the generated [ScalarUDF] struct.
+/// - `ret`: The return type of the generated UDF function.
+/// - `display_name`: The display name of the generated UDF function.
 #[proc_macro_attribute]
 pub fn range_fn(args: TokenStream, input: TokenStream) -> TokenStream {
     process_range_fn(args, input)
