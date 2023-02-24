@@ -74,9 +74,7 @@ pub fn sum_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Op
     display_name = "prom_count_over_time"
 )]
 pub fn count_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> f64 {
-    let result = values.len() as f64;
-    println!("count over time result: {}", result);
-    result
+    values.len() as f64
 }
 
 /// The most recent point value in specified interval.
