@@ -12,13 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_recordbatch::DfRecordBatch;
 use datafusion::dataframe::DataFrame as DfDataFrame;
 use datafusion_expr::Expr as DfExpr;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::pyclass::CompareOp;
 use pyo3::types::PyList;
+use snafu::ResultExt;
 
+use crate::python::error::DataFusionSnafu;
 use crate::python::ffi_types::PyVector;
 use crate::python::utils::block_on_async;
 type PyExprRef = Py<PyExpr>;
@@ -30,6 +33,14 @@ pub(crate) struct PyDataFrame {
 impl From<DfDataFrame> for PyDataFrame {
     fn from(inner: DfDataFrame) -> Self {
         Self { inner }
+    }
+}
+
+impl PyDataFrame {
+    pub(crate) fn from_record_batch(rb: &DfRecordBatch) -> crate::python::error::Result<Self> {
+        let ctx = datafusion::execution::context::SessionContext::new();
+        let inner = ctx.read_batch(rb.clone()).context(DataFusionSnafu)?;
+        Ok(Self { inner })
     }
 }
 

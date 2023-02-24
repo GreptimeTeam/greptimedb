@@ -24,6 +24,8 @@ use snafu::{ensure, Backtrace, GenerateImplicitData, ResultExt};
 use crate::python::error::{self, NewRecordBatchSnafu, OtherSnafu, Result};
 use crate::python::ffi_types::copr::PyQueryEngine;
 use crate::python::ffi_types::{check_args_anno_real_type, select_from_rb, Coprocessor, PyVector};
+use crate::python::pyo3::builtins::greptime_builtins;
+use crate::python::pyo3::dataframe_impl::PyDataFrame;
 use crate::python::pyo3::utils::{init_cpython_interpreter, pyo3_obj_try_to_typed_val};
 
 #[pymethods]
@@ -58,7 +60,7 @@ impl PyQueryEngine {
 /// Execute a `Coprocessor` with given `RecordBatch`
 pub(crate) fn pyo3_exec_parsed(
     copr: &Coprocessor,
-    rb: &RecordBatch,
+    rb: &Option<RecordBatch>,
     params: &HashMap<String, String>,
 ) -> Result<RecordBatch> {
     let arg_names = if let Some(names) = &copr.deco_args.arg_names {
@@ -69,8 +71,13 @@ pub(crate) fn pyo3_exec_parsed(
         }
         .fail();
     };
-    let args: Vec<PyVector> = select_from_rb(rb, arg_names)?;
-    check_args_anno_real_type(&args, copr, rb)?;
+    let args: Vec<PyVector> = if let Some(rb) = rb {
+        let args = select_from_rb(rb, arg_names)?;
+        check_args_anno_real_type(&args, copr, rb)?;
+        args
+    } else {
+        Vec::new()
+    };
     // Just in case cpython is not inited
     init_cpython_interpreter();
     Python::with_gil(|py| -> Result<_> {
@@ -83,9 +90,8 @@ def copr(*dummy, **kwdummy):
     return inner
 coprocessor = copr
 ";
-            let script = format!("{}{}", dummy_decorator, copr.script);
-            let module = PyModule::from_code(py, &script, "<embedded>", "<mod_embed>")?;
-            let fun = module.getattr(copr.name.as_str())?;
+            let gen_call = format!("\n_return_from_coprocessor = {}(*_args_for_coprocessor, **_kwargs_for_coprocessor)", copr.name);
+            let script = format!("{}{}{}", dummy_decorator, copr.script, gen_call);
 
             let args = args
                 .clone()
@@ -101,11 +107,42 @@ coprocessor = copr
                 }
             }
 
-            // TODO(discord9): set `dataframe` and `query` in scope/ or set it into module
+            let locals = PyDict::new(py);
+            let greptime = PyModule::new(py, "greptime")?;
+            greptime_builtins(py, greptime)?;
+            locals.set_item("greptime", greptime)?;
+
+            if let Some(engine) = &copr.query_engine {
+                let query_engine = PyQueryEngine::from_weakref(engine.clone());
+                let query_engine = PyCell::new(py, query_engine)?;
+                locals.set_item("query", query_engine)?;
+            }
+
+            // TODO(discord9): find out why `dataframe` is not in scope
+            if let Some(rb) = rb {
+                let dataframe = PyDataFrame::from_record_batch(rb.df_record_batch())
+                    .map_err(|err|
+                        PyValueError::new_err(
+                            format!("Can't create dataframe from record batch: {}", err
+                        )
+                    )
+                )?;
+                let dataframe = PyCell::new(py, dataframe)?;
+                locals.set_item("dataframe", dataframe)?;
+            }
+
+
+            locals.set_item("_args_for_coprocessor", args)?;
+            locals.set_item("_kwargs_for_coprocessor", kwargs)?;
+
+             // TODO(discord9): find a better way to set `dataframe` and `query` in scope/ or set it into module(latter might be impossible and not idomatic even in python)
+            // set `dataframe` and `query` in scope/ or set it into module
             // could generate a call in python code and use Python::run to run it, just like in RustPython
             // Expect either: a PyVector Or a List/Tuple of PyVector
-            let result = fun.call(args, Some(kwargs))?;
-            let col_len = rb.num_rows();
+            py.run(&script, None, Some(locals))?;
+            let result = locals.get_item("_return_from_coprocessor").ok_or(PyValueError::new_err("Can't find return value of coprocessor function"))?;
+
+            let col_len = rb.as_ref().map(|rb| rb.num_rows()).unwrap_or(1);
             py_any_to_vec(result, col_len)
         })()
         .map_err(|err| error::Error::PyRuntime {
@@ -184,6 +221,7 @@ def a(cpu, mem, **kwargs):
     from greptime import vector, log2, sum, pow
     for k, v in kwargs.items():
         print("%s == %s" % (k, v))
+    # print(dataframe.select(["cpu"]).collect())
     return (0.5 < cpu) & ~( cpu >= 0.75)
     "#;
         let cpu_array = Float32Vector::from_slice([0.9f32, 0.8, 0.7, 0.3]);
@@ -207,6 +245,7 @@ def a(cpu, mem, **kwargs):
             &Some(rb),
             &HashMap::from([("a".to_string(), "1".to_string())]),
         );
+        dbg!(&ret);
         assert!(ret.is_ok());
     }
 }

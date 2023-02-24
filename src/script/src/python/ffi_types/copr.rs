@@ -415,13 +415,8 @@ pub fn exec_parsed(
         BackendType::RustPython => rspy_exec_parsed(copr, rb, params),
         BackendType::CPython => {
             #[cfg(feature = "pyo3")]
-            if let Some(rb) = rb {
+            {
                 pyo3_exec_parsed(copr, rb, params)
-            } else {
-                OtherSnafu {
-                    reason: "CPython doesn't support params yet".to_string(),
-                }
-                .fail()
             }
             #[cfg(not(feature = "pyo3"))]
             OtherSnafu {
