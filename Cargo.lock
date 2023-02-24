@@ -4543,7 +4543,7 @@ dependencies = [
 [[package]]
 name = "opensrv-mysql"
 version = "0.3.0"
-source = "git+https://github.com/datafuselabs/opensrv?rev=b44c9d1360da297b305abf33aecfa94888e1554c#b44c9d1360da297b305abf33aecfa94888e1554c"
+source = "git+https://github.com/sunng87/opensrv?branch=fix/buffer-overread#d5c24b25543ba48b69c3c4fe97f71e499819bd99"
 dependencies = [
  "async-trait",
  "byteorder",
