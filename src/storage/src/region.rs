@@ -156,6 +156,7 @@ pub struct StoreConfig<S: LogStore> {
     pub engine_config: Arc<EngineConfig>,
     pub file_purger: FilePurgerRef,
     pub ttl: Option<Duration>,
+    pub compaction_time_window: Option<i64>,
 }
 
 pub type RecoverdMetadata = (SequenceNumber, (ManifestVersion, RawRegionMetadata));
@@ -232,6 +233,7 @@ impl<S: LogStore> RegionImpl<S> {
                 store_config.memtable_builder,
                 store_config.engine_config.clone(),
                 store_config.ttl,
+                store_config.compaction_time_window,
             )),
             wal,
             flush_strategy: store_config.flush_strategy,
@@ -250,7 +252,7 @@ impl<S: LogStore> RegionImpl<S> {
     pub async fn open(
         name: String,
         store_config: StoreConfig<S>,
-        _opts: &OpenOptions,
+        opts: &OpenOptions,
     ) -> Result<Option<RegionImpl<S>>> {
         // Load version meta data from manifest.
         let (version, mut recovered_metadata) = match Self::recover_from_manifest(
@@ -308,10 +310,12 @@ impl<S: LogStore> RegionImpl<S> {
             version_control,
         });
 
+        let compaction_time_window = store_config.compaction_time_window.or(opts.compaction_time_window);
         let writer = Arc::new(RegionWriter::new(
             store_config.memtable_builder,
             store_config.engine_config.clone(),
             store_config.ttl,
+            compaction_time_window,
         ));
         let writer_ctx = WriterContext {
             shared: &shared,

@@ -48,6 +48,7 @@ pub struct CompactionTaskImpl<S: LogStore> {
     pub manifest: RegionManifest,
     pub expired_ssts: Vec<FileHandle>,
     pub sst_write_buffer_size: ReadableSize,
+    pub compaction_time_window: Option<i64>,
 }
 
 impl<S: LogStore> Debug for CompactionTaskImpl<S> {

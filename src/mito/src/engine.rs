@@ -407,6 +407,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                     .write_buffer_size
                     .map(|size| size.0 as usize),
                 ttl: request.table_options.ttl,
+                compaction_time_window: request.table_options.compaction_time_window,
             };
 
             let region = self
@@ -504,6 +505,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                     .write_buffer_size
                     .map(|s| s.0 as usize),
                 ttl: table_info.meta.options.ttl,
+                compaction_time_window: table_info.meta.options.compaction_time_window,
             };
 
             debug!(

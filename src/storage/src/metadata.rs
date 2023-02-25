@@ -198,6 +198,8 @@ pub struct RegionMetadata {
     pub columns: ColumnsMetadataRef,
     column_families: ColumnFamiliesMetadata,
     version: VersionNumber,
+    /// Time window for compaction
+    compaction_time_window: Option<i64>
 }
 
 impl RegionMetadata {
@@ -214,6 +216,11 @@ impl RegionMetadata {
     #[inline]
     pub fn schema(&self) -> &RegionSchemaRef {
         &self.schema
+    }
+
+    #[inline]
+    pub fn compaction_time_window(&self) -> Option<i64> {
+        self.compaction_time_window
     }
 
     #[inline]
@@ -350,6 +357,7 @@ impl From<&RegionMetadata> for RawRegionMetadata {
             columns: RawColumnsMetadata::from(&*data.columns),
             column_families: RawColumnFamiliesMetadata::from(&data.column_families),
             version: data.version,
+            compaction_time_window: data.compaction_time_window,
         }
     }
 }
@@ -368,6 +376,7 @@ impl TryFrom<RawRegionMetadata> for RegionMetadata {
             columns,
             column_families: raw.column_families.into(),
             version: raw.version,
+            compaction_time_window: raw.compaction_time_window,
         })
     }
 }
@@ -635,6 +644,7 @@ impl TryFrom<RegionDescriptor> for RegionMetadataBuilder {
             .name(desc.name)
             .id(desc.id)
             .row_key(desc.row_key)?
+            .compaction_time_window(None) // TODO should I update `RegionDescriptor` as well?
             .add_column_family(desc.default_cf)?;
         for cf in desc.extra_cfs {
             builder = builder.add_column_family(cf)?;
@@ -791,6 +801,7 @@ struct RegionMetadataBuilder {
     columns_meta_builder: ColumnsMetadataBuilder,
     cfs_meta_builder: ColumnFamiliesMetadataBuilder,
     version: VersionNumber,
+    compaction_time_window: Option<i64>,
 }
 
 impl Default for RegionMetadataBuilder {
@@ -807,6 +818,7 @@ impl RegionMetadataBuilder {
             columns_meta_builder: ColumnsMetadataBuilder::default(),
             cfs_meta_builder: ColumnFamiliesMetadataBuilder::default(),
             version: Schema::INITIAL_VERSION,
+            compaction_time_window: None,
         }
     }
 
@@ -829,6 +841,11 @@ impl RegionMetadataBuilder {
         self.columns_meta_builder.row_key(key)?;
 
         Ok(self)
+    }
+
+    fn compaction_time_window(mut self, compaction_time_window: Option<i64>) -> Self {
+        self.compaction_time_window = compaction_time_window;
+        self
     }
 
     fn add_column_family(mut self, cf: ColumnFamilyDescriptor) -> Result<Self> {
@@ -861,6 +878,7 @@ impl RegionMetadataBuilder {
             columns,
             column_families: self.cfs_meta_builder.build(),
             version: self.version,
+            compaction_time_window: self.compaction_time_window
         })
     }
 }
@@ -1065,6 +1083,7 @@ mod tests {
             .unwrap();
         RegionMetadataBuilder::new()
             .name(TEST_REGION)
+            .compaction_time_window(None)
             .row_key(row_key)
             .unwrap()
             .add_column_family(cf)
