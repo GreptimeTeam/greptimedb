@@ -189,7 +189,7 @@ impl ChunkReaderBuilder {
             }
             let reader = self
                 .sst_layer
-                .read_sst(file.file_name(), &read_opts)
+                .read_sst(file.file_id(), &read_opts)
                 .await?;
 
             reader_builder = reader_builder.push_batch_reader(reader);

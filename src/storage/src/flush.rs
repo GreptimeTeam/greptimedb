@@ -197,19 +197,19 @@ impl<S: LogStore> FlushJob<S> {
                 continue;
             }
 
-            let file_name = Self::generate_sst_file_name();
+            let file_id = Uuid::new_v4();
             // TODO(hl): Check if random file name already exists in meta.
             let iter = m.iter(&iter_ctx)?;
             let sst_layer = self.sst_layer.clone();
 
             futures.push(async move {
                 let SstInfo { time_range } = sst_layer
-                    .write_sst(&file_name, Source::Iter(iter), &WriteOptions::default())
+                    .write_sst(&file_id, Source::Iter(iter), &WriteOptions::default())
                     .await?;
 
                 Ok(FileMeta {
                     region_id,
-                    file_name,
+                    file_id,
                     time_range,
                     level: 0,
                 })
@@ -245,11 +245,6 @@ impl<S: LogStore> FlushJob<S> {
             )
             .await?;
         self.wal.obsolete(self.flush_sequence).await
-    }
-
-    /// Generates random SST file name in format: `^[a-f\d]{8}(-[a-f\d]{4}){3}-[a-f\d]{12}.parquet$`
-    fn generate_sst_file_name() -> String {
-        format!("{}.parquet", Uuid::new_v4().hyphenated())
     }
 }
 

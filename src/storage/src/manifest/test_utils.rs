@@ -42,7 +42,7 @@ pub fn build_region_edit(
             .iter()
             .map(|f| FileMeta {
                 region_id: 0,
-                file_name: f.to_string(),
+                file_id: Uuid::uuid!(f),
                 time_range: None,
                 level: 0,
             })
@@ -51,7 +51,7 @@ pub fn build_region_edit(
             .iter()
             .map(|f| FileMeta {
                 region_id: 0,
-                file_name: f.to_string(),
+                file_id: Uuid::uuid!(f),
                 time_range: None,
                 level: 0,
             })

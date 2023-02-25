@@ -358,7 +358,7 @@ async fn test_recover_region_manifets() {
     let ssts = version.ssts();
     let files = ssts.levels()[0]
         .files()
-        .map(|f| f.file_name().to_string())
+        .map(|f| f.file_name())
         .collect::<HashSet<_>>();
     assert_eq!(3, files.len());
     assert_eq!(

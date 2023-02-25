@@ -171,6 +171,8 @@ mod tests {
     use crate::file_purger::noop::new_noop_file_purger;
     use crate::sst::FileMeta;
 
+    
+
     #[test]
     fn test_time_bucket_span() {
         assert_eq!(vec![0], file_time_bucket_span(1, 9, 10));
@@ -221,19 +223,21 @@ mod tests {
         assert_eq!(
             TIME_BUCKETS[0],
             infer_time_bucket(&[
-                new_file_handle("a", 0, TIME_BUCKETS[0] * 1000 - 1),
-                new_file_handle("b", 1, 10_000)
+                new_file_handle("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", 0, TIME_BUCKETS[0] * 1000 - 1),
+                new_file_handle("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", 1, 10_000)
             ])
         );
     }
 
-    fn new_file_handle(name: &str, start_ts_millis: i64, end_ts_millis: i64) -> FileHandle {
+    // only for test
+    fn new_file_handle(file_id: &str, start_ts_millis: i64, end_ts_millis: i64) -> FileHandle {
         let file_purger = new_noop_file_purger();
         let layer = Arc::new(crate::test_util::access_layer_util::MockAccessLayer {});
+        let file_id_uuid = Uuid::uuid!(file_id);
         FileHandle::new(
             FileMeta {
                 region_id: 0,
-                file_name: name.to_string(),
+                file_id: file_id_uuid,
                 time_range: Some((
                     Timestamp::new_millisecond(start_ts_millis),
                     Timestamp::new_millisecond(end_ts_millis),
@@ -248,7 +252,7 @@ mod tests {
     fn new_file_handles(input: &[(&str, i64, i64)]) -> Vec<FileHandle> {
         input
             .iter()
-            .map(|(name, start, end)| new_file_handle(name, *start, *end))
+            .map(|(file_id, start, end)| new_file_handle(file_id, *start, *end))
             .collect()
     }
 
@@ -277,7 +281,7 @@ mod tests {
                 .get(&bucket)
                 .unwrap()
                 .iter()
-                .map(|f| f.file_name().to_string())
+                .map(|f| f.file_name())
                 .collect();
             assert_eq!(
                 file_names, actual,

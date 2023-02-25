@@ -165,7 +165,7 @@ mod tests {
     }
 
     async fn write_sst(
-        sst_file_name: &str,
+        sst_file_id: &Uuid,
         schema: RegionSchemaRef,
         seq: &AtomicU64,
         object_store: ObjectStore,
@@ -219,7 +219,7 @@ mod tests {
         }
 
         let iter = memtable.iter(&IterContext::default()).unwrap();
-        let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
+        let writer = ParquetWriter::new(sst_file_id.append_extension(), Source::Iter(iter), object_store.clone());
 
         let SstInfo { time_range } = writer
             .write_sst(&sst::WriteOptions::default())
@@ -228,7 +228,7 @@ mod tests {
         let handle = FileHandle::new(
             FileMeta {
                 region_id: 0,
-                file_name: sst_file_name.to_string(),
+                file_id: sst_file_id.clone(),
                 time_range,
                 level: 0,
             },
@@ -278,7 +278,7 @@ mod tests {
         let seq = AtomicU64::new(0);
         let schema = schema_for_test();
         let file1 = write_sst(
-            "a.parquet",
+            &Uuid::uuid!("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
             schema.clone(),
             &seq,
             object_store.clone(),
@@ -293,7 +293,7 @@ mod tests {
         )
         .await;
         let file2 = write_sst(
-            "b.parquet",
+            &Uuid::uuid!("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
             schema.clone(),
             &seq,
             object_store.clone(),
@@ -355,7 +355,7 @@ mod tests {
         let schema = schema_for_test();
         let seq = AtomicU64::new(0);
         let file1 = write_sst(
-            "i1.parquet",
+            &Uuid::uuid!("i1i1i1i1-i1i1-i1i1-i1i1-i1i1i1i1i1i1"),
             schema.clone(),
             &seq,
             object_store.clone(),
@@ -372,7 +372,7 @@ mod tests {
 
         // in file2 we delete the row with timestamp 1000.
         let file2 = write_sst(
-            "i2.parquet",
+            &Uuid::uuid!("i2i2i2i2-i2i2-i2i2-i2i2-i2i2i2i2i2i2"),
             schema.clone(),
             &seq,
             object_store.clone(),
@@ -401,7 +401,7 @@ mod tests {
 
         let opts = WriteOptions {};
         let s1 = ParquetWriter::new(
-            "./o1.parquet",
+            "./o1o1o1o1-o1o1-o1o1-o1o1-o1o1o1o1o1o1.parquet",
             Source::Reader(reader1),
             object_store.clone(),
         )
@@ -419,7 +419,7 @@ mod tests {
         );
 
         let s2 = ParquetWriter::new(
-            "./o2.parquet",
+            "./o2o2o2o2-o2o2-o2o2-o2o2-o2o2o2o2o2o2.parquet",
             Source::Reader(reader2),
             object_store.clone(),
         )
@@ -437,7 +437,7 @@ mod tests {
         );
 
         let s3 = ParquetWriter::new(
-            "./o3.parquet",
+            "./o3o3o3o3-o3o3-o3o3-o3o3-o3o3o3o3o3o3.parquet",
             Source::Reader(reader3),
             object_store.clone(),
         )
@@ -455,13 +455,16 @@ mod tests {
             s3
         );
 
-        let output_files = ["o1.parquet", "o2.parquet", "o3.parquet"]
+        let output_files = [ 
+            Uuid::uuid!("o1o1o1o1-o1o1-o1o1-o1o1-o1o1o1o1o1o1"), 
+            Uuid::uuid!("o2o2o2o2-o2o2-o2o2-o2o2-o2o2o2o2o2o2"), 
+            Uuid::uuid!("o3o3o3o3-o3o3-o3o3-o3o3-o3o3o3o3o3o3")]
             .into_iter()
             .map(|f| {
                 FileHandle::new(
                     FileMeta {
                         region_id: 0,
-                        file_name: f.to_string(),
+                        file_id: f,
                         level: 1,
                         time_range: None,
                     },

@@ -21,10 +21,12 @@ use tokio::sync::Notify;
 use crate::scheduler::rate_limit::{BoxedRateLimitToken, RateLimitToken};
 use crate::scheduler::{Handler, LocalScheduler, Request};
 use crate::sst::AccessLayerRef;
+use uuid::Uuid;
+use crate::sst::FileMeta;
 
 pub struct FilePurgeRequest {
     pub region_id: RegionId,
-    pub file_name: String,
+    pub file_id: Uuid,
     pub sst_layer: AccessLayerRef,
 }
 
@@ -32,7 +34,7 @@ impl Request for FilePurgeRequest {
     type Key = String;
 
     fn key(&self) -> Self::Key {
-        format!("{}/{}", self.region_id, self.file_name)
+        format!("{}/{}", self.region_id, FileMeta::append_extension_parquet(&self.file_id))
     }
 }
 
@@ -49,15 +51,16 @@ impl Handler for FilePurgeHandler {
         finish_notifier: Arc<Notify>,
     ) -> crate::error::Result<()> {
         req.sst_layer
-            .delete_sst(&req.file_name)
+            .delete_sst(&req.file_id)
             .await
             .map_err(|e| {
-                error!(e; "Failed to delete SST file, file: {}, region: {}", req.file_name, req.region_id);
+                error!(e; "Failed to delete SST file, file: {}, region: {}", 
+                FileMeta::append_extension_parquet(&req.file_id), req.region_id);
                 e
             })?;
         debug!(
             "Successfully deleted SST file: {}, region: {}",
-            req.file_name, req.region_id
+            FileMeta::append_extension_parquet(&req.file_id), req.region_id
         );
         token.try_release();
         finish_notifier.notify_one();
@@ -126,7 +129,7 @@ mod tests {
 
     async fn create_sst_file(
         os: ObjectStore,
-        sst_file_name: &str,
+        sst_file_id: &Uuid,
         file_purger: FilePurgerRef,
     ) -> (FileHandle, String, AccessLayerRef) {
         let schema = schema_for_test();
@@ -144,7 +147,7 @@ mod tests {
         let sst_path = "table1";
         let layer = Arc::new(FsAccessLayer::new(sst_path, os.clone()));
         let _sst_info = layer
-            .write_sst(sst_file_name, Source::Iter(iter), &WriteOptions {})
+            .write_sst(sst_file_id, Source::Iter(iter), &WriteOptions {})
             .await
             .unwrap();
 
@@ -152,7 +155,7 @@ mod tests {
             FileHandle::new(
                 FileMeta {
                     region_id: 0,
-                    file_name: sst_file_name.to_string(),
+                    file_id: sst_file_id.clone(),
                     time_range: None,
                     level: 0,
                 },
@@ -174,17 +177,18 @@ mod tests {
                 .unwrap(),
         )
         .finish();
-        let sst_file_name = "test-file-purge-handler.parquet";
+        // let sst_file_name = "test-file-purge-handler.parquet";
+        let sst_file_id = Uuid::uuid!("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
 
         let noop_file_purger = Arc::new(LocalScheduler::new(
             SchedulerConfig::default(),
             NoopFilePurgeHandler,
         ));
         let (file, path, layer) =
-            create_sst_file(object_store.clone(), sst_file_name, noop_file_purger).await;
+            create_sst_file(object_store.clone(), sst_file_id, noop_file_purger).await;
         let request = FilePurgeRequest {
             region_id: 0,
-            file_name: file.file_name().to_string(),
+            file_id: sst_file_id,
             sst_layer: layer,
         };
 
@@ -197,7 +201,11 @@ mod tests {
 
         notify.notified().await;
 
-        let object = object_store.object(&format!("{}/{}", path, sst_file_name));
+        let object = object_store.object(&format!(
+            "{}/{}",
+            path,
+            sst_file_id.with_extension(".parquet")
+        ));
         assert!(!object.is_exist().await.unwrap());
     }
 
@@ -212,13 +220,14 @@ mod tests {
                 .unwrap(),
         )
         .finish();
-        let sst_file_name = "test-file-purger.parquet";
+        // let sst_file_name = "test-file-purger.parquet";
+        let sst_file_id = Uuid::uuid!("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
         let scheduler = Arc::new(LocalScheduler::new(
             SchedulerConfig::default(),
             FilePurgeHandler,
         ));
         let (handle, path, _layer) =
-            create_sst_file(object_store.clone(), sst_file_name, scheduler.clone()).await;
+            create_sst_file(object_store.clone(), sst_file_id, scheduler.clone()).await;
 
         {
             // mark file as deleted and drop the handle, we expect the file is deleted.
@@ -227,7 +236,11 @@ mod tests {
         }
         scheduler.stop(true).await.unwrap();
         assert!(!object_store
-            .object(&format!("{}/{}", path, sst_file_name))
+            .object(&format!(
+                "{}/{}",
+                path,
+                sst_file_id.with_extension(".parquet")
+            ))
             .is_exist()
             .await
             .unwrap());
