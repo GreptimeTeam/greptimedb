@@ -42,7 +42,7 @@ use crate::manifest::action::{RegionChange, RegionMetaActionList};
 use crate::manifest::test_utils::*;
 use crate::memtable::DefaultMemtableBuilder;
 use crate::scheduler::{LocalScheduler, SchedulerConfig};
-use crate::sst::FsAccessLayer;
+use crate::sst::{FileId, FsAccessLayer};
 use crate::test_util::descriptor_util::RegionDescBuilder;
 use crate::test_util::{self, config_util, schema_util, write_batch_util};
 
@@ -309,6 +309,10 @@ async fn test_recover_region_manifets() {
     .0
     .is_none());
 
+    let file_id_a = FileId::random();
+    let file_id_b = FileId::random();
+    let file_id_c = FileId::random();
+
     {
         // save some actions into region_meta
         manifest
@@ -323,8 +327,8 @@ async fn test_recover_region_manifets() {
 
         manifest
             .update(RegionMetaActionList::new(vec![
-                RegionMetaAction::Edit(build_region_edit(1, &["f1"], &[])),
-                RegionMetaAction::Edit(build_region_edit(2, &["f2", "f3"], &[])),
+                RegionMetaAction::Edit(build_region_edit(1, &[file_id_a], &[])),
+                RegionMetaAction::Edit(build_region_edit(2, &[file_id_b, file_id_c], &[])),
             ]))
             .await
             .unwrap();
@@ -358,11 +362,15 @@ async fn test_recover_region_manifets() {
     let ssts = version.ssts();
     let files = ssts.levels()[0]
         .files()
-        .map(|f| f.file_name().to_string())
+        .map(|f| f.file_name())
         .collect::<HashSet<_>>();
     assert_eq!(3, files.len());
     assert_eq!(
-        HashSet::from(["f1".to_string(), "f2".to_string(), "f3".to_string()]),
+        HashSet::from([
+            file_id_a.append_extension_parquet(),
+            file_id_b.append_extension_parquet(),
+            file_id_c.append_extension_parquet()
+        ]),
         files
     );
 

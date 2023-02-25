@@ -31,6 +31,7 @@ mod tests {
     use super::*;
     use crate::manifest::test_utils::*;
     use crate::metadata::RegionMetadata;
+    use crate::sst::FileId;
 
     #[tokio::test]
     async fn test_region_manifest() {
@@ -94,8 +95,12 @@ mod tests {
         // Save some actions
         manifest
             .update(RegionMetaActionList::new(vec![
-                RegionMetaAction::Edit(build_region_edit(1, &["f1"], &[])),
-                RegionMetaAction::Edit(build_region_edit(2, &["f2", "f3"], &[])),
+                RegionMetaAction::Edit(build_region_edit(1, &[FileId::random()], &[])),
+                RegionMetaAction::Edit(build_region_edit(
+                    2,
+                    &[FileId::random(), FileId::random()],
+                    &[],
+                )),
             ]))
             .await
             .unwrap();
