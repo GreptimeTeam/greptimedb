@@ -12,20 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
 use common_query::Output;
+use common_telemetry::tracing::log;
 use common_telemetry::{error, trace};
 use opensrv_mysql::{
-    AsyncMysqlShim, ErrorKind, InitWriter, ParamParser, QueryResultWriter, StatementMetaWriter,
+    AsyncMysqlShim, ColumnFlags, ColumnType, ErrorKind, InitWriter, ParamParser, ParamValue,
+    QueryResultWriter, StatementMetaWriter, ValueInner,
 };
+use parking_lot::RwLock;
 use rand::RngCore;
 use session::context::Channel;
 use session::Session;
 use snafu::ensure;
+use sql::dialect::GenericDialect;
+use sql::parser::ParserContext;
+use sql::statements::statement::Statement;
 use tokio::io::AsyncWrite;
 
 use crate::auth::{Identity, Password, UserProviderRef};
@@ -39,6 +47,8 @@ pub struct MysqlInstanceShim {
     salt: [u8; 20],
     session: Arc<Session>,
     user_provider: Option<UserProviderRef>,
+    prepared_stmts: Arc<RwLock<HashMap<u32, String>>>,
+    prepared_stmts_counter: AtomicU32,
 }
 
 impl MysqlInstanceShim {
@@ -65,6 +75,8 @@ impl MysqlInstanceShim {
             salt: scramble,
             session: Arc::new(Session::new(client_addr, Channel::Mysql)),
             user_provider,
+            prepared_stmts: Default::default(),
+            prepared_stmts_counter: AtomicU32::new(1),
         }
     }
 
@@ -140,34 +152,142 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         true
     }
 
-    async fn on_prepare<'a>(&'a mut self, _: &'a str, w: StatementMetaWriter<'a, W>) -> Result<()> {
-        w.error(
-            ErrorKind::ER_UNKNOWN_ERROR,
-            b"prepare statement is not supported yet",
-        )
-        .await?;
-        Ok(())
+    async fn on_prepare<'a>(
+        &'a mut self,
+        query: &'a str,
+        w: StatementMetaWriter<'a, W>,
+    ) -> Result<()> {
+        log::debug!("prepared original query is: {}", query);
+        let mut query = query.to_string();
+        let mut index = 1;
+        while let Some(position) = query.find('?') {
+            let place_holder = format!("${}", index);
+            query.replace_range(position..position + 1, &place_holder);
+            index += 1;
+        }
+
+        log::debug!("prepared query is {}", query);
+
+        let statement = ParserContext::create_with_dialect(&query, &GenericDialect {});
+        let mut statement = match statement {
+            Err(e) => {
+                w.error(ErrorKind::ER_SYNTAX_ERROR, e.to_string().as_bytes())
+                    .await?;
+                return Ok(());
+            }
+            Ok(s) => s,
+        };
+
+        if statement.len() != 1 {
+            w.error(
+                ErrorKind::ER_SYNTAX_ERROR,
+                b"prepare statement only support single statement",
+            )
+            .await?;
+            return Ok(());
+        }
+
+        let statement = statement.remove(0);
+
+        match &statement {
+            Statement::Query(_query) => {}
+            _ => {
+                w.error(
+                    ErrorKind::ER_UNKNOWN_ERROR,
+                    b"prepare statement only support SELECT now",
+                )
+                .await?;
+                return Ok(());
+            }
+        }
+
+        let stmt_id = self.prepared_stmts_counter.fetch_add(1, Ordering::SeqCst);
+        {
+            let mut guard = self.prepared_stmts.write();
+            guard.insert(stmt_id, query.to_string());
+        }
+
+        let mut params = vec![];
+        // dummy columns to satisfy opensrv_mysql
+        // just the number of params is useful
+        for _ in 1..index {
+            params.push(opensrv_mysql::Column {
+                table: "".to_string(),
+                column: "".to_string(),
+                coltype: ColumnType::MYSQL_TYPE_LONG,
+                colflags: ColumnFlags::NOT_NULL_FLAG,
+            });
+        }
+
+        w.reply(stmt_id, &params, &[]).await?;
+
+        return Ok(());
     }
 
     async fn on_execute<'a>(
         &'a mut self,
-        _: u32,
-        _: ParamParser<'a>,
+        stmt_id: u32,
+        p: ParamParser<'a>,
         w: QueryResultWriter<'a, W>,
     ) -> Result<()> {
-        w.error(
-            ErrorKind::ER_UNKNOWN_ERROR,
-            b"prepare statement is not supported yet",
-        )
-        .await?;
+        let params: Vec<ParamValue> = p.into_iter().collect();
+        let sql = {
+            let guard = self.prepared_stmts.read();
+            guard.get(&stmt_id).map(|s| s.to_owned())
+        };
+
+        let sql = match sql {
+            None => {
+                w.error(
+                    ErrorKind::ER_UNKNOWN_STMT_HANDLER,
+                    b"prepare statement not exist",
+                )
+                .await?;
+                return Ok(());
+            }
+            Some(sql) => sql,
+        };
+
+        // manually replace variables in prepared statement
+        let mut query = sql.to_owned();
+        let mut index = 1;
+        for param in params {
+            let s = match param.value.into_inner() {
+                ValueInner::Int(u) => u.to_string(),
+                ValueInner::UInt(u) => u.to_string(),
+                ValueInner::Double(u) => u.to_string(),
+                ValueInner::NULL => "NULL".to_string(),
+                ValueInner::Bytes(b) => format!("'{}'", &String::from_utf8_lossy(b)),
+                _ => {
+                    w.error(
+                        ErrorKind::ER_BAD_FIELD_ERROR,
+                        b"unsupported_parameter_value",
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
+            query = query.replace(&format!("${}", index), &s);
+            index += 1;
+        }
+
+        log::debug!("execute replaced query: {}", query);
+
+        let outputs = self.do_query(&query).await;
+        let mut writer = MysqlResultWriter::new(w);
+        for output in outputs {
+            writer.write(&query, output).await?;
+        }
+
         Ok(())
     }
 
-    async fn on_close<'a>(&'a mut self, _stmt_id: u32)
+    async fn on_close<'a>(&'a mut self, stmt_id: u32)
     where
         W: 'async_trait,
     {
-        // do nothing because we haven't implemented prepare statement
+        let mut guard = self.prepared_stmts.write();
+        guard.remove(&stmt_id);
     }
 
     async fn on_query<'a>(

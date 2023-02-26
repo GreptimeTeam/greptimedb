@@ -21,7 +21,7 @@ use common_recordbatch::RecordBatch;
 use common_runtime::Builder as RuntimeBuilder;
 use datatypes::schema::Schema;
 use mysql_async::prelude::*;
-use mysql_async::SslOpts;
+use mysql_async::{Row, SslOpts};
 use rand::rngs::StdRng;
 use rand::Rng;
 use servers::error::Result;
@@ -448,6 +448,35 @@ async fn test_query_concurrently() -> Result<()> {
         total_pending_queries -= handle.await.unwrap();
     }
     assert_eq!(0, total_pending_queries);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_query_prepared() -> Result<()> {
+    common_telemetry::init_default_ut_logging();
+
+    let table = MemTable::default_numbers_table();
+
+    let mysql_server = create_mysql_server(table, Default::default())?;
+    let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
+    let server_addr = mysql_server.start(listening).await.unwrap();
+    let server_port = server_addr.port();
+    let mut connection = create_connection_default_db_name(server_port, false)
+        .await
+        .unwrap();
+    let statement = connection
+        .prep(format!("SELECT uint32s FROM numbers WHERE uint32s = ?"))
+        .await;
+    let statement = statement.unwrap();
+    let stmt_id = statement.id();
+
+    assert_eq!(stmt_id, 1);
+
+    let output: std::result::Result<Vec<Row>, mysql_async::Error> = connection
+        .exec(statement, vec![mysql_async::Value::UInt(10)])
+        .await;
+
+    assert!(output.is_ok());
     Ok(())
 }
 
