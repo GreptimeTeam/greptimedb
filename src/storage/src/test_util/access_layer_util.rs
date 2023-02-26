@@ -15,6 +15,8 @@
 use crate::read::BoxedBatchReader;
 use crate::sst::{AccessLayer, ReadOptions, Source, SstInfo, WriteOptions};
 
+use uuid::Uuid;
+
 #[derive(Debug)]
 pub struct MockAccessLayer;
 
@@ -22,7 +24,7 @@ pub struct MockAccessLayer;
 impl AccessLayer for MockAccessLayer {
     async fn write_sst(
         &self,
-        _file_name: &str,
+        _file_id: &Uuid,
         _source: Source,
         _opts: &WriteOptions,
     ) -> crate::error::Result<SstInfo> {
@@ -31,13 +33,13 @@ impl AccessLayer for MockAccessLayer {
 
     async fn read_sst(
         &self,
-        _file_name: &str,
+        _file_name: &Uuid,
         _opts: &ReadOptions,
     ) -> crate::error::Result<BoxedBatchReader> {
         unimplemented!()
     }
 
-    async fn delete_sst(&self, _file_name: &str) -> crate::error::Result<()> {
+    async fn delete_sst(&self, _file_name: &Uuid) -> crate::error::Result<()> {
         Ok(())
     }
 }

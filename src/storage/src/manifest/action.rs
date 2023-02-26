@@ -181,6 +181,7 @@ impl MetaAction for RegionMetaActionList {
 #[cfg(test)]
 mod tests {
     use common_telemetry::logging;
+    use uuid::Uuid;
 
     use super::*;
     use crate::manifest::test_utils;
@@ -194,8 +195,8 @@ mod tests {
             RegionMetaAction::Protocol(protocol.clone()),
             RegionMetaAction::Edit(test_utils::build_region_edit(
                 99,
-                &["test1", "test2"],
-                &["test3"],
+                &[&Uuid::new_v4(), &Uuid::new_v4()],
+                &[&Uuid::new_v4()],
             )),
         ]);
         action_list.set_prev_version(3);

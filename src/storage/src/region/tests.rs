@@ -35,6 +35,7 @@ use store_api::storage::{
     consts, Chunk, ChunkReader, RegionMeta, ScanRequest, SequenceNumber, Snapshot, WriteRequest,
 };
 use tempdir::TempDir;
+use uuid::Uuid;
 
 use super::*;
 use crate::file_purger::noop::NoopFilePurgeHandler;
@@ -45,6 +46,7 @@ use crate::scheduler::{LocalScheduler, SchedulerConfig};
 use crate::sst::FsAccessLayer;
 use crate::test_util::descriptor_util::RegionDescBuilder;
 use crate::test_util::{self, config_util, schema_util, write_batch_util};
+use crate::sst::FileMeta;
 
 /// Create metadata of a region with schema: (timestamp, v0).
 pub fn new_metadata(region_name: &str, enable_version_column: bool) -> RegionMetadata {
@@ -309,6 +311,10 @@ async fn test_recover_region_manifets() {
     .0
     .is_none());
 
+    let file_id_a = Uuid::new_v4();
+    let file_id_b = Uuid::new_v4();
+    let file_id_c = Uuid::new_v4();
+
     {
         // save some actions into region_meta
         manifest
@@ -323,8 +329,8 @@ async fn test_recover_region_manifets() {
 
         manifest
             .update(RegionMetaActionList::new(vec![
-                RegionMetaAction::Edit(build_region_edit(1, &["f1"], &[])),
-                RegionMetaAction::Edit(build_region_edit(2, &["f2", "f3"], &[])),
+                RegionMetaAction::Edit(build_region_edit(1, &[&file_id_a], &[])),
+                RegionMetaAction::Edit(build_region_edit(2, &[&file_id_b, &file_id_c], &[])),
             ]))
             .await
             .unwrap();
@@ -362,7 +368,9 @@ async fn test_recover_region_manifets() {
         .collect::<HashSet<_>>();
     assert_eq!(3, files.len());
     assert_eq!(
-        HashSet::from(["f1".to_string(), "f2".to_string(), "f3".to_string()]),
+        HashSet::from([FileMeta::append_extension_parquet(&file_id_a), 
+        FileMeta::append_extension_parquet(&file_id_b),
+        FileMeta::append_extension_parquet(&file_id_c)]),
         files
     );
 

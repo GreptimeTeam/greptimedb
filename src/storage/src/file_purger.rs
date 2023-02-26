@@ -178,14 +178,14 @@ mod tests {
         )
         .finish();
         // let sst_file_name = "test-file-purge-handler.parquet";
-        let sst_file_id = Uuid::uuid!("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+        let sst_file_id = uuid::uuid!("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
 
         let noop_file_purger = Arc::new(LocalScheduler::new(
             SchedulerConfig::default(),
             NoopFilePurgeHandler,
         ));
-        let (file, path, layer) =
-            create_sst_file(object_store.clone(), sst_file_id, noop_file_purger).await;
+        let (_file, path, layer) =
+            create_sst_file(object_store.clone(), &sst_file_id, noop_file_purger).await;
         let request = FilePurgeRequest {
             region_id: 0,
             file_id: sst_file_id,
@@ -204,7 +204,7 @@ mod tests {
         let object = object_store.object(&format!(
             "{}/{}",
             path,
-            sst_file_id.with_extension(".parquet")
+            FileMeta::append_extension_parquet(&sst_file_id)
         ));
         assert!(!object.is_exist().await.unwrap());
     }
@@ -221,13 +221,13 @@ mod tests {
         )
         .finish();
         // let sst_file_name = "test-file-purger.parquet";
-        let sst_file_id = Uuid::uuid!("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+        let sst_file_id = uuid::uuid!("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
         let scheduler = Arc::new(LocalScheduler::new(
             SchedulerConfig::default(),
             FilePurgeHandler,
         ));
         let (handle, path, _layer) =
-            create_sst_file(object_store.clone(), sst_file_id, scheduler.clone()).await;
+            create_sst_file(object_store.clone(), &sst_file_id, scheduler.clone()).await;
 
         {
             // mark file as deleted and drop the handle, we expect the file is deleted.
@@ -239,7 +239,7 @@ mod tests {
             .object(&format!(
                 "{}/{}",
                 path,
-                sst_file_id.with_extension(".parquet")
+                FileMeta::append_extension_parquet(&sst_file_id)
             ))
             .is_exist()
             .await

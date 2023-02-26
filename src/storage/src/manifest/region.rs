@@ -16,6 +16,8 @@
 use crate::manifest::action::*;
 use crate::manifest::ManifestImpl;
 
+use uuid::Uuid;
+
 pub type RegionManifest = ManifestImpl<RegionMetaActionList>;
 
 #[cfg(test)]
@@ -94,8 +96,8 @@ mod tests {
         // Save some actions
         manifest
             .update(RegionMetaActionList::new(vec![
-                RegionMetaAction::Edit(build_region_edit(1, &["f1"], &[])),
-                RegionMetaAction::Edit(build_region_edit(2, &["f2", "f3"], &[])),
+                RegionMetaAction::Edit(build_region_edit(1, &[&Uuid::new_v4()], &[])),
+                RegionMetaAction::Edit(build_region_edit(2, &[&Uuid::new_v4(), &Uuid::new_v4()], &[])),
             ]))
             .await
             .unwrap();

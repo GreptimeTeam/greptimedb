@@ -15,6 +15,7 @@
 use common_query::logical_plan::{DfExpr, Expr};
 use datafusion_common::ScalarValue;
 use datafusion_expr::{BinaryExpr, Operator};
+use uuid::Uuid;
 
 use crate::chunk::{ChunkReaderBuilder, ChunkReaderImpl};
 use crate::error;
@@ -219,7 +220,8 @@ mod tests {
         }
 
         let iter = memtable.iter(&IterContext::default()).unwrap();
-        let writer = ParquetWriter::new(sst_file_id.append_extension(), Source::Iter(iter), object_store.clone());
+        let file_path = FileMeta::append_extension_parquet(sst_file_id);
+        let writer = ParquetWriter::new(&file_path, Source::Iter(iter), object_store.clone());
 
         let SstInfo { time_range } = writer
             .write_sst(&sst::WriteOptions::default())
@@ -278,7 +280,7 @@ mod tests {
         let seq = AtomicU64::new(0);
         let schema = schema_for_test();
         let file1 = write_sst(
-            &Uuid::uuid!("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+            &uuid::uuid!("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
             schema.clone(),
             &seq,
             object_store.clone(),
@@ -293,7 +295,7 @@ mod tests {
         )
         .await;
         let file2 = write_sst(
-            &Uuid::uuid!("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+            &uuid::uuid!("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
             schema.clone(),
             &seq,
             object_store.clone(),
@@ -355,7 +357,7 @@ mod tests {
         let schema = schema_for_test();
         let seq = AtomicU64::new(0);
         let file1 = write_sst(
-            &Uuid::uuid!("i1i1i1i1-i1i1-i1i1-i1i1-i1i1i1i1i1i1"),
+            &uuid::uuid!("a1a1a1a1-a1a1-a1a1-a1a1-a1a1a1a1a1a1"),
             schema.clone(),
             &seq,
             object_store.clone(),
@@ -372,7 +374,7 @@ mod tests {
 
         // in file2 we delete the row with timestamp 1000.
         let file2 = write_sst(
-            &Uuid::uuid!("i2i2i2i2-i2i2-i2i2-i2i2-i2i2i2i2i2i2"),
+            &uuid::uuid!("a2a2a2a2-a2a2-a2a2-a2a2-a2a2a2a2a2a2"),
             schema.clone(),
             &seq,
             object_store.clone(),
@@ -401,7 +403,7 @@ mod tests {
 
         let opts = WriteOptions {};
         let s1 = ParquetWriter::new(
-            "./o1o1o1o1-o1o1-o1o1-o1o1-o1o1o1o1o1o1.parquet",
+            "./b1b1b1b1-b1b1-b1b1-b1b1-b1b1b1b1b1b1.parquet",
             Source::Reader(reader1),
             object_store.clone(),
         )
@@ -419,7 +421,7 @@ mod tests {
         );
 
         let s2 = ParquetWriter::new(
-            "./o2o2o2o2-o2o2-o2o2-o2o2-o2o2o2o2o2o2.parquet",
+            "./b2b2b2b2-b2b2-b2b2-b2b2-b2b2b2b2b2b2.parquet",
             Source::Reader(reader2),
             object_store.clone(),
         )
@@ -437,7 +439,7 @@ mod tests {
         );
 
         let s3 = ParquetWriter::new(
-            "./o3o3o3o3-o3o3-o3o3-o3o3-o3o3o3o3o3o3.parquet",
+            "./b3b3b3b3-b3b3-b3b3-b3b3-b3b3b3b3b3b3.parquet",
             Source::Reader(reader3),
             object_store.clone(),
         )
@@ -456,9 +458,9 @@ mod tests {
         );
 
         let output_files = [ 
-            Uuid::uuid!("o1o1o1o1-o1o1-o1o1-o1o1-o1o1o1o1o1o1"), 
-            Uuid::uuid!("o2o2o2o2-o2o2-o2o2-o2o2-o2o2o2o2o2o2"), 
-            Uuid::uuid!("o3o3o3o3-o3o3-o3o3-o3o3-o3o3o3o3o3o3")]
+            uuid::uuid!("b1b1b1b1-b1b1-b1b1-b1b1-b1b1b1b1b1b1"), 
+            uuid::uuid!("b2b2b2b2-b2b2-b2b2-b2b2-b2b2b2b2b2b2"), 
+            uuid::uuid!("b3b3b3b3-b3b3-b3b3-b3b3-b3b3b3b3b3b3")]
             .into_iter()
             .map(|f| {
                 FileHandle::new(

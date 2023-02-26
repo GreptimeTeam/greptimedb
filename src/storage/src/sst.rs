@@ -459,110 +459,115 @@ impl AccessLayer for FsAccessLayer {
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use std::collections::HashSet;
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
 
-//     use super::*;
-//     use crate::file_purger::noop::NoopFilePurgeHandler;
-//     use crate::scheduler::{LocalScheduler, SchedulerConfig};
+    use super::*;
+    use crate::file_purger::noop::NoopFilePurgeHandler;
+    use crate::scheduler::{LocalScheduler, SchedulerConfig};
 
-//     // TODO(vinland-avalon): make the caller use an uuid as id
-//     fn create_file_meta(id: &uuid, level: Level) -> FileMeta {
-//         FileMeta {
-//             region_id: 0,
-//             file_id: FileId::From(id),
-//             time_range: None,
-//             level,
-//         }
-//     }
+    // TODO(vinland-avalon): make the caller use an uuid as id
+    fn create_file_meta(file_id: Uuid, level: Level) -> FileMeta {
+        FileMeta {
+            region_id: 0,
+            file_id: file_id,
+            time_range: None,
+            level,
+        }
+    }
 
-//     #[test]
-//     fn test_level_metas_add_and_remove() {
-//         let layer = Arc::new(crate::test_util::access_layer_util::MockAccessLayer {});
-//         let purger = Arc::new(LocalScheduler::new(
-//             SchedulerConfig::default(),
-//             NoopFilePurgeHandler,
-//         ));
-//         let metas = LevelMetas::new(layer, purger);
-//         let merged = metas.merge(
-//             vec![create_file_meta("a", 0), create_file_meta("b", 0)].into_iter(),
-//             vec![].into_iter(),
-//         );
+    #[test]
+    fn test_level_metas_add_and_remove() {
+        let layer = Arc::new(crate::test_util::access_layer_util::MockAccessLayer {});
+        let purger = Arc::new(LocalScheduler::new(
+            SchedulerConfig::default(),
+            NoopFilePurgeHandler,
+        ));
+        let file_ids = [uuid::uuid!("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"), 
+        uuid::uuid!("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+        uuid::uuid!("cccccccc-cccc-cccc-cccc-cccccccccccc"),
+        uuid::uuid!("dddddddd-dddd-dddd-dddd-dddddddddddd")];
 
-//         assert_eq!(
-//             HashSet::from(["a".to_string(), "b".to_string()]),
-//             merged
-//                 .level(0)
-//                 .files()
-//                 .map(|f| f.file_name().to_string())
-//                 .collect()
-//         );
+        let metas = LevelMetas::new(layer, purger);
+        let merged = metas.merge(
+            vec![create_file_meta(file_ids[0].clone(), 0), create_file_meta(file_ids[1].clone(), 0)].into_iter(),
+            vec![].into_iter(),
+        );
 
-//         let merged1 = merged.merge(
-//             vec![create_file_meta("c", 1), create_file_meta("d", 1)].into_iter(),
-//             vec![].into_iter(),
-//         );
-//         assert_eq!(
-//             HashSet::from(["a".to_string(), "b".to_string()]),
-//             merged1
-//                 .level(0)
-//                 .files()
-//                 .map(|f| f.file_name().to_string())
-//                 .collect()
-//         );
+        assert_eq!(
+            HashSet::from([&file_ids[0], &file_ids[1]]),
+            merged
+                .level(0)
+                .files()
+                .map(|f| f.file_id())
+                .collect()
+        );
 
-//         assert_eq!(
-//             HashSet::from(["c".to_string(), "d".to_string()]),
-//             merged1
-//                 .level(1)
-//                 .files()
-//                 .map(|f| f.file_name().to_string())
-//                 .collect()
-//         );
+        let merged1 = merged.merge(
+            vec![create_file_meta(file_ids[2].clone(), 1), create_file_meta(file_ids[3].clone(), 1)].into_iter(),
+            vec![].into_iter(),
+        );
+        assert_eq!(
+            HashSet::from([&file_ids[0], &file_ids[1]]),
+            merged1
+                .level(0)
+                .files()
+                .map(|f| f.file_id())
+                .collect()
+        );
 
-//         let removed1 = merged1.merge(
-//             vec![].into_iter(),
-//             vec![create_file_meta("a", 0), create_file_meta("c", 0)].into_iter(),
-//         );
-//         assert_eq!(
-//             HashSet::from(["b".to_string()]),
-//             removed1
-//                 .level(0)
-//                 .files()
-//                 .map(|f| f.file_name().to_string())
-//                 .collect()
-//         );
+        assert_eq!(
+            HashSet::from([&file_ids[2], &file_ids[3]]),
+            merged1
+                .level(1)
+                .files()
+                .map(|f| f.file_id())
+                .collect()
+        );
 
-//         assert_eq!(
-//             HashSet::from(["c".to_string(), "d".to_string()]),
-//             removed1
-//                 .level(1)
-//                 .files()
-//                 .map(|f| f.file_name().to_string())
-//                 .collect()
-//         );
+        let removed1 = merged1.merge(
+            vec![].into_iter(),
+            vec![create_file_meta(file_ids[0].clone(), 0), create_file_meta(file_ids[2].clone(), 0)].into_iter(),
+        );
+        assert_eq!(
+            HashSet::from([&file_ids[1]]),
+            removed1
+                .level(0)
+                .files()
+                .map(|f| f.file_id())
+                .collect()
+        );
 
-//         let removed2 = removed1.merge(
-//             vec![].into_iter(),
-//             vec![create_file_meta("c", 1), create_file_meta("d", 1)].into_iter(),
-//         );
-//         assert_eq!(
-//             HashSet::from(["b".to_string()]),
-//             removed2
-//                 .level(0)
-//                 .files()
-//                 .map(|f| f.file_name().to_string())
-//                 .collect()
-//         );
+        assert_eq!(
+            HashSet::from([&file_ids[2].clone(), &file_ids[3].clone()]),
+            removed1
+                .level(1)
+                .files()
+                .map(|f| f.file_id())
+                .collect()
+        );
 
-//         assert_eq!(
-//             HashSet::new(),
-//             removed2
-//                 .level(1)
-//                 .files()
-//                 .map(|f| f.file_name().to_string())
-//                 .collect()
-//         );
-//     }
-// }
+        let removed2 = removed1.merge(
+            vec![].into_iter(),
+            vec![create_file_meta(file_ids[2].clone(), 1), create_file_meta(file_ids[3].clone(), 1)].into_iter(),
+        );
+        assert_eq!(
+            HashSet::from([&file_ids[1].clone()]),
+            removed2
+                .level(0)
+                .files()
+                .map(|f| f.file_id())
+                .collect()
+        );
+
+        assert_eq!(
+            HashSet::new(),
+            removed2
+                .level(1)
+                .files()
+                .map(|f| f.file_id())
+                .collect()
+        );
+    }
+}

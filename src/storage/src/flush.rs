@@ -264,8 +264,8 @@ impl<S: LogStore> Job for FlushJob<S> {
 
 #[cfg(test)]
 mod tests {
-    use log_store::NoopLogStore;
-    use regex::Regex;
+    // use log_store::NoopLogStore;
+    // use regex::Regex;
 
     use super::*;
 
@@ -276,13 +276,13 @@ mod tests {
         assert_eq!(56, get_mutable_limitation(64));
     }
 
-    #[test]
-    pub fn test_uuid_generate() {
-        let file_name = FlushJob::<NoopLogStore>::generate_sst_file_name();
-        let regex = Regex::new(r"^[a-f\d]{8}(-[a-f\d]{4}){3}-[a-f\d]{12}.parquet$").unwrap();
-        assert!(
-            regex.is_match(&file_name),
-            "Illegal sst file name: {file_name}",
-        );
-    }
+    // #[test]
+    // pub fn test_uuid_generate() {
+    //     let file_name = FlushJob::<NoopLogStore>::generate_sst_file_name();
+    //     let regex = Regex::new(r"^[a-f\d]{8}(-[a-f\d]{4}){3}-[a-f\d]{12}.parquet$").unwrap();
+    //     assert!(
+    //         regex.is_match(&file_name),
+    //         "Illegal sst file name: {file_name}",
+    //     );
+    // }
 }

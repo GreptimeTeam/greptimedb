@@ -14,6 +14,7 @@
 
 use datatypes::type_id::LogicalTypeId;
 use store_api::storage::SequenceNumber;
+use uuid::Uuid;
 
 use crate::manifest::action::*;
 use crate::metadata::RegionMetadata;
@@ -32,8 +33,8 @@ pub fn build_region_meta() -> RegionMetadata {
 
 pub fn build_region_edit(
     sequence: SequenceNumber,
-    files_to_add: &[&str],
-    files_to_remove: &[&str],
+    files_to_add: &[&Uuid],
+    files_to_remove: &[&Uuid],
 ) -> RegionEdit {
     RegionEdit {
         region_version: 0,
@@ -42,7 +43,7 @@ pub fn build_region_edit(
             .iter()
             .map(|f| FileMeta {
                 region_id: 0,
-                file_id: Uuid::uuid!(f),
+                file_id: **f,
                 time_range: None,
                 level: 0,
             })
@@ -51,7 +52,7 @@ pub fn build_region_edit(
             .iter()
             .map(|f| FileMeta {
                 region_id: 0,
-                file_id: Uuid::uuid!(f),
+                file_id: **f,
                 time_range: None,
                 level: 0,
             })
