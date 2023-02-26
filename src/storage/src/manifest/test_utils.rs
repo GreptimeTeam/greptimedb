@@ -43,7 +43,7 @@ pub fn build_region_edit(
             .iter()
             .map(|f| FileMeta {
                 region_id: 0,
-                file_id: **f,
+                file_id: f.clone().clone(),
                 time_range: None,
                 level: 0,
             })
@@ -52,7 +52,7 @@ pub fn build_region_edit(
             .iter()
             .map(|f| FileMeta {
                 region_id: 0,
-                file_id: **f,
+                file_id: f.clone().clone(),
                 time_range: None,
                 level: 0,
             })

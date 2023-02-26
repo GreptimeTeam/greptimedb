@@ -16,8 +16,6 @@
 use crate::manifest::action::*;
 use crate::manifest::ManifestImpl;
 
-use uuid::Uuid;
-
 pub type RegionManifest = ManifestImpl<RegionMetaActionList>;
 
 #[cfg(test)]
@@ -29,6 +27,7 @@ mod tests {
     use store_api::manifest::action::ProtocolAction;
     use store_api::manifest::{Manifest, MetaActionIterator, MAX_VERSION};
     use tempdir::TempDir;
+    use uuid::Uuid;
 
     use super::*;
     use crate::manifest::test_utils::*;

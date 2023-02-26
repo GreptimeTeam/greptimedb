@@ -15,7 +15,6 @@
 use common_query::logical_plan::{DfExpr, Expr};
 use datafusion_common::ScalarValue;
 use datafusion_expr::{BinaryExpr, Operator};
-use uuid::Uuid;
 
 use crate::chunk::{ChunkReaderBuilder, ChunkReaderImpl};
 use crate::error;
@@ -96,6 +95,7 @@ mod tests {
     use object_store::{ObjectStore, ObjectStoreBuilder};
     use store_api::storage::{ChunkReader, OpType, SequenceNumber};
     use tempdir::TempDir;
+    use uuid::Uuid;
 
     use super::*;
     use crate::file_purger::noop::new_noop_file_purger;

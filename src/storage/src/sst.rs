@@ -292,28 +292,6 @@ impl FileHandleInner {
     }
 }
 
-// #[derive(Debug, Clone)]
-// pub struct FileId(Uuid);
-
-// impl FileId {
-//     pub fn new() -> FileId {
-//         FileId(Uuid::new_v4())
-//     }
-//     // fn From(id: &str) -> FileId {
-//     //     FileId(uuid::uuid!(id))
-//     // }
-//     // TODO(vinland-avalon): make ".parquet" a const variable or default param
-//     fn append_extension(&self, extension: &str) -> String {
-//         format!("{}{}", self.0.hyphenated(), extension)
-//     }
-// }
-
-// impl From<Uuid> for FileId {
-//     fn from(id: Uuid) -> FileId {
-//         FileId(id)
-//     }
-// }
-
 /// Immutable metadata of a sst file.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FileMeta {

@@ -19,7 +19,6 @@ use common_telemetry::{debug, warn};
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
 use common_time::Timestamp;
-use uuid::Uuid;
 
 use crate::compaction::picker::PickerContext;
 use crate::compaction::task::CompactionOutput;
@@ -171,8 +170,7 @@ mod tests {
     use super::*;
     use crate::file_purger::noop::new_noop_file_purger;
     use crate::sst::FileMeta;
-
-    
+    use uuid::Uuid;
 
     #[test]
     fn test_time_bucket_span() {
@@ -282,7 +280,7 @@ mod tests {
                 .unwrap()
                 .iter()
                 .map(|f| f.file_id())
-                .collect::<HashSet<_>>();
+                .collect();
             assert_eq!(
                 file_ids, actual,
                 "bucket: {bucket}, expected: {file_ids:?}, actual: {actual:?}",
