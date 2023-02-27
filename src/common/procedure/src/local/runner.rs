@@ -210,7 +210,6 @@ impl Runner {
                 ExecResult::Continue
             }
             Err(e) => {
-                type ProcedureError = Error;
                 logging::error!(
                     e;
                     "Failed to execute procedure {}-{}, retry: {}",
