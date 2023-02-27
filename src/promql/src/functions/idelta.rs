@@ -169,27 +169,7 @@ impl<const IS_RATE: bool> Display for IDelta<IS_RATE> {
 mod test {
 
     use super::*;
-
-    /// Runner to run range UDFs that only requires ts range and value range.
-    fn simple_range_udf_runner(
-        range_fn: ScalarUDF,
-        input_ts: RangeArray,
-        input_value: RangeArray,
-        expected: Vec<Option<f64>>,
-    ) {
-        let input = vec![
-            ColumnarValue::Array(Arc::new(input_ts.into_dict())),
-            ColumnarValue::Array(Arc::new(input_value.into_dict())),
-        ];
-        let eval_result: Vec<Option<f64>> = extract_array(&(range_fn.fun)(&input).unwrap())
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap()
-            .iter()
-            .collect();
-        assert_eq!(eval_result, expected)
-    }
+    use crate::functions::test_util::simple_range_udf_runner;
 
     #[test]
     fn basic_idelta_and_irate() {

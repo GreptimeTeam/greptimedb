@@ -15,6 +15,8 @@
 mod aggr_over_time;
 mod idelta;
 mod increase;
+#[cfg(test)]
+mod test_util;
 
 pub use aggr_over_time::{
     AbsentOverTime, AvgOverTime, CountOverTime, LastOverTime, MaxOverTime, MinOverTime,
