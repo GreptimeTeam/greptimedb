@@ -139,7 +139,7 @@ pub enum Error {
     #[snafu(display("Unsupported format option: {}", name))]
     UnsupportedCopyFormatOption { name: String },
 
-    #[snafu(display("Unable to convert statement {:?} to DataFusion statement", statement))]
+    #[snafu(display("Unable to convert statement {} to DataFusion statement", statement))]
     ConvertToDfStatement {
         statement: String,
         backtrace: Backtrace,

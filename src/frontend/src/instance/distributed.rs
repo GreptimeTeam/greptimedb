@@ -29,6 +29,7 @@ use chrono::DateTime;
 use client::Database;
 use common_base::Plugins;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::format_full_table_name;
 use common_error::prelude::BoxedError;
 use common_query::Output;
 use common_telemetry::{debug, info};
@@ -443,7 +444,7 @@ impl DistInstance {
             .await
             .context(CatalogSnafu)?
             .context(TableNotFoundSnafu {
-                table_name: format!("{catalog_name}.{schema_name}.{table_name}"),
+                table_name: format_full_table_name(catalog_name, schema_name, table_name),
             })?;
 
         let request = common_grpc_expr::alter_expr_to_request(expr.clone())

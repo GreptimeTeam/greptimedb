@@ -19,6 +19,7 @@ use async_trait::async_trait;
 use bytes::{Buf, Bytes, BytesMut};
 use catalog::table_source::DfTableSourceProvider;
 use catalog::CatalogManagerRef;
+use common_catalog::format_full_table_name;
 use common_telemetry::debug;
 use datafusion::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datafusion::common::{DFField, DFSchema, OwnedTableReference};
@@ -248,7 +249,7 @@ impl DFLogicalSubstraitConvertor {
             .resolve_table(table_ref)
             .await
             .with_context(|_| ResolveTableSnafu {
-                table_name: format!("{catalog_name}.{schema_name}.{table_name}"),
+                table_name: format_full_table_name(&catalog_name, &schema_name, &table_name),
             })?;
 
         // Get schema directly from the table, and compare it with the schema retrieved from substrait proto.
@@ -271,7 +272,7 @@ impl DFLogicalSubstraitConvertor {
         };
 
         // Calculate the projected schema
-        let qualified = &format!("{catalog_name}.{schema_name}.{table_name}");
+        let qualified = &format_full_table_name(&catalog_name, &schema_name, &table_name);
         let projected_schema = Arc::new(
             project_schema(&stored_schema, projection.as_ref())
                 .and_then(|x| {
@@ -290,7 +291,7 @@ impl DFLogicalSubstraitConvertor {
 
         // TODO(ruihang): Support limit(fetch)
         Ok(LogicalPlan::TableScan(TableScan {
-            table_name: format!("{catalog_name}.{schema_name}.{table_name}"),
+            table_name: qualified.to_string(),
             source: adapter,
             projection,
             projected_schema,

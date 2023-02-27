@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use common_catalog::format_full_table_name;
 use datafusion::common::{OwnedTableReference, ResolvedTableReference, TableReference};
 use datafusion::datasource::provider_as_source;
 use datafusion::logical_expr::TableSource;
@@ -112,7 +113,7 @@ impl DfTableSourceProvider {
             .table(table_name)
             .await?
             .with_context(|| TableNotExistSnafu {
-                table: format!("{catalog_name}.{schema_name}.{table_name}"),
+                table: format_full_table_name(catalog_name, schema_name, table_name),
             })?;
 
         let table = DfTableProviderAdapter::new(table);

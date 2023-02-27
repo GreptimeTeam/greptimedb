@@ -17,6 +17,7 @@ datafusion-expr.workspace = true
 datatypes = { path = "../../datatypes" }
 futures = "0.3"
 prost.workspace = true
+session = { path = "../../session" }
 snafu.workspace = true
 table = { path = "../../table" }
 

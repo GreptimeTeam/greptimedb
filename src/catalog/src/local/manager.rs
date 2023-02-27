@@ -437,7 +437,7 @@ impl CatalogManager for LocalCatalogManager {
                 .table(catalog, schema, table_name)
                 .await?
                 .with_context(|| error::TableNotExistSnafu {
-                    table: format!("{catalog}.{schema}.{table_name}"),
+                    table: format_full_table_name(catalog, schema, table_name),
                 })?
                 .table_info()
                 .ident

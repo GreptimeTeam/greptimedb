@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 
 use catalog::CatalogManagerRef;
+use common_catalog::format_full_table_name;
 use common_query::Output;
 use common_recordbatch::RecordBatch;
 use datafusion_expr::type_coercion::binary::coerce_types;
@@ -288,7 +289,7 @@ impl SqlHandler {
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {
-                table_name: format!("{catalog_name}.{schema_name}.{table_name}"),
+                table_name: format_full_table_name(&catalog_name, &schema_name, &table_name),
             })?;
 
         if stmt.is_insert_select() {
