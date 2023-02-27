@@ -20,7 +20,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use async_stream::stream;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
-use common_telemetry::{debug, info};
+use common_telemetry::{debug, error, info};
 use futures::Stream;
 use futures_util::StreamExt;
 use snafu::{OptionExt, ResultExt};
@@ -108,9 +108,14 @@ impl RemoteCatalogManager {
                     debug!("Ignoring non-catalog key: {}", String::from_utf8_lossy(&k));
                     continue;
                 }
-                let key = CatalogKey::parse(&String::from_utf8_lossy(&k))
-                    .context(InvalidCatalogValueSnafu)?;
-                yield Ok(key)
+
+                let catalog_key = String::from_utf8_lossy(&k);
+                if let Ok(key) = CatalogKey::parse(&catalog_key) {
+                    yield Ok(key)
+                } else {
+                    error!("Invalid catalog key: {:?}", catalog_key);
+                    continue;
+                }
             }
         }))
     }
