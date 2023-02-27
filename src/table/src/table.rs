@@ -93,6 +93,11 @@ pub trait Table: Send + Sync {
         }
         .fail()?
     }
+
+    /// Flush table.
+    async fn flush(&self) -> Result<()> {
+        UnsupportedSnafu { operation: "FLUSH" }.fail()?
+    }
 }
 
 pub type TableRef = Arc<dyn Table>;
