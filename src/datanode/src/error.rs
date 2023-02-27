@@ -190,6 +190,12 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
+    #[snafu(display("Failed to build backend, source: {}", source))]
+    BuildBackend {
+        source: object_store::Error,
+        backtrace: Backtrace,
+    },
+
     #[snafu(display("Runtime resource error, source: {}", source))]
     RuntimeResource {
         #[snafu(backtrace)]
@@ -482,9 +488,11 @@ impl ErrorExt for Error {
             | MissingRequiredField { .. }
             | IncorrectInternalState { .. } => StatusCode::Internal,
 
-            InitBackend { .. } | WriteParquet { .. } | PollStream { .. } | WriteObject { .. } => {
-                StatusCode::StorageUnavailable
-            }
+            BuildBackend { .. }
+            | InitBackend { .. }
+            | WriteParquet { .. }
+            | PollStream { .. }
+            | WriteObject { .. } => StatusCode::StorageUnavailable,
             OpenLogStore { source } => source.status_code(),
             StartScriptManager { source } => source.status_code(),
             OpenStorageEngine { source } => source.status_code(),
