@@ -15,11 +15,11 @@
 use api::v1::{ColumnDataType, ColumnDef, CreateTableExpr, TableId};
 use client::{Client, Database};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use prost_09::Message;
-use substrait_proto::protobuf::plan_rel::RelType as PlanRelType;
-use substrait_proto::protobuf::read_rel::{NamedTable, ReadType};
-use substrait_proto::protobuf::rel::RelType;
-use substrait_proto::protobuf::{PlanRel, ReadRel, Rel};
+use prost::Message;
+use substrait_proto::proto::plan_rel::RelType as PlanRelType;
+use substrait_proto::proto::read_rel::{NamedTable, ReadType};
+use substrait_proto::proto::rel::RelType;
+use substrait_proto::proto::{PlanRel, ReadRel, Rel};
 use tracing::{event, Level};
 
 fn main() {
@@ -89,12 +89,8 @@ fn mock_logical_plan() -> Vec<u8> {
     let read_type = ReadType::NamedTable(named_table);
 
     let read_rel = ReadRel {
-        common: None,
-        base_schema: None,
-        filter: None,
-        projection: None,
-        advanced_extension: None,
         read_type: Some(read_type),
+        ..Default::default()
     };
 
     let mut buf = vec![];

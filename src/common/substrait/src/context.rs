@@ -15,10 +15,10 @@
 use std::collections::HashMap;
 
 use datafusion::common::DFSchemaRef;
-use substrait_proto::protobuf::extensions::simple_extension_declaration::{
+use substrait_proto::proto::extensions::simple_extension_declaration::{
     ExtensionFunction, MappingType,
 };
-use substrait_proto::protobuf::extensions::SimpleExtensionDeclaration;
+use substrait_proto::proto::extensions::SimpleExtensionDeclaration;
 
 #[derive(Default)]
 pub struct ConvertorContext {

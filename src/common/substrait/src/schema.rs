@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use datatypes::schema::{ColumnSchema, Schema};
-use substrait_proto::protobuf::r#type::{Nullability, Struct as SubstraitStruct};
-use substrait_proto::protobuf::NamedStruct;
+use substrait_proto::proto::r#type::{Nullability, Struct as SubstraitStruct};
+use substrait_proto::proto::NamedStruct;
 
 use crate::error::Result;
 use crate::types::{from_concrete_type, to_concrete_type};
