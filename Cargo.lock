@@ -7159,7 +7159,6 @@ dependencies = [
  "bytes",
  "common-base",
  "common-error",
- "common-procedure",
  "common-query",
  "common-recordbatch",
  "common-runtime",

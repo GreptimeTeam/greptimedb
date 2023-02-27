@@ -126,12 +126,12 @@ impl Error {
         }
     }
 
-    /// Creates a new [Error::RetryLater] or [Error::External] error from source `ErrorExt`.
-    pub fn from_error_ext<E: ErrorExt + Send + Sync + 'static>(err: E) -> Self {
-        match err.status_code() {
+    /// Determine whether it is a retry later type through [StatusCode]
+    pub fn is_retry_later(status_code: StatusCode) -> bool {
+        match status_code {
             StatusCode::StorageUnavailable
             | StatusCode::RuntimeResourcesExhausted
-            | StatusCode::Internal => Error::retry_later(err),
+            | StatusCode::Internal => true,
 
             StatusCode::Success
             | StatusCode::Unknown
@@ -151,7 +151,17 @@ impl Error {
             | StatusCode::UserPasswordMismatch
             | StatusCode::AuthHeaderNotFound
             | StatusCode::InvalidAuthHeader
-            | StatusCode::AccessDenied => Error::external(err),
+            | StatusCode::AccessDenied => false,
+        }
+    }
+
+    /// Creates a new [Error::RetryLater] or [Error::External] error from source `err` according
+    /// to its [StatusCode].
+    pub fn from_error_ext<E: ErrorExt + Send + Sync + 'static>(err: E) -> Self {
+        if Error::is_retry_later(err.status_code()) {
+            Error::retry_later(err)
+        } else {
+            Error::external(err)
         }
     }
 }

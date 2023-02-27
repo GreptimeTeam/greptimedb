@@ -15,6 +15,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use common_error::ext::ErrorExt;
 use common_telemetry::logging;
 use tokio::time;
 
@@ -210,14 +211,16 @@ impl Runner {
                 ExecResult::Continue
             }
             Err(e) => {
+                type ProcedureError = Error;
                 logging::error!(
                     e;
-                    "Failed to execute procedure {}-{}",
+                    "Failed to execute procedure {}-{}, retry: {}",
                     self.procedure.type_name(),
-                    self.meta.id
+                    self.meta.id,
+                    ProcedureError::is_retry_later(e.status_code())
                 );
 
-                if let Error::RetryLater { .. } = e {
+                if ProcedureError::is_retry_later(e.status_code()) {
                     return ExecResult::RetryLater;
                 }
 
@@ -298,7 +301,7 @@ impl Runner {
                 self.procedure.type_name(),
                 self.meta.id,
                 subprocedure.procedure.type_name(),
-                subprocedure.id
+                subprocedure.id,
             );
 
             self.submit_subprocedure(subprocedure.id, subprocedure.procedure);
@@ -380,7 +383,7 @@ impl Runner {
         logging::info!(
             "Procedure {}-{} done",
             self.procedure.type_name(),
-            self.meta.id
+            self.meta.id,
         );
 
         // Mark the state of this procedure to done.
