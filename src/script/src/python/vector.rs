@@ -783,6 +783,7 @@ pub fn pyobj_try_to_typed_val(
                 }
             }
             ConcreteDataType::List(_) => unreachable!(),
+            ConcreteDataType::Dictionary(_) => unreachable!(),
             ConcreteDataType::Date(_)
             | ConcreteDataType::DateTime(_)
             | ConcreteDataType::Timestamp(_) => {

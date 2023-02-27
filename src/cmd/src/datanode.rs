@@ -14,8 +14,10 @@
 
 use clap::Parser;
 use common_telemetry::logging;
-use datanode::datanode::{Datanode, DatanodeOptions, FileConfig, ObjectStoreConfig};
-use meta_client::MetaClientOpts;
+use datanode::datanode::{
+    Datanode, DatanodeOptions, FileConfig, ObjectStoreConfig, ProcedureConfig,
+};
+use meta_client::MetaClientOptions;
 use servers::Mode;
 use snafu::ResultExt;
 
@@ -65,6 +67,8 @@ struct StartCommand {
     data_dir: Option<String>,
     #[clap(long)]
     wal_dir: Option<String>,
+    #[clap(long)]
+    procedure_dir: Option<String>,
 }
 
 impl StartCommand {
@@ -110,8 +114,8 @@ impl TryFrom<StartCommand> for DatanodeOptions {
         }
 
         if let Some(meta_addr) = cmd.metasrv_addr {
-            opts.meta_client_opts
-                .get_or_insert_with(MetaClientOpts::default)
+            opts.meta_client_options
+                .get_or_insert_with(MetaClientOptions::default)
                 .metasrv_addrs = meta_addr
                 .split(',')
                 .map(&str::trim)
@@ -134,6 +138,11 @@ impl TryFrom<StartCommand> for DatanodeOptions {
         if let Some(wal_dir) = cmd.wal_dir {
             opts.wal.dir = wal_dir;
         }
+
+        if let Some(procedure_dir) = cmd.procedure_dir {
+            opts.procedure = Some(ProcedureConfig::from_file_path(procedure_dir));
+        }
+
         Ok(opts)
     }
 }
@@ -162,12 +171,12 @@ mod tests {
         assert_eq!("/tmp/greptimedb/wal".to_string(), options.wal.dir);
         assert_eq!("127.0.0.1:4406".to_string(), options.mysql_addr);
         assert_eq!(4, options.mysql_runtime_size);
-        let MetaClientOpts {
+        let MetaClientOptions {
             metasrv_addrs: metasrv_addr,
             timeout_millis,
             connect_timeout_millis,
             tcp_nodelay,
-        } = options.meta_client_opts.unwrap();
+        } = options.meta_client_options.unwrap();
 
         assert_eq!(vec!["127.0.0.1:3002".to_string()], metasrv_addr);
         assert_eq!(5000, connect_timeout_millis);
@@ -240,12 +249,12 @@ mod tests {
         assert_eq!(1024 * 1024 * 1024 * 50, dn_opts.wal.purge_threshold.0);
         assert!(!dn_opts.wal.sync_write);
         assert_eq!(Some(42), dn_opts.node_id);
-        let MetaClientOpts {
+        let MetaClientOptions {
             metasrv_addrs: metasrv_addr,
             timeout_millis,
             connect_timeout_millis,
             tcp_nodelay,
-        } = dn_opts.meta_client_opts.unwrap();
+        } = dn_opts.meta_client_options.unwrap();
         assert_eq!(vec!["127.0.0.1:3002".to_string()], metasrv_addr);
         assert_eq!(3000, timeout_millis);
         assert_eq!(5000, connect_timeout_millis);

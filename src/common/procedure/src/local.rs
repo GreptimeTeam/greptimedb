@@ -123,8 +123,6 @@ pub(crate) struct ManagerContext {
     loaders: Mutex<HashMap<String, BoxedProcedureLoader>>,
     lock_map: LockMap,
     procedures: RwLock<HashMap<ProcedureId, ProcedureMetaRef>>,
-    // TODO(yingwen): Now we never clean the messages. But when the root procedure is done, we
-    // should be able to remove the its message and all its child messages.
     /// Messages loaded from the procedure store.
     messages: Mutex<HashMap<ProcedureId, ProcedureMessage>>,
 }

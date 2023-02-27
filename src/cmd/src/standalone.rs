@@ -18,7 +18,7 @@ use clap::Parser;
 use common_base::Plugins;
 use common_telemetry::info;
 use datanode::datanode::{
-    CompactionConfig, Datanode, DatanodeOptions, ObjectStoreConfig, WalConfig,
+    CompactionConfig, Datanode, DatanodeOptions, ObjectStoreConfig, ProcedureConfig, WalConfig,
 };
 use datanode::instance::InstanceRef;
 use frontend::frontend::{Frontend, FrontendOptions};
@@ -68,6 +68,8 @@ impl SubCommand {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StandaloneOptions {
+    pub mode: Mode,
+    pub enable_memory_catalog: bool,
     pub http_options: Option<HttpOptions>,
     pub grpc_options: Option<GrpcOptions>,
     pub mysql_options: Option<MysqlOptions>,
@@ -76,16 +78,17 @@ pub struct StandaloneOptions {
     pub influxdb_options: Option<InfluxdbOptions>,
     pub prometheus_options: Option<PrometheusOptions>,
     pub promql_options: Option<PromqlOptions>,
-    pub mode: Mode,
     pub wal: WalConfig,
     pub storage: ObjectStoreConfig,
     pub compaction: CompactionConfig,
-    pub enable_memory_catalog: bool,
+    pub procedure: Option<ProcedureConfig>,
 }
 
 impl Default for StandaloneOptions {
     fn default() -> Self {
         Self {
+            mode: Mode::Standalone,
+            enable_memory_catalog: false,
             http_options: Some(HttpOptions::default()),
             grpc_options: Some(GrpcOptions::default()),
             mysql_options: Some(MysqlOptions::default()),
@@ -94,11 +97,10 @@ impl Default for StandaloneOptions {
             influxdb_options: Some(InfluxdbOptions::default()),
             prometheus_options: Some(PrometheusOptions::default()),
             promql_options: Some(PromqlOptions::default()),
-            mode: Mode::Standalone,
             wal: WalConfig::default(),
             storage: ObjectStoreConfig::default(),
             compaction: CompactionConfig::default(),
-            enable_memory_catalog: false,
+            procedure: None,
         }
     }
 }
@@ -106,6 +108,7 @@ impl Default for StandaloneOptions {
 impl StandaloneOptions {
     fn frontend_options(self) -> FrontendOptions {
         FrontendOptions {
+            mode: self.mode,
             http_options: self.http_options,
             grpc_options: self.grpc_options,
             mysql_options: self.mysql_options,
@@ -114,17 +117,17 @@ impl StandaloneOptions {
             influxdb_options: self.influxdb_options,
             prometheus_options: self.prometheus_options,
             promql_options: self.promql_options,
-            mode: self.mode,
-            meta_client_opts: None,
+            meta_client_options: None,
         }
     }
 
     fn datanode_options(self) -> DatanodeOptions {
         DatanodeOptions {
+            enable_memory_catalog: self.enable_memory_catalog,
             wal: self.wal,
             storage: self.storage,
-            enable_memory_catalog: self.enable_memory_catalog,
             compaction: self.compaction,
+            procedure: self.procedure,
             ..Default::default()
         }
     }
@@ -366,5 +369,12 @@ mod tests {
             .authenticate(Identity::UserId("test", None), Password::PlainText("test"))
             .await;
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_toml() {
+        let opts = StandaloneOptions::default();
+        let toml_string = toml::to_string(&opts).unwrap();
+        let _parsed: StandaloneOptions = toml::from_str(&toml_string).unwrap();
     }
 }

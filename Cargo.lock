@@ -1350,14 +1350,21 @@ dependencies = [
  "anymap",
  "build-data",
  "clap 3.2.23",
+ "client",
  "common-base",
  "common-error",
+ "common-query",
+ "common-recordbatch",
  "common-telemetry",
  "datanode",
+ "either",
  "frontend",
  "futures",
  "meta-client",
  "meta-srv",
+ "nu-ansi-term",
+ "rexpect",
+ "rustyline",
  "serde",
  "servers",
  "snafu",
@@ -1386,6 +1393,12 @@ dependencies = [
  "strum_macros",
  "unicode-width",
 ]
+
+[[package]]
+name = "comma"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "55b672471b4e9f9e95499ea597ff64941a309b2cdbffcc46f2cc5e2d971fd335"
 
 [[package]]
 name = "common-base"
@@ -2173,6 +2186,7 @@ dependencies = [
  "common-error",
  "common-grpc",
  "common-grpc-expr",
+ "common-procedure",
  "common-query",
  "common-recordbatch",
  "common-runtime",
@@ -2205,9 +2219,11 @@ dependencies = [
  "store-api",
  "substrait 0.1.0",
  "table",
+ "table-procedure",
  "tempdir",
  "tokio",
  "tokio-stream",
+ "toml",
  "tonic",
  "tower",
  "tower-http",
@@ -2708,6 +2724,7 @@ dependencies = [
  "table",
  "tempdir",
  "tokio",
+ "toml",
  "tonic",
  "tower",
 ]
@@ -4543,7 +4560,7 @@ dependencies = [
 [[package]]
 name = "opensrv-mysql"
 version = "0.3.0"
-source = "git+https://github.com/datafuselabs/opensrv?rev=b44c9d1360da297b305abf33aecfa94888e1554c#b44c9d1360da297b305abf33aecfa94888e1554c"
+source = "git+https://github.com/sunng87/opensrv?branch=fix/buffer-overread#d5c24b25543ba48b69c3c4fe97f71e499819bd99"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -5900,6 +5917,19 @@ dependencies = [
  "quote",
  "syn",
  "syn-ext",
+]
+
+[[package]]
+name = "rexpect"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01ff60778f96fb5a48adbe421d21bf6578ed58c0872d712e7e08593c195adff8"
+dependencies = [
+ "comma",
+ "nix 0.25.1",
+ "regex",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]
@@ -7443,6 +7473,28 @@ dependencies = [
  "tempdir",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "table-procedure"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "catalog",
+ "common-error",
+ "common-procedure",
+ "common-telemetry",
+ "datatypes",
+ "log-store",
+ "mito",
+ "object-store",
+ "serde",
+ "serde_json",
+ "snafu",
+ "storage",
+ "table",
+ "tempdir",
+ "tokio",
 ]
 
 [[package]]

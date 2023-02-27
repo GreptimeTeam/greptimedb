@@ -15,9 +15,9 @@
 use std::collections::HashMap;
 
 use catalog::{RegisterSchemaRequest, RegisterTableRequest};
+use common_procedure::{ProcedureManagerRef, ProcedureState, ProcedureWithId};
 use common_query::Output;
-use common_telemetry::tracing::info;
-use common_telemetry::tracing::log::error;
+use common_telemetry::tracing::{error, info};
 use datatypes::schema::RawSchema;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -28,12 +28,13 @@ use store_api::storage::consts::TIME_INDEX_NAME;
 use table::engine::{EngineContext, TableReference};
 use table::metadata::TableId;
 use table::requests::*;
+use table_procedure::CreateTableProcedure;
 
 use crate::error::{
     self, CatalogNotFoundSnafu, CatalogSnafu, ConstraintNotSupportedSnafu, CreateTableSnafu,
     IllegalPrimaryKeysDefSnafu, InsertSystemCatalogSnafu, KeyColumnNotFoundSnafu,
-    RegisterSchemaSnafu, Result, SchemaExistsSnafu, SchemaNotFoundSnafu,
-    UnrecognizedTableOptionSnafu,
+    ProcedureExecSnafu, RegisterSchemaSnafu, Result, SchemaExistsSnafu, SchemaNotFoundSnafu,
+    SubmitProcedureSnafu, UnrecognizedTableOptionSnafu, WaitProcedureSnafu,
 };
 use crate::sql::SqlHandler;
 
@@ -72,6 +73,10 @@ impl SqlHandler {
     }
 
     pub(crate) async fn create_table(&self, req: CreateTableRequest) -> Result<Output> {
+        if let Some(procedure_manager) = &self.procedure_manager {
+            return self.create_table_by_procedure(procedure_manager, req).await;
+        }
+
         let ctx = EngineContext {};
         // first check if catalog and schema exist
         let catalog = self
@@ -125,6 +130,43 @@ impl SqlHandler {
         info!("Successfully created table: {:?}", table_name);
         // TODO(hl): maybe support create multiple tables
         Ok(Output::AffectedRows(0))
+    }
+
+    pub(crate) async fn create_table_by_procedure(
+        &self,
+        procedure_manager: &ProcedureManagerRef,
+        req: CreateTableRequest,
+    ) -> Result<Output> {
+        let table_name = req.table_name.clone();
+        let procedure = CreateTableProcedure::new(
+            req,
+            self.catalog_manager.clone(),
+            self.table_engine.clone(),
+            self.engine_procedure.clone(),
+        );
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        let procedure_id = procedure_with_id.id;
+
+        info!("Create table {} by procedure {}", table_name, procedure_id);
+
+        let mut watcher = procedure_manager
+            .submit(procedure_with_id)
+            .await
+            .context(SubmitProcedureSnafu)?;
+
+        // TODO(yingwen): Wrap this into a function and add error to ProcedureState::Failed.
+        loop {
+            watcher.changed().await.context(WaitProcedureSnafu)?;
+            match *watcher.borrow() {
+                ProcedureState::Running => (),
+                ProcedureState::Done => {
+                    return Ok(Output::AffectedRows(0));
+                }
+                ProcedureState::Failed => {
+                    return ProcedureExecSnafu { procedure_id }.fail();
+                }
+            }
+        }
     }
 
     /// Converts [CreateTable] to [SqlRequest::CreateTable].

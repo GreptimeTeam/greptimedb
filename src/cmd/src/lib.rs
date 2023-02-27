@@ -14,6 +14,7 @@
 
 #![feature(assert_matches)]
 
+pub mod cli;
 pub mod datanode;
 pub mod error;
 pub mod frontend;

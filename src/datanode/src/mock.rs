@@ -60,7 +60,7 @@ impl Instance {
         ));
 
         // By default, catalog manager and factory are created in standalone mode
-        let (catalog_manager, factory) = match opts.mode {
+        let (catalog_manager, factory, heartbeat_task) = match opts.mode {
             Mode::Standalone => {
                 let catalog = Arc::new(
                     catalog::local::LocalCatalogManager::try_new(table_engine.clone())
@@ -68,7 +68,7 @@ impl Instance {
                         .context(CatalogSnafu)?,
                 );
                 let factory = QueryEngineFactory::new(catalog.clone());
-                (catalog as CatalogManagerRef, factory)
+                (catalog as CatalogManagerRef, factory, None)
             }
             Mode::Distributed => {
                 let catalog = Arc::new(catalog::remote::RemoteCatalogManager::new(
@@ -79,31 +79,33 @@ impl Instance {
                     }),
                 ));
                 let factory = QueryEngineFactory::new(catalog.clone());
-                (catalog as CatalogManagerRef, factory)
+                let heartbeat_task = HeartbeatTask::new(
+                    opts.node_id.unwrap_or(42),
+                    opts.rpc_addr.clone(),
+                    None,
+                    meta_client.clone(),
+                    catalog.clone(),
+                );
+                (catalog as CatalogManagerRef, factory, Some(heartbeat_task))
             }
         };
         let query_engine = factory.query_engine();
         let script_executor =
             ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?;
 
-        let heartbeat_task = HeartbeatTask::new(
-            opts.node_id.unwrap_or(42),
-            opts.rpc_addr.clone(),
-            None,
-            meta_client.clone(),
-            catalog_manager.clone(),
-        );
         Ok(Self {
             query_engine: query_engine.clone(),
             sql_handler: SqlHandler::new(
-                table_engine,
+                table_engine.clone(),
                 catalog_manager.clone(),
                 query_engine.clone(),
+                table_engine,
+                None,
             ),
             catalog_manager,
             script_executor,
             table_id_provider: Some(Arc::new(LocalTableIdProvider::default())),
-            heartbeat_task: Some(heartbeat_task),
+            heartbeat_task,
         })
     }
 }

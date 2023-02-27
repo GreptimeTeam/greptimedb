@@ -95,7 +95,7 @@ fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
         },
         List(_) => is_vector_eq!(ListVector, lhs, rhs),
         UInt8(_) | UInt16(_) | UInt32(_) | UInt64(_) | Int8(_) | Int16(_) | Int32(_) | Int64(_)
-        | Float32(_) | Float64(_) => {
+        | Float32(_) | Float64(_) | Dictionary(_) => {
             with_match_primitive_type_id!(lhs_type.logical_type_id(), |$T| {
                 let lhs = lhs.as_any().downcast_ref::<PrimitiveVector<$T>>().unwrap();
                 let rhs = rhs.as_any().downcast_ref::<PrimitiveVector<$T>>().unwrap();

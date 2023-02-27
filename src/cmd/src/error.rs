@@ -15,6 +15,7 @@
 use std::any::Any;
 
 use common_error::prelude::*;
+use rustyline::error::ReadlineError;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -68,6 +69,40 @@ pub enum Error {
         #[snafu(backtrace)]
         source: meta_srv::error::Error,
     },
+
+    #[snafu(display("Invalid REPL command: {reason}"))]
+    InvalidReplCommand { reason: String },
+
+    #[snafu(display("Cannot create REPL: {}", source))]
+    ReplCreation {
+        source: ReadlineError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Error reading command: {}", source))]
+    Readline {
+        source: ReadlineError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to request database, sql: {sql}, source: {source}"))]
+    RequestDatabase {
+        sql: String,
+        #[snafu(backtrace)]
+        source: client::Error,
+    },
+
+    #[snafu(display("Failed to collect RecordBatches, source: {source}"))]
+    CollectRecordBatches {
+        #[snafu(backtrace)]
+        source: common_recordbatch::error::Error,
+    },
+
+    #[snafu(display("Failed to pretty print Recordbatches, source: {source}"))]
+    PrettyPrintRecordBatches {
+        #[snafu(backtrace)]
+        source: common_recordbatch::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -82,8 +117,15 @@ impl ErrorExt for Error {
             Error::ReadConfig { .. } | Error::ParseConfig { .. } | Error::MissingConfig { .. } => {
                 StatusCode::InvalidArguments
             }
-            Error::IllegalConfig { .. } => StatusCode::InvalidArguments,
+            Error::IllegalConfig { .. } | Error::InvalidReplCommand { .. } => {
+                StatusCode::InvalidArguments
+            }
             Error::IllegalAuthConfig { .. } => StatusCode::InvalidArguments,
+            Error::ReplCreation { .. } | Error::Readline { .. } => StatusCode::Internal,
+            Error::RequestDatabase { source, .. } => source.status_code(),
+            Error::CollectRecordBatches { source } | Error::PrettyPrintRecordBatches { source } => {
+                source.status_code()
+            }
         }
     }
 

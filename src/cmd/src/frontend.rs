@@ -23,7 +23,7 @@ use frontend::instance::Instance;
 use frontend::mysql::MysqlOptions;
 use frontend::opentsdb::OpentsdbOptions;
 use frontend::postgres::PostgresOptions;
-use meta_client::MetaClientOpts;
+use meta_client::MetaClientOptions;
 use servers::auth::UserProviderRef;
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
@@ -158,8 +158,8 @@ impl TryFrom<StartCommand> for FrontendOptions {
             opts.influxdb_options = Some(InfluxdbOptions { enable });
         }
         if let Some(metasrv_addr) = cmd.metasrv_addr {
-            opts.meta_client_opts
-                .get_or_insert_with(MetaClientOpts::default)
+            opts.meta_client_options
+                .get_or_insert_with(MetaClientOptions::default)
                 .metasrv_addrs = metasrv_addr
                 .split(',')
                 .map(&str::trim)

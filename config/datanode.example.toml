@@ -19,7 +19,7 @@ sync_write = false
 type = 'File'
 data_dir = '/tmp/greptimedb/data/'
 
-[meta_client_opts]
+[meta_client_options]
 metasrv_addrs = ['127.0.0.1:3002']
 timeout_millis = 3000
 connect_timeout_millis = 5000
@@ -29,3 +29,7 @@ tcp_nodelay = false
 max_inflight_tasks = 4
 max_files_in_level0 = 16
 max_purge_tasks = 32
+
+[procedure.store]
+type = 'File'
+data_dir = '/tmp/greptimedb/procedure/'

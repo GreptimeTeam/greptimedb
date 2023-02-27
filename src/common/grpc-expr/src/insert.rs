@@ -419,8 +419,9 @@ fn convert_values(data_type: &ConcreteDataType, values: Values) -> Vec<Value> {
             .into_iter()
             .map(|v| Value::Timestamp(Timestamp::new_millisecond(v)))
             .collect(),
-        ConcreteDataType::Null(_) => unreachable!(),
-        ConcreteDataType::List(_) => unreachable!(),
+        ConcreteDataType::Null(_) | ConcreteDataType::List(_) | ConcreteDataType::Dictionary(_) => {
+            unreachable!()
+        }
     }
 }
 

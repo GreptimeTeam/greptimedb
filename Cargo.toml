@@ -37,6 +37,7 @@ members = [
     "src/storage",
     "src/store-api",
     "src/table",
+    "src/table-procedure",
     "tests-integration",
     "tests/runner",
 ]

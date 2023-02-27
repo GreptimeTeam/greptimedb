@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
 use common_telemetry::info;
-use meta_client::MetaClientOpts;
+use meta_client::MetaClientOptions;
 use serde::{Deserialize, Serialize};
 use servers::Mode;
 use storage::config::EngineConfig as StorageEngineConfig;
@@ -144,38 +144,61 @@ impl From<&DatanodeOptions> for StorageEngineConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProcedureConfig {
+    /// Storage config for procedure manager.
+    pub store: ObjectStoreConfig,
+}
+
+impl Default for ProcedureConfig {
+    fn default() -> ProcedureConfig {
+        ProcedureConfig::from_file_path("/tmp/greptimedb/procedure/".to_string())
+    }
+}
+
+impl ProcedureConfig {
+    pub fn from_file_path(path: String) -> ProcedureConfig {
+        ProcedureConfig {
+            store: ObjectStoreConfig::File(FileConfig { data_dir: path }),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DatanodeOptions {
+    pub mode: Mode,
+    pub enable_memory_catalog: bool,
     pub node_id: Option<u64>,
     pub rpc_addr: String,
     pub rpc_hostname: Option<String>,
     pub rpc_runtime_size: usize,
     pub mysql_addr: String,
     pub mysql_runtime_size: usize,
-    pub meta_client_opts: Option<MetaClientOpts>,
+    pub meta_client_options: Option<MetaClientOptions>,
     pub wal: WalConfig,
     pub storage: ObjectStoreConfig,
-    pub enable_memory_catalog: bool,
     pub compaction: CompactionConfig,
-    pub mode: Mode,
+    pub procedure: Option<ProcedureConfig>,
 }
 
 impl Default for DatanodeOptions {
     fn default() -> Self {
         Self {
+            mode: Mode::Standalone,
+            enable_memory_catalog: false,
             node_id: None,
             rpc_addr: "127.0.0.1:3001".to_string(),
             rpc_hostname: None,
             rpc_runtime_size: 8,
             mysql_addr: "127.0.0.1:4406".to_string(),
             mysql_runtime_size: 2,
-            meta_client_opts: None,
+            meta_client_options: None,
             wal: WalConfig::default(),
             storage: ObjectStoreConfig::default(),
-            enable_memory_catalog: false,
             compaction: CompactionConfig::default(),
-            mode: Mode::Standalone,
+            procedure: None,
         }
     }
 }
@@ -216,5 +239,17 @@ impl Datanode {
 
     pub fn get_instance(&self) -> InstanceRef {
         self.instance.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_toml() {
+        let opts = DatanodeOptions::default();
+        let toml_string = toml::to_string(&opts).unwrap();
+        let _parsed: DatanodeOptions = toml::from_str(&toml_string).unwrap();
     }
 }
