@@ -14,7 +14,6 @@ purge_threshold = '50GB'
 read_batch_size = 128
 sync_write = false
 
-
 [storage]
 type = 'File'
 data_dir = '/tmp/greptimedb/data/'
@@ -42,3 +41,7 @@ enable = true
 addr = '127.0.0.1:4003'
 runtime_size = 2
 check_pwd = false
+
+[procedure.store]
+type = 'File'
+data_dir = '/tmp/greptimedb/procedure/'

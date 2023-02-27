@@ -2186,6 +2186,7 @@ dependencies = [
  "common-error",
  "common-grpc",
  "common-grpc-expr",
+ "common-procedure",
  "common-query",
  "common-recordbatch",
  "common-runtime",
@@ -2218,6 +2219,7 @@ dependencies = [
  "store-api",
  "substrait 0.1.0",
  "table",
+ "table-procedure",
  "tempdir",
  "tokio",
  "tokio-stream",
@@ -7471,6 +7473,28 @@ dependencies = [
  "tempdir",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "table-procedure"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "catalog",
+ "common-error",
+ "common-procedure",
+ "common-telemetry",
+ "datatypes",
+ "log-store",
+ "mito",
+ "object-store",
+ "serde",
+ "serde_json",
+ "snafu",
+ "storage",
+ "table",
+ "tempdir",
+ "tokio",
 ]
 
 [[package]]

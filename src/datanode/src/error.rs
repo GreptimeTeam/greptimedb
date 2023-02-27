@@ -15,6 +15,7 @@
 use std::any::Any;
 
 use common_error::prelude::*;
+use common_procedure::ProcedureId;
 use common_recordbatch::error::Error as RecordBatchError;
 use datafusion::parquet;
 use datatypes::prelude::ConcreteDataType;
@@ -394,6 +395,31 @@ pub enum Error {
         #[snafu(backtrace)]
         source: table::error::Error,
     },
+
+    #[snafu(display("Failed to recover procedure, source: {}", source))]
+    RecoverProcedure {
+        #[snafu(backtrace)]
+        source: common_procedure::error::Error,
+    },
+
+    #[snafu(display("Failed to submit procedure, source: {}", source))]
+    SubmitProcedure {
+        #[snafu(backtrace)]
+        source: common_procedure::error::Error,
+    },
+
+    #[snafu(display("Failed to wait procedure done, source: {}", source))]
+    WaitProcedure {
+        source: tokio::sync::watch::error::RecvError,
+        backtrace: Backtrace,
+    },
+
+    // TODO(yingwen): Use procedure's error.
+    #[snafu(display("Failed to execute procedure, procedure_id: {}", procedure_id))]
+    ProcedureExec {
+        procedure_id: ProcedureId,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -470,6 +496,10 @@ impl ErrorExt for Error {
             CopyTable { source, .. } => source.status_code(),
             TableScanExec { source, .. } => source.status_code(),
             UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
+            RecoverProcedure { source, .. } | SubmitProcedure { source, .. } => {
+                source.status_code()
+            }
+            WaitProcedure { .. } | ProcedureExec { .. } => StatusCode::Internal,
         }
     }
 

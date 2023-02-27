@@ -18,7 +18,7 @@ use clap::Parser;
 use common_base::Plugins;
 use common_telemetry::info;
 use datanode::datanode::{
-    CompactionConfig, Datanode, DatanodeOptions, ObjectStoreConfig, WalConfig,
+    CompactionConfig, Datanode, DatanodeOptions, ObjectStoreConfig, ProcedureConfig, WalConfig,
 };
 use datanode::instance::InstanceRef;
 use frontend::frontend::{Frontend, FrontendOptions};
@@ -81,6 +81,7 @@ pub struct StandaloneOptions {
     pub wal: WalConfig,
     pub storage: ObjectStoreConfig,
     pub compaction: CompactionConfig,
+    pub procedure: Option<ProcedureConfig>,
 }
 
 impl Default for StandaloneOptions {
@@ -99,6 +100,7 @@ impl Default for StandaloneOptions {
             wal: WalConfig::default(),
             storage: ObjectStoreConfig::default(),
             compaction: CompactionConfig::default(),
+            procedure: None,
         }
     }
 }
@@ -125,6 +127,7 @@ impl StandaloneOptions {
             wal: self.wal,
             storage: self.storage,
             compaction: self.compaction,
+            procedure: self.procedure,
             ..Default::default()
         }
     }

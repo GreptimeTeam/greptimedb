@@ -96,9 +96,11 @@ impl Instance {
         Ok(Self {
             query_engine: query_engine.clone(),
             sql_handler: SqlHandler::new(
-                table_engine,
+                table_engine.clone(),
                 catalog_manager.clone(),
                 query_engine.clone(),
+                table_engine,
+                None,
             ),
             catalog_manager,
             script_executor,
