@@ -29,6 +29,7 @@ use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::prelude::*;
 use sql::ast::ObjectName;
+use sql::statements::copy::CopyTable;
 use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
 use table::engine::TableReference;
@@ -184,22 +185,25 @@ impl Instance {
 
                 Ok(Output::RecordBatches(RecordBatches::empty()))
             }
-            QueryStatement::Sql(Statement::Copy(copy_table)) => {
-                let (catalog_name, schema_name, table_name) =
-                    table_idents_to_full_name(copy_table.table_name(), query_ctx.clone())?;
-                let file_name = copy_table.file_name().to_string();
+            QueryStatement::Sql(Statement::Copy(copy_table)) => match copy_table {
+                CopyTable::To(copy_table) => {
+                    let (catalog_name, schema_name, table_name) =
+                        table_idents_to_full_name(copy_table.table_name(), query_ctx.clone())?;
+                    let file_name = copy_table.file_name().to_string();
 
-                let req = CopyTableRequest {
-                    catalog_name,
-                    schema_name,
-                    table_name,
-                    file_name,
-                };
+                    let req = CopyTableRequest {
+                        catalog_name,
+                        schema_name,
+                        table_name,
+                        file_name,
+                    };
 
-                self.sql_handler
-                    .execute(SqlRequest::CopyTable(req), query_ctx)
-                    .await
-            }
+                    self.sql_handler
+                        .execute(SqlRequest::CopyTable(req), query_ctx)
+                        .await
+                }
+                CopyTable::From(_) => todo!(),
+            },
             QueryStatement::Sql(Statement::Tql(tql)) => self.execute_tql(tql, query_ctx).await,
         }
     }
