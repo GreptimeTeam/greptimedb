@@ -219,7 +219,7 @@ fn build_primary_key_columns(entry_type: EntryType, key: &[u8]) -> HashMap<Strin
     let mut m = HashMap::with_capacity(3);
     m.insert(
         "entry_type".to_string(),
-        Arc::new(UInt8Vector::from_slice(&[entry_type as u8])) as _,
+        Arc::new(UInt8Vector::from_slice([entry_type as u8])) as _,
     );
     m.insert(
         "key".to_string(),
@@ -228,7 +228,7 @@ fn build_primary_key_columns(entry_type: EntryType, key: &[u8]) -> HashMap<Strin
     // Timestamp in key part is intentionally left to 0
     m.insert(
         "timestamp".to_string(),
-        Arc::new(TimestampMillisecondVector::from_slice(&[0])) as _,
+        Arc::new(TimestampMillisecondVector::from_slice([0])) as _,
     );
     m
 }
@@ -258,12 +258,12 @@ pub fn build_insert_request(entry_type: EntryType, key: &[u8], value: &[u8]) -> 
     let now = util::current_time_millis();
     columns_values.insert(
         "gmt_created".to_string(),
-        Arc::new(TimestampMillisecondVector::from_slice(&[now])) as _,
+        Arc::new(TimestampMillisecondVector::from_slice([now])) as _,
     );
 
     columns_values.insert(
         "gmt_modified".to_string(),
-        Arc::new(TimestampMillisecondVector::from_slice(&[now])) as _,
+        Arc::new(TimestampMillisecondVector::from_slice([now])) as _,
     );
 
     InsertRequest {

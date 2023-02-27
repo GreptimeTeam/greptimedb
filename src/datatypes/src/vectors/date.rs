@@ -58,7 +58,7 @@ mod tests {
 
     #[test]
     fn test_date_scalar() {
-        let vector = DateVector::from_slice(&[1, 2]);
+        let vector = DateVector::from_slice([1, 2]);
         assert_eq!(2, vector.len());
         assert_eq!(Some(Date::new(1)), vector.get_data(0));
         assert_eq!(Some(Date::new(2)), vector.get_data(1));
@@ -66,24 +66,24 @@ mod tests {
 
     #[test]
     fn test_date_vector_builder() {
-        let input = DateVector::from_slice(&[1, 2, 3]);
+        let input = DateVector::from_slice([1, 2, 3]);
 
         let mut builder = DateType::default().create_mutable_vector(3);
         builder.push_value_ref(ValueRef::Date(Date::new(5)));
         assert!(builder.try_push_value_ref(ValueRef::Int32(123)).is_err());
         builder.extend_slice_of(&input, 1, 2).unwrap();
         assert!(builder
-            .extend_slice_of(&crate::vectors::Int32Vector::from_slice(&[13]), 0, 1)
+            .extend_slice_of(&crate::vectors::Int32Vector::from_slice([13]), 0, 1)
             .is_err());
         let vector = builder.to_vector();
 
-        let expect: VectorRef = Arc::new(DateVector::from_slice(&[5, 2, 3]));
+        let expect: VectorRef = Arc::new(DateVector::from_slice([5, 2, 3]));
         assert_eq!(expect, vector);
     }
 
     #[test]
     fn test_date_from_arrow() {
-        let vector = DateVector::from_slice(&[1, 2]);
+        let vector = DateVector::from_slice([1, 2]);
         let arrow = vector.as_arrow().slice(0, vector.len());
         let vector2 = DateVector::try_from_arrow_array(&arrow).unwrap();
         assert_eq!(vector, vector2);
@@ -91,7 +91,7 @@ mod tests {
 
     #[test]
     fn test_serialize_date_vector() {
-        let vector = DateVector::from_slice(&[-1, 0, 1]);
+        let vector = DateVector::from_slice([-1, 0, 1]);
         let serialized_json = serde_json::to_string(&vector.serialize_to_json().unwrap()).unwrap();
         assert_eq!(
             r#"["1969-12-31","1970-01-01","1970-01-02"]"#,

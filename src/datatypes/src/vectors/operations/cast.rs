@@ -72,7 +72,7 @@ mod tests {
             u32::MAX as f64,
             u64::MAX as f64,
         ];
-        let f64_vector: VectorRef = Arc::new(Float64Vector::from_slice(&f64_values));
+        let f64_vector: VectorRef = Arc::new(Float64Vector::from_slice(f64_values));
 
         let f64_expected = vec![
             -9223372036854776000.0,
@@ -137,7 +137,7 @@ mod tests {
             i16::MAX as i32,
             i32::MAX,
         ];
-        let date32_vector: VectorRef = Arc::new(DateVector::from_slice(&i32_values));
+        let date32_vector: VectorRef = Arc::new(DateVector::from_slice(i32_values));
 
         let i32_expected = vec![
             "-2147483648",

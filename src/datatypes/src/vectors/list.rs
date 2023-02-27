@@ -624,7 +624,7 @@ pub mod tests {
         );
         let mut iter = list_vector.values_iter();
         assert_eq!(
-            Arc::new(Int32Vector::from_slice(&[1, 2, 3])) as VectorRef,
+            Arc::new(Int32Vector::from_slice([1, 2, 3])) as VectorRef,
             *iter.next().unwrap().unwrap().unwrap()
         );
         assert!(iter.next().unwrap().unwrap().is_none());
@@ -674,7 +674,7 @@ pub mod tests {
         let input = new_list_vector(&data);
         builder.extend_slice_of(&input, 1, 2).unwrap();
         assert!(builder
-            .extend_slice_of(&crate::vectors::Int32Vector::from_slice(&[13]), 0, 1)
+            .extend_slice_of(&crate::vectors::Int32Vector::from_slice([13]), 0, 1)
             .is_err());
         let vector = builder.to_vector();
 
