@@ -196,6 +196,10 @@ impl Region for MockRegion {
     async fn close(&self) -> Result<()> {
         Ok(())
     }
+
+    async fn flush(&self) -> Result<()> {
+        unimplemented!()
+    }
 }
 
 impl MockRegionInner {
