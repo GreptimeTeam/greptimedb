@@ -151,8 +151,8 @@ mod test {
             98.019802, 1.98019802, 61.803399,
         ]));
 
-        let ts_range_array = RangeArray::from_ranges(ts_array.clone(), ranges.clone()).unwrap();
-        let value_range_array = RangeArray::from_ranges(values_array.clone(), ranges).unwrap();
+        let ts_range_array = RangeArray::from_ranges(ts_array, ranges).unwrap();
+        let value_range_array = RangeArray::from_ranges(values_array, ranges).unwrap();
 
         (ts_range_array, value_range_array)
     }
