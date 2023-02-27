@@ -27,6 +27,7 @@ use catalog::{
     RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest,
     SchemaProvider, SchemaProviderRef,
 };
+use common_telemetry::warn;
 use futures::StreamExt;
 use meta_client::rpc::TableName;
 use partition::manager::PartitionRuleManagerRef;
@@ -156,9 +157,13 @@ impl CatalogList for FrontendCatalogManager {
 
                 while let Some(r) = iter.next().await {
                     let Kv(k, _) = r?;
-                    let key = CatalogKey::parse(String::from_utf8_lossy(&k))
-                        .context(InvalidCatalogValueSnafu)?;
-                    res.insert(key.catalog_name);
+
+                    let catalog_key = String::from_utf8_lossy(&k);
+                    if let Ok(key) = CatalogKey::parse(catalog_key.as_ref()) {
+                        res.insert(key.catalog_name);
+                    } else {
+                        warn!("invalid catalog key: {:?}", catalog_key);
+                    }
                 }
                 Ok(res.into_iter().collect())
             })
