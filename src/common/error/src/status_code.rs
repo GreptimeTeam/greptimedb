@@ -86,6 +86,34 @@ impl StatusCode {
     pub fn is_success(code: u32) -> bool {
         Self::Success as u32 == code
     }
+
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            StatusCode::StorageUnavailable
+            | StatusCode::RuntimeResourcesExhausted
+            | StatusCode::Internal => true,
+
+            StatusCode::Success
+            | StatusCode::Unknown
+            | StatusCode::Unsupported
+            | StatusCode::Unexpected
+            | StatusCode::InvalidArguments
+            | StatusCode::InvalidSyntax
+            | StatusCode::PlanQuery
+            | StatusCode::EngineExecuteQuery
+            | StatusCode::TableAlreadyExists
+            | StatusCode::TableNotFound
+            | StatusCode::TableColumnNotFound
+            | StatusCode::TableColumnExists
+            | StatusCode::DatabaseNotFound
+            | StatusCode::UserNotFound
+            | StatusCode::UnsupportedPasswordType
+            | StatusCode::UserPasswordMismatch
+            | StatusCode::AuthHeaderNotFound
+            | StatusCode::InvalidAuthHeader
+            | StatusCode::AccessDenied => false,
+        }
+    }
 }
 
 impl fmt::Display for StatusCode {

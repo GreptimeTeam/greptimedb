@@ -15,7 +15,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use common_error::ext::ErrorExt;
 use common_telemetry::logging;
 use tokio::time;
 
@@ -217,10 +216,10 @@ impl Runner {
                     "Failed to execute procedure {}-{}, retry: {}",
                     self.procedure.type_name(),
                     self.meta.id,
-                    ProcedureError::is_retry_later(e.status_code())
+                    e.is_retry_later(),
                 );
 
-                if ProcedureError::is_retry_later(e.status_code()) {
+                if e.is_retry_later() {
                     return ExecResult::RetryLater;
                 }
 
