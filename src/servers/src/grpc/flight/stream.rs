@@ -140,7 +140,7 @@ mod test {
             false,
         )]));
 
-        let v: VectorRef = Arc::new(Int32Vector::from_slice(&[1, 2]));
+        let v: VectorRef = Arc::new(Int32Vector::from_slice([1, 2]));
         let recordbatch = RecordBatch::new(schema.clone(), vec![v]).unwrap();
 
         let recordbatches = RecordBatches::try_new(schema.clone(), vec![recordbatch.clone()])

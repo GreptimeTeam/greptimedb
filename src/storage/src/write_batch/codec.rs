@@ -142,7 +142,7 @@ mod tests {
     fn gen_new_batch_and_types() -> (WriteBatch, Vec<i32>) {
         let mut batch = write_batch::new_test_batch();
         for i in 0..10 {
-            let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3])) as VectorRef;
+            let intv = Arc::new(UInt64Vector::from_slice([1, 2, 3])) as VectorRef;
             let boolv =
                 Arc::new(BooleanVector::from(vec![Some(true), Some(false), None])) as VectorRef;
             let tsv = Arc::new(TimestampMillisecondVector::from_vec(vec![i, i, i])) as VectorRef;
@@ -181,7 +181,7 @@ mod tests {
     fn gen_new_batch_and_types_with_none_column() -> (WriteBatch, Vec<i32>) {
         let mut batch = write_batch::new_test_batch();
         for _ in 0..10 {
-            let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3])) as VectorRef;
+            let intv = Arc::new(UInt64Vector::from_slice([1, 2, 3])) as VectorRef;
             let tsv = Arc::new(TimestampMillisecondVector::from_vec(vec![0, 0, 0])) as VectorRef;
 
             let mut put_data = HashMap::with_capacity(3);

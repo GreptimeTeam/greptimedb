@@ -276,8 +276,8 @@ mod test {
             .with_time_index(true),
         ];
         let data = vec![
-            Arc::new(UInt32Vector::from_slice(&[0])) as _,
-            Arc::new(TimestampMillisecondVector::from_slice(&[0])) as _,
+            Arc::new(UInt32Vector::from_slice([0])) as _,
+            Arc::new(TimestampMillisecondVector::from_slice([0])) as _,
         ];
         let expected_columns = vec![
             Arc::new(StringVector::from(vec!["t1", "t2"])) as _,

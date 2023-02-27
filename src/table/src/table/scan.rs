@@ -100,12 +100,12 @@ mod test {
 
         let batch1 = RecordBatch::new(
             schema.clone(),
-            vec![Arc::new(Int32Vector::from_slice(&[1, 2])) as _],
+            vec![Arc::new(Int32Vector::from_slice([1, 2])) as _],
         )
         .unwrap();
         let batch2 = RecordBatch::new(
             schema.clone(),
-            vec![Arc::new(Int32Vector::from_slice(&[3, 4, 5])) as _],
+            vec![Arc::new(Int32Vector::from_slice([3, 4, 5])) as _],
         )
         .unwrap();
 

@@ -204,7 +204,7 @@ mod tests {
         );
         assert!(result.is_err());
 
-        let v: VectorRef = Arc::new(Int32Vector::from_slice(&[1, 2]));
+        let v: VectorRef = Arc::new(Int32Vector::from_slice([1, 2]));
         let expected = vec![RecordBatch::new(schema.clone(), vec![v.clone()]).unwrap()];
         let r = RecordBatches::try_from_columns(schema, vec![v]).unwrap();
         assert_eq!(r.take(), expected);
@@ -216,7 +216,7 @@ mod tests {
         let column_b = ColumnSchema::new("b", ConcreteDataType::string_datatype(), false);
         let column_c = ColumnSchema::new("c", ConcreteDataType::boolean_datatype(), false);
 
-        let va: VectorRef = Arc::new(Int32Vector::from_slice(&[1, 2]));
+        let va: VectorRef = Arc::new(Int32Vector::from_slice([1, 2]));
         let vb: VectorRef = Arc::new(StringVector::from(vec!["hello", "world"]));
         let vc: VectorRef = Arc::new(BooleanVector::from(vec![true, false]));
 
@@ -255,11 +255,11 @@ mod tests {
         let column_b = ColumnSchema::new("b", ConcreteDataType::string_datatype(), false);
         let schema = Arc::new(Schema::new(vec![column_a, column_b]));
 
-        let va1: VectorRef = Arc::new(Int32Vector::from_slice(&[1, 2]));
+        let va1: VectorRef = Arc::new(Int32Vector::from_slice([1, 2]));
         let vb1: VectorRef = Arc::new(StringVector::from(vec!["a", "b"]));
         let batch1 = RecordBatch::new(schema.clone(), vec![va1, vb1]).unwrap();
 
-        let va2: VectorRef = Arc::new(Int32Vector::from_slice(&[3, 4, 5]));
+        let va2: VectorRef = Arc::new(Int32Vector::from_slice([3, 4, 5]));
         let vb2: VectorRef = Arc::new(StringVector::from(vec!["c", "d", "e"]));
         let batch2 = RecordBatch::new(schema.clone(), vec![va2, vb2]).unwrap();
 
