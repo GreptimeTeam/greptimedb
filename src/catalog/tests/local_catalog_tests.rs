@@ -71,6 +71,7 @@ mod tests {
 
         let registered_table = catalog_manager
             .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, new_table_name)
+            .await
             .unwrap()
             .unwrap();
         assert_eq!(registered_table.table_info().ident.table_id, table_id);
@@ -158,6 +159,7 @@ mod tests {
             let table = guard.as_ref().unwrap();
             let table_registered = catalog_manager
                 .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "test_table")
+                .await
                 .unwrap()
                 .unwrap();
             assert_eq!(

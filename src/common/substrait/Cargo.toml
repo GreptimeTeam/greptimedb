@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+async-recursion = "1.0"
+async-trait.workspace = true
 bytes = "1.1"
 catalog = { path = "../../catalog" }
 common-catalog = { path = "../catalog" }
@@ -15,6 +17,7 @@ datafusion-expr.workspace = true
 datatypes = { path = "../../datatypes" }
 futures = "0.3"
 prost.workspace = true
+session = { path = "../../session" }
 snafu.workspace = true
 table = { path = "../../table" }
 

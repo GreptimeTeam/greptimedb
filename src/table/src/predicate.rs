@@ -162,10 +162,6 @@ impl<'a> TimeRangePredicateBuilder<'a> {
             | Operator::Multiply
             | Operator::Divide
             | Operator::Modulo
-            | Operator::Like
-            | Operator::NotLike
-            | Operator::ILike
-            | Operator::NotILike
             | Operator::IsDistinctFrom
             | Operator::IsNotDistinctFrom
             | Operator::RegexMatch

@@ -88,6 +88,25 @@ pub enum Error {
         source: std::num::ParseFloatError,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("DataFusion error: {}", source))]
+    DataFusion {
+        source: DataFusionError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("General SQL error: {}", source))]
+    Sql {
+        #[snafu(backtrace)]
+        source: sql::error::Error,
+    },
+
+    #[snafu(display("Cannot plan SQL: {}, source: {}", sql, source))]
+    PlanSql {
+        sql: String,
+        source: DataFusionError,
+        backtrace: Backtrace,
+    },
 }
 
 impl ErrorExt for Error {
@@ -108,6 +127,9 @@ impl ErrorExt for Error {
             CreateRecordBatch { source } => source.status_code(),
             Datatype { source } => source.status_code(),
             QueryExecution { source } | QueryPlan { source } => source.status_code(),
+            DataFusion { .. } => StatusCode::Internal,
+            Sql { source } => source.status_code(),
+            PlanSql { .. } => StatusCode::PlanQuery,
         }
     }
 

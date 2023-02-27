@@ -17,6 +17,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use catalog::error::{self as catalog_error, Error};
 use catalog::{
     CatalogListRef, CatalogProvider, CatalogProviderRef, SchemaProvider, SchemaProviderRef,
@@ -137,6 +138,7 @@ struct DfSchemaProviderAdapter {
     schema_provider: Arc<dyn SchemaProvider>,
 }
 
+#[async_trait]
 impl DfSchemaProvider for DfSchemaProviderAdapter {
     fn as_any(&self) -> &dyn Any {
         self
@@ -148,9 +150,10 @@ impl DfSchemaProvider for DfSchemaProviderAdapter {
             .expect("datafusion does not accept fallible catalog access")
     }
 
-    fn table(&self, name: &str) -> Option<Arc<dyn DfTableProvider>> {
+    async fn table(&self, name: &str) -> Option<Arc<dyn DfTableProvider>> {
         self.schema_provider
             .table(name)
+            .await
             .expect("datafusion does not accept fallible catalog access")
             .map(|table| Arc::new(DfTableProviderAdapter::new(table)) as _)
     }
@@ -186,6 +189,7 @@ struct SchemaProviderAdapter {
     df_schema_provider: Arc<dyn DfSchemaProvider>,
 }
 
+#[async_trait]
 impl SchemaProvider for SchemaProviderAdapter {
     fn as_any(&self) -> &dyn Any {
         self
@@ -196,8 +200,9 @@ impl SchemaProvider for SchemaProviderAdapter {
         Ok(self.df_schema_provider.table_names())
     }
 
-    fn table(&self, name: &str) -> Result<Option<TableRef>, Error> {
-        let table = self.df_schema_provider.table(name).map(|table_provider| {
+    async fn table(&self, name: &str) -> Result<Option<TableRef>, Error> {
+        let table = self.df_schema_provider.table(name).await;
+        let table = table.map(|table_provider| {
             match table_provider
                 .as_any()
                 .downcast_ref::<DfTableProviderAdapter>()
@@ -282,8 +287,8 @@ mod tests {
             .unwrap();
     }
 
-    #[test]
-    pub fn test_register_table() {
+    #[tokio::test]
+    async fn test_register_table() {
         let adapter = DfSchemaProviderAdapter {
             schema_provider: Arc::new(MemorySchemaProvider::new()),
         };
@@ -296,7 +301,7 @@ mod tests {
                 ))),
             )
             .unwrap();
-        adapter.table("test_table").unwrap();
+        adapter.table("test_table").await.unwrap();
     }
 
     #[test]

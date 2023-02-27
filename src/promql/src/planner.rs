@@ -17,7 +17,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
-use datafusion::common::{DFSchemaRef, Result as DfResult};
+use async_recursion::async_recursion;
+use catalog::table_source::DfTableSourceProvider;
+use datafusion::common::{DFSchemaRef, OwnedTableReference, Result as DfResult};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::logical_expr::expr::AggregateFunction;
 use datafusion::logical_expr::expr_rewriter::normalize_cols;
@@ -28,8 +30,6 @@ use datafusion::logical_expr::{
 use datafusion::optimizer::utils;
 use datafusion::prelude::{Column, Expr as DfExpr, JoinType};
 use datafusion::scalar::ScalarValue;
-use datafusion::sql::planner::ContextProvider;
-use datafusion::sql::TableReference;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use promql_parser::label::{MatchOp, Matchers, METRIC_NAME};
 use promql_parser::parser::{
@@ -41,8 +41,8 @@ use snafu::{ensure, OptionExt, ResultExt};
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::error::{
-    DataFusionPlanningSnafu, ExpectExprSnafu, MultipleVectorSnafu, Result, TableNameNotFoundSnafu,
-    TableNotFoundSnafu, TimeIndexNotFoundSnafu, UnexpectedTokenSnafu, UnknownTableSnafu,
+    CatalogSnafu, DataFusionPlanningSnafu, ExpectExprSnafu, MultipleVectorSnafu, Result,
+    TableNameNotFoundSnafu, TimeIndexNotFoundSnafu, UnexpectedTokenSnafu, UnknownTableSnafu,
     UnsupportedExprSnafu, ValueNotFoundSnafu,
 };
 use crate::extension_plan::{
@@ -79,21 +79,25 @@ impl PromPlannerContext {
     }
 }
 
-pub struct PromPlanner<S: ContextProvider> {
-    schema_provider: S,
+pub struct PromPlanner {
+    table_provider: DfTableSourceProvider,
     ctx: PromPlannerContext,
 }
 
-impl<S: ContextProvider> PromPlanner<S> {
-    pub fn stmt_to_plan(stmt: EvalStmt, schema_provider: S) -> Result<LogicalPlan> {
+impl PromPlanner {
+    pub async fn stmt_to_plan(
+        table_provider: DfTableSourceProvider,
+        stmt: EvalStmt,
+    ) -> Result<LogicalPlan> {
         let mut planner = Self {
-            schema_provider,
+            table_provider,
             ctx: PromPlannerContext::from_eval_stmt(&stmt),
         };
-        planner.prom_expr_to_plan(stmt.expr)
+        planner.prom_expr_to_plan(stmt.expr).await
     }
 
-    pub fn prom_expr_to_plan(&mut self, prom_expr: PromExpr) -> Result<LogicalPlan> {
+    #[async_recursion]
+    pub async fn prom_expr_to_plan(&mut self, prom_expr: PromExpr) -> Result<LogicalPlan> {
         let res = match &prom_expr {
             PromExpr::Aggregate(AggregateExpr {
                 op,
@@ -102,7 +106,7 @@ impl<S: ContextProvider> PromPlanner<S> {
                 param: _param,
                 modifier,
             }) => {
-                let input = self.prom_expr_to_plan(*expr.clone())?;
+                let input = self.prom_expr_to_plan(*expr.clone()).await?;
 
                 // calculate columns to group by
                 // Need to append time index column into group by columns
@@ -133,7 +137,7 @@ impl<S: ContextProvider> PromPlanner<S> {
             }
             PromExpr::Unary(UnaryExpr { expr }) => {
                 // Unary Expr in PromQL implys the `-` operator
-                let input = self.prom_expr_to_plan(*expr.clone())?;
+                let input = self.prom_expr_to_plan(*expr.clone()).await?;
                 self.projection_for_each_value_column(input, |col| {
                     Ok(DfExpr::Negative(Box::new(DfExpr::Column(col.into()))))
                 })?
@@ -166,7 +170,7 @@ impl<S: ContextProvider> PromPlanner<S> {
                     .fail()?,
                     // lhs is a literal, rhs is a column
                     (Some(expr), None) => {
-                        let input = self.prom_expr_to_plan(*rhs.clone())?;
+                        let input = self.prom_expr_to_plan(*rhs.clone()).await?;
                         let bin_expr_builder = |col: &String| {
                             let mut binary_expr = DfExpr::BinaryExpr(BinaryExpr {
                                 left: Box::new(expr.clone()),
@@ -189,7 +193,7 @@ impl<S: ContextProvider> PromPlanner<S> {
                     }
                     // lhs is a column, rhs is a literal
                     (None, Some(expr)) => {
-                        let input = self.prom_expr_to_plan(*lhs.clone())?;
+                        let input = self.prom_expr_to_plan(*lhs.clone()).await?;
                         let bin_expr_builder = |col: &String| {
                             let mut binary_expr = DfExpr::BinaryExpr(BinaryExpr {
                                 left: Box::new(DfExpr::Column(col.into())),
@@ -212,11 +216,11 @@ impl<S: ContextProvider> PromPlanner<S> {
                     }
                     // both are columns. join them on time index
                     (None, None) => {
-                        let left_input = self.prom_expr_to_plan(*lhs.clone())?;
+                        let left_input = self.prom_expr_to_plan(*lhs.clone()).await?;
                         let left_value_columns = self.ctx.value_columns.clone();
                         let left_schema = left_input.schema().clone();
 
-                        let right_input = self.prom_expr_to_plan(*rhs.clone())?;
+                        let right_input = self.prom_expr_to_plan(*rhs.clone()).await?;
                         let right_value_columns = self.ctx.value_columns.clone();
                         let right_schema = right_input.schema().clone();
 
@@ -256,7 +260,7 @@ impl<S: ContextProvider> PromPlanner<S> {
                     }
                 }
             }
-            PromExpr::Paren(ParenExpr { expr }) => self.prom_expr_to_plan(*expr.clone())?,
+            PromExpr::Paren(ParenExpr { expr }) => self.prom_expr_to_plan(*expr.clone()).await?,
             PromExpr::Subquery(SubqueryExpr { .. }) => UnsupportedExprSnafu {
                 name: "Prom Subquery",
             }
@@ -276,8 +280,10 @@ impl<S: ContextProvider> PromPlanner<S> {
                 at: _,
             }) => {
                 let matchers = self.preprocess_label_matchers(matchers)?;
-                self.setup_context()?;
-                let normalize = self.selector_to_series_normalize_plan(offset, matchers)?;
+                self.setup_context().await?;
+                let normalize = self
+                    .selector_to_series_normalize_plan(offset, matchers)
+                    .await?;
                 let manipulate = InstantManipulate::new(
                     self.ctx.start,
                     self.ctx.end,
@@ -301,8 +307,10 @@ impl<S: ContextProvider> PromPlanner<S> {
                     offset, matchers, ..
                 } = vector_selector;
                 let matchers = self.preprocess_label_matchers(matchers)?;
-                self.setup_context()?;
-                let normalize = self.selector_to_series_normalize_plan(offset, matchers)?;
+                self.setup_context().await?;
+                let normalize = self
+                    .selector_to_series_normalize_plan(offset, matchers)
+                    .await?;
                 let manipulate = RangeManipulate::new(
                     self.ctx.start,
                     self.ctx.end,
@@ -324,10 +332,11 @@ impl<S: ContextProvider> PromPlanner<S> {
             }
             PromExpr::Call(Call { func, args }) => {
                 let args = self.create_function_args(&args.args)?;
-                let input =
-                    self.prom_expr_to_plan(args.input.with_context(|| ExpectExprSnafu {
+                let input = self
+                    .prom_expr_to_plan(args.input.with_context(|| ExpectExprSnafu {
                         expr: prom_expr.clone(),
-                    })?)?;
+                    })?)
+                    .await?;
                 let mut func_exprs = self.create_function_expr(func, args.literals)?;
                 func_exprs.insert(0, self.create_time_index_column_expr()?);
                 func_exprs.extend_from_slice(&self.create_tag_column_exprs()?);
@@ -358,8 +367,8 @@ impl<S: ContextProvider> PromPlanner<S> {
         Ok(Matchers { matchers })
     }
 
-    fn selector_to_series_normalize_plan(
-        &self,
+    async fn selector_to_series_normalize_plan(
+        &mut self,
         offset: &Option<Offset>,
         label_matchers: Matchers,
     ) -> Result<LogicalPlan> {
@@ -383,7 +392,9 @@ impl<S: ContextProvider> PromPlanner<S> {
         )));
 
         // make table scan with filter exprs
-        let table_scan = self.create_table_scan_plan(&table_name, filters.clone())?;
+        let table_scan = self
+            .create_table_scan_plan(&table_name, filters.clone())
+            .await?;
 
         // make filter and sort plan
         let sort_plan = LogicalPlanBuilder::from(table_scan)
@@ -508,12 +519,19 @@ impl<S: ContextProvider> PromPlanner<S> {
         Ok(exprs)
     }
 
-    fn create_table_scan_plan(&self, table_name: &str, filter: Vec<DfExpr>) -> Result<LogicalPlan> {
-        let table_ref = TableReference::Bare { table: table_name };
+    async fn create_table_scan_plan(
+        &mut self,
+        table_name: &str,
+        filter: Vec<DfExpr>,
+    ) -> Result<LogicalPlan> {
+        let table_ref = OwnedTableReference::Bare {
+            table: table_name.to_string(),
+        };
         let provider = self
-            .schema_provider
-            .get_table_provider(table_ref)
-            .context(TableNotFoundSnafu { table: table_name })?;
+            .table_provider
+            .resolve_table(table_ref)
+            .await
+            .context(CatalogSnafu)?;
         let result = LogicalPlanBuilder::scan_with_filters(table_name, provider, None, filter)
             .context(DataFusionPlanningSnafu)?
             .build()
@@ -522,16 +540,19 @@ impl<S: ContextProvider> PromPlanner<S> {
     }
 
     /// Setup [PromPlannerContext]'s state fields.
-    fn setup_context(&mut self) -> Result<()> {
+    async fn setup_context(&mut self) -> Result<()> {
         let table_name = self
             .ctx
             .table_name
             .clone()
             .context(TableNameNotFoundSnafu)?;
         let table = self
-            .schema_provider
-            .get_table_provider(TableReference::Bare { table: &table_name })
-            .context(TableNotFoundSnafu { table: &table_name })?
+            .table_provider
+            .resolve_table(OwnedTableReference::Bare {
+                table: table_name.to_string(),
+            })
+            .await
+            .context(CatalogSnafu)?
             .as_any()
             .downcast_ref::<DefaultTableSource>()
             .context(UnknownTableSnafu)?
@@ -980,19 +1001,17 @@ mod test {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use promql_parser::parser;
-    use query::query_engine::QueryEngineState;
-    use query::DfContextProviderAdapter;
     use session::context::QueryContext;
     use table::metadata::{TableInfoBuilder, TableMetaBuilder};
     use table::test_util::EmptyTable;
 
     use super::*;
 
-    async fn build_test_context_provider(
+    async fn build_test_table_provider(
         table_name: String,
         num_tag: usize,
         num_field: usize,
-    ) -> DfContextProviderAdapter {
+    ) -> DfTableSourceProvider {
         let mut columns = vec![];
         for i in 0..num_tag {
             columns.push(ColumnSchema::new(
@@ -1041,10 +1060,7 @@ mod test {
             })
             .await
             .unwrap();
-
-        let query_engine_state = QueryEngineState::new(catalog_list, Default::default());
-        let query_context = QueryContext::new();
-        DfContextProviderAdapter::new(query_engine_state, query_context.into())
+        DfTableSourceProvider::new(catalog_list, false, &QueryContext::new())
     }
 
     // {
@@ -1075,8 +1091,10 @@ mod test {
             lookback_delta: Duration::from_secs(1),
         };
 
-        let context_provider = build_test_context_provider("some_metric".to_string(), 1, 1).await;
-        let plan = PromPlanner::stmt_to_plan(eval_stmt, context_provider).unwrap();
+        let table_provider = build_test_table_provider("some_metric".to_string(), 1, 1).await;
+        let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt)
+            .await
+            .unwrap();
 
         let expected = String::from(
             "Filter: TEMPLATE(field_0) IS NOT NULL [timestamp:Timestamp(Millisecond, None), TEMPLATE(field_0):Float64;N, tag_0:Utf8]\
@@ -1278,8 +1296,10 @@ mod test {
         };
 
         // test group by
-        let context_provider = build_test_context_provider("some_metric".to_string(), 2, 2).await;
-        let plan = PromPlanner::stmt_to_plan(eval_stmt.clone(), context_provider).unwrap();
+        let table_provider = build_test_table_provider("some_metric".to_string(), 2, 2).await;
+        let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt.clone())
+            .await
+            .unwrap();
         let  expected_no_without = String::from(
             "Sort: some_metric.tag_1 ASC NULLS LAST, some_metric.timestamp ASC NULLS LAST [tag_1:Utf8, timestamp:Timestamp(Millisecond, None), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
             \n  Aggregate: groupBy=[[some_metric.tag_1, some_metric.timestamp]], aggr=[[TEMPLATE(some_metric.field_0), TEMPLATE(some_metric.field_1)]] [tag_1:Utf8, timestamp:Timestamp(Millisecond, None), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
@@ -1301,8 +1321,10 @@ mod test {
                 vec![String::from("tag_1")].into_iter().collect(),
             ));
         }
-        let context_provider = build_test_context_provider("some_metric".to_string(), 2, 2).await;
-        let plan = PromPlanner::stmt_to_plan(eval_stmt, context_provider).unwrap();
+        let table_provider = build_test_table_provider("some_metric".to_string(), 2, 2).await;
+        let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt)
+            .await
+            .unwrap();
         let  expected_without = String::from(
             "Sort: some_metric.tag_0 ASC NULLS LAST, some_metric.timestamp ASC NULLS LAST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
             \n  Aggregate: groupBy=[[some_metric.tag_0, some_metric.timestamp]], aggr=[[TEMPLATE(some_metric.field_0), TEMPLATE(some_metric.field_1)]] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
@@ -1419,8 +1441,10 @@ mod test {
             lookback_delta: Duration::from_secs(1),
         };
 
-        let context_provider = build_test_context_provider("some_metric".to_string(), 1, 1).await;
-        let plan = PromPlanner::stmt_to_plan(eval_stmt, context_provider).unwrap();
+        let table_provider = build_test_table_provider("some_metric".to_string(), 1, 1).await;
+        let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt)
+            .await
+            .unwrap();
 
         let  expected = String::from(
             "Projection: lhs.tag_0, lhs.timestamp, some_metric.field_0 + some_metric.field_0 AS some_metric.field_0 + some_metric.field_0 [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), some_metric.field_0 + some_metric.field_0:Float64;N]\
@@ -1455,8 +1479,10 @@ mod test {
             lookback_delta: Duration::from_secs(1),
         };
 
-        let context_provider = build_test_context_provider("some_metric".to_string(), 1, 1).await;
-        let plan = PromPlanner::stmt_to_plan(eval_stmt, context_provider).unwrap();
+        let table_provider = build_test_table_provider("some_metric".to_string(), 1, 1).await;
+        let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt)
+            .await
+            .unwrap();
 
         assert_eq!(plan.display_indent_schema().to_string(), expected);
     }
@@ -1528,6 +1554,7 @@ mod test {
     }
 
     #[tokio::test]
+    #[should_panic]
     async fn increase_aggr() {
         let query = "increase(some_metric[5m])";
         let expected = String::from(

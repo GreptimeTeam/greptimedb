@@ -121,8 +121,8 @@ fn catalog_list() -> Result<Arc<MemoryCatalogManager>> {
     Ok(catalog_list)
 }
 
-#[test]
-fn test_query_validate() -> Result<()> {
+#[tokio::test]
+async fn test_query_validate() -> Result<()> {
     common_telemetry::init_default_ut_logging();
     let catalog_list = catalog_list()?;
 
@@ -137,13 +137,16 @@ fn test_query_validate() -> Result<()> {
     let engine = factory.query_engine();
 
     let stmt = QueryLanguageParser::parse_sql("select number from public.numbers").unwrap();
-    let re = engine.statement_to_plan(stmt, Arc::new(QueryContext::new()));
-    assert!(re.is_ok());
+    assert!(engine
+        .statement_to_plan(stmt, QueryContext::arc())
+        .await
+        .is_ok());
 
     let stmt = QueryLanguageParser::parse_sql("select number from wrongschema.numbers").unwrap();
-    let re = engine.statement_to_plan(stmt, Arc::new(QueryContext::new()));
-    assert!(re.is_err());
-
+    assert!(engine
+        .statement_to_plan(stmt, QueryContext::arc())
+        .await
+        .is_err());
     Ok(())
 }
 
@@ -176,6 +179,7 @@ async fn test_udf() -> Result<()> {
             .unwrap();
     let plan = engine
         .statement_to_plan(stmt, Arc::new(QueryContext::new()))
+        .await
         .unwrap();
 
     let output = engine.execute(&plan).await?;

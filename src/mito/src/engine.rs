@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
+use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
 use common_procedure::{BoxedProcedure, ProcedureManager};
 use common_telemetry::tracing::log::info;
@@ -341,7 +342,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 return Ok(table);
             } else {
                 return TableExistsSnafu {
-                    table_name: format!("{catalog_name}.{schema_name}.{table_name}"),
+                    table_name: format_full_table_name(catalog_name, schema_name, table_name),
                 }
                 .fail();
             }
@@ -1369,8 +1370,8 @@ mod tests {
 +-------+-----+--------+-------------------------+
 | host  | cpu | memory | ts                      |
 +-------+-----+--------+-------------------------+
-| host2 | 2   | 2      | 1970-01-01T00:00:00.002 |
-| host4 | 4   | 4      | 1970-01-01T00:00:00.001 |
+| host2 | 2.0 | 2.0    | 1970-01-01T00:00:00.002 |
+| host4 | 4.0 | 4.0    | 1970-01-01T00:00:00.001 |
 +-------+-----+--------+-------------------------+"
         );
     }

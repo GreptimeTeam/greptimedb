@@ -68,9 +68,14 @@ impl SqlQueryHandler for StandaloneSqlQueryHandler {
             .context(error::InvokeDatanodeSnafu)
     }
 
-    fn do_describe(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Option<Schema>> {
+    async fn do_describe(
+        &self,
+        stmt: Statement,
+        query_ctx: QueryContextRef,
+    ) -> Result<Option<Schema>> {
         self.0
             .do_describe(stmt, query_ctx)
+            .await
             .context(error::InvokeDatanodeSnafu)
     }
 

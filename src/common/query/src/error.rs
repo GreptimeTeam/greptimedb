@@ -239,7 +239,6 @@ impl From<BoxedError> for Error {
 
 #[cfg(test)]
 mod tests {
-    use datatypes::arrow::error::ArrowError;
     use snafu::GenerateImplicitData;
 
     use super::*;
@@ -286,7 +285,7 @@ mod tests {
     fn test_convert_df_recordbatch_stream_error() {
         let result: std::result::Result<i32, common_recordbatch::error::Error> =
             Err(common_recordbatch::error::Error::PollStream {
-                source: ArrowError::DivideByZero,
+                source: DataFusionError::Internal("blabla".to_string()),
                 backtrace: Backtrace::generate(),
             });
         let error = result

@@ -70,7 +70,7 @@ impl SqlQueryHandler for DummyInstance {
         unimplemented!()
     }
 
-    fn do_describe(
+    async fn do_describe(
         &self,
         _stmt: sql::statements::statement::Statement,
         _query_ctx: QueryContextRef,

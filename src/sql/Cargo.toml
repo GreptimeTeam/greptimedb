@@ -11,6 +11,7 @@ common-base = { path = "../common/base" }
 common-catalog = { path = "../common/catalog" }
 common-error = { path = "../common/error" }
 common-time = { path = "../common/time" }
+datafusion-sql.workspace = true
 datatypes = { path = "../datatypes" }
 hex = "0.4"
 itertools = "0.10"

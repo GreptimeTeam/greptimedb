@@ -14,16 +14,20 @@
 
 use std::sync::Arc;
 
+use async_recursion::async_recursion;
+use async_trait::async_trait;
 use bytes::{Buf, Bytes, BytesMut};
+use catalog::table_source::DfTableSourceProvider;
 use catalog::CatalogManagerRef;
-use common_error::prelude::BoxedError;
+use common_catalog::format_full_table_name;
 use common_telemetry::debug;
 use datafusion::arrow::datatypes::SchemaRef as ArrowSchemaRef;
-use datafusion::common::{DFField, DFSchema};
+use datafusion::common::{DFField, DFSchema, OwnedTableReference};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::physical_plan::project_schema;
-use datafusion_expr::{Filter, LogicalPlan, TableScan, TableSource};
+use datafusion_expr::{Filter, LogicalPlan, TableScan};
 use prost::Message;
+use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
 use substrait_proto::proto::expression::mask_expression::{StructItem, StructSelect};
 use substrait_proto::proto::expression::MaskExpression;
@@ -37,8 +41,8 @@ use table::table::adapter::DfTableProviderAdapter;
 use crate::context::ConvertorContext;
 use crate::df_expr::{expression_from_df_expr, to_df_expr};
 use crate::error::{
-    self, DFInternalSnafu, DecodeRelSnafu, EmptyPlanSnafu, EncodeRelSnafu, Error, InternalSnafu,
-    InvalidParametersSnafu, MissingFieldSnafu, SchemaNotMatchSnafu, TableNotFoundSnafu,
+    self, DFInternalSnafu, DecodeRelSnafu, EmptyPlanSnafu, EncodeRelSnafu, Error,
+    InvalidParametersSnafu, MissingFieldSnafu, ResolveTableSnafu, SchemaNotMatchSnafu,
     UnknownPlanSnafu, UnsupportedExprSnafu, UnsupportedPlanSnafu,
 };
 use crate::schema::{from_schema, to_schema};
@@ -46,18 +50,19 @@ use crate::SubstraitPlan;
 
 pub struct DFLogicalSubstraitConvertor;
 
+#[async_trait]
 impl SubstraitPlan for DFLogicalSubstraitConvertor {
     type Error = Error;
 
     type Plan = LogicalPlan;
 
-    fn decode<B: Buf + Send>(
+    async fn decode<B: Buf + Send>(
         &self,
         message: B,
         catalog_manager: CatalogManagerRef,
     ) -> Result<Self::Plan, Self::Error> {
         let plan = Plan::decode(message).context(DecodeRelSnafu)?;
-        self.convert_plan(plan, catalog_manager)
+        self.convert_plan(plan, catalog_manager).await
     }
 
     fn encode(&self, plan: Self::Plan) -> Result<Bytes, Self::Error> {
@@ -71,7 +76,7 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
 }
 
 impl DFLogicalSubstraitConvertor {
-    fn convert_plan(
+    async fn convert_plan(
         &self,
         mut plan: Plan,
         catalog_manager: CatalogManagerRef,
@@ -102,20 +107,25 @@ impl DFLogicalSubstraitConvertor {
             .fail()?
         };
 
-        self.rel_to_logical_plan(&mut ctx, Box::new(rel), catalog_manager)
+        // TODO(LFC): Create table provider from outside, respect "disallow_cross_schema_query" option in query engine state.
+        let mut table_provider =
+            DfTableSourceProvider::new(catalog_manager, false, &QueryContext::new());
+        self.rel_to_logical_plan(&mut ctx, Box::new(rel), &mut table_provider)
+            .await
     }
 
-    fn rel_to_logical_plan(
+    #[async_recursion]
+    async fn rel_to_logical_plan(
         &self,
         ctx: &mut ConvertorContext,
         rel: Box<Rel>,
-        catalog_manager: CatalogManagerRef,
+        table_provider: &mut DfTableSourceProvider,
     ) -> Result<LogicalPlan, Error> {
         let rel_type = rel.rel_type.context(EmptyPlanSnafu)?;
 
         // build logical plan
         let logical_plan = match rel_type {
-            RelType::Read(read_rel) => self.convert_read_rel(ctx, read_rel, catalog_manager)?,
+            RelType::Read(read_rel) => self.convert_read_rel(ctx, read_rel, table_provider).await?,
             RelType::Filter(filter) => {
                 let FilterRel {
                     common: _,
@@ -128,7 +138,7 @@ impl DFLogicalSubstraitConvertor {
                     field: "input",
                     plan: "Filter",
                 })?;
-                let input = Arc::new(self.rel_to_logical_plan(ctx, input, catalog_manager)?);
+                let input = Arc::new(self.rel_to_logical_plan(ctx, input, table_provider).await?);
 
                 let condition = condition.context(MissingFieldSnafu {
                     field: "condition",
@@ -191,11 +201,11 @@ impl DFLogicalSubstraitConvertor {
         Ok(logical_plan)
     }
 
-    fn convert_read_rel(
+    async fn convert_read_rel(
         &self,
         ctx: &mut ConvertorContext,
         read_rel: Box<ReadRel>,
-        catalog_manager: CatalogManagerRef,
+        table_provider: &mut DfTableSourceProvider,
     ) -> Result<LogicalPlan, Error> {
         // Extract the catalog, schema and table name from NamedTable. Assume the first three are those names.
         let read_type = read_rel.read_type.context(MissingFieldSnafu {
@@ -230,17 +240,17 @@ impl DFLogicalSubstraitConvertor {
             .projection
             .map(|mask_expr| self.convert_mask_expression(mask_expr));
 
-        // Get table handle from catalog manager
-        let table_ref = catalog_manager
-            .table(&catalog_name, &schema_name, &table_name)
-            .map_err(BoxedError::new)
-            .context(InternalSnafu)?
-            .context(TableNotFoundSnafu {
-                name: format!("{catalog_name}.{schema_name}.{table_name}"),
+        let table_ref = OwnedTableReference::Full {
+            catalog: catalog_name.clone(),
+            schema: schema_name.clone(),
+            table: table_name.clone(),
+        };
+        let adapter = table_provider
+            .resolve_table(table_ref)
+            .await
+            .with_context(|_| ResolveTableSnafu {
+                table_name: format_full_table_name(&catalog_name, &schema_name, &table_name),
             })?;
-        let adapter = Arc::new(DefaultTableSource::new(Arc::new(
-            DfTableProviderAdapter::new(table_ref),
-        )));
 
         // Get schema directly from the table, and compare it with the schema retrieved from substrait proto.
         let stored_schema = adapter.schema();
@@ -262,7 +272,7 @@ impl DFLogicalSubstraitConvertor {
         };
 
         // Calculate the projected schema
-        let qualified = &format!("{catalog_name}.{schema_name}.{table_name}");
+        let qualified = &format_full_table_name(&catalog_name, &schema_name, &table_name);
         let projected_schema = Arc::new(
             project_schema(&stored_schema, projection.as_ref())
                 .and_then(|x| {
@@ -281,7 +291,7 @@ impl DFLogicalSubstraitConvertor {
 
         // TODO(ruihang): Support limit(fetch)
         Ok(LogicalPlan::TableScan(TableScan {
-            table_name: format!("{catalog_name}.{schema_name}.{table_name}"),
+            table_name: qualified.to_string(),
             source: adapter,
             projection,
             projected_schema,
@@ -314,7 +324,7 @@ impl DFLogicalSubstraitConvertor {
             .fail()?,
             LogicalPlan::Filter(filter) => {
                 let input = Some(Box::new(
-                    self.logical_plan_to_rel(ctx, filter.input().clone())?,
+                    self.logical_plan_to_rel(ctx, filter.input.clone())?,
                 ));
 
                 let schema = plan
@@ -324,7 +334,7 @@ impl DFLogicalSubstraitConvertor {
                     .context(error::ConvertDfSchemaSnafu)?;
                 let condition = Some(Box::new(expression_from_df_expr(
                     ctx,
-                    filter.predicate(),
+                    &filter.predicate,
                     &schema,
                 )?));
 
@@ -396,7 +406,10 @@ impl DFLogicalSubstraitConvertor {
             | LogicalPlan::Explain(_)
             | LogicalPlan::Analyze(_)
             | LogicalPlan::Extension(_)
-            | LogicalPlan::Prepare(_) => InvalidParametersSnafu {
+            | LogicalPlan::Prepare(_)
+            | LogicalPlan::Dml(_)
+            | LogicalPlan::DescribeTable(_)
+            | LogicalPlan::Unnest(_) => InvalidParametersSnafu {
                 reason: format!(
                     "Trying to convert DDL/DML plan to substrait proto, plan: {plan:?}",
                 ),
@@ -524,6 +537,7 @@ mod test {
     use catalog::{CatalogList, CatalogProvider, RegisterTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datafusion::common::{DFSchema, ToDFSchema};
+    use datafusion_expr::TableSource;
     use datatypes::schema::RawSchema;
     use table::requests::CreateTableRequest;
     use table::test_util::{EmptyTable, MockTableEngine};
@@ -572,7 +586,7 @@ mod test {
         let convertor = DFLogicalSubstraitConvertor;
 
         let proto = convertor.encode(plan.clone()).unwrap();
-        let tripped_plan = convertor.decode(proto, catalog).unwrap();
+        let tripped_plan = convertor.decode(proto, catalog).await.unwrap();
 
         assert_eq!(format!("{plan:?}"), format!("{tripped_plan:?}"));
     }

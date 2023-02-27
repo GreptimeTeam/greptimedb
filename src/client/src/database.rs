@@ -118,7 +118,7 @@ impl Database {
             request: Some(request),
         };
         let request = Ticket {
-            ticket: request.encode_to_vec(),
+            ticket: request.encode_to_vec().into(),
         };
 
         let mut client = self.client.make_client()?;

@@ -18,9 +18,9 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
+use datafusion::error::Result as DfResult;
 use datafusion::physical_plan::RecordBatchStream as DfRecordBatchStream;
 use datafusion_common::DataFusionError;
-use datatypes::arrow::error::{ArrowError, Result as ArrowResult};
 use datatypes::schema::{Schema, SchemaRef};
 use futures::ready;
 use snafu::ResultExt;
@@ -57,14 +57,14 @@ impl DfRecordBatchStream for DfRecordBatchStreamAdapter {
 }
 
 impl Stream for DfRecordBatchStreamAdapter {
-    type Item = ArrowResult<DfRecordBatch>;
+    type Item = DfResult<DfRecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match Pin::new(&mut self.stream).poll_next(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(recordbatch)) => match recordbatch {
                 Ok(recordbatch) => Poll::Ready(Some(Ok(recordbatch.into_df_record_batch()))),
-                Err(e) => Poll::Ready(Some(Err(ArrowError::ExternalError(Box::new(e))))),
+                Err(e) => Poll::Ready(Some(Err(DataFusionError::External(Box::new(e))))),
             },
             Poll::Ready(None) => Poll::Ready(None),
         }

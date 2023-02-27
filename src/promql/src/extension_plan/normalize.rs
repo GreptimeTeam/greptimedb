@@ -20,6 +20,7 @@ use std::task::{Context, Poll};
 use datafusion::arrow::array::{BooleanArray, Float64Array};
 use datafusion::arrow::compute;
 use datafusion::common::{DFSchemaRef, Result as DataFusionResult, Statistics};
+use datafusion::error::DataFusionError;
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNode};
 use datafusion::physical_expr::PhysicalSortExpr;
@@ -139,10 +140,6 @@ impl ExecutionPlan for SeriesNormalizeExec {
         self.input.output_ordering()
     }
 
-    fn maintains_input_order(&self) -> bool {
-        false
-    }
-
     fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
         vec![self.input.clone()]
     }
@@ -214,7 +211,7 @@ pub struct SeriesNormalizeStream {
 }
 
 impl SeriesNormalizeStream {
-    pub fn normalize(&self, input: RecordBatch) -> ArrowResult<RecordBatch> {
+    pub fn normalize(&self, input: RecordBatch) -> DataFusionResult<RecordBatch> {
         // TODO(ruihang): maybe the input is not timestamp millisecond array
         let ts_column = input
             .column(self.time_index)
@@ -254,7 +251,8 @@ impl SeriesNormalizeStream {
             }
         }
 
-        let result = compute::filter_record_batch(&ordered_batch, &BooleanArray::from(filter))?;
+        let result = compute::filter_record_batch(&ordered_batch, &BooleanArray::from(filter))
+            .map_err(DataFusionError::ArrowError)?;
         Ok(result)
     }
 }
@@ -266,7 +264,7 @@ impl RecordBatchStream for SeriesNormalizeStream {
 }
 
 impl Stream for SeriesNormalizeStream {
-    type Item = ArrowResult<RecordBatch>;
+    type Item = DataFusionResult<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let poll = match self.input.poll_next_unpin(cx) {
@@ -335,15 +333,15 @@ mod test {
             .to_string();
 
         let expected = String::from(
-            "+---------------------+-------+------+\
-            \n| timestamp           | value | path |\
-            \n+---------------------+-------+------+\
-            \n| 1970-01-01T00:00:00 | 10    | foo  |\
-            \n| 1970-01-01T00:00:30 | 100   | foo  |\
-            \n| 1970-01-01T00:01:00 | 0     | foo  |\
-            \n| 1970-01-01T00:01:30 | 1000  | foo  |\
-            \n| 1970-01-01T00:02:00 | 1     | foo  |\
-            \n+---------------------+-------+------+",
+            "+---------------------+--------+------+\
+            \n| timestamp           | value  | path |\
+            \n+---------------------+--------+------+\
+            \n| 1970-01-01T00:00:00 | 10.0   | foo  |\
+            \n| 1970-01-01T00:00:30 | 100.0  | foo  |\
+            \n| 1970-01-01T00:01:00 | 0.0    | foo  |\
+            \n| 1970-01-01T00:01:30 | 1000.0 | foo  |\
+            \n| 1970-01-01T00:02:00 | 1.0    | foo  |\
+            \n+---------------------+--------+------+",
         );
 
         assert_eq!(result_literal, expected);
@@ -367,15 +365,15 @@ mod test {
             .to_string();
 
         let expected = String::from(
-            "+---------------------+-------+------+\
-            \n| timestamp           | value | path |\
-            \n+---------------------+-------+------+\
-            \n| 1969-12-31T23:59:59 | 10    | foo  |\
-            \n| 1970-01-01T00:00:29 | 100   | foo  |\
-            \n| 1970-01-01T00:00:59 | 0     | foo  |\
-            \n| 1970-01-01T00:01:29 | 1000  | foo  |\
-            \n| 1970-01-01T00:01:59 | 1     | foo  |\
-            \n+---------------------+-------+------+",
+            "+---------------------+--------+------+\
+            \n| timestamp           | value  | path |\
+            \n+---------------------+--------+------+\
+            \n| 1969-12-31T23:59:59 | 10.0   | foo  |\
+            \n| 1970-01-01T00:00:29 | 100.0  | foo  |\
+            \n| 1970-01-01T00:00:59 | 0.0    | foo  |\
+            \n| 1970-01-01T00:01:29 | 1000.0 | foo  |\
+            \n| 1970-01-01T00:01:59 | 1.0    | foo  |\
+            \n+---------------------+--------+------+",
         );
 
         assert_eq!(result_literal, expected);

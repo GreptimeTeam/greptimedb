@@ -237,6 +237,7 @@ impl CreateTableProcedure {
             })?;
         let table_exists = schema
             .table(&self.data.request.table_name)
+            .await
             .map_err(Error::external)?
             .is_some();
         if table_exists {

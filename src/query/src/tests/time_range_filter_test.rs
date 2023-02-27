@@ -135,6 +135,7 @@ impl TimeRangeTester {
                 &self
                     .engine
                     .statement_to_plan(stmt, Arc::new(QueryContext::new()))
+                    .await
                     .unwrap(),
             )
             .await

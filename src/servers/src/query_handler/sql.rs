@@ -50,7 +50,7 @@ pub trait SqlQueryHandler {
     ) -> std::result::Result<Output, Self::Error>;
 
     // TODO(LFC): revisit this for mysql prepared statement
-    fn do_describe(
+    async fn do_describe(
         &self,
         stmt: Statement,
         query_ctx: QueryContextRef,
@@ -122,9 +122,14 @@ where
             .context(error::ExecuteStatementSnafu)
     }
 
-    fn do_describe(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Option<Schema>> {
+    async fn do_describe(
+        &self,
+        stmt: Statement,
+        query_ctx: QueryContextRef,
+    ) -> Result<Option<Schema>> {
         self.0
             .do_describe(stmt, query_ctx)
+            .await
             .map_err(BoxedError::new)
             .context(error::DescribeStatementSnafu)
     }

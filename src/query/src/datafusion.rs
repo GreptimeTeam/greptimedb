@@ -21,6 +21,7 @@ mod planner;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use catalog::table_source::DfTableSourceProvider;
 use catalog::CatalogListRef;
 use common_base::Plugins;
 use common_error::prelude::BoxedError;
@@ -35,6 +36,7 @@ use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::timer;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion_sql::planner::{ParserOptions, SqlToRel};
 use datatypes::schema::Schema;
 use promql::planner::PromPlanner;
 use promql_parser::parser::EvalStmt;
@@ -44,15 +46,15 @@ use sql::statements::statement::Statement;
 
 pub use crate::datafusion::catalog_adapter::DfCatalogListAdapter;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
-use crate::datafusion::planner::DfPlanner;
-use crate::error::{QueryExecutionSnafu, QueryPlanSnafu, Result};
+use crate::error::{
+    DataFusionSnafu, PlanSqlSnafu, QueryExecutionSnafu, QueryPlanSnafu, Result, SqlSnafu,
+};
 use crate::executor::QueryExecutor;
 use crate::logical_optimizer::LogicalOptimizer;
 use crate::parser::QueryStatement;
 use crate::physical_optimizer::PhysicalOptimizer;
 use crate::physical_planner::PhysicalPlanner;
 use crate::plan::LogicalPlan;
-use crate::planner::Planner;
 use crate::query_engine::{QueryEngineContext, QueryEngineState};
 use crate::{metric, QueryEngine};
 
@@ -67,19 +69,54 @@ impl DatafusionQueryEngine {
         }
     }
 
-    fn plan_sql_stmt(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
-        let context_provider = DfContextProviderAdapter::new(self.state.clone(), query_ctx);
-        let planner = DfPlanner::new(&context_provider);
-        planner
-            .statement_to_plan(stmt)
-            .map_err(BoxedError::new)
-            .context(QueryPlanSnafu)
+    async fn plan_sql_stmt(
+        &self,
+        stmt: Statement,
+        query_ctx: QueryContextRef,
+    ) -> Result<LogicalPlan> {
+        let session_state = self.state.session_state();
+
+        let df_stmt = (&stmt).try_into().context(SqlSnafu)?;
+
+        let config_options = session_state.config().config_options();
+        let parser_options = ParserOptions {
+            enable_ident_normalization: config_options.sql_parser.enable_ident_normalization,
+            parse_float_as_decimal: config_options.sql_parser.parse_float_as_decimal,
+        };
+
+        let context_provider = DfContextProviderAdapter::try_new(
+            self.state.clone(),
+            session_state,
+            &df_stmt,
+            query_ctx,
+        )
+        .await?;
+        let sql_to_rel = SqlToRel::new_with_options(&context_provider, parser_options);
+
+        let result = sql_to_rel.statement_to_plan(df_stmt).with_context(|_| {
+            let sql = if let Statement::Query(query) = stmt {
+                query.inner.to_string()
+            } else {
+                format!("{stmt:?}")
+            };
+            PlanSqlSnafu { sql }
+        })?;
+        Ok(LogicalPlan::DfPlan(result))
     }
 
     // TODO(ruihang): test this method once parser is ready.
-    fn plan_promql_stmt(&self, stmt: EvalStmt, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
-        let context_provider = DfContextProviderAdapter::new(self.state.clone(), query_ctx);
-        PromPlanner::stmt_to_plan(stmt, context_provider)
+    async fn plan_promql_stmt(
+        &self,
+        stmt: EvalStmt,
+        query_ctx: QueryContextRef,
+    ) -> Result<LogicalPlan> {
+        let table_provider = DfTableSourceProvider::new(
+            self.state.catalog_list().clone(),
+            self.state.disallow_cross_schema_query(),
+            query_ctx.as_ref(),
+        );
+        PromPlanner::stmt_to_plan(table_provider, stmt)
+            .await
             .map(LogicalPlan::DfPlan)
             .map_err(BoxedError::new)
             .context(QueryPlanSnafu)
@@ -93,28 +130,28 @@ impl QueryEngine for DatafusionQueryEngine {
         "datafusion"
     }
 
-    fn statement_to_plan(
+    async fn statement_to_plan(
         &self,
         stmt: QueryStatement,
         query_ctx: QueryContextRef,
     ) -> Result<LogicalPlan> {
         match stmt {
-            QueryStatement::Sql(stmt) => self.plan_sql_stmt(stmt, query_ctx),
-            QueryStatement::Promql(stmt) => self.plan_promql_stmt(stmt, query_ctx),
+            QueryStatement::Sql(stmt) => self.plan_sql_stmt(stmt, query_ctx).await,
+            QueryStatement::Promql(stmt) => self.plan_promql_stmt(stmt, query_ctx).await,
         }
     }
 
-    fn describe(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<Schema> {
+    async fn describe(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<Schema> {
         // TODO(sunng87): consider cache optmised logical plan between describe
         // and execute
-        let plan = self.statement_to_plan(stmt, query_ctx)?;
-        let mut ctx = QueryEngineContext::new(self.state.clone());
+        let plan = self.statement_to_plan(stmt, query_ctx).await?;
+        let mut ctx = QueryEngineContext::new(self.state.session_state());
         let optimised_plan = self.optimize_logical_plan(&mut ctx, &plan)?;
         optimised_plan.schema()
     }
 
     async fn execute(&self, plan: &LogicalPlan) -> Result<Output> {
-        let mut ctx = QueryEngineContext::new(self.state.clone());
+        let mut ctx = QueryEngineContext::new(self.state.session_state());
         let logical_plan = self.optimize_logical_plan(&mut ctx, plan)?;
         let physical_plan = self.create_physical_plan(&mut ctx, &logical_plan).await?;
         let physical_plan = self.optimize_physical_plan(&mut ctx, physical_plan)?;
@@ -123,7 +160,7 @@ impl QueryEngine for DatafusionQueryEngine {
     }
 
     async fn execute_physical(&self, plan: &Arc<dyn PhysicalPlan>) -> Result<Output> {
-        let ctx = QueryEngineContext::new(self.state.clone());
+        let ctx = QueryEngineContext::new(self.state.session_state());
         Ok(Output::Stream(self.execute_stream(&ctx, plan)?))
     }
 
@@ -150,14 +187,14 @@ impl QueryEngine for DatafusionQueryEngine {
 impl LogicalOptimizer for DatafusionQueryEngine {
     fn optimize_logical_plan(
         &self,
-        _: &mut QueryEngineContext,
+        ctx: &mut QueryEngineContext,
         plan: &LogicalPlan,
     ) -> Result<LogicalPlan> {
         let _timer = timer!(metric::METRIC_OPTIMIZE_LOGICAL_ELAPSED);
         match plan {
             LogicalPlan::DfPlan(df_plan) => {
-                let optimized_plan = self
-                    .state
+                let state = ctx.state();
+                let optimized_plan = state
                     .optimize(df_plan)
                     .context(error::DatafusionSnafu {
                         msg: "Fail to optimize logical plan",
@@ -175,14 +212,14 @@ impl LogicalOptimizer for DatafusionQueryEngine {
 impl PhysicalPlanner for DatafusionQueryEngine {
     async fn create_physical_plan(
         &self,
-        _: &mut QueryEngineContext,
+        ctx: &mut QueryEngineContext,
         logical_plan: &LogicalPlan,
     ) -> Result<Arc<dyn PhysicalPlan>> {
         let _timer = timer!(metric::METRIC_CREATE_PHYSICAL_ELAPSED);
         match logical_plan {
             LogicalPlan::DfPlan(df_plan) => {
-                let physical_plan = self
-                    .state
+                let state = ctx.state();
+                let physical_plan = state
                     .create_physical_plan(df_plan)
                     .await
                     .context(error::DatafusionSnafu {
@@ -210,12 +247,12 @@ impl PhysicalPlanner for DatafusionQueryEngine {
 impl PhysicalOptimizer for DatafusionQueryEngine {
     fn optimize_physical_plan(
         &self,
-        _: &mut QueryEngineContext,
+        ctx: &mut QueryEngineContext,
         plan: Arc<dyn PhysicalPlan>,
     ) -> Result<Arc<dyn PhysicalPlan>> {
         let _timer = timer!(metric::METRIC_OPTIMIZE_PHYSICAL_ELAPSED);
 
-        let new_plan = plan
+        let mut new_plan = plan
             .as_any()
             .downcast_ref::<PhysicalPlanAdapter>()
             .context(error::PhysicalPlanDowncastSnafu)
@@ -223,14 +260,13 @@ impl PhysicalOptimizer for DatafusionQueryEngine {
             .context(QueryExecutionSnafu)?
             .df_plan();
 
-        let new_plan = self
-            .state
-            .optimize_physical_plan(new_plan)
-            .context(error::DatafusionSnafu {
-                msg: "Fail to optimize physical plan",
-            })
-            .map_err(BoxedError::new)
-            .context(QueryExecutionSnafu)?;
+        let state = ctx.state();
+        let config = state.config_options();
+        for optimizer in state.physical_optimizers() {
+            new_plan = optimizer
+                .optimize(new_plan, config)
+                .context(DataFusionSnafu)?;
+        }
         Ok(Arc::new(PhysicalPlanAdapter::new(plan.schema(), new_plan)))
     }
 }
@@ -308,14 +344,15 @@ mod tests {
         QueryEngineFactory::new(catalog_list).query_engine()
     }
 
-    #[test]
-    fn test_sql_to_plan() {
+    #[tokio::test]
+    async fn test_sql_to_plan() {
         let engine = create_test_engine();
         let sql = "select sum(number) from numbers limit 20";
 
         let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
         let plan = engine
             .statement_to_plan(stmt, Arc::new(QueryContext::new()))
+            .await
             .unwrap();
 
         // TODO(sunng87): do not rely on to_string for compare
@@ -336,6 +373,7 @@ mod tests {
         let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
         let plan = engine
             .statement_to_plan(stmt, Arc::new(QueryContext::new()))
+            .await
             .unwrap();
 
         let output = engine.execute(&plan).await.unwrap();
@@ -364,8 +402,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_describe() {
+    #[tokio::test]
+    async fn test_describe() {
         let engine = create_test_engine();
         let sql = "select sum(number) from numbers limit 20";
 
@@ -373,6 +411,7 @@ mod tests {
 
         let schema = engine
             .describe(stmt, Arc::new(QueryContext::new()))
+            .await
             .unwrap();
 
         assert_eq!(

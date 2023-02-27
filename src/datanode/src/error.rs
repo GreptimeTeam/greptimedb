@@ -379,7 +379,7 @@ pub enum Error {
 
     #[snafu(display("Failed to poll stream, source: {}", source))]
     PollStream {
-        source: datatypes::arrow::error::ArrowError,
+        source: datafusion_common::DataFusionError,
         backtrace: Backtrace,
     },
 

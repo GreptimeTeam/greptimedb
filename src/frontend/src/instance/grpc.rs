@@ -94,7 +94,7 @@ mod test {
 
         test_handle_ddl_request(frontend.as_ref()).await;
 
-        verify_table_is_dropped(&instance);
+        verify_table_is_dropped(&instance).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -203,16 +203,19 @@ mod test {
         assert!(matches!(output, Output::AffectedRows(1)));
     }
 
-    fn verify_table_is_dropped(instance: &MockDistributedInstance) {
-        assert!(instance.datanodes.iter().all(|(_, x)| x
-            .catalog_manager()
-            .table(
-                "greptime",
-                "database_created_through_grpc",
-                "table_created_through_grpc"
-            )
-            .unwrap()
-            .is_none()))
+    async fn verify_table_is_dropped(instance: &MockDistributedInstance) {
+        for (_, dn) in instance.datanodes.iter() {
+            assert!(dn
+                .catalog_manager()
+                .table(
+                    "greptime",
+                    "database_created_through_grpc",
+                    "table_created_through_grpc"
+                )
+                .await
+                .unwrap()
+                .is_none());
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -413,6 +416,7 @@ CREATE TABLE {table_name} (
             .frontend
             .catalog_manager()
             .table("greptime", "public", table_name)
+            .await
             .unwrap()
             .unwrap();
         let table = table.as_any().downcast_ref::<DistTable>().unwrap();

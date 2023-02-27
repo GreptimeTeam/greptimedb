@@ -635,8 +635,6 @@ mod utils {
             Operator::Modulo => "modulo",
             Operator::And => "and",
             Operator::Or => "or",
-            Operator::Like => "like",
-            Operator::NotLike => "not_like",
             Operator::IsDistinctFrom => "is_distinct_from",
             Operator::IsNotDistinctFrom => "is_not_distinct_from",
             Operator::RegexMatch => "regex_match",
@@ -649,8 +647,6 @@ mod utils {
             Operator::BitwiseShiftRight => "bitwise_shift_right",
             Operator::BitwiseShiftLeft => "bitwise_shift_left",
             Operator::StringConcat => "string_concat",
-            Operator::ILike => "i_like",
-            Operator::NotILike => "not_i_like",
         }
     }
 

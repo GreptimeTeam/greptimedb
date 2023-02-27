@@ -24,13 +24,13 @@ select 4 + 0.5;
 
 select "a";
 
-Error: 3000(PlanQuery), Schema error: No field named 'a'. Valid fields are .
+Error: 3000(PlanQuery), No field named 'a'.
 
 select "A";
 
-Error: 3000(PlanQuery), Schema error: No field named 'A'. Valid fields are .
+Error: 3000(PlanQuery), No field named 'A'.
 
 select * where "a" = "A";
 
-Error: 3000(PlanQuery), Schema error: No field named 'a'. Valid fields are .
+Error: 3000(PlanQuery), No field named 'a'.
 

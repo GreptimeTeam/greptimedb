@@ -45,6 +45,7 @@ impl Instance {
     pub(crate) async fn execute_logical(&self, plan_bytes: Vec<u8>) -> Result<Output> {
         let logical_plan = DFLogicalSubstraitConvertor
             .decode(plan_bytes.as_slice(), self.catalog_manager.clone())
+            .await
             .context(DecodeLogicalPlanSnafu)?;
 
         self.query_engine
@@ -74,6 +75,7 @@ impl Instance {
         let table = self
             .catalog_manager
             .table(catalog, schema, table_name)
+            .await
             .context(error::CatalogSnafu)?
             .context(error::TableNotFoundSnafu { table_name })?;
 
@@ -287,9 +289,9 @@ mod test {
 +---------------------+-------+-----+
 | ts                  | host  | cpu |
 +---------------------+-------+-----+
-| 2022-12-30T07:09:00 | host1 | 1   |
+| 2022-12-30T07:09:00 | host1 | 1.0 |
 | 2022-12-30T07:09:01 | host2 |     |
-| 2022-12-30T07:09:02 | host3 | 3   |
+| 2022-12-30T07:09:02 | host3 | 3.0 |
 +---------------------+-------+-----+";
         assert_eq!(recordbatches.pretty_print().unwrap(), expected);
     }
@@ -325,7 +327,7 @@ mod test {
 +---------------------+-------+------+--------+
 | ts                  | host  | cpu  | memory |
 +---------------------+-------+------+--------+
-| 2022-12-28T04:17:05 | host1 | 66.6 | 1024   |
+| 2022-12-28T04:17:05 | host1 | 66.6 | 1024.0 |
 | 2022-12-28T04:17:06 | host2 | 88.8 | 333.3  |
 +---------------------+-------+------+--------+";
         let actual = recordbatch.pretty_print().unwrap();

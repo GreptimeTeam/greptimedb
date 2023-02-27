@@ -103,7 +103,7 @@ impl FlightService for FlightHandler {
     async fn do_get(&self, request: Request<Ticket>) -> TonicResult<Response<Self::DoGetStream>> {
         let ticket = request.into_inner().ticket;
         let request =
-            GreptimeRequest::decode(ticket.as_slice()).context(error::InvalidFlightTicketSnafu)?;
+            GreptimeRequest::decode(ticket.as_ref()).context(error::InvalidFlightTicketSnafu)?;
 
         let query = request.request.context(error::InvalidQuerySnafu {
             reason: "Expecting non-empty GreptimeRequest.",

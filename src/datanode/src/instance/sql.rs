@@ -51,6 +51,7 @@ impl Instance {
                 let logical_plan = self
                     .query_engine
                     .statement_to_plan(stmt, query_ctx)
+                    .await
                     .context(ExecuteSqlSnafu)?;
 
                 self.query_engine
@@ -216,6 +217,7 @@ impl Instance {
                 let logical_plan = self
                     .query_engine
                     .statement_to_plan(stmt, query_ctx)
+                    .await
                     .context(ExecuteSqlSnafu)?;
 
                 self.query_engine
@@ -335,10 +337,15 @@ impl SqlQueryHandler for Instance {
             .await
     }
 
-    fn do_describe(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Option<Schema>> {
+    async fn do_describe(
+        &self,
+        stmt: Statement,
+        query_ctx: QueryContextRef,
+    ) -> Result<Option<Schema>> {
         if let Statement::Query(_) = stmt {
             self.query_engine
                 .describe(QueryStatement::Sql(stmt), query_ctx)
+                .await
                 .map(Some)
                 .context(error::DescribeStatementSnafu)
         } else {
