@@ -116,6 +116,7 @@ jobs:
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest-8-cores
     timeout-minutes: 60
+    needs: [clippy]
     steps:
       - uses: actions/checkout@v3
       - uses: arduino/setup-protoc@v1
@@ -188,6 +189,7 @@ jobs:
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest-8-cores
     timeout-minutes: 60
+    needs: [clippy]
     steps:
       - uses: actions/checkout@v3
       - uses: arduino/setup-protoc@v1
