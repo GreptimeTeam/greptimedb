@@ -334,7 +334,7 @@ impl LocalManager {
 
         common_runtime::spawn_bg(async move {
             // Run the root procedure.
-            let _ = runner.run().await;
+            runner.run().await;
         });
 
         Ok(watcher)
