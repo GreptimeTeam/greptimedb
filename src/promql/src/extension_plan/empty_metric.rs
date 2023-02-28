@@ -18,6 +18,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use datafusion::arrow::array::Float64Array;
 use datafusion::arrow::datatypes::{DataType, TimeUnit};
 use datafusion::common::{DFField, DFSchema, DFSchemaRef, Result as DataFusionResult, Statistics};
 use datafusion::execution::context::TaskContext;
@@ -50,14 +51,18 @@ impl EmptyMetric {
         end: Millisecond,
         interval: Millisecond,
         time_index_column_name: String,
+        value_column_name: String,
     ) -> DataFusionResult<Self> {
         let schema = Arc::new(DFSchema::new_with_metadata(
-            vec![DFField::new(
-                None,
-                &time_index_column_name,
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            )],
+            vec![
+                DFField::new(
+                    None,
+                    &time_index_column_name,
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                ),
+                DFField::new(None, &value_column_name, DataType::Float64, true),
+            ],
             HashMap::new(),
         )?);
 
@@ -226,9 +231,13 @@ impl Stream for EmptyMetricStream {
             let result_array = (self.start..=self.end)
                 .step_by(self.interval as _)
                 .collect::<Vec<_>>();
+            let float_array =
+                Float64Array::from_iter(result_array.iter().map(|v| *v as f64 / 1000.0));
             let millisecond_array = TimestampMillisecondArray::from(result_array);
-            let batch =
-                RecordBatch::try_new(self.schema.clone(), vec![Arc::new(millisecond_array)]);
+            let batch = RecordBatch::try_new(
+                self.schema.clone(),
+                vec![Arc::new(millisecond_array), Arc::new(float_array)],
+            );
             Poll::Ready(Some(batch))
         } else {
             Poll::Ready(None)
@@ -247,10 +256,12 @@ mod test {
         start: Millisecond,
         end: Millisecond,
         interval: Millisecond,
-        column_name: String,
+        time_column_name: String,
+        value_column_name: String,
         expected: String,
     ) {
-        let empty_metric = EmptyMetric::new(start, end, interval, column_name).unwrap();
+        let empty_metric =
+            EmptyMetric::new(start, end, interval, time_column_name, value_column_name).unwrap();
         let empty_metric_exec = empty_metric.to_execution_plan();
 
         let session_context = SessionContext::default();
@@ -272,22 +283,23 @@ mod test {
             100,
             10,
             "time".to_string(),
+            "value".to_string(),
             String::from(
-                "+-------------------------+\
-                \n| time                    |\
-                \n+-------------------------+\
-                \n| 1970-01-01T00:00:00     |\
-                \n| 1970-01-01T00:00:00.010 |\
-                \n| 1970-01-01T00:00:00.020 |\
-                \n| 1970-01-01T00:00:00.030 |\
-                \n| 1970-01-01T00:00:00.040 |\
-                \n| 1970-01-01T00:00:00.050 |\
-                \n| 1970-01-01T00:00:00.060 |\
-                \n| 1970-01-01T00:00:00.070 |\
-                \n| 1970-01-01T00:00:00.080 |\
-                \n| 1970-01-01T00:00:00.090 |\
-                \n| 1970-01-01T00:00:00.100 |\
-                \n+-------------------------+",
+                "+-------------------------+-------+\
+                \n| time                    | value |\
+                \n+-------------------------+-------+\
+                \n| 1970-01-01T00:00:00     | 0     |\
+                \n| 1970-01-01T00:00:00.010 | 0.01  |\
+                \n| 1970-01-01T00:00:00.020 | 0.02  |\
+                \n| 1970-01-01T00:00:00.030 | 0.03  |\
+                \n| 1970-01-01T00:00:00.040 | 0.04  |\
+                \n| 1970-01-01T00:00:00.050 | 0.05  |\
+                \n| 1970-01-01T00:00:00.060 | 0.06  |\
+                \n| 1970-01-01T00:00:00.070 | 0.07  |\
+                \n| 1970-01-01T00:00:00.080 | 0.08  |\
+                \n| 1970-01-01T00:00:00.090 | 0.09  |\
+                \n| 1970-01-01T00:00:00.100 | 0.1   |\
+                \n+-------------------------+-------+",
             ),
         )
         .await
@@ -300,21 +312,22 @@ mod test {
             100,
             11,
             "time".to_string(),
+            "value".to_string(),
             String::from(
-                "+-------------------------+\
-                \n| time                    |\
-                \n+-------------------------+\
-                \n| 1970-01-01T00:00:00     |\
-                \n| 1970-01-01T00:00:00.011 |\
-                \n| 1970-01-01T00:00:00.022 |\
-                \n| 1970-01-01T00:00:00.033 |\
-                \n| 1970-01-01T00:00:00.044 |\
-                \n| 1970-01-01T00:00:00.055 |\
-                \n| 1970-01-01T00:00:00.066 |\
-                \n| 1970-01-01T00:00:00.077 |\
-                \n| 1970-01-01T00:00:00.088 |\
-                \n| 1970-01-01T00:00:00.099 |\
-                \n+-------------------------+",
+                "+-------------------------+-------+\
+                \n| time                    | value |\
+                \n+-------------------------+-------+\
+                \n| 1970-01-01T00:00:00     | 0     |\
+                \n| 1970-01-01T00:00:00.011 | 0.011 |\
+                \n| 1970-01-01T00:00:00.022 | 0.022 |\
+                \n| 1970-01-01T00:00:00.033 | 0.033 |\
+                \n| 1970-01-01T00:00:00.044 | 0.044 |\
+                \n| 1970-01-01T00:00:00.055 | 0.055 |\
+                \n| 1970-01-01T00:00:00.066 | 0.066 |\
+                \n| 1970-01-01T00:00:00.077 | 0.077 |\
+                \n| 1970-01-01T00:00:00.088 | 0.088 |\
+                \n| 1970-01-01T00:00:00.099 | 0.099 |\
+                \n+-------------------------+-------+",
             ),
         )
         .await
@@ -327,12 +340,13 @@ mod test {
             100,
             1000,
             "time".to_string(),
+            "value".to_string(),
             String::from(
-                "+---------------------+\
-                \n| time                |\
-                \n+---------------------+\
-                \n| 1970-01-01T00:00:00 |\
-                \n+---------------------+",
+                "+---------------------+-------+\
+                \n| time                | value |\
+                \n+---------------------+-------+\
+                \n| 1970-01-01T00:00:00 | 0     |\
+                \n+---------------------+-------+",
             ),
         )
         .await
@@ -345,11 +359,12 @@ mod test {
             -1000,
             10,
             "time".to_string(),
+            "value".to_string(),
             String::from(
-                "+------+\
-                \n| time |\
-                \n+------+\
-                \n+------+",
+                "+------+-------+\
+                \n| time | value |\
+                \n+------+-------+\
+                \n+------+-------+",
             ),
         )
         .await

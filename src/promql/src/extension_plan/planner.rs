@@ -21,8 +21,9 @@ use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNode};
 use datafusion::physical_plan::planner::ExtensionPlanner;
 use datafusion::physical_plan::{ExecutionPlan, PhysicalPlanner};
 
-use super::{InstantManipulate, RangeManipulate, SeriesDivide};
-use crate::extension_plan::SeriesNormalize;
+use crate::extension_plan::{
+    EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
+};
 
 pub struct PromExtensionPlanner {}
 
@@ -44,6 +45,8 @@ impl ExtensionPlanner for PromExtensionPlanner {
             Ok(Some(node.to_execution_plan(physical_inputs[0].clone())))
         } else if let Some(node) = node.as_any().downcast_ref::<SeriesDivide>() {
             Ok(Some(node.to_execution_plan(physical_inputs[0].clone())))
+        } else if let Some(node) = node.as_any().downcast_ref::<EmptyMetric>() {
+            Ok(Some(node.to_execution_plan()))
         } else {
             Ok(None)
         }
