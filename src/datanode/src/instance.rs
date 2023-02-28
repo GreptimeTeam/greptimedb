@@ -436,7 +436,10 @@ async fn create_procedure_manager(
     );
 
     let object_store = new_object_store(&procedure_config.store).await?;
-    let manager_config = ManagerConfig { object_store , max_retry_times: procedure_config.max_retry_times};
+    let manager_config = ManagerConfig {
+        object_store,
+        max_retry_times: procedure_config.max_retry_times,
+    };
 
     Ok(Some(Arc::new(LocalManager::new(manager_config))))
 }

@@ -164,12 +164,10 @@ impl Default for ProcedureConfig {
 }
 
 impl ProcedureConfig {
-    pub fn construct(path: Option<String>,max_times:Option<u32>) -> ProcedureConfig {
-        let mut procedure_config:ProcedureConfig= Default::default();
+    pub fn construct(path: Option<String>, max_times: Option<u32>) -> ProcedureConfig {
+        let mut procedure_config: ProcedureConfig = Default::default();
         if let Some(path) = path {
-            procedure_config.store = ObjectStoreConfig::File(FileConfig {
-                data_dir: path,
-            });
+            procedure_config.store = ObjectStoreConfig::File(FileConfig { data_dir: path });
         }
         if let Some(max_times) = max_times {
             procedure_config.max_retry_times = max_times;

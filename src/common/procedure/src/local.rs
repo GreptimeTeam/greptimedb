@@ -585,7 +585,7 @@ mod tests {
         // Prepare data for the root procedure.
         for step in 0..3 {
             procedure_store
-                .store_procedure(root_id, step,0, &root, None)
+                .store_procedure(root_id, step, 0, &root, None)
                 .await
                 .unwrap();
         }
@@ -595,7 +595,7 @@ mod tests {
         // Prepare data for the child procedure
         for step in 0..2 {
             procedure_store
-                .store_procedure(child_id, step, 0,&child, Some(root_id))
+                .store_procedure(child_id, step, 0, &child, Some(root_id))
                 .await
                 .unwrap();
         }

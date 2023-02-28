@@ -82,11 +82,12 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Procedure retry exceeded max {} times, source: {}", max_retry_times, source))]
-   RetryTimesExceeded{
-        max_retry_times: u32,
-    },
-
+    #[snafu(display(
+        "Procedure retry exceeded max {} times, source: {}",
+        max_retry_times,
+        source
+    ))]
+    RetryTimesExceeded { max_retry_times: u32 },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -101,6 +102,7 @@ impl ErrorExt for Error {
             | Error::ListState { .. }
             | Error::ReadState { .. }
             | Error::FromJson { .. }
+            | Error::RetryTimesExceeded { .. }
             | Error::RetryLater { .. } => StatusCode::Internal,
             Error::LoaderConflict { .. } | Error::DuplicateProcedure { .. } => {
                 StatusCode::InvalidArguments

@@ -59,8 +59,9 @@ impl TestEnv {
         let accessor = Fs::default().root(&procedure_dir).build().unwrap();
         let object_store = ObjectStore::new(accessor).finish();
 
-        let procedure_manager = Arc::new(LocalManager::new(ManagerConfig { object_store ,
-        max_retry_times: 3,
+        let procedure_manager = Arc::new(LocalManager::new(ManagerConfig {
+            object_store,
+            max_retry_times: 3,
         }));
 
         let catalog_manager = Arc::new(MemoryCatalogManager::default());

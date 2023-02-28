@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::intrinsics::powf32;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,7 +24,7 @@ use crate::local::{ManagerContext, ProcedureMeta, ProcedureMetaRef};
 use crate::store::ProcedureStore;
 use crate::{BoxedProcedure, Context, ProcedureId, ProcedureState, ProcedureWithId, Status};
 
-const ERR_WAIT_DURATION: Duration = Duration::from_secs(30);
+const ERR_WAIT_DURATION: u64 = 30;
 
 #[derive(Debug)]
 enum ExecResult {
@@ -176,10 +177,9 @@ impl Runner {
                         self.retry_times += 1;
                         self.wait_on_err(self.retry_times).await;
                     } else {
-                        return Err(
-                            Error::RetryTimesExceeded {
-                                max_retry_times: self.max_retry_times,
-                            });
+                        return Err(Error::RetryTimesExceeded {
+                            max_retry_times: self.max_retry_times,
+                        });
                     }
                 }
                 ExecResult::Failed(e) => return Err(e),
@@ -303,7 +303,15 @@ impl Runner {
     }
 
     async fn wait_on_err(&self, i: u32) {
-        time::sleep(ERR_WAIT_DURATION).await;
+        let err_wait_duration: u64 = ERR_WAIT_DURATION * i;
+        logging::info!(
+            "Procedure {}-{} retry for the {} times after {} seconds",
+            self.procedure.type_name(),
+            self.meta.id,
+            i,
+            err_wait_duration,
+        );
+        time::sleep(Duration::from_secs(err_wait_duration)).await;
     }
 
     async fn on_suspended(&self, subprocedures: Vec<ProcedureWithId>) {
@@ -435,6 +443,7 @@ mod tests {
             manager_ctx: Arc::new(ManagerContext::new()),
             step: 0,
             retry_times: 0,
+            max_retry_times: 3,
             store,
         }
     }
@@ -490,8 +499,8 @@ mod tests {
 
     #[async_trait]
     impl<F> Procedure for ProcedureAdapter<F>
-        where
-            F: FnMut(Context) -> BoxFuture<'static, Result<Status>> + Send + Sync,
+    where
+        F: FnMut(Context) -> BoxFuture<'static, Result<Status>> + Send + Sync,
     {
         fn type_name(&self) -> &str {
             "ProcedureAdapter"
@@ -522,7 +531,7 @@ mod tests {
                     Ok(Status::Done)
                 }
             }
-                .boxed()
+            .boxed()
         };
         let normal = ProcedureAdapter {
             data: "normal".to_string(),
@@ -553,7 +562,7 @@ mod tests {
             &["0000000000.step"],
             &["0000000000.step", "0000000001.commit"],
         )
-            .await;
+        .await;
     }
 
     #[tokio::test]
@@ -570,7 +579,7 @@ mod tests {
                     persist: false,
                 })
             }
-                .boxed()
+            .boxed()
         };
         let suspend = ProcedureAdapter {
             data: "suspend".to_string(),
@@ -601,7 +610,7 @@ mod tests {
                     Ok(Status::Done)
                 }
             }
-                .boxed()
+            .boxed()
         };
         let child = ProcedureAdapter {
             data: "child".to_string(),
@@ -664,7 +673,7 @@ mod tests {
                     }
                 }
             }
-                .boxed()
+            .boxed()
         };
         let parent = ProcedureAdapter {
             data: "parent".to_string(),
@@ -694,14 +703,14 @@ mod tests {
                 child_id,
                 &["0000000000.step", "0000000001.commit"],
             )
-                .await;
+            .await;
         }
         check_files(
             &object_store,
             procedure_id,
             &["0000000000.step", "0000000001.commit"],
         )
-            .await;
+        .await;
     }
 
     #[tokio::test]
@@ -728,6 +737,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_execute_exceed_max_retry_later() {
+        let exec_fn =
+            |_| async { Err(Error::retry_later(MockError::new(StatusCode::Unexpected))) }.boxed();
+
+        let exceed_max_retry_later = ProcedureAdapter {
+            data: "exceed_max_retry_later".to_string(),
+            lock_key: LockKey::single("catalog.schema.table"),
+            exec_fn,
+        };
+
+        let dir = TempDir::new("exceed_max_retry_later").unwrap();
+        let meta = retry_later.new_meta(ROOT_ID);
+        let object_store = test_util::new_object_store(&dir);
+        let procedure_store = ProcedureStore::from(object_store.clone());
+        let mut runner = new_runner(
+            meta.clone(),
+            Box::new(exceed_max_retry_later),
+            procedure_store,
+        );
+        runner.max_retry_times = 0;
+
+        // Run the runer and execute the procedure.
+        let err = runner.execute_procedure_in_loop().await.unwrap_err();
+        println!(err.to_string());
+    }
+
+    #[tokio::test]
     async fn test_execute_on_retry_later_error() {
         let mut times = 0;
 
@@ -740,7 +776,7 @@ mod tests {
                     Ok(Status::Done)
                 }
             }
-                .boxed()
+            .boxed()
         };
 
         let retry_later = ProcedureAdapter {
@@ -811,7 +847,7 @@ mod tests {
                     }
                 }
             }
-                .boxed()
+            .boxed()
         };
         let parent = ProcedureAdapter {
             data: "parent".to_string(),

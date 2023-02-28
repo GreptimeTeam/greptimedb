@@ -144,7 +144,10 @@ impl TryFrom<StartCommand> for DatanodeOptions {
         }
 
         if cmd.enable_procedure {
-            opts.procedure = Some(ProcedureConfig::construct(cmd.procedure_dir, cmd.procedure_max_retry_times));
+            opts.procedure = Some(ProcedureConfig::construct(
+                cmd.procedure_dir,
+                cmd.procedure_max_retry_times,
+            ));
         }
 
         Ok(opts)
