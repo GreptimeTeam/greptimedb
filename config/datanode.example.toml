@@ -1,35 +1,52 @@
-node_id = 42
-mode = 'distributed'
-rpc_addr = '127.0.0.1:3001'
-rpc_hostname = '127.0.0.1'
-rpc_runtime_size = 8
-mysql_addr = '127.0.0.1:4406'
-mysql_runtime_size = 4
+# Node running mode, see `standalone.example.toml`.
+mode = "distributed"
+# Whether to use in-memory catalog, see `standalone.example.toml`.
 enable_memory_catalog = false
+# The datanode identifier, should be unique.
+node_id = 42
+# gRPC server address, "127.0.0.1:3001" by default.
+rpc_addr = "127.0.0.1:3001"
+# Hostname of this node.
+rpc_hostname = "127.0.0.1"
+# The number of gRPC server worker threads, 8 by default.
+rpc_runtime_size = 8
+# MySQL server address, "127.0.0.1:4406" by default.
+mysql_addr = "127.0.0.1:4406"
+# The number of MySQL server worker threads, 2 by default.
+mysql_runtime_size = 2
 
+# Metasrv client options.
+[meta_client_options]
+# Metasrv address list.
+metasrv_addrs = ["127.0.0.1:3002"]
+# Operation timeout in milliseconds, 3000 by default.
+timeout_millis = 3000
+# Connect server timeout in milliseconds, 5000 by default.
+connect_timeout_millis = 5000
+# `TCP_NODELAY` option for accepted connections, true by default.
+tcp_nodelay = true
+
+# WAL options, see `standalone.example.toml`.
 [wal]
 dir = "/tmp/greptimedb/wal"
-file_size = '1GB'
-purge_interval = '10m'
-purge_threshold = '50GB'
+file_size = "1GiB"
+purge_threshold = "50GiB"
+purge_interval = "10m"
 read_batch_size = 128
 sync_write = false
 
+# Storage options, see `standalone.example.toml`.
 [storage]
-type = 'File'
-data_dir = '/tmp/greptimedb/data/'
+type = "File"
+data_dir = "/tmp/greptimedb/data/"
 
-[meta_client_options]
-metasrv_addrs = ['127.0.0.1:3002']
-timeout_millis = 3000
-connect_timeout_millis = 5000
-tcp_nodelay = false
-
+# Compaction options, see `standalone.example.toml`.
 [compaction]
 max_inflight_tasks = 4
-max_files_in_level0 = 16
+max_files_in_level0 = 8
 max_purge_tasks = 32
 
-[procedure.store]
-type = 'File'
-data_dir = '/tmp/greptimedb/procedure/'
+# Procedure storage options, see `standalone.example.toml`.
+# [procedure.store]
+# type = 'File'
+# data_dir = '/tmp/greptimedb/procedure/'
