@@ -19,6 +19,7 @@ use axum::extract::{Query, RawBody, State};
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
+use common_telemetry::error;
 use hyper::Body;
 use prost::Message;
 use schemars::JsonSchema;
@@ -59,7 +60,14 @@ pub async fn remote_write(
         QueryContext::arc()
     };
 
-    handler.write(request, ctx).await?;
+    // TODO debug log
+    // handler.write(request, ctx).await?;
+    let re = handler.write(request, ctx).await;
+    if re.is_err() {
+        error!("prom write error: {:#?}", re.as_ref().err().unwrap());
+    }
+    re?;
+
     Ok((StatusCode::NO_CONTENT, ()))
 }
 
@@ -91,7 +99,13 @@ pub async fn remote_read(
         QueryContext::arc()
     };
 
-    handler.read(request, ctx).await
+    // TODO debug log
+    // handler.read(request, ctx).await
+    let re = handler.read(request, ctx).await;
+    if re.is_err() {
+        error!("prom read error: {:#?}", re.as_ref().err().unwrap());
+    }
+    re
 }
 
 async fn decode_remote_write_request(body: Body) -> Result<WriteRequest> {
