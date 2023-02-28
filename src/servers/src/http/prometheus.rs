@@ -18,7 +18,7 @@ use api::prometheus::remote::{ReadRequest, WriteRequest};
 use axum::extract::{Query, RawBody, State};
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use hyper::Body;
 use prost::Message;
 use schemars::JsonSchema;
@@ -85,7 +85,8 @@ pub async fn remote_read(
     let request = decode_remote_read_request(body).await?;
 
     let ctx = if let Some(db) = params.db {
-        Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, &db))
+        let (catalog, schema) = parse_catalog_and_schema_from_client_database_name(&db);
+        Arc::new(QueryContext::with(catalog, schema))
     } else {
         QueryContext::arc()
     };

@@ -13,16 +13,20 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use axum::extract::{Query, RawBody, State};
 use axum::http::StatusCode as HttpStatusCode;
 use axum::Json;
+use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use hyper::Body;
 use serde::{Deserialize, Serialize};
+use session::context::QueryContext;
 use snafu::ResultExt;
 
 use crate::error::{self, Error, Result};
 use crate::opentsdb::codec::DataPoint;
+use crate::parse_catalog_and_schema_from_client_database_name;
 use crate::query_handler::OpentsdbProtocolHandlerRef;
 
 #[derive(Serialize, Deserialize)]
@@ -75,17 +79,23 @@ pub enum OpentsdbPutResponse {
 #[axum_macros::debug_handler]
 pub async fn put(
     State(opentsdb_handler): State<OpentsdbProtocolHandlerRef>,
-    Query(params): Query<HashMap<String, String>>,
+    Query(mut params): Query<HashMap<String, String>>,
     RawBody(body): RawBody,
 ) -> Result<(HttpStatusCode, Json<OpentsdbPutResponse>)> {
     let summary = params.contains_key("summary");
     let details = params.contains_key("details");
 
+    let db = params
+        .remove("db")
+        .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
+    let (catalog, schema) = parse_catalog_and_schema_from_client_database_name(&db);
+    let ctx = Arc::new(QueryContext::with(catalog, schema));
+
     let data_points = parse_data_points(body).await?;
 
     let response = if !summary && !details {
         for data_point in data_points.into_iter() {
-            if let Err(e) = opentsdb_handler.exec(&data_point.into()).await {
+            if let Err(e) = opentsdb_handler.exec(&data_point.into(), ctx.clone()).await {
                 // Not debugging purpose, failed fast.
                 return error::InternalSnafu {
                     err_msg: e.to_string(),
@@ -106,7 +116,9 @@ pub async fn put(
         };
 
         for data_point in data_points.into_iter() {
-            let result = opentsdb_handler.exec(&data_point.clone().into()).await;
+            let result = opentsdb_handler
+                .exec(&data_point.clone().into(), ctx.clone())
+                .await;
             match result {
                 Ok(()) => response.on_success(),
                 Err(e) => {

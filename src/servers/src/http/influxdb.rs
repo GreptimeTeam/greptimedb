@@ -49,7 +49,6 @@ pub async fn influxdb_write(
         .remove("db")
         .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
     let (catalog, schema) = parse_catalog_and_schema_from_client_database_name(&db);
-
     let ctx = Arc::new(QueryContext::with(catalog, schema));
 
     let precision = params
