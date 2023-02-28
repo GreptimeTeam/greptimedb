@@ -149,19 +149,32 @@ impl From<&DatanodeOptions> for StorageEngineConfig {
 pub struct ProcedureConfig {
     /// Storage config for procedure manager.
     pub store: ObjectStoreConfig,
+    pub retry_max_times: u8,
 }
 
 impl Default for ProcedureConfig {
     fn default() -> ProcedureConfig {
-        ProcedureConfig::from_file_path("/tmp/greptimedb/procedure/".to_string())
+        ProcedureConfig {
+            store: ObjectStoreConfig::File(FileConfig {
+                data_dir: "/tmp/greptimedb/procedure/".to_string(),
+            }),
+            retry_max_times: 3,
+        }
     }
 }
 
 impl ProcedureConfig {
-    pub fn from_file_path(path: String) -> ProcedureConfig {
-        ProcedureConfig {
-            store: ObjectStoreConfig::File(FileConfig { data_dir: path }),
+    pub fn construct(path: Option<String>,max_times:Option<u8>) -> ProcedureConfig {
+        let mut procedure_config:ProcedureConfig= Default::default();
+        if let Some(path) = path {
+            procedure_config.store = ObjectStoreConfig::File(FileConfig {
+                data_dir: path,
+            });
         }
+        if let Some(max_times) = max_times {
+            procedure_config.retry_max_times = max_times;
+        }
+        return procedure_config;
     }
 }
 

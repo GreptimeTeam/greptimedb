@@ -67,8 +67,12 @@ struct StartCommand {
     data_dir: Option<String>,
     #[clap(long)]
     wal_dir: Option<String>,
+    #[clap(long, default_value = false)]
+    enable_procedure: bool,
     #[clap(long)]
     procedure_dir: Option<String>,
+    #[clap(long)]
+    procedure_max_retry_times: Option<u8>,
 }
 
 impl StartCommand {
@@ -139,8 +143,8 @@ impl TryFrom<StartCommand> for DatanodeOptions {
             opts.wal.dir = wal_dir;
         }
 
-        if let Some(procedure_dir) = cmd.procedure_dir {
-            opts.procedure = Some(ProcedureConfig::from_file_path(procedure_dir));
+        if cmd.enable_procedure {
+            opts.procedure = Some(ProcedureConfig::construct(cmd.procedure_dir, cmd.procedure_max_retry_times));
         }
 
         Ok(opts)
