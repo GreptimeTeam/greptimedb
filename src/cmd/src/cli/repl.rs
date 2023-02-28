@@ -13,24 +13,39 @@
 // limitations under the License.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
+use catalog::remote::MetaKvBackend;
 use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::ErrorExt;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::logging;
 use either::Either;
+use frontend::catalog::FrontendCatalogManager;
+use frontend::datanode::DatanodeClients;
+use meta_client::client::MetaClientBuilder;
+use partition::manager::PartitionRuleManager;
+use partition::route::TableRoutes;
+use query::datafusion::DatafusionQueryEngine;
+use query::logical_optimizer::LogicalOptimizer;
+use query::parser::QueryLanguageParser;
+use query::plan::LogicalPlan;
+use query::QueryEngine;
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
+use session::context::QueryContext;
 use snafu::{ErrorCompat, ResultExt};
+use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 
 use crate::cli::cmd::ReplCommand;
 use crate::cli::helper::RustylineHelper;
 use crate::cli::AttachCommand;
 use crate::error::{
-    CollectRecordBatchesSnafu, PrettyPrintRecordBatchesSnafu, ReadlineSnafu, ReplCreationSnafu,
-    RequestDatabaseSnafu, Result,
+    CollectRecordBatchesSnafu, ParseSqlSnafu, PlanStatementSnafu, PrettyPrintRecordBatchesSnafu,
+    ReadlineSnafu, ReplCreationSnafu, RequestDatabaseSnafu, Result, StartMetaClientSnafu,
+    SubstraitEncodeLogicalPlanSnafu,
 };
 
 /// Captures the state of the repl, gathers commands and executes them one by one
@@ -43,6 +58,8 @@ pub(crate) struct Repl {
 
     /// Client for interacting with GreptimeDB
     database: Database,
+
+    query_engine: Option<DatafusionQueryEngine>,
 }
 
 #[allow(clippy::print_stdout)]
@@ -51,7 +68,7 @@ impl Repl {
         println!("{}", ReplCommand::help())
     }
 
-    pub(crate) fn try_new(cmd: &AttachCommand) -> Result<Self> {
+    pub(crate) async fn try_new(cmd: &AttachCommand) -> Result<Self> {
         let mut rl = Editor::new().context(ReplCreationSnafu)?;
 
         if !cmd.disable_helper {
@@ -69,10 +86,17 @@ impl Repl {
         let client = Client::with_urls([&cmd.grpc_addr]);
         let database = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
 
+        let query_engine = if let Some(meta_addr) = &cmd.meta_addr {
+            create_query_engine(meta_addr).await.map(Some)?
+        } else {
+            None
+        };
+
         Ok(Self {
             rl,
             prompt: "> ".to_string(),
             database,
+            query_engine,
         })
     }
 
@@ -134,11 +158,29 @@ impl Repl {
     async fn do_execute_sql(&self, sql: String) -> Result<()> {
         let start = Instant::now();
 
-        let output = self
-            .database
-            .sql(&sql)
-            .await
-            .context(RequestDatabaseSnafu { sql: &sql })?;
+        let output = if let Some(query_engine) = &self.query_engine {
+            let stmt = QueryLanguageParser::parse_sql(&sql)
+                .with_context(|_| ParseSqlSnafu { sql: sql.clone() })?;
+
+            let query_ctx = Arc::new(QueryContext::with(
+                self.database.catalog(),
+                self.database.schema(),
+            ));
+            let LogicalPlan::DfPlan(plan) = query_engine
+                .statement_to_plan(stmt, query_ctx)
+                .await
+                .and_then(|x| query_engine.optimize(&x))
+                .context(PlanStatementSnafu)?;
+
+            let plan = DFLogicalSubstraitConvertor {}
+                .encode(plan)
+                .context(SubstraitEncodeLogicalPlanSnafu)?;
+
+            self.database.logical_plan(plan.to_vec()).await
+        } else {
+            self.database.sql(&sql).await
+        }
+        .context(RequestDatabaseSnafu { sql: &sql })?;
 
         let either = match output {
             Output::Stream(s) => {
@@ -196,4 +238,30 @@ fn history_file() -> PathBuf {
     };
     buf.push(".greptimedb_cli_history");
     buf
+}
+
+async fn create_query_engine(meta_addr: &str) -> Result<DatafusionQueryEngine> {
+    let mut meta_client = MetaClientBuilder::default().enable_store().build();
+    meta_client
+        .start([meta_addr])
+        .await
+        .context(StartMetaClientSnafu)?;
+    let meta_client = Arc::new(meta_client);
+
+    let backend = Arc::new(MetaKvBackend {
+        client: meta_client.clone(),
+    });
+
+    let table_routes = Arc::new(TableRoutes::new(meta_client));
+    let partition_manager = Arc::new(PartitionRuleManager::new(table_routes));
+
+    let datanode_clients = Arc::new(DatanodeClients::default());
+
+    let catalog_list = Arc::new(FrontendCatalogManager::new(
+        backend,
+        partition_manager,
+        datanode_clients,
+    ));
+
+    Ok(DatafusionQueryEngine::new(catalog_list, Default::default()))
 }
