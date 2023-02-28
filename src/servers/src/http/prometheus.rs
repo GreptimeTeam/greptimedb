@@ -19,7 +19,6 @@ use axum::extract::{Query, RawBody, State};
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
-use common_telemetry::error;
 use hyper::Body;
 use prost::Message;
 use schemars::JsonSchema;
