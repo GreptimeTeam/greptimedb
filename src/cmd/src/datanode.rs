@@ -67,7 +67,7 @@ struct StartCommand {
     data_dir: Option<String>,
     #[clap(long)]
     wal_dir: Option<String>,
-    #[clap(long, default_value = false)]
+    #[clap(long)]
     enable_procedure: bool,
     #[clap(long)]
     procedure_dir: Option<String>,
