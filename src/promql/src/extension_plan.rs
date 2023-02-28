@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod empty_metric;
 mod instant_manipulate;
 mod normalize;
 mod planner;
@@ -19,6 +20,7 @@ mod range_manipulate;
 mod series_divide;
 
 use datafusion::arrow::datatypes::{ArrowPrimitiveType, TimestampMillisecondType};
+pub use empty_metric::{EmptyMetric, EmptyMetricExec, EmptyMetricStream};
 pub use instant_manipulate::{InstantManipulate, InstantManipulateExec, InstantManipulateStream};
 pub use normalize::{SeriesNormalize, SeriesNormalizeExec, SeriesNormalizeStream};
 pub use planner::PromExtensionPlanner;
