@@ -301,6 +301,7 @@ impl Runner {
         });
     }
 
+    /// Extend the retry time to wait for the next retry.
     async fn wait_on_err(&self, i: u32) {
         let err_wait_duration = ERR_WAIT_DURATION * i as u64;
         logging::info!(
