@@ -236,7 +236,7 @@ async fn test_execute_insert_by_select() {
 +-------+------+--------+---------------------+
 | host  | cpu  | memory | ts                  |
 +-------+------+--------+---------------------+
-| host1 | 66.6 | 1024   | 2022-06-15T07:02:37 |
+| host1 | 66.6 | 1024.0 | 2022-06-15T07:02:37 |
 | host2 | 88.8 | 333.3  | 2022-06-15T07:02:38 |
 +-------+------+--------+---------------------+"
         .to_string();
@@ -457,8 +457,8 @@ async fn test_rename_table() {
 +-------+-----+--------+---------------------+
 | host  | cpu | memory | ts                  |
 +-------+-----+--------+---------------------+
-| host1 | 1.1 | 100    | 1970-01-01T00:00:01 |
-| host2 | 2.2 | 200    | 1970-01-01T00:00:02 |
+| host1 | 1.1 | 100.0  | 1970-01-01T00:00:01 |
+| host2 | 2.2 | 200.0  | 1970-01-01T00:00:02 |
 +-------+-----+--------+---------------------+\
 "
     .to_string();
@@ -559,9 +559,9 @@ async fn test_alter_table() {
 +-------+-----+--------+---------------------+--------+
 | host  | cpu | memory | ts                  | my_tag |
 +-------+-----+--------+---------------------+--------+
-| host1 | 1.1 | 100    | 1970-01-01T00:00:01 |        |
-| host2 | 2.2 | 200    | 1970-01-01T00:00:02 | hello  |
-| host3 | 3.3 | 300    | 1970-01-01T00:00:03 |        |
+| host1 | 1.1 | 100.0  | 1970-01-01T00:00:01 |        |
+| host2 | 2.2 | 200.0  | 1970-01-01T00:00:02 | hello  |
+| host3 | 3.3 | 300.0  | 1970-01-01T00:00:03 |        |
 +-------+-----+--------+---------------------+--------+\
     "
     .to_string();
@@ -594,14 +594,14 @@ async fn test_alter_table() {
 
     let output = execute_sql(&instance, "select * from demo order by ts").await;
     let expected = "\
-+-------+-----+---------------------+--------+
-| host  | cpu | ts                  | my_tag |
-+-------+-----+---------------------+--------+
-| host1 | 1.1 | 1970-01-01T00:00:01 |        |
-| host2 | 2.2 | 1970-01-01T00:00:02 | hello  |
-| host3 | 3.3 | 1970-01-01T00:00:03 |        |
-| host4 | 400 | 1970-01-01T00:00:04 | world  |
-+-------+-----+---------------------+--------+\
++-------+-------+---------------------+--------+
+| host  | cpu   | ts                  | my_tag |
++-------+-------+---------------------+--------+
+| host1 | 1.1   | 1970-01-01T00:00:01 |        |
+| host2 | 2.2   | 1970-01-01T00:00:02 | hello  |
+| host3 | 3.3   | 1970-01-01T00:00:03 |        |
+| host4 | 400.0 | 1970-01-01T00:00:04 | world  |
++-------+-------+---------------------+--------+\
     "
     .to_string();
     check_output_stream(output, expected).await;
@@ -757,12 +757,42 @@ async fn test_delete() {
 +-------+---------------------+------+--------+
 | host  | ts                  | cpu  | memory |
 +-------+---------------------+------+--------+
-| host2 | 2022-06-15T07:02:38 | 77.7 | 2048   |
-| host3 | 2022-06-15T07:02:39 | 88.8 | 3072   |
+| host2 | 2022-06-15T07:02:38 | 77.7 | 2048.0 |
+| host3 | 2022-06-15T07:02:39 | 88.8 | 3072.0 |
 +-------+---------------------+------+--------+\
 "
     .to_string();
     check_output_stream(output, expect).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_execute_copy_to() {
+    let instance = setup_test_instance("test_execute_copy_to").await;
+
+    // setups
+    execute_sql(
+        &instance,
+        "create table demo(host string, cpu double, memory double, ts timestamp time index);",
+    )
+    .await;
+
+    let output = execute_sql(
+        &instance,
+        r#"insert into demo(host, cpu, memory, ts) values
+                            ('host1', 66.6, 1024, 1655276557000),
+                            ('host2', 88.8,  333.3, 1655276558000)
+                            "#,
+    )
+    .await;
+    assert!(matches!(output, Output::AffectedRows(2)));
+
+    // exports
+    let data_dir = instance.data_tmp_dir().path();
+
+    let copy_to_stmt = format!("Copy demo TO '{}/export/demo.parquet'", data_dir.display());
+
+    let output = execute_sql(&instance, &copy_to_stmt).await;
+    assert!(matches!(output, Output::AffectedRows(2)));
 }
 
 async fn execute_sql(instance: &MockInstance, sql: &str) -> Output {

@@ -126,6 +126,7 @@ impl ScriptsTable {
                 DEFAULT_SCHEMA_NAME,
                 SCRIPTS_TABLE_NAME,
             )
+            .await
             .context(FindScriptsTableSnafu)?
             .context(ScriptsTableNotFoundSnafu)?;
 
@@ -160,6 +161,7 @@ impl ScriptsTable {
         let plan = self
             .query_engine
             .statement_to_plan(stmt, Arc::new(QueryContext::new()))
+            .await
             .unwrap();
 
         let stream = match self

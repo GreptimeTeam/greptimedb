@@ -15,6 +15,9 @@ SELECT a AS k, b FROM test UNION SELECT a AS k, b FROM test ORDER BY k;
 SELECT a % 2, b FROM test UNION SELECT b, a % 2 AS k ORDER BY a % 2;
 
 -- Works duckdb, but not work in greptimedb
+-- TODO(LFC): Failed to meet the expected error:
+-- expected:
+--   Error: 3000(PlanQuery), Schema error: No field named 'a'. Valid fields are 'test.a % Int64(2)', 'b'.
 SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY a % 2;
 
 SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY 3;

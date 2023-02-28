@@ -20,6 +20,12 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 #[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 pub struct Bytes(bytes::Bytes);
 
+impl From<Bytes> for bytes::Bytes {
+    fn from(value: Bytes) -> Self {
+        value.0
+    }
+}
+
 impl From<bytes::Bytes> for Bytes {
     fn from(bytes: bytes::Bytes) -> Bytes {
         Bytes(bytes)

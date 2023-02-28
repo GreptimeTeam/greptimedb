@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+async-recursion = "1.0"
+async-trait.workspace = true
 bytes = "1.1"
 catalog = { path = "../../catalog" }
 common-catalog = { path = "../catalog" }
@@ -14,13 +16,14 @@ datafusion.workspace = true
 datafusion-expr.workspace = true
 datatypes = { path = "../../datatypes" }
 futures = "0.3"
-prost = "0.9"
+prost.workspace = true
+session = { path = "../../session" }
 snafu.workspace = true
 table = { path = "../../table" }
 
 [dependencies.substrait_proto]
 package = "substrait"
-version = "0.2"
+version = "0.4"
 
 [dev-dependencies]
 datatypes = { path = "../../datatypes" }

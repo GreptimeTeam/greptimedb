@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #![feature(let_chains)]
+#![feature(trait_upcasting)]
 
 mod context;
 mod df_expr;
@@ -21,17 +22,19 @@ pub mod error;
 mod schema;
 mod types;
 
+use async_trait::async_trait;
 use bytes::{Buf, Bytes};
 use catalog::CatalogManagerRef;
 
 pub use crate::df_logical::DFLogicalSubstraitConvertor;
 
+#[async_trait]
 pub trait SubstraitPlan {
     type Error: std::error::Error;
 
     type Plan;
 
-    fn decode<B: Buf + Send>(
+    async fn decode<B: Buf + Send>(
         &self,
         message: B,
         catalog_manager: CatalogManagerRef,

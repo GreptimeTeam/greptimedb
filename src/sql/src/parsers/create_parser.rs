@@ -22,7 +22,7 @@ use sqlparser::ast::{ColumnOption, ColumnOptionDef, DataType, Value};
 use sqlparser::dialect::keywords::Keyword;
 use sqlparser::parser::IsOptional::Mandatory;
 use sqlparser::parser::{Parser, ParserError};
-use sqlparser::tokenizer::{Token, Word};
+use sqlparser::tokenizer::{Token, TokenWithLocation, Word};
 
 use crate::ast::{ColumnDef, Ident, TableConstraint, Value as SqlValue};
 use crate::error::{
@@ -45,7 +45,7 @@ static THAN: Lazy<Token> = Lazy::new(|| Token::make_keyword("THAN"));
 /// Parses create [table] statement
 impl<'a> ParserContext<'a> {
     pub(crate) fn parse_create(&mut self) -> Result<Statement> {
-        match self.parser.peek_token() {
+        match self.parser.peek_token().token {
             Token::Word(w) => match w.keyword {
                 Keyword::TABLE => self.parse_create_table(),
 
@@ -135,7 +135,7 @@ impl<'a> ParserContext<'a> {
 
         let column_list = self
             .parser
-            .parse_parenthesized_column_list(Mandatory)
+            .parse_parenthesized_column_list(Mandatory, false)
             .context(error::SyntaxSnafu { sql: self.sql })?;
 
         let entries = self.parse_comma_separated(Self::parse_partition_entry)?;
@@ -172,7 +172,7 @@ impl<'a> ParserContext<'a> {
     }
 
     fn parse_value_list(&mut self) -> Result<SqlValue> {
-        let token = self.parser.peek_token();
+        let token = self.parser.peek_token().token;
         let value = match token {
             Token::Word(Word { value, .. }) if value == MAXVALUE => {
                 let _ = self.parser.next_token();
@@ -228,7 +228,7 @@ impl<'a> ParserContext<'a> {
         loop {
             if let Some(constraint) = self.parse_optional_table_constraint()? {
                 constraints.push(constraint);
-            } else if let Token::Word(_) = self.parser.peek_token() {
+            } else if let Token::Word(_) = self.parser.peek_token().token {
                 self.parse_column(&mut columns, &mut constraints)?;
             } else {
                 return self.expected(
@@ -387,7 +387,10 @@ impl<'a> ParserContext<'a> {
             Ok(Some(ColumnOption::NotNull))
         } else if parser.parse_keywords(&[Keyword::COMMENT]) {
             match parser.next_token() {
-                Token::SingleQuotedString(value, ..) => Ok(Some(ColumnOption::Comment(value))),
+                TokenWithLocation {
+                    token: Token::SingleQuotedString(value, ..),
+                    ..
+                } => Ok(Some(ColumnOption::Comment(value))),
                 unexpected => parser.expected("string", unexpected),
             }
         } else if parser.parse_keyword(Keyword::NULL) {
@@ -428,7 +431,10 @@ impl<'a> ParserContext<'a> {
             None
         };
         match self.parser.next_token() {
-            Token::Word(w) if w.keyword == Keyword::PRIMARY => {
+            TokenWithLocation {
+                token: Token::Word(w),
+                ..
+            } if w.keyword == Keyword::PRIMARY => {
                 self.parser
                     .expect_keyword(Keyword::KEY)
                     .context(error::UnexpectedSnafu {
@@ -438,7 +444,7 @@ impl<'a> ParserContext<'a> {
                     })?;
                 let columns = self
                     .parser
-                    .parse_parenthesized_column_list(Mandatory)
+                    .parse_parenthesized_column_list(Mandatory, false)
                     .context(error::SyntaxSnafu { sql: self.sql })?;
                 Ok(Some(TableConstraint::Unique {
                     name,
@@ -446,7 +452,10 @@ impl<'a> ParserContext<'a> {
                     is_primary: true,
                 }))
             }
-            Token::Word(w) if w.keyword == Keyword::TIME => {
+            TokenWithLocation {
+                token: Token::Word(w),
+                ..
+            } if w.keyword == Keyword::TIME => {
                 self.parser
                     .expect_keyword(Keyword::INDEX)
                     .context(error::UnexpectedSnafu {
@@ -457,7 +466,7 @@ impl<'a> ParserContext<'a> {
 
                 let columns = self
                     .parser
-                    .parse_parenthesized_column_list(Mandatory)
+                    .parse_parenthesized_column_list(Mandatory, false)
                     .context(error::SyntaxSnafu { sql: self.sql })?;
 
                 ensure!(
@@ -503,9 +512,11 @@ impl<'a> ParserContext<'a> {
                 actual: self.peek_token_as_string(),
             })?;
 
-        match self.parser.next_token() {
-            Token::Word(w) => Ok(w.value),
-            unexpected => self.expected("Engine is missing", unexpected),
+        let token = self.parser.next_token();
+        if let Token::Word(w) = token.token {
+            Ok(w.value)
+        } else {
+            self.expected("'Engine' is missing", token)
         }
     }
 }

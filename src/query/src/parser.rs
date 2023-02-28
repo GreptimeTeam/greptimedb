@@ -157,7 +157,7 @@ mod test {
                     distinct: false, \
                     top: None, \
                     projection: \
-                    [Wildcard(WildcardAdditionalOptions { opt_exclude: None, opt_except: None })], \
+                    [Wildcard(WildcardAdditionalOptions { opt_exclude: None, opt_except: None, opt_rename: None })], \
                     into: None, \
                     from: [TableWithJoins { relation: Table { name: ObjectName([Ident { value: \"t1\", quote_style: None }]\
                 ), \
@@ -174,7 +174,7 @@ mod test {
             sort_by: [], \
             having: None, \
             qualify: None \
-            }), order_by: [], limit: None, offset: None, fetch: None, lock: None }, param_types: [] }))");
+            }), order_by: [], limit: None, offset: None, fetch: None, locks: [] }, param_types: [] }))");
 
         assert_eq!(format!("{stmt:?}"), expected);
     }

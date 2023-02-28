@@ -19,28 +19,21 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use catalog::CatalogListRef;
 use common_base::Plugins;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
-use common_query::physical_plan::{SessionContext, TaskContext};
+use common_query::physical_plan::SessionContext;
 use common_query::prelude::ScalarUdf;
-use datafusion::catalog::TableReference;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::{QueryPlanner, SessionConfig, SessionState};
 use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::physical_plan::planner::DefaultPhysicalPlanner;
-use datafusion::physical_plan::udf::ScalarUDF;
 use datafusion::physical_plan::{ExecutionPlan, PhysicalPlanner};
-use datafusion_common::ScalarValue;
-use datafusion_expr::{LogicalPlan as DfLogicalPlan, TableSource};
+use datafusion_expr::LogicalPlan as DfLogicalPlan;
 use datafusion_optimizer::optimizer::Optimizer;
-use datafusion_sql::planner::ContextProvider;
-use datatypes::arrow::datatypes::DataType;
 use promql::extension_plan::PromExtensionPlanner;
-use session::context::QueryContextRef;
 
 use crate::datafusion::DfCatalogListAdapter;
 use crate::optimizer::TypeConversionRule;
-use crate::query_engine::options::{validate_table_references, QueryOptions};
+use crate::query_engine::options::QueryOptions;
 
 /// Query engine global state
 // TODO(yingwen): This QueryEngineState still relies on datafusion, maybe we can define a trait for it,
@@ -64,16 +57,18 @@ impl fmt::Debug for QueryEngineState {
 impl QueryEngineState {
     pub fn new(catalog_list: CatalogListRef, plugins: Arc<Plugins>) -> Self {
         let runtime_env = Arc::new(RuntimeEnv::default());
-        let session_config = SessionConfig::new()
-            .with_default_catalog_and_schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        let session_config = SessionConfig::new().with_create_default_catalog_and_schema(false);
         let mut optimizer = Optimizer::new();
         // Apply the type conversion rule first.
         optimizer.rules.insert(0, Arc::new(TypeConversionRule {}));
 
-        let mut session_state = SessionState::with_config_rt(session_config, runtime_env);
-        session_state.optimizer = optimizer;
-        session_state.catalog_list = Arc::new(DfCatalogListAdapter::new(catalog_list.clone()));
-        session_state.query_planner = Arc::new(DfQueryPlanner::new());
+        let session_state = SessionState::with_config_rt_and_catalog_list(
+            session_config,
+            runtime_env,
+            Arc::new(DfCatalogListAdapter::new(catalog_list.clone())),
+        )
+        .with_optimizer_rules(optimizer.rules)
+        .with_query_planner(Arc::new(DfQueryPlanner::new()));
 
         let df_context = SessionContext::with_state(session_state);
 
@@ -113,69 +108,15 @@ impl QueryEngineState {
         &self.catalog_list
     }
 
-    #[inline]
-    pub(crate) fn task_ctx(&self) -> Arc<TaskContext> {
-        self.df_context.task_ctx()
+    pub(crate) fn disallow_cross_schema_query(&self) -> bool {
+        self.plugins
+            .get::<QueryOptions>()
+            .map(|x| x.disallow_cross_schema_query)
+            .unwrap_or(false)
     }
 
-    pub(crate) fn get_table_provider(
-        &self,
-        query_ctx: QueryContextRef,
-        name: TableReference,
-    ) -> DfResult<Arc<dyn TableSource>> {
-        let state = self.df_context.state();
-
-        if let Some(opts) = self.plugins.get::<QueryOptions>() {
-            if opts.disallow_cross_schema_query {
-                validate_table_references(name, &query_ctx)?;
-            }
-        }
-
-        if let TableReference::Bare { table } = name {
-            let name = TableReference::Partial {
-                schema: &query_ctx.current_schema(),
-                table,
-            };
-            state.get_table_provider(name)
-        } else {
-            state.get_table_provider(name)
-        }
-    }
-
-    pub(crate) fn get_function_meta(&self, name: &str) -> Option<Arc<ScalarUDF>> {
-        self.df_context.state().get_function_meta(name)
-    }
-
-    pub(crate) fn get_variable_type(&self, variable_names: &[String]) -> Option<DataType> {
-        self.df_context.state().get_variable_type(variable_names)
-    }
-
-    pub(crate) fn get_config_option(&self, variable: &str) -> Option<ScalarValue> {
-        self.df_context.state().get_config_option(variable)
-    }
-
-    pub(crate) fn optimize(&self, plan: &DfLogicalPlan) -> DfResult<DfLogicalPlan> {
-        self.df_context.optimize(plan)
-    }
-
-    pub(crate) async fn create_physical_plan(
-        &self,
-        logical_plan: &DfLogicalPlan,
-    ) -> DfResult<Arc<dyn ExecutionPlan>> {
-        self.df_context.create_physical_plan(logical_plan).await
-    }
-
-    pub(crate) fn optimize_physical_plan(
-        &self,
-        mut plan: Arc<dyn ExecutionPlan>,
-    ) -> DfResult<Arc<dyn ExecutionPlan>> {
-        let state = self.df_context.state();
-        let config = &state.config;
-        for optimizer in &state.physical_optimizers {
-            plan = optimizer.optimize(plan, config)?;
-        }
-
-        Ok(plan)
+    pub(crate) fn session_state(&self) -> SessionState {
+        self.df_context.state()
     }
 }
 

@@ -75,6 +75,12 @@ pub enum Error {
         source: serde_json::Error,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Procedure exec failed, source: {}", source))]
+    RetryLater {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -88,7 +94,8 @@ impl ErrorExt for Error {
             | Error::DeleteState { .. }
             | Error::ListState { .. }
             | Error::ReadState { .. }
-            | Error::FromJson { .. } => StatusCode::Internal,
+            | Error::FromJson { .. }
+            | Error::RetryLater { .. } => StatusCode::Internal,
             Error::LoaderConflict { .. } | Error::DuplicateProcedure { .. } => {
                 StatusCode::InvalidArguments
             }
@@ -109,6 +116,28 @@ impl Error {
     pub fn external<E: ErrorExt + Send + Sync + 'static>(err: E) -> Error {
         Error::External {
             source: BoxedError::new(err),
+        }
+    }
+
+    /// Creates a new [Error::RetryLater] error from source `err`.
+    pub fn retry_later<E: ErrorExt + Send + Sync + 'static>(err: E) -> Error {
+        Error::RetryLater {
+            source: BoxedError::new(err),
+        }
+    }
+
+    /// Determine whether it is a retry later type through [StatusCode]
+    pub fn is_retry_later(&self) -> bool {
+        matches!(self, Error::RetryLater { .. })
+    }
+
+    /// Creates a new [Error::RetryLater] or [Error::External] error from source `err` according
+    /// to its [StatusCode].
+    pub fn from_error_ext<E: ErrorExt + Send + Sync + 'static>(err: E) -> Self {
+        if err.status_code().is_retryable() {
+            Error::retry_later(err)
+        } else {
+            Error::external(err)
         }
     }
 }

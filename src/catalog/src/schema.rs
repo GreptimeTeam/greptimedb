@@ -15,11 +15,13 @@
 use std::any::Any;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use table::TableRef;
 
 use crate::error::Result;
 
 /// Represents a schema, comprising a number of named tables.
+#[async_trait]
 pub trait SchemaProvider: Sync + Send {
     /// Returns the schema provider as [`Any`](std::any::Any)
     /// so that it can be downcast to a specific implementation.
@@ -29,7 +31,7 @@ pub trait SchemaProvider: Sync + Send {
     fn table_names(&self) -> Result<Vec<String>>;
 
     /// Retrieves a specific table from the schema by name, provided it exists.
-    fn table(&self, name: &str) -> Result<Option<TableRef>>;
+    async fn table(&self, name: &str) -> Result<Option<TableRef>>;
 
     /// If supported by the implementation, adds a new table to this schema.
     /// If a table of the same name existed before, it returns "Table already exists" error.

@@ -88,6 +88,12 @@ pub enum Error {
         "Table (metric) name not found, this indicates a procedure error in PromQL planner"
     ))]
     TableNameNotFound { backtrace: Backtrace },
+
+    #[snafu(display("General catalog error: {source}"))]
+    Catalog {
+        #[snafu(backtrace)]
+        source: catalog::error::Error,
+    },
 }
 
 impl ErrorExt for Error {
@@ -108,6 +114,8 @@ impl ErrorExt for Error {
             | EmptyRange { .. } => StatusCode::Internal,
 
             TableNotFound { .. } | TableNameNotFound { .. } => StatusCode::TableNotFound,
+
+            Catalog { source } => source.status_code(),
         }
     }
     fn backtrace_opt(&self) -> Option<&Backtrace> {

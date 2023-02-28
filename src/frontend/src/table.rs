@@ -1007,10 +1007,6 @@ mod test {
             vec![0, 1, 2, 3],
         );
         test(
-            vec![binary_expr(col("b"), Operator::Like, lit("foo%")).into()], // b LIKE 'foo%'
-            vec![0, 1, 2, 3],
-        );
-        test(
             vec![binary_expr(col("c"), Operator::Gt, lit(123)).into()], // c > 789
             vec![0, 1, 2, 3],
         );

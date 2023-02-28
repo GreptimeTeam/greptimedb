@@ -376,14 +376,16 @@ impl PyQueryEngine {
         let thread_handle = std::thread::spawn(move || -> std::result::Result<_, String> {
             if let Some(engine) = query {
                 let stmt = QueryLanguageParser::parse_sql(s.as_str()).map_err(|e| e.to_string())?;
-                let plan = engine
-                    .statement_to_plan(stmt, Default::default())
-                    .map_err(|e| e.to_string())?;
                 // To prevent the error of nested creating Runtime, if is nested, use the parent runtime instead
 
                 let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
                 let handle = rt.handle().clone();
                 let res = handle.block_on(async {
+                    let plan = engine
+                        .statement_to_plan(stmt, Default::default())
+                        .await
+                        .map_err(|e| e.to_string())?;
+
                     let res = engine
                         .clone()
                         .execute(&plan)

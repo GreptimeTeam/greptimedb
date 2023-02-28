@@ -201,6 +201,9 @@ pub enum Error {
         #[snafu(backtrace)]
         source: common_catalog::error::Error,
     },
+
+    #[snafu(display("Illegal access to catalog: {} and schema: {}", catalog, schema))]
+    QueryAccessDenied { catalog: String, schema: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -246,6 +249,7 @@ impl ErrorExt for Error {
             }
 
             Error::Unimplemented { .. } => StatusCode::Unsupported,
+            Error::QueryAccessDenied { .. } => StatusCode::AccessDenied,
         }
     }
 

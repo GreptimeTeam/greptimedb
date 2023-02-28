@@ -19,8 +19,9 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use async_stream::stream;
+use async_trait::async_trait;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
-use common_telemetry::{debug, info};
+use common_telemetry::{debug, error, info};
 use futures::Stream;
 use futures_util::StreamExt;
 use snafu::{OptionExt, ResultExt};
@@ -108,9 +109,14 @@ impl RemoteCatalogManager {
                     debug!("Ignoring non-catalog key: {}", String::from_utf8_lossy(&k));
                     continue;
                 }
-                let key = CatalogKey::parse(&String::from_utf8_lossy(&k))
-                    .context(InvalidCatalogValueSnafu)?;
-                yield Ok(key)
+
+                let catalog_key = String::from_utf8_lossy(&k);
+                if let Ok(key) = CatalogKey::parse(&catalog_key) {
+                    yield Ok(key)
+                } else {
+                    error!("Invalid catalog key: {:?}", catalog_key);
+                    continue;
+                }
             }
         }))
     }
@@ -468,7 +474,7 @@ impl CatalogManager for RemoteCatalogManager {
             .schema(schema)
     }
 
-    fn table(
+    async fn table(
         &self,
         catalog_name: &str,
         schema_name: &str,
@@ -483,7 +489,7 @@ impl CatalogManager for RemoteCatalogManager {
                 catalog: catalog_name,
                 schema: schema_name,
             })?;
-        schema.table(table_name)
+        schema.table(table_name).await
     }
 }
 
@@ -692,6 +698,7 @@ impl RemoteSchemaProvider {
     }
 }
 
+#[async_trait]
 impl SchemaProvider for RemoteSchemaProvider {
     fn as_any(&self) -> &dyn Any {
         self
@@ -701,7 +708,7 @@ impl SchemaProvider for RemoteSchemaProvider {
         Ok(self.tables.load().keys().cloned().collect::<Vec<_>>())
     }
 
-    fn table(&self, name: &str) -> Result<Option<TableRef>> {
+    async fn table(&self, name: &str) -> Result<Option<TableRef>> {
         Ok(self.tables.load().get(name).cloned())
     }
 

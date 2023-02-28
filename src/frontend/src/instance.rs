@@ -252,6 +252,7 @@ impl Instance {
         let table = self
             .catalog_manager
             .table(catalog_name, schema_name, table_name)
+            .await
             .context(error::CatalogSnafu)?;
         match table {
             None => {
@@ -485,8 +486,12 @@ impl SqlQueryHandler for Instance {
             .and_then(|output| query_interceptor.post_execute(output, query_ctx.clone()))
     }
 
-    fn do_describe(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Option<Schema>> {
-        self.sql_handler.do_describe(stmt, query_ctx)
+    async fn do_describe(
+        &self,
+        stmt: Statement,
+        query_ctx: QueryContextRef,
+    ) -> Result<Option<Schema>> {
+        self.sql_handler.do_describe(stmt, query_ctx).await
     }
 
     fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
@@ -825,7 +830,7 @@ mod tests {
 
         drop_table(instance).await;
 
-        verify_table_is_dropped(&distributed);
+        verify_table_is_dropped(&distributed).await;
     }
 
     async fn query(instance: &Instance, sql: &str) -> Output {
@@ -858,14 +863,14 @@ mod tests {
         let batches = common_recordbatch::util::collect_batches(s).await.unwrap();
         let pretty_print = batches.pretty_print().unwrap();
         let expected = "\
-+-------+---------------------+-----------+-------------+-----------+
-| host  | ts                  | cpu       | memory      | disk_util |
-+-------+---------------------+-----------+-------------+-----------+
-| 490   | 2013-12-31T16:00:00 | 0.1       | 1           | 9.9       |
-| 550-A | 2022-12-31T16:00:00 | 1         | 100         | 9.9       |
-| 550-W | 2023-12-31T16:00:00 | 10000     | 1000000     | 9.9       |
-| MOSS  | 2043-12-31T16:00:00 | 100000000 | 10000000000 | 9.9       |
-+-------+---------------------+-----------+-------------+-----------+";
++-------+---------------------+-------------+-----------+-----------+
+| host  | ts                  | cpu         | memory    | disk_util |
++-------+---------------------+-------------+-----------+-----------+
+| 490   | 2013-12-31T16:00:00 | 0.1         | 1.0       | 9.9       |
+| 550-A | 2022-12-31T16:00:00 | 1.0         | 100.0     | 9.9       |
+| 550-W | 2023-12-31T16:00:00 | 10000.0     | 1000000.0 | 9.9       |
+| MOSS  | 2043-12-31T16:00:00 | 100000000.0 | 1.0e10    | 9.9       |
++-------+---------------------+-------------+-----------+-----------+";
         assert_eq!(pretty_print, expected);
     }
 
@@ -877,6 +882,7 @@ mod tests {
             .frontend
             .catalog_manager()
             .table("greptime", "public", "demo")
+            .await
             .unwrap()
             .unwrap();
         let table = table.as_any().downcast_ref::<DistTable>().unwrap();
@@ -918,12 +924,15 @@ mod tests {
         assert_eq!(x, 1);
     }
 
-    fn verify_table_is_dropped(instance: &MockDistributedInstance) {
-        assert!(instance.datanodes.iter().all(|(_, x)| x
-            .catalog_manager()
-            .table("greptime", "public", "demo")
-            .unwrap()
-            .is_none()))
+    async fn verify_table_is_dropped(instance: &MockDistributedInstance) {
+        for (_, dn) in instance.datanodes.iter() {
+            assert!(dn
+                .catalog_manager()
+                .table("greptime", "public", "demo")
+                .await
+                .unwrap()
+                .is_none())
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

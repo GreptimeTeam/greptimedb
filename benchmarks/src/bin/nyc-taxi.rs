@@ -208,6 +208,7 @@ fn build_values(column: &ArrayRef) -> Values {
         | DataType::Dictionary(_, _)
         | DataType::Decimal128(_, _)
         | DataType::Decimal256(_, _)
+        | DataType::RunEndEncoded(_, _)
         | DataType::Map(_, _) => todo!(),
     }
 }

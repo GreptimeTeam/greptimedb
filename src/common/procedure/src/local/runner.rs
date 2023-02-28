@@ -43,6 +43,10 @@ impl ExecResult {
         matches!(self, ExecResult::Done)
     }
 
+    fn is_retry_later(&self) -> bool {
+        matches!(self, ExecResult::RetryLater)
+    }
+
     fn is_failed(&self) -> bool {
         matches!(self, ExecResult::Failed(_))
     }
@@ -215,10 +219,15 @@ impl Runner {
             Err(e) => {
                 logging::error!(
                     e;
-                    "Failed to execute procedure {}-{}",
+                    "Failed to execute procedure {}-{}, retry: {}",
                     self.procedure.type_name(),
-                    self.meta.id
+                    self.meta.id,
+                    e.is_retry_later(),
                 );
+
+                if e.is_retry_later() {
+                    return ExecResult::RetryLater;
+                }
 
                 self.meta.set_state(ProcedureState::Failed);
 
@@ -302,7 +311,7 @@ impl Runner {
                 self.procedure.type_name(),
                 self.meta.id,
                 subprocedure.procedure.type_name(),
-                subprocedure.id
+                subprocedure.id,
             );
 
             self.submit_subprocedure(subprocedure.id, subprocedure.procedure);
@@ -385,7 +394,7 @@ impl Runner {
         logging::info!(
             "Procedure {}-{} done",
             self.procedure.type_name(),
-            self.meta.id
+            self.meta.id,
         );
 
         // Mark the state of this procedure to done.
@@ -716,6 +725,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_execute_on_retry_later_error() {
+        let mut times = 0;
+
+        let exec_fn = move |_| {
+            times += 1;
+            async move {
+                if times == 1 {
+                    Err(Error::retry_later(MockError::new(StatusCode::Unexpected)))
+                } else {
+                    Ok(Status::Done)
+                }
+            }
+            .boxed()
+        };
+
+        let retry_later = ProcedureAdapter {
+            data: "retry_later".to_string(),
+            lock_key: LockKey::single("catalog.schema.table"),
+            exec_fn,
+        };
+
+        let dir = TempDir::new("retry_later").unwrap();
+        let meta = retry_later.new_meta(ROOT_ID);
+        let ctx = context_without_provider(meta.id);
+        let object_store = test_util::new_object_store(&dir);
+        let procedure_store = ProcedureStore::from(object_store.clone());
+        let mut runner = new_runner(meta.clone(), Box::new(retry_later), procedure_store);
+
+        let res = runner.execute_once(&ctx).await;
+        assert!(res.is_retry_later(), "{res:?}");
+        assert_eq!(ProcedureState::Running, meta.state());
+
+        let res = runner.execute_once(&ctx).await;
+        assert!(res.is_done(), "{res:?}");
+        assert_eq!(ProcedureState::Done, meta.state());
+        check_files(&object_store, ctx.procedure_id, &["0000000000.commit"]).await;
+    }
+
+    #[tokio::test]
     async fn test_child_error() {
         let mut times = 0;
         let child_id = ProcedureId::random();
@@ -747,7 +795,7 @@ mod tests {
                     let state = ctx.provider.procedure_state(child_id).await.unwrap();
                     if state == Some(ProcedureState::Failed) {
                         // The parent procedure to abort itself if child procedure is failed.
-                        Err(Error::external(PlainError::new(
+                        Err(Error::from_error_ext(PlainError::new(
                             "subprocedure failed".to_string(),
                             StatusCode::Unexpected,
                         )))

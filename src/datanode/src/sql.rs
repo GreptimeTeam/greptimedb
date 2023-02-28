@@ -105,6 +105,7 @@ impl SqlHandler {
                 let table = self
                     .catalog_manager
                     .table(&catalog, &schema, &table)
+                    .await
                     .context(error::CatalogSnafu)?
                     .with_context(|| TableNotFoundSnafu {
                         table_name: req.name().to_string(),
@@ -244,7 +245,7 @@ mod tests {
                 .unwrap(),
         );
         catalog_list.start().await.unwrap();
-        catalog_list
+        assert!(catalog_list
             .register_table(RegisterTableRequest {
                 catalog: DEFAULT_CATALOG_NAME.to_string(),
                 schema: DEFAULT_SCHEMA_NAME.to_string(),
@@ -253,7 +254,7 @@ mod tests {
                 table: Arc::new(DemoTable),
             })
             .await
-            .unwrap();
+            .unwrap());
 
         let factory = QueryEngineFactory::new(catalog_list.clone());
         let query_engine = factory.query_engine();
