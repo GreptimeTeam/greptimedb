@@ -51,6 +51,10 @@ impl MockInstance {
     pub(crate) fn inner(&self) -> &Instance {
         &self.instance
     }
+
+    pub(crate) fn data_tmp_dir(&self) -> &TempDir {
+        &self._guard._data_tmp_dir
+    }
 }
 
 struct TestGuard {

@@ -765,6 +765,36 @@ async fn test_delete() {
     check_output_stream(output, expect).await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn test_execute_copy_to() {
+    let instance = setup_test_instance("test_execute_copy_to").await;
+
+    // setups
+    execute_sql(
+        &instance,
+        "create table demo(host string, cpu double, memory double, ts timestamp time index);",
+    )
+    .await;
+
+    let output = execute_sql(
+        &instance,
+        r#"insert into demo(host, cpu, memory, ts) values
+                            ('host1', 66.6, 1024, 1655276557000),
+                            ('host2', 88.8,  333.3, 1655276558000)
+                            "#,
+    )
+    .await;
+    assert!(matches!(output, Output::AffectedRows(2)));
+
+    // exports
+    let data_dir = instance.data_tmp_dir().path();
+
+    let copy_to_stmt = format!("Copy demo TO '{}/export/demo.parquet'", data_dir.display());
+
+    let output = execute_sql(&instance, &copy_to_stmt).await;
+    assert!(matches!(output, Output::AffectedRows(2)));
+}
+
 async fn execute_sql(instance: &MockInstance, sql: &str) -> Output {
     execute_sql_in_db(instance, sql, DEFAULT_SCHEMA_NAME).await
 }

@@ -52,7 +52,10 @@ impl SqlHandler {
             .context(error::TableScanExecSnafu)?;
         let stream = Box::pin(DfRecordBatchStreamAdapter::new(stream));
 
-        let accessor = Builder::default().build().unwrap();
+        let accessor = Builder::default()
+            .root("/")
+            .build()
+            .context(error::BuildBackendSnafu)?;
         let object_store = ObjectStore::new(accessor).finish();
 
         let mut parquet_writer = ParquetWriter::new(req.file_name, stream, object_store);
