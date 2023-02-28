@@ -26,7 +26,7 @@ use common_error::ext::ErrorExt;
 use common_error::snafu::ErrorCompat;
 use common_query::Output;
 use serde::Serialize;
-use sqlness::{Database, EnvController};
+use sqlness::{Database, EnvController, QueryContext};
 use tinytemplate::TinyTemplate;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
@@ -269,7 +269,7 @@ pub struct GreptimeDB {
 
 #[async_trait]
 impl Database for GreptimeDB {
-    async fn query(&self, query: String) -> Box<dyn Display> {
+    async fn query(&self, _ctx: QueryContext, query: String) -> Box<dyn Display> {
         let mut client = self.client.lock().await;
         if query.trim().starts_with("USE ") {
             let database = query
