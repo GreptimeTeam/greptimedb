@@ -1,47 +1,116 @@
-node_id = 0
-mode = 'standalone'
+# Node running mode, "standalone" or "distributed".
+mode = "standalone"
+# Whether to use in-memory catalog, `false` by default.
 enable_memory_catalog = false
 
+# HTTP server options.
 [http_options]
-addr = '127.0.0.1:4000'
+# Server address, "127.0.0.1:4000" by default.
+addr = "127.0.0.1:4000"
+# HTTP request timeout, 30s by default.
 timeout = "30s"
 
-[wal]
-dir = "/tmp/greptimedb/wal"
-file_size = '1GB'
-purge_interval = '10m'
-purge_threshold = '50GB'
-read_batch_size = 128
-sync_write = false
-
-[storage]
-type = 'File'
-data_dir = '/tmp/greptimedb/data/'
-
+# gRPC server options.
 [grpc_options]
-addr = '127.0.0.1:4001'
+# Server address, "127.0.0.1:4001" by default.
+addr = "127.0.0.1:4001"
+# The number of server worker threads, 8 by default.
 runtime_size = 8
 
+# MySQL server options.
 [mysql_options]
-addr = '127.0.0.1:4002'
+# Server address, "127.0.0.1:4002" by default.
+addr = "127.0.0.1:4002"
+# The number of server worker threads, 2 by default.
 runtime_size = 2
 
-[influxdb_options]
-enable = true
+# MySQL server TLS options.
+[mysql_options.tls]
+# TLS mode, refer to https://www.postgresql.org/docs/current/libpq-ssl.html
+# - "disable" (default value)
+# - "prefer"
+# - "require"
+# - "verify-ca"
+# - "verify-full"
+mode = "disable"
+# Certificate file path.
+cert_path = ""
+# Private key file path.
+key_path = ""
 
-[opentsdb_options]
-addr = '127.0.0.1:4242'
-enable = true
-runtime_size = 2
-
-[prometheus_options]
-enable = true
-
+# PostgresSQL server options.
 [postgres_options]
-addr = '127.0.0.1:4003'
+# Server address, "127.0.0.1:4003" by default.
+addr = "127.0.0.1:4003"
+# The number of server worker threads, 2 by default.
 runtime_size = 2
-check_pwd = false
 
-[procedure.store]
-type = 'File'
-data_dir = '/tmp/greptimedb/procedure/'
+# PostgresSQL server options.
+[postgres_options.tls]
+# TLS mode.
+mode = "disable"
+# certificate file path.
+cert_path = ""
+# private key file path.
+key_path = ""
+
+# OpenTSDB protocol options.
+[opentsdb_options]
+# OpenTSDB telnet API server address, "127.0.0.1:4242" by default.
+addr = "127.0.0.1:4242"
+# The number of server worker threads, 2 by default.
+runtime_size = 2
+
+# InfluxDB protocol options.
+[influxdb_options]
+# Whether to enable InfluxDB protocol in HTTP API, true by default.
+enable = true
+
+# Prometheus protocol options.
+[prometheus_options]
+# Whether to enable Prometheus remote write and read in HTTP API, true by default.
+enable = true
+
+# PromQL protocol options.
+[promql_options]
+# PromQL server address, "127.0.0.1:4004" by default.
+addr = "127.0.0.1:4004"
+
+# WAL options.
+[wal]
+# WAL data directory.
+dir = "/tmp/greptimedb/wal"
+# WAL file size in bytes.
+file_size = "1GiB"
+# WAL purge threshold in bytes.
+purge_threshold = "50GiB"
+# WAL purge interval in seconds.
+purge_interval = "10m"
+# WAL read batch size.
+read_batch_size = 128
+# Whether to sync log file after every write.
+sync_write = false
+
+# Storage options.
+[storage]
+# Storage type.
+type = "File"
+# Data directory, "/tmp/greptimedb/data" by default.
+data_dir = "/tmp/greptimedb/data/"
+
+# Compaction options.
+[compaction]
+# Max task number that can concurrently run.
+max_inflight_tasks = 4
+# Max files in level 0 to trigger compaction.
+max_files_in_level0 = 8
+# Max task number for SST purge task after compaction.
+max_purge_tasks = 32
+
+# Procedure storage options.
+# Uncomment to enable.
+# [procedure.store]
+# # Storage type.
+# type = "File"
+# # Procedure data path.
+# data_dir = "/tmp/greptimedb/procedure/"
