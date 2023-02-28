@@ -115,6 +115,7 @@ struct LoadedProcedure {
     procedure: BoxedProcedure,
     parent_id: Option<ProcedureId>,
     step: u32,
+    retry_times: u32,
 }
 
 /// Shared context of the manager.
@@ -230,6 +231,7 @@ impl ManagerContext {
             procedure,
             parent_id: message.parent_id,
             step: message.step,
+            retry_times: message.retry_times,
         })
     }
 
@@ -291,12 +293,14 @@ impl ManagerContext {
 pub struct ManagerConfig {
     /// Object store
     pub object_store: ObjectStore,
+    pub max_retry_times: u32,
 }
 
 /// A [ProcedureManager] that maintains procedure states locally.
 pub struct LocalManager {
     manager_ctx: Arc<ManagerContext>,
     state_store: StateStoreRef,
+    max_retry_times: u32,
 }
 
 impl LocalManager {
@@ -305,6 +309,7 @@ impl LocalManager {
         LocalManager {
             manager_ctx: Arc::new(ManagerContext::new()),
             state_store: Arc::new(ObjectStateStore::new(config.object_store)),
+            max_retry_times: config.max_retry_times,
         }
     }
 
@@ -321,6 +326,8 @@ impl LocalManager {
             procedure,
             manager_ctx: self.manager_ctx.clone(),
             step,
+            retry_times: 0,
+            max_retry_times: self.max_retry_times,
             store: ProcedureStore::new(self.state_store.clone()),
         };
 
@@ -543,6 +550,7 @@ mod tests {
         let dir = TempDir::new("register").unwrap();
         let config = ManagerConfig {
             object_store: test_util::new_object_store(&dir),
+            max_retry_times: 3,
         };
         let manager = LocalManager::new(config);
 
@@ -562,6 +570,7 @@ mod tests {
         let object_store = test_util::new_object_store(&dir);
         let config = ManagerConfig {
             object_store: object_store.clone(),
+            max_retry_times: 3,
         };
         let manager = LocalManager::new(config);
 
@@ -576,7 +585,7 @@ mod tests {
         // Prepare data for the root procedure.
         for step in 0..3 {
             procedure_store
-                .store_procedure(root_id, step, &root, None)
+                .store_procedure(root_id, step,0, &root, None)
                 .await
                 .unwrap();
         }
@@ -586,7 +595,7 @@ mod tests {
         // Prepare data for the child procedure
         for step in 0..2 {
             procedure_store
-                .store_procedure(child_id, step, &child, Some(root_id))
+                .store_procedure(child_id, step, 0,&child, Some(root_id))
                 .await
                 .unwrap();
         }
@@ -606,6 +615,7 @@ mod tests {
         let dir = TempDir::new("submit").unwrap();
         let config = ManagerConfig {
             object_store: test_util::new_object_store(&dir),
+            max_retry_times: 3,
         };
         let manager = LocalManager::new(config);
 
@@ -652,6 +662,7 @@ mod tests {
         let dir = TempDir::new("on_err").unwrap();
         let config = ManagerConfig {
             object_store: test_util::new_object_store(&dir),
+            max_retry_times: 3,
         };
         let manager = LocalManager::new(config);
 

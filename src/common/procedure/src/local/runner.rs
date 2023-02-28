@@ -100,6 +100,8 @@ pub(crate) struct Runner {
     pub(crate) procedure: BoxedProcedure,
     pub(crate) manager_ctx: Arc<ManagerContext>,
     pub(crate) step: u32,
+    pub(crate) retry_times: u32,
+    pub(crate) max_retry_times: u32,
     pub(crate) store: ProcedureStore,
 }
 
@@ -166,7 +168,12 @@ impl Runner {
                 ExecResult::Continue => (),
                 ExecResult::Done => return Ok(()),
                 ExecResult::RetryLater => {
-                    self.wait_on_err().await;
+                    if self.retry_times < self.max_retry_times {
+                        self.retry_times += 1;
+                        self.wait_on_err(self.retry_times).await;
+                    } else {
+                        return Err(Error::RetryTimesExceeded);
+                    }
                 }
                 ExecResult::Failed(e) => return Err(e),
             }
@@ -233,6 +240,7 @@ impl Runner {
         }
 
         let mut step = 0;
+        let mut retry_times = 0;
         if let Some(loaded_procedure) = self.manager_ctx.load_one_procedure(procedure_id) {
             // Try to load procedure state from the message to avoid re-run the subprocedure
             // from initial state.
@@ -242,6 +250,8 @@ impl Runner {
             procedure = loaded_procedure.procedure;
             // Update step number.
             step = loaded_procedure.step;
+            // Update retry times.
+            retry_times = loaded_procedure.retry_times;
         }
 
         let meta = Arc::new(ProcedureMeta::new(
@@ -254,6 +264,8 @@ impl Runner {
             procedure,
             manager_ctx: self.manager_ctx.clone(),
             step,
+            retry_times,
+            max_retry_times: self.max_retry_times,
             store: self.store.clone(),
         };
 
@@ -278,7 +290,7 @@ impl Runner {
         });
     }
 
-    async fn wait_on_err(&self) {
+    async fn wait_on_err(&self, i: u32) {
         time::sleep(ERR_WAIT_DURATION).await;
     }
 
@@ -319,6 +331,7 @@ impl Runner {
             .store_procedure(
                 self.meta.id,
                 self.step,
+                self.retry_times,
                 &self.procedure,
                 self.meta.parent_id,
             )
@@ -409,6 +422,7 @@ mod tests {
             procedure,
             manager_ctx: Arc::new(ManagerContext::new()),
             step: 0,
+            retry_times: 0,
             store,
         }
     }
@@ -464,8 +478,8 @@ mod tests {
 
     #[async_trait]
     impl<F> Procedure for ProcedureAdapter<F>
-    where
-        F: FnMut(Context) -> BoxFuture<'static, Result<Status>> + Send + Sync,
+        where
+            F: FnMut(Context) -> BoxFuture<'static, Result<Status>> + Send + Sync,
     {
         fn type_name(&self) -> &str {
             "ProcedureAdapter"
@@ -496,7 +510,7 @@ mod tests {
                     Ok(Status::Done)
                 }
             }
-            .boxed()
+                .boxed()
         };
         let normal = ProcedureAdapter {
             data: "normal".to_string(),
@@ -527,7 +541,7 @@ mod tests {
             &["0000000000.step"],
             &["0000000000.step", "0000000001.commit"],
         )
-        .await;
+            .await;
     }
 
     #[tokio::test]
@@ -544,7 +558,7 @@ mod tests {
                     persist: false,
                 })
             }
-            .boxed()
+                .boxed()
         };
         let suspend = ProcedureAdapter {
             data: "suspend".to_string(),
@@ -575,7 +589,7 @@ mod tests {
                     Ok(Status::Done)
                 }
             }
-            .boxed()
+                .boxed()
         };
         let child = ProcedureAdapter {
             data: "child".to_string(),
@@ -638,7 +652,7 @@ mod tests {
                     }
                 }
             }
-            .boxed()
+                .boxed()
         };
         let parent = ProcedureAdapter {
             data: "parent".to_string(),
@@ -668,14 +682,14 @@ mod tests {
                 child_id,
                 &["0000000000.step", "0000000001.commit"],
             )
-            .await;
+                .await;
         }
         check_files(
             &object_store,
             procedure_id,
             &["0000000000.step", "0000000001.commit"],
         )
-        .await;
+            .await;
     }
 
     #[tokio::test]
@@ -746,7 +760,7 @@ mod tests {
                     }
                 }
             }
-            .boxed()
+                .boxed()
         };
         let parent = ProcedureAdapter {
             data: "parent".to_string(),
