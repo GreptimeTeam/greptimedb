@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// to avoid put too many #cfg for pyo3 feature flag
+#![allow(unused)]
 use datafusion::arrow::compute;
 use datafusion::arrow::datatypes::Field;
 use datafusion_common::ScalarValue;

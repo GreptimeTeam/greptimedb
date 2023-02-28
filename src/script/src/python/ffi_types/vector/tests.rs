@@ -22,15 +22,15 @@ use std::sync::Arc;
 
 use datatypes::scalars::ScalarVector;
 use datatypes::vectors::{BooleanVector, Float64Vector, VectorRef};
-use pyo3::types::PyDict;
-use pyo3::Python;
+#[cfg(feature = "pyo3_backend")]
+use pyo3::{types::PyDict, Python};
 use rustpython_compiler::Mode;
 use rustpython_vm::class::PyClassImpl;
 use rustpython_vm::{vm, AsObject};
 
 use crate::python::ffi_types::PyVector;
-use crate::python::pyo3::init_cpython_interpreter;
-use crate::python::pyo3::vector_impl::into_pyo3_cell;
+#[cfg(feature = "pyo3_backend")]
+use crate::python::pyo3::{init_cpython_interpreter, vector_impl::into_pyo3_cell};
 
 #[derive(Debug, Clone)]
 struct TestCase {
@@ -48,6 +48,7 @@ fn test_eval_py_vector_in_pairs() {
     let testcases = get_test_cases();
 
     for testcase in testcases {
+        #[cfg(feature = "pyo3_backend")]
         eval_pyo3(testcase.clone(), locals.clone());
         eval_rspy(testcase, locals.clone())
     }
@@ -111,7 +112,7 @@ fn get_test_cases() -> Vec<TestCase> {
     ];
     Vec::from(testcases)
 }
-
+#[cfg(feature = "pyo3_backend")]
 fn eval_pyo3(testcase: TestCase, locals: HashMap<String, PyVector>) {
     init_cpython_interpreter();
     Python::with_gil(|py| {

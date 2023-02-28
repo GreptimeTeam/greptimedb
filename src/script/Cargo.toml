@@ -5,7 +5,8 @@ version.workspace = true
 license.workspace = true
 
 [features]
-default = ["python", "pyo3"]
+default = ["python"]
+pyo3_backend = ["pyo3"]
 python = [
     "dep:datafusion",
     "dep:datafusion-common",

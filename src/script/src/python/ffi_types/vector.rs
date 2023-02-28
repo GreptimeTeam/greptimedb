@@ -28,6 +28,7 @@ use datatypes::data_type::DataType;
 use datatypes::prelude::Value;
 use datatypes::value::{self, OrderedFloat};
 use datatypes::vectors::{Helper, NullVector, VectorRef};
+#[cfg(feature = "pyo3_backend")]
 use pyo3::pyclass as pyo3class;
 use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyNone, PyStr};
 use rustpython_vm::sliceable::{SaturatedSlice, SequenceIndex, SequenceIndexOp};
@@ -40,7 +41,7 @@ use rustpython_vm::{
 use crate::python::utils::is_instance;
 
 /// The Main FFI type `PyVector` that is used both in RustPython and PyO3
-#[pyo3class(name = "vector")]
+#[cfg_attr(feature = "pyo3_backend", pyo3class(name = "vector"))]
 #[rspyclass(module = false, name = "vector")]
 #[repr(transparent)]
 #[derive(PyPayload, Debug, Clone)]
@@ -82,6 +83,7 @@ where
     move |left, right| f(left, right).map_err(|e| format!("arithmetic error {e}"))
 }
 
+#[cfg(feature = "pyo3_backend")]
 pub(crate) fn wrap_bool_result<F>(
     op_bool_arr: F,
 ) -> impl Fn(&dyn Array, &dyn Array) -> Result<ArrayRef, String>

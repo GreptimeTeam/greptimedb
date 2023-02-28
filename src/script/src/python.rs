@@ -21,5 +21,7 @@ pub(crate) mod utils;
 pub use self::engine::{PyEngine, PyScript};
 
 mod ffi_types;
+
+#[cfg(feature = "pyo3_backend")]
 mod pyo3;
 mod rspython;

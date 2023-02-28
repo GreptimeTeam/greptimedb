@@ -27,6 +27,7 @@ use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{Helper, VectorRef};
 // use crate::python::builtins::greptime_builtin;
 use parse::DecoratorArgs;
+#[cfg(feature = "pyo3_backend")]
 use pyo3::pyclass as pyo3class;
 use query::parser::QueryLanguageParser;
 use query::QueryEngine;
@@ -41,6 +42,7 @@ use vm::{pyclass as rspyclass, PyPayload, PyResult, VirtualMachine};
 
 use crate::python::error::{ensure, ArrowSnafu, OtherSnafu, Result, TypeCastSnafu};
 use crate::python::ffi_types::PyVector;
+#[cfg(feature = "pyo3_backend")]
 use crate::python::pyo3::pyo3_exec_parsed;
 use crate::python::rspython::rspy_exec_parsed;
 
@@ -317,7 +319,7 @@ pub fn exec_coprocessor(script: &str, rb: &Option<RecordBatch>) -> Result<Record
     exec_parsed(&copr, rb, &HashMap::new())
 }
 
-#[pyo3class(name = "query_engine")]
+#[cfg_attr(feature = "pyo3_backend", pyo3class(name = "query_engine"))]
 #[rspyclass(module = false, name = "query_engine")]
 #[derive(Debug, PyPayload)]
 pub struct PyQueryEngine {
@@ -332,6 +334,7 @@ impl PyQueryEngine {
     pub(crate) fn from_weakref(inner: QueryEngineWeakRef) -> Self {
         Self { inner }
     }
+    #[cfg(feature = "pyo3_backend")]
     pub(crate) fn get_ref(&self) -> Option<Arc<dyn QueryEngine>> {
         self.inner.0.upgrade()
     }
@@ -416,11 +419,11 @@ pub fn exec_parsed(
     match copr.backend {
         BackendType::RustPython => rspy_exec_parsed(copr, rb, params),
         BackendType::CPython => {
-            #[cfg(feature = "pyo3")]
+            #[cfg(feature = "pyo3_backend")]
             {
                 pyo3_exec_parsed(copr, rb, params)
             }
-            #[cfg(not(feature = "pyo3"))]
+            #[cfg(not(feature = "pyo3_backend"))]
             OtherSnafu {
                 reason: "`pyo3` feature is disabled, therefore can't run scripts in cpython"
                     .to_string(),

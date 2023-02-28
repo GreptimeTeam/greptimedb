@@ -20,14 +20,14 @@ use datafusion::arrow::array::Float64Array;
 use datafusion::arrow::compute;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::vectors::VectorRef;
-use pyo3::types::PyDict;
-use pyo3::Python;
+#[cfg(feature = "pyo3_backend")]
+use pyo3::{types::PyDict, Python};
 use rustpython_compiler::Mode;
 
 use crate::python::ffi_types::pair_tests::sample_testcases::sample_test_case;
 use crate::python::ffi_types::PyVector;
-use crate::python::pyo3::init_cpython_interpreter;
-use crate::python::pyo3::vector_impl::into_pyo3_cell;
+#[cfg(feature = "pyo3_backend")]
+use crate::python::pyo3::{init_cpython_interpreter, vector_impl::into_pyo3_cell};
 use crate::python::rspython::init_interpreter;
 
 /// generate testcases that should be tested in paired both in RustPython and CPython
@@ -43,6 +43,7 @@ fn pyo3_rspy_test_in_pairs() {
     let testcases = sample_test_case();
     for case in testcases {
         eval_rspy(case.clone());
+        #[cfg(feature = "pyo3_backend")]
         eval_pyo3(case);
     }
 }
@@ -110,6 +111,7 @@ fn eval_rspy(case: TestCase) {
     });
 }
 
+#[cfg(feature = "pyo3_backend")]
 fn eval_pyo3(case: TestCase) {
     init_cpython_interpreter();
     Python::with_gil(|py| {
