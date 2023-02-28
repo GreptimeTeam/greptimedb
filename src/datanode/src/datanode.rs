@@ -172,7 +172,7 @@ impl ProcedureConfig {
         if let Some(max_times) = max_times {
             procedure_config.max_retry_times = max_times;
         }
-        return procedure_config;
+        procedure_config
     }
 }
 

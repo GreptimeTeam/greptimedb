@@ -82,11 +82,7 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display(
-        "Procedure retry exceeded max {} times, source: {}",
-        max_retry_times,
-        source
-    ))]
+    #[snafu(display("Procedure retry exceeded max {} times", max_retry_times,))]
     RetryTimesExceeded { max_retry_times: u32 },
 }
 

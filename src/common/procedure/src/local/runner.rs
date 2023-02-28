@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::intrinsics::powf32;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -303,7 +302,7 @@ impl Runner {
     }
 
     async fn wait_on_err(&self, i: u32) {
-        let err_wait_duration: u64 = ERR_WAIT_DURATION * i;
+        let err_wait_duration = ERR_WAIT_DURATION * i as u64;
         logging::info!(
             "Procedure {}-{} retry for the {} times after {} seconds",
             self.procedure.type_name(),
@@ -737,33 +736,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_execute_exceed_max_retry_later() {
-        let exec_fn =
-            |_| async { Err(Error::retry_later(MockError::new(StatusCode::Unexpected))) }.boxed();
-
-        let exceed_max_retry_later = ProcedureAdapter {
-            data: "exceed_max_retry_later".to_string(),
-            lock_key: LockKey::single("catalog.schema.table"),
-            exec_fn,
-        };
-
-        let dir = TempDir::new("exceed_max_retry_later").unwrap();
-        let meta = retry_later.new_meta(ROOT_ID);
-        let object_store = test_util::new_object_store(&dir);
-        let procedure_store = ProcedureStore::from(object_store.clone());
-        let mut runner = new_runner(
-            meta.clone(),
-            Box::new(exceed_max_retry_later),
-            procedure_store,
-        );
-        runner.max_retry_times = 0;
-
-        // Run the runer and execute the procedure.
-        let err = runner.execute_procedure_in_loop().await.unwrap_err();
-        println!(err.to_string());
-    }
-
-    #[tokio::test]
     async fn test_execute_on_retry_later_error() {
         let mut times = 0;
 
@@ -800,6 +772,35 @@ mod tests {
         assert!(res.is_done(), "{res:?}");
         assert_eq!(ProcedureState::Done, meta.state());
         check_files(&object_store, ctx.procedure_id, &["0000000000.commit"]).await;
+    }
+
+    #[tokio::test]
+    async fn test_execute_exceed_max_retry_later() {
+        let exec_fn =
+            |_| async { Err(Error::retry_later(MockError::new(StatusCode::Unexpected))) }.boxed();
+
+        let exceed_max_retry_later = ProcedureAdapter {
+            data: "exceed_max_retry_later".to_string(),
+            lock_key: LockKey::single("catalog.schema.table"),
+            exec_fn,
+        };
+
+        let dir = TempDir::new("exceed_max_retry_later").unwrap();
+        let meta = exceed_max_retry_later.new_meta(ROOT_ID);
+        let object_store = test_util::new_object_store(&dir);
+        let procedure_store = ProcedureStore::from(object_store.clone());
+        let mut runner = new_runner(
+            meta.clone(),
+            Box::new(exceed_max_retry_later),
+            procedure_store,
+        );
+        runner.max_retry_times = 0;
+
+        // Run the runner and execute the procedure.
+        let err = runner.execute_procedure_in_loop().await.unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Procedure retry exceeded max 0 times"));
     }
 
     #[tokio::test]
@@ -868,7 +869,7 @@ mod tests {
         // Replace the manager ctx.
         runner.manager_ctx = manager_ctx;
 
-        // Run the runer and execute the procedure.
+        // Run the runner and execute the procedure.
         let err = runner.run().await.unwrap_err();
         assert!(err.to_string().contains("subprocedure failed"), "{err}");
     }

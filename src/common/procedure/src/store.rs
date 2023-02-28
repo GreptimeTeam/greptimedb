@@ -329,12 +329,13 @@ mod tests {
             data: "no parent id".to_string(),
             parent_id: None,
             step: 4,
+            retry_times: 0,
         };
 
         let json = serde_json::to_string(&message).unwrap();
         assert_eq!(
             json,
-            r#"{"type_name":"TestMessage","data":"no parent id","parent_id":null,"step":4}"#
+            r#"{"type_name":"TestMessage","data":"no parent id","parent_id":null,"step":4,"retry_times":0}"#
         );
 
         let procedure_id = ProcedureId::parse_str("9f805a1f-05f7-490c-9f91-bd56e3cc54c1").unwrap();
@@ -342,7 +343,7 @@ mod tests {
         let json = serde_json::to_string(&message).unwrap();
         assert_eq!(
             json,
-            r#"{"type_name":"TestMessage","data":"no parent id","parent_id":"9f805a1f-05f7-490c-9f91-bd56e3cc54c1","step":4}"#
+            r#"{"type_name":"TestMessage","data":"no parent id","parent_id":"9f805a1f-05f7-490c-9f91-bd56e3cc54c1","step":4,"retry_times":0}"#
         );
     }
 
