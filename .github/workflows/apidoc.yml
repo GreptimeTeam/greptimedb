@@ -23,7 +23,7 @@ jobs:
     - uses: dtolnay/rust-toolchain@master
       with:
         toolchain: ${{ env.RUST_TOOLCHAIN }}
-    - run: cargo doc
+    - run: cargo doc --workspace --no-deps --document-private-items
     - name: Publish dist directory
       uses: JamesIves/github-pages-deploy-action@v4
       with:
