@@ -251,7 +251,6 @@ impl Runner {
         }
 
         let mut step = 0;
-        let mut retry_times = 0;
         if let Some(loaded_procedure) = self.manager_ctx.load_one_procedure(procedure_id) {
             // Try to load procedure state from the message to avoid re-run the subprocedure
             // from initial state.
@@ -261,8 +260,6 @@ impl Runner {
             procedure = loaded_procedure.procedure;
             // Update step number.
             step = loaded_procedure.step;
-            // Update retry times.
-            retry_times = loaded_procedure.retry_times;
         }
 
         let meta = Arc::new(ProcedureMeta::new(
@@ -275,7 +272,7 @@ impl Runner {
             procedure,
             manager_ctx: self.manager_ctx.clone(),
             step,
-            retry_times,
+            retry_times: 0,
             max_retry_times: self.max_retry_times,
             store: self.store.clone(),
         };
@@ -351,7 +348,6 @@ impl Runner {
             .store_procedure(
                 self.meta.id,
                 self.step,
-                self.retry_times,
                 &self.procedure,
                 self.meta.parent_id,
             )

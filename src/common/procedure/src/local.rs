@@ -115,7 +115,6 @@ struct LoadedProcedure {
     procedure: BoxedProcedure,
     parent_id: Option<ProcedureId>,
     step: u32,
-    retry_times: u32,
 }
 
 /// Shared context of the manager.
@@ -231,7 +230,6 @@ impl ManagerContext {
             procedure,
             parent_id: message.parent_id,
             step: message.step,
-            retry_times: message.retry_times,
         })
     }
 
@@ -303,6 +301,12 @@ pub struct LocalManager {
     max_retry_times: u32,
 }
 
+#[derive(Default)]
+pub struct SubmitOptions {
+    pub step: u32,
+    pub retry_times: u32,
+}
+
 impl LocalManager {
     /// Create a new [LocalManager] with specific `config`.
     pub fn new(config: ManagerConfig) -> LocalManager {
@@ -317,7 +321,7 @@ impl LocalManager {
     fn submit_root(
         &self,
         procedure_id: ProcedureId,
-        step: u32,
+        options: SubmitOptions,
         procedure: BoxedProcedure,
     ) -> Result<Watcher> {
         let meta = Arc::new(ProcedureMeta::new(procedure_id, None, procedure.lock_key()));
@@ -325,8 +329,8 @@ impl LocalManager {
             meta: meta.clone(),
             procedure,
             manager_ctx: self.manager_ctx.clone(),
-            step,
-            retry_times: 0,
+            step: options.step,
+            retry_times: options.retry_times,
             max_retry_times: self.max_retry_times,
             store: ProcedureStore::new(self.state_store.clone()),
         };
@@ -366,7 +370,7 @@ impl ProcedureManager for LocalManager {
             DuplicateProcedureSnafu { procedure_id }
         );
 
-        self.submit_root(procedure.id, 0, procedure.procedure)
+        self.submit_root(procedure.id, SubmitOptions::default(), procedure.procedure)
     }
 
     async fn recover(&self) -> Result<()> {
@@ -393,7 +397,10 @@ impl ProcedureManager for LocalManager {
 
                 if let Err(e) = self.submit_root(
                     *procedure_id,
-                    loaded_procedure.step,
+                    SubmitOptions {
+                        step: loaded_procedure.step,
+                        retry_times: 0,
+                    },
                     loaded_procedure.procedure,
                 ) {
                     logging::error!(e; "Failed to recover procedure {}", procedure_id);
@@ -585,7 +592,7 @@ mod tests {
         // Prepare data for the root procedure.
         for step in 0..3 {
             procedure_store
-                .store_procedure(root_id, step, 0, &root, None)
+                .store_procedure(root_id, step, &root, None)
                 .await
                 .unwrap();
         }
@@ -595,7 +602,7 @@ mod tests {
         // Prepare data for the child procedure
         for step in 0..2 {
             procedure_store
-                .store_procedure(child_id, step, 0, &child, Some(root_id))
+                .store_procedure(child_id, step, &child, Some(root_id))
                 .await
                 .unwrap();
         }
