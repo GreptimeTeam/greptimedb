@@ -223,7 +223,7 @@ impl Stream for EmptyMetricStream {
         let result = if self.is_first_poll {
             self.is_first_poll = false;
             let _timer = self.metric.elapsed_compute().timer();
-            let result_array = (self.start..self.end)
+            let result_array = (self.start..=self.end)
                 .step_by(self.interval as _)
                 .collect::<Vec<_>>();
             let millisecond_array = TimestampMillisecondArray::from(result_array);
@@ -234,5 +234,124 @@ impl Stream for EmptyMetricStream {
             Poll::Ready(None)
         };
         self.metric.record_poll(result)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use datafusion::prelude::SessionContext;
+
+    use super::*;
+
+    async fn do_empty_metric_test(
+        start: Millisecond,
+        end: Millisecond,
+        interval: Millisecond,
+        column_name: String,
+        expected: String,
+    ) {
+        let empty_metric = EmptyMetric::new(start, end, interval, column_name).unwrap();
+        let empty_metric_exec = empty_metric.to_execution_plan();
+
+        let session_context = SessionContext::default();
+        let result =
+            datafusion::physical_plan::collect(empty_metric_exec, session_context.task_ctx())
+                .await
+                .unwrap();
+        let result_literal = datatypes::arrow::util::pretty::pretty_format_batches(&result)
+            .unwrap()
+            .to_string();
+
+        assert_eq!(result_literal, expected);
+    }
+
+    #[tokio::test]
+    async fn normal_empty_metric_test() {
+        do_empty_metric_test(
+            0,
+            100,
+            10,
+            "time".to_string(),
+            String::from(
+                "+-------------------------+\
+                \n| time                    |\
+                \n+-------------------------+\
+                \n| 1970-01-01T00:00:00     |\
+                \n| 1970-01-01T00:00:00.010 |\
+                \n| 1970-01-01T00:00:00.020 |\
+                \n| 1970-01-01T00:00:00.030 |\
+                \n| 1970-01-01T00:00:00.040 |\
+                \n| 1970-01-01T00:00:00.050 |\
+                \n| 1970-01-01T00:00:00.060 |\
+                \n| 1970-01-01T00:00:00.070 |\
+                \n| 1970-01-01T00:00:00.080 |\
+                \n| 1970-01-01T00:00:00.090 |\
+                \n| 1970-01-01T00:00:00.100 |\
+                \n+-------------------------+",
+            ),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn unaligned_empty_metric_test() {
+        do_empty_metric_test(
+            0,
+            100,
+            11,
+            "time".to_string(),
+            String::from(
+                "+-------------------------+\
+                \n| time                    |\
+                \n+-------------------------+\
+                \n| 1970-01-01T00:00:00     |\
+                \n| 1970-01-01T00:00:00.011 |\
+                \n| 1970-01-01T00:00:00.022 |\
+                \n| 1970-01-01T00:00:00.033 |\
+                \n| 1970-01-01T00:00:00.044 |\
+                \n| 1970-01-01T00:00:00.055 |\
+                \n| 1970-01-01T00:00:00.066 |\
+                \n| 1970-01-01T00:00:00.077 |\
+                \n| 1970-01-01T00:00:00.088 |\
+                \n| 1970-01-01T00:00:00.099 |\
+                \n+-------------------------+",
+            ),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn one_row_empty_metric_test() {
+        do_empty_metric_test(
+            0,
+            100,
+            1000,
+            "time".to_string(),
+            String::from(
+                "+---------------------+\
+                \n| time                |\
+                \n+---------------------+\
+                \n| 1970-01-01T00:00:00 |\
+                \n+---------------------+",
+            ),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn negative_range_empty_metric_test() {
+        do_empty_metric_test(
+            1000,
+            -1000,
+            10,
+            "time".to_string(),
+            String::from(
+                "+------+\
+                \n| time |\
+                \n+------+\
+                \n+------+",
+            ),
+        )
+        .await
     }
 }
