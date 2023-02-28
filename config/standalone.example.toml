@@ -45,7 +45,7 @@ addr = "127.0.0.1:4003"
 # The number of server worker threads, 2 by default.
 runtime_size = 2
 
-# PostgresSQL server options.
+# PostgresSQL server TLS options, see `[mysql_options.tls]` section.
 [postgres_options.tls]
 # TLS mode.
 mode = "disable"
