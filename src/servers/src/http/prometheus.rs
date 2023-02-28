@@ -60,14 +60,8 @@ pub async fn remote_write(
         QueryContext::arc()
     };
 
-    // TODO debug log
-    // handler.write(request, ctx).await?;
-    let re = handler.write(request, ctx).await;
-    if re.is_err() {
-        error!("prom write error: {:#?}", re.as_ref().err().unwrap());
-    }
-    re?;
-
+    // TODO(shuiyisong): add more error log
+    handler.write(request, ctx).await?;
     Ok((StatusCode::NO_CONTENT, ()))
 }
 
@@ -99,13 +93,8 @@ pub async fn remote_read(
         QueryContext::arc()
     };
 
-    // TODO debug log
-    // handler.read(request, ctx).await
-    let re = handler.read(request, ctx).await;
-    if re.is_err() {
-        error!("prom read error: {:#?}", re.as_ref().err().unwrap());
-    }
-    re
+    // TODO(shuiyisong): add more error log
+    handler.read(request, ctx).await
 }
 
 async fn decode_remote_write_request(body: Body) -> Result<WriteRequest> {
