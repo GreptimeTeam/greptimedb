@@ -274,7 +274,7 @@ def a(cpu: vector[f64], mem: vector[f64])->(vector[f64|None], vector[into(f64)],
 "#,
         predicate: ParseIsErr(
             reason:
-            " keyword argument, found "
+            "Expect a list of String, found one element to be"
         )
     ),
     (

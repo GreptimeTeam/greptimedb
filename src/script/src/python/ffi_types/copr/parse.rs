@@ -31,6 +31,7 @@ pub struct DecoratorArgs {
     pub arg_names: Option<Vec<String>>,
     pub ret_names: Vec<String>,
     pub sql: Option<String>,
+    #[cfg_attr(test, serde(skip))]
     pub backend: BackendType, // maybe add a URL for connecting or what?
                               // also predicate for timed triggered or conditional triggered?
 }
