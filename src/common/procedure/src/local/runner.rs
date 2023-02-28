@@ -176,7 +176,10 @@ impl Runner {
                         self.retry_times += 1;
                         self.wait_on_err(self.retry_times).await;
                     } else {
-                        return Err(Error::RetryTimesExceeded);
+                        return Err(
+                            Error::RetryTimesExceeded {
+                                max_retry_times: self.max_retry_times,
+                            });
                     }
                 }
                 ExecResult::Failed(e) => return Err(e),
@@ -737,7 +740,7 @@ mod tests {
                     Ok(Status::Done)
                 }
             }
-            .boxed()
+                .boxed()
         };
 
         let retry_later = ProcedureAdapter {

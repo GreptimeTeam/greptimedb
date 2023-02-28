@@ -81,6 +81,12 @@ pub enum Error {
         #[snafu(backtrace)]
         source: BoxedError,
     },
+
+    #[snafu(display("Procedure retry exceeded max {} times, source: {}", max_retry_times, source))]
+   RetryTimesExceeded{
+        max_retry_times: u32,
+    },
+
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
