@@ -27,6 +27,7 @@ use session::context::QueryContext;
 use snafu::prelude::*;
 
 use crate::error::{self, Result};
+use crate::parse_catalog_and_schema_from_client_database_name;
 use crate::prometheus::snappy_decompress;
 use crate::query_handler::{PrometheusProtocolHandlerRef, PrometheusResponse};
 
@@ -52,7 +53,8 @@ pub async fn remote_write(
     let request = decode_remote_write_request(body).await?;
 
     let ctx = if let Some(db) = params.db {
-        Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, &db))
+        let (catalog, schema) = parse_catalog_and_schema_from_client_database_name(&db);
+        Arc::new(QueryContext::with(catalog, schema))
     } else {
         QueryContext::arc()
     };
