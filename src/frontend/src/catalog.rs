@@ -46,7 +46,7 @@ pub struct FrontendCatalogManager {
 }
 
 impl FrontendCatalogManager {
-    pub(crate) fn new(
+    pub fn new(
         backend: KvBackendRef,
         partition_manager: PartitionRuleManagerRef,
         datanode_clients: Arc<DatanodeClients>,

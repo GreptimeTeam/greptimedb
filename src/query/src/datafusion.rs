@@ -58,7 +58,7 @@ use crate::plan::LogicalPlan;
 use crate::query_engine::{QueryEngineContext, QueryEngineState};
 use crate::{metric, QueryEngine};
 
-pub(crate) struct DatafusionQueryEngine {
+pub struct DatafusionQueryEngine {
     state: QueryEngineState,
 }
 
@@ -145,14 +145,14 @@ impl QueryEngine for DatafusionQueryEngine {
         // TODO(sunng87): consider cache optmised logical plan between describe
         // and execute
         let plan = self.statement_to_plan(stmt, query_ctx).await?;
-        let mut ctx = QueryEngineContext::new(self.state.session_state());
-        let optimised_plan = self.optimize_logical_plan(&mut ctx, &plan)?;
+        let optimised_plan = self.optimize(&plan)?;
         optimised_plan.schema()
     }
 
     async fn execute(&self, plan: &LogicalPlan) -> Result<Output> {
+        let logical_plan = self.optimize(plan)?;
+
         let mut ctx = QueryEngineContext::new(self.state.session_state());
-        let logical_plan = self.optimize_logical_plan(&mut ctx, plan)?;
         let physical_plan = self.create_physical_plan(&mut ctx, &logical_plan).await?;
         let physical_plan = self.optimize_physical_plan(&mut ctx, physical_plan)?;
 
@@ -185,16 +185,13 @@ impl QueryEngine for DatafusionQueryEngine {
 }
 
 impl LogicalOptimizer for DatafusionQueryEngine {
-    fn optimize_logical_plan(
-        &self,
-        ctx: &mut QueryEngineContext,
-        plan: &LogicalPlan,
-    ) -> Result<LogicalPlan> {
+    fn optimize(&self, plan: &LogicalPlan) -> Result<LogicalPlan> {
         let _timer = timer!(metric::METRIC_OPTIMIZE_LOGICAL_ELAPSED);
         match plan {
             LogicalPlan::DfPlan(df_plan) => {
-                let state = ctx.state();
-                let optimized_plan = state
+                let optimized_plan = self
+                    .state
+                    .session_state()
                     .optimize(df_plan)
                     .context(error::DatafusionSnafu {
                         msg: "Fail to optimize logical plan",

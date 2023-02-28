@@ -19,13 +19,13 @@ use common_grpc::channel_manager::ChannelManager;
 use meta_client::rpc::Peer;
 use moka::future::{Cache, CacheBuilder};
 
-pub(crate) struct DatanodeClients {
+pub struct DatanodeClients {
     channel_manager: ChannelManager,
     clients: Cache<Peer, Client>,
 }
 
-impl DatanodeClients {
-    pub(crate) fn new() -> Self {
+impl Default for DatanodeClients {
+    fn default() -> Self {
         Self {
             channel_manager: ChannelManager::new(),
             clients: CacheBuilder::new(1024)
@@ -34,7 +34,9 @@ impl DatanodeClients {
                 .build(),
         }
     }
+}
 
+impl DatanodeClients {
     pub(crate) async fn get_client(&self, datanode: &Peer) -> Client {
         self.clients
             .get_with_by_ref(datanode, async move {

@@ -103,6 +103,31 @@ pub enum Error {
         #[snafu(backtrace)]
         source: common_recordbatch::error::Error,
     },
+
+    #[snafu(display("Failed to start Meta client, source: {}", source))]
+    StartMetaClient {
+        #[snafu(backtrace)]
+        source: meta_client::error::Error,
+    },
+
+    #[snafu(display("Failed to parse SQL: {}, source: {}", sql, source))]
+    ParseSql {
+        sql: String,
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
+
+    #[snafu(display("Failed to plan statement, source: {}", source))]
+    PlanStatement {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
+
+    #[snafu(display("Failed to encode logical plan in substrait, source: {}", source))]
+    SubstraitEncodeLogicalPlan {
+        #[snafu(backtrace)]
+        source: substrait::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -126,6 +151,11 @@ impl ErrorExt for Error {
             Error::CollectRecordBatches { source } | Error::PrettyPrintRecordBatches { source } => {
                 source.status_code()
             }
+            Error::StartMetaClient { source } => source.status_code(),
+            Error::ParseSql { source, .. } | Error::PlanStatement { source } => {
+                source.status_code()
+            }
+            Error::SubstraitEncodeLogicalPlan { source } => source.status_code(),
         }
     }
 
