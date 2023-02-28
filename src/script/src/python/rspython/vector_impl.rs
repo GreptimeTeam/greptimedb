@@ -346,6 +346,7 @@ pub(crate) fn pyobj_try_to_typed_val(
     vm: &VirtualMachine,
     dtype: Option<ConcreteDataType>,
 ) -> Option<value::Value> {
+    // TODO(discord9): use `PyResult` instead of `Option` for better error handling
     if let Some(dtype) = dtype {
         match dtype {
             ConcreteDataType::Null(_) => {
@@ -452,7 +453,6 @@ pub(crate) fn pyobj_try_to_typed_val(
                     None
                 }
             }
-            ConcreteDataType::List(_) => unreachable!(),
             ConcreteDataType::Date(_)
             | ConcreteDataType::DateTime(_)
             | ConcreteDataType::Timestamp(_) => {
@@ -481,6 +481,7 @@ pub(crate) fn pyobj_try_to_typed_val(
                     None
                 }
             }
+            _ => None,
         }
     } else if is_instance::<PyNone>(&obj, vm) {
         // if Untyped then by default return types with highest precision
