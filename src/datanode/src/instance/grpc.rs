@@ -98,6 +98,7 @@ impl Instance {
             DdlExpr::Alter(expr) => self.handle_alter(expr).await,
             DdlExpr::CreateDatabase(expr) => self.handle_create_database(expr, query_ctx).await,
             DdlExpr::DropTable(expr) => self.handle_drop_table(expr).await,
+            DdlExpr::FlushTable(_) => todo!(),
         }
     }
 }
