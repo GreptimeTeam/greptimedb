@@ -16,15 +16,16 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use chrono::{NaiveDate, NaiveDateTime};
 use common_query::Output;
 use common_telemetry::tracing::log;
 use common_telemetry::{error, trace};
 use opensrv_mysql::{
-    AsyncMysqlShim, ColumnFlags, ColumnType, ErrorKind, InitWriter, ParamParser, ParamValue,
-    QueryResultWriter, StatementMetaWriter, ValueInner,
+    AsyncMysqlShim, Column, ColumnFlags, ColumnType, ErrorKind, InitWriter, ParamParser,
+    ParamValue, QueryResultWriter, StatementMetaWriter, ValueInner,
 };
 use parking_lot::RwLock;
 use rand::RngCore;
@@ -37,7 +38,7 @@ use sql::statements::statement::Statement;
 use tokio::io::AsyncWrite;
 
 use crate::auth::{Identity, Password, UserProviderRef};
-use crate::error::{self, Result};
+use crate::error::{self, Error, Result};
 use crate::mysql::writer::MysqlResultWriter;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
@@ -103,6 +104,18 @@ impl MysqlInstanceShim {
         );
         output
     }
+
+    fn set_query(&self, query: String) -> u32 {
+        let stmt_id = self.prepared_stmts_counter.fetch_add(1, Ordering::SeqCst);
+        let mut guard = self.prepared_stmts.write();
+        guard.insert(stmt_id, query.to_string());
+        stmt_id
+    }
+
+    fn query(&self, stmt_id: u32) -> Option<String> {
+        let guard = self.prepared_stmts.read();
+        guard.get(&stmt_id).map(|s| s.to_owned())
+    }
 }
 
 #[async_trait]
@@ -157,70 +170,17 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         query: &'a str,
         w: StatementMetaWriter<'a, W>,
     ) -> Result<()> {
-        log::debug!("prepared original query is: {}", query);
-        let mut query = query.to_string();
-        let mut index = 1;
-        while let Some(position) = query.find('?') {
-            let place_holder = format!("${}", index);
-            query.replace_range(position..position + 1, &place_holder);
-            index += 1;
-        }
-
-        log::debug!("prepared query is {}", query);
-
-        let statement = ParserContext::create_with_dialect(&query, &GenericDialect {});
-        let mut statement = match statement {
-            Err(e) => {
-                w.error(ErrorKind::ER_SYNTAX_ERROR, e.to_string().as_bytes())
-                    .await?;
-                return Ok(());
-            }
-            Ok(s) => s,
+        let (query, param_num) = replace_placeholder(query);
+        if let Err(e) = validate_query(&query).await {
+            w.error(ErrorKind::ER_UNKNOWN_ERROR, e.to_string().as_bytes())
+                .await?;
+            return Ok(());
         };
 
-        if statement.len() != 1 {
-            w.error(
-                ErrorKind::ER_SYNTAX_ERROR,
-                b"prepare statement only support single statement",
-            )
-            .await?;
-            return Ok(());
-        }
-
-        let statement = statement.remove(0);
-
-        match &statement {
-            Statement::Query(_query) => {}
-            _ => {
-                w.error(
-                    ErrorKind::ER_UNKNOWN_ERROR,
-                    b"prepare statement only support SELECT now",
-                )
-                .await?;
-                return Ok(());
-            }
-        }
-
-        let stmt_id = self.prepared_stmts_counter.fetch_add(1, Ordering::SeqCst);
-        {
-            let mut guard = self.prepared_stmts.write();
-            guard.insert(stmt_id, query.to_string());
-        }
-
-        let mut params = vec![];
-        // dummy columns to satisfy opensrv_mysql
-        // just the number of params is useful
-        for _ in 1..index {
-            params.push(opensrv_mysql::Column {
-                table: "".to_string(),
-                column: "".to_string(),
-                coltype: ColumnType::MYSQL_TYPE_LONG,
-                colflags: ColumnFlags::NOT_NULL_FLAG,
-            });
-        }
+        let stmt_id = self.set_query(query);
+        let params = dummy_params(param_num);
 
         w.reply(stmt_id, &params, &[]).await?;
-
         return Ok(());
     }
 
@@ -231,12 +191,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         w: QueryResultWriter<'a, W>,
     ) -> Result<()> {
         let params: Vec<ParamValue> = p.into_iter().collect();
-        let sql = {
-            let guard = self.prepared_stmts.read();
-            guard.get(&stmt_id).map(|s| s.to_owned())
-        };
-
-        let sql = match sql {
+        let query = match self.query(stmt_id) {
             None => {
                 w.error(
                     ErrorKind::ER_UNKNOWN_STMT_HANDLER,
@@ -245,39 +200,14 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                 .await?;
                 return Ok(());
             }
-            Some(sql) => sql,
+            Some(query) => query,
         };
 
-        // manually replace variables in prepared statement
-        let mut query = sql.to_owned();
-        let mut index = 1;
-        for param in params {
-            let s = match param.value.into_inner() {
-                ValueInner::Int(u) => u.to_string(),
-                ValueInner::UInt(u) => u.to_string(),
-                ValueInner::Double(u) => u.to_string(),
-                ValueInner::NULL => "NULL".to_string(),
-                ValueInner::Bytes(b) => format!("'{}'", &String::from_utf8_lossy(b)),
-                _ => {
-                    w.error(
-                        ErrorKind::ER_BAD_FIELD_ERROR,
-                        b"unsupported_parameter_value",
-                    )
-                    .await?;
-                    return Ok(());
-                }
-            };
-            query = query.replace(&format!("${}", index), &s);
-            index += 1;
-        }
-
+        let query = replace_params(params, query);
         log::debug!("execute replaced query: {}", query);
 
         let outputs = self.do_query(&query).await;
-        let mut writer = MysqlResultWriter::new(w);
-        for output in outputs {
-            writer.write(&query, output).await?;
-        }
+        write_output(w, &query, outputs).await?;
 
         Ok(())
     }
@@ -330,4 +260,97 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
 
         w.ok().await.map_err(|e| e.into())
     }
+}
+
+fn replace_params(params: Vec<ParamValue>, query: String) -> String {
+    let mut query = query.to_owned();
+    let mut index = 1;
+    for param in params {
+        let s = match param.value.into_inner() {
+            ValueInner::Int(u) => u.to_string(),
+            ValueInner::UInt(u) => u.to_string(),
+            ValueInner::Double(u) => u.to_string(),
+            ValueInner::NULL => "NULL".to_string(),
+            ValueInner::Bytes(b) => format!("'{}'", &String::from_utf8_lossy(b)),
+            ValueInner::Date(_) => NaiveDate::from(param.value).to_string(),
+            ValueInner::Datetime(_) => NaiveDateTime::from(param.value).to_string(),
+            ValueInner::Time(_) => format_duration(Duration::from(param.value)),
+        };
+        query = query.replace(&format!("${}", index), &s);
+        index += 1;
+    }
+    query
+}
+
+fn format_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs() % 60;
+    let minutes = (duration.as_secs() / 60) % 60;
+    let hours = (duration.as_secs() / 60) / 60;
+    format!("{}:{}:{}", hours, minutes, seconds)
+}
+
+async fn validate_query(query: &String) -> Result<Statement> {
+    let statement = ParserContext::create_with_dialect(&query, &GenericDialect {});
+    let mut statement = match statement {
+        Err(e) => {
+            return Err(Error::PrepareStatementFailed {
+                err_msg: e.to_string(),
+            })
+        }
+        Ok(s) => s,
+    };
+
+    if statement.len() != 1 {
+        return Err(Error::PrepareStatementFailed {
+            err_msg: "prepare statement only support single statement".to_string(),
+        });
+    }
+
+    let statement = statement.remove(0);
+
+    match statement {
+        Statement::Query(_) => Ok(statement),
+        _ => Err(Error::PrepareStatementFailed {
+            err_msg: "prepare statment only support SELECT now".to_string(),
+        }),
+    }
+}
+
+async fn write_output<'a, W: AsyncWrite + Send + Sync + Unpin>(
+    w: QueryResultWriter<'a, W>,
+    query: &String,
+    outputs: Vec<Result<Output>>,
+) -> Result<()> {
+    let mut writer = MysqlResultWriter::new(w);
+    for output in outputs {
+        writer.write(&query, output).await?;
+    }
+    Ok(())
+}
+
+// dummy columns to satisfy opensrv_mysql
+// just the number of params is useful
+fn dummy_params(index: u32) -> Vec<Column> {
+    let mut params = vec![];
+
+    for _ in 1..index {
+        params.push(opensrv_mysql::Column {
+            table: "".to_string(),
+            column: "".to_string(),
+            coltype: ColumnType::MYSQL_TYPE_LONG,
+            colflags: ColumnFlags::NOT_NULL_FLAG,
+        });
+    }
+    params
+}
+
+fn replace_placeholder(query: &str) -> (String, u32) {
+    let mut query = query.to_string();
+    let mut index = 1;
+    while let Some(position) = query.find('?') {
+        let place_holder = format!("${}", index);
+        query.replace_range(position..position + 1, &place_holder);
+        index += 1;
+    }
+    (query, index)
 }
