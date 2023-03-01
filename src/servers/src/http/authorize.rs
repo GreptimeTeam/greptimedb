@@ -62,6 +62,12 @@ impl RegexExtractor {
     }
 }
 
+impl Default for RegexExtractor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<RespBody> HttpAuth<RespBody> {
     pub fn new(user_provider: Option<UserProviderRef>) -> Self {
         Self {
@@ -139,7 +145,7 @@ async fn authorize<B: Send + Sync + 'static>(
         })?;
 
     let (catalog, database) =
-        crate::parse_catalog_and_schema_from_client_database_name(&input_database);
+        crate::parse_catalog_and_schema_from_client_database_name(input_database);
 
     let user_info = request
         .extensions()
@@ -396,10 +402,8 @@ mod tests {
     fn test_regex_compile() {
         let re = Regex::new(DB_EXTRACT_PATTERN);
         assert!(re.is_ok());
-
         let re = Regex::new(INFLUXDB_USER_PATTERN);
         assert!(re.is_ok());
-
         let re = Regex::new(INFLUXDB_PASS_PATTERN);
         assert!(re.is_ok());
     }
