@@ -113,7 +113,10 @@ impl TryFrom<StartCommand> for MetaSrvOptions {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use meta_srv::selector::SelectorType;
+    use tempfile::NamedTempFile;
 
     use super::*;
 
@@ -136,15 +139,23 @@ mod tests {
 
     #[test]
     fn test_read_from_config_file() {
+        let mut file = NamedTempFile::new().unwrap();
+        let toml_str = r#"
+            bind_addr = "127.0.0.1:3002"
+            server_addr = "127.0.0.1:3002"
+            store_addr = "127.0.0.1:2379"
+            datanode_lease_secs = 15
+            selector = "LeaseBased"
+            use_memory_store = false
+        "#;
+        write!(file, "{}", toml_str).unwrap();
+
         let cmd = StartCommand {
             bind_addr: None,
             server_addr: None,
             store_addr: None,
             selector: None,
-            config_file: Some(format!(
-                "{}/../../config/metasrv.example.toml",
-                std::env::current_dir().unwrap().as_path().to_str().unwrap()
-            )),
+            config_file: Some(file.path().to_str().unwrap().to_string()),
             use_memory_store: false,
         };
         let options: MetaSrvOptions = cmd.try_into().unwrap();

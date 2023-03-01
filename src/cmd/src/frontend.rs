@@ -173,9 +173,11 @@ impl TryFrom<StartCommand> for FrontendOptions {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
     use std::time::Duration;
 
     use servers::auth::{Identity, Password, UserProviderRef};
+    use tempfile::NamedTempFile;
 
     use super::*;
 
@@ -231,6 +233,16 @@ mod tests {
 
     #[test]
     fn test_read_from_config_file() {
+        let mut file = NamedTempFile::new().unwrap();
+        let toml_str = r#"
+            mode = "distributed"
+
+            [http_options]
+            addr = "127.0.0.1:4000"
+            timeout = "30s"
+        "#;
+        write!(file, "{}", toml_str).unwrap();
+
         let command = StartCommand {
             http_addr: None,
             grpc_addr: None,
@@ -238,10 +250,7 @@ mod tests {
             postgres_addr: None,
             opentsdb_addr: None,
             influxdb_enable: None,
-            config_file: Some(format!(
-                "{}/../../config/frontend.example.toml",
-                std::env::current_dir().unwrap().as_path().to_str().unwrap()
-            )),
+            config_file: Some(file.path().to_str().unwrap().to_string()),
             metasrv_addr: None,
             tls_mode: None,
             tls_cert_path: None,
