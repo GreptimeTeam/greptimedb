@@ -22,7 +22,7 @@ use tokio::time;
 use crate::error::{ProcedurePanicSnafu, Result};
 use crate::local::{ManagerContext, ProcedureMeta, ProcedureMetaRef};
 use crate::store::ProcedureStore;
-use crate::{BoxedProcedure, Context, ProcedureId, ProcedureState, ProcedureWithId, Status};
+use crate::{BoxedProcedure, Context, Error, ProcedureId, ProcedureState, ProcedureWithId, Status};
 
 #[derive(Debug)]
 enum ExecResult {
@@ -175,7 +175,8 @@ impl Runner {
                         retry_times += retry_times;
                         self.wait_on_err(d, retry_times).await;
                     } else {
-                        ExecResult::Failed
+                        self.meta.set_state(ProcedureState::failed(Arc::new(Error::RetryTimesExceeded {})));
+                        return;
                     }
                 }
             }
@@ -794,10 +795,9 @@ mod tests {
             .with_max_times(3);
 
         // Run the runner and execute the procedure.
-        let err = runner.execute_procedure_in_loop().await.unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("Procedure retry exceeded max times"));
+        runner.execute_procedure_in_loop().await;
+        let err = meta.state().error().unwrap().to_string();
+        assert!(err.contains("Procedure retry exceeded max times"));
     }
 
     #[tokio::test]
@@ -867,7 +867,7 @@ mod tests {
         // Replace the manager ctx.
         runner.manager_ctx = manager_ctx;
 
-        // Run the runer and execute the procedure.
+        // Run the runner and execute the procedure.
         runner.run().await;
         let err = meta.state().error().unwrap().to_string();
         assert!(err.contains("subprocedure failed"), "{err}");
