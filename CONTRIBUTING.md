@@ -59,19 +59,14 @@ You could setup the [`pre-commit`](https://pre-commit.com/#plugins) hooks to run
 
 1. Install `pre-commit`
 
-        ```sh
         pip install pre-commit
-        ```
 
-        or
+    or
 
-        ```sh
         brew install pre-commit
-        ```
 
 2. Install the `pre-commit` hooks
 
-        ```sh
         $ pre-commit install
         pre-commit installed at .git/hooks/pre-commit
 
@@ -80,7 +75,6 @@ You could setup the [`pre-commit`](https://pre-commit.com/#plugins) hooks to run
 
         $ pre-commit install --hook-type pre-push
         pre-commit installed at .git/hooks/pre-push
-        ```
 
 Now, `pre-commit` will run automatically on `git commit`.
 
