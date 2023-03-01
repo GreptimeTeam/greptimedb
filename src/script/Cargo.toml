@@ -6,6 +6,7 @@ license.workspace = true
 
 [features]
 default = ["python"]
+pyo3_backend = ["pyo3"]
 python = [
     "dep:datafusion",
     "dep:datafusion-common",
@@ -58,6 +59,7 @@ rustpython-vm = { git = "https://github.com/discord9/RustPython", optional = tru
     "default",
     "codegen",
 ] }
+pyo3 = { version = "0.18", optional = true }
 session = { path = "../session" }
 snafu = { version = "0.7", features = ["backtraces"] }
 sql = { path = "../sql" }

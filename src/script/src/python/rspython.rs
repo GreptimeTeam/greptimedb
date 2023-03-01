@@ -12,16 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Python script coprocessor
+mod copr_impl;
+#[cfg(test)]
+mod test;
+pub(crate) mod vector_impl;
 
-mod engine;
-pub mod error;
-pub(crate) mod utils;
+pub(crate) mod builtins;
+mod dataframe_impl;
+mod utils;
 
-pub use self::engine::{PyEngine, PyScript};
-
-mod ffi_types;
-
-#[cfg(feature = "pyo3_backend")]
-mod pyo3;
-mod rspython;
+#[cfg(test)]
+pub(crate) use copr_impl::init_interpreter;
+pub(crate) use copr_impl::rspy_exec_parsed;
