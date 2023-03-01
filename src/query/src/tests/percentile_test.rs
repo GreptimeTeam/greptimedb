@@ -129,7 +129,7 @@ fn create_correctness_engine() -> Arc<dyn QueryEngine> {
 
     let numbers = [3_i32, 6_i32, 8_i32, 10_i32];
 
-    let column: VectorRef = Arc::new(Int32Vector::from_slice(&numbers));
+    let column: VectorRef = Arc::new(Int32Vector::from_slice(numbers));
     columns.push(column);
 
     let schema = Arc::new(Schema::new(column_schemas));

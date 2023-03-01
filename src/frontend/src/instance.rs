@@ -119,7 +119,7 @@ impl Instance {
         });
         let table_routes = Arc::new(TableRoutes::new(meta_client.clone()));
         let partition_manager = Arc::new(PartitionRuleManager::new(table_routes));
-        let datanode_clients = Arc::new(DatanodeClients::new());
+        let datanode_clients = Arc::new(DatanodeClients::default());
 
         let catalog_manager = Arc::new(FrontendCatalogManager::new(
             meta_backend,

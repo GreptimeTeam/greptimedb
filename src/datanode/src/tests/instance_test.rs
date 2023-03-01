@@ -795,6 +795,42 @@ async fn test_execute_copy_to() {
     assert!(matches!(output, Output::AffectedRows(2)));
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn test_create_by_procedure() {
+    common_telemetry::init_default_ut_logging();
+
+    let instance = MockInstance::with_procedure_enabled("create_by_procedure").await;
+
+    let output = execute_sql(
+        &instance,
+        r#"create table test_table(
+                            host string,
+                            ts timestamp,
+                            cpu double default 0,
+                            memory double,
+                            TIME INDEX (ts),
+                            PRIMARY KEY(host)
+                        ) engine=mito with(regions=1);"#,
+    )
+    .await;
+    assert!(matches!(output, Output::AffectedRows(0)));
+
+    // Create if not exists
+    let output = execute_sql(
+        &instance,
+        r#"create table if not exists test_table(
+                            host string,
+                            ts timestamp,
+                            cpu double default 0,
+                            memory double,
+                            TIME INDEX (ts),
+                            PRIMARY KEY(host)
+                        ) engine=mito with(regions=1);"#,
+    )
+    .await;
+    assert!(matches!(output, Output::AffectedRows(0)));
+}
+
 async fn execute_sql(instance: &MockInstance, sql: &str) -> Output {
     execute_sql_in_db(instance, sql, DEFAULT_SCHEMA_NAME).await
 }

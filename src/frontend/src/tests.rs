@@ -210,7 +210,7 @@ pub(crate) async fn create_distributed_instance(test_name: &str) -> MockDistribu
     let kv_store: KvStoreRef = Arc::new(MemStore::default()) as _;
     let meta_srv = meta_srv::mocks::mock(MetaSrvOptions::default(), kv_store.clone(), None).await;
 
-    let datanode_clients = Arc::new(DatanodeClients::new());
+    let datanode_clients = Arc::new(DatanodeClients::default());
 
     let mut test_guards = vec![];
 

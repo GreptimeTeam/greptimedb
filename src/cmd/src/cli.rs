@@ -50,13 +50,15 @@ impl SubCommand {
 pub(crate) struct AttachCommand {
     #[clap(long)]
     pub(crate) grpc_addr: String,
+    #[clap(long)]
+    pub(crate) meta_addr: Option<String>,
     #[clap(long, action)]
     pub(crate) disable_helper: bool,
 }
 
 impl AttachCommand {
     async fn run(self) -> Result<()> {
-        let mut repl = Repl::try_new(&self)?;
+        let mut repl = Repl::try_new(&self).await?;
         repl.run().await
     }
 }

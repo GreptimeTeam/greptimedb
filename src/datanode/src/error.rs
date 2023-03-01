@@ -408,23 +408,18 @@ pub enum Error {
         source: common_procedure::error::Error,
     },
 
-    #[snafu(display("Failed to submit procedure, source: {}", source))]
+    #[snafu(display("Failed to submit procedure {}, source: {}", procedure_id, source))]
     SubmitProcedure {
+        procedure_id: ProcedureId,
         #[snafu(backtrace)]
         source: common_procedure::error::Error,
     },
 
-    #[snafu(display("Failed to wait procedure done, source: {}", source))]
+    #[snafu(display("Failed to wait procedure {} done, source: {}", procedure_id, source))]
     WaitProcedure {
-        source: tokio::sync::watch::error::RecvError,
-        backtrace: Backtrace,
-    },
-
-    // TODO(yingwen): Use procedure's error.
-    #[snafu(display("Failed to execute procedure, procedure_id: {}", procedure_id))]
-    ProcedureExec {
         procedure_id: ProcedureId,
-        backtrace: Backtrace,
+        #[snafu(backtrace)]
+        source: common_procedure::error::Error,
     },
 }
 
@@ -507,7 +502,7 @@ impl ErrorExt for Error {
             RecoverProcedure { source, .. } | SubmitProcedure { source, .. } => {
                 source.status_code()
             }
-            WaitProcedure { .. } | ProcedureExec { .. } => StatusCode::Internal,
+            WaitProcedure { source, .. } => source.status_code(),
         }
     }
 

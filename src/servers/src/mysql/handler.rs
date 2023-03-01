@@ -206,7 +206,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
 
         let context = self.session.context();
         context.set_current_catalog(catalog);
-        context.set_current_schema(database);
+        context.set_current_schema(schema);
 
         w.ok().await.map_err(|e| e.into())
     }

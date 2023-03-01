@@ -9,7 +9,8 @@ RUN apt-get update && apt-get install -y \
     protobuf-compiler \
     curl \
     build-essential \
-    pkg-config
+    pkg-config \
+    python3-dev
 
 # Install Rust.
 SHELL ["/bin/bash", "-c"]

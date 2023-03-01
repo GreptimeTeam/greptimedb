@@ -96,7 +96,7 @@ async fn test_datafusion_query_engine() -> Result<()> {
     let expected: Vec<u32> = (0u32..limit as u32).collect();
     assert_eq!(
         *batch.column(0),
-        Arc::new(UInt32Vector::from_slice(&expected)) as VectorRef
+        Arc::new(UInt32Vector::from_slice(expected)) as VectorRef
     );
 
     Ok(())
@@ -200,7 +200,7 @@ async fn test_udf() -> Result<()> {
     let expected: Vec<u32> = vec![1, 1, 4, 27, 256, 3125, 46656, 823543, 16777216, 387420489];
     assert_eq!(
         *batch.column(0),
-        Arc::new(UInt32Vector::from_slice(&expected)) as VectorRef
+        Arc::new(UInt32Vector::from_slice(expected)) as VectorRef
     );
 
     Ok(())

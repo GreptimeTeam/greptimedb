@@ -341,7 +341,7 @@ mod tests {
         let column_schema = ColumnSchema::new("test", ConcreteDataType::int32_datatype(), false);
         let vector = column_schema.create_default_vector_for_padding(4);
         assert_eq!(4, vector.len());
-        let expect: VectorRef = Arc::new(Int32Vector::from_slice(&[0, 0, 0, 0]));
+        let expect: VectorRef = Arc::new(Int32Vector::from_slice([0, 0, 0, 0]));
         assert_eq!(expect, vector);
     }
 

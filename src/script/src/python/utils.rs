@@ -12,24 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
-use datafusion_common::ScalarValue;
-use datafusion_expr::ColumnarValue as DFColValue;
-use datatypes::prelude::ScalarVector;
-use datatypes::vectors::{
-    BooleanVector, Float64Vector, Helper, Int64Vector, NullVector, StringVector, VectorRef,
-};
 use futures::Future;
-use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyList, PyStr};
-use rustpython_vm::{PyObjectRef, PyPayload, PyRef, VirtualMachine};
-use snafu::{Backtrace, GenerateImplicitData, OptionExt, ResultExt};
+use rustpython_vm::builtins::PyBaseExceptionRef;
+use rustpython_vm::{PyObjectRef, PyPayload, VirtualMachine};
+use snafu::{Backtrace, GenerateImplicitData};
 
-use crate::python::builtins::try_into_columnar_value;
-use crate::python::error::ret_other_error_with;
-use crate::python::{error, PyVector};
-
-pub(crate) type PyVectorRef = PyRef<PyVector>;
+use crate::python::error;
 
 /// use `rustpython`'s `is_instance` method to check if a PyObject is a instance of class.
 /// if `PyResult` is Err, then this function return `false`
@@ -49,69 +37,6 @@ pub fn format_py_error(excep: PyBaseExceptionRef, vm: &VirtualMachine) -> error:
     error::Error::PyRuntime {
         msg,
         backtrace: Backtrace::generate(),
-    }
-}
-
-/// convert a single PyVector or a number(a constant)(wrapping in PyObjectRef) into a Array(or a constant array)
-pub fn py_vec_obj_to_array(
-    obj: &PyObjectRef,
-    vm: &VirtualMachine,
-    col_len: usize,
-) -> Result<VectorRef, error::Error> {
-    // It's ugly, but we can't find a better way right now.
-    if is_instance::<PyVector>(obj, vm) {
-        let pyv = obj
-            .payload::<PyVector>()
-            .with_context(|| ret_other_error_with(format!("can't cast obj {obj:?} to PyVector")))?;
-        Ok(pyv.as_vector_ref())
-    } else if is_instance::<PyInt>(obj, vm) {
-        let val = obj
-            .to_owned()
-            .try_into_value::<i64>(vm)
-            .map_err(|e| format_py_error(e, vm))?;
-        let ret = Int64Vector::from_iterator(std::iter::repeat(val).take(col_len));
-        Ok(Arc::new(ret) as _)
-    } else if is_instance::<PyFloat>(obj, vm) {
-        let val = obj
-            .to_owned()
-            .try_into_value::<f64>(vm)
-            .map_err(|e| format_py_error(e, vm))?;
-        let ret = Float64Vector::from_iterator(std::iter::repeat(val).take(col_len));
-        Ok(Arc::new(ret) as _)
-    } else if is_instance::<PyBool>(obj, vm) {
-        let val = obj
-            .to_owned()
-            .try_into_value::<bool>(vm)
-            .map_err(|e| format_py_error(e, vm))?;
-
-        let ret = BooleanVector::from_iterator(std::iter::repeat(val).take(col_len));
-        Ok(Arc::new(ret) as _)
-    } else if is_instance::<PyStr>(obj, vm) {
-        let val = obj
-            .to_owned()
-            .try_into_value::<String>(vm)
-            .map_err(|e| format_py_error(e, vm))?;
-
-        let ret = StringVector::from_iterator(std::iter::repeat(val.as_str()).take(col_len));
-        Ok(Arc::new(ret) as _)
-    } else if is_instance::<PyList>(obj, vm) {
-        let columnar_value =
-            try_into_columnar_value(obj.clone(), vm).map_err(|e| format_py_error(e, vm))?;
-
-        match columnar_value {
-            DFColValue::Scalar(ScalarValue::List(scalars, _datatype)) => match scalars {
-                Some(scalars) => {
-                    let array = ScalarValue::iter_to_array(scalars.into_iter())
-                        .context(error::DataFusionSnafu)?;
-
-                    Helper::try_into_vector(array).context(error::TypeCastSnafu)
-                }
-                None => Ok(Arc::new(NullVector::new(0))),
-            },
-            _ => unreachable!(),
-        }
-    } else {
-        ret_other_error_with(format!("Expect a vector or a constant, found {obj:?}")).fail()
     }
 }
 

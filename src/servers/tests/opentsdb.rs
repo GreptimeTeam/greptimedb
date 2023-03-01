@@ -27,6 +27,7 @@ use servers::opentsdb::connection::Connection;
 use servers::opentsdb::OpentsdbServer;
 use servers::query_handler::OpentsdbProtocolHandler;
 use servers::server::Server;
+use session::context::QueryContextRef;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Notify};
 
@@ -36,7 +37,7 @@ struct DummyOpentsdbInstance {
 
 #[async_trait]
 impl OpentsdbProtocolHandler for DummyOpentsdbInstance {
-    async fn exec(&self, data_point: &DataPoint) -> Result<()> {
+    async fn exec(&self, data_point: &DataPoint, _ctx: QueryContextRef) -> Result<()> {
         let metric = data_point.metric();
         if metric == "should_failed" {
             return server_error::InternalSnafu {

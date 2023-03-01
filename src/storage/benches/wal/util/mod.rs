@@ -71,10 +71,10 @@ pub fn gen_new_batch_and_types(putdate_nums: usize) -> (WriteBatch, Vec<i32>) {
         rng.fill(&mut boolvs[..]);
         rng.fill(&mut tsvs[..]);
         rng.fill(&mut fvs[..]);
-        let intv = Arc::new(UInt64Vector::from_slice(&intvs)) as VectorRef;
+        let intv = Arc::new(UInt64Vector::from_slice(intvs)) as VectorRef;
         let boolv = Arc::new(BooleanVector::from(boolvs.to_vec())) as VectorRef;
         let tsv = Arc::new(TimestampMillisecondVector::from_values(tsvs)) as VectorRef;
-        let fvs = Arc::new(Float64Vector::from_slice(&fvs)) as VectorRef;
+        let fvs = Arc::new(Float64Vector::from_slice(fvs)) as VectorRef;
         let svs = Arc::new(StringVector::from_slice(&svs)) as VectorRef;
         let mut put_data = HashMap::with_capacity(11);
         put_data.insert("k1".to_string(), intv.clone());

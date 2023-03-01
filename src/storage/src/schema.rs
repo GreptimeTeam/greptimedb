@@ -38,18 +38,18 @@ mod tests {
     }
 
     pub(crate) fn new_batch_with_num_values(num_value_columns: usize) -> Batch {
-        let k0 = Int64Vector::from_slice(&[1, 2, 3]);
+        let k0 = Int64Vector::from_slice([1, 2, 3]);
         let timestamp = TimestampMillisecondVector::from_vec(vec![4, 5, 6]);
 
         let mut columns: Vec<VectorRef> = vec![Arc::new(k0), Arc::new(timestamp)];
 
         for i in 0..num_value_columns {
-            let vi = Int64Vector::from_slice(&[i as i64, i as i64, i as i64]);
+            let vi = Int64Vector::from_slice([i as i64, i as i64, i as i64]);
             columns.push(Arc::new(vi));
         }
 
-        let sequences = UInt64Vector::from_slice(&[100, 100, 100]);
-        let op_types = UInt8Vector::from_slice(&[0, 0, 0]);
+        let sequences = UInt64Vector::from_slice([100, 100, 100]);
+        let op_types = UInt8Vector::from_slice([0, 0, 0]);
 
         columns.push(Arc::new(sequences));
         columns.push(Arc::new(op_types));
