@@ -10,7 +10,7 @@ on:
 name: Release
 
 env:
-  RUST_TOOLCHAIN: nightly-2023-02-14
+  RUST_TOOLCHAIN: nightly-2023-02-26
 
   # FIXME(zyy17): Would be better to use `gh release list -L 1 | cut -f 3` to get the latest release version tag, but for a long time, we will stay at 'v0.1.0-alpha-*'.
   SCHEDULED_BUILD_VERSION_PREFIX: v0.1.0-alpha
@@ -76,10 +76,10 @@ jobs:
           ETCD_VER=v3.5.7
           DOWNLOAD_URL=https://github.com/etcd-io/etcd/releases/download
           curl -L ${DOWNLOAD_URL}/${ETCD_VER}/etcd-${ETCD_VER}-linux-amd64.tar.gz -o /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz
-          mkdir -p /tmp/etcd-download 
-          tar xzvf /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz -C /tmp/etcd-download --strip-components=1 
+          mkdir -p /tmp/etcd-download
+          tar xzvf /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz -C /tmp/etcd-download --strip-components=1
           rm -f /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz
-          
+
           sudo cp -a /tmp/etcd-download/etcd* /usr/local/bin/
           nohup etcd >/tmp/etcd.log 2>&1 &
 

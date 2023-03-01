@@ -189,8 +189,8 @@ mod tests {
         ]));
         let schema = Arc::new(Schema::try_from(arrow_schema).unwrap());
 
-        let c1 = Arc::new(UInt32Vector::from_slice(&[1, 2, 3]));
-        let c2 = Arc::new(UInt32Vector::from_slice(&[4, 5, 6]));
+        let c1 = Arc::new(UInt32Vector::from_slice([1, 2, 3]));
+        let c2 = Arc::new(UInt32Vector::from_slice([4, 5, 6]));
         let columns: Vec<VectorRef> = vec![c1, c2];
 
         let batch = RecordBatch::new(schema.clone(), columns.clone()).unwrap();
@@ -222,7 +222,7 @@ mod tests {
         let schema = Arc::new(Schema::try_new(column_schemas).unwrap());
 
         let numbers: Vec<u32> = (0..10).collect();
-        let columns = vec![Arc::new(UInt32Vector::from_slice(&numbers)) as VectorRef];
+        let columns = vec![Arc::new(UInt32Vector::from_slice(numbers)) as VectorRef];
         let batch = RecordBatch::new(schema, columns).unwrap();
 
         let output = serde_json::to_string(&batch).unwrap();

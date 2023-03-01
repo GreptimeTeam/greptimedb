@@ -392,7 +392,7 @@ mod tests {
 
                 assert_eq!(
                     *batch.column(0),
-                    Arc::new(UInt64Vector::from_slice(&[4950])) as VectorRef
+                    Arc::new(UInt64Vector::from_slice([4950])) as VectorRef
                 );
             }
             _ => unreachable!(),

@@ -167,30 +167,30 @@ mod tests {
             Some("world"),
         ])));
 
-        assert_vector_ref_eq(Arc::new(Int8Vector::from_slice(&[1, 2, 3, 4])));
-        assert_vector_ref_eq(Arc::new(UInt8Vector::from_slice(&[1, 2, 3, 4])));
-        assert_vector_ref_eq(Arc::new(Int16Vector::from_slice(&[1, 2, 3, 4])));
-        assert_vector_ref_eq(Arc::new(UInt16Vector::from_slice(&[1, 2, 3, 4])));
-        assert_vector_ref_eq(Arc::new(Int32Vector::from_slice(&[1, 2, 3, 4])));
-        assert_vector_ref_eq(Arc::new(UInt32Vector::from_slice(&[1, 2, 3, 4])));
-        assert_vector_ref_eq(Arc::new(Int64Vector::from_slice(&[1, 2, 3, 4])));
-        assert_vector_ref_eq(Arc::new(UInt64Vector::from_slice(&[1, 2, 3, 4])));
-        assert_vector_ref_eq(Arc::new(Float32Vector::from_slice(&[1.0, 2.0, 3.0, 4.0])));
-        assert_vector_ref_eq(Arc::new(Float64Vector::from_slice(&[1.0, 2.0, 3.0, 4.0])));
+        assert_vector_ref_eq(Arc::new(Int8Vector::from_slice([1, 2, 3, 4])));
+        assert_vector_ref_eq(Arc::new(UInt8Vector::from_slice([1, 2, 3, 4])));
+        assert_vector_ref_eq(Arc::new(Int16Vector::from_slice([1, 2, 3, 4])));
+        assert_vector_ref_eq(Arc::new(UInt16Vector::from_slice([1, 2, 3, 4])));
+        assert_vector_ref_eq(Arc::new(Int32Vector::from_slice([1, 2, 3, 4])));
+        assert_vector_ref_eq(Arc::new(UInt32Vector::from_slice([1, 2, 3, 4])));
+        assert_vector_ref_eq(Arc::new(Int64Vector::from_slice([1, 2, 3, 4])));
+        assert_vector_ref_eq(Arc::new(UInt64Vector::from_slice([1, 2, 3, 4])));
+        assert_vector_ref_eq(Arc::new(Float32Vector::from_slice([1.0, 2.0, 3.0, 4.0])));
+        assert_vector_ref_eq(Arc::new(Float64Vector::from_slice([1.0, 2.0, 3.0, 4.0])));
     }
 
     #[test]
     fn test_vector_ne() {
         assert_vector_ref_ne(
-            Arc::new(Int32Vector::from_slice(&[1, 2, 3, 4])),
-            Arc::new(Int32Vector::from_slice(&[1, 2])),
+            Arc::new(Int32Vector::from_slice([1, 2, 3, 4])),
+            Arc::new(Int32Vector::from_slice([1, 2])),
         );
         assert_vector_ref_ne(
-            Arc::new(Int32Vector::from_slice(&[1, 2, 3, 4])),
-            Arc::new(Int8Vector::from_slice(&[1, 2, 3, 4])),
+            Arc::new(Int32Vector::from_slice([1, 2, 3, 4])),
+            Arc::new(Int8Vector::from_slice([1, 2, 3, 4])),
         );
         assert_vector_ref_ne(
-            Arc::new(Int32Vector::from_slice(&[1, 2, 3, 4])),
+            Arc::new(Int32Vector::from_slice([1, 2, 3, 4])),
             Arc::new(BooleanVector::from(vec![true, true])),
         );
         assert_vector_ref_ne(

@@ -24,7 +24,7 @@ on:
 name: CI
 
 env:
-  RUST_TOOLCHAIN: nightly-2023-02-14
+  RUST_TOOLCHAIN: nightly-2023-02-26
 
 jobs:
   typos:
@@ -116,6 +116,7 @@ jobs:
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest-8-cores
     timeout-minutes: 60
+    needs: [clippy]
     steps:
       - uses: actions/checkout@v3
       - uses: arduino/setup-protoc@v1
@@ -131,7 +132,7 @@ jobs:
           ETCD_VER=v3.5.7
           DOWNLOAD_URL=https://github.com/etcd-io/etcd/releases/download
           curl -L ${DOWNLOAD_URL}/${ETCD_VER}/etcd-${ETCD_VER}-linux-amd64.tar.gz -o /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz
-          mkdir -p /tmp/etcd-download 
+          mkdir -p /tmp/etcd-download
           tar xzvf /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz -C /tmp/etcd-download --strip-components=1
           rm -f /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz
 
@@ -188,6 +189,7 @@ jobs:
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest-8-cores
     timeout-minutes: 60
+    needs: [clippy]
     steps:
       - uses: actions/checkout@v3
       - uses: arduino/setup-protoc@v1
