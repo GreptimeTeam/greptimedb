@@ -305,12 +305,6 @@ pub struct LocalManager {
     retry_interval: u64,
 }
 
-#[derive(Default)]
-pub struct SubmitOptions {
-    pub step: u32,
-    pub retry_times: u64,
-}
-
 impl LocalManager {
     /// Create a new [LocalManager] with specific `config`.
     pub fn new(config: ManagerConfig) -> LocalManager {
@@ -401,7 +395,11 @@ impl ProcedureManager for LocalManager {
                     loaded_procedure.step
                 );
 
-                if let Err(e) = self.submit_root(*procedure_id, 0, loaded_procedure.procedure) {
+                if let Err(e) = self.submit_root(
+                    *procedure_id,
+                    loaded_procedure.step,
+                    loaded_procedure.procedure,
+                ) {
                     logging::error!(e; "Failed to recover procedure {}", procedure_id);
                 }
             }
