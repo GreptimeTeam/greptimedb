@@ -141,7 +141,7 @@ async fn authorize<B: Send + Sync + 'static>(
     let query = request.uri().query().unwrap_or_default();
     let input_database =
         extract_helper(query, &regex_extractor.db_extractor).context(IllegalParamSnafu {
-            msg: "db not provided",
+            msg: "db not provided or corrupted",
         })?;
 
     let (catalog, database) =
@@ -192,9 +192,6 @@ fn get_influxdb_credentials<B: Send + Sync + 'static>(
     } else {
         // try v1
         let Some(query_str) = request.uri().query() else { return Ok(None) };
-
-        // TODO(shuiyisong): remove this for performance optimization
-        // `authorize` would deserialize query from urlencoded again
 
         let username = extract_helper(query_str, &regex_extractor.influxdb_user_extractor);
         let password = extract_helper(query_str, &regex_extractor.influxdb_pass_extractor);
@@ -406,5 +403,61 @@ mod tests {
         assert!(re.is_ok());
         let re = Regex::new(INFLUXDB_PASS_PATTERN);
         assert!(re.is_ok());
+    }
+
+    #[test]
+    fn test_regex_capture() {
+        let extractor = RegexExtractor::new();
+        matches!(extract_helper("name=bar", &extractor.db_extractor), None);
+        matches!(
+            extract_helper("db=foo", &extractor.db_extractor),
+            Some("foo")
+        );
+        matches!(
+            extract_helper("name=bar&db=foo", &extractor.db_extractor),
+            Some("foo")
+        );
+        matches!(
+            extract_helper("db=foo&name=bar", &extractor.db_extractor),
+            Some("foo")
+        );
+        matches!(
+            extract_helper("name1=bar&db=foo&name2=bar", &extractor.db_extractor),
+            Some("foo")
+        );
+
+        matches!(
+            extract_helper("p=4", &extractor.influxdb_user_extractor),
+            None
+        );
+        matches!(
+            extract_helper("u=123", &extractor.influxdb_user_extractor),
+            Some("123")
+        );
+        matches!(
+            extract_helper("u=123&p=4", &extractor.influxdb_user_extractor),
+            Some("123")
+        );
+        matches!(
+            extract_helper("p1=4&u=123&p2=5", &extractor.influxdb_user_extractor),
+            Some("123")
+        );
+
+        matches!(
+            extract_helper("u=123", &extractor.influxdb_pass_extractor),
+            None
+        );
+        matches!(
+            extract_helper("p=4", &extractor.influxdb_pass_extractor),
+            Some("4")
+        );
+        matches!(
+            extract_helper("u=123&p=4", &extractor.influxdb_pass_extractor),
+            Some("4")
+        );
+        matches!(
+            extract_helper("u1=123&p=4&u2=567", &extractor.influxdb_pass_extractor),
+            Some("4")
+        );
     }
 }
