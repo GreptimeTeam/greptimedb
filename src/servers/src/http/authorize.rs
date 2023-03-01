@@ -53,6 +53,7 @@ pub struct RegexExtractor {
 }
 
 impl RegexExtractor {
+    // regex compile is tested in test below
     pub fn new() -> Self {
         Self {
             db_extractor: Regex::new(DB_EXTRACT_PATTERN).unwrap(),
