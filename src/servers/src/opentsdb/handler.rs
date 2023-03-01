@@ -14,6 +14,7 @@
 
 //! Modified from Tokio's mini-redis example.
 
+use session::context::QueryContext;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::error::Result;
@@ -59,6 +60,8 @@ impl<S: AsyncWrite + AsyncRead + Unpin> Handler<S> {
     }
 
     pub(crate) async fn run(&mut self) -> Result<()> {
+        // TODO(shuiyisong): figure out how to auth in tcp connection.
+        let ctx = QueryContext::arc();
         while !self.shutdown.is_shutdown() {
             // While reading a request, also listen for the shutdown signal.
             let maybe_line = tokio::select! {
@@ -88,7 +91,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> Handler<S> {
 
             match DataPoint::try_create(&line) {
                 Ok(data_point) => {
-                    let result = self.query_handler.exec(&data_point).await;
+                    let result = self.query_handler.exec(&data_point, ctx.clone()).await;
                     if let Err(e) = result {
                         self.connection.write_line(e.to_string()).await?;
                     }
@@ -108,6 +111,7 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
+    use session::context::QueryContextRef;
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::{broadcast, mpsc};
 
@@ -121,7 +125,7 @@ mod tests {
 
     #[async_trait]
     impl OpentsdbProtocolHandler for DummyQueryHandler {
-        async fn exec(&self, data_point: &DataPoint) -> Result<()> {
+        async fn exec(&self, data_point: &DataPoint, _ctx: QueryContextRef) -> Result<()> {
             let metric = data_point.metric();
             if metric == "should_failed" {
                 return error::InternalSnafu {

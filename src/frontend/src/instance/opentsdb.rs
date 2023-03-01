@@ -17,16 +17,16 @@ use common_error::prelude::BoxedError;
 use servers::error as server_error;
 use servers::opentsdb::codec::DataPoint;
 use servers::query_handler::OpentsdbProtocolHandler;
-use session::context::QueryContext;
+use session::context::QueryContextRef;
 use snafu::prelude::*;
 
 use crate::instance::Instance;
 
 #[async_trait]
 impl OpentsdbProtocolHandler for Instance {
-    async fn exec(&self, data_point: &DataPoint) -> server_error::Result<()> {
+    async fn exec(&self, data_point: &DataPoint, ctx: QueryContextRef) -> server_error::Result<()> {
         let request = data_point.as_grpc_insert();
-        self.handle_insert(request, QueryContext::arc())
+        self.handle_insert(request, ctx)
             .await
             .map_err(BoxedError::new)
             .with_context(|_| server_error::ExecuteQuerySnafu {
@@ -66,6 +66,7 @@ mod tests {
     }
 
     async fn test_exec(instance: &Arc<Instance>) {
+        let ctx = QueryContext::arc();
         let data_point1 = DataPoint::new(
             "my_metric_1".to_string(),
             1000,
@@ -76,7 +77,7 @@ mod tests {
             ],
         );
         // should create new table "my_metric_1" directly
-        let result = instance.exec(&data_point1).await;
+        let result = instance.exec(&data_point1, ctx.clone()).await;
         assert!(result.is_ok());
 
         let data_point2 = DataPoint::new(
@@ -89,12 +90,12 @@ mod tests {
             ],
         );
         // should create new column "tagk3" directly
-        let result = instance.exec(&data_point2).await;
+        let result = instance.exec(&data_point2, ctx.clone()).await;
         assert!(result.is_ok());
 
         let data_point3 = DataPoint::new("my_metric_1".to_string(), 3000, 3.0, vec![]);
         // should handle null tags properly
-        let result = instance.exec(&data_point3).await;
+        let result = instance.exec(&data_point3, ctx.clone()).await;
         assert!(result.is_ok());
 
         let output = instance

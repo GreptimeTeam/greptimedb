@@ -65,7 +65,7 @@ pub trait InfluxdbLineProtocolHandler {
 pub trait OpentsdbProtocolHandler {
     /// A successful request will not return a response.
     /// Only on error will the socket return a line of data.
-    async fn exec(&self, data_point: &DataPoint) -> Result<()>;
+    async fn exec(&self, data_point: &DataPoint, ctx: QueryContextRef) -> Result<()>;
 }
 
 pub struct PrometheusResponse {
