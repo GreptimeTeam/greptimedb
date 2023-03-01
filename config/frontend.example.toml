@@ -1,12 +1,58 @@
-mode = 'distributed'
-datanode_rpc_addr = '127.0.0.1:3001'
+# Node running mode, see `standalone.example.toml`.
+mode = "distributed"
 
+# HTTP server options, see `standalone.example.toml`.
 [http_options]
-addr = '127.0.0.1:4000'
+addr = "127.0.0.1:4000"
 timeout = "30s"
 
+# gRPC server options, see `standalone.example.toml`.
+[grpc_options]
+addr = "127.0.0.1:4001"
+runtime_size = 8
+
+# MySQL server options, see `standalone.example.toml`.
+[mysql_options]
+addr = "127.0.0.1:4002"
+runtime_size = 2
+
+# MySQL server TLS options, see `standalone.example.toml`.
+[mysql_options.tls]
+mode = "disable"
+cert_path = ""
+key_path = ""
+
+# PostgresSQL server options, see `standalone.example.toml`.
+[postgres_options]
+addr = "127.0.0.1:4003"
+runtime_size = 2
+
+# PostgresSQL server TLS options, see `standalone.example.toml`.
+[postgres_options.tls]
+mode = "disable"
+cert_path = ""
+key_path = ""
+
+# OpenTSDB protocol options, see `standalone.example.toml`.
+[opentsdb_options]
+addr = "127.0.0.1:4242"
+runtime_size = 2
+
+# InfluxDB protocol options, see `standalone.example.toml`.
+[influxdb_options]
+enable = true
+
+# Prometheus protocol options, see `standalone.example.toml`.
+[prometheus_options]
+enable = true
+
+# PromQL protocol options, see `standalone.example.toml`.
+[promql_options]
+addr = "127.0.0.1:4004"
+
+# Metasrv client options, see `datanode.example.toml`.
 [meta_client_options]
-metasrv_addrs = ['127.0.0.1:3002']
+metasrv_addrs = ["127.0.0.1:3002"]
 timeout_millis = 3000
 connect_timeout_millis = 5000
-tcp_nodelay = false
+tcp_nodelay = true
