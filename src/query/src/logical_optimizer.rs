@@ -14,12 +14,7 @@
 
 use crate::error::Result;
 use crate::plan::LogicalPlan;
-use crate::query_engine::QueryEngineContext;
 
 pub trait LogicalOptimizer {
-    fn optimize_logical_plan(
-        &self,
-        ctx: &mut QueryEngineContext,
-        plan: &LogicalPlan,
-    ) -> Result<LogicalPlan>;
+    fn optimize(&self, plan: &LogicalPlan) -> Result<LogicalPlan>;
 }

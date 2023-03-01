@@ -593,7 +593,7 @@ mod tests {
 
         // timestamp
         assert_eq!(
-            &TimestampMillisecondVector::from_slice(&[
+            &TimestampMillisecondVector::from_slice([
                 1000.into(),
                 1000.into(),
                 1001.into(),

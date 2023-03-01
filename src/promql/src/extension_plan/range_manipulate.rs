@@ -24,7 +24,7 @@ use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::error::ArrowError;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DFField, DFSchema, DFSchemaRef};
-use datafusion::error::Result as DataFusionResult;
+use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use datafusion::physical_expr::PhysicalSortExpr;
@@ -33,7 +33,6 @@ use datafusion::physical_plan::{
     DisplayFormatType, ExecutionPlan, Partitioning, RecordBatchStream, SendableRecordBatchStream,
     Statistics,
 };
-use datatypes::arrow::error::Result as ArrowResult;
 use futures::{Stream, StreamExt};
 
 use crate::extension_plan::Millisecond;
@@ -97,7 +96,9 @@ impl RangeManipulate {
 
         // process time index column
         // the raw timestamp field is preserved. And a new timestamp_range field is appended to the last.
-        let index = input_schema.index_of_column_by_name(None, time_index)?;
+        let Some(index) = input_schema.index_of_column_by_name(None, time_index)? else {
+            return Err(datafusion::common::field_not_found(None, time_index, input_schema.as_ref()))
+        };
         let timestamp_range_field = columns[index]
             .field()
             .clone()
@@ -108,7 +109,9 @@ impl RangeManipulate {
 
         // process value columns
         for name in value_columns {
-            let index = input_schema.index_of_column_by_name(None, name)?;
+            let Some(index) = input_schema.index_of_column_by_name(None, name)? else {
+                return Err(datafusion::common::field_not_found(None, name, input_schema.as_ref()))
+            };
             columns[index] = DFField::from(RangeArray::convert_field(columns[index].field()));
         }
 
@@ -211,8 +214,8 @@ impl ExecutionPlan for RangeManipulateExec {
         self.input.output_ordering()
     }
 
-    fn maintains_input_order(&self) -> bool {
-        true
+    fn maintains_input_order(&self) -> Vec<bool> {
+        vec![true; self.children().len()]
     }
 
     fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
@@ -330,7 +333,7 @@ impl RecordBatchStream for RangeManipulateStream {
 }
 
 impl Stream for RangeManipulateStream {
-    type Item = ArrowResult<RecordBatch>;
+    type Item = DataFusionResult<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let poll = match self.input.poll_next_unpin(cx) {
@@ -348,7 +351,7 @@ impl RangeManipulateStream {
     // Prometheus: https://github.com/prometheus/prometheus/blob/e934d0f01158a1d55fa0ebb035346b195fcc1260/promql/engine.go#L1113-L1198
     // But they are not exactly the same, because we don't eager-evaluate on the data in this plan.
     // And the generated timestamp is not aligned to the step. It's expected to do later.
-    pub fn manipulate(&self, input: RecordBatch) -> ArrowResult<RecordBatch> {
+    pub fn manipulate(&self, input: RecordBatch) -> DataFusionResult<RecordBatch> {
         let mut other_columns = (0..input.columns().len()).collect::<HashSet<_>>();
         // calculate the range
         let (aligned_ts, ranges) = self.calculate_range(&input);
@@ -382,6 +385,7 @@ impl RangeManipulateStream {
         new_columns[self.time_index] = aligned_ts;
 
         RecordBatch::try_new(self.output_schema.clone(), new_columns)
+            .map_err(DataFusionError::ArrowError)
     }
 
     fn calculate_range(&self, input: &RecordBatch) -> (ArrayRef, Vec<(u32, u32)>) {

@@ -108,16 +108,16 @@ impl ScriptsTable {
         // Timestamp in key part is intentionally left to 0
         columns_values.insert(
             "timestamp".to_string(),
-            Arc::new(TimestampMillisecondVector::from_slice(&[0])) as _,
+            Arc::new(TimestampMillisecondVector::from_slice([0])) as _,
         );
         let now = util::current_time_millis();
         columns_values.insert(
             "gmt_created".to_string(),
-            Arc::new(TimestampMillisecondVector::from_slice(&[now])) as _,
+            Arc::new(TimestampMillisecondVector::from_slice([now])) as _,
         );
         columns_values.insert(
             "gmt_modified".to_string(),
-            Arc::new(TimestampMillisecondVector::from_slice(&[now])) as _,
+            Arc::new(TimestampMillisecondVector::from_slice([now])) as _,
         );
         let table = self
             .catalog_manager
@@ -126,6 +126,7 @@ impl ScriptsTable {
                 DEFAULT_SCHEMA_NAME,
                 SCRIPTS_TABLE_NAME,
             )
+            .await
             .context(FindScriptsTableSnafu)?
             .context(ScriptsTableNotFoundSnafu)?;
 
@@ -160,6 +161,7 @@ impl ScriptsTable {
         let plan = self
             .query_engine
             .statement_to_plan(stmt, Arc::new(QueryContext::new()))
+            .await
             .unwrap();
 
         let stream = match self

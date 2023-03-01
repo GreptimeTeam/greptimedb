@@ -441,6 +441,7 @@ impl ExtendedQueryHandler for PostgresServerHandler {
         if let Some(schema) = self
             .query_handler
             .do_describe(stmt.clone(), self.query_ctx.clone())
+            .await
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?
         {
             schema_to_pg(&schema, FieldFormat::Binary)

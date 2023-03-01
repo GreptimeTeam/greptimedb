@@ -20,10 +20,10 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
 use snafu::{ResultExt, Snafu};
-use tokio::sync::watch::Receiver;
 use uuid::Uuid;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
+use crate::watcher::Watcher;
 
 /// Procedure execution status.
 #[derive(Debug)]
@@ -198,20 +198,47 @@ impl FromStr for ProcedureId {
 /// Loader to recover the [Procedure] instance from serialized data.
 pub type BoxedProcedureLoader = Box<dyn Fn(&str) -> Result<BoxedProcedure> + Send>;
 
-// TODO(yingwen): Find a way to return the error message if the procedure is failed.
 /// State of a submitted procedure.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone)]
 pub enum ProcedureState {
     /// The procedure is running.
+    #[default]
     Running,
     /// The procedure is finished.
     Done,
     /// The procedure is failed and cannot proceed anymore.
-    Failed,
+    Failed { error: Arc<Error> },
 }
 
-/// Watcher to watch procedure state.
-pub type Watcher = Receiver<ProcedureState>;
+impl ProcedureState {
+    /// Returns a [ProcedureState] with failed state.
+    pub fn failed(error: Arc<Error>) -> ProcedureState {
+        ProcedureState::Failed { error }
+    }
+
+    /// Returns true if the procedure state is running.
+    pub fn is_running(&self) -> bool {
+        matches!(self, ProcedureState::Running)
+    }
+
+    /// Returns true if the procedure state is done.
+    pub fn is_done(&self) -> bool {
+        matches!(self, ProcedureState::Done)
+    }
+
+    /// Returns true if the procedure state failed.
+    pub fn is_failed(&self) -> bool {
+        matches!(self, ProcedureState::Failed { .. })
+    }
+
+    /// Returns the error.
+    pub fn error(&self) -> Option<&Arc<Error>> {
+        match self {
+            ProcedureState::Failed { error } => Some(error),
+            _ => None,
+        }
+    }
+}
 
 // TODO(yingwen): Shutdown
 /// `ProcedureManager` executes [Procedure] submitted to it.
@@ -244,6 +271,9 @@ pub type ProcedureManagerRef = Arc<dyn ProcedureManager>;
 
 #[cfg(test)]
 mod tests {
+    use common_error::mock::MockError;
+    use common_error::prelude::StatusCode;
+
     use super::*;
 
     #[test]
@@ -310,5 +340,18 @@ mod tests {
 
         let parsed = serde_json::from_str(&json).unwrap();
         assert_eq!(id, parsed);
+    }
+
+    #[test]
+    fn test_procedure_state() {
+        assert!(ProcedureState::Running.is_running());
+        assert!(ProcedureState::Running.error().is_none());
+        assert!(ProcedureState::Done.is_done());
+
+        let state = ProcedureState::failed(Arc::new(Error::external(MockError::new(
+            StatusCode::Unexpected,
+        ))));
+        assert!(state.is_failed());
+        assert!(state.error().is_some());
     }
 }

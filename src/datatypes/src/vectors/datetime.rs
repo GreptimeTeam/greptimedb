@@ -81,7 +81,7 @@ mod tests {
         assert_eq!(Value::Null, v.get(1));
         assert_eq!(Value::DateTime(DateTime::new(-1)), v.get(2));
 
-        let input = DateTimeVector::from_wrapper_slice(&[
+        let input = DateTimeVector::from_wrapper_slice([
             DateTime::new(1),
             DateTime::new(2),
             DateTime::new(3),
@@ -92,11 +92,11 @@ mod tests {
         assert!(builder.try_push_value_ref(ValueRef::Int32(123)).is_err());
         builder.extend_slice_of(&input, 1, 2).unwrap();
         assert!(builder
-            .extend_slice_of(&crate::vectors::Int32Vector::from_slice(&[13]), 0, 1)
+            .extend_slice_of(&crate::vectors::Int32Vector::from_slice([13]), 0, 1)
             .is_err());
         let vector = builder.to_vector();
 
-        let expect: VectorRef = Arc::new(DateTimeVector::from_wrapper_slice(&[
+        let expect: VectorRef = Arc::new(DateTimeVector::from_wrapper_slice([
             DateTime::new(5),
             DateTime::new(2),
             DateTime::new(3),
@@ -106,7 +106,7 @@ mod tests {
 
     #[test]
     fn test_datetime_from_arrow() {
-        let vector = DateTimeVector::from_wrapper_slice(&[DateTime::new(1), DateTime::new(2)]);
+        let vector = DateTimeVector::from_wrapper_slice([DateTime::new(1), DateTime::new(2)]);
         let arrow = vector.as_arrow().slice(0, vector.len());
         let vector2 = DateTimeVector::try_from_arrow_array(&arrow).unwrap();
         assert_eq!(vector, vector2);

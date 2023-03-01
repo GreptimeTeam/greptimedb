@@ -162,7 +162,8 @@ pub async fn explain(
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
     let plan = query_engine
-        .statement_to_plan(QueryStatement::Sql(Statement::Explain(*stmt)), query_ctx)?;
+        .statement_to_plan(QueryStatement::Sql(Statement::Explain(*stmt)), query_ctx)
+        .await?;
     query_engine.execute(&plan).await
 }
 
@@ -276,8 +277,8 @@ mod test {
             .with_time_index(true),
         ];
         let data = vec![
-            Arc::new(UInt32Vector::from_slice(&[0])) as _,
-            Arc::new(TimestampMillisecondVector::from_slice(&[0])) as _,
+            Arc::new(UInt32Vector::from_slice([0])) as _,
+            Arc::new(TimestampMillisecondVector::from_slice([0])) as _,
         ];
         let expected_columns = vec![
             Arc::new(StringVector::from(vec!["t1", "t2"])) as _,

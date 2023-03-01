@@ -21,6 +21,8 @@ use catalog::{CatalogManager, CatalogManagerRef, RegisterTableRequest};
 use common_base::readable_size::ReadableSize;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_procedure::local::{LocalManager, ManagerConfig};
+use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::info;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::LogConfig;
@@ -45,11 +47,11 @@ use table::table::TableIdProviderRef;
 use table::Table;
 
 use crate::datanode::{
-    DatanodeOptions, ObjectStoreConfig, WalConfig, DEFAULT_OBJECT_STORE_CACHE_SIZE,
+    DatanodeOptions, ObjectStoreConfig, ProcedureConfig, WalConfig, DEFAULT_OBJECT_STORE_CACHE_SIZE,
 };
 use crate::error::{
     self, CatalogSnafu, MetaClientInitSnafu, MissingMetasrvOptsSnafu, MissingNodeIdSnafu,
-    NewCatalogSnafu, OpenLogStoreSnafu, Result,
+    NewCatalogSnafu, OpenLogStoreSnafu, RecoverProcedureSnafu, Result,
 };
 use crate::heartbeat::HeartbeatTask;
 use crate::script::ScriptExecutor;
@@ -173,12 +175,32 @@ impl Instance {
                 catalog_manager.clone(),
             )),
         };
+
+        let procedure_manager = create_procedure_manager(&opts.procedure).await?;
+        if let Some(procedure_manager) = &procedure_manager {
+            table_engine.register_procedure_loaders(&**procedure_manager);
+            table_procedure::register_procedure_loaders(
+                catalog_manager.clone(),
+                table_engine.clone(),
+                table_engine.clone(),
+                &**procedure_manager,
+            );
+
+            // Recover procedures.
+            procedure_manager
+                .recover()
+                .await
+                .context(RecoverProcedureSnafu)?;
+        }
+
         Ok(Self {
             query_engine: query_engine.clone(),
             sql_handler: SqlHandler::new(
-                table_engine,
+                table_engine.clone(),
                 catalog_manager.clone(),
                 query_engine.clone(),
+                table_engine,
+                procedure_manager,
             ),
             catalog_manager,
             script_executor,
@@ -399,4 +421,22 @@ pub(crate) async fn create_log_store(wal_config: &WalConfig) -> Result<RaftEngin
         .await
         .context(OpenLogStoreSnafu)?;
     Ok(logstore)
+}
+
+pub(crate) async fn create_procedure_manager(
+    procedure_config: &Option<ProcedureConfig>,
+) -> Result<Option<ProcedureManagerRef>> {
+    let Some(procedure_config) = procedure_config else {
+        return Ok(None);
+    };
+
+    info!(
+        "Creating procedure manager with config: {:?}",
+        procedure_config
+    );
+
+    let object_store = new_object_store(&procedure_config.store).await?;
+    let manager_config = ManagerConfig { object_store };
+
+    Ok(Some(Arc::new(LocalManager::new(manager_config))))
 }

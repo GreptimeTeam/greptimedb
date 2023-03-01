@@ -165,14 +165,14 @@ mod tests {
 
     #[test]
     fn test_find_unique_scalar_multi_times_with_prev() {
-        let prev = Int32Vector::from_slice(&[1]);
+        let prev = Int32Vector::from_slice([1]);
 
-        let v1 = Int32Vector::from_slice(&[2, 3, 4]);
+        let v1 = Int32Vector::from_slice([2, 3, 4]);
         let mut selected = BitVec::repeat(false, v1.len());
         v1.find_unique(&mut selected, Some(&prev));
 
         // Though element in v2 are the same as prev, but we should still keep them.
-        let v2 = Int32Vector::from_slice(&[1, 1, 1]);
+        let v2 = Int32Vector::from_slice([1, 1, 1]);
         v2.find_unique(&mut selected, Some(&prev));
 
         check_bitmap(&[true, true, true], &selected);
@@ -184,34 +184,34 @@ mod tests {
 
     #[test]
     fn test_find_unique_scalar_with_prev() {
-        let prev = Int32Vector::from_slice(&[1]);
+        let prev = Int32Vector::from_slice([1]);
 
         let mut selected = new_bitmap(&[true, false, true, false]);
-        let v = Int32Vector::from_slice(&[2, 3, 4, 5]);
+        let v = Int32Vector::from_slice([2, 3, 4, 5]);
         v.find_unique(&mut selected, Some(&prev));
         // All elements are different.
         check_bitmap(&[true, true, true, true], &selected);
 
         let mut selected = new_bitmap(&[true, false, true, false]);
-        let v = Int32Vector::from_slice(&[1, 2, 3, 4]);
+        let v = Int32Vector::from_slice([1, 2, 3, 4]);
         v.find_unique(&mut selected, Some(&prev));
         // Though first element is duplicate, but we keep the flag unchanged.
         check_bitmap(&[true, true, true, true], &selected);
 
         // Same case as above, but now `prev` is None.
         let mut selected = new_bitmap(&[true, false, true, false]);
-        let v = Int32Vector::from_slice(&[1, 2, 3, 4]);
+        let v = Int32Vector::from_slice([1, 2, 3, 4]);
         v.find_unique(&mut selected, None);
         check_bitmap(&[true, true, true, true], &selected);
 
         // Same case as above, but now `prev` is empty.
         let mut selected = new_bitmap(&[true, false, true, false]);
-        let v = Int32Vector::from_slice(&[1, 2, 3, 4]);
-        v.find_unique(&mut selected, Some(&Int32Vector::from_slice(&[])));
+        let v = Int32Vector::from_slice([1, 2, 3, 4]);
+        v.find_unique(&mut selected, Some(&Int32Vector::from_slice([])));
         check_bitmap(&[true, true, true, true], &selected);
 
         let mut selected = new_bitmap(&[false, false, false, false]);
-        let v = Int32Vector::from_slice(&[2, 2, 4, 5]);
+        let v = Int32Vector::from_slice([2, 2, 4, 5]);
         v.find_unique(&mut selected, Some(&prev));
         // only v[1] is duplicate.
         check_bitmap(&[true, false, true, true], &selected);
@@ -269,7 +269,7 @@ mod tests {
     }
 
     fn check_find_unique_constant(len: usize) {
-        let input = ConstantVector::new(Arc::new(Int32Vector::from_slice(&[8])), len);
+        let input = ConstantVector::new(Arc::new(Int32Vector::from_slice([8])), len);
         let mut selected = BitVec::repeat(false, len);
         input.find_unique(&mut selected, None);
 
@@ -281,7 +281,7 @@ mod tests {
 
         let mut selected = BitVec::repeat(false, len);
         let prev = Some(ConstantVector::new(
-            Arc::new(Int32Vector::from_slice(&[8])),
+            Arc::new(Int32Vector::from_slice([8])),
             1,
         ));
         input.find_unique(&mut selected, prev.as_ref().map(|v| v as _));
@@ -298,11 +298,11 @@ mod tests {
 
     #[test]
     fn test_find_unique_constant_with_prev() {
-        let prev = ConstantVector::new(Arc::new(Int32Vector::from_slice(&[1])), 1);
+        let prev = ConstantVector::new(Arc::new(Int32Vector::from_slice([1])), 1);
 
         // Keep flags unchanged.
         let mut selected = new_bitmap(&[true, false, true, false]);
-        let v = ConstantVector::new(Arc::new(Int32Vector::from_slice(&[1])), 4);
+        let v = ConstantVector::new(Arc::new(Int32Vector::from_slice([1])), 4);
         v.find_unique(&mut selected, Some(&prev));
         check_bitmap(&[true, false, true, false], &selected);
 
@@ -321,7 +321,7 @@ mod tests {
         v.find_unique(
             &mut selected,
             Some(&ConstantVector::new(
-                Arc::new(Int32Vector::from_slice(&[1])),
+                Arc::new(Int32Vector::from_slice([1])),
                 0,
             )),
         );
@@ -329,7 +329,7 @@ mod tests {
 
         // Different constant vector.
         let mut selected = new_bitmap(&[false, false, true, false]);
-        let v = ConstantVector::new(Arc::new(Int32Vector::from_slice(&[2])), 4);
+        let v = ConstantVector::new(Arc::new(Int32Vector::from_slice([2])), 4);
         v.find_unique(&mut selected, Some(&prev));
         check_bitmap(&[true, false, true, false], &selected);
     }

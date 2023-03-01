@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use datafusion_sql::parser::Statement as DfStatement;
+use sqlparser::ast::Statement as SpStatement;
+
+use crate::error::{ConvertToDfStatementSnafu, Error};
 use crate::statements::alter::AlterTable;
 use crate::statements::copy::CopyTable;
 use crate::statements::create::{CreateDatabase, CreateTable};
@@ -66,4 +70,22 @@ pub struct Hint {
     pub error_code: Option<u16>,
     pub comment: String,
     pub prefix: String,
+}
+
+impl TryFrom<&Statement> for DfStatement {
+    type Error = Error;
+
+    fn try_from(s: &Statement) -> Result<Self, Self::Error> {
+        let s = match s {
+            Statement::Query(query) => SpStatement::Query(Box::new(query.inner.clone())),
+            Statement::Explain(explain) => explain.inner.clone(),
+            _ => {
+                return ConvertToDfStatementSnafu {
+                    statement: format!("{s:?}"),
+                }
+                .fail();
+            }
+        };
+        Ok(DfStatement::Statement(Box::new(s)))
+    }
 }

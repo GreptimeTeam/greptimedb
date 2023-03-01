@@ -123,8 +123,6 @@ pub(crate) struct ManagerContext {
     loaders: Mutex<HashMap<String, BoxedProcedureLoader>>,
     lock_map: LockMap,
     procedures: RwLock<HashMap<ProcedureId, ProcedureMetaRef>>,
-    // TODO(yingwen): Now we never clean the messages. But when the root procedure is done, we
-    // should be able to remove the its message and all its child messages.
     /// Messages loaded from the procedure store.
     messages: Mutex<HashMap<ProcedureId, ProcedureMessage>>,
 }
@@ -336,7 +334,7 @@ impl LocalManager {
 
         common_runtime::spawn_bg(async move {
             // Run the root procedure.
-            let _ = runner.run().await;
+            runner.run().await;
         });
 
         Ok(watcher)
@@ -449,9 +447,9 @@ mod tests {
         assert!(ctx.try_insert_procedure(meta.clone()));
         assert!(ctx.contains_procedure(meta.id));
 
-        assert_eq!(ProcedureState::Running, ctx.state(meta.id).unwrap());
+        assert!(ctx.state(meta.id).unwrap().is_running());
         meta.set_state(ProcedureState::Done);
-        assert_eq!(ProcedureState::Done, ctx.state(meta.id).unwrap());
+        assert!(ctx.state(meta.id).unwrap().is_done());
     }
 
     #[test]
@@ -636,7 +634,7 @@ mod tests {
         // Wait for the procedure done.
         let mut watcher = manager.procedure_watcher(procedure_id).unwrap();
         watcher.changed().await.unwrap();
-        assert_eq!(ProcedureState::Done, *watcher.borrow());
+        assert!(watcher.borrow().is_done());
 
         // Try to submit procedure with same id again.
         let err = manager
@@ -699,7 +697,7 @@ mod tests {
                     .unwrap();
                 // Wait for the notification.
                 watcher.changed().await.unwrap();
-                assert_eq!(ProcedureState::Failed, *watcher.borrow());
+                assert!(watcher.borrow().is_failed());
             }
         };
 

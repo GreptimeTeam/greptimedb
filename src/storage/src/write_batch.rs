@@ -367,8 +367,8 @@ mod tests {
         let columns = NameToVector::new(HashMap::new()).unwrap();
         assert!(columns.is_empty());
 
-        let vector1 = Arc::new(Int32Vector::from_slice(&[1, 2, 3, 4, 5])) as VectorRef;
-        let vector2 = Arc::new(UInt64Vector::from_slice(&[0, 2, 4, 6, 8])) as VectorRef;
+        let vector1 = Arc::new(Int32Vector::from_slice([1, 2, 3, 4, 5])) as VectorRef;
+        let vector2 = Arc::new(UInt64Vector::from_slice([0, 2, 4, 6, 8])) as VectorRef;
 
         let mut put_data = HashMap::with_capacity(3);
         put_data.insert("k1".to_string(), vector1.clone());
@@ -382,7 +382,7 @@ mod tests {
 
     #[test]
     fn test_name_to_vector_empty_vector() {
-        let vector1 = Arc::new(Int32Vector::from_slice(&[])) as VectorRef;
+        let vector1 = Arc::new(Int32Vector::from_slice([])) as VectorRef;
         let mut put_data = HashMap::new();
         put_data.insert("k1".to_string(), vector1);
 
@@ -393,9 +393,9 @@ mod tests {
 
     #[test]
     fn test_write_batch_put() {
-        let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3])) as VectorRef;
+        let intv = Arc::new(UInt64Vector::from_slice([1, 2, 3])) as VectorRef;
         let boolv = Arc::new(BooleanVector::from(vec![true, false, true])) as VectorRef;
-        let tsv = Arc::new(TimestampMillisecondVector::from_slice(&[0, 0, 0])) as VectorRef;
+        let tsv = Arc::new(TimestampMillisecondVector::from_slice([0, 0, 0])) as VectorRef;
 
         let mut put_data = HashMap::with_capacity(4);
         put_data.insert("k1".to_string(), intv.clone());
@@ -437,8 +437,8 @@ mod tests {
 
     #[test]
     fn test_put_data_different_len() {
-        let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3])) as VectorRef;
-        let tsv = Arc::new(TimestampMillisecondVector::from_slice(&[0, 0])) as VectorRef;
+        let intv = Arc::new(UInt64Vector::from_slice([1, 2, 3])) as VectorRef;
+        let tsv = Arc::new(TimestampMillisecondVector::from_slice([0, 0])) as VectorRef;
         let boolv = Arc::new(BooleanVector::from(vec![true, false, true])) as VectorRef;
 
         let mut put_data = HashMap::new();
@@ -455,7 +455,7 @@ mod tests {
     #[test]
     fn test_put_type_mismatch() {
         let boolv = Arc::new(BooleanVector::from(vec![true, false, true])) as VectorRef;
-        let tsv = Arc::new(Int64Vector::from_slice(&[0, 0, 0])) as VectorRef;
+        let tsv = Arc::new(Int64Vector::from_slice([0, 0, 0])) as VectorRef;
 
         let mut put_data = HashMap::new();
         put_data.insert("k1".to_string(), boolv);
@@ -469,7 +469,7 @@ mod tests {
     #[test]
     fn test_put_type_has_null() {
         let intv = Arc::new(UInt64Vector::from(vec![Some(1), None, Some(3)])) as VectorRef;
-        let tsv = Arc::new(Int64Vector::from_slice(&[0, 0, 0])) as VectorRef;
+        let tsv = Arc::new(Int64Vector::from_slice([0, 0, 0])) as VectorRef;
 
         let mut put_data = HashMap::new();
         put_data.insert("k1".to_string(), intv);
@@ -483,7 +483,7 @@ mod tests {
     #[test]
     fn test_put_missing_column() {
         let boolv = Arc::new(BooleanVector::from(vec![true, false, true])) as VectorRef;
-        let tsv = Arc::new(Int64Vector::from_slice(&[0, 0, 0])) as VectorRef;
+        let tsv = Arc::new(Int64Vector::from_slice([0, 0, 0])) as VectorRef;
 
         let mut put_data = HashMap::new();
         put_data.insert("v1".to_string(), boolv);
@@ -496,8 +496,8 @@ mod tests {
 
     #[test]
     fn test_put_unknown_column() {
-        let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3])) as VectorRef;
-        let tsv = Arc::new(TimestampMillisecondVector::from_slice(&[0, 0, 0])) as VectorRef;
+        let intv = Arc::new(UInt64Vector::from_slice([1, 2, 3])) as VectorRef;
+        let tsv = Arc::new(TimestampMillisecondVector::from_slice([0, 0, 0])) as VectorRef;
         let boolv = Arc::new(BooleanVector::from(vec![true, false, true])) as VectorRef;
 
         let mut put_data = HashMap::new();
@@ -528,8 +528,8 @@ mod tests {
 
     #[test]
     fn test_write_batch_delete() {
-        let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3])) as VectorRef;
-        let tsv = Arc::new(TimestampMillisecondVector::from_slice(&[0, 0, 0])) as VectorRef;
+        let intv = Arc::new(UInt64Vector::from_slice([1, 2, 3])) as VectorRef;
+        let tsv = Arc::new(TimestampMillisecondVector::from_slice([0, 0, 0])) as VectorRef;
 
         let mut keys = HashMap::with_capacity(3);
         keys.insert("k1".to_string(), intv.clone());
@@ -548,7 +548,7 @@ mod tests {
 
     #[test]
     fn test_delete_missing_column() {
-        let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3])) as VectorRef;
+        let intv = Arc::new(UInt64Vector::from_slice([1, 2, 3])) as VectorRef;
 
         let mut keys = HashMap::with_capacity(3);
         keys.insert("k1".to_string(), intv.clone());
@@ -561,8 +561,8 @@ mod tests {
 
     #[test]
     fn test_delete_columns_more_than_row_key() {
-        let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3])) as VectorRef;
-        let tsv = Arc::new(TimestampMillisecondVector::from_slice(&[0, 0, 0])) as VectorRef;
+        let intv = Arc::new(UInt64Vector::from_slice([1, 2, 3])) as VectorRef;
+        let tsv = Arc::new(TimestampMillisecondVector::from_slice([0, 0, 0])) as VectorRef;
 
         let mut keys = HashMap::with_capacity(3);
         keys.insert("k1".to_string(), intv.clone());
@@ -577,7 +577,7 @@ mod tests {
 
     #[test]
     fn test_delete_type_mismatch() {
-        let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3])) as VectorRef;
+        let intv = Arc::new(UInt64Vector::from_slice([1, 2, 3])) as VectorRef;
         let boolv = Arc::new(BooleanVector::from(vec![true, false, true])) as VectorRef;
 
         let mut keys = HashMap::with_capacity(3);
@@ -592,8 +592,8 @@ mod tests {
 
     #[test]
     fn test_delete_non_null_value() {
-        let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3])) as VectorRef;
-        let tsv = Arc::new(TimestampMillisecondVector::from_slice(&[0, 0, 0])) as VectorRef;
+        let intv = Arc::new(UInt64Vector::from_slice([1, 2, 3])) as VectorRef;
+        let tsv = Arc::new(TimestampMillisecondVector::from_slice([0, 0, 0])) as VectorRef;
 
         let mut keys = HashMap::with_capacity(2);
         keys.insert("k1".to_string(), intv.clone());

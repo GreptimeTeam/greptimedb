@@ -35,7 +35,7 @@ Error: 4001(TableNotFound), Table not found: t
 
 SELECT * FROM t;
 
-Error: 3000(PlanQuery), Error during planning: table 'greptime.public.t' not found
+Error: 4001(TableNotFound), Table `greptime.public.t` not exist
 
 CREATE TABLE t(i INTEGER, j BIGINT TIME INDEX);
 

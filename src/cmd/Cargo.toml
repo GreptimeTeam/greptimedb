@@ -11,24 +11,36 @@ path = "src/bin/greptime.rs"
 
 [dependencies]
 anymap = "1.0.0-beta.2"
+catalog = { path = "../catalog" }
 clap = { version = "3.1", features = ["derive"] }
+client = { path = "../client" }
 common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
+common-query = { path = "../common/query" }
+common-recordbatch = { path = "../common/recordbatch" }
+substrait = { path = "../common/substrait" }
 common-telemetry = { path = "../common/telemetry", features = [
     "deadlock_detection",
 ] }
 datanode = { path = "../datanode" }
+either = "1.8"
 frontend = { path = "../frontend" }
 futures.workspace = true
 meta-client = { path = "../meta-client" }
 meta-srv = { path = "../meta-srv" }
+nu-ansi-term = "0.46"
+partition = { path = "../partition" }
+query = { path = "../query" }
+rustyline = "10.1"
 serde.workspace = true
 servers = { path = "../servers" }
+session = { path = "../session" }
 snafu.workspace = true
 tokio.workspace = true
 toml = "0.5"
 
 [dev-dependencies]
+rexpect = "0.5"
 serde.workspace = true
 tempdir = "0.3"
 

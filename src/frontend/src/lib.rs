@@ -14,8 +14,8 @@
 
 #![feature(assert_matches)]
 
-mod catalog;
-mod datanode;
+pub mod catalog;
+pub mod datanode;
 pub mod error;
 mod expr_factory;
 pub mod frontend;

@@ -15,6 +15,7 @@
 use std::any::Any;
 
 use common_error::prelude::*;
+use common_procedure::ProcedureId;
 use common_recordbatch::error::Error as RecordBatchError;
 use datafusion::parquet;
 use datatypes::prelude::ConcreteDataType;
@@ -185,6 +186,12 @@ pub enum Error {
     #[snafu(display("Failed to init backend, config: {:#?}, source: {}", config, source))]
     InitBackend {
         config: Box<ObjectStoreConfig>,
+        source: object_store::Error,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to build backend, source: {}", source))]
+    BuildBackend {
         source: object_store::Error,
         backtrace: Backtrace,
     },
@@ -378,7 +385,7 @@ pub enum Error {
 
     #[snafu(display("Failed to poll stream, source: {}", source))]
     PollStream {
-        source: datatypes::arrow::error::ArrowError,
+        source: datafusion_common::DataFusionError,
         backtrace: Backtrace,
     },
 
@@ -393,6 +400,26 @@ pub enum Error {
     UnrecognizedTableOption {
         #[snafu(backtrace)]
         source: table::error::Error,
+    },
+
+    #[snafu(display("Failed to recover procedure, source: {}", source))]
+    RecoverProcedure {
+        #[snafu(backtrace)]
+        source: common_procedure::error::Error,
+    },
+
+    #[snafu(display("Failed to submit procedure {}, source: {}", procedure_id, source))]
+    SubmitProcedure {
+        procedure_id: ProcedureId,
+        #[snafu(backtrace)]
+        source: common_procedure::error::Error,
+    },
+
+    #[snafu(display("Failed to wait procedure {} done, source: {}", procedure_id, source))]
+    WaitProcedure {
+        procedure_id: ProcedureId,
+        #[snafu(backtrace)]
+        source: common_procedure::error::Error,
     },
 }
 
@@ -456,9 +483,11 @@ impl ErrorExt for Error {
             | MissingRequiredField { .. }
             | IncorrectInternalState { .. } => StatusCode::Internal,
 
-            InitBackend { .. } | WriteParquet { .. } | PollStream { .. } | WriteObject { .. } => {
-                StatusCode::StorageUnavailable
-            }
+            BuildBackend { .. }
+            | InitBackend { .. }
+            | WriteParquet { .. }
+            | PollStream { .. }
+            | WriteObject { .. } => StatusCode::StorageUnavailable,
             OpenLogStore { source } => source.status_code(),
             StartScriptManager { source } => source.status_code(),
             OpenStorageEngine { source } => source.status_code(),
@@ -470,6 +499,10 @@ impl ErrorExt for Error {
             CopyTable { source, .. } => source.status_code(),
             TableScanExec { source, .. } => source.status_code(),
             UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
+            RecoverProcedure { source, .. } | SubmitProcedure { source, .. } => {
+                source.status_code()
+            }
+            WaitProcedure { source, .. } => source.status_code(),
         }
     }
 

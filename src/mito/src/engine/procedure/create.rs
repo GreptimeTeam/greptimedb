@@ -187,13 +187,12 @@ impl<S: StorageEngine> CreateMitoTable<S> {
             }
 
             let region_name = engine::region_name(self.data.request.id, *number);
-            // TODO(yingwen): Most error is recoverable.
             if let Some(region) = self
                 .engine_inner
                 .storage_engine
                 .open_region(&engine_ctx, &region_name, &open_opts)
                 .await
-                .map_err(Error::external)?
+                .map_err(Error::from_error_ext)?
             {
                 // Region already exists.
                 self.regions.insert(*number, region);
@@ -218,7 +217,7 @@ impl<S: StorageEngine> CreateMitoTable<S> {
                 .storage_engine
                 .create_region(&engine_ctx, region_desc, &create_opts)
                 .await
-                .map_err(Error::external)?;
+                .map_err(Error::from_error_ext)?;
 
             self.regions.insert(*number, region);
         }

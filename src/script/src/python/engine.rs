@@ -40,8 +40,8 @@ use snafu::{ensure, ResultExt};
 use sql::statements::statement::Statement;
 
 use crate::engine::{CompileContext, EvalContext, Script, ScriptEngine};
-use crate::python::coprocessor::{exec_parsed, parse, AnnotationInfo, CoprocessorRef};
 use crate::python::error::{self, Result};
+use crate::python::ffi_types::copr::{exec_parsed, parse, AnnotationInfo, CoprocessorRef};
 
 const PY_ENGINE: &str = "python";
 
@@ -241,7 +241,8 @@ impl Script for PyScript {
             );
             let plan = self
                 .query_engine
-                .statement_to_plan(stmt, Arc::new(QueryContext::new()))?;
+                .statement_to_plan(stmt, Arc::new(QueryContext::new()))
+                .await?;
             let res = self.query_engine.execute(&plan).await?;
             let copr = self.copr.clone();
             match res {

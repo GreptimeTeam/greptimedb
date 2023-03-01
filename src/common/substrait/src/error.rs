@@ -105,6 +105,13 @@ pub enum Error {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
+
+    #[snafu(display("Unable to resolve table: {table_name}, error: {source}"))]
+    ResolveTable {
+        table_name: String,
+        #[snafu(backtrace)]
+        source: catalog::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -127,6 +134,7 @@ impl ErrorExt for Error {
             | Error::SchemaNotMatch { .. } => StatusCode::InvalidArguments,
             Error::DFInternal { .. } | Error::Internal { .. } => StatusCode::Internal,
             Error::ConvertDfSchema { source } => source.status_code(),
+            Error::ResolveTable { source, .. } => source.status_code(),
         }
     }
 

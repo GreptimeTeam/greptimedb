@@ -145,7 +145,7 @@ mod tests {
 
     fn new_put_data() -> HashMap<String, VectorRef> {
         let mut put_data = HashMap::new();
-        let k0 = Arc::new(Int32Vector::from_slice(&[1, 2, 3])) as VectorRef;
+        let k0 = Arc::new(Int32Vector::from_slice([1, 2, 3])) as VectorRef;
         let ts = Arc::new(TimestampMillisecondVector::from_values([11, 12, 13])) as VectorRef;
 
         put_data.insert("k0".to_string(), k0);

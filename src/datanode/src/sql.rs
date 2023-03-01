@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use catalog::CatalogManagerRef;
+use common_procedure::ProcedureManagerRef;
 use common_query::Output;
 use common_telemetry::error;
 use query::query_engine::QueryEngineRef;
@@ -23,7 +24,7 @@ use sql::statements::delete::Delete;
 use sql::statements::describe::DescribeTable;
 use sql::statements::explain::Explain;
 use sql::statements::show::{ShowDatabases, ShowTables};
-use table::engine::{EngineContext, TableEngineRef, TableReference};
+use table::engine::{EngineContext, TableEngineProcedureRef, TableEngineRef, TableReference};
 use table::requests::*;
 use table::TableRef;
 
@@ -57,6 +58,8 @@ pub struct SqlHandler {
     table_engine: TableEngineRef,
     catalog_manager: CatalogManagerRef,
     query_engine: QueryEngineRef,
+    engine_procedure: TableEngineProcedureRef,
+    procedure_manager: Option<ProcedureManagerRef>,
 }
 
 impl SqlHandler {
@@ -64,11 +67,15 @@ impl SqlHandler {
         table_engine: TableEngineRef,
         catalog_manager: CatalogManagerRef,
         query_engine: QueryEngineRef,
+        engine_procedure: TableEngineProcedureRef,
+        procedure_manager: Option<ProcedureManagerRef>,
     ) -> Self {
         Self {
             table_engine,
             catalog_manager,
             query_engine,
+            engine_procedure,
+            procedure_manager,
         }
     }
 
@@ -98,6 +105,7 @@ impl SqlHandler {
                 let table = self
                     .catalog_manager
                     .table(&catalog, &schema, &table)
+                    .await
                     .context(error::CatalogSnafu)?
                     .with_context(|| TableNotFoundSnafu {
                         table_name: req.name().to_string(),
@@ -237,7 +245,7 @@ mod tests {
                 .unwrap(),
         );
         catalog_list.start().await.unwrap();
-        catalog_list
+        assert!(catalog_list
             .register_table(RegisterTableRequest {
                 catalog: DEFAULT_CATALOG_NAME.to_string(),
                 schema: DEFAULT_SCHEMA_NAME.to_string(),
@@ -246,11 +254,17 @@ mod tests {
                 table: Arc::new(DemoTable),
             })
             .await
-            .unwrap();
+            .unwrap());
 
         let factory = QueryEngineFactory::new(catalog_list.clone());
         let query_engine = factory.query_engine();
-        let sql_handler = SqlHandler::new(table_engine, catalog_list.clone(), query_engine.clone());
+        let sql_handler = SqlHandler::new(
+            table_engine.clone(),
+            catalog_list.clone(),
+            query_engine.clone(),
+            table_engine,
+            None,
+        );
 
         let stmt = match QueryLanguageParser::parse_sql(sql).unwrap() {
             QueryStatement::Sql(Statement::Insert(i)) => i,

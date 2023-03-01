@@ -18,12 +18,13 @@ use std::sync::Arc;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_grpc::writer::Precision;
 use session::context::QueryContext;
 
 use crate::error::{Result, TimePrecisionSnafu};
 use crate::influxdb::InfluxdbRequest;
+use crate::parse_catalog_and_schema_from_client_database_name;
 use crate::query_handler::InfluxdbLineProtocolHandlerRef;
 
 // https://docs.influxdata.com/influxdb/v1.8/tools/api/#ping-http-endpoint
@@ -47,7 +48,8 @@ pub async fn influxdb_write(
     let db = params
         .remove("db")
         .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
-    let ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, &db));
+    let (catalog, schema) = parse_catalog_and_schema_from_client_database_name(&db);
+    let ctx = Arc::new(QueryContext::with(catalog, schema));
 
     let precision = params
         .get("precision")

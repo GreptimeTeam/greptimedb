@@ -28,7 +28,7 @@ use table::engine::{EngineContext, TableEngineRef};
 use table::requests::{CreateTableRequest, TableOptions};
 use tempdir::TempDir;
 
-use crate::datanode::{DatanodeOptions, FileConfig, ObjectStoreConfig, WalConfig};
+use crate::datanode::{DatanodeOptions, FileConfig, ObjectStoreConfig, ProcedureConfig, WalConfig};
 use crate::error::{CreateTableSnafu, Result};
 use crate::instance::Instance;
 use crate::sql::SqlHandler;
@@ -36,6 +36,7 @@ use crate::sql::SqlHandler;
 pub(crate) struct MockInstance {
     instance: Instance,
     _guard: TestGuard,
+    _procedure_dir: Option<TempDir>,
 }
 
 impl MockInstance {
@@ -45,11 +46,38 @@ impl MockInstance {
         let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
         instance.start().await.unwrap();
 
-        MockInstance { instance, _guard }
+        MockInstance {
+            instance,
+            _guard,
+            _procedure_dir: None,
+        }
+    }
+
+    pub(crate) async fn with_procedure_enabled(name: &str) -> Self {
+        let (mut opts, _guard) = create_tmp_dir_and_datanode_opts(name);
+        let procedure_dir = TempDir::new(&format!("gt_procedure_{name}")).unwrap();
+        opts.procedure = Some(ProcedureConfig {
+            store: ObjectStoreConfig::File(FileConfig {
+                data_dir: procedure_dir.path().to_str().unwrap().to_string(),
+            }),
+        });
+
+        let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
+        instance.start().await.unwrap();
+
+        MockInstance {
+            instance,
+            _guard,
+            _procedure_dir: Some(procedure_dir),
+        }
     }
 
     pub(crate) fn inner(&self) -> &Instance {
         &self.instance
+    }
+
+    pub(crate) fn data_tmp_dir(&self) -> &TempDir {
+        &self._guard._data_tmp_dir
     }
 }
 
@@ -140,7 +168,13 @@ pub async fn create_mock_sql_handler() -> SqlHandler {
     let catalog_list = catalog::local::new_memory_catalog_list().unwrap();
     let factory = QueryEngineFactory::new(catalog_list);
 
-    SqlHandler::new(mock_engine, catalog_manager, factory.query_engine())
+    SqlHandler::new(
+        mock_engine.clone(),
+        catalog_manager,
+        factory.query_engine(),
+        mock_engine,
+        None,
+    )
 }
 
 pub(crate) async fn setup_test_instance(test_name: &str) -> MockInstance {

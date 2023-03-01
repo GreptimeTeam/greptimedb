@@ -34,7 +34,7 @@ struct DummyInstance {
 
 #[async_trait]
 impl OpentsdbProtocolHandler for DummyInstance {
-    async fn exec(&self, data_point: &DataPoint) -> Result<()> {
+    async fn exec(&self, data_point: &DataPoint, _ctx: QueryContextRef) -> Result<()> {
         if data_point.metric() == "should_failed" {
             return error::InternalSnafu {
                 err_msg: "expected",
@@ -70,7 +70,7 @@ impl SqlQueryHandler for DummyInstance {
         unimplemented!()
     }
 
-    fn do_describe(
+    async fn do_describe(
         &self,
         _stmt: sql::statements::statement::Statement,
         _query_ctx: QueryContextRef,

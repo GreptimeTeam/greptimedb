@@ -315,7 +315,11 @@ mod test {
                 .unwrap()
                 .build()
                 .unwrap();
-        let physical_plan = ctx.create_physical_plan(&logical_plan).await.unwrap();
+        let physical_plan = ctx
+            .state()
+            .create_physical_plan(&logical_plan)
+            .await
+            .unwrap();
         let df_recordbatches = collect(physical_plan, Arc::new(TaskContext::from(&ctx)))
             .await
             .unwrap();

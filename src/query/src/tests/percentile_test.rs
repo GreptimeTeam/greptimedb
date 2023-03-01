@@ -58,6 +58,7 @@ async fn test_percentile_correctness() -> Result<()> {
     let stmt = QueryLanguageParser::parse_sql(&sql).unwrap();
     let plan = engine
         .statement_to_plan(stmt, Arc::new(QueryContext::new()))
+        .await
         .unwrap();
 
     let output = engine.execute(&plan).await.unwrap();
@@ -103,6 +104,7 @@ async fn execute_percentile<'a>(
     let stmt = QueryLanguageParser::parse_sql(&sql).unwrap();
     let plan = engine
         .statement_to_plan(stmt, Arc::new(QueryContext::new()))
+        .await
         .unwrap();
 
     let output = engine.execute(&plan).await.unwrap();
@@ -127,7 +129,7 @@ fn create_correctness_engine() -> Arc<dyn QueryEngine> {
 
     let numbers = [3_i32, 6_i32, 8_i32, 10_i32];
 
-    let column: VectorRef = Arc::new(Int32Vector::from_slice(&numbers));
+    let column: VectorRef = Arc::new(Int32Vector::from_slice(numbers));
     columns.push(column);
 
     let schema = Arc::new(Schema::new(column_schemas));

@@ -16,8 +16,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::{AffectedRows, FlightMetadata};
-use arrow_flight::utils::{flight_data_from_arrow_batch, flight_data_to_arrow_batch};
+use arrow_flight::utils::flight_data_to_arrow_batch;
 use arrow_flight::{FlightData, IpcMessage, SchemaAsIpc};
+use common_base::bytes::Bytes;
 use common_recordbatch::{RecordBatch, RecordBatches};
 use datatypes::arrow;
 use datatypes::arrow::datatypes::Schema as ArrowSchema;
@@ -39,38 +40,58 @@ pub enum FlightMessage {
     AffectedRows(usize),
 }
 
-#[derive(Default)]
 pub struct FlightEncoder {
     write_options: writer::IpcWriteOptions,
+    data_gen: writer::IpcDataGenerator,
+    dictionary_tracker: writer::DictionaryTracker,
+}
+
+impl Default for FlightEncoder {
+    fn default() -> Self {
+        Self {
+            write_options: writer::IpcWriteOptions::default(),
+            data_gen: writer::IpcDataGenerator::default(),
+            dictionary_tracker: writer::DictionaryTracker::new(false),
+        }
+    }
 }
 
 impl FlightEncoder {
-    pub fn encode(&self, flight_message: FlightMessage) -> FlightData {
+    pub fn encode(&mut self, flight_message: FlightMessage) -> FlightData {
         match flight_message {
             FlightMessage::Schema(schema) => {
                 SchemaAsIpc::new(schema.arrow_schema(), &self.write_options).into()
             }
             FlightMessage::Recordbatch(recordbatch) => {
-                let (flight_dictionaries, flight_batch) = flight_data_from_arrow_batch(
-                    recordbatch.df_record_batch(),
-                    &self.write_options,
-                );
+                let (encoded_dictionaries, encoded_batch) = self
+                    .data_gen
+                    .encoded_batch(
+                        recordbatch.df_record_batch(),
+                        &mut self.dictionary_tracker,
+                        &self.write_options,
+                    )
+                    .expect("DictionaryTracker configured above to not fail on replacement");
 
                 // TODO(LFC): Handle dictionary as FlightData here, when we supported Arrow's Dictionary DataType.
                 // Currently we don't have a datatype corresponding to Arrow's Dictionary DataType,
                 // so there won't be any "dictionaries" here. Assert to be sure about it, and
                 // perform a "testing guard" in case we forgot to handle the possible "dictionaries"
                 // here in the future.
-                debug_assert_eq!(flight_dictionaries.len(), 0);
+                debug_assert_eq!(encoded_dictionaries.len(), 0);
 
-                flight_batch
+                encoded_batch.into()
             }
             FlightMessage::AffectedRows(rows) => {
                 let metadata = FlightMetadata {
                     affected_rows: Some(AffectedRows { value: rows as _ }),
                 }
                 .encode_to_vec();
-                FlightData::new(None, IpcMessage(build_none_flight_msg()), metadata, vec![])
+                FlightData::new(
+                    None,
+                    IpcMessage(build_none_flight_msg().into()),
+                    metadata,
+                    vec![],
+                )
             }
         }
     }
@@ -83,7 +104,8 @@ pub struct FlightDecoder {
 
 impl FlightDecoder {
     pub fn try_decode(&mut self, flight_data: FlightData) -> Result<FlightMessage> {
-        let message = root_as_message(flight_data.data_header.as_slice()).map_err(|e| {
+        let bytes = flight_data.data_header.slice(..);
+        let message = root_as_message(&bytes).map_err(|e| {
             InvalidFlightDataSnafu {
                 reason: e.to_string(),
             }
@@ -91,7 +113,7 @@ impl FlightDecoder {
         })?;
         match message.header_type() {
             MessageHeader::NONE => {
-                let metadata = FlightMetadata::decode(flight_data.app_metadata.as_slice())
+                let metadata = FlightMetadata::decode(flight_data.app_metadata)
                     .context(DecodeFlightDataSnafu)?;
                 if let Some(AffectedRows { value }) = metadata.affected_rows {
                     return Ok(FlightMessage::AffectedRows(value as _));
@@ -176,7 +198,7 @@ pub fn flight_messages_to_recordbatches(messages: Vec<FlightMessage>) -> Result<
     }
 }
 
-fn build_none_flight_msg() -> Vec<u8> {
+fn build_none_flight_msg() -> Bytes {
     let mut builder = FlatBufferBuilder::new();
 
     let mut message = arrow::ipc::MessageBuilder::new(&mut builder);
@@ -187,7 +209,7 @@ fn build_none_flight_msg() -> Vec<u8> {
     let data = message.finish();
     builder.finish(data, None);
 
-    builder.finished_data().to_vec()
+    builder.finished_data().into()
 }
 
 #[cfg(test)]

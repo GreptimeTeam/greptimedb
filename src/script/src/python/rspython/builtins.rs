@@ -27,8 +27,15 @@ use datatypes::vectors::Helper as HelperVec;
 use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyList, PyStr};
 use rustpython_vm::{pymodule, AsObject, PyObjectRef, PyPayload, PyResult, VirtualMachine};
 
+use crate::python::ffi_types::PyVector;
 use crate::python::utils::is_instance;
-use crate::python::PyVector;
+
+pub fn init_greptime_builtins(module_name: &str, vm: &mut VirtualMachine) {
+    vm.add_native_module(
+        module_name.to_string(),
+        Box::new(greptime_builtin::make_module),
+    );
+}
 
 /// "Can't cast operand of type `{name}` into `{ty}`."
 fn type_cast_error(name: &str, ty: &str, vm: &VirtualMachine) -> PyBaseExceptionRef {
@@ -295,13 +302,13 @@ pub(crate) mod greptime_builtin {
     use rustpython_vm::function::{FuncArgs, KwArgs, OptionalArg};
     use rustpython_vm::{AsObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine};
 
-    use crate::python::builtins::{
+    use super::{
         all_to_f64, eval_aggr_fn, from_df_err, try_into_columnar_value, try_into_py_obj,
         type_cast_error,
     };
-    use crate::python::utils::{is_instance, py_vec_obj_to_array, PyVectorRef};
-    use crate::python::vector::val_to_pyobj;
-    use crate::python::PyVector;
+    use crate::python::ffi_types::vector::val_to_pyobj;
+    use crate::python::ffi_types::PyVector;
+    use crate::python::rspython::utils::{is_instance, py_vec_obj_to_array, PyVectorRef};
 
     #[pyfunction]
     fn vector(args: OptionalArg<PyObjectRef>, vm: &VirtualMachine) -> PyResult<PyVector> {
@@ -356,7 +363,7 @@ pub(crate) mod greptime_builtin {
                 return Err(vm.new_runtime_error(format!("Failed to evaluate accumulator: {err}")))
             }
         };
-        let res = val_to_pyobj(res, vm);
+        let res = val_to_pyobj(res, vm)?;
         Ok(res)
     }
 
@@ -962,7 +969,7 @@ pub(crate) mod greptime_builtin {
                         Ok(obj) => match py_vec_obj_to_array(&obj, vm, 1){
                             Ok(v) => if v.len()==1{
                                 Ok(v)
-                            } else {
+                            }else{
                                 Err(vm.new_runtime_error(format!("Expect return's length to be at most one, found to be length of {}.", v.len())))
                             },
                             Err(err) => Err(vm

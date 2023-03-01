@@ -55,8 +55,16 @@ impl Database {
         }
     }
 
+    pub fn catalog(&self) -> &String {
+        &self.catalog
+    }
+
     pub fn set_catalog(&mut self, catalog: impl Into<String>) {
         self.catalog = catalog.into();
+    }
+
+    pub fn schema(&self) -> &String {
+        &self.schema
     }
 
     pub fn set_schema(&mut self, schema: impl Into<String>) {
@@ -118,7 +126,7 @@ impl Database {
             request: Some(request),
         };
         let request = Ticket {
-            ticket: request.encode_to_vec(),
+            ticket: request.encode_to_vec().into(),
         };
 
         let mut client = self.client.make_client()?;

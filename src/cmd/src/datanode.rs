@@ -14,7 +14,9 @@
 
 use clap::Parser;
 use common_telemetry::logging;
-use datanode::datanode::{Datanode, DatanodeOptions, FileConfig, ObjectStoreConfig};
+use datanode::datanode::{
+    Datanode, DatanodeOptions, FileConfig, ObjectStoreConfig, ProcedureConfig,
+};
 use meta_client::MetaClientOptions;
 use servers::Mode;
 use snafu::ResultExt;
@@ -65,6 +67,8 @@ struct StartCommand {
     data_dir: Option<String>,
     #[clap(long)]
     wal_dir: Option<String>,
+    #[clap(long)]
+    procedure_dir: Option<String>,
 }
 
 impl StartCommand {
@@ -134,6 +138,11 @@ impl TryFrom<StartCommand> for DatanodeOptions {
         if let Some(wal_dir) = cmd.wal_dir {
             opts.wal.dir = wal_dir;
         }
+
+        if let Some(procedure_dir) = cmd.procedure_dir {
+            opts.procedure = Some(ProcedureConfig::from_file_path(procedure_dir));
+        }
+
         Ok(opts)
     }
 }

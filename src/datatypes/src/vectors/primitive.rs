@@ -518,14 +518,14 @@ mod tests {
         builder.push_value_ref(ValueRef::Int64(123));
         assert!(builder.try_push_value_ref(ValueRef::Int32(123)).is_err());
 
-        let input = Int64Vector::from_slice(&[7, 8, 9]);
+        let input = Int64Vector::from_slice([7, 8, 9]);
         builder.extend_slice_of(&input, 1, 2).unwrap();
         assert!(builder
-            .extend_slice_of(&Int32Vector::from_slice(&[13]), 0, 1)
+            .extend_slice_of(&Int32Vector::from_slice([13]), 0, 1)
             .is_err());
         let vector = builder.to_vector();
 
-        let expect: VectorRef = Arc::new(Int64Vector::from_slice(&[123, 8, 9]));
+        let expect: VectorRef = Arc::new(Int64Vector::from_slice([123, 8, 9]));
         assert_eq!(expect, vector);
     }
 
@@ -537,7 +537,7 @@ mod tests {
                     $ty::from_native($ty::MAX),
                     $ty::from_native($ty::MIN),
                 ]);
-                let from_slice = $vec::from_slice(&[$ty::MAX, $ty::MIN]);
+                let from_slice = $vec::from_slice([$ty::MAX, $ty::MIN]);
                 assert_eq!(from_wrapper_slice, from_slice);
             };
         }

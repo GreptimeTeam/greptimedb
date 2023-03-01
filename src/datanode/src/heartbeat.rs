@@ -106,7 +106,7 @@ impl HeartbeatTask {
         let mut tx = Self::create_streams(&meta_client, running.clone()).await?;
         common_runtime::spawn_bg(async move {
             while running.load(Ordering::Acquire) {
-                let region_num = match region_number(&catalog_manager_clone) {
+                let region_num = match region_number(&catalog_manager_clone).await {
                     Ok(region_num) => region_num as i64,
                     Err(e) => {
                         error!("failed to get region number, err: {e:?}");

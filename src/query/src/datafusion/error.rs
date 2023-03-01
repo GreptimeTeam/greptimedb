@@ -31,13 +31,6 @@ pub enum InnerError {
     #[snafu(display("PhysicalPlan downcast failed"))]
     PhysicalPlanDowncast { backtrace: Backtrace },
 
-    #[snafu(display("Cannot plan SQL: {}, source: {}", sql, source))]
-    PlanSql {
-        sql: String,
-        source: DataFusionError,
-        backtrace: Backtrace,
-    },
-
     #[snafu(display("Fail to convert arrow schema, source: {}", source))]
     ConvertSchema {
         #[snafu(backtrace)]
@@ -77,7 +70,6 @@ impl ErrorExt for InnerError {
             PhysicalPlanDowncast { .. } | ConvertSchema { .. } | TableSchemaMismatch { .. } => {
                 StatusCode::Unexpected
             }
-            PlanSql { .. } => StatusCode::PlanQuery,
             ConvertDfRecordBatchStream { source } => source.status_code(),
             ExecutePhysicalPlan { source } => source.status_code(),
         }
@@ -113,12 +105,6 @@ mod tests {
             .err()
             .unwrap();
         assert_error(&err, StatusCode::EngineExecuteQuery);
-
-        let err = throw_df_error()
-            .context(PlanSqlSnafu { sql: "" })
-            .err()
-            .unwrap();
-        assert_error(&err, StatusCode::PlanQuery);
 
         let res: Result<(), InnerError> = PhysicalPlanDowncastSnafu {}.fail();
         let err = res.err().unwrap();
