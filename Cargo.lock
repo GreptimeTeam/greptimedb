@@ -1414,6 +1414,7 @@ dependencies = [
  "snafu",
  "substrait 0.1.0",
  "tempdir",
+ "tempfile",
  "tokio",
  "toml",
 ]
