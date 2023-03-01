@@ -142,6 +142,8 @@ struct StartCommand {
     #[clap(long)]
     mysql_addr: Option<String>,
     #[clap(long)]
+    promql_addr: Option<String>,
+    #[clap(long)]
     postgres_addr: Option<String>,
     #[clap(long)]
     opentsdb_addr: Option<String>,
@@ -254,6 +256,11 @@ impl TryFrom<StartCommand> for FrontendOptions {
                 ..Default::default()
             })
         }
+
+        if let Some(addr) = cmd.promql_addr {
+            opts.promql_options = Some(PromqlOptions { addr })
+        }
+
         if let Some(addr) = cmd.postgres_addr {
             opts.postgres_options = Some(PostgresOptions {
                 addr,
@@ -302,6 +309,7 @@ mod tests {
             http_addr: None,
             rpc_addr: None,
             mysql_addr: None,
+            promql_addr: None,
             postgres_addr: None,
             opentsdb_addr: None,
             config_file: Some(format!(
@@ -347,6 +355,7 @@ mod tests {
         let command = StartCommand {
             http_addr: None,
             rpc_addr: None,
+            promql_addr: None,
             mysql_addr: None,
             postgres_addr: None,
             opentsdb_addr: None,
