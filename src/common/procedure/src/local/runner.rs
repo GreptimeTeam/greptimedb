@@ -172,7 +172,7 @@ impl Runner {
                 ExecResult::Done | ExecResult::Failed => return,
                 ExecResult::RetryLater => {
                     if let Some(d) = exponential.next() {
-                        retry_times += retry_times;
+                        retry_times += 1;
                         self.wait_on_err(d, retry_times).await;
                     } else {
                         self.meta.set_state(ProcedureState::failed(Arc::new(Error::RetryTimesExceeded {})));
