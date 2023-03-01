@@ -177,7 +177,6 @@ impl Instance {
         };
 
         let procedure_manager = create_procedure_manager(&opts.procedure).await?;
-        // Recover procedures.
         if let Some(procedure_manager) = &procedure_manager {
             table_engine.register_procedure_loaders(&**procedure_manager);
             table_procedure::register_procedure_loaders(
@@ -187,6 +186,7 @@ impl Instance {
                 &**procedure_manager,
             );
 
+            // Recover procedures.
             procedure_manager
                 .recover()
                 .await
@@ -423,7 +423,7 @@ pub(crate) async fn create_log_store(wal_config: &WalConfig) -> Result<RaftEngin
     Ok(logstore)
 }
 
-async fn create_procedure_manager(
+pub(crate) async fn create_procedure_manager(
     procedure_config: &Option<ProcedureConfig>,
 ) -> Result<Option<ProcedureManagerRef>> {
     let Some(procedure_config) = procedure_config else {

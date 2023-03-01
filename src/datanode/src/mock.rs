@@ -31,9 +31,11 @@ use table::metadata::TableId;
 use table::table::TableIdProvider;
 
 use crate::datanode::DatanodeOptions;
-use crate::error::{CatalogSnafu, Result};
+use crate::error::{CatalogSnafu, RecoverProcedureSnafu, Result};
 use crate::heartbeat::HeartbeatTask;
-use crate::instance::{create_log_store, new_object_store, DefaultEngine, Instance};
+use crate::instance::{
+    create_log_store, create_procedure_manager, new_object_store, DefaultEngine, Instance,
+};
 use crate::script::ScriptExecutor;
 use crate::sql::SqlHandler;
 
@@ -93,6 +95,16 @@ impl Instance {
         let script_executor =
             ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?;
 
+        let procedure_manager = create_procedure_manager(&opts.procedure).await?;
+        if let Some(procedure_manager) = &procedure_manager {
+            table_engine.register_procedure_loaders(&**procedure_manager);
+            // Recover procedures.
+            procedure_manager
+                .recover()
+                .await
+                .context(RecoverProcedureSnafu)?;
+        }
+
         Ok(Self {
             query_engine: query_engine.clone(),
             sql_handler: SqlHandler::new(
@@ -100,7 +112,7 @@ impl Instance {
                 catalog_manager.clone(),
                 query_engine.clone(),
                 table_engine,
-                None,
+                procedure_manager,
             ),
             catalog_manager,
             script_executor,

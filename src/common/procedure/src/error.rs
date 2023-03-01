@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::sync::Arc;
 
 use common_error::prelude::*;
 
@@ -81,6 +82,21 @@ pub enum Error {
         #[snafu(backtrace)]
         source: BoxedError,
     },
+
+    #[snafu(display("Procedure panics, procedure_id: {}", procedure_id))]
+    ProcedurePanic { procedure_id: ProcedureId },
+
+    #[snafu(display("Failed to wait watcher, source: {}", source))]
+    WaitWatcher {
+        source: tokio::sync::watch::error::RecvError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to execute procedure, source: {}", source))]
+    ProcedureExec {
+        source: Arc<Error>,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -95,10 +111,13 @@ impl ErrorExt for Error {
             | Error::ListState { .. }
             | Error::ReadState { .. }
             | Error::FromJson { .. }
-            | Error::RetryLater { .. } => StatusCode::Internal,
+            | Error::RetryLater { .. }
+            | Error::WaitWatcher { .. } => StatusCode::Internal,
             Error::LoaderConflict { .. } | Error::DuplicateProcedure { .. } => {
                 StatusCode::InvalidArguments
             }
+            Error::ProcedurePanic { .. } => StatusCode::Unexpected,
+            Error::ProcedureExec { source, .. } => source.status_code(),
         }
     }
 

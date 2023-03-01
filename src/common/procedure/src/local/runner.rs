@@ -18,7 +18,7 @@ use std::time::Duration;
 use common_telemetry::logging;
 use tokio::time;
 
-use crate::error::{Error, Result};
+use crate::error::{ProcedurePanicSnafu, Result};
 use crate::local::{ManagerContext, ProcedureMeta, ProcedureMetaRef};
 use crate::store::ProcedureStore;
 use crate::{BoxedProcedure, Context, ProcedureId, ProcedureState, ProcedureWithId, Status};
@@ -30,7 +30,7 @@ enum ExecResult {
     Continue,
     Done,
     RetryLater,
-    Failed(Error),
+    Failed,
 }
 
 #[cfg(test)]
@@ -48,7 +48,7 @@ impl ExecResult {
     }
 
     fn is_failed(&self) -> bool {
-        matches!(self, ExecResult::Failed(_))
+        matches!(self, ExecResult::Failed)
     }
 }
 
@@ -83,7 +83,11 @@ impl Drop for ProcedureGuard {
             // Set state to failed. This is useful in test as runtime may not abort when the runner task panics.
             // See https://github.com/tokio-rs/tokio/issues/2002 .
             // We set set_panic_hook() in the application's main function. But our tests don't have this panic hook.
-            self.meta.set_state(ProcedureState::Failed);
+            let err = ProcedurePanicSnafu {
+                procedure_id: self.meta.id,
+            }
+            .build();
+            self.meta.set_state(ProcedureState::failed(Arc::new(err)));
         }
 
         // Notify parent procedure.
@@ -109,7 +113,7 @@ pub(crate) struct Runner {
 
 impl Runner {
     /// Run the procedure.
-    pub(crate) async fn run(mut self) -> Result<()> {
+    pub(crate) async fn run(mut self) {
         // Ensure we can update the procedure state.
         let guard = ProcedureGuard::new(self.meta.clone(), self.manager_ctx.clone());
 
@@ -129,12 +133,9 @@ impl Runner {
                 .await;
         }
 
-        let mut result = Ok(());
         // Execute the procedure. We need to release the lock whenever the the execution
         // is successful or fail.
-        if let Err(e) = self.execute_procedure_in_loop().await {
-            result = Err(e);
-        }
+        self.execute_procedure_in_loop().await;
 
         // We can't remove the metadata of the procedure now as users and its parent might
         // need to query its state.
@@ -155,11 +156,9 @@ impl Runner {
             self.procedure.type_name(),
             self.meta.id
         );
-
-        result
     }
 
-    async fn execute_procedure_in_loop(&mut self) -> Result<()> {
+    async fn execute_procedure_in_loop(&mut self) {
         let ctx = Context {
             procedure_id: self.meta.id,
             provider: self.manager_ctx.clone(),
@@ -168,11 +167,10 @@ impl Runner {
         loop {
             match self.execute_once(&ctx).await {
                 ExecResult::Continue => (),
-                ExecResult::Done => return Ok(()),
+                ExecResult::Done | ExecResult::Failed => return,
                 ExecResult::RetryLater => {
                     self.wait_on_err().await;
                 }
-                ExecResult::Failed(e) => return Err(e),
             }
         }
     }
@@ -222,14 +220,14 @@ impl Runner {
                     return ExecResult::RetryLater;
                 }
 
-                self.meta.set_state(ProcedureState::Failed);
+                self.meta.set_state(ProcedureState::failed(Arc::new(e)));
 
                 // Write rollback key so we can skip this procedure while recovering procedures.
                 if self.rollback_procedure().await.is_err() {
                     return ExecResult::RetryLater;
                 }
 
-                ExecResult::Failed(e)
+                ExecResult::Failed
             }
         }
     }
@@ -404,7 +402,7 @@ mod tests {
 
     use super::*;
     use crate::local::test_util;
-    use crate::{ContextProvider, LockKey, Procedure};
+    use crate::{ContextProvider, Error, LockKey, Procedure};
 
     const ROOT_ID: &str = "9f805a1f-05f7-490c-9f91-bd56e3cc54c1";
 
@@ -630,9 +628,14 @@ mod tests {
                     // Wait for subprocedures.
                     let mut all_child_done = true;
                     for id in children_ids {
-                        if ctx.provider.procedure_state(id).await.unwrap()
-                            != Some(ProcedureState::Done)
-                        {
+                        let is_not_done = ctx
+                            .provider
+                            .procedure_state(id)
+                            .await
+                            .unwrap()
+                            .map(|s| !s.is_done())
+                            .unwrap_or(true);
+                        if is_not_done {
                             all_child_done = false;
                         }
                     }
@@ -668,7 +671,7 @@ mod tests {
         // Replace the manager ctx.
         runner.manager_ctx = manager_ctx;
 
-        runner.run().await.unwrap();
+        runner.run().await;
 
         // Check files on store.
         for child_id in children_ids {
@@ -706,7 +709,7 @@ mod tests {
 
         let res = runner.execute_once(&ctx).await;
         assert!(res.is_failed(), "{res:?}");
-        assert_eq!(ProcedureState::Failed, meta.state());
+        assert!(meta.state().is_failed());
         check_files(&object_store, ctx.procedure_id, &["0000000000.rollback"]).await;
     }
 
@@ -741,11 +744,11 @@ mod tests {
 
         let res = runner.execute_once(&ctx).await;
         assert!(res.is_retry_later(), "{res:?}");
-        assert_eq!(ProcedureState::Running, meta.state());
+        assert!(meta.state().is_running());
 
         let res = runner.execute_once(&ctx).await;
         assert!(res.is_done(), "{res:?}");
-        assert_eq!(ProcedureState::Done, meta.state());
+        assert!(meta.state().is_done());
         check_files(&object_store, ctx.procedure_id, &["0000000000.commit"]).await;
     }
 
@@ -779,7 +782,8 @@ mod tests {
                 } else {
                     // Wait for subprocedures.
                     let state = ctx.provider.procedure_state(child_id).await.unwrap();
-                    if state == Some(ProcedureState::Failed) {
+                    let is_failed = state.map(|s| s.is_failed()).unwrap_or(false);
+                    if is_failed {
                         // The parent procedure to abort itself if child procedure is failed.
                         Err(Error::from_error_ext(PlainError::new(
                             "subprocedure failed".to_string(),
@@ -811,12 +815,13 @@ mod tests {
 
         let manager_ctx = Arc::new(ManagerContext::new());
         // Manually add this procedure to the manager ctx.
-        assert!(manager_ctx.try_insert_procedure(meta));
+        assert!(manager_ctx.try_insert_procedure(meta.clone()));
         // Replace the manager ctx.
         runner.manager_ctx = manager_ctx;
 
         // Run the runer and execute the procedure.
-        let err = runner.run().await.unwrap_err();
-        assert!(err.to_string().contains("subprocedure failed"), "{err}");
+        runner.run().await;
+        let err = meta.state().error().unwrap().to_string();
+        assert!(err.contains("subprocedure failed"), "{err}");
     }
 }
