@@ -13,6 +13,6 @@ common-grpc = { path = "../../src/common/grpc" }
 common-query = { path = "../../src/common/query" }
 common-time = { path = "../../src/common/time" }
 serde.workspace = true
-sqlness = { git = "https://github.com/CeresDB/sqlness.git", rev = "e6d602ed7d894ffb806580f17f4a6f1283abbf1f" }
+sqlness = "0.4"
 tinytemplate = "1.2"
 tokio.workspace = true
