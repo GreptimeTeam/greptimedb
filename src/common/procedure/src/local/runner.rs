@@ -15,6 +15,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use backon::{BackoffBuilder, ExponentialBuilder};
 use common_telemetry::logging;
 use tokio::time;
 
@@ -22,8 +23,6 @@ use crate::error::{Error, Result};
 use crate::local::{ManagerContext, ProcedureMeta, ProcedureMetaRef};
 use crate::store::ProcedureStore;
 use crate::{BoxedProcedure, Context, ProcedureId, ProcedureState, ProcedureWithId, Status};
-
-const ERR_WAIT_DURATION: u64 = 30;
 
 #[derive(Debug)]
 enum ExecResult {
@@ -104,8 +103,7 @@ pub(crate) struct Runner {
     pub(crate) procedure: BoxedProcedure,
     pub(crate) manager_ctx: Arc<ManagerContext>,
     pub(crate) step: u32,
-    pub(crate) retry_times: u32,
-    pub(crate) max_retry_times: u32,
+    pub(crate) exponential_builder: ExponentialBuilder,
     pub(crate) store: ProcedureStore,
 }
 
@@ -167,18 +165,20 @@ impl Runner {
             provider: self.manager_ctx.clone(),
         };
 
+        let mut exponential = self.exponential_builder.build();
         loop {
+            let mut retry_times = 0;
             match self.execute_once(&ctx).await {
                 ExecResult::Continue => (),
-                ExecResult::Done => return Ok(()),
+                ExecResult::Done => {
+                    return Ok(());
+                }
                 ExecResult::RetryLater => {
-                    if self.retry_times < self.max_retry_times {
-                        self.retry_times += 1;
-                        self.wait_on_err(self.retry_times).await;
+                    if let Some(d) = exponential.next() {
+                        retry_times += retry_times;
+                        self.wait_on_err(d, retry_times).await;
                     } else {
-                        return Err(Error::RetryTimesExceeded {
-                            max_retry_times: self.max_retry_times,
-                        });
+                        return Err(Error::RetryTimesExceeded {});
                     }
                 }
                 ExecResult::Failed(e) => return Err(e),
@@ -272,8 +272,7 @@ impl Runner {
             procedure,
             manager_ctx: self.manager_ctx.clone(),
             step,
-            retry_times: 0,
-            max_retry_times: self.max_retry_times,
+            exponential_builder: self.exponential_builder.clone(),
             store: self.store.clone(),
         };
 
@@ -299,16 +298,15 @@ impl Runner {
     }
 
     /// Extend the retry time to wait for the next retry.
-    async fn wait_on_err(&self, i: u32) {
-        let err_wait_duration = ERR_WAIT_DURATION * i as u64;
+    async fn wait_on_err(&self, d: Duration, i: u64) {
         logging::info!(
-            "Procedure {}-{} retry for the {} times after {} seconds",
+            "Procedure {}-{} retry for the {} times after {} millis",
             self.procedure.type_name(),
             self.meta.id,
             i,
-            err_wait_duration,
+            d.as_millis(),
         );
-        time::sleep(Duration::from_secs(err_wait_duration)).await;
+        time::sleep(d).await;
     }
 
     async fn on_suspended(&self, subprocedures: Vec<ProcedureWithId>) {
@@ -438,8 +436,7 @@ mod tests {
             procedure,
             manager_ctx: Arc::new(ManagerContext::new()),
             step: 0,
-            retry_times: 0,
-            max_retry_times: 3,
+            exponential_builder: ExponentialBuilder::default(),
             store,
         }
     }
@@ -791,13 +788,15 @@ mod tests {
             Box::new(exceed_max_retry_later),
             procedure_store,
         );
-        runner.max_retry_times = 0;
+        runner.exponential_builder = ExponentialBuilder::default()
+            .with_min_delay(Duration::from_millis(1))
+            .with_max_times(3);
 
         // Run the runner and execute the procedure.
         let err = runner.execute_procedure_in_loop().await.unwrap_err();
         assert!(err
             .to_string()
-            .contains("Procedure retry exceeded max 0 times"));
+            .contains("Procedure retry exceeded max times"));
     }
 
     #[tokio::test]

@@ -72,7 +72,7 @@ struct StartCommand {
     #[clap(long)]
     procedure_dir: Option<String>,
     #[clap(long)]
-    procedure_max_retry_times: Option<u32>,
+    procedure_max_retry_times: Option<usize>,
 }
 
 impl StartCommand {

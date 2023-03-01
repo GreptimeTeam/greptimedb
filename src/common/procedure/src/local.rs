@@ -17,8 +17,10 @@ mod runner;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
 
 use async_trait::async_trait;
+use backon::ExponentialBuilder;
 use common_telemetry::logging;
 use object_store::ObjectStore;
 use snafu::ensure;
@@ -291,20 +293,20 @@ impl ManagerContext {
 pub struct ManagerConfig {
     /// Object store
     pub object_store: ObjectStore,
-    pub max_retry_times: u32,
+    pub max_retry_times: usize,
 }
 
 /// A [ProcedureManager] that maintains procedure states locally.
 pub struct LocalManager {
     manager_ctx: Arc<ManagerContext>,
     state_store: StateStoreRef,
-    max_retry_times: u32,
+    max_retry_times: usize,
 }
 
 #[derive(Default)]
 pub struct SubmitOptions {
     pub step: u32,
-    pub retry_times: u32,
+    pub retry_times: u64,
 }
 
 impl LocalManager {
@@ -330,8 +332,9 @@ impl LocalManager {
             procedure,
             manager_ctx: self.manager_ctx.clone(),
             step: options.step,
-            retry_times: options.retry_times,
-            max_retry_times: self.max_retry_times,
+            exponential_builder: ExponentialBuilder::default()
+                .with_min_delay(Duration::from_millis(options.retry_times))
+                .with_max_times(self.max_retry_times),
             store: ProcedureStore::new(self.state_store.clone()),
         };
 

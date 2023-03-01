@@ -149,7 +149,7 @@ impl From<&DatanodeOptions> for StorageEngineConfig {
 pub struct ProcedureConfig {
     /// Storage config for procedure manager.
     pub store: ObjectStoreConfig,
-    pub max_retry_times: u32,
+    pub max_retry_times: usize,
 }
 
 impl Default for ProcedureConfig {
@@ -164,7 +164,7 @@ impl Default for ProcedureConfig {
 }
 
 impl ProcedureConfig {
-    pub fn construct(path: Option<String>, max_times: Option<u32>) -> ProcedureConfig {
+    pub fn construct(path: Option<String>, max_times: Option<usize>) -> ProcedureConfig {
         let mut procedure_config: ProcedureConfig = Default::default();
         if let Some(path) = path {
             procedure_config.store = ObjectStoreConfig::File(FileConfig { data_dir: path });

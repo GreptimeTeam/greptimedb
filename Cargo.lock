@@ -1565,6 +1565,7 @@ name = "common-procedure"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "backon 0.4.0",
  "common-error",
  "common-runtime",
  "common-telemetry",
