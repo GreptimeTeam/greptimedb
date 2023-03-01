@@ -73,6 +73,8 @@ struct StartCommand {
     procedure_dir: Option<String>,
     #[clap(long)]
     procedure_max_retry_times: Option<usize>,
+    #[clap(long)]
+    procedure_retry_interval: Option<u64>,
 }
 
 impl StartCommand {
@@ -147,6 +149,7 @@ impl TryFrom<StartCommand> for DatanodeOptions {
             opts.procedure = Some(ProcedureConfig::construct(
                 cmd.procedure_dir,
                 cmd.procedure_max_retry_times,
+                cmd.procedure_retry_interval,
             ));
         }
 

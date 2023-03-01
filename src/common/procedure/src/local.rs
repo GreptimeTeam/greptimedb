@@ -294,6 +294,7 @@ pub struct ManagerConfig {
     /// Object store
     pub object_store: ObjectStore,
     pub max_retry_times: usize,
+    pub retry_interval: u64,
 }
 
 /// A [ProcedureManager] that maintains procedure states locally.
@@ -301,6 +302,7 @@ pub struct LocalManager {
     manager_ctx: Arc<ManagerContext>,
     state_store: StateStoreRef,
     max_retry_times: usize,
+    retry_interval: u64,
 }
 
 #[derive(Default)]
@@ -316,6 +318,7 @@ impl LocalManager {
             manager_ctx: Arc::new(ManagerContext::new()),
             state_store: Arc::new(ObjectStateStore::new(config.object_store)),
             max_retry_times: config.max_retry_times,
+            retry_interval: config.retry_interval,
         }
     }
 
@@ -323,7 +326,7 @@ impl LocalManager {
     fn submit_root(
         &self,
         procedure_id: ProcedureId,
-        options: SubmitOptions,
+        step: u32,
         procedure: BoxedProcedure,
     ) -> Result<Watcher> {
         let meta = Arc::new(ProcedureMeta::new(procedure_id, None, procedure.lock_key()));
@@ -331,9 +334,9 @@ impl LocalManager {
             meta: meta.clone(),
             procedure,
             manager_ctx: self.manager_ctx.clone(),
-            step: options.step,
+            step,
             exponential_builder: ExponentialBuilder::default()
-                .with_min_delay(Duration::from_millis(options.retry_times))
+                .with_min_delay(Duration::from_millis(self.retry_interval))
                 .with_max_times(self.max_retry_times),
             store: ProcedureStore::new(self.state_store.clone()),
         };
@@ -373,7 +376,7 @@ impl ProcedureManager for LocalManager {
             DuplicateProcedureSnafu { procedure_id }
         );
 
-        self.submit_root(procedure.id, SubmitOptions::default(), procedure.procedure)
+        self.submit_root(procedure.id, 0, procedure.procedure)
     }
 
     async fn recover(&self) -> Result<()> {
@@ -398,14 +401,7 @@ impl ProcedureManager for LocalManager {
                     loaded_procedure.step
                 );
 
-                if let Err(e) = self.submit_root(
-                    *procedure_id,
-                    SubmitOptions {
-                        step: loaded_procedure.step,
-                        retry_times: 0,
-                    },
-                    loaded_procedure.procedure,
-                ) {
+                if let Err(e) = self.submit_root(*procedure_id, 0, loaded_procedure.procedure) {
                     logging::error!(e; "Failed to recover procedure {}", procedure_id);
                 }
             }
@@ -561,6 +557,7 @@ mod tests {
         let config = ManagerConfig {
             object_store: test_util::new_object_store(&dir),
             max_retry_times: 3,
+            retry_interval: 500,
         };
         let manager = LocalManager::new(config);
 
@@ -581,6 +578,7 @@ mod tests {
         let config = ManagerConfig {
             object_store: object_store.clone(),
             max_retry_times: 3,
+            retry_interval: 500,
         };
         let manager = LocalManager::new(config);
 
@@ -626,6 +624,7 @@ mod tests {
         let config = ManagerConfig {
             object_store: test_util::new_object_store(&dir),
             max_retry_times: 3,
+            retry_interval: 500,
         };
         let manager = LocalManager::new(config);
 
@@ -673,6 +672,7 @@ mod tests {
         let config = ManagerConfig {
             object_store: test_util::new_object_store(&dir),
             max_retry_times: 3,
+            retry_interval: 500,
         };
         let manager = LocalManager::new(config);
 
