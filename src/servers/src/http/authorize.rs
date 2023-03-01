@@ -12,14 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 use axum::http::{self, Request, StatusCode};
 use axum::response::Response;
 use common_telemetry::error;
 use futures::future::BoxFuture;
 use http_body::Body;
+use regex::Regex;
 use session::context::UserInfo;
 use snafu::{ensure, OptionExt, ResultExt};
 use tower_http::auth::AsyncAuthorizeRequest;
@@ -34,15 +35,38 @@ use crate::error::{
 };
 use crate::http::HTTP_API_PREFIX;
 
+const DB_EXTRACT_PATTERN: &str = r"&?db=([^&]+)&?";
+const INFLUXDB_USER_PATTERN: &str = r"&?u=([^&]+)&?";
+const INFLUXDB_PASS_PATTERN: &str = r"&?p=([^&]+)&?";
+
 pub struct HttpAuth<RespBody> {
     user_provider: Option<UserProviderRef>,
+    regex_extractor: Arc<RegexExtractor>,
     _ty: PhantomData<RespBody>,
+}
+
+#[derive(Clone)]
+pub struct RegexExtractor {
+    db_extractor: Regex,
+    influxdb_user_extractor: Regex,
+    influxdb_pass_extractor: Regex,
+}
+
+impl RegexExtractor {
+    pub fn new() -> Self {
+        Self {
+            db_extractor: Regex::new(DB_EXTRACT_PATTERN).unwrap(),
+            influxdb_user_extractor: Regex::new(INFLUXDB_USER_PATTERN).unwrap(),
+            influxdb_pass_extractor: Regex::new(INFLUXDB_PASS_PATTERN).unwrap(),
+        }
+    }
 }
 
 impl<RespBody> HttpAuth<RespBody> {
     pub fn new(user_provider: Option<UserProviderRef>) -> Self {
         Self {
             user_provider,
+            regex_extractor: Arc::new(RegexExtractor::new()),
             _ty: PhantomData,
         }
     }
@@ -52,6 +76,7 @@ impl<RespBody> Clone for HttpAuth<RespBody> {
     fn clone(&self) -> Self {
         Self {
             user_provider: self.user_provider.clone(),
+            regex_extractor: self.regex_extractor.clone(),
             _ty: PhantomData,
         }
     }
@@ -68,6 +93,7 @@ where
 
     fn authorize(&mut self, mut request: Request<B>) -> Self::Future {
         let user_provider = self.user_provider.clone();
+        let regex_extractor = self.regex_extractor.clone();
         Box::pin(async move {
             let need_auth = need_auth(&request);
 
@@ -79,7 +105,7 @@ where
             };
 
             // do authenticate
-            match authenticate(&user_provider, &request).await {
+            match authenticate(&user_provider, &regex_extractor, &request).await {
                 Ok(user_info) => {
                     request.extensions_mut().insert(user_info);
                 }
@@ -89,7 +115,7 @@ where
                 }
             }
 
-            match authorize(&user_provider, &request).await {
+            match authorize(&user_provider, &regex_extractor, &request).await {
                 Ok(_) => Ok(request),
                 Err(e) => {
                     error!("authorize failed: {}", e);
@@ -102,22 +128,15 @@ where
 
 async fn authorize<B: Send + Sync + 'static>(
     user_provider: &UserProviderRef,
+    regex_extractor: &Arc<RegexExtractor>,
     request: &Request<B>,
 ) -> crate::auth::Result<()> {
     // try get database name
     let query = request.uri().query().unwrap_or_default();
-    let input_database = match serde_urlencoded::from_str::<HashMap<String, String>>(query) {
-        Ok(query_map) => query_map
-            .get("db")
-            .context(IllegalParamSnafu {
-                msg: "fail to get valid database from http query",
-            })?
-            .to_owned(),
-        Err(e) => IllegalParamSnafu {
-            msg: format!("fail to parse http query: {e}"),
-        }
-        .fail()?,
-    };
+    let input_database =
+        extract_helper(query, &regex_extractor.db_extractor).context(IllegalParamSnafu {
+            msg: "db not provided",
+        })?;
 
     let (catalog, database) =
         crate::parse_catalog_and_schema_from_client_database_name(&input_database);
@@ -132,8 +151,19 @@ async fn authorize<B: Send + Sync + 'static>(
     user_provider.authorize(catalog, database, user_info).await
 }
 
+fn extract_helper<'a>(query: &'a str, extractor: &Regex) -> Option<&'a str> {
+    extractor.captures(query).and_then(|cap| {
+        if cap.len() == 2 {
+            cap.get(1).map(|m| m.as_str())
+        } else {
+            None
+        }
+    })
+}
+
 fn get_influxdb_credentials<B: Send + Sync + 'static>(
     request: &Request<B>,
+    regex_extractor: &Arc<RegexExtractor>,
 ) -> Result<Option<(Username, Password)>> {
     // compat with influxdb v2 and v1
     if let Some(header) = request.headers().get(http::header::AUTHORIZATION) {
@@ -159,16 +189,9 @@ fn get_influxdb_credentials<B: Send + Sync + 'static>(
 
         // TODO(shuiyisong): remove this for performance optimization
         // `authorize` would deserialize query from urlencoded again
-        let query = match serde_urlencoded::from_str::<HashMap<String, String>>(query_str) {
-            Ok(query_map) => query_map,
-            Err(e) => IllegalParamSnafu {
-                msg: format!("fail to parse http query: {e}"),
-            }
-            .fail()?,
-        };
 
-        let username = query.get("u");
-        let password = query.get("p");
+        let username = extract_helper(query_str, &regex_extractor.influxdb_user_extractor);
+        let password = extract_helper(query_str, &regex_extractor.influxdb_pass_extractor);
 
         match (username, password) {
             (None, None) => Ok(None),
@@ -187,11 +210,12 @@ fn get_influxdb_credentials<B: Send + Sync + 'static>(
 
 async fn authenticate<B: Send + Sync + 'static>(
     user_provider: &UserProviderRef,
+    regex_extractor: &Arc<RegexExtractor>,
     request: &Request<B>,
 ) -> Result<UserInfo> {
     let (username, password) = if request.uri().path().contains("influxdb") {
         // compatible with influxdb auth
-        get_influxdb_credentials(request)?.context(NotFoundInfluxAuthSnafu)?
+        get_influxdb_credentials(request, regex_extractor)?.context(NotFoundInfluxAuthSnafu)?
     } else {
         // normal http auth
         let scheme = auth_header(request)?;
@@ -366,5 +390,17 @@ mod tests {
         }
 
         Ok(req.body(()).unwrap())
+    }
+
+    #[test]
+    fn test_regex_compile() {
+        let re = Regex::new(DB_EXTRACT_PATTERN);
+        assert!(re.is_ok());
+
+        let re = Regex::new(INFLUXDB_USER_PATTERN);
+        assert!(re.is_ok());
+
+        let re = Regex::new(INFLUXDB_PASS_PATTERN);
+        assert!(re.is_ok());
     }
 }
