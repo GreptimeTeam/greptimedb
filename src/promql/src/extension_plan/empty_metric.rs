@@ -21,6 +21,7 @@ use std::task::{Context, Poll};
 use datafusion::arrow::array::Float64Array;
 use datafusion::arrow::datatypes::{DataType, TimeUnit};
 use datafusion::common::{DFField, DFSchema, DFSchemaRef, Result as DataFusionResult, Statistics};
+use datafusion::error::DataFusionError;
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNode};
 use datafusion::physical_expr::PhysicalSortExpr;
@@ -31,7 +32,6 @@ use datafusion::physical_plan::{
 use datafusion::prelude::Expr;
 use datatypes::arrow::array::TimestampMillisecondArray;
 use datatypes::arrow::datatypes::SchemaRef;
-use datatypes::arrow::error::Result as ArrowResult;
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::Stream;
 
@@ -147,8 +147,8 @@ impl ExecutionPlan for EmptyMetricExec {
         None
     }
 
-    fn maintains_input_order(&self) -> bool {
-        true
+    fn maintains_input_order(&self) -> Vec<bool> {
+        vec![]
     }
 
     fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
@@ -222,7 +222,7 @@ impl RecordBatchStream for EmptyMetricStream {
 }
 
 impl Stream for EmptyMetricStream {
-    type Item = ArrowResult<RecordBatch>;
+    type Item = DataFusionResult<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let result = if self.is_first_poll {
@@ -237,7 +237,8 @@ impl Stream for EmptyMetricStream {
             let batch = RecordBatch::try_new(
                 self.schema.clone(),
                 vec![Arc::new(millisecond_array), Arc::new(float_array)],
-            );
+            )
+            .map_err(DataFusionError::ArrowError);
             Poll::Ready(Some(batch))
         } else {
             Poll::Ready(None)
@@ -288,7 +289,7 @@ mod test {
                 "+-------------------------+-------+\
                 \n| time                    | value |\
                 \n+-------------------------+-------+\
-                \n| 1970-01-01T00:00:00     | 0     |\
+                \n| 1970-01-01T00:00:00     | 0.0   |\
                 \n| 1970-01-01T00:00:00.010 | 0.01  |\
                 \n| 1970-01-01T00:00:00.020 | 0.02  |\
                 \n| 1970-01-01T00:00:00.030 | 0.03  |\
@@ -317,7 +318,7 @@ mod test {
                 "+-------------------------+-------+\
                 \n| time                    | value |\
                 \n+-------------------------+-------+\
-                \n| 1970-01-01T00:00:00     | 0     |\
+                \n| 1970-01-01T00:00:00     | 0.0   |\
                 \n| 1970-01-01T00:00:00.011 | 0.011 |\
                 \n| 1970-01-01T00:00:00.022 | 0.022 |\
                 \n| 1970-01-01T00:00:00.033 | 0.033 |\
@@ -345,7 +346,7 @@ mod test {
                 "+---------------------+-------+\
                 \n| time                | value |\
                 \n+---------------------+-------+\
-                \n| 1970-01-01T00:00:00 | 0     |\
+                \n| 1970-01-01T00:00:00 | 0.0   |\
                 \n+---------------------+-------+",
             ),
         )
