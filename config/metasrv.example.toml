@@ -9,6 +9,7 @@ datanode_lease_secs = 15
 # Datanode selector type.
 # - "LeaseBased" (default value).
 # - "LoadBased"
+# For details, please see "https://docs.greptime.com/developer-guide/meta/selector".
 selector = "LeaseBased"
 # Store data in memory, false by default.
 use_memory_store = false
