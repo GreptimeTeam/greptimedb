@@ -13,14 +13,12 @@
 // limitations under the License.
 
 use std::marker::PhantomData;
-use std::sync::Arc;
 
 use axum::http::{self, Request, StatusCode};
 use axum::response::Response;
 use common_telemetry::error;
 use futures::future::BoxFuture;
 use http_body::Body;
-use regex::Regex;
 use session::context::UserInfo;
 use snafu::{ensure, OptionExt, ResultExt};
 use tower_http::auth::AsyncAuthorizeRequest;
@@ -35,45 +33,15 @@ use crate::error::{
 };
 use crate::http::HTTP_API_PREFIX;
 
-const DB_EXTRACT_PATTERN: &str = r"&?db=([^&]+)&?";
-const INFLUXDB_USER_PATTERN: &str = r"&?u=([^&]+)&?";
-const INFLUXDB_PASS_PATTERN: &str = r"&?p=([^&]+)&?";
-
 pub struct HttpAuth<RespBody> {
     user_provider: Option<UserProviderRef>,
-    regex_extractor: Arc<RegexExtractor>,
     _ty: PhantomData<RespBody>,
-}
-
-#[derive(Clone)]
-pub struct RegexExtractor {
-    db_extractor: Regex,
-    influxdb_user_extractor: Regex,
-    influxdb_pass_extractor: Regex,
-}
-
-impl RegexExtractor {
-    // regex compile is tested in test below
-    pub fn new() -> Self {
-        Self {
-            db_extractor: Regex::new(DB_EXTRACT_PATTERN).unwrap(),
-            influxdb_user_extractor: Regex::new(INFLUXDB_USER_PATTERN).unwrap(),
-            influxdb_pass_extractor: Regex::new(INFLUXDB_PASS_PATTERN).unwrap(),
-        }
-    }
-}
-
-impl Default for RegexExtractor {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl<RespBody> HttpAuth<RespBody> {
     pub fn new(user_provider: Option<UserProviderRef>) -> Self {
         Self {
             user_provider,
-            regex_extractor: Arc::new(RegexExtractor::new()),
             _ty: PhantomData,
         }
     }
@@ -83,7 +51,6 @@ impl<RespBody> Clone for HttpAuth<RespBody> {
     fn clone(&self) -> Self {
         Self {
             user_provider: self.user_provider.clone(),
-            regex_extractor: self.regex_extractor.clone(),
             _ty: PhantomData,
         }
     }
@@ -100,7 +67,6 @@ where
 
     fn authorize(&mut self, mut request: Request<B>) -> Self::Future {
         let user_provider = self.user_provider.clone();
-        let regex_extractor = self.regex_extractor.clone();
         Box::pin(async move {
             let need_auth = need_auth(&request);
 
@@ -112,7 +78,7 @@ where
             };
 
             // do authenticate
-            match authenticate(&user_provider, &regex_extractor, &request).await {
+            match authenticate(&user_provider, &request).await {
                 Ok(user_info) => {
                     request.extensions_mut().insert(user_info);
                 }
@@ -122,7 +88,7 @@ where
                 }
             }
 
-            match authorize(&user_provider, &regex_extractor, &request).await {
+            match authorize(&user_provider, &request).await {
                 Ok(_) => Ok(request),
                 Err(e) => {
                     error!("authorize failed: {}", e);
@@ -135,15 +101,13 @@ where
 
 async fn authorize<B: Send + Sync + 'static>(
     user_provider: &UserProviderRef,
-    regex_extractor: &Arc<RegexExtractor>,
     request: &Request<B>,
 ) -> crate::auth::Result<()> {
     // try get database name
     let query = request.uri().query().unwrap_or_default();
-    let input_database =
-        extract_helper(query, &regex_extractor.db_extractor).context(IllegalParamSnafu {
-            msg: "db not provided or corrupted",
-        })?;
+    let input_database = extract_db_from_query(query).context(IllegalParamSnafu {
+        msg: "db not provided or corrupted",
+    })?;
 
     let (catalog, database) =
         crate::parse_catalog_and_schema_from_client_database_name(input_database);
@@ -158,19 +122,8 @@ async fn authorize<B: Send + Sync + 'static>(
     user_provider.authorize(catalog, database, user_info).await
 }
 
-fn extract_helper<'a>(query: &'a str, extractor: &Regex) -> Option<&'a str> {
-    extractor.captures(query).and_then(|cap| {
-        if cap.len() == 2 {
-            cap.get(1).map(|m| m.as_str())
-        } else {
-            None
-        }
-    })
-}
-
 fn get_influxdb_credentials<B: Send + Sync + 'static>(
     request: &Request<B>,
-    regex_extractor: &Arc<RegexExtractor>,
 ) -> Result<Option<(Username, Password)>> {
     // compat with influxdb v2 and v1
     if let Some(header) = request.headers().get(http::header::AUTHORIZATION) {
@@ -194,10 +147,7 @@ fn get_influxdb_credentials<B: Send + Sync + 'static>(
         // try v1
         let Some(query_str) = request.uri().query() else { return Ok(None) };
 
-        let username = extract_helper(query_str, &regex_extractor.influxdb_user_extractor);
-        let password = extract_helper(query_str, &regex_extractor.influxdb_pass_extractor);
-
-        match (username, password) {
+        match extract_influxdb_user_from_query(query_str) {
             (None, None) => Ok(None),
             (Some(username), Some(password)) => {
                 Ok(Some((username.to_string(), password.to_string())))
@@ -214,12 +164,11 @@ fn get_influxdb_credentials<B: Send + Sync + 'static>(
 
 async fn authenticate<B: Send + Sync + 'static>(
     user_provider: &UserProviderRef,
-    regex_extractor: &Arc<RegexExtractor>,
     request: &Request<B>,
 ) -> Result<UserInfo> {
     let (username, password) = if request.uri().path().contains("influxdb") {
         // compatible with influxdb auth
-        get_influxdb_credentials(request, regex_extractor)?.context(NotFoundInfluxAuthSnafu)?
+        get_influxdb_credentials(request)?.context(NotFoundInfluxAuthSnafu)?
     } else {
         // normal http auth
         let scheme = auth_header(request)?;
@@ -309,8 +258,33 @@ fn need_auth<B>(req: &Request<B>) -> bool {
     path.starts_with(HTTP_API_PREFIX)
 }
 
+fn extract_db_from_query(query: &str) -> Option<&str> {
+    for pair in query.split('&') {
+        if let Some(db) = pair.strip_prefix("db=") {
+            return if pair.len() == 3 { None } else { Some(db) };
+        }
+    }
+    None
+}
+
+fn extract_influxdb_user_from_query(query: &str) -> (Option<&str>, Option<&str>) {
+    let mut username = None;
+    let mut password = None;
+
+    for pair in query.split('&') {
+        if pair.starts_with("u=") && pair.len() > 2 {
+            username = Some(&pair[2..]);
+        } else if pair.starts_with("p=") && pair.len() > 2 {
+            password = Some(&pair[2..]);
+        }
+    }
+    (username, password)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
+
     use super::*;
 
     #[test]
@@ -347,7 +321,7 @@ mod tests {
 
         let wrong_credential = "dXNlcm5hbWU6cG Fzc3dvcmQ=";
         let result = decode_basic(wrong_credential);
-        matches!(result.err(), Some(error::Error::InvalidBase64Value { .. }));
+        assert_matches!(result.err(), Some(error::Error::InvalidBase64Value { .. }));
     }
 
     #[test]
@@ -358,7 +332,7 @@ mod tests {
 
         let auth_scheme_str = "basic dGVzdDp0ZXN0";
         let scheme: AuthScheme = auth_scheme_str.try_into().unwrap();
-        matches!(scheme, AuthScheme::Basic(username, pwd) if username == "test" && pwd == "test");
+        assert_matches!(scheme, AuthScheme::Basic(username, pwd) if username == "test" && pwd == "test");
 
         let unsupported = "digest";
         let auth_scheme: Result<AuthScheme> = unsupported.try_into();
@@ -371,18 +345,18 @@ mod tests {
         let req = mock_http_request(Some("Basic dXNlcm5hbWU6cGFzc3dvcmQ="), None).unwrap();
 
         let auth_scheme = auth_header(&req).unwrap();
-        matches!(auth_scheme, AuthScheme::Basic(username, pwd) if username == "username" && pwd == "password");
+        assert_matches!(auth_scheme, AuthScheme::Basic(username, pwd) if username == "username" && pwd == "password");
 
         let wrong_req = mock_http_request(Some("Basic dXNlcm5hbWU6 cGFzc3dvcmQ="), None).unwrap();
         let res = auth_header(&wrong_req);
-        matches!(
+        assert_matches!(
             res.err(),
             Some(error::Error::InvalidAuthorizationHeader { .. })
         );
 
         let wrong_req = mock_http_request(Some("Digest dXNlcm5hbWU6cGFzc3dvcmQ="), None).unwrap();
         let res = auth_header(&wrong_req);
-        matches!(res.err(), Some(error::Error::UnsupportedAuthScheme { .. }));
+        assert_matches!(res.err(), Some(error::Error::UnsupportedAuthScheme { .. }));
     }
 
     fn mock_http_request(auth_header: Option<&str>, uri: Option<&str>) -> Result<Request<()>> {
@@ -397,68 +371,38 @@ mod tests {
     }
 
     #[test]
-    fn test_regex_compile() {
-        let re = Regex::new(DB_EXTRACT_PATTERN);
-        assert!(re.is_ok());
-        let re = Regex::new(INFLUXDB_USER_PATTERN);
-        assert!(re.is_ok());
-        let re = Regex::new(INFLUXDB_PASS_PATTERN);
-        assert!(re.is_ok());
+    fn test_extract_db() {
+        assert_matches!(extract_db_from_query(""), None);
+        assert_matches!(extract_db_from_query("&"), None);
+        assert_matches!(extract_db_from_query("db="), None);
+        assert_matches!(extract_db_from_query("db=foo"), Some("foo"));
+        assert_matches!(extract_db_from_query("name=bar"), None);
+        assert_matches!(extract_db_from_query("db=&name=bar"), None);
+        assert_matches!(extract_db_from_query("db=foo&name=bar"), Some("foo"));
+        assert_matches!(extract_db_from_query("name=bar&db="), None);
+        assert_matches!(extract_db_from_query("name=bar&db=foo"), Some("foo"));
+        assert_matches!(extract_db_from_query("name=bar&db=&name=bar"), None);
+        assert_matches!(
+            extract_db_from_query("name=bar&db=foo&name=bar"),
+            Some("foo")
+        );
     }
 
     #[test]
-    fn test_regex_capture() {
-        let extractor = RegexExtractor::new();
-        matches!(extract_helper("name=bar", &extractor.db_extractor), None);
-        matches!(
-            extract_helper("db=foo", &extractor.db_extractor),
-            Some("foo")
+    fn test_extract_user() {
+        assert_matches!(extract_influxdb_user_from_query(""), (None, None));
+        assert_matches!(extract_influxdb_user_from_query("u="), (None, None));
+        assert_matches!(
+            extract_influxdb_user_from_query("u=123"),
+            (Some("123"), None)
         );
-        matches!(
-            extract_helper("name=bar&db=foo", &extractor.db_extractor),
-            Some("foo")
+        assert_matches!(
+            extract_influxdb_user_from_query("u=123&p="),
+            (Some("123"), None)
         );
-        matches!(
-            extract_helper("db=foo&name=bar", &extractor.db_extractor),
-            Some("foo")
-        );
-        matches!(
-            extract_helper("name1=bar&db=foo&name2=bar", &extractor.db_extractor),
-            Some("foo")
-        );
-
-        matches!(
-            extract_helper("p=4", &extractor.influxdb_user_extractor),
-            None
-        );
-        matches!(
-            extract_helper("u=123", &extractor.influxdb_user_extractor),
-            Some("123")
-        );
-        matches!(
-            extract_helper("u=123&p=4", &extractor.influxdb_user_extractor),
-            Some("123")
-        );
-        matches!(
-            extract_helper("p1=4&u=123&p2=5", &extractor.influxdb_user_extractor),
-            Some("123")
-        );
-
-        matches!(
-            extract_helper("u=123", &extractor.influxdb_pass_extractor),
-            None
-        );
-        matches!(
-            extract_helper("p=4", &extractor.influxdb_pass_extractor),
-            Some("4")
-        );
-        matches!(
-            extract_helper("u=123&p=4", &extractor.influxdb_pass_extractor),
-            Some("4")
-        );
-        matches!(
-            extract_helper("u1=123&p=4&u2=567", &extractor.influxdb_pass_extractor),
-            Some("4")
+        assert_matches!(
+            extract_influxdb_user_from_query("u=123&p=4"),
+            (Some("123"), Some("4"))
         );
     }
 }

@@ -134,10 +134,10 @@ async fn test_auth_by_plain_text() {
         )
         .await;
     assert!(auth_result.is_err());
-    matches!(
+    assert!(matches!(
         auth_result.err().unwrap(),
         servers::auth::Error::UnsupportedPasswordType { .. }
-    );
+    ));
 
     // auth failed, err: user not exist.
     let auth_result = user_provider
@@ -147,10 +147,10 @@ async fn test_auth_by_plain_text() {
         )
         .await;
     assert!(auth_result.is_err());
-    matches!(
+    assert!(matches!(
         auth_result.err().unwrap(),
         servers::auth::Error::UserNotFound { .. }
-    );
+    ));
 
     // auth failed, err: wrong password
     let auth_result = user_provider
@@ -160,10 +160,10 @@ async fn test_auth_by_plain_text() {
         )
         .await;
     assert!(auth_result.is_err());
-    matches!(
+    assert!(matches!(
         auth_result.err().unwrap(),
         servers::auth::Error::UserPasswordMismatch { .. }
-    );
+    ))
 }
 
 #[tokio::test]
