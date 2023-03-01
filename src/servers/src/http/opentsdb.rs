@@ -79,16 +79,18 @@ pub enum OpentsdbPutResponse {
 #[axum_macros::debug_handler]
 pub async fn put(
     State(opentsdb_handler): State<OpentsdbProtocolHandlerRef>,
-    Query(mut params): Query<HashMap<String, String>>,
+    Query(params): Query<HashMap<String, String>>,
     RawBody(body): RawBody,
 ) -> Result<(HttpStatusCode, Json<OpentsdbPutResponse>)> {
     let summary = params.contains_key("summary");
     let details = params.contains_key("details");
 
     let db = params
-        .remove("db")
-        .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
-    let (catalog, schema) = parse_catalog_and_schema_from_client_database_name(&db);
+        .get("db")
+        .map(|v| v.as_str())
+        .unwrap_or(DEFAULT_SCHEMA_NAME);
+
+    let (catalog, schema) = parse_catalog_and_schema_from_client_database_name(db);
     let ctx = Arc::new(QueryContext::with(catalog, schema));
 
     let data_points = parse_data_points(body).await?;
