@@ -439,7 +439,7 @@ pub(crate) async fn create_procedure_manager(
     let manager_config = ManagerConfig {
         object_store,
         max_retry_times: procedure_config.max_retry_times,
-        retry_interval: procedure_config.retry_interval,
+        retry_delay: procedure_config.retry_delay,
     };
 
     Ok(Some(Arc::new(LocalManager::new(manager_config))))

@@ -62,7 +62,7 @@ impl TestEnv {
         let procedure_manager = Arc::new(LocalManager::new(ManagerConfig {
             object_store,
             max_retry_times: 3,
-            retry_interval: 500,
+            retry_delay: 500,
         }));
 
         let catalog_manager = Arc::new(MemoryCatalogManager::default());

@@ -150,7 +150,7 @@ pub struct ProcedureConfig {
     /// Storage config for procedure manager.
     pub store: ObjectStoreConfig,
     pub max_retry_times: usize,
-    pub retry_interval: u64,
+    pub retry_delay: u64,
 }
 
 impl Default for ProcedureConfig {
@@ -160,7 +160,7 @@ impl Default for ProcedureConfig {
                 data_dir: "/tmp/greptimedb/procedure/".to_string(),
             }),
             max_retry_times: 3,
-            retry_interval: 500,
+            retry_delay: 500,
         }
     }
 }
@@ -179,7 +179,7 @@ impl ProcedureConfig {
             procedure_config.max_retry_times = max_times;
         }
         if let Some(retry_interval) = retry_interval {
-            procedure_config.retry_interval = retry_interval;
+            procedure_config.retry_delay = retry_interval;
         }
         procedure_config
     }

@@ -294,7 +294,7 @@ pub struct ManagerConfig {
     /// Object store
     pub object_store: ObjectStore,
     pub max_retry_times: usize,
-    pub retry_interval: u64,
+    pub retry_delay: u64,
 }
 
 /// A [ProcedureManager] that maintains procedure states locally.
@@ -312,7 +312,7 @@ impl LocalManager {
             manager_ctx: Arc::new(ManagerContext::new()),
             state_store: Arc::new(ObjectStateStore::new(config.object_store)),
             max_retry_times: config.max_retry_times,
-            retry_interval: config.retry_interval,
+            retry_interval: config.retry_delay,
         }
     }
 
@@ -555,7 +555,7 @@ mod tests {
         let config = ManagerConfig {
             object_store: test_util::new_object_store(&dir),
             max_retry_times: 3,
-            retry_interval: 500,
+            retry_delay: 500,
         };
         let manager = LocalManager::new(config);
 
@@ -576,7 +576,7 @@ mod tests {
         let config = ManagerConfig {
             object_store: object_store.clone(),
             max_retry_times: 3,
-            retry_interval: 500,
+            retry_delay: 500,
         };
         let manager = LocalManager::new(config);
 
@@ -622,7 +622,7 @@ mod tests {
         let config = ManagerConfig {
             object_store: test_util::new_object_store(&dir),
             max_retry_times: 3,
-            retry_interval: 500,
+            retry_delay: 500,
         };
         let manager = LocalManager::new(config);
 
@@ -670,7 +670,7 @@ mod tests {
         let config = ManagerConfig {
             object_store: test_util::new_object_store(&dir),
             max_retry_times: 3,
-            retry_interval: 500,
+            retry_delay: 500,
         };
         let manager = LocalManager::new(config);
 
