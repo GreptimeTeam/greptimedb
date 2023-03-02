@@ -149,7 +149,10 @@ impl From<&DatanodeOptions> for StorageEngineConfig {
 pub struct ProcedureConfig {
     /// Storage config for procedure manager.
     pub store: ObjectStoreConfig,
+    /// Max retry times of procedure.
     pub max_retry_times: usize,
+    /// The first retry interval of procedure will increase exponentially after that.
+    #[serde(with = "humantime_serde")]
     pub retry_delay: Duration,
 }
 

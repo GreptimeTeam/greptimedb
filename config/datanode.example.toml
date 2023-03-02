@@ -50,3 +50,5 @@ max_purge_tasks = 32
 # [procedure.store]
 # type = 'File'
 # data_dir = '/tmp/greptimedb/procedure/'
+# max_retry_times = 3
+# retry_delay = 500ms

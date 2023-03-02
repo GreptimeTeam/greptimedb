@@ -114,3 +114,7 @@ max_purge_tasks = 32
 # type = "File"
 # # Procedure data path.
 # data_dir = "/tmp/greptimedb/procedure/"
+# # Procedure max retry time.
+# max_retry_times = 3
+# # The first retry interval of preocedure will increase exponentially after that
+# retry_delay = 500ms
