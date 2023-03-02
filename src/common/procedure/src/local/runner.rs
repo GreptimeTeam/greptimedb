@@ -781,7 +781,7 @@ mod tests {
 
         let res = runner.execute_once(&ctx).await;
         assert!(res.is_retry_later(), "{res:?}");
-        assert!(meta.state().is_running());
+        assert!(meta.state().is_retrying());
 
         let res = runner.execute_once(&ctx).await;
         assert!(res.is_done(), "{res:?}");
