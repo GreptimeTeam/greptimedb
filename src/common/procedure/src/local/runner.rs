@@ -189,6 +189,7 @@ impl Runner {
                                 },
                             )))
                         }
+                        return;
                     }
                 }
             }
