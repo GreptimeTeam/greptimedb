@@ -81,17 +81,10 @@ impl PyUDF {
 
     /// Fake a schema, should only be used with dynamically eval a Python Udf
     fn fake_schema(&self, columns: &[VectorRef]) -> SchemaRef {
-        let empty_args = vec![];
-        let arg_names = self
-            .copr
-            .deco_args
-            .arg_names
-            .as_ref()
-            .unwrap_or(&empty_args);
         let col_sch: Vec<_> = columns
             .iter()
             .enumerate()
-            .map(|(i, col)| ColumnSchema::new(arg_names[i].clone(), col.data_type(), true))
+            .map(|(i, col)| ColumnSchema::new(format!("name_{i}"), col.data_type(), true))
             .collect();
         let schema = datatypes::schema::Schema::new(col_sch);
         Arc::new(schema)

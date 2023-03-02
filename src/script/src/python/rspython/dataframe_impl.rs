@@ -251,7 +251,7 @@ pub(crate) mod data_frame {
         }
     }
 
-    #[rspyclass(module = "data_frame", name = "Expr")]
+    #[rspyclass(module = "data_frame", name = "PyExpr")]
     #[derive(PyPayload, Debug, Clone)]
     pub struct PyExpr {
         pub inner: DfExpr,
