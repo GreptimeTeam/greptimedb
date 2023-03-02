@@ -26,6 +26,7 @@ use common_time::{Date, DateTime};
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::prelude::{ValueRef, VectorRef};
 use datatypes::schema::SchemaRef;
+use datatypes::types::TimestampType;
 use datatypes::value::Value;
 use datatypes::vectors::MutableVector;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -414,10 +415,25 @@ fn convert_values(data_type: &ConcreteDataType, values: Values) -> Vec<Value> {
             .into_iter()
             .map(|v| Value::Date(v.into()))
             .collect(),
-        ConcreteDataType::Timestamp(_) => values
+        ConcreteDataType::Timestamp(TimestampType::Second(_)) => values
+            .ts_second_values
+            .into_iter()
+            .map(|v| Value::Timestamp(Timestamp::new_second(v)))
+            .collect(),
+        ConcreteDataType::Timestamp(TimestampType::Millisecond(_)) => values
             .ts_millisecond_values
             .into_iter()
             .map(|v| Value::Timestamp(Timestamp::new_millisecond(v)))
+            .collect(),
+        ConcreteDataType::Timestamp(TimestampType::Microsecond(_)) => values
+            .ts_microsecond_values
+            .into_iter()
+            .map(|v| Value::Timestamp(Timestamp::new_microsecond(v)))
+            .collect(),
+        ConcreteDataType::Timestamp(TimestampType::Nanosecond(_)) => values
+            .ts_nanosecond_values
+            .into_iter()
+            .map(|v| Value::Timestamp(Timestamp::new_nanosecond(v)))
             .collect(),
         ConcreteDataType::Null(_) | ConcreteDataType::List(_) | ConcreteDataType::Dictionary(_) => {
             unreachable!()
@@ -444,6 +460,7 @@ mod tests {
     use common_time::timestamp::Timestamp;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
+    use datatypes::types::{TimestampMillisecondType, TimestampSecondType, TimestampType};
     use datatypes::value::Value;
     use snafu::ResultExt;
     use table::error::Result as TableResult;
@@ -645,6 +662,39 @@ mod tests {
             ],
             result
         );
+    }
+
+    #[test]
+    fn test_convert_timestamp_values() {
+        // second
+        let actual = convert_values(
+            &ConcreteDataType::Timestamp(TimestampType::Second(TimestampSecondType)),
+            Values {
+                ts_second_values: vec![1_i64, 2_i64, 3_i64],
+                ..Default::default()
+            },
+        );
+        let expect = vec![
+            Value::Timestamp(Timestamp::new_second(1_i64)),
+            Value::Timestamp(Timestamp::new_second(2_i64)),
+            Value::Timestamp(Timestamp::new_second(3_i64)),
+        ];
+        assert_eq!(expect, actual);
+
+        // millisecond
+        let actual = convert_values(
+            &ConcreteDataType::Timestamp(TimestampType::Millisecond(TimestampMillisecondType)),
+            Values {
+                ts_millisecond_values: vec![1_i64, 2_i64, 3_i64],
+                ..Default::default()
+            },
+        );
+        let expect = vec![
+            Value::Timestamp(Timestamp::new_millisecond(1_i64)),
+            Value::Timestamp(Timestamp::new_millisecond(2_i64)),
+            Value::Timestamp(Timestamp::new_millisecond(3_i64)),
+        ];
+        assert_eq!(expect, actual);
     }
 
     #[test]
