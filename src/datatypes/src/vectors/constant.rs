@@ -20,10 +20,10 @@ use arrow::array::{Array, ArrayRef};
 use snafu::ResultExt;
 
 use crate::data_type::ConcreteDataType;
-use crate::error::{Result, SerializeSnafu};
+use crate::error::{self, Result, SerializeSnafu};
 use crate::serialize::Serializable;
 use crate::value::{Value, ValueRef};
-use crate::vectors::{BooleanVector, Helper, Validity, Vector, VectorRef};
+use crate::vectors::{BooleanVector, Helper, UInt32Vector, Validity, Vector, VectorRef};
 
 #[derive(Clone)]
 pub struct ConstantVector {
@@ -82,6 +82,24 @@ impl ConstantVector {
             self.inner().cast(to_type)?,
             self.length,
         )))
+    }
+
+    pub(crate) fn take_vector(&self, indices: &UInt32Vector) -> Result<VectorRef> {
+        if indices.is_empty() {
+            return Ok(self.slice(0, 0));
+        }
+        for i in 0..indices.len() {
+            if let Value::UInt32(idx) = indices.get(i) {
+                if idx >= self.len() as u32 {
+                    return error::BadArrayAccessSnafu { index: idx as usize, size: indices.len() }.fail();
+                }
+            }
+        }
+        let length = indices.len() - indices.null_count();
+        if length == self.len() {
+            return Ok(Arc::new(self.clone()));
+        }
+        Ok(Arc::new(ConstantVector::new(self.inner().clone(), length)))
     }
 }
 
