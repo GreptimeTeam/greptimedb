@@ -138,12 +138,9 @@ impl TryFrom<StartCommand> for DatanodeOptions {
         if let Some(wal_dir) = cmd.wal_dir {
             opts.wal.dir = wal_dir;
         }
-
-        opts.procedure = if let Some(path) = cmd.procedure_dir {
-            Some(toml_loader::from_file!(&path)?)
-        } else {
-            Some(ProcedureConfig::default())
-        };
+        if let Some(procedure_dir) = cmd.procedure_dir {
+            opts.procedure = Some(ProcedureConfig::from_file_path(procedure_dir));
+        }
 
         Ok(opts)
     }

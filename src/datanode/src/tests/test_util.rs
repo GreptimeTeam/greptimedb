@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use common_query::Output;
@@ -57,13 +56,9 @@ impl MockInstance {
     pub(crate) async fn with_procedure_enabled(name: &str) -> Self {
         let (mut opts, _guard) = create_tmp_dir_and_datanode_opts(name);
         let procedure_dir = TempDir::new(&format!("gt_procedure_{name}")).unwrap();
-        opts.procedure = Some(ProcedureConfig {
-            store: ObjectStoreConfig::File(FileConfig {
-                data_dir: procedure_dir.path().to_str().unwrap().to_string(),
-            }),
-            max_retry_times: 3,
-            retry_delay: Duration::from_secs(500),
-        });
+        opts.procedure = Some(ProcedureConfig::from_file_path(
+            procedure_dir.path().to_str().unwrap().to_string(),
+        ));
 
         let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
         instance.start().await.unwrap();

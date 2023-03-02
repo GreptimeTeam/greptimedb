@@ -150,7 +150,6 @@ pub struct ProcedureConfig {
     /// Storage config for procedure manager.
     pub store: ObjectStoreConfig,
     pub max_retry_times: usize,
-    #[serde(with = "humantime_serde")]
     pub retry_delay: Duration,
 }
 
@@ -162,6 +161,15 @@ impl Default for ProcedureConfig {
             }),
             max_retry_times: 3,
             retry_delay: Duration::from_millis(500),
+        }
+    }
+}
+
+impl ProcedureConfig {
+    pub fn from_file_path(path: String) -> ProcedureConfig {
+        ProcedureConfig {
+            store: ObjectStoreConfig::File(FileConfig { data_dir: path }),
+            ..Default::default()
         }
     }
 }
