@@ -148,26 +148,21 @@ impl From<&DatanodeOptions> for StorageEngineConfig {
 #[serde(default)]
 pub struct ProcedureConfig {
     /// Storage config for procedure manager.
-    pub store_path: String,
+    pub store: ObjectStoreConfig,
     pub max_retry_times: usize,
-    pub retry_delay: u64,
+    #[serde(with = "humantime_serde")]
+    pub retry_delay: Duration,
 }
 
 impl Default for ProcedureConfig {
     fn default() -> ProcedureConfig {
         ProcedureConfig {
-            store_path: "/tmp/greptimedb/procedure/".to_string(),
+            store: ObjectStoreConfig::File(FileConfig {
+                data_dir: "/tmp/greptimedb/procedure/".to_string(),
+            }),
             max_retry_times: 3,
-            retry_delay: 500,
+            retry_delay: Duration::from_millis(500),
         }
-    }
-}
-
-impl ProcedureConfig {
-    pub fn store(&self) -> ObjectStoreConfig {
-        ObjectStoreConfig::File(FileConfig {
-            data_dir: self.store_path.clone(),
-        })
     }
 }
 

@@ -22,7 +22,7 @@ use tokio::time;
 use crate::error::{ProcedurePanicSnafu, Result};
 use crate::local::{ManagerContext, ProcedureMeta, ProcedureMetaRef};
 use crate::store::ProcedureStore;
-use crate::ProcedureState::Retry;
+use crate::ProcedureState::Retrying;
 use crate::{BoxedProcedure, Context, Error, ProcedureId, ProcedureState, ProcedureWithId, Status};
 
 #[derive(Debug)]
@@ -180,8 +180,8 @@ impl Runner {
                     if let Some(d) = retry.next() {
                         self.wait_on_err(d, retry_times).await;
                     } else {
-                        assert!(self.meta.state().is_retry());
-                        if let Retry { error } = self.meta.state() {
+                        assert!(self.meta.state().is_retrying());
+                        if let Retrying { error } = self.meta.state() {
                             self.meta.set_state(ProcedureState::failed(Arc::new(
                                 Error::RetryTimesExceeded {
                                     source: error,
@@ -208,7 +208,7 @@ impl Runner {
 
                 if status.need_persist() {
                     if let Err(err) = self.persist_procedure().await {
-                        self.meta.set_state(ProcedureState::retry(Arc::new(err)));
+                        self.meta.set_state(ProcedureState::retrying(Arc::new(err)));
                         return ExecResult::RetryLater;
                     }
                 }
@@ -220,7 +220,7 @@ impl Runner {
                     }
                     Status::Done => {
                         if let Err(e) = self.commit_procedure().await {
-                            self.meta.set_state(ProcedureState::retry(Arc::new(e)));
+                            self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
                             return ExecResult::RetryLater;
                         }
 
@@ -241,13 +241,13 @@ impl Runner {
                 );
 
                 if e.is_retry_later() {
-                    self.meta.set_state(ProcedureState::retry(Arc::new(e)));
+                    self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
                     return ExecResult::RetryLater;
                 }
 
                 // Write rollback key so we can skip this procedure while recovering procedures.
                 if let Err(e) = self.rollback_procedure().await {
-                    self.meta.set_state(ProcedureState::retry(Arc::new(e)));
+                    self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
                     return ExecResult::RetryLater;
                 }
 
