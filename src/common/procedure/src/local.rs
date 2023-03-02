@@ -302,7 +302,7 @@ pub struct LocalManager {
     manager_ctx: Arc<ManagerContext>,
     state_store: StateStoreRef,
     max_retry_times: usize,
-    retry_interval: u64,
+    retry_delay: u64,
 }
 
 impl LocalManager {
@@ -312,7 +312,7 @@ impl LocalManager {
             manager_ctx: Arc::new(ManagerContext::new()),
             state_store: Arc::new(ObjectStateStore::new(config.object_store)),
             max_retry_times: config.max_retry_times,
-            retry_interval: config.retry_delay,
+            retry_delay: config.retry_delay,
         }
     }
 
@@ -330,7 +330,7 @@ impl LocalManager {
             manager_ctx: self.manager_ctx.clone(),
             step,
             exponential_builder: ExponentialBuilder::default()
-                .with_min_delay(Duration::from_millis(self.retry_interval))
+                .with_min_delay(Duration::from_millis(self.retry_delay))
                 .with_max_times(self.max_retry_times),
             store: ProcedureStore::new(self.state_store.clone()),
         };

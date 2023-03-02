@@ -98,7 +98,7 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Procedure retry exceeded max times, procedure_id: {}", procedure_id))]
+    #[snafu(display("Procedure retry exceeded max times, procedure_id: {}, source:{}", procedure_id, source))]
     RetryTimesExceeded {
         source: Arc<Error>,
         procedure_id: ProcedureId,
