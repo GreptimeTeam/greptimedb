@@ -165,29 +165,29 @@ impl Runner {
             provider: self.manager_ctx.clone(),
         };
 
-        let mut exponential = self.exponential_builder.build();
-        loop {
-            let mut retry_times = 0;
-            match self.execute_once(&ctx).await {
-                ExecResult::Continue => (),
-                ExecResult::Done | ExecResult::Failed => return,
+        self.execute_once_with_retry(&ctx).await;
+    }
+
+    async fn execute_once_with_retry(&mut self, ctx: &Context) {
+        let retry = self.exponential_builder.build();
+        let mut retry_times = 0;
+        for dur in retry {
+            match self.execute_once(ctx).await {
+                ExecResult::Continue | ExecResult::Done | ExecResult::Failed => return,
                 ExecResult::RetryLater => {
-                    if let Some(d) = exponential.next() {
-                        retry_times += 1;
-                        self.wait_on_err(d, retry_times).await;
-                    } else {
-                        if let Retry { error } = self.meta.state() {
-                            self.meta.set_state(ProcedureState::failed(Arc::new(
-                                Error::RetryTimesExceeded {
-                                    source: error,
-                                    procedure_id: self.meta.id,
-                                },
-                            )))
-                        }
-                        return;
-                    }
+                    retry_times += 1;
+                    self.wait_on_err(dur, retry_times).await;
                 }
             }
+        }
+        assert!(self.meta.state().is_retry());
+        if let Retry { error } = self.meta.state() {
+            self.meta.set_state(ProcedureState::failed(Arc::new(
+                Error::RetryTimesExceeded {
+                    source: error,
+                    procedure_id: self.meta.id,
+                },
+            )))
         }
     }
 
@@ -215,7 +215,8 @@ impl Runner {
                         self.on_suspended(subprocedures).await;
                     }
                     Status::Done => {
-                        if self.commit_procedure().await.is_err() {
+                        if let Err(e) = self.commit_procedure().await {
+                            self.meta.set_state(ProcedureState::retry(Arc::new(e)));
                             return ExecResult::RetryLater;
                         }
 
