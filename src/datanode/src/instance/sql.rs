@@ -24,7 +24,7 @@ use datatypes::schema::Schema;
 use futures::StreamExt;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use servers::error as server_error;
-use servers::promql::PromqlHandler;
+use servers::prom::PromHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::prelude::*;
@@ -362,7 +362,7 @@ impl SqlQueryHandler for Instance {
 }
 
 #[async_trait]
-impl PromqlHandler for Instance {
+impl PromHandler for Instance {
     async fn do_query(&self, query: &PromQuery) -> server_error::Result<Output> {
         let _timer = timer!(metric::METRIC_HANDLE_PROMQL_ELAPSED);
 

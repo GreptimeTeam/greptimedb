@@ -13,6 +13,7 @@
 // limitations under the License.
 
 //! prometheus protocol supportings
+//! handles prometheus remote_write, remote_read logic
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};

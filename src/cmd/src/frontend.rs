@@ -23,7 +23,7 @@ use frontend::instance::Instance;
 use frontend::mysql::MysqlOptions;
 use frontend::opentsdb::OpentsdbOptions;
 use frontend::postgres::PostgresOptions;
-use frontend::promql::PromqlOptions;
+use frontend::prom::PromOptions;
 use meta_client::MetaClientOptions;
 use servers::auth::UserProviderRef;
 use servers::http::HttpOptions;
@@ -68,7 +68,7 @@ pub struct StartCommand {
     #[clap(long)]
     mysql_addr: Option<String>,
     #[clap(long)]
-    promql_addr: Option<String>,
+    prom_addr: Option<String>,
     #[clap(long)]
     postgres_addr: Option<String>,
     #[clap(long)]
@@ -144,8 +144,8 @@ impl TryFrom<StartCommand> for FrontendOptions {
                 ..Default::default()
             });
         }
-        if let Some(addr) = cmd.promql_addr {
-            opts.promql_options = Some(PromqlOptions { addr });
+        if let Some(addr) = cmd.prom_addr {
+            opts.prom_options = Some(PromOptions { addr });
         }
         if let Some(addr) = cmd.postgres_addr {
             opts.postgres_options = Some(PostgresOptions {
@@ -192,7 +192,7 @@ mod tests {
         let command = StartCommand {
             http_addr: Some("127.0.0.1:1234".to_string()),
             grpc_addr: None,
-            promql_addr: Some("127.0.0.1:4444".to_string()),
+            prom_addr: Some("127.0.0.1:4444".to_string()),
             mysql_addr: Some("127.0.0.1:5678".to_string()),
             postgres_addr: Some("127.0.0.1:5432".to_string()),
             opentsdb_addr: Some("127.0.0.1:4321".to_string()),
@@ -216,7 +216,7 @@ mod tests {
             opts.opentsdb_options.as_ref().unwrap().addr,
             "127.0.0.1:4321"
         );
-        assert_eq!(opts.promql_options.as_ref().unwrap().addr, "127.0.0.1:4444");
+        assert_eq!(opts.prom_options.as_ref().unwrap().addr, "127.0.0.1:4444");
 
         let default_opts = FrontendOptions::default();
         assert_eq!(
@@ -255,7 +255,7 @@ mod tests {
             http_addr: None,
             grpc_addr: None,
             mysql_addr: None,
-            promql_addr: None,
+            prom_addr: None,
             postgres_addr: None,
             opentsdb_addr: None,
             influxdb_enable: None,
@@ -285,7 +285,7 @@ mod tests {
             http_addr: None,
             grpc_addr: None,
             mysql_addr: None,
-            promql_addr: None,
+            prom_addr: None,
             postgres_addr: None,
             opentsdb_addr: None,
             influxdb_enable: None,

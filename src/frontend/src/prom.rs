@@ -15,11 +15,11 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PromqlOptions {
+pub struct PromOptions {
     pub addr: String,
 }
 
-impl Default for PromqlOptions {
+impl Default for PromOptions {
     fn default() -> Self {
         Self {
             addr: "127.0.0.1:4004".to_string(),
@@ -29,11 +29,11 @@ impl Default for PromqlOptions {
 
 #[cfg(test)]
 mod tests {
-    use super::PromqlOptions;
+    use super::PromOptions;
 
     #[test]
     fn test_prometheus_options() {
-        let default = PromqlOptions::default();
+        let default = PromOptions::default();
         assert_eq!(default.addr, "127.0.0.1:4004".to_string());
     }
 }
