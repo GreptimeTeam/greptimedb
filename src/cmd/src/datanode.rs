@@ -68,8 +68,6 @@ struct StartCommand {
     #[clap(long)]
     wal_dir: Option<String>,
     #[clap(long)]
-    enable_procedure: bool,
-    #[clap(long)]
     procedure_dir: Option<String>,
 }
 
@@ -130,7 +128,7 @@ impl TryFrom<StartCommand> for DatanodeOptions {
             return MissingConfigSnafu {
                 msg: "Missing node id option",
             }
-            .fail();
+                .fail();
         }
 
         if let Some(data_dir) = cmd.data_dir {
@@ -141,13 +139,11 @@ impl TryFrom<StartCommand> for DatanodeOptions {
             opts.wal.dir = wal_dir;
         }
 
-        if cmd.enable_procedure {
-            opts.procedure = if let Some(path) = cmd.procedure_dir {
-                Some(toml_loader::from_file!(&path)?)
-            } else {
-                Some(ProcedureConfig::default())
-            }
-        }
+        opts.procedure = if let Some(path) = cmd.procedure_dir {
+            Some(toml_loader::from_file!(&path)?)
+        } else {
+            Some(ProcedureConfig::default())
+        };
 
         Ok(opts)
     }
@@ -262,21 +258,21 @@ mod tests {
             metasrv_addr: Some("127.0.0.1:3002".to_string()),
             ..Default::default()
         })
-        .unwrap()
-        .mode;
+            .unwrap()
+            .mode;
         assert_matches!(mode, Mode::Distributed);
 
         assert!(DatanodeOptions::try_from(StartCommand {
             metasrv_addr: Some("127.0.0.1:3002".to_string()),
             ..Default::default()
         })
-        .is_err());
+            .is_err());
 
         // Providing node_id but leave metasrv_addr absent is ok since metasrv_addr has default value
         DatanodeOptions::try_from(StartCommand {
             node_id: Some(42),
             ..Default::default()
         })
-        .unwrap();
+            .unwrap();
     }
 }
