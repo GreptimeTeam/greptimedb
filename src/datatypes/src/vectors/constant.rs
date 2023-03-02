@@ -91,7 +91,11 @@ impl ConstantVector {
         for i in 0..indices.len() {
             if let Value::UInt32(idx) = indices.get(i) {
                 if idx >= self.len() as u32 {
-                    return error::BadArrayAccessSnafu { index: idx as usize, size: indices.len() }.fail();
+                    return error::BadArrayAccessSnafu {
+                        index: idx as usize,
+                        size: indices.len(),
+                    }
+                    .fail();
                 }
             }
         }

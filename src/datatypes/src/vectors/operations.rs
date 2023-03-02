@@ -25,7 +25,7 @@ use crate::types::LogicalPrimitiveType;
 use crate::vectors::constant::ConstantVector;
 use crate::vectors::{
     BinaryVector, BooleanVector, ConcreteDataType, ListVector, NullVector, PrimitiveVector,
-    StringVector, Vector, VectorRef, UInt32Vector
+    StringVector, UInt32Vector, Vector, VectorRef,
 };
 
 /// Vector compute operations.

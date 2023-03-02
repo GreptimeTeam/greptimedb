@@ -30,18 +30,21 @@ pub(crate) use take_indices;
 
 #[cfg(test)]
 mod tests {
-    use common_time::{Date, DateTime};
     use std::sync::Arc;
-    use arrow::array::{ PrimitiveArray, UInt32Array};
+
+    use arrow::array::{PrimitiveArray, UInt32Array};
+    use common_time::{Date, DateTime};
+
     use crate::prelude::VectorRef;
     use crate::scalars::ScalarVector;
-    use crate::types::{LogicalPrimitiveType};
-    use crate::vectors::operations::VectorOp;
-    use crate::types::WrapperType;
     use crate::timestamp::{
         TimestampMicrosecond, TimestampMillisecond, TimestampNanosecond, TimestampSecond,
     };
-    use crate::vectors::{BooleanVector, ConstantVector, Int32Vector, PrimitiveVector, StringVector, UInt32Vector};
+    use crate::types::{LogicalPrimitiveType, WrapperType};
+    use crate::vectors::operations::VectorOp;
+    use crate::vectors::{
+        BooleanVector, ConstantVector, Int32Vector, PrimitiveVector, StringVector, UInt32Vector,
+    };
 
     fn check_take_primitive<T>(
         input: Vec<Option<T::Native>>,
@@ -55,7 +58,9 @@ mod tests {
         let indices = UInt32Vector::new(UInt32Array::from(indices));
         let output = v.take(&indices).unwrap();
 
-        let expected: VectorRef = Arc::new(PrimitiveVector::<T>::new(PrimitiveArray::<T::ArrowPrimitive>::from(expect)));
+        let expected: VectorRef = Arc::new(PrimitiveVector::<T>::new(PrimitiveArray::<
+            T::ArrowPrimitive,
+        >::from(expect)));
         assert_eq!(expected, output);
     }
 
@@ -68,7 +73,7 @@ mod tests {
             let out = v.take(&indices).unwrap();
 
             let expect: VectorRef = Arc::new($VectorType::from_iterator(
-                [3, 0, 1, 4].into_iter().map($ValueType::$method)
+                [3, 0, 1, 4].into_iter().map($ValueType::$method),
             ));
             assert_eq!(expect, out);
         }};
@@ -85,9 +90,9 @@ mod tests {
 
         // nullable float32
         check_take_primitive::<crate::types::Float32Type>(
-            vec![Some(3.14), None, Some(1.34), Some(4.13), Some(5.13)],
+            vec![Some(3.24), None, Some(1.34), Some(4.13), Some(5.13)],
             vec![Some(3), None, Some(0), Some(1), Some(4)],
-            vec![Some(4.13), None, Some(3.14), None, Some(5.13)],
+            vec![Some(4.13), None, Some(3.24), None, Some(5.13)],
         );
 
         // nullable uint32
@@ -101,8 +106,16 @@ mod tests {
         take_time_like_test!(DateVector, Date, new);
         take_time_like_test!(DateTimeVector, DateTime, new);
         take_time_like_test!(TimestampSecondVector, TimestampSecond, from_native);
-        take_time_like_test!(TimestampMillisecondVector, TimestampMillisecond, from_native);
-        take_time_like_test!(TimestampMicrosecondVector, TimestampMicrosecond, from_native);
+        take_time_like_test!(
+            TimestampMillisecondVector,
+            TimestampMillisecond,
+            from_native
+        );
+        take_time_like_test!(
+            TimestampMicrosecondVector,
+            TimestampMicrosecond,
+            from_native
+        );
         take_time_like_test!(TimestampNanosecondVector, TimestampNanosecond, from_native);
     }
 
@@ -117,7 +130,7 @@ mod tests {
 
     #[test]
     fn test_take_constant() {
-        check_take_constant(2, 5, &[3,4]);
+        check_take_constant(2, 5, &[3, 4]);
         check_take_constant(3, 10, &[1, 2, 3]);
     }
 
@@ -133,16 +146,31 @@ mod tests {
 
     #[test]
     fn test_take_bool() {
-        let v = BooleanVector::from_slice(&[false,true,false,true,false,false,true]);
-        let indices = UInt32Vector::from_slice(&[1,3,5,6]);
+        let v = BooleanVector::from_slice(&[false, true, false, true, false, false, true]);
+        let indices = UInt32Vector::from_slice(&[1, 3, 5, 6]);
         let out = v.take(&indices).unwrap();
-        let expected: VectorRef = Arc::new(BooleanVector::from_slice(&[true,true,false,true]));
+        let expected: VectorRef = Arc::new(BooleanVector::from_slice(&[true, true, false, true]));
         assert_eq!(out, expected);
 
-        let v = BooleanVector::from(vec![Some(true), None, Some(false), Some(true), Some(false), Some(false), Some(true), None]);
+        let v = BooleanVector::from(vec![
+            Some(true),
+            None,
+            Some(false),
+            Some(true),
+            Some(false),
+            Some(false),
+            Some(true),
+            None,
+        ]);
         let indices = UInt32Vector::from(vec![Some(1), None, Some(3), Some(5), Some(6)]);
         let out = v.take(&indices).unwrap();
-        let expected: VectorRef = Arc::new(BooleanVector::from(vec![None, None, Some(true), Some(false), Some(true)]));
+        let expected: VectorRef = Arc::new(BooleanVector::from(vec![
+            None,
+            None,
+            Some(true),
+            Some(false),
+            Some(true),
+        ]));
         assert_eq!(out, expected);
     }
 }
