@@ -169,25 +169,29 @@ impl Runner {
     }
 
     async fn execute_once_with_retry(&mut self, ctx: &Context) {
-        let retry = self.exponential_builder.build();
+        let mut retry = self.exponential_builder.build();
         let mut retry_times = 0;
-        for dur in retry {
+        loop {
             match self.execute_once(ctx).await {
-                ExecResult::Continue | ExecResult::Done | ExecResult::Failed => return,
+                ExecResult::Done | ExecResult::Failed => return,
+                ExecResult::Continue => (),
                 ExecResult::RetryLater => {
                     retry_times += 1;
-                    self.wait_on_err(dur, retry_times).await;
+                    if let Some(d) = retry.next() {
+                        self.wait_on_err(d, retry_times).await;
+                    } else {
+                        assert!(self.meta.state().is_retry());
+                        if let Retry { error } = self.meta.state() {
+                            self.meta.set_state(ProcedureState::failed(Arc::new(
+                                Error::RetryTimesExceeded {
+                                    source: error,
+                                    procedure_id: self.meta.id,
+                                },
+                            )))
+                        }
+                    }
                 }
             }
-        }
-        assert!(self.meta.state().is_retry());
-        if let Retry { error } = self.meta.state() {
-            self.meta.set_state(ProcedureState::failed(Arc::new(
-                Error::RetryTimesExceeded {
-                    source: error,
-                    procedure_id: self.meta.id,
-                },
-            )))
         }
     }
 
