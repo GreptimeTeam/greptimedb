@@ -115,7 +115,6 @@ impl RemoteCatalogManager {
                     yield Ok(key)
                 } else {
                     error!("Invalid catalog key: {:?}", catalog_key);
-                    continue;
                 }
             }
         }))
