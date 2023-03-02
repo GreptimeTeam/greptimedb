@@ -98,8 +98,11 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Procedure retry exceeded max times"))]
-    RetryTimesExceeded {},
+    #[snafu(display("Procedure retry exceeded max times, procedure_id: {}", procedure_id))]
+    RetryTimesExceeded {
+        source: Arc<Error>,
+        procedure_id: ProcedureId,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

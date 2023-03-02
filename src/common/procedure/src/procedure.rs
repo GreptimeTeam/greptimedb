@@ -206,6 +206,8 @@ pub enum ProcedureState {
     Running,
     /// The procedure is finished.
     Done,
+    /// The procedure is failed and can be retried.
+    Retry { error: Arc<Error> },
     /// The procedure is failed and cannot proceed anymore.
     Failed { error: Arc<Error> },
 }
@@ -214,6 +216,11 @@ impl ProcedureState {
     /// Returns a [ProcedureState] with failed state.
     pub fn failed(error: Arc<Error>) -> ProcedureState {
         ProcedureState::Failed { error }
+    }
+
+    /// Returns a [ProcedureState] with retry state.
+    pub fn retry(error: Arc<Error>) -> ProcedureState {
+        ProcedureState::Retry { error }
     }
 
     /// Returns true if the procedure state is running.
@@ -231,10 +238,16 @@ impl ProcedureState {
         matches!(self, ProcedureState::Failed { .. })
     }
 
+    /// Returns true if the procedure state retry.
+    pub fn is_retry(&self) -> bool {
+        matches!(self, ProcedureState::Retry { .. })
+    }
+
     /// Returns the error.
     pub fn error(&self) -> Option<&Arc<Error>> {
         match self {
             ProcedureState::Failed { error } => Some(error),
+            ProcedureState::Retry { error } => Some(error),
             _ => None,
         }
     }
