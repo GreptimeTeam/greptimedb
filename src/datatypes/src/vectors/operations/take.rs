@@ -120,7 +120,7 @@ mod tests {
     }
 
     fn check_take_constant(expect_length: usize, input_length: usize, indices: &[u32]) {
-        let v = ConstantVector::new(Arc::new(Int32Vector::from_slice(&[111])), input_length);
+        let v = ConstantVector::new(Arc::new(Int32Vector::from_slice([111])), input_length);
         let indices = UInt32Vector::from_slice(indices);
         let out = v.take(&indices).unwrap();
 
@@ -137,7 +137,7 @@ mod tests {
     #[test]
     fn test_take_scalar() {
         let v = StringVector::from_slice(&["0", "1", "2", "3"]);
-        let indices = UInt32Vector::from_slice(&[1, 3, 2]);
+        let indices = UInt32Vector::from_slice([1, 3, 2]);
         let out = v.take(&indices).unwrap();
 
         let expect: VectorRef = Arc::new(StringVector::from_slice(&["1", "3", "2"]));
@@ -147,7 +147,7 @@ mod tests {
     #[test]
     fn test_take_bool() {
         let v = BooleanVector::from_slice(&[false, true, false, true, false, false, true]);
-        let indices = UInt32Vector::from_slice(&[1, 3, 5, 6]);
+        let indices = UInt32Vector::from_slice([1, 3, 5, 6]);
         let out = v.take(&indices).unwrap();
         let expected: VectorRef = Arc::new(BooleanVector::from_slice(&[true, true, false, true]));
         assert_eq!(out, expected);
