@@ -100,6 +100,15 @@ macro_rules! to_con_type {
     };
 }
 
+/// Convert PyAny to [`ScalarValue`]
+pub(crate) fn pyo3_obj_try_to_typed_scalar_value(
+    obj: &PyAny,
+    dtype: Option<ConcreteDataType>,
+) -> PyResult<ScalarValue> {
+    let val = pyo3_obj_try_to_typed_val(obj, dtype)?;
+    val.try_to_scalar_value(&val.data_type())
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
 /// to int/float/boolean, if dtype is None, then convert to highest prec type
 pub(crate) fn pyo3_obj_try_to_typed_val(
     obj: &PyAny,

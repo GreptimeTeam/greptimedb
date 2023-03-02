@@ -35,6 +35,7 @@ pub(crate) mod data_frame {
 
     use crate::python::error::DataFusionSnafu;
     use crate::python::ffi_types::PyVector;
+    use crate::python::rspython::utils::py_obj_to_value;
     use crate::python::utils::block_on_async;
     #[rspyclass(module = "data_frame", name = "DataFrame")]
     #[derive(PyPayload, Debug)]
@@ -261,6 +262,16 @@ pub(crate) mod data_frame {
     fn col(name: String, vm: &VirtualMachine) -> PyExprRef {
         let expr: PyExpr = DfExpr::Column(datafusion_common::Column::from_name(name)).into();
         expr.into_ref(vm)
+    }
+
+    #[pyfunction]
+    fn lit(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyExprRef> {
+        let val = py_obj_to_value(&obj, vm)?;
+        let scalar_val = val
+            .try_to_scalar_value(&val.data_type())
+            .map_err(|e| vm.new_runtime_error(format!("{e}")))?;
+        let expr: PyExpr = DfExpr::Literal(scalar_val).into();
+        Ok(expr.into_ref(vm))
     }
 
     // TODO(discord9): lit function that take PyObject and turn it into ScalarValue

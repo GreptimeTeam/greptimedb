@@ -308,7 +308,7 @@ pub(crate) mod greptime_builtin {
     };
     use crate::python::ffi_types::vector::val_to_pyobj;
     use crate::python::ffi_types::PyVector;
-    use crate::python::rspython::utils::{is_instance, py_vec_obj_to_array, PyVectorRef};
+    use crate::python::rspython::utils::{is_instance, py_obj_to_vec, PyVectorRef};
 
     #[pyfunction]
     fn vector(args: OptionalArg<PyObjectRef>, vm: &VirtualMachine) -> PyResult<PyVector> {
@@ -966,7 +966,7 @@ pub(crate) mod greptime_builtin {
                 let args = FuncArgs::new(vec![v.into_pyobject(vm)], KwArgs::default());
                 let ret = func.invoke(args, vm);
                 match ret{
-                        Ok(obj) => match py_vec_obj_to_array(&obj, vm, 1){
+                        Ok(obj) => match py_obj_to_vec(&obj, vm, 1){
                             Ok(v) => if v.len()==1{
                                 Ok(v)
                             }else{

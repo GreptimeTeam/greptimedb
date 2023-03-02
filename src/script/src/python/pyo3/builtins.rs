@@ -27,7 +27,7 @@ use pyo3::types::PyList;
 use super::utils::scalar_value_to_py_any;
 use crate::python::ffi_types::utils::all_to_f64;
 use crate::python::ffi_types::PyVector;
-use crate::python::pyo3::dataframe_impl::col;
+use crate::python::pyo3::dataframe_impl::{col, lit};
 use crate::python::pyo3::utils::{
     columnar_value_to_py_any, try_into_columnar_value, val_to_py_any,
 };
@@ -44,6 +44,7 @@ pub(crate) fn greptime_builtins(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     batch_import!(
         m,
         [
+            lit,
             col,
             vector,
             pow,

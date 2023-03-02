@@ -17,12 +17,12 @@ use std::sync::Arc;
 use datafusion_common::ScalarValue;
 use datafusion_expr::ColumnarValue as DFColValue;
 use datatypes::prelude::ScalarVector;
+use datatypes::value::Value;
 use datatypes::vectors::{
     BooleanVector, Float64Vector, Helper, Int64Vector, NullVector, StringVector, VectorRef,
 };
-use futures::Future;
 use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyList, PyStr};
-use rustpython_vm::{PyObjectRef, PyPayload, PyRef, VirtualMachine};
+use rustpython_vm::{PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine};
 use snafu::{Backtrace, GenerateImplicitData, OptionExt, ResultExt};
 
 use crate::python::error;
@@ -53,8 +53,32 @@ pub fn format_py_error(excep: PyBaseExceptionRef, vm: &VirtualMachine) -> error:
     }
 }
 
+pub(crate) fn py_obj_to_value(obj: &PyObjectRef, vm: &VirtualMachine) -> PyResult<Value> {
+    macro_rules! obj2val {
+        ($OBJ: ident, $($PY_TYPE: ident => $RS_TYPE: ident => $VARIANT: ident),*) => {
+            $(
+                if is_instance::<$PY_TYPE>($OBJ, vm) {
+                    let val = $OBJ
+                        .to_owned()
+                        .try_into_value::<$RS_TYPE>(vm)?;
+                    Ok(Value::$VARIANT(val.into()))
+                }
+            )else*
+            else {
+                Err(vm.new_runtime_error(format!("can't convert obj {obj:?} to Value")))
+            }
+        };
+    }
+    obj2val!(obj,
+        PyBool => bool => Boolean,
+        PyInt => i64 => Int64,
+        PyFloat => f64 => Float64,
+        PyStr => String => String
+    )
+}
+
 /// convert a single PyVector or a number(a constant)(wrapping in PyObjectRef) into a Array(or a constant array)
-pub fn py_vec_obj_to_array(
+pub fn py_obj_to_vec(
     obj: &PyObjectRef,
     vm: &VirtualMachine,
     col_len: usize,

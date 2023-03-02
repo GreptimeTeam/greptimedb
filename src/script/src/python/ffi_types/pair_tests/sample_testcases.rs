@@ -19,27 +19,27 @@ use std::sync::Arc;
 use datatypes::prelude::ScalarVector;
 use datatypes::vectors::{BooleanVector, Float64Vector, Int64Vector, VectorRef};
 
-use crate::python::ffi_types::pair_tests::TestCase;
+use crate::python::ffi_types::pair_tests::CodeBlockTestCase;
 
-macro_rules! vector {
-    ($ty: ident, $slice: expr) => {
-        Arc::new($ty::from_slice($slice)) as VectorRef
-    };
-}
-
-macro_rules! ronish {
-    ($($key: literal : $expr: expr),*$(,)?) => {
-        HashMap::from([
-            $(($key.to_string(), $expr)),*
-        ])
-    };
-}
-
+/// Generate tests for basic vector operations and basic builtin functions
 /// Using a function to generate testcase instead of `.ron` configure file because it's more flexible and we are in #[cfg(test)] so no binary bloat worrying
 #[allow(clippy::approx_constant)]
-pub(super) fn sample_test_case() -> Vec<TestCase> {
+pub(super) fn sample_test_case() -> Vec<CodeBlockTestCase> {
+    macro_rules! vector {
+        ($ty: ident, $slice: expr) => {
+            Arc::new($ty::from_slice($slice)) as VectorRef
+        };
+    }
+
+    macro_rules! ronish {
+        ($($key: literal : $expr: expr),*$(,)?) => {
+            HashMap::from([
+                $(($key.to_string(), $expr)),*
+            ])
+        };
+    }
     vec![
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "a": vector!(Float64Vector, [1.0f64, 2.0, 3.0])
             },
@@ -53,7 +53,7 @@ ret"#
                 .to_string(),
             expect: vector!(Float64Vector, [1.0f64, 2.0, 3.0]),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "a": vector!(Float64Vector, [1.0f64, 2.0, 3.0]),
                 "b": vector!(Float64Vector, [3.0f64, 2.0, 1.0])
@@ -65,7 +65,7 @@ ret"#
                 .to_string(),
             expect: vector!(Float64Vector, [4.0f64, 4.0, 4.0]),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "a": vector!(Float64Vector, [1.0f64, 2.0, 3.0]),
                 "b": vector!(Float64Vector, [3.0f64, 2.0, 1.0])
@@ -77,7 +77,7 @@ ret"#
                 .to_string(),
             expect: vector!(Float64Vector, [-2.0f64, 0.0, 2.0]),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "a": vector!(Float64Vector, [1.0f64, 2.0, 3.0]),
                 "b": vector!(Float64Vector, [3.0f64, 2.0, 1.0])
@@ -89,7 +89,7 @@ ret"#
                 .to_string(),
             expect: vector!(Float64Vector, [3.0f64, 4.0, 3.0]),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "a": vector!(Float64Vector, [1.0f64, 2.0, 3.0]),
                 "b": vector!(Float64Vector, [3.0f64, 2.0, 1.0])
@@ -101,7 +101,7 @@ ret"#
                 .to_string(),
             expect: vector!(Float64Vector, [1. / 3., 1.0, 3.0]),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "values": vector!(Float64Vector, [1.0f64, 2.0, 3.0])
             },
@@ -115,7 +115,7 @@ ret"#
                 [1.0f64, std::f64::consts::SQRT_2, 1.7320508075688772,]
             ),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "values": vector!(Float64Vector, [1.0, 2.0, 3.0])
             },
@@ -129,7 +129,7 @@ ret"#
                 [0.8414709848078965, 0.9092974268256817, 0.1411200080598672,]
             ),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "values": vector!(Float64Vector, [1.0, 2.0, 3.0])
             },
@@ -143,7 +143,7 @@ ret"#
                 [0.5403023058681398, -0.4161468365471424, -0.9899924966004454,]
             ),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "values": vector!(Float64Vector, [1.0, 2.0, 3.0])
             },
@@ -157,7 +157,7 @@ ret"#
                 [1.5574077246549023, -2.185039863261519, -0.1425465430742778,]
             ),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "values": vector!(Float64Vector, [0.3, 0.5, 1.0])
             },
@@ -171,7 +171,7 @@ ret"#
                 [0.3046926540153975, 0.5235987755982989, 1.5707963267948966,]
             ),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "values": vector!(Float64Vector, [0.3, 0.5, 1.0])
             },
@@ -185,7 +185,7 @@ ret"#
                 [1.2661036727794992, 1.0471975511965979, 0.0,]
             ),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "values": vector!(Float64Vector, [0.3, 0.5, 1.1])
             },
@@ -199,7 +199,7 @@ ret"#
                 [0.2914567944778671, 0.4636476090008061, 0.8329812666744317,]
             ),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "values": vector!(Float64Vector, [0.3, 0.5, 1.1])
             },
@@ -210,7 +210,7 @@ ret"#
                 .to_string(),
             expect: vector!(Float64Vector, [0.0, 0.0, 1.0,]),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "values": vector!(Float64Vector, [0.3, 0.5, 1.1])
             },
@@ -221,7 +221,7 @@ ret"#
                 .to_string(),
             expect: vector!(Float64Vector, [1.0, 1.0, 2.0,]),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "values": vector!(Float64Vector, [0.3, 0.5, 1.1])
             },
@@ -232,7 +232,7 @@ ret"#
                 .to_string(),
             expect: vector!(Float64Vector, [0.0, 1.0, 1.0,]),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "values": vector!(Float64Vector, [0.3, 0.5, 1.1])
             },
@@ -243,7 +243,7 @@ ret"#
                 .to_string(),
             expect: vector!(Float64Vector, [0.0, 0.0, 1.0,]),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "values": vector!(Float64Vector, [-0.3, 0.5, -1.1])
             },
@@ -254,7 +254,7 @@ ret"#
                 .to_string(),
             expect: vector!(Float64Vector, [0.3, 0.5, 1.1,]),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "values": vector!(Float64Vector, [-0.3, 0.5, -1.1])
             },
@@ -265,7 +265,7 @@ ret"#
                 .to_string(),
             expect: vector!(Float64Vector, [-1.0, 1.0, -1.0,]),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "values": vector!(Float64Vector, [0., 1.0, 2.0])
             },
@@ -276,7 +276,7 @@ ret"#
                 .to_string(),
             expect: vector!(Float64Vector, [1.0, consts::E, 7.38905609893065,]),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "values": vector!(Float64Vector, [1.0, 2.0, 3.0])
             },
@@ -287,7 +287,7 @@ ret"#
                 .to_string(),
             expect: vector!(Float64Vector, [0.0, consts::LN_2, 1.0986122886681098,]),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "values": vector!(Float64Vector, [1.0, 2.0, 3.0])
             },
@@ -298,7 +298,7 @@ ret"#
                 .to_string(),
             expect: vector!(Float64Vector, [0.0, 1.0, 1.584962500721156,]),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "values": vector!(Float64Vector, [1.0, 2.0, 3.0])
             },
@@ -309,7 +309,7 @@ ret"#
                 .to_string(),
             expect: vector!(Float64Vector, [0.0, consts::LOG10_2, 0.47712125471966244,]),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {},
             script: r#"
 from greptime import *
@@ -318,7 +318,7 @@ ret"#
                 .to_string(),
             expect: vector!(BooleanVector, &[true, true, true]),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "values": vector!(Int64Vector, [1, 2, 2, 3])
             },
@@ -329,7 +329,7 @@ ret"#
                 .to_string(),
             expect: vector!(Int64Vector, [3]),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "values": vector!(Int64Vector, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
             },
@@ -340,7 +340,7 @@ ret"#
                 .to_string(),
             expect: vector!(Int64Vector, [6]),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "values": vector!(Float64Vector, [1.0, 2.0, 3.0])
             },
@@ -351,7 +351,7 @@ ret"#
                 .to_string(),
             expect: vector!(Float64Vector, [1.0, 2.0, 3.0]),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "values": vector!(Float64Vector, [1.0, 2.0, 3.0])
             },
@@ -362,7 +362,7 @@ ret"#
                 .to_string(),
             expect: vector!(Float64Vector, [2.0]),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "a": vector!(Float64Vector, [1.0, 2.0, 3.0]),
                 "b": vector!(Float64Vector, [1.0, 0.0, -1.0])
@@ -374,7 +374,7 @@ ret"#
                 .to_string(),
             expect: vector!(Float64Vector, [-1.0]),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "values": vector!(Int64Vector, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]),
             },
@@ -385,7 +385,7 @@ ret"#
                 .to_string(),
             expect: vector!(Int64Vector, [10]),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "a": vector!(Float64Vector, [1.0, 2.0, 3.0]),
                 "b": vector!(Float64Vector, [1.0, 0.0, -1.0])
@@ -397,7 +397,7 @@ ret"#
                 .to_string(),
             expect: vector!(Float64Vector, [-1.0]),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "a": vector!(Float64Vector, [1.0, 2.0, 3.0]),
                 "b": vector!(Float64Vector, [1.0, 0.0, -1.0])
@@ -409,7 +409,7 @@ ret"#
                 .to_string(),
             expect: vector!(Float64Vector, [-0.6666666666666666]),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "a": vector!(Float64Vector, [1.0, 2.0, 3.0]),
             },
@@ -420,7 +420,7 @@ ret"#
                 .to_string(),
             expect: vector!(Float64Vector, [3.0]),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "a": vector!(Float64Vector, [1.0, 2.0, 3.0]),
             },
@@ -431,7 +431,7 @@ ret"#
                 .to_string(),
             expect: vector!(Float64Vector, [1.0]),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "values": vector!(Float64Vector, [1., 2., 3., 4., 5., 6., 7., 8., 9., 10.]),
             },
@@ -442,7 +442,7 @@ ret"#
                 .to_string(),
             expect: vector!(Float64Vector, [3.0276503540974917]),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "values": vector!(Float64Vector, [1., 2., 3., 4., 5., 6., 7., 8., 9., 10.]),
             },
@@ -453,7 +453,7 @@ ret"#
                 .to_string(),
             expect: vector!(Float64Vector, [2.8722813232690143]),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "values": vector!(Float64Vector, [1., 2., 3., 4., 5., 6., 7., 8., 9., 10.]),
             },
@@ -464,7 +464,7 @@ ret"#
                 .to_string(),
             expect: vector!(Float64Vector, [55.0]),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "values": vector!(Float64Vector, [1., 2., 3., 4., 5., 6., 7., 8., 9., 10.]),
             },
@@ -475,7 +475,7 @@ ret"#
                 .to_string(),
             expect: vector!(Float64Vector, [9.166666666666666]),
         },
-        TestCase {
+        CodeBlockTestCase {
             input: ronish! {
                 "values": vector!(Float64Vector, [1., 2., 3., 4., 5., 6., 7., 8., 9., 10.]),
             },

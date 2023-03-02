@@ -219,7 +219,7 @@ pub(crate) fn select_from_rb(rb: &RecordBatch, fetch_names: &[String]) -> Result
         .iter()
         .map(|name| {
             let vector = rb.column_by_name(name).with_context(|| OtherSnafu {
-                reason: format!("Can't find field name {name}"),
+                reason: format!("Can't find field name {name} in all columns in {rb:?}"),
             })?;
             Ok(PyVector::from(vector.clone()))
         })
@@ -229,15 +229,29 @@ pub(crate) fn select_from_rb(rb: &RecordBatch, fetch_names: &[String]) -> Result
 /// match between arguments' real type and annotation types
 /// if type anno is `vector[_]` then use real type(from RecordBatch's schema)
 pub(crate) fn check_args_anno_real_type(
+    arg_names: &[String],
     args: &[PyVector],
     copr: &Coprocessor,
     rb: &RecordBatch,
 ) -> Result<()> {
+    ensure!(
+        arg_names.len() == args.len(),
+        OtherSnafu {
+            reason: format!("arg_names:{arg_names:?} and args{args:?}'s length is different")
+        }
+    );
     for (idx, arg) in args.iter().enumerate() {
         let anno_ty = copr.arg_types[idx].clone();
         let real_ty = arg.to_arrow_array().data_type().clone();
         let real_ty = ConcreteDataType::from_arrow_type(&real_ty);
-        let is_nullable: bool = rb.schema.column_schemas()[idx].is_nullable();
+        let arg_name = arg_names[idx].clone();
+        let col_idx = rb.schema.column_index_by_name(&arg_name).ok_or(
+            OtherSnafu {
+                reason: format!("Can't find column by name {arg_name}"),
+            }
+            .build(),
+        )?;
+        let is_nullable: bool = rb.schema.column_schemas()[col_idx].is_nullable();
         ensure!(
             anno_ty
                 .clone()

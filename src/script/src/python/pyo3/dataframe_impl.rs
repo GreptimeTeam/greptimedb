@@ -23,6 +23,7 @@ use snafu::ResultExt;
 
 use crate::python::error::DataFusionSnafu;
 use crate::python::ffi_types::PyVector;
+use crate::python::pyo3::utils::pyo3_obj_try_to_typed_scalar_value;
 use crate::python::utils::block_on_async;
 type PyExprRef = Py<PyExpr>;
 #[pyclass]
@@ -223,6 +224,13 @@ impl PyDataFrame {
     }
 }
 
+#[pyfunction]
+pub(crate) fn lit(py: Python<'_>, value: PyObject) -> PyResult<PyExpr> {
+    let value = pyo3_obj_try_to_typed_scalar_value(value.as_ref(py), None)?;
+    let expr: PyExpr = DfExpr::Literal(value).into();
+    Ok(expr)
+}
+
 #[pyclass]
 pub(crate) struct PyExpr {
     inner: DfExpr,
@@ -242,7 +250,7 @@ pub(crate) fn col(name: String) -> PyExpr {
 
 #[pymethods]
 impl PyExpr {
-    fn __richcmp__(&self, other: &Self, op: CompareOp) -> PyResult<Self> {
+    fn __richcmp__(&self, py: Python<'_>, other: &Self, op: CompareOp) -> PyResult<Self> {
         let op = match op {
             CompareOp::Lt => DfExpr::lt,
             CompareOp::Le => DfExpr::lt_eq,
@@ -251,20 +259,18 @@ impl PyExpr {
             CompareOp::Gt => DfExpr::gt,
             CompareOp::Ge => DfExpr::gt_eq,
         };
-        Ok(op(self.inner.clone(), other.inner.clone()).into())
+        py.allow_threads(|| Ok(op(self.inner.clone(), other.inner.clone()).into()))
     }
     fn alias(&self, name: String) -> PyResult<PyExpr> {
         Ok(self.inner.clone().alias(name).into())
     }
     fn __and__(&self, py: Python<'_>, other: PyExprRef) -> PyResult<PyExpr> {
-        Ok(self
-            .inner
-            .clone()
-            .and(other.borrow(py).inner.clone())
-            .into())
+        let other = other.borrow(py).inner.clone();
+        py.allow_threads(|| Ok(self.inner.clone().and(other).into()))
     }
     fn __or__(&self, py: Python<'_>, other: PyExprRef) -> PyResult<PyExpr> {
-        Ok(self.inner.clone().or(other.borrow(py).inner.clone()).into())
+        let other = other.borrow(py).inner.clone();
+        py.allow_threads(|| Ok(self.inner.clone().or(other).into()))
     }
     fn __invert__(&self) -> PyResult<PyExpr> {
         Ok(self.inner.clone().not().into())
