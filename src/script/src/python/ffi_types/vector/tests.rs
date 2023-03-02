@@ -57,8 +57,8 @@ fn test_eval_py_vector_in_pairs() {
 fn sample_py_vector() -> HashMap<String, VectorRef> {
     let b1 = Arc::new(BooleanVector::from_slice(&[false, false, true, true])) as VectorRef;
     let b2 = Arc::new(BooleanVector::from_slice(&[false, true, false, true])) as VectorRef;
-    let f1 = Arc::new(Float64Vector::from_slice(&[0.0f64, 2.0, 10.0, 42.0])) as VectorRef;
-    let f2 = Arc::new(Float64Vector::from_slice(&[-0.1f64, -42.0, 2., 7.0])) as VectorRef;
+    let f1 = Arc::new(Float64Vector::from_slice([0.0f64, 2.0, 10.0, 42.0])) as VectorRef;
+    let f2 = Arc::new(Float64Vector::from_slice([-0.1f64, -42.0, 2., 7.0])) as VectorRef;
     HashMap::from([
         ("b1".to_owned(), b1),
         ("b2".to_owned(), b2),
@@ -85,24 +85,20 @@ fn get_test_cases() -> Vec<TestCase> {
         },
         TestCase {
             eval: "f1+f2".to_string(),
-            result: Arc::new(Float64Vector::from_slice(&[-0.1f64, -40.0, 12., 49.0])) as VectorRef,
+            result: Arc::new(Float64Vector::from_slice([-0.1f64, -40.0, 12., 49.0])) as VectorRef,
         },
         TestCase {
             eval: "f1-f2".to_string(),
-            result: Arc::new(Float64Vector::from_slice(&[0.1f64, 44.0, 8., 35.0])) as VectorRef,
+            result: Arc::new(Float64Vector::from_slice([0.1f64, 44.0, 8., 35.0])) as VectorRef,
         },
         TestCase {
             eval: "f1*f2".to_string(),
-            result: Arc::new(Float64Vector::from_slice(&[
-                -0.0f64,
-                -84.0,
-                20.,
-                42.0 * 7.0,
-            ])) as VectorRef,
+            result: Arc::new(Float64Vector::from_slice([-0.0f64, -84.0, 20., 42.0 * 7.0]))
+                as VectorRef,
         },
         TestCase {
             eval: "f1/f2".to_string(),
-            result: Arc::new(Float64Vector::from_slice(&[
+            result: Arc::new(Float64Vector::from_slice([
                 0.0 / -0.1f64,
                 2. / -42.,
                 10. / 2.,

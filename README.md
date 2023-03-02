@@ -61,11 +61,12 @@ To compile GreptimeDB from source, you'll need:
   find an installation instructions [here](https://grpc.io/docs/protoc-installation/).
   **Note that `protoc` version needs to be >= 3.15** because we have used the `optional`
   keyword. You can check it with `protoc --version`.
-- python3-dev or python3-devel(Optional, only needed if you want to run scripts in cpython): this install a Python shared library required for running python scripting engine(In CPython Mode).
-  This is available as `python3-dev` on ubuntu, you can install it with `sudo apt install python3-dev`, or `python3-devel` on RPM based distributions (e.g. Fedora, Red Hat, SuSE), Mac 's Python3 package should have this shared library by default.
-Then, you can build GreptimeDB from source code:
-
-```
+- python3-dev or python3-devel(Optional, only needed if you want to run scripts
+  in cpython): this install a Python shared library required for running python
+  scripting engine(In CPython Mode). This is available as `python3-dev` on
+  ubuntu, you can install it with `sudo apt install python3-dev`, or
+  `python3-devel` on RPM based distributions (e.g. Fedora, Red Hat, SuSE). Mac's
+  `Python3` package should have this shared library by default.
 
 #### Build with Docker
 

@@ -1,4 +1,4 @@
-# Welcome!
+# Welcome 👋
 
 Thanks a lot for considering contributing to GreptimeDB. We believe people like you would make GreptimeDB a great product. We intend to build a community where individuals can have open talks, show respect for one another, and speak with true ❤️. Meanwhile, we are to keep transparency and make your effort count here.
 
@@ -54,30 +54,29 @@ GreptimeDB uses the [Apache 2.0 license](https://github.com/GreptimeTeam/greptim
 - Make sure all clippy warnings are fixed (you can check it locally by running `cargo clippy --workspace --all-targets -- -D warnings -D clippy::print_stdout -D clippy::print_stderr`).
 
 #### `pre-commit` Hooks
+
 You could setup the [`pre-commit`](https://pre-commit.com/#plugins) hooks to run these checks on every commit automatically.
 
 1. Install `pre-commit`
-```
-$ pip install pre-commit
-```
-or
-```
-$ brew install pre-commit
-```
+
+        pip install pre-commit
+
+    or
+
+        brew install pre-commit
 
 2. Install the `pre-commit` hooks
-```
-$ pre-commit install
-pre-commit installed at .git/hooks/pre-commit
 
-$ pre-commit install --hook-type commit-msg
-pre-commit installed at .git/hooks/commit-msg
+        $ pre-commit install
+        pre-commit installed at .git/hooks/pre-commit
 
-$ pre-commit install --hook-type pre-push
-pre-commit installed at .git/hooks/pre-pus
-```
+        $ pre-commit install --hook-type commit-msg
+        pre-commit installed at .git/hooks/commit-msg
 
-now `pre-commit` will run automatically on `git commit`.
+        $ pre-commit install --hook-type pre-push
+        pre-commit installed at .git/hooks/pre-push
+
+Now, `pre-commit` will run automatically on `git commit`.
 
 ### Title
 
@@ -102,10 +101,12 @@ of what you were trying to do and what went wrong. You can also reach for help i
 ## Community
 
 The core team will be thrilled if you participate in any way you like. When you are stuck, try ask for help by filing an issue, with a detailed description of what you were trying to do and what went wrong. If you have any questions or if you would like to get involved in our community, please check out:
+
 - [GreptimeDB Community Slack](https://greptime.com/slack)
 - [GreptimeDB Github Discussions](https://github.com/GreptimeTeam/greptimedb/discussions)
 
 Also, see some extra GreptimeDB content:
+
 - [GreptimeDB Docs](https://greptime.com/docs)
 - [Learn GreptimeDB](https://greptime.com/products/db)
 - [Greptime Inc. Website](https://greptime.com)

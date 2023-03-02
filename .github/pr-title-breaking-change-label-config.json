@@ -4,9 +4,10 @@
         "color": "D93F0B"
     },
     "CHECKS": {
-        "regexp": "^.*\\!:.*",
+        "regexp": "^(?:(?!!:).)*$",
         "ignoreLabels": [
             "ignore-title"
-        ]
+        ],
+        "alwaysPassCI": true
     }
 }

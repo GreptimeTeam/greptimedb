@@ -160,27 +160,68 @@ impl TryFrom<StartCommand> for DatanodeOptions {
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
+    use std::io::Write;
     use std::time::Duration;
 
     use datanode::datanode::{CompactionConfig, ObjectStoreConfig};
     use servers::Mode;
+    use tempfile::NamedTempFile;
 
     use super::*;
 
     #[test]
     fn test_read_from_config_file() {
+        let mut file = NamedTempFile::new().unwrap();
+        let toml_str = r#"
+            mode = "distributed"
+            enable_memory_catalog = false
+            node_id = 42
+            rpc_addr = "127.0.0.1:3001"
+            rpc_hostname = "127.0.0.1"
+            rpc_runtime_size = 8
+            mysql_addr = "127.0.0.1:4406"
+            mysql_runtime_size = 2
+
+            [meta_client_options]
+            metasrv_addrs = ["127.0.0.1:3002"]
+            timeout_millis = 3000
+            connect_timeout_millis = 5000
+            tcp_nodelay = true
+
+            [wal]
+            dir = "/tmp/greptimedb/wal"
+            file_size = "1GB"
+            purge_threshold = "50GB"
+            purge_interval = "10m"
+            read_batch_size = 128
+            sync_write = false
+
+            [storage]
+            type = "File"
+            data_dir = "/tmp/greptimedb/data/"
+
+            [compaction]
+            max_inflight_tasks = 4
+            max_files_in_level0 = 8
+            max_purge_tasks = 32
+        "#;
+        write!(file, "{}", toml_str).unwrap();
+
         let cmd = StartCommand {
-            config_file: Some(format!(
-                "{}/../../config/datanode.example.toml",
-                std::env::current_dir().unwrap().as_path().to_str().unwrap()
-            )),
+            config_file: Some(file.path().to_str().unwrap().to_string()),
             ..Default::default()
         };
         let options: DatanodeOptions = cmd.try_into().unwrap();
         assert_eq!("127.0.0.1:3001".to_string(), options.rpc_addr);
-        assert_eq!("/tmp/greptimedb/wal".to_string(), options.wal.dir);
         assert_eq!("127.0.0.1:4406".to_string(), options.mysql_addr);
-        assert_eq!(4, options.mysql_runtime_size);
+        assert_eq!(2, options.mysql_runtime_size);
+        assert_eq!(Some(42), options.node_id);
+
+        assert_eq!(Duration::from_secs(600), options.wal.purge_interval);
+        assert_eq!(1024 * 1024 * 1024, options.wal.file_size.0);
+        assert_eq!(1024 * 1024 * 1024 * 50, options.wal.purge_threshold.0);
+        assert!(!options.wal.sync_write);
+
         let MetaClientOptions {
             metasrv_addrs: metasrv_addr,
             timeout_millis,
@@ -191,7 +232,7 @@ mod tests {
         assert_eq!(vec!["127.0.0.1:3002".to_string()], metasrv_addr);
         assert_eq!(5000, connect_timeout_millis);
         assert_eq!(3000, timeout_millis);
-        assert!(!tcp_nodelay);
+        assert!(tcp_nodelay);
 
         match options.storage {
             ObjectStoreConfig::File(FileConfig { data_dir }) => {
@@ -204,7 +245,7 @@ mod tests {
         assert_eq!(
             CompactionConfig {
                 max_inflight_tasks: 4,
-                max_files_in_level0: 16,
+                max_files_in_level0: 8,
                 max_purge_tasks: 32,
             },
             options.compaction
@@ -241,33 +282,5 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-    }
-
-    #[test]
-    fn test_merge_config() {
-        let dn_opts = DatanodeOptions::try_from(StartCommand {
-            config_file: Some(format!(
-                "{}/../../config/datanode.example.toml",
-                std::env::current_dir().unwrap().as_path().to_str().unwrap()
-            )),
-            ..Default::default()
-        })
-        .unwrap();
-        assert_eq!("/tmp/greptimedb/wal", dn_opts.wal.dir);
-        assert_eq!(Duration::from_secs(600), dn_opts.wal.purge_interval);
-        assert_eq!(1024 * 1024 * 1024, dn_opts.wal.file_size.0);
-        assert_eq!(1024 * 1024 * 1024 * 50, dn_opts.wal.purge_threshold.0);
-        assert!(!dn_opts.wal.sync_write);
-        assert_eq!(Some(42), dn_opts.node_id);
-        let MetaClientOptions {
-            metasrv_addrs: metasrv_addr,
-            timeout_millis,
-            connect_timeout_millis,
-            tcp_nodelay,
-        } = dn_opts.meta_client_options.unwrap();
-        assert_eq!(vec!["127.0.0.1:3002".to_string()], metasrv_addr);
-        assert_eq!(3000, timeout_millis);
-        assert_eq!(5000, connect_timeout_millis);
-        assert!(!tcp_nodelay);
     }
 }

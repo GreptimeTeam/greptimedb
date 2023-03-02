@@ -1414,6 +1414,7 @@ dependencies = [
  "snafu",
  "substrait 0.1.0",
  "tempdir",
+ "tempfile",
  "tokio",
  "toml",
 ]
@@ -7208,8 +7209,9 @@ dependencies = [
 
 [[package]]
 name = "sqlness"
-version = "0.3.0"
-source = "git+https://github.com/CeresDB/sqlness.git?rev=e6d602ed7d894ffb806580f17f4a6f1283abbf1f#e6d602ed7d894ffb806580f17f4a6f1283abbf1f"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc90b1d2e46d618148d3118ec25c3cb4c18563fef8589095fc21389952c54864"
 dependencies = [
  "async-trait",
  "derive_builder 0.11.2",
