@@ -39,7 +39,7 @@ impl<'a> ParserContext<'a> {
                     actual: self.peek_token_as_string(),
                 })?;
 
-        if self.parser.expect_keyword(Keyword::TO).is_ok() {
+        if self.parser.parse_keyword(Keyword::TO) {
             self.parse_copy_table_to(table_name)
         } else {
             self.parser
@@ -80,7 +80,7 @@ impl<'a> ParserContext<'a> {
                     }
                 }
                 //TODO: throws warnings?
-                &_ => (),
+                _ => (),
             }
         }
 
