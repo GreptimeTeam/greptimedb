@@ -2224,6 +2224,7 @@ name = "datanode"
 version = "0.1.0"
 dependencies = [
  "api",
+ "async-compat",
  "async-stream",
  "async-trait",
  "axum",
@@ -2248,8 +2249,10 @@ dependencies = [
  "datafusion-expr",
  "datatypes",
  "futures",
+ "futures-util",
  "humantime-serde",
  "hyper",
+ "lazy_static",
  "log-store",
  "meta-client",
  "meta-srv",
@@ -2259,6 +2262,7 @@ dependencies = [
  "pin-project",
  "prost",
  "query",
+ "regex",
  "script",
  "serde",
  "serde_json",
@@ -2278,6 +2282,7 @@ dependencies = [
  "tonic",
  "tower",
  "tower-http",
+ "url",
 ]
 
 [[package]]
@@ -3186,9 +3191,9 @@ dependencies = [
 
 [[package]]
 name = "http"
-version = "0.2.8"
+version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75f43d41e26995c17e71ee126451dd3941010b0514a81a9d11f3b341debc2399"
+checksum = "bd6effc99afb63425aff9b05836f029929e345a6148a14b7ecd5ab67af944482"
 dependencies = [
  "bytes",
  "fnv",

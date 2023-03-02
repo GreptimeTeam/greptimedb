@@ -21,6 +21,7 @@ use datafusion::parquet;
 use datatypes::prelude::ConcreteDataType;
 use storage::error::Error as StorageError;
 use table::error::Error as TableError;
+use url::ParseError;
 
 use crate::datanode::ObjectStoreConfig;
 
@@ -205,6 +206,30 @@ pub enum Error {
     #[snafu(display("Invalid SQL, error: {}", msg))]
     InvalidSql { msg: String },
 
+    #[snafu(display("Invalid url: {}, error :{}", url, source))]
+    InvalidUrl { url: String, source: ParseError },
+
+    #[snafu(display("Invalid filepath: {}", path))]
+    InvalidPath { path: String },
+
+    #[snafu(display("Invalid connection: {}", msg))]
+    InvalidConnection { msg: String },
+
+    #[snafu(display("Unsupported backend protocol: {}", protocol))]
+    UnsupportedBackendProtocol { protocol: String },
+
+    #[snafu(display("Failed to regex, source: {}", source))]
+    BuildRegex {
+        backtrace: Backtrace,
+        source: regex::Error,
+    },
+
+    #[snafu(display("Failed to parse the data, source: {}", source))]
+    ParseDataTypes {
+        #[snafu(backtrace)]
+        source: common_recordbatch::error::Error,
+    },
+
     #[snafu(display("Not support SQL, error: {}", msg))]
     NotSupportSql { msg: String },
 
@@ -377,6 +402,22 @@ pub enum Error {
         source: common_query::error::Error,
     },
 
+    #[snafu(display(
+        "File Schema mismatch, expected table schema: {} but found :{}",
+        table_schema,
+        file_schema
+    ))]
+    InvalidSchema {
+        table_schema: String,
+        file_schema: String,
+    },
+
+    #[snafu(display("Failed to read parquet file, source: {}", source))]
+    ReadParquet {
+        source: parquet::errors::ParquetError,
+        backtrace: Backtrace,
+    },
+
     #[snafu(display("Failed to write parquet file, source: {}", source))]
     WriteParquet {
         source: parquet::errors::ParquetError,
@@ -389,8 +430,28 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
+    #[snafu(display("Failed to build parquet record batch stream, source: {}", source))]
+    BuildParquetRecordBatchStream {
+        backtrace: Backtrace,
+        source: parquet::errors::ParquetError,
+    },
+
+    #[snafu(display("Failed to read object in path: {}, source: {}", path, source))]
+    ReadObject {
+        path: String,
+        backtrace: Backtrace,
+        source: object_store::Error,
+    },
+
     #[snafu(display("Failed to write object into path: {}, source: {}", path, source))]
     WriteObject {
+        path: String,
+        backtrace: Backtrace,
+        source: object_store::Error,
+    },
+
+    #[snafu(display("Failed to lists object in path: {}, source: {}", path, source))]
+    ListObjects {
         path: String,
         backtrace: Backtrace,
         source: object_store::Error,
@@ -456,6 +517,11 @@ impl ErrorExt for Error {
             ColumnValuesNumberMismatch { .. }
             | ColumnTypeMismatch { .. }
             | InvalidSql { .. }
+            | InvalidUrl { .. }
+            | InvalidPath { .. }
+            | InvalidConnection { .. }
+            | UnsupportedBackendProtocol { .. }
+            | BuildRegex { .. }
             | NotSupportSql { .. }
             | KeyColumnNotFound { .. }
             | IllegalPrimaryKeysDef { .. }
@@ -481,13 +547,19 @@ impl ErrorExt for Error {
             | RenameTable { .. }
             | Catalog { .. }
             | MissingRequiredField { .. }
+            | BuildParquetRecordBatchStream { .. }
+            | InvalidSchema { .. }
+            | ParseDataTypes { .. }
             | IncorrectInternalState { .. } => StatusCode::Internal,
 
             BuildBackend { .. }
             | InitBackend { .. }
+            | ReadParquet { .. }
             | WriteParquet { .. }
             | PollStream { .. }
-            | WriteObject { .. } => StatusCode::StorageUnavailable,
+            | ReadObject { .. }
+            | WriteObject { .. }
+            | ListObjects { .. } => StatusCode::StorageUnavailable,
             OpenLogStore { source } => source.status_code(),
             StartScriptManager { source } => source.status_code(),
             OpenStorageEngine { source } => source.status_code(),

@@ -33,7 +33,9 @@ use sql::statements::copy::CopyTable;
 use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
 use table::engine::TableReference;
-use table::requests::{CopyTableRequest, CreateDatabaseRequest, DropTableRequest};
+use table::requests::{
+    CopyTableFromRequest, CopyTableRequest, CreateDatabaseRequest, DropTableRequest,
+};
 
 use crate::error::{self, BumpTableIdSnafu, ExecuteSqlSnafu, Result, TableIdProviderNotFoundSnafu};
 use crate::instance::Instance;
@@ -202,7 +204,21 @@ impl Instance {
                         .execute(SqlRequest::CopyTable(req), query_ctx)
                         .await
                 }
-                CopyTable::From(_) => todo!(),
+                CopyTable::From(copy_table) => {
+                    let (catalog_name, schema_name, table_name) =
+                        table_idents_to_full_name(&copy_table.table_name, query_ctx.clone())?;
+                    let req = CopyTableFromRequest {
+                        catalog_name,
+                        schema_name,
+                        table_name,
+                        connection: copy_table.connection,
+                        pattern: copy_table.pattern,
+                        from: copy_table.from,
+                    };
+                    self.sql_handler
+                        .execute(SqlRequest::CopyTableFrom(req), query_ctx)
+                        .await
+                }
             },
             QueryStatement::Sql(Statement::Tql(tql)) => self.execute_tql(tql, query_ctx).await,
         }

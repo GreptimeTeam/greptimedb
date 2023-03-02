@@ -32,6 +32,7 @@ datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datatypes = { path = "../datatypes" }
 futures = "0.3"
+futures-util.workspace = true
 hyper = { version = "0.14", features = ["full"] }
 humantime-serde = "1.1"
 log-store = { path = "../log-store" }
@@ -60,6 +61,10 @@ tokio-stream = { version = "0.1", features = ["net"] }
 tonic.workspace = true
 tower = { version = "0.4", features = ["full"] }
 tower-http = { version = "0.3", features = ["full"] }
+regex = "1.6"
+lazy_static = "1.4"
+async-compat = "0.2"
+url = "2.3.1"
 
 [dev-dependencies]
 axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", branch = "patch-1" }
