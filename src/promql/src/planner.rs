@@ -337,7 +337,7 @@ impl PromPlanner {
                 })
             }
             PromExpr::Call(Call { func, args }) => {
-                // TODO(ruihang): refactor this, transform the AST in advance to include a empty metric table.
+                // TODO(ruihang): refactor this, transform the AST in advance to include an empty metric table.
                 if func.name == SPECIAL_TIME_FUNCTION {
                     self.ctx.time_index_column = Some(SPECIAL_TIME_FUNCTION.to_string());
                     self.ctx.value_columns = vec![DEFAULT_VALUE_COLUMN.to_string()];
