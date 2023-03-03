@@ -20,7 +20,6 @@ use std::result::Result as StdResult;
 use std::sync::{Arc, Weak};
 
 use common_recordbatch::{RecordBatch, RecordBatches};
-use common_telemetry::tracing::warn;
 use datatypes::arrow::array::Array;
 use datatypes::arrow::compute;
 use datatypes::data_type::{ConcreteDataType, DataType};
