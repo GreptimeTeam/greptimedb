@@ -26,7 +26,7 @@ use datatypes::schema::SchemaRef;
 
 use crate::error::{Result, UnsupportedSnafu};
 use crate::metadata::{FilterPushDownType, TableId, TableInfoRef, TableType};
-use crate::requests::{AlterTableRequest, DeleteRequest, InsertRequest};
+use crate::requests::{AlterTableRequest, DeleteRequest, FlushTableRequest, InsertRequest};
 
 pub type AlterContext = anymap::Map<dyn Any + Send + Sync>;
 
@@ -92,6 +92,11 @@ pub trait Table: Send + Sync {
             operation: "DELETE",
         }
         .fail()?
+    }
+
+    /// Flush table.
+    async fn flush(&self, _request: FlushTableRequest) -> Result<()> {
+        UnsupportedSnafu { operation: "FLUSH" }.fail()?
     }
 }
 
