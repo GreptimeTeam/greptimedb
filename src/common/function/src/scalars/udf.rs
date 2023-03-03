@@ -54,15 +54,18 @@ pub fn create_udf(func: FunctionRef) -> ScalarUdf {
             .collect();
 
         let result = func_cloned.eval(func_ctx, &args.context(FromScalarValueSnafu)?);
+        // FIXME(discord9): just use `Vector` to convert to `ColumnarValue`
+        let udf = result.map(ColumnarValue::Vector)?;
+        /*
 
-        let udf = if len.is_some() {
-            result.map(ColumnarValue::Vector)?
-        } else {
-            ScalarValue::try_from_array(&result?.to_arrow_array(), 0)
-                .map(ColumnarValue::Scalar)
-                .context(ExecuteFunctionSnafu)?
-        };
-
+                let udf = if len.is_some() {
+                    result.map(ColumnarValue::Vector)?
+                } else {
+                    ScalarValue::try_from_array(&result?.to_arrow_array(), 0)
+                        .map(ColumnarValue::Scalar)
+                        .context(ExecuteFunctionSnafu)?
+                };
+        */
         Ok(udf)
     });
 

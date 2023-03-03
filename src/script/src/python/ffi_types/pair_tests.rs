@@ -55,7 +55,7 @@ struct CodeBlockTestCase {
 struct CoprTestCase {
     // will be build to a RecordBatch and feed to coprocessor
     script: String,
-    expect: Option<HashMap<String, VectorRef>>
+    expect: Option<HashMap<String, VectorRef>>,
 }
 
 #[allow(unused)]
