@@ -470,7 +470,7 @@ def add(a, b):
     return a + b;
 
 @copr(args=["a", "b", "c"], returns = ["r"], sql="select number as a,number as b,number as c from numbers limit 100")
-def test(a, b, c):
+def test(a, b, c)->vector[f64]:
     return add(a, b) / g.sqrt(c + 1)
 "#;
         let script = script_engine
@@ -508,7 +508,7 @@ def test(a, b, c):
 import greptime as gt
 
 @copr(args=["number"], returns = ["r"], sql="select number from numbers limit 100")
-def test(a):
+def test(a)->vector[i64]:
     return gt.vector([x for x in a if x % 2 == 0])
 "#;
         let script = script_engine

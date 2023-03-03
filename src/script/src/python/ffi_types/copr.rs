@@ -20,6 +20,7 @@ use std::result::Result as StdResult;
 use std::sync::{Arc, Weak};
 
 use common_recordbatch::{RecordBatch, RecordBatches};
+use common_telemetry::tracing::error;
 use datatypes::arrow::array::Array;
 use datatypes::arrow::compute;
 use datatypes::data_type::{ConcreteDataType, DataType};
@@ -437,12 +438,12 @@ pub fn exec_parsed(
             {
                 pyo3_exec_parsed(copr, rb, params)
             }
+            // FIXME(discord9): rethink if this is ok to
             #[cfg(not(feature = "pyo3_backend"))]
-            OtherSnafu {
-                reason: "`pyo3` feature is disabled, therefore can't run scripts in cpython"
-                    .to_string(),
+            {
+                warn!("pyo3_backend` feature is disabled, therefore can't run scripts in cpython, fall back to rustpython backend");
+                rspy_exec_parsed(copr, rb, params)
             }
-            .fail()
         }
     }
 }

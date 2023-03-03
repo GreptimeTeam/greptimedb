@@ -19,7 +19,46 @@ use std::sync::Arc;
 use datatypes::prelude::ScalarVector;
 use datatypes::vectors::{BooleanVector, Float64Vector, Int64Vector, VectorRef};
 
+use super::CoprTestCase;
+use crate::python::ffi_types::copr::BackendType;
 use crate::python::ffi_types::pair_tests::CodeBlockTestCase;
+
+pub(super) fn generate_copr_intgrate_tests() -> Vec<CoprTestCase> {
+    vec![
+        CoprTestCase {
+            script: r#"
+@copr(args=["number", "number"],
+    returns=["value"],
+    sql = "select number from numbers limit 5", backend = "rspy")
+def add_vecs(n1, n2)->vector[i32]:
+    return n1 + n2
+"#
+            .to_string(),
+            ..Default::default()
+        },
+        CoprTestCase {
+            script: r#"
+@copr(args=["number", "number"],
+    returns=["value"],
+    sql = "select number from numbers limit 5", backend = "pyo3")
+def add_vecs(n1, n2)->vector[i32]:
+    return n1 + n2
+"#
+            .to_string(),
+            ..Default::default()
+        },
+        CoprTestCase {
+            script: r#"
+@copr(returns=["value"])
+def answer() -> vector[i64]:
+    from greptime import vector
+    return vector([42, 43, 44])
+"#
+            .to_string(),
+            ..Default::default()
+        },
+    ]
+}
 
 /// Generate tests for basic vector operations and basic builtin functions
 /// Using a function to generate testcase instead of `.ron` configure file because it's more flexible and we are in #[cfg(test)] so no binary bloat worrying

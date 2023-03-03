@@ -30,7 +30,10 @@ use rustpython_compiler::Mode;
 
 use crate::engine::{CompileContext, EvalContext, Script, ScriptEngine};
 use crate::python::engine::sample_script_engine;
-use crate::python::ffi_types::pair_tests::sample_testcases::sample_test_case;
+use crate::python::ffi_types::copr::BackendType;
+use crate::python::ffi_types::pair_tests::sample_testcases::{
+    generate_copr_intgrate_tests, sample_test_case,
+};
 use crate::python::ffi_types::PyVector;
 #[cfg(feature = "pyo3_backend")]
 use crate::python::pyo3::{init_cpython_interpreter, vector_impl::into_pyo3_cell};
@@ -52,23 +55,10 @@ struct CodeBlockTestCase {
 struct CoprTestCase {
     // will be build to a RecordBatch and feed to coprocessor
     script: String,
-    expect: Option<HashMap<String, VectorRef>>,
+    expect: Option<HashMap<String, VectorRef>>
 }
 
-fn generate_copr_intgrate_tests() -> Vec<CoprTestCase> {
-    vec![CoprTestCase {
-        script: r#"
-@copr(args=["number", "number"],
-    returns=["value"],
-    sql = "select number from numbers limit 5")
-def add_vecs(n1, n2)->vector[i32]:
-    return n1 + n2
-"#
-        .to_string(),
-        ..Default::default()
-    }]
-}
-
+#[allow(unused)]
 fn into_recordbatch(input: HashMap<String, VectorRef>) -> RecordBatch {
     let mut schema = Vec::new();
     let mut columns = Vec::new();
@@ -85,27 +75,36 @@ fn into_recordbatch(input: HashMap<String, VectorRef>) -> RecordBatch {
 async fn integrated_copr_test() {
     let testcases = generate_copr_intgrate_tests();
     let script_engine = sample_script_engine();
-    for case in testcases {
+    for (idx, case) in testcases.into_iter().enumerate() {
         let script = case.script;
         let script = script_engine
             .compile(&script, CompileContext::default())
             .await
             .unwrap();
-        dbg!(&script.copr);
         let output = script
             .execute(HashMap::default(), EvalContext::default())
             .await
             .unwrap();
-        let res = common_recordbatch::util::collect_batches(match output {
-            Output::Stream(s) => {
-                dbg!(&s.schema());
-                s
-            }
+        let res = match output {
+            Output::Stream(s) => common_recordbatch::util::collect_batches(s).await.unwrap(),
+            Output::RecordBatches(rbs) => rbs,
             _ => unreachable!(),
-        })
-        .await
-        .unwrap();
+        };
         let rb = res.iter().next().expect("One and only one recordbatch");
+        if let Some(expect_result) = case.expect {
+            let mut actual_result = HashMap::new();
+            for col_sch in rb.schema.column_schemas() {
+                let col = rb.column_by_name(&col_sch.name).unwrap();
+                actual_result.insert(col_sch.name.clone(), col.clone());
+            }
+            for (name, col) in expect_result {
+                let actual_col = actual_result.get(&name).expect("Column with this name");
+                if !check_equal(col.clone(), actual_col.clone()) {
+                    panic!("Column {name} doesn't match, expect {col:?}, found {actual_col:?}")
+                }
+            }
+        }
+        println!("Testcase {idx} .. Ok");
         dbg!(rb);
     }
 }

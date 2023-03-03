@@ -41,12 +41,12 @@ macro_rules! batch_import {
 #[pymodule]
 #[pyo3(name = "greptime")]
 pub(crate) fn greptime_builtins(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
+    m.add_class::<PyVector>()?;
     batch_import!(
         m,
         [
             lit,
             col,
-            vector,
             pow,
             clip,
             diff,

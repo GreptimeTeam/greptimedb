@@ -341,7 +341,7 @@ pub async fn test_scripts_api(store_type: StorageType) {
         .body(
             r#"
 @copr(sql='select number from numbers limit 10', args=['number'], returns=['n'])
-def test(n):
+def test(n)->vector[f64]:
     return n + 1;
 "#,
         )

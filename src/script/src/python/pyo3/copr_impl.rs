@@ -83,12 +83,16 @@ pub(crate) fn pyo3_exec_parsed(
     Python::with_gil(|py| -> Result<_> {
         let mut cols = (|| -> PyResult<_> {
             let dummy_decorator = "
+# Postponed evaluation of annotations(PEP 563) so annotation can be set freely
+# This is needed for Python < 3.9
+from __future__ import annotations
 # A dummy decorator, actual implementation is in Rust code
 def copr(*dummy, **kwdummy):
     def inner(func):
         return func
     return inner
 coprocessor = copr
+from greptime import vector
 ";
             let gen_call = format!("\n_return_from_coprocessor = {}(*_args_for_coprocessor, **_kwargs_for_coprocessor)", copr.name);
             let script = format!("{}{}{}", dummy_decorator, copr.script, gen_call);
