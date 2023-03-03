@@ -63,14 +63,8 @@ pub(crate) fn pyo3_exec_parsed(
     rb: &Option<RecordBatch>,
     params: &HashMap<String, String>,
 ) -> Result<RecordBatch> {
-    let arg_names = if let Some(names) = &copr.deco_args.arg_names {
-        names
-    } else {
-        return OtherSnafu {
-            reason: "PyO3 Backend doesn't support params yet".to_string(),
-        }
-        .fail();
-    };
+    // i.e params or use `vector(..)` to construct a PyVector
+    let arg_names = &copr.deco_args.arg_names.clone().unwrap_or(vec![]);
     let args: Vec<PyVector> = if let Some(rb) = rb {
         let args = select_from_rb(rb, arg_names)?;
         check_args_anno_real_type(arg_names, &args, copr, rb)?;

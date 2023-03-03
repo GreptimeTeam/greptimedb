@@ -22,7 +22,6 @@ use datafusion_physical_expr::{math_expressions, AggregateExpr};
 use datatypes::vectors::VectorRef;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyList;
 
 use super::utils::scalar_value_to_py_any;
 use crate::python::ffi_types::utils::all_to_f64;
@@ -202,11 +201,6 @@ macro_rules! simple_vector_fn {
             eval_aggr_func(py, $name_str, &[$($arg),*])
         }
     };
-}
-
-#[pyfunction]
-fn vector(iterable: &PyList) -> PyResult<PyVector> {
-    PyVector::py_new(iterable)
 }
 
 // TODO(discord9): More Aggr functions& allow threads

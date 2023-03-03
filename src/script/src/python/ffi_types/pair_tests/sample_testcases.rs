@@ -20,7 +20,6 @@ use datatypes::prelude::ScalarVector;
 use datatypes::vectors::{BooleanVector, Float64Vector, Int64Vector, VectorRef};
 
 use super::CoprTestCase;
-use crate::python::ffi_types::copr::BackendType;
 use crate::python::ffi_types::pair_tests::CodeBlockTestCase;
 
 pub(super) fn generate_copr_intgrate_tests() -> Vec<CoprTestCase> {
@@ -36,6 +35,7 @@ def add_vecs(n1, n2)->vector[i32]:
             .to_string(),
             ..Default::default()
         },
+        #[cfg(feature = "pyo3_backend")]
         CoprTestCase {
             script: r#"
 @copr(args=["number", "number"],
@@ -50,6 +50,17 @@ def add_vecs(n1, n2)->vector[i32]:
         CoprTestCase {
             script: r#"
 @copr(returns=["value"])
+def answer() -> vector[i64]:
+    from greptime import vector
+    return vector([42, 43, 44])
+"#
+            .to_string(),
+            ..Default::default()
+        },
+        #[cfg(feature = "pyo3_backend")]
+        CoprTestCase {
+            script: r#"
+@copr(returns=["value"], backend = "pyo3")
 def answer() -> vector[i64]:
     from greptime import vector
     return vector([42, 43, 44])

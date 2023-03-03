@@ -14,9 +14,9 @@
 
 use std::sync::Arc;
 
-use common_query::error::{ExecuteFunctionSnafu, FromScalarValueSnafu};
+use common_query::error::FromScalarValueSnafu;
 use common_query::prelude::{
-    ColumnarValue, ReturnTypeFunction, ScalarFunctionImplementation, ScalarUdf, ScalarValue,
+    ColumnarValue, ReturnTypeFunction, ScalarFunctionImplementation, ScalarUdf,
 };
 use datatypes::error::Error as DataTypeError;
 use datatypes::prelude::*;

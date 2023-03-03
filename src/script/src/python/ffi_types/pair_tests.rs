@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use common_query::Output;
 use common_recordbatch::RecordBatch;
+use common_telemetry::info;
 use datafusion::arrow::array::Float64Array;
 use datafusion::arrow::compute;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
@@ -30,7 +31,6 @@ use rustpython_compiler::Mode;
 
 use crate::engine::{CompileContext, EvalContext, Script, ScriptEngine};
 use crate::python::engine::sample_script_engine;
-use crate::python::ffi_types::copr::BackendType;
 use crate::python::ffi_types::pair_tests::sample_testcases::{
     generate_copr_intgrate_tests, sample_test_case,
 };
@@ -72,7 +72,7 @@ fn into_recordbatch(input: HashMap<String, VectorRef>) -> RecordBatch {
 }
 
 #[tokio::test]
-async fn integrated_copr_test() {
+async fn integrated_py_copr_test() {
     let testcases = generate_copr_intgrate_tests();
     let script_engine = sample_script_engine();
     for (idx, case) in testcases.into_iter().enumerate() {
@@ -104,7 +104,7 @@ async fn integrated_copr_test() {
                 }
             }
         }
-        println!("Testcase {idx} .. Ok");
+        info!("Testcase {idx} .. Ok");
         dbg!(rb);
     }
 }
