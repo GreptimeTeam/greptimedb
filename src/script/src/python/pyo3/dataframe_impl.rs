@@ -224,6 +224,7 @@ impl PyDataFrame {
     }
 }
 
+/// Convert a Python Object into a `Expr` for use in constructing literal i.e. `col("number") < lit(42)`
 #[pyfunction]
 pub(crate) fn lit(py: Python<'_>, value: PyObject) -> PyResult<PyExpr> {
     let value = pyo3_obj_try_to_typed_scalar_value(value.as_ref(py), None)?;

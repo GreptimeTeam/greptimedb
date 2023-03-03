@@ -439,11 +439,13 @@ pub fn exec_parsed(
             {
                 pyo3_exec_parsed(copr, rb, params)
             }
-            // FIXME(discord9): rethink if this is ok to fall back
             #[cfg(not(feature = "pyo3_backend"))]
             {
-                warn!("pyo3_backend` feature is disabled, therefore can't run scripts in cpython, fall back to rustpython backend");
-                rspy_exec_parsed(copr, rb, params)
+                OtherSnafu {
+                    reason: "`pyo3` feature is disabled, therefore can't run scripts in cpython"
+                        .to_string(),
+                }
+                .fail()
             }
         }
     }

@@ -39,7 +39,7 @@ use crate::python::ffi_types::PyVector;
 use crate::python::pyo3::{init_cpython_interpreter, vector_impl::into_pyo3_cell};
 use crate::python::rspython::init_interpreter;
 
-//TODO(discord9): paired test for slicing Vector
+// TODO(discord9): paired test for slicing Vector
 // & slice tests & lit() function for dataframe & test with full coprocessor&query engine ability
 /// generate testcases that should be tested in paired both in RustPython and CPython
 #[derive(Debug, Clone)]

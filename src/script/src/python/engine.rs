@@ -85,8 +85,8 @@ impl PyUDF {
         // for Coprocessor
         let args = self.copr.deco_args.arg_names.clone();
         let try_get_name = |i: usize| {
-            if let Some(args) = args.as_ref() {
-                args[i].clone()
+            if let Some(arg_name) = args.as_ref().and_then(|args| args.get(i)) {
+                arg_name.clone()
             } else {
                 format!("name_{i}")
             }
@@ -149,7 +149,6 @@ impl Function for PyUDF {
         _func_ctx: common_function::scalars::function::FunctionContext,
         columns: &[datatypes::vectors::VectorRef],
     ) -> common_query::error::Result<datatypes::vectors::VectorRef> {
-        // FIXME(discord9): the returned vector will be truncated if no args is provided
         // FIXME(discord9): exec_parsed require a RecordBatch(basically a Vector+Schema), where schema can't pop out from nowhere, right?
         let schema = self.fake_schema(columns);
         let columns = columns.to_vec();
@@ -378,7 +377,7 @@ mod tests {
 import greptime as gt
 
 @copr(args=["number"], returns = ["number"], sql = "select * from numbers")
-def test(number)->vector[u32]:
+def test(number)-> vector[u32]:
     return query.sql("select * from numbers")[0][0]
 "#;
         let script = script_engine
@@ -405,7 +404,7 @@ def test(number)->vector[u32]:
 
         let script = r#"
 @copr(returns = ["number"])
-def test(**params)->vector[i64]:
+def test(**params)-> vector[i64]:
     return int(params['a']) + int(params['b'])
 "#;
         let script = script_engine
@@ -438,7 +437,7 @@ import greptime as gt
 from data_frame import col
 
 @copr(args=["number"], returns = ["number"], sql = "select * from numbers")
-def test(number)->vector[u32]:
+def test(number)-> vector[u32]:
     return dataframe.filter(col("number")==col("number")).collect()[0][0]
 "#;
         let script = script_engine
@@ -470,7 +469,7 @@ def add(a, b):
     return a + b;
 
 @copr(args=["a", "b", "c"], returns = ["r"], sql="select number as a,number as b,number as c from numbers limit 100")
-def test(a, b, c)->vector[f64]:
+def test(a, b, c)-> vector[f64]:
     return add(a, b) / g.sqrt(c + 1)
 "#;
         let script = script_engine
@@ -508,7 +507,7 @@ def test(a, b, c)->vector[f64]:
 import greptime as gt
 
 @copr(args=["number"], returns = ["r"], sql="select number from numbers limit 100")
-def test(a)->vector[i64]:
+def test(a)-> vector[i64]:
     return gt.vector([x for x in a if x % 2 == 0])
 "#;
         let script = script_engine

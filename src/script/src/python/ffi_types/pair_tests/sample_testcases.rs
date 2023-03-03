@@ -28,8 +28,8 @@ pub(super) fn generate_copr_intgrate_tests() -> Vec<CoprTestCase> {
             script: r#"
 @copr(args=["number", "number"],
     returns=["value"],
-    sql = "select number from numbers limit 5", backend = "rspy")
-def add_vecs(n1, n2)->vector[i32]:
+    sql="select number from numbers limit 5", backend="rspy")
+def add_vecs(n1, n2) -> vector[i32]:
     return n1 + n2
 "#
             .to_string(),
@@ -40,8 +40,8 @@ def add_vecs(n1, n2)->vector[i32]:
             script: r#"
 @copr(args=["number", "number"],
     returns=["value"],
-    sql = "select number from numbers limit 5", backend = "pyo3")
-def add_vecs(n1, n2)->vector[i32]:
+    sql="select number from numbers limit 5", backend="pyo3")
+def add_vecs(n1, n2) -> vector[i32]:
     return n1 + n2
 "#
             .to_string(),
@@ -60,10 +60,21 @@ def answer() -> vector[i64]:
         #[cfg(feature = "pyo3_backend")]
         CoprTestCase {
             script: r#"
-@copr(returns=["value"], backend = "pyo3")
+@copr(returns=["value"], backend="pyo3")
 def answer() -> vector[i64]:
     from greptime import vector
     return vector([42, 43, 44])
+"#
+            .to_string(),
+            ..Default::default()
+        },
+        CoprTestCase {
+            script: r#"
+@copr(returns=["value"], backend="pyo3")
+def answer() -> vector[i64]:
+    from greptime import vector, col, lit
+    ret = dataframe.select([col("number")]).filter(col("number")<lit(3)).collect()[0][0]
+    return ret
 "#
             .to_string(),
             ..Default::default()

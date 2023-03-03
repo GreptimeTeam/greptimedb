@@ -30,7 +30,7 @@ async fn test_insert_py_udf_and_query() -> Result<()> {
     let instance = create_testing_instance(table);
     let src = r#"
 @coprocessor(args=["uint32s"], returns = ["ret"])
-def double_that(col)->vector[u32]:
+def double_that(col) -> vector[u32]:
     return col*2
     "#;
     instance
