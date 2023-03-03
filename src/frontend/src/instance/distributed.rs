@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::{
-    column_def, AlterExpr, CreateDatabaseExpr, CreateTableExpr, DropTableExpr, InsertRequest,
-    TableId,
+    column_def, AlterExpr, CreateDatabaseExpr, CreateTableExpr, DropTableExpr, FlushTableExpr,
+    InsertRequest, TableId,
 };
 use async_trait::async_trait;
 use catalog::helper::{SchemaKey, SchemaValue};
@@ -40,7 +40,7 @@ use meta_client::client::MetaClient;
 use meta_client::rpc::router::DeleteRequest as MetaDeleteRequest;
 use meta_client::rpc::{
     CompareAndPutRequest, CreateRequest as MetaCreateRequest, Partition as MetaPartition,
-    RouteResponse, TableName,
+    RouteRequest, RouteResponse, TableName,
 };
 use partition::partition::{PartitionBound, PartitionDef};
 use query::parser::{PromQuery, QueryStatement};
@@ -264,6 +264,61 @@ impl DistInstance {
         }
 
         Ok(Output::AffectedRows(1))
+    }
+
+    async fn flush_table(&self, table_name: TableName, region_id: Option<u32>) -> Result<Output> {
+        let _ = self
+            .catalog_manager
+            .table(
+                &table_name.catalog_name,
+                &table_name.schema_name,
+                &table_name.table_name,
+            )
+            .await
+            .context(CatalogSnafu)?
+            .with_context(|| TableNotFoundSnafu {
+                table_name: table_name.to_string(),
+            })?;
+
+        let route_response = self
+            .meta_client
+            .route(RouteRequest {
+                table_names: vec![table_name.clone()],
+            })
+            .await
+            .context(RequestMetaSnafu)?;
+
+        let expr = FlushTableExpr {
+            catalog_name: table_name.catalog_name.clone(),
+            schema_name: table_name.schema_name.clone(),
+            table_name: table_name.table_name.clone(),
+            region_id,
+        };
+
+        for table_route in &route_response.table_routes {
+            let should_send_rpc = table_route.region_routes.iter().any(|route| {
+                if let Some(region_id) = region_id {
+                    region_id == route.region.id as u32
+                } else {
+                    true
+                }
+            });
+
+            if !should_send_rpc {
+                continue;
+            }
+            for datanode in table_route.find_leaders() {
+                debug!("Flushing table {table_name} on Datanode {datanode:?}");
+
+                let client = self.datanode_clients.get_client(&datanode).await;
+                let client = Database::new(&expr.catalog_name, &expr.schema_name, client);
+                client
+                    .flush_table(expr.clone())
+                    .await
+                    .context(RequestDatanodeSnafu)?;
+            }
+        }
+        Ok(Output::AffectedRows(0))
     }
 
     async fn handle_statement(

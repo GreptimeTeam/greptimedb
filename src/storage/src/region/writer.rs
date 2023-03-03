@@ -689,14 +689,11 @@ impl WriterInner {
         Some(schedule_compaction_cb)
     }
 
-    async fn manual_flush<S: LogStore>(
-        &mut self,
-        writer_ctx: WriterContext<'_, S>,
-    ) -> Result<()> {
+    async fn manual_flush<S: LogStore>(&mut self, writer_ctx: WriterContext<'_, S>) -> Result<()> {
         self.trigger_flush(&writer_ctx).await?;
         Ok(())
     }
-    
+
     #[inline]
     fn is_closed(&self) -> bool {
         self.closed

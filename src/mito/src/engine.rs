@@ -61,17 +61,17 @@ const INIT_TABLE_VERSION: TableVersion = 0;
 
 /// Generate region name in the form of "{TABLE_ID}_{REGION_NUMBER}"
 #[inline]
-fn region_name(table_id: TableId, n: u32) -> String {
+pub fn region_name(table_id: TableId, n: u32) -> String {
     format!("{table_id}_{n:010}")
 }
 
 #[inline]
-fn region_id(table_id: TableId, n: u32) -> RegionId {
+pub fn region_id(table_id: TableId, n: u32) -> RegionId {
     (u64::from(table_id) << 32) | u64::from(n)
 }
 
 #[inline]
-fn table_dir(catalog_name: &str, schema_name: &str, table_id: TableId) -> String {
+pub fn table_dir(catalog_name: &str, schema_name: &str, table_id: TableId) -> String {
     format!("{catalog_name}/{schema_name}/{table_id}/")
 }
 

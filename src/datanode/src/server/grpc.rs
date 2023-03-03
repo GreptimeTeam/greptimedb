@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::{AlterExpr, CreateTableExpr, DropTableExpr};
+use api::v1::{AlterExpr, CreateTableExpr, DropTableExpr, FlushTableExpr};
 use common_grpc_expr::{alter_expr_to_request, create_expr_to_request};
 use common_query::Output;
 use common_telemetry::info;
 use session::context::QueryContext;
 use snafu::prelude::*;
-use table::requests::DropTableRequest;
+use table::requests::{DropTableRequest, FlushTableRequest};
 
 use crate::error::{
     AlterExprToRequestSnafu, BumpTableIdSnafu, CreateExprToRequestSnafu,
@@ -80,6 +80,18 @@ impl Instance {
         };
         self.sql_handler()
             .execute(SqlRequest::DropTable(req), QueryContext::arc())
+            .await
+    }
+
+    pub(crate) async fn handle_flush_table(&self, expr: FlushTableExpr) -> Result<Output> {
+        let req = FlushTableRequest {
+            catalog_name: expr.catalog_name,
+            schema_name: expr.schema_name,
+            table_name: expr.table_name,
+            region_id: expr.region_id,
+        };
+        self.sql_handler()
+            .execute(SqlRequest::FlushTable(req), QueryContext::arc())
             .await
     }
 }

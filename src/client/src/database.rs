@@ -19,8 +19,8 @@ use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{
-    AlterExpr, AuthHeader, CreateTableExpr, DdlRequest, DropTableExpr, GreptimeRequest,
-    InsertRequest, PromRangeQuery, QueryRequest, RequestHeader,
+    AlterExpr, AuthHeader, CreateTableExpr, DdlRequest, DropTableExpr, FlushTableExpr,
+    GreptimeRequest, InsertRequest, PromRangeQuery, QueryRequest, RequestHeader,
 };
 use arrow_flight::{FlightData, Ticket};
 use common_error::prelude::*;
@@ -131,6 +131,13 @@ impl Database {
     pub async fn drop_table(&self, expr: DropTableExpr) -> Result<Output> {
         self.do_get(Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::DropTable(expr)),
+        }))
+        .await
+    }
+
+    pub async fn flush_table(&self, expr: FlushTableExpr) -> Result<Output> {
+        self.do_get(Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::FlushTable(expr)),
         }))
         .await
     }

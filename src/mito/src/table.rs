@@ -44,7 +44,7 @@ use table::metadata::{
     FilterPushDownType, RawTableInfo, TableInfo, TableInfoRef, TableMeta, TableType,
 };
 use table::requests::{
-    AddColumnRequest, AlterKind, AlterTableRequest, DeleteRequest, InsertRequest,
+    AddColumnRequest, AlterKind, AlterTableRequest, DeleteRequest, FlushTableRequest, InsertRequest,
 };
 use table::table::scan::SimpleTableScan;
 use table::table::{AlterContext, Table};
@@ -321,6 +321,25 @@ impl<R: Region> Table for MitoTable<R> {
             rows_deleted += rows_num;
         }
         Ok(rows_deleted)
+    }
+
+    async fn flush(&self, request: FlushTableRequest) -> TableResult<()> {
+        if let Some(region_id) = request.region_id {
+            if let Some(region) = self.regions.get(&region_id) {
+                region
+                    .flush()
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(table_error::TableOperationSnafu)?;
+            };
+        } else {
+            futures::future::try_join_all(self.regions.values().map(|region| region.flush()))
+                .await
+                .map_err(BoxedError::new)
+                .context(table_error::TableOperationSnafu)?;
+        };
+
+        Ok(())
     }
 }
 

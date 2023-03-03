@@ -25,3 +25,5 @@ pub mod server;
 pub mod sql;
 #[cfg(test)]
 mod tests;
+
+pub use mito::engine::{region_id, region_name, table_dir};
