@@ -18,6 +18,7 @@ use std::sync::Arc;
 use catalog::remote::MetaKvBackend;
 use catalog::CatalogManagerRef;
 use common_catalog::consts::MIN_USER_TABLE_ID;
+use common_wrcu::WrcuStat;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_srv::mocks::MockInfo;
 use mito::config::EngineConfig as TableEngineConfig;
@@ -87,6 +88,7 @@ impl Instance {
                     None,
                     meta_client.clone(),
                     catalog.clone(),
+                    WrcuStat::default(),
                 );
                 (catalog as CatalogManagerRef, factory, Some(heartbeat_task))
             }
@@ -118,6 +120,7 @@ impl Instance {
             script_executor,
             table_id_provider: Some(Arc::new(LocalTableIdProvider::default())),
             heartbeat_task,
+            wrcu_stat: None,
         })
     }
 }

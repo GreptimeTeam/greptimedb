@@ -12,13 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::v1::meta::{HeartbeatRequest, HeartbeatResponse, NodeStat, Peer};
-use catalog::{region_number, CatalogManagerRef};
+use api::v1::meta::{HeartbeatRequest, HeartbeatResponse, NodeStat, Peer, RegionStat, TableName};
+use catalog::{table_regions_map, CatalogManagerRef, FullTableName};
 use common_telemetry::{error, info, warn};
+use common_wrcu::{StatKey, Statistics, WrcuStat};
 use meta_client::client::{HeartbeatSender, MetaClient};
 use snafu::ResultExt;
 
@@ -31,6 +33,7 @@ pub struct HeartbeatTask {
     running: Arc<AtomicBool>,
     meta_client: Arc<MetaClient>,
     catalog_manager: CatalogManagerRef,
+    wrcu_stat: WrcuStat,
     interval: u64,
 }
 
@@ -48,6 +51,7 @@ impl HeartbeatTask {
         server_hostname: Option<String>,
         meta_client: Arc<MetaClient>,
         catalog_manager: CatalogManagerRef,
+        wrcu_stat: WrcuStat,
     ) -> Self {
         Self {
             node_id,
@@ -56,6 +60,7 @@ impl HeartbeatTask {
             running: Arc::new(AtomicBool::new(false)),
             meta_client,
             catalog_manager,
+            wrcu_stat,
             interval: 5_000, // default interval is set to 5 secs
         }
     }
@@ -104,13 +109,33 @@ impl HeartbeatTask {
 
         let catalog_manager_clone = self.catalog_manager.clone();
         let mut tx = Self::create_streams(&meta_client, running.clone()).await?;
+
+        let wrcu_stat = self.wrcu_stat.clone();
+
         common_runtime::spawn_bg(async move {
             while running.load(Ordering::Acquire) {
-                let region_num = match region_number(&catalog_manager_clone).await {
-                    Ok(region_num) => region_num as i64,
+                let table_regions_map = table_regions_map(&catalog_manager_clone).await;
+
+                let total_regions = match table_regions_map.as_ref() {
+                    Ok(map) => map.iter().map(|(_, regions)| regions.len()).sum::<usize>() as i64,
                     Err(e) => {
                         error!("failed to get region number, err: {e:?}");
                         -1
+                    }
+                };
+
+                let Statistics {
+                    wcus,
+                    rcus,
+                    region_wcu_map,
+                    region_rcu_map,
+                } = wrcu_stat.statistics_and_clear();
+
+                let region_stats = match table_regions_map.as_ref() {
+                    Ok(map) => combine_region_stats(region_wcu_map, region_rcu_map, map),
+                    Err(e) => {
+                        error!("failed to get region stats, err: {e:?}");
+                        vec![]
                     }
                 };
 
@@ -120,9 +145,12 @@ impl HeartbeatTask {
                         addr: addr.clone(),
                     }),
                     node_stat: Some(NodeStat {
-                        region_num,
+                        region_num: total_regions,
+                        wcus: wcus as i64,
+                        rcus: rcus as i64,
                         ..Default::default()
                     }),
+                    region_stats,
                     ..Default::default()
                 };
 
@@ -147,7 +175,6 @@ impl HeartbeatTask {
 }
 
 /// Resolves hostname:port address for meta registration
-///
 fn resolve_addr(bind_addr: &str, hostname_addr: &Option<String>) -> String {
     match hostname_addr {
         Some(hostname_addr) => {
@@ -163,6 +190,63 @@ fn resolve_addr(bind_addr: &str, hostname_addr: &Option<String>) -> String {
         }
         None => bind_addr.to_owned(),
     }
+}
+
+/// Combined region status according to the parameters
+fn combine_region_stats(
+    region_wcu_map: HashMap<StatKey, u64>,
+    region_rcu_map: HashMap<StatKey, u64>,
+    table_regions_map: &HashMap<FullTableName, Vec<u32>>,
+) -> Vec<RegionStat> {
+    let mut region_stats = vec![];
+    for (
+        FullTableName {
+            catalog_name,
+            schema_name,
+            table_name,
+        },
+        regions,
+    ) in table_regions_map
+    {
+        for region_id in regions {
+            let full_table_name = Some(TableName {
+                catalog_name: catalog_name.to_string(),
+                schema_name: schema_name.to_string(),
+                table_name: table_name.to_string(),
+            });
+
+            let wcus = region_wcu_map
+                .get(&StatKey {
+                    catalog: catalog_name.clone(),
+                    schema: schema_name.clone(),
+                    table: table_name.clone(),
+                    region_number: *region_id,
+                })
+                .map(|x| *x as i64)
+                .unwrap_or_default();
+
+            let rcus = region_rcu_map
+                .get(&StatKey {
+                    catalog: catalog_name.clone(),
+                    schema: schema_name.clone(),
+                    table: table_name.clone(),
+                    region_number: *region_id,
+                })
+                .map(|x| *x as i64)
+                .unwrap_or_default();
+
+            let region_stat = RegionStat {
+                region_id: *region_id as u64,
+                table_name: full_table_name,
+                wcus,
+                rcus,
+                ..Default::default()
+            };
+
+            region_stats.push(region_stat);
+        }
+    }
+    region_stats
 }
 
 #[cfg(test)]

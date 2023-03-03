@@ -19,6 +19,7 @@ members = [
     "src/common/substrait",
     "src/common/telemetry",
     "src/common/time",
+    "src/common/wrcu",
     "src/datanode",
     "src/datatypes",
     "src/frontend",

@@ -15,6 +15,7 @@
 #![feature(assert_matches)]
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
@@ -225,9 +226,18 @@ pub(crate) async fn handle_system_table_request<'a, M: CatalogManager>(
     Ok(())
 }
 
-/// The number of regions in the datanode node.
-pub async fn region_number(catalog_manager: &CatalogManagerRef) -> Result<u64> {
-    let mut region_number: u64 = 0;
+#[derive(Hash, PartialEq, Eq)]
+pub struct FullTableName {
+    pub catalog_name: String,
+    pub schema_name: String,
+    pub table_name: String,
+}
+
+/// The map of full_table_name to region_ids in the datanode node.
+pub async fn table_regions_map(
+    catalog_manager: &CatalogManagerRef,
+) -> Result<HashMap<FullTableName, Vec<u32>>> {
+    let mut table_regions_map = HashMap::new();
 
     for catalog_name in catalog_manager.catalog_names()? {
         let catalog =
@@ -254,10 +264,19 @@ pub async fn region_number(catalog_manager: &CatalogManagerRef) -> Result<u64> {
                             table_info: &table_name,
                         })?;
 
-                let region_numbers = &table.table_info().meta.region_numbers;
-                region_number += region_numbers.len() as u64;
+                let table_info = table.table_info();
+                let region_numbers = table_info.meta.region_numbers.clone();
+
+                table_regions_map.insert(
+                    FullTableName {
+                        catalog_name: catalog_name.clone(),
+                        schema_name: schema_name.clone(),
+                        table_name,
+                    },
+                    region_numbers,
+                );
             }
         }
     }
-    Ok(region_number)
+    Ok(table_regions_map)
 }

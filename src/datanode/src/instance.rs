@@ -24,6 +24,7 @@ use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::info;
+use common_wrcu::WrcuStat;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::LogConfig;
 use meta_client::client::{MetaClient, MetaClientBuilder};
@@ -71,6 +72,7 @@ pub struct Instance {
     pub(crate) script_executor: ScriptExecutor,
     pub(crate) table_id_provider: Option<TableIdProviderRef>,
     pub(crate) heartbeat_task: Option<HeartbeatTask>,
+    pub(crate) wrcu_stat: Option<WrcuStat>,
 }
 
 pub type InstanceRef = Arc<Instance>;
@@ -165,15 +167,22 @@ impl Instance {
         let script_executor =
             ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?;
 
-        let heartbeat_task = match opts.mode {
-            Mode::Standalone => None,
-            Mode::Distributed => Some(HeartbeatTask::new(
-                opts.node_id.context(MissingNodeIdSnafu)?,
-                opts.rpc_addr.clone(),
-                opts.rpc_hostname.clone(),
-                meta_client.as_ref().unwrap().clone(),
-                catalog_manager.clone(),
-            )),
+        let (heartbeat_task, wrcu_stat) = match opts.mode {
+            Mode::Standalone => (None, None),
+            Mode::Distributed => {
+                let wrcu_stat = WrcuStat::default();
+                (
+                    Some(HeartbeatTask::new(
+                        opts.node_id.context(MissingNodeIdSnafu)?,
+                        opts.rpc_addr.clone(),
+                        opts.rpc_hostname.clone(),
+                        meta_client.as_ref().unwrap().clone(),
+                        catalog_manager.clone(),
+                        wrcu_stat.clone(),
+                    )),
+                    Some(wrcu_stat),
+                )
+            }
         };
 
         let procedure_manager = create_procedure_manager(&opts.procedure).await?;
@@ -206,6 +215,7 @@ impl Instance {
             script_executor,
             heartbeat_task,
             table_id_provider,
+            wrcu_stat,
         })
     }
 

@@ -1,0 +1,13 @@
+[package]
+name = "common-wrcu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+api = { path = "../../api" }
+dashmap = "5.4"
+parking_lot = "0.12"
+snafu = { version = "0.7", features = ["backtraces"] }
+
+[dev-dependencies]

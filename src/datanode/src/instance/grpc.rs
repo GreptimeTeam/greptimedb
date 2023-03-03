@@ -71,6 +71,11 @@ impl Instance {
     ) -> Result<Output> {
         let catalog = &ctx.current_catalog();
         let schema = &ctx.current_schema();
+
+        if let Some(wrcu_stat) = self.wrcu_stat.as_ref() {
+            wrcu_stat.add_grpc_insert_req(catalog, schema, &request);
+        }
+
         let table_name = &request.table_name.clone();
         let table = self
             .catalog_manager
