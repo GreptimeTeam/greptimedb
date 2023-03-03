@@ -18,6 +18,7 @@ common-recordbatch = { path = "../common/recordbatch" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
+dashmap = "5.4"
 datafusion.workspace = true
 datatypes = { path = "../datatypes" }
 futures = "0.3"

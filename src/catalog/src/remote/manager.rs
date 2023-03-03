@@ -22,6 +22,7 @@ use async_stream::stream;
 use async_trait::async_trait;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use common_telemetry::{debug, error, info};
+use dashmap::DashMap;
 use futures::Stream;
 use futures_util::StreamExt;
 use snafu::{OptionExt, ResultExt};
@@ -39,6 +40,7 @@ use crate::error::{
 use crate::helper::{
     build_catalog_prefix, build_schema_prefix, build_table_global_prefix, CatalogKey, CatalogValue,
     SchemaKey, SchemaValue, TableGlobalKey, TableGlobalValue, TableRegionalKey, TableRegionalValue,
+    CATALOG_KEY_PREFIX,
 };
 use crate::remote::{Kv, KvBackendRef};
 use crate::{
@@ -51,10 +53,9 @@ use crate::{
 pub struct RemoteCatalogManager {
     node_id: u64,
     backend: KvBackendRef,
-    catalogs: Arc<ArcSwap<HashMap<String, CatalogProviderRef>>>,
+    catalogs: Arc<DashMap<String, CatalogProviderRef>>,
     engine: TableEngineRef,
     system_table_requests: Mutex<Vec<RegisterSystemTableRequest>>,
-    mutex: Arc<Mutex<()>>,
 }
 
 impl RemoteCatalogManager {
@@ -65,7 +66,6 @@ impl RemoteCatalogManager {
             backend,
             catalogs: Default::default(),
             system_table_requests: Default::default(),
-            mutex: Default::default(),
         }
     }
 
@@ -386,7 +386,11 @@ impl CatalogManager for RemoteCatalogManager {
             "Initialized catalogs: {:?}",
             catalogs.keys().cloned().collect::<Vec<_>>()
         );
-        self.catalogs.store(Arc::new(catalogs));
+
+        catalogs.into_iter().for_each(|(k, v)| {
+            self.catalogs.insert(k, v);
+        });
+
         info!("Max table id allocated: {}", max_table_id);
 
         let mut system_table_requests = self.system_table_requests.lock().await;
@@ -504,12 +508,10 @@ impl CatalogList for RemoteCatalogManager {
     ) -> Result<Option<CatalogProviderRef>> {
         let key = self.build_catalog_key(&name).to_string();
         let backend = self.backend.clone();
-        let mutex = self.mutex.clone();
         let catalogs = self.catalogs.clone();
 
         std::thread::spawn(|| {
             common_runtime::block_on_write(async move {
-                let _guard = mutex.lock().await;
                 backend
                     .set(
                         key.as_bytes(),
@@ -518,11 +520,9 @@ impl CatalogList for RemoteCatalogManager {
                             .context(InvalidCatalogValueSnafu)?,
                     )
                     .await?;
-                let prev_catalogs = catalogs.load();
-                let mut new_catalogs = HashMap::with_capacity(prev_catalogs.len() + 1);
-                new_catalogs.clone_from(&prev_catalogs);
-                let prev = new_catalogs.insert(name, catalog);
-                catalogs.store(Arc::new(new_catalogs));
+
+                let prev = catalogs.insert(name, catalog.clone());
+
                 Ok(prev)
             })
         })
@@ -532,12 +532,51 @@ impl CatalogList for RemoteCatalogManager {
 
     /// List all catalogs from metasrv
     fn catalog_names(&self) -> Result<Vec<String>> {
-        Ok(self.catalogs.load().keys().cloned().collect::<Vec<_>>())
+        Ok(self.catalogs.iter().map(|k| k.key().to_string()).collect())
     }
 
     /// Read catalog info of given name from metasrv.
     fn catalog(&self, name: &str) -> Result<Option<CatalogProviderRef>> {
-        Ok(self.catalogs.load().get(name).cloned())
+        let maybe_catalog = self.catalogs.get(name);
+
+        if let Some(catalog) = maybe_catalog {
+            return Ok(Some(catalog.clone()));
+        }
+
+        let backend = self.backend.clone();
+        let catalog_name = name.to_string();
+
+        // TODO(fys): refactor it later
+        let exist = std::thread::spawn(|| {
+            common_runtime::block_on_write(async move {
+                let mut stream = backend.range(CATALOG_KEY_PREFIX.as_bytes());
+
+                while let Some(Ok(catalog)) = stream.next().await {
+                    let catalog_key = String::from_utf8_lossy(&catalog.0);
+
+                    if let Ok(key) = CatalogKey::parse(&catalog_key) {
+                        if key.catalog_name == catalog_name {
+                            return true;
+                        }
+                    }
+                }
+
+                false
+            })
+        })
+        .join()
+        .unwrap();
+
+        if exist {
+            let catalog_provider = self.new_catalog_provider(name);
+
+            self.catalogs
+                .insert(name.to_string(), catalog_provider.clone());
+
+            return Ok(Some(catalog_provider));
+        }
+
+        Ok(None)
     }
 }
 

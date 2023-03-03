@@ -1100,6 +1100,7 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "common-time",
+ "dashmap",
  "datafusion",
  "datatypes",
  "futures",
