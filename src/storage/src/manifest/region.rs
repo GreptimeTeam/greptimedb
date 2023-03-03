@@ -26,7 +26,6 @@ mod tests {
     use object_store::{ObjectStore, ObjectStoreBuilder};
     use store_api::manifest::action::ProtocolAction;
     use store_api::manifest::{Manifest, MetaActionIterator, MAX_VERSION};
-    use tempdir::TempDir;
 
     use super::*;
     use crate::manifest::test_utils::*;
@@ -35,7 +34,10 @@ mod tests {
     #[tokio::test]
     async fn test_region_manifest() {
         common_telemetry::init_default_ut_logging();
-        let tmp_dir = TempDir::new("test_region_manifest").unwrap();
+        let tmp_dir = tempfile::Builder::new()
+            .prefix("test_region_manifest")
+            .tempdir()
+            .unwrap();
         let object_store = ObjectStore::new(
             Fs::default()
                 .root(&tmp_dir.path().to_string_lossy())

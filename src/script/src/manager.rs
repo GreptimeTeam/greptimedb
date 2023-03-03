@@ -126,11 +126,13 @@ mod tests {
     use storage::compaction::noop::NoopCompactionScheduler;
     use storage::config::EngineConfig as StorageEngineConfig;
     use storage::EngineImpl;
-    use tempdir::TempDir;
 
     #[tokio::test]
     async fn test_insert_find_compile_script() {
-        let wal_dir = TempDir::new("test_insert_find_compile_script_wal").unwrap();
+        let wal_dir = tempfile::Builder::new()
+            .prefix("test_insert_find_compile_script_wal")
+            .tempdir()
+            .unwrap();
         let wal_dir_str = wal_dir.path().to_string_lossy();
 
         common_telemetry::init_default_ut_logging();

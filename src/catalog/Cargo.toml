@@ -39,5 +39,5 @@ log-store = { path = "../log-store" }
 mito = { path = "../mito", features = ["test"] }
 object-store = { path = "../object-store" }
 storage = { path = "../storage" }
-tempdir = "0.3"
+tempfile = "3.4.0"
 tokio.workspace = true

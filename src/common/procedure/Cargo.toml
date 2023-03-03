@@ -20,4 +20,4 @@ uuid.workspace = true
 
 [dev-dependencies]
 futures-util.workspace = true
-tempdir = "0.3"
+tempfile = "3.4.0"

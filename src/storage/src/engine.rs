@@ -382,7 +382,6 @@ mod tests {
     use object_store::services::Fs;
     use object_store::ObjectStoreBuilder;
     use store_api::storage::Region;
-    use tempdir::TempDir;
 
     use super::*;
     use crate::compaction::noop::NoopCompactionScheduler;
@@ -392,7 +391,10 @@ mod tests {
     async fn test_create_new_region() {
         let (log_store, _tmp) =
             log_store_util::create_tmp_local_file_log_store("test_engine_wal").await;
-        let dir = TempDir::new("test_create_new_region").unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("test_create_new_region")
+            .tempdir()
+            .unwrap();
         let store_dir = dir.path().to_string_lossy();
 
         let accessor = Fs::default().root(&store_dir).build().unwrap();

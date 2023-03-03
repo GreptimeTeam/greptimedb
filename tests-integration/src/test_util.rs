@@ -46,7 +46,7 @@ use servers::Mode;
 use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineRef};
 use table::requests::{CreateTableRequest, TableOptions};
-use tempdir::TempDir;
+use tempfile::TempDir;
 
 static PORTS: OnceCell<AtomicUsize> = OnceCell::new();
 
@@ -149,7 +149,7 @@ fn get_test_store_config(
             (config, Some(TempDirGuard::S3(TempFolder::new(&store, "/"))))
         }
         StorageType::File => {
-            let data_tmp_dir = TempDir::new(&format!("gt_data_{name}")).unwrap();
+            let data_tmp_dir = create_tmp_dir(&format!("gt_data_{name}"));
 
             (
                 ObjectStoreConfig::File(FileConfig {
@@ -189,7 +189,7 @@ pub fn create_tmp_dir_and_datanode_opts(
     store_type: StorageType,
     name: &str,
 ) -> (DatanodeOptions, TestGuard) {
-    let wal_tmp_dir = TempDir::new(&format!("gt_wal_{name}")).unwrap();
+    let wal_tmp_dir = create_tmp_dir(&format!("gt_wal_{name}"));
 
     let (storage, data_tmp_dir) = get_test_store_config(&store_type, name);
 
@@ -209,6 +209,10 @@ pub fn create_tmp_dir_and_datanode_opts(
             data_tmp_dir,
         },
     )
+}
+
+fn create_tmp_dir(prefix: &str) -> TempDir {
+    tempfile::Builder::new().prefix(prefix).tempdir().unwrap()
 }
 
 pub async fn create_test_table(

@@ -248,7 +248,7 @@ mod tests {
     use async_trait::async_trait;
     use object_store::services::Fs as Builder;
     use object_store::ObjectStoreBuilder;
-    use tempdir::TempDir;
+    use tempfile::TempDir;
 
     use super::*;
     use crate::{Context, LockKey, Procedure, Status};
@@ -373,7 +373,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_store_procedure() {
-        let dir = TempDir::new("store_procedure").unwrap();
+        let dir = create_tmp_dir("store_procedure");
         let store = procedure_store_for_test(&dir);
 
         let procedure_id = ProcedureId::random();
@@ -398,7 +398,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_commit_procedure() {
-        let dir = TempDir::new("commit_procedure").unwrap();
+        let dir = create_tmp_dir("commit_procedure");
         let store = procedure_store_for_test(&dir);
 
         let procedure_id = ProcedureId::random();
@@ -416,7 +416,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_rollback_procedure() {
-        let dir = TempDir::new("rollback_procedure").unwrap();
+        let dir = create_tmp_dir("rollback_procedure");
         let store = procedure_store_for_test(&dir);
 
         let procedure_id = ProcedureId::random();
@@ -434,7 +434,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_messages() {
-        let dir = TempDir::new("load_messages").unwrap();
+        let dir = create_tmp_dir("load_messages");
         let store = procedure_store_for_test(&dir);
 
         // store 3 steps
@@ -484,5 +484,9 @@ mod tests {
         assert_eq!("id0-2", msg.data);
         let msg = messages.get(&id2).unwrap();
         assert_eq!("id2-0", msg.data);
+    }
+
+    fn create_tmp_dir(prefix: &str) -> TempDir {
+        tempfile::Builder::new().prefix(prefix).tempdir().unwrap()
     }
 }

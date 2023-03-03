@@ -31,7 +31,7 @@ use storage::EngineImpl;
 use store_api::manifest::Manifest;
 use store_api::storage::ReadContext;
 use table::requests::{AddColumnRequest, AlterKind, DeleteRequest, TableOptions};
-use tempdir::TempDir;
+use tempfile::TempDir;
 
 use super::*;
 use crate::table::test_util;

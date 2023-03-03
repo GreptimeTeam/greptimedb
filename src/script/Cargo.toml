@@ -73,5 +73,5 @@ ron = "0.7"
 serde = { version = "1.0", features = ["derive"] }
 storage = { path = "../storage" }
 store-api = { path = "../store-api" }
-tempdir = "0.3"
+tempfile = "3.4.0"
 tokio-test = "0.4"

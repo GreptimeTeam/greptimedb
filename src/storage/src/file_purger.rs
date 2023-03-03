@@ -109,7 +109,7 @@ mod tests {
     use object_store::services::Fs;
     use object_store::{ObjectStore, ObjectStoreBuilder};
     use store_api::storage::OpType;
-    use tempdir::TempDir;
+    use tempfile::TempDir;
 
     use super::*;
     use crate::file_purger::noop::NoopFilePurgeHandler;
@@ -166,7 +166,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_purger_handler() {
-        let dir = TempDir::new("file-purge").unwrap();
+        let dir = create_tmp_dir("file-purge");
         let object_store = ObjectStore::new(
             Fs::default()
                 .root(dir.path().to_str().unwrap())
@@ -204,7 +204,7 @@ mod tests {
     #[tokio::test]
     async fn test_file_purge_loop() {
         common_telemetry::init_default_ut_logging();
-        let dir = TempDir::new("file-purge").unwrap();
+        let dir = create_tmp_dir("file-purge");
         let object_store = ObjectStore::new(
             Fs::default()
                 .root(dir.path().to_str().unwrap())
@@ -231,5 +231,9 @@ mod tests {
             .is_exist()
             .await
             .unwrap());
+    }
+
+    fn create_tmp_dir(prefix: &str) -> TempDir {
+        tempfile::Builder::new().prefix(prefix).tempdir().unwrap()
     }
 }

@@ -22,4 +22,4 @@ mito = { path = "../mito" }
 object-store = { path = "../object-store" }
 storage = { path = "../storage" }
 tokio.workspace = true
-tempdir = "0.3"
+tempfile = "3.4.0"

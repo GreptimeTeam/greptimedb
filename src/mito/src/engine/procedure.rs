@@ -44,7 +44,7 @@ mod procedure_test_util {
     use storage::compaction::noop::NoopCompactionScheduler;
     use storage::config::EngineConfig as StorageEngineConfig;
     use storage::EngineImpl;
-    use tempdir::TempDir;
+    use tempfile::TempDir;
 
     use super::*;
     use crate::engine::{EngineConfig, MitoEngine};

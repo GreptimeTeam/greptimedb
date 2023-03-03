@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use store_api::storage::{AlterOperation, AlterRequest, Region, RegionMeta, WriteResponse};
-use tempdir::TempDir;
+use tempfile::TempDir;
 
 use crate::engine;
 use crate::error::Error;
@@ -87,7 +87,7 @@ impl CloseTester {
 #[tokio::test]
 async fn test_close_basic() {
     common_telemetry::init_default_ut_logging();
-    let dir = TempDir::new("close-basic").unwrap();
+    let dir = create_tmp_dir("close-basic");
     let store_dir = dir.path().to_str().unwrap();
 
     let flush_switch = Arc::new(FlushSwitch::default());
@@ -123,7 +123,7 @@ async fn test_close_basic() {
 #[tokio::test]
 async fn test_close_wait_flush_done() {
     common_telemetry::init_default_ut_logging();
-    let dir = TempDir::new("close-basic").unwrap();
+    let dir = create_tmp_dir("close-basic");
     let store_dir = dir.path().to_str().unwrap();
 
     let flush_switch = Arc::new(FlushSwitch::default());
@@ -144,4 +144,8 @@ async fn test_close_wait_flush_done() {
     tester.base().region.close().await.unwrap();
 
     assert!(!has_parquet_file(&sst_dir));
+}
+
+fn create_tmp_dir(prefix: &str) -> TempDir {
+    tempfile::Builder::new().prefix(prefix).tempdir().unwrap()
 }

@@ -19,7 +19,7 @@ mod tests {
     use std::time::Duration;
 
     use rexpect::session::PtyReplSession;
-    use tempdir::TempDir;
+    use tempfile::TempDir;
 
     struct Repl {
         repl: PtyReplSession,
@@ -48,8 +48,8 @@ mod tests {
 
     #[test]
     fn test_repl() {
-        let data_dir = TempDir::new_in("/tmp", "data").unwrap();
-        let wal_dir = TempDir::new_in("/tmp", "wal").unwrap();
+        let data_dir = create_tmp_dir("data");
+        let wal_dir = create_tmp_dir("wal");
 
         let mut bin_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         bin_path.push("../../target/debug");
@@ -141,5 +141,9 @@ mod tests {
         repl.read_expect("Total Rows: 1");
 
         repl.read_contains("Cost");
+    }
+
+    fn create_tmp_dir(prefix: &str) -> TempDir {
+        tempfile::Builder::new().prefix(prefix).tempdir().unwrap()
     }
 }

@@ -26,7 +26,7 @@ use object_store::{ObjectStore, ObjectStoreBuilder};
 use storage::compaction::noop::NoopCompactionScheduler;
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
-use tempdir::TempDir;
+use tempfile::TempDir;
 
 pub struct TestEnv {
     pub dir: TempDir,
@@ -37,7 +37,7 @@ pub struct TestEnv {
 
 impl TestEnv {
     pub fn new(prefix: &str) -> TestEnv {
-        let dir = TempDir::new(prefix).unwrap();
+        let dir = tempfile::Builder::new().prefix(prefix).tempdir().unwrap();
         let store_dir = format!("{}/db", dir.path().to_string_lossy());
         let accessor = Fs::default().root(&store_dir).build().unwrap();
         let object_store = ObjectStore::new(accessor).finish();

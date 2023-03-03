@@ -33,7 +33,7 @@ use partition::route::TableRoutes;
 use servers::grpc::GrpcServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
 use servers::Mode;
-use tempdir::TempDir;
+use tempfile::TempDir;
 use tonic::transport::Server;
 use tower::service_fn;
 
@@ -75,8 +75,8 @@ pub(crate) async fn create_standalone_instance(test_name: &str) -> MockStandalon
 }
 
 fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) {
-    let wal_tmp_dir = TempDir::new(&format!("gt_wal_{name}")).unwrap();
-    let data_tmp_dir = TempDir::new(&format!("gt_data_{name}")).unwrap();
+    let wal_tmp_dir = create_tmp_dir(&format!("gt_wal_{name}"));
+    let data_tmp_dir = create_tmp_dir(&format!("gt_data_{name}"));
     let opts = DatanodeOptions {
         wal: WalConfig {
             dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
@@ -161,8 +161,8 @@ async fn create_distributed_datanode(
     datanode_id: u64,
     meta_srv: MockInfo,
 ) -> (Arc<DatanodeInstance>, TestGuard) {
-    let wal_tmp_dir = TempDir::new(&format!("gt_wal_{test_name}_dist_dn_{datanode_id}")).unwrap();
-    let data_tmp_dir = TempDir::new(&format!("gt_data_{test_name}_dist_dn_{datanode_id}")).unwrap();
+    let wal_tmp_dir = create_tmp_dir(&format!("gt_wal_{test_name}_dist_dn_{datanode_id}"));
+    let data_tmp_dir = create_tmp_dir(&format!("gt_data_{test_name}_dist_dn_{datanode_id}"));
     let opts = DatanodeOptions {
         node_id: Some(datanode_id),
         wal: WalConfig {
@@ -190,6 +190,10 @@ async fn create_distributed_datanode(
             _data_tmp_dir: data_tmp_dir,
         },
     )
+}
+
+fn create_tmp_dir(prefix: &str) -> TempDir {
+    tempfile::Builder::new().prefix(prefix).tempdir().unwrap()
 }
 
 async fn wait_datanodes_alive(kv_store: KvStoreRef) {

@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use store_api::storage::{OpenOptions, WriteResponse};
-use tempdir::TempDir;
+use tempfile::TempDir;
 
 use crate::engine;
 use crate::flush::FlushStrategyRef;
@@ -100,7 +100,7 @@ impl FlushTester {
 async fn test_flush_and_stall() {
     common_telemetry::init_default_ut_logging();
 
-    let dir = TempDir::new("flush-stall").unwrap();
+    let dir = create_tmp_dir("flush-stall");
     let store_dir = dir.path().to_str().unwrap();
 
     let flush_switch = Arc::new(FlushSwitch::default());
@@ -126,7 +126,7 @@ async fn test_flush_and_stall() {
 
 #[tokio::test]
 async fn test_flush_empty() {
-    let dir = TempDir::new("flush-empty").unwrap();
+    let dir = create_tmp_dir("flush-empty");
     let store_dir = dir.path().to_str().unwrap();
 
     let flush_switch = Arc::new(FlushSwitch::default());
@@ -159,7 +159,7 @@ async fn test_flush_empty() {
 async fn test_read_after_flush() {
     common_telemetry::init_default_ut_logging();
 
-    let dir = TempDir::new("read-flush").unwrap();
+    let dir = create_tmp_dir("read-flush");
     let store_dir = dir.path().to_str().unwrap();
 
     let flush_switch = Arc::new(FlushSwitch::default());
@@ -192,7 +192,7 @@ async fn test_read_after_flush() {
 
 #[tokio::test]
 async fn test_merge_read_after_flush() {
-    let dir = TempDir::new("merge-read-flush").unwrap();
+    let dir = create_tmp_dir("merge-read-flush");
     let store_dir = dir.path().to_str().unwrap();
 
     let flush_switch = Arc::new(FlushSwitch::default());
@@ -233,4 +233,8 @@ async fn test_merge_read_after_flush() {
     // Scan after reopen.
     let output = tester.full_scan().await;
     assert_eq!(expect, output);
+}
+
+fn create_tmp_dir(prefix: &str) -> TempDir {
+    tempfile::Builder::new().prefix(prefix).tempdir().unwrap()
 }

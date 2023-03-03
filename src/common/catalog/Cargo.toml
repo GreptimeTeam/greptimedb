@@ -17,5 +17,5 @@ snafu = { version = "0.7", features = ["backtraces"] }
 
 [dev-dependencies]
 chrono.workspace = true
-tempdir = "0.3"
+tempfile = "3.4.0"
 tokio.workspace = true

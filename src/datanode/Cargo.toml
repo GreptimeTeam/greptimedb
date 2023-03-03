@@ -66,5 +66,5 @@ axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", br
 client = { path = "../client" }
 common-query = { path = "../common/query" }
 datafusion-common.workspace = true
-tempdir = "0.3"
+tempfile = "3.4.0"
 toml = "0.5"

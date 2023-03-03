@@ -26,7 +26,7 @@ use servers::Mode;
 use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineRef};
 use table::requests::{CreateTableRequest, TableOptions};
-use tempdir::TempDir;
+use tempfile::TempDir;
 
 use crate::datanode::{DatanodeOptions, FileConfig, ObjectStoreConfig, ProcedureConfig, WalConfig};
 use crate::error::{CreateTableSnafu, Result};
@@ -55,7 +55,7 @@ impl MockInstance {
 
     pub(crate) async fn with_procedure_enabled(name: &str) -> Self {
         let (mut opts, _guard) = create_tmp_dir_and_datanode_opts(name);
-        let procedure_dir = TempDir::new(&format!("gt_procedure_{name}")).unwrap();
+        let procedure_dir = create_tmp_dir(&format!("gt_procedure_{name}"));
         opts.procedure = Some(ProcedureConfig {
             store: ObjectStoreConfig::File(FileConfig {
                 data_dir: procedure_dir.path().to_str().unwrap().to_string(),
@@ -87,8 +87,8 @@ struct TestGuard {
 }
 
 fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) {
-    let wal_tmp_dir = TempDir::new(&format!("gt_wal_{name}")).unwrap();
-    let data_tmp_dir = TempDir::new(&format!("gt_data_{name}")).unwrap();
+    let wal_tmp_dir = create_tmp_dir(&format!("gt_wal_{name}"));
+    let data_tmp_dir = create_tmp_dir(&format!("gt_data_{name}"));
     let opts = DatanodeOptions {
         wal: WalConfig {
             dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
@@ -211,4 +211,8 @@ pub async fn check_unordered_output_stream(output: Output, expected: String) {
     let pretty_print = sort_table(recordbatches.pretty_print().unwrap());
     let expected = sort_table(expected);
     assert_eq!(pretty_print, expected);
+}
+
+fn create_tmp_dir(prefix: &str) -> TempDir {
+    tempfile::Builder::new().prefix(prefix).tempdir().unwrap()
 }

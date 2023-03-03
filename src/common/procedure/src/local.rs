@@ -411,7 +411,7 @@ impl ProcedureManager for LocalManager {
 mod test_util {
     use object_store::services::Fs as Builder;
     use object_store::ObjectStoreBuilder;
-    use tempdir::TempDir;
+    use tempfile::TempDir;
 
     use super::*;
 
@@ -430,7 +430,7 @@ mod test_util {
 mod tests {
     use common_error::mock::MockError;
     use common_error::prelude::StatusCode;
-    use tempdir::TempDir;
+    use tempfile::TempDir;
 
     use super::*;
     use crate::error::Error;
@@ -540,7 +540,7 @@ mod tests {
 
     #[test]
     fn test_register_loader() {
-        let dir = TempDir::new("register").unwrap();
+        let dir = create_tmp_dir("register");
         let config = ManagerConfig {
             object_store: test_util::new_object_store(&dir),
         };
@@ -558,7 +558,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_recover() {
-        let dir = TempDir::new("recover").unwrap();
+        let dir = create_tmp_dir("recover");
         let object_store = test_util::new_object_store(&dir);
         let config = ManagerConfig {
             object_store: object_store.clone(),
@@ -603,7 +603,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_submit_procedure() {
-        let dir = TempDir::new("submit").unwrap();
+        let dir = create_tmp_dir("submit");
         let config = ManagerConfig {
             object_store: test_util::new_object_store(&dir),
         };
@@ -649,7 +649,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_state_changed_on_err() {
-        let dir = TempDir::new("on_err").unwrap();
+        let dir = create_tmp_dir("on_err");
         let config = ManagerConfig {
             object_store: test_util::new_object_store(&dir),
         };
@@ -703,5 +703,9 @@ mod tests {
 
         check_procedure(MockProcedure { panic: false }).await;
         check_procedure(MockProcedure { panic: true }).await;
+    }
+
+    fn create_tmp_dir(prefix: &str) -> TempDir {
+        tempfile::Builder::new().prefix(prefix).tempdir().unwrap()
     }
 }

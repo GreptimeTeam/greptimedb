@@ -31,7 +31,6 @@ mod tests {
 
     use serde::{Deserialize, Serialize};
     use snafu::ResultExt;
-    use tempdir::TempDir;
 
     use super::*;
     use crate::error::Result;
@@ -62,7 +61,10 @@ mod tests {
             host: "greptime.test".to_string(),
         };
 
-        let dir = TempDir::new("test_from_file").unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("test_from_file")
+            .tempdir()
+            .unwrap();
         let test_file = format!("{}/test.toml", dir.path().to_str().unwrap());
 
         let s = toml::to_string(&config).unwrap();

@@ -265,7 +265,7 @@ mod tests {
     use datatypes::arrow_array::StringArray;
     use parquet::arrow::ParquetRecordBatchStreamBuilder;
     use parquet::file::properties::WriterProperties;
-    use tempdir::TempDir;
+    use tempfile::TempDir;
 
     use super::*;
 
@@ -308,7 +308,10 @@ mod tests {
     }
 
     async fn assert_prune(array_cnt: usize, predicate: Predicate, expect: Vec<bool>) {
-        let dir = TempDir::new("prune_parquet").unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("prune_parquet")
+            .tempdir()
+            .unwrap();
         let (path, schema) = gen_test_parquet_file(&dir, array_cnt).await;
         let schema = Arc::new(datatypes::schema::Schema::try_from(schema).unwrap());
         let builder = ParquetRecordBatchStreamBuilder::new(

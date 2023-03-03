@@ -94,7 +94,7 @@ mod tests {
     use object_store::services::Fs;
     use object_store::{ObjectStore, ObjectStoreBuilder};
     use store_api::storage::{ChunkReader, OpType, SequenceNumber};
-    use tempdir::TempDir;
+    use tempfile::TempDir;
 
     use super::*;
     use crate::file_purger::noop::new_noop_file_purger;
@@ -270,7 +270,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sst_reader() {
-        let dir = TempDir::new("write_parquet").unwrap();
+        let dir = create_tmp_dir("write_parquet");
         let path = dir.path().to_str().unwrap();
         let backend = Fs::default().root(path).build().unwrap();
         let object_store = ObjectStore::new(backend).finish();
@@ -347,7 +347,7 @@ mod tests {
     /// and check the output contains the same data as input files.
     #[tokio::test]
     async fn test_sst_split() {
-        let dir = TempDir::new("write_parquet").unwrap();
+        let dir = create_tmp_dir("write_parquet");
         let path = dir.path().to_str().unwrap();
         let backend = Fs::default().root(path).build().unwrap();
         let object_store = ObjectStore::new(backend).finish();
@@ -476,5 +476,9 @@ mod tests {
             read_file(&output_files, schema.clone(), sst_layer.clone()).await;
 
         assert_eq!(timestamps_in_outputs, timestamps_in_inputs);
+    }
+
+    fn create_tmp_dir(prefix: &str) -> TempDir {
+        tempfile::Builder::new().prefix(prefix).tempdir().unwrap()
     }
 }

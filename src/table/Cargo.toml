@@ -33,6 +33,6 @@ tokio.workspace = true
 
 [dev-dependencies]
 parquet = { workspace = true, features = ["async"] }
-tempdir = "0.3"
+tempfile = "3.4.0"
 tokio-util = { version = "0.7", features = ["compat"] }
 serde_json.workspace = true

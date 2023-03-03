@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use tempdir::TempDir;
+use tempfile::TempDir;
 
 use crate::raft_engine::log_store::RaftEngineLogStore;
 use crate::LogConfig;
@@ -20,7 +20,7 @@ use crate::LogConfig;
 /// Create a tmp directory for write log, used for test.
 // TODO: Add a test feature
 pub async fn create_tmp_local_file_log_store(dir: &str) -> (RaftEngineLogStore, TempDir) {
-    let dir = TempDir::new(dir).unwrap();
+    let dir = tempfile::Builder::new().prefix(dir).tempdir().unwrap();
     let cfg = LogConfig {
         file_size: 128 * 1024,
         log_file_dir: dir.path().to_str().unwrap().to_string(),

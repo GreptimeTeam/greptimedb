@@ -343,7 +343,7 @@ mod tests {
     use store_api::logstore::entry_stream::SendableEntryStream;
     use store_api::logstore::namespace::Namespace as NamespaceTrait;
     use store_api::logstore::LogStore;
-    use tempdir::TempDir;
+    use tempfile::TempDir;
 
     use crate::config::LogConfig;
     use crate::error::Error;
@@ -352,7 +352,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_open_logstore() {
-        let dir = TempDir::new("raft-engine-logstore-test").unwrap();
+        let dir = create_tmp_dir("raft-engine-logstore-test");
         let logstore = RaftEngineLogStore::try_new(LogConfig {
             log_file_dir: dir.path().to_str().unwrap().to_string(),
             ..Default::default()
@@ -366,7 +366,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_manage_namespace() {
-        let dir = TempDir::new("raft-engine-logstore-test").unwrap();
+        let dir = create_tmp_dir("raft-engine-logstore-test");
         let mut logstore = RaftEngineLogStore::try_new(LogConfig {
             log_file_dir: dir.path().to_str().unwrap().to_string(),
             ..Default::default()
@@ -393,7 +393,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_append_and_read() {
-        let dir = TempDir::new("raft-engine-logstore-test").unwrap();
+        let dir = create_tmp_dir("raft-engine-logstore-test");
         let logstore = RaftEngineLogStore::try_new(LogConfig {
             log_file_dir: dir.path().to_str().unwrap().to_string(),
             ..Default::default()
@@ -434,7 +434,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reopen() {
-        let dir = TempDir::new("raft-engine-logstore-reopen-test").unwrap();
+        let dir = create_tmp_dir("raft-engine-logstore-reopen-test");
         {
             let logstore = RaftEngineLogStore::try_new(LogConfig {
                 log_file_dir: dir.path().to_str().unwrap().to_string(),
@@ -491,7 +491,7 @@ mod tests {
     #[tokio::test]
     async fn test_compaction() {
         common_telemetry::init_default_ut_logging();
-        let dir = TempDir::new("raft-engine-logstore-test").unwrap();
+        let dir = create_tmp_dir("raft-engine-logstore-test");
 
         let config = LogConfig {
             log_file_dir: dir.path().to_str().unwrap().to_string(),
@@ -524,7 +524,7 @@ mod tests {
     #[tokio::test]
     async fn test_obsolete() {
         common_telemetry::init_default_ut_logging();
-        let dir = TempDir::new("raft-engine-logstore-test").unwrap();
+        let dir = create_tmp_dir("raft-engine-logstore-test");
 
         let config = LogConfig {
             log_file_dir: dir.path().to_str().unwrap().to_string(),
@@ -549,5 +549,9 @@ mod tests {
         let mut vec = collect_entries(res).await;
         vec.sort_by(|a, b| a.id.partial_cmp(&b.id).unwrap());
         assert_eq!(101, vec.first().unwrap().id);
+    }
+
+    fn create_tmp_dir(prefix: &str) -> TempDir {
+        tempfile::Builder::new().prefix(prefix).tempdir().unwrap()
     }
 }

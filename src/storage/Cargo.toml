@@ -48,7 +48,7 @@ criterion = "0.3"
 datatypes = { path = "../datatypes", features = ["test"] }
 log-store = { path = "../log-store" }
 rand = "0.8"
-tempdir = "0.3"
+tempfile = "3.4.0"
 
 [build-dependencies]
 tonic-build = "0.8"

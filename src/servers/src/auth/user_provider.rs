@@ -188,7 +188,6 @@ pub mod test {
     use std::io::{LineWriter, Write};
 
     use session::context::UserInfo;
-    use tempdir::TempDir;
 
     use crate::auth::user_provider::{double_sha1, sha1_one, sha1_two, StaticUserProvider};
     use crate::auth::{Identity, Password, UserProvider};
@@ -245,7 +244,10 @@ pub mod test {
 
     #[tokio::test]
     async fn test_file_provider() {
-        let dir = TempDir::new("test_file_provider").unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("test_file_provider")
+            .tempdir()
+            .unwrap();
         let file_path = format!("{}/test_file_provider", dir.path().to_str().unwrap());
         {
             // write a tmp file

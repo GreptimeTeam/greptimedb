@@ -24,7 +24,7 @@ use store_api::logstore::LogStore;
 use store_api::storage::{
     Chunk, ChunkReader, ReadContext, Region, ScanRequest, Snapshot, WriteContext, WriteRequest,
 };
-use tempdir::TempDir;
+use tempfile::TempDir;
 
 use crate::region::{RegionImpl, RegionMetadata};
 use crate::test_util::{self, config_util, descriptor_util, write_batch_util};
@@ -179,7 +179,7 @@ async fn new_tester(store_dir: &str) -> ProjectionTester<RaftEngineLogStore> {
 
 #[tokio::test]
 async fn test_projection_ordered() {
-    let dir = TempDir::new("projection-ordered").unwrap();
+    let dir = create_tmp_dir("projection-ordered");
     let store_dir = dir.path().to_str().unwrap();
 
     let tester = new_tester(store_dir).await;
@@ -193,7 +193,7 @@ async fn test_projection_ordered() {
 
 #[tokio::test]
 async fn test_projection_unordered() {
-    let dir = TempDir::new("projection-unordered").unwrap();
+    let dir = create_tmp_dir("projection-unordered");
     let store_dir = dir.path().to_str().unwrap();
 
     let tester = new_tester(store_dir).await;
@@ -203,4 +203,8 @@ async fn test_projection_unordered() {
     let output = tester.scan(Some(vec![3, 0])).await;
     let expect = vec![vec![100, 1], vec![101, 2], vec![102, 3], vec![103, 4]];
     assert_eq!(expect, output);
+}
+
+fn create_tmp_dir(prefix: &str) -> TempDir {
+    tempfile::Builder::new().prefix(prefix).tempdir().unwrap()
 }
