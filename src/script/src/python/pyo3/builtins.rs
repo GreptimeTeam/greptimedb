@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
+
 use common_function::scalars::{FunctionRef, FUNCTION_REGISTRY};
 use datafusion::arrow::array::{ArrayRef, NullArray};
 use datafusion::physical_plan::expressions;
