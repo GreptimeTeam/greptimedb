@@ -33,7 +33,7 @@ use crate::python::pyo3::builtins::greptime_builtins;
 
 /// prevent race condition of init cpython
 static START_PYO3: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
-pub(crate) fn to_py_err(err: impl ToString)->PyErr{
+pub(crate) fn to_py_err(err: impl ToString) -> PyErr {
     PyArrowException::new_err(err.to_string())
 }
 pub(crate) fn init_cpython_interpreter() {

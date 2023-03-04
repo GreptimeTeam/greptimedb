@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use arrow::array::{ArrayData, make_array};
+use arrow::array::{make_array, ArrayData};
 use arrow::pyarrow::PyArrowConvert;
 use datafusion::arrow::array::BooleanArray;
 use datafusion::arrow::compute;

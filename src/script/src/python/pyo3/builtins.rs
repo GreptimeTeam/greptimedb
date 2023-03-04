@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::sync::Arc;
-
 use common_function::scalars::{FunctionRef, FUNCTION_REGISTRY};
 use datafusion::arrow::array::{ArrayRef, NullArray};
 use datafusion::physical_plan::expressions;
@@ -30,6 +29,20 @@ use crate::python::pyo3::dataframe_impl::{col, lit};
 use crate::python::pyo3::utils::{
     columnar_value_to_py_any, try_into_columnar_value, val_to_py_any,
 };
+
+/// Try to extract a `PyVector` or convert from a `pyarrow.array` object
+fn try_into_py_vector(py: Python, obj: PyObject) -> PyResult<PyVector> {
+    if let Ok(v) = obj.extract::<PyVector>(py) {
+        Ok(v)
+    } else {
+        PyVector::from_py(obj.as_ref(py).get_type(), py, obj.clone())
+    }
+}
+fn to_array_of_py_vec(py: Python, obj: &[&PyObject]) -> PyResult<Vec<PyVector>> {
+    obj.iter()
+        .map(|v| try_into_py_vector(py, v.to_object(py)))
+        .collect::<PyResult<_>>()
+}
 
 macro_rules! batch_import {
     ($m: ident, [$($fn_name: ident),*]) => {
@@ -95,7 +108,8 @@ pub(crate) fn greptime_builtins(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     Ok(())
 }
 
-fn eval_func(py: Python<'_>, name: &str, v: &[&PyVector]) -> PyResult<PyVector> {
+fn eval_func(py: Python<'_>, name: &str, v: &[&PyObject]) -> PyResult<PyVector> {
+    let v = to_array_of_py_vec(py, v)?;
     py.allow_threads(|| {
         let v: Vec<VectorRef> = v.iter().map(|v| v.as_vector_ref()).collect();
         let func: Option<FunctionRef> = FUNCTION_REGISTRY.get_function(name);
@@ -153,7 +167,7 @@ fn eval_aggr_func(py: Python<'_>, name: &str, args: &[&PyVector]) -> PyResult<Py
 
 /// evaluate Aggregate Expr using its backing accumulator
 /// TODO(discord9): cast to f64 before use/Provide cast to f64 function?
-fn eval_aggr_expr<T: AggregateExpr>(
+fn eval_df_aggr_expr<T: AggregateExpr>(
     py: Python<'_>,
     aggr: T,
     values: &[ArrayRef],
@@ -191,8 +205,8 @@ macro_rules! bind_call_unary_math_function {
 macro_rules! simple_vector_fn {
     ($name: ident, $name_str: tt, [$($arg:ident),*]) => {
         #[pyfunction]
-        fn $name(py: Python<'_>, $($arg: &PyVector),*) -> PyResult<PyVector> {
-            eval_func(py, $name_str, &[$($arg),*])
+        fn $name(py: Python<'_>, $($arg: PyObject),*) -> PyResult<PyVector> {
+            eval_func(py, $name_str, &[$(&$arg),*])
         }
     };
     ($name: ident, $name_str: tt, AGG[$($arg:ident),*]) => {
@@ -250,7 +264,7 @@ macro_rules! bind_aggr_expr {
         fn $FUNC_NAME(py: Python<'_>, $($ARG: &PyVector),*)->PyResult<PyObject>{
             // just a place holder, we just want the inner `XXXAccumulator`'s function
             // so its expr is irrelevant
-            return eval_aggr_expr(
+            return eval_df_aggr_expr(
                 py,
                 expressions::$AGGR_FUNC::new(
                     $(
@@ -268,7 +282,7 @@ macro_rules! bind_aggr_expr {
 expand into:
 ```
 fn approx_distinct(py: Python<'_>, v0: &PyVector) -> PyResult<PyObject> {
-    return eval_aggr_expr(
+    return eval_df_aggr_expr(
         py,
         expressions::ApproxDistinct::new(
             Arc::new(expressions::Column::new("expr0", 0)) as _,
@@ -288,7 +302,7 @@ bind_aggr_expr!(median, Median,[v0], v0, expr0=>0);
 #[pyfunction]
 fn approx_percentile_cont(py: Python<'_>, values: &PyVector, percent: f64) -> PyResult<PyObject> {
     let percent = expressions::Literal::new(datafusion_common::ScalarValue::Float64(Some(percent)));
-    return eval_aggr_expr(
+    return eval_df_aggr_expr(
         py,
         expressions::ApproxPercentileCont::new(
             vec![

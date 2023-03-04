@@ -89,7 +89,7 @@ def answer() -> vector[i64]:
     return vector.from_py(vector([42, 43, 44]).to_py())
 "#
             .to_string(),
-            expect: Some(ronish!("value": vector!(Int64Vector, [42, 43, 44])))
+            expect: Some(ronish!("value": vector!(Int64Vector, [42, 43, 44]))),
         },
         #[cfg(feature = "pyo3_backend")]
         CoprTestCase {
