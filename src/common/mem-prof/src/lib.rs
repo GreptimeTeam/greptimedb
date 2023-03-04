@@ -24,6 +24,7 @@ const OPT_PROF: &[u8] = b"opt.prof\0";
 
 // caller site is supposed to clean up the tmp_file
 // e.g. use `tempfile` to generate a temporary file
+#[cfg(feature = "mem-prof")]
 pub fn dump_profile(tmp_file_path: &str) -> Result<Vec<u8>, Box<dyn Error>> {
     if !is_prof_enabled()? {
         return Err("opt.prof is not ON,
@@ -48,6 +49,7 @@ pub fn dump_profile(tmp_file_path: &str) -> Result<Vec<u8>, Box<dyn Error>> {
     Ok(buf)
 }
 
+#[cfg(feature = "mem-prof")]
 fn is_prof_enabled() -> Result<bool, Box<dyn Error>> {
     Ok(unsafe {
         tikv_jemalloc_ctl::raw::read::<bool>(OPT_PROF)

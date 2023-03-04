@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+mem-prof=[
+    "common-mem-prof/mem-prof"
+]
+
 [dependencies]
 aide = { version = "0.9", features = ["axum"] }
 arrow-flight.workspace = true
@@ -25,7 +30,7 @@ common-recordbatch = { path = "../common/recordbatch" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
-common-mem-prof = { path = "../common/mem-prof" }
+common-mem-prof = { path = "../common/mem-prof"}
 
 datatypes = { path = "../datatypes" }
 derive_builder = "0.12"

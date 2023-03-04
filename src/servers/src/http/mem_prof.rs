@@ -15,10 +15,11 @@
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 
+#[cfg(feature = "mem-prof")]
 #[axum_macros::debug_handler]
 pub async fn mem_prof() -> crate::error::Result<impl IntoResponse> {
     Ok((
         StatusCode::OK,
-        common_mem_prof::dump_profile("/tmp").unwrap(),
+        common_mem_prof::dump_profile("/tmp/greptimedb-prof").unwrap(),
     ))
 }

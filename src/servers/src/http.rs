@@ -15,10 +15,12 @@
 pub mod authorize;
 pub mod handler;
 pub mod influxdb;
-pub mod mem_prof;
 pub mod opentsdb;
 pub mod prometheus;
 pub mod script;
+
+#[cfg(feature = "mem-prof")]
+pub mod mem_prof;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -447,10 +449,13 @@ impl HttpServer {
         }
 
         // mem profiler
-        router = router.nest(
-            &format!("/{HTTP_API_VERSION}/prof"),
-            Router::new().route("/mem", routing::get(crate::http::mem_prof::mem_prof)),
-        );
+        #[cfg(feature = "mem-prof")]
+        {
+            router = router.nest(
+                &format!("/{HTTP_API_VERSION}/prof"),
+                Router::new().route("/mem", routing::get(crate::http::mem_prof::mem_prof)),
+            );
+        }
 
         router = router.route("/metrics", routing::get(handler::metrics));
 
