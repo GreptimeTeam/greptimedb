@@ -207,6 +207,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: Install latest nextest release
         uses: taiki-e/install-action@nextest
+      - name: Install Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          cache: 'pip' 
+      - name: Install PyArrow Package
+        run: pip install pyarrow
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Collect coverage data
