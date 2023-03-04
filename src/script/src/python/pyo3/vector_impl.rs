@@ -294,10 +294,10 @@ mod test {
         let b: PyVector = (Arc::new(b) as VectorRef).into();
         locals.insert("bv2".to_string(), b);
 
-        let f = Float64Vector::from_slice(&[0.0f64, 1.0, 42.0, 3.0]);
+        let f = Float64Vector::from_slice([0.0f64, 1.0, 42.0, 3.0]);
         let f: PyVector = (Arc::new(f) as VectorRef).into();
         locals.insert("fv1".to_string(), f);
-        let f = Float64Vector::from_slice(&[1919.810f64, 0.114, 51.4, 3.0]);
+        let f = Float64Vector::from_slice([1919.810f64, 0.114, 51.4, 3.0]);
         let f: PyVector = (Arc::new(f) as VectorRef).into();
         locals.insert("fv2".to_string(), f);
         locals

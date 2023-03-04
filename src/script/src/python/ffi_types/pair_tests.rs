@@ -19,7 +19,6 @@ use std::sync::Arc;
 
 use common_query::Output;
 use common_recordbatch::RecordBatch;
-use common_telemetry::info;
 use datafusion::arrow::array::Float64Array;
 use datafusion::arrow::compute;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
@@ -76,6 +75,7 @@ async fn integrated_py_copr_test() {
     let testcases = generate_copr_intgrate_tests();
     let script_engine = sample_script_engine();
     for (idx, case) in testcases.into_iter().enumerate() {
+        dbg!(idx);
         let script = case.script;
         let script = script_engine
             .compile(&script, CompileContext::default())
@@ -104,7 +104,6 @@ async fn integrated_py_copr_test() {
                 }
             }
         }
-        info!("Testcase {idx} .. Ok");
         dbg!(rb);
     }
 }

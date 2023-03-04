@@ -559,7 +559,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
         // constant column(int)
         name: "test_data_frame",
         code: r#"
-from data_frame import col
+from greptime import col
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
 def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
     vector[f32]):
@@ -593,7 +593,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
         // constant column(int)
         name: "test_data_frame",
         code: r#"
-from data_frame import col
+from greptime import col
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
 def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
     vector[f32]):

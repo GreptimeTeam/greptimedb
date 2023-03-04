@@ -17,11 +17,23 @@ use std::f64::consts;
 use std::sync::Arc;
 
 use datatypes::prelude::ScalarVector;
-use datatypes::vectors::{BooleanVector, Float64Vector, Int64Vector, VectorRef};
+use datatypes::vectors::{BooleanVector, Float64Vector, Int32Vector, Int64Vector, VectorRef};
 
 use super::CoprTestCase;
 use crate::python::ffi_types::pair_tests::CodeBlockTestCase;
+macro_rules! vector {
+    ($ty: ident, $slice: expr) => {
+        Arc::new($ty::from_slice($slice)) as VectorRef
+    };
+}
 
+macro_rules! ronish {
+    ($($key: literal : $expr: expr),*$(,)?) => {
+        HashMap::from([
+            $(($key.to_string(), $expr)),*
+        ])
+    };
+}
 pub(super) fn generate_copr_intgrate_tests() -> Vec<CoprTestCase> {
     vec![
         CoprTestCase {
@@ -33,7 +45,7 @@ def add_vecs(n1, n2) -> vector[i32]:
     return n1 + n2
 "#
             .to_string(),
-            ..Default::default()
+            expect: Some(ronish!("value": vector!(Int32Vector, [0, 2, 4, 6, 8]))),
         },
         #[cfg(feature = "pyo3_backend")]
         CoprTestCase {
@@ -45,7 +57,7 @@ def add_vecs(n1, n2) -> vector[i32]:
     return n1 + n2
 "#
             .to_string(),
-            ..Default::default()
+            expect: Some(ronish!("value": vector!(Int32Vector, [0, 2, 4, 6, 8]))),
         },
         CoprTestCase {
             script: r#"
@@ -55,7 +67,7 @@ def answer() -> vector[i64]:
     return vector([42, 43, 44])
 "#
             .to_string(),
-            ..Default::default()
+            expect: Some(ronish!("value": vector!(Int64Vector, [42, 43, 44]))),
         },
         #[cfg(feature = "pyo3_backend")]
         CoprTestCase {
@@ -66,18 +78,34 @@ def answer() -> vector[i64]:
     return vector([42, 43, 44])
 "#
             .to_string(),
-            ..Default::default()
+            expect: Some(ronish!("value": vector!(Int64Vector, [42, 43, 44]))),
         },
         CoprTestCase {
             script: r#"
-@copr(returns=["value"], backend="pyo3")
+@copr(args=[], returns = ["number"], sql = "select * from numbers", backend="rspy")
 def answer() -> vector[i64]:
     from greptime import vector, col, lit
-    ret = dataframe.select([col("number")]).filter(col("number")<lit(3)).collect()[0][0]
+    expr_0 = (col("number")<lit(3)) & (col("number")>0)
+    ret = dataframe.select([col("number")]).filter(expr_0).collect()[0][0]
     return ret
 "#
             .to_string(),
-            ..Default::default()
+            expect: Some(ronish!("number": vector!(Int64Vector, [1, 2]))),
+        },
+        #[cfg(feature = "pyo3_backend")]
+        CoprTestCase {
+            script: r#"
+@copr(args=[], returns = ["number"], sql = "select * from numbers", backend="pyo3")
+def answer() -> vector[i64]:
+    from greptime import vector, col, lit
+    # Bitwise Operator  pred comparsion operator
+    expr_0 = (col("number")<lit(3)) & (col("number")>0)
+    print(expr_0)
+    ret = dataframe.select([col("number")]).filter(expr_0).collect()[0][0]
+    return ret
+"#
+            .to_string(),
+            expect: Some(ronish!("number": vector!(Int64Vector, [1, 2]))),
         },
     ]
 }
@@ -86,19 +114,6 @@ def answer() -> vector[i64]:
 /// Using a function to generate testcase instead of `.ron` configure file because it's more flexible and we are in #[cfg(test)] so no binary bloat worrying
 #[allow(clippy::approx_constant)]
 pub(super) fn sample_test_case() -> Vec<CodeBlockTestCase> {
-    macro_rules! vector {
-        ($ty: ident, $slice: expr) => {
-            Arc::new($ty::from_slice($slice)) as VectorRef
-        };
-    }
-
-    macro_rules! ronish {
-        ($($key: literal : $expr: expr),*$(,)?) => {
-            HashMap::from([
-                $(($key.to_string(), $expr)),*
-            ])
-        };
-    }
     vec![
         CodeBlockTestCase {
             input: ronish! {

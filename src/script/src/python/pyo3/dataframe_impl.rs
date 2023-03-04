@@ -232,6 +232,7 @@ pub(crate) fn lit(py: Python<'_>, value: PyObject) -> PyResult<PyExpr> {
     Ok(expr)
 }
 
+#[derive(Clone)]
 #[pyclass]
 pub(crate) struct PyExpr {
     inner: DfExpr,
@@ -251,7 +252,8 @@ pub(crate) fn col(name: String) -> PyExpr {
 
 #[pymethods]
 impl PyExpr {
-    fn __richcmp__(&self, py: Python<'_>, other: &Self, op: CompareOp) -> PyResult<Self> {
+    fn __richcmp__(&self, py: Python<'_>, other: PyObject, op: CompareOp) -> PyResult<Self> {
+        let other = other.extract::<Self>(py).or_else(|_| lit(py, other))?;
         let op = match op {
             CompareOp::Lt => DfExpr::lt,
             CompareOp::Le => DfExpr::lt_eq,
@@ -278,5 +280,8 @@ impl PyExpr {
     }
     fn sort(&self, asc: bool, nulls_first: bool) -> PyExpr {
         self.inner.clone().sort(asc, nulls_first).into()
+    }
+    fn __repr__(&self) -> String {
+        format!("{:#?}", &self.inner)
     }
 }

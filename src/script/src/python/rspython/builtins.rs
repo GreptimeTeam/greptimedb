@@ -291,7 +291,7 @@ pub(crate) mod greptime_builtin {
     use common_function::scalars::{Function, FunctionRef, FUNCTION_REGISTRY};
     use datafusion::arrow::datatypes::DataType as ArrowDataType;
     use datafusion::physical_plan::expressions;
-    use datafusion_expr::ColumnarValue as DFColValue;
+    use datafusion_expr::{ColumnarValue as DFColValue, Expr as DfExpr};
     use datafusion_physical_expr::math_expressions;
     use datatypes::arrow::array::{ArrayRef, Int64Array, NullArray};
     use datatypes::arrow::error::ArrowError;
@@ -308,11 +308,30 @@ pub(crate) mod greptime_builtin {
     };
     use crate::python::ffi_types::vector::val_to_pyobj;
     use crate::python::ffi_types::PyVector;
-    use crate::python::rspython::utils::{is_instance, py_obj_to_vec, PyVectorRef};
+    use crate::python::rspython::dataframe_impl::data_frame::{PyExpr, PyExprRef};
+    use crate::python::rspython::utils::{
+        is_instance, py_obj_to_value, py_obj_to_vec, PyVectorRef,
+    };
 
     #[pyfunction]
     fn vector(args: OptionalArg<PyObjectRef>, vm: &VirtualMachine) -> PyResult<PyVector> {
         PyVector::new(args, vm)
+    }
+
+    #[pyfunction]
+    fn col(name: String, vm: &VirtualMachine) -> PyExprRef {
+        let expr: PyExpr = DfExpr::Column(datafusion_common::Column::from_name(name)).into();
+        expr.into_ref(vm)
+    }
+
+    #[pyfunction]
+    pub(crate) fn lit(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyExprRef> {
+        let val = py_obj_to_value(&obj, vm)?;
+        let scalar_val = val
+            .try_to_scalar_value(&val.data_type())
+            .map_err(|e| vm.new_runtime_error(format!("{e}")))?;
+        let expr: PyExpr = DfExpr::Literal(scalar_val).into();
+        Ok(expr.into_ref(vm))
     }
 
     // the main binding code, due to proc macro things, can't directly use a simpler macro

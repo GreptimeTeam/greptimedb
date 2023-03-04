@@ -433,8 +433,7 @@ def test(**params)-> vector[i64]:
         let script_engine = sample_script_engine();
 
         let script = r#"
-import greptime as gt
-from data_frame import col
+from greptime import col
 
 @copr(args=["number"], returns = ["number"], sql = "select * from numbers")
 def test(number)-> vector[u32]:
