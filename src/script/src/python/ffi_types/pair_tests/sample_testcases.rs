@@ -80,6 +80,29 @@ def answer() -> vector[i64]:
             .to_string(),
             expect: Some(ronish!("value": vector!(Int64Vector, [42, 43, 44]))),
         },
+        #[cfg(feature = "pyo3_backend")]
+        CoprTestCase {
+            script: r#"
+@copr(returns=["value"], backend="pyo3")
+def answer() -> vector[i64]:
+    from greptime import vector
+    return vector.from_py(vector([42, 43, 44]).to_py())
+"#
+            .to_string(),
+            expect: Some(ronish!("value": vector!(Int64Vector, [42, 43, 44])))
+        },
+        #[cfg(feature = "pyo3_backend")]
+        CoprTestCase {
+            script: r#"
+@copr(returns=["value"], backend="pyo3")
+def answer() -> vector[i64]:
+    from greptime import vector
+    import pyarrow as pa
+    return vector.from_py(pa.array([42, 43, 44]))
+"#
+            .to_string(),
+            expect: Some(ronish!("value": vector!(Int64Vector, [42, 43, 44]))),
+        },
         CoprTestCase {
             script: r#"
 @copr(args=[], returns = ["number"], sql = "select * from numbers", backend="rspy")

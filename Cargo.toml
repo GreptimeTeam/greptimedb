@@ -48,7 +48,7 @@ edition = "2021"
 license = "Apache-2.0"
 
 [workspace.dependencies]
-arrow = "33.0"
+arrow = { version = "33.0", features = ["pyarrow"] }
 arrow-array = "33.0"
 arrow-flight = "33.0"
 arrow-schema = { version = "33.0", features = ["serde"] }

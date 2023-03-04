@@ -71,11 +71,12 @@ fn into_recordbatch(input: HashMap<String, VectorRef>) -> RecordBatch {
 }
 
 #[tokio::test]
+#[allow(clippy::print_stdout)]
 async fn integrated_py_copr_test() {
     let testcases = generate_copr_intgrate_tests();
     let script_engine = sample_script_engine();
     for (idx, case) in testcases.into_iter().enumerate() {
-        dbg!(idx);
+        println!("Testcase {idx}:\n script: {}", case.script);
         let script = case.script;
         let script = script_engine
             .compile(&script, CompileContext::default())
@@ -104,7 +105,7 @@ async fn integrated_py_copr_test() {
                 }
             }
         }
-        dbg!(rb);
+        println!(".. Ok");
     }
 }
 

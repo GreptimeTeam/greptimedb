@@ -14,6 +14,7 @@
 
 use std::sync::Mutex;
 
+use arrow::pyarrow::PyArrowException;
 use common_telemetry::info;
 use datafusion_common::ScalarValue;
 use datafusion_expr::ColumnarValue;
@@ -32,7 +33,9 @@ use crate::python::pyo3::builtins::greptime_builtins;
 
 /// prevent race condition of init cpython
 static START_PYO3: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
-
+pub(crate) fn to_py_err(err: impl ToString)->PyErr{
+    PyArrowException::new_err(err.to_string())
+}
 pub(crate) fn init_cpython_interpreter() {
     let mut start = START_PYO3.lock().unwrap();
     if !*start {

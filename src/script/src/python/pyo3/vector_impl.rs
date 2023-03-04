@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use arrow::array::{ArrayData, make_array};
+use arrow::pyarrow::PyArrowConvert;
 use datafusion::arrow::array::BooleanArray;
 use datafusion::arrow::compute;
 use datafusion::arrow::compute::kernels::{arithmetic, comparison};
@@ -22,10 +24,10 @@ use datatypes::vectors::Helper;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::pyclass::CompareOp;
-use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyString};
+use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyString, PyType};
 
 use crate::python::ffi_types::vector::{arrow_rtruediv, wrap_bool_result, wrap_result, PyVector};
-use crate::python::pyo3::utils::pyo3_obj_try_to_typed_val;
+use crate::python::pyo3::utils::{pyo3_obj_try_to_typed_val, to_py_err};
 
 macro_rules! get_con_type {
     ($obj:ident, $($pyty:ident => $con_ty:ident),*$(,)?) => {
@@ -264,6 +266,17 @@ impl PyVector {
     }
     fn __repr__(&self) -> PyResult<String> {
         Ok(format!("{self:#?}"))
+    }
+    /// Convert to `pyarrow` 's array
+    pub(crate) fn to_py(&self, py: Python) -> PyResult<PyObject> {
+        self.to_arrow_array().data().to_pyarrow(py)
+    }
+    /// Convert from `pyarrow`'s array
+    #[classmethod]
+    pub(crate) fn from_py(_cls: &PyType, py: Python, obj: PyObject) -> PyResult<PyVector> {
+        let array = make_array(ArrayData::from_pyarrow(obj.as_ref(py))?);
+        let v = Helper::try_into_vector(array).map_err(to_py_err)?;
+        Ok(v.into())
     }
 }
 
