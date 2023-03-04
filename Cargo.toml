@@ -12,6 +12,7 @@ members = [
     "src/common/function-macro",
     "src/common/grpc",
     "src/common/grpc-expr",
+    "src/common/mem-prof",
     "src/common/procedure",
     "src/common/query",
     "src/common/recordbatch",

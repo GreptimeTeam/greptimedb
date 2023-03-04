@@ -15,6 +15,7 @@
 pub mod authorize;
 pub mod handler;
 pub mod influxdb;
+pub mod mem_prof;
 pub mod opentsdb;
 pub mod prometheus;
 pub mod script;
@@ -444,6 +445,12 @@ impl HttpServer {
                 self.route_prom(prom_handler),
             );
         }
+
+        // mem profiler
+        router = router.nest(
+            &format!("/{HTTP_API_VERSION}/prof"),
+            Router::new().route("/mem", routing::get(crate::http::mem_prof::mem_prof)),
+        );
 
         router = router.route("/metrics", routing::get(handler::metrics));
 

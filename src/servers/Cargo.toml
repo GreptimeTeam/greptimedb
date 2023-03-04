@@ -25,6 +25,8 @@ common-recordbatch = { path = "../common/recordbatch" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
+common-mem-prof = { path = "../common/mem-prof" }
+
 datatypes = { path = "../datatypes" }
 derive_builder = "0.12"
 digest = "0.10"

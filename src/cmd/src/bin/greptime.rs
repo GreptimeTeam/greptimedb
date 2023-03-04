@@ -87,6 +87,11 @@ fn print_version() -> &'static str {
     )
 }
 
+use tikv_jemallocator;
+
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cmd = Command::parse();

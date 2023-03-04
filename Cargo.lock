@@ -1415,6 +1415,8 @@ dependencies = [
  "substrait 0.1.0",
  "tempdir",
  "tempfile",
+ "tikv-jemalloc-ctl",
+ "tikv-jemallocator",
  "tokio",
  "toml",
 ]
@@ -1564,6 +1566,15 @@ dependencies = [
  "datatypes",
  "snafu",
  "table",
+]
+
+[[package]]
+name = "common-mem-prof"
+version = "0.1.0"
+dependencies = [
+ "tikv-jemalloc-ctl",
+ "tikv-jemalloc-sys",
+ "tikv-jemallocator",
 ]
 
 [[package]]
@@ -6901,6 +6912,7 @@ dependencies = [
  "common-error",
  "common-grpc",
  "common-grpc-expr",
+ "common-mem-prof",
  "common-query",
  "common-recordbatch",
  "common-runtime",
@@ -7829,6 +7841,37 @@ dependencies = [
  "byteorder",
  "integer-encoding",
  "ordered-float 2.10.0",
+]
+
+[[package]]
+name = "tikv-jemalloc-ctl"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e37706572f4b151dff7a0146e040804e9c26fe3a3118591112f05cf12a4216c1"
+dependencies = [
+ "libc",
+ "paste",
+ "tikv-jemalloc-sys",
+]
+
+[[package]]
+name = "tikv-jemalloc-sys"
+version = "0.5.3+5.3.0-patched"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a678df20055b43e57ef8cddde41cdfda9a3c1a060b67f4c5836dfb1d78543ba8"
+dependencies = [
+ "cc",
+ "libc",
+]
+
+[[package]]
+name = "tikv-jemallocator"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "20612db8a13a6c06d57ec83953694185a367e16945f66565e8028d2c0bd76979"
+dependencies = [
+ "libc",
+ "tikv-jemalloc-sys",
 ]
 
 [[package]]

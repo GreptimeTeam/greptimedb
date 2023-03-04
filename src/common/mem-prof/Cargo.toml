@@ -1,0 +1,16 @@
+[package]
+name = "common-mem-prof"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tikv-jemallocator = "0.5"
+tikv-jemalloc-ctl = "0.5"
+
+[dependencies.tikv-jemalloc-sys]
+version = "0.5.3+5.3.0-patched"
+features = ["stats", "profiling", "unprefixed_malloc_on_supported_platforms"]
+
+[profile.release]
+debug = true
