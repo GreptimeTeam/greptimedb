@@ -537,46 +537,45 @@ impl CatalogList for RemoteCatalogManager {
 
     /// Read catalog info of given name from metasrv.
     fn catalog(&self, name: &str) -> Result<Option<CatalogProviderRef>> {
-        let maybe_catalog = self.catalogs.get(name);
+        let catalog = self.catalogs.get(name);
 
-        if let Some(catalog) = maybe_catalog {
+        if let Some(catalog) = catalog {
             return Ok(Some(catalog.clone()));
         }
 
-        let backend = self.backend.clone();
-        let catalog_name = name.to_string();
+        // It's for lack of incremental catalog syncing between datanode and meta. Here we fetch catalog
+        // from meta on demand. This can be removed when incremental catalog syncing is done in datanode.
 
-        // TODO(fys): refactor it later
-        let exist = std::thread::spawn(|| {
+        let backend = self.backend.clone();
+
+        let catalogs: Vec<String> = std::thread::spawn(|| {
             common_runtime::block_on_write(async move {
                 let mut stream = backend.range(CATALOG_KEY_PREFIX.as_bytes());
+                let mut catalogs = Vec::new();
 
-                while let Some(Ok(catalog)) = stream.next().await {
-                    let catalog_key = String::from_utf8_lossy(&catalog.0);
+                while let Some(catalog) = stream.next().await {
+                    if let Ok(catalog) = catalog {
+                        let catalog_key = String::from_utf8_lossy(&catalog.0);
 
-                    if let Ok(key) = CatalogKey::parse(&catalog_key) {
-                        if key.catalog_name == catalog_name {
-                            return true;
+                        if let Ok(key) = CatalogKey::parse(&catalog_key) {
+                            catalogs.push(key.catalog_name);
                         }
                     }
                 }
 
-                false
+                catalogs
             })
         })
         .join()
         .unwrap();
 
-        if exist {
-            let catalog_provider = self.new_catalog_provider(name);
-
+        for catalog in catalogs {
             self.catalogs
-                .insert(name.to_string(), catalog_provider.clone());
-
-            return Ok(Some(catalog_provider));
+                .entry(catalog.clone())
+                .or_insert(self.new_catalog_provider(&catalog));
         }
 
-        Ok(None)
+        Ok(self.catalogs.get(name).as_deref().cloned())
     }
 }
 
