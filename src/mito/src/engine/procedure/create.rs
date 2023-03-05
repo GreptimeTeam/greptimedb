@@ -151,15 +151,18 @@ impl<S: StorageEngine> CreateMitoTable<S> {
             &self.data.request.schema_name,
             self.data.request.id,
         );
+        let table_options = &self.data.request.table_options;
+        let write_buffer_size = table_options.write_buffer_size.map(|size| size.0 as usize);
+        let ttl = table_options.ttl;
         let open_opts = OpenOptions {
             parent_dir: table_dir.clone(),
-            write_buffer_size: None,
-            ttl: None,
+            write_buffer_size,
+            ttl,
         };
         let create_opts = CreateOptions {
             parent_dir: table_dir,
-            write_buffer_size: None,
-            ttl: None,
+            write_buffer_size,
+            ttl,
         };
 
         let table_schema =
