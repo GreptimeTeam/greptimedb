@@ -143,7 +143,7 @@ mod tests {
         let iter = memtable.iter(&IterContext::default()).unwrap();
         let sst_path = "table1";
         let layer = Arc::new(FsAccessLayer::new(sst_path, os.clone()));
-        let _sst_info = layer
+        let sst_info = layer
             .write_sst(sst_file_name, Source::Iter(iter), &WriteOptions {})
             .await
             .unwrap();
@@ -155,6 +155,7 @@ mod tests {
                     file_name: sst_file_name.to_string(),
                     time_range: None,
                     level: 0,
+                    file_size: sst_info.file_size,
                 },
                 layer.clone(),
                 file_purger,

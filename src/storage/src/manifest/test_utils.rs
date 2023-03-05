@@ -20,6 +20,8 @@ use crate::metadata::RegionMetadata;
 use crate::sst::FileMeta;
 use crate::test_util::descriptor_util::RegionDescBuilder;
 
+pub const DEFAULT_TEST_FILE_SIZE: u64 = 1024;
+
 pub fn build_region_meta() -> RegionMetadata {
     let region_name = "region-0";
     let desc = RegionDescBuilder::new(region_name)
@@ -45,6 +47,7 @@ pub fn build_region_edit(
                 file_name: f.to_string(),
                 time_range: None,
                 level: 0,
+                file_size: DEFAULT_TEST_FILE_SIZE,
             })
             .collect(),
         files_to_remove: files_to_remove
@@ -54,6 +57,7 @@ pub fn build_region_edit(
                 file_name: f.to_string(),
                 time_range: None,
                 level: 0,
+                file_size: DEFAULT_TEST_FILE_SIZE,
             })
             .collect(),
     }

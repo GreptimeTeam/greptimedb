@@ -130,7 +130,17 @@ impl<'a> ParquetWriter<'a> {
         object.write(buf).await.context(WriteObjectSnafu {
             path: object.path(),
         })?;
-        Ok(SstInfo { time_range })
+        let file_size = object
+            .metadata()
+            .await
+            .context(WriteObjectSnafu {
+                path: object.path(),
+            })?
+            .content_length();
+        Ok(SstInfo {
+            time_range,
+            file_size,
+        })
     }
 }
 
@@ -667,7 +677,10 @@ mod tests {
         let iter = memtable.iter(&IterContext::default()).unwrap();
         let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
 
-        let SstInfo { time_range } = writer
+        let SstInfo {
+            time_range,
+            file_size,
+        } = writer
             .write_sst(&sst::WriteOptions::default())
             .await
             .unwrap();
@@ -679,6 +692,7 @@ mod tests {
             )),
             time_range
         );
+        assert_ne!(file_size, 0);
         let operator = ObjectStore::new(
             Fs::default()
                 .root(dir.path().to_str().unwrap())
@@ -740,7 +754,10 @@ mod tests {
         let iter = memtable.iter(&IterContext::default()).unwrap();
         let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
 
-        let SstInfo { time_range } = writer
+        let SstInfo {
+            time_range,
+            file_size,
+        } = writer
             .write_sst(&sst::WriteOptions::default())
             .await
             .unwrap();
@@ -752,6 +769,7 @@ mod tests {
             )),
             time_range
         );
+        assert_ne!(file_size, 0);
         let operator = ObjectStore::new(
             Fs::default()
                 .root(dir.path().to_str().unwrap())
@@ -853,7 +871,10 @@ mod tests {
         let iter = memtable.iter(&IterContext::default()).unwrap();
         let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
 
-        let SstInfo { time_range } = writer
+        let SstInfo {
+            time_range,
+            file_size,
+        } = writer
             .write_sst(&sst::WriteOptions::default())
             .await
             .unwrap();
@@ -865,6 +886,7 @@ mod tests {
             )),
             time_range
         );
+        assert_ne!(file_size, 0);
 
         let projected_schema =
             Arc::new(ProjectedSchema::new(schema, Some(vec![1, 0, 3, 2])).unwrap());

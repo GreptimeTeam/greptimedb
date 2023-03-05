@@ -239,6 +239,7 @@ mod tests {
                     Timestamp::new_millisecond(end_ts_millis),
                 )),
                 level: 0,
+                file_size: 0,
             },
             layer,
             file_purger,
