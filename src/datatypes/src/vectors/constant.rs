@@ -17,10 +17,11 @@ use std::fmt;
 use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef};
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 
 use crate::data_type::ConcreteDataType;
 use crate::error::{self, Result, SerializeSnafu};
+use crate::scalars::ScalarVector;
 use crate::serialize::Serializable;
 use crate::value::{Value, ValueRef};
 use crate::vectors::{BooleanVector, Helper, UInt32Vector, Validity, Vector, VectorRef};
@@ -88,17 +89,23 @@ impl ConstantVector {
         if indices.is_empty() {
             return Ok(self.slice(0, 0));
         }
-        for i in 0..indices.len() {
-            if let Value::UInt32(idx) = indices.get(i) {
-                if idx >= self.len() as u32 {
-                    return error::BadArrayAccessSnafu {
-                        index: idx as usize,
-                        size: indices.len(),
-                    }
-                    .fail();
+        let len = self.len() as u32;
+        indices
+            .iter_data()
+            .map(|idx| {
+                if let Some(idx) = idx {
+                    ensure!(
+                        idx < len,
+                        error::BadArrayAccessSnafu {
+                            index: idx as usize,
+                            size: indices.len()
+                        }
+                    );
                 }
-            }
-        }
+                Ok(())
+            })
+            .collect::<Result<Vec<_>>>()?;
+
         let length = indices.len() - indices.null_count();
         if length == self.len() {
             return Ok(Arc::new(self.clone()));
