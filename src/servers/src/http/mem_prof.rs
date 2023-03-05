@@ -14,12 +14,17 @@
 
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use snafu::ResultExt;
+
+use crate::error::DumpProfileDataSnafu;
 
 #[cfg(feature = "mem-prof")]
 #[axum_macros::debug_handler]
 pub async fn mem_prof() -> crate::error::Result<impl IntoResponse> {
     Ok((
         StatusCode::OK,
-        common_mem_prof::dump_profile("/tmp/greptimedb-prof").unwrap(),
+        common_mem_prof::dump_profile()
+            .await
+            .context(DumpProfileDataSnafu)?,
     ))
 }

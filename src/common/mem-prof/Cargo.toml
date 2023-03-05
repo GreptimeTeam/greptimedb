@@ -8,12 +8,17 @@ license.workspace = true
 mem-prof = [
     "tikv-jemalloc-sys/stats",
     "tikv-jemalloc-sys/profiling",
-    "tikv-jemalloc-sys/unprefixed_malloc_on_supported_platforms"
+    "tikv-jemalloc-sys/unprefixed_malloc_on_supported_platforms",
+    "tikv-jemalloc-ctl/use_std"
 ]
 
 [dependencies]
-tikv-jemallocator = "0.5"
+common-error = {path = "../error"}
+snafu.workspace = true
+tempfile = "3.4"
 tikv-jemalloc-ctl = "0.5"
+tikv-jemallocator = "0.5"
+tokio.workspace = true
 
 [dependencies.tikv-jemalloc-sys]
 version = "0.5"
