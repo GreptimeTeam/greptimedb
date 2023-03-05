@@ -171,9 +171,8 @@ fn create_mysql_column(column_schema: &ColumnSchema) -> Result<Column> {
         ConcreteDataType::Int64(_) | ConcreteDataType::UInt64(_) => {
             Ok(ColumnType::MYSQL_TYPE_LONGLONG)
         }
-        ConcreteDataType::Float32(_) | ConcreteDataType::Float64(_) => {
-            Ok(ColumnType::MYSQL_TYPE_FLOAT)
-        }
+        ConcreteDataType::Float32(_) => Ok(ColumnType::MYSQL_TYPE_FLOAT),
+        ConcreteDataType::Float64(_) => Ok(ColumnType::MYSQL_TYPE_DOUBLE),
         ConcreteDataType::Binary(_) | ConcreteDataType::String(_) => {
             Ok(ColumnType::MYSQL_TYPE_VARCHAR)
         }

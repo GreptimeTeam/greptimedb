@@ -108,7 +108,7 @@ impl MysqlInstanceShim {
     fn set_query(&self, query: String) -> u32 {
         let stmt_id = self.prepared_stmts_counter.fetch_add(1, Ordering::SeqCst);
         let mut guard = self.prepared_stmts.write();
-        guard.insert(stmt_id, query.to_string());
+        guard.insert(stmt_id, query);
         stmt_id
     }
 
@@ -263,7 +263,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
 }
 
 fn replace_params(params: Vec<ParamValue>, query: String) -> String {
-    let mut query = query.to_owned();
+    let mut query = query;
     let mut index = 1;
     for param in params {
         let s = match param.value.into_inner() {
@@ -289,8 +289,8 @@ fn format_duration(duration: Duration) -> String {
     format!("{}:{}:{}", hours, minutes, seconds)
 }
 
-async fn validate_query(query: &String) -> Result<Statement> {
-    let statement = ParserContext::create_with_dialect(&query, &GenericDialect {});
+async fn validate_query(query: &str) -> Result<Statement> {
+    let statement = ParserContext::create_with_dialect(query, &GenericDialect {});
     let mut statement = match statement {
         Err(e) => {
             return Err(Error::PrepareStatementFailed {
@@ -311,19 +311,19 @@ async fn validate_query(query: &String) -> Result<Statement> {
     match statement {
         Statement::Query(_) => Ok(statement),
         _ => Err(Error::PrepareStatementFailed {
-            err_msg: "prepare statment only support SELECT now".to_string(),
+            err_msg: "prepare statement only support SELECT now".to_string(),
         }),
     }
 }
 
 async fn write_output<'a, W: AsyncWrite + Send + Sync + Unpin>(
     w: QueryResultWriter<'a, W>,
-    query: &String,
+    query: &str,
     outputs: Vec<Result<Output>>,
 ) -> Result<()> {
     let mut writer = MysqlResultWriter::new(w);
     for output in outputs {
-        writer.write(&query, output).await?;
+        writer.write(query, output).await?;
     }
     Ok(())
 }
