@@ -218,7 +218,7 @@ mod tests {
         }
 
         let iter = memtable.iter(&IterContext::default()).unwrap();
-        let file_path = sst_file_id.append_extension_parquet();
+        let file_path = sst_file_id.as_parquet();
         let writer = ParquetWriter::new(&file_path, Source::Iter(iter), object_store.clone());
 
         let SstInfo {
@@ -409,7 +409,7 @@ mod tests {
 
         let opts = WriteOptions {};
         let s1 = ParquetWriter::new(
-            &output_file_ids[0].append_extension_parquet(),
+            &output_file_ids[0].as_parquet(),
             Source::Reader(reader1),
             object_store.clone(),
         )
@@ -425,7 +425,7 @@ mod tests {
         );
 
         let s2 = ParquetWriter::new(
-            &output_file_ids[1].append_extension_parquet(),
+            &output_file_ids[1].as_parquet(),
             Source::Reader(reader2),
             object_store.clone(),
         )
@@ -441,7 +441,7 @@ mod tests {
         );
 
         let s3 = ParquetWriter::new(
-            &output_file_ids[2].append_extension_parquet(),
+            &output_file_ids[2].as_parquet(),
             Source::Reader(reader3),
             object_store.clone(),
         )

@@ -200,7 +200,7 @@ impl FileHandle {
 
     #[inline]
     pub fn file_name(&self) -> String {
-        self.inner.meta.file_id.append_extension_parquet()
+        self.inner.meta.file_id.as_parquet()
     }
 
     #[inline]
@@ -271,13 +271,13 @@ impl Drop for FileHandleInner {
                     info!(
                         "Scheduled SST purge task, region: {}, name: {}, res: {}",
                         self.meta.region_id,
-                        self.meta.file_id.append_extension_parquet(),
+                        self.meta.file_id.as_parquet(),
                         res
                     );
                 }
                 Err(e) => {
                     error!(e; "Failed to schedule SST purge task, region: {}, name: {}", 
-                    self.meta.region_id, self.meta.file_id.append_extension_parquet());
+                    self.meta.region_id, self.meta.file_id.as_parquet());
                 }
             }
         }
@@ -321,7 +321,7 @@ impl FileId {
     }
 
     /// Append `.parquet` to file id to make a complete file name
-    pub fn append_extension_parquet(&self) -> String {
+    pub fn as_parquet(&self) -> String {
         format!("{}{}", self.0.hyphenated(), ".parquet")
     }
 }
@@ -456,13 +456,13 @@ impl AccessLayer for FsAccessLayer {
     ) -> Result<SstInfo> {
         // Now we only supports parquet format. We may allow caller to specific SST format in
         // WriteOptions in the future.
-        let file_path = self.sst_file_path(&file_id.append_extension_parquet());
+        let file_path = self.sst_file_path(&file_id.as_parquet());
         let writer = ParquetWriter::new(&file_path, source, self.object_store.clone());
         writer.write_sst(opts).await
     }
 
     async fn read_sst(&self, file_id: FileId, opts: &ReadOptions) -> Result<BoxedBatchReader> {
-        let file_path = self.sst_file_path(&file_id.append_extension_parquet());
+        let file_path = self.sst_file_path(&file_id.as_parquet());
         let reader = ParquetReader::new(
             &file_path,
             self.object_store.clone(),
@@ -476,7 +476,7 @@ impl AccessLayer for FsAccessLayer {
     }
 
     async fn delete_sst(&self, file_id: FileId) -> Result<()> {
-        let path = self.sst_file_path(&file_id.append_extension_parquet());
+        let path = self.sst_file_path(&file_id.as_parquet());
         let object = self.object_store.object(&path);
         object.delete().await.context(DeleteSstSnafu)
     }
@@ -513,11 +513,11 @@ mod tests {
     }
 
     #[test]
-    fn test_file_id_append_extension() {
+    fn test_file_id_as_parquet() {
         let id = FileId::from_str("67e55044-10b1-426f-9247-bb680e5fe0c8").unwrap();
         assert_eq!(
             "67e55044-10b1-426f-9247-bb680e5fe0c8.parquet",
-            id.append_extension_parquet()
+            id.as_parquet()
         );
     }
 

@@ -32,11 +32,7 @@ impl Request for FilePurgeRequest {
     type Key = String;
 
     fn key(&self) -> Self::Key {
-        format!(
-            "{}/{}",
-            self.region_id,
-            self.file_id.append_extension_parquet()
-        )
+        format!("{}/{}", self.region_id, self.file_id)
     }
 }
 
@@ -54,12 +50,12 @@ impl Handler for FilePurgeHandler {
     ) -> crate::error::Result<()> {
         req.sst_layer.delete_sst(req.file_id).await.map_err(|e| {
             error!(e; "Failed to delete SST file, file: {}, region: {}", 
-                req.file_id.append_extension_parquet(), req.region_id);
+                req.file_id.as_parquet(), req.region_id);
             e
         })?;
         debug!(
             "Successfully deleted SST file: {}, region: {}",
-            req.file_id.append_extension_parquet(),
+            req.file_id.as_parquet(),
             req.region_id
         );
         token.try_release();
@@ -202,11 +198,7 @@ mod tests {
 
         notify.notified().await;
 
-        let object = object_store.object(&format!(
-            "{}/{}",
-            path,
-            sst_file_id.append_extension_parquet()
-        ));
+        let object = object_store.object(&format!("{}/{}", path, sst_file_id.as_parquet()));
         assert!(!object.is_exist().await.unwrap());
     }
 
@@ -236,11 +228,7 @@ mod tests {
         }
         scheduler.stop(true).await.unwrap();
         assert!(!object_store
-            .object(&format!(
-                "{}/{}",
-                path,
-                sst_file_id.append_extension_parquet()
-            ))
+            .object(&format!("{}/{}", path, sst_file_id.as_parquet()))
             .is_exist()
             .await
             .unwrap());

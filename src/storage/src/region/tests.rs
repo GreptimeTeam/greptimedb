@@ -367,9 +367,9 @@ async fn test_recover_region_manifets() {
     assert_eq!(3, files.len());
     assert_eq!(
         HashSet::from([
-            file_id_a.append_extension_parquet(),
-            file_id_b.append_extension_parquet(),
-            file_id_c.append_extension_parquet()
+            file_id_a.as_parquet(),
+            file_id_b.as_parquet(),
+            file_id_c.as_parquet()
         ]),
         files
     );
