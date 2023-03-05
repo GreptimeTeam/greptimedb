@@ -28,7 +28,6 @@ use crate::error::{
 const PROF_DUMP: &[u8] = b"prof.dump\0";
 const OPT_PROF: &[u8] = b"opt.prof\0";
 
-#[cfg(feature = "mem-prof")]
 pub async fn dump_profile() -> error::Result<Vec<u8>> {
     ensure!(is_prof_enabled()?, ProfilingNotEnabledSnafu);
     let tmp_path = tempfile::tempdir().map_err(|_| {
@@ -69,7 +68,6 @@ pub async fn dump_profile() -> error::Result<Vec<u8>> {
     Ok(buf)
 }
 
-#[cfg(feature = "mem-prof")]
 fn is_prof_enabled() -> error::Result<bool> {
     // safety: OPT_PROF variable, if present, is always a boolean value.
     Ok(unsafe { tikv_jemalloc_ctl::raw::read::<bool>(OPT_PROF).context(ReadOptProfSnafu)? })

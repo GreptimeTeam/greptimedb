@@ -257,6 +257,7 @@ pub enum Error {
     #[snafu(display("Cannot find requested database: {}-{}", catalog, schema))]
     DatabaseNotFound { catalog: String, schema: String },
 
+    #[cfg(feature = "mem-prof")]
     #[snafu(display("Failed to dump profile data, source: {}", source))]
     DumpProfileData {
         #[snafu(backtrace)]
@@ -321,6 +322,7 @@ impl ErrorExt for Error {
             | InvalidUtf8Value { .. } => StatusCode::InvalidAuthHeader,
 
             DatabaseNotFound { .. } => StatusCode::DatabaseNotFound,
+            #[cfg(feature = "mem-prof")]
             DumpProfileData { source, .. } => source.status_code(),
         }
     }
