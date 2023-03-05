@@ -52,6 +52,6 @@ datanode = { path = "../datanode" }
 futures = "0.3"
 meta-srv = { path = "../meta-srv", features = ["mock"] }
 strfmt = "0.2"
-tempfile = "3.4.0"
+tempfile.workspace = true
 toml = "0.5"
 tower = "0.4"

@@ -30,7 +30,7 @@ servers = { path = "../src/servers" }
 snafu.workspace = true
 sql = { path = "../src/sql" }
 table = { path = "../src/table" }
-tempfile = "3.4.0"
+tempfile.workspace = true
 tokio.workspace = true
 uuid.workspace = true
 
