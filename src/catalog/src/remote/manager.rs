@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -548,17 +548,17 @@ impl CatalogList for RemoteCatalogManager {
 
         let backend = self.backend.clone();
 
-        let catalogs: Vec<String> = std::thread::spawn(|| {
+        let catalogs: HashSet<String> = std::thread::spawn(|| {
             common_runtime::block_on_read(async move {
                 let mut stream = backend.range(CATALOG_KEY_PREFIX.as_bytes());
-                let mut catalogs = Vec::new();
+                let mut catalogs = HashSet::new();
 
                 while let Some(catalog) = stream.next().await {
                     if let Ok(catalog) = catalog {
                         let catalog_key = String::from_utf8_lossy(&catalog.0);
 
                         if let Ok(key) = CatalogKey::parse(&catalog_key) {
-                            catalogs.push(key.catalog_name);
+                            catalogs.insert(key.catalog_name);
                         }
                     }
                 }
@@ -568,6 +568,9 @@ impl CatalogList for RemoteCatalogManager {
         })
         .join()
         .unwrap();
+
+        self.catalogs
+            .retain(|catalog_name, _| catalogs.get(catalog_name).is_some());
 
         for catalog in catalogs {
             self.catalogs
