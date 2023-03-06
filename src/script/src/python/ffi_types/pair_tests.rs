@@ -15,27 +15,98 @@
 mod sample_testcases;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use common_query::Output;
+use common_recordbatch::RecordBatch;
 use datafusion::arrow::array::Float64Array;
 use datafusion::arrow::compute;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
+use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::VectorRef;
 #[cfg(feature = "pyo3_backend")]
 use pyo3::{types::PyDict, Python};
 use rustpython_compiler::Mode;
 
-use crate::python::ffi_types::pair_tests::sample_testcases::sample_test_case;
+use crate::engine::{CompileContext, EvalContext, Script, ScriptEngine};
+use crate::python::engine::sample_script_engine;
+use crate::python::ffi_types::pair_tests::sample_testcases::{
+    generate_copr_intgrate_tests, sample_test_case,
+};
 use crate::python::ffi_types::PyVector;
 #[cfg(feature = "pyo3_backend")]
 use crate::python::pyo3::{init_cpython_interpreter, vector_impl::into_pyo3_cell};
 use crate::python::rspython::init_interpreter;
 
+// TODO(discord9): paired test for slicing Vector
+// & slice tests & lit() function for dataframe & test with full coprocessor&query engine ability
 /// generate testcases that should be tested in paired both in RustPython and CPython
 #[derive(Debug, Clone)]
-struct TestCase {
+struct CodeBlockTestCase {
     input: HashMap<String, VectorRef>,
     script: String,
     expect: VectorRef,
+}
+
+/// TODO(discord9): input a simple recordbatch, set a query engine, and such,
+/// so that for a full Coprocessor it will work
+#[derive(Debug, Clone, Default)]
+struct CoprTestCase {
+    // will be build to a RecordBatch and feed to coprocessor
+    script: String,
+    expect: Option<HashMap<String, VectorRef>>,
+}
+
+#[allow(unused)]
+fn into_recordbatch(input: HashMap<String, VectorRef>) -> RecordBatch {
+    let mut schema = Vec::new();
+    let mut columns = Vec::new();
+    for (name, v) in input {
+        schema.push(ColumnSchema::new(name, v.data_type(), false));
+        columns.push(v);
+    }
+    let schema = Arc::new(Schema::new(schema));
+
+    RecordBatch::new(schema, columns).unwrap()
+}
+
+#[tokio::test]
+#[allow(clippy::print_stdout)]
+async fn integrated_py_copr_test() {
+    let testcases = generate_copr_intgrate_tests();
+    let script_engine = sample_script_engine();
+    for (idx, case) in testcases.into_iter().enumerate() {
+        println!("Testcase {idx}:\n script: {}", case.script);
+        let script = case.script;
+        let script = script_engine
+            .compile(&script, CompileContext::default())
+            .await
+            .unwrap();
+        let output = script
+            .execute(HashMap::default(), EvalContext::default())
+            .await
+            .unwrap();
+        let res = match output {
+            Output::Stream(s) => common_recordbatch::util::collect_batches(s).await.unwrap(),
+            Output::RecordBatches(rbs) => rbs,
+            _ => unreachable!(),
+        };
+        let rb = res.iter().next().expect("One and only one recordbatch");
+        if let Some(expect_result) = case.expect {
+            let mut actual_result = HashMap::new();
+            for col_sch in rb.schema.column_schemas() {
+                let col = rb.column_by_name(&col_sch.name).unwrap();
+                actual_result.insert(col_sch.name.clone(), col.clone());
+            }
+            for (name, col) in expect_result {
+                let actual_col = actual_result.get(&name).expect("Column with this name");
+                if !check_equal(col.clone(), actual_col.clone()) {
+                    panic!("Column {name} doesn't match, expect {col:?}, found {actual_col:?}")
+                }
+            }
+        }
+        println!(".. Ok");
+    }
 }
 
 #[test]
@@ -76,7 +147,7 @@ fn check_equal(v0: VectorRef, v1: VectorRef) -> bool {
 }
 
 /// will panic if something is wrong, used in tests only
-fn eval_rspy(case: TestCase) {
+fn eval_rspy(case: CodeBlockTestCase) {
     let interpreter = init_interpreter();
     interpreter.enter(|vm| {
         let scope = vm.new_scope_with_builtins();
@@ -112,7 +183,7 @@ fn eval_rspy(case: TestCase) {
 }
 
 #[cfg(feature = "pyo3_backend")]
-fn eval_pyo3(case: TestCase) {
+fn eval_pyo3(case: CodeBlockTestCase) {
     init_cpython_interpreter();
     Python::with_gil(|py| {
         let locals = {

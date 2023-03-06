@@ -24,6 +24,7 @@ python = [
 ]
 
 [dependencies]
+arrow.workspace = true
 async-trait.workspace = true
 catalog = { path = "../catalog" }
 common-catalog = { path = "../common/catalog" }

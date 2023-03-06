@@ -209,6 +209,7 @@ dependencies = [
  "arrow-select",
  "arrow-string",
  "comfy-table",
+ "pyo3",
 ]
 
 [[package]]
@@ -390,6 +391,7 @@ version = "33.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eb327717d87eb94be5eff3b0cb8987f54059d343ee5235abf7f143c85f54cfc8"
 dependencies = [
+ "bitflags",
  "serde",
 ]
 
@@ -6657,6 +6659,7 @@ checksum = "ddccb15bcce173023b3fedd9436f882a0739b8dfb45e4f6b6002bee5929f61b2"
 name = "script"
 version = "0.1.0"
 dependencies = [
+ "arrow",
  "async-trait",
  "catalog",
  "common-catalog",

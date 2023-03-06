@@ -13,9 +13,11 @@
 // limitations under the License.
 
 use futures::Future;
+use once_cell::sync::OnceCell;
 use rustpython_vm::builtins::PyBaseExceptionRef;
 use rustpython_vm::{PyObjectRef, PyPayload, VirtualMachine};
 use snafu::{Backtrace, GenerateImplicitData};
+use tokio::runtime::Runtime;
 
 use crate::python::error;
 
@@ -39,7 +41,12 @@ pub fn format_py_error(excep: PyBaseExceptionRef, vm: &VirtualMachine) -> error:
         backtrace: Backtrace::generate(),
     }
 }
-
+static LOCAL_RUNTIME: OnceCell<tokio::runtime::Runtime> = OnceCell::new();
+fn get_local_runtime() -> std::thread::Result<&'static Runtime> {
+    let rt = LOCAL_RUNTIME
+        .get_or_try_init(|| tokio::runtime::Runtime::new().map_err(|e| Box::new(e) as _))?;
+    Ok(rt)
+}
 /// a terrible hack to call async from sync by:
 /// TODO(discord9): find a better way
 /// 1. spawn a new thread
@@ -49,6 +56,7 @@ where
     F: Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
-    let rt = tokio::runtime::Runtime::new().map_err(|e| Box::new(e) as _)?;
+    let rt = get_local_runtime()?;
+
     std::thread::spawn(move || rt.block_on(f)).join()
 }

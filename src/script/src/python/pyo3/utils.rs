@@ -14,6 +14,7 @@
 
 use std::sync::Mutex;
 
+use arrow::pyarrow::PyArrowException;
 use common_telemetry::info;
 use datafusion_common::ScalarValue;
 use datafusion_expr::ColumnarValue;
@@ -32,7 +33,9 @@ use crate::python::pyo3::builtins::greptime_builtins;
 
 /// prevent race condition of init cpython
 static START_PYO3: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
-
+pub(crate) fn to_py_err(err: impl ToString) -> PyErr {
+    PyArrowException::new_err(err.to_string())
+}
 pub(crate) fn init_cpython_interpreter() {
     let mut start = START_PYO3.lock().unwrap();
     if !*start {
@@ -100,6 +103,15 @@ macro_rules! to_con_type {
     };
 }
 
+/// Convert PyAny to [`ScalarValue`]
+pub(crate) fn pyo3_obj_try_to_typed_scalar_value(
+    obj: &PyAny,
+    dtype: Option<ConcreteDataType>,
+) -> PyResult<ScalarValue> {
+    let val = pyo3_obj_try_to_typed_val(obj, dtype)?;
+    val.try_to_scalar_value(&val.data_type())
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
 /// to int/float/boolean, if dtype is None, then convert to highest prec type
 pub(crate) fn pyo3_obj_try_to_typed_val(
     obj: &PyAny,
