@@ -231,7 +231,7 @@ mod tests {
         let handle = FileHandle::new(
             FileMeta {
                 region_id: 0,
-                file_id: sst_file_id,
+                file_name: sst_file_id,
                 time_range,
                 level: 0,
                 file_size,
@@ -463,7 +463,7 @@ mod tests {
                 FileHandle::new(
                     FileMeta {
                         region_id: 0,
-                        file_id: f,
+                        file_name: f,
                         level: 1,
                         time_range: None,
                         file_size: 0,

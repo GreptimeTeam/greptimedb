@@ -181,7 +181,7 @@ impl CompactionOutput {
 
         Ok(FileMeta {
             region_id,
-            file_id: output_file_id,
+            file_name: output_file_id,
             time_range,
             level: self.output_level,
             file_size,

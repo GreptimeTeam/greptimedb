@@ -208,7 +208,7 @@ impl<S: LogStore> FlushJob<S> {
 
                 Ok(FileMeta {
                     region_id,
-                    file_id,
+                    file_name: file_id,
                     time_range,
                     level: 0,
                     file_size,

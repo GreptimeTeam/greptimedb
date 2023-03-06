@@ -151,7 +151,7 @@ mod tests {
             FileHandle::new(
                 FileMeta {
                     region_id: 0,
-                    file_id: sst_file_id,
+                    file_name: sst_file_id,
                     time_range: None,
                     level: 0,
                     file_size: sst_info.file_size,

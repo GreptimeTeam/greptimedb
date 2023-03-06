@@ -25,7 +25,7 @@ use common_telemetry::{error, info};
 use common_time::range::TimestampRange;
 use common_time::Timestamp;
 use object_store::{util, ObjectStore};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{ResultExt, Snafu};
 use store_api::storage::{ChunkReader, RegionId};
 use table::predicate::Predicate;
@@ -98,7 +98,7 @@ impl LevelMetas {
 
         for file in files_to_remove {
             let level = file.level;
-            if let Some(removed_file) = merged.levels[level as usize].remove_file(file.file_id) {
+            if let Some(removed_file) = merged.levels[level as usize].remove_file(file.file_name) {
                 removed_file.mark_deleted();
             }
         }
@@ -200,12 +200,12 @@ impl FileHandle {
 
     #[inline]
     pub fn file_name(&self) -> String {
-        self.inner.meta.file_id.as_parquet()
+        self.inner.meta.file_name.as_parquet()
     }
 
     #[inline]
     pub fn file_id(&self) -> FileId {
-        self.inner.meta.file_id
+        self.inner.meta.file_name
     }
 
     #[inline]
@@ -263,7 +263,7 @@ impl Drop for FileHandleInner {
         if self.deleted.load(Ordering::Relaxed) {
             let request = FilePurgeRequest {
                 sst_layer: self.sst_layer.clone(),
-                file_id: self.meta.file_id,
+                file_id: self.meta.file_name,
                 region_id: self.meta.region_id,
             };
             match self.file_purger.schedule(request) {
@@ -271,13 +271,13 @@ impl Drop for FileHandleInner {
                     info!(
                         "Scheduled SST purge task, region: {}, name: {}, res: {}",
                         self.meta.region_id,
-                        self.meta.file_id.as_parquet(),
+                        self.meta.file_name.as_parquet(),
                         res
                     );
                 }
                 Err(e) => {
                     error!(e; "Failed to schedule SST purge task, region: {}, name: {}", 
-                    self.meta.region_id, self.meta.file_id.as_parquet());
+                    self.meta.region_id, self.meta.file_name.as_parquet());
                 }
             }
         }
@@ -300,7 +300,7 @@ impl FileHandleInner {
     }
 }
 
-#[derive(Debug, Snafu)]
+#[derive(Debug, Snafu, PartialEq)]
 pub struct ParseIdError {
     source: uuid::Error,
 }
@@ -347,13 +347,23 @@ pub struct FileMeta {
     /// Region of file.
     pub region_id: RegionId,
     /// Compared to normal file names, FileId ignore the extension
-    pub file_id: FileId,
+    #[serde(deserialize_with = "deserialize_from_string")]
+    pub file_name: FileId,
     /// Timestamp range of file.
     pub time_range: Option<(Timestamp, Timestamp)>,
     /// SST level of the file.
     pub level: Level,
     /// Size of the file.
     pub file_size: u64,
+}
+
+fn deserialize_from_string<'de, D>(deserializer: D) -> std::result::Result<FileId, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s: &str = Deserialize::deserialize(deserializer)?;
+    let stripped = s.strip_suffix(".parquet").unwrap_or(s); // strip parquet suffix if needed.
+    FileId::from_str(stripped).map_err(<D::Error as serde::de::Error>::custom)
 }
 
 #[derive(Debug, Default)]
@@ -513,6 +523,35 @@ mod tests {
     }
 
     #[test]
+    fn test_deserialize_file_meta() {
+        let file_meta = create_file_meta(FileId::random(), 0);
+        let serialized_file_meta = serde_json::to_string(&file_meta).unwrap();
+        let deserialized_file_meta = serde_json::from_str(&serialized_file_meta);
+        assert_eq!(file_meta, deserialized_file_meta.unwrap());
+    }
+
+    #[test]
+    fn test_deserialize_from_string() {
+        let json_file_meta = "{\"region_id\":0,\"file_name\":\"bc5896ec-e4d8-4017-a80d-f2de73188d55\",\"time_range\":null,\"level\":0}";
+        let file_meta = create_file_meta(
+            FileId::from_str("bc5896ec-e4d8-4017-a80d-f2de73188d55").unwrap(),
+            0,
+        );
+        let deserialized_file_meta: FileMeta = serde_json::from_str(json_file_meta).unwrap();
+        assert_eq!(file_meta, deserialized_file_meta);
+    }
+    #[test]
+    fn test_deserialize_from_string_parquet() {
+        let json_file_meta = "{\"region_id\":0,\"file_name\":\"bc5896ec-e4d8-4017-a80d-f2de73188d55.parquet\",\"time_range\":null,\"level\":0}";
+        let file_meta = create_file_meta(
+            FileId::from_str("bc5896ec-e4d8-4017-a80d-f2de73188d55").unwrap(),
+            0,
+        );
+        let deserialized_file_meta: FileMeta = serde_json::from_str(json_file_meta).unwrap();
+        assert_eq!(file_meta, deserialized_file_meta);
+    }
+
+    #[test]
     fn test_file_id_as_parquet() {
         let id = FileId::from_str("67e55044-10b1-426f-9247-bb680e5fe0c8").unwrap();
         assert_eq!(
@@ -524,7 +563,7 @@ mod tests {
     fn create_file_meta(file_id: FileId, level: Level) -> FileMeta {
         FileMeta {
             region_id: 0,
-            file_id,
+            file_name: file_id,
             time_range: None,
             level,
             file_size: 0,

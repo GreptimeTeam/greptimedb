@@ -44,7 +44,7 @@ pub fn build_region_edit(
             .iter()
             .map(|f| FileMeta {
                 region_id: 0,
-                file_id: *f,
+                file_name: *f,
                 time_range: None,
                 level: 0,
                 file_size: DEFAULT_TEST_FILE_SIZE,
@@ -54,7 +54,7 @@ pub fn build_region_edit(
             .iter()
             .map(|f| FileMeta {
                 region_id: 0,
-                file_id: *f,
+                file_name: *f,
                 time_range: None,
                 level: 0,
                 file_size: DEFAULT_TEST_FILE_SIZE,
