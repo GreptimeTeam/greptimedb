@@ -5,9 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-mem-prof = [
-    "dep:common-mem-prof"
-]
+mem-prof = ["dep:common-mem-prof"]
 
 [dependencies]
 aide = { version = "0.9", features = ["axum"] }

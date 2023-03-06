@@ -10,10 +10,7 @@ name = "greptime"
 path = "src/bin/greptime.rs"
 
 [features]
-mem-prof = [
-    "tikv-jemallocator",
-    "tikv-jemalloc-ctl",
-]
+mem-prof = ["tikv-jemallocator", "tikv-jemalloc-ctl"]
 
 [dependencies]
 anymap = "1.0.0-beta.2"
@@ -24,7 +21,9 @@ common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
-common-telemetry = { path = "../common/telemetry", features = ["deadlock_detection", ] }
+common-telemetry = { path = "../common/telemetry", features = [
+    "deadlock_detection",
+] }
 datanode = { path = "../datanode" }
 either = "1.8"
 frontend = { path = "../frontend" }
