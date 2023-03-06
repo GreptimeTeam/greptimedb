@@ -123,7 +123,6 @@ def answer() -> vector[i64]:
     from greptime import vector, col, lit
     # Bitwise Operator  pred comparison operator
     expr_0 = (col("number")<lit(3)) & (col("number")>0)
-    print(expr_0)
     ret = dataframe.select([col("number")]).filter(expr_0).collect()[0][0]
     return ret
 "#

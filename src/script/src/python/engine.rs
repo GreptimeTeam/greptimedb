@@ -377,7 +377,7 @@ mod tests {
 import greptime as gt
 
 @copr(args=["number"], returns = ["number"], sql = "select * from numbers")
-def test(number)-> vector[u32]:
+def test(number) -> vector[u32]:
     return query.sql("select * from numbers")[0][0]
 "#;
         let script = script_engine
@@ -404,7 +404,7 @@ def test(number)-> vector[u32]:
 
         let script = r#"
 @copr(returns = ["number"])
-def test(**params)-> vector[i64]:
+def test(**params) -> vector[i64]:
     return int(params['a']) + int(params['b'])
 "#;
         let script = script_engine
@@ -436,7 +436,7 @@ def test(**params)-> vector[i64]:
 from greptime import col
 
 @copr(args=["number"], returns = ["number"], sql = "select * from numbers")
-def test(number)-> vector[u32]:
+def test(number) -> vector[u32]:
     return dataframe.filter(col("number")==col("number")).collect()[0][0]
 "#;
         let script = script_engine
@@ -468,7 +468,7 @@ def add(a, b):
     return a + b;
 
 @copr(args=["a", "b", "c"], returns = ["r"], sql="select number as a,number as b,number as c from numbers limit 100")
-def test(a, b, c)-> vector[f64]:
+def test(a, b, c) -> vector[f64]:
     return add(a, b) / g.sqrt(c + 1)
 "#;
         let script = script_engine
@@ -506,7 +506,7 @@ def test(a, b, c)-> vector[f64]:
 import greptime as gt
 
 @copr(args=["number"], returns = ["r"], sql="select number from numbers limit 100")
-def test(a)-> vector[i64]:
+def test(a) -> vector[i64]:
     return gt.vector([x for x in a if x % 2 == 0])
 "#;
         let script = script_engine

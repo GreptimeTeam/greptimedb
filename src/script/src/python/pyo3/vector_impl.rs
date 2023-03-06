@@ -268,12 +268,12 @@ impl PyVector {
         Ok(format!("{self:#?}"))
     }
     /// Convert to `pyarrow` 's array
-    pub(crate) fn to_py(&self, py: Python) -> PyResult<PyObject> {
+    pub(crate) fn to_pyarrow(&self, py: Python) -> PyResult<PyObject> {
         self.to_arrow_array().data().to_pyarrow(py)
     }
     /// Convert from `pyarrow`'s array
     #[classmethod]
-    pub(crate) fn from_py(_cls: &PyType, py: Python, obj: PyObject) -> PyResult<PyVector> {
+    pub(crate) fn from_pyarrow(_cls: &PyType, py: Python, obj: PyObject) -> PyResult<PyVector> {
         let array = make_array(ArrayData::from_pyarrow(obj.as_ref(py))?);
         let v = Helper::try_into_vector(array).map_err(to_py_err)?;
         Ok(v.into())

@@ -32,13 +32,16 @@ use crate::python::pyo3::utils::{
 };
 
 /// Try to extract a `PyVector` or convert from a `pyarrow.array` object
+#[inline]
 fn try_into_py_vector(py: Python, obj: PyObject) -> PyResult<PyVector> {
     if let Ok(v) = obj.extract::<PyVector>(py) {
         Ok(v)
     } else {
-        PyVector::from_py(obj.as_ref(py).get_type(), py, obj.clone())
+        PyVector::from_pyarrow(obj.as_ref(py).get_type(), py, obj.clone())
     }
 }
+
+#[inline]
 fn to_array_of_py_vec(py: Python, obj: &[&PyObject]) -> PyResult<Vec<PyVector>> {
     obj.iter()
         .map(|v| try_into_py_vector(py, v.to_object(py)))
