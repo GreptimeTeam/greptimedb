@@ -16,12 +16,11 @@ use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef};
-use snafu::{ensure, ResultExt};
+use arrow::array::{Array, ArrayRef, UInt32Array};
+use snafu::{ensure, IntoError, ResultExt};
 
 use crate::data_type::ConcreteDataType;
 use crate::error::{self, Result, SerializeSnafu};
-use crate::scalars::ScalarVector;
 use crate::serialize::Serializable;
 use crate::value::{Value, ValueRef};
 use crate::vectors::{BooleanVector, Helper, UInt32Vector, Validity, Vector, VectorRef};
@@ -89,28 +88,31 @@ impl ConstantVector {
         if indices.is_empty() {
             return Ok(self.slice(0, 0));
         }
-        let len = self.len() as u32;
-        indices
-            .iter_data()
-            .map(|idx| {
-                if let Some(idx) = idx {
-                    ensure!(
-                        idx < len,
-                        error::BadArrayAccessSnafu {
-                            index: idx as usize,
-                            size: indices.len()
-                        }
-                    );
-                }
-                Ok(())
-            })
-            .collect::<Result<Vec<_>>>()?;
+        ensure!(
+            indices.null_count() == 0,
+            error::UnsupportedOperationSnafu {
+                op: "taking a null index",
+                vector_type: self.vector_type_name(),
+            }
+        );
 
-        let length = indices.len() - indices.null_count();
-        if length == self.len() {
-            return Ok(Arc::new(self.clone()));
+        let len = self.len();
+        let arr = indices.to_arrow_array();
+        let indices_arr = arr.as_any().downcast_ref::<UInt32Array>().unwrap();
+        if !arrow::compute::min_boolean(
+            &arrow::compute::lt_scalar(indices_arr, len as u32).unwrap(),
+        )
+        .unwrap()
+        {
+            return Err(error::ArrowComputeSnafu.into_error(
+                arrow::error::ArrowError::ComputeError("Array index out of bounds".to_string()),
+            ));
         }
-        Ok(Arc::new(ConstantVector::new(self.inner().clone(), length)))
+
+        Ok(Arc::new(ConstantVector::new(
+            self.inner().clone(),
+            indices.len(),
+        )))
     }
 }
 
