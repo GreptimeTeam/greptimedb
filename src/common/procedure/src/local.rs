@@ -333,6 +333,7 @@ impl LocalManager {
                 .with_min_delay(self.retry_delay)
                 .with_max_times(self.max_retry_times),
             store: ProcedureStore::new(self.state_store.clone()),
+            rolling_back: false,
         };
 
         let watcher = meta.state_receiver.clone();

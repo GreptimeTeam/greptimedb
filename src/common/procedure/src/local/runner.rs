@@ -110,6 +110,7 @@ pub(crate) struct Runner {
     pub(crate) step: u32,
     pub(crate) exponential_builder: ExponentialBuilder,
     pub(crate) store: ProcedureStore,
+    pub(crate) rolling_back: bool,
 }
 
 impl Runner {
@@ -165,6 +166,7 @@ impl Runner {
             provider: self.manager_ctx.clone(),
         };
 
+        self.rolling_back = false;
         self.execute_once_with_retry(&ctx).await;
     }
 
@@ -197,6 +199,16 @@ impl Runner {
     }
 
     async fn execute_once(&mut self, ctx: &Context) -> ExecResult {
+        // if rolling_back, there is no need to execute again.
+        if self.rolling_back {
+            if let Err(e) = self.rollback_procedure().await {
+                self.rolling_back = true;
+                self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
+                return ExecResult::RetryLater;
+            }
+
+            return ExecResult::Failed;
+        }
         match self.procedure.execute(ctx).await {
             Ok(status) => {
                 logging::debug!(
@@ -248,6 +260,7 @@ impl Runner {
 
                 // Write rollback key so we can skip this procedure while recovering procedures.
                 if let Err(e) = self.rollback_procedure().await {
+                    self.rolling_back = true;
                     self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
                     return ExecResult::RetryLater;
                 }
@@ -290,6 +303,7 @@ impl Runner {
             step,
             exponential_builder: self.exponential_builder.clone(),
             store: self.store.clone(),
+            rolling_back: false,
         };
 
         // Insert the procedure. We already check the procedure existence before inserting
@@ -454,6 +468,7 @@ mod tests {
             step: 0,
             exponential_builder: ExponentialBuilder::default(),
             store,
+            rolling_back: false,
         }
     }
 
