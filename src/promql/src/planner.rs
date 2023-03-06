@@ -46,11 +46,17 @@ use crate::error::{
     UnsupportedExprSnafu, ValueNotFoundSnafu,
 };
 use crate::extension_plan::{
-    InstantManipulate, Millisecond, RangeManipulate, SeriesDivide, SeriesNormalize,
+    EmptyMetric, InstantManipulate, Millisecond, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
 use crate::functions::{IDelta, Increase};
 
 const LEFT_PLAN_JOIN_ALIAS: &str = "lhs";
+
+/// `time()` function in PromQL.
+const SPECIAL_TIME_FUNCTION: &str = "time";
+
+/// default value column name for empty metric
+const DEFAULT_VALUE_COLUMN: &str = "value";
 
 #[derive(Default, Debug, Clone)]
 struct PromPlannerContext {
@@ -331,6 +337,26 @@ impl PromPlanner {
                 })
             }
             PromExpr::Call(Call { func, args }) => {
+                // TODO(ruihang): refactor this, transform the AST in advance to include an empty metric table.
+                if func.name == SPECIAL_TIME_FUNCTION {
+                    self.ctx.time_index_column = Some(SPECIAL_TIME_FUNCTION.to_string());
+                    self.ctx.value_columns = vec![DEFAULT_VALUE_COLUMN.to_string()];
+                    self.ctx.table_name = Some(String::new());
+
+                    return Ok(LogicalPlan::Extension(Extension {
+                        node: Arc::new(
+                            EmptyMetric::new(
+                                self.ctx.start,
+                                self.ctx.end,
+                                self.ctx.interval,
+                                SPECIAL_TIME_FUNCTION.to_string(),
+                                DEFAULT_VALUE_COLUMN.to_string(),
+                            )
+                            .context(DataFusionPlanningSnafu)?,
+                        ),
+                    }));
+                }
+
                 let args = self.create_function_args(&args.args)?;
                 let input = self
                     .prom_expr_to_plan(args.input.with_context(|| ExpectExprSnafu {
