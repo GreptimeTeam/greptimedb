@@ -1110,6 +1110,7 @@ dependencies = [
  "meta-client",
  "mito",
  "object-store",
+ "parking_lot",
  "regex",
  "serde",
  "serde_json",

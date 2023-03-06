@@ -25,6 +25,7 @@ use common_telemetry::{debug, error, info};
 use dashmap::DashMap;
 use futures::Stream;
 use futures_util::StreamExt;
+use parking_lot::RwLock;
 use snafu::{OptionExt, ResultExt};
 use table::engine::{EngineContext, TableEngineRef};
 use table::metadata::TableId;
@@ -53,7 +54,7 @@ use crate::{
 pub struct RemoteCatalogManager {
     node_id: u64,
     backend: KvBackendRef,
-    catalogs: Arc<DashMap<String, CatalogProviderRef>>,
+    catalogs: Arc<RwLock<DashMap<String, CatalogProviderRef>>>,
     engine: TableEngineRef,
     system_table_requests: Mutex<Vec<RegisterSystemTableRequest>>,
 }
@@ -387,9 +388,12 @@ impl CatalogManager for RemoteCatalogManager {
             catalogs.keys().cloned().collect::<Vec<_>>()
         );
 
-        catalogs.into_iter().for_each(|(k, v)| {
-            self.catalogs.insert(k, v);
-        });
+        {
+            let self_catalogs = self.catalogs.read();
+            catalogs.into_iter().for_each(|(k, v)| {
+                self_catalogs.insert(k, v);
+            });
+        }
 
         info!("Max table id allocated: {}", max_table_id);
 
@@ -521,6 +525,7 @@ impl CatalogList for RemoteCatalogManager {
                     )
                     .await?;
 
+                let catalogs = catalogs.read();
                 let prev = catalogs.insert(name, catalog.clone());
 
                 Ok(prev)
@@ -532,13 +537,24 @@ impl CatalogList for RemoteCatalogManager {
 
     /// List all catalogs from metasrv
     fn catalog_names(&self) -> Result<Vec<String>> {
-        Ok(self.catalogs.iter().map(|k| k.key().to_string()).collect())
+        let catalogs = self.catalogs.read();
+        Ok(catalogs.iter().map(|k| k.key().to_string()).collect())
     }
 
     /// Read catalog info of given name from metasrv.
     fn catalog(&self, name: &str) -> Result<Option<CatalogProviderRef>> {
-        let catalog = self.catalogs.get(name);
+        {
+            let catalogs = self.catalogs.read();
+            let catalog = catalogs.get(name);
 
+            if let Some(catalog) = catalog {
+                return Ok(Some(catalog.clone()));
+            }
+        }
+
+        let catalogs = self.catalogs.write();
+
+        let catalog = catalogs.get(name);
         if let Some(catalog) = catalog {
             return Ok(Some(catalog.clone()));
         }
@@ -548,7 +564,7 @@ impl CatalogList for RemoteCatalogManager {
 
         let backend = self.backend.clone();
 
-        let catalogs: HashSet<String> = std::thread::spawn(|| {
+        let catalogs_from_meta: HashSet<String> = std::thread::spawn(|| {
             common_runtime::block_on_read(async move {
                 let mut stream = backend.range(CATALOG_KEY_PREFIX.as_bytes());
                 let mut catalogs = HashSet::new();
@@ -569,16 +585,17 @@ impl CatalogList for RemoteCatalogManager {
         .join()
         .unwrap();
 
-        self.catalogs
-            .retain(|catalog_name, _| catalogs.get(catalog_name).is_some());
+        catalogs.retain(|catalog_name, _| catalogs_from_meta.get(catalog_name).is_some());
 
-        for catalog in catalogs {
-            self.catalogs
+        for catalog in catalogs_from_meta {
+            catalogs
                 .entry(catalog.clone())
                 .or_insert(self.new_catalog_provider(&catalog));
         }
 
-        Ok(self.catalogs.get(name).as_deref().cloned())
+        let catalog = catalogs.get(name);
+
+        Ok(catalog.as_deref().cloned())
     }
 }
 
