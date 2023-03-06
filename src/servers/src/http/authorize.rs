@@ -261,7 +261,7 @@ fn need_auth<B>(req: &Request<B>) -> bool {
 fn extract_db_from_query(query: &str) -> Option<&str> {
     for pair in query.split('&') {
         if let Some(db) = pair.strip_prefix("db=") {
-            return if pair.len() == 3 { None } else { Some(db) };
+            return if db.is_empty() { None } else { Some(db) };
         }
     }
     None
@@ -402,6 +402,16 @@ mod tests {
         );
         assert_matches!(
             extract_influxdb_user_from_query("u=123&p=4"),
+            (Some("123"), Some("4"))
+        );
+        assert_matches!(extract_influxdb_user_from_query("p="), (None, None));
+        assert_matches!(extract_influxdb_user_from_query("p=4"), (None, Some("4")));
+        assert_matches!(
+            extract_influxdb_user_from_query("p=4&u="),
+            (None, Some("4"))
+        );
+        assert_matches!(
+            extract_influxdb_user_from_query("p=4&u=123"),
             (Some("123"), Some("4"))
         );
     }
