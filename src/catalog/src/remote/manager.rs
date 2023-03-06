@@ -549,7 +549,7 @@ impl CatalogList for RemoteCatalogManager {
         let backend = self.backend.clone();
 
         let catalogs: Vec<String> = std::thread::spawn(|| {
-            common_runtime::block_on_write(async move {
+            common_runtime::block_on_read(async move {
                 let mut stream = backend.range(CATALOG_KEY_PREFIX.as_bytes());
                 let mut catalogs = Vec::new();
 
