@@ -54,9 +54,8 @@ pub fn create_udf(func: FunctionRef) -> ScalarUdf {
             .collect();
 
         let result = func_cloned.eval(func_ctx, &args.context(FromScalarValueSnafu)?);
-        // FIXME(discord9): just use `Vector` to convert to `ColumnarValue`
-        let udf = result.map(ColumnarValue::Vector)?;
-        Ok(udf)
+        let udf_result = result.map(ColumnarValue::Vector)?;
+        Ok(udf_result)
     });
 
     ScalarUdf::new(func.name(), &func.signature(), &return_type, &fun)
