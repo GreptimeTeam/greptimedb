@@ -17,9 +17,9 @@ use std::sync::Arc;
 
 use api::v1::meta::store_client::StoreClient;
 use api::v1::meta::{
-    BatchPutRequest, BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse,
-    DeleteRangeRequest, DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest,
-    PutResponse, RangeRequest, RangeResponse,
+    BatchGetRequest, BatchGetResponse, BatchPutRequest, BatchPutResponse, CompareAndPutRequest,
+    CompareAndPutResponse, DeleteRangeRequest, DeleteRangeResponse, MoveValueRequest,
+    MoveValueResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
 use common_grpc::channel_manager::ChannelManager;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -68,6 +68,11 @@ impl Client {
     pub async fn put(&self, req: PutRequest) -> Result<PutResponse> {
         let inner = self.inner.read().await;
         inner.put(req).await
+    }
+
+    pub async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse> {
+        let inner = self.inner.read().await;
+        inner.batch_get(req).await
     }
 
     pub async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
@@ -137,6 +142,18 @@ impl Inner {
         let mut client = self.random_client()?;
         req.set_header(self.id);
         let res = client.put(req).await.context(error::TonicStatusSnafu)?;
+
+        Ok(res.into_inner())
+    }
+
+    async fn batch_get(&self, mut req: BatchGetRequest) -> Result<BatchGetResponse> {
+        let mut client = self.random_client()?;
+        req.set_header(self.id);
+
+        let res = client
+            .batch_get(req)
+            .await
+            .context(error::TonicStatusSnafu)?;
 
         Ok(res.into_inner())
     }

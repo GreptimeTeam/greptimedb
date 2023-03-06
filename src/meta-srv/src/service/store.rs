@@ -22,7 +22,7 @@ use api::v1::meta::{
     CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest, DeleteRangeResponse,
     MoveValueRequest, MoveValueResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
-use tonic::{Request, Response, Status};
+use tonic::{Request, Response};
 
 use crate::metasrv::MetaSrv;
 use crate::service::GrpcResult;
@@ -43,12 +43,11 @@ impl store_server::Store for MetaSrv {
         Ok(Response::new(res))
     }
 
-    async fn batch_get(
-        &self,
-        _request: Request<BatchGetRequest>,
-    ) -> Result<Response<BatchGetResponse>, Status> {
-        // TODO(fys): please fix this
-        unimplemented!()
+    async fn batch_get(&self, req: Request<BatchGetRequest>) -> GrpcResult<BatchGetResponse> {
+        let req = req.into_inner();
+        let res = self.kv_store().batch_get(req).await?;
+
+        Ok(Response::new(res))
     }
 
     async fn batch_put(&self, req: Request<BatchPutRequest>) -> GrpcResult<BatchPutResponse> {
@@ -117,6 +116,18 @@ mod tests {
 
         let req = PutRequest::default();
         let res = meta_srv.put(req.into_request()).await;
+
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_batch_get() {
+        let kv_store = Arc::new(MemStore::new());
+
+        let meta_srv = MetaSrvBuilder::new().kv_store(kv_store).build().await;
+
+        let req = BatchGetRequest::default();
+        let res = meta_srv.batch_get(req.into_request()).await;
 
         assert!(res.is_ok());
     }

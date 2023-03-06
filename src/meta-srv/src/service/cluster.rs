@@ -20,7 +20,6 @@ use common_telemetry::warn;
 use tonic::{Request, Response};
 
 use crate::metasrv::MetaSrv;
-use crate::service::store::ext::KvStoreExt;
 use crate::service::GrpcResult;
 
 #[async_trait::async_trait]
@@ -37,8 +36,8 @@ impl cluster_server::Cluster for MetaSrv {
             return Ok(Response::new(resp));
         }
 
-        let req = req.into_inner();
-        let kvs = self.in_memory().batch_get(req.keys).await?;
+        let kvs = self.in_memory().batch_get(req.into_inner()).await?.kvs;
+
         let success = ResponseHeader::success(0);
 
         let get_resp = BatchGetResponse {
