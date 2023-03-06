@@ -430,7 +430,7 @@ mod test_util {
 mod tests {
     use common_error::mock::MockError;
     use common_error::prelude::StatusCode;
-    use tempfile::TempDir;
+    use common_test_util::temp_dir::create_temp_dir;
 
     use super::*;
     use crate::error::Error;
@@ -540,7 +540,7 @@ mod tests {
 
     #[test]
     fn test_register_loader() {
-        let dir = create_tmp_dir("register");
+        let dir = create_temp_dir("register");
         let config = ManagerConfig {
             object_store: test_util::new_object_store(&dir),
         };
@@ -558,7 +558,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_recover() {
-        let dir = create_tmp_dir("recover");
+        let dir = create_temp_dir("recover");
         let object_store = test_util::new_object_store(&dir);
         let config = ManagerConfig {
             object_store: object_store.clone(),
@@ -603,7 +603,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_submit_procedure() {
-        let dir = create_tmp_dir("submit");
+        let dir = create_temp_dir("submit");
         let config = ManagerConfig {
             object_store: test_util::new_object_store(&dir),
         };
@@ -649,7 +649,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_state_changed_on_err() {
-        let dir = create_tmp_dir("on_err");
+        let dir = create_temp_dir("on_err");
         let config = ManagerConfig {
             object_store: test_util::new_object_store(&dir),
         };
@@ -703,9 +703,5 @@ mod tests {
 
         check_procedure(MockProcedure { panic: false }).await;
         check_procedure(MockProcedure { panic: true }).await;
-    }
-
-    fn create_tmp_dir(prefix: &str) -> TempDir {
-        tempfile::Builder::new().prefix(prefix).tempdir().unwrap()
     }
 }

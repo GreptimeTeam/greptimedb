@@ -16,6 +16,7 @@ common-grpc = { path = "../src/common/grpc" }
 common-query = { path = "../src/common/query" }
 common-runtime = { path = "../src/common/runtime" }
 common-telemetry = { path = "../src/common/telemetry" }
+common-test-util = { path = "../src/common/test-util" }
 datanode = { path = "../src/datanode" }
 datatypes = { path = "../src/datatypes" }
 dotenv = "0.15"

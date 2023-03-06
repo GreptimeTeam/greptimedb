@@ -147,6 +147,7 @@ mod tests {
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_query::logical_plan::Expr;
     use common_query::physical_plan::PhysicalPlanRef;
+    use common_test_util::temp_dir::create_temp_dir;
     use common_time::timestamp::Timestamp;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
@@ -217,10 +218,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_statement_to_request() {
-        let dir = tempfile::Builder::new()
-            .prefix("setup_test_engine_and_table")
-            .tempdir()
-            .unwrap();
+        let dir = create_temp_dir("setup_test_engine_and_table");
         let store_dir = dir.path().to_string_lossy();
         let accessor = Builder::default().root(&store_dir).build().unwrap();
         let object_store = ObjectStore::new(accessor).finish();

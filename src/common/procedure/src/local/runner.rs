@@ -395,10 +395,10 @@ mod tests {
     use common_error::ext::PlainError;
     use common_error::mock::MockError;
     use common_error::prelude::StatusCode;
+    use common_test_util::temp_dir::create_temp_dir;
     use futures_util::future::BoxFuture;
     use futures_util::{FutureExt, TryStreamExt};
     use object_store::ObjectStore;
-    use tempfile::TempDir;
 
     use super::*;
     use crate::local::test_util;
@@ -511,7 +511,7 @@ mod tests {
             exec_fn,
         };
 
-        let dir = create_tmp_dir("normal");
+        let dir = create_temp_dir("normal");
         let meta = normal.new_meta(ROOT_ID);
         let ctx = context_without_provider(meta.id);
         let object_store = test_util::new_object_store(&dir);
@@ -559,7 +559,7 @@ mod tests {
             exec_fn,
         };
 
-        let dir = create_tmp_dir("suspend");
+        let dir = create_temp_dir("suspend");
         let meta = suspend.new_meta(ROOT_ID);
         let ctx = context_without_provider(meta.id);
         let object_store = test_util::new_object_store(&dir);
@@ -658,7 +658,7 @@ mod tests {
             exec_fn,
         };
 
-        let dir = create_tmp_dir("parent");
+        let dir = create_temp_dir("parent");
         let meta = parent.new_meta(ROOT_ID);
         let procedure_id = meta.id;
 
@@ -700,7 +700,7 @@ mod tests {
             exec_fn,
         };
 
-        let dir = create_tmp_dir("fail");
+        let dir = create_temp_dir("fail");
         let meta = fail.new_meta(ROOT_ID);
         let ctx = context_without_provider(meta.id);
         let object_store = test_util::new_object_store(&dir);
@@ -735,7 +735,7 @@ mod tests {
             exec_fn,
         };
 
-        let dir = create_tmp_dir("retry_later");
+        let dir = create_temp_dir("retry_later");
         let meta = retry_later.new_meta(ROOT_ID);
         let ctx = context_without_provider(meta.id);
         let object_store = test_util::new_object_store(&dir);
@@ -806,7 +806,7 @@ mod tests {
             exec_fn,
         };
 
-        let dir = create_tmp_dir("child_err");
+        let dir = create_temp_dir("child_err");
         let meta = parent.new_meta(ROOT_ID);
 
         let object_store = test_util::new_object_store(&dir);
@@ -823,9 +823,5 @@ mod tests {
         runner.run().await;
         let err = meta.state().error().unwrap().to_string();
         assert!(err.contains("subprocedure failed"), "{err}");
-    }
-
-    fn create_tmp_dir(prefix: &str) -> TempDir {
-        tempfile::Builder::new().prefix(prefix).tempdir().unwrap()
     }
 }

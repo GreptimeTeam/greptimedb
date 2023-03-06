@@ -34,6 +34,7 @@ table = { path = "../table" }
 tokio.workspace = true
 
 [dev-dependencies]
+common-test-util = { path = "../common/test-util" }
 chrono.workspace = true
 log-store = { path = "../log-store" }
 mito = { path = "../mito", features = ["test"] }

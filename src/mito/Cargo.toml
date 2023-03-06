@@ -34,7 +34,5 @@ storage = { path = "../storage" }
 store-api = { path = "../store-api" }
 table = { path = "../table" }
 tempfile.workspace = true
+common-test-util = { path = "../common/test-util" }
 tokio.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true

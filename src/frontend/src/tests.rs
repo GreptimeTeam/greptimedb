@@ -20,6 +20,7 @@ use catalog::remote::MetaKvBackend;
 use client::Client;
 use common_grpc::channel_manager::ChannelManager;
 use common_runtime::Builder as RuntimeBuilder;
+use common_test_util::temp_dir::create_temp_dir;
 use datanode::datanode::{DatanodeOptions, FileConfig, ObjectStoreConfig, WalConfig};
 use datanode::instance::Instance as DatanodeInstance;
 use meta_client::client::MetaClientBuilder;
@@ -75,8 +76,8 @@ pub(crate) async fn create_standalone_instance(test_name: &str) -> MockStandalon
 }
 
 fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) {
-    let wal_tmp_dir = create_tmp_dir(&format!("gt_wal_{name}"));
-    let data_tmp_dir = create_tmp_dir(&format!("gt_data_{name}"));
+    let wal_tmp_dir = create_temp_dir(&format!("gt_wal_{name}"));
+    let data_tmp_dir = create_temp_dir(&format!("gt_data_{name}"));
     let opts = DatanodeOptions {
         wal: WalConfig {
             dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
@@ -161,8 +162,8 @@ async fn create_distributed_datanode(
     datanode_id: u64,
     meta_srv: MockInfo,
 ) -> (Arc<DatanodeInstance>, TestGuard) {
-    let wal_tmp_dir = create_tmp_dir(&format!("gt_wal_{test_name}_dist_dn_{datanode_id}"));
-    let data_tmp_dir = create_tmp_dir(&format!("gt_data_{test_name}_dist_dn_{datanode_id}"));
+    let wal_tmp_dir = create_temp_dir(&format!("gt_wal_{test_name}_dist_dn_{datanode_id}"));
+    let data_tmp_dir = create_temp_dir(&format!("gt_data_{test_name}_dist_dn_{datanode_id}"));
     let opts = DatanodeOptions {
         node_id: Some(datanode_id),
         wal: WalConfig {
@@ -190,10 +191,6 @@ async fn create_distributed_datanode(
             _data_tmp_dir: data_tmp_dir,
         },
     )
-}
-
-fn create_tmp_dir(prefix: &str) -> TempDir {
-    tempfile::Builder::new().prefix(prefix).tempdir().unwrap()
 }
 
 async fn wait_datanodes_alive(kv_store: KvStoreRef) {

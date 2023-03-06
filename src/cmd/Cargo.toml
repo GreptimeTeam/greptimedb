@@ -40,6 +40,7 @@ tokio.workspace = true
 toml = "0.5"
 
 [dev-dependencies]
+common-test-util = { path = "../common/test-util" }
 rexpect = "0.5"
 serde.workspace = true
 tempfile.workspace = true

@@ -15,9 +15,9 @@
 //! Region read/write tests.
 
 use common_telemetry::info;
+use common_test_util::temp_dir::create_temp_dir;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use store_api::storage::{OpenOptions, SequenceNumber, WriteResponse};
-use tempfile::TempDir;
 
 use crate::error::Result;
 use crate::region::tests::{self, FileTesterBase};
@@ -120,7 +120,7 @@ impl Tester {
 
 #[tokio::test]
 async fn test_simple_put_scan() {
-    let dir = create_tmp_dir("put-scan");
+    let dir = create_temp_dir("put-scan");
     let store_dir = dir.path().to_str().unwrap();
     let tester = Tester::new(REGION_NAME, store_dir).await;
 
@@ -140,7 +140,7 @@ async fn test_simple_put_scan() {
 
 #[tokio::test]
 async fn test_sequence_increase() {
-    let dir = create_tmp_dir("sequence");
+    let dir = create_temp_dir("sequence");
     let store_dir = dir.path().to_str().unwrap();
     let tester = Tester::new(REGION_NAME, store_dir).await;
 
@@ -157,7 +157,7 @@ async fn test_sequence_increase() {
 async fn test_reopen() {
     common_telemetry::logging::init_default_ut_logging();
 
-    let dir = create_tmp_dir("reopen");
+    let dir = create_temp_dir("reopen");
     let store_dir = dir.path().to_str().unwrap();
     let mut tester = Tester::new(REGION_NAME, store_dir).await;
 
@@ -184,7 +184,7 @@ async fn test_reopen() {
 
 #[tokio::test]
 async fn test_open_empty() {
-    let dir = create_tmp_dir("open-empty");
+    let dir = create_temp_dir("open-empty");
     let store_dir = dir.path().to_str().unwrap();
     let mut tester = Tester::empty(REGION_NAME, store_dir).await;
 
@@ -194,7 +194,7 @@ async fn test_open_empty() {
 
 #[tokio::test]
 async fn test_scan_different_batch() {
-    let dir = create_tmp_dir("different-batch");
+    let dir = create_temp_dir("different-batch");
     let store_dir = dir.path().to_str().unwrap();
     let mut tester = Tester::new(REGION_NAME, store_dir).await;
 
@@ -216,7 +216,7 @@ async fn test_scan_different_batch() {
 #[tokio::test]
 async fn test_put_delete_scan() {
     common_telemetry::init_default_ut_logging();
-    let dir = create_tmp_dir("put-delete-scan");
+    let dir = create_temp_dir("put-delete-scan");
     let store_dir = dir.path().to_str().unwrap();
     let mut tester = Tester::new(REGION_NAME, store_dir).await;
 
@@ -246,7 +246,7 @@ async fn test_put_delete_scan() {
 
 #[tokio::test]
 async fn test_put_delete_absent_key() {
-    let dir = create_tmp_dir("put-delete-scan");
+    let dir = create_temp_dir("put-delete-scan");
     let store_dir = dir.path().to_str().unwrap();
     let mut tester = Tester::new(REGION_NAME, store_dir).await;
 
@@ -273,8 +273,4 @@ async fn test_put_delete_absent_key() {
     tester.try_reopen().await.unwrap();
     let output = tester.full_scan().await;
     assert_eq!(expect, output);
-}
-
-fn create_tmp_dir(prefix: &str) -> TempDir {
-    tempfile::Builder::new().prefix(prefix).tempdir().unwrap()
 }

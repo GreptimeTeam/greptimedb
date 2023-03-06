@@ -120,6 +120,8 @@ mod tests {
 
     use super::*;
     type DefaultEngine = MitoEngine<EngineImpl<RaftEngineLogStore>>;
+
+    use common_test_util::temp_dir::create_temp_dir;
     use log_store::raft_engine::log_store::RaftEngineLogStore;
     use log_store::LogConfig;
     use mito::engine::MitoEngine;
@@ -129,10 +131,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_insert_find_compile_script() {
-        let wal_dir = tempfile::Builder::new()
-            .prefix("test_insert_find_compile_script_wal")
-            .tempdir()
-            .unwrap();
+        let wal_dir = create_temp_dir("test_insert_find_compile_script_wal");
         let wal_dir_str = wal_dir.path().to_string_lossy();
 
         common_telemetry::init_default_ut_logging();

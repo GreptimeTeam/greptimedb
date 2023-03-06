@@ -18,6 +18,7 @@ use catalog::local::MemoryCatalogManager;
 use catalog::CatalogManagerRef;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
+use common_test_util::temp_dir::create_temp_dir;
 use log_store::NoopLogStore;
 use mito::config::EngineConfig;
 use mito::engine::MitoEngine;
@@ -37,7 +38,7 @@ pub struct TestEnv {
 
 impl TestEnv {
     pub fn new(prefix: &str) -> TestEnv {
-        let dir = tempfile::Builder::new().prefix(prefix).tempdir().unwrap();
+        let dir = create_temp_dir(prefix);
         let store_dir = format!("{}/db", dir.path().to_string_lossy());
         let accessor = Fs::default().root(&store_dir).build().unwrap();
         let object_store = ObjectStore::new(accessor).finish();

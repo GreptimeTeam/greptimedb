@@ -17,13 +17,13 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use common_telemetry::logging;
+use common_test_util::temp_dir::create_temp_dir;
 use object_store::cache_policy::LruCacheLayer;
 use object_store::services::{Fs, S3};
 use object_store::test_util::TempFolder;
 use object_store::{util, Object, ObjectLister, ObjectMode, ObjectStore, ObjectStoreBuilder};
 use opendal::services::Oss;
 use opendal::Operator;
-use tempfile::TempDir;
 
 async fn test_object_crud(store: &ObjectStore) -> Result<()> {
     // Create object handler.
@@ -93,8 +93,8 @@ async fn test_object_list(store: &ObjectStore) -> Result<()> {
 
 #[tokio::test]
 async fn test_fs_backend() -> Result<()> {
-    let data_dir = create_tmp_dir("test_fs_backend");
-    let tmp_dir = create_tmp_dir("test_fs_backend");
+    let data_dir = create_temp_dir("test_fs_backend");
+    let tmp_dir = create_temp_dir("test_fs_backend");
     let store = ObjectStore::new(
         Fs::default()
             .root(&data_dir.path().to_string_lossy())
@@ -195,7 +195,7 @@ async fn assert_cache_files(
 #[tokio::test]
 async fn test_object_store_cache_policy() -> Result<()> {
     // create file storage
-    let root_dir = create_tmp_dir("test_fs_backend");
+    let root_dir = create_temp_dir("test_fs_backend");
     let store = ObjectStore::new(
         Fs::default()
             .root(&root_dir.path().to_string_lossy())
@@ -204,7 +204,7 @@ async fn test_object_store_cache_policy() -> Result<()> {
     );
 
     // create file cache layer
-    let cache_dir = create_tmp_dir("test_fs_cache");
+    let cache_dir = create_temp_dir("test_fs_cache");
     let cache_acc = Fs::default()
         .root(&cache_dir.path().to_string_lossy())
         .atomic_write_dir(&cache_dir.path().to_string_lossy())
@@ -267,8 +267,4 @@ async fn test_object_store_cache_policy() -> Result<()> {
     .await?;
 
     Ok(())
-}
-
-fn create_tmp_dir(prefix: &str) -> TempDir {
-    tempfile::Builder::new().prefix(prefix).tempdir().unwrap()
 }

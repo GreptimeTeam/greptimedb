@@ -48,6 +48,7 @@ tokio.workspace = true
 tonic.workspace = true
 
 [dev-dependencies]
+common-test-util = { path = "../common/test-util" }
 datanode = { path = "../datanode" }
 futures = "0.3"
 meta-srv = { path = "../meta-srv", features = ["mock"] }

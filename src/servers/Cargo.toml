@@ -71,6 +71,7 @@ tower-http = { version = "0.3", features = ["full"] }
 axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", branch = "patch-1" }
 client = { path = "../client" }
 common-base = { path = "../common/base" }
+common-test-util = { path = "../common/test-util" }
 mysql_async = { version = "0.31", default-features = false, features = [
     "default-rustls",
 ] }

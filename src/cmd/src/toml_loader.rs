@@ -29,6 +29,7 @@ mod tests {
     use std::fs::File;
     use std::io::Write;
 
+    use common_test_util::temp_dir::create_temp_dir;
     use serde::{Deserialize, Serialize};
     use snafu::ResultExt;
 
@@ -61,10 +62,7 @@ mod tests {
             host: "greptime.test".to_string(),
         };
 
-        let dir = tempfile::Builder::new()
-            .prefix("test_from_file")
-            .tempdir()
-            .unwrap();
+        let dir = create_temp_dir("test_from_file");
         let test_file = format!("{}/test.toml", dir.path().to_str().unwrap());
 
         let s = toml::to_string(&config).unwrap();

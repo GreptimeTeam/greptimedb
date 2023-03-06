@@ -22,6 +22,7 @@ pub type RegionManifest = ManifestImpl<RegionMetaActionList>;
 mod tests {
     use std::sync::Arc;
 
+    use common_test_util::temp_dir::create_temp_dir;
     use object_store::services::Fs;
     use object_store::{ObjectStore, ObjectStoreBuilder};
     use store_api::manifest::action::ProtocolAction;
@@ -34,10 +35,7 @@ mod tests {
     #[tokio::test]
     async fn test_region_manifest() {
         common_telemetry::init_default_ut_logging();
-        let tmp_dir = tempfile::Builder::new()
-            .prefix("test_region_manifest")
-            .tempdir()
-            .unwrap();
+        let tmp_dir = create_temp_dir("test_region_manifest");
         let object_store = ObjectStore::new(
             Fs::default()
                 .root(&tmp_dir.path().to_string_lossy())

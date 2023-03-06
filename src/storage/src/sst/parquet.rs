@@ -519,6 +519,7 @@ impl BatchReader for ChunkStream {
 mod tests {
     use std::sync::Arc;
 
+    use common_test_util::temp_dir::create_temp_dir;
     use datatypes::arrow::array::{Array, ArrayRef, UInt64Array, UInt8Array};
     use datatypes::prelude::{ScalarVector, Vector};
     use datatypes::types::{TimestampMillisecondType, TimestampType};
@@ -526,7 +527,6 @@ mod tests {
     use object_store::services::Fs;
     use object_store::ObjectStoreBuilder;
     use store_api::storage::OpType;
-    use tempfile::TempDir;
 
     use super::*;
     use crate::memtable::{
@@ -561,7 +561,7 @@ mod tests {
             ], // values
         );
 
-        let dir = create_tmp_dir("write_parquet");
+        let dir = create_temp_dir("write_parquet");
         let path = dir.path().to_str().unwrap();
         let backend = Fs::default().root(path).build().unwrap();
         let object_store = ObjectStore::new(backend).finish();
@@ -659,7 +659,7 @@ mod tests {
             &values_vec, // values
         );
 
-        let dir = create_tmp_dir("write_parquet");
+        let dir = create_temp_dir("write_parquet");
         let path = dir.path().to_str().unwrap();
         let backend = Fs::default().root(path).build().unwrap();
         let object_store = ObjectStore::new(backend).finish();
@@ -732,7 +732,7 @@ mod tests {
             ], // values
         );
 
-        let dir = create_tmp_dir("write_parquet");
+        let dir = create_temp_dir("write_parquet");
         let path = dir.path().to_str().unwrap();
         let backend = Fs::default().root(path).build().unwrap();
         let object_store = ObjectStore::new(backend).finish();
@@ -845,7 +845,7 @@ mod tests {
             ], // values
         );
 
-        let dir = create_tmp_dir("read-parquet-by-range");
+        let dir = create_temp_dir("read-parquet-by-range");
         let path = dir.path().to_str().unwrap();
         let backend = Fs::default().root(path).build().unwrap();
         let object_store = ObjectStore::new(backend).finish();
@@ -950,9 +950,5 @@ mod tests {
         check_unit_lossy(TimeUnit::Nanosecond, TimeUnit::Millisecond, true);
         check_unit_lossy(TimeUnit::Nanosecond, TimeUnit::Microsecond, true);
         check_unit_lossy(TimeUnit::Nanosecond, TimeUnit::Nanosecond, false);
-    }
-
-    fn create_tmp_dir(prefix: &str) -> TempDir {
-        tempfile::Builder::new().prefix(prefix).tempdir().unwrap()
     }
 }

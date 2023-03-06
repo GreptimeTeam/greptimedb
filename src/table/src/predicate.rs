@@ -255,6 +255,7 @@ impl<'a> TimeRangePredicateBuilder<'a> {
 mod tests {
     use std::sync::Arc;
 
+    use common_test_util::temp_dir::create_temp_dir;
     use datafusion::parquet::arrow::ArrowWriter;
     pub use datafusion::parquet::schema::types::BasicTypeInfo;
     use datafusion_common::{Column, ScalarValue};
@@ -308,10 +309,7 @@ mod tests {
     }
 
     async fn assert_prune(array_cnt: usize, predicate: Predicate, expect: Vec<bool>) {
-        let dir = tempfile::Builder::new()
-            .prefix("prune_parquet")
-            .tempdir()
-            .unwrap();
+        let dir = create_temp_dir("prune_parquet");
         let (path, schema) = gen_test_parquet_file(&dir, array_cnt).await;
         let schema = Arc::new(datatypes::schema::Schema::try_from(schema).unwrap());
         let builder = ParquetRecordBatchStreamBuilder::new(

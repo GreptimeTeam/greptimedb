@@ -64,6 +64,7 @@ tower-http = { version = "0.3", features = ["full"] }
 [dev-dependencies]
 axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", branch = "patch-1" }
 client = { path = "../client" }
+common-test-util = { path = "../common/test-util" }
 common-query = { path = "../common/query" }
 datafusion-common.workspace = true
 tempfile.workspace = true

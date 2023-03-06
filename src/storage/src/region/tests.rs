@@ -23,6 +23,7 @@ mod projection;
 use std::collections::{HashMap, HashSet};
 
 use common_telemetry::logging;
+use common_test_util::temp_dir::create_temp_dir;
 use datatypes::prelude::{ScalarVector, WrapperType};
 use datatypes::timestamp::TimestampMillisecond;
 use datatypes::type_id::LogicalTypeId;
@@ -34,7 +35,6 @@ use object_store::{ObjectStore, ObjectStoreBuilder};
 use store_api::storage::{
     consts, Chunk, ChunkReader, RegionMeta, ScanRequest, SequenceNumber, Snapshot, WriteRequest,
 };
-use tempfile::TempDir;
 
 use super::*;
 use crate::file_purger::noop::NoopFilePurgeHandler;
@@ -242,7 +242,7 @@ async fn test_new_region() {
         .build();
     let metadata: RegionMetadata = desc.try_into().unwrap();
 
-    let dir = create_tmp_dir("test_new_region");
+    let dir = create_temp_dir("test_new_region");
     let store_dir = dir.path().to_str().unwrap();
 
     let store_config = config_util::new_store_config(region_name, store_dir).await;
@@ -275,7 +275,7 @@ async fn test_new_region() {
 
 #[tokio::test]
 async fn test_recover_region_manifets() {
-    let tmp_dir = create_tmp_dir("test_new_region");
+    let tmp_dir = create_temp_dir("test_new_region");
     let memtable_builder = Arc::new(DefaultMemtableBuilder::default()) as _;
 
     let object_store = ObjectStore::new(
@@ -365,8 +365,4 @@ async fn test_recover_region_manifets() {
 
     // check manifest state
     assert_eq!(3, manifest.last_version());
-}
-
-fn create_tmp_dir(prefix: &str) -> TempDir {
-    tempfile::Builder::new().prefix(prefix).tempdir().unwrap()
 }
