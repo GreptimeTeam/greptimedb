@@ -76,7 +76,6 @@ mysql_async = { version = "0.31", default-features = false, features = [
 rand = "0.8"
 script = { path = "../script", features = ["python"] }
 serde_json = "1.0"
-serde_urlencoded = "0.7"
 table = { path = "../table" }
 tempdir = "0.3"
 tokio-postgres = "0.7"
