@@ -38,7 +38,7 @@ use once_cell::sync::OnceCell;
 use rand::Rng;
 use servers::grpc::GrpcServer;
 use servers::http::{HttpOptions, HttpServer};
-use servers::promql::PromqlServer;
+use servers::prom::PromServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
 use servers::query_handler::sql::ServerSqlQueryHandlerAdaptor;
 use servers::server::Server;
@@ -305,7 +305,7 @@ pub async fn setup_test_http_app_with_frontend(
     (app, guard)
 }
 
-pub async fn setup_test_promql_app_with_frontend(
+pub async fn setup_test_prom_app_with_frontend(
     store_type: StorageType,
     name: &str,
 ) -> (Router, TestGuard) {
@@ -320,8 +320,8 @@ pub async fn setup_test_promql_app_with_frontend(
     )
     .await
     .unwrap();
-    let promql_server = PromqlServer::create_server(Arc::new(frontend) as _);
-    let app = promql_server.make_app();
+    let prom_server = PromServer::create_server(Arc::new(frontend) as _);
+    let app = prom_server.make_app();
     (app, guard)
 }
 

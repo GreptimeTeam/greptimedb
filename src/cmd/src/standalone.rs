@@ -28,8 +28,8 @@ use frontend::instance::Instance as FeInstance;
 use frontend::mysql::MysqlOptions;
 use frontend::opentsdb::OpentsdbOptions;
 use frontend::postgres::PostgresOptions;
+use frontend::prom::PromOptions;
 use frontend::prometheus::PrometheusOptions;
-use frontend::promql::PromqlOptions;
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
@@ -77,7 +77,7 @@ pub struct StandaloneOptions {
     pub opentsdb_options: Option<OpentsdbOptions>,
     pub influxdb_options: Option<InfluxdbOptions>,
     pub prometheus_options: Option<PrometheusOptions>,
-    pub promql_options: Option<PromqlOptions>,
+    pub prom_options: Option<PromOptions>,
     pub wal: WalConfig,
     pub storage: ObjectStoreConfig,
     pub compaction: CompactionConfig,
@@ -96,7 +96,7 @@ impl Default for StandaloneOptions {
             opentsdb_options: Some(OpentsdbOptions::default()),
             influxdb_options: Some(InfluxdbOptions::default()),
             prometheus_options: Some(PrometheusOptions::default()),
-            promql_options: Some(PromqlOptions::default()),
+            prom_options: Some(PromOptions::default()),
             wal: WalConfig::default(),
             storage: ObjectStoreConfig::default(),
             compaction: CompactionConfig::default(),
@@ -116,7 +116,7 @@ impl StandaloneOptions {
             opentsdb_options: self.opentsdb_options,
             influxdb_options: self.influxdb_options,
             prometheus_options: self.prometheus_options,
-            promql_options: self.promql_options,
+            prom_options: self.prom_options,
             meta_client_options: None,
         }
     }
@@ -141,6 +141,8 @@ struct StartCommand {
     rpc_addr: Option<String>,
     #[clap(long)]
     mysql_addr: Option<String>,
+    #[clap(long)]
+    prom_addr: Option<String>,
     #[clap(long)]
     postgres_addr: Option<String>,
     #[clap(long)]
@@ -254,6 +256,11 @@ impl TryFrom<StartCommand> for FrontendOptions {
                 ..Default::default()
             })
         }
+
+        if let Some(addr) = cmd.prom_addr {
+            opts.prom_options = Some(PromOptions { addr })
+        }
+
         if let Some(addr) = cmd.postgres_addr {
             opts.postgres_options = Some(PostgresOptions {
                 addr,
@@ -302,6 +309,7 @@ mod tests {
             http_addr: None,
             rpc_addr: None,
             mysql_addr: None,
+            prom_addr: None,
             postgres_addr: None,
             opentsdb_addr: None,
             config_file: Some(format!(
@@ -347,6 +355,7 @@ mod tests {
         let command = StartCommand {
             http_addr: None,
             rpc_addr: None,
+            prom_addr: None,
             mysql_addr: None,
             postgres_addr: None,
             opentsdb_addr: None,

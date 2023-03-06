@@ -23,6 +23,7 @@ use frontend::instance::Instance;
 use frontend::mysql::MysqlOptions;
 use frontend::opentsdb::OpentsdbOptions;
 use frontend::postgres::PostgresOptions;
+use frontend::prom::PromOptions;
 use meta_client::MetaClientOptions;
 use servers::auth::UserProviderRef;
 use servers::http::HttpOptions;
@@ -66,6 +67,8 @@ pub struct StartCommand {
     grpc_addr: Option<String>,
     #[clap(long)]
     mysql_addr: Option<String>,
+    #[clap(long)]
+    prom_addr: Option<String>,
     #[clap(long)]
     postgres_addr: Option<String>,
     #[clap(long)]
@@ -141,6 +144,9 @@ impl TryFrom<StartCommand> for FrontendOptions {
                 ..Default::default()
             });
         }
+        if let Some(addr) = cmd.prom_addr {
+            opts.prom_options = Some(PromOptions { addr });
+        }
         if let Some(addr) = cmd.postgres_addr {
             opts.postgres_options = Some(PostgresOptions {
                 addr,
@@ -186,6 +192,7 @@ mod tests {
         let command = StartCommand {
             http_addr: Some("127.0.0.1:1234".to_string()),
             grpc_addr: None,
+            prom_addr: Some("127.0.0.1:4444".to_string()),
             mysql_addr: Some("127.0.0.1:5678".to_string()),
             postgres_addr: Some("127.0.0.1:5432".to_string()),
             opentsdb_addr: Some("127.0.0.1:4321".to_string()),
@@ -209,6 +216,7 @@ mod tests {
             opts.opentsdb_options.as_ref().unwrap().addr,
             "127.0.0.1:4321"
         );
+        assert_eq!(opts.prom_options.as_ref().unwrap().addr, "127.0.0.1:4444");
 
         let default_opts = FrontendOptions::default();
         assert_eq!(
@@ -247,6 +255,7 @@ mod tests {
             http_addr: None,
             grpc_addr: None,
             mysql_addr: None,
+            prom_addr: None,
             postgres_addr: None,
             opentsdb_addr: None,
             influxdb_enable: None,
@@ -276,6 +285,7 @@ mod tests {
             http_addr: None,
             grpc_addr: None,
             mysql_addr: None,
+            prom_addr: None,
             postgres_addr: None,
             opentsdb_addr: None,
             influxdb_enable: None,

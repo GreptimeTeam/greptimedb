@@ -49,7 +49,7 @@ use query::parser::PromQuery;
 use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
 use servers::error as server_error;
 use servers::interceptor::{SqlQueryInterceptor, SqlQueryInterceptorRef};
-use servers::promql::{PromqlHandler, PromqlHandlerRef};
+use servers::prom::{PromHandler, PromHandlerRef};
 use servers::query_handler::grpc::{GrpcQueryHandler, GrpcQueryHandlerRef};
 use servers::query_handler::sql::{SqlQueryHandler, SqlQueryHandlerRef};
 use servers::query_handler::{
@@ -81,7 +81,7 @@ pub trait FrontendInstance:
     + InfluxdbLineProtocolHandler
     + PrometheusProtocolHandler
     + ScriptHandler
-    + PromqlHandler
+    + PromHandler
     + Send
     + Sync
     + 'static
@@ -99,7 +99,7 @@ pub struct Instance {
     script_handler: Option<ScriptHandlerRef>,
     sql_handler: SqlQueryHandlerRef<Error>,
     grpc_query_handler: GrpcQueryHandlerRef<Error>,
-    promql_handler: Option<PromqlHandlerRef>,
+    promql_handler: Option<PromHandlerRef>,
 
     create_expr_factory: CreateExprFactoryRef,
 
@@ -539,7 +539,7 @@ impl ScriptHandler for Instance {
 }
 
 #[async_trait]
-impl PromqlHandler for Instance {
+impl PromHandler for Instance {
     async fn do_query(&self, query: &PromQuery) -> server_error::Result<Output> {
         if let Some(promql_handler) = &self.promql_handler {
             promql_handler.do_query(query).await
