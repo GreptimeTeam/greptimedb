@@ -33,6 +33,7 @@ use crate::instance::sql::table_idents_to_full_name;
 
 mod alter;
 mod copy_table;
+mod copy_table_from;
 mod create;
 mod delete;
 mod drop_table;
@@ -51,6 +52,7 @@ pub enum SqlRequest {
     Explain(Box<Explain>),
     Delete(Delete),
     CopyTable(CopyTableRequest),
+    CopyTableFrom(CopyTableFromRequest),
 }
 
 // Handler to execute SQL except query
@@ -92,6 +94,7 @@ impl SqlHandler {
             SqlRequest::DropTable(req) => self.drop_table(req).await,
             SqlRequest::Delete(req) => self.delete(query_ctx.clone(), req).await,
             SqlRequest::CopyTable(req) => self.copy_table(req).await,
+            SqlRequest::CopyTableFrom(req) => self.copy_table_from(req).await,
             SqlRequest::ShowDatabases(req) => {
                 show_databases(req, self.catalog_manager.clone()).context(ExecuteSqlSnafu)
             }
