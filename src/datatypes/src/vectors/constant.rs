@@ -17,7 +17,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, UInt32Array};
-use snafu::{ensure, IntoError, ResultExt};
+use snafu::{ensure, ResultExt};
 
 use crate::data_type::ConcreteDataType;
 use crate::error::{self, Result, SerializeSnafu};
@@ -104,9 +104,7 @@ impl ConstantVector {
         )
         .unwrap()
         {
-            return Err(error::ArrowComputeSnafu.into_error(
-                arrow::error::ArrowError::ComputeError("Array index out of bounds".to_string()),
-            ));
+            panic!("Array index out of bounds, cannot take index out of the length of the array: {len}");
         }
 
         Ok(Arc::new(ConstantVector::new(

@@ -43,7 +43,8 @@ mod tests {
     use crate::types::{LogicalPrimitiveType, WrapperType};
     use crate::vectors::operations::VectorOp;
     use crate::vectors::{
-        BooleanVector, ConstantVector, Int32Vector, PrimitiveVector, StringVector, UInt32Vector,
+        BooleanVector, ConstantVector, Int32Vector, NullVector, PrimitiveVector, StringVector,
+        UInt32Vector,
     };
 
     fn check_take_primitive<T>(
@@ -132,6 +133,32 @@ mod tests {
     fn test_take_constant() {
         check_take_constant(2, 5, &[3, 4]);
         check_take_constant(3, 10, &[1, 2, 3]);
+        check_take_constant(4, 10, &[1, 5, 3, 6]);
+        check_take_constant(5, 10, &[1, 9, 8, 7, 3]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_take_constant_out_of_index() {
+        check_take_constant(2, 5, &[3, 5]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_take_out_of_index() {
+        let v = Int32Vector::from_slice(&[1, 2, 3, 4, 5]);
+        let indies = UInt32Vector::from_slice(&[1, 5, 6]);
+        v.take(&indies).unwrap();
+    }
+
+    #[test]
+    fn test_take_null() {
+        let v = NullVector::new(5);
+        let indices = UInt32Vector::from_slice([1, 3, 2]);
+        let out = v.take(&indices).unwrap();
+
+        let expect: VectorRef = Arc::new(NullVector::new(3));
+        assert_eq!(expect, out);
     }
 
     #[test]
