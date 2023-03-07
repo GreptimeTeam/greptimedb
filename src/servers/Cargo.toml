@@ -52,7 +52,6 @@ rustls-pemfile = "1.0"
 schemars = "0.8"
 serde.workspace = true
 serde_json = "1.0"
-serde_urlencoded = "0.7"
 session = { path = "../session" }
 sha1 = "0.10"
 snafu = { version = "0.7", features = ["backtraces"] }

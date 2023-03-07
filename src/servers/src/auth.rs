@@ -82,7 +82,7 @@ pub enum Error {
     #[snafu(display("Invalid config value: {}, {}", value, msg))]
     InvalidConfig { value: String, msg: String },
 
-    #[snafu(display("Illegal runtime param: {}", msg))]
+    #[snafu(display("Illegal param: {}", msg))]
     IllegalParam { msg: String },
 
     #[snafu(display("Internal state error: {}", msg))]
