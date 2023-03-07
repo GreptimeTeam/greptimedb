@@ -63,6 +63,12 @@ impl GrpcQueryHandler for Instance {
                         };
                         let mut result =
                             SqlQueryHandler::do_promql_query(self, &prom_query, ctx).await;
+                        ensure!(
+                            result.len() == 1,
+                            error::NotSupportedSnafu {
+                                feat: "execute multiple statements in PromQL query string through GRPC interface"
+                            }
+                        );
                         result.remove(0)?
                     }
                 }
