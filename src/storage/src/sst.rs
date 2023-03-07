@@ -291,7 +291,8 @@ impl FileHandleInner {
 }
 
 /// Immutable metadata of a sst file.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct FileMeta {
     /// Region of file.
     pub region_id: RegionId,
@@ -302,7 +303,6 @@ pub struct FileMeta {
     /// SST level of the file.
     pub level: Level,
     /// Size of the file.
-    #[serde(default)]
     pub file_size: u64,
 }
 
