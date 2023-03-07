@@ -38,7 +38,7 @@ use sql::statements::statement::Statement;
 use tokio::io::AsyncWrite;
 
 use crate::auth::{Identity, Password, UserProviderRef};
-use crate::error::{self, Error, Result};
+use crate::error::{self, InvalidPrepareStatementSnafu, Result};
 use crate::mysql::writer::MysqlResultWriter;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
@@ -48,6 +48,7 @@ pub struct MysqlInstanceShim {
     salt: [u8; 20],
     session: Arc<Session>,
     user_provider: Option<UserProviderRef>,
+    // TODO(SSebo): use something like moka to achieve TTL or LRU
     prepared_stmts: Arc<RwLock<HashMap<u32, String>>>,
     prepared_stmts_counter: AtomicU32,
 }
@@ -291,29 +292,30 @@ fn format_duration(duration: Duration) -> String {
 
 async fn validate_query(query: &str) -> Result<Statement> {
     let statement = ParserContext::create_with_dialect(query, &GenericDialect {});
-    let mut statement = match statement {
-        Err(e) => {
-            return Err(Error::PrepareStatementFailed {
-                err_msg: e.to_string(),
-            })
+    let mut statement = statement.map_err(|e| {
+        InvalidPrepareStatementSnafu {
+            err_msg: e.to_string(),
         }
-        Ok(s) => s,
-    };
+        .build()
+    })?;
 
-    if statement.len() != 1 {
-        return Err(Error::PrepareStatementFailed {
+    ensure!(
+        statement.len() == 1,
+        InvalidPrepareStatementSnafu {
             err_msg: "prepare statement only support single statement".to_string(),
-        });
-    }
+        }
+    );
 
     let statement = statement.remove(0);
 
-    match statement {
-        Statement::Query(_) => Ok(statement),
-        _ => Err(Error::PrepareStatementFailed {
-            err_msg: "prepare statement only support SELECT now".to_string(),
-        }),
-    }
+    ensure!(
+        matches!(statement, Statement::Query(_)),
+        InvalidPrepareStatementSnafu {
+            err_msg: "prepare statement only support SELECT for now".to_string(),
+        }
+    );
+
+    Ok(statement)
 }
 
 async fn write_output<'a, W: AsyncWrite + Send + Sync + Unpin>(
@@ -328,8 +330,8 @@ async fn write_output<'a, W: AsyncWrite + Send + Sync + Unpin>(
     Ok(())
 }
 
-// dummy columns to satisfy opensrv_mysql
-// just the number of params is useful
+// dummy columns to satisfy opensrv_mysql, just the number of params is useful
+// TODO(SSebo): use parameter type inference to return actual types
 fn dummy_params(index: u32) -> Vec<Column> {
     let mut params = vec![];
 
