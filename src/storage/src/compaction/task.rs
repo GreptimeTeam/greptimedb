@@ -175,13 +175,16 @@ impl CompactionOutput {
         let output_file_id = FileId::random();
         let opts = WriteOptions {};
 
-        let SstInfo { time_range, file_size } = sst_layer
-            .write_sst(&output_file_id, Source::Reader(reader), &opts)
+        let SstInfo {
+            time_range,
+            file_size,
+        } = sst_layer
+            .write_sst(output_file_id, Source::Reader(reader), &opts)
             .await?;
 
         Ok(FileMeta {
             region_id,
-            file_name: output_file_id,
+            file_id: output_file_id,
             time_range,
             level: self.output_level,
             file_size,

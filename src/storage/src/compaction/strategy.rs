@@ -233,7 +233,7 @@ mod tests {
         FileHandle::new(
             FileMeta {
                 region_id: 0,
-                file_name: file_id,
+                file_id,
                 time_range: Some((
                     Timestamp::new_millisecond(start_ts_millis),
                     Timestamp::new_millisecond(end_ts_millis),

@@ -98,7 +98,7 @@ impl LevelMetas {
 
         for file in files_to_remove {
             let level = file.level;
-            if let Some(removed_file) = merged.levels[level as usize].remove_file(file.file_name) {
+            if let Some(removed_file) = merged.levels[level as usize].remove_file(file.file_id) {
                 removed_file.mark_deleted();
             }
         }
@@ -200,12 +200,12 @@ impl FileHandle {
 
     #[inline]
     pub fn file_name(&self) -> String {
-        self.inner.meta.file_name.as_parquet()
+        self.inner.meta.file_id.as_parquet()
     }
 
     #[inline]
     pub fn file_id(&self) -> FileId {
-        self.inner.meta.file_name
+        self.inner.meta.file_id
     }
 
     #[inline]
@@ -263,7 +263,7 @@ impl Drop for FileHandleInner {
         if self.deleted.load(Ordering::Relaxed) {
             let request = FilePurgeRequest {
                 sst_layer: self.sst_layer.clone(),
-                file_id: self.meta.file_name,
+                file_id: self.meta.file_id,
                 region_id: self.meta.region_id,
             };
             match self.file_purger.schedule(request) {
@@ -271,13 +271,13 @@ impl Drop for FileHandleInner {
                     info!(
                         "Scheduled SST purge task, region: {}, name: {}, res: {}",
                         self.meta.region_id,
-                        self.meta.file_name.as_parquet(),
+                        self.meta.file_id.as_parquet(),
                         res
                     );
                 }
                 Err(e) => {
                     error!(e; "Failed to schedule SST purge task, region: {}, name: {}", 
-                    self.meta.region_id, self.meta.file_name.as_parquet());
+                    self.meta.region_id, self.meta.file_id.as_parquet());
                 }
             }
         }
@@ -306,7 +306,7 @@ pub struct ParseIdError {
 }
 
 /// Unique id for [SST File].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub struct FileId(Uuid);
 
 impl FileId {
@@ -348,7 +348,8 @@ pub struct FileMeta {
     pub region_id: RegionId,
     /// Compared to normal file names, FileId ignore the extension
     #[serde(deserialize_with = "deserialize_from_string")]
-    pub file_name: FileId,
+    #[serde(alias = "file_name")]
+    pub file_id: FileId,
     /// Timestamp range of file.
     pub time_range: Option<(Timestamp, Timestamp)>,
     /// SST level of the file.
@@ -532,7 +533,7 @@ mod tests {
 
     #[test]
     fn test_deserialize_from_string() {
-        let json_file_meta = "{\"region_id\":0,\"file_name\":\"bc5896ec-e4d8-4017-a80d-f2de73188d55\",\"time_range\":null,\"level\":0}";
+        let json_file_meta = "{\"region_id\":0,\"file_id\":\"bc5896ec-e4d8-4017-a80d-f2de73188d55\",\"time_range\":null,\"level\":0}";
         let file_meta = create_file_meta(
             FileId::from_str("bc5896ec-e4d8-4017-a80d-f2de73188d55").unwrap(),
             0,
@@ -542,6 +543,17 @@ mod tests {
     }
     #[test]
     fn test_deserialize_from_string_parquet() {
+        let json_file_meta = "{\"region_id\":0,\"file_id\":\"bc5896ec-e4d8-4017-a80d-f2de73188d55.parquet\",\"time_range\":null,\"level\":0}";
+        let file_meta = create_file_meta(
+            FileId::from_str("bc5896ec-e4d8-4017-a80d-f2de73188d55").unwrap(),
+            0,
+        );
+        let deserialized_file_meta: FileMeta = serde_json::from_str(json_file_meta).unwrap();
+        assert_eq!(file_meta, deserialized_file_meta);
+    }
+
+    #[test]
+    fn test_deserialize_from_string_parquet_file_name() {
         let json_file_meta = "{\"region_id\":0,\"file_name\":\"bc5896ec-e4d8-4017-a80d-f2de73188d55.parquet\",\"time_range\":null,\"level\":0}";
         let file_meta = create_file_meta(
             FileId::from_str("bc5896ec-e4d8-4017-a80d-f2de73188d55").unwrap(),
@@ -563,7 +575,7 @@ mod tests {
     fn create_file_meta(file_id: FileId, level: Level) -> FileMeta {
         FileMeta {
             region_id: 0,
-            file_name: file_id,
+            file_id,
             time_range: None,
             level,
             file_size: 0,

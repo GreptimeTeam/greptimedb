@@ -202,13 +202,16 @@ impl<S: LogStore> FlushJob<S> {
             let sst_layer = self.sst_layer.clone();
 
             futures.push(async move {
-                let SstInfo { time_range, file_size } = sst_layer
-                    .write_sst(&file_id, Source::Iter(iter), &WriteOptions::default())
+                let SstInfo {
+                    time_range,
+                    file_size,
+                } = sst_layer
+                    .write_sst(file_id, Source::Iter(iter), &WriteOptions::default())
                     .await?;
 
                 Ok(FileMeta {
                     region_id,
-                    file_name: file_id,
+                    file_id,
                     time_range,
                     level: 0,
                     file_size,
