@@ -2,9 +2,6 @@
 
 This crate provides an easy approach to dump memory profiling info.
 
-To enable memory profiling, build GreptimeDB binary with `mem-prof` feature enabled: 
-
-
 ## Prerequisites
 ### jemalloc
 ```bash
@@ -21,10 +18,10 @@ sudo apt install libjemalloc-dev
 curl https://raw.githubusercontent.com/brendangregg/FlameGraph/master/flamegraph.pl > ./flamegraph.pl 
 ```
 
-### Build GreptimeDB with `mem-profa` feature.
+### Build GreptimeDB with `mem-prof` feature.
 
 ```bash
-cargo build --features=mem-profa
+cargo build --features=mem-prof
 ```
 
 ## Profiling
@@ -43,7 +40,7 @@ curl localhost:4000/v1/prof/mem > greptime.hprof
 
 You can periodically dump profiling data and compare them to find the delta memory usage.
 
-## Ananlyze profiling data with flamegraph
+## Analyze profiling data with flamegraph
 
 To create flamegraph according to dumped profiling data:
 
