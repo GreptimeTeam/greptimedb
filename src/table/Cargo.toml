@@ -34,6 +34,5 @@ tokio.workspace = true
 [dev-dependencies]
 common-test-util = { path = "../common/test-util" }
 parquet = { workspace = true, features = ["async"] }
-tempfile.workspace = true
 tokio-util = { version = "0.7", features = ["compat"] }
 serde_json.workspace = true

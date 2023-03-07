@@ -22,7 +22,7 @@ use axum::Router;
 use catalog::CatalogManagerRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use common_runtime::Builder as RuntimeBuilder;
-use common_test_util::temp_dir::create_temp_dir;
+use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datanode::datanode::{
     DatanodeOptions, FileConfig, ObjectStoreConfig, OssConfig, S3Config, WalConfig,
 };
@@ -47,7 +47,6 @@ use servers::Mode;
 use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineRef};
 use table::requests::{CreateTableRequest, TableOptions};
-use tempfile::TempDir;
 
 static PORTS: OnceCell<AtomicUsize> = OnceCell::new();
 

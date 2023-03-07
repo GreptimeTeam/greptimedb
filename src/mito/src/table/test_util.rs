@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_test_util::temp_dir::create_temp_dir;
+use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema, Schema, SchemaBuilder, SchemaRef};
 use datatypes::vectors::VectorRef;
@@ -31,7 +31,6 @@ use table::engine::{EngineContext, TableEngine};
 use table::metadata::{TableInfo, TableInfoBuilder, TableMetaBuilder, TableType};
 use table::requests::{CreateTableRequest, InsertRequest, TableOptions};
 use table::TableRef;
-use tempfile::TempDir;
 
 use crate::config::EngineConfig;
 use crate::engine::{MitoEngine, MITO_ENGINE};

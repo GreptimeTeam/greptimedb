@@ -33,5 +33,4 @@ tokio-util.workspace = true
 
 [dev-dependencies]
 common-test-util = { path = "../common/test-util" }
-tempfile.workspace = true
 rand = "0.8"

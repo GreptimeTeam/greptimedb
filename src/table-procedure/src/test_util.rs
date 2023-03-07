@@ -18,7 +18,7 @@ use catalog::local::MemoryCatalogManager;
 use catalog::CatalogManagerRef;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
-use common_test_util::temp_dir::create_temp_dir;
+use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use log_store::NoopLogStore;
 use mito::config::EngineConfig;
 use mito::engine::MitoEngine;
@@ -27,7 +27,6 @@ use object_store::{ObjectStore, ObjectStoreBuilder};
 use storage::compaction::noop::NoopCompactionScheduler;
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
-use tempfile::TempDir;
 
 pub struct TestEnv {
     pub dir: TempDir,

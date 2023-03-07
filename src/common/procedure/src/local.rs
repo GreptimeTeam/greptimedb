@@ -409,9 +409,9 @@ impl ProcedureManager for LocalManager {
 /// Create a new [ProcedureMeta] for test purpose.
 #[cfg(test)]
 mod test_util {
+    use common_test_util::temp_dir::TempDir;
     use object_store::services::Fs as Builder;
     use object_store::ObjectStoreBuilder;
-    use tempfile::TempDir;
 
     use super::*;
 

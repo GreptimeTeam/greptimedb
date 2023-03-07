@@ -21,4 +21,3 @@ uuid.workspace = true
 [dev-dependencies]
 common-test-util = { path = "../test-util" }
 futures-util.workspace = true
-tempfile.workspace = true

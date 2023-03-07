@@ -40,5 +40,4 @@ log-store = { path = "../log-store" }
 mito = { path = "../mito", features = ["test"] }
 object-store = { path = "../object-store" }
 storage = { path = "../storage" }
-tempfile.workspace = true
 tokio.workspace = true

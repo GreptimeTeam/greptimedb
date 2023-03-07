@@ -255,7 +255,7 @@ impl<'a> TimeRangePredicateBuilder<'a> {
 mod tests {
     use std::sync::Arc;
 
-    use common_test_util::temp_dir::create_temp_dir;
+    use common_test_util::temp_dir::{create_temp_dir, TempDir};
     use datafusion::parquet::arrow::ArrowWriter;
     pub use datafusion::parquet::schema::types::BasicTypeInfo;
     use datafusion_common::{Column, ScalarValue};
@@ -266,7 +266,6 @@ mod tests {
     use datatypes::arrow_array::StringArray;
     use parquet::arrow::ParquetRecordBatchStreamBuilder;
     use parquet::file::properties::WriterProperties;
-    use tempfile::TempDir;
 
     use super::*;
 

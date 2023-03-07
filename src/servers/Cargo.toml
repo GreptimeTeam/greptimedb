@@ -79,7 +79,6 @@ rand = "0.8"
 script = { path = "../script", features = ["python"] }
 serde_json = "1.0"
 table = { path = "../table" }
-tempfile.workspace = true
 tokio-postgres = "0.7"
 tokio-postgres-rustls = "0.9"
 tokio-test = "0.4"

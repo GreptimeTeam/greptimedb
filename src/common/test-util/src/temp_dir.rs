@@ -12,8 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use tempfile::TempDir;
+pub use tempfile::{NamedTempFile, TempDir};
 
 pub fn create_temp_dir(prefix: &str) -> TempDir {
     tempfile::Builder::new().prefix(prefix).tempdir().unwrap()
+}
+
+pub fn create_named_temp_file() -> NamedTempFile {
+    NamedTempFile::new().unwrap()
 }

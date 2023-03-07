@@ -395,7 +395,7 @@ pub struct TableEntryValue {
 #[cfg(test)]
 mod tests {
     use common_recordbatch::RecordBatches;
-    use common_test_util::temp_dir::create_temp_dir;
+    use common_test_util::temp_dir::{create_temp_dir, TempDir};
     use datatypes::value::Value;
     use log_store::NoopLogStore;
     use mito::config::EngineConfig;
@@ -406,7 +406,6 @@ mod tests {
     use storage::EngineImpl;
     use table::metadata::TableType;
     use table::metadata::TableType::Base;
-    use tempfile::TempDir;
 
     use super::*;
 

@@ -20,7 +20,7 @@ use catalog::remote::MetaKvBackend;
 use client::Client;
 use common_grpc::channel_manager::ChannelManager;
 use common_runtime::Builder as RuntimeBuilder;
-use common_test_util::temp_dir::create_temp_dir;
+use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datanode::datanode::{DatanodeOptions, FileConfig, ObjectStoreConfig, WalConfig};
 use datanode::instance::Instance as DatanodeInstance;
 use meta_client::client::MetaClientBuilder;
@@ -34,7 +34,6 @@ use partition::route::TableRoutes;
 use servers::grpc::GrpcServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
 use servers::Mode;
-use tempfile::TempDir;
 use tonic::transport::Server;
 use tower::service_fn;
 

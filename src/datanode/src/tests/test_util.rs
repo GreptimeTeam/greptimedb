@@ -17,7 +17,7 @@ use std::sync::Arc;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use common_query::Output;
 use common_recordbatch::util;
-use common_test_util::temp_dir::create_temp_dir;
+use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema};
 use mito::config::EngineConfig;
@@ -27,7 +27,6 @@ use servers::Mode;
 use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineRef};
 use table::requests::{CreateTableRequest, TableOptions};
-use tempfile::TempDir;
 
 use crate::datanode::{DatanodeOptions, FileConfig, ObjectStoreConfig, ProcedureConfig, WalConfig};
 use crate::error::{CreateTableSnafu, Result};
