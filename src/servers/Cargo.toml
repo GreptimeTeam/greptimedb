@@ -4,10 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+mem-prof = ["dep:common-mem-prof"]
+
 [dependencies]
 aide = { version = "0.9", features = ["axum"] }
-arrow-flight.workspace = true
 api = { path = "../api" }
+arrow-flight.workspace = true
 async-trait = "0.1"
 axum = "0.6"
 axum-macros = "0.3"
@@ -20,6 +23,7 @@ common-catalog = { path = "../common/catalog" }
 common-error = { path = "../common/error" }
 common-grpc = { path = "../common/grpc" }
 common-grpc-expr = { path = "../common/grpc-expr" }
+common-mem-prof = { path = "../common/mem-prof", optional = true }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-runtime = { path = "../common/runtime" }
@@ -59,12 +63,13 @@ snap = "1"
 sql = { path = "../sql" }
 strum = { version = "0.24", features = ["derive"] }
 table = { path = "../table" }
-tokio.workspace = true
 tokio-rustls = "0.23"
 tokio-stream = { version = "0.1", features = ["net"] }
+tokio.workspace = true
 tonic.workspace = true
 tower = { version = "0.4", features = ["full"] }
 tower-http = { version = "0.3", features = ["full"] }
+
 
 [dev-dependencies]
 axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", branch = "patch-1" }

@@ -19,6 +19,9 @@ pub mod opentsdb;
 pub mod prometheus;
 pub mod script;
 
+#[cfg(feature = "mem-prof")]
+pub mod mem_prof;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -442,6 +445,15 @@ impl HttpServer {
             router = router.nest(
                 &format!("/{HTTP_API_VERSION}/prometheus"),
                 self.route_prom(prom_handler),
+            );
+        }
+
+        // mem profiler
+        #[cfg(feature = "mem-prof")]
+        {
+            router = router.nest(
+                &format!("/{HTTP_API_VERSION}/prof"),
+                Router::new().route("/mem", routing::get(crate::http::mem_prof::mem_prof)),
             );
         }
 
