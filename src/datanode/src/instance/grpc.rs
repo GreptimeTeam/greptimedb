@@ -18,7 +18,7 @@ use api::v1::query_request::Query;
 use api::v1::{CreateDatabaseExpr, DdlRequest, InsertRequest};
 use async_trait::async_trait;
 use common_query::Output;
-use query::parser::QueryLanguageParser;
+use query::parser::{PromQuery, QueryLanguageParser};
 use query::plan::LogicalPlan;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use session::context::QueryContextRef;
@@ -61,6 +61,15 @@ impl Instance {
                 self.execute_stmt(stmt, ctx).await?
             }
             Query::LogicalPlan(plan) => self.execute_logical(plan).await?,
+            Query::Promql(promql) => {
+                let prom_query = PromQuery {
+                    query: promql.query,
+                    start: promql.start,
+                    end: promql.end,
+                    step: promql.step,
+                };
+                self.execute_promql(&prom_query, ctx).await?
+            }
         })
     }
 

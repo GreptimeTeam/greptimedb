@@ -22,7 +22,7 @@ use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt};
 
 use crate::error::{self, Result};
-use crate::instance::Instance;
+use crate::instance::{Instance, PromQuery};
 
 #[async_trait]
 impl GrpcQueryHandler for Instance {
@@ -53,6 +53,17 @@ impl GrpcQueryHandler for Instance {
                             feat: "Execute LogicalPlan in Frontend",
                         }
                         .fail();
+                    }
+                    Query::Promql(promql) => {
+                        let prom_query = PromQuery {
+                            query: promql.query,
+                            start: promql.start,
+                            end: promql.end,
+                            step: promql.step,
+                        };
+                        let mut result =
+                            SqlQueryHandler::do_promql_query(self, &prom_query, ctx).await;
+                        result.remove(0)?
                     }
                 }
             }
