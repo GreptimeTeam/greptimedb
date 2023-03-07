@@ -22,9 +22,13 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema};
 use mito::config::EngineConfig;
 use mito::table::test_util::{new_test_object_store, MockEngine, MockMitoEngine};
+use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::QueryEngineFactory;
 use servers::Mode;
+use session::context::QueryContext;
 use snafu::ResultExt;
+use sql::statements::statement::Statement;
+use sql::statements::tql::Tql;
 use table::engine::{EngineContext, TableEngineRef};
 use table::requests::{CreateTableRequest, TableOptions};
 
@@ -69,6 +73,40 @@ impl MockInstance {
             instance,
             _guard,
             _procedure_dir: Some(procedure_dir),
+        }
+    }
+
+    pub(crate) async fn execute_sql(&self, sql: &str) -> Output {
+        let engine = self.inner().query_engine();
+        let planner = engine.planner();
+
+        let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
+        match stmt {
+            QueryStatement::Sql(Statement::Query(_)) => {
+                let plan = planner.plan(stmt, QueryContext::arc()).await.unwrap();
+                engine.execute(&plan).await.unwrap()
+            }
+            QueryStatement::Sql(Statement::Tql(tql)) => {
+                let plan = match tql {
+                    Tql::Eval(eval) => {
+                        let promql = PromQuery {
+                            start: eval.start,
+                            end: eval.end,
+                            step: eval.step,
+                            query: eval.query,
+                        };
+                        let stmt = QueryLanguageParser::parse_promql(&promql).unwrap();
+                        planner.plan(stmt, QueryContext::arc()).await.unwrap()
+                    }
+                    Tql::Explain(_) => unimplemented!(),
+                };
+                engine.execute(&plan).await.unwrap()
+            }
+            _ => self
+                .inner()
+                .execute_stmt(stmt, QueryContext::arc())
+                .await
+                .unwrap(),
         }
     }
 

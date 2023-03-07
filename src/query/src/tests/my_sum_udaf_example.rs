@@ -24,19 +24,17 @@ use common_function_macro::{as_aggr_func_creator, AggrFuncTypeStore};
 use common_query::error::{CreateAccumulatorSnafu, Result as QueryResult};
 use common_query::logical_plan::{Accumulator, AggregateFunctionCreator};
 use common_query::prelude::*;
-use common_query::Output;
-use common_recordbatch::{util, RecordBatch};
+use common_recordbatch::{RecordBatch, RecordBatches};
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::types::{LogicalPrimitiveType, WrapperType};
 use datatypes::vectors::Helper;
 use datatypes::with_match_primitive_type_id;
 use num_traits::AsPrimitive;
-use session::context::QueryContext;
 use table::test_util::MemTable;
 
 use crate::error::Result;
-use crate::parser::QueryLanguageParser;
+use crate::tests::exec_selection;
 use crate::QueryEngineFactory;
 
 #[derive(Debug, Default)]
@@ -220,18 +218,8 @@ where
     )));
 
     let sql = format!("select MY_SUM({column_name}) as my_sum from {table_name}");
-    let stmt = QueryLanguageParser::parse_sql(&sql).unwrap();
-    let plan = engine
-        .statement_to_plan(stmt, Arc::new(QueryContext::new()))
-        .await
-        .unwrap();
-
-    let output = engine.execute(&plan).await?;
-    let recordbatch_stream = match output {
-        Output::Stream(batch) => batch,
-        _ => unreachable!(),
-    };
-    let batches = util::collect_batches(recordbatch_stream).await.unwrap();
+    let batches = exec_selection(engine, &sql).await;
+    let batches = RecordBatches::try_new(batches.first().unwrap().schema.clone(), batches).unwrap();
 
     let pretty_print = batches.pretty_print().unwrap();
     assert_eq!(expected, pretty_print);

@@ -279,7 +279,8 @@ impl Script for PyScript {
             );
             let plan = self
                 .query_engine
-                .statement_to_plan(stmt, Arc::new(QueryContext::new()))
+                .planner()
+                .plan(stmt, QueryContext::arc())
                 .await?;
             let res = self.query_engine.execute(&plan).await?;
             let copr = self.copr.clone();

@@ -39,8 +39,8 @@ use table::TableRef;
 use crate::error::{
     CatalogSnafu, CollectRecordsSnafu, ColumnDefaultValueSnafu, ColumnNoneDefaultValueSnafu,
     ColumnNotFoundSnafu, ColumnTypeMismatchSnafu, ColumnValuesNumberMismatchSnafu, Error,
-    ExecuteSqlSnafu, InsertSnafu, MissingInsertBodySnafu, ParseSqlSnafu, ParseSqlValueSnafu,
-    Result, TableNotFoundSnafu,
+    ExecuteLogicalPlanSnafu, InsertSnafu, MissingInsertBodySnafu, ParseSqlSnafu,
+    ParseSqlValueSnafu, PlanStatementSnafu, Result, TableNotFoundSnafu,
 };
 use crate::sql::{table_idents_to_full_name, SqlHandler, SqlRequest};
 
@@ -236,18 +236,19 @@ impl SqlHandler {
 
         let logical_plan = self
             .query_engine
-            .statement_to_plan(
+            .planner()
+            .plan(
                 QueryStatement::Sql(Statement::Query(Box::new(query))),
                 query_ctx.clone(),
             )
             .await
-            .context(ExecuteSqlSnafu)?;
+            .context(PlanStatementSnafu)?;
 
         let output = self
             .query_engine
             .execute(&logical_plan)
             .await
-            .context(ExecuteSqlSnafu)?;
+            .context(ExecuteLogicalPlanSnafu)?;
 
         let stream: InsertRequestStream = match output {
             Output::RecordBatches(batches) => {

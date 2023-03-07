@@ -367,7 +367,8 @@ impl PyQueryEngine {
                 let handle = rt.handle().clone();
                 let res = handle.block_on(async {
                     let plan = engine
-                        .statement_to_plan(stmt, Default::default())
+                        .planner()
+                        .plan(stmt, Default::default())
                         .await
                         .map_err(|e| e.to_string())?;
                     let res = engine

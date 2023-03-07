@@ -21,9 +21,6 @@ mod planner;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use catalog::table_source::DfTableSourceProvider;
-use catalog::CatalogListRef;
-use common_base::Plugins;
 use common_error::prelude::BoxedError;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::udf::create_udf;
@@ -36,115 +33,44 @@ use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::timer;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::ExecutionPlan;
-use datafusion_sql::planner::{ParserOptions, SqlToRel};
 use datatypes::schema::Schema;
-use promql::planner::PromPlanner;
-use promql_parser::parser::EvalStmt;
-use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
-use sql::statements::statement::Statement;
 
 pub use crate::datafusion::catalog_adapter::DfCatalogListAdapter;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
-use crate::error::{
-    DataFusionSnafu, PlanSqlSnafu, QueryExecutionSnafu, QueryPlanSnafu, Result, SqlSnafu,
-};
+use crate::error::{DataFusionSnafu, QueryExecutionSnafu, Result};
 use crate::executor::QueryExecutor;
 use crate::logical_optimizer::LogicalOptimizer;
-use crate::parser::QueryStatement;
 use crate::physical_optimizer::PhysicalOptimizer;
 use crate::physical_planner::PhysicalPlanner;
 use crate::plan::LogicalPlan;
+use crate::planner::{DfLogicalPlanner, LogicalPlanner};
 use crate::query_engine::{QueryEngineContext, QueryEngineState};
 use crate::{metric, QueryEngine};
 
 pub struct DatafusionQueryEngine {
-    state: QueryEngineState,
+    state: Arc<QueryEngineState>,
 }
 
 impl DatafusionQueryEngine {
-    pub fn new(catalog_list: CatalogListRef, plugins: Arc<Plugins>) -> Self {
-        Self {
-            state: QueryEngineState::new(catalog_list.clone(), plugins),
-        }
-    }
-
-    async fn plan_sql_stmt(
-        &self,
-        stmt: Statement,
-        query_ctx: QueryContextRef,
-    ) -> Result<LogicalPlan> {
-        let session_state = self.state.session_state();
-
-        let df_stmt = (&stmt).try_into().context(SqlSnafu)?;
-
-        let config_options = session_state.config().config_options();
-        let parser_options = ParserOptions {
-            enable_ident_normalization: config_options.sql_parser.enable_ident_normalization,
-            parse_float_as_decimal: config_options.sql_parser.parse_float_as_decimal,
-        };
-
-        let context_provider = DfContextProviderAdapter::try_new(
-            self.state.clone(),
-            session_state,
-            &df_stmt,
-            query_ctx,
-        )
-        .await?;
-        let sql_to_rel = SqlToRel::new_with_options(&context_provider, parser_options);
-
-        let result = sql_to_rel.statement_to_plan(df_stmt).with_context(|_| {
-            let sql = if let Statement::Query(query) = stmt {
-                query.inner.to_string()
-            } else {
-                format!("{stmt:?}")
-            };
-            PlanSqlSnafu { sql }
-        })?;
-        Ok(LogicalPlan::DfPlan(result))
-    }
-
-    // TODO(ruihang): test this method once parser is ready.
-    async fn plan_promql_stmt(
-        &self,
-        stmt: EvalStmt,
-        query_ctx: QueryContextRef,
-    ) -> Result<LogicalPlan> {
-        let table_provider = DfTableSourceProvider::new(
-            self.state.catalog_list().clone(),
-            self.state.disallow_cross_schema_query(),
-            query_ctx.as_ref(),
-        );
-        PromPlanner::stmt_to_plan(table_provider, stmt)
-            .await
-            .map(LogicalPlan::DfPlan)
-            .map_err(BoxedError::new)
-            .context(QueryPlanSnafu)
+    pub fn new(state: Arc<QueryEngineState>) -> Self {
+        Self { state }
     }
 }
 
-// TODO(LFC): Refactor consideration: extract a "Planner" that stores query context and execute queries inside.
 #[async_trait]
 impl QueryEngine for DatafusionQueryEngine {
+    fn planner(&self) -> Arc<dyn LogicalPlanner> {
+        Arc::new(DfLogicalPlanner::new(self.state.clone()))
+    }
+
     fn name(&self) -> &str {
         "datafusion"
     }
 
-    async fn statement_to_plan(
-        &self,
-        stmt: QueryStatement,
-        query_ctx: QueryContextRef,
-    ) -> Result<LogicalPlan> {
-        match stmt {
-            QueryStatement::Sql(stmt) => self.plan_sql_stmt(stmt, query_ctx).await,
-            QueryStatement::Promql(stmt) => self.plan_promql_stmt(stmt, query_ctx).await,
-        }
-    }
-
-    async fn describe(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<Schema> {
+    async fn describe(&self, plan: LogicalPlan) -> Result<Schema> {
         // TODO(sunng87): consider cache optmised logical plan between describe
         // and execute
-        let plan = self.statement_to_plan(stmt, query_ctx).await?;
         let optimised_plan = self.optimize(&plan)?;
         optimised_plan.schema()
     }
@@ -157,11 +83,6 @@ impl QueryEngine for DatafusionQueryEngine {
         let physical_plan = self.optimize_physical_plan(&mut ctx, physical_plan)?;
 
         Ok(Output::Stream(self.execute_stream(&ctx, &physical_plan)?))
-    }
-
-    async fn execute_physical(&self, plan: &Arc<dyn PhysicalPlan>) -> Result<Output> {
-        let ctx = QueryEngineContext::new(self.state.session_state());
-        Ok(Output::Stream(self.execute_stream(&ctx, plan)?))
     }
 
     fn register_udf(&self, udf: ScalarUdf) {
@@ -348,7 +269,8 @@ mod tests {
 
         let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
         let plan = engine
-            .statement_to_plan(stmt, Arc::new(QueryContext::new()))
+            .planner()
+            .plan(stmt, QueryContext::arc())
             .await
             .unwrap();
 
@@ -369,7 +291,8 @@ mod tests {
 
         let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
         let plan = engine
-            .statement_to_plan(stmt, Arc::new(QueryContext::new()))
+            .planner()
+            .plan(stmt, Arc::new(QueryContext::new()))
             .await
             .unwrap();
 
@@ -406,10 +329,13 @@ mod tests {
 
         let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
 
-        let schema = engine
-            .describe(stmt, Arc::new(QueryContext::new()))
+        let plan = engine
+            .planner()
+            .plan(stmt, QueryContext::arc())
             .await
             .unwrap();
+
+        let schema = engine.describe(plan).await.unwrap();
 
         assert_eq!(
             schema.column_schemas()[0],

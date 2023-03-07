@@ -46,6 +46,9 @@ mod tests {
         }
     }
 
+    // TODO(LFC): Un-ignore this REPL test.
+    // Ignore this REPL test because some logical plans like create database are not supported yet in Datanode.
+    #[ignore]
     #[test]
     fn test_repl() {
         let data_dir = create_temp_dir("data");

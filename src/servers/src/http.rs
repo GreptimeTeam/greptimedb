@@ -614,14 +614,6 @@ mod test {
             unimplemented!()
         }
 
-        async fn do_statement_query(
-            &self,
-            _stmt: sql::statements::statement::Statement,
-            _query_ctx: QueryContextRef,
-        ) -> Result<Output> {
-            unimplemented!()
-        }
-
         async fn do_describe(
             &self,
             _stmt: sql::statements::statement::Statement,

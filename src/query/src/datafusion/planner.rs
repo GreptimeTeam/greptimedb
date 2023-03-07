@@ -37,7 +37,7 @@ use crate::error::{CatalogSnafu, DataFusionSnafu, Result};
 use crate::query_engine::QueryEngineState;
 
 pub struct DfContextProviderAdapter {
-    engine_state: QueryEngineState,
+    engine_state: Arc<QueryEngineState>,
     session_state: SessionState,
     tables: HashMap<String, Arc<dyn TableSource>>,
     table_provider: DfTableSourceProvider,
@@ -45,7 +45,7 @@ pub struct DfContextProviderAdapter {
 
 impl DfContextProviderAdapter {
     pub(crate) async fn try_new(
-        engine_state: QueryEngineState,
+        engine_state: Arc<QueryEngineState>,
         session_state: SessionState,
         df_stmt: &DfStatement,
         query_ctx: QueryContextRef,

@@ -17,15 +17,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use common_runtime::Builder as RuntimeBuilder;
-use common_telemetry::tracing::log::info;
-use servers::error::Error::InternalIo;
 use servers::grpc::GrpcServer;
-use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
-use servers::query_handler::sql::ServerSqlQueryHandlerAdaptor;
 use servers::server::Server;
-use servers::tls::TlsOption;
-use servers::Mode;
 use snafu::ResultExt;
 
 use crate::datanode::DatanodeOptions;
@@ -40,7 +34,6 @@ pub mod grpc;
 /// All rpc services.
 pub struct Services {
     grpc_server: GrpcServer,
-    mysql_server: Option<Box<dyn Server>>,
 }
 
 impl Services {
@@ -53,48 +46,12 @@ impl Services {
                 .context(RuntimeResourceSnafu)?,
         );
 
-        let mysql_server = match opts.mode {
-            Mode::Standalone => {
-                info!("Disable MySQL server on datanode when running in standalone mode");
-                None
-            }
-            Mode::Distributed => {
-                let mysql_io_runtime = Arc::new(
-                    RuntimeBuilder::default()
-                        .worker_threads(opts.mysql_runtime_size)
-                        .thread_name("mysql-io-handlers")
-                        .build()
-                        .context(RuntimeResourceSnafu)?,
-                );
-                let tls = TlsOption::default();
-                // default tls config returns None
-                // but try to think a better way to do this
-                Some(MysqlServer::create_server(
-                    mysql_io_runtime,
-                    Arc::new(MysqlSpawnRef::new(
-                        ServerSqlQueryHandlerAdaptor::arc(instance.clone()),
-                        None,
-                    )),
-                    Arc::new(MysqlSpawnConfig::new(
-                        tls.should_force_tls(),
-                        tls.setup()
-                            .map_err(|e| StartServer {
-                                source: InternalIo { source: e },
-                            })?
-                            .map(Arc::new),
-                        false,
-                    )),
-                ))
-            }
-        };
-
         Ok(Self {
             grpc_server: GrpcServer::new(
                 ServerGrpcQueryHandlerAdaptor::arc(instance),
                 None,
                 grpc_runtime,
             ),
-            mysql_server,
         })
     }
 
@@ -102,17 +59,8 @@ impl Services {
         let grpc_addr: SocketAddr = opts.rpc_addr.parse().context(ParseAddrSnafu {
             addr: &opts.rpc_addr,
         })?;
-
-        let mut res = vec![self.grpc_server.start(grpc_addr)];
-        if let Some(mysql_server) = &self.mysql_server {
-            let mysql_addr = &opts.mysql_addr;
-            let mysql_addr: SocketAddr = mysql_addr
-                .parse()
-                .context(ParseAddrSnafu { addr: mysql_addr })?;
-            res.push(mysql_server.start(mysql_addr));
-        };
-
-        futures::future::try_join_all(res)
+        self.grpc_server
+            .start(grpc_addr)
             .await
             .context(StartServerSnafu)?;
         Ok(())
