@@ -21,13 +21,15 @@ use datatypes::arrow::array::{Array, ArrayRef};
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::vectors::Helper;
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError, PyIndexError};
 use pyo3::prelude::*;
 use pyo3::pyclass::CompareOp;
 use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyString, PyType};
 
 use crate::python::ffi_types::vector::{arrow_rtruediv, wrap_bool_result, wrap_result, PyVector};
 use crate::python::pyo3::utils::{pyo3_obj_try_to_typed_val, to_py_err};
+
+use super::utils::val_to_py_any;
 
 macro_rules! get_con_type {
     ($obj:ident, $($pyty:ident => $con_ty:ident),*$(,)?) => {
@@ -277,6 +279,47 @@ impl PyVector {
         let array = make_array(ArrayData::from_pyarrow(obj.as_ref(py))?);
         let v = Helper::try_into_vector(array).map_err(to_py_err)?;
         Ok(v.into())
+    }
+
+    /// PyO3's Magic Method for slicing and indexing
+    fn __getitem__(&self, py: Python, needle: PyObject) -> PyResult<PyObject> {
+        if let Ok(needle) = needle.extract::<PyVector>(py) {
+            let mask = needle.to_arrow_array();
+            let mask = mask
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .ok_or_else(|| {
+                    PyValueError::new_err(
+                        "A Boolean Array is requested for slicing, found {mask:?}",
+                    )
+                })?;
+            let result = compute::filter(&self.to_arrow_array(), mask)
+                .map_err(|err| PyRuntimeError::new_err(format!("Arrow Error: {err:#?}")))?;
+            let ret = Helper::try_into_vector(result.clone()).map_err(|e| {
+                PyRuntimeError::new_err(format!("Can't cast result into vector, err: {e:?}"))
+            })?;
+            let ret = Self::from(ret).into_py(py);
+            Ok(ret)
+        } else if let Ok(index) = needle.extract::<isize>(py){
+            // deal with negative index
+            let len = self.len() as isize;
+            let index = if index < 0 {
+                len + index
+            } else {
+                index
+            };
+            if index < 0 || index >= len {
+                return Err(PyIndexError::new_err(format!(
+                    "Index out of bound, index: {index}, len: {len}",
+                    index = index,
+                    len = len
+                )));
+            }
+            let val = self.as_vector_ref().get(index as usize);
+            val_to_py_any(py, val)
+        } else {
+            Err(PyValueError::new_err("{needle:?} is neither a Vector nor a int, can't use for slicing or indexing"))
+        }
     }
 }
 

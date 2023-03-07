@@ -140,7 +140,7 @@ impl Coprocessor {
             cols.len() == names.len() && names.len() == anno.len(),
             OtherSnafu {
                 reason: format!(
-                    "Unmatched length for cols({}), names({}) and anno({})",
+                    "Unmatched length for cols({}), names({}) and annotation({})",
                     cols.len(),
                     names.len(),
                     anno.len()

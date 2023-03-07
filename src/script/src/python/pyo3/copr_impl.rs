@@ -86,7 +86,6 @@ def copr(*dummy, **kwdummy):
         return func
     return inner
 coprocessor = copr
-from greptime import vector
 ";
             let gen_call = format!("\n_return_from_coprocessor = {}(*_args_for_coprocessor, **_kwargs_for_coprocessor)", copr.name);
             let script = format!("{}{}{}", dummy_decorator, copr.script, gen_call);
