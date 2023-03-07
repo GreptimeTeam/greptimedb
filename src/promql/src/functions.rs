@@ -12,9 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod aggr_over_time;
 mod idelta;
 mod increase;
+#[cfg(test)]
+mod test_util;
 
+pub use aggr_over_time::{
+    AbsentOverTime, AvgOverTime, CountOverTime, LastOverTime, MaxOverTime, MinOverTime,
+    PresentOverTime, SumOverTime,
+};
 use datafusion::arrow::array::ArrayRef;
 use datafusion::error::DataFusionError;
 use datafusion::physical_plan::ColumnarValue;
