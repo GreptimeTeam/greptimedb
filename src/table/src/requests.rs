@@ -214,7 +214,7 @@ pub struct FlushTableRequest {
     pub catalog_name: String,
     pub schema_name: String,
     pub table_name: String,
-    pub region_id: Option<RegionNumber>,
+    pub region_number: Option<RegionNumber>,
 }
 
 #[cfg(test)]

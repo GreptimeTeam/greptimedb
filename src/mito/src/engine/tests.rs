@@ -827,7 +827,7 @@ async fn test_flush_table_with_region_id() {
     assert!(!has_parquet_file(&region_dir));
 
     let req = FlushTableRequest {
-        region_id: Some(0),
+        region_number: Some(0),
         ..Default::default()
     };
 

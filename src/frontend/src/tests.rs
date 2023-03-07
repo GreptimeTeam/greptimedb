@@ -23,7 +23,6 @@ use common_runtime::Builder as RuntimeBuilder;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datanode::datanode::{DatanodeOptions, FileConfig, ObjectStoreConfig, WalConfig};
 use datanode::instance::Instance as DatanodeInstance;
-use datanode::{region_name, table_dir};
 use meta_client::client::MetaClientBuilder;
 use meta_client::rpc::Peer;
 use meta_srv::metasrv::MetaSrvOptions;
@@ -35,6 +34,7 @@ use partition::route::TableRoutes;
 use servers::grpc::GrpcServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
 use servers::Mode;
+use table::engine::{region_name, table_dir};
 use tonic::transport::Server;
 use tower::service_fn;
 

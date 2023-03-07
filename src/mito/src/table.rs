@@ -324,7 +324,7 @@ impl<R: Region> Table for MitoTable<R> {
     }
 
     async fn flush(&self, request: FlushTableRequest) -> TableResult<()> {
-        if let Some(region_id) = request.region_id {
+        if let Some(region_id) = request.region_number {
             if let Some(region) = self.regions.get(&region_id) {
                 region
                     .flush()

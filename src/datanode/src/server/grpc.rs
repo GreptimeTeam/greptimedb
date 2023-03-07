@@ -88,7 +88,7 @@ impl Instance {
             catalog_name: expr.catalog_name,
             schema_name: expr.schema_name,
             table_name: expr.table_name,
-            region_id: expr.region_id,
+            region_number: expr.region_id,
         };
         self.sql_handler()
             .execute(SqlRequest::FlushTable(req), QueryContext::arc())

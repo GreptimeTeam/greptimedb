@@ -31,13 +31,14 @@ use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{
     ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyDescriptorBuilder, ColumnId,
     CreateOptions, EngineContext as StorageEngineContext, OpenOptions, Region,
-    RegionDescriptorBuilder, RegionId, RowKeyDescriptor, RowKeyDescriptorBuilder, StorageEngine,
+    RegionDescriptorBuilder, RowKeyDescriptor, RowKeyDescriptorBuilder, StorageEngine,
 };
-use table::engine::{EngineContext, TableEngine, TableEngineProcedure, TableReference};
+use table::engine::{
+    region_id, region_name, table_dir, EngineContext, TableEngine, TableEngineProcedure,
+    TableReference,
+};
 use table::error::TableOperationSnafu;
-use table::metadata::{
-    TableId, TableInfo, TableInfoBuilder, TableMetaBuilder, TableType, TableVersion,
-};
+use table::metadata::{TableInfo, TableInfoBuilder, TableMetaBuilder, TableType, TableVersion};
 use table::requests::{
     AlterKind, AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest,
 };
@@ -58,22 +59,6 @@ use crate::table::MitoTable;
 pub const MITO_ENGINE: &str = "mito";
 pub const INIT_COLUMN_ID: ColumnId = 0;
 const INIT_TABLE_VERSION: TableVersion = 0;
-
-/// Generate region name in the form of "{TABLE_ID}_{REGION_NUMBER}"
-#[inline]
-pub fn region_name(table_id: TableId, n: u32) -> String {
-    format!("{table_id}_{n:010}")
-}
-
-#[inline]
-pub fn region_id(table_id: TableId, n: u32) -> RegionId {
-    (u64::from(table_id) << 32) | u64::from(n)
-}
-
-#[inline]
-pub fn table_dir(catalog_name: &str, schema_name: &str, table_id: TableId) -> String {
-    format!("{catalog_name}/{schema_name}/{table_id}/")
-}
 
 /// [TableEngine] implementation.
 ///
