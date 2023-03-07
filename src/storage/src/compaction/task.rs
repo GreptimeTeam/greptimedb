@@ -173,7 +173,10 @@ impl CompactionOutput {
         let output_file_name = format!("{}.parquet", Uuid::new_v4().hyphenated());
         let opts = WriteOptions {};
 
-        let SstInfo { time_range } = sst_layer
+        let SstInfo {
+            time_range,
+            file_size,
+        } = sst_layer
             .write_sst(&output_file_name, Source::Reader(reader), &opts)
             .await?;
 
@@ -182,6 +185,7 @@ impl CompactionOutput {
             file_name: output_file_name,
             time_range,
             level: self.output_level,
+            file_size,
         })
     }
 }

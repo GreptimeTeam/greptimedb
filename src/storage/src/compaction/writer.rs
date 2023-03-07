@@ -221,7 +221,10 @@ mod tests {
         let iter = memtable.iter(&IterContext::default()).unwrap();
         let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
 
-        let SstInfo { time_range } = writer
+        let SstInfo {
+            time_range,
+            file_size,
+        } = writer
             .write_sst(&sst::WriteOptions::default())
             .await
             .unwrap();
@@ -231,6 +234,7 @@ mod tests {
                 file_name: sst_file_name.to_string(),
                 time_range,
                 level: 0,
+                file_size,
             },
             Arc::new(crate::test_util::access_layer_util::MockAccessLayer {}),
             new_noop_file_purger(),
@@ -409,13 +413,11 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            SstInfo {
-                time_range: Some((
-                    Timestamp::new_millisecond(2000),
-                    Timestamp::new_millisecond(2000)
-                )),
-            },
-            s1
+            Some((
+                Timestamp::new_millisecond(2000),
+                Timestamp::new_millisecond(2000)
+            )),
+            s1.time_range,
         );
 
         let s2 = ParquetWriter::new(
@@ -427,13 +429,11 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            SstInfo {
-                time_range: Some((
-                    Timestamp::new_millisecond(3000),
-                    Timestamp::new_millisecond(5002)
-                )),
-            },
-            s2
+            Some((
+                Timestamp::new_millisecond(3000),
+                Timestamp::new_millisecond(5002)
+            )),
+            s2.time_range,
         );
 
         let s3 = ParquetWriter::new(
@@ -446,13 +446,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            SstInfo {
-                time_range: Some((
-                    Timestamp::new_millisecond(6000),
-                    Timestamp::new_millisecond(8000)
-                )),
-            },
-            s3
+            Some((
+                Timestamp::new_millisecond(6000),
+                Timestamp::new_millisecond(8000)
+            )),
+            s3.time_range
         );
 
         let output_files = ["o1.parquet", "o2.parquet", "o3.parquet"]
@@ -464,6 +462,7 @@ mod tests {
                         file_name: f.to_string(),
                         level: 1,
                         time_range: None,
+                        file_size: 0,
                     },
                     Arc::new(crate::test_util::access_layer_util::MockAccessLayer {}),
                     new_noop_file_purger(),

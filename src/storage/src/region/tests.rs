@@ -302,7 +302,7 @@ async fn test_recover_region_manifets() {
         &manifest,
         &memtable_builder,
         &sst_layer,
-        &file_purger
+        &file_purger,
     )
     .await
     .unwrap()

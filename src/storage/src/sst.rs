@@ -232,6 +232,11 @@ impl FileHandle {
     pub fn meta(&self) -> FileMeta {
         self.inner.meta.clone()
     }
+
+    #[inline]
+    pub fn file_size(&self) -> u64 {
+        self.inner.meta.file_size
+    }
 }
 
 /// Actually data of [FileHandle].
@@ -286,7 +291,8 @@ impl FileHandleInner {
 }
 
 /// Immutable metadata of a sst file.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct FileMeta {
     /// Region of file.
     pub region_id: RegionId,
@@ -296,6 +302,8 @@ pub struct FileMeta {
     pub time_range: Option<(Timestamp, Timestamp)>,
     /// SST level of the file.
     pub level: Level,
+    /// Size of the file.
+    pub file_size: u64,
 }
 
 #[derive(Debug, Default)]
@@ -317,6 +325,7 @@ pub struct ReadOptions {
 #[derive(Debug, PartialEq)]
 pub struct SstInfo {
     pub time_range: Option<(Timestamp, Timestamp)>,
+    pub file_size: u64,
 }
 
 /// SST access layer.
@@ -437,6 +446,7 @@ mod tests {
             file_name: name.to_string(),
             time_range: None,
             level,
+            file_size: 0,
         }
     }
 

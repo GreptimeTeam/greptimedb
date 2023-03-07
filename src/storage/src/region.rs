@@ -125,6 +125,16 @@ impl<S: LogStore> Region for RegionImpl<S> {
     async fn close(&self) -> Result<()> {
         self.inner.close().await
     }
+
+    fn disk_usage_bytes(&self) -> u64 {
+        let version = self.inner.version_control().current();
+        version
+            .ssts()
+            .levels()
+            .iter()
+            .map(|level_ssts| level_ssts.files().map(|sst| sst.file_size()).sum::<u64>())
+            .sum()
+    }
 }
 
 /// Storage related config for region.
