@@ -178,7 +178,62 @@ where
 mod tests {
     use std::sync::Arc;
 
-    use super::{Counter, Snapshot};
+    use super::{Counter, Snapshot, StatKey};
+    use crate::WrcuStat;
+
+    #[test]
+    fn test_wrcu_stat() {
+        let wrcu_stat = WrcuStat::default();
+
+        let joins: Vec<_> = (0..4)
+            .map(|_| {
+                let wrcu_stat_clone = wrcu_stat.clone();
+
+                std::thread::spawn(move || {
+                    for _ in 0..1000 {
+                        wrcu_stat_clone.add_wcu("catalog", "schema", "table", 0, 10);
+                        wrcu_stat_clone.add_rcu("catalog", "schema", "table", 0, 5);
+                        wrcu_stat_clone.add_wcu("catalog", "schema", "table", 1, 20);
+                        wrcu_stat_clone.add_rcu("catalog", "schema", "table", 1, 10);
+                    }
+                })
+            })
+            .collect();
+
+        for join in joins {
+            join.join().unwrap();
+        }
+
+        let stats = wrcu_stat.statistics_and_clear();
+
+        assert_eq!(1000 * 4 * (10 + 20), stats.wcus);
+        assert_eq!(1000 * 4 * (5 + 10), stats.rcus);
+
+        let stat_key = &StatKey {
+            catalog: "catalog".to_string(),
+            schema: "schema".to_string(),
+            table: "table".to_string(),
+            region_number: 0,
+        };
+        assert_eq!(1000 * 4 * 10, *stats.region_wcu_map.get(stat_key).unwrap());
+        assert_eq!(1000 * 4 * 5, *stats.region_rcu_map.get(stat_key).unwrap());
+
+        let stat_key = &StatKey {
+            catalog: "catalog".to_string(),
+            schema: "schema".to_string(),
+            table: "table".to_string(),
+            region_number: 1,
+        };
+        assert_eq!(1000 * 4 * 20, *stats.region_wcu_map.get(stat_key).unwrap());
+        assert_eq!(1000 * 4 * 10, *stats.region_rcu_map.get(stat_key).unwrap());
+
+        let stats = wrcu_stat.statistics_and_clear();
+
+        assert_eq!(0, stats.wcus);
+        assert_eq!(0, stats.rcus);
+        assert!(stats.region_wcu_map.is_empty());
+        assert!(stats.region_rcu_map.is_empty());
+    }
 
     #[test]
     fn test_counter() {

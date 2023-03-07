@@ -132,7 +132,7 @@ impl HeartbeatTask {
                 } = wrcu_stat.statistics_and_clear();
 
                 let region_stats = match table_regions_map.as_ref() {
-                    Ok(map) => combine_region_stats(region_wcu_map, region_rcu_map, map),
+                    Ok(map) => to_region_stats(region_wcu_map, region_rcu_map, map),
                     Err(e) => {
                         error!("failed to get region stats, err: {e:?}");
                         vec![]
@@ -193,7 +193,7 @@ fn resolve_addr(bind_addr: &str, hostname_addr: &Option<String>) -> String {
 }
 
 /// Combined region status according to the parameters
-fn combine_region_stats(
+fn to_region_stats(
     region_wcu_map: HashMap<StatKey, u64>,
     region_rcu_map: HashMap<StatKey, u64>,
     table_regions_map: &HashMap<FullTableName, Vec<u32>>,
@@ -251,6 +251,66 @@ fn combine_region_stats(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use catalog::FullTableName;
+    use common_wrcu::StatKey;
+
+    use super::to_region_stats;
+
+    #[test]
+    fn test_to_region_stat() {
+        let mut region_wcu_map = HashMap::new();
+        region_wcu_map.insert(
+            StatKey {
+                catalog: "c1".to_string(),
+                schema: "s1".to_string(),
+                table: "t1".to_string(),
+                region_number: 1,
+            },
+            10,
+        );
+
+        let mut region_rcu_map = HashMap::with_capacity(3);
+        region_rcu_map.insert(
+            StatKey {
+                catalog: "c1".to_string(),
+                schema: "s1".to_string(),
+                table: "t2".to_string(),
+                region_number: 2,
+            },
+            20,
+        );
+
+        let mut table_regions_map = HashMap::new();
+        table_regions_map.insert(
+            FullTableName {
+                catalog_name: "c1".to_string(),
+                schema_name: "s1".to_string(),
+                table_name: "t1".to_string(),
+            },
+            vec![1],
+        );
+        table_regions_map.insert(
+            FullTableName {
+                catalog_name: "c1".to_string(),
+                schema_name: "s1".to_string(),
+                table_name: "t2".to_string(),
+            },
+            vec![2],
+        );
+
+        let region_stats = to_region_stats(region_wcu_map, region_rcu_map, &table_regions_map);
+
+        assert_eq!(2, region_stats.len());
+
+        assert_eq!(10, region_stats[0].wcus);
+        assert_eq!(0, region_stats[0].rcus);
+
+        assert_eq!(0, region_stats[1].wcus);
+        assert_eq!(20, region_stats[1].rcus);
+    }
+
     #[test]
     fn test_resolve_addr() {
         assert_eq!(
