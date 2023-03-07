@@ -41,4 +41,3 @@ pub mod write_batch;
 
 pub use engine::EngineImpl;
 mod file_purger;
-mod statistics_collector;

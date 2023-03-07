@@ -297,20 +297,17 @@ async fn test_recover_region_manifets() {
         SchedulerConfig::default(),
         NoopFilePurgeHandler,
     ));
-    let statistics_collector = StatisticsCollectorRef::default();
     // Recover from empty
     assert!(RegionImpl::<NoopLogStore>::recover_from_manifest(
         &manifest,
         &memtable_builder,
         &sst_layer,
         &file_purger,
-        &statistics_collector,
     )
     .await
     .unwrap()
     .0
     .is_none());
-    assert_eq!(statistics_collector.disk_usage_bytes(), 0);
 
     {
         // save some actions into region_meta
@@ -343,14 +340,12 @@ async fn test_recover_region_manifets() {
             .unwrap();
     }
 
-    let statistics_collector = StatisticsCollectorRef::default();
     // try to recover
     let (version, recovered_metadata) = RegionImpl::<NoopLogStore>::recover_from_manifest(
         &manifest,
         &memtable_builder,
         &sst_layer,
         &file_purger,
-        &statistics_collector,
     )
     .await
     .unwrap();
@@ -373,10 +368,4 @@ async fn test_recover_region_manifets() {
 
     // check manifest state
     assert_eq!(3, manifest.last_version());
-
-    // 3 files in total
-    assert_eq!(
-        statistics_collector.disk_usage_bytes(),
-        3 * DEFAULT_TEST_FILE_SIZE
-    );
 }

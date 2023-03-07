@@ -302,6 +302,7 @@ pub struct FileMeta {
     /// SST level of the file.
     pub level: Level,
     /// Size of the file.
+    #[serde(default)]
     pub file_size: u64,
 }
 

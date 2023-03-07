@@ -46,7 +46,6 @@ pub use crate::region::writer::{AlterContext, RegionWriter, RegionWriterRef, Wri
 use crate::schema::compat::CompatWrite;
 use crate::snapshot::SnapshotImpl;
 use crate::sst::AccessLayerRef;
-use crate::statistics_collector::StatisticsCollectorRef;
 use crate::version::{
     Version, VersionControl, VersionControlRef, VersionEdit, INIT_COMMITTED_SEQUENCE,
 };
@@ -128,7 +127,13 @@ impl<S: LogStore> Region for RegionImpl<S> {
     }
 
     fn disk_usage_bytes(&self) -> u64 {
-        self.inner.statistics_collector.disk_usage_bytes()
+        let version = self.inner.version_control().current();
+        version
+            .ssts()
+            .levels()
+            .iter()
+            .map(|level_ssts| level_ssts.files().map(|sst| sst.file_size()).sum::<u64>())
+            .sum()
     }
 }
 
@@ -195,7 +200,6 @@ impl<S: LogStore> RegionImpl<S> {
         let name = metadata.name().to_string();
         let version_control = VersionControl::with_version(version);
         let wal = Wal::new(id, store_config.log_store);
-        let statistics_collector = StatisticsCollectorRef::default();
 
         let inner = Arc::new(RegionInner {
             shared: Arc::new(SharedData {
@@ -207,7 +211,6 @@ impl<S: LogStore> RegionImpl<S> {
                 store_config.memtable_builder,
                 store_config.engine_config.clone(),
                 store_config.ttl,
-                statistics_collector.clone(),
             )),
             wal,
             flush_strategy: store_config.flush_strategy,
@@ -215,7 +218,6 @@ impl<S: LogStore> RegionImpl<S> {
             compaction_scheduler: store_config.compaction_scheduler,
             sst_layer: store_config.sst_layer,
             manifest: store_config.manifest,
-            statistics_collector,
         });
 
         RegionImpl { inner }
@@ -229,14 +231,12 @@ impl<S: LogStore> RegionImpl<S> {
         store_config: StoreConfig<S>,
         _opts: &OpenOptions,
     ) -> Result<Option<RegionImpl<S>>> {
-        let statistics_collector = StatisticsCollectorRef::default();
         // Load version meta data from manifest.
         let (version, mut recovered_metadata) = match Self::recover_from_manifest(
             &store_config.manifest,
             &store_config.memtable_builder,
             &store_config.sst_layer,
             &store_config.file_purger,
-            &statistics_collector,
         )
         .await?
         {
@@ -291,7 +291,6 @@ impl<S: LogStore> RegionImpl<S> {
             store_config.memtable_builder,
             store_config.engine_config.clone(),
             store_config.ttl,
-            statistics_collector.clone(),
         ));
         let writer_ctx = WriterContext {
             shared: &shared,
@@ -317,7 +316,6 @@ impl<S: LogStore> RegionImpl<S> {
             compaction_scheduler: store_config.compaction_scheduler,
             sst_layer: store_config.sst_layer,
             manifest: store_config.manifest,
-            statistics_collector,
         });
 
         Ok(Some(RegionImpl { inner }))
@@ -333,7 +331,6 @@ impl<S: LogStore> RegionImpl<S> {
         memtable_builder: &MemtableBuilderRef,
         sst_layer: &AccessLayerRef,
         file_purger: &FilePurgerRef,
-        statistics_collector: &StatisticsCollectorRef,
     ) -> Result<(Option<Version>, RecoveredMetadataMap)> {
         let (start, end) = Self::manifest_scan_range();
         let mut iter = manifest.scan(start, end).await?;
@@ -365,12 +362,7 @@ impl<S: LogStore> RegionImpl<S> {
                             file_purger.clone(),
                         ));
                         for (manifest_version, action) in actions.drain(..) {
-                            version = Self::replay_edit(
-                                manifest_version,
-                                action,
-                                version,
-                                statistics_collector,
-                            );
+                            version = Self::replay_edit(manifest_version, action, version);
                         }
                     }
                     (RegionMetaAction::Change(c), Some(v)) => {
@@ -383,12 +375,7 @@ impl<S: LogStore> RegionImpl<S> {
                         version = None;
                     }
                     (action, Some(v)) => {
-                        version = Self::replay_edit(
-                            manifest_version,
-                            action,
-                            Some(v),
-                            statistics_collector,
-                        );
+                        version = Self::replay_edit(manifest_version, action, Some(v));
                     }
                 }
             }
@@ -414,7 +401,6 @@ impl<S: LogStore> RegionImpl<S> {
         manifest_version: ManifestVersion,
         action: RegionMetaAction,
         version: Option<Version>,
-        statistics_collector: &StatisticsCollectorRef,
     ) -> Option<Version> {
         if let RegionMetaAction::Edit(e) = action {
             let edit = VersionEdit {
@@ -424,10 +410,6 @@ impl<S: LogStore> RegionImpl<S> {
                 manifest_version,
                 max_memtable_id: None,
             };
-            statistics_collector
-                .increase_disk_usage_bytes(edit.files_to_add.iter().map(|f| f.file_size).sum());
-            statistics_collector
-                .descrease_disk_usage_bytes(edit.files_to_remove.iter().map(|f| f.file_size).sum());
             version.map(|mut v| {
                 v.apply_edit(edit);
                 v
@@ -511,7 +493,6 @@ struct RegionInner<S: LogStore> {
     compaction_scheduler: CompactionSchedulerRef<S>,
     sst_layer: AccessLayerRef,
     manifest: RegionManifest,
-    statistics_collector: StatisticsCollectorRef,
 }
 
 impl<S: LogStore> RegionInner<S> {

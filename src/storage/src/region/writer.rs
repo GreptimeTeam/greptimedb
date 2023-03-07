@@ -39,7 +39,6 @@ use crate::proto::wal::WalHeader;
 use crate::region::{RecoverdMetadata, RecoveredMetadataMap, RegionManifest, SharedDataRef};
 use crate::schema::compat::CompatWrite;
 use crate::sst::AccessLayerRef;
-use crate::statistics_collector::StatisticsCollectorRef;
 use crate::version::{VersionControl, VersionControlRef, VersionEdit, VersionRef};
 use crate::wal::Wal;
 use crate::write_batch::WriteBatch;
@@ -59,7 +58,6 @@ pub struct RegionWriter {
     ///
     /// Increasing committed sequence should be guarded by this lock.
     version_mutex: Mutex<()>,
-    statistics_collector: StatisticsCollectorRef,
 }
 
 impl RegionWriter {
@@ -67,12 +65,10 @@ impl RegionWriter {
         memtable_builder: MemtableBuilderRef,
         config: Arc<EngineConfig>,
         ttl: Option<Duration>,
-        statistics_collector: StatisticsCollectorRef,
     ) -> RegionWriter {
         RegionWriter {
             inner: Mutex::new(WriterInner::new(memtable_builder, config, ttl)),
             version_mutex: Mutex::new(()),
-            statistics_collector,
         }
     }
 
@@ -143,15 +139,6 @@ impl RegionWriter {
             manifest_version,
             max_memtable_id,
         };
-        self.statistics_collector
-            .increase_disk_usage_bytes(version_edit.files_to_add.iter().map(|f| f.file_size).sum());
-        self.statistics_collector.descrease_disk_usage_bytes(
-            version_edit
-                .files_to_remove
-                .iter()
-                .map(|f| f.file_size)
-                .sum(),
-        );
 
         // We could tolerate failure during persisting manifest version to the WAL, since it won't
         // affect how we applying the edit to the version.
