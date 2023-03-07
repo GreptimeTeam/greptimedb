@@ -15,9 +15,7 @@
 mod wcu_calc;
 mod wrcu_stat;
 
-pub use wrcu_stat::WrcuStat;
-pub use wrcu_stat::Statistics;
-pub use wrcu_stat::StatKey;
+pub use wrcu_stat::{StatKey, Statistics, WrcuStat};
 
 /// An interface for computing WCUs for insert request
 pub trait WcuCalc {
