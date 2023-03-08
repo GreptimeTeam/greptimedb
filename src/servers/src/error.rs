@@ -263,6 +263,8 @@ pub enum Error {
         #[snafu(backtrace)]
         source: common_mem_prof::error::Error,
     },
+    #[snafu(display("Invalid prepare statement: {}", err_msg))]
+    InvalidPrepareStatement { err_msg: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -302,6 +304,7 @@ impl ErrorExt for Error {
             | DecompressPromRemoteRequest { .. }
             | InvalidPromRemoteRequest { .. }
             | InvalidFlightTicket { .. }
+            | InvalidPrepareStatement { .. }
             | TimePrecision { .. } => StatusCode::InvalidArguments,
 
             InfluxdbLinesWrite { source, .. } | ConvertFlightMessage { source } => {

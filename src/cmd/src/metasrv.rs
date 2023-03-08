@@ -115,8 +115,8 @@ impl TryFrom<StartCommand> for MetaSrvOptions {
 mod tests {
     use std::io::Write;
 
+    use common_test_util::temp_dir::create_named_temp_file;
     use meta_srv::selector::SelectorType;
-    use tempfile::NamedTempFile;
 
     use super::*;
 
@@ -139,7 +139,7 @@ mod tests {
 
     #[test]
     fn test_read_from_config_file() {
-        let mut file = NamedTempFile::new().unwrap();
+        let mut file = create_named_temp_file();
         let toml_str = r#"
             bind_addr = "127.0.0.1:3002"
             server_addr = "127.0.0.1:3002"

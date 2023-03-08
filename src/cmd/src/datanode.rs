@@ -153,15 +153,15 @@ mod tests {
     use std::io::Write;
     use std::time::Duration;
 
+    use common_test_util::temp_dir::create_named_temp_file;
     use datanode::datanode::{CompactionConfig, ObjectStoreConfig};
     use servers::Mode;
-    use tempfile::NamedTempFile;
 
     use super::*;
 
     #[test]
     fn test_read_from_config_file() {
-        let mut file = NamedTempFile::new().unwrap();
+        let mut file = create_named_temp_file();
         let toml_str = r#"
             mode = "distributed"
             enable_memory_catalog = false

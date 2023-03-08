@@ -40,11 +40,11 @@ mod procedure_test_util {
     use common_procedure::{
         BoxedProcedure, Context, ContextProvider, ProcedureId, ProcedureState, Result, Status,
     };
+    use common_test_util::temp_dir::TempDir;
     use log_store::NoopLogStore;
     use storage::compaction::noop::NoopCompactionScheduler;
     use storage::config::EngineConfig as StorageEngineConfig;
     use storage::EngineImpl;
-    use tempdir::TempDir;
 
     use super::*;
     use crate::engine::{EngineConfig, MitoEngine};

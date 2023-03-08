@@ -18,8 +18,8 @@ mod tests {
     use std::process::{Command, Stdio};
     use std::time::Duration;
 
+    use common_test_util::temp_dir::create_temp_dir;
     use rexpect::session::PtyReplSession;
-    use tempdir::TempDir;
 
     struct Repl {
         repl: PtyReplSession,
@@ -48,8 +48,8 @@ mod tests {
 
     #[test]
     fn test_repl() {
-        let data_dir = TempDir::new_in("/tmp", "data").unwrap();
-        let wal_dir = TempDir::new_in("/tmp", "wal").unwrap();
+        let data_dir = create_temp_dir("data");
+        let wal_dir = create_temp_dir("wal");
 
         let mut bin_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         bin_path.push("../../target/debug");

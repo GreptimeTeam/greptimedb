@@ -23,6 +23,7 @@ mod projection;
 use std::collections::{HashMap, HashSet};
 
 use common_telemetry::logging;
+use common_test_util::temp_dir::create_temp_dir;
 use datatypes::prelude::{ScalarVector, WrapperType};
 use datatypes::timestamp::TimestampMillisecond;
 use datatypes::type_id::LogicalTypeId;
@@ -34,7 +35,6 @@ use object_store::{ObjectStore, ObjectStoreBuilder};
 use store_api::storage::{
     consts, Chunk, ChunkReader, RegionMeta, ScanRequest, SequenceNumber, Snapshot, WriteRequest,
 };
-use tempdir::TempDir;
 
 use super::*;
 use crate::file_purger::noop::NoopFilePurgeHandler;
@@ -42,7 +42,7 @@ use crate::manifest::action::{RegionChange, RegionMetaActionList};
 use crate::manifest::test_utils::*;
 use crate::memtable::DefaultMemtableBuilder;
 use crate::scheduler::{LocalScheduler, SchedulerConfig};
-use crate::sst::FsAccessLayer;
+use crate::sst::{FileId, FsAccessLayer};
 use crate::test_util::descriptor_util::RegionDescBuilder;
 use crate::test_util::{self, config_util, schema_util, write_batch_util};
 
@@ -242,13 +242,10 @@ async fn test_new_region() {
         .build();
     let metadata: RegionMetadata = desc.try_into().unwrap();
 
-    let store_dir = TempDir::new("test_new_region")
-        .unwrap()
-        .path()
-        .to_string_lossy()
-        .to_string();
+    let dir = create_temp_dir("test_new_region");
+    let store_dir = dir.path().to_str().unwrap();
 
-    let store_config = config_util::new_store_config(region_name, &store_dir).await;
+    let store_config = config_util::new_store_config(region_name, store_dir).await;
     let placeholder_memtable = store_config
         .memtable_builder
         .build(metadata.schema().clone());
@@ -278,7 +275,7 @@ async fn test_new_region() {
 
 #[tokio::test]
 async fn test_recover_region_manifets() {
-    let tmp_dir = TempDir::new("test_new_region").unwrap();
+    let tmp_dir = create_temp_dir("test_new_region");
     let memtable_builder = Arc::new(DefaultMemtableBuilder::default()) as _;
 
     let object_store = ObjectStore::new(
@@ -309,6 +306,10 @@ async fn test_recover_region_manifets() {
     .0
     .is_none());
 
+    let file_id_a = FileId::random();
+    let file_id_b = FileId::random();
+    let file_id_c = FileId::random();
+
     {
         // save some actions into region_meta
         manifest
@@ -323,8 +324,8 @@ async fn test_recover_region_manifets() {
 
         manifest
             .update(RegionMetaActionList::new(vec![
-                RegionMetaAction::Edit(build_region_edit(1, &["f1"], &[])),
-                RegionMetaAction::Edit(build_region_edit(2, &["f2", "f3"], &[])),
+                RegionMetaAction::Edit(build_region_edit(1, &[file_id_a], &[])),
+                RegionMetaAction::Edit(build_region_edit(2, &[file_id_b, file_id_c], &[])),
             ]))
             .await
             .unwrap();
@@ -358,11 +359,15 @@ async fn test_recover_region_manifets() {
     let ssts = version.ssts();
     let files = ssts.levels()[0]
         .files()
-        .map(|f| f.file_name().to_string())
+        .map(|f| f.file_name())
         .collect::<HashSet<_>>();
     assert_eq!(3, files.len());
     assert_eq!(
-        HashSet::from(["f1".to_string(), "f2".to_string(), "f3".to_string()]),
+        HashSet::from([
+            file_id_a.as_parquet(),
+            file_id_b.as_parquet(),
+            file_id_c.as_parquet()
+        ]),
         files
     );
 

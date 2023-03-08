@@ -184,6 +184,7 @@ mod tests {
 
     use super::*;
     use crate::manifest::test_utils;
+    use crate::sst::FileId;
 
     #[test]
     fn test_encode_decode_action_list() {
@@ -194,8 +195,8 @@ mod tests {
             RegionMetaAction::Protocol(protocol.clone()),
             RegionMetaAction::Edit(test_utils::build_region_edit(
                 99,
-                &["test1", "test2"],
-                &["test3"],
+                &[FileId::random(), FileId::random()],
+                &[FileId::random()],
             )),
         ]);
         action_list.set_prev_version(3);

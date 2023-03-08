@@ -12,15 +12,4 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::raft_engine::log_store::RaftEngineLogStore;
-use crate::LogConfig;
-
-/// Create a write log for the provided path, used for test.
-pub async fn create_tmp_local_file_log_store(path: &str) -> RaftEngineLogStore {
-    let cfg = LogConfig {
-        file_size: 128 * 1024,
-        log_file_dir: path.to_string(),
-        ..Default::default()
-    };
-    RaftEngineLogStore::try_new(cfg).await.unwrap()
-}
+pub mod temp_dir;

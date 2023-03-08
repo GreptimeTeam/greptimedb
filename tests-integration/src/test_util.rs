@@ -22,6 +22,7 @@ use axum::Router;
 use catalog::CatalogManagerRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use common_runtime::Builder as RuntimeBuilder;
+use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datanode::datanode::{
     DatanodeOptions, FileConfig, ObjectStoreConfig, OssConfig, S3Config, WalConfig,
 };
@@ -46,7 +47,6 @@ use servers::Mode;
 use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineRef};
 use table::requests::{CreateTableRequest, TableOptions};
-use tempdir::TempDir;
 
 static PORTS: OnceCell<AtomicUsize> = OnceCell::new();
 
@@ -149,7 +149,7 @@ fn get_test_store_config(
             (config, Some(TempDirGuard::S3(TempFolder::new(&store, "/"))))
         }
         StorageType::File => {
-            let data_tmp_dir = TempDir::new(&format!("gt_data_{name}")).unwrap();
+            let data_tmp_dir = create_temp_dir(&format!("gt_data_{name}"));
 
             (
                 ObjectStoreConfig::File(FileConfig {
@@ -189,7 +189,7 @@ pub fn create_tmp_dir_and_datanode_opts(
     store_type: StorageType,
     name: &str,
 ) -> (DatanodeOptions, TestGuard) {
-    let wal_tmp_dir = TempDir::new(&format!("gt_wal_{name}")).unwrap();
+    let wal_tmp_dir = create_temp_dir(&format!("gt_wal_{name}"));
 
     let (storage, data_tmp_dir) = get_test_store_config(&store_type, name);
 

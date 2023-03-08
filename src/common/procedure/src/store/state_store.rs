@@ -115,15 +115,15 @@ impl StateStore for ObjectStateStore {
 
 #[cfg(test)]
 mod tests {
+    use common_test_util::temp_dir::create_temp_dir;
     use object_store::services::Fs as Builder;
     use object_store::ObjectStoreBuilder;
-    use tempdir::TempDir;
 
     use super::*;
 
     #[tokio::test]
     async fn test_object_state_store() {
-        let dir = TempDir::new("state_store").unwrap();
+        let dir = create_temp_dir("state_store");
         let store_dir = dir.path().to_str().unwrap();
         let accessor = Builder::default().root(store_dir).build().unwrap();
         let object_store = ObjectStore::new(accessor).finish();

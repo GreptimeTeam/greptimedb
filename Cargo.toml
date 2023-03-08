@@ -19,6 +19,7 @@ members = [
     "src/common/runtime",
     "src/common/substrait",
     "src/common/telemetry",
+    "src/common/test-util",
     "src/common/time",
     "src/datanode",
     "src/datatypes",
