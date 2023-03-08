@@ -39,7 +39,6 @@ pub(crate) fn to_py_err(err: impl ToString) -> PyErr {
 pub(crate) fn init_cpython_interpreter() {
     let mut start = START_PYO3.lock().unwrap();
     if !*start {
-        pyo3::append_to_inittab!(greptime_builtins);
         pyo3::prepare_freethreaded_python();
         *start = true;
         info!("Started CPython Interpreter");

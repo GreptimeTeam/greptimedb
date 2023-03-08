@@ -54,6 +54,22 @@ def boolean_array() -> vector[f64]:
 @copr(returns=["value"], backend="pyo3")
 def boolean_array() -> vector[f64]:
     from greptime import vector
+    from greptime import query, dataframe
+    assert "query_engine" in str(type(query))
+    assert "ValueError" in str(type(dataframe))
+    v = vector([1.0, 2.0, 3.0])
+    # This returns a vector([2.0])
+    return v[(v > 1) & (v < 3)]
+"#
+            .to_string(),
+            expect: Some(ronish!("value": vector!(Float64Vector, [2.0f64]))),
+        },
+        #[cfg(feature = "pyo3_backend")]
+        CoprTestCase {
+            script: r#"
+@copr(returns=["value"], backend="pyo3")
+def boolean_array() -> vector[f64]:
+    from greptime import vector
     v = vector([1.0, 2.0, 3.0])
     # This returns a vector([2.0])
     return v[(v > 1) & (v < 3)]

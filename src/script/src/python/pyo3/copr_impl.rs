@@ -57,6 +57,18 @@ impl PyQueryEngine {
     }
     // TODO: put this into greptime module
 }
+
+/// dynamically insert a module into sys.modules so you can use `import MODULE_NAME` in python
+fn insert_module_to_sys_table(py: Python, name: &str, module: &PyModule) -> PyResult<()> {
+    // Import and get sys.modules
+    let sys = PyModule::import(py, "sys")?;
+    let py_modules: &PyDict = sys.getattr("modules")?.downcast()?;
+
+    // Insert module into sys.modules
+    py_modules.set_item(name, module)?;
+    Ok(())
+}
+
 /// Execute a `Coprocessor` with given `RecordBatch`
 pub(crate) fn pyo3_exec_parsed(
     copr: &Coprocessor,
@@ -110,12 +122,14 @@ coprocessor = copr
             let locals = PyDict::new(py);
             let greptime = PyModule::new(py, "greptime")?;
             greptime_builtins(py, greptime)?;
-            locals.set_item("greptime", greptime)?;
 
             if let Some(engine) = &copr.query_engine {
                 let query_engine = PyQueryEngine::from_weakref(engine.clone());
                 let query_engine = PyCell::new(py, query_engine)?;
-                globals.set_item("query", query_engine)?;
+                greptime.add("query", query_engine)?;
+            }else{
+                greptime.add("query", PyValueError::new_err(
+                    "No query engine found for coprocessor".to_string()))?;
             }
 
             // TODO(discord9): find out why `dataframe` is not in scope
@@ -128,10 +142,13 @@ coprocessor = copr
                     )
                 )?;
                 let dataframe = PyCell::new(py, dataframe)?;
-                globals.set_item("dataframe", dataframe)?;
+                greptime.add("dataframe", dataframe)?;
+            }else{
+                greptime.add("dataframe", PyValueError::new_err(
+                    "No dataframe found for coprocessor".to_string()))?;
             }
 
-
+            insert_module_to_sys_table(py, "greptime", greptime)?;
             locals.set_item("_args_for_coprocessor", args)?;
             locals.set_item("_kwargs_for_coprocessor", kwargs)?;
 
