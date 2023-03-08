@@ -366,17 +366,13 @@ impl PromPlanner {
                         expr: prom_expr.clone(),
                     })?)
                     .await?;
-                println!("input schema ident:\n{}", input.display_indent_schema());
-                println!("input schema: {:?}", input.schema());
                 let mut func_exprs = self.create_function_expr(func, args.literals)?;
                 func_exprs.insert(0, self.create_time_index_column_expr()?);
                 func_exprs.extend_from_slice(&self.create_tag_column_exprs()?);
 
-                let plan_result = LogicalPlanBuilder::from(input)
+                LogicalPlanBuilder::from(input)
                     .project(func_exprs)
-                    .context(DataFusionPlanningSnafu);
-                println!("project plan result: {:?}", plan_result);
-                plan_result?
+                    .context(DataFusionPlanningSnafu)?
                     .filter(self.create_empty_values_filter_expr()?)
                     .context(DataFusionPlanningSnafu)?
                     .build()
