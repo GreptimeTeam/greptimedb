@@ -119,7 +119,7 @@ pub fn all_datatype_testing_data() -> TestingData {
         ColumnType::MYSQL_TYPE_LONG,
         ColumnType::MYSQL_TYPE_LONGLONG,
         ColumnType::MYSQL_TYPE_FLOAT,
-        ColumnType::MYSQL_TYPE_FLOAT,
+        ColumnType::MYSQL_TYPE_DOUBLE,
         ColumnType::MYSQL_TYPE_VARCHAR,
         ColumnType::MYSQL_TYPE_VARCHAR,
     ];

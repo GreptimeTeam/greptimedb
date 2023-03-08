@@ -6949,6 +6949,7 @@ dependencies = [
  "once_cell",
  "openmetrics-parser",
  "opensrv-mysql",
+ "parking_lot",
  "pgwire",
  "pin-project",
  "postgres-types",
