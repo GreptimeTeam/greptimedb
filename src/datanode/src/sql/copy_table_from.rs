@@ -22,7 +22,6 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::vectors::{Helper, VectorRef};
 use futures::future;
 use futures_util::TryStreamExt;
-use lazy_static::lazy_static;
 use object_store::services::{Fs, S3};
 use object_store::{Object, ObjectStore, ObjectStoreBuilder};
 use regex::Regex;
@@ -34,10 +33,6 @@ use url::{ParseError, Url};
 
 use crate::error::{self, Result};
 use crate::sql::SqlHandler;
-
-lazy_static! {
-    static ref SCHEMA_PATTERN: Regex = Regex::new(r"^\w*://").unwrap();
-}
 
 const S3_SCHEMA: &str = "S3";
 const ENDPOINT_URL: &str = "ENDPOINT_URL";
@@ -223,18 +218,17 @@ impl DataSource {
         }
 
         if let Some(enable_str) = connection.get(ENABLE_VIRTUAL_HOST_STYLE) {
-            let enable = enable_str.as_str().parse::<bool>();
-
-            match enable {
-                Ok(true) => {
-                    builder.enable_virtual_host_style();
+            let enable = enable_str.as_str().parse::<bool>().map_err(|e| {
+                error::InvalidConnectionSnafu {
+                    msg: format!(
+                        "failed to parse the option {}={}, {}",
+                        ENABLE_VIRTUAL_HOST_STYLE, enable_str, e
+                    ),
                 }
-                Err(_) => {
-                    return Err(error::Error::InvalidConnection {
-                        msg: format!("failed to parse the {}", ENABLE_VIRTUAL_HOST_STYLE),
-                    })
-                }
-                _ => (),
+                .build()
+            })?;
+            if enable {
+                builder.enable_virtual_host_style();
             }
         }
 

@@ -9,6 +9,7 @@ default = ["python"]
 python = ["dep:script"]
 
 [dependencies]
+async-compat = "0.2"
 async-stream.workspace = true
 async-trait.workspace = true
 api = { path = "../api" }
@@ -44,6 +45,7 @@ object-store = { path = "../object-store" }
 pin-project = "1.0"
 prost.workspace = true
 query = { path = "../query" }
+regex = "1.6"
 script = { path = "../script", features = ["python"], optional = true }
 serde = "1.0"
 serde_json = "1.0"
@@ -61,9 +63,6 @@ tokio-stream = { version = "0.1", features = ["net"] }
 tonic.workspace = true
 tower = { version = "0.4", features = ["full"] }
 tower-http = { version = "0.3", features = ["full"] }
-regex = "1.6"
-lazy_static = "1.4"
-async-compat = "0.2"
 url = "2.3.1"
 
 [dev-dependencies]
