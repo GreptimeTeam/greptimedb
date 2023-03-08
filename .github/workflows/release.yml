@@ -30,21 +30,16 @@ jobs:
           - arch: x86_64-unknown-linux-gnu
             os: ubuntu-2004-16-cores
             file: greptime-linux-amd64
-            continue-on-error: false
-          - arch: aarch64-unknown-linux-gnu
-            os: ubuntu-2004-16-cores
-            file: greptime-linux-arm64
-            continue-on-error: true
-          - arch: aarch64-apple-darwin
-            os: macos-latest
-            file: greptime-darwin-arm64
-            continue-on-error: true
-          - arch: x86_64-apple-darwin
-            os: macos-latest
-            file: greptime-darwin-amd64
-            continue-on-error: true
+          # - arch: aarch64-unknown-linux-gnu
+          #   os: ubuntu-2004-16-cores
+          #   file: greptime-linux-arm64
+          # - arch: aarch64-apple-darwin
+          #   os: macos-latest
+          #   file: greptime-darwin-arm64
+          # - arch: x86_64-apple-darwin
+          #   os: macos-latest
+          #   file: greptime-darwin-amd64
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.continue-on-error }}
     if: github.repository == 'GreptimeTeam/greptimedb'
     steps:
       - name: Checkout sources
@@ -198,17 +193,17 @@ jobs:
           tar xvf greptime-linux-amd64.tgz
           rm greptime-linux-amd64.tgz
 
-      - name: Download arm64 binary
-        uses: actions/download-artifact@v3
-        with:
-          name: greptime-linux-arm64
-          path: arm64
+      # - name: Download arm64 binary
+      #   uses: actions/download-artifact@v3
+      #   with:
+      #     name: greptime-linux-arm64
+      #     path: arm64
 
-      - name: Unzip the arm64 artifacts
-        run: |
-          cd arm64
-          tar xvf greptime-linux-arm64.tgz
-          rm greptime-linux-arm64.tgz
+      # - name: Unzip the arm64 artifacts
+      #   run: |
+      #     cd arm64
+      #     tar xvf greptime-linux-arm64.tgz
+      #     rm greptime-linux-arm64.tgz
 
       - name: Login to UCloud Container Registry
         uses: docker/login-action@v2
@@ -250,7 +245,8 @@ jobs:
           context: .
           file: ./docker/ci/Dockerfile
           push: true
-          platforms: linux/amd64,linux/arm64
+          # platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           tags: |
             greptime/greptimedb:latest
             greptime/greptimedb:${{ env.IMAGE_TAG }}
