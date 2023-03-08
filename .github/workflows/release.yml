@@ -30,16 +30,21 @@ jobs:
           - arch: x86_64-unknown-linux-gnu
             os: ubuntu-2004-16-cores
             file: greptime-linux-amd64
+            continue-on-error: false
           - arch: aarch64-unknown-linux-gnu
             os: ubuntu-2004-16-cores
             file: greptime-linux-arm64
+            continue-on-error: true
           - arch: aarch64-apple-darwin
             os: macos-latest
             file: greptime-darwin-arm64
+            continue-on-error: true
           - arch: x86_64-apple-darwin
             os: macos-latest
             file: greptime-darwin-amd64
+            continue-on-error: true
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.continue-on-error }}
     if: github.repository == 'GreptimeTeam/greptimedb'
     steps:
       - name: Checkout sources

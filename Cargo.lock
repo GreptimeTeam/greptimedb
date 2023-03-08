@@ -679,7 +679,7 @@ dependencies = [
  "getrandom",
  "instant",
  "pin-project-lite",
- "rand 0.8.5",
+ "rand",
  "tokio",
 ]
 
@@ -691,7 +691,7 @@ checksum = "6cd1a59bc091e593ee9ed62df4e4a07115e00a0e0a52fd7e0e04540773939b80"
 dependencies = [
  "futures",
  "pin-project",
- "rand 0.8.5",
+ "rand",
  "tokio",
 ]
 
@@ -703,7 +703,7 @@ checksum = "f34fac4d7cdaefa2deded0eda2d5d59dbfd43370ff3f856209e72340ae84c294"
 dependencies = [
  "futures",
  "pin-project",
- "rand 0.8.5",
+ "rand",
  "tokio",
 ]
 
@@ -1101,6 +1101,7 @@ dependencies = [
  "common-recordbatch",
  "common-runtime",
  "common-telemetry",
+ "common-test-util",
  "common-time",
  "dashmap",
  "datafusion",
@@ -1120,7 +1121,6 @@ dependencies = [
  "snafu",
  "storage",
  "table",
- "tempdir",
  "tokio",
 ]
 
@@ -1357,7 +1357,7 @@ dependencies = [
  "futures-util",
  "parking_lot",
  "prost",
- "rand 0.8.5",
+ "rand",
  "snafu",
  "substrait 0.1.0",
  "substrait 0.4.0",
@@ -1401,6 +1401,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-telemetry",
+ "common-test-util",
  "datanode",
  "either",
  "frontend",
@@ -1417,8 +1418,6 @@ dependencies = [
  "session",
  "snafu",
  "substrait 0.1.0",
- "tempdir",
- "tempfile",
  "tikv-jemalloc-ctl",
  "tikv-jemallocator",
  "tokio",
@@ -1480,7 +1479,6 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu",
- "tempdir",
  "tokio",
 ]
 
@@ -1548,7 +1546,7 @@ dependencies = [
  "flatbuffers",
  "futures",
  "prost",
- "rand 0.8.5",
+ "rand",
  "snafu",
  "tokio",
  "tonic",
@@ -1594,6 +1592,7 @@ dependencies = [
  "common-error",
  "common-runtime",
  "common-telemetry",
+ "common-test-util",
  "futures",
  "futures-util",
  "object-store",
@@ -1601,7 +1600,6 @@ dependencies = [
  "serde_json",
  "smallvec",
  "snafu",
- "tempdir",
  "tokio",
  "uuid",
 ]
@@ -1677,12 +1675,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-test-util"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+]
+
+[[package]]
 name = "common-time"
 version = "0.1.0"
 dependencies = [
  "chrono",
  "common-error",
- "rand 0.8.5",
+ "rand",
  "serde",
  "serde_json",
  "snafu",
@@ -2132,7 +2137,7 @@ dependencies = [
  "paste",
  "percent-encoding",
  "pin-project-lite",
- "rand 0.8.5",
+ "rand",
  "smallvec",
  "sqlparser",
  "tempfile",
@@ -2209,7 +2214,7 @@ dependencies = [
  "md-5",
  "num-traits",
  "paste",
- "rand 0.8.5",
+ "rand",
  "regex",
  "sha2",
  "unicode-segmentation",
@@ -2224,7 +2229,7 @@ dependencies = [
  "arrow",
  "datafusion-common",
  "paste",
- "rand 0.8.5",
+ "rand",
 ]
 
 [[package]]
@@ -2263,6 +2268,7 @@ dependencies = [
  "common-recordbatch",
  "common-runtime",
  "common-telemetry",
+ "common-test-util",
  "common-time",
  "datafusion",
  "datafusion-common",
@@ -2294,7 +2300,6 @@ dependencies = [
  "substrait 0.1.0",
  "table",
  "table-procedure",
- "tempdir",
  "tokio",
  "tokio-stream",
  "toml",
@@ -2654,7 +2659,7 @@ checksum = "fe5e43d0f78a42ad591453aedb1d7ae631ce7ee445c7643691055a9ed8d3b01c"
 dependencies = [
  "log",
  "once_cell",
- "rand 0.8.5",
+ "rand",
 ]
 
 [[package]]
@@ -2771,6 +2776,7 @@ dependencies = [
  "common-recordbatch",
  "common-runtime",
  "common-telemetry",
+ "common-test-util",
  "datafusion",
  "datafusion-common",
  "datafusion-expr",
@@ -2797,7 +2803,6 @@ dependencies = [
  "strfmt",
  "substrait 0.1.0",
  "table",
- "tempdir",
  "tokio",
  "toml",
  "tonic",
@@ -2877,12 +2882,6 @@ dependencies = [
  "libc",
  "winapi",
 ]
-
-[[package]]
-name = "fuchsia-cprng"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a06f77d526c1a601b7c4cdd98f54b5eaabffc14d5f2f0296febdc7f357c6d3ba"
 
 [[package]]
 name = "funty"
@@ -3731,6 +3730,7 @@ dependencies = [
  "common-error",
  "common-runtime",
  "common-telemetry",
+ "common-test-util",
  "crc",
  "futures",
  "futures-util",
@@ -3738,10 +3738,9 @@ dependencies = [
  "protobuf",
  "protobuf-build",
  "raft-engine",
- "rand 0.8.5",
+ "rand",
  "snafu",
  "store-api",
- "tempdir",
  "tokio",
  "tokio-util",
 ]
@@ -3983,7 +3982,7 @@ dependencies = [
  "etcd-client",
  "futures",
  "meta-srv",
- "rand 0.8.5",
+ "rand",
  "serde",
  "serde_json",
  "snafu",
@@ -4146,6 +4145,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-telemetry",
+ "common-test-util",
  "common-time",
  "datafusion",
  "datafusion-common",
@@ -4159,7 +4159,6 @@ dependencies = [
  "storage",
  "store-api",
  "table",
- "tempdir",
  "tokio",
 ]
 
@@ -4195,7 +4194,7 @@ version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "12ca7f22ed370d5991a9caec16a83187e865bc8a532f889670337d5a5689e3a1"
 dependencies = [
- "rand_core 0.6.4",
+ "rand_core",
 ]
 
 [[package]]
@@ -4263,7 +4262,7 @@ dependencies = [
  "lexical",
  "num-bigint",
  "num-traits",
- "rand 0.8.5",
+ "rand",
  "regex",
  "rust_decimal",
  "saturating",
@@ -4290,7 +4289,7 @@ dependencies = [
  "num-complex",
  "num-rational",
  "num-traits",
- "rand 0.8.5",
+ "rand",
  "rand_distr",
  "simba",
  "typenum",
@@ -4428,7 +4427,7 @@ dependencies = [
  "num-integer",
  "num-iter",
  "num-traits",
- "rand 0.8.5",
+ "rand",
  "smallvec",
  "zeroize",
 ]
@@ -4550,10 +4549,10 @@ dependencies = [
  "anyhow",
  "async-trait",
  "common-telemetry",
+ "common-test-util",
  "futures",
  "lru 0.9.0",
  "opendal",
- "tempdir",
  "tokio",
  "uuid",
 ]
@@ -4672,7 +4671,7 @@ dependencies = [
  "lazy_static",
  "percent-encoding",
  "pin-project",
- "rand 0.8.5",
+ "rand",
  "thiserror",
  "tokio",
  "tokio-stream",
@@ -4990,7 +4989,7 @@ dependencies = [
  "log",
  "md5",
  "postgres-types",
- "rand 0.8.5",
+ "rand",
  "ring",
  "stringprep",
  "thiserror",
@@ -5046,7 +5045,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d5285893bb5eb82e6aaf5d59ee909a06a16737a8970984dd7746ba9283498d6"
 dependencies = [
  "phf_shared 0.10.0",
- "rand 0.8.5",
+ "rand",
 ]
 
 [[package]]
@@ -5056,7 +5055,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1181c94580fa345f50f19d738aaa39c0ed30a600d95cb2d3e23f94266f14fbf"
 dependencies = [
  "phf_shared 0.11.1",
- "rand 0.8.5",
+ "rand",
 ]
 
 [[package]]
@@ -5225,7 +5224,7 @@ dependencies = [
  "hmac",
  "md-5",
  "memchr",
- "rand 0.8.5",
+ "rand",
  "sha2",
  "stringprep",
 ]
@@ -5653,7 +5652,7 @@ dependencies = [
  "paste",
  "promql",
  "promql-parser",
- "rand 0.8.5",
+ "rand",
  "serde",
  "serde_json",
  "session",
@@ -5737,26 +5736,13 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.4.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "552840b97013b1a26992c11eac34bdd778e464601a4c2054b5f0bff7c6761293"
-dependencies = [
- "fuchsia-cprng",
- "libc",
- "rand_core 0.3.1",
- "rdrand",
- "winapi",
-]
-
-[[package]]
-name = "rand"
 version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34af8d1a0e25924bc5b7c43c079c942339d8f0a8b57c39049bef581b46327404"
 dependencies = [
  "libc",
  "rand_chacha",
- "rand_core 0.6.4",
+ "rand_core",
 ]
 
 [[package]]
@@ -5766,23 +5752,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6c10a63a0fa32252be49d21e7709d4d4baf8d231c2dbce1eaa8141b9b127d88"
 dependencies = [
  "ppv-lite86",
- "rand_core 0.6.4",
+ "rand_core",
 ]
-
-[[package]]
-name = "rand_core"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a6fdeb83b075e8266dcc8762c22776f6877a63111121f5f8c7411e5be7eed4b"
-dependencies = [
- "rand_core 0.4.2",
-]
-
-[[package]]
-name = "rand_core"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c33a3c44ca05fa6f1807d8e6743f3824e8509beca625669633be0acbdf509dc"
 
 [[package]]
 name = "rand_core"
@@ -5800,7 +5771,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32cb0b9bc82b0a0876c2dd994a7e7a2683d3e7390ca40e6886785ef0c7e3ee31"
 dependencies = [
  "num-traits",
- "rand 0.8.5",
+ "rand",
 ]
 
 [[package]]
@@ -5838,15 +5809,6 @@ dependencies = [
  "crossbeam-deque",
  "crossbeam-utils",
  "num_cpus",
-]
-
-[[package]]
-name = "rdrand"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "678054eb77286b51581ba43620cc911abf02758c91f93f479767aed0f90458b2"
-dependencies = [
- "rand_core 0.3.1",
 ]
 
 [[package]]
@@ -5905,15 +5867,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "remove_dir_all"
-version = "0.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3acd125665422973a33ac9d3dd2df85edad0f4ae9b00dafb1a05e43a9f5ef8e7"
-dependencies = [
- "winapi",
-]
-
-[[package]]
 name = "rend"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5942,7 +5895,7 @@ dependencies = [
  "once_cell",
  "percent-encoding",
  "quick-xml",
- "rand 0.8.5",
+ "rand",
  "rsa",
  "rust-ini",
  "serde",
@@ -6095,7 +6048,7 @@ dependencies = [
  "num-traits",
  "pkcs1",
  "pkcs8",
- "rand_core 0.6.4",
+ "rand_core",
  "sha2",
  "signature",
  "subtle",
@@ -6124,7 +6077,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "num-traits",
- "rand 0.8.5",
+ "rand",
  "rkyv",
  "serde",
  "serde_json",
@@ -6263,7 +6216,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "radium",
- "rand 0.8.5",
+ "rand",
  "siphasher",
  "unic-ucd-category",
  "volatile",
@@ -6408,8 +6361,8 @@ dependencies = [
  "parking_lot",
  "paste",
  "puruspe",
- "rand 0.8.5",
- "rand_core 0.6.4",
+ "rand",
+ "rand_core",
  "rustpython-common",
  "rustpython-derive",
  "rustpython-vm",
@@ -6475,7 +6428,7 @@ dependencies = [
  "optional",
  "parking_lot",
  "paste",
- "rand 0.8.5",
+ "rand",
  "result-like",
  "rustc_version 0.4.0",
  "rustpython-ast",
@@ -6689,6 +6642,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-telemetry",
+ "common-test-util",
  "common-time",
  "console",
  "crossbeam-utils",
@@ -6721,7 +6675,6 @@ dependencies = [
  "storage",
  "store-api",
  "table",
- "tempdir",
  "tokio",
  "tokio-test",
 ]
@@ -6932,6 +6885,7 @@ dependencies = [
  "common-recordbatch",
  "common-runtime",
  "common-telemetry",
+ "common-test-util",
  "common-time",
  "datatypes",
  "derive_builder 0.12.0",
@@ -6955,7 +6909,7 @@ dependencies = [
  "promql-parser",
  "prost",
  "query",
- "rand 0.8.5",
+ "rand",
  "regex",
  "rustls",
  "rustls-pemfile",
@@ -6970,7 +6924,6 @@ dependencies = [
  "sql",
  "strum",
  "table",
- "tempdir",
  "tokio",
  "tokio-postgres",
  "tokio-postgres-rustls",
@@ -7065,7 +7018,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fe458c98333f9c8152221191a77e2a44e8325d0193484af2e9421a53019e57d"
 dependencies = [
  "digest",
- "rand_core 0.6.4",
+ "rand_core",
 ]
 
 [[package]]
@@ -7314,7 +7267,7 @@ dependencies = [
  "lazy_static",
  "nalgebra",
  "num-traits",
- "rand 0.8.5",
+ "rand",
 ]
 
 [[package]]
@@ -7345,6 +7298,7 @@ dependencies = [
  "common-recordbatch",
  "common-runtime",
  "common-telemetry",
+ "common-test-util",
  "common-time",
  "criterion 0.3.6",
  "datafusion-common",
@@ -7359,7 +7313,7 @@ dependencies = [
  "paste",
  "planus",
  "prost",
- "rand 0.8.5",
+ "rand",
  "regex",
  "serde",
  "serde_json",
@@ -7367,7 +7321,6 @@ dependencies = [
  "snafu",
  "store-api",
  "table",
- "tempdir",
  "tokio",
  "tokio-util",
  "tonic",
@@ -7615,6 +7568,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-telemetry",
+ "common-test-util",
  "common-time",
  "datafusion",
  "datafusion-common",
@@ -7631,7 +7585,6 @@ dependencies = [
  "serde_json",
  "snafu",
  "store-api",
- "tempdir",
  "tokio",
  "tokio-util",
 ]
@@ -7645,6 +7598,7 @@ dependencies = [
  "common-error",
  "common-procedure",
  "common-telemetry",
+ "common-test-util",
  "datatypes",
  "log-store",
  "mito",
@@ -7654,7 +7608,6 @@ dependencies = [
  "snafu",
  "storage",
  "table",
- "tempdir",
  "tokio",
 ]
 
@@ -7675,16 +7628,6 @@ name = "target-lexicon"
 version = "0.12.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ae9980cab1db3fceee2f6c6f643d5d8de2997c58ee8d25fb0cc8a9e9e7348e5"
-
-[[package]]
-name = "tempdir"
-version = "0.3.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15f2b5fb00ccdf689e0149d1b1b3c03fead81c2b37735d812fa8bddbbf41b6d8"
-dependencies = [
- "rand 0.4.6",
- "remove_dir_all",
-]
 
 [[package]]
 name = "tempfile"
@@ -7743,6 +7686,7 @@ dependencies = [
  "common-query",
  "common-runtime",
  "common-telemetry",
+ "common-test-util",
  "datanode",
  "datatypes",
  "dotenv",
@@ -7751,14 +7695,14 @@ dependencies = [
  "object-store",
  "once_cell",
  "paste",
- "rand 0.8.5",
+ "rand",
  "serde",
  "serde_json",
  "servers",
  "snafu",
  "sql",
  "table",
- "tempdir",
+ "tempfile",
  "tokio",
  "uuid",
 ]
@@ -8194,7 +8138,7 @@ dependencies = [
  "indexmap",
  "pin-project",
  "pin-project-lite",
- "rand 0.8.5",
+ "rand",
  "slab",
  "tokio",
  "tokio-util",
@@ -8391,7 +8335,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "97fee6b57c6a41524a810daee9286c02d7752c4253064d0b05472833a438f675"
 dependencies = [
  "cfg-if 1.0.0",
- "rand 0.8.5",
+ "rand",
  "static_assertions",
 ]
 
@@ -8705,7 +8649,7 @@ checksum = "422ee0de9031b5b948b97a8fc04e3aa35230001a722ddd27943e0be31564ce4c"
 dependencies = [
  "atomic",
  "getrandom",
- "rand 0.8.5",
+ "rand",
  "serde",
  "uuid-macro-internal",
 ]
