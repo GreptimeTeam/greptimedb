@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema, Schema, SchemaBuilder, SchemaRef};
 use datatypes::vectors::VectorRef;
@@ -30,7 +31,6 @@ use table::engine::{EngineContext, TableEngine};
 use table::metadata::{TableInfo, TableInfoBuilder, TableMetaBuilder, TableType};
 use table::requests::{CreateTableRequest, InsertRequest, TableOptions};
 use table::TableRef;
-use tempdir::TempDir;
 
 use crate::config::EngineConfig;
 use crate::engine::{MitoEngine, MITO_ENGINE};
@@ -96,7 +96,7 @@ pub fn build_test_table_info() -> TableInfo {
 }
 
 pub async fn new_test_object_store(prefix: &str) -> (TempDir, ObjectStore) {
-    let dir = TempDir::new(prefix).unwrap();
+    let dir = create_temp_dir(prefix);
     let store_dir = dir.path().to_string_lossy();
     let accessor = Builder::default().root(&store_dir).build().unwrap();
     (dir, ObjectStore::new(accessor).finish())

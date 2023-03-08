@@ -15,6 +15,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+use common_test_util::temp_dir::create_temp_dir;
 use datatypes::prelude::*;
 use datatypes::timestamp::TimestampMillisecond;
 use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, VectorRef};
@@ -24,7 +25,6 @@ use store_api::storage::{
     ColumnDescriptorBuilder, ColumnId, Region, RegionMeta, ScanRequest, SchemaRef, Snapshot,
     WriteRequest, WriteResponse,
 };
-use tempdir::TempDir;
 
 use crate::region::tests::{self, FileTesterBase};
 use crate::region::{OpenOptions, RawRegionMetadata, RegionImpl, RegionMetadata};
@@ -266,7 +266,7 @@ fn check_schema_names(schema: &SchemaRef, names: &[&str]) {
 async fn test_alter_region_with_reopen() {
     common_telemetry::init_default_ut_logging();
 
-    let dir = TempDir::new("alter-region").unwrap();
+    let dir = create_temp_dir("alter-region");
     let store_dir = dir.path().to_str().unwrap();
     let mut tester = AlterTester::new(store_dir).await;
 
@@ -338,7 +338,7 @@ async fn test_alter_region_with_reopen() {
 
 #[tokio::test]
 async fn test_alter_region() {
-    let dir = TempDir::new("alter-region").unwrap();
+    let dir = create_temp_dir("alter-region");
     let store_dir = dir.path().to_str().unwrap();
     let tester = AlterTester::new(store_dir).await;
 
@@ -377,7 +377,7 @@ async fn test_alter_region() {
 
 #[tokio::test]
 async fn test_put_old_schema_after_alter() {
-    let dir = TempDir::new("put-old").unwrap();
+    let dir = create_temp_dir("put-old");
     let store_dir = dir.path().to_str().unwrap();
     let tester = AlterTester::new(store_dir).await;
 
@@ -415,7 +415,7 @@ async fn test_put_old_schema_after_alter() {
 
 #[tokio::test]
 async fn test_replay_metadata_after_open() {
-    let dir = TempDir::new("replay-metadata-after-open").unwrap();
+    let dir = create_temp_dir("replay-metadata-after-open");
     let store_dir = dir.path().to_str().unwrap();
     let mut tester = AlterTester::new(store_dir).await;
 

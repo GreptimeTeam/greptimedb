@@ -529,6 +529,7 @@ impl BatchReader for ChunkStream {
 mod tests {
     use std::sync::Arc;
 
+    use common_test_util::temp_dir::create_temp_dir;
     use datatypes::arrow::array::{Array, ArrayRef, UInt64Array, UInt8Array};
     use datatypes::prelude::{ScalarVector, Vector};
     use datatypes::types::{TimestampMillisecondType, TimestampType};
@@ -536,7 +537,6 @@ mod tests {
     use object_store::services::Fs;
     use object_store::ObjectStoreBuilder;
     use store_api::storage::OpType;
-    use tempdir::TempDir;
 
     use super::*;
     use crate::memtable::{
@@ -571,7 +571,7 @@ mod tests {
             ], // values
         );
 
-        let dir = TempDir::new("write_parquet").unwrap();
+        let dir = create_temp_dir("write_parquet");
         let path = dir.path().to_str().unwrap();
         let backend = Fs::default().root(path).build().unwrap();
         let object_store = ObjectStore::new(backend).finish();
@@ -669,7 +669,7 @@ mod tests {
             &values_vec, // values
         );
 
-        let dir = TempDir::new("write_parquet").unwrap();
+        let dir = create_temp_dir("write_parquet");
         let path = dir.path().to_str().unwrap();
         let backend = Fs::default().root(path).build().unwrap();
         let object_store = ObjectStore::new(backend).finish();
@@ -746,7 +746,7 @@ mod tests {
             ], // values
         );
 
-        let dir = TempDir::new("write_parquet").unwrap();
+        let dir = create_temp_dir("write_parquet");
         let path = dir.path().to_str().unwrap();
         let backend = Fs::default().root(path).build().unwrap();
         let object_store = ObjectStore::new(backend).finish();
@@ -863,7 +863,7 @@ mod tests {
             ], // values
         );
 
-        let dir = TempDir::new("read-parquet-by-range").unwrap();
+        let dir = create_temp_dir("read-parquet-by-range");
         let path = dir.path().to_str().unwrap();
         let backend = Fs::default().root(path).build().unwrap();
         let object_store = ObjectStore::new(backend).finish();

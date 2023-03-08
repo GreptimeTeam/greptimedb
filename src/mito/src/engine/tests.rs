@@ -17,6 +17,7 @@
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::physical_plan::SessionContext;
 use common_recordbatch::util;
+use common_test_util::temp_dir::TempDir;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, RawSchema};
 use datatypes::value::Value;
@@ -31,7 +32,6 @@ use storage::EngineImpl;
 use store_api::manifest::Manifest;
 use store_api::storage::ReadContext;
 use table::requests::{AddColumnRequest, AlterKind, DeleteRequest, TableOptions};
-use tempdir::TempDir;
 
 use super::*;
 use crate::table::test_util;

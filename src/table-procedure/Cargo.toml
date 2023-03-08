@@ -17,9 +17,9 @@ snafu.workspace = true
 table = { path = "../table" }
 
 [dev-dependencies]
+common-test-util = { path = "../common/test-util" }
 log-store = { path = "../log-store" }
 mito = { path = "../mito" }
 object-store = { path = "../object-store" }
 storage = { path = "../storage" }
 tokio.workspace = true
-tempdir = "0.3"

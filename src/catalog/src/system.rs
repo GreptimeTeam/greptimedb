@@ -395,6 +395,7 @@ pub struct TableEntryValue {
 #[cfg(test)]
 mod tests {
     use common_recordbatch::RecordBatches;
+    use common_test_util::temp_dir::{create_temp_dir, TempDir};
     use datatypes::value::Value;
     use log_store::NoopLogStore;
     use mito::config::EngineConfig;
@@ -405,7 +406,6 @@ mod tests {
     use storage::EngineImpl;
     use table::metadata::TableType;
     use table::metadata::TableType::Base;
-    use tempdir::TempDir;
 
     use super::*;
 
@@ -480,7 +480,7 @@ mod tests {
     }
 
     pub async fn prepare_table_engine() -> (TempDir, TableEngineRef) {
-        let dir = TempDir::new("system-table-test").unwrap();
+        let dir = create_temp_dir("system-table-test");
         let store_dir = dir.path().to_string_lossy();
         let accessor = object_store::services::Fs::default()
             .root(&store_dir)

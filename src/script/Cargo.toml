@@ -68,11 +68,11 @@ table = { path = "../table" }
 tokio.workspace = true
 
 [dev-dependencies]
+common-test-util = { path = "../common/test-util" }
 log-store = { path = "../log-store" }
 mito = { path = "../mito", features = ["test"] }
 ron = "0.7"
 serde = { version = "1.0", features = ["derive"] }
 storage = { path = "../storage" }
 store-api = { path = "../store-api" }
-tempdir = "0.3"
 tokio-test = "0.4"

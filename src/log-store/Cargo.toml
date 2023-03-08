@@ -28,9 +28,9 @@ protobuf = { version = "2", features = ["bytes"] }
 raft-engine = "0.3"
 snafu = { version = "0.7", features = ["backtraces"] }
 store-api = { path = "../store-api" }
-tempdir = "0.3"
 tokio.workspace = true
 tokio-util.workspace = true
 
 [dev-dependencies]
+common-test-util = { path = "../common/test-util" }
 rand = "0.8"

@@ -85,6 +85,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
 
+    use common_test_util::temp_dir::create_temp_dir;
     use common_time::Timestamp;
     use datatypes::prelude::{LogicalTypeId, ScalarVector, ScalarVectorBuilder};
     use datatypes::timestamp::TimestampMillisecond;
@@ -94,7 +95,6 @@ mod tests {
     use object_store::services::Fs;
     use object_store::{ObjectStore, ObjectStoreBuilder};
     use store_api::storage::{ChunkReader, OpType, SequenceNumber};
-    use tempdir::TempDir;
 
     use super::*;
     use crate::file_purger::noop::new_noop_file_purger;
@@ -274,7 +274,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sst_reader() {
-        let dir = TempDir::new("write_parquet").unwrap();
+        let dir = create_temp_dir("write_parquet");
         let path = dir.path().to_str().unwrap();
         let backend = Fs::default().root(path).build().unwrap();
         let object_store = ObjectStore::new(backend).finish();
@@ -351,7 +351,7 @@ mod tests {
     /// and check the output contains the same data as input files.
     #[tokio::test]
     async fn test_sst_split() {
-        let dir = TempDir::new("write_parquet").unwrap();
+        let dir = create_temp_dir("write_parquet");
         let path = dir.path().to_str().unwrap();
         let backend = Fs::default().root(path).build().unwrap();
         let object_store = ObjectStore::new(backend).finish();

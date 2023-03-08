@@ -14,5 +14,5 @@ tokio.workspace = true
 [dev-dependencies]
 anyhow = "1.0"
 common-telemetry = { path = "../common/telemetry" }
-tempdir = "0.3"
+common-test-util = { path = "../common/test-util" }
 uuid.workspace = true
