@@ -18,7 +18,6 @@ use std::fmt::{Debug, Formatter};
 use common_telemetry::{error, info};
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
-use uuid::Uuid;
 
 use crate::compaction::writer::build_sst_reader;
 use crate::error::Result;
@@ -26,7 +25,9 @@ use crate::manifest::action::RegionEdit;
 use crate::manifest::region::RegionManifest;
 use crate::region::{RegionWriterRef, SharedDataRef};
 use crate::schema::RegionSchemaRef;
-use crate::sst::{AccessLayerRef, FileHandle, FileMeta, Level, Source, SstInfo, WriteOptions};
+use crate::sst::{
+    AccessLayerRef, FileHandle, FileId, FileMeta, Level, Source, SstInfo, WriteOptions,
+};
 use crate::wal::Wal;
 
 #[async_trait::async_trait]
@@ -170,19 +171,20 @@ impl CompactionOutput {
             self.bucket_bound + self.bucket,
         )
         .await?;
-        let output_file_name = format!("{}.parquet", Uuid::new_v4().hyphenated());
+
+        let output_file_id = FileId::random();
         let opts = WriteOptions {};
 
         let SstInfo {
             time_range,
             file_size,
         } = sst_layer
-            .write_sst(&output_file_name, Source::Reader(reader), &opts)
+            .write_sst(output_file_id, Source::Reader(reader), &opts)
             .await?;
 
         Ok(FileMeta {
             region_id,
-            file_name: output_file_name,
+            file_id: output_file_id,
             time_range,
             level: self.output_level,
             file_size,

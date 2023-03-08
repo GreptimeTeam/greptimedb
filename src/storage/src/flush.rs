@@ -21,7 +21,6 @@ use common_telemetry::logging;
 use store_api::logstore::LogStore;
 use store_api::storage::consts::WRITE_ROW_GROUP_SIZE;
 use store_api::storage::SequenceNumber;
-use uuid::Uuid;
 
 use crate::background::{Context, Job, JobHandle, JobPoolRef};
 use crate::error::{CancelledSnafu, Result};
@@ -29,7 +28,7 @@ use crate::manifest::action::*;
 use crate::manifest::region::RegionManifest;
 use crate::memtable::{IterContext, MemtableId, MemtableRef};
 use crate::region::{RegionWriterRef, SharedDataRef};
-use crate::sst::{AccessLayerRef, FileMeta, Source, SstInfo, WriteOptions};
+use crate::sst::{AccessLayerRef, FileId, FileMeta, Source, SstInfo, WriteOptions};
 use crate::wal::Wal;
 
 /// Default write buffer size (32M).
@@ -197,7 +196,7 @@ impl<S: LogStore> FlushJob<S> {
                 continue;
             }
 
-            let file_name = Self::generate_sst_file_name();
+            let file_id = FileId::random();
             // TODO(hl): Check if random file name already exists in meta.
             let iter = m.iter(&iter_ctx)?;
             let sst_layer = self.sst_layer.clone();
@@ -207,12 +206,12 @@ impl<S: LogStore> FlushJob<S> {
                     time_range,
                     file_size,
                 } = sst_layer
-                    .write_sst(&file_name, Source::Iter(iter), &WriteOptions::default())
+                    .write_sst(file_id, Source::Iter(iter), &WriteOptions::default())
                     .await?;
 
                 Ok(FileMeta {
                     region_id,
-                    file_name,
+                    file_id,
                     time_range,
                     level: 0,
                     file_size,
@@ -250,11 +249,6 @@ impl<S: LogStore> FlushJob<S> {
             .await?;
         self.wal.obsolete(self.flush_sequence).await
     }
-
-    /// Generates random SST file name in format: `^[a-f\d]{8}(-[a-f\d]{4}){3}-[a-f\d]{12}.parquet$`
-    fn generate_sst_file_name() -> String {
-        format!("{}.parquet", Uuid::new_v4().hyphenated())
-    }
 }
 
 #[async_trait]
@@ -273,9 +267,6 @@ impl<S: LogStore> Job for FlushJob<S> {
 
 #[cfg(test)]
 mod tests {
-    use log_store::NoopLogStore;
-    use regex::Regex;
-
     use super::*;
 
     #[test]
@@ -283,15 +274,5 @@ mod tests {
         assert_eq!(7, get_mutable_limitation(8));
         assert_eq!(8, get_mutable_limitation(10));
         assert_eq!(56, get_mutable_limitation(64));
-    }
-
-    #[test]
-    pub fn test_uuid_generate() {
-        let file_name = FlushJob::<NoopLogStore>::generate_sst_file_name();
-        let regex = Regex::new(r"^[a-f\d]{8}(-[a-f\d]{4}){3}-[a-f\d]{12}.parquet$").unwrap();
-        assert!(
-            regex.is_match(&file_name),
-            "Illegal sst file name: {file_name}",
-        );
     }
 }
