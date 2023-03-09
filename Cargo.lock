@@ -1349,6 +1349,7 @@ dependencies = [
  "common-grpc-expr",
  "common-query",
  "common-recordbatch",
+ "common-telemetry",
  "common-time",
  "datafusion",
  "datanode",
