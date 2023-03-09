@@ -26,12 +26,7 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display(
-        "Failed to do Flight get, addr: {}, code: {}, source: {}",
-        addr,
-        tonic_code,
-        source
-    ))]
+    #[snafu(display("Failed to do Flight get, code: {}, source: {}", tonic_code, source))]
     FlightGet {
         addr: String,
         tonic_code: Code,
