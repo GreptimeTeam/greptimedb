@@ -227,7 +227,6 @@ jobs:
           path: amd64
 
       - name: Unzip the amd64 artifacts
-        id: unzip-amd64
         run: |
           cd amd64
           tar xvf greptime-linux-amd64.tgz
@@ -264,7 +263,7 @@ jobs:
 
       - name: Build and push amd64 only
         uses: docker/build-push-action@v3
-        if: success() || steps.unzip-arm64.conclusion == 'failure' # Only build and push amd64 platform if unzip-arm64 fails
+        if: success() || steps.download-arm64.conclusion == 'failure' # Only build and push amd64 platform if download-arm64 fails
         with:
           context: .
           file: ./docker/ci/Dockerfile
