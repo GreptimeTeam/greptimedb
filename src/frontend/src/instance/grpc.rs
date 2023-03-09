@@ -16,13 +16,14 @@ use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use async_trait::async_trait;
 use common_query::Output;
+use query::parser::PromQuery;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt};
 
 use crate::error::{self, Result};
-use crate::instance::{Instance, PromQuery};
+use crate::instance::Instance;
 
 #[async_trait]
 impl GrpcQueryHandler for Instance {
@@ -557,6 +558,102 @@ CREATE TABLE {table_name} (
 | 2023-01-01T07:26:19 |   |   |
 | 2023-01-01T07:26:20 |   | z |
 +---------------------+---+---+";
+        assert_eq!(recordbatches.pretty_print().unwrap(), expected);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_promql_query() {
+        common_telemetry::init_default_ut_logging();
+
+        let standalone = tests::create_standalone_instance("test_standalone_promql_query").await;
+        let instance = &standalone.instance;
+
+        let table_name = "my_table";
+        let sql = format!("CREATE TABLE {table_name} (h string, a double, ts TIMESTAMP, TIME INDEX (ts), PRIMARY KEY(h))");
+        create_table(instance, sql).await;
+
+        let insert = InsertRequest {
+            table_name: table_name.to_string(),
+            columns: vec![
+                Column {
+                    column_name: "h".to_string(),
+                    values: Some(Values {
+                        string_values: vec![
+                            "t".to_string(),
+                            "t".to_string(),
+                            "t".to_string(),
+                            "t".to_string(),
+                            "t".to_string(),
+                            "t".to_string(),
+                            "t".to_string(),
+                            "t".to_string(),
+                        ],
+                        ..Default::default()
+                    }),
+                    semantic_type: SemanticType::Tag as i32,
+                    datatype: ColumnDataType::String as i32,
+                    ..Default::default()
+                },
+                Column {
+                    column_name: "a".to_string(),
+                    values: Some(Values {
+                        f64_values: vec![1f64, 11f64, 20f64, 22f64, 50f64, 55f64, 99f64],
+                        ..Default::default()
+                    }),
+                    null_mask: vec![4],
+                    semantic_type: SemanticType::Field as i32,
+                    datatype: ColumnDataType::Float64 as i32,
+                },
+                Column {
+                    column_name: "ts".to_string(),
+                    values: Some(Values {
+                        ts_millisecond_values: vec![
+                            1672557972000,
+                            1672557973000,
+                            1672557974000,
+                            1672557975000,
+                            1672557976000,
+                            1672557977000,
+                            1672557978000,
+                            1672557979000,
+                        ],
+                        ..Default::default()
+                    }),
+                    semantic_type: SemanticType::Timestamp as i32,
+                    datatype: ColumnDataType::TimestampMillisecond as i32,
+                    ..Default::default()
+                },
+            ],
+            row_count: 8,
+            ..Default::default()
+        };
+
+        let request = Request::Insert(insert);
+        let output = query(instance, request).await;
+        assert!(matches!(output, Output::AffectedRows(8)));
+
+        let request = Request::Query(QueryRequest {
+            query: Some(Query::Promql(api::v1::PromQlQuery {
+                query: "my_table".to_owned(),
+                start: "1672557973".to_owned(),
+                end: "1672557978".to_owned(),
+                step: "1s".to_owned(),
+            })),
+        });
+        let output = query(instance, request).await;
+        let Output::Stream(stream) = output else { unreachable!() };
+        let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
+        let expected = "\
++---+------+---------------------+
+| h | a    | ts                  |
++---+------+---------------------+
+| t | 11.0 | 2023-01-01T07:26:13 |
+| t |      | 2023-01-01T07:26:14 |
+| t | 20.0 | 2023-01-01T07:26:15 |
+| t | 22.0 | 2023-01-01T07:26:16 |
+| t | 50.0 | 2023-01-01T07:26:17 |
+| t | 55.0 | 2023-01-01T07:26:18 |
++---+------+---------------------+";
         assert_eq!(recordbatches.pretty_print().unwrap(), expected);
     }
 }
