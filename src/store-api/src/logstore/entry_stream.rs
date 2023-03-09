@@ -122,7 +122,7 @@ mod tests {
     #[tokio::test]
     pub async fn test_entry_stream() {
         let stream =
-            async_stream::stream!({ yield Ok(vec![SimpleEntry::new("test_entry".as_bytes())]) });
+            async_stream::stream!(yield Ok(vec![SimpleEntry::new("test_entry".as_bytes())]));
 
         let mut stream_impl = EntryStreamImpl {
             inner: Box::pin(stream),
