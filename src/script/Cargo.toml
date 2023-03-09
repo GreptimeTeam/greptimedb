@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 default = ["python"]
-pyo3_backend = ["pyo3"]
+pyo3_backend = ["dep:pyo3", "arrow/pyarrow"]
 python = [
     "dep:datafusion",
     "dep:datafusion-common",
