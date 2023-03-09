@@ -15,6 +15,3 @@ tokio.workspace = true
 [dependencies.tikv-jemalloc-sys]
 version = "0.5"
 features = ["stats", "profiling", "unprefixed_malloc_on_supported_platforms"]
-
-[profile.release]
-debug = true
