@@ -81,7 +81,7 @@ uuid = { version = "1", features = ["serde", "v4", "fast-rng"] }
 [profile.release]
 debug = true
 
-[profile.weekly]
+[profile.nightly]
 inherits = "release"
 strip = true
 lto = "thin"
