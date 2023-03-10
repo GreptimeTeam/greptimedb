@@ -118,8 +118,8 @@ jobs:
           ac_cv_have_long_long_format=yes \
           --disable-ipv6 ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no && \
           make && make altinstall
-          export PYO3_CROSS_LIB_DIR=/Python3.10_aarch64
-          echo "PYO3_CROSS_LIB_DIR=/Python3.10_aarch64" >> $GITHUB_ENV
+          export PYO3_CROSS_LIB_DIR=/Python3.10_aarch64/lib
+          echo "PYO3_CROSS_LIB_DIR=/Python3.10_aarch64/lib" >> $GITHUB_ENV
 
       - name: Install rust toolchain
         uses: dtolnay/rust-toolchain@master
