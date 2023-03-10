@@ -16,6 +16,7 @@ common-grpc-expr = { path = "../common/grpc-expr" }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-time = { path = "../common/time" }
+common-telemetry = { path = "../common/telemetry" }
 datafusion.workspace = true
 datatypes = { path = "../datatypes" }
 enum_dispatch = "0.3"

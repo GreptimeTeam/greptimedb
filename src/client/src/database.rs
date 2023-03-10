@@ -26,6 +26,7 @@ use arrow_flight::{FlightData, Ticket};
 use common_error::prelude::*;
 use common_grpc::flight::{flight_messages_to_recordbatches, FlightDecoder, FlightMessage};
 use common_query::Output;
+use common_telemetry::logging;
 use futures_util::{TryFutureExt, TryStreamExt};
 use prost::Message;
 use snafu::{ensure, ResultExt};
@@ -148,6 +149,15 @@ impl Database {
                     .context(error::FlightGetSnafu {
                         tonic_code: e.code(),
                         addr: client.addr(),
+                    })
+                    .map_err(|error| {
+                        logging::error!(
+                            "Failed to do Flight get, addr: {}, code: {}, source: {}",
+                            client.addr(),
+                            e.code(),
+                            error
+                        );
+                        error
                     })
                     .unwrap_err()
             })?;
