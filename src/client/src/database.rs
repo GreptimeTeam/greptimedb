@@ -20,7 +20,7 @@ use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{
     AlterExpr, AuthHeader, CreateTableExpr, DdlRequest, DropTableExpr, GreptimeRequest,
-    InsertRequest, PromQlQuery, QueryRequest, RequestHeader,
+    InsertRequest, PromRangeQuery, QueryRequest, RequestHeader,
 };
 use arrow_flight::{FlightData, Ticket};
 use common_error::prelude::*;
@@ -95,9 +95,15 @@ impl Database {
         .await
     }
 
-    pub async fn promql(&self, promql: &str, start: &str, end: &str, step: &str) -> Result<Output> {
+    pub async fn prom_range_query(
+        &self,
+        promql: &str,
+        start: &str,
+        end: &str,
+        step: &str,
+    ) -> Result<Output> {
         self.do_get(Request::Query(QueryRequest {
-            query: Some(Query::Promql(PromQlQuery {
+            query: Some(Query::PromRangeQuery(PromRangeQuery {
                 query: promql.to_string(),
                 start: start.to_string(),
                 end: end.to_string(),

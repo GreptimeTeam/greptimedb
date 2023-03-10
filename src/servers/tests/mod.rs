@@ -175,7 +175,7 @@ impl GrpcQueryHandler for DummyInstance {
                         result.remove(0)?
                     }
                     Query::LogicalPlan(_) => unimplemented!(),
-                    Query::Promql(promql) => {
+                    Query::PromRangeQuery(promql) => {
                         let prom_query = PromQuery {
                             query: promql.query,
                             start: promql.start,

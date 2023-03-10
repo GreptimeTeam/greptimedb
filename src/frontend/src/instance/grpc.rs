@@ -55,7 +55,7 @@ impl GrpcQueryHandler for Instance {
                         }
                         .fail();
                     }
-                    Query::Promql(promql) => {
+                    Query::PromRangeQuery(promql) => {
                         let prom_query = PromQuery {
                             query: promql.query,
                             start: promql.start,
@@ -633,7 +633,7 @@ CREATE TABLE {table_name} (
         assert!(matches!(output, Output::AffectedRows(8)));
 
         let request = Request::Query(QueryRequest {
-            query: Some(Query::Promql(api::v1::PromQlQuery {
+            query: Some(Query::PromRangeQuery(api::v1::PromRangeQuery {
                 query: "my_table".to_owned(),
                 start: "1672557973".to_owned(),
                 end: "1672557978".to_owned(),
