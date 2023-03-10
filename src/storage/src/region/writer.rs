@@ -362,7 +362,7 @@ struct WriterInner {
     closed: bool,
     engine_config: Arc<EngineConfig>,
     ttl: Option<Duration>,
-    compaction_time_window: Option<i64>, // TODO never used
+    compaction_time_window: Option<i64>,
 }
 
 impl WriterInner {

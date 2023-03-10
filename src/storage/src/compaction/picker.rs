@@ -37,7 +37,6 @@ pub trait Picker: Send + 'static {
 
     fn pick(
         &self,
-        ctx: &PickerContext,
         req: &Self::Request,
     ) -> crate::error::Result<Option<Self::Task>>;
 }
@@ -103,7 +102,6 @@ impl<S: LogStore> Picker for SimplePicker<S> {
 
     fn pick(
         &self,
-        ctx: &PickerContext,
         req: &CompactionRequestImpl<S>,
     ) -> crate::error::Result<Option<CompactionTaskImpl<S>>> {
         let levels = &req.levels();
@@ -124,6 +122,7 @@ impl<S: LogStore> Picker for SimplePicker<S> {
             expired_ssts.iter().for_each(|f| f.mark_compacting(true));
         }
 
+        let ctx = &PickerContext::with(req.compaction_time_window);
         for level_num in 0..levels.level_num() {
             let level = levels.level(level_num as u8);
             let (compaction_time_window, outputs) = self.strategy.pick(ctx, level);
