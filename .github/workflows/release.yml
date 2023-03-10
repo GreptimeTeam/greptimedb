@@ -100,7 +100,7 @@ jobs:
 
       - name: Compile Python 3.10.10 from source for Aarch64
         if: contains(matrix.arch, 'aarch64-unknown-linux-gnu')
-        run:
+        run: |
           sudo apt -y install wget
           wget https://www.python.org/ftp/python/3.10.10/Python-3.10.10.tgz
           tar -xvf Python-3.10.10.tgz
