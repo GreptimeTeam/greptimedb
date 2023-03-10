@@ -59,5 +59,5 @@ if [ -n "${OS_TYPE}" ] && [ -n "${ARCH_TYPE}" ]; then
         wget "https://github.com/${GITHUB_ORG}/${GITHUB_REPO}/releases/download/${VERSION}/${BIN}-${OS_TYPE}-${ARCH_TYPE}.tgz"
     fi
 
-    tar xvf ${BIN}-${OS_TYPE}-${ARCH_TYPE}.tgz && rm ${BIN}-${OS_TYPE}-${ARCH_TYPE}.tgz && echo "Run '${BIN} --help' to get started"
+    tar xvf ${BIN}-${OS_TYPE}-${ARCH_TYPE}.tgz && rm ${BIN}-${OS_TYPE}-${ARCH_TYPE}.tgz && echo "Run './${BIN} --help' to get started"
 fi
