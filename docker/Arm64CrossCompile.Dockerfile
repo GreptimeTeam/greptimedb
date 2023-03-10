@@ -44,7 +44,7 @@ RUN cd Python-3.10.10 && \
     ac_cv_pthread_is_default=no ac_cv_pthread=yes ac_cv_cxx_thread=yes \
     ac_cv_have_long_long_format=yes \
     --disable-ipv6 ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no && \
-    make -j10 && make altinstall
+    make && make altinstall
 # Install rustup target for cross compiling.
 RUN rustup target add aarch64-unknown-linux-gnu
 # Set the environment variable for cross compiling and compile it
