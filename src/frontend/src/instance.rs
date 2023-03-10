@@ -630,7 +630,7 @@ fn validate_insert_request(schema: &Schema, request: &InsertRequest) -> Result<(
             .find(|x| x.column_name == column_schema.name)
             .map(|column| column.null_mask.is_empty() || column.null_mask.iter().all(|x| *x == 0));
         ensure!(
-            matches!(not_null, Some(true)),
+            not_null == Some(true),
             InvalidInsertRequestSnafu {
                 reason: format!(
                     "Expecting insert data to be presented on a not null or no default value column '{}'.",
