@@ -208,8 +208,8 @@ impl<R: Region> Table for MitoTable<R> {
         Ok(Arc::new(SimpleTableScan::new(stream)))
     }
 
-    fn supports_filter_pushdown(&self, _filter: &Expr) -> table::error::Result<FilterPushDownType> {
-        Ok(FilterPushDownType::Inexact)
+    fn supports_filters_pushdown(&self, filters: &[&Expr]) -> TableResult<Vec<FilterPushDownType>> {
+        Ok(vec![FilterPushDownType::Inexact; filters.len()])
     }
 
     /// Alter table changes the schemas of the table.

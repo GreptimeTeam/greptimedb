@@ -24,7 +24,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::DFSchemaRef;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
-use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
+use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::PhysicalSortExpr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
@@ -42,7 +42,7 @@ use crate::extension_plan::Millisecond;
 /// This plan will try to align the input time series, for every timestamp between
 /// `start` and `end` with step `interval`. Find in the `lookback` range if data
 /// is missing at the given timestamp.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct InstantManipulate {
     start: Millisecond,
     end: Millisecond,
@@ -52,9 +52,9 @@ pub struct InstantManipulate {
     input: LogicalPlan,
 }
 
-impl UserDefinedLogicalNode for InstantManipulate {
-    fn as_any(&self) -> &dyn Any {
-        self as _
+impl UserDefinedLogicalNodeCore for InstantManipulate {
+    fn name(&self) -> &str {
+        "InstantManipulate"
     }
 
     fn inputs(&self) -> Vec<&LogicalPlan> {
@@ -77,21 +77,17 @@ impl UserDefinedLogicalNode for InstantManipulate {
         )
     }
 
-    fn from_template(
-        &self,
-        _exprs: &[Expr],
-        inputs: &[LogicalPlan],
-    ) -> Arc<dyn UserDefinedLogicalNode> {
+    fn from_template(&self, _exprs: &[Expr], inputs: &[LogicalPlan]) -> Self {
         assert!(!inputs.is_empty());
 
-        Arc::new(Self {
+        Self {
             start: self.start,
             end: self.end,
             lookback_delta: self.lookback_delta,
             interval: self.interval,
             time_index_column: self.time_index_column.clone(),
             input: inputs[0].clone(),
-        })
+        }
     }
 }
 

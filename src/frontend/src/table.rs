@@ -140,8 +140,11 @@ impl Table for DistTable {
         Ok(Arc::new(dist_scan))
     }
 
-    fn supports_filter_pushdown(&self, _filter: &Expr) -> table::Result<FilterPushDownType> {
-        Ok(FilterPushDownType::Inexact)
+    fn supports_filters_pushdown(
+        &self,
+        filters: &[&Expr],
+    ) -> table::Result<Vec<FilterPushDownType>> {
+        Ok(vec![FilterPushDownType::Inexact; filters.len()])
     }
 
     async fn alter(&self, context: AlterContext, request: &AlterTableRequest) -> table::Result<()> {

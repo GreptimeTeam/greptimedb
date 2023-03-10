@@ -26,7 +26,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DFField, DFSchema, DFSchemaRef};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
-use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
+use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::PhysicalSortExpr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
@@ -42,7 +42,7 @@ use crate::range_array::RangeArray;
 ///
 /// This plan will "fold" time index and value columns into [RangeArray]s, and truncate
 /// other columns to the same length with the "folded" [RangeArray] column.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct RangeManipulate {
     start: Millisecond,
     end: Millisecond,
@@ -137,9 +137,9 @@ impl RangeManipulate {
     }
 }
 
-impl UserDefinedLogicalNode for RangeManipulate {
-    fn as_any(&self) -> &dyn Any {
-        self as _
+impl UserDefinedLogicalNodeCore for RangeManipulate {
+    fn name(&self) -> &str {
+        "RangeManipulate"
     }
 
     fn inputs(&self) -> Vec<&LogicalPlan> {
@@ -162,14 +162,10 @@ impl UserDefinedLogicalNode for RangeManipulate {
         )
     }
 
-    fn from_template(
-        &self,
-        _exprs: &[Expr],
-        inputs: &[LogicalPlan],
-    ) -> Arc<dyn UserDefinedLogicalNode> {
+    fn from_template(&self, _exprs: &[Expr], inputs: &[LogicalPlan]) -> Self {
         assert!(!inputs.is_empty());
 
-        Arc::new(Self {
+        Self {
             start: self.start,
             end: self.end,
             interval: self.interval,
@@ -178,7 +174,7 @@ impl UserDefinedLogicalNode for RangeManipulate {
             value_columns: self.value_columns.clone(),
             input: inputs[0].clone(),
             output_schema: self.output_schema.clone(),
-        })
+        }
     }
 }
 
