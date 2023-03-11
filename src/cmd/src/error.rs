@@ -32,6 +32,12 @@ pub enum Error {
         source: frontend::error::Error,
     },
 
+    #[snafu(display("Failed to build meta server, source: {}", source))]
+    BuildMetaServer {
+        #[snafu(backtrace)]
+        source: meta_srv::error::Error,
+    },
+
     #[snafu(display("Failed to start meta server, source: {}", source))]
     StartMetaServer {
         #[snafu(backtrace)]
@@ -138,6 +144,7 @@ impl ErrorExt for Error {
             Error::StartDatanode { source } => source.status_code(),
             Error::StartFrontend { source } => source.status_code(),
             Error::StartMetaServer { source } => source.status_code(),
+            Error::BuildMetaServer { source } => source.status_code(),
             Error::UnsupportedSelectorType { source, .. } => source.status_code(),
             Error::ReadConfig { .. } | Error::ParseConfig { .. } | Error::MissingConfig { .. } => {
                 StatusCode::InvalidArguments

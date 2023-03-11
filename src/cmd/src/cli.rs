@@ -17,9 +17,24 @@ mod helper;
 mod repl;
 
 use clap::Parser;
-use repl::Repl;
+pub use repl::Repl;
 
 use crate::error::Result;
+
+pub struct Instance {
+    repl: Repl,
+}
+
+impl Instance {
+    pub async fn run(&mut self) -> Result<()> {
+        self.repl.run().await
+    }
+
+    pub async fn stop(&self) -> Result<()> {
+        // TODO: handle cli shutdown
+        Ok(())
+    }
+}
 
 #[derive(Parser)]
 pub struct Command {
@@ -28,8 +43,8 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn run(self) -> Result<()> {
-        self.cmd.run().await
+    pub async fn build(self) -> Result<Instance> {
+        self.cmd.build().await
     }
 }
 
@@ -39,9 +54,9 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn run(self) -> Result<()> {
+    async fn build(self) -> Result<Instance> {
         match self {
-            SubCommand::Attach(cmd) => cmd.run().await,
+            SubCommand::Attach(cmd) => cmd.build().await,
         }
     }
 }
@@ -57,8 +72,8 @@ pub(crate) struct AttachCommand {
 }
 
 impl AttachCommand {
-    async fn run(self) -> Result<()> {
-        let mut repl = Repl::try_new(&self).await?;
-        repl.run().await
+    async fn build(self) -> Result<Instance> {
+        let repl = Repl::try_new(&self).await?;
+        Ok(Instance { repl })
     }
 }

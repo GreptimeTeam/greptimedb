@@ -24,6 +24,21 @@ use snafu::ResultExt;
 use crate::error::{Error, MissingConfigSnafu, Result, StartDatanodeSnafu};
 use crate::toml_loader;
 
+pub struct Instance {
+    datanode: Datanode,
+}
+
+impl Instance {
+    pub async fn run(&mut self) -> Result<()> {
+        self.datanode.start().await.context(StartDatanodeSnafu)
+    }
+
+    pub async fn stop(&self) -> Result<()> {
+        // TODO: handle datanode shutdown
+        Ok(())
+    }
+}
+
 #[derive(Parser)]
 pub struct Command {
     #[clap(subcommand)]
@@ -31,8 +46,8 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn run(self) -> Result<()> {
-        self.subcmd.run().await
+    pub async fn build(self) -> Result<Instance> {
+        self.subcmd.build().await
     }
 }
 
@@ -42,9 +57,9 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn run(self) -> Result<()> {
+    async fn build(self) -> Result<Instance> {
         match self {
-            SubCommand::Start(cmd) => cmd.run().await,
+            SubCommand::Start(cmd) => cmd.build().await,
         }
     }
 }
@@ -72,19 +87,16 @@ struct StartCommand {
 }
 
 impl StartCommand {
-    async fn run(self) -> Result<()> {
+    async fn build(self) -> Result<Instance> {
         logging::info!("Datanode start command: {:#?}", self);
 
         let opts: DatanodeOptions = self.try_into()?;
 
         logging::info!("Datanode options: {:#?}", opts);
 
-        Datanode::new(opts)
-            .await
-            .context(StartDatanodeSnafu)?
-            .start()
-            .await
-            .context(StartDatanodeSnafu)
+        let datanode = Datanode::new(opts).await.context(StartDatanodeSnafu)?;
+
+        Ok(Instance { datanode })
     }
 }
 
