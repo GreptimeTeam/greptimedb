@@ -72,6 +72,7 @@ use crate::error::{
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::FrontendOptions;
 use crate::instance::standalone::{StandaloneGrpcQueryHandler, StandaloneSqlQueryHandler};
+use crate::server::{start_server, ServerHandlers, Services};
 
 #[async_trait]
 pub trait FrontendInstance:
@@ -106,6 +107,8 @@ pub struct Instance {
     /// plugins: this map holds extensions to customize query or auth
     /// behaviours.
     plugins: Arc<Plugins>,
+
+    servers: Arc<ServerHandlers>,
 }
 
 impl Instance {
@@ -143,7 +146,8 @@ impl Instance {
             sql_handler: dist_instance.clone(),
             grpc_query_handler: dist_instance,
             promql_handler: None,
-            plugins,
+            plugins: plugins.clone(),
+            servers: Arc::new(HashMap::new()),
         })
     }
 
@@ -186,7 +190,19 @@ impl Instance {
             grpc_query_handler: StandaloneGrpcQueryHandler::arc(dn_instance.clone()),
             promql_handler: Some(dn_instance.clone()),
             plugins: Default::default(),
+            servers: Arc::new(HashMap::new()),
         }
+    }
+
+    pub async fn build_servers(
+        &mut self,
+        opts: &FrontendOptions,
+        plugins: Arc<Plugins>,
+    ) -> Result<()> {
+        let servers = Services::build(opts, Arc::new(self.clone()), plugins).await?;
+        self.servers = Arc::new(servers);
+
+        Ok(())
     }
 
     #[cfg(test)]
@@ -199,6 +215,7 @@ impl Instance {
             grpc_query_handler: dist_instance,
             promql_handler: None,
             plugins: Default::default(),
+            servers: Arc::new(HashMap::new()),
         }
     }
 
@@ -370,13 +387,24 @@ impl Instance {
     pub fn plugins(&self) -> Arc<Plugins> {
         self.plugins.clone()
     }
+
+    pub async fn shutdown(&self) -> Result<()> {
+        futures::future::try_join_all(self.servers.values().map(|server| server.0.shutdown()))
+            .await
+            .context(error::ShutdownServerSnafu)
+            .map(|_| ())
+    }
 }
 
 #[async_trait]
 impl FrontendInstance for Instance {
     async fn start(&mut self) -> Result<()> {
         // TODO(hl): Frontend init should move to here
-        Ok(())
+
+        futures::future::try_join_all(self.servers.values().map(start_server))
+            .await
+            .context(error::StartServerSnafu)
+            .map(|_| ())
     }
 }
 

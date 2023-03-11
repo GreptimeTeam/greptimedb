@@ -519,6 +519,8 @@ impl HttpServer {
     }
 }
 
+pub const HTTP_SERVER: &str = "HTTP_SERVER";
+
 #[async_trait]
 impl Server for HttpServer {
     async fn shutdown(&self) -> Result<()> {
@@ -556,6 +558,10 @@ impl Server for HttpServer {
         graceful.await.context(StartHttpSnafu)?;
 
         Ok(listening)
+    }
+
+    fn name(&self) -> &str {
+        HTTP_SERVER
     }
 }
 

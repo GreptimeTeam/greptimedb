@@ -21,10 +21,10 @@ use datanode::datanode::{
     CompactionConfig, Datanode, DatanodeOptions, ObjectStoreConfig, ProcedureConfig, WalConfig,
 };
 use datanode::instance::InstanceRef;
-use frontend::frontend::{Frontend, FrontendOptions};
+use frontend::frontend::FrontendOptions;
 use frontend::grpc::GrpcOptions;
 use frontend::influxdb::InfluxdbOptions;
-use frontend::instance::Instance as FeInstance;
+use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use frontend::mysql::MysqlOptions;
 use frontend::opentsdb::OpentsdbOptions;
 use frontend::postgres::PostgresOptions;
@@ -187,7 +187,7 @@ impl StartCommand {
         let mut datanode = Datanode::new(dn_opts.clone())
             .await
             .context(StartDatanodeSnafu)?;
-        let mut frontend = build_frontend(fe_opts, plugins, datanode.get_instance()).await?;
+        let mut frontend = build_frontend(plugins.clone(), datanode.get_instance()).await?;
 
         // Start datanode instance before starting services, to avoid requests come in before internal components are started.
         datanode
@@ -196,6 +196,11 @@ impl StartCommand {
             .context(StartDatanodeSnafu)?;
         info!("Datanode instance started");
 
+        frontend
+            .build_servers(&fe_opts, plugins)
+            .await
+            .context(StartFrontendSnafu)?;
+
         frontend.start().await.context(StartFrontendSnafu)?;
         Ok(())
     }
@@ -203,14 +208,13 @@ impl StartCommand {
 
 /// Build frontend instance in standalone mode
 async fn build_frontend(
-    fe_opts: FrontendOptions,
     plugins: Arc<Plugins>,
     datanode_instance: InstanceRef,
-) -> Result<Frontend<FeInstance>> {
+) -> Result<FeInstance> {
     let mut frontend_instance = FeInstance::new_standalone(datanode_instance.clone());
     frontend_instance.set_script_handler(datanode_instance);
     frontend_instance.set_plugins(plugins.clone());
-    Ok(Frontend::new(fe_opts, frontend_instance, plugins))
+    Ok(frontend_instance)
 }
 
 impl TryFrom<StartCommand> for FrontendOptions {
