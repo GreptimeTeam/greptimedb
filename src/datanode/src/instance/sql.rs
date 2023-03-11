@@ -23,6 +23,7 @@ use common_telemetry::timer;
 use datatypes::schema::Schema;
 use futures::StreamExt;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
+use query::plan::LogicalPlan;
 use servers::error as server_error;
 use servers::prom::PromHandler;
 use servers::query_handler::sql::SqlQueryHandler;
@@ -361,7 +362,7 @@ impl SqlQueryHandler for Instance {
         &self,
         stmt: Statement,
         query_ctx: QueryContextRef,
-    ) -> Result<Option<Schema>> {
+    ) -> Result<Option<(Schema, LogicalPlan)>> {
         if let Statement::Query(_) = stmt {
             self.query_engine
                 .describe(QueryStatement::Sql(stmt), query_ctx)

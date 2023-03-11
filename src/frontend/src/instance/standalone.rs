@@ -20,6 +20,7 @@ use common_query::Output;
 use datanode::error::Error as DatanodeError;
 use datatypes::schema::Schema;
 use query::parser::PromQuery;
+use query::plan::LogicalPlan;
 use servers::query_handler::grpc::{GrpcQueryHandler, GrpcQueryHandlerRef};
 use servers::query_handler::sql::{SqlQueryHandler, SqlQueryHandlerRef};
 use session::context::QueryContextRef;
@@ -72,7 +73,7 @@ impl SqlQueryHandler for StandaloneSqlQueryHandler {
         &self,
         stmt: Statement,
         query_ctx: QueryContextRef,
-    ) -> Result<Option<Schema>> {
+    ) -> Result<Option<(Schema, LogicalPlan)>> {
         self.0
             .do_describe(stmt, query_ctx)
             .await

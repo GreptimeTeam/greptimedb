@@ -141,12 +141,17 @@ impl QueryEngine for DatafusionQueryEngine {
         }
     }
 
-    async fn describe(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<Schema> {
+    async fn describe(
+        &self,
+        stmt: QueryStatement,
+        query_ctx: QueryContextRef,
+    ) -> Result<(Schema, LogicalPlan)> {
         // TODO(sunng87): consider cache optmised logical plan between describe
         // and execute
         let plan = self.statement_to_plan(stmt, query_ctx).await?;
         let optimised_plan = self.optimize(&plan)?;
-        optimised_plan.schema()
+        let schema = optimised_plan.schema()?;
+        Ok((schema, optimised_plan))
     }
 
     async fn execute(&self, plan: &LogicalPlan) -> Result<Output> {
@@ -406,7 +411,7 @@ mod tests {
 
         let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
 
-        let schema = engine
+        let (schema, _) = engine
             .describe(stmt, Arc::new(QueryContext::new()))
             .await
             .unwrap();

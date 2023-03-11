@@ -20,6 +20,7 @@ use axum_test_helper::TestClient;
 use common_query::Output;
 use datatypes::schema::Schema;
 use query::parser::PromQuery;
+use query::plan::LogicalPlan;
 use servers::error::{self, Result};
 use servers::http::{HttpOptions, HttpServer};
 use servers::opentsdb::codec::DataPoint;
@@ -74,7 +75,7 @@ impl SqlQueryHandler for DummyInstance {
         &self,
         _stmt: sql::statements::statement::Statement,
         _query_ctx: QueryContextRef,
-    ) -> Result<Option<Schema>> {
+    ) -> Result<Option<(Schema, LogicalPlan)>> {
         unimplemented!()
     }
 

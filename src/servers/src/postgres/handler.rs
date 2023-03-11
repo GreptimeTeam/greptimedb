@@ -438,7 +438,7 @@ impl ExtendedQueryHandler for PostgresServerHandler {
         C: ClientInfo + Unpin + Send + Sync,
     {
         let (stmt, _) = statement.statement();
-        if let Some(schema) = self
+        if let Some((schema, _)) = self
             .query_handler
             .do_describe(stmt.clone(), self.query_ctx.clone())
             .await

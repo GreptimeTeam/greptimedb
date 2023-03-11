@@ -581,6 +581,7 @@ mod test {
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{StringVector, UInt32Vector};
     use query::parser::PromQuery;
+    use query::plan::LogicalPlan;
     use session::context::QueryContextRef;
     use tokio::sync::mpsc;
 
@@ -620,7 +621,7 @@ mod test {
             &self,
             _stmt: sql::statements::statement::Statement,
             _query_ctx: QueryContextRef,
-        ) -> Result<Option<Schema>> {
+        ) -> Result<Option<(Schema, LogicalPlan)>> {
             unimplemented!()
         }
 

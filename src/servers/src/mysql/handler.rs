@@ -107,7 +107,7 @@ impl MysqlInstanceShim {
     }
 
     fn set_query(&self, query: String) -> u32 {
-        let stmt_id = self.prepared_stmts_counter.fetch_add(1, Ordering::SeqCst);
+        let stmt_id = self.prepared_stmts_counter.fetch_add(1, Ordering::Relaxed);
         let mut guard = self.prepared_stmts.write();
         guard.insert(stmt_id, query);
         stmt_id
@@ -336,7 +336,7 @@ fn dummy_params(index: u32) -> Vec<Column> {
     let mut params = vec![];
 
     for _ in 1..index {
-        params.push(opensrv_mysql::Column {
+        params.push(Column {
             table: "".to_string(),
             column: "".to_string(),
             coltype: ColumnType::MYSQL_TYPE_LONG,

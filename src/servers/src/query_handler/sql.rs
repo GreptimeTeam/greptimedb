@@ -19,6 +19,7 @@ use common_error::prelude::*;
 use common_query::Output;
 use datatypes::schema::Schema;
 use query::parser::PromQuery;
+use query::plan::LogicalPlan;
 use session::context::QueryContextRef;
 use sql::statements::statement::Statement;
 
@@ -54,7 +55,7 @@ pub trait SqlQueryHandler {
         &self,
         stmt: Statement,
         query_ctx: QueryContextRef,
-    ) -> std::result::Result<Option<Schema>, Self::Error>;
+    ) -> std::result::Result<Option<(Schema, LogicalPlan)>, Self::Error>;
 
     fn is_valid_schema(
         &self,
@@ -126,7 +127,7 @@ where
         &self,
         stmt: Statement,
         query_ctx: QueryContextRef,
-    ) -> Result<Option<Schema>> {
+    ) -> Result<Option<(Schema, LogicalPlan)>> {
         self.0
             .do_describe(stmt, query_ctx)
             .await

@@ -46,7 +46,11 @@ pub trait QueryEngine: Send + Sync {
         query_ctx: QueryContextRef,
     ) -> Result<LogicalPlan>;
 
-    async fn describe(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<Schema>;
+    async fn describe(
+        &self,
+        stmt: QueryStatement,
+        query_ctx: QueryContextRef,
+    ) -> Result<(Schema, LogicalPlan)>;
 
     async fn execute(&self, plan: &LogicalPlan) -> Result<Output>;
 

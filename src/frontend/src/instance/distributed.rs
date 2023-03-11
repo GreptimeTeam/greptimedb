@@ -44,6 +44,7 @@ use meta_client::rpc::{
 };
 use partition::partition::{PartitionBound, PartitionDef};
 use query::parser::{PromQuery, QueryStatement};
+use query::plan::LogicalPlan;
 use query::sql::{describe_table, explain, show_databases, show_tables};
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::query_handler::sql::SqlQueryHandler;
@@ -546,7 +547,7 @@ impl SqlQueryHandler for DistInstance {
         &self,
         stmt: Statement,
         query_ctx: QueryContextRef,
-    ) -> Result<Option<Schema>> {
+    ) -> Result<Option<(Schema, LogicalPlan)>> {
         if let Statement::Query(_) = stmt {
             self.query_engine
                 .describe(QueryStatement::Sql(stmt), query_ctx)

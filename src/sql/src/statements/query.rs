@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use datatypes::prelude::ConcreteDataType;
+use datatypes::prelude::{ConcreteDataType, Value};
 use sqlparser::ast::Query as SpQuery;
 
 use crate::error::Error;
@@ -22,6 +22,7 @@ use crate::error::Error;
 pub struct Query {
     pub inner: SpQuery,
     pub param_types: Vec<ConcreteDataType>,
+    pub param_values: Vec<Value>,
 }
 
 /// Automatically converts from sqlparser Query instance to SqlQuery.
@@ -32,6 +33,7 @@ impl TryFrom<SpQuery> for Query {
         Ok(Query {
             inner: q,
             param_types: vec![],
+            param_values: vec![],
         })
     }
 }
@@ -51,5 +53,9 @@ impl Query {
 
     pub fn param_types_mut(&mut self) -> &mut Vec<ConcreteDataType> {
         &mut self.param_types
+    }
+
+    pub fn param_values_mut(&mut self) -> &mut Vec<Value> {
+        &mut self.param_values
     }
 }
