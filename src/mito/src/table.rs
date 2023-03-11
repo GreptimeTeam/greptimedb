@@ -322,6 +322,15 @@ impl<R: Region> Table for MitoTable<R> {
         }
         Ok(rows_deleted)
     }
+
+    async fn close(&self) -> TableResult<()> {
+        futures::future::try_join_all(self.regions.values().map(|region| region.close()))
+            .await
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)?;
+
+        Ok(())
+    }
 }
 
 struct ChunkStream {

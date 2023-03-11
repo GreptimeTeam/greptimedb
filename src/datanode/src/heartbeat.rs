@@ -144,6 +144,18 @@ impl HeartbeatTask {
 
         Ok(())
     }
+
+    pub async fn close(&self) -> Result<()> {
+        let running = self.running.clone();
+        if running
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            warn!("Call close heartbeat task multiple times");
+        }
+
+        Ok(())
+    }
 }
 
 /// Resolves hostname:port address for meta registration

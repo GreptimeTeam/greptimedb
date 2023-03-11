@@ -93,6 +93,11 @@ pub trait Table: Send + Sync {
         }
         .fail()?
     }
+
+    /// Close the table.
+    async fn close(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 pub type TableRef = Arc<dyn Table>;

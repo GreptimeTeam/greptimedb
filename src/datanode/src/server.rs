@@ -30,7 +30,9 @@ use snafu::ResultExt;
 
 use crate::datanode::DatanodeOptions;
 use crate::error::Error::StartServer;
-use crate::error::{ParseAddrSnafu, Result, RuntimeResourceSnafu, StartServerSnafu};
+use crate::error::{
+    ParseAddrSnafu, Result, RuntimeResourceSnafu, ShutdownServerSnafu, StartServerSnafu,
+};
 use crate::instance::InstanceRef;
 
 pub mod grpc;
@@ -113,6 +115,19 @@ impl Services {
         futures::future::try_join_all(res)
             .await
             .context(StartServerSnafu)?;
+        Ok(())
+    }
+
+    pub async fn shutdown(&self) -> Result<()> {
+        let mut res = vec![self.grpc_server.shutdown()];
+        if let Some(mysql_server) = &self.mysql_server {
+            res.push(mysql_server.shutdown());
+        }
+
+        futures::future::try_join_all(res)
+            .await
+            .context(ShutdownServerSnafu)?;
+
         Ok(())
     }
 }
