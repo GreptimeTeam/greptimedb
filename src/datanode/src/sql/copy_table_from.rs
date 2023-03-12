@@ -34,7 +34,7 @@ use url::{ParseError, Url};
 use crate::error::{self, Result};
 use crate::sql::SqlHandler;
 
-const S3_SCHEMA: &str = "S3";
+pub const S3_SCHEMA: &str = "S3";
 const ENDPOINT_URL: &str = "ENDPOINT_URL";
 const ACCESS_KEY_ID: &str = "ACCESS_KEY_ID";
 const SECRET_ACCESS_KEY: &str = "SECRET_ACCESS_KEY";
@@ -165,13 +165,10 @@ impl DataSource {
                     Source::Dir
                 };
 
-                let accessor = Fs::default()
-                    .root(&path)
-                    .build()
-                    .context(error::BuildBackendSnafu)?;
+                let object_store = build_fs_backend(&path)?;
 
                 Ok(DataSource {
-                    object_store: ObjectStore::new(accessor).finish(),
+                    object_store,
                     source,
                     path,
                     regex,
@@ -182,59 +179,6 @@ impl DataSource {
             }
             .fail(),
         }
-    }
-
-    fn build_s3_backend(
-        host: Option<&str>,
-        path: &str,
-        connection: HashMap<String, String>,
-    ) -> Result<ObjectStore> {
-        let mut builder = S3::default();
-
-        builder.root(path);
-
-        if let Some(bucket) = host {
-            builder.bucket(bucket);
-        }
-
-        if let Some(endpoint) = connection.get(ENDPOINT_URL) {
-            builder.endpoint(endpoint);
-        }
-
-        if let Some(region) = connection.get(REGION) {
-            builder.region(region);
-        }
-
-        if let Some(key_id) = connection.get(ACCESS_KEY_ID) {
-            builder.access_key_id(key_id);
-        }
-
-        if let Some(key) = connection.get(SECRET_ACCESS_KEY) {
-            builder.secret_access_key(key);
-        }
-
-        if let Some(session_token) = connection.get(SESSION_TOKEN) {
-            builder.security_token(session_token);
-        }
-
-        if let Some(enable_str) = connection.get(ENABLE_VIRTUAL_HOST_STYLE) {
-            let enable = enable_str.as_str().parse::<bool>().map_err(|e| {
-                error::InvalidConnectionSnafu {
-                    msg: format!(
-                        "failed to parse the option {}={}, {}",
-                        ENABLE_VIRTUAL_HOST_STYLE, enable_str, e
-                    ),
-                }
-                .build()
-            })?;
-            if enable {
-                builder.enable_virtual_host_style();
-            }
-        }
-
-        let accessor = builder.build().context(error::BuildBackendSnafu)?;
-
-        Ok(ObjectStore::new(accessor).finish())
     }
 
     fn from_url(
@@ -257,7 +201,7 @@ impl DataSource {
         };
 
         let object_store = match schema.to_uppercase().as_str() {
-            S3_SCHEMA => DataSource::build_s3_backend(host, &dir, connection)?,
+            S3_SCHEMA => build_s3_backend(host, &dir, connection)?,
             _ => {
                 return error::UnsupportedBackendProtocolSnafu {
                     protocol: schema.to_string(),
@@ -346,6 +290,68 @@ impl DataSource {
             ("/".to_string(), Some(path.to_string()))
         }
     }
+}
+
+pub fn build_s3_backend(
+    host: Option<&str>,
+    path: &str,
+    connection: HashMap<String, String>,
+) -> Result<ObjectStore> {
+    let mut builder = S3::default();
+
+    builder.root(path);
+
+    if let Some(bucket) = host {
+        builder.bucket(bucket);
+    }
+
+    if let Some(endpoint) = connection.get(ENDPOINT_URL) {
+        builder.endpoint(endpoint);
+    }
+
+    if let Some(region) = connection.get(REGION) {
+        builder.region(region);
+    }
+
+    if let Some(key_id) = connection.get(ACCESS_KEY_ID) {
+        builder.access_key_id(key_id);
+    }
+
+    if let Some(key) = connection.get(SECRET_ACCESS_KEY) {
+        builder.secret_access_key(key);
+    }
+
+    if let Some(session_token) = connection.get(SESSION_TOKEN) {
+        builder.security_token(session_token);
+    }
+
+    if let Some(enable_str) = connection.get(ENABLE_VIRTUAL_HOST_STYLE) {
+        let enable = enable_str.as_str().parse::<bool>().map_err(|e| {
+            error::InvalidConnectionSnafu {
+                msg: format!(
+                    "failed to parse the option {}={}, {}",
+                    ENABLE_VIRTUAL_HOST_STYLE, enable_str, e
+                ),
+            }
+            .build()
+        })?;
+        if enable {
+            builder.enable_virtual_host_style();
+        }
+    }
+
+    let accessor = builder.build().context(error::BuildBackendSnafu)?;
+
+    Ok(ObjectStore::new(accessor).finish())
+}
+
+pub fn build_fs_backend(root: &str) -> Result<ObjectStore> {
+    let accessor = Fs::default()
+        .root(root)
+        .build()
+        .context(error::BuildBackendSnafu)?;
+
+    Ok(ObjectStore::new(accessor).finish())
 }
 
 #[cfg(test)]

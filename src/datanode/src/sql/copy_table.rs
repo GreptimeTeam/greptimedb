@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::pin::Pin;
 
 use common_query::physical_plan::SessionContext;
@@ -22,16 +23,47 @@ use datafusion::parquet::basic::{Compression, Encoding};
 use datafusion::parquet::file::properties::WriterProperties;
 use datafusion::physical_plan::RecordBatchStream;
 use futures::TryStreamExt;
-use object_store::services::Fs as Builder;
-use object_store::{ObjectStore, ObjectStoreBuilder};
+use object_store::ObjectStore;
 use snafu::ResultExt;
 use table::engine::TableReference;
 use table::requests::CopyTableRequest;
+use url::{ParseError, Url};
 
+use super::copy_table_from::{build_fs_backend, build_s3_backend, S3_SCHEMA};
 use crate::error::{self, Result};
 use crate::sql::SqlHandler;
 
 impl SqlHandler {
+    fn build_backend(&self, url: &str, connection: HashMap<String, String>) -> Result<ObjectStore> {
+        let result = Url::parse(url);
+
+        match result {
+            Ok(url) => {
+                let host = url.host_str();
+
+                let schema = url.scheme();
+
+                match schema.to_uppercase().as_str() {
+                    S3_SCHEMA => build_s3_backend(host, "/", connection),
+
+                    _ => error::UnsupportedBackendProtocolSnafu {
+                        protocol: schema.to_string(),
+                    }
+                    .fail(),
+                }
+            }
+            Err(err) => {
+                if ParseError::RelativeUrlWithoutBase == err {
+                    build_fs_backend("/")
+                } else {
+                    Err(error::Error::InvalidUrl {
+                        url: url.to_string(),
+                        source: err,
+                    })
+                }
+            }
+        }
+    }
     pub(crate) async fn copy_table(&self, req: CopyTableRequest) -> Result<Output> {
         let table_ref = TableReference {
             catalog: &req.catalog_name,
@@ -52,11 +84,7 @@ impl SqlHandler {
             .context(error::TableScanExecSnafu)?;
         let stream = Box::pin(DfRecordBatchStreamAdapter::new(stream));
 
-        let accessor = Builder::default()
-            .root("/")
-            .build()
-            .context(error::BuildBackendSnafu)?;
-        let object_store = ObjectStore::new(accessor).finish();
+        let object_store = self.build_backend(&req.file_name, req.connection)?;
 
         let mut parquet_writer = ParquetWriter::new(req.file_name, stream, object_store);
         // TODO(jiachun):

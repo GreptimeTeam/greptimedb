@@ -26,30 +26,25 @@ pub enum CopyTable {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CopyTableTo {
-    table_name: ObjectName,
-    file_name: String,
-    format: Format,
+    pub table_name: ObjectName,
+    pub file_name: String,
+    pub format: Format,
+    pub connection: HashMap<String, String>,
 }
 
 impl CopyTableTo {
-    pub(crate) fn new(table_name: ObjectName, file_name: String, format: Format) -> Self {
+    pub(crate) fn new(
+        table_name: ObjectName,
+        file_name: String,
+        format: Format,
+        connection: HashMap<String, String>,
+    ) -> Self {
         Self {
             table_name,
             file_name,
             format,
+            connection,
         }
-    }
-
-    pub fn table_name(&self) -> &ObjectName {
-        &self.table_name
-    }
-
-    pub fn file_name(&self) -> &str {
-        &self.file_name
-    }
-
-    pub fn format(&self) -> &Format {
-        &self.format
     }
 }
 
