@@ -18,6 +18,7 @@ use std::any::Any;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
+use api::v1::meta::{RegionStat, TableName};
 use common_telemetry::info;
 use snafu::{OptionExt, ResultExt};
 use table::engine::{EngineContext, TableEngineRef};
@@ -225,10 +226,10 @@ pub(crate) async fn handle_system_table_request<'a, M: CatalogManager>(
     Ok(())
 }
 
-/// The number of regions in the datanode node.
-pub async fn region_number(catalog_manager: &CatalogManagerRef) -> Result<u64> {
-    let mut region_number: u64 = 0;
-
+/// The stat of regions in the datanode node.
+/// number of regions can be got from len of vec.
+pub async fn region_stats(catalog_manager: &CatalogManagerRef) -> Result<Vec<RegionStat>> {
+    let mut region_stats = Vec::new();
     for catalog_name in catalog_manager.catalog_names()? {
         let catalog =
             catalog_manager
@@ -254,10 +255,28 @@ pub async fn region_number(catalog_manager: &CatalogManagerRef) -> Result<u64> {
                             table_info: &table_name,
                         })?;
 
-                let region_numbers = &table.table_info().meta.region_numbers;
-                region_number += region_numbers.len() as u64;
+                region_stats.extend(
+                    table
+                        .region_stats()
+                        .context(error::RegionStatsSnafu {
+                            catalog: &catalog_name,
+                            schema: &schema_name,
+                            table: &table_name,
+                        })?
+                        .into_iter()
+                        .map(|stat| RegionStat {
+                            region_id: stat.region_id,
+                            table_name: Some(TableName {
+                                catalog_name: catalog_name.clone(),
+                                schema_name: schema_name.clone(),
+                                table_name: table_name.clone(),
+                            }),
+                            approximate_bytes: stat.disk_usage_bytes as i64,
+                            ..Default::default()
+                        }),
+                );
             }
         }
     }
-    Ok(region_number)
+    Ok(region_stats)
 }

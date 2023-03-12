@@ -47,7 +47,7 @@ use table::requests::{
     AddColumnRequest, AlterKind, AlterTableRequest, DeleteRequest, InsertRequest,
 };
 use table::table::scan::SimpleTableScan;
-use table::table::{AlterContext, Table};
+use table::table::{AlterContext, RegionStat, Table};
 use tokio::sync::Mutex;
 
 use crate::error;
@@ -330,6 +330,17 @@ impl<R: Region> Table for MitoTable<R> {
             .context(table_error::TableOperationSnafu)?;
 
         Ok(())
+    }
+
+    fn region_stats(&self) -> table::error::Result<Vec<RegionStat>> {
+        Ok(self
+            .regions
+            .values()
+            .map(|region| RegionStat {
+                region_id: region.id(),
+                disk_usage_bytes: region.disk_usage_bytes(),
+            })
+            .collect())
     }
 }
 
