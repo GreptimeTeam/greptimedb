@@ -89,10 +89,17 @@ impl SqlQueryHandler for DummyInstance {
 
     async fn do_statement_query(
         &self,
-        _stmt: Statement,
-        _query_ctx: QueryContextRef,
+        stmt: Statement,
+        query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        unimplemented!()
+        let stmt = QueryStatement::Sql(stmt);
+        let plan = self
+            .query_engine
+            .statement_to_plan(stmt, query_ctx)
+            .await
+            .unwrap();
+        let output = self.query_engine.execute(&plan).await.unwrap();
+        Ok(output)
     }
 
     async fn do_describe(

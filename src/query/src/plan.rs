@@ -66,12 +66,15 @@ impl LogicalPlan {
         }
     }
 
-    pub fn with_param_values(&self, param_values: Vec<ScalarValue>) -> Option<LogicalPlan> {
+    pub fn replace_params_with_values(
+        &self,
+        param_values: &Vec<ScalarValue>,
+    ) -> Option<LogicalPlan> {
         match self {
             // TODO(SSebo): return proper error
             Self::DfPlan(plan) => plan
                 .clone()
-                .with_param_values(param_values)
+                .replace_params_with_values(param_values)
                 .ok()
                 .map(LogicalPlan::DfPlan),
         }

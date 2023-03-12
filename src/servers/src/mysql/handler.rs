@@ -19,21 +19,27 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use chrono::{NaiveDate, NaiveDateTime};
+use chrono::{Datelike, NaiveDate, NaiveDateTime};
+use common_base::bytes::{Bytes, StringBytes};
 use common_query::Output;
-use common_telemetry::tracing::log;
 use common_telemetry::{error, trace};
+use common_time::{Date, DateTime, Timestamp};
+use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::Schema;
+use datatypes::value::Value;
 use opensrv_mysql::{
     AsyncMysqlShim, Column, ColumnFlags, ColumnType, ErrorKind, InitWriter, ParamParser,
     ParamValue, QueryResultWriter, StatementMetaWriter, ValueInner,
 };
 use parking_lot::RwLock;
+use query::plan::LogicalPlan;
 use rand::RngCore;
 use session::context::Channel;
 use session::Session;
 use snafu::ensure;
 use sql::dialect::GenericDialect;
 use sql::parser::ParserContext;
+use sql::statements::query::Query;
 use sql::statements::statement::Statement;
 use tokio::io::AsyncWrite;
 
@@ -106,6 +112,26 @@ impl MysqlInstanceShim {
         output
     }
 
+    async fn do_stmt_query(&self, id: u32, statement: Statement) -> Vec<Result<Output>> {
+        trace!("Start executing stmt: '{}'", id);
+        let start = Instant::now();
+
+        // TODO(LFC): Find a better way to deal with these special federated queries:
+        // `check` uses regex to filter out unsupported statements emitted by MySQL's federated
+        // components, this is quick and dirty, there must be a better way to do it.
+        let output = self
+            .query_handler
+            .do_statement_query(statement, self.session.context())
+            .await;
+
+        trace!(
+            "Finished executing stmt: '{}', total time costs in microseconds: {}",
+            id,
+            start.elapsed().as_micros()
+        );
+        vec![output]
+    }
+
     fn set_query(&self, query: String) -> u32 {
         let stmt_id = self.prepared_stmts_counter.fetch_add(1, Ordering::Relaxed);
         let mut guard = self.prepared_stmts.write();
@@ -116,6 +142,23 @@ impl MysqlInstanceShim {
     fn query(&self, stmt_id: u32) -> Option<String> {
         let guard = self.prepared_stmts.read();
         guard.get(&stmt_id).map(|s| s.to_owned())
+    }
+
+    async fn do_describe(&self, statement: Statement) -> Result<Option<(Schema, LogicalPlan)>> {
+        trace!("Start executing describe: '{:?}'", statement);
+        let start = Instant::now();
+
+        let output = self
+            .query_handler
+            .do_describe(statement.clone(), self.session.context())
+            .await;
+
+        trace!(
+            "Finished executing describe: '{:?}', total time costs in microseconds: {}",
+            statement,
+            start.elapsed().as_micros()
+        );
+        output
     }
 }
 
@@ -204,10 +247,47 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             Some(query) => query,
         };
 
-        let query = replace_params(params, query);
-        log::debug!("execute replaced query: {}", query);
+        let mut statement = match validate_query(&query).await {
+            Err(e) => {
+                w.error(ErrorKind::ER_UNKNOWN_ERROR, e.to_string().as_bytes())
+                    .await?;
+                return Ok(());
+            }
+            Ok(stmt) => stmt,
+        };
 
-        let outputs = self.do_query(&query).await;
+        let (_schema, plan) = match self.do_describe(statement.clone()).await {
+            Err(e) => {
+                w.error(ErrorKind::ER_INTERNAL_ERROR, e.to_string().as_bytes())
+                    .await?;
+                return Ok(());
+            }
+            Ok(None) => {
+                w.error(
+                    ErrorKind::ER_INTERNAL_ERROR,
+                    b"prepare statement can not generate query plan",
+                )
+                .await?;
+                return Ok(());
+            }
+            Ok(Some((schema, plan))) => (schema, plan),
+        };
+
+        if let Statement::Query(ref mut query) = &mut statement {
+            if let Some(param_types) = plan.param_types() {
+                if params.len() != param_types.len() {
+                    w.error(
+                        ErrorKind::ER_UNKNOWN_ERROR,
+                        b"prepare statement params number mismatch",
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                prepare_params(query, param_types, params)
+            }
+        }
+
+        let outputs = self.do_stmt_query(stmt_id, statement).await;
         write_output(w, &query, outputs).await?;
 
         Ok(())
@@ -263,31 +343,62 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
     }
 }
 
-fn replace_params(params: Vec<ParamValue>, query: String) -> String {
-    let mut query = query;
-    let mut index = 1;
-    for param in params {
-        let s = match param.value.into_inner() {
-            ValueInner::Int(u) => u.to_string(),
-            ValueInner::UInt(u) => u.to_string(),
-            ValueInner::Double(u) => u.to_string(),
-            ValueInner::NULL => "NULL".to_string(),
-            ValueInner::Bytes(b) => format!("'{}'", &String::from_utf8_lossy(b)),
-            ValueInner::Date(_) => NaiveDate::from(param.value).to_string(),
-            ValueInner::Datetime(_) => NaiveDateTime::from(param.value).to_string(),
-            ValueInner::Time(_) => format_duration(Duration::from(param.value)),
-        };
-        query = query.replace(&format!("${}", index), &s);
-        index += 1;
+fn prepare_params(
+    query: &mut Box<Query>,
+    param_types: HashMap<String, Option<ConcreteDataType>>,
+    params: Vec<ParamValue>,
+) {
+    let param_len = params.len();
+    let types_len = param_types.len();
+    assert_eq!(param_len, types_len);
+    for i in 0..param_types.len() {
+        if let Some(Some(t)) = param_types.get(&format!("${}", i + 1)) {
+            let t = t.to_owned();
+            // SAFETY: length checked before
+            let param = params.get(i).unwrap();
+            let value = convert_value(param, &t);
+
+            query.param_types.push(t);
+            query.param_values.push(value);
+        }
     }
-    query
 }
 
-fn format_duration(duration: Duration) -> String {
-    let seconds = duration.as_secs() % 60;
-    let minutes = (duration.as_secs() / 60) % 60;
-    let hours = (duration.as_secs() / 60) / 60;
-    format!("{}:{}:{}", hours, minutes, seconds)
+fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Value {
+    match param.value.into_inner() {
+        ValueInner::Int(i) => match t {
+            ConcreteDataType::Int8(_) => Value::Int8(i as i8),
+            ConcreteDataType::Int16(_) => Value::Int16(i as i16),
+            ConcreteDataType::Int32(_) => Value::Int32(i as i32),
+            _ => Value::Int64(i),
+        },
+        ValueInner::UInt(u) => match t {
+            ConcreteDataType::UInt8(_) => Value::UInt8(u as u8),
+            ConcreteDataType::UInt16(_) => Value::UInt16(u as u16),
+            ConcreteDataType::UInt32(_) => Value::UInt32(u as u32),
+            _ => Value::UInt64(u),
+        },
+        ValueInner::Double(f) => match t {
+            ConcreteDataType::Float32(_) => Value::Float32((f as f32).into()),
+            _ => Value::Float64(f.into()),
+        },
+        ValueInner::NULL => Value::Null,
+        ValueInner::Bytes(b) => match t {
+            ConcreteDataType::String(_) => {
+                Value::String(StringBytes::from(String::from_utf8_lossy(b).to_string()))
+            }
+            _ => Value::Binary(Bytes::from(b)),
+        },
+        ValueInner::Date(_) => {
+            Value::Date(Date::new(NaiveDate::from(param.value).num_days_from_ce()))
+        }
+        ValueInner::Datetime(_) => Value::DateTime(DateTime::new(
+            NaiveDateTime::from(param.value).timestamp_millis(),
+        )),
+        ValueInner::Time(_) => Value::Timestamp(Timestamp::new_millisecond(
+            Duration::from(param.value).as_millis() as i64,
+        )),
+    }
 }
 
 async fn validate_query(query: &str) -> Result<Statement> {

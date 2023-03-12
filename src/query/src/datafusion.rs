@@ -36,6 +36,7 @@ use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::timer;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion_common::ScalarValue;
 use datafusion_sql::planner::{ParserOptions, SqlToRel};
 use datatypes::schema::Schema;
 use promql::planner::PromPlanner;
@@ -93,14 +94,39 @@ impl DatafusionQueryEngine {
         .await?;
         let sql_to_rel = SqlToRel::new_with_options(&context_provider, parser_options);
 
-        let result = sql_to_rel.statement_to_plan(df_stmt).with_context(|_| {
-            let sql = if let Statement::Query(query) = stmt {
+        let mut result = sql_to_rel.statement_to_plan(df_stmt).with_context(|_| {
+            let sql = if let Statement::Query(query) = stmt.clone() {
                 query.inner.to_string()
             } else {
                 format!("{stmt:?}")
             };
             PlanSqlSnafu { sql }
         })?;
+
+        if let Statement::Query(query) = stmt {
+            let types = query.param_types;
+            let values = query.param_values;
+            let mut vals: Vec<ScalarValue> = vec![];
+
+            assert_eq!(types.len(), values.len());
+
+            if !types.is_empty() {
+                for i in 0..types.len() {
+                    // SAFETY: checked the index before
+                    let t = types.get(i).unwrap();
+                    let v = values.get(i).unwrap();
+                    let v = v.try_to_scalar_value(t);
+                    // TODO(SSebo): fixme
+                    let v = v.unwrap();
+                    vals.push(v);
+                }
+
+                // TODO(SSebo): fixme
+                let r = result.replace_params_with_values(&vals);
+                result = r.unwrap();
+            }
+        }
+
         Ok(LogicalPlan::DfPlan(result))
     }
 
