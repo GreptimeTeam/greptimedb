@@ -331,14 +331,14 @@ impl<R: Region> Table for MitoTable<R> {
                     .await
                     .map_err(BoxedError::new)
                     .context(table_error::TableOperationSnafu)?;
-            };
+            }
         } else {
             futures::future::try_join_all(self.regions.values().map(|region| region.flush()))
                 .await
                 .map_err(BoxedError::new)
                 .context(table_error::TableOperationSnafu)?;
-        };
-        
+        }
+
         Ok(())
     }
 
