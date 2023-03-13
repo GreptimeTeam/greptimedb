@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use catalog::CatalogManagerRef;
+use common_error::prelude::BoxedError;
 use common_procedure::ProcedureManagerRef;
 use common_query::Output;
 use common_telemetry::error;
@@ -28,7 +29,9 @@ use table::engine::{EngineContext, TableEngineProcedureRef, TableEngineRef, Tabl
 use table::requests::*;
 use table::TableRef;
 
-use crate::error::{self, ExecuteSqlSnafu, GetTableSnafu, Result, TableNotFoundSnafu};
+use crate::error::{
+    self, CloseTableEngineSnafu, ExecuteSqlSnafu, GetTableSnafu, Result, TableNotFoundSnafu,
+};
 use crate::instance::sql::table_idents_to_full_name;
 
 mod alter;
@@ -138,6 +141,14 @@ impl SqlHandler {
 
     pub fn table_engine(&self) -> TableEngineRef {
         self.table_engine.clone()
+    }
+
+    pub async fn close(&self) -> Result<()> {
+        self.table_engine
+            .close()
+            .await
+            .map_err(BoxedError::new)
+            .context(CloseTableEngineSnafu)
     }
 }
 

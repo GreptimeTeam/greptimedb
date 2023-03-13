@@ -221,4 +221,8 @@ impl TableEngine for MockTableEngine {
     ) -> table::Result<bool> {
         unimplemented!()
     }
+
+    async fn close(&self) -> table::Result<()> {
+        Ok(())
+    }
 }

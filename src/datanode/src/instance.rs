@@ -20,6 +20,7 @@ use catalog::remote::MetaKvBackend;
 use catalog::{CatalogManager, CatalogManagerRef, RegisterTableRequest};
 use common_base::readable_size::ReadableSize;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
+use common_error::prelude::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
@@ -51,7 +52,7 @@ use crate::datanode::{
 };
 use crate::error::{
     self, CatalogSnafu, MetaClientInitSnafu, MissingMetasrvOptsSnafu, MissingNodeIdSnafu,
-    NewCatalogSnafu, OpenLogStoreSnafu, RecoverProcedureSnafu, Result,
+    NewCatalogSnafu, OpenLogStoreSnafu, RecoverProcedureSnafu, Result, ShutdownInstanceSnafu,
 };
 use crate::heartbeat::HeartbeatTask;
 use crate::script::ScriptExecutor;
@@ -218,6 +219,22 @@ impl Instance {
             task.start().await?;
         }
         Ok(())
+    }
+
+    pub async fn shutdown(&self) -> Result<()> {
+        if let Some(heartbeat_task) = &self.heartbeat_task {
+            heartbeat_task
+                .close()
+                .await
+                .map_err(BoxedError::new)
+                .context(ShutdownInstanceSnafu)?;
+        }
+
+        self.sql_handler
+            .close()
+            .await
+            .map_err(BoxedError::new)
+            .context(ShutdownInstanceSnafu)
     }
 
     pub fn sql_handler(&self) -> &SqlHandler {

@@ -482,6 +482,24 @@ pub enum Error {
         #[snafu(backtrace)]
         source: common_procedure::error::Error,
     },
+
+    #[snafu(display("Failed to close table engine, source: {}", source))]
+    CloseTableEngine {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to shutdown server, source: {}", source))]
+    ShutdownServer {
+        #[snafu(backtrace)]
+        source: servers::error::Error,
+    },
+
+    #[snafu(display("Failed to shutdown instance, source: {}", source))]
+    ShutdownInstance {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -550,7 +568,10 @@ impl ErrorExt for Error {
             | BuildParquetRecordBatchStream { .. }
             | InvalidSchema { .. }
             | ParseDataTypes { .. }
-            | IncorrectInternalState { .. } => StatusCode::Internal,
+            | IncorrectInternalState { .. }
+            | ShutdownServer { .. }
+            | ShutdownInstance { .. }
+            | CloseTableEngine { .. } => StatusCode::Internal,
 
             BuildBackend { .. }
             | InitBackend { .. }

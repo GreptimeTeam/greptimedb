@@ -165,6 +165,10 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
             .map_err(BoxedError::new)
             .context(table_error::TableOperationSnafu)
     }
+
+    async fn close(&self) -> TableResult<()> {
+        self.inner.close().await
+    }
 }
 
 impl<S: StorageEngine> TableEngineProcedure for MitoEngine<S> {
@@ -622,6 +626,19 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             .unwrap()
             .remove(&table_reference.to_string())
             .is_some())
+    }
+
+    async fn close(&self) -> TableResult<()> {
+        let _lock = self.table_mutex.lock().await;
+
+        let tables = self.tables.write().unwrap().clone();
+
+        futures::future::try_join_all(tables.values().map(|t| t.close()))
+            .await
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)?;
+
+        Ok(())
     }
 }
 

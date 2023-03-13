@@ -240,6 +240,20 @@ impl Datanode {
     pub fn get_instance(&self) -> InstanceRef {
         self.instance.clone()
     }
+
+    async fn shutdown_instance(&self) -> Result<()> {
+        self.instance.shutdown().await
+    }
+
+    async fn shutdown_services(&self) -> Result<()> {
+        self.services.shutdown().await
+    }
+
+    pub async fn shutdown(&self) -> Result<()> {
+        // We must shutdown services first
+        self.shutdown_services().await?;
+        self.shutdown_instance().await
+    }
 }
 
 #[cfg(test)]
