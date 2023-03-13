@@ -120,7 +120,7 @@ jobs:
 
       - name: Run cargo build
         # TODO(discord9): remove `-F pyo3_backend` once make it default
-        run: cargo build ${{ matrix.opts }} --profile ${{ env.CARGO_PROFILE }} --locked --target ${{ matrix.arch }} -F pyo3_backend
+        run: cargo build ${{ matrix.opts }} --profile ${{ env.CARGO_PROFILE }} --locked --target ${{ matrix.arch }}
 
       - name: Calculate checksum and rename binary
         shell: bash
