@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::env;
 use std::sync::Arc;
 
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use common_recordbatch::util;
+use common_telemetry::logging;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::vectors::{Int64Vector, StringVector, UInt64Vector, VectorRef};
 use session::context::QueryContext;
@@ -796,6 +798,45 @@ async fn test_execute_copy_to() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_execute_copy_to_s3() {
+    logging::init_default_ut_logging();
+    if let Ok(bucket) = env::var("GT_S3_BUCKET") {
+        if !bucket.is_empty() {
+            let instance = setup_test_instance("test_execute_copy_to_s3").await;
+
+            // setups
+            execute_sql(
+            &instance,
+            "create table demo(host string, cpu double, memory double, ts timestamp time index);",
+        )
+        .await;
+
+            let output = execute_sql(
+                &instance,
+                r#"insert into demo(host, cpu, memory, ts) values
+                            ('host1', 66.6, 1024, 1655276557000),
+                            ('host2', 88.8,  333.3, 1655276558000)
+                            "#,
+            )
+            .await;
+            assert!(matches!(output, Output::AffectedRows(2)));
+            let key_id = env::var("GT_S3_ACCESS_KEY_ID").unwrap();
+            let key = env::var("GT_S3_ACCESS_KEY").unwrap();
+            let url =
+                env::var("GT_S3_ENDPOINT_URL").unwrap_or("https://s3.amazonaws.com".to_string());
+
+            let root = uuid::Uuid::new_v4().to_string();
+
+            // exports
+            let copy_to_stmt = format!("Copy demo TO 's3://{}/{}/export/demo.parquet' CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',ENDPOINT_URL='{}')", bucket,root ,key_id, key, url);
+
+            let output = execute_sql(&instance, &copy_to_stmt).await;
+            assert!(matches!(output, Output::AffectedRows(2)));
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_execute_copy_from() {
     let instance = setup_test_instance("test_execute_copy_from").await;
 
@@ -877,6 +918,106 @@ async fn test_execute_copy_from() {
 +-------+------+--------+---------------------+"
             .to_string();
         check_output_stream(output, expected).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_execute_copy_from_s3() {
+    logging::init_default_ut_logging();
+    if let Ok(bucket) = env::var("GT_S3_BUCKET") {
+        if !bucket.is_empty() {
+            let instance = setup_test_instance("test_execute_copy_from_s3").await;
+
+            // setups
+            execute_sql(
+            &instance,
+            "create table demo(host string, cpu double, memory double, ts timestamp time index);",
+        )
+        .await;
+
+            let output = execute_sql(
+                &instance,
+                r#"insert into demo(host, cpu, memory, ts) values
+                            ('host1', 66.6, 1024, 1655276557000),
+                            ('host2', 88.8,  333.3, 1655276558000)
+                            "#,
+            )
+            .await;
+            assert!(matches!(output, Output::AffectedRows(2)));
+
+            // export
+            let root = uuid::Uuid::new_v4().to_string();
+            let key_id = env::var("GT_S3_ACCESS_KEY_ID").unwrap();
+            let key = env::var("GT_S3_ACCESS_KEY").unwrap();
+            let url =
+                env::var("GT_S3_ENDPOINT_URL").unwrap_or("https://s3.amazonaws.com".to_string());
+
+            let copy_to_stmt = format!("Copy demo TO 's3://{}/{}/export/demo.parquet' CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',ENDPOINT_URL='{}')", bucket,root ,key_id, key, url);
+            logging::info!("Copy table to s3: {}", copy_to_stmt);
+
+            let output = execute_sql(&instance, &copy_to_stmt).await;
+            assert!(matches!(output, Output::AffectedRows(2)));
+
+            struct Test<'a> {
+                sql: &'a str,
+                table_name: &'a str,
+            }
+            let tests = [
+                Test {
+                    sql: &format!(
+                        "Copy with_filename FROM 's3://{}/{}/export/demo.parquet_1_2'",
+                        bucket, root
+                    ),
+                    table_name: "with_filename",
+                },
+                Test {
+                    sql: &format!("Copy with_path FROM 's3://{}/{}/export/'", bucket, root),
+                    table_name: "with_path",
+                },
+                Test {
+                    sql: &format!(
+                        "Copy with_pattern FROM 's3://{}/{}/export/' WITH (PATTERN = 'demo.*')",
+                        bucket, root
+                    ),
+                    table_name: "with_pattern",
+                },
+            ];
+
+            for test in tests {
+                // import
+                execute_sql(
+                    &instance,
+                    &format!(
+                "create table {}(host string, cpu double, memory double, ts timestamp time index);",
+                test.table_name
+            ),
+                )
+                .await;
+                let sql = format!(
+                    "{} CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',ENDPOINT_URL='{}')",
+                    test.sql, key_id, key, url
+                );
+                logging::info!("Running sql: {}", sql);
+
+                let output = execute_sql(&instance, &sql).await;
+                assert!(matches!(output, Output::AffectedRows(2)));
+
+                let output = execute_sql(
+                    &instance,
+                    &format!("select * from {} order by ts", test.table_name),
+                )
+                .await;
+                let expected = "\
++-------+------+--------+---------------------+
+| host  | cpu  | memory | ts                  |
++-------+------+--------+---------------------+
+| host1 | 66.6 | 1024.0 | 2022-06-15T07:02:37 |
+| host2 | 88.8 | 333.3  | 2022-06-15T07:02:38 |
++-------+------+--------+---------------------+"
+                    .to_string();
+                check_output_stream(output, expected).await;
+            }
+        }
     }
 }
 

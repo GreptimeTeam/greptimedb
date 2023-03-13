@@ -34,7 +34,11 @@ use crate::error::{self, Result};
 use crate::sql::SqlHandler;
 
 impl SqlHandler {
-    fn build_backend(&self, url: &str, connection: HashMap<String, String>) -> Result<ObjectStore> {
+    fn build_backend(
+        &self,
+        url: &str,
+        connection: HashMap<String, String>,
+    ) -> Result<(ObjectStore, String)> {
         let result = Url::parse(url);
 
         match result {
@@ -43,8 +47,13 @@ impl SqlHandler {
 
                 let schema = url.scheme();
 
+                let path = url.path();
+
                 match schema.to_uppercase().as_str() {
-                    S3_SCHEMA => build_s3_backend(host, "/", connection),
+                    S3_SCHEMA => {
+                        let object_store = build_s3_backend(host, "/", connection)?;
+                        Ok((object_store, path.to_string()))
+                    }
 
                     _ => error::UnsupportedBackendProtocolSnafu {
                         protocol: schema.to_string(),
@@ -52,16 +61,14 @@ impl SqlHandler {
                     .fail(),
                 }
             }
-            Err(err) => {
-                if ParseError::RelativeUrlWithoutBase == err {
-                    build_fs_backend("/")
-                } else {
-                    Err(error::Error::InvalidUrl {
-                        url: url.to_string(),
-                        source: err,
-                    })
-                }
+            Err(ParseError::RelativeUrlWithoutBase) => {
+                let object_store = build_fs_backend("/")?;
+                Ok((object_store, url.to_string()))
             }
+            Err(err) => Err(error::Error::InvalidUrl {
+                url: url.to_string(),
+                source: err,
+            }),
         }
     }
     pub(crate) async fn copy_table(&self, req: CopyTableRequest) -> Result<Output> {
@@ -84,9 +91,9 @@ impl SqlHandler {
             .context(error::TableScanExecSnafu)?;
         let stream = Box::pin(DfRecordBatchStreamAdapter::new(stream));
 
-        let object_store = self.build_backend(&req.file_name, req.connection)?;
+        let (object_store, file_name) = self.build_backend(&req.file_name, req.connection)?;
 
-        let mut parquet_writer = ParquetWriter::new(req.file_name, stream, object_store);
+        let mut parquet_writer = ParquetWriter::new(file_name, stream, object_store);
         // TODO(jiachun):
         // For now, COPY is implemented synchronously.
         // When copying large table, it will be blocked for a long time.
