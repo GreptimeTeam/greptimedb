@@ -35,6 +35,24 @@ pub enum Error {
         source: query::error::Error,
     },
 
+    #[snafu(display("Failed to plan statement, source: {}", source))]
+    PlanStatement {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
+
+    #[snafu(display("Failed to execute statement, source: {}", source))]
+    ExecuteStatement {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
+
+    #[snafu(display("Failed to execute logical plan, source: {}", source))]
+    ExecuteLogicalPlan {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
+
     #[snafu(display("Failed to decode logical plan, source: {}", source))]
     DecodeLogicalPlan {
         #[snafu(backtrace)]
@@ -508,7 +526,12 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
-            ExecuteSql { source } | DescribeStatement { source } => source.status_code(),
+            ExecuteSql { source }
+            | PlanStatement { source }
+            | ExecuteStatement { source }
+            | ExecuteLogicalPlan { source }
+            | DescribeStatement { source } => source.status_code(),
+
             DecodeLogicalPlan { source } => source.status_code(),
             NewCatalog { source } | RegisterSchema { source } => source.status_code(),
             FindTable { source, .. } => source.status_code(),

@@ -38,6 +38,7 @@ use crate::parser::QueryLanguageParser;
 use crate::plan::LogicalPlan;
 use crate::query_engine::options::QueryOptions;
 use crate::query_engine::QueryEngineFactory;
+use crate::tests::exec_selection;
 use crate::tests::pow::pow;
 
 #[tokio::test]
@@ -138,13 +139,15 @@ async fn test_query_validate() -> Result<()> {
 
     let stmt = QueryLanguageParser::parse_sql("select number from public.numbers").unwrap();
     assert!(engine
-        .statement_to_plan(stmt, QueryContext::arc())
+        .planner()
+        .plan(stmt, QueryContext::arc())
         .await
         .is_ok());
 
     let stmt = QueryLanguageParser::parse_sql("select number from wrongschema.numbers").unwrap();
     assert!(engine
-        .statement_to_plan(stmt, QueryContext::arc())
+        .planner()
+        .plan(stmt, QueryContext::arc())
         .await
         .is_err());
     Ok(())
@@ -174,21 +177,8 @@ async fn test_udf() -> Result<()> {
 
     engine.register_udf(udf);
 
-    let stmt =
-        QueryLanguageParser::parse_sql("select my_pow(number, number) as p from numbers limit 10")
-            .unwrap();
-    let plan = engine
-        .statement_to_plan(stmt, Arc::new(QueryContext::new()))
-        .await
-        .unwrap();
-
-    let output = engine.execute(&plan).await?;
-    let recordbatch = match output {
-        Output::Stream(recordbatch) => recordbatch,
-        _ => unreachable!(),
-    };
-
-    let numbers = util::collect(recordbatch).await.unwrap();
+    let sql = "select my_pow(number, number) as p from numbers limit 10";
+    let numbers = exec_selection(engine, sql).await;
     assert_eq!(1, numbers.len());
     assert_eq!(numbers[0].num_columns(), 1);
     assert_eq!(1, numbers[0].schema.num_columns());

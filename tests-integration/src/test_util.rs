@@ -257,7 +257,7 @@ pub async fn create_test_table(
     Ok(())
 }
 
-async fn build_frontend_instance(datanode_instance: InstanceRef) -> FeInstance {
+fn build_frontend_instance(datanode_instance: InstanceRef) -> FeInstance {
     let mut frontend_instance = FeInstance::new_standalone(datanode_instance.clone());
     frontend_instance.set_script_handler(datanode_instance);
     frontend_instance
@@ -275,7 +275,7 @@ pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router
     .await
     .unwrap();
     let http_server = HttpServer::new(
-        ServerSqlQueryHandlerAdaptor::arc(instance),
+        ServerSqlQueryHandlerAdaptor::arc(Arc::new(build_frontend_instance(instance))),
         HttpOptions::default(),
     );
     (http_server.make_app(), guard)
@@ -287,7 +287,7 @@ pub async fn setup_test_http_app_with_frontend(
 ) -> (Router, TestGuard) {
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
     let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
-    let frontend = build_frontend_instance(instance.clone()).await;
+    let frontend = build_frontend_instance(instance.clone());
     instance.start().await.unwrap();
     create_test_table(
         frontend.catalog_manager(),
@@ -311,7 +311,7 @@ pub async fn setup_test_prom_app_with_frontend(
 ) -> (Router, TestGuard) {
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
     let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
-    let frontend = build_frontend_instance(instance.clone()).await;
+    let frontend = build_frontend_instance(instance.clone());
     instance.start().await.unwrap();
     create_test_table(
         frontend.catalog_manager(),

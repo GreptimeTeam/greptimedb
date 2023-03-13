@@ -19,9 +19,12 @@ use common_query::Output;
 use common_recordbatch::util;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::vectors::{Int64Vector, StringVector, UInt64Vector, VectorRef};
+use query::parser::{QueryLanguageParser, QueryStatement};
 use session::context::QueryContext;
+use snafu::ResultExt;
+use sql::statements::statement::Statement;
 
-use crate::error::Error;
+use crate::error::{Error, ExecuteLogicalPlanSnafu, PlanStatementSnafu};
 use crate::tests::test_util::{self, check_output_stream, setup_test_instance, MockInstance};
 
 #[tokio::test(flavor = "multi_thread")]
@@ -414,7 +417,6 @@ pub async fn test_execute_create() {
 
 #[tokio::test]
 async fn test_rename_table() {
-    common_telemetry::init_default_ut_logging();
     let instance = MockInstance::new("test_rename_table_local").await;
 
     let output = execute_sql(&instance, "create database db").await;
@@ -933,7 +935,20 @@ async fn try_execute_sql_in_db(
     db: &str,
 ) -> Result<Output, crate::error::Error> {
     let query_ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, db));
-    instance.inner().execute_sql(sql, query_ctx).await
+
+    let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
+    match stmt {
+        QueryStatement::Sql(Statement::Query(_)) => {
+            let engine = instance.inner().query_engine();
+            let plan = engine
+                .planner()
+                .plan(stmt, query_ctx)
+                .await
+                .context(PlanStatementSnafu)?;
+            engine.execute(&plan).await.context(ExecuteLogicalPlanSnafu)
+        }
+        _ => instance.inner().execute_stmt(stmt, query_ctx).await,
+    }
 }
 
 async fn execute_sql_in_db(instance: &MockInstance, sql: &str, db: &str) -> Output {

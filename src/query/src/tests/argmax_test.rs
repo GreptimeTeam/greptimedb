@@ -14,17 +14,12 @@
 
 use std::sync::Arc;
 
-use common_query::Output;
-use common_recordbatch::error::Result as RecordResult;
-use common_recordbatch::{util, RecordBatch};
 use datatypes::for_all_primitive_types;
 use datatypes::prelude::*;
 use datatypes::types::WrapperType;
-use session::context::QueryContext;
 
 use crate::error::Result;
-use crate::parser::QueryLanguageParser;
-use crate::tests::function;
+use crate::tests::{exec_selection, function};
 use crate::QueryEngine;
 
 #[tokio::test]
@@ -52,9 +47,8 @@ async fn test_argmax_success<T>(
 where
     T: WrapperType + PartialOrd,
 {
-    let result = execute_argmax(column_name, table_name, engine.clone())
-        .await
-        .unwrap();
+    let sql = format!("select ARGMAX({column_name}) as argmax from {table_name}");
+    let result = exec_selection(engine.clone(), &sql).await;
     let value = function::get_value_from_batches("argmax", result);
 
     let numbers =
@@ -76,24 +70,4 @@ where
     let expected_value = Value::from(expected_value);
     assert_eq!(value, expected_value);
     Ok(())
-}
-
-async fn execute_argmax<'a>(
-    column_name: &'a str,
-    table_name: &'a str,
-    engine: Arc<dyn QueryEngine>,
-) -> RecordResult<Vec<RecordBatch>> {
-    let sql = format!("select ARGMAX({column_name}) as argmax from {table_name}");
-    let stmt = QueryLanguageParser::parse_sql(&sql).unwrap();
-    let plan = engine
-        .statement_to_plan(stmt, Arc::new(QueryContext::new()))
-        .await
-        .unwrap();
-
-    let output = engine.execute(&plan).await.unwrap();
-    let recordbatch_stream = match output {
-        Output::Stream(batch) => batch,
-        _ => unreachable!(),
-    };
-    util::collect(recordbatch_stream).await
 }

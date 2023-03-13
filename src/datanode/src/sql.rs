@@ -18,12 +18,11 @@ use common_procedure::ProcedureManagerRef;
 use common_query::Output;
 use common_telemetry::error;
 use query::query_engine::QueryEngineRef;
-use query::sql::{describe_table, explain, show_databases, show_tables};
+use query::sql::{describe_table, show_databases, show_tables};
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use sql::statements::delete::Delete;
 use sql::statements::describe::DescribeTable;
-use sql::statements::explain::Explain;
 use sql::statements::show::{ShowDatabases, ShowTables};
 use table::engine::{EngineContext, TableEngineProcedureRef, TableEngineRef, TableReference};
 use table::requests::*;
@@ -52,7 +51,6 @@ pub enum SqlRequest {
     ShowDatabases(ShowDatabases),
     ShowTables(ShowTables),
     DescribeTable(DescribeTable),
-    Explain(Box<Explain>),
     Delete(Delete),
     CopyTable(CopyTableRequest),
     CopyTableFrom(CopyTableFromRequest),
@@ -118,9 +116,6 @@ impl SqlHandler {
                     })?;
                 describe_table(table).context(ExecuteSqlSnafu)
             }
-            SqlRequest::Explain(req) => explain(req, self.query_engine.clone(), query_ctx.clone())
-                .await
-                .context(ExecuteSqlSnafu),
         };
         if let Err(e) = &result {
             error!(e; "{query_ctx}");

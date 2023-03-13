@@ -31,22 +31,14 @@ async fn create_insert_query_assert(
     expected: &str,
 ) {
     let instance = setup_test_instance("test_execute_insert").await;
-    let query_ctx = QueryContext::arc();
-    instance
-        .inner()
-        .execute_sql(create, query_ctx.clone())
-        .await
-        .unwrap();
 
-    instance
-        .inner()
-        .execute_sql(insert, query_ctx.clone())
-        .await
-        .unwrap();
+    instance.execute_sql(create).await;
+
+    instance.execute_sql(insert).await;
 
     let query_output = instance
         .inner()
-        .execute_promql_statement(promql, start, end, interval, lookback, query_ctx)
+        .execute_promql_statement(promql, start, end, interval, lookback, QueryContext::arc())
         .await
         .unwrap();
     let expected = String::from(expected);
@@ -56,24 +48,12 @@ async fn create_insert_query_assert(
 #[allow(clippy::too_many_arguments)]
 async fn create_insert_tql_assert(create: &str, insert: &str, tql: &str, expected: &str) {
     let instance = setup_test_instance("test_execute_insert").await;
-    let query_ctx = QueryContext::arc();
-    instance
-        .inner()
-        .execute_sql(create, query_ctx.clone())
-        .await
-        .unwrap();
 
-    instance
-        .inner()
-        .execute_sql(insert, query_ctx.clone())
-        .await
-        .unwrap();
+    instance.execute_sql(create).await;
 
-    let query_output = instance
-        .inner()
-        .execute_sql(tql, query_ctx.clone())
-        .await
-        .unwrap();
+    instance.execute_sql(insert).await;
+
+    let query_output = instance.execute_sql(tql).await;
     let expected = String::from(expected);
     check_unordered_output_stream(query_output, expected).await;
 }

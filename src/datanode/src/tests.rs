@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// TODO(LFC): These tests should be moved to frontend crate. They are actually standalone instance tests.
 mod instance_test;
 mod promql_test;
 pub(crate) mod test_util;

@@ -247,6 +247,24 @@ pub enum Error {
         source: query::error::Error,
     },
 
+    #[snafu(display("Failed to plan statement, source: {}", source))]
+    PlanStatement {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
+
+    #[snafu(display("Failed to parse query, source: {}", source))]
+    ParseQuery {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
+
+    #[snafu(display("Failed to execute logical plan, source: {}", source))]
+    ExecLogicalPlan {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
+
     #[snafu(display("Failed to build DataFusion logical plan, source: {}", source))]
     BuildDfLogicalPlan {
         source: datafusion_common::DataFusionError,
@@ -426,9 +444,12 @@ impl ErrorExt for Error {
             | Error::ToTableInsertRequest { source }
             | Error::FindNewColumnsOnInsertion { source } => source.status_code(),
 
-            Error::ExecuteStatement { source, .. } | Error::DescribeStatement { source } => {
-                source.status_code()
-            }
+            Error::ExecuteStatement { source, .. }
+            | Error::PlanStatement { source }
+            | Error::ParseQuery { source }
+            | Error::ExecLogicalPlan { source }
+            | Error::DescribeStatement { source } => source.status_code(),
+
             Error::AlterExprToRequest { source, .. } => source.status_code(),
             Error::LeaderNotFound { .. } => StatusCode::StorageUnavailable,
             Error::TableAlreadyExist { .. } => StatusCode::TableAlreadyExists,
