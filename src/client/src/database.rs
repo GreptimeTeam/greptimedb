@@ -20,7 +20,7 @@ use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{
     AlterExpr, AuthHeader, CreateTableExpr, DdlRequest, DropTableExpr, GreptimeRequest,
-    InsertRequest, QueryRequest, RequestHeader,
+    InsertRequest, PromRangeQuery, QueryRequest, RequestHeader,
 };
 use arrow_flight::{FlightData, Ticket};
 use common_error::prelude::*;
@@ -92,6 +92,24 @@ impl Database {
     pub async fn logical_plan(&self, logical_plan: Vec<u8>) -> Result<Output> {
         self.do_get(Request::Query(QueryRequest {
             query: Some(Query::LogicalPlan(logical_plan)),
+        }))
+        .await
+    }
+
+    pub async fn prom_range_query(
+        &self,
+        promql: &str,
+        start: &str,
+        end: &str,
+        step: &str,
+    ) -> Result<Output> {
+        self.do_get(Request::Query(QueryRequest {
+            query: Some(Query::PromRangeQuery(PromRangeQuery {
+                query: promql.to_string(),
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            })),
         }))
         .await
     }
