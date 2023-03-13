@@ -204,6 +204,12 @@ pub enum Error {
 
     #[snafu(display("Illegal access to catalog: {} and schema: {}", catalog, schema))]
     QueryAccessDenied { catalog: String, schema: String },
+
+    #[snafu(display("Failed to get from cache, error: {}", err_msg))]
+    GetCache {
+        err_msg: String,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -222,7 +228,9 @@ impl ErrorExt for Error {
             | Error::EmptyValue { .. }
             | Error::ValueDeserialize { .. } => StatusCode::StorageUnavailable,
 
-            Error::SystemCatalogTypeMismatch { .. } => StatusCode::Internal,
+            Error::GetCache { .. } | Error::SystemCatalogTypeMismatch { .. } => {
+                StatusCode::Internal
+            }
 
             Error::ReadSystemCatalog { source, .. } => source.status_code(),
             Error::InvalidCatalogValue { source, .. } | Error::CatalogEntrySerde { source } => {

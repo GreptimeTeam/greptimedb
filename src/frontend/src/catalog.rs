@@ -14,10 +14,13 @@
 
 use std::any::Any;
 use std::collections::HashSet;
+use std::ops::Deref;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
-use catalog::error::{self as catalog_err, InvalidCatalogValueSnafu, Result as CatalogResult};
+use catalog::error::Error::GetCache;
+use catalog::error::{self as catalog_err, Result as CatalogResult};
 use catalog::helper::{
     build_catalog_prefix, build_schema_prefix, build_table_global_prefix, CatalogKey, SchemaKey,
     TableGlobalKey, TableGlobalValue,
@@ -31,8 +34,10 @@ use catalog::{
 use common_telemetry::error;
 use futures::StreamExt;
 use meta_client::rpc::TableName;
+use moka::sync::{Cache, CacheBuilder};
 use partition::manager::PartitionRuleManagerRef;
 use snafu::prelude::*;
+use snafu::{Backtrace, GenerateImplicitData};
 use table::TableRef;
 
 use crate::datanode::DatanodeClients;
@@ -43,6 +48,7 @@ pub struct FrontendCatalogManager {
     backend: KvBackendRef,
     partition_manager: PartitionRuleManagerRef,
     datanode_clients: Arc<DatanodeClients>,
+    cache: Arc<Cache<String, CatalogProviderRef>>,
 }
 
 impl FrontendCatalogManager {
@@ -51,10 +57,18 @@ impl FrontendCatalogManager {
         partition_manager: PartitionRuleManagerRef,
         datanode_clients: Arc<DatanodeClients>,
     ) -> Self {
+        let cache = Arc::new(
+            CacheBuilder::new(1024)
+                .time_to_live(Duration::from_secs(30 * 60))
+                .time_to_idle(Duration::from_secs(5 * 60))
+                .build(),
+        );
+
         Self {
             backend,
             partition_manager,
             datanode_clients,
+            cache,
         }
     }
 
@@ -75,7 +89,7 @@ impl FrontendCatalogManager {
 // as soon as it's stable: https://github.com/rust-lang/rust/issues/65991
 #[async_trait::async_trait]
 impl CatalogManager for FrontendCatalogManager {
-    async fn start(&self) -> catalog::error::Result<()> {
+    async fn start(&self) -> CatalogResult<()> {
         Ok(())
     }
 
@@ -93,10 +107,7 @@ impl CatalogManager for FrontendCatalogManager {
         Ok(true)
     }
 
-    async fn register_schema(
-        &self,
-        _request: RegisterSchemaRequest,
-    ) -> catalog::error::Result<bool> {
+    async fn register_schema(&self, _request: RegisterSchemaRequest) -> CatalogResult<bool> {
         unimplemented!()
     }
 
@@ -107,15 +118,11 @@ impl CatalogManager for FrontendCatalogManager {
     async fn register_system_table(
         &self,
         _request: RegisterSystemTableRequest,
-    ) -> catalog::error::Result<()> {
+    ) -> CatalogResult<()> {
         unimplemented!()
     }
 
-    fn schema(
-        &self,
-        catalog: &str,
-        schema: &str,
-    ) -> catalog::error::Result<Option<SchemaProviderRef>> {
+    fn schema(&self, catalog: &str, schema: &str) -> CatalogResult<Option<SchemaProviderRef>> {
         self.catalog(catalog)?
             .context(catalog::error::CatalogNotFoundSnafu {
                 catalog_name: catalog,
@@ -128,11 +135,65 @@ impl CatalogManager for FrontendCatalogManager {
         catalog: &str,
         schema: &str,
         table_name: &str,
-    ) -> catalog::error::Result<Option<TableRef>> {
+    ) -> CatalogResult<Option<TableRef>> {
         self.schema(catalog, schema)?
             .context(catalog::error::SchemaNotFoundSnafu { catalog, schema })?
             .table(table_name)
             .await
+    }
+}
+
+impl FrontendCatalogManager {
+    fn refresh_catalogs(&self) -> CatalogResult<()> {
+        // TODO(fys): waiting for datafusion asynchronous api about catalog
+        std::thread::scope(|s| {
+            let join = s.spawn(|| {
+                common_runtime::block_on_read(async move { self.async_refresh_catalogs().await })
+            });
+            join.join().unwrap()
+        })
+    }
+
+    async fn async_refresh_catalogs(&self) -> CatalogResult<()> {
+        let backend = self.backend.clone();
+        let key = build_catalog_prefix();
+        let mut iter = backend.range(key.as_bytes());
+
+        let mut catalog_names = HashSet::new();
+        while let Some(r) = iter.next().await {
+            let Kv(k, _) = r?;
+
+            let catalog_key = String::from_utf8_lossy(&k);
+            if let Ok(key) = CatalogKey::parse(catalog_key.as_ref()) {
+                catalog_names.insert(key.catalog_name);
+            } else {
+                error!("invalid catalog key: {:?}", catalog_key);
+            }
+        }
+
+        for catalog_name in catalog_names {
+            if self.cache.get(&catalog_name).is_some() {
+                continue;
+            }
+
+            let cache = Arc::new(
+                CacheBuilder::new(1024)
+                    .time_to_live(Duration::from_secs(30 * 60))
+                    .time_to_idle(Duration::from_secs(5 * 60))
+                    .build(),
+            );
+
+            let catalog_provider = Arc::new(FrontendCatalogProvider {
+                catalog_name: catalog_name.clone(),
+                backend: self.backend().clone(),
+                partition_manager: self.partition_manager.clone(),
+                datanode_clients: self.datanode_clients.clone(),
+                cache,
+            });
+
+            self.cache.insert(catalog_name, catalog_provider);
+        }
+        Ok(())
     }
 }
 
@@ -145,48 +206,42 @@ impl CatalogList for FrontendCatalogManager {
         &self,
         _name: String,
         _catalog: CatalogProviderRef,
-    ) -> catalog::error::Result<Option<CatalogProviderRef>> {
+    ) -> CatalogResult<Option<CatalogProviderRef>> {
         unimplemented!("Frontend catalog list does not support register catalog")
     }
 
-    fn catalog_names(&self) -> catalog::error::Result<Vec<String>> {
-        let backend = self.backend.clone();
-        let res = std::thread::spawn(|| {
-            common_runtime::block_on_read(async move {
-                let key = build_catalog_prefix();
-                let mut iter = backend.range(key.as_bytes());
-                let mut res = HashSet::new();
+    fn catalog_names(&self) -> CatalogResult<Vec<String>> {
+        self.refresh_catalogs()?;
 
-                while let Some(r) = iter.next().await {
-                    let Kv(k, _) = r?;
+        let catalog_names: Vec<String> = self
+            .cache
+            .iter()
+            .map(|(name, _)| name.to_string())
+            .collect();
 
-                    let catalog_key = String::from_utf8_lossy(&k);
-                    if let Ok(key) = CatalogKey::parse(catalog_key.as_ref()) {
-                        res.insert(key.catalog_name);
-                    } else {
-                        error!("invalid catalog key: {:?}", catalog_key);
-                    }
-                }
-                Ok(res.into_iter().collect())
-            })
-        })
-        .join()
-        .unwrap();
-        res
+        Ok(catalog_names)
     }
 
-    fn catalog(&self, name: &str) -> catalog::error::Result<Option<CatalogProviderRef>> {
-        let all_catalogs = self.catalog_names()?;
-        if all_catalogs.contains(&name.to_string()) {
-            Ok(Some(Arc::new(FrontendCatalogProvider {
-                catalog_name: name.to_string(),
-                backend: self.backend.clone(),
-                partition_manager: self.partition_manager.clone(),
-                datanode_clients: self.datanode_clients.clone(),
-            })))
-        } else {
-            Ok(None)
+    fn catalog(&self, name: &str) -> CatalogResult<Option<CatalogProviderRef>> {
+        // TODO(fys): Moka does not seem to have an "try_optionally_get_with" api.
+        let catalog = self.cache.try_get_with_by_ref(name, || {
+            self.refresh_catalogs()?;
+
+            self.cache
+                .get(name)
+                .context(catalog_err::CatalogNotFoundSnafu { catalog_name: name })
+        });
+
+        if let Err(e) = catalog.as_ref() {
+            if let catalog_err::Error::CatalogNotFound { .. } = e.deref() {
+                return Ok(None);
+            }
         }
+
+        catalog.map(Some).map_err(|e| GetCache {
+            err_msg: e.to_string(),
+            backtrace: Backtrace::generate(),
+        })
     }
 }
 
@@ -195,6 +250,60 @@ pub struct FrontendCatalogProvider {
     backend: KvBackendRef,
     partition_manager: PartitionRuleManagerRef,
     datanode_clients: Arc<DatanodeClients>,
+    cache: Arc<Cache<String, SchemaProviderRef>>,
+}
+
+impl FrontendCatalogProvider {
+    fn refresh_schemas(&self) -> CatalogResult<()> {
+        // TODO(fys): waiting for datafusion asynchronous api about catalog
+        std::thread::scope(|s| {
+            let join = s.spawn(|| {
+                common_runtime::block_on_read(async move { self.async_refresh_schemas().await })
+            });
+            join.join().unwrap()
+        })
+    }
+
+    async fn async_refresh_schemas(&self) -> CatalogResult<()> {
+        let backend = self.backend.clone();
+        let catalog_name = self.catalog_name.clone();
+        let key = build_schema_prefix(&catalog_name);
+        let mut iter = backend.range(key.as_bytes());
+        let mut schema_names = HashSet::new();
+
+        while let Some(r) = iter.next().await {
+            let Kv(k, _) = r?;
+            let key = SchemaKey::parse(String::from_utf8_lossy(&k))
+                .context(catalog_err::InvalidCatalogValueSnafu)?;
+            schema_names.insert(key.schema_name);
+        }
+
+        for schema_name in schema_names {
+            if self.cache.get(&schema_name).is_some() {
+                continue;
+            }
+
+            let cache = Arc::new(
+                CacheBuilder::new(1024)
+                    .time_to_live(Duration::from_secs(30 * 60))
+                    .time_to_idle(Duration::from_secs(5 * 60))
+                    .build(),
+            );
+
+            let schema_provider = Arc::new(FrontendSchemaProvider {
+                catalog_name: self.catalog_name.clone(),
+                schema_name: schema_name.clone(),
+                backend: self.backend.clone(),
+                partition_manager: self.partition_manager.clone(),
+                datanode_clients: self.datanode_clients.clone(),
+                cache,
+            });
+
+            self.cache.insert(schema_name, schema_provider);
+        }
+
+        Ok(())
+    }
 }
 
 impl CatalogProvider for FrontendCatalogProvider {
@@ -202,50 +311,51 @@ impl CatalogProvider for FrontendCatalogProvider {
         self
     }
 
-    fn schema_names(&self) -> catalog::error::Result<Vec<String>> {
-        let backend = self.backend.clone();
-        let catalog_name = self.catalog_name.clone();
-        let res = std::thread::spawn(|| {
-            common_runtime::block_on_read(async move {
-                let key = build_schema_prefix(&catalog_name);
-                let mut iter = backend.range(key.as_bytes());
-                let mut res = HashSet::new();
+    fn schema_names(&self) -> CatalogResult<Vec<String>> {
+        self.refresh_schemas()?;
 
-                while let Some(r) = iter.next().await {
-                    let Kv(k, _) = r?;
-                    let key = SchemaKey::parse(String::from_utf8_lossy(&k))
-                        .context(InvalidCatalogValueSnafu)?;
-                    res.insert(key.schema_name);
-                }
-                Ok(res.into_iter().collect())
-            })
-        })
-        .join()
-        .unwrap();
-        res
+        let schema_names: Vec<String> = self
+            .cache
+            .iter()
+            .map(|(name, _)| name.to_string())
+            .collect();
+
+        Ok(schema_names)
     }
 
     fn register_schema(
         &self,
         _name: String,
         _schema: SchemaProviderRef,
-    ) -> catalog::error::Result<Option<SchemaProviderRef>> {
+    ) -> CatalogResult<Option<SchemaProviderRef>> {
         unimplemented!("Frontend catalog provider does not support register schema")
     }
 
-    fn schema(&self, name: &str) -> catalog::error::Result<Option<SchemaProviderRef>> {
-        let all_schemas = self.schema_names()?;
-        if all_schemas.contains(&name.to_string()) {
-            Ok(Some(Arc::new(FrontendSchemaProvider {
-                catalog_name: self.catalog_name.clone(),
-                schema_name: name.to_string(),
-                backend: self.backend.clone(),
-                partition_manager: self.partition_manager.clone(),
-                datanode_clients: self.datanode_clients.clone(),
-            })))
-        } else {
-            Ok(None)
+    fn schema(&self, name: &str) -> CatalogResult<Option<SchemaProviderRef>> {
+        let catalog = &self.catalog_name;
+
+        // TODO(fys): Moka does not seem to have an "try_optionally_get_with" api.
+        let schema = self.cache.try_get_with_by_ref(name, || {
+            self.refresh_schemas()?;
+
+            self.cache
+                .get(name)
+                .context(catalog_err::SchemaNotFoundSnafu {
+                    catalog,
+                    schema: name.to_string(),
+                })
+        });
+
+        if let Err(e) = schema.as_ref() {
+            if let catalog_err::Error::SchemaNotFound { .. } = e.deref() {
+                return Ok(None);
+            }
         }
+
+        schema.map(Some).map_err(|e| GetCache {
+            err_msg: e.to_string(),
+            backtrace: Backtrace::generate(),
+        })
     }
 }
 
@@ -255,6 +365,72 @@ pub struct FrontendSchemaProvider {
     backend: KvBackendRef,
     partition_manager: PartitionRuleManagerRef,
     datanode_clients: Arc<DatanodeClients>,
+    cache: Arc<Cache<String, TableRef>>,
+}
+
+impl FrontendSchemaProvider {
+    fn refresh_tables(&self) -> CatalogResult<()> {
+        // TODO(fys): waiting for datafusion asynchronous api about catalog
+        std::thread::scope(|s| {
+            let join = s.spawn(|| {
+                common_runtime::block_on_read(async move { self.async_refresh_tables().await })
+            });
+            join.join().unwrap()
+        })
+    }
+
+    async fn async_refresh_tables(&self) -> CatalogResult<()> {
+        let backend = self.backend.clone();
+        let catalog_name = self.catalog_name.clone();
+        let schema_name = self.schema_name.clone();
+
+        let key = build_table_global_prefix(catalog_name, schema_name);
+        let mut iter = backend.range(key.as_bytes());
+        let mut table_names = HashSet::new();
+
+        while let Some(r) = iter.next().await {
+            let Kv(k, _) = r?;
+            let key = TableGlobalKey::parse(String::from_utf8_lossy(&k))
+                .context(catalog_err::InvalidCatalogValueSnafu)?;
+            table_names.insert(key.table_name);
+        }
+
+        for table_name in table_names {
+            if self.cache.get(&table_name).is_some() {
+                continue;
+            }
+
+            let table_global_key = TableGlobalKey {
+                catalog_name: self.catalog_name.clone(),
+                schema_name: self.schema_name.clone(),
+                table_name: table_name.clone(),
+            };
+
+            let Some(kv) = self.backend.get(table_global_key.to_string().as_bytes()).await? else { continue };
+
+            let tg_val = TableGlobalValue::from_bytes(kv.1)
+                .context(catalog_err::InvalidCatalogValueSnafu)?;
+
+            let table_info = Arc::new(
+                tg_val
+                    .table_info
+                    .try_into()
+                    .context(catalog_err::InvalidTableInfoInCatalogSnafu)?,
+            );
+
+            let table = Arc::new(DistTable::new(
+                TableName::new(&self.catalog_name, &self.schema_name, table_name.clone()),
+                table_info,
+                self.partition_manager.clone(),
+                self.datanode_clients.clone(),
+                self.backend.clone(),
+            ));
+
+            self.cache.insert(table_name, table);
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -263,58 +439,43 @@ impl SchemaProvider for FrontendSchemaProvider {
         self
     }
 
-    fn table_names(&self) -> catalog::error::Result<Vec<String>> {
-        let backend = self.backend.clone();
-        let catalog_name = self.catalog_name.clone();
-        let schema_name = self.schema_name.clone();
+    fn table_names(&self) -> CatalogResult<Vec<String>> {
+        self.refresh_tables()?;
 
-        std::thread::spawn(|| {
-            common_runtime::block_on_read(async move {
-                let key = build_table_global_prefix(catalog_name, schema_name);
-                let mut iter = backend.range(key.as_bytes());
-                let mut res = HashSet::new();
+        let table_names: Vec<String> = self
+            .cache
+            .iter()
+            .map(|(name, _)| name.to_string())
+            .collect();
 
-                while let Some(r) = iter.next().await {
-                    let Kv(k, _) = r?;
-                    let key = TableGlobalKey::parse(String::from_utf8_lossy(&k))
-                        .context(InvalidCatalogValueSnafu)?;
-                    res.insert(key.table_name);
-                }
-                Ok(res.into_iter().collect())
-            })
+        Ok(table_names)
+    }
+
+    async fn table(&self, name: &str) -> CatalogResult<Option<TableRef>> {
+        // TODO(fys): Moka does not seem to have an "try_optionally_get_with" api.
+        let table = self.cache.try_get_with_by_ref(name, || {
+            self.refresh_tables()?;
+
+            self.cache
+                .get(name)
+                .context(catalog_err::TableNotExistSnafu {
+                    table: name.to_string(),
+                })
+        });
+
+        if let Err(e) = table.as_ref() {
+            if let catalog_err::Error::TableNotExist { .. } = e.deref() {
+                return Ok(None);
+            }
+        }
+
+        table.map(Some).map_err(|e| GetCache {
+            err_msg: e.to_string(),
+            backtrace: Backtrace::generate(),
         })
-        .join()
-        .unwrap()
     }
 
-    async fn table(&self, name: &str) -> catalog::error::Result<Option<TableRef>> {
-        let table_global_key = TableGlobalKey {
-            catalog_name: self.catalog_name.clone(),
-            schema_name: self.schema_name.clone(),
-            table_name: name.to_string(),
-        };
-        let Some(kv) = self.backend.get(table_global_key.to_string().as_bytes()).await? else { return Ok(None) };
-        let v = TableGlobalValue::from_bytes(kv.1).context(InvalidCatalogValueSnafu)?;
-        let table_info = Arc::new(
-            v.table_info
-                .try_into()
-                .context(catalog_err::InvalidTableInfoInCatalogSnafu)?,
-        );
-        let table = Arc::new(DistTable::new(
-            TableName::new(&self.catalog_name, &self.schema_name, name),
-            table_info,
-            self.partition_manager.clone(),
-            self.datanode_clients.clone(),
-            self.backend.clone(),
-        ));
-        Ok(Some(table))
-    }
-
-    fn register_table(
-        &self,
-        _name: String,
-        _table: TableRef,
-    ) -> catalog::error::Result<Option<TableRef>> {
+    fn register_table(&self, _name: String, _table: TableRef) -> CatalogResult<Option<TableRef>> {
         unimplemented!("Frontend schema provider does not support register table")
     }
 
@@ -322,11 +483,11 @@ impl SchemaProvider for FrontendSchemaProvider {
         unimplemented!("Frontend schema provider does not support rename table")
     }
 
-    fn deregister_table(&self, _name: &str) -> catalog::error::Result<Option<TableRef>> {
+    fn deregister_table(&self, _name: &str) -> CatalogResult<Option<TableRef>> {
         unimplemented!("Frontend schema provider does not support deregister table")
     }
 
-    fn table_exist(&self, name: &str) -> catalog::error::Result<bool> {
+    fn table_exist(&self, name: &str) -> CatalogResult<bool> {
         Ok(self.table_names()?.contains(&name.to_string()))
     }
 }
