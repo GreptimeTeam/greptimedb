@@ -37,7 +37,7 @@ RUN rustup target add aarch64-unknown-linux-gnu
 RUN cargo fetch
 # Set the environment variable for cross compiling and compile it
 # cross compiled python is `python3` in path, but pyo3 need `python` in path so alias it
-# Build the project in release mode. Set Net fetch with git cli to true to avoid git error with bad networking.
+# Build the project in release mode.
 RUN export PYO3_CROSS_LIB_DIR=$PY_INSTALL_PATH/lib && \ 
     alias python=python3 && \
     cargo build --target aarch64-unknown-linux-gnu --release -F pyo3_backend

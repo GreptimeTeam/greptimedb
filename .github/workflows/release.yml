@@ -119,7 +119,8 @@ jobs:
         run: make unit-test integration-test sqlness-test
 
       - name: Run cargo build
-        run: cargo build ${{ matrix.opts }} --profile ${{ env.CARGO_PROFILE }} --locked --target ${{ matrix.arch }}
+        # TODO: remove `-F pyo3_backend` once make it default
+        run: cargo build ${{ matrix.opts }} --profile ${{ env.CARGO_PROFILE }} --locked --target ${{ matrix.arch }} -F pyo3_backend
 
       - name: Calculate checksum and rename binary
         shell: bash
