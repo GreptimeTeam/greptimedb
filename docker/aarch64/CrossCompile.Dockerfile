@@ -9,7 +9,8 @@ RUN apt-get update && apt-get install -y \
     protobuf-compiler \
     curl \
     build-essential \
-    pkg-config
+    pkg-config \
+    wget
 
 # Install Rust.
 SHELL ["/bin/bash", "-c"]
@@ -26,8 +27,7 @@ COPY . .
 ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/
 ENV LIBRARY_PATH=$LIBRARY_PATH:/usr/local/lib/
 ENV PY_INSTALL_PATH=${PWD}/python_arm64_build
-RUN apt-get -y install wget && \
-    chmod +x ./docker/aarch64/compile-python.sh && \
+RUN chmod +x ./docker/aarch64/compile-python.sh && \
     ./docker/aarch64/compile-python.sh
 # Install rustup target for cross compiling.
 RUN rustup target add aarch64-unknown-linux-gnu
