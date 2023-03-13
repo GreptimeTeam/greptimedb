@@ -103,37 +103,8 @@ jobs:
         run: |
           sudo apt-get -y update
           sudo apt-get -y install wget
-          wget https://www.python.org/ftp/python/3.10.10/Python-3.10.10.tgz
-          tar -xvf Python-3.10.10.tgz
-          cd Python-3.10.10
-          ./configure \
-          --enable-shared \
-          ac_cv_pthread_is_default=no ac_cv_pthread=yes ac_cv_cxx_thread=yes \
-          ac_cv_have_long_long_format=yes \
-          --disable-ipv6 ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no && \
-          make
-          sudo make install
-          cd ..
-          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/
-          export PY_INSTALL_PATH=${PWD}/python_arm64_build
-          cd Python-3.10.10 && \
-          make clean && \
-          make distclean && \
-          alias python=python3 && \
-          ./configure --build=x86_64-linux-gnu --host=aarch64-linux-gnu \
-          --prefix=$PY_INSTALL_PATH/py_cross --enable-optimizations \
-          CC=aarch64-linux-gnu-gcc \
-          CXX=aarch64-linux-gnu-g++ \
-          AR=aarch64-linux-gnu-ar \
-          LD=aarch64-linux-gnu-ld \
-          RANLIB=aarch64-linux-gnu-ranlib \
-          --enable-shared \
-          ac_cv_pthread_is_default=no ac_cv_pthread=yes ac_cv_cxx_thread=yes \
-          ac_cv_have_long_long_format=yes \
-          --disable-ipv6 ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no && \
-          make && 
-          sudo make altinstall && \
-          cd ..
+          sudo chmod +x ./docker/aarch64/compile-python.sh
+          sudo ./docker/aarch64/compile-python.sh
           export PYO3_CROSS_LIB_DIR=${PWD}/python310-aarch64/lib
           echo $PYO3_CROSS_LIB_DIR
 
