@@ -16,8 +16,10 @@ use std::fmt::{self, Display};
 use std::sync::Arc;
 
 use common_procedure::BoxedProcedure;
+use store_api::storage::RegionId;
 
 use crate::error::Result;
+use crate::metadata::TableId;
 use crate::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
 use crate::TableRef;
 
@@ -122,6 +124,22 @@ pub trait TableEngineProcedure: Send + Sync {
 }
 
 pub type TableEngineProcedureRef = Arc<dyn TableEngineProcedure>;
+
+/// Generate region name in the form of "{TABLE_ID}_{REGION_NUMBER}"
+#[inline]
+pub fn region_name(table_id: TableId, n: u32) -> String {
+    format!("{table_id}_{n:010}")
+}
+
+#[inline]
+pub fn region_id(table_id: TableId, n: u32) -> RegionId {
+    (u64::from(table_id) << 32) | u64::from(n)
+}
+
+#[inline]
+pub fn table_dir(catalog_name: &str, schema_name: &str, table_id: TableId) -> String {
+    format!("{catalog_name}/{schema_name}/{table_id}/")
+}
 
 #[cfg(test)]
 mod tests {

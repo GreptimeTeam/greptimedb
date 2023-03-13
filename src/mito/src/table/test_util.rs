@@ -20,7 +20,7 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema, Schema, SchemaBuilder, SchemaRef};
-use datatypes::vectors::VectorRef;
+use datatypes::vectors::{Float64Vector, StringVector, TimestampMillisecondVector, VectorRef};
 use log_store::NoopLogStore;
 use object_store::services::Fs as Builder;
 use object_store::{ObjectStore, ObjectStoreBuilder};
@@ -30,7 +30,7 @@ use storage::EngineImpl;
 use table::engine::{EngineContext, TableEngine};
 use table::metadata::{TableInfo, TableInfoBuilder, TableMetaBuilder, TableType};
 use table::requests::{CreateTableRequest, InsertRequest, TableOptions};
-use table::TableRef;
+use table::{Table, TableRef};
 
 use crate::config::EngineConfig;
 use crate::engine::{MitoEngine, MITO_ENGINE};
@@ -177,4 +177,20 @@ pub async fn setup_mock_engine_and_table(
         .unwrap();
 
     (mock_engine, table_engine, table, object_store, dir)
+}
+
+pub async fn setup_table(table: Arc<dyn Table>) {
+    let mut columns_values: HashMap<String, VectorRef> = HashMap::with_capacity(4);
+    let hosts: VectorRef = Arc::new(StringVector::from(vec!["host1", "host2", "host3", "host4"]));
+    let cpus: VectorRef = Arc::new(Float64Vector::from_vec(vec![1.0, 2.0, 3.0, 4.0]));
+    let memories: VectorRef = Arc::new(Float64Vector::from_vec(vec![1.0, 2.0, 3.0, 4.0]));
+    let tss: VectorRef = Arc::new(TimestampMillisecondVector::from_vec(vec![1, 2, 2, 1]));
+
+    columns_values.insert("host".to_string(), hosts.clone());
+    columns_values.insert("cpu".to_string(), cpus.clone());
+    columns_values.insert("memory".to_string(), memories.clone());
+    columns_values.insert("ts".to_string(), tss.clone());
+
+    let insert_req = new_insert_request("demo".to_string(), columns_values);
+    assert_eq!(4, table.insert(insert_req).await.unwrap());
 }

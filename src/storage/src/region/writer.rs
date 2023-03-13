@@ -260,6 +260,15 @@ impl RegionWriter {
         Ok(())
     }
 
+    /// Flush task manually  
+    pub async fn flush<S: LogStore>(&self, writer_ctx: WriterContext<'_, S>) -> Result<()> {
+        let mut inner = self.inner.lock().await;
+
+        ensure!(!inner.is_closed(), error::ClosedRegionSnafu);
+
+        inner.manual_flush(writer_ctx).await
+    }
+
     /// Cancel flush task if any
     async fn cancel_flush(&self) -> Result<()> {
         let mut inner = self.inner.lock().await;
@@ -678,6 +687,11 @@ impl WriterInner {
             }
         });
         Some(schedule_compaction_cb)
+    }
+
+    async fn manual_flush<S: LogStore>(&mut self, writer_ctx: WriterContext<'_, S>) -> Result<()> {
+        self.trigger_flush(&writer_ctx).await?;
+        Ok(())
     }
 
     #[inline]

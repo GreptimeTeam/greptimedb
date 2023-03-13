@@ -39,6 +39,7 @@ mod copy_table_from;
 mod create;
 mod delete;
 mod drop_table;
+mod flush_table;
 pub(crate) mod insert;
 
 #[derive(Debug)]
@@ -48,6 +49,7 @@ pub enum SqlRequest {
     CreateDatabase(CreateDatabaseRequest),
     Alter(AlterTableRequest),
     DropTable(DropTableRequest),
+    FlushTable(FlushTableRequest),
     ShowDatabases(ShowDatabases),
     ShowTables(ShowTables),
     DescribeTable(DescribeTable),
@@ -116,6 +118,7 @@ impl SqlHandler {
                     })?;
                 describe_table(table).context(ExecuteSqlSnafu)
             }
+            SqlRequest::FlushTable(req) => self.flush_table(req).await,
         };
         if let Err(e) = &result {
             error!(e; "{query_ctx}");
