@@ -96,4 +96,8 @@ impl TableEngine for MockTableEngine {
     async fn drop_table(&self, _ctx: &EngineContext, _request: DropTableRequest) -> Result<bool> {
         unimplemented!()
     }
+
+    async fn close(&self) -> Result<()> {
+        Ok(())
+    }
 }

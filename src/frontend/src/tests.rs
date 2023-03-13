@@ -271,7 +271,6 @@ pub(crate) async fn create_distributed_instance(test_name: &str) -> MockDistribu
         meta_client.clone(),
         catalog_manager,
         datanode_clients.clone(),
-        Default::default(),
     );
     let dist_instance = Arc::new(dist_instance);
     let frontend = Instance::new_distributed(dist_instance.clone());

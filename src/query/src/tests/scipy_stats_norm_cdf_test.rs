@@ -14,19 +14,14 @@
 
 use std::sync::Arc;
 
-use common_query::Output;
-use common_recordbatch::error::Result as RecordResult;
-use common_recordbatch::{util, RecordBatch};
 use datatypes::for_all_primitive_types;
 use datatypes::types::WrapperType;
 use num_traits::AsPrimitive;
-use session::context::QueryContext;
 use statrs::distribution::{ContinuousCDF, Normal};
 use statrs::statistics::Statistics;
 
 use crate::error::Result;
-use crate::parser::QueryLanguageParser;
-use crate::tests::function;
+use crate::tests::{exec_selection, function};
 use crate::QueryEngine;
 
 #[tokio::test]
@@ -54,9 +49,10 @@ async fn test_scipy_stats_norm_cdf_success<T>(
 where
     T: WrapperType + AsPrimitive<f64>,
 {
-    let result = execute_scipy_stats_norm_cdf(column_name, table_name, engine.clone())
-        .await
-        .unwrap();
+    let sql = format!(
+        "select SCIPYSTATSNORMCDF({column_name},2.0) as scipy_stats_norm_cdf from {table_name}",
+    );
+    let result = exec_selection(engine.clone(), &sql).await;
     let value = function::get_value_from_batches("scipy_stats_norm_cdf", result);
 
     let numbers =
@@ -70,26 +66,4 @@ where
 
     assert_eq!(value, expected_value.into());
     Ok(())
-}
-
-async fn execute_scipy_stats_norm_cdf<'a>(
-    column_name: &'a str,
-    table_name: &'a str,
-    engine: Arc<dyn QueryEngine>,
-) -> RecordResult<Vec<RecordBatch>> {
-    let sql = format!(
-        "select SCIPYSTATSNORMCDF({column_name},2.0) as scipy_stats_norm_cdf from {table_name}",
-    );
-    let stmt = QueryLanguageParser::parse_sql(&sql).unwrap();
-    let plan = engine
-        .statement_to_plan(stmt, Arc::new(QueryContext::new()))
-        .await
-        .unwrap();
-
-    let output = engine.execute(&plan).await.unwrap();
-    let recordbatch_stream = match output {
-        Output::Stream(batch) => batch,
-        _ => unreachable!(),
-    };
-    util::collect(recordbatch_stream).await
 }

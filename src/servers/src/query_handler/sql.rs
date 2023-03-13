@@ -43,12 +43,6 @@ pub trait SqlQueryHandler {
         query_ctx: QueryContextRef,
     ) -> Vec<std::result::Result<Output, Self::Error>>;
 
-    async fn do_statement_query(
-        &self,
-        stmt: Statement,
-        query_ctx: QueryContextRef,
-    ) -> std::result::Result<Output, Self::Error>;
-
     // TODO(LFC): revisit this for mysql prepared statement
     async fn do_describe(
         &self,
@@ -108,18 +102,6 @@ where
                 })
             })
             .collect()
-    }
-
-    async fn do_statement_query(
-        &self,
-        stmt: Statement,
-        query_ctx: QueryContextRef,
-    ) -> Result<Output> {
-        self.0
-            .do_statement_query(stmt, query_ctx)
-            .await
-            .map_err(BoxedError::new)
-            .context(error::ExecuteStatementSnafu)
     }
 
     async fn do_describe(

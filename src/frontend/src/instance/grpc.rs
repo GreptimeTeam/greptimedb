@@ -97,6 +97,7 @@ mod test {
     use catalog::helper::{TableGlobalKey, TableGlobalValue};
     use common_query::Output;
     use common_recordbatch::RecordBatches;
+    use query::parser::QueryLanguageParser;
     use session::context::QueryContext;
     use tests::{has_parquet_file, test_region_dir};
 
@@ -578,14 +579,18 @@ CREATE TABLE {table_name} (
         assert_eq!(region_to_dn_map.len(), expected_distribution.len());
 
         for (region, dn) in region_to_dn_map.iter() {
+            let stmt = QueryLanguageParser::parse_sql(&format!(
+                "SELECT ts, a FROM {table_name} ORDER BY ts"
+            ))
+            .unwrap();
             let dn = instance.datanodes.get(dn).unwrap();
-            let output = dn
-                .execute_sql(
-                    &format!("SELECT ts, a FROM {table_name} ORDER BY ts"),
-                    QueryContext::arc(),
-                )
+            let engine = dn.query_engine();
+            let plan = engine
+                .planner()
+                .plan(stmt, QueryContext::arc())
                 .await
                 .unwrap();
+            let output = engine.execute(&plan).await.unwrap();
             let Output::Stream(stream) = output else { unreachable!() };
             let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
             let actual = recordbatches.pretty_print().unwrap();

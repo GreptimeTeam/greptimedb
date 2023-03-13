@@ -12,6 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_query::Output;
+use common_recordbatch::{util, RecordBatch};
+use session::context::QueryContext;
+
+use crate::parser::QueryLanguageParser;
+use crate::QueryEngineRef;
+
 mod argmax_test;
 mod argmin_test;
 mod mean_test;
@@ -25,3 +32,17 @@ mod time_range_filter_test;
 
 mod function;
 mod pow;
+
+async fn exec_selection(engine: QueryEngineRef, sql: &str) -> Vec<RecordBatch> {
+    let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
+    let plan = engine
+        .planner()
+        .plan(stmt, QueryContext::arc())
+        .await
+        .unwrap();
+    let Output::Stream(stream) = engine
+        .execute(&plan)
+        .await
+        .unwrap() else { unreachable!() };
+    util::collect(stream).await.unwrap()
+}

@@ -519,6 +519,8 @@ impl HttpServer {
     }
 }
 
+pub const HTTP_SERVER: &str = "HTTP_SERVER";
+
 #[async_trait]
 impl Server for HttpServer {
     async fn shutdown(&self) -> Result<()> {
@@ -556,6 +558,10 @@ impl Server for HttpServer {
         graceful.await.context(StartHttpSnafu)?;
 
         Ok(listening)
+    }
+
+    fn name(&self) -> &str {
+        HTTP_SERVER
     }
 }
 
@@ -605,14 +611,6 @@ mod test {
             _: &PromQuery,
             _: QueryContextRef,
         ) -> Vec<std::result::Result<Output, Self::Error>> {
-            unimplemented!()
-        }
-
-        async fn do_statement_query(
-            &self,
-            _stmt: sql::statements::statement::Statement,
-            _query_ctx: QueryContextRef,
-        ) -> Result<Output> {
             unimplemented!()
         }
 

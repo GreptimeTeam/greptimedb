@@ -97,6 +97,8 @@ impl OpentsdbServer {
     }
 }
 
+pub const OPENTSDB_SERVER: &str = "OPENTSDB_SERVER";
+
 #[async_trait]
 impl Server for OpentsdbServer {
     async fn shutdown(&self) -> Result<()> {
@@ -116,5 +118,8 @@ impl Server for OpentsdbServer {
         let join_handle = tokio::spawn(self.accept(io_runtime, stream));
         self.base_server.start_with(join_handle).await?;
         Ok(addr)
+    }
+    fn name(&self) -> &str {
+        OPENTSDB_SERVER
     }
 }

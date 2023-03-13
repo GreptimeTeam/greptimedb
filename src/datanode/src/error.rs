@@ -35,6 +35,24 @@ pub enum Error {
         source: query::error::Error,
     },
 
+    #[snafu(display("Failed to plan statement, source: {}", source))]
+    PlanStatement {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
+
+    #[snafu(display("Failed to execute statement, source: {}", source))]
+    ExecuteStatement {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
+
+    #[snafu(display("Failed to execute logical plan, source: {}", source))]
+    ExecuteLogicalPlan {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
+
     #[snafu(display("Failed to decode logical plan, source: {}", source))]
     DecodeLogicalPlan {
         #[snafu(backtrace)]
@@ -489,6 +507,24 @@ pub enum Error {
         #[snafu(backtrace)]
         source: common_procedure::error::Error,
     },
+
+    #[snafu(display("Failed to close table engine, source: {}", source))]
+    CloseTableEngine {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to shutdown server, source: {}", source))]
+    ShutdownServer {
+        #[snafu(backtrace)]
+        source: servers::error::Error,
+    },
+
+    #[snafu(display("Failed to shutdown instance, source: {}", source))]
+    ShutdownInstance {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -497,7 +533,12 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
-            ExecuteSql { source } | DescribeStatement { source } => source.status_code(),
+            ExecuteSql { source }
+            | PlanStatement { source }
+            | ExecuteStatement { source }
+            | ExecuteLogicalPlan { source }
+            | DescribeStatement { source } => source.status_code(),
+
             DecodeLogicalPlan { source } => source.status_code(),
             NewCatalog { source } | RegisterSchema { source } => source.status_code(),
             FindTable { source, .. } => source.status_code(),
@@ -558,7 +599,10 @@ impl ErrorExt for Error {
             | BuildParquetRecordBatchStream { .. }
             | InvalidSchema { .. }
             | ParseDataTypes { .. }
-            | IncorrectInternalState { .. } => StatusCode::Internal,
+            | IncorrectInternalState { .. }
+            | ShutdownServer { .. }
+            | ShutdownInstance { .. }
+            | CloseTableEngine { .. } => StatusCode::Internal,
 
             BuildBackend { .. }
             | InitBackend { .. }

@@ -96,7 +96,15 @@ jobs:
         if: contains(matrix.arch, 'linux') && endsWith(matrix.arch, '-gnu')
         run: |
           sudo apt-get -y update
-          sudo apt-get -y install libssl-dev pkg-config g++-aarch64-linux-gnu gcc-aarch64-linux-gnu
+          sudo apt-get -y install libssl-dev pkg-config g++-aarch64-linux-gnu gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu wget
+
+      - name: Compile Python 3.10.10 from source for Aarch64
+        if: contains(matrix.arch, 'aarch64-unknown-linux-gnu')
+        run: |
+          sudo chmod +x ./docker/aarch64/compile-python.sh
+          sudo ./docker/aarch64/compile-python.sh
+          export PYO3_CROSS_LIB_DIR=${PWD}/python310-aarch64/lib
+          echo $PYO3_CROSS_LIB_DIR
 
       - name: Install rust toolchain
         uses: dtolnay/rust-toolchain@master

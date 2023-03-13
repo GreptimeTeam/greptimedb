@@ -13,22 +13,24 @@
 // limitations under the License.
 
 use catalog::CatalogManagerRef;
+use common_error::prelude::BoxedError;
 use common_procedure::ProcedureManagerRef;
 use common_query::Output;
 use common_telemetry::error;
 use query::query_engine::QueryEngineRef;
-use query::sql::{describe_table, explain, show_databases, show_tables};
+use query::sql::{describe_table, show_databases, show_tables};
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use sql::statements::delete::Delete;
 use sql::statements::describe::DescribeTable;
-use sql::statements::explain::Explain;
 use sql::statements::show::{ShowDatabases, ShowTables};
 use table::engine::{EngineContext, TableEngineProcedureRef, TableEngineRef, TableReference};
 use table::requests::*;
 use table::TableRef;
 
-use crate::error::{self, ExecuteSqlSnafu, GetTableSnafu, Result, TableNotFoundSnafu};
+use crate::error::{
+    self, CloseTableEngineSnafu, ExecuteSqlSnafu, GetTableSnafu, Result, TableNotFoundSnafu,
+};
 use crate::instance::sql::table_idents_to_full_name;
 
 mod alter;
@@ -51,7 +53,6 @@ pub enum SqlRequest {
     ShowDatabases(ShowDatabases),
     ShowTables(ShowTables),
     DescribeTable(DescribeTable),
-    Explain(Box<Explain>),
     Delete(Delete),
     CopyTable(CopyTableRequest),
     CopyTableFrom(CopyTableFromRequest),
@@ -117,9 +118,6 @@ impl SqlHandler {
                     })?;
                 describe_table(table).context(ExecuteSqlSnafu)
             }
-            SqlRequest::Explain(req) => explain(req, self.query_engine.clone(), query_ctx.clone())
-                .await
-                .context(ExecuteSqlSnafu),
             SqlRequest::FlushTable(req) => self.flush_table(req).await,
         };
         if let Err(e) = &result {
@@ -141,6 +139,14 @@ impl SqlHandler {
 
     pub fn table_engine(&self) -> TableEngineRef {
         self.table_engine.clone()
+    }
+
+    pub async fn close(&self) -> Result<()> {
+        self.table_engine
+            .close()
+            .await
+            .map_err(BoxedError::new)
+            .context(CloseTableEngineSnafu)
     }
 }
 

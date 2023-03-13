@@ -13,12 +13,13 @@
 // limitations under the License.
 
 #![feature(assert_matches)]
+#![feature(trait_upcasting)]
 
 pub mod datanode;
 pub mod error;
 mod heartbeat;
 pub mod instance;
-mod metric;
+pub mod metric;
 mod mock;
 mod script;
 pub mod server;

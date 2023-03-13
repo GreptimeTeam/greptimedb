@@ -20,6 +20,7 @@ use catalog::remote::MetaKvBackend;
 use catalog::{CatalogManager, CatalogManagerRef, RegisterTableRequest};
 use common_base::readable_size::ReadableSize;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
+use common_error::prelude::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
@@ -51,7 +52,7 @@ use crate::datanode::{
 };
 use crate::error::{
     self, CatalogSnafu, MetaClientInitSnafu, MissingMetasrvOptsSnafu, MissingNodeIdSnafu,
-    NewCatalogSnafu, OpenLogStoreSnafu, RecoverProcedureSnafu, Result,
+    NewCatalogSnafu, OpenLogStoreSnafu, RecoverProcedureSnafu, Result, ShutdownInstanceSnafu,
 };
 use crate::heartbeat::HeartbeatTask;
 use crate::script::ScriptExecutor;
@@ -77,9 +78,6 @@ pub type InstanceRef = Arc<Instance>;
 
 impl Instance {
     pub async fn new(opts: &DatanodeOptions) -> Result<Self> {
-        let object_store = new_object_store(&opts.storage).await?;
-        let logstore = Arc::new(create_log_store(&opts.wal).await?);
-
         let meta_client = match opts.mode {
             Mode::Standalone => None,
             Mode::Distributed => {
@@ -96,11 +94,22 @@ impl Instance {
 
         let compaction_scheduler = create_compaction_scheduler(opts);
 
+        Self::new_with(opts, meta_client, compaction_scheduler).await
+    }
+
+    pub(crate) async fn new_with(
+        opts: &DatanodeOptions,
+        meta_client: Option<Arc<MetaClient>>,
+        compaction_scheduler: CompactionSchedulerRef<RaftEngineLogStore>,
+    ) -> Result<Self> {
+        let object_store = new_object_store(&opts.storage).await?;
+        let log_store = Arc::new(create_log_store(&opts.wal).await?);
+
         let table_engine = Arc::new(DefaultEngine::new(
             TableEngineConfig::default(),
             EngineImpl::new(
                 StorageEngineConfig::from(opts),
-                logstore.clone(),
+                log_store.clone(),
                 object_store.clone(),
                 compaction_scheduler,
             ),
@@ -108,7 +117,7 @@ impl Instance {
         ));
 
         // create remote catalog manager
-        let (catalog_manager, factory, table_id_provider) = match opts.mode {
+        let (catalog_manager, table_id_provider) = match opts.mode {
             Mode::Standalone => {
                 if opts.enable_memory_catalog {
                     let catalog = Arc::new(catalog::local::MemoryCatalogManager::default());
@@ -125,11 +134,8 @@ impl Instance {
                         .await
                         .expect("Failed to register numbers");
 
-                    let factory = QueryEngineFactory::new(catalog.clone());
-
                     (
                         catalog.clone() as CatalogManagerRef,
-                        factory,
                         Some(catalog as TableIdProviderRef),
                     )
                 } else {
@@ -138,11 +144,9 @@ impl Instance {
                             .await
                             .context(CatalogSnafu)?,
                     );
-                    let factory = QueryEngineFactory::new(catalog.clone());
 
                     (
                         catalog.clone() as CatalogManagerRef,
-                        factory,
                         Some(catalog as TableIdProviderRef),
                     )
                 }
@@ -156,11 +160,11 @@ impl Instance {
                         client: meta_client.as_ref().unwrap().clone(),
                     }),
                 ));
-                let factory = QueryEngineFactory::new(catalog.clone());
-                (catalog as CatalogManagerRef, factory, None)
+                (catalog as CatalogManagerRef, None)
             }
         };
 
+        let factory = QueryEngineFactory::new(catalog_manager.clone());
         let query_engine = factory.query_engine();
         let script_executor =
             ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?;
@@ -220,12 +224,32 @@ impl Instance {
         Ok(())
     }
 
+    pub async fn shutdown(&self) -> Result<()> {
+        if let Some(heartbeat_task) = &self.heartbeat_task {
+            heartbeat_task
+                .close()
+                .await
+                .map_err(BoxedError::new)
+                .context(ShutdownInstanceSnafu)?;
+        }
+
+        self.sql_handler
+            .close()
+            .await
+            .map_err(BoxedError::new)
+            .context(ShutdownInstanceSnafu)
+    }
+
     pub fn sql_handler(&self) -> &SqlHandler {
         &self.sql_handler
     }
 
     pub fn catalog_manager(&self) -> &CatalogManagerRef {
         &self.catalog_manager
+    }
+
+    pub fn query_engine(&self) -> QueryEngineRef {
+        self.query_engine.clone()
     }
 }
 

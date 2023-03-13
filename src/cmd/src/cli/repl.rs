@@ -32,6 +32,7 @@ use query::datafusion::DatafusionQueryEngine;
 use query::logical_optimizer::LogicalOptimizer;
 use query::parser::QueryLanguageParser;
 use query::plan::LogicalPlan;
+use query::query_engine::QueryEngineState;
 use query::QueryEngine;
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
@@ -166,11 +167,15 @@ impl Repl {
                 self.database.catalog(),
                 self.database.schema(),
             ));
-            let LogicalPlan::DfPlan(plan) = query_engine
-                .statement_to_plan(stmt, query_ctx)
+
+            let plan = query_engine
+                .planner()
+                .plan(stmt, query_ctx)
                 .await
-                .and_then(|x| query_engine.optimize(&x))
                 .context(PlanStatementSnafu)?;
+
+            let LogicalPlan::DfPlan(plan) =
+                query_engine.optimize(&plan).context(PlanStatementSnafu)?;
 
             let plan = DFLogicalSubstraitConvertor {}
                 .encode(plan)
@@ -262,6 +267,7 @@ async fn create_query_engine(meta_addr: &str) -> Result<DatafusionQueryEngine> {
         partition_manager,
         datanode_clients,
     ));
+    let state = Arc::new(QueryEngineState::new(catalog_list, Default::default()));
 
-    Ok(DatafusionQueryEngine::new(catalog_list, Default::default()))
+    Ok(DatafusionQueryEngine::new(state))
 }

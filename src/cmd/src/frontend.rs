@@ -16,10 +16,10 @@ use std::sync::Arc;
 
 use clap::Parser;
 use common_base::Plugins;
-use frontend::frontend::{Frontend, FrontendOptions};
+use frontend::frontend::FrontendOptions;
 use frontend::grpc::GrpcOptions;
 use frontend::influxdb::InfluxdbOptions;
-use frontend::instance::Instance;
+use frontend::instance::{FrontendInstance, Instance};
 use frontend::mysql::MysqlOptions;
 use frontend::opentsdb::OpentsdbOptions;
 use frontend::postgres::PostgresOptions;
@@ -94,12 +94,16 @@ impl StartCommand {
         let plugins = Arc::new(load_frontend_plugins(&self.user_provider)?);
         let opts: FrontendOptions = self.try_into()?;
 
-        let instance = Instance::try_new_distributed(&opts, plugins.clone())
+        let mut instance = Instance::try_new_distributed(&opts, plugins.clone())
             .await
             .context(error::StartFrontendSnafu)?;
 
-        let mut frontend = Frontend::new(opts, instance, plugins);
-        frontend.start().await.context(error::StartFrontendSnafu)
+        instance
+            .build_servers(&opts, plugins)
+            .await
+            .context(error::StartFrontendSnafu)?;
+
+        instance.start().await.context(error::StartFrontendSnafu)
     }
 }
 

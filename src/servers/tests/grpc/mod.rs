@@ -91,6 +91,10 @@ impl Server for MockGrpcServer {
 
         Ok(addr)
     }
+
+    fn name(&self) -> &str {
+        "MockGrpcServer"
+    }
 }
 
 fn create_grpc_server(table: MemTable) -> Result<Arc<dyn Server>> {

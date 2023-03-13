@@ -14,6 +14,7 @@ client = { path = "../client" }
 common-base = { path = "../common/base" }
 common-catalog = { path = "../common/catalog" }
 common-error = { path = "../common/error" }
+common-function = { path = "../common/function" }
 common-grpc = { path = "../common/grpc" }
 common-grpc-expr = { path = "../common/grpc-expr" }
 common-query = { path = "../common/query" }

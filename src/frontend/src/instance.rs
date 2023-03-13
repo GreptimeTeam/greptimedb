@@ -36,22 +36,26 @@ use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::logging::{debug, info};
+use common_telemetry::timer;
 use datafusion::sql::sqlparser::ast::ObjectName;
 use datanode::instance::sql::table_idents_to_full_name;
 use datanode::instance::InstanceRef as DnInstanceRef;
+use datanode::metric;
 use datatypes::schema::Schema;
 use distributed::DistInstance;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOptions;
 use partition::manager::PartitionRuleManager;
 use partition::route::TableRoutes;
-use query::parser::PromQuery;
+use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
+use query::query_engine::StatementHandlerRef;
+use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error as server_error;
 use servers::interceptor::{SqlQueryInterceptor, SqlQueryInterceptorRef};
 use servers::prom::{PromHandler, PromHandlerRef};
 use servers::query_handler::grpc::{GrpcQueryHandler, GrpcQueryHandlerRef};
-use servers::query_handler::sql::{SqlQueryHandler, SqlQueryHandlerRef};
+use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::{
     InfluxdbLineProtocolHandler, OpentsdbProtocolHandler, PrometheusProtocolHandler, ScriptHandler,
     ScriptHandlerRef,
@@ -62,16 +66,19 @@ use sql::dialect::GenericDialect;
 use sql::parser::ParserContext;
 use sql::statements::copy::CopyTable;
 use sql::statements::statement::Statement;
+use sql::statements::tql::Tql;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
-    self, Error, ExecutePromqlSnafu, ExternalSnafu, InvalidInsertRequestSnafu,
-    MissingMetasrvOptsSnafu, NotSupportedSnafu, ParseSqlSnafu, Result, SqlExecInterceptedSnafu,
+    self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExecuteStatementSnafu, ExternalSnafu,
+    InvalidInsertRequestSnafu, MissingMetasrvOptsSnafu, NotSupportedSnafu, ParseQuerySnafu,
+    ParseSqlSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
 };
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::FrontendOptions;
-use crate::instance::standalone::{StandaloneGrpcQueryHandler, StandaloneSqlQueryHandler};
+use crate::instance::standalone::StandaloneGrpcQueryHandler;
+use crate::server::{start_server, ServerHandlers, Services};
 
 #[async_trait]
 pub trait FrontendInstance:
@@ -97,7 +104,8 @@ pub struct Instance {
 
     /// Script handler is None in distributed mode, only works on standalone mode.
     script_handler: Option<ScriptHandlerRef>,
-    sql_handler: SqlQueryHandlerRef<Error>,
+    statement_handler: StatementHandlerRef,
+    query_engine: QueryEngineRef,
     grpc_query_handler: GrpcQueryHandlerRef<Error>,
     promql_handler: Option<PromHandlerRef>,
 
@@ -106,6 +114,8 @@ pub struct Instance {
     /// plugins: this map holds extensions to customize query or auth
     /// behaviours.
     plugins: Arc<Plugins>,
+
+    servers: Arc<ServerHandlers>,
 }
 
 impl Instance {
@@ -128,22 +138,24 @@ impl Instance {
             datanode_clients.clone(),
         ));
 
-        let dist_instance = DistInstance::new(
-            meta_client,
-            catalog_manager.clone(),
-            datanode_clients,
-            plugins.clone(),
-        );
+        let dist_instance =
+            DistInstance::new(meta_client, catalog_manager.clone(), datanode_clients);
         let dist_instance = Arc::new(dist_instance);
+
+        let query_engine =
+            QueryEngineFactory::new_with_plugins(catalog_manager.clone(), plugins.clone())
+                .query_engine();
 
         Ok(Instance {
             catalog_manager,
             script_handler: None,
             create_expr_factory: Arc::new(DefaultCreateExprFactory),
-            sql_handler: dist_instance.clone(),
+            statement_handler: dist_instance.clone(),
+            query_engine,
             grpc_query_handler: dist_instance,
             promql_handler: None,
-            plugins,
+            plugins: plugins.clone(),
+            servers: Arc::new(HashMap::new()),
         })
     }
 
@@ -182,23 +194,40 @@ impl Instance {
             catalog_manager: dn_instance.catalog_manager().clone(),
             script_handler: None,
             create_expr_factory: Arc::new(DefaultCreateExprFactory),
-            sql_handler: StandaloneSqlQueryHandler::arc(dn_instance.clone()),
+            statement_handler: dn_instance.clone(),
+            query_engine: dn_instance.query_engine(),
             grpc_query_handler: StandaloneGrpcQueryHandler::arc(dn_instance.clone()),
             promql_handler: Some(dn_instance.clone()),
             plugins: Default::default(),
+            servers: Arc::new(HashMap::new()),
         }
+    }
+
+    pub async fn build_servers(
+        &mut self,
+        opts: &FrontendOptions,
+        plugins: Arc<Plugins>,
+    ) -> Result<()> {
+        let servers = Services::build(opts, Arc::new(self.clone()), plugins).await?;
+        self.servers = Arc::new(servers);
+
+        Ok(())
     }
 
     #[cfg(test)]
     pub(crate) fn new_distributed(dist_instance: Arc<DistInstance>) -> Self {
+        let catalog_manager = dist_instance.catalog_manager();
+        let query_engine = QueryEngineFactory::new(catalog_manager.clone()).query_engine();
         Instance {
-            catalog_manager: dist_instance.catalog_manager(),
+            catalog_manager,
             script_handler: None,
+            statement_handler: dist_instance.clone(),
+            query_engine,
             create_expr_factory: Arc::new(DefaultCreateExprFactory),
-            sql_handler: dist_instance.clone(),
             grpc_query_handler: dist_instance,
             promql_handler: None,
             plugins: Default::default(),
+            servers: Arc::new(HashMap::new()),
         }
     }
 
@@ -373,13 +402,24 @@ impl Instance {
     pub fn plugins(&self) -> Arc<Plugins> {
         self.plugins.clone()
     }
+
+    pub async fn shutdown(&self) -> Result<()> {
+        futures::future::try_join_all(self.servers.values().map(|server| server.0.shutdown()))
+            .await
+            .context(error::ShutdownServerSnafu)
+            .map(|_| ())
+    }
 }
 
 #[async_trait]
 impl FrontendInstance for Instance {
     async fn start(&mut self) -> Result<()> {
         // TODO(hl): Frontend init should move to here
-        Ok(())
+
+        futures::future::try_join_all(self.servers.values().map(start_server))
+            .await
+            .context(error::StartServerSnafu)
+            .map(|_| ())
     }
 }
 
@@ -390,20 +430,57 @@ fn parse_stmt(sql: &str) -> Result<Vec<Statement>> {
 impl Instance {
     async fn query_statement(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
         check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
+
+        let planner = self.query_engine.planner();
+
         match stmt {
+            Statement::Query(_) | Statement::Explain(_) => {
+                let plan = planner
+                    .plan(QueryStatement::Sql(stmt), query_ctx)
+                    .await
+                    .context(PlanStatementSnafu)?;
+                self.query_engine
+                    .execute(&plan)
+                    .await
+                    .context(ExecLogicalPlanSnafu)
+            }
+            Statement::Tql(tql) => {
+                let plan = match tql {
+                    Tql::Eval(eval) => {
+                        let promql = PromQuery {
+                            start: eval.start,
+                            end: eval.end,
+                            step: eval.step,
+                            query: eval.query,
+                        };
+                        let stmt =
+                            QueryLanguageParser::parse_promql(&promql).context(ParseQuerySnafu)?;
+                        planner
+                            .plan(stmt, query_ctx)
+                            .await
+                            .context(PlanStatementSnafu)?
+                    }
+                    Tql::Explain(_) => unimplemented!(),
+                };
+                self.query_engine
+                    .execute(&plan)
+                    .await
+                    .context(ExecLogicalPlanSnafu)
+            }
             Statement::CreateDatabase(_)
             | Statement::ShowDatabases(_)
             | Statement::CreateTable(_)
             | Statement::ShowTables(_)
             | Statement::DescribeTable(_)
-            | Statement::Explain(_)
-            | Statement::Query(_)
             | Statement::Insert(_)
             | Statement::Delete(_)
             | Statement::Alter(_)
             | Statement::DropTable(_)
-            | Statement::Tql(_)
-            | Statement::Copy(_) => self.sql_handler.do_statement_query(stmt, query_ctx).await,
+            | Statement::Copy(_) => self
+                .statement_handler
+                .handle_statement(QueryStatement::Sql(stmt), query_ctx)
+                .await
+                .context(ExecuteStatementSnafu),
             Statement::Use(db) => self.handle_use(db, query_ctx),
             Statement::ShowCreateTable(_) => NotSupportedSnafu {
                 feat: format!("{stmt:?}"),
@@ -418,6 +495,8 @@ impl SqlQueryHandler for Instance {
     type Error = Error;
 
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
+        let _timer = timer!(metric::METRIC_HANDLE_SQL_ELAPSED);
+
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query = match query_interceptor.pre_parsing(query, query_ctx.clone()) {
             Ok(q) => q,
@@ -474,28 +553,26 @@ impl SqlQueryHandler for Instance {
         }
     }
 
-    async fn do_statement_query(
-        &self,
-        stmt: Statement,
-        query_ctx: QueryContextRef,
-    ) -> Result<Output> {
-        let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
-
-        // TODO(sunng87): figure out at which stage we can call
-        // this hook after ArrowFlight adoption. We need to provide
-        // LogicalPlan as to this hook.
-        query_interceptor.pre_execute(&stmt, None, query_ctx.clone())?;
-        self.query_statement(stmt, query_ctx.clone())
-            .await
-            .and_then(|output| query_interceptor.post_execute(output, query_ctx.clone()))
-    }
-
     async fn do_describe(
         &self,
         stmt: Statement,
         query_ctx: QueryContextRef,
     ) -> Result<Option<Schema>> {
-        self.sql_handler.do_describe(stmt, query_ctx).await
+        if let Statement::Query(_) = stmt {
+            let plan = self
+                .query_engine
+                .planner()
+                .plan(QueryStatement::Sql(stmt), query_ctx)
+                .await
+                .context(PlanStatementSnafu)?;
+            self.query_engine
+                .describe(plan)
+                .await
+                .map(Some)
+                .context(error::DescribeStatementSnafu)
+        } else {
+            Ok(None)
+        }
     }
 
     fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
@@ -1000,12 +1077,16 @@ mod tests {
             .collect::<HashMap<u32, u64>>();
         assert_eq!(region_to_dn_map.len(), expected_distribution.len());
 
+        let stmt = QueryLanguageParser::parse_sql("SELECT ts, host FROM demo ORDER BY ts").unwrap();
         for (region, dn) in region_to_dn_map.iter() {
             let dn = instance.datanodes.get(dn).unwrap();
-            let output = dn
-                .execute_sql("SELECT ts, host FROM demo ORDER BY ts", QueryContext::arc())
+            let engine = dn.query_engine();
+            let plan = engine
+                .planner()
+                .plan(stmt.clone(), QueryContext::arc())
                 .await
                 .unwrap();
+            let output = engine.execute(&plan).await.unwrap();
             let Output::Stream(stream) = output else { unreachable!() };
             let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
             let actual = recordbatches.pretty_print().unwrap();
