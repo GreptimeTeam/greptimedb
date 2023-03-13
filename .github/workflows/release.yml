@@ -103,7 +103,7 @@ jobs:
         run: |
           sudo chmod +x ./docker/aarch64/compile-python.sh
           sudo ./docker/aarch64/compile-python.sh
-          export PYO3_CROSS_LIB_DIR=${PWD}/python310-aarch64/lib
+          export PYO3_CROSS_LIB_DIR=$PY_INSTALL_PATH/lib
           echo $PYO3_CROSS_LIB_DIR
 
       - name: Install rust toolchain

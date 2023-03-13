@@ -22,20 +22,23 @@ RUN apt-get -y update && \
     apt-get -y install g++-aarch64-linux-gnu gcc-aarch64-linux-gnu && \
     apt-get install binutils-aarch64-linux-gnu
 
-COPY . .
+COPY ./docker/aarch64/compile-python.sh ./docker/aarch64/
 # This three env var is set in script, so I set it manually in dockerfile.
 ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/
 ENV LIBRARY_PATH=$LIBRARY_PATH:/usr/local/lib/
-ENV PY_INSTALL_PATH=${PWD}/python_arm64_build
+ENV PY_INSTALL_PATH=/python_arm64_build
 RUN chmod +x ./docker/aarch64/compile-python.sh && \
     ./docker/aarch64/compile-python.sh
 # Install rustup target for cross compiling.
 RUN rustup target add aarch64-unknown-linux-gnu
+# Update dependency, using separate `RUN` to separate cache
+COPY . .
+RUN cargo fetch
 # Set the environment variable for cross compiling and compile it
-# Build the project in release mode. Set Net fetch with git cli to true to avoid git error.
+# cross compiled python is `python3` in path, but pyo3 need `python` in path so alias it
+# Build the project in release mode. Set Net fetch with git cli to true to avoid git error with bad networking.
 RUN export PYO3_CROSS_LIB_DIR=$PY_INSTALL_PATH/lib && \ 
     alias python=python3 && \
-    CARGO_NET_GIT_FETCH_WITH_CLI=1 && \
     cargo build --target aarch64-unknown-linux-gnu --release -F pyo3_backend
 
 # Exporting the binary to the clean image
