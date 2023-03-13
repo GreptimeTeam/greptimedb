@@ -19,7 +19,7 @@ ENV PATH /root/.cargo/bin/:$PATH
 
 # Install cross platform toolchain
 RUN apt-get -y update && \
-    apt-get -y install libssl-dev pkg-config g++-aarch64-linux-gnu gcc-aarch64-linux-gnu && \
+    apt-get -y install g++-aarch64-linux-gnu gcc-aarch64-linux-gnu && \
     apt-get install binutils-aarch64-linux-gnu
 
 COPY . .
@@ -36,7 +36,7 @@ RUN rustup target add aarch64-unknown-linux-gnu
 RUN export PYO3_CROSS_LIB_DIR=$PY_INSTALL_PATH/lib && \ 
     alias python=python3 && \
     CARGO_NET_GIT_FETCH_WITH_CLI=1 && \
-    cargo build --target aarch64-unknown-linux-gnu --release
+    cargo build --target aarch64-unknown-linux-gnu --release -F pyo3_backend
 
 # Exporting the binary to the clean image
 FROM ubuntu:22.04 as base
