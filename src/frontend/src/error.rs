@@ -44,6 +44,12 @@ pub enum Error {
         source: servers::error::Error,
     },
 
+    #[snafu(display("Failed to shutdown server, source: {}", source))]
+    ShutdownServer {
+        #[snafu(backtrace)]
+        source: servers::error::Error,
+    },
+
     #[snafu(display("Failed to parse address {}, source: {}", addr, source))]
     ParseAddr {
         addr: String,
@@ -381,6 +387,7 @@ impl ErrorExt for Error {
 
             Error::SqlExecIntercepted { source, .. } => source.status_code(),
             Error::StartServer { source, .. } => source.status_code(),
+            Error::ShutdownServer { source, .. } => source.status_code(),
 
             Error::ParseSql { source } => source.status_code(),
 

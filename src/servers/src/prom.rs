@@ -106,6 +106,8 @@ impl PromServer {
     }
 }
 
+pub const PROM_SERVER: &str = "PROM_SERVER";
+
 #[async_trait]
 impl Server for PromServer {
     async fn shutdown(&self) -> Result<()> {
@@ -145,6 +147,10 @@ impl Server for PromServer {
         graceful.await.context(StartHttpSnafu)?;
 
         Ok(listening)
+    }
+
+    fn name(&self) -> &str {
+        PROM_SERVER
     }
 }
 

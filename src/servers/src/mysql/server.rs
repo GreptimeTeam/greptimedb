@@ -200,6 +200,8 @@ impl MysqlServer {
     }
 }
 
+pub const MYSQL_SERVER: &str = "MYSQL_SERVER";
+
 #[async_trait]
 impl Server for MysqlServer {
     async fn shutdown(&self) -> Result<()> {
@@ -213,5 +215,9 @@ impl Server for MysqlServer {
         let join_handle = tokio::spawn(self.accept(io_runtime, stream));
         self.base_server.start_with(join_handle).await?;
         Ok(addr)
+    }
+
+    fn name(&self) -> &str {
+        MYSQL_SERVER
     }
 }

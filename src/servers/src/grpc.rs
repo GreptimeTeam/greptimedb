@@ -65,6 +65,8 @@ impl GrpcServer {
     }
 }
 
+pub const GRPC_SERVER: &str = "GRPC_SERVER";
+
 #[async_trait]
 impl Server for GrpcServer {
     async fn shutdown(&self) -> Result<()> {
@@ -107,5 +109,9 @@ impl Server for GrpcServer {
             .context(StartGrpcSnafu)?;
 
         Ok(addr)
+    }
+
+    fn name(&self) -> &str {
+        GRPC_SERVER
     }
 }
