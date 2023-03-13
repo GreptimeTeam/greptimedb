@@ -29,10 +29,11 @@ ENV LIBRARY_PATH=$LIBRARY_PATH:/usr/local/lib/
 ENV PY_INSTALL_PATH=/python_arm64_build
 RUN chmod +x ./docker/aarch64/compile-python.sh && \
     ./docker/aarch64/compile-python.sh
+
+COPY . .
 # Install rustup target for cross compiling.
 RUN rustup target add aarch64-unknown-linux-gnu
 # Update dependency, using separate `RUN` to separate cache
-COPY . .
 RUN cargo fetch
 # Set the environment variable for cross compiling and compile it
 # cross compiled python is `python3` in path, but pyo3 need `python` in path so alias it
