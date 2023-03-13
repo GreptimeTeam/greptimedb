@@ -23,18 +23,21 @@ RUN apt-get -y update && \
     apt-get install binutils-aarch64-linux-gnu
 
 COPY ./docker/aarch64/compile-python.sh ./docker/aarch64/
-# This three env var is set in script, so I set it manually in dockerfile.
-ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/
-ENV LIBRARY_PATH=$LIBRARY_PATH:/usr/local/lib/
-ENV PY_INSTALL_PATH=/python_arm64_build
 RUN chmod +x ./docker/aarch64/compile-python.sh && \
     ./docker/aarch64/compile-python.sh
 
-COPY . .
+COPY ./rust-toolchain.toml .
 # Install rustup target for cross compiling.
 RUN rustup target add aarch64-unknown-linux-gnu
+COPY . .
 # Update dependency, using separate `RUN` to separate cache
 RUN cargo fetch
+
+# This three env var is set in script, so I set it manually in dockerfile.
+ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/
+ENV LIBRARY_PATH=$LIBRARY_PATH:/usr/local/lib/
+ENV PY_INSTALL_PATH=/greptimedb/python_arm64_build
+
 # Set the environment variable for cross compiling and compile it
 # cross compiled python is `python3` in path, but pyo3 need `python` in path so alias it
 # Build the project in release mode.
