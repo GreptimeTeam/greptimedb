@@ -23,7 +23,6 @@ use servers::server::Server;
 use snafu::ResultExt;
 
 use crate::datanode::DatanodeOptions;
-use crate::error::Error::StartServer;
 use crate::error::{
     ParseAddrSnafu, Result, RuntimeResourceSnafu, ShutdownServerSnafu, StartServerSnafu,
 };
@@ -67,15 +66,9 @@ impl Services {
     }
 
     pub async fn shutdown(&self) -> Result<()> {
-        let mut res = vec![self.grpc_server.shutdown()];
-        if let Some(mysql_server) = &self.mysql_server {
-            res.push(mysql_server.shutdown());
-        }
-
-        futures::future::try_join_all(res)
+        self.grpc_server
+            .shutdown()
             .await
-            .context(ShutdownServerSnafu)?;
-
-        Ok(())
+            .context(ShutdownServerSnafu)
     }
 }

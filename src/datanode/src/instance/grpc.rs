@@ -80,7 +80,7 @@ impl Instance {
                     _ => self.execute_stmt(stmt, ctx).await,
                 }
             }
-            Query::LogicalPlan(plan) => self.execute_logical(plan).await?,
+            Query::LogicalPlan(plan) => self.execute_logical(plan).await,
             Query::PromRangeQuery(promql) => {
                 let prom_query = PromQuery {
                     query: promql.query,
@@ -88,9 +88,9 @@ impl Instance {
                     end: promql.end,
                     step: promql.step,
                 };
-                self.execute_promql(&prom_query, ctx).await?
+                self.execute_promql(&prom_query, ctx).await
             }
-        })
+        }
     }
 
     pub async fn handle_insert(

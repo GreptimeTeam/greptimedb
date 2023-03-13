@@ -71,12 +71,13 @@ use sql::statements::tql::Tql;
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
-    self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExecuteStatementSnafu, ExternalSnafu, InvalidInsertRequestSnafu,
-    MissingMetasrvOptsSnafu, NotSupportedSnafu, ParseQuerySnafu, ParseSqlSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
+    self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExecuteStatementSnafu, ExternalSnafu,
+    InvalidInsertRequestSnafu, MissingMetasrvOptsSnafu, NotSupportedSnafu, ParseQuerySnafu,
+    ParseSqlSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
 };
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::FrontendOptions;
-use crate::instance::standalone::{StandaloneGrpcQueryHandler, StandaloneSqlQueryHandler};
+use crate::instance::standalone::StandaloneGrpcQueryHandler;
 use crate::server::{start_server, ServerHandlers, Services};
 
 #[async_trait]
