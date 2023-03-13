@@ -96,10 +96,6 @@ impl<'a> ParquetWriter<'a> {
             .set_column_encoding(ColumnPath::new(vec![ts_col_name]), Encoding::DELTA_BINARY_PACKED)
             .set_column_dictionary_enabled(ColumnPath::new(vec!["__sequence".to_string()]), false)
             .set_column_encoding(ColumnPath::new(vec!["__sequence".to_string()]), Encoding::DELTA_BINARY_PACKED)
-            .set_column_dictionary_enabled(ColumnPath::new(vec![ts_col_name.clone()]), false)
-            .set_column_encoding(ColumnPath::new(vec![ts_col_name]), Encoding::DELTA_BINARY_PACKED)
-            .set_column_dictionary_enabled(ColumnPath::new(vec!["__sequence".to_string()]), false)
-            .set_column_encoding(ColumnPath::new(vec!["__sequence".to_string()]), Encoding::DELTA_BINARY_PACKED)
             .set_max_row_group_size(self.max_row_group_size)
             .set_key_value_metadata(extra_meta.map(|map| {
                 map.iter()

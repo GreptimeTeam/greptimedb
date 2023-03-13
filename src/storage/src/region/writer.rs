@@ -375,11 +375,16 @@ impl WriterInner {
         let next_sequence = committed_sequence + 1;
 
         let version = version_control.current();
-        let wal_header = WalHeader::with_last_manifest_version(version.manifest_version());
-        writer_ctx
-            .wal
-            .write_to_wal(next_sequence, wal_header, Some(request.payload()))
-            .await?;
+
+
+        // table with id less than MIN_USER_TABLE_ID is system table
+        if (region_id >> 32) < 1024 {
+            let wal_header = WalHeader::with_last_manifest_version(version.manifest_version());
+            writer_ctx
+                .wal
+                .write_to_wal(next_sequence, wal_header, Some(request.payload()))
+                .await?;
+        }
 
         // Insert batch into memtable.
         let mut inserter = Inserter::new(next_sequence);
