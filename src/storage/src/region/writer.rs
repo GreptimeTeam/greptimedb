@@ -376,7 +376,6 @@ impl WriterInner {
 
         let version = version_control.current();
 
-
         // table with id less than MIN_USER_TABLE_ID is system table
         if (region_id >> 32) < 1024 {
             let wal_header = WalHeader::with_last_manifest_version(version.manifest_version());
