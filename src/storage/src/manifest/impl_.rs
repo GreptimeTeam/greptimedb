@@ -169,6 +169,12 @@ impl<M: MetaAction<Error = Error>> ManifestImplInner<M> {
             };
             action_list.set_protocol(new_protocol.clone());
 
+            logging::info!(
+                "Updated manifest protocol from {} to {}.",
+                protocol,
+                new_protocol
+            );
+
             self.protocol.store(Arc::new(new_protocol));
         }
 
