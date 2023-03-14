@@ -2107,8 +2107,8 @@ dependencies = [
 
 [[package]]
 name = "datafusion"
-version = "19.0.0"
-source = "git+https://github.com/MichaelScofield/arrow-datafusion.git?rev=d7b3c730049f2561755f9d855f638cb580c38eff#d7b3c730049f2561755f9d855f638cb580c38eff"
+version = "20.0.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=146a949218ec970784974137277cde3b4e547d0a#146a949218ec970784974137277cde3b4e547d0a"
 dependencies = [
  "ahash 0.8.3",
  "arrow",
@@ -2137,7 +2137,6 @@ dependencies = [
  "object_store",
  "parking_lot",
  "parquet",
- "paste",
  "percent-encoding",
  "pin-project-lite",
  "rand",
@@ -2155,8 +2154,8 @@ dependencies = [
 
 [[package]]
 name = "datafusion-common"
-version = "19.0.0"
-source = "git+https://github.com/MichaelScofield/arrow-datafusion.git?rev=d7b3c730049f2561755f9d855f638cb580c38eff#d7b3c730049f2561755f9d855f638cb580c38eff"
+version = "20.0.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=146a949218ec970784974137277cde3b4e547d0a#146a949218ec970784974137277cde3b4e547d0a"
 dependencies = [
  "arrow",
  "chrono",
@@ -2168,8 +2167,8 @@ dependencies = [
 
 [[package]]
 name = "datafusion-execution"
-version = "19.0.0"
-source = "git+https://github.com/MichaelScofield/arrow-datafusion.git?rev=d7b3c730049f2561755f9d855f638cb580c38eff#d7b3c730049f2561755f9d855f638cb580c38eff"
+version = "20.0.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=146a949218ec970784974137277cde3b4e547d0a#146a949218ec970784974137277cde3b4e547d0a"
 dependencies = [
  "dashmap",
  "datafusion-common",
@@ -2185,20 +2184,19 @@ dependencies = [
 
 [[package]]
 name = "datafusion-expr"
-version = "19.0.0"
-source = "git+https://github.com/MichaelScofield/arrow-datafusion.git?rev=d7b3c730049f2561755f9d855f638cb580c38eff#d7b3c730049f2561755f9d855f638cb580c38eff"
+version = "20.0.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=146a949218ec970784974137277cde3b4e547d0a#146a949218ec970784974137277cde3b4e547d0a"
 dependencies = [
  "ahash 0.8.3",
  "arrow",
  "datafusion-common",
- "log",
  "sqlparser",
 ]
 
 [[package]]
 name = "datafusion-optimizer"
-version = "19.0.0"
-source = "git+https://github.com/MichaelScofield/arrow-datafusion.git?rev=d7b3c730049f2561755f9d855f638cb580c38eff#d7b3c730049f2561755f9d855f638cb580c38eff"
+version = "20.0.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=146a949218ec970784974137277cde3b4e547d0a#146a949218ec970784974137277cde3b4e547d0a"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2214,8 +2212,8 @@ dependencies = [
 
 [[package]]
 name = "datafusion-physical-expr"
-version = "19.0.0"
-source = "git+https://github.com/MichaelScofield/arrow-datafusion.git?rev=d7b3c730049f2561755f9d855f638cb580c38eff#d7b3c730049f2561755f9d855f638cb580c38eff"
+version = "20.0.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=146a949218ec970784974137277cde3b4e547d0a#146a949218ec970784974137277cde3b4e547d0a"
 dependencies = [
  "ahash 0.8.3",
  "arrow",
@@ -2233,7 +2231,6 @@ dependencies = [
  "itertools",
  "lazy_static",
  "md-5",
- "num-traits",
  "paste",
  "petgraph",
  "rand",
@@ -2245,8 +2242,8 @@ dependencies = [
 
 [[package]]
 name = "datafusion-row"
-version = "19.0.0"
-source = "git+https://github.com/MichaelScofield/arrow-datafusion.git?rev=d7b3c730049f2561755f9d855f638cb580c38eff#d7b3c730049f2561755f9d855f638cb580c38eff"
+version = "20.0.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=146a949218ec970784974137277cde3b4e547d0a#146a949218ec970784974137277cde3b4e547d0a"
 dependencies = [
  "arrow",
  "datafusion-common",
@@ -2256,8 +2253,8 @@ dependencies = [
 
 [[package]]
 name = "datafusion-sql"
-version = "19.0.0"
-source = "git+https://github.com/MichaelScofield/arrow-datafusion.git?rev=d7b3c730049f2561755f9d855f638cb580c38eff#d7b3c730049f2561755f9d855f638cb580c38eff"
+version = "20.0.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=146a949218ec970784974137277cde3b4e547d0a#146a949218ec970784974137277cde3b4e547d0a"
 dependencies = [
  "arrow-schema",
  "datafusion-common",
