@@ -238,7 +238,7 @@ impl ProcedureState {
         matches!(self, ProcedureState::Failed { .. })
     }
 
-    /// Returns true if the procedure state retry.
+    /// Returns true if the procedure state is retrying.
     pub fn is_retrying(&self) -> bool {
         matches!(self, ProcedureState::Retrying { .. })
     }

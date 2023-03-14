@@ -151,7 +151,7 @@ pub struct ProcedureConfig {
     pub store: ObjectStoreConfig,
     /// Max retry times of procedure.
     pub max_retry_times: usize,
-    /// The first retry interval of procedure will increase exponentially after that.
+    /// Initial retry delay of procedures, increases exponentially.
     #[serde(with = "humantime_serde")]
     pub retry_delay: Duration,
 }
