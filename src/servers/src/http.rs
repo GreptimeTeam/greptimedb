@@ -349,7 +349,6 @@ async fn serve_docs() -> Html<String> {
 #[derive(Clone)]
 pub struct ApiState {
     pub sql_handler: ServerSqlQueryHandlerRef,
-    pub grpc_handler: ServerGrpcQueryHandlerRef,
     pub script_handler: Option<ScriptHandlerRef>,
 }
 
@@ -428,7 +427,6 @@ impl HttpServer {
         let sql_router = self
             .route_sql(ApiState {
                 sql_handler: self.sql_handler.clone(),
-                grpc_handler: self.grpc_handler.clone(),
                 script_handler: self.script_handler.clone(),
             })
             .finish_api(&mut api)
@@ -604,13 +602,24 @@ mod test {
     use query::parser::PromQuery;
     use session::context::QueryContextRef;
     use tokio::sync::mpsc;
+    use api::v1::greptime_request::Request;
 
     use super::*;
     use crate::error::Error;
+    use crate::query_handler::grpc::{GrpcQueryHandler, ServerGrpcQueryHandlerAdaptor};
     use crate::query_handler::sql::{ServerSqlQueryHandlerAdaptor, SqlQueryHandler};
 
     struct DummyInstance {
         _tx: mpsc::Sender<(String, Vec<u8>)>,
+    }
+
+    #[async_trait]
+    impl GrpcQueryHandler for DummyInstance {
+        type Error = Error;
+
+        async fn do_query(&self, _query: Request, _ctx: QueryContextRef) -> std::result::Result<Output, Self::Error> {
+            unimplemented!()
+        }
     }
 
     #[async_trait]
@@ -652,9 +661,11 @@ mod test {
 
     fn make_test_app(tx: mpsc::Sender<(String, Vec<u8>)>) -> Router {
         let instance = Arc::new(DummyInstance { _tx: tx });
-        let instance = ServerSqlQueryHandlerAdaptor::arc(instance.clone());
-        let server = HttpServer::new(instance.clone(),
-                                     instance,
+        let sql_instance = ServerSqlQueryHandlerAdaptor::arc(instance.clone());
+        let grpc_instance = ServerGrpcQueryHandlerAdaptor::arc(instance);
+
+        let server = HttpServer::new(sql_instance,
+                                     grpc_instance,
                                      HttpOptions::default());
         server.make_app().route(
             "/test/timeout",

@@ -32,9 +32,20 @@ use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::{PrometheusProtocolHandler, PrometheusResponse};
 use session::context::QueryContextRef;
 use tokio::sync::mpsc;
+use api::v1::greptime_request::Request;
+use servers::query_handler::grpc::GrpcQueryHandler;
 
 struct DummyInstance {
     tx: mpsc::Sender<(String, Vec<u8>)>,
+}
+
+#[async_trait]
+impl GrpcQueryHandler for DummyInstance {
+    type Error =Error;
+
+    async fn do_query(&self, _query: Request, _ctx: QueryContextRef) -> std::result::Result<Output, Self::Error> {
+        unimplemented!()
+    }
 }
 
 #[async_trait]
@@ -102,7 +113,9 @@ impl SqlQueryHandler for DummyInstance {
 
 fn make_test_app(tx: mpsc::Sender<(String, Vec<u8>)>) -> Router {
     let instance = Arc::new(DummyInstance { tx });
-    let mut server = HttpServer::new(instance.clone(), HttpOptions::default());
+    let mut server = HttpServer::new(instance.clone(),
+                                     instance.clone(),
+                                     HttpOptions::default());
     server.set_prom_handler(instance);
     server.make_app()
 }

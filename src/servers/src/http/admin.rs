@@ -41,7 +41,7 @@ pub async fn flush(
     // if table name is not present, flush all tables inside schema
     let table_name = params.get("table_name").cloned().unwrap_or_default();
 
-    let region_id: Option<u32> = params.get("region_id").map(|v| v.parse()).transpose().ok().flatten();
+    let region_id: Option<u32> = params.get("region").map(|v| v.parse()).transpose().ok().flatten();
 
     let request = Request::Ddl(DdlRequest {
         expr: Some(Expr::FlushTable(FlushTableExpr {
