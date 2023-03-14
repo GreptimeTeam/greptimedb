@@ -65,5 +65,5 @@ pub async fn flush(
     });
 
     grpc_handler.do_query(request, QueryContext::arc()).await?;
-    Ok((HttpStatusCode::OK, Json::from("hello, world".to_string())))
+    Ok((HttpStatusCode::OK, Json::from("done".to_string())))
 }
