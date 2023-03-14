@@ -269,17 +269,6 @@ pub enum Error {
 
     #[snafu(display("Invalid flush argument: {}", err_msg))]
     InvalidFlushArgument { err_msg: String },
-    // #[snafu(display("Failed to flush table, catalog: {}, schema: {}, table: {}, region: {:?}, source: {}",
-    // catalog, schema, table, region_id, source
-    // ))]
-    // FlushTable {
-    //     catalog: String,
-    //     schema: String,
-    //     table: String,
-    //     region_id: Option<u32>,
-    //     #[snafu(backtrace)]
-    //     source: Error,
-    // },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
