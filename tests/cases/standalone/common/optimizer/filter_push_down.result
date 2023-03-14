@@ -92,15 +92,32 @@ SELECT i1.i,i2.i FROM integers i1 LEFT OUTER JOIN integers i2 ON 1=1 WHERE i1.i=
 
 SELECT * FROM integers WHERE i IN ((SELECT i FROM integers)) ORDER BY i;
 
-Error: 3001(EngineExecuteQuery), This feature is not implemented: Physical plan does not support logical expression (<subquery>)
++---+---+
+| i | j |
++---+---+
+| 1 | 1 |
+| 2 | 2 |
+| 3 | 3 |
++---+---+
 
 SELECT * FROM integers WHERE i NOT IN ((SELECT i FROM integers WHERE i=1)) ORDER BY i;
 
-Error: 3001(EngineExecuteQuery), This feature is not implemented: Physical plan does not support logical expression (<subquery>)
++---+---+
+| i | j |
++---+---+
+| 2 | 2 |
+| 3 | 3 |
+|   | 4 |
++---+---+
 
 SELECT * FROM integers WHERE i IN ((SELECT i FROM integers)) AND i<3 ORDER BY i;
 
-Error: 3001(EngineExecuteQuery), This feature is not implemented: Physical plan does not support logical expression (<subquery>)
++---+---+
+| i | j |
++---+---+
+| 1 | 1 |
+| 2 | 2 |
++---+---+
 
 SELECT i1.i,i2.i FROM integers i1, integers i2 WHERE i IN ((SELECT i FROM integers)) AND i1.i=i2.i ORDER BY 1;
 

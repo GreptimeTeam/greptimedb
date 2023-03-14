@@ -157,7 +157,7 @@ mod test {
                     distinct: false, \
                     top: None, \
                     projection: \
-                    [Wildcard(WildcardAdditionalOptions { opt_exclude: None, opt_except: None, opt_rename: None })], \
+                    [Wildcard(WildcardAdditionalOptions { opt_exclude: None, opt_except: None, opt_rename: None, opt_replace: None })], \
                     into: None, \
                     from: [TableWithJoins { relation: Table { name: ObjectName([Ident { value: \"t1\", quote_style: None }]\
                 ), \
