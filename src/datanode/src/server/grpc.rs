@@ -84,10 +84,16 @@ impl Instance {
     }
 
     pub(crate) async fn handle_flush_table(&self, expr: FlushTableExpr) -> Result<Output> {
+        let table_name = if expr.table_name.trim().is_empty() {
+            None
+        } else {
+            Some(expr.table_name)
+        };
+
         let req = FlushTableRequest {
             catalog_name: expr.catalog_name,
             schema_name: expr.schema_name,
-            table_name: expr.table_name,
+            table_name,
             region_number: expr.region_id,
         };
         self.sql_handler()
@@ -148,7 +154,6 @@ mod tests {
     }
 
     #[test]
-
     fn test_create_column_schema() {
         let column_def = ColumnDef {
             name: "a".to_string(),

@@ -275,7 +275,8 @@ pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router
     .await
     .unwrap();
     let http_server = HttpServer::new(
-        ServerSqlQueryHandlerAdaptor::arc(Arc::new(build_frontend_instance(instance))),
+        ServerSqlQueryHandlerAdaptor::arc(Arc::new(build_frontend_instance(instance.clone()))),
+        ServerGrpcQueryHandlerAdaptor::arc(instance.clone()),
         HttpOptions::default(),
     );
     (http_server.make_app(), guard)
@@ -296,8 +297,10 @@ pub async fn setup_test_http_app_with_frontend(
     )
     .await
     .unwrap();
+    let frontend_ref = Arc::new(frontend);
     let mut http_server = HttpServer::new(
-        ServerSqlQueryHandlerAdaptor::arc(Arc::new(frontend)),
+        ServerSqlQueryHandlerAdaptor::arc(frontend_ref.clone()),
+        ServerGrpcQueryHandlerAdaptor::arc(frontend_ref),
         HttpOptions::default(),
     );
     http_server.set_script_handler(instance.clone());
