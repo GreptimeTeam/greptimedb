@@ -247,7 +247,7 @@ mod tests {
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 false,
             )
-                .with_time_index(true),
+            .with_time_index(true),
             ColumnSchema::new("cpu", ConcreteDataType::float32_datatype(), true),
             ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
         ];

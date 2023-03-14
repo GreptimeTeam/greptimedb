@@ -12,20 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 
+use api::v1::ddl_request::Expr;
+use api::v1::greptime_request::Request;
+use api::v1::{DdlRequest, FlushTableExpr};
 use axum::extract::{Query, RawBody, State};
 use axum::http::StatusCode as HttpStatusCode;
 use axum::Json;
-use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
-use std::collections::HashMap;
-use snafu::OptionExt;
-use api::v1::greptime_request::Request;
-use api::v1::{DdlRequest, FlushTableExpr};
-use api::v1::ddl_request::Expr;
 use session::context::QueryContext;
-use crate::error;
+use snafu::OptionExt;
 
-use crate::error::{Result};
+use crate::error;
+use crate::error::Result;
+use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 
 #[axum_macros::debug_handler]
 pub async fn flush(
@@ -33,15 +33,27 @@ pub async fn flush(
     Query(params): Query<HashMap<String, String>>,
     RawBody(_): RawBody,
 ) -> Result<(HttpStatusCode, Json<String>)> {
-    let catalog_name = params.get("catalog_name").cloned().unwrap_or("greptime".to_string());
-    let schema_name = params.get("schema_name").cloned().context(error::InvalidFlushArgumentSnafu {
-        err_msg: "schema_name is not present",
-    })?;
+    let catalog_name = params
+        .get("catalog_name")
+        .cloned()
+        .unwrap_or("greptime".to_string());
+    let schema_name =
+        params
+            .get("schema_name")
+            .cloned()
+            .context(error::InvalidFlushArgumentSnafu {
+                err_msg: "schema_name is not present",
+            })?;
 
     // if table name is not present, flush all tables inside schema
     let table_name = params.get("table_name").cloned().unwrap_or_default();
 
-    let region_id: Option<u32> = params.get("region").map(|v| v.parse()).transpose().ok().flatten();
+    let region_id: Option<u32> = params
+        .get("region")
+        .map(|v| v.parse())
+        .transpose()
+        .ok()
+        .flatten();
 
     let request = Request::Ddl(DdlRequest {
         expr: Some(Expr::FlushTable(FlushTableExpr {
@@ -49,7 +61,7 @@ pub async fn flush(
             schema_name: schema_name.clone(),
             table_name: table_name.clone(),
             region_id,
-        }))
+        })),
     });
 
     grpc_handler.do_query(request, QueryContext::arc()).await?;

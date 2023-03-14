@@ -17,6 +17,7 @@ use std::sync::Arc;
 use api::prometheus::remote::{
     LabelMatcher, Query, QueryResult, ReadRequest, ReadResponse, WriteRequest,
 };
+use api::v1::greptime_request::Request;
 use async_trait::async_trait;
 use axum::Router;
 use axum_test_helper::TestClient;
@@ -28,12 +29,11 @@ use servers::error::{Error, Result};
 use servers::http::{HttpOptions, HttpServer};
 use servers::prometheus;
 use servers::prometheus::{snappy_compress, Metrics};
+use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::{PrometheusProtocolHandler, PrometheusResponse};
 use session::context::QueryContextRef;
 use tokio::sync::mpsc;
-use api::v1::greptime_request::Request;
-use servers::query_handler::grpc::GrpcQueryHandler;
 
 struct DummyInstance {
     tx: mpsc::Sender<(String, Vec<u8>)>,
@@ -41,9 +41,13 @@ struct DummyInstance {
 
 #[async_trait]
 impl GrpcQueryHandler for DummyInstance {
-    type Error =Error;
+    type Error = Error;
 
-    async fn do_query(&self, _query: Request, _ctx: QueryContextRef) -> std::result::Result<Output, Self::Error> {
+    async fn do_query(
+        &self,
+        _query: Request,
+        _ctx: QueryContextRef,
+    ) -> std::result::Result<Output, Self::Error> {
         unimplemented!()
     }
 }
@@ -113,9 +117,7 @@ impl SqlQueryHandler for DummyInstance {
 
 fn make_test_app(tx: mpsc::Sender<(String, Vec<u8>)>) -> Router {
     let instance = Arc::new(DummyInstance { tx });
-    let mut server = HttpServer::new(instance.clone(),
-                                     instance.clone(),
-                                     HttpOptions::default());
+    let mut server = HttpServer::new(instance.clone(), instance.clone(), HttpOptions::default());
     server.set_prom_handler(instance);
     server.make_app()
 }
