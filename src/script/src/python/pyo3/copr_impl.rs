@@ -24,7 +24,6 @@ use snafu::{ensure, Backtrace, GenerateImplicitData, ResultExt};
 use crate::python::error::{self, NewRecordBatchSnafu, OtherSnafu, Result};
 use crate::python::ffi_types::copr::PyQueryEngine;
 use crate::python::ffi_types::{check_args_anno_real_type, select_from_rb, Coprocessor, PyVector};
-use crate::python::pyo3::builtins::greptime_builtins;
 use crate::python::pyo3::dataframe_impl::PyDataFrame;
 use crate::python::pyo3::utils::{init_cpython_interpreter, pyo3_obj_try_to_typed_val};
 
@@ -56,21 +55,6 @@ impl PyQueryEngine {
         }
     }
     // TODO: put this into greptime module
-}
-
-/// dynamically insert a module into sys.modules so you can use `import MODULE_NAME` in python
-pub(crate) fn insert_module_to_sys_table(
-    py: Python,
-    name: &str,
-    module: &PyModule,
-) -> PyResult<()> {
-    // Import and get sys.modules
-    let sys = PyModule::import(py, "sys")?;
-    let py_modules: &PyDict = sys.getattr("modules")?.downcast()?;
-
-    // Insert module into sys.modules
-    py_modules.set_item(name, module)?;
-    Ok(())
 }
 
 /// Execute a `Coprocessor` with given `RecordBatch`
@@ -124,8 +108,6 @@ coprocessor = copr
             let globals = py_main.dict();
 
             let locals = PyDict::new(py);
-            let greptime = PyModule::new(py, "greptime")?;
-            greptime_builtins(py, greptime)?;
 
             if let Some(engine) = &copr.query_engine {
                 let query_engine = PyQueryEngine::from_weakref(engine.clone());
@@ -146,9 +128,9 @@ coprocessor = copr
                 globals.set_item("__dataframe__", dataframe)?;
             }
 
-            insert_module_to_sys_table(py, "greptime", greptime)?;
             locals.set_item("_args_for_coprocessor", args)?;
             locals.set_item("_kwargs_for_coprocessor", kwargs)?;
+            // `greptime` is already import when init interpreter, so no need to set in here
 
              // TODO(discord9): find a better way to set `dataframe` and `query` in scope/ or set it into module(latter might be impossible and not idomatic even in python)
             // set `dataframe` and `query` in scope/ or set it into module

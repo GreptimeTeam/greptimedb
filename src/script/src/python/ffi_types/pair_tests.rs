@@ -92,7 +92,6 @@ async fn integrated_py_copr_test() {
             _ => unreachable!(),
         };
         let rb = res.iter().next().expect("One and only one recordbatch");
-        println!("Result: {:?}", rb);
         if let Some(expect_result) = case.expect {
             let mut actual_result = HashMap::new();
             for col_sch in rb.schema.column_schemas() {
