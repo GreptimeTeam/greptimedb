@@ -26,7 +26,7 @@ use datatypes::schema::SchemaRef;
 
 use crate::error::{Result, UnsupportedSnafu};
 use crate::metadata::{FilterPushDownType, TableId, TableInfoRef, TableType};
-use crate::requests::{AlterTableRequest, DeleteRequest, InsertRequest};
+use crate::requests::{AlterTableRequest, DeleteRequest, FlushTableRequest, InsertRequest};
 
 pub type AlterContext = anymap::Map<dyn Any + Send + Sync>;
 
@@ -70,10 +70,10 @@ pub trait Table: Send + Sync {
         limit: Option<usize>,
     ) -> Result<PhysicalPlanRef>;
 
-    /// Tests whether the table provider can make use of a filter expression
+    /// Tests whether the table provider can make use of any or all filter expressions
     /// to optimise data retrieval.
-    fn supports_filter_pushdown(&self, _filter: &Expr) -> Result<FilterPushDownType> {
-        Ok(FilterPushDownType::Unsupported)
+    fn supports_filters_pushdown(&self, filters: &[&Expr]) -> Result<Vec<FilterPushDownType>> {
+        Ok(vec![FilterPushDownType::Unsupported; filters.len()])
     }
 
     /// Alter table.
@@ -92,6 +92,11 @@ pub trait Table: Send + Sync {
             operation: "DELETE",
         }
         .fail()?
+    }
+
+    /// Flush table.
+    async fn flush(&self, _request: FlushTableRequest) -> Result<()> {
+        UnsupportedSnafu { operation: "FLUSH" }.fail()?
     }
 
     /// Close the table.

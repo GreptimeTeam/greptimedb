@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use datafusion_expr::TableProviderFilterPushDown;
 pub use datatypes::error::{Error as ConvertError, Result as ConvertResult};
 use datatypes::schema::{ColumnSchema, RawSchema, Schema, SchemaBuilder, SchemaRef};
 use derive_builder::Builder;
@@ -45,6 +46,26 @@ pub enum FilterPushDownType {
     /// filter expression. The Filter plan node containing this expression
     /// will be removed.
     Exact,
+}
+
+impl From<TableProviderFilterPushDown> for FilterPushDownType {
+    fn from(value: TableProviderFilterPushDown) -> Self {
+        match value {
+            TableProviderFilterPushDown::Unsupported => FilterPushDownType::Unsupported,
+            TableProviderFilterPushDown::Inexact => FilterPushDownType::Inexact,
+            TableProviderFilterPushDown::Exact => FilterPushDownType::Exact,
+        }
+    }
+}
+
+impl From<FilterPushDownType> for TableProviderFilterPushDown {
+    fn from(value: FilterPushDownType) -> Self {
+        match value {
+            FilterPushDownType::Unsupported => TableProviderFilterPushDown::Unsupported,
+            FilterPushDownType::Inexact => TableProviderFilterPushDown::Inexact,
+            FilterPushDownType::Exact => TableProviderFilterPushDown::Exact,
+        }
+    }
 }
 
 /// Indicates the type of this table for metadata/catalog purposes.

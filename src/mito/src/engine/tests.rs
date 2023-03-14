@@ -31,13 +31,27 @@ use storage::region::RegionImpl;
 use storage::EngineImpl;
 use store_api::manifest::Manifest;
 use store_api::storage::ReadContext;
-use table::requests::{AddColumnRequest, AlterKind, DeleteRequest, TableOptions};
+use table::requests::{
+    AddColumnRequest, AlterKind, DeleteRequest, FlushTableRequest, TableOptions,
+};
 
 use super::*;
-use crate::table::test_util;
 use crate::table::test_util::{
-    new_insert_request, schema_for_test, TestEngineComponents, TABLE_NAME,
+    self, new_insert_request, schema_for_test, setup_table, TestEngineComponents, TABLE_NAME,
 };
+
+pub fn has_parquet_file(sst_dir: &str) -> bool {
+    for entry in std::fs::read_dir(sst_dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if !path.is_dir() {
+            assert_eq!("parquet", path.extension().unwrap());
+            return true;
+        }
+    }
+
+    false
+}
 
 async fn setup_table_with_column_default_constraint() -> (TempDir, String, TableRef) {
     let table_name = "test_default_constraint";
@@ -751,4 +765,77 @@ async fn test_table_delete_rows() {
 | host4 | 4.0 | 4.0    | 1970-01-01T00:00:00.001 |
 +-------+-----+--------+-------------------------+"
     );
+}
+
+#[tokio::test]
+async fn test_flush_table_all_regions() {
+    let TestEngineComponents {
+        table_ref: table,
+        dir,
+        ..
+    } = test_util::setup_test_engine_and_table().await;
+
+    setup_table(table.clone()).await;
+
+    let table_id = 1u32;
+    let region_name = region_name(table_id, 0);
+
+    let table_info = table.table_info();
+    let table_dir = table_dir(&table_info.catalog_name, &table_info.schema_name, table_id);
+
+    let region_dir = format!(
+        "{}/{}/{}",
+        dir.path().to_str().unwrap(),
+        table_dir,
+        region_name
+    );
+
+    assert!(!has_parquet_file(&region_dir));
+
+    // Trigger flush all region
+    table.flush(FlushTableRequest::default()).await.unwrap();
+
+    // Trigger again, wait for the previous task finished
+    table.flush(FlushTableRequest::default()).await.unwrap();
+
+    assert!(has_parquet_file(&region_dir));
+}
+
+#[tokio::test]
+async fn test_flush_table_with_region_id() {
+    let TestEngineComponents {
+        table_ref: table,
+        dir,
+        ..
+    } = test_util::setup_test_engine_and_table().await;
+
+    setup_table(table.clone()).await;
+
+    let table_id = 1u32;
+    let region_name = region_name(table_id, 0);
+
+    let table_info = table.table_info();
+    let table_dir = table_dir(&table_info.catalog_name, &table_info.schema_name, table_id);
+
+    let region_dir = format!(
+        "{}/{}/{}",
+        dir.path().to_str().unwrap(),
+        table_dir,
+        region_name
+    );
+
+    assert!(!has_parquet_file(&region_dir));
+
+    let req = FlushTableRequest {
+        region_number: Some(0),
+        ..Default::default()
+    };
+
+    // Trigger flush all region
+    table.flush(req.clone()).await.unwrap();
+
+    // Trigger again, wait for the previous task finished
+    table.flush(req).await.unwrap();
+
+    assert!(has_parquet_file(&region_dir));
 }

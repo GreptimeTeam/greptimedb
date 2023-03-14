@@ -25,6 +25,7 @@ use store_api::storage::{
     ColumnId, CreateOptions, EngineContext, OpenOptions, RegionDescriptorBuilder, RegionNumber,
     StorageEngine,
 };
+use table::engine::{region_id, table_dir};
 use table::metadata::{TableInfoBuilder, TableMetaBuilder, TableType};
 use table::requests::CreateTableRequest;
 
@@ -146,7 +147,7 @@ impl<S: StorageEngine> CreateMitoTable<S> {
     /// Creates regions for the table.
     async fn on_create_regions(&mut self) -> Result<Status> {
         let engine_ctx = EngineContext::default();
-        let table_dir = engine::table_dir(
+        let table_dir = table_dir(
             &self.data.request.catalog_name,
             &self.data.request.schema_name,
             self.data.request.id,
@@ -203,7 +204,7 @@ impl<S: StorageEngine> CreateMitoTable<S> {
             }
 
             // We need to create that region.
-            let region_id = engine::region_id(self.data.request.id, *number);
+            let region_id = region_id(self.data.request.id, *number);
             let region_desc = RegionDescriptorBuilder::default()
                 .id(region_id)
                 .name(region_name.clone())
@@ -234,7 +235,7 @@ impl<S: StorageEngine> CreateMitoTable<S> {
 
     /// Writes metadata to the table manifest.
     async fn on_write_table_manifest(&mut self) -> Result<Status> {
-        let table_dir = engine::table_dir(
+        let table_dir = table_dir(
             &self.data.request.catalog_name,
             &self.data.request.schema_name,
             self.data.request.id,

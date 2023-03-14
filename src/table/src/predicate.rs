@@ -18,7 +18,10 @@ use common_time::range::TimestampRange;
 use common_time::Timestamp;
 use datafusion::parquet::file::metadata::RowGroupMetaData;
 use datafusion::physical_optimizer::pruning::PruningPredicate;
+use datafusion_common::ToDFSchema;
 use datafusion_expr::{Between, BinaryExpr, Operator};
+use datafusion_physical_expr::create_physical_expr;
+use datafusion_physical_expr::execution_props::ExecutionProps;
 use datatypes::schema::SchemaRef;
 use datatypes::value::scalar_value_to_timestamp;
 
@@ -46,8 +49,26 @@ impl Predicate {
         row_groups: &[RowGroupMetaData],
     ) -> Vec<bool> {
         let mut res = vec![true; row_groups.len()];
+        let arrow_schema = (*schema.arrow_schema()).clone();
+        let df_schema = arrow_schema.clone().to_dfschema_ref();
+        let df_schema = match df_schema {
+            Ok(x) => x,
+            Err(e) => {
+                warn!("Failed to create Datafusion schema when trying to prune row groups, error: {e}");
+                return res;
+            }
+        };
+
+        let execution_props = &ExecutionProps::new();
         for expr in &self.exprs {
-            match PruningPredicate::try_new(expr.df_expr().clone(), schema.arrow_schema().clone()) {
+            match create_physical_expr(
+                expr.df_expr(),
+                df_schema.as_ref(),
+                arrow_schema.as_ref(),
+                execution_props,
+            )
+            .and_then(|expr| PruningPredicate::try_new(expr, arrow_schema.clone()))
+            {
                 Ok(p) => {
                     let stat = RowGroupPruningStatistics::new(row_groups, &schema);
                     match p.prune(&stat) {

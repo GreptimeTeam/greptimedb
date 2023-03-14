@@ -26,7 +26,7 @@ make install
 cd ..
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/
 export LIBRARY_PATH=$LIBRARY_PATH:/usr/local/lib/
-export PY_INSTALL_PATH=${PWD}/python_arm64_build
+export PY_INSTALL_PATH=$(pwd)/python_arm64_build
 cd Python-3.10.10 && \
 make clean && \
 make distclean && \

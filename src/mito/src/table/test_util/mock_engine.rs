@@ -200,6 +200,10 @@ impl Region for MockRegion {
     fn disk_usage_bytes(&self) -> u64 {
         0
     }
+
+    async fn flush(&self) -> Result<()> {
+        unimplemented!()
+    }
 }
 
 impl MockRegionInner {

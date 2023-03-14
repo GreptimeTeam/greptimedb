@@ -22,7 +22,7 @@ use datafusion::arrow::compute;
 use datafusion::common::{DFSchemaRef, Result as DataFusionResult, Statistics};
 use datafusion::error::DataFusionError;
 use datafusion::execution::context::TaskContext;
-use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNode};
+use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::PhysicalSortExpr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
@@ -43,7 +43,7 @@ use crate::extension_plan::Millisecond;
 /// - bias sample's timestamp by offset
 /// - sort the record batch based on timestamp column
 /// - remove NaN values
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct SeriesNormalize {
     offset: Millisecond,
     time_index_column_name: String,
@@ -51,9 +51,9 @@ pub struct SeriesNormalize {
     input: LogicalPlan,
 }
 
-impl UserDefinedLogicalNode for SeriesNormalize {
-    fn as_any(&self) -> &dyn Any {
-        self as _
+impl UserDefinedLogicalNodeCore for SeriesNormalize {
+    fn name(&self) -> &str {
+        "SeriesNormalize"
     }
 
     fn inputs(&self) -> Vec<&LogicalPlan> {
@@ -76,18 +76,14 @@ impl UserDefinedLogicalNode for SeriesNormalize {
         )
     }
 
-    fn from_template(
-        &self,
-        _exprs: &[datafusion::logical_expr::Expr],
-        inputs: &[LogicalPlan],
-    ) -> Arc<dyn UserDefinedLogicalNode> {
+    fn from_template(&self, _exprs: &[Expr], inputs: &[LogicalPlan]) -> Self {
         assert!(!inputs.is_empty());
 
-        Arc::new(Self {
+        Self {
             offset: self.offset,
             time_index_column_name: self.time_index_column_name.clone(),
             input: inputs[0].clone(),
-        })
+        }
     }
 }
 
