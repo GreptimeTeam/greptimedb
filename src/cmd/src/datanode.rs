@@ -21,7 +21,7 @@ use meta_client::MetaClientOptions;
 use servers::Mode;
 use snafu::ResultExt;
 
-use crate::error::{Error, MissingConfigSnafu, Result, StartDatanodeSnafu};
+use crate::error::{Error, MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu};
 use crate::toml_loader;
 
 pub struct Instance {
@@ -34,8 +34,10 @@ impl Instance {
     }
 
     pub async fn stop(&self) -> Result<()> {
-        // TODO: handle datanode shutdown
-        Ok(())
+        self.datanode
+            .shutdown()
+            .await
+            .context(ShutdownDatanodeSnafu)
     }
 }
 

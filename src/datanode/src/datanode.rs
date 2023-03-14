@@ -241,7 +241,7 @@ impl Datanode {
         self.instance.clone()
     }
 
-    async fn shutdown_instance(&self) -> Result<()> {
+    pub async fn shutdown_instance(&self) -> Result<()> {
         self.instance.shutdown().await
     }
 

@@ -36,7 +36,10 @@ use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
 use snafu::ResultExt;
 
-use crate::error::{Error, IllegalConfigSnafu, Result, StartDatanodeSnafu, StartFrontendSnafu};
+use crate::error::{
+    Error, IllegalConfigSnafu, Result, ShutdownDatanodeSnafu, ShutdownFrontendSnafu,
+    StartDatanodeSnafu, StartFrontendSnafu,
+};
 use crate::frontend::load_frontend_plugins;
 use crate::toml_loader;
 
@@ -152,7 +155,17 @@ impl Instance {
     }
 
     pub async fn stop(&self) -> Result<()> {
-        // TODO: handle standalone shutdown
+        self.frontend
+            .shutdown()
+            .await
+            .context(ShutdownFrontendSnafu)?;
+
+        self.datanode
+            .shutdown_instance()
+            .await
+            .context(ShutdownDatanodeSnafu)?;
+        info!("Datanode instance stopped.");
+
         Ok(())
     }
 }
