@@ -1,42 +1,42 @@
-on:
-  push:
-    branches:
-      - develop
-    paths-ignore:
-      - 'docs/**'
-      - 'config/**'
-      - '**.md'
-      - '.dockerignore'
-      - 'docker/**'
-      - '.gitignore'
+# on:
+#   push:
+#     branches:
+#       - develop
+#     paths-ignore:
+#       - 'docs/**'
+#       - 'config/**'
+#       - '**.md'
+#       - '.dockerignore'
+#       - 'docker/**'
+#       - '.gitignore'
 
-name: Build API docs
+# name: Build API docs
 
-env:
-  RUST_TOOLCHAIN: nightly-2023-02-26
+# env:
+#   RUST_TOOLCHAIN: nightly-2023-02-26
 
-jobs:
-  apidoc:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v3
-    - uses: arduino/setup-protoc@v1
-      with:
-        repo-token: ${{ secrets.GITHUB_TOKEN }}
-    - uses: dtolnay/rust-toolchain@master
-      with:
-        toolchain: ${{ env.RUST_TOOLCHAIN }}
-    - run: cargo doc --workspace --no-deps --document-private-items
-    - run: |
-        cat <<EOF > target/doc/index.html
-        <!DOCTYPE html>
-        <html>
-        <head>
-        <meta http-equiv="refresh" content="0; url='greptime/'" />
-        </head>
-        <body></body></html>
-        EOF
-    - name: Publish dist directory
-      uses: JamesIves/github-pages-deploy-action@v4
-      with:
-        folder: target/doc
+# jobs:
+#   apidoc:
+#     runs-on: ubuntu-latest
+#     steps:
+#     - uses: actions/checkout@v3
+#     - uses: arduino/setup-protoc@v1
+#       with:
+#         repo-token: ${{ secrets.GITHUB_TOKEN }}
+#     - uses: dtolnay/rust-toolchain@master
+#       with:
+#         toolchain: ${{ env.RUST_TOOLCHAIN }}
+#     - run: cargo doc --workspace --no-deps --document-private-items
+#     - run: |
+#         cat <<EOF > target/doc/index.html
+#         <!DOCTYPE html>
+#         <html>
+#         <head>
+#         <meta http-equiv="refresh" content="0; url='greptime/'" />
+#         </head>
+#         <body></body></html>
+#         EOF
+#     - name: Publish dist directory
+#       uses: JamesIves/github-pages-deploy-action@v4
+#       with:
+#         folder: target/doc
