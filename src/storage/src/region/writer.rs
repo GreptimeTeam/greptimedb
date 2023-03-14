@@ -375,6 +375,7 @@ impl WriterInner {
         let next_sequence = committed_sequence + 1;
 
         let version = version_control.current();
+
         let wal_header = WalHeader::with_last_manifest_version(version.manifest_version());
         writer_ctx
             .wal
