@@ -57,13 +57,12 @@ arrow-schema = { version = "34.0", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
-# TODO(LFC): Use official DataFusion, when https://github.com/apache/arrow-datafusion/pull/5542 got merged
-datafusion = { git = "https://github.com/MichaelScofield/arrow-datafusion.git", rev = "d7b3c730049f2561755f9d855f638cb580c38eff" }
-datafusion-common = { git = "https://github.com/MichaelScofield/arrow-datafusion.git", rev = "d7b3c730049f2561755f9d855f638cb580c38eff" }
-datafusion-expr = { git = "https://github.com/MichaelScofield/arrow-datafusion.git", rev = "d7b3c730049f2561755f9d855f638cb580c38eff" }
-datafusion-optimizer = { git = "https://github.com/MichaelScofield/arrow-datafusion.git", rev = "d7b3c730049f2561755f9d855f638cb580c38eff" }
-datafusion-physical-expr = { git = "https://github.com/MichaelScofield/arrow-datafusion.git", rev = "d7b3c730049f2561755f9d855f638cb580c38eff" }
-datafusion-sql = { git = "https://github.com/MichaelScofield/arrow-datafusion.git", rev = "d7b3c730049f2561755f9d855f638cb580c38eff" }
+datafusion = { git = "https://github.com/apache/arrow-datafusion.git", rev = "146a949218ec970784974137277cde3b4e547d0a" }
+datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", rev = "146a949218ec970784974137277cde3b4e547d0a" }
+datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "146a949218ec970784974137277cde3b4e547d0a" }
+datafusion-optimizer = { git = "https://github.com/apache/arrow-datafusion.git", rev = "146a949218ec970784974137277cde3b4e547d0a" }
+datafusion-physical-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "146a949218ec970784974137277cde3b4e547d0a" }
+datafusion-sql = { git = "https://github.com/apache/arrow-datafusion.git", rev = "146a949218ec970784974137277cde3b4e547d0a" }
 futures = "0.3"
 futures-util = "0.3"
 parquet = "34.0"

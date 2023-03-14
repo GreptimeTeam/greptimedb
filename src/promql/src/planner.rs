@@ -957,7 +957,12 @@ impl PromPlanner {
             .tag_columns
             .iter()
             .chain(self.ctx.time_index_column.iter())
-            .map(|col| Ok(DfExpr::Column(Column::from(col))));
+            .map(|col| {
+                Ok(DfExpr::Column(Column::new(
+                    self.ctx.table_name.clone(),
+                    col,
+                )))
+            });
 
         // build computation exprs
         let result_value_columns = self
@@ -1485,7 +1490,7 @@ mod test {
             .unwrap();
 
         let  expected = String::from(
-            "Projection: lhs.tag_0, lhs.timestamp, some_metric.field_0 + some_metric.field_0 AS some_metric.field_0 + some_metric.field_0 [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), some_metric.field_0 + some_metric.field_0:Float64;N]\
+            "Projection: some_metric.tag_0, some_metric.timestamp, some_metric.field_0 + some_metric.field_0 AS some_metric.field_0 + some_metric.field_0 [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), some_metric.field_0 + some_metric.field_0:Float64;N]\
             \n  Inner Join: lhs.tag_0 = some_metric.tag_0, lhs.timestamp = some_metric.timestamp [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n    SubqueryAlias: lhs [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\

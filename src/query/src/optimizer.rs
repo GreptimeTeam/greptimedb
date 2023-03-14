@@ -34,6 +34,8 @@ use datatypes::arrow::datatypes::DataType;
 pub struct TypeConversionRule;
 
 impl OptimizerRule for TypeConversionRule {
+    // TODO(ruihang): fix this warning
+    #[allow(deprecated)]
     fn try_optimize(
         &self,
         plan: &LogicalPlan,

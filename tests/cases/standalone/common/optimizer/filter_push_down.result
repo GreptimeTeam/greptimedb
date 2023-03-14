@@ -121,7 +121,13 @@ SELECT * FROM integers WHERE i IN ((SELECT i FROM integers)) AND i<3 ORDER BY i;
 
 SELECT i1.i,i2.i FROM integers i1, integers i2 WHERE i IN ((SELECT i FROM integers)) AND i1.i=i2.i ORDER BY 1;
 
-Error: 3000(PlanQuery), Error during planning: column reference i is ambiguous
++---+---+
+| i | i |
++---+---+
+| 1 | 1 |
+| 2 | 2 |
+| 3 | 3 |
++---+---+
 
 SELECT * FROM integers i1 WHERE EXISTS(SELECT i FROM integers WHERE i=i1.i) ORDER BY i1.i;
 
