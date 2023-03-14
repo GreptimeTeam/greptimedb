@@ -98,12 +98,19 @@ impl ManifestObjectStore {
         }
     }
 
+    #[inline]
     fn delta_file_path(&self, version: ManifestVersion) -> String {
         format!("{}{}", self.path, delta_file(version))
     }
 
+    #[inline]
     fn checkpoint_file_path(&self, version: ManifestVersion) -> String {
         format!("{}{}", self.path, checkpoint_file(version))
+    }
+
+    #[inline]
+    fn last_checkpoint_path(&self) -> String {
+        format!("{}{}", self.path, LAST_CHECKPOINT_FILE)
     }
 }
 
@@ -209,9 +216,7 @@ impl ManifestLogStorage for ManifestObjectStore {
             path: object.path(),
         })?;
 
-        let last_checkpoint = self
-            .object_store
-            .object(&format!("{}{}", self.path, LAST_CHECKPOINT_FILE));
+        let last_checkpoint = self.object_store.object(&self.last_checkpoint_path());
 
         let checkpoint_metadata = CheckpointMetadata {
             size: bytes.len(),
@@ -238,9 +243,7 @@ impl ManifestLogStorage for ManifestObjectStore {
     }
 
     async fn load_checkpoint(&self) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
-        let last_checkpoint = self
-            .object_store
-            .object(&format!("{}{}", self.path, LAST_CHECKPOINT_FILE));
+        let last_checkpoint = self.object_store.object(&self.last_checkpoint_path());
 
         let checkpoint_exists = last_checkpoint.is_exist().await.context(ReadObjectSnafu {
             path: last_checkpoint.path(),
