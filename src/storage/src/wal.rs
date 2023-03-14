@@ -106,6 +106,9 @@ impl<S: LogStore> Wal<S> {
         mut header: WalHeader,
         payload: Option<&Payload>,
     ) -> Result<Id> {
+        if !cfg!(test) && (self.region_id >> 32) >= 1024 {
+            return Ok(seq);
+        }
         if let Some(p) = payload {
             header.mutation_types = wal::gen_mutation_types(p);
         }
