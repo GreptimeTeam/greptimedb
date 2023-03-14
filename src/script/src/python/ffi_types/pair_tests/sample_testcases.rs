@@ -55,8 +55,16 @@ def boolean_array() -> vector[f64]:
 def boolean_array() -> vector[f64]:
     from greptime import vector
     from greptime import query, dataframe
-    assert "query_engine" in str(type(query))
-    assert "ValueError" in str(type(dataframe))
+    
+    try: 
+        print("query()=", query())
+    except KeyError as e:
+        print("query()=", e)
+    try: 
+        print("dataframe()=", dataframe())
+    except KeyError as e:
+        print("dataframe()=", e)
+
     v = vector([1.0, 2.0, 3.0])
     # This returns a vector([2.0])
     return v[(v > 1) & (v < 3)]

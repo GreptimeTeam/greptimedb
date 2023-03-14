@@ -130,10 +130,7 @@ coprocessor = copr
             if let Some(engine) = &copr.query_engine {
                 let query_engine = PyQueryEngine::from_weakref(engine.clone());
                 let query_engine = PyCell::new(py, query_engine)?;
-                greptime.add("query", query_engine)?;
-            }else{
-                greptime.add("query", PyValueError::new_err(
-                    "No query engine found for coprocessor".to_string()))?;
+                globals.set_item("__query__", query_engine)?;
             }
 
             // TODO(discord9): find out why `dataframe` is not in scope
@@ -146,10 +143,7 @@ coprocessor = copr
                     )
                 )?;
                 let dataframe = PyCell::new(py, dataframe)?;
-                greptime.add("dataframe", dataframe)?;
-            }else{
-                greptime.add("dataframe", PyValueError::new_err(
-                    "No dataframe found for coprocessor".to_string()))?;
+                globals.set_item("__dataframe__", dataframe)?;
             }
 
             insert_module_to_sys_table(py, "greptime", greptime)?;
@@ -242,7 +236,7 @@ def a(cpu, mem, **kwargs):
     from greptime import vector, log2, sum, pow, col, lit, dataframe
     for k, v in kwargs.items():
         print("%s == %s" % (k, v))
-    print(dataframe.select([col("cpu")<lit(0.3)]).collect())
+    print(dataframe().select([col("cpu")<lit(0.3)]).collect())
     return (0.5 < cpu) & ~( cpu >= 0.75)
     "#;
         let cpu_array = Float32Vector::from_slice([0.9f32, 0.8, 0.7, 0.3]);
