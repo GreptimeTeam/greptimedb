@@ -29,10 +29,12 @@ jobs:
             os: ubuntu-2004-16-cores
             file: greptime-linux-amd64
             continue-on-error: false
+            opts: "-F pyo3_backend"
           - arch: aarch64-unknown-linux-gnu
             os: ubuntu-2004-16-cores
             file: greptime-linux-arm64
             continue-on-error: true
+            opts: "-F pyo3_backend"
           - arch: aarch64-apple-darwin
             os: macos-latest
             file: greptime-darwin-arm64
@@ -103,8 +105,6 @@ jobs:
         run: |
           sudo chmod +x ./docker/aarch64/compile-python.sh
           sudo ./docker/aarch64/compile-python.sh
-          export PYO3_CROSS_LIB_DIR=$(pwd)/python_arm64_build/lib
-          echo $PYO3_CROSS_LIB_DIR
 
       - name: Install rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -118,13 +118,18 @@ jobs:
       - name: Run tests
         run: make unit-test integration-test sqlness-test
 
-      - name: Run cargo build with pyo3-backend
-        if: contains(matrix.arch, 'linux') && endsWith(matrix.arch, '-gnu')
-        run: cargo build ${{ matrix.opts }} --profile ${{ env.CARGO_PROFILE }} --locked --target ${{ matrix.arch }} -F pyo3_backend
+      - name: Run cargo build for aarch64-linux
+        if: contains(matrix.arch, 'aarch64-unknown-linux-gnu')
+        run: |
+          # TODO(zyy17): We should make PYO3_CROSS_LIB_DIR configurable.
+          export PYO3_CROSS_LIB_DIR=$(pwd)/python_arm64_build/lib
+          echo "PYO3_CROSS_LIB_DIR: $PYO3_CROSS_LIB_DIR"
+          alias python=python3
+          cargo build --profile ${{ env.CARGO_PROFILE }} --locked --target ${{ matrix.arch }} ${{ matrix.opts }}
 
-      - name: Run cargo build with macos
-        if: contains(matrix.arch, 'darwin')
-        run: cargo build ${{ matrix.opts }} --profile ${{ env.CARGO_PROFILE }} --locked --target ${{ matrix.arch }}
+      - name: Run cargo build
+        if: contains(matrix.arch, 'aarch64-unknown-linux-gnu') == false
+        run: cargo build --profile ${{ env.CARGO_PROFILE }} --locked --target ${{ matrix.arch }} ${{ matrix.opts }}
 
       - name: Calculate checksum and rename binary
         shell: bash
