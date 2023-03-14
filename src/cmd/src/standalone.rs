@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use common_base::Plugins;
+use common_error::prelude::BoxedError;
 use common_telemetry::info;
 use datanode::datanode::{
     CompactionConfig, Datanode, DatanodeOptions, ObjectStoreConfig, ProcedureConfig, WalConfig,
@@ -36,7 +37,9 @@ use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
 use snafu::ResultExt;
 
-use crate::error::{Error, IllegalConfigSnafu, Result, StartDatanodeSnafu, StartFrontendSnafu};
+use crate::error::{
+    Error, IllegalConfigSnafu, Result, StartDatanodeSnafu, StartFrontendSnafu, StopDatanodeSnafu,
+};
 use crate::frontend::load_frontend_plugins;
 use crate::toml_loader;
 
@@ -152,7 +155,17 @@ impl Instance {
     }
 
     pub async fn stop(&self) -> Result<()> {
-        // TODO: handle standalone shutdown
+        self.datanode
+            .shutdown()
+            .await
+            .map_err(BoxedError::new)
+            .context(StopDatanodeSnafu)?;
+        self.frontend
+            .shutdown()
+            .await
+            .map_err(BoxedError::new)
+            .context(StopDatanodeSnafu)?;
+
         Ok(())
     }
 }

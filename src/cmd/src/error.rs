@@ -26,6 +26,12 @@ pub enum Error {
         source: datanode::error::Error,
     },
 
+    #[snafu(display("Failed to stop datanode, source: {}", source))]
+    StopDatanode {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to start frontend, source: {}", source))]
     StartFrontend {
         #[snafu(backtrace)]
@@ -163,6 +169,7 @@ impl ErrorExt for Error {
                 source.status_code()
             }
             Error::SubstraitEncodeLogicalPlan { source } => source.status_code(),
+            Error::StopDatanode { source } => source.status_code(),
         }
     }
 

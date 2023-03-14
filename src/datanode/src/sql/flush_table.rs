@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_query::Output;
 use snafu::{OptionExt, ResultExt};
 use table::engine::TableReference;
@@ -63,6 +64,10 @@ impl SqlHandler {
         table: &str,
         region: Option<u32>,
     ) -> Result<()> {
+        if schema == DEFAULT_SCHEMA_NAME && table == "numbers" {
+            return Ok(());
+        }
+
         let table_ref = TableReference {
             catalog,
             schema,
