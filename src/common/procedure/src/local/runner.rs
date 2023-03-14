@@ -814,7 +814,7 @@ mod tests {
             exec_fn,
         };
 
-        let dir = TempDir::new("exceed_max_retry_later").unwrap();
+        let dir = create_temp_dir("exceed_max_retry_later");
         let meta = exceed_max_retry_later.new_meta(ROOT_ID);
         let object_store = test_util::new_object_store(&dir);
         let procedure_store = ProcedureStore::from(object_store.clone());
