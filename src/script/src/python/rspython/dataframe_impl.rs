@@ -38,7 +38,7 @@ pub(crate) mod data_frame {
     use crate::python::rspython::builtins::greptime_builtin::lit;
     use crate::python::utils::block_on_async;
     #[rspyclass(module = "data_frame", name = "DataFrame")]
-    #[derive(PyPayload, Debug)]
+    #[derive(PyPayload, Debug, Clone)]
     pub struct PyDataFrame {
         pub inner: DfDataFrame,
     }

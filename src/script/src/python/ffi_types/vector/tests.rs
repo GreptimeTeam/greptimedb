@@ -133,7 +133,7 @@ fn get_test_cases() -> Vec<TestCase> {
 }
 #[cfg(feature = "pyo3_backend")]
 fn eval_pyo3(testcase: TestCase, locals: HashMap<String, PyVector>) {
-    init_cpython_interpreter();
+    init_cpython_interpreter().unwrap();
     Python::with_gil(|py| {
         let locals = {
             let locals_dict = PyDict::new(py);

@@ -335,7 +335,7 @@ pub fn exec_coprocessor(script: &str, rb: &Option<RecordBatch>) -> Result<Record
 
 #[cfg_attr(feature = "pyo3_backend", pyo3class(name = "query_engine"))]
 #[rspyclass(module = false, name = "query_engine")]
-#[derive(Debug, PyPayload)]
+#[derive(Debug, PyPayload, Clone)]
 pub struct PyQueryEngine {
     inner: QueryEngineWeakRef,
 }

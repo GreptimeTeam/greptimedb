@@ -379,7 +379,8 @@ import greptime as gt
 
 @copr(args=["number"], returns = ["number"], sql = "select * from numbers")
 def test(number) -> vector[u32]:
-    return query.sql("select * from numbers")[0][0]
+    from greptime import query
+    return query().sql("select * from numbers")[0][0]
 "#;
         let script = script_engine
             .compile(script, CompileContext::default())
@@ -438,7 +439,8 @@ from greptime import col
 
 @copr(args=["number"], returns = ["number"], sql = "select * from numbers")
 def test(number) -> vector[u32]:
-    return dataframe.filter(col("number")==col("number")).collect()[0][0]
+    from greptime import dataframe
+    return dataframe().filter(col("number")==col("number")).collect()[0][0]
 "#;
         let script = script_engine
             .compile(script, CompileContext::default())

@@ -148,9 +148,9 @@ def answer() -> vector[i64]:
             script: r#"
 @copr(args=[], returns = ["number"], sql = "select * from numbers", backend="rspy")
 def answer() -> vector[i64]:
-    from greptime import vector, col, lit
+    from greptime import vector, col, lit, dataframe
     expr_0 = (col("number")<lit(3)) & (col("number")>0)
-    ret = dataframe.select([col("number")]).filter(expr_0).collect()[0][0]
+    ret = dataframe().select([col("number")]).filter(expr_0).collect()[0][0]
     return ret
 "#
             .to_string(),
@@ -161,10 +161,10 @@ def answer() -> vector[i64]:
             script: r#"
 @copr(args=[], returns = ["number"], sql = "select * from numbers", backend="pyo3")
 def answer() -> vector[i64]:
-    from greptime import vector, col, lit
+    from greptime import vector, col, lit, dataframe
     # Bitwise Operator  pred comparison operator
     expr_0 = (col("number")<lit(3)) & (col("number")>0)
-    ret = dataframe.select([col("number")]).filter(expr_0).collect()[0][0]
+    ret = dataframe().select([col("number")]).filter(expr_0).collect()[0][0]
     return ret
 "#
             .to_string(),

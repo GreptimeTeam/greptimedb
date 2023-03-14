@@ -306,12 +306,37 @@ pub(crate) mod greptime_builtin {
         all_to_f64, eval_aggr_fn, from_df_err, try_into_columnar_value, try_into_py_obj,
         type_cast_error,
     };
+    use crate::python::ffi_types::copr::PyQueryEngine;
     use crate::python::ffi_types::vector::val_to_pyobj;
     use crate::python::ffi_types::PyVector;
-    use crate::python::rspython::dataframe_impl::data_frame::{PyExpr, PyExprRef};
+    use crate::python::rspython::dataframe_impl::data_frame::{PyDataFrame, PyExpr, PyExprRef};
     use crate::python::rspython::utils::{
         is_instance, py_obj_to_value, py_obj_to_vec, PyVectorRef,
     };
+
+    /// get `__dataframe__` from globals and return it
+    /// TODO(discord9): this is a terrible hack, we should find a better way to get `__dataframe__`
+    #[pyfunction]
+    fn dataframe(vm: &VirtualMachine) -> PyResult<PyDataFrame> {
+        let df = vm.current_globals().get_item("__dataframe__", vm)?;
+        let df = df
+            .payload::<PyDataFrame>()
+            .ok_or_else(|| vm.new_type_error(format!("object {:?} is not a DataFrame", df)))?;
+        let df = df.clone();
+        Ok(df)
+    }
+
+    /// get `__query__` from globals and return it
+    /// TODO(discord9): this is a terrible hack, we should find a better way to get `__dataframe__`
+    #[pyfunction]
+    fn query(vm: &VirtualMachine) -> PyResult<PyQueryEngine> {
+        let query_engine = vm.current_globals().get_item("__query__", vm)?;
+        let query_engine = query_engine.payload::<PyQueryEngine>().ok_or_else(|| {
+            vm.new_type_error(format!("object {:?} is not a QueryEngine", query_engine))
+        })?;
+        let query_engine = query_engine.clone();
+        Ok(query_engine)
+    }
 
     #[pyfunction]
     fn vector(args: OptionalArg<PyObjectRef>, vm: &VirtualMachine) -> PyResult<PyVector> {

@@ -59,7 +59,11 @@ impl PyQueryEngine {
 }
 
 /// dynamically insert a module into sys.modules so you can use `import MODULE_NAME` in python
-fn insert_module_to_sys_table(py: Python, name: &str, module: &PyModule) -> PyResult<()> {
+pub(crate) fn insert_module_to_sys_table(
+    py: Python,
+    name: &str,
+    module: &PyModule,
+) -> PyResult<()> {
     // Import and get sys.modules
     let sys = PyModule::import(py, "sys")?;
     let py_modules: &PyDict = sys.getattr("modules")?.downcast()?;
@@ -85,7 +89,7 @@ pub(crate) fn pyo3_exec_parsed(
         Vec::new()
     };
     // Just in case cpython is not inited
-    init_cpython_interpreter();
+    init_cpython_interpreter().unwrap();
     Python::with_gil(|py| -> Result<_> {
         let mut cols = (|| -> PyResult<_> {
             let dummy_decorator = "
@@ -235,7 +239,7 @@ mod copr_test {
 @copr(args=["cpu", "mem"], returns=["ref"], backend="pyo3")
 def a(cpu, mem, **kwargs):
     import greptime as gt
-    from greptime import vector, log2, sum, pow, col, lit
+    from greptime import vector, log2, sum, pow, col, lit, dataframe
     for k, v in kwargs.items():
         print("%s == %s" % (k, v))
     print(dataframe.select([col("cpu")<lit(0.3)]).collect())

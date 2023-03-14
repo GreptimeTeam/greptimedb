@@ -30,19 +30,28 @@ use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyTuple};
 use crate::python::ffi_types::utils::{collect_diff_types_string, new_item_field};
 use crate::python::ffi_types::PyVector;
 use crate::python::pyo3::builtins::greptime_builtins;
+use crate::python::pyo3::copr_impl::insert_module_to_sys_table;
 
 /// prevent race condition of init cpython
 static START_PYO3: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
 pub(crate) fn to_py_err(err: impl ToString) -> PyErr {
     PyArrowException::new_err(err.to_string())
 }
-pub(crate) fn init_cpython_interpreter() {
+
+/// init cpython interpreter with `greptime` builtins, if already inited, ignored
+pub(crate) fn init_cpython_interpreter() -> PyResult<()> {
     let mut start = START_PYO3.lock().unwrap();
     if !*start {
         pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| -> PyResult<()> {
+            let greptime = PyModule::new(py, "greptime")?;
+            greptime_builtins(py, greptime)?;
+            insert_module_to_sys_table(py, "greptime", greptime)
+        })?;
         *start = true;
         info!("Started CPython Interpreter");
     }
+    Ok(())
 }
 
 pub fn val_to_py_any(py: Python<'_>, val: Value) -> PyResult<PyObject> {

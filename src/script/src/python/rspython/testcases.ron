@@ -559,11 +559,11 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
         // constant column(int)
         name: "test_data_frame",
         code: r#"
-from greptime import col
+from greptime import col, dataframe
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
 def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
     vector[f32]):
-    ret = dataframe.select([col("cpu"), col("mem")]).collect()[0]
+    ret = dataframe().select([col("cpu"), col("mem")]).collect()[0]
     return ret[0], ret[1]
 "#,
         predicate: ExecIsOk(
@@ -593,11 +593,11 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
         // constant column(int)
         name: "test_data_frame",
         code: r#"
-from greptime import col
+from greptime import col, dataframe
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
 def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
     vector[f32]):
-    ret = dataframe.filter(col("cpu")>col("mem")).collect()[0]
+    ret = dataframe().filter(col("cpu")>col("mem")).collect()[0]
     return ret[0], ret[1]
 "#,
         predicate: ExecIsOk(

@@ -21,15 +21,14 @@ use datatypes::arrow::array::{Array, ArrayRef};
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::vectors::Helper;
-use pyo3::exceptions::{PyRuntimeError, PyValueError, PyIndexError};
+use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::pyclass::CompareOp;
 use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyString, PyType};
 
+use super::utils::val_to_py_any;
 use crate::python::ffi_types::vector::{arrow_rtruediv, wrap_bool_result, wrap_result, PyVector};
 use crate::python::pyo3::utils::{pyo3_obj_try_to_typed_val, to_py_err};
-
-use super::utils::val_to_py_any;
 
 macro_rules! get_con_type {
     ($obj:ident, $($pyty:ident => $con_ty:ident),*$(,)?) => {
@@ -300,14 +299,10 @@ impl PyVector {
             })?;
             let ret = Self::from(ret).into_py(py);
             Ok(ret)
-        } else if let Ok(index) = needle.extract::<isize>(py){
+        } else if let Ok(index) = needle.extract::<isize>(py) {
             // deal with negative index
             let len = self.len() as isize;
-            let index = if index < 0 {
-                len + index
-            } else {
-                index
-            };
+            let index = if index < 0 { len + index } else { index };
             if index < 0 || index >= len {
                 return Err(PyIndexError::new_err(format!(
                     "Index out of bound, index: {index}, len: {len}",
@@ -318,7 +313,9 @@ impl PyVector {
             let val = self.as_vector_ref().get(index as usize);
             val_to_py_any(py, val)
         } else {
-            Err(PyValueError::new_err("{needle:?} is neither a Vector nor a int, can't use for slicing or indexing"))
+            Err(PyValueError::new_err(
+                "{needle:?} is neither a Vector nor a int, can't use for slicing or indexing",
+            ))
         }
     }
 }
@@ -360,7 +357,7 @@ mod test {
     }
     #[test]
     fn test_py_vector_api() {
-        init_cpython_interpreter();
+        init_cpython_interpreter().unwrap();
         Python::with_gil(|py| {
             let module = PyModule::new(py, "gt").unwrap();
             module.add_class::<PyVector>().unwrap();
