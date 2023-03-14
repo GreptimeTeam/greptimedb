@@ -205,7 +205,7 @@ impl Runner {
             return ExecResult::RetryLater;
         }
         self.meta.set_state(ProcedureState::failed(error));
-        return ExecResult::Failed;
+        ExecResult::Failed
     }
 
     async fn execute_once(&mut self, ctx: &Context) -> ExecResult {
@@ -266,7 +266,7 @@ impl Runner {
                 }
 
                 // Write rollback key so we can skip this procedure while recovering procedures.
-                return self.rollback(Arc::new(e)).await;
+                self.rollback(Arc::new(e)).await
             }
         }
     }
