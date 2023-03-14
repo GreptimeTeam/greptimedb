@@ -30,9 +30,39 @@ struct Command {
     subcmd: SubCommand,
 }
 
+pub enum Application {
+    Datanode(datanode::Instance),
+    Frontend(frontend::Instance),
+    Metasrv(metasrv::Instance),
+    Standalone(standalone::Instance),
+    Cli(cli::Instance),
+}
+
+impl Application {
+    async fn run(&mut self) -> Result<()> {
+        match self {
+            Application::Datanode(instance) => instance.run().await,
+            Application::Frontend(instance) => instance.run().await,
+            Application::Metasrv(instance) => instance.run().await,
+            Application::Standalone(instance) => instance.run().await,
+            Application::Cli(instance) => instance.run().await,
+        }
+    }
+
+    async fn stop(&self) -> Result<()> {
+        match self {
+            Application::Datanode(instance) => instance.stop().await,
+            Application::Frontend(instance) => instance.stop().await,
+            Application::Metasrv(instance) => instance.stop().await,
+            Application::Standalone(instance) => instance.stop().await,
+            Application::Cli(instance) => instance.stop().await,
+        }
+    }
+}
+
 impl Command {
-    async fn run(self) -> Result<()> {
-        self.subcmd.run().await
+    async fn build(self) -> Result<Application> {
+        self.subcmd.build().await
     }
 }
 
@@ -51,13 +81,28 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn run(self) -> Result<()> {
+    async fn build(self) -> Result<Application> {
         match self {
-            SubCommand::Datanode(cmd) => cmd.run().await,
-            SubCommand::Frontend(cmd) => cmd.run().await,
-            SubCommand::Metasrv(cmd) => cmd.run().await,
-            SubCommand::Standalone(cmd) => cmd.run().await,
-            SubCommand::Cli(cmd) => cmd.run().await,
+            SubCommand::Datanode(cmd) => {
+                let app = cmd.build().await?;
+                Ok(Application::Datanode(app))
+            }
+            SubCommand::Frontend(cmd) => {
+                let app = cmd.build().await?;
+                Ok(Application::Frontend(app))
+            }
+            SubCommand::Metasrv(cmd) => {
+                let app = cmd.build().await?;
+                Ok(Application::Metasrv(app))
+            }
+            SubCommand::Standalone(cmd) => {
+                let app = cmd.build().await?;
+                Ok(Application::Standalone(app))
+            }
+            SubCommand::Cli(cmd) => {
+                let app = cmd.build().await?;
+                Ok(Application::Cli(app))
+            }
         }
     }
 }
@@ -104,13 +149,18 @@ async fn main() -> Result<()> {
     common_telemetry::init_default_metrics_recorder();
     let _guard = common_telemetry::init_global_logging(app_name, log_dir, log_level, false);
 
+    let mut app = cmd.build().await?;
+
     tokio::select! {
-        result = cmd.run() => {
+        result = app.run() => {
             if let Err(err) = result {
                 error!(err; "Fatal error occurs!");
             }
         }
         _ = tokio::signal::ctrl_c() => {
+            if let Err(err) = app.stop().await {
+                error!(err; "Fatal error occurs!");
+            }
             info!("Goodbye!");
         }
     }
