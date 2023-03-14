@@ -24,7 +24,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use common_telemetry::info;
+use common_telemetry::logging;
 use store_api::manifest::ManifestVersion;
 use store_api::storage::{SchemaRef, SequenceNumber};
 
@@ -248,7 +248,7 @@ impl Version {
             .ssts
             .merge(handles_to_add, edit.files_to_remove.into_iter());
 
-        info!(
+        logging::debug!(
             "After apply edit, region: {}, SST files: {:?}",
             self.metadata.id(),
             merged_ssts
