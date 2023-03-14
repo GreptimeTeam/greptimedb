@@ -23,7 +23,7 @@ use datafusion::arrow::datatypes::{DataType, TimeUnit};
 use datafusion::common::{DFField, DFSchema, DFSchemaRef, Result as DataFusionResult, Statistics};
 use datafusion::error::DataFusionError;
 use datafusion::execution::context::TaskContext;
-use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNode};
+use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::PhysicalSortExpr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
@@ -37,7 +37,7 @@ use futures::Stream;
 
 use crate::extension_plan::Millisecond;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EmptyMetric {
     start: Millisecond,
     end: Millisecond,
@@ -86,9 +86,9 @@ impl EmptyMetric {
     }
 }
 
-impl UserDefinedLogicalNode for EmptyMetric {
-    fn as_any(&self) -> &dyn Any {
-        self as _
+impl UserDefinedLogicalNodeCore for EmptyMetric {
+    fn name(&self) -> &str {
+        "EmptyMetric"
     }
 
     fn inputs(&self) -> Vec<&LogicalPlan> {
@@ -111,12 +111,8 @@ impl UserDefinedLogicalNode for EmptyMetric {
         )
     }
 
-    fn from_template(
-        &self,
-        _exprs: &[datafusion::prelude::Expr],
-        _inputs: &[LogicalPlan],
-    ) -> Arc<dyn UserDefinedLogicalNode> {
-        Arc::new(self.clone())
+    fn from_template(&self, _expr: &[Expr], _inputs: &[LogicalPlan]) -> Self {
+        self.clone()
     }
 }
 

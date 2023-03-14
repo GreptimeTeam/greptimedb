@@ -70,8 +70,11 @@ impl Table for MemTableWrapper {
         self.inner.scan(projection, filters, limit).await
     }
 
-    fn supports_filter_pushdown(&self, _filter: &Expr) -> table::Result<FilterPushDownType> {
-        Ok(FilterPushDownType::Exact)
+    fn supports_filters_pushdown(
+        &self,
+        filters: &[&Expr],
+    ) -> table::Result<Vec<FilterPushDownType>> {
+        Ok(vec![FilterPushDownType::Exact; filters.len()])
     }
 }
 

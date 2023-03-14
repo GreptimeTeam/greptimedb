@@ -70,10 +70,10 @@ pub trait Table: Send + Sync {
         limit: Option<usize>,
     ) -> Result<PhysicalPlanRef>;
 
-    /// Tests whether the table provider can make use of a filter expression
+    /// Tests whether the table provider can make use of any or all filter expressions
     /// to optimise data retrieval.
-    fn supports_filter_pushdown(&self, _filter: &Expr) -> Result<FilterPushDownType> {
-        Ok(FilterPushDownType::Unsupported)
+    fn supports_filters_pushdown(&self, filters: &[&Expr]) -> Result<Vec<FilterPushDownType>> {
+        Ok(vec![FilterPushDownType::Unsupported; filters.len()])
     }
 
     /// Alter table.
