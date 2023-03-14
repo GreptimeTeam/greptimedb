@@ -1,0 +1,11 @@
+# WAL options.
+[wal]
+# WAL data directory.
+dir = "/tmp/greptimedb/wal"
+
+# Storage options.
+[storage]
+# Storage type.
+type = "File"
+# Data directory, "/tmp/greptimedb/data" by default.
+data_dir = "/tmp/greptimedb/data"
