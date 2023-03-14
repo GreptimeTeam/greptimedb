@@ -198,7 +198,7 @@ impl Runner {
         }
     }
 
-    async fn rollback(&mut self, error:Arc<Error>)->ExecResult {
+    async fn rollback(&mut self, error: Arc<Error>) -> ExecResult {
         if let Err(e) = self.rollback_procedure().await {
             self.rolling_back = true;
             self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
@@ -212,7 +212,8 @@ impl Runner {
         // if rolling_back, there is no need to execute again.
         if self.rolling_back {
             // We can definitely get the previous error here.
-            let err= self.meta.state().error().unwrap();
+            let state = self.meta.state();
+            let err = state.error().unwrap();
             return self.rollback(err.clone()).await;
         }
         match self.procedure.execute(ctx).await {
