@@ -78,15 +78,18 @@ impl TableProvider for DfTableProviderAdapter {
         Ok(Arc::new(DfPhysicalPlanAdapter(inner)))
     }
 
-    fn supports_filter_pushdown(&self, filter: &DfExpr) -> DfResult<DfTableProviderFilterPushDown> {
-        let p = self
+    fn supports_filters_pushdown(
+        &self,
+        filters: &[&DfExpr],
+    ) -> DfResult<Vec<DfTableProviderFilterPushDown>> {
+        let filters = filters
+            .iter()
+            .map(|&x| x.clone().into())
+            .collect::<Vec<_>>();
+        Ok(self
             .table
-            .supports_filter_pushdown(&filter.clone().into())?;
-        match p {
-            FilterPushDownType::Unsupported => Ok(DfTableProviderFilterPushDown::Unsupported),
-            FilterPushDownType::Inexact => Ok(DfTableProviderFilterPushDown::Inexact),
-            FilterPushDownType::Exact => Ok(DfTableProviderFilterPushDown::Exact),
-        }
+            .supports_filters_pushdown(&filters.iter().collect::<Vec<_>>())
+            .map(|v| v.into_iter().map(Into::into).collect::<Vec<_>>())?)
     }
 }
 
@@ -155,16 +158,11 @@ impl Table for TableAdapter {
         Ok(Arc::new(PhysicalPlanAdapter::new(schema, execution_plan)))
     }
 
-    fn supports_filter_pushdown(&self, filter: &Expr) -> Result<FilterPushDownType> {
-        match self
-            .table_provider
-            .supports_filter_pushdown(filter.df_expr())
-            .context(error::DatafusionSnafu)?
-        {
-            DfTableProviderFilterPushDown::Unsupported => Ok(FilterPushDownType::Unsupported),
-            DfTableProviderFilterPushDown::Inexact => Ok(FilterPushDownType::Inexact),
-            DfTableProviderFilterPushDown::Exact => Ok(FilterPushDownType::Exact),
-        }
+    fn supports_filters_pushdown(&self, filters: &[&Expr]) -> Result<Vec<FilterPushDownType>> {
+        self.table_provider
+            .supports_filters_pushdown(&filters.iter().map(|x| x.df_expr()).collect::<Vec<_>>())
+            .context(error::DatafusionSnafu)
+            .map(|v| v.into_iter().map(Into::into).collect::<Vec<_>>())
     }
 }
 

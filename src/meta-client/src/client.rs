@@ -32,9 +32,10 @@ use crate::error::Result;
 use crate::rpc::lock::{LockRequest, LockResponse, UnlockRequest};
 use crate::rpc::router::DeleteRequest;
 use crate::rpc::{
-    BatchPutRequest, BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, CreateRequest,
-    DeleteRangeRequest, DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest,
-    PutResponse, RangeRequest, RangeResponse, RouteRequest, RouteResponse,
+    BatchGetRequest, BatchGetResponse, BatchPutRequest, BatchPutResponse, CompareAndPutRequest,
+    CompareAndPutResponse, CreateRequest, DeleteRangeRequest, DeleteRangeResponse,
+    MoveValueRequest, MoveValueResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
+    RouteRequest, RouteResponse,
 };
 
 pub type Id = (u64, u64);
@@ -243,6 +244,11 @@ impl MetaClient {
     /// Put puts the given key into the key-value store.
     pub async fn put(&self, req: PutRequest) -> Result<PutResponse> {
         self.store_client()?.put(req.into()).await?.try_into()
+    }
+
+    /// BatchGet atomically get values by the given keys from the key-value store.
+    pub async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse> {
+        self.store_client()?.batch_get(req.into()).await?.try_into()
     }
 
     /// BatchPut atomically puts the given keys into the key-value store.
@@ -711,6 +717,26 @@ mod tests {
         let res = tc.client.range(req).await;
         let kvs = res.unwrap().take_kvs();
         assert_eq!(2, kvs.len());
+    }
+
+    #[tokio::test]
+    async fn test_batch_get() {
+        let tc = new_client("test_batch_get").await;
+        tc.gen_data().await;
+
+        let req = BatchGetRequest::default()
+            .add_key(tc.key("key-1"))
+            .add_key(tc.key("key-2"));
+        let mut res = tc.client.batch_get(req).await.unwrap();
+
+        assert_eq!(2, res.take_kvs().len());
+
+        let req = BatchGetRequest::default()
+            .add_key(tc.key("key-1"))
+            .add_key(tc.key("key-222"));
+        let mut res = tc.client.batch_get(req).await.unwrap();
+
+        assert_eq!(1, res.take_kvs().len());
     }
 
     #[tokio::test]

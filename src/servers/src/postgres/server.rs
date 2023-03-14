@@ -97,6 +97,8 @@ impl PostgresServer {
     }
 }
 
+pub const POSTGRES_SERVER: &str = "POSTGRES_SERVER";
+
 #[async_trait]
 impl Server for PostgresServer {
     async fn shutdown(&self) -> Result<()> {
@@ -117,5 +119,9 @@ impl Server for PostgresServer {
 
         self.base_server.start_with(join_handle).await?;
         Ok(addr)
+    }
+
+    fn name(&self) -> &str {
+        POSTGRES_SERVER
     }
 }

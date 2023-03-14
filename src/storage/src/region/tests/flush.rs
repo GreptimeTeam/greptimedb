@@ -16,9 +16,9 @@
 
 use std::sync::Arc;
 
+use common_test_util::temp_dir::create_temp_dir;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
-use store_api::storage::{OpenOptions, WriteResponse};
-use tempdir::TempDir;
+use store_api::storage::{OpenOptions, Region, WriteResponse};
 
 use crate::engine;
 use crate::flush::FlushStrategyRef;
@@ -94,13 +94,17 @@ impl FlushTester {
     async fn wait_flush_done(&self) {
         self.base().region.wait_flush_done().await.unwrap();
     }
+
+    async fn flush(&self) {
+        self.base().region.flush().await.unwrap();
+    }
 }
 
 #[tokio::test]
 async fn test_flush_and_stall() {
     common_telemetry::init_default_ut_logging();
 
-    let dir = TempDir::new("flush-stall").unwrap();
+    let dir = create_temp_dir("flush-stall");
     let store_dir = dir.path().to_str().unwrap();
 
     let flush_switch = Arc::new(FlushSwitch::default());
@@ -125,8 +129,32 @@ async fn test_flush_and_stall() {
 }
 
 #[tokio::test]
+async fn test_manual_flush() {
+    common_telemetry::init_default_ut_logging();
+    let dir = create_temp_dir("manual_flush");
+
+    let store_dir = dir.path().to_str().unwrap();
+
+    let flush_switch = Arc::new(FlushSwitch::default());
+    let tester = FlushTester::new(store_dir, flush_switch.clone()).await;
+
+    let data = [(1000, Some(100))];
+    // Put one element so we have content to flush.
+    tester.put(&data).await;
+
+    // No parquet file should be flushed.
+    let sst_dir = format!("{}/{}", store_dir, engine::region_sst_dir("", REGION_NAME));
+    assert!(!has_parquet_file(&sst_dir));
+
+    tester.flush().await;
+    tester.wait_flush_done().await;
+
+    assert!(has_parquet_file(&sst_dir));
+}
+
+#[tokio::test]
 async fn test_flush_empty() {
-    let dir = TempDir::new("flush-empty").unwrap();
+    let dir = create_temp_dir("flush-empty");
     let store_dir = dir.path().to_str().unwrap();
 
     let flush_switch = Arc::new(FlushSwitch::default());
@@ -159,7 +187,7 @@ async fn test_flush_empty() {
 async fn test_read_after_flush() {
     common_telemetry::init_default_ut_logging();
 
-    let dir = TempDir::new("read-flush").unwrap();
+    let dir = create_temp_dir("read-flush");
     let store_dir = dir.path().to_str().unwrap();
 
     let flush_switch = Arc::new(FlushSwitch::default());
@@ -192,7 +220,7 @@ async fn test_read_after_flush() {
 
 #[tokio::test]
 async fn test_merge_read_after_flush() {
-    let dir = TempDir::new("merge-read-flush").unwrap();
+    let dir = create_temp_dir("merge-read-flush");
     let store_dir = dir.path().to_str().unwrap();
 
     let flush_switch = Arc::new(FlushSwitch::default());

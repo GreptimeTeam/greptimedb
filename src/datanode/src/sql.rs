@@ -13,29 +13,33 @@
 // limitations under the License.
 
 use catalog::CatalogManagerRef;
+use common_error::prelude::BoxedError;
 use common_procedure::ProcedureManagerRef;
 use common_query::Output;
 use common_telemetry::error;
 use query::query_engine::QueryEngineRef;
-use query::sql::{describe_table, explain, show_databases, show_tables};
+use query::sql::{describe_table, show_databases, show_tables};
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use sql::statements::delete::Delete;
 use sql::statements::describe::DescribeTable;
-use sql::statements::explain::Explain;
 use sql::statements::show::{ShowDatabases, ShowTables};
 use table::engine::{EngineContext, TableEngineProcedureRef, TableEngineRef, TableReference};
 use table::requests::*;
 use table::TableRef;
 
-use crate::error::{self, ExecuteSqlSnafu, GetTableSnafu, Result, TableNotFoundSnafu};
+use crate::error::{
+    self, CloseTableEngineSnafu, ExecuteSqlSnafu, GetTableSnafu, Result, TableNotFoundSnafu,
+};
 use crate::instance::sql::table_idents_to_full_name;
 
 mod alter;
 mod copy_table;
+mod copy_table_from;
 mod create;
 mod delete;
 mod drop_table;
+mod flush_table;
 pub(crate) mod insert;
 
 #[derive(Debug)]
@@ -45,12 +49,13 @@ pub enum SqlRequest {
     CreateDatabase(CreateDatabaseRequest),
     Alter(AlterTableRequest),
     DropTable(DropTableRequest),
+    FlushTable(FlushTableRequest),
     ShowDatabases(ShowDatabases),
     ShowTables(ShowTables),
     DescribeTable(DescribeTable),
-    Explain(Box<Explain>),
     Delete(Delete),
     CopyTable(CopyTableRequest),
+    CopyTableFrom(CopyTableFromRequest),
 }
 
 // Handler to execute SQL except query
@@ -92,6 +97,7 @@ impl SqlHandler {
             SqlRequest::DropTable(req) => self.drop_table(req).await,
             SqlRequest::Delete(req) => self.delete(query_ctx.clone(), req).await,
             SqlRequest::CopyTable(req) => self.copy_table(req).await,
+            SqlRequest::CopyTableFrom(req) => self.copy_table_from(req).await,
             SqlRequest::ShowDatabases(req) => {
                 show_databases(req, self.catalog_manager.clone()).context(ExecuteSqlSnafu)
             }
@@ -112,9 +118,7 @@ impl SqlHandler {
                     })?;
                 describe_table(table).context(ExecuteSqlSnafu)
             }
-            SqlRequest::Explain(req) => explain(req, self.query_engine.clone(), query_ctx.clone())
-                .await
-                .context(ExecuteSqlSnafu),
+            SqlRequest::FlushTable(req) => self.flush_table(req).await,
         };
         if let Err(e) = &result {
             error!(e; "{query_ctx}");
@@ -136,6 +140,14 @@ impl SqlHandler {
     pub fn table_engine(&self) -> TableEngineRef {
         self.table_engine.clone()
     }
+
+    pub async fn close(&self) -> Result<()> {
+        self.table_engine
+            .close()
+            .await
+            .map_err(BoxedError::new)
+            .context(CloseTableEngineSnafu)
+    }
 }
 
 #[cfg(test)]
@@ -147,6 +159,7 @@ mod tests {
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_query::logical_plan::Expr;
     use common_query::physical_plan::PhysicalPlanRef;
+    use common_test_util::temp_dir::create_temp_dir;
     use common_time::timestamp::Timestamp;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
@@ -167,7 +180,6 @@ mod tests {
     use table::error::Result as TableResult;
     use table::metadata::TableInfoRef;
     use table::Table;
-    use tempdir::TempDir;
 
     use super::*;
     use crate::error::Error;
@@ -218,7 +230,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_statement_to_request() {
-        let dir = TempDir::new("setup_test_engine_and_table").unwrap();
+        let dir = create_temp_dir("setup_test_engine_and_table");
         let store_dir = dir.path().to_string_lossy();
         let accessor = Builder::default().root(&store_dir).build().unwrap();
         let object_store = ObjectStore::new(accessor).finish();

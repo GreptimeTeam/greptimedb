@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use datatypes::scalars::ScalarVector;
-use datatypes::vectors::{BooleanVector, Float64Vector, VectorRef};
+use datatypes::vectors::{BooleanVector, Float64Vector, Int64Vector, VectorRef};
 #[cfg(feature = "pyo3_backend")]
 use pyo3::{types::PyDict, Python};
 use rustpython_compiler::Mode;
@@ -59,11 +59,13 @@ fn sample_py_vector() -> HashMap<String, VectorRef> {
     let b2 = Arc::new(BooleanVector::from_slice(&[false, true, false, true])) as VectorRef;
     let f1 = Arc::new(Float64Vector::from_slice([0.0f64, 2.0, 10.0, 42.0])) as VectorRef;
     let f2 = Arc::new(Float64Vector::from_slice([-0.1f64, -42.0, 2., 7.0])) as VectorRef;
+    let f3 = Arc::new(Float64Vector::from_slice([1.0f64, -42.0, 2., 7.0])) as VectorRef;
     HashMap::from([
         ("b1".to_owned(), b1),
         ("b2".to_owned(), b2),
         ("f1".to_owned(), f1),
         ("f2".to_owned(), f2),
+        ("f3".to_owned(), f3),
     ])
 }
 
@@ -104,6 +106,27 @@ fn get_test_cases() -> Vec<TestCase> {
                 10. / 2.,
                 42. / 7.,
             ])) as VectorRef,
+        },
+        TestCase {
+            eval: "f2.__rtruediv__(f1)".to_string(),
+            result: Arc::new(Float64Vector::from_slice([
+                0.0 / -0.1f64,
+                2. / -42.,
+                10. / 2.,
+                42. / 7.,
+            ])) as VectorRef,
+        },
+        TestCase {
+            eval: "f2.__floordiv__(f3)".to_string(),
+            result: Arc::new(Int64Vector::from_slice([0, 1, 1, 1])) as VectorRef,
+        },
+        TestCase {
+            eval: "f3.__rfloordiv__(f2)".to_string(),
+            result: Arc::new(Int64Vector::from_slice([0, 1, 1, 1])) as VectorRef,
+        },
+        TestCase {
+            eval: "f3.filter(b1)".to_string(),
+            result: Arc::new(Float64Vector::from_slice([2.0, 7.0])) as VectorRef,
         },
     ];
     Vec::from(testcases)

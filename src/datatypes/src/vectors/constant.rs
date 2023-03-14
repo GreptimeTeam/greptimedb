@@ -16,14 +16,14 @@ use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef};
-use snafu::ResultExt;
+use arrow::array::{Array, ArrayRef, UInt32Array};
+use snafu::{ensure, ResultExt};
 
 use crate::data_type::ConcreteDataType;
-use crate::error::{Result, SerializeSnafu};
+use crate::error::{self, Result, SerializeSnafu};
 use crate::serialize::Serializable;
 use crate::value::{Value, ValueRef};
-use crate::vectors::{BooleanVector, Helper, Validity, Vector, VectorRef};
+use crate::vectors::{BooleanVector, Helper, UInt32Vector, Validity, Vector, VectorRef};
 
 #[derive(Clone)]
 pub struct ConstantVector {
@@ -81,6 +81,35 @@ impl ConstantVector {
         Ok(Arc::new(ConstantVector::new(
             self.inner().cast(to_type)?,
             self.length,
+        )))
+    }
+
+    pub(crate) fn take_vector(&self, indices: &UInt32Vector) -> Result<VectorRef> {
+        if indices.is_empty() {
+            return Ok(self.slice(0, 0));
+        }
+        ensure!(
+            indices.null_count() == 0,
+            error::UnsupportedOperationSnafu {
+                op: "taking a null index",
+                vector_type: self.vector_type_name(),
+            }
+        );
+
+        let len = self.len();
+        let arr = indices.to_arrow_array();
+        let indices_arr = arr.as_any().downcast_ref::<UInt32Array>().unwrap();
+        if !arrow::compute::min_boolean(
+            &arrow::compute::lt_scalar(indices_arr, len as u32).unwrap(),
+        )
+        .unwrap()
+        {
+            panic!("Array index out of bounds, cannot take index out of the length of the array: {len}");
+        }
+
+        Ok(Arc::new(ConstantVector::new(
+            self.inner().clone(),
+            indices.len(),
         )))
     }
 }

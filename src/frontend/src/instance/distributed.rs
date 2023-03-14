@@ -19,15 +19,14 @@ use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::{
-    column_def, AlterExpr, CreateDatabaseExpr, CreateTableExpr, DropTableExpr, InsertRequest,
-    TableId,
+    column_def, AlterExpr, CreateDatabaseExpr, CreateTableExpr, DropTableExpr, FlushTableExpr,
+    InsertRequest, TableId,
 };
 use async_trait::async_trait;
 use catalog::helper::{SchemaKey, SchemaValue};
 use catalog::{CatalogManager, DeregisterTableRequest, RegisterTableRequest};
 use chrono::DateTime;
 use client::Database;
-use common_base::Plugins;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::format_full_table_name;
 use common_error::prelude::BoxedError;
@@ -35,18 +34,18 @@ use common_query::Output;
 use common_telemetry::{debug, info};
 use datanode::instance::sql::table_idents_to_full_name;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{RawSchema, Schema};
+use datatypes::schema::RawSchema;
 use meta_client::client::MetaClient;
 use meta_client::rpc::router::DeleteRequest as MetaDeleteRequest;
 use meta_client::rpc::{
     CompareAndPutRequest, CreateRequest as MetaCreateRequest, Partition as MetaPartition,
-    RouteResponse, TableName,
+    RouteRequest, RouteResponse, TableName,
 };
 use partition::partition::{PartitionBound, PartitionDef};
-use query::parser::{PromQuery, QueryStatement};
-use query::sql::{describe_table, explain, show_databases, show_tables};
-use query::{QueryEngineFactory, QueryEngineRef};
-use servers::query_handler::sql::SqlQueryHandler;
+use query::error::QueryExecutionSnafu;
+use query::parser::QueryStatement;
+use query::query_engine::StatementHandler;
+use query::sql::{describe_table, show_databases, show_tables};
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::Value as SqlValue;
@@ -61,12 +60,12 @@ use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogEntrySerdeSnafu, CatalogSnafu, ColumnDataTypeSnafu,
-    DeserializePartitionSnafu, ParseSqlSnafu, PrimaryKeyNotFoundSnafu, RequestDatanodeSnafu,
-    RequestMetaSnafu, Result, SchemaExistsSnafu, StartMetaClientSnafu, TableAlreadyExistSnafu,
-    TableNotFoundSnafu, TableSnafu, ToTableInsertRequestSnafu, UnrecognizedTableOptionSnafu,
+    DeserializePartitionSnafu, NotSupportedSnafu, ParseSqlSnafu, PrimaryKeyNotFoundSnafu,
+    RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaExistsSnafu, StartMetaClientSnafu,
+    TableAlreadyExistSnafu, TableNotFoundSnafu, TableSnafu, ToTableInsertRequestSnafu,
+    UnrecognizedTableOptionSnafu,
 };
 use crate::expr_factory;
-use crate::instance::parse_stmt;
 use crate::sql::insert_to_request;
 use crate::table::DistTable;
 
@@ -75,7 +74,6 @@ pub(crate) struct DistInstance {
     meta_client: Arc<MetaClient>,
     catalog_manager: Arc<FrontendCatalogManager>,
     datanode_clients: Arc<DatanodeClients>,
-    query_engine: QueryEngineRef,
 }
 
 impl DistInstance {
@@ -83,16 +81,11 @@ impl DistInstance {
         meta_client: Arc<MetaClient>,
         catalog_manager: Arc<FrontendCatalogManager>,
         datanode_clients: Arc<DatanodeClients>,
-        plugins: Arc<Plugins>,
     ) -> Self {
-        let query_engine =
-            QueryEngineFactory::new_with_plugins(catalog_manager.clone(), plugins.clone())
-                .query_engine();
         Self {
             meta_client,
             catalog_manager,
             datanode_clients,
-            query_engine,
         }
     }
 
@@ -266,20 +259,67 @@ impl DistInstance {
         Ok(Output::AffectedRows(1))
     }
 
+    async fn flush_table(&self, table_name: TableName, region_id: Option<u32>) -> Result<Output> {
+        let _ = self
+            .catalog_manager
+            .table(
+                &table_name.catalog_name,
+                &table_name.schema_name,
+                &table_name.table_name,
+            )
+            .await
+            .context(CatalogSnafu)?
+            .with_context(|| TableNotFoundSnafu {
+                table_name: table_name.to_string(),
+            })?;
+
+        let route_response = self
+            .meta_client
+            .route(RouteRequest {
+                table_names: vec![table_name.clone()],
+            })
+            .await
+            .context(RequestMetaSnafu)?;
+
+        let expr = FlushTableExpr {
+            catalog_name: table_name.catalog_name.clone(),
+            schema_name: table_name.schema_name.clone(),
+            table_name: table_name.table_name.clone(),
+            region_id,
+        };
+
+        for table_route in &route_response.table_routes {
+            let should_send_rpc = table_route.region_routes.iter().any(|route| {
+                if let Some(region_id) = region_id {
+                    region_id == route.region.id as u32
+                } else {
+                    true
+                }
+            });
+
+            if !should_send_rpc {
+                continue;
+            }
+            for datanode in table_route.find_leaders() {
+                debug!("Flushing table {table_name} on Datanode {datanode:?}");
+
+                let client = self.datanode_clients.get_client(&datanode).await;
+                let client = Database::new(&expr.catalog_name, &expr.schema_name, client);
+                client
+                    .flush_table(expr.clone())
+                    .await
+                    .context(RequestDatanodeSnafu)?;
+            }
+        }
+        Ok(Output::AffectedRows(0))
+    }
+
     async fn handle_statement(
         &self,
         stmt: Statement,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
         match stmt {
-            Statement::Query(_) => {
-                let plan = self
-                    .query_engine
-                    .statement_to_plan(QueryStatement::Sql(stmt), query_ctx)
-                    .await
-                    .context(error::ExecuteStatementSnafu {})?;
-                self.query_engine.execute(&plan).await
-            }
             Statement::CreateDatabase(stmt) => {
                 let expr = CreateDatabaseExpr {
                     database_name: stmt.name.to_string(),
@@ -321,9 +361,6 @@ impl DistInstance {
                     })?;
                 describe_table(table)
             }
-            Statement::Explain(stmt) => {
-                explain(Box::new(stmt), self.query_engine.clone(), query_ctx).await
-            }
             Statement::Insert(insert) => {
                 let (catalog, schema, table) =
                     table_idents_to_full_name(insert.table_name(), query_ctx.clone())
@@ -351,29 +388,6 @@ impl DistInstance {
             }
         }
         .context(error::ExecuteStatementSnafu)
-    }
-
-    async fn handle_sql(&self, sql: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
-        let stmts = parse_stmt(sql);
-        match stmts {
-            Ok(stmts) => {
-                let mut results = Vec::with_capacity(stmts.len());
-
-                for stmt in stmts {
-                    let result = self.handle_statement(stmt, query_ctx.clone()).await;
-                    let is_err = result.is_err();
-
-                    results.push(result);
-
-                    if is_err {
-                        break;
-                    }
-                }
-
-                results
-            }
-            Err(e) => vec![Err(e)],
-        }
     }
 
     /// Handles distributed database creation
@@ -519,50 +533,21 @@ impl DistInstance {
 }
 
 #[async_trait]
-impl SqlQueryHandler for DistInstance {
-    type Error = error::Error;
-
-    async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
-        self.handle_sql(query, query_ctx).await
-    }
-
-    async fn do_promql_query(
+impl StatementHandler for DistInstance {
+    async fn handle_statement(
         &self,
-        _: &PromQuery,
-        _: QueryContextRef,
-    ) -> Vec<std::result::Result<Output, Self::Error>> {
-        unimplemented!()
-    }
-
-    async fn do_statement_query(
-        &self,
-        stmt: Statement,
+        stmt: QueryStatement,
         query_ctx: QueryContextRef,
-    ) -> Result<Output> {
-        self.handle_statement(stmt, query_ctx).await
-    }
-
-    async fn do_describe(
-        &self,
-        stmt: Statement,
-        query_ctx: QueryContextRef,
-    ) -> Result<Option<Schema>> {
-        if let Statement::Query(_) = stmt {
-            self.query_engine
-                .describe(QueryStatement::Sql(stmt), query_ctx)
-                .await
-                .map(Some)
-                .context(error::DescribeStatementSnafu)
-        } else {
-            Ok(None)
+    ) -> query::error::Result<Output> {
+        match stmt {
+            QueryStatement::Sql(stmt) => self.handle_statement(stmt, query_ctx).await,
+            QueryStatement::Promql(_) => NotSupportedSnafu {
+                feat: "distributed execute promql".to_string(),
+            }
+            .fail(),
         }
-    }
-
-    fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
-        self.catalog_manager
-            .schema(catalog, schema)
-            .map(|s| s.is_some())
-            .context(CatalogSnafu)
+        .map_err(BoxedError::new)
+        .context(QueryExecutionSnafu)
     }
 }
 
@@ -721,14 +706,15 @@ fn find_partition_columns(
 #[cfg(test)]
 mod test {
     use itertools::Itertools;
-    use servers::query_handler::sql::SqlQueryHandlerRef;
+    use query::parser::QueryLanguageParser;
+    use query::query_engine::StatementHandlerRef;
     use session::context::QueryContext;
     use sql::dialect::GenericDialect;
     use sql::parser::ParserContext;
     use sql::statements::statement::Statement;
 
     use super::*;
-    use crate::instance::standalone::StandaloneSqlQueryHandler;
+    use crate::instance::parse_stmt;
 
     #[tokio::test]
     async fn test_parse_partitions() {
@@ -771,28 +757,28 @@ ENGINE=mito",
         }
     }
 
+    async fn handle_sql(instance: &Arc<DistInstance>, sql: &str) -> Output {
+        let stmt = parse_stmt(sql).unwrap().remove(0);
+        instance
+            .handle_statement(stmt, QueryContext::arc())
+            .await
+            .unwrap()
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_show_databases() {
         let instance = crate::tests::create_distributed_instance("test_show_databases").await;
         let dist_instance = &instance.dist_instance;
 
         let sql = "create database test_show_databases";
-        let output = dist_instance
-            .handle_sql(sql, QueryContext::arc())
-            .await
-            .remove(0)
-            .unwrap();
+        let output = handle_sql(dist_instance, sql).await;
         match output {
             Output::AffectedRows(rows) => assert_eq!(rows, 1),
             _ => unreachable!(),
         }
 
         let sql = "show databases";
-        let output = dist_instance
-            .handle_sql(sql, QueryContext::arc())
-            .await
-            .remove(0)
-            .unwrap();
+        let output = handle_sql(dist_instance, sql).await;
         match output {
             Output::RecordBatches(r) => {
                 let expected1 = vec![
@@ -829,11 +815,7 @@ ENGINE=mito",
         let datanode_instances = instance.datanodes;
 
         let sql = "create database test_show_tables";
-        dist_instance
-            .handle_sql(sql, QueryContext::arc())
-            .await
-            .remove(0)
-            .unwrap();
+        handle_sql(dist_instance, sql).await;
 
         let sql = "
             CREATE TABLE greptime.test_show_tables.dist_numbers (
@@ -848,18 +830,14 @@ ENGINE=mito",
                 PARTITION r3 VALUES LESS THAN (MAXVALUE),
             )
             ENGINE=mito";
-        dist_instance
-            .handle_sql(sql, QueryContext::arc())
-            .await
-            .remove(0)
-            .unwrap();
+        handle_sql(dist_instance, sql).await;
 
-        async fn assert_show_tables(instance: SqlQueryHandlerRef<error::Error>) {
+        async fn assert_show_tables(handler: StatementHandlerRef) {
             let sql = "show tables in test_show_tables";
-            let output = instance
-                .do_query(sql, QueryContext::arc())
+            let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
+            let output = handler
+                .handle_statement(stmt, QueryContext::arc())
                 .await
-                .remove(0)
                 .unwrap();
             match output {
                 Output::RecordBatches(r) => {
@@ -878,7 +856,7 @@ ENGINE=mito",
 
         // Asserts that new table is created in Datanode as well.
         for x in datanode_instances.values() {
-            assert_show_tables(StandaloneSqlQueryHandler::arc(x.clone())).await
+            assert_show_tables(x.clone()).await
         }
     }
 }

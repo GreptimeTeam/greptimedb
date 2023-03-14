@@ -21,6 +21,7 @@ use datafusion::parquet;
 use datatypes::prelude::ConcreteDataType;
 use storage::error::Error as StorageError;
 use table::error::Error as TableError;
+use url::ParseError;
 
 use crate::datanode::ObjectStoreConfig;
 
@@ -30,6 +31,24 @@ use crate::datanode::ObjectStoreConfig;
 pub enum Error {
     #[snafu(display("Failed to execute sql, source: {}", source))]
     ExecuteSql {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
+
+    #[snafu(display("Failed to plan statement, source: {}", source))]
+    PlanStatement {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
+
+    #[snafu(display("Failed to execute statement, source: {}", source))]
+    ExecuteStatement {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
+
+    #[snafu(display("Failed to execute logical plan, source: {}", source))]
+    ExecuteLogicalPlan {
         #[snafu(backtrace)]
         source: query::error::Error,
     },
@@ -150,6 +169,13 @@ pub enum Error {
         source: TableError,
     },
 
+    #[snafu(display("Failed to flush table: {}, source: {}", table_name, source))]
+    FlushTable {
+        table_name: String,
+        #[snafu(backtrace)]
+        source: TableError,
+    },
+
     #[snafu(display("Failed to start server, source: {}", source))]
     StartServer {
         #[snafu(backtrace)]
@@ -204,6 +230,30 @@ pub enum Error {
 
     #[snafu(display("Invalid SQL, error: {}", msg))]
     InvalidSql { msg: String },
+
+    #[snafu(display("Invalid url: {}, error :{}", url, source))]
+    InvalidUrl { url: String, source: ParseError },
+
+    #[snafu(display("Invalid filepath: {}", path))]
+    InvalidPath { path: String },
+
+    #[snafu(display("Invalid connection: {}", msg))]
+    InvalidConnection { msg: String },
+
+    #[snafu(display("Unsupported backend protocol: {}", protocol))]
+    UnsupportedBackendProtocol { protocol: String },
+
+    #[snafu(display("Failed to regex, source: {}", source))]
+    BuildRegex {
+        backtrace: Backtrace,
+        source: regex::Error,
+    },
+
+    #[snafu(display("Failed to parse the data, source: {}", source))]
+    ParseDataTypes {
+        #[snafu(backtrace)]
+        source: common_recordbatch::error::Error,
+    },
 
     #[snafu(display("Not support SQL, error: {}", msg))]
     NotSupportSql { msg: String },
@@ -377,6 +427,22 @@ pub enum Error {
         source: common_query::error::Error,
     },
 
+    #[snafu(display(
+        "File Schema mismatch, expected table schema: {} but found :{}",
+        table_schema,
+        file_schema
+    ))]
+    InvalidSchema {
+        table_schema: String,
+        file_schema: String,
+    },
+
+    #[snafu(display("Failed to read parquet file, source: {}", source))]
+    ReadParquet {
+        source: parquet::errors::ParquetError,
+        backtrace: Backtrace,
+    },
+
     #[snafu(display("Failed to write parquet file, source: {}", source))]
     WriteParquet {
         source: parquet::errors::ParquetError,
@@ -389,8 +455,28 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
+    #[snafu(display("Failed to build parquet record batch stream, source: {}", source))]
+    BuildParquetRecordBatchStream {
+        backtrace: Backtrace,
+        source: parquet::errors::ParquetError,
+    },
+
+    #[snafu(display("Failed to read object in path: {}, source: {}", path, source))]
+    ReadObject {
+        path: String,
+        backtrace: Backtrace,
+        source: object_store::Error,
+    },
+
     #[snafu(display("Failed to write object into path: {}, source: {}", path, source))]
     WriteObject {
+        path: String,
+        backtrace: Backtrace,
+        source: object_store::Error,
+    },
+
+    #[snafu(display("Failed to lists object in path: {}, source: {}", path, source))]
+    ListObjects {
         path: String,
         backtrace: Backtrace,
         source: object_store::Error,
@@ -421,6 +507,24 @@ pub enum Error {
         #[snafu(backtrace)]
         source: common_procedure::error::Error,
     },
+
+    #[snafu(display("Failed to close table engine, source: {}", source))]
+    CloseTableEngine {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to shutdown server, source: {}", source))]
+    ShutdownServer {
+        #[snafu(backtrace)]
+        source: servers::error::Error,
+    },
+
+    #[snafu(display("Failed to shutdown instance, source: {}", source))]
+    ShutdownInstance {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -429,7 +533,12 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
-            ExecuteSql { source } | DescribeStatement { source } => source.status_code(),
+            ExecuteSql { source }
+            | PlanStatement { source }
+            | ExecuteStatement { source }
+            | ExecuteLogicalPlan { source }
+            | DescribeStatement { source } => source.status_code(),
+
             DecodeLogicalPlan { source } => source.status_code(),
             NewCatalog { source } | RegisterSchema { source } => source.status_code(),
             FindTable { source, .. } => source.status_code(),
@@ -437,6 +546,7 @@ impl ErrorExt for Error {
                 source.status_code()
             }
             DropTable { source, .. } => source.status_code(),
+            FlushTable { source, .. } => source.status_code(),
 
             Insert { source, .. } => source.status_code(),
             Delete { source, .. } => source.status_code(),
@@ -456,6 +566,11 @@ impl ErrorExt for Error {
             ColumnValuesNumberMismatch { .. }
             | ColumnTypeMismatch { .. }
             | InvalidSql { .. }
+            | InvalidUrl { .. }
+            | InvalidPath { .. }
+            | InvalidConnection { .. }
+            | UnsupportedBackendProtocol { .. }
+            | BuildRegex { .. }
             | NotSupportSql { .. }
             | KeyColumnNotFound { .. }
             | IllegalPrimaryKeysDef { .. }
@@ -481,13 +596,22 @@ impl ErrorExt for Error {
             | RenameTable { .. }
             | Catalog { .. }
             | MissingRequiredField { .. }
-            | IncorrectInternalState { .. } => StatusCode::Internal,
+            | BuildParquetRecordBatchStream { .. }
+            | InvalidSchema { .. }
+            | ParseDataTypes { .. }
+            | IncorrectInternalState { .. }
+            | ShutdownServer { .. }
+            | ShutdownInstance { .. }
+            | CloseTableEngine { .. } => StatusCode::Internal,
 
             BuildBackend { .. }
             | InitBackend { .. }
+            | ReadParquet { .. }
             | WriteParquet { .. }
             | PollStream { .. }
-            | WriteObject { .. } => StatusCode::StorageUnavailable,
+            | ReadObject { .. }
+            | WriteObject { .. }
+            | ListObjects { .. } => StatusCode::StorageUnavailable,
             OpenLogStore { source } => source.status_code(),
             StartScriptManager { source } => source.status_code(),
             OpenStorageEngine { source } => source.status_code(),

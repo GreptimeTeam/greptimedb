@@ -12,12 +12,14 @@ members = [
     "src/common/function-macro",
     "src/common/grpc",
     "src/common/grpc-expr",
+    "src/common/mem-prof",
     "src/common/procedure",
     "src/common/query",
     "src/common/recordbatch",
     "src/common/runtime",
     "src/common/substrait",
     "src/common/telemetry",
+    "src/common/test-util",
     "src/common/time",
     "src/datanode",
     "src/datatypes",
@@ -43,33 +45,34 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "Apache-2.0"
 
 [workspace.dependencies]
-arrow = "33.0"
-arrow-array = "33.0"
-arrow-flight = "33.0"
-arrow-schema = { version = "33.0", features = ["serde"] }
+arrow = { version = "34.0" }
+arrow-array = "34.0"
+arrow-flight = "34.0"
+arrow-schema = { version = "34.0", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
-datafusion = { git = "https://github.com/apache/arrow-datafusion.git", rev = "fad360df0132a2fcb264a7c07b2b02f0b1dfc644" }
-datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", rev = "fad360df0132a2fcb264a7c07b2b02f0b1dfc644" }
-datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "fad360df0132a2fcb264a7c07b2b02f0b1dfc644" }
-datafusion-optimizer = { git = "https://github.com/apache/arrow-datafusion.git", rev = "fad360df0132a2fcb264a7c07b2b02f0b1dfc644" }
-datafusion-physical-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "fad360df0132a2fcb264a7c07b2b02f0b1dfc644" }
-datafusion-sql = { git = "https://github.com/apache/arrow-datafusion.git", rev = "fad360df0132a2fcb264a7c07b2b02f0b1dfc644" }
+# TODO(LFC): Use official DataFusion, when https://github.com/apache/arrow-datafusion/pull/5542 got merged
+datafusion = { git = "https://github.com/MichaelScofield/arrow-datafusion.git", rev = "d7b3c730049f2561755f9d855f638cb580c38eff" }
+datafusion-common = { git = "https://github.com/MichaelScofield/arrow-datafusion.git", rev = "d7b3c730049f2561755f9d855f638cb580c38eff" }
+datafusion-expr = { git = "https://github.com/MichaelScofield/arrow-datafusion.git", rev = "d7b3c730049f2561755f9d855f638cb580c38eff" }
+datafusion-optimizer = { git = "https://github.com/MichaelScofield/arrow-datafusion.git", rev = "d7b3c730049f2561755f9d855f638cb580c38eff" }
+datafusion-physical-expr = { git = "https://github.com/MichaelScofield/arrow-datafusion.git", rev = "d7b3c730049f2561755f9d855f638cb580c38eff" }
+datafusion-sql = { git = "https://github.com/MichaelScofield/arrow-datafusion.git", rev = "d7b3c730049f2561755f9d855f638cb580c38eff" }
 futures = "0.3"
 futures-util = "0.3"
-parquet = "33.0"
+parquet = "34.0"
 paste = "1.0"
 prost = "0.11"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 snafu = { version = "0.7", features = ["backtraces"] }
-sqlparser = "0.30"
+sqlparser = "0.32"
 tempfile = "3"
 tokio = { version = "1.24.2", features = ["full"] }
 tokio-util = "0.7"
@@ -79,7 +82,7 @@ uuid = { version = "1", features = ["serde", "v4", "fast-rng"] }
 [profile.release]
 debug = true
 
-[profile.weekly]
+[profile.nightly]
 inherits = "release"
 strip = true
 lto = "thin"

@@ -22,6 +22,7 @@ use axum::Router;
 use catalog::CatalogManagerRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use common_runtime::Builder as RuntimeBuilder;
+use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datanode::datanode::{
     DatanodeOptions, FileConfig, ObjectStoreConfig, OssConfig, S3Config, WalConfig,
 };
@@ -38,7 +39,7 @@ use once_cell::sync::OnceCell;
 use rand::Rng;
 use servers::grpc::GrpcServer;
 use servers::http::{HttpOptions, HttpServer};
-use servers::promql::PromqlServer;
+use servers::prom::PromServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
 use servers::query_handler::sql::ServerSqlQueryHandlerAdaptor;
 use servers::server::Server;
@@ -46,7 +47,6 @@ use servers::Mode;
 use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineRef};
 use table::requests::{CreateTableRequest, TableOptions};
-use tempdir::TempDir;
 
 static PORTS: OnceCell<AtomicUsize> = OnceCell::new();
 
@@ -149,7 +149,7 @@ fn get_test_store_config(
             (config, Some(TempDirGuard::S3(TempFolder::new(&store, "/"))))
         }
         StorageType::File => {
-            let data_tmp_dir = TempDir::new(&format!("gt_data_{name}")).unwrap();
+            let data_tmp_dir = create_temp_dir(&format!("gt_data_{name}"));
 
             (
                 ObjectStoreConfig::File(FileConfig {
@@ -189,7 +189,7 @@ pub fn create_tmp_dir_and_datanode_opts(
     store_type: StorageType,
     name: &str,
 ) -> (DatanodeOptions, TestGuard) {
-    let wal_tmp_dir = TempDir::new(&format!("gt_wal_{name}")).unwrap();
+    let wal_tmp_dir = create_temp_dir(&format!("gt_wal_{name}"));
 
     let (storage, data_tmp_dir) = get_test_store_config(&store_type, name);
 
@@ -257,7 +257,7 @@ pub async fn create_test_table(
     Ok(())
 }
 
-async fn build_frontend_instance(datanode_instance: InstanceRef) -> FeInstance {
+fn build_frontend_instance(datanode_instance: InstanceRef) -> FeInstance {
     let mut frontend_instance = FeInstance::new_standalone(datanode_instance.clone());
     frontend_instance.set_script_handler(datanode_instance);
     frontend_instance
@@ -275,7 +275,7 @@ pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router
     .await
     .unwrap();
     let http_server = HttpServer::new(
-        ServerSqlQueryHandlerAdaptor::arc(instance),
+        ServerSqlQueryHandlerAdaptor::arc(Arc::new(build_frontend_instance(instance))),
         HttpOptions::default(),
     );
     (http_server.make_app(), guard)
@@ -287,7 +287,7 @@ pub async fn setup_test_http_app_with_frontend(
 ) -> (Router, TestGuard) {
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
     let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
-    let frontend = build_frontend_instance(instance.clone()).await;
+    let frontend = build_frontend_instance(instance.clone());
     instance.start().await.unwrap();
     create_test_table(
         frontend.catalog_manager(),
@@ -305,13 +305,13 @@ pub async fn setup_test_http_app_with_frontend(
     (app, guard)
 }
 
-pub async fn setup_test_promql_app_with_frontend(
+pub async fn setup_test_prom_app_with_frontend(
     store_type: StorageType,
     name: &str,
 ) -> (Router, TestGuard) {
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
     let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
-    let frontend = build_frontend_instance(instance.clone()).await;
+    let frontend = build_frontend_instance(instance.clone());
     instance.start().await.unwrap();
     create_test_table(
         frontend.catalog_manager(),
@@ -320,8 +320,8 @@ pub async fn setup_test_promql_app_with_frontend(
     )
     .await
     .unwrap();
-    let promql_server = PromqlServer::create_server(Arc::new(frontend) as _);
-    let app = promql_server.make_app();
+    let prom_server = PromServer::create_server(Arc::new(frontend) as _);
+    let app = prom_server.make_app();
     (app, guard)
 }
 

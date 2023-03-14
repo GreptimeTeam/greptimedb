@@ -421,9 +421,9 @@ impl ProcedureManager for LocalManager {
 /// Create a new [ProcedureMeta] for test purpose.
 #[cfg(test)]
 mod test_util {
+    use common_test_util::temp_dir::TempDir;
     use object_store::services::Fs as Builder;
     use object_store::ObjectStoreBuilder;
-    use tempdir::TempDir;
 
     use super::*;
 
@@ -442,7 +442,7 @@ mod test_util {
 mod tests {
     use common_error::mock::MockError;
     use common_error::prelude::StatusCode;
-    use tempdir::TempDir;
+    use common_test_util::temp_dir::create_temp_dir;
 
     use super::*;
     use crate::error::Error;
@@ -552,7 +552,7 @@ mod tests {
 
     #[test]
     fn test_register_loader() {
-        let dir = TempDir::new("register").unwrap();
+        let dir = create_temp_dir("register");
         let config = ManagerConfig {
             object_store: test_util::new_object_store(&dir),
             max_retry_times: 3,
@@ -572,7 +572,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_recover() {
-        let dir = TempDir::new("recover").unwrap();
+        let dir = create_temp_dir("recover");
         let object_store = test_util::new_object_store(&dir);
         let config = ManagerConfig {
             object_store: object_store.clone(),
@@ -619,7 +619,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_submit_procedure() {
-        let dir = TempDir::new("submit").unwrap();
+        let dir = create_temp_dir("submit");
         let config = ManagerConfig {
             object_store: test_util::new_object_store(&dir),
             max_retry_times: 3,
@@ -667,7 +667,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_state_changed_on_err() {
-        let dir = TempDir::new("on_err").unwrap();
+        let dir = create_temp_dir("on_err");
         let config = ManagerConfig {
             object_store: test_util::new_object_store(&dir),
             max_retry_times: 3,

@@ -19,9 +19,12 @@ use common_query::Output;
 use common_recordbatch::util;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::vectors::{Int64Vector, StringVector, UInt64Vector, VectorRef};
+use query::parser::{QueryLanguageParser, QueryStatement};
 use session::context::QueryContext;
+use snafu::ResultExt;
+use sql::statements::statement::Statement;
 
-use crate::error::Error;
+use crate::error::{Error, ExecuteLogicalPlanSnafu, PlanStatementSnafu};
 use crate::tests::test_util::{self, check_output_stream, setup_test_instance, MockInstance};
 
 #[tokio::test(flavor = "multi_thread")]
@@ -414,7 +417,6 @@ pub async fn test_execute_create() {
 
 #[tokio::test]
 async fn test_rename_table() {
-    common_telemetry::init_default_ut_logging();
     let instance = MockInstance::new("test_rename_table_local").await;
 
     let output = execute_sql(&instance, "create database db").await;
@@ -796,6 +798,91 @@ async fn test_execute_copy_to() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_execute_copy_from() {
+    let instance = setup_test_instance("test_execute_copy_from").await;
+
+    // setups
+    execute_sql(
+        &instance,
+        "create table demo(host string, cpu double, memory double, ts timestamp time index);",
+    )
+    .await;
+
+    let output = execute_sql(
+        &instance,
+        r#"insert into demo(host, cpu, memory, ts) values
+                            ('host1', 66.6, 1024, 1655276557000),
+                            ('host2', 88.8,  333.3, 1655276558000)
+                            "#,
+    )
+    .await;
+    assert!(matches!(output, Output::AffectedRows(2)));
+
+    // export
+    let data_dir = instance.data_tmp_dir().path();
+
+    let copy_to_stmt = format!("Copy demo TO '{}/export/demo.parquet'", data_dir.display());
+
+    let output = execute_sql(&instance, &copy_to_stmt).await;
+    assert!(matches!(output, Output::AffectedRows(2)));
+
+    struct Test<'a> {
+        sql: &'a str,
+        table_name: &'a str,
+    }
+    let tests = [
+        Test {
+            sql: &format!(
+                "Copy with_filename FROM '{}/export/demo.parquet_1_2'",
+                data_dir.display()
+            ),
+            table_name: "with_filename",
+        },
+        Test {
+            sql: &format!("Copy with_path FROM '{}/export/'", data_dir.display()),
+            table_name: "with_path",
+        },
+        Test {
+            sql: &format!(
+                "Copy with_pattern FROM '{}/export/' WITH (PATTERN = 'demo.*')",
+                data_dir.display()
+            ),
+            table_name: "with_pattern",
+        },
+    ];
+
+    for test in tests {
+        // import
+        execute_sql(
+            &instance,
+            &format!(
+                "create table {}(host string, cpu double, memory double, ts timestamp time index);",
+                test.table_name
+            ),
+        )
+        .await;
+
+        let output = execute_sql(&instance, test.sql).await;
+        assert!(matches!(output, Output::AffectedRows(2)));
+
+        let output = execute_sql(
+            &instance,
+            &format!("select * from {} order by ts", test.table_name),
+        )
+        .await;
+        let expected = "\
++-------+------+--------+---------------------+
+| host  | cpu  | memory | ts                  |
++-------+------+--------+---------------------+
+| host1 | 66.6 | 1024.0 | 2022-06-15T07:02:37 |
+| host2 | 88.8 | 333.3  | 2022-06-15T07:02:38 |
++-------+------+--------+---------------------+"
+            .to_string();
+        check_output_stream(output, expected).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_create_by_procedure() {
     common_telemetry::init_default_ut_logging();
 
@@ -848,7 +935,20 @@ async fn try_execute_sql_in_db(
     db: &str,
 ) -> Result<Output, crate::error::Error> {
     let query_ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, db));
-    instance.inner().execute_sql(sql, query_ctx).await
+
+    let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
+    match stmt {
+        QueryStatement::Sql(Statement::Query(_)) => {
+            let engine = instance.inner().query_engine();
+            let plan = engine
+                .planner()
+                .plan(stmt, query_ctx)
+                .await
+                .context(PlanStatementSnafu)?;
+            engine.execute(&plan).await.context(ExecuteLogicalPlanSnafu)
+        }
+        _ => instance.inner().execute_stmt(stmt, query_ctx).await,
+    }
 }
 
 async fn execute_sql_in_db(instance: &MockInstance, sql: &str, db: &str) -> Output {

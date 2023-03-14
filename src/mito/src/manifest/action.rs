@@ -176,4 +176,20 @@ mod tests {
         assert_eq!(decode_list, action_list);
         assert_eq!(p.unwrap(), protocol);
     }
+
+    // These tests are used to ensure backward compatibility of manifest files.
+    // DO NOT modify the serialized string when they fail, check if your
+    // modification to manifest-related structs is compatible with older manifests.
+    #[test]
+    fn test_table_manifest_compatibility() {
+        let table_change = r#"{"table_info":{"ident":{"table_id":0,"version":0},"name":"demo","desc":null,"catalog_name":"greptime","schema_name":"public","meta":{"schema":{"column_schemas":[{"name":"host","data_type":{"String":null},"is_nullable":false,"is_time_index":false,"default_constraint":null,"metadata":{}},{"name":"cpu","data_type":{"Float64":{}},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{}},{"name":"memory","data_type":{"Float64":{}},"is_nullable":false,"is_time_index":false,"default_constraint":null,"metadata":{}},{"name":"ts","data_type":{"Timestamp":{"Millisecond":null}},"is_nullable":true,"is_time_index":true,"default_constraint":null,"metadata":{"greptime:time_index":"true"}}],"timestamp_index":3,"version":0},"primary_key_indices":[0],"value_indices":[1,2,3],"engine":"mito","next_column_id":1,"region_numbers":[],"engine_options":{},"options":{"write_buffer_size":null,"ttl":null,"extra_options":{}},"created_on":"2023-03-06T08:50:34.662020Z"},"table_type":"Base"}}"#;
+        serde_json::from_str::<TableChange>(table_change).unwrap();
+
+        let table_remove =
+            r#"{"table_ident":{"table_id":42,"version":0},"table_name":"test_table"}"#;
+        serde_json::from_str::<TableRemove>(table_remove).unwrap();
+
+        let protocol_action = r#"{"min_reader_version":0,"min_writer_version":1}"#;
+        serde_json::from_str::<ProtocolAction>(protocol_action).unwrap();
+    }
 }

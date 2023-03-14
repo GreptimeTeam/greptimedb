@@ -19,7 +19,7 @@ use serde_json::json;
 use servers::http::handler::HealthResponse;
 use servers::http::{JsonOutput, JsonResponse};
 use tests_integration::test_util::{
-    setup_test_http_app, setup_test_http_app_with_frontend, setup_test_promql_app_with_frontend,
+    setup_test_http_app, setup_test_http_app_with_frontend, setup_test_prom_app_with_frontend,
     StorageType,
 };
 
@@ -54,7 +54,7 @@ macro_rules! http_tests {
 
                 test_sql_api,
                 test_prometheus_promql_api,
-                test_promql_http_api,
+                test_prom_http_api,
                 test_metrics_api,
                 test_scripts_api,
                 test_health_api,
@@ -284,9 +284,9 @@ pub async fn test_prometheus_promql_api(store_type: StorageType) {
     guard.remove_all().await;
 }
 
-pub async fn test_promql_http_api(store_type: StorageType) {
+pub async fn test_prom_http_api(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
-    let (app, mut guard) = setup_test_promql_app_with_frontend(store_type, "promql_api").await;
+    let (app, mut guard) = setup_test_prom_app_with_frontend(store_type, "promql_api").await;
     let client = TestClient::new(app);
 
     // instant query
@@ -341,7 +341,7 @@ pub async fn test_scripts_api(store_type: StorageType) {
         .body(
             r#"
 @copr(sql='select number from numbers limit 10', args=['number'], returns=['n'])
-def test(n):
+def test(n) -> vector[f64]:
     return n + 1;
 "#,
         )

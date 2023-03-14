@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 default = ["python"]
-pyo3_backend = ["pyo3"]
+pyo3_backend = ["dep:pyo3", "arrow/pyarrow"]
 python = [
     "dep:datafusion",
     "dep:datafusion-common",
@@ -24,6 +24,7 @@ python = [
 ]
 
 [dependencies]
+arrow.workspace = true
 async-trait.workspace = true
 catalog = { path = "../catalog" }
 common-catalog = { path = "../common/catalog" }
@@ -59,7 +60,7 @@ rustpython-vm = { git = "https://github.com/discord9/RustPython", optional = tru
     "default",
     "codegen",
 ] }
-pyo3 = { version = "0.18", optional = true }
+pyo3 = { version = "0.18", optional = true, features = ["abi3", "abi3-py37"] }
 session = { path = "../session" }
 snafu = { version = "0.7", features = ["backtraces"] }
 sql = { path = "../sql" }
@@ -67,11 +68,11 @@ table = { path = "../table" }
 tokio.workspace = true
 
 [dev-dependencies]
+common-test-util = { path = "../common/test-util" }
 log-store = { path = "../log-store" }
 mito = { path = "../mito", features = ["test"] }
 ron = "0.7"
 serde = { version = "1.0", features = ["derive"] }
 storage = { path = "../storage" }
 store-api = { path = "../store-api" }
-tempdir = "0.3"
 tokio-test = "0.4"

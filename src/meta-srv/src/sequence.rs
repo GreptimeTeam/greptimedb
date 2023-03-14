@@ -150,6 +150,8 @@ impl Inner {
 mod tests {
     use std::sync::Arc;
 
+    use api::v1::meta::{BatchGetRequest, BatchGetResponse};
+
     use super::*;
     use crate::service::store::kv::KvStore;
     use crate::service::store::memory::MemStore;
@@ -189,6 +191,10 @@ mod tests {
                 &self,
                 _: api::v1::meta::BatchPutRequest,
             ) -> Result<api::v1::meta::BatchPutResponse> {
+                unreachable!()
+            }
+
+            async fn batch_get(&self, _: BatchGetRequest) -> Result<BatchGetResponse> {
                 unreachable!()
             }
 

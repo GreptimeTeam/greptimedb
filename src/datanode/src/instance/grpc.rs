@@ -18,15 +18,19 @@ use api::v1::query_request::Query;
 use api::v1::{CreateDatabaseExpr, DdlRequest, InsertRequest};
 use async_trait::async_trait;
 use common_query::Output;
-use query::parser::QueryLanguageParser;
+use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::plan::LogicalPlan;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
+use sql::statements::statement::Statement;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::requests::CreateDatabaseRequest;
 
-use crate::error::{self, DecodeLogicalPlanSnafu, ExecuteSqlSnafu, Result};
+use crate::error::{
+    self, DecodeLogicalPlanSnafu, ExecuteLogicalPlanSnafu, ExecuteSqlSnafu, PlanStatementSnafu,
+    Result,
+};
 use crate::instance::Instance;
 
 impl Instance {
@@ -51,17 +55,42 @@ impl Instance {
         self.query_engine
             .execute(&LogicalPlan::DfPlan(logical_plan))
             .await
-            .context(ExecuteSqlSnafu)
+            .context(ExecuteLogicalPlanSnafu)
     }
 
     async fn handle_query(&self, query: Query, ctx: QueryContextRef) -> Result<Output> {
-        Ok(match query {
+        match query {
             Query::Sql(sql) => {
                 let stmt = QueryLanguageParser::parse_sql(&sql).context(ExecuteSqlSnafu)?;
-                self.execute_stmt(stmt, ctx).await?
+                match stmt {
+                    // TODO(LFC): Remove SQL execution branch here.
+                    // Keep this because substrait can't handle much of SQLs now.
+                    QueryStatement::Sql(Statement::Query(_)) => {
+                        let plan = self
+                            .query_engine
+                            .planner()
+                            .plan(stmt, ctx)
+                            .await
+                            .context(PlanStatementSnafu)?;
+                        self.query_engine
+                            .execute(&plan)
+                            .await
+                            .context(ExecuteLogicalPlanSnafu)
+                    }
+                    _ => self.execute_stmt(stmt, ctx).await,
+                }
             }
-            Query::LogicalPlan(plan) => self.execute_logical(plan).await?,
-        })
+            Query::LogicalPlan(plan) => self.execute_logical(plan).await,
+            Query::PromRangeQuery(promql) => {
+                let prom_query = PromQuery {
+                    query: promql.query,
+                    start: promql.start,
+                    end: promql.end,
+                    step: promql.step,
+                };
+                self.execute_promql(&prom_query, ctx).await
+            }
+        }
     }
 
     pub async fn handle_insert(
@@ -98,6 +127,7 @@ impl Instance {
             DdlExpr::Alter(expr) => self.handle_alter(expr).await,
             DdlExpr::CreateDatabase(expr) => self.handle_create_database(expr, query_ctx).await,
             DdlExpr::DropTable(expr) => self.handle_drop_table(expr).await,
+            DdlExpr::FlushTable(expr) => self.handle_flush_table(expr).await,
         }
     }
 }
@@ -131,10 +161,22 @@ mod test {
     };
     use common_recordbatch::RecordBatches;
     use datatypes::prelude::*;
+    use query::parser::QueryLanguageParser;
     use session::context::QueryContext;
 
     use super::*;
     use crate::tests::test_util::{self, MockInstance};
+
+    async fn exec_selection(instance: &Instance, sql: &str) -> Output {
+        let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
+        let engine = instance.query_engine();
+        let plan = engine
+            .planner()
+            .plan(stmt, QueryContext::arc())
+            .await
+            .unwrap();
+        engine.execute(&plan).await.unwrap()
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_handle_ddl() {
@@ -198,22 +240,17 @@ mod test {
         let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
         assert!(matches!(output, Output::AffectedRows(0)));
 
+        let stmt = QueryLanguageParser::parse_sql(
+            "INSERT INTO my_database.my_table (a, b, ts) VALUES ('s', 1, 1672384140000)",
+        )
+        .unwrap();
         let output = instance
-            .execute_sql(
-                "INSERT INTO my_database.my_table (a, b, ts) VALUES ('s', 1, 1672384140000)",
-                QueryContext::arc(),
-            )
+            .execute_stmt(stmt, QueryContext::arc())
             .await
             .unwrap();
         assert!(matches!(output, Output::AffectedRows(1)));
 
-        let output = instance
-            .execute_sql(
-                "SELECT ts, a, b FROM my_database.my_table",
-                QueryContext::arc(),
-            )
-            .await
-            .unwrap();
+        let output = exec_selection(instance, "SELECT ts, a, b FROM my_database.my_table").await;
         let Output::Stream(stream) = output else { unreachable!() };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
         let expected = "\
@@ -279,10 +316,7 @@ mod test {
         let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
         assert!(matches!(output, Output::AffectedRows(3)));
 
-        let output = instance
-            .execute_sql("SELECT ts, host, cpu FROM demo", QueryContext::arc())
-            .await
-            .unwrap();
+        let output = exec_selection(instance, "SELECT ts, host, cpu FROM demo").await;
         let Output::Stream(stream) = output else { unreachable!() };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
         let expected = "\

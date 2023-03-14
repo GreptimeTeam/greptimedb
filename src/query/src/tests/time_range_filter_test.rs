@@ -26,14 +26,13 @@ use common_time::Timestamp;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{Int64Vector, TimestampMillisecondVector};
-use session::context::QueryContext;
 use table::metadata::{FilterPushDownType, TableInfoRef};
 use table::predicate::TimeRangePredicateBuilder;
 use table::test_util::MemTable;
 use table::Table;
 use tokio::sync::RwLock;
 
-use crate::parser::QueryLanguageParser;
+use crate::tests::exec_selection;
 use crate::{QueryEngineFactory, QueryEngineRef};
 
 struct MemTableWrapper {
@@ -71,8 +70,11 @@ impl Table for MemTableWrapper {
         self.inner.scan(projection, filters, limit).await
     }
 
-    fn supports_filter_pushdown(&self, _filter: &Expr) -> table::Result<FilterPushDownType> {
-        Ok(FilterPushDownType::Exact)
+    fn supports_filters_pushdown(
+        &self,
+        filters: &[&Expr],
+    ) -> table::Result<Vec<FilterPushDownType>> {
+        Ok(vec![FilterPushDownType::Exact; filters.len()])
     }
 }
 
@@ -128,18 +130,7 @@ struct TimeRangeTester {
 
 impl TimeRangeTester {
     async fn check(&self, sql: &str, expect: TimestampRange) {
-        let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
-        let _ = self
-            .engine
-            .execute(
-                &self
-                    .engine
-                    .statement_to_plan(stmt, Arc::new(QueryContext::new()))
-                    .await
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let _ = exec_selection(self.engine.clone(), sql).await;
         let filters = self.table.get_filters().await;
 
         let range = TimeRangePredicateBuilder::new("ts", &filters).build();

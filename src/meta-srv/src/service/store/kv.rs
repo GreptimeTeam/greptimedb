@@ -15,9 +15,9 @@
 use std::sync::Arc;
 
 use api::v1::meta::{
-    BatchPutRequest, BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse,
-    DeleteRangeRequest, DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest,
-    PutResponse, RangeRequest, RangeResponse,
+    BatchGetRequest, BatchGetResponse, BatchPutRequest, BatchPutResponse, CompareAndPutRequest,
+    CompareAndPutResponse, DeleteRangeRequest, DeleteRangeResponse, MoveValueRequest,
+    MoveValueResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
 
 use crate::error::Result;
@@ -30,6 +30,8 @@ pub trait KvStore: Send + Sync {
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse>;
 
     async fn put(&self, req: PutRequest) -> Result<PutResponse>;
+
+    async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse>;
 
     async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse>;
 

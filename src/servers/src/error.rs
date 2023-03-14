@@ -256,6 +256,15 @@ pub enum Error {
 
     #[snafu(display("Cannot find requested database: {}-{}", catalog, schema))]
     DatabaseNotFound { catalog: String, schema: String },
+
+    #[cfg(feature = "mem-prof")]
+    #[snafu(display("Failed to dump profile data, source: {}", source))]
+    DumpProfileData {
+        #[snafu(backtrace)]
+        source: common_mem_prof::error::Error,
+    },
+    #[snafu(display("Invalid prepare statement: {}", err_msg))]
+    InvalidPrepareStatement { err_msg: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -295,6 +304,7 @@ impl ErrorExt for Error {
             | DecompressPromRemoteRequest { .. }
             | InvalidPromRemoteRequest { .. }
             | InvalidFlightTicket { .. }
+            | InvalidPrepareStatement { .. }
             | TimePrecision { .. } => StatusCode::InvalidArguments,
 
             InfluxdbLinesWrite { source, .. } | ConvertFlightMessage { source } => {
@@ -315,6 +325,8 @@ impl ErrorExt for Error {
             | InvalidUtf8Value { .. } => StatusCode::InvalidAuthHeader,
 
             DatabaseNotFound { .. } => StatusCode::DatabaseNotFound,
+            #[cfg(feature = "mem-prof")]
+            DumpProfileData { source, .. } => source.status_code(),
         }
     }
 

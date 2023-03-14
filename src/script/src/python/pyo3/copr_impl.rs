@@ -63,17 +63,11 @@ pub(crate) fn pyo3_exec_parsed(
     rb: &Option<RecordBatch>,
     params: &HashMap<String, String>,
 ) -> Result<RecordBatch> {
-    let arg_names = if let Some(names) = &copr.deco_args.arg_names {
-        names
-    } else {
-        return OtherSnafu {
-            reason: "PyO3 Backend doesn't support params yet".to_string(),
-        }
-        .fail();
-    };
+    // i.e params or use `vector(..)` to construct a PyVector
+    let arg_names = &copr.deco_args.arg_names.clone().unwrap_or(vec![]);
     let args: Vec<PyVector> = if let Some(rb) = rb {
         let args = select_from_rb(rb, arg_names)?;
-        check_args_anno_real_type(&args, copr, rb)?;
+        check_args_anno_real_type(arg_names, &args, copr, rb)?;
         args
     } else {
         Vec::new()
@@ -83,12 +77,16 @@ pub(crate) fn pyo3_exec_parsed(
     Python::with_gil(|py| -> Result<_> {
         let mut cols = (|| -> PyResult<_> {
             let dummy_decorator = "
+# Postponed evaluation of annotations(PEP 563) so annotation can be set freely
+# This is needed for Python < 3.9
+from __future__ import annotations
 # A dummy decorator, actual implementation is in Rust code
 def copr(*dummy, **kwdummy):
     def inner(func):
         return func
     return inner
 coprocessor = copr
+from greptime import vector
 ";
             let gen_call = format!("\n_return_from_coprocessor = {}(*_args_for_coprocessor, **_kwargs_for_coprocessor)", copr.name);
             let script = format!("{}{}{}", dummy_decorator, copr.script, gen_call);
@@ -221,10 +219,10 @@ mod copr_test {
 @copr(args=["cpu", "mem"], returns=["ref"], backend="pyo3")
 def a(cpu, mem, **kwargs):
     import greptime as gt
-    from greptime import vector, log2, sum, pow, col
+    from greptime import vector, log2, sum, pow, col, lit
     for k, v in kwargs.items():
         print("%s == %s" % (k, v))
-    print(dataframe.select([col("cpu")]).collect())
+    print(dataframe.select([col("cpu")<lit(0.3)]).collect())
     return (0.5 < cpu) & ~( cpu >= 0.75)
     "#;
         let cpu_array = Float32Vector::from_slice([0.9f32, 0.8, 0.7, 0.3]);

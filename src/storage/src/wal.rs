@@ -244,14 +244,17 @@ impl Decoder for WalHeaderDecoder {
 
 #[cfg(test)]
 mod tests {
+    use common_test_util::temp_dir::create_temp_dir;
     use log_store::test_util;
 
     use super::*;
 
     #[tokio::test]
     pub async fn test_write_wal() {
-        let (log_store, _tmp) =
-            test_util::log_store_util::create_tmp_local_file_log_store("wal_test").await;
+        let log_file_dir = create_temp_dir("wal_test");
+        let log_file_dir_path = log_file_dir.path().to_str().unwrap();
+        let log_store =
+            test_util::log_store_util::create_tmp_local_file_log_store(log_file_dir_path).await;
         let wal = Wal::new(0, Arc::new(log_store));
 
         let res = wal.write(0, b"test1").await.unwrap();
@@ -264,8 +267,10 @@ mod tests {
     #[tokio::test]
     pub async fn test_read_wal_only_header() -> Result<()> {
         common_telemetry::init_default_ut_logging();
-        let (log_store, _tmp) =
-            test_util::log_store_util::create_tmp_local_file_log_store("wal_test").await;
+        let log_file_dir = create_temp_dir("wal_test");
+        let log_file_dir_path = log_file_dir.path().to_str().unwrap();
+        let log_store =
+            test_util::log_store_util::create_tmp_local_file_log_store(log_file_dir_path).await;
         let wal = Wal::new(0, Arc::new(log_store));
         let header = WalHeader::with_last_manifest_version(111);
         let seq_num = 3;

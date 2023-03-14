@@ -23,7 +23,6 @@ use catalog::CatalogListRef;
 use common_base::Plugins;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::{FunctionRef, FUNCTION_REGISTRY};
-use common_query::physical_plan::PhysicalPlan;
 use common_query::prelude::ScalarUdf;
 use common_query::Output;
 use datatypes::schema::Schema;
@@ -33,24 +32,31 @@ use crate::datafusion::DatafusionQueryEngine;
 use crate::error::Result;
 use crate::parser::QueryStatement;
 use crate::plan::LogicalPlan;
+use crate::planner::LogicalPlanner;
 pub use crate::query_engine::context::QueryEngineContext;
 pub use crate::query_engine::state::QueryEngineState;
 
-#[async_trait]
-pub trait QueryEngine: Send + Sync {
-    fn name(&self) -> &str;
+pub type StatementHandlerRef = Arc<dyn StatementHandler>;
 
-    async fn statement_to_plan(
+// TODO(LFC): Gradually make more statements executed in the form of logical plan, and remove this trait. Tracked in #1010.
+#[async_trait]
+pub trait StatementHandler: Send + Sync {
+    async fn handle_statement(
         &self,
         stmt: QueryStatement,
         query_ctx: QueryContextRef,
-    ) -> Result<LogicalPlan>;
+    ) -> Result<Output>;
+}
 
-    async fn describe(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<Schema>;
+#[async_trait]
+pub trait QueryEngine: Send + Sync {
+    fn planner(&self) -> Arc<dyn LogicalPlanner>;
+
+    fn name(&self) -> &str;
+
+    async fn describe(&self, plan: LogicalPlan) -> Result<Schema>;
 
     async fn execute(&self, plan: &LogicalPlan) -> Result<Output>;
-
-    async fn execute_physical(&self, plan: &Arc<dyn PhysicalPlan>) -> Result<Output>;
 
     fn register_udf(&self, udf: ScalarUdf);
 
@@ -65,13 +71,12 @@ pub struct QueryEngineFactory {
 
 impl QueryEngineFactory {
     pub fn new(catalog_list: CatalogListRef) -> Self {
-        let query_engine = Arc::new(DatafusionQueryEngine::new(catalog_list, Default::default()));
-        register_functions(&query_engine);
-        Self { query_engine }
+        Self::new_with_plugins(catalog_list, Default::default())
     }
 
     pub fn new_with_plugins(catalog_list: CatalogListRef, plugins: Arc<Plugins>) -> Self {
-        let query_engine = Arc::new(DatafusionQueryEngine::new(catalog_list, plugins));
+        let state = Arc::new(QueryEngineState::new(catalog_list, plugins));
+        let query_engine = Arc::new(DatafusionQueryEngine::new(state));
         register_functions(&query_engine);
         Self { query_engine }
     }

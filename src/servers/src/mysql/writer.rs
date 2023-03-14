@@ -171,9 +171,8 @@ fn create_mysql_column(column_schema: &ColumnSchema) -> Result<Column> {
         ConcreteDataType::Int64(_) | ConcreteDataType::UInt64(_) => {
             Ok(ColumnType::MYSQL_TYPE_LONGLONG)
         }
-        ConcreteDataType::Float32(_) | ConcreteDataType::Float64(_) => {
-            Ok(ColumnType::MYSQL_TYPE_FLOAT)
-        }
+        ConcreteDataType::Float32(_) => Ok(ColumnType::MYSQL_TYPE_FLOAT),
+        ConcreteDataType::Float64(_) => Ok(ColumnType::MYSQL_TYPE_DOUBLE),
         ConcreteDataType::Binary(_) | ConcreteDataType::String(_) => {
             Ok(ColumnType::MYSQL_TYPE_VARCHAR)
         }
@@ -186,6 +185,14 @@ fn create_mysql_column(column_schema: &ColumnSchema) -> Result<Column> {
         }
         .fail(),
     };
+    let mut colflags = ColumnFlags::empty();
+    match column_schema.data_type {
+        ConcreteDataType::UInt16(_)
+        | ConcreteDataType::UInt8(_)
+        | ConcreteDataType::UInt32(_)
+        | ConcreteDataType::UInt64(_) => colflags |= ColumnFlags::UNSIGNED_FLAG,
+        _ => {}
+    };
     column_type.map(|column_type| Column {
         column: column_schema.name.clone(),
         coltype: column_type,
@@ -193,7 +200,7 @@ fn create_mysql_column(column_schema: &ColumnSchema) -> Result<Column> {
         // TODO(LFC): Currently "table" and "colflags" are not relevant in MySQL server
         //   implementation, will revisit them again in the future.
         table: "".to_string(),
-        colflags: ColumnFlags::empty(),
+        colflags,
     })
 }
 

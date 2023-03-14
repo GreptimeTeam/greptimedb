@@ -18,12 +18,14 @@ common-recordbatch = { path = "../common/recordbatch" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
+dashmap = "5.4"
 datafusion.workspace = true
 datatypes = { path = "../datatypes" }
 futures = "0.3"
 futures-util.workspace = true
 lazy_static = "1.4"
 meta-client = { path = "../meta-client" }
+parking_lot = "0.12"
 regex = "1.6"
 serde = "1.0"
 serde_json = "1.0"
@@ -34,10 +36,10 @@ table = { path = "../table" }
 tokio.workspace = true
 
 [dev-dependencies]
+common-test-util = { path = "../common/test-util" }
 chrono.workspace = true
 log-store = { path = "../log-store" }
 mito = { path = "../mito", features = ["test"] }
 object-store = { path = "../object-store" }
 storage = { path = "../storage" }
-tempdir = "0.3"
 tokio.workspace = true

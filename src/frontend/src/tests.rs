@@ -20,6 +20,7 @@ use catalog::remote::MetaKvBackend;
 use client::Client;
 use common_grpc::channel_manager::ChannelManager;
 use common_runtime::Builder as RuntimeBuilder;
+use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datanode::datanode::{DatanodeOptions, FileConfig, ObjectStoreConfig, WalConfig};
 use datanode::instance::Instance as DatanodeInstance;
 use meta_client::client::MetaClientBuilder;
@@ -33,7 +34,7 @@ use partition::route::TableRoutes;
 use servers::grpc::GrpcServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
 use servers::Mode;
-use tempdir::TempDir;
+use table::engine::{region_name, table_dir};
 use tonic::transport::Server;
 use tower::service_fn;
 
@@ -56,9 +57,21 @@ pub(crate) struct MockDistributedInstance {
     _guards: Vec<TestGuard>,
 }
 
+impl MockDistributedInstance {
+    pub fn data_tmp_dirs(&self) -> Vec<&TempDir> {
+        self._guards.iter().map(|g| &g._data_tmp_dir).collect()
+    }
+}
+
 pub(crate) struct MockStandaloneInstance {
     pub(crate) instance: Arc<Instance>,
     _guard: TestGuard,
+}
+
+impl MockStandaloneInstance {
+    pub fn data_tmp_dir(&self) -> &TempDir {
+        &self._guard._data_tmp_dir
+    }
 }
 
 pub(crate) async fn create_standalone_instance(test_name: &str) -> MockStandaloneInstance {
@@ -75,8 +88,8 @@ pub(crate) async fn create_standalone_instance(test_name: &str) -> MockStandalon
 }
 
 fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) {
-    let wal_tmp_dir = TempDir::new(&format!("gt_wal_{name}")).unwrap();
-    let data_tmp_dir = TempDir::new(&format!("gt_data_{name}")).unwrap();
+    let wal_tmp_dir = create_temp_dir(&format!("gt_wal_{name}"));
+    let data_tmp_dir = create_temp_dir(&format!("gt_data_{name}"));
     let opts = DatanodeOptions {
         wal: WalConfig {
             dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
@@ -161,8 +174,8 @@ async fn create_distributed_datanode(
     datanode_id: u64,
     meta_srv: MockInfo,
 ) -> (Arc<DatanodeInstance>, TestGuard) {
-    let wal_tmp_dir = TempDir::new(&format!("gt_wal_{test_name}_dist_dn_{datanode_id}")).unwrap();
-    let data_tmp_dir = TempDir::new(&format!("gt_data_{test_name}_dist_dn_{datanode_id}")).unwrap();
+    let wal_tmp_dir = create_temp_dir(&format!("gt_wal_{test_name}_dist_dn_{datanode_id}"));
+    let data_tmp_dir = create_temp_dir(&format!("gt_data_{test_name}_dist_dn_{datanode_id}"));
     let opts = DatanodeOptions {
         node_id: Some(datanode_id),
         wal: WalConfig {
@@ -258,7 +271,6 @@ pub(crate) async fn create_distributed_instance(test_name: &str) -> MockDistribu
         meta_client.clone(),
         catalog_manager,
         datanode_clients.clone(),
-        Default::default(),
     );
     let dist_instance = Arc::new(dist_instance);
     let frontend = Instance::new_distributed(dist_instance.clone());
@@ -269,4 +281,30 @@ pub(crate) async fn create_distributed_instance(test_name: &str) -> MockDistribu
         datanodes: datanode_instances,
         _guards: test_guards,
     }
+}
+
+pub fn test_region_dir(
+    dir: &str,
+    catalog_name: &str,
+    schema_name: &str,
+    table_id: u32,
+    region_id: u32,
+) -> String {
+    let table_dir = table_dir(catalog_name, schema_name, table_id);
+    let region_name = region_name(table_id, region_id);
+
+    format!("{}/{}/{}", dir, table_dir, region_name)
+}
+
+pub fn has_parquet_file(sst_dir: &str) -> bool {
+    for entry in std::fs::read_dir(sst_dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if !path.is_dir() {
+            assert_eq!("parquet", path.extension().unwrap());
+            return true;
+        }
+    }
+
+    false
 }

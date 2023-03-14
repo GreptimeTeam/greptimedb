@@ -169,7 +169,7 @@ mod tests {
 
     use super::*;
     use crate::file_purger::noop::new_noop_file_purger;
-    use crate::sst::FileMeta;
+    use crate::sst::{FileId, FileMeta};
 
     #[test]
     fn test_time_bucket_span() {
@@ -221,99 +221,95 @@ mod tests {
         assert_eq!(
             TIME_BUCKETS[0],
             infer_time_bucket(&[
-                new_file_handle("a", 0, TIME_BUCKETS[0] * 1000 - 1),
-                new_file_handle("b", 1, 10_000)
+                new_file_handle(FileId::random(), 0, TIME_BUCKETS[0] * 1000 - 1),
+                new_file_handle(FileId::random(), 1, 10_000)
             ])
         );
     }
 
-    fn new_file_handle(name: &str, start_ts_millis: i64, end_ts_millis: i64) -> FileHandle {
+    fn new_file_handle(file_id: FileId, start_ts_millis: i64, end_ts_millis: i64) -> FileHandle {
         let file_purger = new_noop_file_purger();
         let layer = Arc::new(crate::test_util::access_layer_util::MockAccessLayer {});
         FileHandle::new(
             FileMeta {
                 region_id: 0,
-                file_name: name.to_string(),
+                file_id,
                 time_range: Some((
                     Timestamp::new_millisecond(start_ts_millis),
                     Timestamp::new_millisecond(end_ts_millis),
                 )),
                 level: 0,
+                file_size: 0,
             },
             layer,
             file_purger,
         )
     }
 
-    fn new_file_handles(input: &[(&str, i64, i64)]) -> Vec<FileHandle> {
+    fn new_file_handles(input: &[(FileId, i64, i64)]) -> Vec<FileHandle> {
         input
             .iter()
-            .map(|(name, start, end)| new_file_handle(name, *start, *end))
+            .map(|(file_id, start, end)| new_file_handle(*file_id, *start, *end))
             .collect()
     }
 
     fn check_bucket_calculation(
         bucket_sec: i64,
         files: Vec<FileHandle>,
-        expected: &[(i64, &[&str])],
+        expected: &[(i64, &[FileId])],
     ) {
         let res = calculate_time_buckets(bucket_sec, &files);
 
         let expected = expected
             .iter()
-            .map(|(bucket, file_names)| {
-                (
-                    *bucket,
-                    file_names
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect::<HashSet<_>>(),
-                )
-            })
+            .map(|(bucket, file_ids)| (*bucket, file_ids.iter().copied().collect::<HashSet<_>>()))
             .collect::<HashMap<_, _>>();
 
-        for (bucket, file_names) in expected {
+        for (bucket, file_ids) in expected {
             let actual = res
                 .get(&bucket)
                 .unwrap()
                 .iter()
-                .map(|f| f.file_name().to_string())
+                .map(|f| f.file_id())
                 .collect();
             assert_eq!(
-                file_names, actual,
-                "bucket: {bucket}, expected: {file_names:?}, actual: {actual:?}",
+                file_ids, actual,
+                "bucket: {bucket}, expected: {file_ids:?}, actual: {actual:?}",
             );
         }
     }
 
     #[test]
     fn test_calculate_time_buckets() {
+        let file_id_a = FileId::random();
+        let file_id_b = FileId::random();
         // simple case, files with disjoint
         check_bucket_calculation(
             10,
-            new_file_handles(&[("a", 0, 9000), ("b", 10000, 19000)]),
-            &[(0, &["a"]), (10, &["b"])],
+            new_file_handles(&[(file_id_a, 0, 9000), (file_id_b, 10000, 19000)]),
+            &[(0, &[file_id_a]), (10, &[file_id_b])],
         );
 
         // files across buckets
         check_bucket_calculation(
             10,
-            new_file_handles(&[("a", 0, 10001), ("b", 10000, 19000)]),
-            &[(0, &["a"]), (10, &["a", "b"])],
+            new_file_handles(&[(file_id_a, 0, 10001), (file_id_b, 10000, 19000)]),
+            &[(0, &[file_id_a]), (10, &[file_id_a, file_id_b])],
         );
         check_bucket_calculation(
             10,
-            new_file_handles(&[("a", 0, 10000)]),
-            &[(0, &["a"]), (10, &["a"])],
+            new_file_handles(&[(file_id_a, 0, 10000)]),
+            &[(0, &[file_id_a]), (10, &[file_id_a])],
         );
 
         // file with an large time range
+        let file_id_array = &[file_id_a];
         let expected = (0..(TIME_BUCKETS[4] / TIME_BUCKETS[0]))
-            .map(|b| (b * TIME_BUCKETS[0], &["a"] as _))
+            .map(|b| (b * TIME_BUCKETS[0], file_id_array as _))
             .collect::<Vec<_>>();
         check_bucket_calculation(
             TIME_BUCKETS[0],
-            new_file_handles(&[("a", 0, TIME_BUCKETS[4] * 1000)]),
+            new_file_handles(&[(file_id_a, 0, TIME_BUCKETS[4] * 1000)]),
             &expected,
         );
     }

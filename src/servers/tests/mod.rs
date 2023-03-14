@@ -71,7 +71,8 @@ impl SqlQueryHandler for DummyInstance {
         let stmt = QueryLanguageParser::parse_sql(query).unwrap();
         let plan = self
             .query_engine
-            .statement_to_plan(stmt, query_ctx)
+            .planner()
+            .plan(stmt, query_ctx)
             .await
             .unwrap();
         let output = self.query_engine.execute(&plan).await.unwrap();
@@ -86,25 +87,19 @@ impl SqlQueryHandler for DummyInstance {
         unimplemented!()
     }
 
-    async fn do_statement_query(
-        &self,
-        _stmt: Statement,
-        _query_ctx: QueryContextRef,
-    ) -> Result<Output> {
-        unimplemented!()
-    }
-
     async fn do_describe(
         &self,
         stmt: Statement,
         query_ctx: QueryContextRef,
     ) -> Result<Option<Schema>> {
         if let Statement::Query(_) = stmt {
-            let schema = self
+            let plan = self
                 .query_engine
-                .describe(QueryStatement::Sql(stmt), query_ctx)
+                .planner()
+                .plan(QueryStatement::Sql(stmt), query_ctx)
                 .await
                 .unwrap();
+            let schema = self.query_engine.describe(plan).await.unwrap();
             Ok(Some(schema))
         } else {
             Ok(None)
@@ -175,6 +170,23 @@ impl GrpcQueryHandler for DummyInstance {
                         result.remove(0)?
                     }
                     Query::LogicalPlan(_) => unimplemented!(),
+                    Query::PromRangeQuery(promql) => {
+                        let prom_query = PromQuery {
+                            query: promql.query,
+                            start: promql.start,
+                            end: promql.end,
+                            step: promql.step,
+                        };
+                        let mut result =
+                            SqlQueryHandler::do_promql_query(self, &prom_query, ctx).await;
+                        ensure!(
+                            result.len() == 1,
+                            NotSupportedSnafu {
+                                feat: "execute multiple statements in PromQL query string through GRPC interface"
+                            }
+                        );
+                        result.remove(0)?
+                    }
                 }
             }
             Request::Ddl(_) => unimplemented!(),

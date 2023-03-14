@@ -45,10 +45,10 @@ uuid.workspace = true
 [dev-dependencies]
 atomic_float = "0.1"
 criterion = "0.3"
+common-test-util = { path = "../common/test-util" }
 datatypes = { path = "../datatypes", features = ["test"] }
 log-store = { path = "../log-store" }
 rand = "0.8"
-tempdir = "0.3"
 
 [build-dependencies]
 tonic-build = "0.8"

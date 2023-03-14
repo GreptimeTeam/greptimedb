@@ -17,16 +17,20 @@ use std::sync::Arc;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use common_query::Output;
 use common_recordbatch::util;
+use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema};
 use mito::config::EngineConfig;
 use mito::table::test_util::{new_test_object_store, MockEngine, MockMitoEngine};
+use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::QueryEngineFactory;
 use servers::Mode;
+use session::context::QueryContext;
 use snafu::ResultExt;
+use sql::statements::statement::Statement;
+use sql::statements::tql::Tql;
 use table::engine::{EngineContext, TableEngineRef};
 use table::requests::{CreateTableRequest, TableOptions};
-use tempdir::TempDir;
 
 use crate::datanode::{DatanodeOptions, FileConfig, ObjectStoreConfig, ProcedureConfig, WalConfig};
 use crate::error::{CreateTableSnafu, Result};
@@ -55,10 +59,12 @@ impl MockInstance {
 
     pub(crate) async fn with_procedure_enabled(name: &str) -> Self {
         let (mut opts, _guard) = create_tmp_dir_and_datanode_opts(name);
-        let procedure_dir = TempDir::new(&format!("gt_procedure_{name}")).unwrap();
-        opts.procedure = Some(ProcedureConfig::from_file_path(
-            procedure_dir.path().to_str().unwrap().to_string(),
-        ));
+        let procedure_dir = create_temp_dir(&format!("gt_procedure_{name}"));
+        opts.procedure = Some(ProcedureConfig {
+            store: ObjectStoreConfig::File(FileConfig {
+                data_dir: procedure_dir.path().to_str().unwrap().to_string(),
+            }),
+        });
 
         let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
         instance.start().await.unwrap();
@@ -67,6 +73,40 @@ impl MockInstance {
             instance,
             _guard,
             _procedure_dir: Some(procedure_dir),
+        }
+    }
+
+    pub(crate) async fn execute_sql(&self, sql: &str) -> Output {
+        let engine = self.inner().query_engine();
+        let planner = engine.planner();
+
+        let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
+        match stmt {
+            QueryStatement::Sql(Statement::Query(_)) => {
+                let plan = planner.plan(stmt, QueryContext::arc()).await.unwrap();
+                engine.execute(&plan).await.unwrap()
+            }
+            QueryStatement::Sql(Statement::Tql(tql)) => {
+                let plan = match tql {
+                    Tql::Eval(eval) => {
+                        let promql = PromQuery {
+                            start: eval.start,
+                            end: eval.end,
+                            step: eval.step,
+                            query: eval.query,
+                        };
+                        let stmt = QueryLanguageParser::parse_promql(&promql).unwrap();
+                        planner.plan(stmt, QueryContext::arc()).await.unwrap()
+                    }
+                    Tql::Explain(_) => unimplemented!(),
+                };
+                engine.execute(&plan).await.unwrap()
+            }
+            _ => self
+                .inner()
+                .execute_stmt(stmt, QueryContext::arc())
+                .await
+                .unwrap(),
         }
     }
 
@@ -85,8 +125,8 @@ struct TestGuard {
 }
 
 fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) {
-    let wal_tmp_dir = TempDir::new(&format!("gt_wal_{name}")).unwrap();
-    let data_tmp_dir = TempDir::new(&format!("gt_data_{name}")).unwrap();
+    let wal_tmp_dir = create_temp_dir(&format!("gt_wal_{name}"));
+    let data_tmp_dir = create_temp_dir(&format!("gt_data_{name}"));
     let opts = DatanodeOptions {
         wal: WalConfig {
             dir: wal_tmp_dir.path().to_str().unwrap().to_string(),

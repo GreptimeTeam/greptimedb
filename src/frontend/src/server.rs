@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -25,12 +26,11 @@ use servers::http::HttpServer;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::opentsdb::OpentsdbServer;
 use servers::postgres::PostgresServer;
-use servers::promql::PromqlServer;
+use servers::prom::PromServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
 use servers::query_handler::sql::ServerSqlQueryHandlerAdaptor;
 use servers::server::Server;
 use snafu::ResultExt;
-use tokio::try_join;
 
 use crate::error::Error::StartServer;
 use crate::error::{self, Result};
@@ -41,19 +41,23 @@ use crate::prometheus::PrometheusOptions;
 
 pub(crate) struct Services;
 
+pub type ServerHandlers = HashMap<String, ServerHandler>;
+
+pub type ServerHandler = (Box<dyn Server>, SocketAddr);
+
 impl Services {
-    pub(crate) async fn start<T>(
+    pub(crate) async fn build<T>(
         opts: &FrontendOptions,
         instance: Arc<T>,
         plugins: Arc<Plugins>,
-    ) -> Result<()>
+    ) -> Result<ServerHandlers>
     where
         T: FrontendInstance,
     {
-        info!("Starting frontend servers");
+        let mut result = Vec::<ServerHandler>::with_capacity(plugins.len());
         let user_provider = plugins.get::<UserProviderRef>().cloned();
 
-        let grpc_server_and_addr = if let Some(opts) = &opts.grpc_options {
+        if let Some(opts) = &opts.grpc_options {
             let grpc_addr = parse_addr(&opts.addr)?;
 
             let grpc_runtime = Arc::new(
@@ -70,12 +74,10 @@ impl Services {
                 grpc_runtime,
             );
 
-            Some((Box::new(grpc_server) as _, grpc_addr))
-        } else {
-            None
+            result.push((Box::new(grpc_server), grpc_addr));
         };
 
-        let mysql_server_and_addr = if let Some(opts) = &opts.mysql_options {
+        if let Some(opts) = &opts.mysql_options {
             let mysql_addr = parse_addr(&opts.addr)?;
 
             let mysql_io_runtime = Arc::new(
@@ -102,13 +104,10 @@ impl Services {
                     opts.reject_no_database.unwrap_or(false),
                 )),
             );
+            result.push((mysql_server, mysql_addr));
+        }
 
-            Some((mysql_server, mysql_addr))
-        } else {
-            None
-        };
-
-        let postgres_server_and_addr = if let Some(opts) = &opts.postgres_options {
+        if let Some(opts) = &opts.postgres_options {
             let pg_addr = parse_addr(&opts.addr)?;
 
             let pg_io_runtime = Arc::new(
@@ -126,12 +125,12 @@ impl Services {
                 user_provider.clone(),
             )) as Box<dyn Server>;
 
-            Some((pg_server, pg_addr))
-        } else {
-            None
-        };
+            result.push((pg_server, pg_addr));
+        }
 
-        let opentsdb_server_and_addr = if let Some(opts) = &opts.opentsdb_options {
+        let mut set_opentsdb_handler = false;
+
+        if let Some(opts) = &opts.opentsdb_options {
             let addr = parse_addr(&opts.addr)?;
 
             let io_runtime = Arc::new(
@@ -144,12 +143,11 @@ impl Services {
 
             let server = OpentsdbServer::create_server(instance.clone(), io_runtime);
 
-            Some((server, addr))
-        } else {
-            None
-        };
+            result.push((server, addr));
+            set_opentsdb_handler = true;
+        }
 
-        let http_server_and_addr = if let Some(http_options) = &opts.http_options {
+        if let Some(http_options) = &opts.http_options {
             let http_addr = parse_addr(&http_options.addr)?;
 
             let mut http_server = HttpServer::new(
@@ -160,7 +158,7 @@ impl Services {
                 http_server.set_user_provider(user_provider);
             }
 
-            if opentsdb_server_and_addr.is_some() {
+            if set_opentsdb_handler {
                 http_server.set_opentsdb_handler(instance.clone());
             }
             if matches!(
@@ -178,34 +176,24 @@ impl Services {
             }
             http_server.set_script_handler(instance.clone());
 
-            Some((Box::new(http_server) as _, http_addr))
-        } else {
-            None
-        };
+            result.push((Box::new(http_server), http_addr));
+        }
 
-        let promql_server_and_addr = if let Some(promql_options) = &opts.promql_options {
-            let promql_addr = parse_addr(&promql_options.addr)?;
+        if let Some(prom_options) = &opts.prom_options {
+            let prom_addr = parse_addr(&prom_options.addr)?;
 
-            let mut promql_server = PromqlServer::create_server(instance.clone());
+            let mut prom_server = PromServer::create_server(instance);
             if let Some(user_provider) = user_provider {
-                promql_server.set_user_provider(user_provider);
+                prom_server.set_user_provider(user_provider);
             }
 
-            Some((promql_server as _, promql_addr))
-        } else {
-            None
+            result.push((prom_server, prom_addr));
         };
 
-        try_join!(
-            start_server(http_server_and_addr),
-            start_server(grpc_server_and_addr),
-            start_server(mysql_server_and_addr),
-            start_server(postgres_server_and_addr),
-            start_server(opentsdb_server_and_addr),
-            start_server(promql_server_and_addr),
-        )
-        .context(error::StartServerSnafu)?;
-        Ok(())
+        Ok(result
+            .into_iter()
+            .map(|(server, addr)| (server.name().to_string(), (server, addr)))
+            .collect())
     }
 }
 
@@ -213,13 +201,10 @@ fn parse_addr(addr: &str) -> Result<SocketAddr> {
     addr.parse().context(error::ParseAddrSnafu { addr })
 }
 
-async fn start_server(
-    server_and_addr: Option<(Box<dyn Server>, SocketAddr)>,
+pub async fn start_server(
+    server_and_addr: &(Box<dyn Server>, SocketAddr),
 ) -> servers::error::Result<Option<SocketAddr>> {
-    if let Some((server, addr)) = server_and_addr {
-        info!("Starting server at {}", addr);
-        server.start(addr).await.map(Some)
-    } else {
-        Ok(None)
-    }
+    let (server, addr) = server_and_addr;
+    info!("Starting {} at {}", server.name(), addr);
+    server.start(*addr).await.map(Some)
 }

@@ -125,6 +125,20 @@ impl<S: LogStore> Region for RegionImpl<S> {
     async fn close(&self) -> Result<()> {
         self.inner.close().await
     }
+
+    fn disk_usage_bytes(&self) -> u64 {
+        let version = self.inner.version_control().current();
+        version
+            .ssts()
+            .levels()
+            .iter()
+            .map(|level_ssts| level_ssts.files().map(|sst| sst.file_size()).sum::<u64>())
+            .sum()
+    }
+
+    async fn flush(&self) -> Result<()> {
+        self.inner.flush().await
+    }
 }
 
 /// Storage related config for region.
@@ -549,5 +563,19 @@ impl<S: LogStore> RegionInner<S> {
 
     async fn close(&self) -> Result<()> {
         self.writer.close().await
+    }
+
+    async fn flush(&self) -> Result<()> {
+        let writer_ctx = WriterContext {
+            shared: &self.shared,
+            flush_strategy: &self.flush_strategy,
+            flush_scheduler: &self.flush_scheduler,
+            compaction_scheduler: &self.compaction_scheduler,
+            sst_layer: &self.sst_layer,
+            wal: &self.wal,
+            writer: &self.writer,
+            manifest: &self.manifest,
+        };
+        self.writer.flush(writer_ctx).await
     }
 }

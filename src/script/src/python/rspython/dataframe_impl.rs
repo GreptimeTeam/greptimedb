@@ -35,6 +35,7 @@ pub(crate) mod data_frame {
 
     use crate::python::error::DataFusionSnafu;
     use crate::python::ffi_types::PyVector;
+    use crate::python::rspython::builtins::greptime_builtin::lit;
     use crate::python::utils::block_on_async;
     #[rspyclass(module = "data_frame", name = "DataFrame")]
     #[derive(PyPayload, Debug)]
@@ -251,21 +252,15 @@ pub(crate) mod data_frame {
         }
     }
 
-    #[rspyclass(module = "data_frame", name = "Expr")]
+    #[rspyclass(module = "data_frame", name = "PyExpr")]
     #[derive(PyPayload, Debug, Clone)]
     pub struct PyExpr {
         pub inner: DfExpr,
     }
 
-    #[pyfunction]
-    fn col(name: String, vm: &VirtualMachine) -> PyExprRef {
-        let expr: PyExpr = DfExpr::Column(datafusion_common::Column::from_name(name)).into();
-        expr.into_ref(vm)
-    }
-
     // TODO(discord9): lit function that take PyObject and turn it into ScalarValue
 
-    type PyExprRef = PyRef<PyExpr>;
+    pub(crate) type PyExprRef = PyRef<PyExpr>;
 
     impl From<datafusion_expr::Expr> for PyExpr {
         fn from(value: DfExpr) -> Self {
@@ -280,10 +275,8 @@ pub(crate) mod data_frame {
             op: PyComparisonOp,
             vm: &VirtualMachine,
         ) -> PyResult<rustpython_vm::function::Either<PyObjectRef, PyComparisonValue>> {
-            if let (Some(zelf), Some(other)) =
-                (zelf.downcast_ref::<Self>(), other.downcast_ref::<Self>())
-            {
-                let ret = zelf.richcompare((**other).clone(), op, vm)?;
+            if let Some(zelf) = zelf.downcast_ref::<Self>() {
+                let ret = zelf.richcompare(other.to_owned(), op, vm)?;
                 let ret = ret.into_pyobject(vm);
                 Ok(rustpython_vm::function::Either::A(ret))
             } else {
@@ -307,10 +300,15 @@ pub(crate) mod data_frame {
     impl PyExpr {
         fn richcompare(
             &self,
-            other: Self,
+            other: PyObjectRef,
             op: PyComparisonOp,
-            _vm: &VirtualMachine,
+            vm: &VirtualMachine,
         ) -> PyResult<Self> {
+            let other = if let Some(other) = other.downcast_ref::<Self>() {
+                other.to_owned()
+            } else {
+                lit(other, vm)?
+            };
             let f = match op {
                 PyComparisonOp::Eq => DfExpr::eq,
                 PyComparisonOp::Ne => DfExpr::not_eq,
@@ -319,7 +317,7 @@ pub(crate) mod data_frame {
                 PyComparisonOp::Ge => DfExpr::gt_eq,
                 PyComparisonOp::Le => DfExpr::lt_eq,
             };
-            Ok(f(self.inner.clone(), other.inner).into())
+            Ok(f(self.inner.clone(), other.inner.clone()).into())
         }
         #[pymethod]
         fn alias(&self, name: String) -> PyResult<PyExpr> {

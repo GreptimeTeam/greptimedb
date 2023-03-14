@@ -22,20 +22,21 @@ pub type RegionManifest = ManifestImpl<RegionMetaActionList>;
 mod tests {
     use std::sync::Arc;
 
+    use common_test_util::temp_dir::create_temp_dir;
     use object_store::services::Fs;
     use object_store::{ObjectStore, ObjectStoreBuilder};
     use store_api::manifest::action::ProtocolAction;
     use store_api::manifest::{Manifest, MetaActionIterator, MAX_VERSION};
-    use tempdir::TempDir;
 
     use super::*;
     use crate::manifest::test_utils::*;
     use crate::metadata::RegionMetadata;
+    use crate::sst::FileId;
 
     #[tokio::test]
     async fn test_region_manifest() {
         common_telemetry::init_default_ut_logging();
-        let tmp_dir = TempDir::new("test_region_manifest").unwrap();
+        let tmp_dir = create_temp_dir("test_region_manifest");
         let object_store = ObjectStore::new(
             Fs::default()
                 .root(&tmp_dir.path().to_string_lossy())
@@ -94,8 +95,12 @@ mod tests {
         // Save some actions
         manifest
             .update(RegionMetaActionList::new(vec![
-                RegionMetaAction::Edit(build_region_edit(1, &["f1"], &[])),
-                RegionMetaAction::Edit(build_region_edit(2, &["f2", "f3"], &[])),
+                RegionMetaAction::Edit(build_region_edit(1, &[FileId::random()], &[])),
+                RegionMetaAction::Edit(build_region_edit(
+                    2,
+                    &[FileId::random(), FileId::random()],
+                    &[],
+                )),
             ]))
             .await
             .unwrap();

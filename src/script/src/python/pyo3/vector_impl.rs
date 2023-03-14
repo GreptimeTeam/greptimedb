@@ -12,17 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use arrow::array::{make_array, ArrayData};
+use arrow::pyarrow::PyArrowConvert;
+use datafusion::arrow::array::BooleanArray;
+use datafusion::arrow::compute;
 use datafusion::arrow::compute::kernels::{arithmetic, comparison};
 use datatypes::arrow::array::{Array, ArrayRef};
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::prelude::{ConcreteDataType, DataType};
-use pyo3::exceptions::{PyNotImplementedError, PyValueError};
+use datatypes::vectors::Helper;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::pyclass::CompareOp;
-use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyString};
+use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyString, PyType};
 
-use crate::python::ffi_types::vector::{wrap_bool_result, wrap_result, PyVector};
-use crate::python::pyo3::utils::pyo3_obj_try_to_typed_val;
+use crate::python::ffi_types::vector::{arrow_rtruediv, wrap_bool_result, wrap_result, PyVector};
+use crate::python::pyo3::utils::{pyo3_obj_try_to_typed_val, to_py_err};
 
 macro_rules! get_con_type {
     ($obj:ident, $($pyty:ident => $con_ty:ident),*$(,)?) => {
@@ -179,15 +184,47 @@ impl PyVector {
     }
     #[allow(unused)]
     fn __rtruediv__(&self, py: Python<'_>, other: PyObject) -> PyResult<Self> {
-        Err(PyNotImplementedError::new_err(()))
+        if pyo3_is_obj_scalar(other.as_ref(py)) {
+            self.pyo3_scalar_arith_op(py, other, Some(ArrowDataType::Float64), arrow_rtruediv)
+        } else {
+            self.pyo3_vector_arith_op(
+                py,
+                other,
+                Some(ArrowDataType::Float64),
+                wrap_result(|a, b| arithmetic::divide_dyn(b, a)),
+            )
+        }
     }
     #[allow(unused)]
     fn __floordiv__(&self, py: Python<'_>, other: PyObject) -> PyResult<Self> {
-        Err(PyNotImplementedError::new_err(()))
+        if pyo3_is_obj_scalar(other.as_ref(py)) {
+            self.pyo3_scalar_arith_op(
+                py,
+                other,
+                Some(ArrowDataType::Int64),
+                wrap_result(arithmetic::divide_dyn),
+            )
+        } else {
+            self.pyo3_vector_arith_op(
+                py,
+                other,
+                Some(ArrowDataType::Int64),
+                wrap_result(arithmetic::divide_dyn),
+            )
+        }
     }
     #[allow(unused)]
     fn __rfloordiv__(&self, py: Python<'_>, other: PyObject) -> PyResult<Self> {
-        Err(PyNotImplementedError::new_err(()))
+        if pyo3_is_obj_scalar(other.as_ref(py)) {
+            self.pyo3_scalar_arith_op(py, other, Some(ArrowDataType::Int64), arrow_rtruediv)
+        } else {
+            self.pyo3_vector_arith_op(
+                py,
+                other,
+                Some(ArrowDataType::Int64),
+                wrap_result(|a, b| arithmetic::divide_dyn(b, a)),
+            )
+        }
     }
     fn __and__(&self, other: &Self) -> PyResult<Self> {
         Self::vector_and(self, other).map_err(PyValueError::new_err)
@@ -198,6 +235,29 @@ impl PyVector {
     fn __invert__(&self) -> PyResult<Self> {
         Self::vector_invert(self).map_err(PyValueError::new_err)
     }
+    /// take a boolean array and filters the Array, returning elements matching the filter (i.e. where the values are true).
+    #[pyo3(name = "filter")]
+    fn pyo3_filter(&self, py: Python<'_>, other: &Self) -> PyResult<Self> {
+        py.allow_threads(|| {
+            let left = self.to_arrow_array();
+            let right = other.to_arrow_array();
+            if let Some(filter) = right.as_any().downcast_ref::<BooleanArray>() {
+                let res = compute::filter(left.as_ref(), filter);
+                let res =
+                    res.map_err(|err| PyValueError::new_err(format!("Arrow Error: {err:#?}")))?;
+                let ret = Helper::try_into_vector(res.clone()).map_err(|e| {
+                    PyValueError::new_err(format!(
+                        "Can't cast result into vector, result: {res:?}, err: {e:?}",
+                    ))
+                })?;
+                Ok(ret.into())
+            } else {
+                Err(PyValueError::new_err(format!(
+                    "Can't cast operand into a Boolean Array, which is {right:#?}"
+                )))
+            }
+        })
+    }
     fn __len__(&self) -> usize {
         self.len()
     }
@@ -206,6 +266,17 @@ impl PyVector {
     }
     fn __repr__(&self) -> PyResult<String> {
         Ok(format!("{self:#?}"))
+    }
+    /// Convert to `pyarrow` 's array
+    pub(crate) fn to_pyarrow(&self, py: Python) -> PyResult<PyObject> {
+        self.to_arrow_array().data().to_pyarrow(py)
+    }
+    /// Convert from `pyarrow`'s array
+    #[classmethod]
+    pub(crate) fn from_pyarrow(_cls: &PyType, py: Python, obj: PyObject) -> PyResult<PyVector> {
+        let array = make_array(ArrayData::from_pyarrow(obj.as_ref(py))?);
+        let v = Helper::try_into_vector(array).map_err(to_py_err)?;
+        Ok(v.into())
     }
 }
 
@@ -236,10 +307,10 @@ mod test {
         let b: PyVector = (Arc::new(b) as VectorRef).into();
         locals.insert("bv2".to_string(), b);
 
-        let f = Float64Vector::from_slice(&[0.0f64, 1.0, 42.0, 3.0]);
+        let f = Float64Vector::from_slice([0.0f64, 1.0, 42.0, 3.0]);
         let f: PyVector = (Arc::new(f) as VectorRef).into();
         locals.insert("fv1".to_string(), f);
-        let f = Float64Vector::from_slice(&[1919.810f64, 0.114, 51.4, 3.0]);
+        let f = Float64Vector::from_slice([1919.810f64, 0.114, 51.4, 3.0]);
         let f: PyVector = (Arc::new(f) as VectorRef).into();
         locals.insert("fv2".to_string(), f);
         locals

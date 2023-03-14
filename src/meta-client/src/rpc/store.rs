@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use api::v1::meta::{
+    BatchGetRequest as PbBatchGetRequest, BatchGetResponse as PbBatchGetResponse,
     BatchPutRequest as PbBatchPutRequest, BatchPutResponse as PbBatchPutResponse,
     CompareAndPutRequest as PbCompareAndPutRequest,
     CompareAndPutResponse as PbCompareAndPutResponse, DeleteRangeRequest as PbDeleteRangeRequest,
@@ -236,6 +237,68 @@ impl PutResponse {
     #[inline]
     pub fn take_prev_kv(&mut self) -> Option<KeyValue> {
         self.0.prev_kv.take().map(KeyValue::new)
+    }
+}
+
+pub struct BatchGetRequest {
+    pub keys: Vec<Vec<u8>>,
+}
+
+impl From<BatchGetRequest> for PbBatchGetRequest {
+    fn from(req: BatchGetRequest) -> Self {
+        Self {
+            header: None,
+            keys: req.keys,
+        }
+    }
+}
+
+impl Default for BatchGetRequest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BatchGetRequest {
+    #[inline]
+    pub fn new() -> Self {
+        Self { keys: vec![] }
+    }
+
+    #[inline]
+    pub fn add_key(mut self, key: impl Into<Vec<u8>>) -> Self {
+        self.keys.push(key.into());
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BatchGetResponse(PbBatchGetResponse);
+
+impl TryFrom<PbBatchGetResponse> for BatchGetResponse {
+    type Error = error::Error;
+
+    fn try_from(pb: PbBatchGetResponse) -> Result<Self> {
+        util::check_response_header(pb.header.as_ref())?;
+
+        Ok(Self(pb))
+    }
+}
+
+impl BatchGetResponse {
+    #[inline]
+    pub fn new(res: PbBatchGetResponse) -> Self {
+        Self(res)
+    }
+
+    #[inline]
+    pub fn take_header(&mut self) -> Option<ResponseHeader> {
+        self.0.header.take().map(ResponseHeader::new)
+    }
+
+    #[inline]
+    pub fn take_kvs(&mut self) -> Vec<KeyValue> {
+        self.0.kvs.drain(..).map(KeyValue::new).collect()
     }
 }
 
@@ -697,6 +760,40 @@ mod tests {
         assert_eq!(b"k1".to_vec(), kv.take_key());
         assert_eq!(b"v1".to_vec(), kv.value().to_vec());
         assert_eq!(b"v1".to_vec(), kv.take_value());
+    }
+
+    #[test]
+    fn test_batch_get_request_trans() {
+        let req = BatchGetRequest::default()
+            .add_key(b"test_key1".to_vec())
+            .add_key(b"test_key2".to_vec())
+            .add_key(b"test_key3".to_vec());
+
+        let into_req: PbBatchGetRequest = req.into();
+
+        assert!(into_req.header.is_none());
+        assert_eq!(b"test_key1".as_slice(), into_req.keys.get(0).unwrap());
+        assert_eq!(b"test_key2".as_slice(), into_req.keys.get(1).unwrap());
+        assert_eq!(b"test_key3".as_slice(), into_req.keys.get(2).unwrap());
+    }
+
+    #[test]
+    fn test_batch_get_response_trans() {
+        let pb_res = PbBatchGetResponse {
+            header: None,
+            kvs: vec![PbKeyValue {
+                key: b"test_key1".to_vec(),
+                value: b"test_value1".to_vec(),
+            }],
+        };
+        let mut res = BatchGetResponse::new(pb_res);
+
+        assert!(res.take_header().is_none());
+
+        let kvs = res.take_kvs();
+
+        assert_eq!(b"test_key1".as_slice(), kvs[0].key());
+        assert_eq!(b"test_value1".as_slice(), kvs[0].value());
     }
 
     #[test]

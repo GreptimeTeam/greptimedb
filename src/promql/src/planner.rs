@@ -48,7 +48,10 @@ use crate::error::{
 use crate::extension_plan::{
     EmptyMetric, InstantManipulate, Millisecond, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
-use crate::functions::{IDelta, Increase};
+use crate::functions::{
+    AbsentOverTime, AvgOverTime, CountOverTime, IDelta, Increase, LastOverTime, MaxOverTime,
+    MinOverTime, PresentOverTime, SumOverTime,
+};
 
 const LEFT_PLAN_JOIN_ALIAS: &str = "lhs";
 
@@ -366,6 +369,7 @@ impl PromPlanner {
                 let mut func_exprs = self.create_function_expr(func, args.literals)?;
                 func_exprs.insert(0, self.create_time_index_column_expr()?);
                 func_exprs.extend_from_slice(&self.create_tag_column_exprs()?);
+
                 LogicalPlanBuilder::from(input)
                     .project(func_exprs)
                     .context(DataFusionPlanningSnafu)?
@@ -667,6 +671,14 @@ impl PromPlanner {
             "increase" => ScalarFunc::Udf(Increase::scalar_udf()),
             "idelta" => ScalarFunc::Udf(IDelta::<false>::scalar_udf()),
             "irate" => ScalarFunc::Udf(IDelta::<true>::scalar_udf()),
+            "avg_over_time" => ScalarFunc::Udf(AvgOverTime::scalar_udf()),
+            "min_over_time" => ScalarFunc::Udf(MinOverTime::scalar_udf()),
+            "max_over_time" => ScalarFunc::Udf(MaxOverTime::scalar_udf()),
+            "sum_over_time" => ScalarFunc::Udf(SumOverTime::scalar_udf()),
+            "count_over_time" => ScalarFunc::Udf(CountOverTime::scalar_udf()),
+            "last_over_time" => ScalarFunc::Udf(LastOverTime::scalar_udf()),
+            "absent_over_time" => ScalarFunc::Udf(AbsentOverTime::scalar_udf()),
+            "present_over_time" => ScalarFunc::Udf(PresentOverTime::scalar_udf()),
             _ => ScalarFunc::DataFusionBuiltin(
                 BuiltinScalarFunction::from_str(func.name).map_err(|_| {
                     UnsupportedExprSnafu {
@@ -1580,7 +1592,7 @@ mod test {
     }
 
     #[tokio::test]
-    #[should_panic]
+    #[ignore = "wait for https://github.com/apache/arrow-datafusion/issues/5513"]
     async fn increase_aggr() {
         let query = "increase(some_metric[5m])";
         let expected = String::from(
@@ -1592,7 +1604,6 @@ mod test {
             \n          Sort: some_metric.tag_0 DESC NULLS LAST, some_metric.timestamp DESC NULLS LAST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n            Filter: some_metric.timestamp >= TimestampMillisecond(-1000, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n              TableScan: some_metric, unsupported_filters=[timestamp >= TimestampMillisecond(-1000, None), timestamp <= TimestampMillisecond(100000000, None)] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
-
         );
 
         indie_query_plan_compare(query, expected).await;
@@ -1609,7 +1620,24 @@ mod test {
             \n        Sort: some_metric.tag_0 DESC NULLS LAST, some_metric.timestamp DESC NULLS LAST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n          Filter: some_metric.timestamp >= TimestampMillisecond(-1000, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n            TableScan: some_metric, unsupported_filters=[timestamp >= TimestampMillisecond(-1000, None), timestamp <= TimestampMillisecond(100000000, None)] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
+        );
 
+        indie_query_plan_compare(query, expected).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "wait for https://github.com/apache/arrow-datafusion/issues/5513"]
+    async fn count_over_time() {
+        let query = "count_over_time(some_metric[5m])";
+        let expected = String::from(
+            "Filter: prom_count_over_time(timestamp_range,field_0) IS NOT NULL [timestamp:Timestamp(Millisecond, None), prom_count_over_time(timestamp_range,field_0):Float64;N, tag_0:Utf8]\
+            \n  Projection: some_metric.timestamp, prom_count_over_time(timestamp_range, field_0) AS prom_count_over_time(timestamp_range,field_0), some_metric.tag_0 [timestamp:Timestamp(Millisecond, None), prom_count_over_time(timestamp_range,field_0):Float64;N, tag_0:Utf8]\
+            \n    PromRangeManipulate: req range=[0..100000000], interval=[5000], eval range=[300000], time index=[timestamp], values=[\"field_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Dictionary(Int64, Float64);N, timestamp_range:Dictionary(Int64, Timestamp(Millisecond, None))]\
+            \n      PromSeriesNormalize: offset=[0], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n        PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n          Sort: some_metric.tag_0 DESC NULLS LAST, some_metric.timestamp DESC NULLS LAST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n            Filter: some_metric.timestamp >= TimestampMillisecond(-1000, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n              TableScan: some_metric, unsupported_filters=[timestamp >= TimestampMillisecond(-1000, None), timestamp <= TimestampMillisecond(100000000, None)] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
         );
 
         indie_query_plan_compare(query, expected).await;

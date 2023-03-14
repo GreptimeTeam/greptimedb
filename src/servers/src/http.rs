@@ -19,6 +19,9 @@ pub mod opentsdb;
 pub mod prometheus;
 pub mod script;
 
+#[cfg(feature = "mem-prof")]
+pub mod mem_prof;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -445,6 +448,15 @@ impl HttpServer {
             );
         }
 
+        // mem profiler
+        #[cfg(feature = "mem-prof")]
+        {
+            router = router.nest(
+                &format!("/{HTTP_API_VERSION}/prof"),
+                Router::new().route("/mem", routing::get(crate::http::mem_prof::mem_prof)),
+            );
+        }
+
         router = router.route("/metrics", routing::get(handler::metrics));
 
         router = router.route(
@@ -507,6 +519,8 @@ impl HttpServer {
     }
 }
 
+pub const HTTP_SERVER: &str = "HTTP_SERVER";
+
 #[async_trait]
 impl Server for HttpServer {
     async fn shutdown(&self) -> Result<()> {
@@ -544,6 +558,10 @@ impl Server for HttpServer {
         graceful.await.context(StartHttpSnafu)?;
 
         Ok(listening)
+    }
+
+    fn name(&self) -> &str {
+        HTTP_SERVER
     }
 }
 
@@ -593,14 +611,6 @@ mod test {
             _: &PromQuery,
             _: QueryContextRef,
         ) -> Vec<std::result::Result<Output, Self::Error>> {
-            unimplemented!()
-        }
-
-        async fn do_statement_query(
-            &self,
-            _stmt: sql::statements::statement::Statement,
-            _query_ctx: QueryContextRef,
-        ) -> Result<Output> {
             unimplemented!()
         }
 

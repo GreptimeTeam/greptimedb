@@ -10,10 +10,6 @@ rpc_addr = "127.0.0.1:3001"
 rpc_hostname = "127.0.0.1"
 # The number of gRPC server worker threads, 8 by default.
 rpc_runtime_size = 8
-# MySQL server address, "127.0.0.1:4406" by default.
-mysql_addr = "127.0.0.1:4406"
-# The number of MySQL server worker threads, 2 by default.
-mysql_runtime_size = 2
 
 # Metasrv client options.
 [meta_client_options]

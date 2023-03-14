@@ -20,5 +20,5 @@ tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+common-test-util = { path = "../test-util" }
 futures-util.workspace = true
-tempdir = "0.3"

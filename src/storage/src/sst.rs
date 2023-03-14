@@ -15,6 +15,8 @@
 pub(crate) mod parquet;
 
 use std::collections::HashMap;
+use std::fmt;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -23,10 +25,11 @@ use common_telemetry::{error, info};
 use common_time::range::TimestampRange;
 use common_time::Timestamp;
 use object_store::{util, ObjectStore};
-use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use serde::{Deserialize, Deserializer, Serialize};
+use snafu::{ResultExt, Snafu};
 use store_api::storage::{ChunkReader, RegionId};
 use table::predicate::Predicate;
+use uuid::Uuid;
 
 use crate::chunk::ChunkReaderImpl;
 use crate::error::{DeleteSstSnafu, Result};
@@ -95,7 +98,7 @@ impl LevelMetas {
 
         for file in files_to_remove {
             let level = file.level;
-            if let Some(removed_file) = merged.levels[level as usize].remove_file(&file.file_name) {
+            if let Some(removed_file) = merged.levels[level as usize].remove_file(file.file_id) {
                 removed_file.mark_deleted();
             }
         }
@@ -114,7 +117,7 @@ pub struct LevelMeta {
     /// Handles to the files in this level.
     // TODO(yingwen): Now for simplicity, files are unordered, maybe sort the files by time range
     // or use another structure to hold them.
-    files: HashMap<String, FileHandle>,
+    files: HashMap<FileId, FileHandle>,
 }
 
 impl LevelMeta {
@@ -126,11 +129,11 @@ impl LevelMeta {
     }
 
     fn add_file(&mut self, file: FileHandle) {
-        self.files.insert(file.file_name().to_string(), file);
+        self.files.insert(file.file_id(), file);
     }
 
-    fn remove_file(&mut self, file_to_remove: &str) -> Option<FileHandle> {
-        self.files.remove(file_to_remove)
+    fn remove_file(&mut self, file_to_remove: FileId) -> Option<FileHandle> {
+        self.files.remove(&file_to_remove)
     }
 
     /// Returns the level of level meta.
@@ -173,7 +176,6 @@ fn new_level_meta_vec() -> LevelMetaVec {
         .unwrap() // safety: LevelMetaVec is a fixed length array with length MAX_LEVEL
 }
 
-/// In-memory handle to a file.
 #[derive(Debug, Clone)]
 pub struct FileHandle {
     inner: Arc<FileHandleInner>,
@@ -197,8 +199,13 @@ impl FileHandle {
     }
 
     #[inline]
-    pub fn file_name(&self) -> &str {
-        &self.inner.meta.file_name
+    pub fn file_name(&self) -> String {
+        self.inner.meta.file_id.as_parquet()
+    }
+
+    #[inline]
+    pub fn file_id(&self) -> FileId {
+        self.inner.meta.file_id
     }
 
     #[inline]
@@ -232,6 +239,11 @@ impl FileHandle {
     pub fn meta(&self) -> FileMeta {
         self.inner.meta.clone()
     }
+
+    #[inline]
+    pub fn file_size(&self) -> u64 {
+        self.inner.meta.file_size
+    }
 }
 
 /// Actually data of [FileHandle].
@@ -251,18 +263,21 @@ impl Drop for FileHandleInner {
         if self.deleted.load(Ordering::Relaxed) {
             let request = FilePurgeRequest {
                 sst_layer: self.sst_layer.clone(),
-                file_name: self.meta.file_name.clone(),
+                file_id: self.meta.file_id,
                 region_id: self.meta.region_id,
             };
             match self.file_purger.schedule(request) {
                 Ok(res) => {
                     info!(
                         "Scheduled SST purge task, region: {}, name: {}, res: {}",
-                        self.meta.region_id, self.meta.file_name, res
+                        self.meta.region_id,
+                        self.meta.file_id.as_parquet(),
+                        res
                     );
                 }
                 Err(e) => {
-                    error!(e; "Failed to schedule SST purge task, region: {}, name: {}", self.meta.region_id, self.meta.file_name);
+                    error!(e; "Failed to schedule SST purge task, region: {}, name: {}", 
+                    self.meta.region_id, self.meta.file_id.as_parquet());
                 }
             }
         }
@@ -285,17 +300,71 @@ impl FileHandleInner {
     }
 }
 
+#[derive(Debug, Snafu, PartialEq)]
+pub struct ParseIdError {
+    source: uuid::Error,
+}
+
+/// Unique id for [SST File].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub struct FileId(Uuid);
+
+impl FileId {
+    /// Returns a new unique [FileId] randomly.
+    pub fn random() -> FileId {
+        FileId(Uuid::new_v4())
+    }
+
+    /// Parses id from string.
+    pub fn parse_str(input: &str) -> std::result::Result<FileId, ParseIdError> {
+        Uuid::parse_str(input).map(FileId).context(ParseIdSnafu)
+    }
+
+    /// Append `.parquet` to file id to make a complete file name
+    pub fn as_parquet(&self) -> String {
+        format!("{}{}", self.0.hyphenated(), ".parquet")
+    }
+}
+
+impl fmt::Display for FileId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl FromStr for FileId {
+    type Err = ParseIdError;
+
+    fn from_str(s: &str) -> std::result::Result<FileId, ParseIdError> {
+        FileId::parse_str(s)
+    }
+}
+
 /// Immutable metadata of a sst file.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct FileMeta {
     /// Region of file.
     pub region_id: RegionId,
-    /// File name
-    pub file_name: String,
+    /// Compared to normal file names, FileId ignore the extension
+    #[serde(deserialize_with = "deserialize_from_string")]
+    #[serde(alias = "file_name")]
+    pub file_id: FileId,
     /// Timestamp range of file.
     pub time_range: Option<(Timestamp, Timestamp)>,
     /// SST level of the file.
     pub level: Level,
+    /// Size of the file.
+    pub file_size: u64,
+}
+
+fn deserialize_from_string<'de, D>(deserializer: D) -> std::result::Result<FileId, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s: &str = Deserialize::deserialize(deserializer)?;
+    let stripped = s.strip_suffix(".parquet").unwrap_or(s); // strip parquet suffix if needed.
+    FileId::from_str(stripped).map_err(<D::Error as serde::de::Error>::custom)
 }
 
 #[derive(Debug, Default)]
@@ -317,6 +386,7 @@ pub struct ReadOptions {
 #[derive(Debug, PartialEq)]
 pub struct SstInfo {
     pub time_range: Option<(Timestamp, Timestamp)>,
+    pub file_size: u64,
 }
 
 /// SST access layer.
@@ -325,16 +395,16 @@ pub trait AccessLayer: Send + Sync + std::fmt::Debug {
     /// Writes SST file with given `file_name`.
     async fn write_sst(
         &self,
-        file_name: &str,
+        file_id: FileId,
         source: Source,
         opts: &WriteOptions,
     ) -> Result<SstInfo>;
 
     /// Read SST file with given `file_name` and schema.
-    async fn read_sst(&self, file_name: &str, opts: &ReadOptions) -> Result<BoxedBatchReader>;
+    async fn read_sst(&self, file_id: FileId, opts: &ReadOptions) -> Result<BoxedBatchReader>;
 
     /// Deletes a SST file with given name.
-    async fn delete_sst(&self, file_name: &str) -> Result<()>;
+    async fn delete_sst(&self, file_id: FileId) -> Result<()>;
 }
 
 pub type AccessLayerRef = Arc<dyn AccessLayer>;
@@ -391,19 +461,19 @@ impl FsAccessLayer {
 impl AccessLayer for FsAccessLayer {
     async fn write_sst(
         &self,
-        file_name: &str,
+        file_id: FileId,
         source: Source,
         opts: &WriteOptions,
     ) -> Result<SstInfo> {
         // Now we only supports parquet format. We may allow caller to specific SST format in
         // WriteOptions in the future.
-        let file_path = self.sst_file_path(file_name);
+        let file_path = self.sst_file_path(&file_id.as_parquet());
         let writer = ParquetWriter::new(&file_path, source, self.object_store.clone());
         writer.write_sst(opts).await
     }
 
-    async fn read_sst(&self, file_name: &str, opts: &ReadOptions) -> Result<BoxedBatchReader> {
-        let file_path = self.sst_file_path(file_name);
+    async fn read_sst(&self, file_id: FileId, opts: &ReadOptions) -> Result<BoxedBatchReader> {
+        let file_path = self.sst_file_path(&file_id.as_parquet());
         let reader = ParquetReader::new(
             &file_path,
             self.object_store.clone(),
@@ -416,8 +486,8 @@ impl AccessLayer for FsAccessLayer {
         Ok(Box::new(stream))
     }
 
-    async fn delete_sst(&self, file_name: &str) -> Result<()> {
-        let path = self.sst_file_path(file_name);
+    async fn delete_sst(&self, file_id: FileId) -> Result<()> {
+        let path = self.sst_file_path(&file_id.as_parquet());
         let object = self.object_store.object(&path);
         object.delete().await.context(DeleteSstSnafu)
     }
@@ -431,12 +501,84 @@ mod tests {
     use crate::file_purger::noop::NoopFilePurgeHandler;
     use crate::scheduler::{LocalScheduler, SchedulerConfig};
 
-    fn create_file_meta(name: &str, level: Level) -> FileMeta {
+    #[test]
+    fn test_file_id() {
+        let id = FileId::random();
+        let uuid_str = id.to_string();
+        assert_eq!(id.0.to_string(), uuid_str);
+
+        let parsed = FileId::parse_str(&uuid_str).unwrap();
+        assert_eq!(id, parsed);
+        let parsed = uuid_str.parse().unwrap();
+        assert_eq!(id, parsed);
+    }
+
+    #[test]
+    fn test_file_id_serialization() {
+        let id = FileId::random();
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(format!("\"{id}\""), json);
+
+        let parsed = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, parsed);
+    }
+
+    #[test]
+    fn test_deserialize_file_meta() {
+        let file_meta = create_file_meta(FileId::random(), 0);
+        let serialized_file_meta = serde_json::to_string(&file_meta).unwrap();
+        let deserialized_file_meta = serde_json::from_str(&serialized_file_meta);
+        assert_eq!(file_meta, deserialized_file_meta.unwrap());
+    }
+
+    #[test]
+    fn test_deserialize_from_string() {
+        let json_file_meta = "{\"region_id\":0,\"file_id\":\"bc5896ec-e4d8-4017-a80d-f2de73188d55\",\"time_range\":null,\"level\":0}";
+        let file_meta = create_file_meta(
+            FileId::from_str("bc5896ec-e4d8-4017-a80d-f2de73188d55").unwrap(),
+            0,
+        );
+        let deserialized_file_meta: FileMeta = serde_json::from_str(json_file_meta).unwrap();
+        assert_eq!(file_meta, deserialized_file_meta);
+    }
+    #[test]
+    fn test_deserialize_from_string_parquet() {
+        let json_file_meta = "{\"region_id\":0,\"file_id\":\"bc5896ec-e4d8-4017-a80d-f2de73188d55.parquet\",\"time_range\":null,\"level\":0}";
+        let file_meta = create_file_meta(
+            FileId::from_str("bc5896ec-e4d8-4017-a80d-f2de73188d55").unwrap(),
+            0,
+        );
+        let deserialized_file_meta: FileMeta = serde_json::from_str(json_file_meta).unwrap();
+        assert_eq!(file_meta, deserialized_file_meta);
+    }
+
+    #[test]
+    fn test_deserialize_from_string_parquet_file_name() {
+        let json_file_meta = "{\"region_id\":0,\"file_name\":\"bc5896ec-e4d8-4017-a80d-f2de73188d55.parquet\",\"time_range\":null,\"level\":0}";
+        let file_meta = create_file_meta(
+            FileId::from_str("bc5896ec-e4d8-4017-a80d-f2de73188d55").unwrap(),
+            0,
+        );
+        let deserialized_file_meta: FileMeta = serde_json::from_str(json_file_meta).unwrap();
+        assert_eq!(file_meta, deserialized_file_meta);
+    }
+
+    #[test]
+    fn test_file_id_as_parquet() {
+        let id = FileId::from_str("67e55044-10b1-426f-9247-bb680e5fe0c8").unwrap();
+        assert_eq!(
+            "67e55044-10b1-426f-9247-bb680e5fe0c8.parquet",
+            id.as_parquet()
+        );
+    }
+
+    fn create_file_meta(file_id: FileId, level: Level) -> FileMeta {
         FileMeta {
             region_id: 0,
-            file_name: name.to_string(),
+            file_id,
             time_range: None,
             level,
+            file_size: 0,
         }
     }
 
@@ -447,85 +589,80 @@ mod tests {
             SchedulerConfig::default(),
             NoopFilePurgeHandler,
         ));
+        let file_ids = [
+            FileId::random(),
+            FileId::random(),
+            FileId::random(),
+            FileId::random(),
+        ];
+
         let metas = LevelMetas::new(layer, purger);
         let merged = metas.merge(
-            vec![create_file_meta("a", 0), create_file_meta("b", 0)].into_iter(),
+            vec![
+                create_file_meta(file_ids[0], 0),
+                create_file_meta(file_ids[1], 0),
+            ]
+            .into_iter(),
             vec![].into_iter(),
         );
 
         assert_eq!(
-            HashSet::from(["a".to_string(), "b".to_string()]),
-            merged
-                .level(0)
-                .files()
-                .map(|f| f.file_name().to_string())
-                .collect()
+            HashSet::from([file_ids[0], file_ids[1]]),
+            merged.level(0).files().map(|f| f.file_id()).collect()
         );
 
         let merged1 = merged.merge(
-            vec![create_file_meta("c", 1), create_file_meta("d", 1)].into_iter(),
+            vec![
+                create_file_meta(file_ids[2], 1),
+                create_file_meta(file_ids[3], 1),
+            ]
+            .into_iter(),
             vec![].into_iter(),
         );
         assert_eq!(
-            HashSet::from(["a".to_string(), "b".to_string()]),
-            merged1
-                .level(0)
-                .files()
-                .map(|f| f.file_name().to_string())
-                .collect()
+            HashSet::from([file_ids[0], file_ids[1]]),
+            merged1.level(0).files().map(|f| f.file_id()).collect()
         );
 
         assert_eq!(
-            HashSet::from(["c".to_string(), "d".to_string()]),
-            merged1
-                .level(1)
-                .files()
-                .map(|f| f.file_name().to_string())
-                .collect()
+            HashSet::from([file_ids[2], file_ids[3]]),
+            merged1.level(1).files().map(|f| f.file_id()).collect()
         );
 
         let removed1 = merged1.merge(
             vec![].into_iter(),
-            vec![create_file_meta("a", 0), create_file_meta("c", 0)].into_iter(),
+            vec![
+                create_file_meta(file_ids[0], 0),
+                create_file_meta(file_ids[2], 0),
+            ]
+            .into_iter(),
         );
         assert_eq!(
-            HashSet::from(["b".to_string()]),
-            removed1
-                .level(0)
-                .files()
-                .map(|f| f.file_name().to_string())
-                .collect()
+            HashSet::from([file_ids[1]]),
+            removed1.level(0).files().map(|f| f.file_id()).collect()
         );
 
         assert_eq!(
-            HashSet::from(["c".to_string(), "d".to_string()]),
-            removed1
-                .level(1)
-                .files()
-                .map(|f| f.file_name().to_string())
-                .collect()
+            HashSet::from([file_ids[2], file_ids[3]]),
+            removed1.level(1).files().map(|f| f.file_id()).collect()
         );
 
         let removed2 = removed1.merge(
             vec![].into_iter(),
-            vec![create_file_meta("c", 1), create_file_meta("d", 1)].into_iter(),
+            vec![
+                create_file_meta(file_ids[2], 1),
+                create_file_meta(file_ids[3], 1),
+            ]
+            .into_iter(),
         );
         assert_eq!(
-            HashSet::from(["b".to_string()]),
-            removed2
-                .level(0)
-                .files()
-                .map(|f| f.file_name().to_string())
-                .collect()
+            HashSet::from([file_ids[1]]),
+            removed2.level(0).files().map(|f| f.file_id()).collect()
         );
 
         assert_eq!(
             HashSet::new(),
-            removed2
-                .level(1)
-                .files()
-                .map(|f| f.file_name().to_string())
-                .collect()
+            removed2.level(1).files().map(|f| f.file_id()).collect()
         );
     }
 }

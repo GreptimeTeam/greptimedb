@@ -17,8 +17,10 @@ use store_api::storage::SequenceNumber;
 
 use crate::manifest::action::*;
 use crate::metadata::RegionMetadata;
-use crate::sst::FileMeta;
+use crate::sst::{FileId, FileMeta};
 use crate::test_util::descriptor_util::RegionDescBuilder;
+
+pub const DEFAULT_TEST_FILE_SIZE: u64 = 1024;
 
 pub fn build_region_meta() -> RegionMetadata {
     let region_name = "region-0";
@@ -32,8 +34,8 @@ pub fn build_region_meta() -> RegionMetadata {
 
 pub fn build_region_edit(
     sequence: SequenceNumber,
-    files_to_add: &[&str],
-    files_to_remove: &[&str],
+    files_to_add: &[FileId],
+    files_to_remove: &[FileId],
 ) -> RegionEdit {
     RegionEdit {
         region_version: 0,
@@ -42,18 +44,20 @@ pub fn build_region_edit(
             .iter()
             .map(|f| FileMeta {
                 region_id: 0,
-                file_name: f.to_string(),
+                file_id: *f,
                 time_range: None,
                 level: 0,
+                file_size: DEFAULT_TEST_FILE_SIZE,
             })
             .collect(),
         files_to_remove: files_to_remove
             .iter()
             .map(|f| FileMeta {
                 region_id: 0,
-                file_name: f.to_string(),
+                file_id: *f,
                 time_range: None,
                 level: 0,
+                file_size: DEFAULT_TEST_FILE_SIZE,
             })
             .collect(),
     }

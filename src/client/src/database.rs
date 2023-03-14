@@ -19,13 +19,14 @@ use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{
-    AlterExpr, AuthHeader, CreateTableExpr, DdlRequest, DropTableExpr, GreptimeRequest,
-    InsertRequest, QueryRequest, RequestHeader,
+    AlterExpr, AuthHeader, CreateTableExpr, DdlRequest, DropTableExpr, FlushTableExpr,
+    GreptimeRequest, InsertRequest, PromRangeQuery, QueryRequest, RequestHeader,
 };
 use arrow_flight::{FlightData, Ticket};
 use common_error::prelude::*;
 use common_grpc::flight::{flight_messages_to_recordbatches, FlightDecoder, FlightMessage};
 use common_query::Output;
+use common_telemetry::logging;
 use futures_util::{TryFutureExt, TryStreamExt};
 use prost::Message;
 use snafu::{ensure, ResultExt};
@@ -95,6 +96,24 @@ impl Database {
         .await
     }
 
+    pub async fn prom_range_query(
+        &self,
+        promql: &str,
+        start: &str,
+        end: &str,
+        step: &str,
+    ) -> Result<Output> {
+        self.do_get(Request::Query(QueryRequest {
+            query: Some(Query::PromRangeQuery(PromRangeQuery {
+                query: promql.to_string(),
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            })),
+        }))
+        .await
+    }
+
     pub async fn create(&self, expr: CreateTableExpr) -> Result<Output> {
         self.do_get(Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::CreateTable(expr)),
@@ -112,6 +131,13 @@ impl Database {
     pub async fn drop_table(&self, expr: DropTableExpr) -> Result<Output> {
         self.do_get(Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::DropTable(expr)),
+        }))
+        .await
+    }
+
+    pub async fn flush_table(&self, expr: FlushTableExpr) -> Result<Output> {
+        self.do_get(Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::FlushTable(expr)),
         }))
         .await
     }
@@ -148,6 +174,15 @@ impl Database {
                     .context(error::FlightGetSnafu {
                         tonic_code: e.code(),
                         addr: client.addr(),
+                    })
+                    .map_err(|error| {
+                        logging::error!(
+                            "Failed to do Flight get, addr: {}, code: {}, source: {}",
+                            client.addr(),
+                            e.code(),
+                            error
+                        );
+                        error
                     })
                     .unwrap_err()
             })?;

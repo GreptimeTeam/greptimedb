@@ -169,36 +169,7 @@ impl<const IS_RATE: bool> Display for IDelta<IS_RATE> {
 mod test {
 
     use super::*;
-
-    fn idelta_runner(input_ts: RangeArray, input_value: RangeArray, expected: Vec<f64>) {
-        let input = vec![
-            ColumnarValue::Array(Arc::new(input_ts.into_dict())),
-            ColumnarValue::Array(Arc::new(input_value.into_dict())),
-        ];
-        let output = extract_array(&IDelta::<false>::calc(&input).unwrap())
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap()
-            .values()
-            .to_vec();
-        assert_eq!(output, expected);
-    }
-
-    fn irate_runner(input_ts: RangeArray, input_value: RangeArray, expected: Vec<f64>) {
-        let input = vec![
-            ColumnarValue::Array(Arc::new(input_ts.into_dict())),
-            ColumnarValue::Array(Arc::new(input_value.into_dict())),
-        ];
-        let output = extract_array(&IDelta::<true>::calc(&input).unwrap())
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap()
-            .values()
-            .to_vec();
-        assert_eq!(output, expected);
-    }
+    use crate::functions::test_util::simple_range_udf_runner;
 
     #[test]
     fn basic_idelta_and_irate() {
@@ -214,21 +185,26 @@ mod test {
         ]));
         let values_ranges = [(0, 2), (0, 5), (1, 1), (3, 3), (8, 1), (9, 0)];
 
+        // test idelta
         let ts_range_array = RangeArray::from_ranges(ts_array.clone(), ts_ranges).unwrap();
         let value_range_array =
             RangeArray::from_ranges(values_array.clone(), values_ranges).unwrap();
-        idelta_runner(
+        simple_range_udf_runner(
+            IDelta::<false>::scalar_udf(),
             ts_range_array,
             value_range_array,
-            vec![1.0, -5.0, 0.0, 6.0, 0.0, 0.0],
+            vec![Some(1.0), Some(-5.0), None, Some(6.0), None, None],
         );
 
+        // test irate
         let ts_range_array = RangeArray::from_ranges(ts_array, ts_ranges).unwrap();
         let value_range_array = RangeArray::from_ranges(values_array, values_ranges).unwrap();
-        irate_runner(
+        simple_range_udf_runner(
+            IDelta::<true>::scalar_udf(),
             ts_range_array,
             value_range_array,
-            vec![0.5, 0.0, 0.0, 3.0, 0.0, 0.0],
+            // the second point represent counter reset
+            vec![Some(0.5), Some(0.0), None, Some(3.0), None, None],
         );
     }
 }

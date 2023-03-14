@@ -445,10 +445,10 @@ mod tests {
     use common_error::ext::PlainError;
     use common_error::mock::MockError;
     use common_error::prelude::StatusCode;
+    use common_test_util::temp_dir::create_temp_dir;
     use futures_util::future::BoxFuture;
     use futures_util::{FutureExt, TryStreamExt};
     use object_store::ObjectStore;
-    use tempdir::TempDir;
 
     use super::*;
     use crate::local::test_util;
@@ -563,7 +563,7 @@ mod tests {
             exec_fn,
         };
 
-        let dir = TempDir::new("normal").unwrap();
+        let dir = create_temp_dir("normal");
         let meta = normal.new_meta(ROOT_ID);
         let ctx = context_without_provider(meta.id);
         let object_store = test_util::new_object_store(&dir);
@@ -611,7 +611,7 @@ mod tests {
             exec_fn,
         };
 
-        let dir = TempDir::new("suspend").unwrap();
+        let dir = create_temp_dir("suspend");
         let meta = suspend.new_meta(ROOT_ID);
         let ctx = context_without_provider(meta.id);
         let object_store = test_util::new_object_store(&dir);
@@ -710,7 +710,7 @@ mod tests {
             exec_fn,
         };
 
-        let dir = TempDir::new("parent").unwrap();
+        let dir = create_temp_dir("parent");
         let meta = parent.new_meta(ROOT_ID);
         let procedure_id = meta.id;
 
@@ -752,7 +752,7 @@ mod tests {
             exec_fn,
         };
 
-        let dir = TempDir::new("fail").unwrap();
+        let dir = create_temp_dir("fail");
         let meta = fail.new_meta(ROOT_ID);
         let ctx = context_without_provider(meta.id);
         let object_store = test_util::new_object_store(&dir);
@@ -787,7 +787,7 @@ mod tests {
             exec_fn,
         };
 
-        let dir = TempDir::new("retry_later").unwrap();
+        let dir = create_temp_dir("retry_later");
         let meta = retry_later.new_meta(ROOT_ID);
         let ctx = context_without_provider(meta.id);
         let object_store = test_util::new_object_store(&dir);
@@ -888,7 +888,7 @@ mod tests {
             exec_fn,
         };
 
-        let dir = TempDir::new("child_err").unwrap();
+        let dir = create_temp_dir("child_err");
         let meta = parent.new_meta(ROOT_ID);
 
         let object_store = test_util::new_object_store(&dir);

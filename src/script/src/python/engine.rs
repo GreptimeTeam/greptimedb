@@ -30,7 +30,7 @@ use common_recordbatch::{
     RecordBatch, RecordBatchStream, RecordBatches, SendableRecordBatchStream,
 };
 use datafusion_expr::Volatility;
-use datatypes::schema::{ColumnSchema, SchemaRef};
+use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::VectorRef;
 use futures::Stream;
 use query::parser::{QueryLanguageParser, QueryStatement};
@@ -40,9 +40,8 @@ use snafu::{ensure, ResultExt};
 use sql::statements::statement::Statement;
 
 use crate::engine::{CompileContext, EvalContext, Script, ScriptEngine};
-use crate::python::error::{self, Result};
+use crate::python::error::{self, PyRuntimeSnafu, Result};
 use crate::python::ffi_types::copr::{exec_parsed, parse, AnnotationInfo, CoprocessorRef};
-
 const PY_ENGINE: &str = "python";
 
 #[derive(Debug)]
@@ -81,17 +80,21 @@ impl PyUDF {
 
     /// Fake a schema, should only be used with dynamically eval a Python Udf
     fn fake_schema(&self, columns: &[VectorRef]) -> SchemaRef {
-        let empty_args = vec![];
-        let arg_names = self
-            .copr
-            .deco_args
-            .arg_names
-            .as_ref()
-            .unwrap_or(&empty_args);
+        // try to give schema right names in args so script can run as UDF without modify
+        // because when running as PyUDF, the incoming columns should have matching names to make sense
+        // for Coprocessor
+        let args = self.copr.deco_args.arg_names.clone();
+        let try_get_name = |i: usize| {
+            if let Some(arg_name) = args.as_ref().and_then(|args| args.get(i)) {
+                arg_name.clone()
+            } else {
+                format!("name_{i}")
+            }
+        };
         let col_sch: Vec<_> = columns
             .iter()
             .enumerate()
-            .map(|(i, col)| ColumnSchema::new(arg_names[i].clone(), col.data_type(), true))
+            .map(|(i, col)| ColumnSchema::new(try_get_name(i), col.data_type(), true))
             .collect();
         let schema = datatypes::schema::Schema::new(col_sch);
         Arc::new(schema)
@@ -172,7 +175,7 @@ impl Function for PyUDF {
 
 pub struct PyScript {
     query_engine: QueryEngineRef,
-    copr: CoprocessorRef,
+    pub(crate) copr: CoprocessorRef,
 }
 
 impl PyScript {
@@ -188,12 +191,48 @@ impl PyScript {
 pub struct CoprStream {
     stream: SendableRecordBatchStream,
     copr: CoprocessorRef,
+    ret_schema: SchemaRef,
     params: HashMap<String, String>,
+}
+
+impl CoprStream {
+    fn try_new(
+        stream: SendableRecordBatchStream,
+        copr: CoprocessorRef,
+        params: HashMap<String, String>,
+    ) -> Result<Self> {
+        let mut schema = vec![];
+        for (ty, name) in copr.return_types.iter().zip(&copr.deco_args.ret_names) {
+            let ty = ty.clone().ok_or(
+                PyRuntimeSnafu {
+                    msg: "return type not annotated, can't generate schema",
+                }
+                .build(),
+            )?;
+            let is_nullable = ty.is_nullable;
+            let ty = ty.datatype.ok_or(
+                PyRuntimeSnafu {
+                    msg: "return type not annotated, can't generate schema",
+                }
+                .build(),
+            )?;
+            let col_schema = ColumnSchema::new(name, ty, is_nullable);
+            schema.push(col_schema);
+        }
+        let ret_schema = Arc::new(Schema::new(schema));
+        Ok(Self {
+            stream,
+            copr,
+            ret_schema,
+            params,
+        })
+    }
 }
 
 impl RecordBatchStream for CoprStream {
     fn schema(&self) -> SchemaRef {
-        self.stream.schema()
+        // FIXME(discord9): use copr returns for schema
+        self.ret_schema.clone()
     }
 }
 
@@ -207,7 +246,6 @@ impl Stream for CoprStream {
                 let batch = exec_parsed(&self.copr, &Some(recordbatch), &self.params)
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)?;
-
                 Poll::Ready(Some(Ok(batch)))
             }
             Poll::Ready(other) => Poll::Ready(other),
@@ -241,16 +279,15 @@ impl Script for PyScript {
             );
             let plan = self
                 .query_engine
-                .statement_to_plan(stmt, Arc::new(QueryContext::new()))
+                .planner()
+                .plan(stmt, QueryContext::arc())
                 .await?;
             let res = self.query_engine.execute(&plan).await?;
             let copr = self.copr.clone();
             match res {
-                Output::Stream(stream) => Ok(Output::Stream(Box::pin(CoprStream {
-                    params,
-                    copr,
-                    stream,
-                }))),
+                Output::Stream(stream) => Ok(Output::Stream(Box::pin(CoprStream::try_new(
+                    stream, copr, params,
+                )?))),
                 _ => unreachable!(),
             }
         } else {
@@ -296,7 +333,8 @@ impl ScriptEngine for PyEngine {
         })
     }
 }
-
+#[cfg(test)]
+pub(crate) use tests::sample_script_engine;
 #[cfg(test)]
 mod tests {
     use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
@@ -311,7 +349,7 @@ mod tests {
 
     use super::*;
 
-    fn sample_script_engine() -> PyEngine {
+    pub(crate) fn sample_script_engine() -> PyEngine {
         let catalog_list = catalog::local::new_memory_catalog_list().unwrap();
 
         let default_schema = Arc::new(MemorySchemaProvider::new());
@@ -340,7 +378,7 @@ mod tests {
 import greptime as gt
 
 @copr(args=["number"], returns = ["number"], sql = "select * from numbers")
-def test(number)->vector[u32]:
+def test(number) -> vector[u32]:
     return query.sql("select * from numbers")[0][0]
 "#;
         let script = script_engine
@@ -367,7 +405,7 @@ def test(number)->vector[u32]:
 
         let script = r#"
 @copr(returns = ["number"])
-def test(**params)->vector[i64]:
+def test(**params) -> vector[i64]:
     return int(params['a']) + int(params['b'])
 "#;
         let script = script_engine
@@ -396,11 +434,10 @@ def test(**params)->vector[i64]:
         let script_engine = sample_script_engine();
 
         let script = r#"
-import greptime as gt
-from data_frame import col
+from greptime import col
 
 @copr(args=["number"], returns = ["number"], sql = "select * from numbers")
-def test(number)->vector[u32]:
+def test(number) -> vector[u32]:
     return dataframe.filter(col("number")==col("number")).collect()[0][0]
 "#;
         let script = script_engine
@@ -432,7 +469,7 @@ def add(a, b):
     return a + b;
 
 @copr(args=["a", "b", "c"], returns = ["r"], sql="select number as a,number as b,number as c from numbers limit 100")
-def test(a, b, c):
+def test(a, b, c) -> vector[f64]:
     return add(a, b) / g.sqrt(c + 1)
 "#;
         let script = script_engine
@@ -470,7 +507,7 @@ def test(a, b, c):
 import greptime as gt
 
 @copr(args=["number"], returns = ["r"], sql="select number from numbers limit 100")
-def test(a):
+def test(a) -> vector[i64]:
     return gt.vector([x for x in a if x % 2 == 0])
 "#;
         let script = script_engine

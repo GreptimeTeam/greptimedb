@@ -36,22 +36,26 @@ use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::logging::{debug, info};
+use common_telemetry::timer;
 use datafusion::sql::sqlparser::ast::ObjectName;
 use datanode::instance::sql::table_idents_to_full_name;
 use datanode::instance::InstanceRef as DnInstanceRef;
+use datanode::metric;
 use datatypes::schema::Schema;
 use distributed::DistInstance;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOptions;
 use partition::manager::PartitionRuleManager;
 use partition::route::TableRoutes;
-use query::parser::PromQuery;
+use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
+use query::query_engine::StatementHandlerRef;
+use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error as server_error;
 use servers::interceptor::{SqlQueryInterceptor, SqlQueryInterceptorRef};
-use servers::promql::{PromqlHandler, PromqlHandlerRef};
+use servers::prom::{PromHandler, PromHandlerRef};
 use servers::query_handler::grpc::{GrpcQueryHandler, GrpcQueryHandlerRef};
-use servers::query_handler::sql::{SqlQueryHandler, SqlQueryHandlerRef};
+use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::{
     InfluxdbLineProtocolHandler, OpentsdbProtocolHandler, PrometheusProtocolHandler, ScriptHandler,
     ScriptHandlerRef,
@@ -62,16 +66,19 @@ use sql::dialect::GenericDialect;
 use sql::parser::ParserContext;
 use sql::statements::copy::CopyTable;
 use sql::statements::statement::Statement;
+use sql::statements::tql::Tql;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
-    self, Error, ExecutePromqlSnafu, ExternalSnafu, MissingMetasrvOptsSnafu, NotSupportedSnafu,
-    ParseSqlSnafu, Result, SqlExecInterceptedSnafu,
+    self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExecuteStatementSnafu, ExternalSnafu,
+    InvalidInsertRequestSnafu, MissingMetasrvOptsSnafu, NotSupportedSnafu, ParseQuerySnafu,
+    ParseSqlSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
 };
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::FrontendOptions;
-use crate::instance::standalone::{StandaloneGrpcQueryHandler, StandaloneSqlQueryHandler};
+use crate::instance::standalone::StandaloneGrpcQueryHandler;
+use crate::server::{start_server, ServerHandlers, Services};
 
 #[async_trait]
 pub trait FrontendInstance:
@@ -81,7 +88,7 @@ pub trait FrontendInstance:
     + InfluxdbLineProtocolHandler
     + PrometheusProtocolHandler
     + ScriptHandler
-    + PromqlHandler
+    + PromHandler
     + Send
     + Sync
     + 'static
@@ -97,15 +104,18 @@ pub struct Instance {
 
     /// Script handler is None in distributed mode, only works on standalone mode.
     script_handler: Option<ScriptHandlerRef>,
-    sql_handler: SqlQueryHandlerRef<Error>,
+    statement_handler: StatementHandlerRef,
+    query_engine: QueryEngineRef,
     grpc_query_handler: GrpcQueryHandlerRef<Error>,
-    promql_handler: Option<PromqlHandlerRef>,
+    promql_handler: Option<PromHandlerRef>,
 
     create_expr_factory: CreateExprFactoryRef,
 
     /// plugins: this map holds extensions to customize query or auth
     /// behaviours.
     plugins: Arc<Plugins>,
+
+    servers: Arc<ServerHandlers>,
 }
 
 impl Instance {
@@ -128,22 +138,24 @@ impl Instance {
             datanode_clients.clone(),
         ));
 
-        let dist_instance = DistInstance::new(
-            meta_client,
-            catalog_manager.clone(),
-            datanode_clients,
-            plugins.clone(),
-        );
+        let dist_instance =
+            DistInstance::new(meta_client, catalog_manager.clone(), datanode_clients);
         let dist_instance = Arc::new(dist_instance);
+
+        let query_engine =
+            QueryEngineFactory::new_with_plugins(catalog_manager.clone(), plugins.clone())
+                .query_engine();
 
         Ok(Instance {
             catalog_manager,
             script_handler: None,
             create_expr_factory: Arc::new(DefaultCreateExprFactory),
-            sql_handler: dist_instance.clone(),
+            statement_handler: dist_instance.clone(),
+            query_engine,
             grpc_query_handler: dist_instance,
             promql_handler: None,
-            plugins,
+            plugins: plugins.clone(),
+            servers: Arc::new(HashMap::new()),
         })
     }
 
@@ -182,23 +194,40 @@ impl Instance {
             catalog_manager: dn_instance.catalog_manager().clone(),
             script_handler: None,
             create_expr_factory: Arc::new(DefaultCreateExprFactory),
-            sql_handler: StandaloneSqlQueryHandler::arc(dn_instance.clone()),
+            statement_handler: dn_instance.clone(),
+            query_engine: dn_instance.query_engine(),
             grpc_query_handler: StandaloneGrpcQueryHandler::arc(dn_instance.clone()),
             promql_handler: Some(dn_instance.clone()),
             plugins: Default::default(),
+            servers: Arc::new(HashMap::new()),
         }
+    }
+
+    pub async fn build_servers(
+        &mut self,
+        opts: &FrontendOptions,
+        plugins: Arc<Plugins>,
+    ) -> Result<()> {
+        let servers = Services::build(opts, Arc::new(self.clone()), plugins).await?;
+        self.servers = Arc::new(servers);
+
+        Ok(())
     }
 
     #[cfg(test)]
     pub(crate) fn new_distributed(dist_instance: Arc<DistInstance>) -> Self {
+        let catalog_manager = dist_instance.catalog_manager();
+        let query_engine = QueryEngineFactory::new(catalog_manager.clone()).query_engine();
         Instance {
-            catalog_manager: dist_instance.catalog_manager(),
+            catalog_manager,
             script_handler: None,
+            statement_handler: dist_instance.clone(),
+            query_engine,
             create_expr_factory: Arc::new(DefaultCreateExprFactory),
-            sql_handler: dist_instance.clone(),
             grpc_query_handler: dist_instance,
             promql_handler: None,
             plugins: Default::default(),
+            servers: Arc::new(HashMap::new()),
         }
     }
 
@@ -231,7 +260,7 @@ impl Instance {
     }
 
     async fn handle_insert(&self, request: InsertRequest, ctx: QueryContextRef) -> Result<Output> {
-        self.create_or_alter_table_on_demand(ctx.clone(), &request.table_name, &request.columns)
+        self.create_or_alter_table_on_demand(ctx.clone(), &request)
             .await?;
 
         let query = Request::Insert(request);
@@ -244,11 +273,12 @@ impl Instance {
     async fn create_or_alter_table_on_demand(
         &self,
         ctx: QueryContextRef,
-        table_name: &str,
-        columns: &[Column],
+        request: &InsertRequest,
     ) -> Result<()> {
         let catalog_name = &ctx.current_catalog();
         let schema_name = &ctx.current_schema();
+        let table_name = &request.table_name;
+        let columns = &request.columns;
 
         let table = self
             .catalog_manager
@@ -270,6 +300,8 @@ impl Instance {
             }
             Some(table) => {
                 let schema = table.schema();
+
+                validate_insert_request(schema.as_ref(), request)?;
 
                 if let Some(add_columns) = common_grpc_expr::find_new_columns(&schema, columns)
                     .context(error::FindNewColumnsOnInsertionSnafu)?
@@ -370,13 +402,24 @@ impl Instance {
     pub fn plugins(&self) -> Arc<Plugins> {
         self.plugins.clone()
     }
+
+    pub async fn shutdown(&self) -> Result<()> {
+        futures::future::try_join_all(self.servers.values().map(|server| server.0.shutdown()))
+            .await
+            .context(error::ShutdownServerSnafu)
+            .map(|_| ())
+    }
 }
 
 #[async_trait]
 impl FrontendInstance for Instance {
     async fn start(&mut self) -> Result<()> {
         // TODO(hl): Frontend init should move to here
-        Ok(())
+
+        futures::future::try_join_all(self.servers.values().map(start_server))
+            .await
+            .context(error::StartServerSnafu)
+            .map(|_| ())
     }
 }
 
@@ -387,20 +430,57 @@ fn parse_stmt(sql: &str) -> Result<Vec<Statement>> {
 impl Instance {
     async fn query_statement(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
         check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
+
+        let planner = self.query_engine.planner();
+
         match stmt {
+            Statement::Query(_) | Statement::Explain(_) => {
+                let plan = planner
+                    .plan(QueryStatement::Sql(stmt), query_ctx)
+                    .await
+                    .context(PlanStatementSnafu)?;
+                self.query_engine
+                    .execute(&plan)
+                    .await
+                    .context(ExecLogicalPlanSnafu)
+            }
+            Statement::Tql(tql) => {
+                let plan = match tql {
+                    Tql::Eval(eval) => {
+                        let promql = PromQuery {
+                            start: eval.start,
+                            end: eval.end,
+                            step: eval.step,
+                            query: eval.query,
+                        };
+                        let stmt =
+                            QueryLanguageParser::parse_promql(&promql).context(ParseQuerySnafu)?;
+                        planner
+                            .plan(stmt, query_ctx)
+                            .await
+                            .context(PlanStatementSnafu)?
+                    }
+                    Tql::Explain(_) => unimplemented!(),
+                };
+                self.query_engine
+                    .execute(&plan)
+                    .await
+                    .context(ExecLogicalPlanSnafu)
+            }
             Statement::CreateDatabase(_)
             | Statement::ShowDatabases(_)
             | Statement::CreateTable(_)
             | Statement::ShowTables(_)
             | Statement::DescribeTable(_)
-            | Statement::Explain(_)
-            | Statement::Query(_)
             | Statement::Insert(_)
             | Statement::Delete(_)
             | Statement::Alter(_)
             | Statement::DropTable(_)
-            | Statement::Tql(_)
-            | Statement::Copy(_) => self.sql_handler.do_statement_query(stmt, query_ctx).await,
+            | Statement::Copy(_) => self
+                .statement_handler
+                .handle_statement(QueryStatement::Sql(stmt), query_ctx)
+                .await
+                .context(ExecuteStatementSnafu),
             Statement::Use(db) => self.handle_use(db, query_ctx),
             Statement::ShowCreateTable(_) => NotSupportedSnafu {
                 feat: format!("{stmt:?}"),
@@ -415,6 +495,8 @@ impl SqlQueryHandler for Instance {
     type Error = Error;
 
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
+        let _timer = timer!(metric::METRIC_HANDLE_SQL_ELAPSED);
+
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query = match query_interceptor.pre_parsing(query, query_ctx.clone()) {
             Ok(q) => q,
@@ -471,28 +553,26 @@ impl SqlQueryHandler for Instance {
         }
     }
 
-    async fn do_statement_query(
-        &self,
-        stmt: Statement,
-        query_ctx: QueryContextRef,
-    ) -> Result<Output> {
-        let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
-
-        // TODO(sunng87): figure out at which stage we can call
-        // this hook after ArrowFlight adoption. We need to provide
-        // LogicalPlan as to this hook.
-        query_interceptor.pre_execute(&stmt, None, query_ctx.clone())?;
-        self.query_statement(stmt, query_ctx.clone())
-            .await
-            .and_then(|output| query_interceptor.post_execute(output, query_ctx.clone()))
-    }
-
     async fn do_describe(
         &self,
         stmt: Statement,
         query_ctx: QueryContextRef,
     ) -> Result<Option<Schema>> {
-        self.sql_handler.do_describe(stmt, query_ctx).await
+        if let Statement::Query(_) = stmt {
+            let plan = self
+                .query_engine
+                .planner()
+                .plan(QueryStatement::Sql(stmt), query_ctx)
+                .await
+                .context(PlanStatementSnafu)?;
+            self.query_engine
+                .describe(plan)
+                .await
+                .map(Some)
+                .context(error::DescribeStatementSnafu)
+        } else {
+            Ok(None)
+        }
     }
 
     fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
@@ -539,7 +619,7 @@ impl ScriptHandler for Instance {
 }
 
 #[async_trait]
-impl PromqlHandler for Instance {
+impl PromHandler for Instance {
     async fn do_query(&self, query: &PromQuery) -> server_error::Result<Output> {
         if let Some(promql_handler) = &self.promql_handler {
             promql_handler.do_query(query).await
@@ -616,13 +696,39 @@ fn validate_param(name: &ObjectName, query_ctx: &QueryContextRef) -> Result<()> 
         .context(SqlExecInterceptedSnafu)
 }
 
+fn validate_insert_request(schema: &Schema, request: &InsertRequest) -> Result<()> {
+    for column_schema in schema.column_schemas() {
+        if column_schema.is_nullable() || column_schema.default_constraint().is_some() {
+            continue;
+        }
+        let not_null = request
+            .columns
+            .iter()
+            .find(|x| x.column_name == column_schema.name)
+            .map(|column| column.null_mask.is_empty() || column.null_mask.iter().all(|x| *x == 0));
+        ensure!(
+            not_null == Some(true),
+            InvalidInsertRequestSnafu {
+                reason: format!(
+                    "Expecting insert data to be presented on a not null or no default value column '{}'.",
+                    &column_schema.name
+                )
+            }
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::borrow::Cow;
     use std::collections::HashMap;
     use std::sync::atomic::AtomicU32;
 
+    use api::v1::column::Values;
     use catalog::helper::{TableGlobalKey, TableGlobalValue};
+    use datatypes::prelude::{ConcreteDataType, Value};
+    use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
     use query::query_engine::options::QueryOptions;
     use session::context::QueryContext;
     use strfmt::Format;
@@ -631,6 +737,71 @@ mod tests {
     use crate::table::DistTable;
     use crate::tests;
     use crate::tests::MockDistributedInstance;
+
+    #[test]
+    fn test_validate_insert_request() {
+        let schema = Schema::new(vec![
+            ColumnSchema::new("a", ConcreteDataType::int32_datatype(), true)
+                .with_default_constraint(None)
+                .unwrap(),
+            ColumnSchema::new("b", ConcreteDataType::int32_datatype(), true)
+                .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::Int32(100))))
+                .unwrap(),
+        ]);
+        let request = InsertRequest {
+            columns: vec![Column {
+                column_name: "c".to_string(),
+                values: Some(Values {
+                    i32_values: vec![1],
+                    ..Default::default()
+                }),
+                null_mask: vec![0],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        // If nullable is true, it doesn't matter whether the insert request has the column.
+        assert!(validate_insert_request(&schema, &request).is_ok());
+
+        let schema = Schema::new(vec![
+            ColumnSchema::new("a", ConcreteDataType::int32_datatype(), false)
+                .with_default_constraint(None)
+                .unwrap(),
+            ColumnSchema::new("b", ConcreteDataType::int32_datatype(), false)
+                .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::Int32(-100))))
+                .unwrap(),
+        ]);
+        let request = InsertRequest {
+            columns: vec![Column {
+                column_name: "a".to_string(),
+                values: Some(Values {
+                    i32_values: vec![1],
+                    ..Default::default()
+                }),
+                null_mask: vec![0],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        // If nullable is false, but the column is defined with default value,
+        // it also doesn't matter whether the insert request has the column.
+        assert!(validate_insert_request(&schema, &request).is_ok());
+
+        let request = InsertRequest {
+            columns: vec![Column {
+                column_name: "b".to_string(),
+                values: Some(Values {
+                    i32_values: vec![1],
+                    ..Default::default()
+                }),
+                null_mask: vec![0],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        // Neither of the above cases.
+        assert!(validate_insert_request(&schema, &request).is_err());
+    }
 
     #[test]
     fn test_exec_validation() {
@@ -906,12 +1077,16 @@ mod tests {
             .collect::<HashMap<u32, u64>>();
         assert_eq!(region_to_dn_map.len(), expected_distribution.len());
 
+        let stmt = QueryLanguageParser::parse_sql("SELECT ts, host FROM demo ORDER BY ts").unwrap();
         for (region, dn) in region_to_dn_map.iter() {
             let dn = instance.datanodes.get(dn).unwrap();
-            let output = dn
-                .execute_sql("SELECT ts, host FROM demo ORDER BY ts", QueryContext::arc())
+            let engine = dn.query_engine();
+            let plan = engine
+                .planner()
+                .plan(stmt.clone(), QueryContext::arc())
                 .await
                 .unwrap();
+            let output = engine.execute(&plan).await.unwrap();
             let Output::Stream(stream) = output else { unreachable!() };
             let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
             let actual = recordbatches.pretty_print().unwrap();

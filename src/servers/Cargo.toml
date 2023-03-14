@@ -4,10 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+mem-prof = ["dep:common-mem-prof"]
+
 [dependencies]
 aide = { version = "0.9", features = ["axum"] }
-arrow-flight.workspace = true
 api = { path = "../api" }
+arrow-flight.workspace = true
 async-trait = "0.1"
 axum = "0.6"
 axum-macros = "0.3"
@@ -20,6 +23,7 @@ common-catalog = { path = "../common/catalog" }
 common-error = { path = "../common/error" }
 common-grpc = { path = "../common/grpc" }
 common-grpc-expr = { path = "../common/grpc-expr" }
+common-mem-prof = { path = "../common/mem-prof", optional = true }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-runtime = { path = "../common/runtime" }
@@ -39,6 +43,7 @@ num_cpus = "1.13"
 once_cell = "1.16"
 openmetrics-parser = "0.4"
 opensrv-mysql = { git = "https://github.com/sunng87/opensrv", branch = "fix/buffer-overread" }
+parking_lot = "0.12"
 pgwire = "0.10"
 pin-project = "1.0"
 postgres-types = { version = "0.2", features = ["with-chrono-0_4"] }
@@ -52,7 +57,6 @@ rustls-pemfile = "1.0"
 schemars = "0.8"
 serde.workspace = true
 serde_json = "1.0"
-serde_urlencoded = "0.7"
 session = { path = "../session" }
 sha1 = "0.10"
 snafu = { version = "0.7", features = ["backtraces"] }
@@ -60,17 +64,19 @@ snap = "1"
 sql = { path = "../sql" }
 strum = { version = "0.24", features = ["derive"] }
 table = { path = "../table" }
-tokio.workspace = true
 tokio-rustls = "0.23"
 tokio-stream = { version = "0.1", features = ["net"] }
+tokio.workspace = true
 tonic.workspace = true
 tower = { version = "0.4", features = ["full"] }
 tower-http = { version = "0.3", features = ["full"] }
+
 
 [dev-dependencies]
 axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", branch = "patch-1" }
 client = { path = "../client" }
 common-base = { path = "../common/base" }
+common-test-util = { path = "../common/test-util" }
 mysql_async = { version = "0.31", default-features = false, features = [
     "default-rustls",
 ] }
@@ -78,7 +84,6 @@ rand = "0.8"
 script = { path = "../script", features = ["python"] }
 serde_json = "1.0"
 table = { path = "../table" }
-tempdir = "0.3"
 tokio-postgres = "0.7"
 tokio-postgres-rustls = "0.9"
 tokio-test = "0.4"

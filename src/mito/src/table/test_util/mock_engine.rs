@@ -196,6 +196,14 @@ impl Region for MockRegion {
     async fn close(&self) -> Result<()> {
         Ok(())
     }
+
+    fn disk_usage_bytes(&self) -> u64 {
+        0
+    }
+
+    async fn flush(&self) -> Result<()> {
+        unimplemented!()
+    }
 }
 
 impl MockRegionInner {

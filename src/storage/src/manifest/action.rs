@@ -184,6 +184,7 @@ mod tests {
 
     use super::*;
     use crate::manifest::test_utils;
+    use crate::sst::FileId;
 
     #[test]
     fn test_encode_decode_action_list() {
@@ -194,8 +195,8 @@ mod tests {
             RegionMetaAction::Protocol(protocol.clone()),
             RegionMetaAction::Edit(test_utils::build_region_edit(
                 99,
-                &["test1", "test2"],
-                &["test3"],
+                &[FileId::random(), FileId::random()],
+                &[FileId::random()],
             )),
         ]);
         action_list.set_prev_version(3);
@@ -220,5 +221,23 @@ mod tests {
         let (decode_list, p) = RegionMetaActionList::decode(&bs, 1).unwrap();
         assert_eq!(decode_list, action_list);
         assert_eq!(p.unwrap(), protocol);
+    }
+
+    // These tests are used to ensure backward compatibility of manifest files.
+    // DO NOT modify the serialized string when they fail, check if your
+    // modification to manifest-related structs is compatible with older manifests.
+    #[test]
+    fn test_region_manifest_compatibility() {
+        let region_edit = r#"{"region_version":0,"flushed_sequence":null,"files_to_add":[{"region_id":4402341478400,"file_name":"4b220a70-2b03-4641-9687-b65d94641208.parquet","time_range":[{"value":1451609210000,"unit":"Millisecond"},{"value":1451609520000,"unit":"Millisecond"}],"level":1}],"files_to_remove":[{"region_id":4402341478400,"file_name":"34b6ebb9-b8a5-4a4b-b744-56f67defad02.parquet","time_range":[{"value":1451609210000,"unit":"Millisecond"},{"value":1451609520000,"unit":"Millisecond"}],"level":0}]}"#;
+        serde_json::from_str::<RegionEdit>(region_edit).unwrap();
+
+        let region_change = r#" {"committed_sequence":42,"metadata":{"id":0,"name":"region-0","columns":{"columns":[{"cf_id":0,"desc":{"id":2,"name":"k1","data_type":{"Int32":{}},"is_nullable":false,"is_time_index":false,"default_constraint":null,"comment":""}},{"cf_id":0,"desc":{"id":1,"name":"timestamp","data_type":{"Timestamp":{"Millisecond":null}},"is_nullable":false,"is_time_index":true,"default_constraint":null,"comment":""}},{"cf_id":1,"desc":{"id":3,"name":"v1","data_type":{"Float32":{}},"is_nullable":true,"is_time_index":false,"default_constraint":null,"comment":""}},{"cf_id":1,"desc":{"id":2147483649,"name":"__sequence","data_type":{"UInt64":{}},"is_nullable":false,"is_time_index":false,"default_constraint":null,"comment":""}},{"cf_id":1,"desc":{"id":2147483650,"name":"__op_type","data_type":{"UInt8":{}},"is_nullable":false,"is_time_index":false,"default_constraint":null,"comment":""}}],"row_key_end":2,"timestamp_key_index":1,"enable_version_column":false,"user_column_end":3},"column_families":{"column_families":[{"name":"default","cf_id":1,"column_index_start":2,"column_index_end":3}]},"version":0}}"#;
+        serde_json::from_str::<RegionChange>(region_change).unwrap();
+
+        let region_remove = r#"{"region_id":42}"#;
+        serde_json::from_str::<RegionRemove>(region_remove).unwrap();
+
+        let protocol_action = r#"{"min_reader_version":1,"min_writer_version":2}"#;
+        serde_json::from_str::<ProtocolAction>(protocol_action).unwrap();
     }
 }

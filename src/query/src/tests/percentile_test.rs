@@ -17,21 +17,17 @@ use std::sync::Arc;
 use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
 use catalog::{CatalogList, CatalogProvider, SchemaProvider};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_query::Output;
-use common_recordbatch::error::Result as RecordResult;
-use common_recordbatch::{util, RecordBatch};
+use common_recordbatch::RecordBatch;
 use datatypes::for_all_primitive_types;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::Int32Vector;
 use function::{create_query_engine, get_numbers_from_table};
 use num_traits::AsPrimitive;
-use session::context::QueryContext;
 use table::test_util::MemTable;
 
 use crate::error::Result;
-use crate::parser::QueryLanguageParser;
-use crate::tests::function;
+use crate::tests::{exec_selection, function};
 use crate::{QueryEngine, QueryEngineFactory};
 
 #[tokio::test]
@@ -55,18 +51,7 @@ async fn test_percentile_aggregator() -> Result<()> {
 async fn test_percentile_correctness() -> Result<()> {
     let engine = create_correctness_engine();
     let sql = String::from("select PERCENTILE(corr_number,88.0) as percentile from corr_numbers");
-    let stmt = QueryLanguageParser::parse_sql(&sql).unwrap();
-    let plan = engine
-        .statement_to_plan(stmt, Arc::new(QueryContext::new()))
-        .await
-        .unwrap();
-
-    let output = engine.execute(&plan).await.unwrap();
-    let recordbatch_stream = match output {
-        Output::Stream(batch) => batch,
-        _ => unreachable!(),
-    };
-    let record_batch = util::collect(recordbatch_stream).await.unwrap();
+    let record_batch = exec_selection(engine, &sql).await;
     let column = record_batch[0].column(0);
     let value = column.get(0);
     assert_eq!(value, Value::from(9.280_000_000_000_001_f64));
@@ -81,9 +66,8 @@ async fn test_percentile_success<T>(
 where
     T: WrapperType + AsPrimitive<f64>,
 {
-    let result = execute_percentile(column_name, table_name, engine.clone())
-        .await
-        .unwrap();
+    let sql = format!("select PERCENTILE({column_name},50.0) as percentile from {table_name}");
+    let result = exec_selection(engine.clone(), &sql).await;
     let value = function::get_value_from_batches("percentile", result);
 
     let numbers = get_numbers_from_table::<T>(column_name, table_name, engine.clone()).await;
@@ -93,26 +77,6 @@ where
     let expected_value = expected_value.percentile(0.5).unwrap();
     assert_eq!(value, expected_value.into());
     Ok(())
-}
-
-async fn execute_percentile<'a>(
-    column_name: &'a str,
-    table_name: &'a str,
-    engine: Arc<dyn QueryEngine>,
-) -> RecordResult<Vec<RecordBatch>> {
-    let sql = format!("select PERCENTILE({column_name},50.0) as percentile from {table_name}");
-    let stmt = QueryLanguageParser::parse_sql(&sql).unwrap();
-    let plan = engine
-        .statement_to_plan(stmt, Arc::new(QueryContext::new()))
-        .await
-        .unwrap();
-
-    let output = engine.execute(&plan).await.unwrap();
-    let recordbatch_stream = match output {
-        Output::Stream(batch) => batch,
-        _ => unreachable!(),
-    };
-    util::collect(recordbatch_stream).await
 }
 
 fn create_correctness_engine() -> Arc<dyn QueryEngine> {

@@ -85,6 +85,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
 
+    use common_test_util::temp_dir::create_temp_dir;
     use common_time::Timestamp;
     use datatypes::prelude::{LogicalTypeId, ScalarVector, ScalarVectorBuilder};
     use datatypes::timestamp::TimestampMillisecond;
@@ -94,7 +95,6 @@ mod tests {
     use object_store::services::Fs;
     use object_store::{ObjectStore, ObjectStoreBuilder};
     use store_api::storage::{ChunkReader, OpType, SequenceNumber};
-    use tempdir::TempDir;
 
     use super::*;
     use crate::file_purger::noop::new_noop_file_purger;
@@ -102,9 +102,8 @@ mod tests {
         DefaultMemtableBuilder, IterContext, KeyValues, Memtable, MemtableBuilder,
     };
     use crate::metadata::RegionMetadata;
-    use crate::sst;
     use crate::sst::parquet::ParquetWriter;
-    use crate::sst::{FileMeta, FsAccessLayer, Source, SstInfo, WriteOptions};
+    use crate::sst::{self, FileId, FileMeta, FsAccessLayer, Source, SstInfo, WriteOptions};
     use crate::test_util::descriptor_util::RegionDescBuilder;
 
     fn schema_for_test() -> RegionSchemaRef {
@@ -165,7 +164,7 @@ mod tests {
     }
 
     async fn write_sst(
-        sst_file_name: &str,
+        sst_file_id: FileId,
         schema: RegionSchemaRef,
         seq: &AtomicU64,
         object_store: ObjectStore,
@@ -219,18 +218,23 @@ mod tests {
         }
 
         let iter = memtable.iter(&IterContext::default()).unwrap();
-        let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
+        let file_path = sst_file_id.as_parquet();
+        let writer = ParquetWriter::new(&file_path, Source::Iter(iter), object_store.clone());
 
-        let SstInfo { time_range } = writer
+        let SstInfo {
+            time_range,
+            file_size,
+        } = writer
             .write_sst(&sst::WriteOptions::default())
             .await
             .unwrap();
         let handle = FileHandle::new(
             FileMeta {
                 region_id: 0,
-                file_name: sst_file_name.to_string(),
+                file_id: sst_file_id,
                 time_range,
                 level: 0,
+                file_size,
             },
             Arc::new(crate::test_util::access_layer_util::MockAccessLayer {}),
             new_noop_file_purger(),
@@ -270,7 +274,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sst_reader() {
-        let dir = TempDir::new("write_parquet").unwrap();
+        let dir = create_temp_dir("write_parquet");
         let path = dir.path().to_str().unwrap();
         let backend = Fs::default().root(path).build().unwrap();
         let object_store = ObjectStore::new(backend).finish();
@@ -278,7 +282,7 @@ mod tests {
         let seq = AtomicU64::new(0);
         let schema = schema_for_test();
         let file1 = write_sst(
-            "a.parquet",
+            FileId::random(),
             schema.clone(),
             &seq,
             object_store.clone(),
@@ -293,7 +297,7 @@ mod tests {
         )
         .await;
         let file2 = write_sst(
-            "b.parquet",
+            FileId::random(),
             schema.clone(),
             &seq,
             object_store.clone(),
@@ -347,15 +351,19 @@ mod tests {
     /// and check the output contains the same data as input files.
     #[tokio::test]
     async fn test_sst_split() {
-        let dir = TempDir::new("write_parquet").unwrap();
+        let dir = create_temp_dir("write_parquet");
         let path = dir.path().to_str().unwrap();
         let backend = Fs::default().root(path).build().unwrap();
         let object_store = ObjectStore::new(backend).finish();
 
         let schema = schema_for_test();
         let seq = AtomicU64::new(0);
+
+        let input_file_ids = [FileId::random(), FileId::random()];
+        let output_file_ids = [FileId::random(), FileId::random(), FileId::random()];
+
         let file1 = write_sst(
-            "i1.parquet",
+            input_file_ids[0],
             schema.clone(),
             &seq,
             object_store.clone(),
@@ -372,7 +380,7 @@ mod tests {
 
         // in file2 we delete the row with timestamp 1000.
         let file2 = write_sst(
-            "i2.parquet",
+            input_file_ids[1],
             schema.clone(),
             &seq,
             object_store.clone(),
@@ -401,7 +409,7 @@ mod tests {
 
         let opts = WriteOptions {};
         let s1 = ParquetWriter::new(
-            "./o1.parquet",
+            &output_file_ids[0].as_parquet(),
             Source::Reader(reader1),
             object_store.clone(),
         )
@@ -409,17 +417,15 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            SstInfo {
-                time_range: Some((
-                    Timestamp::new_millisecond(2000),
-                    Timestamp::new_millisecond(2000)
-                )),
-            },
-            s1
+            Some((
+                Timestamp::new_millisecond(2000),
+                Timestamp::new_millisecond(2000)
+            )),
+            s1.time_range,
         );
 
         let s2 = ParquetWriter::new(
-            "./o2.parquet",
+            &output_file_ids[1].as_parquet(),
             Source::Reader(reader2),
             object_store.clone(),
         )
@@ -427,17 +433,15 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            SstInfo {
-                time_range: Some((
-                    Timestamp::new_millisecond(3000),
-                    Timestamp::new_millisecond(5002)
-                )),
-            },
-            s2
+            Some((
+                Timestamp::new_millisecond(3000),
+                Timestamp::new_millisecond(5002)
+            )),
+            s2.time_range,
         );
 
         let s3 = ParquetWriter::new(
-            "./o3.parquet",
+            &output_file_ids[2].as_parquet(),
             Source::Reader(reader3),
             object_store.clone(),
         )
@@ -446,24 +450,23 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            SstInfo {
-                time_range: Some((
-                    Timestamp::new_millisecond(6000),
-                    Timestamp::new_millisecond(8000)
-                )),
-            },
-            s3
+            Some((
+                Timestamp::new_millisecond(6000),
+                Timestamp::new_millisecond(8000)
+            )),
+            s3.time_range
         );
 
-        let output_files = ["o1.parquet", "o2.parquet", "o3.parquet"]
+        let output_files = output_file_ids
             .into_iter()
             .map(|f| {
                 FileHandle::new(
                     FileMeta {
                         region_id: 0,
-                        file_name: f.to_string(),
+                        file_id: f,
                         level: 1,
                         time_range: None,
+                        file_size: 0,
                     },
                     Arc::new(crate::test_util::access_layer_util::MockAccessLayer {}),
                     new_noop_file_purger(),

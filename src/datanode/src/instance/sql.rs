@@ -17,25 +17,28 @@ use std::time::{Duration, SystemTime};
 use async_trait::async_trait;
 use common_error::prelude::BoxedError;
 use common_query::Output;
-use common_recordbatch::RecordBatches;
 use common_telemetry::logging::info;
 use common_telemetry::timer;
-use datatypes::schema::Schema;
 use futures::StreamExt;
+use query::error::QueryExecutionSnafu;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
+use query::query_engine::StatementHandler;
 use servers::error as server_error;
-use servers::promql::PromqlHandler;
-use servers::query_handler::sql::SqlQueryHandler;
+use servers::prom::PromHandler;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::prelude::*;
 use sql::ast::ObjectName;
 use sql::statements::copy::CopyTable;
 use sql::statements::statement::Statement;
-use sql::statements::tql::Tql;
 use table::engine::TableReference;
-use table::requests::{CopyTableRequest, CreateDatabaseRequest, DropTableRequest};
+use table::requests::{
+    CopyTableFromRequest, CopyTableRequest, CreateDatabaseRequest, DropTableRequest,
+};
 
-use crate::error::{self, BumpTableIdSnafu, ExecuteSqlSnafu, Result, TableIdProviderNotFoundSnafu};
+use crate::error::{
+    self, BumpTableIdSnafu, ExecuteSqlSnafu, ExecuteStatementSnafu, PlanStatementSnafu, Result,
+    TableIdProviderNotFoundSnafu,
+};
 use crate::instance::Instance;
 use crate::metric;
 use crate::sql::insert::InsertRequests;
@@ -48,18 +51,6 @@ impl Instance {
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
         match stmt {
-            QueryStatement::Sql(Statement::Query(_)) | QueryStatement::Promql(_) => {
-                let logical_plan = self
-                    .query_engine
-                    .statement_to_plan(stmt, query_ctx)
-                    .await
-                    .context(ExecuteSqlSnafu)?;
-
-                self.query_engine
-                    .execute(&logical_plan)
-                    .await
-                    .context(ExecuteSqlSnafu)
-            }
             QueryStatement::Sql(Statement::Insert(insert)) => {
                 let requests = self
                     .sql_handler
@@ -161,11 +152,6 @@ impl Instance {
                     .execute(SqlRequest::ShowTables(show_tables), query_ctx)
                     .await
             }
-            QueryStatement::Sql(Statement::Explain(explain)) => {
-                self.sql_handler
-                    .execute(SqlRequest::Explain(Box::new(explain)), query_ctx)
-                    .await
-            }
             QueryStatement::Sql(Statement::DescribeTable(describe_table)) => {
                 self.sql_handler
                     .execute(SqlRequest::DescribeTable(describe_table), query_ctx)
@@ -173,17 +159,6 @@ impl Instance {
             }
             QueryStatement::Sql(Statement::ShowCreateTable(_show_create_table)) => {
                 unimplemented!("SHOW CREATE TABLE is unimplemented yet");
-            }
-            QueryStatement::Sql(Statement::Use(ref schema)) => {
-                let catalog = &query_ctx.current_catalog();
-                ensure!(
-                    self.is_valid_schema(catalog, schema)?,
-                    error::DatabaseNotFoundSnafu { catalog, schema }
-                );
-
-                query_ctx.set_current_schema(schema);
-
-                Ok(Output::RecordBatches(RecordBatches::empty()))
             }
             QueryStatement::Sql(Statement::Copy(copy_table)) => match copy_table {
                 CopyTable::To(copy_table) => {
@@ -202,42 +177,28 @@ impl Instance {
                         .execute(SqlRequest::CopyTable(req), query_ctx)
                         .await
                 }
-                CopyTable::From(_) => todo!(),
+                CopyTable::From(copy_table) => {
+                    let (catalog_name, schema_name, table_name) =
+                        table_idents_to_full_name(&copy_table.table_name, query_ctx.clone())?;
+                    let req = CopyTableFromRequest {
+                        catalog_name,
+                        schema_name,
+                        table_name,
+                        connection: copy_table.connection,
+                        pattern: copy_table.pattern,
+                        from: copy_table.from,
+                    };
+                    self.sql_handler
+                        .execute(SqlRequest::CopyTableFrom(req), query_ctx)
+                        .await
+                }
             },
-            QueryStatement::Sql(Statement::Tql(tql)) => self.execute_tql(tql, query_ctx).await,
+            QueryStatement::Sql(Statement::Query(_))
+            | QueryStatement::Sql(Statement::Explain(_))
+            | QueryStatement::Sql(Statement::Use(_))
+            | QueryStatement::Sql(Statement::Tql(_))
+            | QueryStatement::Promql(_) => unreachable!(),
         }
-    }
-
-    pub(crate) async fn execute_tql(&self, tql: Tql, query_ctx: QueryContextRef) -> Result<Output> {
-        match tql {
-            Tql::Eval(eval) => {
-                let promql = PromQuery {
-                    start: eval.start,
-                    end: eval.end,
-                    step: eval.step,
-                    query: eval.query,
-                };
-                let stmt = QueryLanguageParser::parse_promql(&promql).context(ExecuteSqlSnafu)?;
-                let logical_plan = self
-                    .query_engine
-                    .statement_to_plan(stmt, query_ctx)
-                    .await
-                    .context(ExecuteSqlSnafu)?;
-
-                self.query_engine
-                    .execute(&logical_plan)
-                    .await
-                    .context(ExecuteSqlSnafu)
-            }
-            Tql::Explain(_explain) => {
-                todo!("waiting for promql-parser ast adding a explain node")
-            }
-        }
-    }
-
-    pub async fn execute_sql(&self, sql: &str, query_ctx: QueryContextRef) -> Result<Output> {
-        let stmt = QueryLanguageParser::parse_sql(sql).context(ExecuteSqlSnafu)?;
-        self.execute_stmt(stmt, query_ctx).await
     }
 
     pub async fn execute_promql(
@@ -245,8 +206,17 @@ impl Instance {
         promql: &PromQuery,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
+        let _timer = timer!(metric::METRIC_HANDLE_PROMQL_ELAPSED);
+
         let stmt = QueryLanguageParser::parse_promql(promql).context(ExecuteSqlSnafu)?;
-        self.execute_stmt(stmt, query_ctx).await
+
+        let engine = self.query_engine();
+        let plan = engine
+            .planner()
+            .plan(stmt, query_ctx)
+            .await
+            .context(PlanStatementSnafu)?;
+        engine.execute(&plan).await.context(ExecuteStatementSnafu)
     }
 
     // TODO(ruihang): merge this and `execute_promql` after #951 landed
@@ -275,7 +245,14 @@ impl Instance {
                 eval_stmt.lookback_delta = lookback
             }
         }
-        self.execute_stmt(stmt, query_ctx).await
+
+        let engine = self.query_engine();
+        let plan = engine
+            .planner()
+            .plan(stmt, query_ctx)
+            .await
+            .context(PlanStatementSnafu)?;
+        engine.execute(&plan).await.context(ExecuteStatementSnafu)
     }
 }
 
@@ -311,62 +288,21 @@ pub fn table_idents_to_full_name(
 }
 
 #[async_trait]
-impl SqlQueryHandler for Instance {
-    type Error = error::Error;
-
-    async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
-        let _timer = timer!(metric::METRIC_HANDLE_SQL_ELAPSED);
-        // we assume sql string has only 1 statement in datanode
-        let result = self.execute_sql(query, query_ctx).await;
-        vec![result]
-    }
-
-    async fn do_promql_query(
+impl StatementHandler for Instance {
+    async fn handle_statement(
         &self,
-        query: &PromQuery,
+        stmt: QueryStatement,
         query_ctx: QueryContextRef,
-    ) -> Vec<Result<Output>> {
-        let _timer = timer!(metric::METRIC_HANDLE_PROMQL_ELAPSED);
-        let result = self.execute_promql(query, query_ctx).await;
-        vec![result]
-    }
-
-    async fn do_statement_query(
-        &self,
-        stmt: Statement,
-        query_ctx: QueryContextRef,
-    ) -> Result<Output> {
-        let _timer = timer!(metric::METRIC_HANDLE_SQL_ELAPSED);
-        self.execute_stmt(QueryStatement::Sql(stmt), query_ctx)
+    ) -> query::error::Result<Output> {
+        self.execute_stmt(stmt, query_ctx)
             .await
-    }
-
-    async fn do_describe(
-        &self,
-        stmt: Statement,
-        query_ctx: QueryContextRef,
-    ) -> Result<Option<Schema>> {
-        if let Statement::Query(_) = stmt {
-            self.query_engine
-                .describe(QueryStatement::Sql(stmt), query_ctx)
-                .await
-                .map(Some)
-                .context(error::DescribeStatementSnafu)
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
-        self.catalog_manager
-            .schema(catalog, schema)
-            .map(|s| s.is_some())
-            .context(error::CatalogSnafu)
+            .map_err(BoxedError::new)
+            .context(QueryExecutionSnafu)
     }
 }
 
 #[async_trait]
-impl PromqlHandler for Instance {
+impl PromHandler for Instance {
     async fn do_query(&self, query: &PromQuery) -> server_error::Result<Output> {
         let _timer = timer!(metric::METRIC_HANDLE_PROMQL_ELAPSED);
 

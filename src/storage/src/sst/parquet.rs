@@ -130,7 +130,17 @@ impl<'a> ParquetWriter<'a> {
         object.write(buf).await.context(WriteObjectSnafu {
             path: object.path(),
         })?;
-        Ok(SstInfo { time_range })
+        let file_size = object
+            .metadata()
+            .await
+            .context(WriteObjectSnafu {
+                path: object.path(),
+            })?
+            .content_length();
+        Ok(SstInfo {
+            time_range,
+            file_size,
+        })
     }
 }
 
@@ -519,6 +529,7 @@ impl BatchReader for ChunkStream {
 mod tests {
     use std::sync::Arc;
 
+    use common_test_util::temp_dir::create_temp_dir;
     use datatypes::arrow::array::{Array, ArrayRef, UInt64Array, UInt8Array};
     use datatypes::prelude::{ScalarVector, Vector};
     use datatypes::types::{TimestampMillisecondType, TimestampType};
@@ -526,7 +537,6 @@ mod tests {
     use object_store::services::Fs;
     use object_store::ObjectStoreBuilder;
     use store_api::storage::OpType;
-    use tempdir::TempDir;
 
     use super::*;
     use crate::memtable::{
@@ -561,7 +571,7 @@ mod tests {
             ], // values
         );
 
-        let dir = TempDir::new("write_parquet").unwrap();
+        let dir = create_temp_dir("write_parquet");
         let path = dir.path().to_str().unwrap();
         let backend = Fs::default().root(path).build().unwrap();
         let object_store = ObjectStore::new(backend).finish();
@@ -659,7 +669,7 @@ mod tests {
             &values_vec, // values
         );
 
-        let dir = TempDir::new("write_parquet").unwrap();
+        let dir = create_temp_dir("write_parquet");
         let path = dir.path().to_str().unwrap();
         let backend = Fs::default().root(path).build().unwrap();
         let object_store = ObjectStore::new(backend).finish();
@@ -667,7 +677,10 @@ mod tests {
         let iter = memtable.iter(&IterContext::default()).unwrap();
         let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
 
-        let SstInfo { time_range } = writer
+        let SstInfo {
+            time_range,
+            file_size,
+        } = writer
             .write_sst(&sst::WriteOptions::default())
             .await
             .unwrap();
@@ -679,6 +692,7 @@ mod tests {
             )),
             time_range
         );
+        assert_ne!(file_size, 0);
         let operator = ObjectStore::new(
             Fs::default()
                 .root(dir.path().to_str().unwrap())
@@ -732,7 +746,7 @@ mod tests {
             ], // values
         );
 
-        let dir = TempDir::new("write_parquet").unwrap();
+        let dir = create_temp_dir("write_parquet");
         let path = dir.path().to_str().unwrap();
         let backend = Fs::default().root(path).build().unwrap();
         let object_store = ObjectStore::new(backend).finish();
@@ -740,7 +754,10 @@ mod tests {
         let iter = memtable.iter(&IterContext::default()).unwrap();
         let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
 
-        let SstInfo { time_range } = writer
+        let SstInfo {
+            time_range,
+            file_size,
+        } = writer
             .write_sst(&sst::WriteOptions::default())
             .await
             .unwrap();
@@ -752,6 +769,7 @@ mod tests {
             )),
             time_range
         );
+        assert_ne!(file_size, 0);
         let operator = ObjectStore::new(
             Fs::default()
                 .root(dir.path().to_str().unwrap())
@@ -845,7 +863,7 @@ mod tests {
             ], // values
         );
 
-        let dir = TempDir::new("read-parquet-by-range").unwrap();
+        let dir = create_temp_dir("read-parquet-by-range");
         let path = dir.path().to_str().unwrap();
         let backend = Fs::default().root(path).build().unwrap();
         let object_store = ObjectStore::new(backend).finish();
@@ -853,7 +871,10 @@ mod tests {
         let iter = memtable.iter(&IterContext::default()).unwrap();
         let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
 
-        let SstInfo { time_range } = writer
+        let SstInfo {
+            time_range,
+            file_size,
+        } = writer
             .write_sst(&sst::WriteOptions::default())
             .await
             .unwrap();
@@ -865,6 +886,7 @@ mod tests {
             )),
             time_range
         );
+        assert_ne!(file_size, 0);
 
         let projected_schema =
             Arc::new(ProjectedSchema::new(schema, Some(vec![1, 0, 3, 2])).unwrap());

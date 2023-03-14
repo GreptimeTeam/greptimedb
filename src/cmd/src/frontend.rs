@@ -16,13 +16,14 @@ use std::sync::Arc;
 
 use clap::Parser;
 use common_base::Plugins;
-use frontend::frontend::{Frontend, FrontendOptions};
+use frontend::frontend::FrontendOptions;
 use frontend::grpc::GrpcOptions;
 use frontend::influxdb::InfluxdbOptions;
-use frontend::instance::Instance;
+use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use frontend::mysql::MysqlOptions;
 use frontend::opentsdb::OpentsdbOptions;
 use frontend::postgres::PostgresOptions;
+use frontend::prom::PromOptions;
 use meta_client::MetaClientOptions;
 use servers::auth::UserProviderRef;
 use servers::http::HttpOptions;
@@ -33,6 +34,24 @@ use snafu::ResultExt;
 use crate::error::{self, IllegalAuthConfigSnafu, Result};
 use crate::toml_loader;
 
+pub struct Instance {
+    frontend: FeInstance,
+}
+
+impl Instance {
+    pub async fn run(&mut self) -> Result<()> {
+        self.frontend
+            .start()
+            .await
+            .context(error::StartFrontendSnafu)
+    }
+
+    pub async fn stop(&self) -> Result<()> {
+        // TODO: handle frontend shutdown
+        Ok(())
+    }
+}
+
 #[derive(Parser)]
 pub struct Command {
     #[clap(subcommand)]
@@ -40,8 +59,8 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn run(self) -> Result<()> {
-        self.subcmd.run().await
+    pub async fn build(self) -> Result<Instance> {
+        self.subcmd.build().await
     }
 }
 
@@ -51,9 +70,9 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn run(self) -> Result<()> {
+    async fn build(self) -> Result<Instance> {
         match self {
-            SubCommand::Start(cmd) => cmd.run().await,
+            SubCommand::Start(cmd) => cmd.build().await,
         }
     }
 }
@@ -66,6 +85,8 @@ pub struct StartCommand {
     grpc_addr: Option<String>,
     #[clap(long)]
     mysql_addr: Option<String>,
+    #[clap(long)]
+    prom_addr: Option<String>,
     #[clap(long)]
     postgres_addr: Option<String>,
     #[clap(long)]
@@ -87,16 +108,20 @@ pub struct StartCommand {
 }
 
 impl StartCommand {
-    async fn run(self) -> Result<()> {
+    async fn build(self) -> Result<Instance> {
         let plugins = Arc::new(load_frontend_plugins(&self.user_provider)?);
         let opts: FrontendOptions = self.try_into()?;
 
-        let instance = Instance::try_new_distributed(&opts, plugins.clone())
+        let mut instance = FeInstance::try_new_distributed(&opts, plugins.clone())
             .await
             .context(error::StartFrontendSnafu)?;
 
-        let mut frontend = Frontend::new(opts, instance, plugins);
-        frontend.start().await.context(error::StartFrontendSnafu)
+        instance
+            .build_servers(&opts, plugins)
+            .await
+            .context(error::StartFrontendSnafu)?;
+
+        Ok(Instance { frontend: instance })
     }
 }
 
@@ -141,6 +166,9 @@ impl TryFrom<StartCommand> for FrontendOptions {
                 ..Default::default()
             });
         }
+        if let Some(addr) = cmd.prom_addr {
+            opts.prom_options = Some(PromOptions { addr });
+        }
         if let Some(addr) = cmd.postgres_addr {
             opts.postgres_options = Some(PostgresOptions {
                 addr,
@@ -176,8 +204,8 @@ mod tests {
     use std::io::Write;
     use std::time::Duration;
 
+    use common_test_util::temp_dir::create_named_temp_file;
     use servers::auth::{Identity, Password, UserProviderRef};
-    use tempfile::NamedTempFile;
 
     use super::*;
 
@@ -186,6 +214,7 @@ mod tests {
         let command = StartCommand {
             http_addr: Some("127.0.0.1:1234".to_string()),
             grpc_addr: None,
+            prom_addr: Some("127.0.0.1:4444".to_string()),
             mysql_addr: Some("127.0.0.1:5678".to_string()),
             postgres_addr: Some("127.0.0.1:5432".to_string()),
             opentsdb_addr: Some("127.0.0.1:4321".to_string()),
@@ -209,6 +238,7 @@ mod tests {
             opts.opentsdb_options.as_ref().unwrap().addr,
             "127.0.0.1:4321"
         );
+        assert_eq!(opts.prom_options.as_ref().unwrap().addr, "127.0.0.1:4444");
 
         let default_opts = FrontendOptions::default();
         assert_eq!(
@@ -233,7 +263,7 @@ mod tests {
 
     #[test]
     fn test_read_from_config_file() {
-        let mut file = NamedTempFile::new().unwrap();
+        let mut file = create_named_temp_file();
         let toml_str = r#"
             mode = "distributed"
 
@@ -247,6 +277,7 @@ mod tests {
             http_addr: None,
             grpc_addr: None,
             mysql_addr: None,
+            prom_addr: None,
             postgres_addr: None,
             opentsdb_addr: None,
             influxdb_enable: None,
@@ -276,6 +307,7 @@ mod tests {
             http_addr: None,
             grpc_addr: None,
             mysql_addr: None,
+            prom_addr: None,
             postgres_addr: None,
             opentsdb_addr: None,
             influxdb_enable: None,

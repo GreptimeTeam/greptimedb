@@ -19,6 +19,7 @@ common-time = { path = "../common/time" }
 datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
+datafusion-physical-expr.workspace = true
 datatypes = { path = "../datatypes" }
 derive_builder = "0.11"
 futures.workspace = true
@@ -32,7 +33,7 @@ store-api = { path = "../store-api" }
 tokio.workspace = true
 
 [dev-dependencies]
+common-test-util = { path = "../common/test-util" }
 parquet = { workspace = true, features = ["async"] }
-tempdir = "0.3"
 tokio-util = { version = "0.7", features = ["compat"] }
 serde_json.workspace = true

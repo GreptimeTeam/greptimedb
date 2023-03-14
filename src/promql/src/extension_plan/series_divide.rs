@@ -23,7 +23,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::DFSchemaRef;
 use datafusion::error::Result as DataFusionResult;
 use datafusion::execution::context::TaskContext;
-use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
+use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::PhysicalSortExpr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
@@ -33,15 +33,15 @@ use datafusion::physical_plan::{
 use datatypes::arrow::compute;
 use futures::{ready, Stream, StreamExt};
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct SeriesDivide {
     tag_columns: Vec<String>,
     input: LogicalPlan,
 }
 
-impl UserDefinedLogicalNode for SeriesDivide {
-    fn as_any(&self) -> &dyn Any {
-        self as _
+impl UserDefinedLogicalNodeCore for SeriesDivide {
+    fn name(&self) -> &str {
+        "SeriesDivide"
     }
 
     fn inputs(&self) -> Vec<&LogicalPlan> {
@@ -60,17 +60,13 @@ impl UserDefinedLogicalNode for SeriesDivide {
         write!(f, "PromSeriesDivide: tags={:?}", self.tag_columns)
     }
 
-    fn from_template(
-        &self,
-        _exprs: &[Expr],
-        inputs: &[LogicalPlan],
-    ) -> Arc<dyn UserDefinedLogicalNode> {
+    fn from_template(&self, _exprs: &[Expr], inputs: &[LogicalPlan]) -> Self {
         assert!(!inputs.is_empty());
 
-        Arc::new(Self {
+        Self {
             tag_columns: self.tag_columns.clone(),
             input: inputs[0].clone(),
-        })
+        }
     }
 }
 

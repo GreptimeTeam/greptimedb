@@ -12,28 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use serde::{Deserialize, Serialize};
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use snafu::ResultExt;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PromqlOptions {
-    pub addr: String,
-}
+use crate::error::DumpProfileDataSnafu;
 
-impl Default for PromqlOptions {
-    fn default() -> Self {
-        Self {
-            addr: "127.0.0.1:4004".to_string(),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::PromqlOptions;
-
-    #[test]
-    fn test_prometheus_options() {
-        let default = PromqlOptions::default();
-        assert_eq!(default.addr, "127.0.0.1:4004".to_string());
-    }
+#[cfg(feature = "mem-prof")]
+#[axum_macros::debug_handler]
+pub async fn mem_prof() -> crate::error::Result<impl IntoResponse> {
+    Ok((
+        StatusCode::OK,
+        common_mem_prof::dump_profile()
+            .await
+            .context(DumpProfileDataSnafu)?,
+    ))
 }

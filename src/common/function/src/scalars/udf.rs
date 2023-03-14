@@ -14,9 +14,9 @@
 
 use std::sync::Arc;
 
-use common_query::error::{ExecuteFunctionSnafu, FromScalarValueSnafu};
+use common_query::error::FromScalarValueSnafu;
 use common_query::prelude::{
-    ColumnarValue, ReturnTypeFunction, ScalarFunctionImplementation, ScalarUdf, ScalarValue,
+    ColumnarValue, ReturnTypeFunction, ScalarFunctionImplementation, ScalarUdf,
 };
 use datatypes::error::Error as DataTypeError;
 use datatypes::prelude::*;
@@ -54,16 +54,8 @@ pub fn create_udf(func: FunctionRef) -> ScalarUdf {
             .collect();
 
         let result = func_cloned.eval(func_ctx, &args.context(FromScalarValueSnafu)?);
-
-        let udf = if len.is_some() {
-            result.map(ColumnarValue::Vector)?
-        } else {
-            ScalarValue::try_from_array(&result?.to_arrow_array(), 0)
-                .map(ColumnarValue::Scalar)
-                .context(ExecuteFunctionSnafu)?
-        };
-
-        Ok(udf)
+        let udf_result = result.map(ColumnarValue::Vector)?;
+        Ok(udf_result)
     });
 
     ScalarUdf::new(func.name(), &func.signature(), &return_type, &fun)

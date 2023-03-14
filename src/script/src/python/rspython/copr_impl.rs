@@ -33,7 +33,7 @@ use crate::python::ffi_types::{check_args_anno_real_type, select_from_rb, Coproc
 use crate::python::rspython::builtins::init_greptime_builtins;
 use crate::python::rspython::dataframe_impl::data_frame::set_dataframe_in_scope;
 use crate::python::rspython::dataframe_impl::init_data_frame;
-use crate::python::rspython::utils::{format_py_error, is_instance, py_vec_obj_to_array};
+use crate::python::rspython::utils::{format_py_error, is_instance, py_obj_to_vec};
 
 thread_local!(static INTERPRETER: RefCell<Option<Arc<Interpreter>>> = RefCell::new(None));
 
@@ -45,8 +45,9 @@ pub(crate) fn rspy_exec_parsed(
 ) -> Result<RecordBatch> {
     // 3. get args from `rb`, and cast them into PyVector
     let args: Vec<PyVector> = if let Some(rb) = rb {
-        let args = select_from_rb(rb, copr.deco_args.arg_names.as_ref().unwrap_or(&vec![]))?;
-        check_args_anno_real_type(&args, copr, rb)?;
+        let arg_names = copr.deco_args.arg_names.clone().unwrap_or(vec![]);
+        let args = select_from_rb(rb, &arg_names)?;
+        check_args_anno_real_type(&arg_names, &args, copr, rb)?;
         args
     } else {
         vec![]
@@ -158,7 +159,7 @@ pub(crate) fn exec_with_cached_vm(
 }
 
 /// convert a tuple of `PyVector` or one `PyVector`(wrapped in a Python Object Ref[`PyObjectRef`])
-/// to a `Vec<ArrayRef>`
+/// to a `Vec<VectorRef>`
 /// by default, a constant(int/float/bool) gives the a constant array of same length with input args
 fn try_into_columns(
     obj: &PyObjectRef,
@@ -171,11 +172,11 @@ fn try_into_columns(
             .with_context(|| ret_other_error_with(format!("can't cast obj {obj:?} to PyTuple)")))?;
         let cols = tuple
             .iter()
-            .map(|obj| py_vec_obj_to_array(obj, vm, col_len))
+            .map(|obj| py_obj_to_vec(obj, vm, col_len))
             .collect::<Result<Vec<VectorRef>>>()?;
         Ok(cols)
     } else {
-        let col = py_vec_obj_to_array(obj, vm, col_len)?;
+        let col = py_obj_to_vec(obj, vm, col_len)?;
         Ok(vec![col])
     }
 }

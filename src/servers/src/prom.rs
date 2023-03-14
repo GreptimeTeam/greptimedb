@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! prom supply the prometheus HTTP API Server compliance
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -52,24 +53,25 @@ use crate::error::{
 use crate::http::authorize::HttpAuth;
 use crate::server::Server;
 
-pub const PROMQL_API_VERSION: &str = "v1";
+pub const PROM_API_VERSION: &str = "v1";
 
-pub type PromqlHandlerRef = Arc<dyn PromqlHandler + Send + Sync>;
+pub type PromHandlerRef = Arc<dyn PromHandler + Send + Sync>;
 
 #[async_trait]
-pub trait PromqlHandler {
+pub trait PromHandler {
     async fn do_query(&self, query: &PromQuery) -> Result<Output>;
 }
 
-pub struct PromqlServer {
-    query_handler: PromqlHandlerRef,
+/// PromServer represents PrometheusServer which handles the compliance with prometheus HTTP API
+pub struct PromServer {
+    query_handler: PromHandlerRef,
     shutdown_tx: Mutex<Option<Sender<()>>>,
     user_provider: Option<UserProviderRef>,
 }
 
-impl PromqlServer {
-    pub fn create_server(query_handler: PromqlHandlerRef) -> Box<Self> {
-        Box::new(PromqlServer {
+impl PromServer {
+    pub fn create_server(query_handler: PromHandlerRef) -> Box<Self> {
+        Box::new(PromServer {
             query_handler,
             shutdown_tx: Mutex::new(None),
             user_provider: None,
@@ -90,7 +92,7 @@ impl PromqlServer {
             .with_state(self.query_handler.clone());
 
         Router::new()
-            .nest(&format!("/api/{PROMQL_API_VERSION}"), router)
+            .nest(&format!("/api/{PROM_API_VERSION}"), router)
             // middlewares
             .layer(
                 ServiceBuilder::new()
@@ -104,16 +106,18 @@ impl PromqlServer {
     }
 }
 
+pub const PROM_SERVER: &str = "PROM_SERVER";
+
 #[async_trait]
-impl Server for PromqlServer {
+impl Server for PromServer {
     async fn shutdown(&self) -> Result<()> {
         let mut shutdown_tx = self.shutdown_tx.lock().await;
         if let Some(tx) = shutdown_tx.take() {
             if tx.send(()).is_err() {
-                info!("Receiver dropped, the PromQl server has already existed");
+                info!("Receiver dropped, the Prometheus API server has already existed");
             }
         }
-        info!("Shutdown PromQL server");
+        info!("Shutdown Prometheus API server");
 
         Ok(())
     }
@@ -124,7 +128,9 @@ impl Server for PromqlServer {
             let mut shutdown_tx = self.shutdown_tx.lock().await;
             ensure!(
                 shutdown_tx.is_none(),
-                AlreadyStartedSnafu { server: "PromQL" }
+                AlreadyStartedSnafu {
+                    server: "Prometheus"
+                }
             );
 
             let app = self.make_app();
@@ -135,32 +141,36 @@ impl Server for PromqlServer {
             server
         };
         let listening = server.local_addr();
-        info!("PromQL server is bound to {}", listening);
+        info!("Prometheus API server is bound to {}", listening);
 
         let graceful = server.with_graceful_shutdown(rx.map(drop));
         graceful.await.context(StartHttpSnafu)?;
 
         Ok(listening)
     }
+
+    fn name(&self) -> &str {
+        PROM_SERVER
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
-pub struct PromqlSeries {
+pub struct PromSeries {
     metric: HashMap<String, String>,
     values: Vec<(f64, String)>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
-pub struct PromqlData {
+pub struct PromData {
     #[serde(rename = "resultType")]
     result_type: String,
-    result: Vec<PromqlSeries>,
+    result: Vec<PromSeries>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
-pub struct PromqlJsonResponse {
+pub struct PromJsonResponse {
     status: String,
-    data: PromqlData,
+    data: PromData,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -170,23 +180,23 @@ pub struct PromqlJsonResponse {
     warnings: Option<Vec<String>>,
 }
 
-impl PromqlJsonResponse {
+impl PromJsonResponse {
     pub fn error<S1, S2>(error_type: S1, reason: S2) -> Json<Self>
     where
         S1: Into<String>,
         S2: Into<String>,
     {
-        Json(PromqlJsonResponse {
+        Json(PromJsonResponse {
             status: "error".to_string(),
-            data: PromqlData::default(),
+            data: PromData::default(),
             error: Some(reason.into()),
             error_type: Some(error_type.into()),
             warnings: None,
         })
     }
 
-    pub fn success(data: PromqlData) -> Json<Self> {
-        Json(PromqlJsonResponse {
+    pub fn success(data: PromData) -> Json<Self> {
+        Json(PromJsonResponse {
             status: "success".to_string(),
             data,
             error: None,
@@ -224,7 +234,7 @@ impl PromqlJsonResponse {
                 if err.status_code() == StatusCode::TableNotFound
                     || err.status_code() == StatusCode::TableColumnNotFound
                 {
-                    Self::success(PromqlData {
+                    Self::success(PromData {
                         result_type: "matrix".to_string(),
                         ..Default::default()
                     })
@@ -235,7 +245,7 @@ impl PromqlJsonResponse {
         }
     }
 
-    fn record_batches_to_data(batches: RecordBatches, metric_name: String) -> Result<PromqlData> {
+    fn record_batches_to_data(batches: RecordBatches, metric_name: String) -> Result<PromData> {
         // infer semantic type of each column from schema.
         // TODO(ruihang): wish there is a better way to do this.
         let mut timestamp_column_index = None;
@@ -322,13 +332,13 @@ impl PromqlJsonResponse {
 
         let result = buffer
             .into_iter()
-            .map(|(tags, values)| PromqlSeries {
+            .map(|(tags, values)| PromSeries {
                 metric: tags.into_iter().collect(),
                 values,
             })
             .collect();
 
-        let data = PromqlData {
+        let data = PromData {
             result_type: "matrix".to_string(),
             result,
         };
@@ -346,10 +356,10 @@ pub struct InstantQuery {
 
 #[axum_macros::debug_handler]
 pub async fn instant_query(
-    State(_handler): State<PromqlHandlerRef>,
+    State(_handler): State<PromHandlerRef>,
     Query(_params): Query<InstantQuery>,
-) -> Json<PromqlJsonResponse> {
-    PromqlJsonResponse::error(
+) -> Json<PromJsonResponse> {
+    PromJsonResponse::error(
         "not implemented",
         "instant query api `/query` is not implemented. Use `/query_range` instead.",
     )
@@ -366,10 +376,10 @@ pub struct RangeQuery {
 
 #[axum_macros::debug_handler]
 pub async fn range_query(
-    State(handler): State<PromqlHandlerRef>,
+    State(handler): State<PromHandlerRef>,
     Query(params): Query<RangeQuery>,
     Form(form_params): Form<RangeQuery>,
-) -> Json<PromqlJsonResponse> {
+) -> Json<PromJsonResponse> {
     let prom_query = PromQuery {
         query: params.query.or(form_params.query).unwrap_or_default(),
         start: params.start.or(form_params.start).unwrap_or_default(),
@@ -378,7 +388,7 @@ pub async fn range_query(
     };
     let result = handler.do_query(&prom_query).await;
     let metric_name = retrieve_metric_name(&prom_query.query).unwrap_or_default();
-    PromqlJsonResponse::from_query_result(result, metric_name).await
+    PromJsonResponse::from_query_result(result, metric_name).await
 }
 
 fn retrieve_metric_name(promql: &str) -> Option<String> {

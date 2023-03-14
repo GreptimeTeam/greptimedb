@@ -29,7 +29,7 @@ use crate::error::{self, Result};
 pub(crate) type AbortableStream = Abortable<TcpListenerStream>;
 
 #[async_trait]
-pub trait Server: Send {
+pub trait Server: Send + Sync {
     /// Shutdown the server gracefully.
     async fn shutdown(&self) -> Result<()>;
 
@@ -37,6 +37,8 @@ pub trait Server: Send {
     ///
     /// Caller should ensure `start()` is only invoked once.
     async fn start(&self, listening: SocketAddr) -> Result<SocketAddr>;
+
+    fn name(&self) -> &str;
 }
 
 struct AcceptTask {

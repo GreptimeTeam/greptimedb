@@ -16,6 +16,7 @@ mod cast;
 mod filter;
 mod find_unique;
 mod replicate;
+mod take;
 
 use common_base::BitVec;
 
@@ -24,7 +25,7 @@ use crate::types::LogicalPrimitiveType;
 use crate::vectors::constant::ConstantVector;
 use crate::vectors::{
     BinaryVector, BooleanVector, ConcreteDataType, ListVector, NullVector, PrimitiveVector,
-    StringVector, Vector, VectorRef,
+    StringVector, UInt32Vector, Vector, VectorRef,
 };
 
 /// Vector compute operations.
@@ -63,6 +64,12 @@ pub trait VectorOp {
     ///
     /// TODO(dennis) describe behaviors in details.
     fn cast(&self, to_type: &ConcreteDataType) -> Result<VectorRef>;
+
+    /// Take elements from the vector by the given indices.
+    ///
+    /// # Panics
+    /// Panics if an index is out of bounds.
+    fn take(&self, indices: &UInt32Vector) -> Result<VectorRef>;
 }
 
 macro_rules! impl_scalar_vector_op {
@@ -83,6 +90,10 @@ macro_rules! impl_scalar_vector_op {
 
             fn cast(&self, to_type: &ConcreteDataType) -> Result<VectorRef> {
                 cast::cast_non_constant!(self, to_type)
+            }
+
+            fn take(&self, indices: &UInt32Vector) -> Result<VectorRef> {
+                take::take_indices!(self, $VectorType, indices)
             }
         }
     )+};
@@ -108,6 +119,10 @@ impl<T: LogicalPrimitiveType> VectorOp for PrimitiveVector<T> {
     fn cast(&self, to_type: &ConcreteDataType) -> Result<VectorRef> {
         cast::cast_non_constant!(self, to_type)
     }
+
+    fn take(&self, indices: &UInt32Vector) -> Result<VectorRef> {
+        take::take_indices!(self, PrimitiveVector<T>, indices)
+    }
 }
 
 impl VectorOp for NullVector {
@@ -131,6 +146,10 @@ impl VectorOp for NullVector {
         }
         .fail()
     }
+
+    fn take(&self, indices: &UInt32Vector) -> Result<VectorRef> {
+        take::take_indices!(self, NullVector, indices)
+    }
 }
 
 impl VectorOp for ConstantVector {
@@ -149,5 +168,9 @@ impl VectorOp for ConstantVector {
 
     fn cast(&self, to_type: &ConcreteDataType) -> Result<VectorRef> {
         self.cast_vector(to_type)
+    }
+
+    fn take(&self, indices: &UInt32Vector) -> Result<VectorRef> {
+        self.take_vector(indices)
     }
 }
