@@ -266,7 +266,14 @@ impl RegionWriter {
 
         ensure!(!inner.is_closed(), error::ClosedRegionSnafu);
 
-        inner.manual_flush(writer_ctx).await
+        inner.manual_flush(writer_ctx).await?;
+
+        // Wait flush.
+        if let Some(handle) = inner.flush_handle.take() {
+            handle.join().await?;
+        }
+
+        Ok(())
     }
 
     /// Cancel flush task if any
