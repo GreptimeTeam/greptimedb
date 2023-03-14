@@ -198,16 +198,22 @@ impl Runner {
         }
     }
 
+    async fn rollback(&mut self, error:Arc<Error>)->ExecResult {
+        if let Err(e) = self.rollback_procedure().await {
+            self.rolling_back = true;
+            self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
+            return ExecResult::RetryLater;
+        }
+        self.meta.set_state(ProcedureState::failed(error));
+        return ExecResult::Failed;
+    }
+
     async fn execute_once(&mut self, ctx: &Context) -> ExecResult {
         // if rolling_back, there is no need to execute again.
         if self.rolling_back {
-            if let Err(e) = self.rollback_procedure().await {
-                self.rolling_back = true;
-                self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
-                return ExecResult::RetryLater;
-            }
-
-            return ExecResult::Failed;
+            // We can definitely get the previous error here.
+            let err= self.meta.state().error().unwrap();
+            return self.rollback(err.clone()).await;
         }
         match self.procedure.execute(ctx).await {
             Ok(status) => {
@@ -259,15 +265,7 @@ impl Runner {
                 }
 
                 // Write rollback key so we can skip this procedure while recovering procedures.
-                if let Err(e) = self.rollback_procedure().await {
-                    self.rolling_back = true;
-                    self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
-                    return ExecResult::RetryLater;
-                }
-
-                self.meta.set_state(ProcedureState::failed(Arc::new(e)));
-
-                ExecResult::Failed
+                return self.rollback(Arc::new(e)).await;
             }
         }
     }
