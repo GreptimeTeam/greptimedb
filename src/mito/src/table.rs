@@ -44,7 +44,7 @@ use table::metadata::{
     FilterPushDownType, RawTableInfo, TableInfo, TableInfoRef, TableMeta, TableType,
 };
 use table::requests::{
-    AddColumnRequest, AlterKind, AlterTableRequest, DeleteRequest, FlushTableRequest, InsertRequest,
+    AddColumnRequest, AlterKind, AlterTableRequest, DeleteRequest, InsertRequest,
 };
 use table::table::scan::SimpleTableScan;
 use table::table::{AlterContext, Table};
@@ -323,9 +323,9 @@ impl<R: Region> Table for MitoTable<R> {
         Ok(rows_deleted)
     }
 
-    async fn flush(&self, request: FlushTableRequest) -> TableResult<()> {
-        if let Some(region_id) = request.region_number {
-            if let Some(region) = self.regions.get(&region_id) {
+    async fn flush(&self, region_number: Option<RegionNumber>) -> TableResult<()> {
+        if let Some(region_number) = region_number {
+            if let Some(region) = self.regions.get(&region_number) {
                 region
                     .flush()
                     .await

@@ -13,28 +13,43 @@
 // limitations under the License.
 
 use common_query::Output;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use table::engine::TableReference;
 use table::requests::FlushTableRequest;
 
-use crate::error::{self, Result};
+use crate::error::{self, CatalogSnafu, DatabaseNotFoundSnafu, Result};
 use crate::sql::SqlHandler;
 
 impl SqlHandler {
     pub(crate) async fn flush_table(&self, req: FlushTableRequest) -> Result<Output> {
+        if let Some(table) = &req.table_name {
+            self.flush_table_inner(&req.catalog_name, &req.schema_name, table, req.region_number).await?;
+        } else {
+            let schema = self.catalog_manager.schema(&req.catalog_name, &req.schema_name).context(CatalogSnafu)?.context(DatabaseNotFoundSnafu {
+                catalog: &req.catalog_name,
+                schema: &req.schema_name,
+            })?;
+
+            let all_table_names = schema.table_names().context(CatalogSnafu)?;
+            futures::future::join_all(all_table_names.iter().map(|table| {
+                self.flush_table_inner(&req.catalog_name, &req.schema_name,table, req.region_number)
+            })
+            ).await.into_iter().collect::<Result<Vec<_>>>()?;
+        }
+        Ok(Output::AffectedRows(0))
+    }
+
+    async fn flush_table_inner(&self, catalog:&str, schema:&str, table: &str, region: Option<u32>) -> Result<()> {
         let table_ref = TableReference {
-            catalog: &req.catalog_name,
-            schema: &req.schema_name,
-            table: &req.table_name,
+            catalog,
+            schema,
+            table,
         };
 
         let full_table_name = table_ref.to_string();
-
         let table = self.get_table(&table_ref)?;
-
-        table.flush(req).await.context(error::FlushTableSnafu {
+        table.flush(region).await.context(error::FlushTableSnafu {
             table_name: full_table_name,
-        })?;
-        Ok(Output::AffectedRows(0))
+        })
     }
 }

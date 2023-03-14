@@ -84,12 +84,19 @@ impl Instance {
     }
 
     pub(crate) async fn handle_flush_table(&self, expr: FlushTableExpr) -> Result<Output> {
+        let table_name = if expr.table_name.trim().is_empty() {
+            None
+        } else {
+            Some(expr.table_name)
+        };
+
         let req = FlushTableRequest {
             catalog_name: expr.catalog_name,
             schema_name: expr.schema_name,
-            table_name: expr.table_name,
+            table_name,
             region_number: expr.region_id,
         };
+        println!("req: {:?}\n", req);
         self.sql_handler()
             .execute(SqlRequest::FlushTable(req), QueryContext::arc())
             .await
@@ -148,7 +155,6 @@ mod tests {
     }
 
     #[test]
-
     fn test_create_column_schema() {
         let column_def = ColumnDef {
             name: "a".to_string(),
@@ -242,7 +248,7 @@ mod tests {
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 false,
             )
-            .with_time_index(true),
+                .with_time_index(true),
             ColumnSchema::new("cpu", ConcreteDataType::float32_datatype(), true),
             ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
         ];

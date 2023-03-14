@@ -21,6 +21,7 @@ pub mod script;
 
 #[cfg(feature = "mem-prof")]
 pub mod mem_prof;
+mod admin;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -56,11 +57,13 @@ use self::authorize::HttpAuth;
 use self::influxdb::{influxdb_health, influxdb_ping, influxdb_write};
 use crate::auth::UserProviderRef;
 use crate::error::{AlreadyStartedSnafu, Result, StartHttpSnafu};
+use crate::http::admin::flush;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::query_handler::{
     InfluxdbLineProtocolHandlerRef, OpentsdbProtocolHandlerRef, PrometheusProtocolHandlerRef,
     ScriptHandlerRef,
 };
+use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 use crate::server::Server;
 
 /// create query context from database name information, catalog and schema are
@@ -96,6 +99,7 @@ pub static PUBLIC_APIS: [&str; 2] = ["/v1/influxdb/ping", "/v1/influxdb/health"]
 
 pub struct HttpServer {
     sql_handler: ServerSqlQueryHandlerRef,
+    grpc_handler: ServerGrpcQueryHandlerRef,
     options: HttpOptions,
     influxdb_handler: Option<InfluxdbLineProtocolHandlerRef>,
     opentsdb_handler: Option<OpentsdbProtocolHandlerRef>,
@@ -345,13 +349,17 @@ async fn serve_docs() -> Html<String> {
 #[derive(Clone)]
 pub struct ApiState {
     pub sql_handler: ServerSqlQueryHandlerRef,
+    pub grpc_handler: ServerGrpcQueryHandlerRef,
     pub script_handler: Option<ScriptHandlerRef>,
 }
 
 impl HttpServer {
-    pub fn new(sql_handler: ServerSqlQueryHandlerRef, options: HttpOptions) -> Self {
+    pub fn new(sql_handler: ServerSqlQueryHandlerRef,
+               grpc_handler: ServerGrpcQueryHandlerRef,
+               options: HttpOptions) -> Self {
         Self {
             sql_handler,
+            grpc_handler,
             options,
             opentsdb_handler: None,
             influxdb_handler: None,
@@ -420,12 +428,14 @@ impl HttpServer {
         let sql_router = self
             .route_sql(ApiState {
                 sql_handler: self.sql_handler.clone(),
+                grpc_handler: self.grpc_handler.clone(),
                 script_handler: self.script_handler.clone(),
             })
             .finish_api(&mut api)
             .layer(Extension(api));
 
         let mut router = Router::new().nest(&format!("/{HTTP_API_VERSION}"), sql_router);
+        router = router.nest(&format!("/{HTTP_API_VERSION}/admin"), self.route_admin(self.grpc_handler.clone()));
 
         if let Some(opentsdb_handler) = self.opentsdb_handler.clone() {
             router = router.nest(
@@ -516,6 +526,11 @@ impl HttpServer {
         Router::new()
             .route("/api/put", routing::post(opentsdb::put))
             .with_state(opentsdb_handler)
+    }
+
+    fn route_admin<S>(&self, grpc_handler: ServerGrpcQueryHandlerRef) -> Router<S> {
+        Router::new().route("/flush", routing::post(flush))
+            .with_state(grpc_handler)
     }
 }
 
@@ -637,8 +652,10 @@ mod test {
 
     fn make_test_app(tx: mpsc::Sender<(String, Vec<u8>)>) -> Router {
         let instance = Arc::new(DummyInstance { _tx: tx });
-        let instance = ServerSqlQueryHandlerAdaptor::arc(instance);
-        let server = HttpServer::new(instance, HttpOptions::default());
+        let instance = ServerSqlQueryHandlerAdaptor::arc(instance.clone());
+        let server = HttpServer::new(instance.clone(),
+                                     instance,
+                                     HttpOptions::default());
         server.make_app().route(
             "/test/timeout",
             get(forever.layer(
