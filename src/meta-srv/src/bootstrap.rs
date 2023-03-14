@@ -39,18 +39,45 @@ use crate::service::store::kv::ResettableKvStoreRef;
 use crate::service::store::memory::MemStore;
 use crate::{error, Result};
 
-// Bootstrap the rpc server to serve incoming request
-pub async fn bootstrap_meta_srv(opts: MetaSrvOptions) -> Result<()> {
-    let meta_srv = make_meta_srv(opts.clone()).await?;
-    bootstrap_meta_srv_with_router(opts, router(meta_srv)).await
+#[derive(Clone)]
+pub struct MetaSrvInstance {
+    meta_srv: MetaSrv,
+
+    opts: MetaSrvOptions,
 }
 
-pub async fn bootstrap_meta_srv_with_router(opts: MetaSrvOptions, router: Router) -> Result<()> {
-    let listener = TcpListener::bind(&opts.bind_addr)
+impl MetaSrvInstance {
+    pub async fn new(opts: MetaSrvOptions) -> Result<MetaSrvInstance> {
+        let meta_srv = build_meta_srv(&opts).await?;
+
+        Ok(MetaSrvInstance { meta_srv, opts })
+    }
+
+    pub async fn start(&self) -> Result<()> {
+        self.meta_srv.start().await;
+        bootstrap_meta_srv_with_router(&self.opts.bind_addr, router(self.meta_srv.clone())).await?;
+
+        Ok(())
+    }
+
+    pub async fn close(&self) -> Result<()> {
+        // TODO: shutdown the router
+        self.meta_srv.shutdown();
+
+        Ok(())
+    }
+}
+
+// Bootstrap the rpc server to serve incoming request
+pub async fn bootstrap_meta_srv(opts: MetaSrvOptions) -> Result<()> {
+    let meta_srv = make_meta_srv(&opts).await?;
+    bootstrap_meta_srv_with_router(&opts.bind_addr, router(meta_srv)).await
+}
+
+pub async fn bootstrap_meta_srv_with_router(bind_addr: &str, router: Router) -> Result<()> {
+    let listener = TcpListener::bind(bind_addr)
         .await
-        .context(error::TcpBindSnafu {
-            addr: &opts.bind_addr,
-        })?;
+        .context(error::TcpBindSnafu { addr: bind_addr })?;
     let listener = TcpListenerStream::new(listener);
 
     router
@@ -72,7 +99,7 @@ pub fn router(meta_srv: MetaSrv) -> Router {
         .add_service(admin::make_admin_service(meta_srv))
 }
 
-pub async fn make_meta_srv(opts: MetaSrvOptions) -> Result<MetaSrv> {
+pub async fn build_meta_srv(opts: &MetaSrvOptions) -> Result<MetaSrv> {
     let (kv_store, election, lock) = if opts.use_memory_store {
         (Arc::new(MemStore::new()) as _, None, None)
     } else {
@@ -107,7 +134,7 @@ pub async fn make_meta_srv(opts: MetaSrvOptions) -> Result<MetaSrv> {
     };
 
     let meta_srv = MetaSrvBuilder::new()
-        .options(opts)
+        .options(opts.clone())
         .kv_store(kv_store)
         .in_memory(in_memory)
         .selector(selector)
@@ -116,6 +143,12 @@ pub async fn make_meta_srv(opts: MetaSrvOptions) -> Result<MetaSrv> {
         .lock(lock)
         .build()
         .await;
+
+    Ok(meta_srv)
+}
+
+pub async fn make_meta_srv(opts: &MetaSrvOptions) -> Result<MetaSrv> {
+    let meta_srv = build_meta_srv(opts).await?;
 
     meta_srv.start().await;
 

@@ -14,12 +14,31 @@
 
 use clap::Parser;
 use common_telemetry::{info, logging, warn};
-use meta_srv::bootstrap;
+use meta_srv::bootstrap::MetaSrvInstance;
 use meta_srv::metasrv::MetaSrvOptions;
 use snafu::ResultExt;
 
 use crate::error::{Error, Result};
 use crate::{error, toml_loader};
+
+pub struct Instance {
+    instance: MetaSrvInstance,
+}
+
+impl Instance {
+    pub async fn run(&mut self) -> Result<()> {
+        self.instance
+            .start()
+            .await
+            .context(error::StartMetaServerSnafu)?;
+        Ok(())
+    }
+
+    pub async fn stop(&self) -> Result<()> {
+        // TODO: handle metasrv shutdown
+        Ok(())
+    }
+}
 
 #[derive(Parser)]
 pub struct Command {
@@ -28,8 +47,8 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn run(self) -> Result<()> {
-        self.subcmd.run().await
+    pub async fn build(self) -> Result<Instance> {
+        self.subcmd.build().await
     }
 }
 
@@ -39,9 +58,9 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn run(self) -> Result<()> {
+    async fn build(self) -> Result<Instance> {
         match self {
-            SubCommand::Start(cmd) => cmd.run().await,
+            SubCommand::Start(cmd) => cmd.build().await,
         }
     }
 }
@@ -63,16 +82,17 @@ struct StartCommand {
 }
 
 impl StartCommand {
-    async fn run(self) -> Result<()> {
+    async fn build(self) -> Result<Instance> {
         logging::info!("MetaSrv start command: {:#?}", self);
 
         let opts: MetaSrvOptions = self.try_into()?;
 
         logging::info!("MetaSrv options: {:#?}", opts);
-
-        bootstrap::bootstrap_meta_srv(opts)
+        let instance = MetaSrvInstance::new(opts)
             .await
-            .context(error::StartMetaServerSnafu)
+            .context(error::BuildMetaServerSnafu)?;
+
+        Ok(Instance { instance })
     }
 }
 

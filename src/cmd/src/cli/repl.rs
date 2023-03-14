@@ -50,7 +50,7 @@ use crate::error::{
 };
 
 /// Captures the state of the repl, gathers commands and executes them one by one
-pub(crate) struct Repl {
+pub struct Repl {
     /// Rustyline editor for interacting with user on command line
     rl: Editor<RustylineHelper>,
 

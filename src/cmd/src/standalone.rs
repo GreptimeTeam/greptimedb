@@ -47,8 +47,8 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn run(self) -> Result<()> {
-        self.subcmd.run().await
+    pub async fn build(self) -> Result<Instance> {
+        self.subcmd.build().await
     }
 }
 
@@ -58,9 +58,9 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn run(self) -> Result<()> {
+    async fn build(self) -> Result<Instance> {
         match self {
-            SubCommand::Start(cmd) => cmd.run().await,
+            SubCommand::Start(cmd) => cmd.build().await,
         }
     }
 }
@@ -133,6 +133,30 @@ impl StandaloneOptions {
     }
 }
 
+pub struct Instance {
+    datanode: Datanode,
+    frontend: FeInstance,
+}
+
+impl Instance {
+    pub async fn run(&mut self) -> Result<()> {
+        // Start datanode instance before starting services, to avoid requests come in before internal components are started.
+        self.datanode
+            .start_instance()
+            .await
+            .context(StartDatanodeSnafu)?;
+        info!("Datanode instance started");
+
+        self.frontend.start().await.context(StartFrontendSnafu)?;
+        Ok(())
+    }
+
+    pub async fn stop(&self) -> Result<()> {
+        // TODO: handle standalone shutdown
+        Ok(())
+    }
+}
+
 #[derive(Debug, Parser)]
 struct StartCommand {
     #[clap(long)]
@@ -164,7 +188,7 @@ struct StartCommand {
 }
 
 impl StartCommand {
-    async fn run(self) -> Result<()> {
+    async fn build(self) -> Result<Instance> {
         let enable_memory_catalog = self.enable_memory_catalog;
         let config_file = self.config_file.clone();
         let plugins = Arc::new(load_frontend_plugins(&self.user_provider)?);
@@ -184,25 +208,18 @@ impl StartCommand {
             fe_opts, dn_opts
         );
 
-        let mut datanode = Datanode::new(dn_opts.clone())
+        let datanode = Datanode::new(dn_opts.clone())
             .await
             .context(StartDatanodeSnafu)?;
-        let mut frontend = build_frontend(plugins.clone(), datanode.get_instance()).await?;
 
-        // Start datanode instance before starting services, to avoid requests come in before internal components are started.
-        datanode
-            .start_instance()
-            .await
-            .context(StartDatanodeSnafu)?;
-        info!("Datanode instance started");
+        let mut frontend = build_frontend(plugins.clone(), datanode.get_instance()).await?;
 
         frontend
             .build_servers(&fe_opts, plugins)
             .await
             .context(StartFrontendSnafu)?;
 
-        frontend.start().await.context(StartFrontendSnafu)?;
-        Ok(())
+        Ok(Instance { datanode, frontend })
     }
 }
 

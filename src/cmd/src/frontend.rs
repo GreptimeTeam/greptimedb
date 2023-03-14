@@ -19,7 +19,7 @@ use common_base::Plugins;
 use frontend::frontend::FrontendOptions;
 use frontend::grpc::GrpcOptions;
 use frontend::influxdb::InfluxdbOptions;
-use frontend::instance::{FrontendInstance, Instance};
+use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use frontend::mysql::MysqlOptions;
 use frontend::opentsdb::OpentsdbOptions;
 use frontend::postgres::PostgresOptions;
@@ -34,6 +34,24 @@ use snafu::ResultExt;
 use crate::error::{self, IllegalAuthConfigSnafu, Result};
 use crate::toml_loader;
 
+pub struct Instance {
+    frontend: FeInstance,
+}
+
+impl Instance {
+    pub async fn run(&mut self) -> Result<()> {
+        self.frontend
+            .start()
+            .await
+            .context(error::StartFrontendSnafu)
+    }
+
+    pub async fn stop(&self) -> Result<()> {
+        // TODO: handle frontend shutdown
+        Ok(())
+    }
+}
+
 #[derive(Parser)]
 pub struct Command {
     #[clap(subcommand)]
@@ -41,8 +59,8 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn run(self) -> Result<()> {
-        self.subcmd.run().await
+    pub async fn build(self) -> Result<Instance> {
+        self.subcmd.build().await
     }
 }
 
@@ -52,9 +70,9 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn run(self) -> Result<()> {
+    async fn build(self) -> Result<Instance> {
         match self {
-            SubCommand::Start(cmd) => cmd.run().await,
+            SubCommand::Start(cmd) => cmd.build().await,
         }
     }
 }
@@ -90,11 +108,11 @@ pub struct StartCommand {
 }
 
 impl StartCommand {
-    async fn run(self) -> Result<()> {
+    async fn build(self) -> Result<Instance> {
         let plugins = Arc::new(load_frontend_plugins(&self.user_provider)?);
         let opts: FrontendOptions = self.try_into()?;
 
-        let mut instance = Instance::try_new_distributed(&opts, plugins.clone())
+        let mut instance = FeInstance::try_new_distributed(&opts, plugins.clone())
             .await
             .context(error::StartFrontendSnafu)?;
 
@@ -103,7 +121,7 @@ impl StartCommand {
             .await
             .context(error::StartFrontendSnafu)?;
 
-        instance.start().await.context(error::StartFrontendSnafu)
+        Ok(Instance { frontend: instance })
     }
 }
 
