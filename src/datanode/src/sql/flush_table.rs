@@ -12,10 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_catalog::consts::DEFAULT_SCHEMA_NAME;
+use catalog::SchemaProviderRef;
 use common_query::Output;
 use snafu::{OptionExt, ResultExt};
-use table::engine::TableReference;
 use table::requests::FlushTableRequest;
 
 use crate::error::{self, CatalogSnafu, DatabaseNotFoundSnafu, Result};
@@ -23,33 +22,25 @@ use crate::sql::SqlHandler;
 
 impl SqlHandler {
     pub(crate) async fn flush_table(&self, req: FlushTableRequest) -> Result<Output> {
-        if let Some(table) = &req.table_name {
-            self.flush_table_inner(
-                &req.catalog_name,
-                &req.schema_name,
-                table,
-                req.region_number,
-            )
-            .await?;
-        } else {
-            let schema = self
-                .catalog_manager
-                .schema(&req.catalog_name, &req.schema_name)
-                .context(CatalogSnafu)?
-                .context(DatabaseNotFoundSnafu {
-                    catalog: &req.catalog_name,
-                    schema: &req.schema_name,
-                })?;
+        let schema = self
+            .catalog_manager
+            .schema(&req.catalog_name, &req.schema_name)
+            .context(CatalogSnafu)?
+            .context(DatabaseNotFoundSnafu {
+                catalog: &req.catalog_name,
+                schema: &req.schema_name,
+            })?;
 
+        if let Some(table) = &req.table_name {
+            self.flush_table_inner(schema, table, req.region_number)
+                .await?;
+        } else {
             let all_table_names = schema.table_names().context(CatalogSnafu)?;
-            futures::future::join_all(all_table_names.iter().map(|table| {
-                self.flush_table_inner(
-                    &req.catalog_name,
-                    &req.schema_name,
-                    table,
-                    req.region_number,
-                )
-            }))
+            futures::future::join_all(
+                all_table_names
+                    .iter()
+                    .map(|table| self.flush_table_inner(schema.clone(), table, req.region_number)),
+            )
             .await
             .into_iter()
             .collect::<Result<Vec<_>>>()?;
@@ -59,25 +50,17 @@ impl SqlHandler {
 
     async fn flush_table_inner(
         &self,
-        catalog: &str,
-        schema: &str,
-        table: &str,
+        schema: SchemaProviderRef,
+        table_name: &str,
         region: Option<u32>,
     ) -> Result<()> {
-        if schema == DEFAULT_SCHEMA_NAME && table == "numbers" {
-            return Ok(());
-        }
-
-        let table_ref = TableReference {
-            catalog,
-            schema,
-            table,
-        };
-
-        let full_table_name = table_ref.to_string();
-        let table = self.get_table(&table_ref)?;
-        table.flush(region).await.context(error::FlushTableSnafu {
-            table_name: full_table_name,
-        })
+        schema
+            .table(table_name)
+            .await
+            .context(error::FindTableSnafu { table_name })?
+            .context(error::TableNotFoundSnafu { table_name })?
+            .flush(region)
+            .await
+            .context(error::FlushTableSnafu { table_name })
     }
 }
