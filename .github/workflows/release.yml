@@ -33,17 +33,17 @@ jobs:
           - arch: aarch64-unknown-linux-gnu
             os: ubuntu-2004-16-cores
             file: greptime-linux-arm64
-            continue-on-error: true
+            continue-on-error: false
             opts: "-F pyo3_backend"
           - arch: aarch64-apple-darwin
             os: macos-latest
             file: greptime-darwin-arm64
-            continue-on-error: true
+            continue-on-error: false
             opts: "-F pyo3_backend"
           - arch: x86_64-apple-darwin
             os: macos-latest
             file: greptime-darwin-amd64
-            continue-on-error: true
+            continue-on-error: false
             opts: "-F pyo3_backend"
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.continue-on-error }}
