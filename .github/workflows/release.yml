@@ -2,9 +2,9 @@ on:
   push:
     tags:
       - "v*.*.*"
-  schedule:
-    # At 00:00 on Monday.
-    - cron: '0 0 * * 1'
+  # schedule:
+  #   # At 00:00 on Monday.
+  #   - cron: '0 0 * * 1'
   workflow_dispatch:
 
 name: Release
@@ -29,23 +29,23 @@ jobs:
             os: ubuntu-2004-16-cores
             file: greptime-linux-amd64
             continue-on-error: false
-            opts: "-F pyo3_backend"
+            # opts: "-F pyo3_backend"
           - arch: aarch64-unknown-linux-gnu
             os: ubuntu-2004-16-cores
             file: greptime-linux-arm64
             continue-on-error: true
-            opts: "-F pyo3_backend"
-          - arch: aarch64-apple-darwin
-            os: macos-latest
-            file: greptime-darwin-arm64
-            continue-on-error: true
-          - arch: x86_64-apple-darwin
-            os: macos-latest
-            file: greptime-darwin-amd64
-            continue-on-error: true
+            # opts: "-F pyo3_backend"
+          # - arch: aarch64-apple-darwin
+          #   os: macos-latest
+          #   file: greptime-darwin-arm64
+          #   continue-on-error: true
+          # - arch: x86_64-apple-darwin
+          #   os: macos-latest
+          #   file: greptime-darwin-amd64
+          #   continue-on-error: true
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.continue-on-error }}
-    if: github.repository == 'GreptimeTeam/greptimedb'
+    if: github.repository == 'GreptimeTeam/greptimedb-edge'
     steps:
       - name: Checkout sources
         uses: actions/checkout@v3
@@ -154,7 +154,7 @@ jobs:
     name: Release artifacts
     needs: [build]
     runs-on: ubuntu-latest
-    if: github.repository == 'GreptimeTeam/greptimedb'
+    if: github.repository == 'GreptimeTeam/greptimedb-edge'
     steps:
       - name: Checkout sources
         uses: actions/checkout@v3
@@ -193,142 +193,142 @@ jobs:
           files: |
             **/greptime-*
 
-  docker:
-    name: Build docker image
-    needs: [build]
-    runs-on: ubuntu-latest
-    if: github.repository == 'GreptimeTeam/greptimedb'
-    steps:
-      - name: Checkout sources
-        uses: actions/checkout@v3
+  # docker:
+  #   name: Build docker image
+  #   needs: [build]
+  #   runs-on: ubuntu-latest
+  #   if: github.repository == 'GreptimeTeam/greptimedb'
+  #   steps:
+  #     - name: Checkout sources
+  #       uses: actions/checkout@v3
 
-      - name: Login to UCloud Container Registry
-        uses: docker/login-action@v2
-        with:
-          registry: uhub.service.ucloud.cn
-          username: ${{ secrets.UCLOUD_USERNAME }}
-          password: ${{ secrets.UCLOUD_PASSWORD }}
+  #     - name: Login to UCloud Container Registry
+  #       uses: docker/login-action@v2
+  #       with:
+  #         registry: uhub.service.ucloud.cn
+  #         username: ${{ secrets.UCLOUD_USERNAME }}
+  #         password: ${{ secrets.UCLOUD_PASSWORD }}
 
-      - name: Login to Dockerhub
-        uses: docker/login-action@v2
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+  #     - name: Login to Dockerhub
+  #       uses: docker/login-action@v2
+  #       with:
+  #         username: ${{ secrets.DOCKERHUB_USERNAME }}
+  #         password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Configure scheduled build image tag # the tag would be ${SCHEDULED_BUILD_VERSION_PREFIX}-YYYYMMDD-${SCHEDULED_PERIOD}
-        shell: bash
-        if: github.event_name == 'schedule'
-        run: |
-          buildTime=`date "+%Y%m%d"`
-          SCHEDULED_BUILD_VERSION=${{ env.SCHEDULED_BUILD_VERSION_PREFIX }}-$buildTime-${{ env.SCHEDULED_PERIOD }}
-          echo "IMAGE_TAG=${SCHEDULED_BUILD_VERSION:1}" >> $GITHUB_ENV
+  #     - name: Configure scheduled build image tag # the tag would be ${SCHEDULED_BUILD_VERSION_PREFIX}-YYYYMMDD-${SCHEDULED_PERIOD}
+  #       shell: bash
+  #       if: github.event_name == 'schedule'
+  #       run: |
+  #         buildTime=`date "+%Y%m%d"`
+  #         SCHEDULED_BUILD_VERSION=${{ env.SCHEDULED_BUILD_VERSION_PREFIX }}-$buildTime-${{ env.SCHEDULED_PERIOD }}
+  #         echo "IMAGE_TAG=${SCHEDULED_BUILD_VERSION:1}" >> $GITHUB_ENV
 
-      - name: Configure tag # If the release tag is v0.1.0, then the image version tag will be 0.1.0.
-        shell: bash
-        if: github.event_name != 'schedule'
-        run: |
-          VERSION=${{ github.ref_name }}
-          echo "IMAGE_TAG=${VERSION:1}" >> $GITHUB_ENV
+  #     - name: Configure tag # If the release tag is v0.1.0, then the image version tag will be 0.1.0.
+  #       shell: bash
+  #       if: github.event_name != 'schedule'
+  #       run: |
+  #         VERSION=${{ github.ref_name }}
+  #         echo "IMAGE_TAG=${VERSION:1}" >> $GITHUB_ENV
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v2
+  #     - name: Set up QEMU
+  #       uses: docker/setup-qemu-action@v2
 
-      - name: Set up buildx
-        uses: docker/setup-buildx-action@v2
+  #     - name: Set up buildx
+  #       uses: docker/setup-buildx-action@v2
 
-      - name: Download amd64 binary
-        uses: actions/download-artifact@v3
-        with:
-          name: greptime-linux-amd64
-          path: amd64
+  #     - name: Download amd64 binary
+  #       uses: actions/download-artifact@v3
+  #       with:
+  #         name: greptime-linux-amd64
+  #         path: amd64
 
-      - name: Unzip the amd64 artifacts
-        run: |
-          cd amd64
-          tar xvf greptime-linux-amd64.tgz
-          rm greptime-linux-amd64.tgz
+  #     - name: Unzip the amd64 artifacts
+  #       run: |
+  #         cd amd64
+  #         tar xvf greptime-linux-amd64.tgz
+  #         rm greptime-linux-amd64.tgz
 
-      - name: Download arm64 binary
-        id: download-arm64
-        uses: actions/download-artifact@v3
-        with:
-          name: greptime-linux-arm64
-          path: arm64
+  #     - name: Download arm64 binary
+  #       id: download-arm64
+  #       uses: actions/download-artifact@v3
+  #       with:
+  #         name: greptime-linux-arm64
+  #         path: arm64
 
-      - name: Unzip the arm64 artifacts
-        id: unzip-arm64
-        if: success() || steps.download-arm64.conclusion == 'success'
-        run: |
-          cd arm64
-          tar xvf greptime-linux-arm64.tgz
-          rm greptime-linux-arm64.tgz
+  #     - name: Unzip the arm64 artifacts
+  #       id: unzip-arm64
+  #       if: success() || steps.download-arm64.conclusion == 'success'
+  #       run: |
+  #         cd arm64
+  #         tar xvf greptime-linux-arm64.tgz
+  #         rm greptime-linux-arm64.tgz
 
-      - name: Build and push all
-        uses: docker/build-push-action@v3
-        if: success() || steps.unzip-arm64.conclusion == 'success' # Build and push all platform if unzip-arm64 succeeds
-        with:
-          context: .
-          file: ./docker/ci/Dockerfile
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: |
-            greptime/greptimedb:latest
-            greptime/greptimedb:${{ env.IMAGE_TAG }}
+  #     - name: Build and push all
+  #       uses: docker/build-push-action@v3
+  #       if: success() || steps.unzip-arm64.conclusion == 'success' # Build and push all platform if unzip-arm64 succeeds
+  #       with:
+  #         context: .
+  #         file: ./docker/ci/Dockerfile
+  #         push: true
+  #         platforms: linux/amd64,linux/arm64
+  #         tags: |
+  #           greptime/greptimedb:latest
+  #           greptime/greptimedb:${{ env.IMAGE_TAG }}
 
-      - name: Build and push amd64 only
-        uses: docker/build-push-action@v3
-        if: success() || steps.download-arm64.conclusion == 'failure' # Only build and push amd64 platform if download-arm64 fails
-        with:
-          context: .
-          file: ./docker/ci/Dockerfile
-          push: true
-          platforms: linux/amd64
-          tags: |
-            greptime/greptimedb:latest
-            greptime/greptimedb:${{ env.IMAGE_TAG }}
+  #     - name: Build and push amd64 only
+  #       uses: docker/build-push-action@v3
+  #       if: success() || steps.download-arm64.conclusion == 'failure' # Only build and push amd64 platform if download-arm64 fails
+  #       with:
+  #         context: .
+  #         file: ./docker/ci/Dockerfile
+  #         push: true
+  #         platforms: linux/amd64
+  #         tags: |
+  #           greptime/greptimedb:latest
+  #           greptime/greptimedb:${{ env.IMAGE_TAG }}
 
-  docker-push-uhub:
-    name: Push docker image to UCloud Container Registry
-    needs: [docker]
-    runs-on: ubuntu-latest
-    if: github.repository == 'GreptimeTeam/greptimedb'
-    # Push to uhub may fail(500 error), but we don't want to block the release process. The failed job will be retried manually.
-    continue-on-error: true
-    steps:
-      - name: Checkout sources
-        uses: actions/checkout@v3
+  # docker-push-uhub:
+  #   name: Push docker image to UCloud Container Registry
+  #   needs: [docker]
+  #   runs-on: ubuntu-latest
+  #   if: github.repository == 'GreptimeTeam/greptimedb'
+  #   # Push to uhub may fail(500 error), but we don't want to block the release process. The failed job will be retried manually.
+  #   continue-on-error: true
+  #   steps:
+  #     - name: Checkout sources
+  #       uses: actions/checkout@v3
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v2
+  #     - name: Set up QEMU
+  #       uses: docker/setup-qemu-action@v2
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+  #     - name: Set up Docker Buildx
+  #       uses: docker/setup-buildx-action@v2
 
-      - name: Login to UCloud Container Registry
-        uses: docker/login-action@v2
-        with:
-          registry: uhub.service.ucloud.cn
-          username: ${{ secrets.UCLOUD_USERNAME }}
-          password: ${{ secrets.UCLOUD_PASSWORD }}
+  #     - name: Login to UCloud Container Registry
+  #       uses: docker/login-action@v2
+  #       with:
+  #         registry: uhub.service.ucloud.cn
+  #         username: ${{ secrets.UCLOUD_USERNAME }}
+  #         password: ${{ secrets.UCLOUD_PASSWORD }}
 
-      - name: Configure scheduled build image tag # the tag would be ${SCHEDULED_BUILD_VERSION_PREFIX}-YYYYMMDD-${SCHEDULED_PERIOD}
-        shell: bash
-        if: github.event_name == 'schedule'
-        run: |
-          buildTime=`date "+%Y%m%d"`
-          SCHEDULED_BUILD_VERSION=${{ env.SCHEDULED_BUILD_VERSION_PREFIX }}-$buildTime-${{ env.SCHEDULED_PERIOD }}
-          echo "IMAGE_TAG=${SCHEDULED_BUILD_VERSION:1}" >> $GITHUB_ENV
+  #     - name: Configure scheduled build image tag # the tag would be ${SCHEDULED_BUILD_VERSION_PREFIX}-YYYYMMDD-${SCHEDULED_PERIOD}
+  #       shell: bash
+  #       if: github.event_name == 'schedule'
+  #       run: |
+  #         buildTime=`date "+%Y%m%d"`
+  #         SCHEDULED_BUILD_VERSION=${{ env.SCHEDULED_BUILD_VERSION_PREFIX }}-$buildTime-${{ env.SCHEDULED_PERIOD }}
+  #         echo "IMAGE_TAG=${SCHEDULED_BUILD_VERSION:1}" >> $GITHUB_ENV
 
-      - name: Configure tag # If the release tag is v0.1.0, then the image version tag will be 0.1.0.
-        shell: bash
-        if: github.event_name != 'schedule'
-        run: |
-          VERSION=${{ github.ref_name }}
-          echo "IMAGE_TAG=${VERSION:1}" >> $GITHUB_ENV
+  #     - name: Configure tag # If the release tag is v0.1.0, then the image version tag will be 0.1.0.
+  #       shell: bash
+  #       if: github.event_name != 'schedule'
+  #       run: |
+  #         VERSION=${{ github.ref_name }}
+  #         echo "IMAGE_TAG=${VERSION:1}" >> $GITHUB_ENV
 
-      - name: Push image to uhub # Use 'docker buildx imagetools create' to create a new image base on source image.
-        run: |
-          docker buildx imagetools create \
-            --tag uhub.service.ucloud.cn/greptime/greptimedb:latest \
-            --tag uhub.service.ucloud.cn/greptime/greptimedb:${{ env.IMAGE_TAG }} \
-            greptime/greptimedb:${{ env.IMAGE_TAG }}
+  #     - name: Push image to uhub # Use 'docker buildx imagetools create' to create a new image base on source image.
+  #       run: |
+  #         docker buildx imagetools create \
+  #           --tag uhub.service.ucloud.cn/greptime/greptimedb:latest \
+  #           --tag uhub.service.ucloud.cn/greptime/greptimedb:${{ env.IMAGE_TAG }} \
+  #           greptime/greptimedb:${{ env.IMAGE_TAG }}
