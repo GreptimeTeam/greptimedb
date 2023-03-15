@@ -332,7 +332,7 @@ impl<R: Region> Table for MitoTable<R> {
         Ok(())
     }
 
-    fn region_stats(&self) -> table::error::Result<Vec<RegionStat>> {
+    fn region_stats(&self) -> TableResult<Vec<RegionStat>> {
         Ok(self
             .regions
             .values()
