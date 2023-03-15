@@ -90,7 +90,7 @@ fn failure_detection() {
 Some design considerations:
 
 - Why active detecting while we have passively detection? Because it could be happened that the network is singly connectable sometimes (especially in the complex Cloud environment), then the Datanode's heartbeats cannot reach Metasrv, while Metasrv could request Datanode. Active detecting avoid this false positive situation.
-- Why use region heartbeat instead of Datanode heartbeat, i.e. the detection works on region instead of Datanode? Because we might face the possibility that only part of the regions in the Datanode are not available, not ALL regions. Especially the situation that Datanodes are used by multiple tenants. If this is the case, it's better to do failover upon the designated regions instead of the whole regions that reside on the Datanode. All in all, we want a more subtle control over region failover. 
+- Why the detection works on region instead of Datanode? Because we might face the possibility that only part of the regions in the Datanode are not available, not ALL regions. Especially the situation that Datanodes are used by multiple tenants. If this is the case, it's better to do failover upon the designated regions instead of the whole regions that reside on the Datanode. All in all, we want a more subtle control over region failover. 
 
 So we detect some regions are not available. How to regain the availability back?
 
@@ -99,6 +99,8 @@ So we detect some regions are not available. How to regain the availability back
 Region Failover largely relies on remote WAL, aka "[Bunshin](https://github.com/GreptimeTeam/bunshin)". I'm not including any of the details of it in this RFC, let's just assume we already have it.
 
 In general, region failover is fairly simple. Once Metasrv decides to do failover upon some regions, it first chooses one or more Datanodes to hold the failed region. This can be done easily, as the Metasrv already has the whole picture of Datanodes: it knows which Datanode has the minimum regions, what Datanode historically had the lowest CPU usage and IO rate, and how the Datanodes are assigned to tenants, among other information that can all help the Metasrv choose the most suitable Datanodes. Let's call these chosen Datanodes as "candidates".
+
+> The strategy to choose the most suitable candidates required careful design, but it's another RFC.
 
 Then, Metasrv sets the states of these failed regions as "passive". We should add a field to `Region`:
 
@@ -126,7 +128,7 @@ Third, Metasrv fires the "close region" requests to the failed Datanodes, and fi
 
 > Currently the "close region" is undefined in Datanode. It could be a local cache clean up of region data or other resources tidy up.
 
-Finally, when a candidate successfully opens its region, it calls back to Metasrv, indicating it is ready to handle region. Metasrv updates the region's state to "active", so as to let Frontend lifts the restrictions of region writes (again, the read part of region is untouched).
+Finally, when a candidate successfully opens its region, it calls back to Metasrv, indicating it is ready to handle region. "call back" here is backed by its heartbeat to Metasrv. Metasrv updates the region's state to "active", so as to let Frontend lifts the restrictions of region writes (again, the read part of region is untouched).
 
 All the above steps should be managed by remote procedure framework. It's another implementation challenge in the region failover feature. (One is the remote WAL of course.)
 
