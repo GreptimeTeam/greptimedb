@@ -28,6 +28,7 @@ impl SqlHandler {
                 &req.schema_name,
                 table,
                 req.region_number,
+                req.wait,
             )
             .await?;
         } else {
@@ -47,6 +48,7 @@ impl SqlHandler {
                     &req.schema_name,
                     table,
                     req.region_number,
+                    req.wait,
                 )
             }))
             .await
@@ -62,6 +64,7 @@ impl SqlHandler {
         schema: &str,
         table: &str,
         region: Option<u32>,
+        wait: Option<bool>,
     ) -> Result<()> {
         let table_ref = TableReference {
             catalog,
@@ -71,8 +74,11 @@ impl SqlHandler {
 
         let full_table_name = table_ref.to_string();
         let table = self.get_table(&table_ref)?;
-        table.flush(region).await.context(error::FlushTableSnafu {
-            table_name: full_table_name,
-        })
+        table
+            .flush(region, wait)
+            .await
+            .context(error::FlushTableSnafu {
+                table_name: full_table_name,
+            })
     }
 }

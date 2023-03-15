@@ -793,10 +793,10 @@ async fn test_flush_table_all_regions() {
     assert!(!has_parquet_file(&region_dir));
 
     // Trigger flush all region
-    table.flush(None).await.unwrap();
+    table.flush(None, None).await.unwrap();
 
     // Trigger again, wait for the previous task finished
-    table.flush(None).await.unwrap();
+    table.flush(None, None).await.unwrap();
 
     assert!(has_parquet_file(&region_dir));
 }
@@ -832,10 +832,10 @@ async fn test_flush_table_with_region_id() {
     };
 
     // Trigger flush all region
-    table.flush(req.region_number).await.unwrap();
+    table.flush(req.region_number, Some(false)).await.unwrap();
 
     // Trigger again, wait for the previous task finished
-    table.flush(req.region_number).await.unwrap();
+    table.flush(req.region_number, Some(true)).await.unwrap();
 
     assert!(has_parquet_file(&region_dir));
 }

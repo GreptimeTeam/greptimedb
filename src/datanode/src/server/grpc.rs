@@ -95,6 +95,7 @@ impl Instance {
             schema_name: expr.schema_name,
             table_name,
             region_number: expr.region_id,
+            wait: None,
         };
         self.sql_handler()
             .execute(SqlRequest::FlushTable(req), QueryContext::arc())

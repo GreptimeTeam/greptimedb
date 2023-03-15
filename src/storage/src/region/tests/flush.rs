@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use common_test_util::temp_dir::create_temp_dir;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
-use store_api::storage::{OpenOptions, Region, WriteResponse};
+use store_api::storage::{FlushContext, OpenOptions, Region, WriteResponse};
 
 use crate::engine;
 use crate::flush::FlushStrategyRef;
@@ -91,12 +91,12 @@ impl FlushTester {
         self.base().full_scan().await
     }
 
-    async fn wait_flush_done(&self) {
-        self.base().region.wait_flush_done().await.unwrap();
-    }
-
     async fn flush(&self) {
-        self.base().region.flush().await.unwrap();
+        self.base()
+            .region
+            .flush(&FlushContext::default())
+            .await
+            .unwrap();
     }
 }
 
@@ -147,7 +147,6 @@ async fn test_manual_flush() {
     assert!(!has_parquet_file(&sst_dir));
 
     tester.flush().await;
-    tester.wait_flush_done().await;
 
     assert!(has_parquet_file(&sst_dir));
 }
@@ -165,7 +164,6 @@ async fn test_flush_empty() {
     let data = [(1000, Some(100))];
     // Put element to trigger flush.
     tester.put(&data).await;
-    tester.wait_flush_done().await;
 
     // Disable flush.
     flush_switch.set_should_flush(false);
@@ -202,7 +200,6 @@ async fn test_read_after_flush() {
 
     // Put element to trigger flush.
     tester.put(&[(3000, Some(300))]).await;
-    tester.wait_flush_done().await;
 
     let expect = vec![(1000, Some(100)), (2000, Some(200)), (3000, Some(300))];
 
@@ -235,7 +232,6 @@ async fn test_merge_read_after_flush() {
 
     // Put element to trigger flush (In SST2).
     tester.put(&[(2000, Some(201))]).await;
-    tester.wait_flush_done().await;
 
     // Disable flush.
     flush_switch.set_should_flush(false);
@@ -247,7 +243,6 @@ async fn test_merge_read_after_flush() {
     flush_switch.set_should_flush(true);
     // Trigger flush and overwrite row (In memtable).
     tester.put(&[(2000, Some(203))]).await;
-    tester.wait_flush_done().await;
 
     let expect = vec![(1000, Some(100)), (2000, Some(203)), (3000, Some(300))];
 
