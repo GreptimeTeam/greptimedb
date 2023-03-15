@@ -806,10 +806,10 @@ async fn test_execute_copy_to_s3() {
 
             // setups
             execute_sql(
-            &instance,
-            "create table demo(host string, cpu double, memory double, ts timestamp time index);",
-        )
-        .await;
+                &instance,
+                "create table demo(host string, cpu double, memory double, ts timestamp time index);",
+            )
+            .await;
 
             let output = execute_sql(
                 &instance,
@@ -828,7 +828,7 @@ async fn test_execute_copy_to_s3() {
             let root = uuid::Uuid::new_v4().to_string();
 
             // exports
-            let copy_to_stmt = format!("Copy demo TO 's3://{}/{}/export/demo.parquet' CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',ENDPOINT_URL='{}')", bucket,root ,key_id, key, url);
+            let copy_to_stmt = format!("Copy demo TO 's3://{}/{}/export/demo.parquet' CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',ENDPOINT_URL='{}')", bucket, root, key_id, key, url);
 
             let output = execute_sql(&instance, &copy_to_stmt).await;
             assert!(matches!(output, Output::AffectedRows(2)));
@@ -930,10 +930,10 @@ async fn test_execute_copy_from_s3() {
 
             // setups
             execute_sql(
-            &instance,
-            "create table demo(host string, cpu double, memory double, ts timestamp time index);",
-        )
-        .await;
+                &instance,
+                "create table demo(host string, cpu double, memory double, ts timestamp time index);",
+            )
+            .await;
 
             let output = execute_sql(
                 &instance,
@@ -952,7 +952,7 @@ async fn test_execute_copy_from_s3() {
             let url =
                 env::var("GT_S3_ENDPOINT_URL").unwrap_or("https://s3.amazonaws.com".to_string());
 
-            let copy_to_stmt = format!("Copy demo TO 's3://{}/{}/export/demo.parquet' CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',ENDPOINT_URL='{}')", bucket,root ,key_id, key, url);
+            let copy_to_stmt = format!("Copy demo TO 's3://{}/{}/export/demo.parquet' CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',ENDPOINT_URL='{}')", bucket, root, key_id, key, url);
             logging::info!("Copy table to s3: {}", copy_to_stmt);
 
             let output = execute_sql(&instance, &copy_to_stmt).await;
