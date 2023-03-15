@@ -22,6 +22,7 @@ use crate::scalars::aggregate::{AggregateFunctionMetaRef, AggregateFunctions};
 use crate::scalars::function::FunctionRef;
 use crate::scalars::math::MathFunction;
 use crate::scalars::numpy::NumpyFunction;
+use crate::scalars::timestamp::TimestampFunction;
 
 #[derive(Default)]
 pub struct FunctionRegistry {
@@ -71,6 +72,7 @@ pub static FUNCTION_REGISTRY: Lazy<Arc<FunctionRegistry>> = Lazy::new(|| {
 
     MathFunction::register(&function_registry);
     NumpyFunction::register(&function_registry);
+    TimestampFunction::register(&function_registry);
 
     AggregateFunctions::register(&function_registry);
 
