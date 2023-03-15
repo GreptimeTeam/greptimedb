@@ -20,7 +20,7 @@ use common_telemetry::error;
 use common_time::datetime::DateTime;
 use common_time::timestamp::TimeUnit;
 use datatypes::prelude::{ConcreteDataType, Value};
-use datatypes::schema::{ColumnSchema, SchemaRef};
+use datatypes::schema::SchemaRef;
 use opensrv_mysql::{
     Column, ColumnFlags, ColumnType, ErrorKind, OkResponse, QueryResultWriter, RowWriter,
 };
@@ -158,8 +158,11 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
     }
 }
 
-fn create_mysql_column(column_schema: &ColumnSchema) -> Result<Column> {
-    let column_type = match column_schema.data_type {
+pub(crate) fn create_mysql_column(
+    data_type: &ConcreteDataType,
+    column_name: &str,
+) -> Result<Column> {
+    let column_type = match data_type {
         ConcreteDataType::Null(_) => Ok(ColumnType::MYSQL_TYPE_NULL),
         ConcreteDataType::Boolean(_) | ConcreteDataType::Int8(_) | ConcreteDataType::UInt8(_) => {
             Ok(ColumnType::MYSQL_TYPE_TINY)
@@ -178,15 +181,12 @@ fn create_mysql_column(column_schema: &ColumnSchema) -> Result<Column> {
         }
         ConcreteDataType::Timestamp(_) => Ok(ColumnType::MYSQL_TYPE_DATETIME),
         _ => error::InternalSnafu {
-            err_msg: format!(
-                "not implemented for column datatype {:?}",
-                column_schema.data_type
-            ),
+            err_msg: format!("not implemented for column datatype {:?}", data_type),
         }
         .fail(),
     };
     let mut colflags = ColumnFlags::empty();
-    match column_schema.data_type {
+    match data_type {
         ConcreteDataType::UInt16(_)
         | ConcreteDataType::UInt8(_)
         | ConcreteDataType::UInt32(_)
@@ -194,7 +194,7 @@ fn create_mysql_column(column_schema: &ColumnSchema) -> Result<Column> {
         _ => {}
     };
     column_type.map(|column_type| Column {
-        column: column_schema.name.clone(),
+        column: column_name.to_owned(),
         coltype: column_type,
 
         // TODO(LFC): Currently "table" and "colflags" are not relevant in MySQL server
@@ -209,6 +209,6 @@ pub fn create_mysql_column_def(schema: &SchemaRef) -> Result<Vec<Column>> {
     schema
         .column_schemas()
         .iter()
-        .map(create_mysql_column)
+        .map(|c| create_mysql_column(&c.data_type, &c.name))
         .collect()
 }

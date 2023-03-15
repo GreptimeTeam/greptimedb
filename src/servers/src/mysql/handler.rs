@@ -28,8 +28,8 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::Schema;
 use datatypes::value::Value;
 use opensrv_mysql::{
-    AsyncMysqlShim, Column, ColumnFlags, ColumnType, ErrorKind, InitWriter, ParamParser,
-    ParamValue, QueryResultWriter, StatementMetaWriter, ValueInner,
+    AsyncMysqlShim, Column, ErrorKind, InitWriter, ParamParser, ParamValue, QueryResultWriter,
+    StatementMetaWriter, ValueInner,
 };
 use parking_lot::RwLock;
 use query::plan::LogicalPlan;
@@ -45,7 +45,7 @@ use tokio::io::AsyncWrite;
 
 use crate::auth::{Identity, Password, UserProviderRef};
 use crate::error::{self, InvalidPrepareStatementSnafu, Result};
-use crate::mysql::writer::MysqlResultWriter;
+use crate::mysql::writer::{create_mysql_column, MysqlResultWriter};
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
 // An intermediate shim for executing MySQL queries.
@@ -55,7 +55,7 @@ pub struct MysqlInstanceShim {
     session: Arc<Session>,
     user_provider: Option<UserProviderRef>,
     // TODO(SSebo): use something like moka to achieve TTL or LRU
-    prepared_stmts: Arc<RwLock<HashMap<u32, String>>>,
+    prepared_stmts: Arc<RwLock<HashMap<u32, Statement>>>,
     prepared_stmts_counter: AtomicU32,
 }
 
@@ -116,9 +116,6 @@ impl MysqlInstanceShim {
         trace!("Start executing stmt: '{}'", id);
         let start = Instant::now();
 
-        // TODO(LFC): Find a better way to deal with these special federated queries:
-        // `check` uses regex to filter out unsupported statements emitted by MySQL's federated
-        // components, this is quick and dirty, there must be a better way to do it.
         let output = self
             .query_handler
             .do_statement_query(statement, self.session.context())
@@ -132,16 +129,22 @@ impl MysqlInstanceShim {
         vec![output]
     }
 
-    fn set_query(&self, query: String) -> u32 {
+    fn save_statement(&self, statement: Statement) -> u32 {
         let stmt_id = self.prepared_stmts_counter.fetch_add(1, Ordering::Relaxed);
         let mut guard = self.prepared_stmts.write();
-        guard.insert(stmt_id, query);
+        guard.insert(stmt_id, statement);
         stmt_id
     }
 
-    fn query(&self, stmt_id: u32) -> Option<String> {
+    fn statement(&self, stmt_id: u32) -> Result<Statement> {
         let guard = self.prepared_stmts.read();
-        guard.get(&stmt_id).map(|s| s.to_owned())
+        match guard.get(&stmt_id).map(|s| s.to_owned()) {
+            Some(stmt) => Ok(stmt),
+            None => error::InternalSnafu {
+                err_msg: format!("statement not found for id {}", stmt_id),
+            }
+            .fail(),
+        }
     }
 
     async fn do_describe(&self, statement: Statement) -> Result<Option<(Schema, LogicalPlan)>> {
@@ -214,15 +217,22 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         query: &'a str,
         w: StatementMetaWriter<'a, W>,
     ) -> Result<()> {
-        let (query, param_num) = replace_placeholder(query);
-        if let Err(e) = validate_query(&query).await {
-            w.error(ErrorKind::ER_UNKNOWN_ERROR, e.to_string().as_bytes())
+        let (query, _) = replace_placeholder(query);
+        let statement = validate_query(&query).await?;
+        let plan = match self.do_describe(statement.clone()).await? {
+            None => {
+                w.error(
+                    ErrorKind::ER_INTERNAL_ERROR,
+                    b"prepare statement can not generate query plan",
+                )
                 .await?;
-            return Ok(());
+                return Ok(());
+            }
+            Some((_, plan)) => plan,
         };
 
-        let stmt_id = self.set_query(query);
-        let params = dummy_params(param_num);
+        let stmt_id = self.save_statement(statement);
+        let params = response_params(plan.param_types())?;
 
         w.reply(stmt_id, &params, &[]).await?;
         return Ok(());
@@ -235,34 +245,9 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         w: QueryResultWriter<'a, W>,
     ) -> Result<()> {
         let params: Vec<ParamValue> = p.into_iter().collect();
-        let query = match self.query(stmt_id) {
+        let mut statement = self.statement(stmt_id)?;
+        let plan = match self.do_describe(statement.clone()).await? {
             None => {
-                w.error(
-                    ErrorKind::ER_UNKNOWN_STMT_HANDLER,
-                    b"prepare statement not exist",
-                )
-                .await?;
-                return Ok(());
-            }
-            Some(query) => query,
-        };
-
-        let mut statement = match validate_query(&query).await {
-            Err(e) => {
-                w.error(ErrorKind::ER_UNKNOWN_ERROR, e.to_string().as_bytes())
-                    .await?;
-                return Ok(());
-            }
-            Ok(stmt) => stmt,
-        };
-
-        let (_schema, plan) = match self.do_describe(statement.clone()).await {
-            Err(e) => {
-                w.error(ErrorKind::ER_INTERNAL_ERROR, e.to_string().as_bytes())
-                    .await?;
-                return Ok(());
-            }
-            Ok(None) => {
                 w.error(
                     ErrorKind::ER_INTERNAL_ERROR,
                     b"prepare statement can not generate query plan",
@@ -270,25 +255,23 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                 .await?;
                 return Ok(());
             }
-            Ok(Some((schema, plan))) => (schema, plan),
+            Some((_, plan)) => plan,
         };
 
         if let Statement::Query(ref mut query) = &mut statement {
             if let Some(param_types) = plan.param_types() {
                 if params.len() != param_types.len() {
-                    w.error(
-                        ErrorKind::ER_UNKNOWN_ERROR,
-                        b"prepare statement params number mismatch",
-                    )
-                    .await?;
-                    return Ok(());
+                    return error::InternalSnafu {
+                        err_msg: "prepare statement params number mismatch".to_string(),
+                    }
+                    .fail();
                 }
                 prepare_params(query, param_types, params)
             }
         }
 
         let outputs = self.do_stmt_query(stmt_id, statement).await;
-        write_output(w, &query, outputs).await?;
+        write_output(w, "", outputs).await?;
 
         Ok(())
     }
@@ -441,20 +424,21 @@ async fn write_output<'a, W: AsyncWrite + Send + Sync + Unpin>(
     Ok(())
 }
 
-// dummy columns to satisfy opensrv_mysql, just the number of params is useful
-// TODO(SSebo): use parameter type inference to return actual types
-fn dummy_params(index: u32) -> Vec<Column> {
+fn response_params(
+    param_types: Option<HashMap<String, Option<ConcreteDataType>>>,
+) -> Result<Vec<Column>> {
     let mut params = vec![];
 
-    for _ in 1..index {
-        params.push(Column {
-            table: "".to_string(),
-            column: "".to_string(),
-            coltype: ColumnType::MYSQL_TYPE_LONG,
-            colflags: ColumnFlags::NOT_NULL_FLAG,
-        });
+    if let Some(param_types) = param_types {
+        for index in 1..param_types.len() + 1 {
+            if let Some(Some(t)) = param_types.get(&format!("${}", index)) {
+                let column = create_mysql_column(t, "")?;
+                params.push(column);
+            }
+        }
     }
-    params
+
+    Ok(params)
 }
 
 fn replace_placeholder(query: &str) -> (String, u32) {
