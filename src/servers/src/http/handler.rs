@@ -43,6 +43,7 @@ pub async fn sql(
     Form(form_params): Form<SqlQuery>,
 ) -> Json<JsonResponse> {
     let sql_handler = &state.sql_handler;
+
     let start = Instant::now();
     let sql = query_params.sql.or(form_params.sql);
     let db = query_params.db.or(form_params.db);

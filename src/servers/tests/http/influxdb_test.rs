@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use api::v1::greptime_request::Request;
 use api::v1::InsertRequest;
 use async_trait::async_trait;
 use axum::{http, Router};
@@ -24,6 +25,7 @@ use query::parser::PromQuery;
 use servers::error::{Error, Result};
 use servers::http::{HttpOptions, HttpServer};
 use servers::influxdb::InfluxdbRequest;
+use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::InfluxdbLineProtocolHandler;
 use session::context::QueryContextRef;
@@ -33,6 +35,19 @@ use crate::auth::{DatabaseAuthInfo, MockUserProvider};
 
 struct DummyInstance {
     tx: Arc<mpsc::Sender<(String, String)>>,
+}
+
+#[async_trait]
+impl GrpcQueryHandler for DummyInstance {
+    type Error = Error;
+
+    async fn do_query(
+        &self,
+        _query: Request,
+        _ctx: QueryContextRef,
+    ) -> std::result::Result<Output, Self::Error> {
+        unimplemented!()
+    }
 }
 
 #[async_trait]
@@ -79,7 +94,7 @@ impl SqlQueryHandler for DummyInstance {
 
 fn make_test_app(tx: Arc<mpsc::Sender<(String, String)>>, db_name: Option<&str>) -> Router {
     let instance = Arc::new(DummyInstance { tx });
-    let mut server = HttpServer::new(instance.clone(), HttpOptions::default());
+    let mut server = HttpServer::new(instance.clone(), instance.clone(), HttpOptions::default());
     let mut user_provider = MockUserProvider::default();
     if let Some(name) = db_name {
         user_provider.set_authorization_info(DatabaseAuthInfo {

@@ -213,7 +213,7 @@ pub struct CopyTableFromRequest {
 pub struct FlushTableRequest {
     pub catalog_name: String,
     pub schema_name: String,
-    pub table_name: String,
+    pub table_name: Option<String>,
     pub region_number: Option<RegionNumber>,
 }
 

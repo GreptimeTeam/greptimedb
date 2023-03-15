@@ -152,6 +152,7 @@ impl Services {
 
             let mut http_server = HttpServer::new(
                 ServerSqlQueryHandlerAdaptor::arc(instance.clone()),
+                ServerGrpcQueryHandlerAdaptor::arc(instance.clone()),
                 http_options.clone(),
             );
             if let Some(user_provider) = user_provider.clone() {
