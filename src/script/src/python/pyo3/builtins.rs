@@ -20,10 +20,13 @@ use datafusion::physical_plan::expressions;
 use datafusion_expr::ColumnarValue;
 use datafusion_physical_expr::{math_expressions, AggregateExpr};
 use datatypes::vectors::VectorRef;
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyKeyError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
+use super::dataframe_impl::PyDataFrame;
 use super::utils::scalar_value_to_py_any;
+use crate::python::ffi_types::copr::PyQueryEngine;
 use crate::python::ffi_types::utils::all_to_f64;
 use crate::python::ffi_types::PyVector;
 use crate::python::pyo3::dataframe_impl::{col, lit};
@@ -58,9 +61,12 @@ macro_rules! batch_import {
 #[pyo3(name = "greptime")]
 pub(crate) fn greptime_builtins(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_class::<PyVector>()?;
+    use self::query_engine;
     batch_import!(
         m,
         [
+            dataframe,
+            query_engine,
             lit,
             col,
             pow,
@@ -110,6 +116,34 @@ pub(crate) fn greptime_builtins(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
         ]
     );
     Ok(())
+}
+
+fn get_globals(py: Python) -> PyResult<&PyDict> {
+    // TODO(discord9): check if this is sound(in python)
+    let py_main = PyModule::import(py, "__main__")?;
+    let globals = py_main.dict();
+    Ok(globals)
+}
+
+#[pyfunction]
+fn dataframe(py: Python) -> PyResult<PyDataFrame> {
+    let globals = get_globals(py)?;
+    let df = globals
+        .get_item("__dataframe__")
+        .ok_or(PyKeyError::new_err("No __dataframe__ variable is found"))?
+        .extract::<PyDataFrame>()?;
+    Ok(df)
+}
+
+#[pyfunction]
+#[pyo3(name = "query")]
+fn query_engine(py: Python) -> PyResult<PyQueryEngine> {
+    let globals = get_globals(py)?;
+    let query = globals
+        .get_item("__query__")
+        .ok_or(PyKeyError::new_err("No __query__ variable is found"))?
+        .extract::<PyQueryEngine>()?;
+    Ok(query)
 }
 
 fn eval_func(py: Python<'_>, name: &str, v: &[&PyObject]) -> PyResult<PyVector> {

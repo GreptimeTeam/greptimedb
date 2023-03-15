@@ -24,7 +24,6 @@ use snafu::{ensure, Backtrace, GenerateImplicitData, ResultExt};
 use crate::python::error::{self, NewRecordBatchSnafu, OtherSnafu, Result};
 use crate::python::ffi_types::copr::PyQueryEngine;
 use crate::python::ffi_types::{check_args_anno_real_type, select_from_rb, Coprocessor, PyVector};
-use crate::python::pyo3::builtins::greptime_builtins;
 use crate::python::pyo3::dataframe_impl::PyDataFrame;
 use crate::python::pyo3::utils::{init_cpython_interpreter, pyo3_obj_try_to_typed_val};
 
@@ -57,6 +56,7 @@ impl PyQueryEngine {
     }
     // TODO: put this into greptime module
 }
+
 /// Execute a `Coprocessor` with given `RecordBatch`
 pub(crate) fn pyo3_exec_parsed(
     copr: &Coprocessor,
@@ -73,7 +73,7 @@ pub(crate) fn pyo3_exec_parsed(
         Vec::new()
     };
     // Just in case cpython is not inited
-    init_cpython_interpreter();
+    init_cpython_interpreter().unwrap();
     Python::with_gil(|py| -> Result<_> {
         let mut cols = (|| -> PyResult<_> {
             let dummy_decorator = "
@@ -86,7 +86,6 @@ def copr(*dummy, **kwdummy):
         return func
     return inner
 coprocessor = copr
-from greptime import vector
 ";
             let gen_call = format!("\n_return_from_coprocessor = {}(*_args_for_coprocessor, **_kwargs_for_coprocessor)", copr.name);
             let script = format!("{}{}{}", dummy_decorator, copr.script, gen_call);
@@ -109,14 +108,11 @@ from greptime import vector
             let globals = py_main.dict();
 
             let locals = PyDict::new(py);
-            let greptime = PyModule::new(py, "greptime")?;
-            greptime_builtins(py, greptime)?;
-            locals.set_item("greptime", greptime)?;
 
             if let Some(engine) = &copr.query_engine {
                 let query_engine = PyQueryEngine::from_weakref(engine.clone());
                 let query_engine = PyCell::new(py, query_engine)?;
-                globals.set_item("query", query_engine)?;
+                globals.set_item("__query__", query_engine)?;
             }
 
             // TODO(discord9): find out why `dataframe` is not in scope
@@ -129,12 +125,12 @@ from greptime import vector
                     )
                 )?;
                 let dataframe = PyCell::new(py, dataframe)?;
-                globals.set_item("dataframe", dataframe)?;
+                globals.set_item("__dataframe__", dataframe)?;
             }
-
 
             locals.set_item("_args_for_coprocessor", args)?;
             locals.set_item("_kwargs_for_coprocessor", kwargs)?;
+            // `greptime` is already import when init interpreter, so no need to set in here
 
              // TODO(discord9): find a better way to set `dataframe` and `query` in scope/ or set it into module(latter might be impossible and not idomatic even in python)
             // set `dataframe` and `query` in scope/ or set it into module
@@ -219,10 +215,10 @@ mod copr_test {
 @copr(args=["cpu", "mem"], returns=["ref"], backend="pyo3")
 def a(cpu, mem, **kwargs):
     import greptime as gt
-    from greptime import vector, log2, sum, pow, col, lit
+    from greptime import vector, log2, sum, pow, col, lit, dataframe
     for k, v in kwargs.items():
         print("%s == %s" % (k, v))
-    print(dataframe.select([col("cpu")<lit(0.3)]).collect())
+    print(dataframe().select([col("cpu")<lit(0.3)]).collect())
     return (0.5 < cpu) & ~( cpu >= 0.75)
     "#;
         let cpu_array = Float32Vector::from_slice([0.9f32, 0.8, 0.7, 0.3]);

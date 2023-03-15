@@ -81,12 +81,13 @@ fn set_items_in_scope(
 fn set_query_engine_in_scope(
     scope: &Scope,
     vm: &VirtualMachine,
+    name: &str,
     query_engine: PyQueryEngine,
 ) -> Result<()> {
     scope
         .locals
         .as_object()
-        .set_item("query", query_engine.to_pyobject(vm), vm)
+        .set_item(name, query_engine.to_pyobject(vm), vm)
         .map_err(|e| format_py_error(e, vm))
 }
 
@@ -101,7 +102,7 @@ pub(crate) fn exec_with_cached_vm(
         // set arguments with given name and values
         let scope = vm.new_scope_with_builtins();
         if let Some(rb) = rb {
-            set_dataframe_in_scope(&scope, vm, "dataframe", rb)?;
+            set_dataframe_in_scope(&scope, vm, "__dataframe__", rb)?;
         }
 
         if let Some(arg_names) = &copr.deco_args.arg_names {
@@ -113,7 +114,7 @@ pub(crate) fn exec_with_cached_vm(
             let query_engine = PyQueryEngine::from_weakref(engine.clone());
 
             // put a object named with query of class PyQueryEngine in scope
-            set_query_engine_in_scope(&scope, vm, query_engine)?;
+            set_query_engine_in_scope(&scope, vm, "__query__", query_engine)?;
         }
 
         if let Some(kwarg) = &copr.kwarg {

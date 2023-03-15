@@ -26,6 +26,8 @@ use crate::python::ffi_types::PyVector;
 use crate::python::pyo3::utils::pyo3_obj_try_to_typed_scalar_value;
 use crate::python::utils::block_on_async;
 type PyExprRef = Py<PyExpr>;
+
+#[derive(Debug, Clone)]
 #[pyclass]
 pub(crate) struct PyDataFrame {
     inner: DfDataFrame,
@@ -47,6 +49,9 @@ impl PyDataFrame {
 
 #[pymethods]
 impl PyDataFrame {
+    fn __call__(&self) -> PyResult<Self> {
+        Ok(self.clone())
+    }
     fn select_columns(&self, columns: Vec<String>) -> PyResult<Self> {
         Ok(self
             .inner
@@ -252,6 +257,9 @@ pub(crate) fn col(name: String) -> PyExpr {
 
 #[pymethods]
 impl PyExpr {
+    fn __call__(&self) -> PyResult<Self> {
+        Ok(self.clone())
+    }
     fn __richcmp__(&self, py: Python<'_>, other: PyObject, op: CompareOp) -> PyResult<Self> {
         let other = other.extract::<Self>(py).or_else(|_| lit(py, other))?;
         let op = match op {

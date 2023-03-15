@@ -38,6 +38,55 @@ pub(super) fn generate_copr_intgrate_tests() -> Vec<CoprTestCase> {
     vec![
         CoprTestCase {
             script: r#"
+from greptime import vector
+@copr(returns=["value"])
+def boolean_array() -> vector[f64]:
+    v = vector([1.0, 2.0, 3.0])
+    # This returns a vector([2.0])
+    return v[(v > 1) & (v < 3)]
+"#
+            .to_string(),
+            expect: Some(ronish!("value": vector!(Float64Vector, [2.0f64]))),
+        },
+        #[cfg(feature = "pyo3_backend")]
+        CoprTestCase {
+            script: r#"
+@copr(returns=["value"], backend="pyo3")
+def boolean_array() -> vector[f64]:
+    from greptime import vector
+    from greptime import query, dataframe
+    
+    try: 
+        print("query()=", query())
+    except KeyError as e:
+        print("query()=", e)
+    try: 
+        print("dataframe()=", dataframe())
+    except KeyError as e:
+        print("dataframe()=", e)
+
+    v = vector([1.0, 2.0, 3.0])
+    # This returns a vector([2.0])
+    return v[(v > 1) & (v < 3)]
+"#
+            .to_string(),
+            expect: Some(ronish!("value": vector!(Float64Vector, [2.0f64]))),
+        },
+        #[cfg(feature = "pyo3_backend")]
+        CoprTestCase {
+            script: r#"
+@copr(returns=["value"], backend="pyo3")
+def boolean_array() -> vector[f64]:
+    from greptime import vector
+    v = vector([1.0, 2.0, 3.0])
+    # This returns a vector([2.0])
+    return v[(v > 1) & (v < 3)]
+"#
+            .to_string(),
+            expect: Some(ronish!("value": vector!(Float64Vector, [2.0f64]))),
+        },
+        CoprTestCase {
+            script: r#"
 @copr(args=["number", "number"],
     returns=["value"],
     sql="select number from numbers limit 5", backend="rspy")
@@ -107,9 +156,9 @@ def answer() -> vector[i64]:
             script: r#"
 @copr(args=[], returns = ["number"], sql = "select * from numbers", backend="rspy")
 def answer() -> vector[i64]:
-    from greptime import vector, col, lit
+    from greptime import vector, col, lit, dataframe
     expr_0 = (col("number")<lit(3)) & (col("number")>0)
-    ret = dataframe.select([col("number")]).filter(expr_0).collect()[0][0]
+    ret = dataframe().select([col("number")]).filter(expr_0).collect()[0][0]
     return ret
 "#
             .to_string(),
@@ -120,10 +169,10 @@ def answer() -> vector[i64]:
             script: r#"
 @copr(args=[], returns = ["number"], sql = "select * from numbers", backend="pyo3")
 def answer() -> vector[i64]:
-    from greptime import vector, col, lit
+    from greptime import vector, col, lit, dataframe
     # Bitwise Operator  pred comparison operator
     expr_0 = (col("number")<lit(3)) & (col("number")>0)
-    ret = dataframe.select([col("number")]).filter(expr_0).collect()[0][0]
+    ret = dataframe().select([col("number")]).filter(expr_0).collect()[0][0]
     return ret
 "#
             .to_string(),

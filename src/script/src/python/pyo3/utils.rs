@@ -36,7 +36,9 @@ static START_PYO3: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
 pub(crate) fn to_py_err(err: impl ToString) -> PyErr {
     PyArrowException::new_err(err.to_string())
 }
-pub(crate) fn init_cpython_interpreter() {
+
+/// init cpython interpreter with `greptime` builtins, if already inited, do nothing
+pub(crate) fn init_cpython_interpreter() -> PyResult<()> {
     let mut start = START_PYO3.lock().unwrap();
     if !*start {
         pyo3::append_to_inittab!(greptime_builtins);
@@ -44,6 +46,7 @@ pub(crate) fn init_cpython_interpreter() {
         *start = true;
         info!("Started CPython Interpreter");
     }
+    Ok(())
 }
 
 pub fn val_to_py_any(py: Python<'_>, val: Value) -> PyResult<PyObject> {

@@ -184,7 +184,7 @@ fn eval_rspy(case: CodeBlockTestCase) {
 
 #[cfg(feature = "pyo3_backend")]
 fn eval_pyo3(case: CodeBlockTestCase) {
-    init_cpython_interpreter();
+    init_cpython_interpreter().unwrap();
     Python::with_gil(|py| {
         let locals = {
             let locals_dict = PyDict::new(py);
