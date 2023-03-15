@@ -394,6 +394,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 .id(region_id)
                 .name(&region_name)
                 .row_key(row_key.clone())
+                .compaction_time_window(request.table_options.compaction_time_window)
                 .default_cf(default_cf.clone())
                 .build()
                 .context(BuildRegionDescriptorSnafu {

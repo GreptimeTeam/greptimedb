@@ -37,7 +37,7 @@ pub type StrategyRef = Arc<dyn Strategy + Send + Sync>;
 pub struct SimpleTimeWindowStrategy {}
 
 impl Strategy for SimpleTimeWindowStrategy {
-    fn pick(&self, ctx: &PickerContext, level: &LevelMeta) -> (Option<i64>, Vec<CompactionOutput>) {        
+    fn pick(&self, ctx: &PickerContext, level: &LevelMeta) -> (Option<i64>, Vec<CompactionOutput>) {
         // SimpleTimeWindowStrategy only handles level 0 to level 1 compaction.
         if level.level() != 0 {
             return (None, vec![]);
@@ -47,19 +47,23 @@ impl Strategy for SimpleTimeWindowStrategy {
         if files.is_empty() {
             return (None, vec![]);
         }
-        let time_bucket = ctx.compaction_time_window().unwrap_or_else(|| infer_time_bucket(&files));
+        let time_bucket = ctx
+            .compaction_time_window()
+            .unwrap_or_else(|| infer_time_bucket(&files));
         let buckets = calculate_time_buckets(time_bucket, &files);
         debug!("File bucket:{}, file groups: {:?}", time_bucket, buckets);
-        (Some(time_bucket),
-         buckets
-          .into_iter()
-          .map(|(bound, files)| CompactionOutput {
-              output_level: 1,
-              bucket_bound: bound,
-              bucket: time_bucket,
-              inputs: files,
-          })
-          .collect())
+        (
+            Some(time_bucket),
+            buckets
+                .into_iter()
+                .map(|(bound, files)| CompactionOutput {
+                    output_level: 1,
+                    bucket_bound: bound,
+                    bucket: time_bucket,
+                    inputs: files,
+                })
+                .collect(),
+        )
     }
 }
 

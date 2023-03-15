@@ -219,6 +219,7 @@ impl<S: StorageEngine> CreateMitoTable<S> {
                 .name(region_name.clone())
                 .row_key(row_key.clone())
                 .default_cf(default_cf.clone())
+                .compaction_time_window(compaction_time_window)
                 .build()
                 .context(BuildRegionDescriptorSnafu {
                     table_name: &self.data.request.table_name,

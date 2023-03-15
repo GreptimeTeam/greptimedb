@@ -71,7 +71,12 @@ impl RegionWriter {
         compaction_time_window: Option<i64>,
     ) -> RegionWriter {
         RegionWriter {
-            inner: Mutex::new(WriterInner::new(memtable_builder, config, ttl, compaction_time_window)),
+            inner: Mutex::new(WriterInner::new(
+                memtable_builder,
+                config,
+                ttl,
+                compaction_time_window,
+            )),
             version_mutex: Mutex::new(()),
         }
     }
@@ -642,7 +647,13 @@ impl WriterInner {
             return Ok(());
         }
 
-        let cb = Self::build_flush_callback(&current_version, ctx, &self.engine_config, self.ttl, self.compaction_time_window);
+        let cb = Self::build_flush_callback(
+            &current_version,
+            ctx,
+            &self.engine_config,
+            self.ttl,
+            self.compaction_time_window,
+        );
 
         let flush_req = FlushJob {
             max_memtable_id: max_memtable_id.unwrap(),

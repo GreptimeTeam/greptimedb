@@ -35,10 +35,7 @@ pub trait Picker: Send + 'static {
     type Request: Request;
     type Task: CompactionTask;
 
-    fn pick(
-        &self,
-        req: &Self::Request,
-    ) -> crate::error::Result<Option<Self::Task>>;
+    fn pick(&self, req: &Self::Request) -> crate::error::Result<Option<Self::Task>>;
 }
 
 pub struct PickerContext {

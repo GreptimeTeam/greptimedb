@@ -309,8 +309,9 @@ impl<S: LogStore> RegionImpl<S> {
             name,
             version_control,
         });
-
-        let compaction_time_window = store_config.compaction_time_window.or(opts.compaction_time_window);
+        let compaction_time_window = store_config
+            .compaction_time_window
+            .or(opts.compaction_time_window);
         let writer = Arc::new(RegionWriter::new(
             store_config.memtable_builder,
             store_config.engine_config.clone(),

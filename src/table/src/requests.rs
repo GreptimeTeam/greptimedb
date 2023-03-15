@@ -60,12 +60,11 @@ pub struct TableOptions {
     /// Extra options that may not applicable to all table engines.
     pub extra_options: HashMap<String, String>,
     /// Time window for compaction
-    pub compaction_time_window: Option<i64>
+    pub compaction_time_window: Option<i64>,
 }
 
 pub const WRITE_BUFFER_SIZE_KEY: &str = "write_buffer_size";
 pub const TTL_KEY: &str = "ttl";
-pub const COMPACTION_TIME_WINDOW_KEY: &str = "compaction_time_window";
 
 impl TryFrom<&HashMap<String, String>> for TableOptions {
     type Error = error::Error;
@@ -96,11 +95,10 @@ impl TryFrom<&HashMap<String, String>> for TableOptions {
                 .into();
             options.ttl = Some(ttl_value);
         }
-
         if let Some(compaction_time_window) = value.get(COMPACTION_TIME_WINDOW_KEY) {
-            options.compaction_time_window = Some(parse_compaction_time_window(compaction_time_window));
+            options.compaction_time_window =
+                Some(parse_compaction_time_window(compaction_time_window));
         }
-
         options.extra_options = HashMap::from_iter(value.iter().filter_map(|(k, v)| {
             if k != WRITE_BUFFER_SIZE_KEY && k != TTL_KEY {
                 Some((k.clone(), v.clone()))
@@ -111,11 +109,6 @@ impl TryFrom<&HashMap<String, String>> for TableOptions {
         Ok(options)
     }
 }
-
-fn parse_compaction_time_window(_compaction_time_window: &str) -> i64 {
-    todo!()
-}
-
 
 impl From<&TableOptions> for HashMap<String, String> {
     fn from(opts: &TableOptions) -> Self {
@@ -130,11 +123,12 @@ impl From<&TableOptions> for HashMap<String, String> {
             let ttl_str = humantime::format_duration(ttl).to_string();
             res.insert(TTL_KEY.to_string(), ttl_str);
         }
-
-        if let Some(compaction_time_window) =  opts.compaction_time_window{
-            res.insert(COMPACTION_TIME_WINDOW_KEY.to_string(), stringify_compaction_time_window(compaction_time_window));
+        if let Some(compaction_time_window) = opts.compaction_time_window {
+            res.insert(
+                COMPACTION_TIME_WINDOW_KEY.to_string(),
+                stringify_compaction_time_window(compaction_time_window),
+            );
         }
-
         res.extend(
             opts.extra_options
                 .iter()
@@ -142,10 +136,6 @@ impl From<&TableOptions> for HashMap<String, String> {
         );
         res
     }
-}
-
-fn stringify_compaction_time_window(_compaction_time_window: i64) -> String {
-    todo!()
 }
 
 /// Open table request
@@ -240,6 +230,14 @@ pub struct FlushTableRequest {
     pub wait: Option<bool>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct FlushTableRequest {
+    pub catalog_name: String,
+    pub schema_name: String,
+    pub table_name: Option<String>,
+    pub region_number: Option<RegionNumber>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,7 +248,6 @@ mod tests {
             write_buffer_size: None,
             ttl: Some(Duration::from_secs(1000)),
             extra_options: HashMap::new(),
-            compaction_time_window: None,
         };
         let serialized = serde_json::to_string(&options).unwrap();
         let deserialized: TableOptions = serde_json::from_str(&serialized).unwrap();
@@ -263,7 +260,6 @@ mod tests {
             write_buffer_size: Some(ReadableSize::mb(128)),
             ttl: Some(Duration::from_secs(1000)),
             extra_options: HashMap::new(),
-            compaction_time_window: None,
         };
         let serialized_map = HashMap::from(&options);
         let serialized = TableOptions::try_from(&serialized_map).unwrap();
@@ -273,7 +269,6 @@ mod tests {
             write_buffer_size: None,
             ttl: None,
             extra_options: HashMap::new(),
-            compaction_time_window: None,
         };
         let serialized_map = HashMap::from(&options);
         let serialized = TableOptions::try_from(&serialized_map).unwrap();
@@ -283,7 +278,6 @@ mod tests {
             write_buffer_size: Some(ReadableSize::mb(128)),
             ttl: Some(Duration::from_secs(1000)),
             extra_options: HashMap::from([("a".to_string(), "A".to_string())]),
-            compaction_time_window: None,
         };
         let serialized_map = HashMap::from(&options);
         let serialized = TableOptions::try_from(&serialized_map).unwrap();

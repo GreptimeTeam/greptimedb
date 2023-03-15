@@ -94,6 +94,7 @@ impl RegionDescBuilder {
             row_key: self.key_builder.build().unwrap(),
             default_cf: self.default_cf_builder.build().unwrap(),
             extra_cfs: Vec::new(),
+            compaction_time_window: None, // TODO should we it to "RegionDescBuilder"
         }
     }
 

@@ -199,7 +199,7 @@ pub struct RegionMetadata {
     column_families: ColumnFamiliesMetadata,
     version: VersionNumber,
     /// Time window for compaction
-    compaction_time_window: Option<i64>
+    compaction_time_window: Option<i64>,
 }
 
 impl RegionMetadata {
@@ -324,7 +324,8 @@ impl RegionMetadata {
         let mut builder = RegionDescriptorBuilder::default()
             .id(self.id)
             .name(&self.name)
-            .row_key(row_key);
+            .row_key(row_key)
+            .compaction_time_window(self.compaction_time_window);
 
         for (cf_id, cf) in &self.column_families.id_to_cfs {
             let mut cf_builder = ColumnFamilyDescriptorBuilder::default()
@@ -644,7 +645,7 @@ impl TryFrom<RegionDescriptor> for RegionMetadataBuilder {
             .name(desc.name)
             .id(desc.id)
             .row_key(desc.row_key)?
-            .compaction_time_window(None) // TODO should I update `RegionDescriptor` as well?
+            .compaction_time_window(desc.compaction_time_window)
             .add_column_family(desc.default_cf)?;
         for cf in desc.extra_cfs {
             builder = builder.add_column_family(cf)?;
@@ -878,7 +879,7 @@ impl RegionMetadataBuilder {
             columns,
             column_families: self.cfs_meta_builder.build(),
             version: self.version,
-            compaction_time_window: self.compaction_time_window
+            compaction_time_window: self.compaction_time_window,
         })
     }
 }
