@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use catalog::local::MemoryCatalogManager;
 use catalog::CatalogManagerRef;
@@ -59,7 +60,11 @@ impl TestEnv {
         let accessor = Fs::default().root(&procedure_dir).build().unwrap();
         let object_store = ObjectStore::new(accessor).finish();
 
-        let procedure_manager = Arc::new(LocalManager::new(ManagerConfig { object_store }));
+        let procedure_manager = Arc::new(LocalManager::new(ManagerConfig {
+            object_store,
+            max_retry_times: 3,
+            retry_delay: Duration::from_secs(500),
+        }));
 
         let catalog_manager = Arc::new(MemoryCatalogManager::default());
 

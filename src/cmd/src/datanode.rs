@@ -150,7 +150,6 @@ impl TryFrom<StartCommand> for DatanodeOptions {
         if let Some(wal_dir) = cmd.wal_dir {
             opts.wal.dir = wal_dir;
         }
-
         if let Some(procedure_dir) = cmd.procedure_dir {
             opts.procedure = Some(ProcedureConfig::from_file_path(procedure_dir));
         }

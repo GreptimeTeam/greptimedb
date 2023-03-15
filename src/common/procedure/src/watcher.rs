@@ -33,6 +33,9 @@ pub async fn wait(watcher: &mut Watcher) -> Result<()> {
             ProcedureState::Failed { error } => {
                 return Err(error.clone()).context(ProcedureExecSnafu);
             }
+            ProcedureState::Retrying { error } => {
+                return Err(error.clone()).context(ProcedureExecSnafu);
+            }
         }
     }
 }

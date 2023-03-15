@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use common_query::Output;
@@ -64,6 +65,8 @@ impl MockInstance {
             store: ObjectStoreConfig::File(FileConfig {
                 data_dir: procedure_dir.path().to_str().unwrap().to_string(),
             }),
+            max_retry_times: 3,
+            retry_delay: Duration::from_millis(500),
         });
 
         let instance = Instance::with_mock_meta_client(&opts).await.unwrap();

@@ -197,7 +197,7 @@ impl CreateTableProcedure {
         };
 
         match sub_state {
-            ProcedureState::Running => Ok(Status::Suspended {
+            ProcedureState::Running | ProcedureState::Retrying { .. } => Ok(Status::Suspended {
                 subprocedures: Vec::new(),
                 persist: false,
             }),

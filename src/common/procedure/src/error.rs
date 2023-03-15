@@ -97,6 +97,16 @@ pub enum Error {
         source: Arc<Error>,
         backtrace: Backtrace,
     },
+
+    #[snafu(display(
+        "Procedure retry exceeded max times, procedure_id: {}, source:{}",
+        procedure_id,
+        source
+    ))]
+    RetryTimesExceeded {
+        source: Arc<Error>,
+        procedure_id: ProcedureId,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -111,6 +121,7 @@ impl ErrorExt for Error {
             | Error::ListState { .. }
             | Error::ReadState { .. }
             | Error::FromJson { .. }
+            | Error::RetryTimesExceeded { .. }
             | Error::RetryLater { .. }
             | Error::WaitWatcher { .. } => StatusCode::Internal,
             Error::LoaderConflict { .. } | Error::DuplicateProcedure { .. } => {

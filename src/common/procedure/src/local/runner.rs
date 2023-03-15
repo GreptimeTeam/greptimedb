@@ -15,15 +15,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use backon::{BackoffBuilder, ExponentialBuilder};
 use common_telemetry::logging;
 use tokio::time;
 
 use crate::error::{ProcedurePanicSnafu, Result};
 use crate::local::{ManagerContext, ProcedureMeta, ProcedureMetaRef};
 use crate::store::ProcedureStore;
-use crate::{BoxedProcedure, Context, ProcedureId, ProcedureState, ProcedureWithId, Status};
-
-const ERR_WAIT_DURATION: Duration = Duration::from_secs(30);
+use crate::ProcedureState::Retrying;
+use crate::{BoxedProcedure, Context, Error, ProcedureId, ProcedureState, ProcedureWithId, Status};
 
 #[derive(Debug)]
 enum ExecResult {
@@ -108,7 +108,9 @@ pub(crate) struct Runner {
     pub(crate) procedure: BoxedProcedure,
     pub(crate) manager_ctx: Arc<ManagerContext>,
     pub(crate) step: u32,
+    pub(crate) exponential_builder: ExponentialBuilder,
     pub(crate) store: ProcedureStore,
+    pub(crate) rolling_back: bool,
 }
 
 impl Runner {
@@ -164,18 +166,56 @@ impl Runner {
             provider: self.manager_ctx.clone(),
         };
 
+        self.rolling_back = false;
+        self.execute_once_with_retry(&ctx).await;
+    }
+
+    async fn execute_once_with_retry(&mut self, ctx: &Context) {
+        let mut retry = self.exponential_builder.build();
+        let mut retry_times = 0;
         loop {
-            match self.execute_once(&ctx).await {
-                ExecResult::Continue => (),
+            match self.execute_once(ctx).await {
                 ExecResult::Done | ExecResult::Failed => return,
+                ExecResult::Continue => (),
                 ExecResult::RetryLater => {
-                    self.wait_on_err().await;
+                    retry_times += 1;
+                    if let Some(d) = retry.next() {
+                        self.wait_on_err(d, retry_times).await;
+                    } else {
+                        assert!(self.meta.state().is_retrying());
+                        if let Retrying { error } = self.meta.state() {
+                            self.meta.set_state(ProcedureState::failed(Arc::new(
+                                Error::RetryTimesExceeded {
+                                    source: error,
+                                    procedure_id: self.meta.id,
+                                },
+                            )))
+                        }
+                        return;
+                    }
                 }
             }
         }
     }
 
+    async fn rollback(&mut self, error: Arc<Error>) -> ExecResult {
+        if let Err(e) = self.rollback_procedure().await {
+            self.rolling_back = true;
+            self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
+            return ExecResult::RetryLater;
+        }
+        self.meta.set_state(ProcedureState::failed(error));
+        ExecResult::Failed
+    }
+
     async fn execute_once(&mut self, ctx: &Context) -> ExecResult {
+        // if rolling_back, there is no need to execute again.
+        if self.rolling_back {
+            // We can definitely get the previous error here.
+            let state = self.meta.state();
+            let err = state.error().unwrap();
+            return self.rollback(err.clone()).await;
+        }
         match self.procedure.execute(ctx).await {
             Ok(status) => {
                 logging::debug!(
@@ -186,8 +226,11 @@ impl Runner {
                     status.need_persist(),
                 );
 
-                if status.need_persist() && self.persist_procedure().await.is_err() {
-                    return ExecResult::RetryLater;
+                if status.need_persist() {
+                    if let Err(err) = self.persist_procedure().await {
+                        self.meta.set_state(ProcedureState::retrying(Arc::new(err)));
+                        return ExecResult::RetryLater;
+                    }
                 }
 
                 match status {
@@ -196,7 +239,8 @@ impl Runner {
                         self.on_suspended(subprocedures).await;
                     }
                     Status::Done => {
-                        if self.commit_procedure().await.is_err() {
+                        if let Err(e) = self.commit_procedure().await {
+                            self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
                             return ExecResult::RetryLater;
                         }
 
@@ -217,17 +261,12 @@ impl Runner {
                 );
 
                 if e.is_retry_later() {
+                    self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
                     return ExecResult::RetryLater;
                 }
-
-                self.meta.set_state(ProcedureState::failed(Arc::new(e)));
 
                 // Write rollback key so we can skip this procedure while recovering procedures.
-                if self.rollback_procedure().await.is_err() {
-                    return ExecResult::RetryLater;
-                }
-
-                ExecResult::Failed
+                self.rollback(Arc::new(e)).await
             }
         }
     }
@@ -261,7 +300,9 @@ impl Runner {
             procedure,
             manager_ctx: self.manager_ctx.clone(),
             step,
+            exponential_builder: self.exponential_builder.clone(),
             store: self.store.clone(),
+            rolling_back: false,
         };
 
         // Insert the procedure. We already check the procedure existence before inserting
@@ -285,8 +326,16 @@ impl Runner {
         });
     }
 
-    async fn wait_on_err(&self) {
-        time::sleep(ERR_WAIT_DURATION).await;
+    /// Extend the retry time to wait for the next retry.
+    async fn wait_on_err(&self, d: Duration, i: u64) {
+        logging::info!(
+            "Procedure {}-{} retry for the {} times after {} millis",
+            self.procedure.type_name(),
+            self.meta.id,
+            i,
+            d.as_millis(),
+        );
+        time::sleep(d).await;
     }
 
     async fn on_suspended(&self, subprocedures: Vec<ProcedureWithId>) {
@@ -416,7 +465,9 @@ mod tests {
             procedure,
             manager_ctx: Arc::new(ManagerContext::new()),
             step: 0,
+            exponential_builder: ExponentialBuilder::default(),
             store,
+            rolling_back: false,
         }
     }
 
@@ -744,12 +795,42 @@ mod tests {
 
         let res = runner.execute_once(&ctx).await;
         assert!(res.is_retry_later(), "{res:?}");
-        assert!(meta.state().is_running());
+        assert!(meta.state().is_retrying());
 
         let res = runner.execute_once(&ctx).await;
         assert!(res.is_done(), "{res:?}");
         assert!(meta.state().is_done());
         check_files(&object_store, ctx.procedure_id, &["0000000000.commit"]).await;
+    }
+
+    #[tokio::test]
+    async fn test_execute_exceed_max_retry_later() {
+        let exec_fn =
+            |_| async { Err(Error::retry_later(MockError::new(StatusCode::Unexpected))) }.boxed();
+
+        let exceed_max_retry_later = ProcedureAdapter {
+            data: "exceed_max_retry_later".to_string(),
+            lock_key: LockKey::single("catalog.schema.table"),
+            exec_fn,
+        };
+
+        let dir = create_temp_dir("exceed_max_retry_later");
+        let meta = exceed_max_retry_later.new_meta(ROOT_ID);
+        let object_store = test_util::new_object_store(&dir);
+        let procedure_store = ProcedureStore::from(object_store.clone());
+        let mut runner = new_runner(
+            meta.clone(),
+            Box::new(exceed_max_retry_later),
+            procedure_store,
+        );
+        runner.exponential_builder = ExponentialBuilder::default()
+            .with_min_delay(Duration::from_millis(1))
+            .with_max_times(3);
+
+        // Run the runner and execute the procedure.
+        runner.execute_procedure_in_loop().await;
+        let err = meta.state().error().unwrap().to_string();
+        assert!(err.contains("Procedure retry exceeded max times"));
     }
 
     #[tokio::test]
@@ -819,7 +900,7 @@ mod tests {
         // Replace the manager ctx.
         runner.manager_ctx = manager_ctx;
 
-        // Run the runer and execute the procedure.
+        // Run the runner and execute the procedure.
         runner.run().await;
         let err = meta.state().error().unwrap().to_string();
         assert!(err.contains("subprocedure failed"), "{err}");

@@ -149,11 +149,22 @@ impl From<&DatanodeOptions> for StorageEngineConfig {
 pub struct ProcedureConfig {
     /// Storage config for procedure manager.
     pub store: ObjectStoreConfig,
+    /// Max retry times of procedure.
+    pub max_retry_times: usize,
+    /// Initial retry delay of procedures, increases exponentially.
+    #[serde(with = "humantime_serde")]
+    pub retry_delay: Duration,
 }
 
 impl Default for ProcedureConfig {
     fn default() -> ProcedureConfig {
-        ProcedureConfig::from_file_path("/tmp/greptimedb/procedure/".to_string())
+        ProcedureConfig {
+            store: ObjectStoreConfig::File(FileConfig {
+                data_dir: "/tmp/greptimedb/procedure/".to_string(),
+            }),
+            max_retry_times: 3,
+            retry_delay: Duration::from_millis(500),
+        }
     }
 }
 
@@ -161,6 +172,7 @@ impl ProcedureConfig {
     pub fn from_file_path(path: String) -> ProcedureConfig {
         ProcedureConfig {
             store: ObjectStoreConfig::File(FileConfig { data_dir: path }),
+            ..Default::default()
         }
     }
 }

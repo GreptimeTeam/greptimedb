@@ -17,8 +17,10 @@ mod runner;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
 
 use async_trait::async_trait;
+use backon::ExponentialBuilder;
 use common_telemetry::logging;
 use object_store::ObjectStore;
 use snafu::ensure;
@@ -291,12 +293,16 @@ impl ManagerContext {
 pub struct ManagerConfig {
     /// Object store
     pub object_store: ObjectStore,
+    pub max_retry_times: usize,
+    pub retry_delay: Duration,
 }
 
 /// A [ProcedureManager] that maintains procedure states locally.
 pub struct LocalManager {
     manager_ctx: Arc<ManagerContext>,
     state_store: StateStoreRef,
+    max_retry_times: usize,
+    retry_delay: Duration,
 }
 
 impl LocalManager {
@@ -305,6 +311,8 @@ impl LocalManager {
         LocalManager {
             manager_ctx: Arc::new(ManagerContext::new()),
             state_store: Arc::new(ObjectStateStore::new(config.object_store)),
+            max_retry_times: config.max_retry_times,
+            retry_delay: config.retry_delay,
         }
     }
 
@@ -321,7 +329,11 @@ impl LocalManager {
             procedure,
             manager_ctx: self.manager_ctx.clone(),
             step,
+            exponential_builder: ExponentialBuilder::default()
+                .with_min_delay(self.retry_delay)
+                .with_max_times(self.max_retry_times),
             store: ProcedureStore::new(self.state_store.clone()),
+            rolling_back: false,
         };
 
         let watcher = meta.state_receiver.clone();
@@ -543,6 +555,8 @@ mod tests {
         let dir = create_temp_dir("register");
         let config = ManagerConfig {
             object_store: test_util::new_object_store(&dir),
+            max_retry_times: 3,
+            retry_delay: Duration::from_millis(500),
         };
         let manager = LocalManager::new(config);
 
@@ -562,6 +576,8 @@ mod tests {
         let object_store = test_util::new_object_store(&dir);
         let config = ManagerConfig {
             object_store: object_store.clone(),
+            max_retry_times: 3,
+            retry_delay: Duration::from_millis(500),
         };
         let manager = LocalManager::new(config);
 
@@ -606,6 +622,8 @@ mod tests {
         let dir = create_temp_dir("submit");
         let config = ManagerConfig {
             object_store: test_util::new_object_store(&dir),
+            max_retry_times: 3,
+            retry_delay: Duration::from_millis(500),
         };
         let manager = LocalManager::new(config);
 
@@ -652,6 +670,8 @@ mod tests {
         let dir = create_temp_dir("on_err");
         let config = ManagerConfig {
             object_store: test_util::new_object_store(&dir),
+            max_retry_times: 3,
+            retry_delay: Duration::from_millis(500),
         };
         let manager = LocalManager::new(config);
 
