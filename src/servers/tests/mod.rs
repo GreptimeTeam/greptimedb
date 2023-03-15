@@ -47,7 +47,7 @@ mod py_script;
 
 const LOCALHOST_WITH_0: &str = "127.0.0.1:0";
 
-struct DummyInstance {
+pub struct DummyInstance {
     query_engine: QueryEngineRef,
     py_engine: Arc<PyEngine>,
     scripts: RwLock<HashMap<String, Arc<PyScript>>>,

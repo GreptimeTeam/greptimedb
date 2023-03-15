@@ -263,8 +263,12 @@ pub enum Error {
         #[snafu(backtrace)]
         source: common_mem_prof::error::Error,
     },
+
     #[snafu(display("Invalid prepare statement: {}", err_msg))]
     InvalidPrepareStatement { err_msg: String },
+
+    #[snafu(display("Invalid flush argument: {}", err_msg))]
+    InvalidFlushArgument { err_msg: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -327,6 +331,7 @@ impl ErrorExt for Error {
             DatabaseNotFound { .. } => StatusCode::DatabaseNotFound,
             #[cfg(feature = "mem-prof")]
             DumpProfileData { source, .. } => source.status_code(),
+            InvalidFlushArgument { .. } => StatusCode::InvalidArguments,
         }
     }
 

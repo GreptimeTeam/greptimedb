@@ -23,10 +23,11 @@ use async_trait::async_trait;
 use common_query::logical_plan::Expr;
 use common_query::physical_plan::PhysicalPlanRef;
 use datatypes::schema::SchemaRef;
+use store_api::storage::RegionNumber;
 
 use crate::error::{Result, UnsupportedSnafu};
 use crate::metadata::{FilterPushDownType, TableId, TableInfoRef, TableType};
-use crate::requests::{AlterTableRequest, DeleteRequest, FlushTableRequest, InsertRequest};
+use crate::requests::{AlterTableRequest, DeleteRequest, InsertRequest};
 
 pub type AlterContext = anymap::Map<dyn Any + Send + Sync>;
 
@@ -95,7 +96,8 @@ pub trait Table: Send + Sync {
     }
 
     /// Flush table.
-    async fn flush(&self, _request: FlushTableRequest) -> Result<()> {
+    async fn flush(&self, region_number: Option<RegionNumber>) -> Result<()> {
+        let _ = region_number;
         UnsupportedSnafu { operation: "FLUSH" }.fail()?
     }
 

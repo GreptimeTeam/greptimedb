@@ -17,11 +17,12 @@ use axum_test_helper::TestClient;
 use servers::http::{HttpOptions, HttpServer};
 use table::test_util::MemTable;
 
-use crate::create_testing_sql_query_handler;
+use crate::{create_testing_grpc_query_handler, create_testing_sql_query_handler};
 
 fn make_test_app() -> Router {
     let server = HttpServer::new(
         create_testing_sql_query_handler(MemTable::default_numbers_table()),
+        create_testing_grpc_query_handler(MemTable::default_numbers_table()),
         HttpOptions::default(),
     );
     server.make_app()

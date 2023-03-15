@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use api::v1::greptime_request::Request;
 use async_trait::async_trait;
 use axum::Router;
 use axum_test_helper::TestClient;
@@ -23,6 +24,7 @@ use query::parser::PromQuery;
 use servers::error::{self, Result};
 use servers::http::{HttpOptions, HttpServer};
 use servers::opentsdb::codec::DataPoint;
+use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::OpentsdbProtocolHandler;
 use session::context::QueryContextRef;
@@ -30,6 +32,19 @@ use tokio::sync::mpsc;
 
 struct DummyInstance {
     tx: mpsc::Sender<String>,
+}
+
+#[async_trait]
+impl GrpcQueryHandler for DummyInstance {
+    type Error = crate::Error;
+
+    async fn do_query(
+        &self,
+        _query: Request,
+        _ctx: QueryContextRef,
+    ) -> std::result::Result<Output, Self::Error> {
+        unimplemented!()
+    }
 }
 
 #[async_trait]
@@ -77,7 +92,7 @@ impl SqlQueryHandler for DummyInstance {
 
 fn make_test_app(tx: mpsc::Sender<String>) -> Router {
     let instance = Arc::new(DummyInstance { tx });
-    let mut server = HttpServer::new(instance.clone(), HttpOptions::default());
+    let mut server = HttpServer::new(instance.clone(), instance.clone(), HttpOptions::default());
     server.set_opentsdb_handler(instance);
     server.make_app()
 }
