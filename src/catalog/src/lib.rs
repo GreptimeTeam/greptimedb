@@ -227,7 +227,7 @@ pub(crate) async fn handle_system_table_request<'a, M: CatalogManager>(
 }
 
 /// The stat of regions in the datanode node.
-/// number of regions can be got from len of vec.
+/// The number of regions can be got from len of vec.
 pub async fn region_stats(catalog_manager: &CatalogManagerRef) -> Result<Vec<RegionStat>> {
     let mut region_stats = Vec::new();
     for catalog_name in catalog_manager.catalog_names()? {
