@@ -103,6 +103,14 @@ pub trait Table: Send + Sync {
     async fn close(&self) -> Result<()> {
         Ok(())
     }
+
+    /// Get region stats in this table.
+    fn region_stats(&self) -> Result<Vec<RegionStat>> {
+        UnsupportedSnafu {
+            operation: "REGION_STATS",
+        }
+        .fail()?
+    }
 }
 
 pub type TableRef = Arc<dyn Table>;
@@ -113,3 +121,9 @@ pub trait TableIdProvider {
 }
 
 pub type TableIdProviderRef = Arc<dyn TableIdProvider + Send + Sync>;
+
+#[derive(Default, Debug)]
+pub struct RegionStat {
+    pub region_id: u64,
+    pub disk_usage_bytes: u64,
+}

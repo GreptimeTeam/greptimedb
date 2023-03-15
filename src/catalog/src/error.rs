@@ -204,6 +204,21 @@ pub enum Error {
 
     #[snafu(display("Illegal access to catalog: {} and schema: {}", catalog, schema))]
     QueryAccessDenied { catalog: String, schema: String },
+
+    #[snafu(display(
+        "Failed to get region stats, catalog: {}, schema: {}, table: {}, source: {}",
+        catalog,
+        schema,
+        table,
+        source
+    ))]
+    RegionStats {
+        catalog: String,
+        schema: String,
+        table: String,
+        #[snafu(backtrace)]
+        source: table::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -238,7 +253,8 @@ impl ErrorExt for Error {
             | Error::InsertCatalogRecord { source, .. }
             | Error::OpenTable { source, .. }
             | Error::CreateTable { source, .. }
-            | Error::DeregisterTable { source, .. } => source.status_code(),
+            | Error::DeregisterTable { source, .. }
+            | Error::RegionStats { source, .. } => source.status_code(),
 
             Error::MetaSrv { source, .. } => source.status_code(),
             Error::SystemCatalogTableScan { source } => source.status_code(),
