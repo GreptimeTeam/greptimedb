@@ -282,7 +282,7 @@ impl Script for PyScript {
                 .planner()
                 .plan(stmt, QueryContext::arc())
                 .await?;
-            let res = self.query_engine.execute(&plan).await?;
+            let res = self.query_engine.execute(plan, QueryContext::arc()).await?;
             let copr = self.copr.clone();
             match res {
                 Output::Stream(stream) => Ok(Output::Stream(Box::pin(CoprStream::try_new(

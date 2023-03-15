@@ -21,7 +21,7 @@ use common_query::Output;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::plan::LogicalPlan;
 use servers::query_handler::grpc::GrpcQueryHandler;
-use session::context::QueryContextRef;
+use session::context::{QueryContext, QueryContextRef};
 use snafu::prelude::*;
 use sql::statements::statement::Statement;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
@@ -53,7 +53,7 @@ impl Instance {
             .context(DecodeLogicalPlanSnafu)?;
 
         self.query_engine
-            .execute(&LogicalPlan::DfPlan(logical_plan))
+            .execute(LogicalPlan::DfPlan(logical_plan), QueryContext::arc())
             .await
             .context(ExecuteLogicalPlanSnafu)
     }
@@ -69,11 +69,11 @@ impl Instance {
                         let plan = self
                             .query_engine
                             .planner()
-                            .plan(stmt, ctx)
+                            .plan(stmt, ctx.clone())
                             .await
                             .context(PlanStatementSnafu)?;
                         self.query_engine
-                            .execute(&plan)
+                            .execute(plan, ctx.clone())
                             .await
                             .context(ExecuteLogicalPlanSnafu)
                     }
@@ -175,7 +175,7 @@ mod test {
             .plan(stmt, QueryContext::arc())
             .await
             .unwrap();
-        engine.execute(&plan).await.unwrap()
+        engine.execute(plan, QueryContext::arc()).await.unwrap()
     }
 
     #[tokio::test(flavor = "multi_thread")]

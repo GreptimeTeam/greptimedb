@@ -79,6 +79,7 @@ impl TryFrom<&Statement> for DfStatement {
         let s = match s {
             Statement::Query(query) => SpStatement::Query(Box::new(query.inner.clone())),
             Statement::Explain(explain) => explain.inner.clone(),
+            Statement::Insert(insert) => insert.inner.clone(),
             _ => {
                 return ConvertToDfStatementSnafu {
                     statement: format!("{s:?}"),

@@ -18,7 +18,7 @@ use datafusion_expr::LogicalPlan as DfLogicalPlan;
 use datatypes::schema::Schema;
 use snafu::ResultExt;
 
-use crate::error::Result;
+use crate::error::{ConvertDatafusionSchemaSnafu, Result};
 
 /// A LogicalPlan represents the different types of relational
 /// operators (such as Projection, Filter, etc) and can be created by
@@ -42,7 +42,7 @@ impl LogicalPlan {
                 df_schema
                     .clone()
                     .try_into()
-                    .context(crate::error::DatatypeSnafu)
+                    .context(ConvertDatafusionSchemaSnafu)
             }
         }
     }

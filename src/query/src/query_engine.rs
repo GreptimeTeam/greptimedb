@@ -56,7 +56,7 @@ pub trait QueryEngine: Send + Sync {
 
     async fn describe(&self, plan: LogicalPlan) -> Result<Schema>;
 
-    async fn execute(&self, plan: &LogicalPlan) -> Result<Output>;
+    async fn execute(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output>;
 
     fn register_udf(&self, udf: ScalarUdf);
 

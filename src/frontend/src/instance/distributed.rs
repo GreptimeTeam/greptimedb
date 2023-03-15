@@ -33,6 +33,7 @@ use common_error::prelude::BoxedError;
 use common_query::Output;
 use common_telemetry::{debug, info};
 use datanode::instance::sql::table_idents_to_full_name;
+use datanode::sql::SqlHandler;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::RawSchema;
 use meta_client::client::MetaClient;
@@ -60,13 +61,12 @@ use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogEntrySerdeSnafu, CatalogSnafu, ColumnDataTypeSnafu,
-    DeserializePartitionSnafu, NotSupportedSnafu, ParseSqlSnafu, PrimaryKeyNotFoundSnafu,
-    RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaExistsSnafu, StartMetaClientSnafu,
-    TableAlreadyExistSnafu, TableNotFoundSnafu, TableSnafu, ToTableInsertRequestSnafu,
-    UnrecognizedTableOptionSnafu,
+    DeserializePartitionSnafu, InvokeDatanodeSnafu, NotSupportedSnafu, ParseSqlSnafu,
+    PrimaryKeyNotFoundSnafu, RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaExistsSnafu,
+    StartMetaClientSnafu, TableAlreadyExistSnafu, TableNotFoundSnafu, TableSnafu,
+    ToTableInsertRequestSnafu, UnrecognizedTableOptionSnafu,
 };
 use crate::expr_factory;
-use crate::sql::insert_to_request;
 use crate::table::DistTable;
 
 #[derive(Clone)]
@@ -374,7 +374,10 @@ impl DistInstance {
                     .context(CatalogSnafu)?
                     .context(TableNotFoundSnafu { table_name: table })?;
 
-                let insert_request = insert_to_request(&table, *insert, query_ctx)?;
+                let insert_request =
+                    SqlHandler::insert_to_request(self.catalog_manager.clone(), *insert, query_ctx)
+                        .await
+                        .context(InvokeDatanodeSnafu)?;
 
                 return Ok(Output::AffectedRows(
                     table.insert(insert_request).await.context(TableSnafu)?,

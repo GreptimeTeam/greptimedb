@@ -24,7 +24,6 @@ use datatypes::schema::{ColumnSchema, RawSchema};
 use mito::config::EngineConfig;
 use mito::table::test_util::{new_test_object_store, MockEngine, MockMitoEngine};
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
-use query::QueryEngineFactory;
 use servers::Mode;
 use session::context::QueryContext;
 use snafu::ResultExt;
@@ -87,7 +86,7 @@ impl MockInstance {
         match stmt {
             QueryStatement::Sql(Statement::Query(_)) => {
                 let plan = planner.plan(stmt, QueryContext::arc()).await.unwrap();
-                engine.execute(&plan).await.unwrap()
+                engine.execute(plan, QueryContext::arc()).await.unwrap()
             }
             QueryStatement::Sql(Statement::Tql(tql)) => {
                 let plan = match tql {
@@ -103,7 +102,7 @@ impl MockInstance {
                     }
                     Tql::Explain(_) => unimplemented!(),
                 };
-                engine.execute(&plan).await.unwrap()
+                engine.execute(plan, QueryContext::arc()).await.unwrap()
             }
             _ => self
                 .inner()
@@ -201,17 +200,7 @@ pub async fn create_mock_sql_handler() -> SqlHandler {
             .await
             .unwrap(),
     );
-
-    let catalog_list = catalog::local::new_memory_catalog_list().unwrap();
-    let factory = QueryEngineFactory::new(catalog_list);
-
-    SqlHandler::new(
-        mock_engine.clone(),
-        catalog_manager,
-        factory.query_engine(),
-        mock_engine,
-        None,
-    )
+    SqlHandler::new(mock_engine.clone(), catalog_manager, mock_engine, None)
 }
 
 pub(crate) async fn setup_test_instance(test_name: &str) -> MockInstance {

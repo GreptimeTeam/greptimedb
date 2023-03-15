@@ -17,9 +17,7 @@ use std::any::Any;
 use common_datasource::error::Error as DataSourceError;
 use common_error::prelude::*;
 use common_procedure::ProcedureId;
-use common_recordbatch::error::Error as RecordBatchError;
 use datafusion::parquet;
-use datatypes::prelude::ConcreteDataType;
 use storage::error::Error as StorageError;
 use table::error::Error as TableError;
 use url::ParseError;
@@ -124,24 +122,6 @@ pub enum Error {
         values
     ))]
     ColumnValuesNumberMismatch { columns: usize, values: usize },
-
-    #[snafu(display(
-        "Column type mismatch, column: {}, expected type: {:?}, actual: {:?}",
-        column,
-        expected,
-        actual,
-    ))]
-    ColumnTypeMismatch {
-        column: String,
-        expected: ConcreteDataType,
-        actual: ConcreteDataType,
-    },
-
-    #[snafu(display("Failed to collect record batch, source: {}", source))]
-    CollectRecords {
-        #[snafu(backtrace)]
-        source: RecordBatchError,
-    },
 
     #[snafu(display("Failed to parse sql value, source: {}", source))]
     ParseSqlValue {
@@ -556,8 +536,6 @@ impl ErrorExt for Error {
 
             Insert { source, .. } => source.status_code(),
             Delete { source, .. } => source.status_code(),
-            CollectRecords { source, .. } => source.status_code(),
-
             TableNotFound { .. } => StatusCode::TableNotFound,
             ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
 
@@ -570,7 +548,6 @@ impl ErrorExt for Error {
             ConvertSchema { source, .. } | VectorComputation { source } => source.status_code(),
 
             ColumnValuesNumberMismatch { .. }
-            | ColumnTypeMismatch { .. }
             | InvalidSql { .. }
             | InvalidUrl { .. }
             | InvalidPath { .. }

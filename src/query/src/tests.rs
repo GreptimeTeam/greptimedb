@@ -41,7 +41,7 @@ async fn exec_selection(engine: QueryEngineRef, sql: &str) -> Vec<RecordBatch> {
         .await
         .unwrap();
     let Output::Stream(stream) = engine
-        .execute(&plan)
+        .execute(plan, QueryContext::arc())
         .await
         .unwrap() else { unreachable!() };
     util::collect(stream).await.unwrap()

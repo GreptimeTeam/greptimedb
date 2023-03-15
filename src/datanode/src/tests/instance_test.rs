@@ -26,7 +26,7 @@ use session::context::QueryContext;
 use snafu::ResultExt;
 use sql::statements::statement::Statement;
 
-use crate::error::{Error, ExecuteLogicalPlanSnafu, PlanStatementSnafu};
+use crate::error::{ExecuteLogicalPlanSnafu, PlanStatementSnafu};
 use crate::tests::test_util::{self, check_output_stream, setup_test_instance, MockInstance};
 
 #[tokio::test(flavor = "multi_thread")]
@@ -185,67 +185,6 @@ async fn test_execute_insert() {
     )
     .await;
     assert!(matches!(output, Output::AffectedRows(2)));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_execute_insert_by_select() {
-    let instance = setup_test_instance("test_execute_insert_by_select").await;
-
-    // create table
-    execute_sql(
-        &instance,
-        "create table demo1(host string, cpu double, memory double, ts timestamp time index);",
-    )
-    .await;
-    execute_sql(
-        &instance,
-        "create table demo2(host string, cpu double, memory double, ts timestamp time index);",
-    )
-    .await;
-
-    let output = execute_sql(
-        &instance,
-        r#"insert into demo1(host, cpu, memory, ts) values
-                           ('host1', 66.6, 1024, 1655276557000),
-                           ('host2', 88.8,  333.3, 1655276558000)
-                           "#,
-    )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(2)));
-
-    assert!(matches!(
-        try_execute_sql(&instance, "insert into demo2(host) select * from demo1")
-            .await
-            .unwrap_err(),
-        Error::ColumnValuesNumberMismatch { .. }
-    ));
-    assert!(matches!(
-        try_execute_sql(&instance, "insert into demo2 select cpu,memory from demo1")
-            .await
-            .unwrap_err(),
-        Error::ColumnValuesNumberMismatch { .. }
-    ));
-
-    assert!(matches!(
-        try_execute_sql(&instance, "insert into demo2(ts) select memory from demo1")
-            .await
-            .unwrap_err(),
-        Error::ColumnTypeMismatch { .. }
-    ));
-
-    let output = execute_sql(&instance, "insert into demo2 select * from demo1").await;
-    assert!(matches!(output, Output::AffectedRows(2)));
-
-    let output = execute_sql(&instance, "select * from demo2 order by ts").await;
-    let expected = "\
-+-------+------+--------+---------------------+
-| host  | cpu  | memory | ts                  |
-+-------+------+--------+---------------------+
-| host1 | 66.6 | 1024.0 | 2022-06-15T07:02:37 |
-| host2 | 88.8 | 333.3  | 2022-06-15T07:02:38 |
-+-------+------+--------+---------------------+"
-        .to_string();
-    check_output_stream(output, expected).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -948,13 +887,6 @@ async fn execute_sql(instance: &MockInstance, sql: &str) -> Output {
     execute_sql_in_db(instance, sql, DEFAULT_SCHEMA_NAME).await
 }
 
-async fn try_execute_sql(
-    instance: &MockInstance,
-    sql: &str,
-) -> Result<Output, crate::error::Error> {
-    try_execute_sql_in_db(instance, sql, DEFAULT_SCHEMA_NAME).await
-}
-
 async fn try_execute_sql_in_db(
     instance: &MockInstance,
     sql: &str,
@@ -968,10 +900,13 @@ async fn try_execute_sql_in_db(
             let engine = instance.inner().query_engine();
             let plan = engine
                 .planner()
-                .plan(stmt, query_ctx)
+                .plan(stmt, query_ctx.clone())
                 .await
                 .context(PlanStatementSnafu)?;
-            engine.execute(&plan).await.context(ExecuteLogicalPlanSnafu)
+            engine
+                .execute(plan, query_ctx)
+                .await
+                .context(ExecuteLogicalPlanSnafu)
         }
         _ => instance.inner().execute_stmt(stmt, query_ctx).await,
     }

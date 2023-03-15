@@ -19,7 +19,6 @@ use common_error::prelude::BoxedError;
 use common_query::Output;
 use common_telemetry::logging::info;
 use common_telemetry::timer;
-use futures::StreamExt;
 use query::error::QueryExecutionSnafu;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::query_engine::StatementHandler;
@@ -39,8 +38,7 @@ use crate::error::{
 };
 use crate::instance::Instance;
 use crate::metric;
-use crate::sql::insert::InsertRequests;
-use crate::sql::SqlRequest;
+use crate::sql::{SqlHandler, SqlRequest};
 
 impl Instance {
     pub async fn execute_stmt(
@@ -50,33 +48,13 @@ impl Instance {
     ) -> Result<Output> {
         match stmt {
             QueryStatement::Sql(Statement::Insert(insert)) => {
-                let requests = self
-                    .sql_handler
-                    .insert_to_requests(self.catalog_manager.clone(), *insert, query_ctx.clone())
-                    .await?;
-
-                match requests {
-                    InsertRequests::Request(request) => {
-                        self.sql_handler.execute(request, query_ctx.clone()).await
-                    }
-
-                    InsertRequests::Stream(mut s) => {
-                        let mut rows = 0;
-                        while let Some(request) = s.next().await {
-                            match self
-                                .sql_handler
-                                .execute(request?, query_ctx.clone())
-                                .await?
-                            {
-                                Output::AffectedRows(n) => {
-                                    rows += n;
-                                }
-                                _ => unreachable!(),
-                            }
-                        }
-                        Ok(Output::AffectedRows(rows))
-                    }
-                }
+                let request = SqlHandler::insert_to_request(
+                    self.catalog_manager.clone(),
+                    *insert,
+                    query_ctx.clone(),
+                )
+                .await?;
+                self.sql_handler.insert(request).await
             }
             QueryStatement::Sql(Statement::Delete(delete)) => {
                 let request = SqlRequest::Delete(*delete);
@@ -226,10 +204,13 @@ impl Instance {
         let engine = self.query_engine();
         let plan = engine
             .planner()
-            .plan(stmt, query_ctx)
+            .plan(stmt, query_ctx.clone())
             .await
             .context(PlanStatementSnafu)?;
-        engine.execute(&plan).await.context(ExecuteStatementSnafu)
+        engine
+            .execute(plan, query_ctx)
+            .await
+            .context(ExecuteStatementSnafu)
     }
 
     // TODO(ruihang): merge this and `execute_promql` after #951 landed
@@ -262,10 +243,13 @@ impl Instance {
         let engine = self.query_engine();
         let plan = engine
             .planner()
-            .plan(stmt, query_ctx)
+            .plan(stmt, query_ctx.clone())
             .await
             .context(PlanStatementSnafu)?;
-        engine.execute(&plan).await.context(ExecuteStatementSnafu)
+        engine
+            .execute(plan, query_ctx)
+            .await
+            .context(ExecuteStatementSnafu)
     }
 }
 
