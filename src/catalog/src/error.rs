@@ -206,7 +206,7 @@ pub enum Error {
     QueryAccessDenied { catalog: String, schema: String },
 
     #[snafu(display(
-        "Failed to get region stats, catalog: {}, schema: {}, table: {}source: {}",
+        "Failed to get region stats, catalog: {}, schema: {}, table: {}, source: {}",
         catalog,
         schema,
         table,
