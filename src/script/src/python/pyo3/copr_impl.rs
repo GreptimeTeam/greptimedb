@@ -219,7 +219,7 @@ def a(cpu, mem, **kwargs):
     for k, v in kwargs.items():
         print("%s == %s" % (k, v))
     print(dataframe().select([col("cpu")<lit(0.3)]).collect())
-    return (0.5 < cpu) & ~( cpu >= 0.75)
+    return (0.5 < cpu) & ~(cpu >= 0.75)
     "#;
         let cpu_array = Float32Vector::from_slice([0.9f32, 0.8, 0.7, 0.3]);
         let mem_array = Float64Vector::from_slice([0.1f64, 0.2, 0.3, 0.4]);
