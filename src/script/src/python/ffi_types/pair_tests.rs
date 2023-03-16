@@ -109,6 +109,7 @@ async fn integrated_py_copr_test() {
     }
 }
 
+#[allow(clippy::print_stdout)]
 #[test]
 fn pyo3_rspy_test_in_pairs() {
     let testcases = sample_test_case();

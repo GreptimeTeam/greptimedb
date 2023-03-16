@@ -15,10 +15,10 @@
 use common_recordbatch::DfRecordBatch;
 use datafusion::dataframe::DataFrame as DfDataFrame;
 use datafusion_expr::Expr as DfExpr;
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::pyclass::CompareOp;
-use pyo3::types::PyList;
+use pyo3::types::{PyList, PyType};
 use snafu::ResultExt;
 
 use crate::python::error::DataFusionSnafu;
@@ -49,6 +49,16 @@ impl PyDataFrame {
 
 #[pymethods]
 impl PyDataFrame {
+    #[classmethod]
+    fn from_sql(_cls: &PyType, sql: String) -> PyResult<Self> {
+        block_on_async(async move {
+            let ctx = datafusion::execution::context::SessionContext::new();
+            ctx.sql(&sql).await
+        })
+        .map_err(|e| PyRuntimeError::new_err(format!("{e:?}")))?
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+        .map(|df| df.into())
+    }
     fn __call__(&self) -> PyResult<Self> {
         Ok(self.clone())
     }

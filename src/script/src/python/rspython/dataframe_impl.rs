@@ -63,6 +63,16 @@ pub(crate) mod data_frame {
     }
     #[rspyclass]
     impl PyDataFrame {
+        #[pymethod]
+        fn from_sql(sql: String, vm: &VirtualMachine) -> PyResult<Self> {
+            block_on_async(async move {
+                let ctx = datafusion::execution::context::SessionContext::new();
+                ctx.sql(&sql).await
+            })
+            .map_err(|e| vm.new_runtime_error(format!("{e:?}")))?
+            .map_err(|e| vm.new_runtime_error(e.to_string()))
+            .map(|df| df.into())
+        }
         /// TODO(discord9): error handling
         fn from_record_batch(rb: &DfRecordBatch) -> crate::python::error::Result<Self> {
             let ctx = datafusion::execution::context::SessionContext::new();
