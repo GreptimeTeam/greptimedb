@@ -143,7 +143,8 @@ impl Timestamp {
             Some(Timestamp::new(value, unit))
         } else {
             let mul = unit.factor() / self.unit().factor();
-            Some(Timestamp::new(self.value.div_ceil(mul as i64), unit))
+            let new_ts = self.value as f64 / mul as f64;
+            Some(Timestamp::new(new_ts.ceil() as i64, unit))
         }
     }
 
