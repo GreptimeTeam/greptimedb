@@ -391,7 +391,8 @@ impl PyVector {
             Ok(v.into_pyobject(vm))
         } else if step.is_negative() {
             // Negative step require special treatment
-            for i in range.rev().step_by(step.unsigned_abs()) {
+            // range.start > range.stop if slice can found no-empty
+            for i in (range.end+1..range.start).rev().step_by(step.unsigned_abs()) {
                 // Safety: This mutable vector is created from the vector's data type.
                 buf.push_value_ref(vector.get_ref(i));
             }

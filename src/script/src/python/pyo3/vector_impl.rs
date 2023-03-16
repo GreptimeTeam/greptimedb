@@ -24,7 +24,7 @@ use datatypes::vectors::Helper;
 use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::pyclass::CompareOp;
-use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyString, PyType};
+use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PySlice, PyString, PyType};
 
 use super::utils::val_to_py_any;
 use crate::python::ffi_types::vector::{arrow_rtruediv, wrap_bool_result, wrap_result, PyVector};
@@ -299,6 +299,55 @@ impl PyVector {
             })?;
             let ret = Self::from(ret).into_py(py);
             Ok(ret)
+        } else if let Ok(slice) = needle.downcast::<PySlice>(py) {
+            let indices = slice.indices(self.len() as i64)?;
+            let (start, stop, step, slicelength) = (
+                indices.start,
+                indices.stop,
+                indices.step,
+                indices.slicelength,
+            );
+            // Adjust start and stop to positive
+            let adjust = |idx: isize| -> PyResult<usize> {
+                if idx >= 0 && (idx as usize) < self.len() {
+                    Ok(idx as usize)
+                } else if idx < 0 && self.len() >= (-idx as usize) {
+                    // slice(-1) = slice(len-1)
+                    Ok(self.len() - (-idx as usize))
+                } else {
+                    Err(PyIndexError::new_err(format!(
+                        "Trying to slice legnth{} with index {}",
+                        self.len(),
+                        idx
+                    )))
+                }
+            };
+            let (start, stop) = (adjust(start)?, adjust(stop)?);
+            let vector = self.as_vector_ref();
+
+            let mut buf = vector
+                .data_type()
+                .create_mutable_vector(indices.slicelength as usize);
+            let v = if indices.slicelength == 0 {
+                buf.to_vector()
+            } else if step == 1 {
+                vector.slice(start, slicelength as usize)
+            } else {
+                if indices.step > 0 {
+                    for i in (start..stop).step_by(step as usize) {
+                        buf.push_value_ref(vector.get_ref(i));
+                    }
+                } else {
+                    // if no-empty, then stop < start
+                    // note: start..stop is empty is start >= stop
+                    for i in (stop + 1..=start).rev().step_by(-step as usize) {
+                        buf.push_value_ref(vector.get_ref(i));
+                    }
+                }
+                buf.to_vector()
+            };
+            let v: PyVector = v.into();
+            Ok(v.into_py(py))
         } else if let Ok(index) = needle.extract::<isize>(py) {
             // deal with negative index
             let len = self.len() as isize;
