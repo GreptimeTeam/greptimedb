@@ -307,22 +307,11 @@ impl PyVector {
                 indices.step,
                 indices.slicelength,
             );
-            // Adjust start and stop to positive
-            let adjust = |idx: isize| -> PyResult<usize> {
-                if idx >= 0 && (idx as usize) < self.len() {
-                    Ok(idx as usize)
-                } else if idx < 0 && self.len() >= (-idx as usize) {
-                    // slice(-1) = slice(len-1)
-                    Ok(self.len() - (-idx as usize))
-                } else {
-                    Err(PyIndexError::new_err(format!(
-                        "Trying to slice legnth{} with index {}",
-                        self.len(),
-                        idx
-                    )))
-                }
-            };
-            let (start, stop) = (adjust(start)?, adjust(stop)?);
+            if start < 0 {
+                return Err(PyValueError::new_err(format!(
+                    "Negative start is not supported, found {start} in {indices:?}"
+                )));
+            } // Negative stop is supported, means from "indices.start" to the actual start of the vector
             let vector = self.as_vector_ref();
 
             let mut buf = vector
@@ -331,16 +320,23 @@ impl PyVector {
             let v = if indices.slicelength == 0 {
                 buf.to_vector()
             } else if step == 1 {
-                vector.slice(start, slicelength as usize)
+                vector.slice(start as usize, slicelength as usize)
             } else {
                 if indices.step > 0 {
-                    for i in (start..stop).step_by(step as usize) {
+                    let range = if stop == -1 {
+                        start as usize..start as usize
+                    } else {
+                        start as usize..stop as usize
+                    };
+                    for i in range.step_by(step.unsigned_abs()) {
                         buf.push_value_ref(vector.get_ref(i));
                     }
                 } else {
                     // if no-empty, then stop < start
                     // note: start..stop is empty is start >= stop
-                    for i in (stop + 1..=start).rev().step_by(-step as usize) {
+                    // stop>=-1
+                    let range = { (stop + 1) as usize..=start as usize };
+                    for i in range.rev().step_by(step.unsigned_abs()) {
                         buf.push_value_ref(vector.get_ref(i));
                     }
                 }

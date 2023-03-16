@@ -381,7 +381,6 @@ impl PyVector {
         // adjust_indices so negative number is transform to usize
         let (mut range, step, slice_len) = slice.adjust_indices(self.len());
         let vector = self.as_vector_ref();
-
         let mut buf = vector.data_type().create_mutable_vector(slice_len);
         if slice_len == 0 {
             let v: PyVector = buf.to_vector().into();
@@ -392,7 +391,7 @@ impl PyVector {
         } else if step.is_negative() {
             // Negative step require special treatment
             // range.start > range.stop if slice can found no-empty
-            for i in (range.end+1..range.start).rev().step_by(step.unsigned_abs()) {
+            for i in range.rev().step_by(step.unsigned_abs()) {
                 // Safety: This mutable vector is created from the vector's data type.
                 buf.push_value_ref(vector.get_ref(i));
             }

@@ -113,6 +113,7 @@ async fn integrated_py_copr_test() {
 fn pyo3_rspy_test_in_pairs() {
     let testcases = sample_test_case();
     for case in testcases {
+        println!("Testcase: {}", case.script);
         eval_rspy(case.clone());
         #[cfg(feature = "pyo3_backend")]
         eval_pyo3(case);
@@ -122,6 +123,9 @@ fn pyo3_rspy_test_in_pairs() {
 fn check_equal(v0: VectorRef, v1: VectorRef) -> bool {
     let v0 = v0.to_arrow_array();
     let v1 = v1.to_arrow_array();
+    if v0.len() != v1.len() {
+        return false;
+    }
     fn is_float(ty: &ArrowDataType) -> bool {
         use ArrowDataType::*;
         matches!(ty, Float16 | Float32 | Float64)

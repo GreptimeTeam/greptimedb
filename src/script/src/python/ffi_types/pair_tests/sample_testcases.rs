@@ -178,6 +178,30 @@ def answer() -> vector[i64]:
             .to_string(),
             expect: Some(ronish!("number": vector!(Int64Vector, [1, 2]))),
         },
+        #[cfg(feature = "pyo3_backend")]
+        CoprTestCase {
+            script: r#"
+@copr(returns=["value"], backend="pyo3")
+def answer() -> vector[i64]:
+    from greptime import vector
+    import pyarrow as pa
+    a = vector.from_pyarrow(pa.array([42, 43, 44]))
+    return a[0:1]
+"#
+            .to_string(),
+            expect: Some(ronish!("value": vector!(Int64Vector, [42]))),
+        },
+        CoprTestCase {
+            script: r#"
+@copr(returns=["value"], backend="rspy")
+def answer() -> vector[i64]:
+    from greptime import vector
+    a = vector([42, 43, 44])
+    return a[-2:-1]
+"#
+            .to_string(),
+            expect: Some(ronish!("value": vector!(Int64Vector, [43]))),
+        },
     ]
 }
 
@@ -185,6 +209,7 @@ def answer() -> vector[i64]:
 /// Using a function to generate testcase instead of `.ron` configure file because it's more flexible and we are in #[cfg(test)] so no binary bloat worrying
 #[allow(clippy::approx_constant)]
 pub(super) fn sample_test_case() -> Vec<CodeBlockTestCase> {
+    // TODO(discord9): detailed tests for slicing vector
     vec![
         CodeBlockTestCase {
             input: ronish! {
@@ -192,13 +217,54 @@ pub(super) fn sample_test_case() -> Vec<CodeBlockTestCase> {
             },
             script: r#"
 from greptime import *
-ret = a+3.0
-ret = ret * 2.0
-ret = ret / 2.0
-ret = ret - 3.0
+ret = a[0:1]
 ret"#
                 .to_string(),
-            expect: vector!(Float64Vector, [1.0f64, 2.0, 3.0]),
+            expect: vector!(Float64Vector, [1.0f64]),
+        },
+        CodeBlockTestCase {
+            input: ronish! {
+                "a": vector!(Float64Vector, [1.0f64, 2.0, 3.0])
+            },
+            script: r#"
+from greptime import *
+ret = a[0:1:1]
+ret"#
+                .to_string(),
+            expect: vector!(Float64Vector, [1.0f64]),
+        },
+        CodeBlockTestCase {
+            input: ronish! {
+                "a": vector!(Float64Vector, [1.0f64, 2.0, 3.0])
+            },
+            script: r#"
+from greptime import *
+ret = a[-2:-1]
+ret"#
+                .to_string(),
+            expect: vector!(Float64Vector, [2.0f64]),
+        },
+        CodeBlockTestCase {
+            input: ronish! {
+                "a": vector!(Float64Vector, [1.0f64, 2.0, 3.0])
+            },
+            script: r#"
+from greptime import *
+ret = a[-1:-2:-1]
+ret"#
+                .to_string(),
+            expect: vector!(Float64Vector, [3.0f64]),
+        },
+        CodeBlockTestCase {
+            input: ronish! {
+                "a": vector!(Float64Vector, [1.0f64, 2.0, 3.0])
+            },
+            script: r#"
+from greptime import *
+ret = a[-1:-4:-1]
+ret"#
+                .to_string(),
+            expect: vector!(Float64Vector, [3.0f64, 2.0, 1.0]),
         },
         CodeBlockTestCase {
             input: ronish! {
