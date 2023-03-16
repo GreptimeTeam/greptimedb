@@ -1,6 +1,9 @@
 FROM ubuntu:22.04
 
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get -y install ca-certificates
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    ca-certificates \
+    python3 \
+    python3-dev
 
 ARG TARGETARCH
 
