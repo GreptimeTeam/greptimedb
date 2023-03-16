@@ -130,8 +130,24 @@ impl<'a> ParserContext<'a> {
             }
         }
 
+        let connection_options = self
+            .parser
+            .parse_options(Keyword::CONNECTION)
+            .context(error::SyntaxSnafu { sql: self.sql })?;
+
+        let connection = connection_options
+            .into_iter()
+            .filter_map(|option| {
+                if let Some(v) = ParserContext::parse_option_string(option.value) {
+                    Some((option.name.value.to_uppercase(), v))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         Ok(CopyTable::To(CopyTableTo::new(
-            table_name, file_name, format,
+            table_name, file_name, format, connection,
         )))
     }
 
@@ -167,7 +183,7 @@ mod tests {
             match statement {
                 Statement::Copy(CopyTable::To(copy_table)) => {
                     let (catalog, schema, table) =
-                        if let [catalog, schema, table] = &copy_table.table_name().0[..] {
+                        if let [catalog, schema, table] = &copy_table.table_name.0[..] {
                             (
                                 catalog.value.clone(),
                                 schema.value.clone(),
@@ -181,11 +197,11 @@ mod tests {
                     assert_eq!("schema0", schema);
                     assert_eq!("tbl", table);
 
-                    let file_name = copy_table.file_name();
+                    let file_name = copy_table.file_name;
                     assert_eq!("tbl_file.parquet", file_name);
 
-                    let format = copy_table.format();
-                    assert_eq!(Format::Parquet, *format);
+                    let format = copy_table.format;
+                    assert_eq!(Format::Parquet, format);
                 }
                 _ => unreachable!(),
             }
@@ -268,6 +284,44 @@ mod tests {
                     if let Some(expected_pattern) = test.expected_pattern {
                         assert_eq!(copy_table.pattern.clone().unwrap(), expected_pattern);
                     }
+                    assert_eq!(copy_table.connection.clone(), test.expected_connection);
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_copy_table_to() {
+        struct Test<'a> {
+            sql: &'a str,
+            expected_connection: HashMap<String, String>,
+        }
+
+        let tests = [
+            Test {
+                sql: "COPY catalog0.schema0.tbl TO 'tbl_file.parquet' ",
+                expected_connection: HashMap::new(),
+            },
+            Test {
+                sql: "COPY catalog0.schema0.tbl TO 'tbl_file.parquet' CONNECTION (FOO='Bar', ONE='two')",
+                expected_connection: [("FOO","Bar"),("ONE","two")].into_iter().map(|(k,v)|{(k.to_string(),v.to_string())}).collect()
+            },
+            Test {
+                sql:"COPY catalog0.schema0.tbl TO 'tbl_file.parquet' WITH (FORMAT = 'parquet') CONNECTION (FOO='Bar', ONE='two')",
+                expected_connection: [("FOO","Bar"),("ONE","two")].into_iter().map(|(k,v)|{(k.to_string(),v.to_string())}).collect()
+            },
+        ];
+
+        for test in tests {
+            let mut result =
+                ParserContext::create_with_dialect(test.sql, &GenericDialect {}).unwrap();
+            assert_eq!(1, result.len());
+
+            let statement = result.remove(0);
+            assert_matches!(statement, Statement::Copy { .. });
+            match statement {
+                Statement::Copy(CopyTable::To(copy_table)) => {
                     assert_eq!(copy_table.connection.clone(), test.expected_connection);
                 }
                 _ => unreachable!(),

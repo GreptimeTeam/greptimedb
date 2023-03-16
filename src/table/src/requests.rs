@@ -197,6 +197,7 @@ pub struct CopyTableRequest {
     pub schema_name: String,
     pub table_name: String,
     pub file_name: String,
+    pub connection: HashMap<String, String>,
 }
 
 #[derive(Debug)]

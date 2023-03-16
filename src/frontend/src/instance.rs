@@ -677,7 +677,7 @@ pub fn check_permission(
             validate_param(delete.table_name(), query_ctx)?;
         }
         Statement::Copy(stmd) => match stmd {
-            CopyTable::To(copy_table_to) => validate_param(copy_table_to.table_name(), query_ctx)?,
+            CopyTable::To(copy_table_to) => validate_param(&copy_table_to.table_name, query_ctx)?,
             CopyTable::From(copy_table_from) => {
                 validate_param(&copy_table_from.table_name, query_ctx)?
             }

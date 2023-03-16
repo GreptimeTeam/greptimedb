@@ -163,14 +163,14 @@ impl Instance {
             QueryStatement::Sql(Statement::Copy(copy_table)) => match copy_table {
                 CopyTable::To(copy_table) => {
                     let (catalog_name, schema_name, table_name) =
-                        table_idents_to_full_name(copy_table.table_name(), query_ctx.clone())?;
-                    let file_name = copy_table.file_name().to_string();
-
+                        table_idents_to_full_name(&copy_table.table_name, query_ctx.clone())?;
+                    let file_name = copy_table.file_name;
                     let req = CopyTableRequest {
                         catalog_name,
                         schema_name,
                         table_name,
                         file_name,
+                        connection: copy_table.connection,
                     };
 
                     self.sql_handler
