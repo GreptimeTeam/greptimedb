@@ -215,6 +215,7 @@ impl Instance {
     }
 
     pub async fn start(&self) -> Result<()> {
+        // FIXME(yingwen): Recover procedure manager after catalog manager is started.
         self.catalog_manager
             .start()
             .await
