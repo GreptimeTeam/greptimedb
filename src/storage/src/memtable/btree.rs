@@ -14,10 +14,10 @@
 
 use std::cmp::Ordering;
 use std::collections::{btree_map, BTreeMap};
-use std::fmt;
 use std::ops::Bound;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, RwLock};
+use std::{fmt, mem};
 
 use datatypes::data_type::DataType;
 use datatypes::prelude::*;
@@ -80,14 +80,19 @@ impl Memtable for BTreeMemtable {
     }
 
     fn write(&self, kvs: &KeyValues) -> Result<()> {
-        self.estimated_bytes
-            .fetch_add(kvs.estimated_memory_size(), AtomicOrdering::Relaxed);
-
-        let mut map = self.map.write().unwrap();
-        let iter_row = IterRow::new(kvs);
-        for (inner_key, row_value) in iter_row {
-            map.insert(inner_key, row_value);
+        let mut write_bytes = 0;
+        {
+            let mut map = self.map.write().unwrap();
+            let iter_row = IterRow::new(kvs);
+            for (inner_key, row_value) in iter_row {
+                write_bytes += inner_key.memory_size();
+                write_bytes += row_value.memory_size();
+                map.insert(inner_key, row_value);
+            }
         }
+
+        self.estimated_bytes
+            .fetch_add(write_bytes, AtomicOrdering::Relaxed);
 
         Ok(())
     }
@@ -400,11 +405,23 @@ impl InnerKey {
         self.index_in_batch = 0;
         self.op_type = OpType::min_type();
     }
+
+    fn memory_size(&self) -> usize {
+        let base_size = mem::size_of::<Self>();
+        let key_size: usize = self.row_key.iter().map(|v| v.memory_size()).sum();
+        base_size + key_size
+    }
 }
 
 #[derive(Clone, Debug)]
 struct RowValue {
     values: Vec<Value>,
+}
+
+impl RowValue {
+    fn memory_size(&self) -> usize {
+        self.values.iter().map(|v| v.memory_size()).sum()
+    }
 }
 
 trait RowsProvider {

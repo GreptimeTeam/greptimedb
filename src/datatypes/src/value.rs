@@ -14,6 +14,7 @@
 
 use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
+use std::mem;
 use std::str::FromStr;
 
 use arrow::datatypes::{DataType as ArrowDataType, Field};
@@ -248,6 +249,33 @@ impl Value {
         };
 
         Ok(scalar_value)
+    }
+
+    /// Returns the memory size of the value.
+    pub fn memory_size(&self) -> usize {
+        let base_size = mem::size_of::<Self>();
+        let heap_size = match self {
+            Value::String(v) => v.as_utf8().len(),
+            Value::Binary(v) => v.len(),
+            Value::List(list) => list.heap_size(),
+            Value::Boolean(_)
+            | Value::UInt8(_)
+            | Value::UInt16(_)
+            | Value::UInt32(_)
+            | Value::UInt64(_)
+            | Value::Int8(_)
+            | Value::Int16(_)
+            | Value::Int32(_)
+            | Value::Int64(_)
+            | Value::Float32(_)
+            | Value::Float64(_)
+            | Value::Date(_)
+            | Value::DateTime(_)
+            | Value::Null
+            | Value::Timestamp(_) => 0,
+        };
+
+        base_size + heap_size
     }
 }
 
@@ -492,6 +520,17 @@ impl ListValue {
             vs,
             Box::new(new_item_field(output_type.item_type().as_arrow_type())),
         ))
+    }
+
+    /// Returns the heap size of the [ListValue].
+    fn heap_size(&self) -> usize {
+        let vec_size = mem::size_of::<Vec<Value>>();
+        if let Some(items) = &self.items {
+            let items_size: usize = items.iter().map(|v| v.memory_size()).sum();
+            vec_size + items_size
+        } else {
+            vec_size
+        }
     }
 }
 
@@ -1626,5 +1665,53 @@ mod tests {
             ScalarValue::TimestampNanosecond(Some(1), None),
             timestamp_to_scalar_value(TimeUnit::Nanosecond, Some(1))
         );
+    }
+
+    #[test]
+    fn test_value_memory_size() {
+        let items = Some(Box::new(vec![Value::Int32(0), Value::Null]));
+        let values = [
+            Value::Null,
+            Value::Boolean(false),
+            Value::UInt8(0),
+            Value::UInt16(0),
+            Value::UInt32(0),
+            Value::UInt64(0),
+            Value::Int8(0),
+            Value::Int16(0),
+            Value::Int32(0),
+            Value::Int64(0),
+            Value::Float32(0.0.into()),
+            Value::Float64(0.0.into()),
+            Value::String(StringBytes::from("hello")),
+            Value::Binary(Bytes::from(vec![1, 2, 3])),
+            Value::Date(Date::new(0)),
+            Value::DateTime(DateTime::new(0)),
+            Value::Timestamp(Timestamp::new(1000, TimeUnit::Millisecond)),
+            Value::List(ListValue::new(items, ConcreteDataType::int32_datatype())),
+        ];
+        let expect_sizes = [
+            40,
+            40,
+            40,
+            40,
+            40,
+            40,
+            40,
+            40,
+            40,
+            40,
+            40,
+            40,
+            40 + 5, // base size + "hello"
+            40 + 3, // base size + bytes
+            40,
+            40,
+            40,
+            40 + 24 + 40 * 2, // base size + vec size + size of 2 values
+        ];
+
+        let actual_sizes: Vec<_> = values.iter().map(|v| v.memory_size()).collect();
+        assert_eq!(&expect_sizes[..], actual_sizes);
     }
 }

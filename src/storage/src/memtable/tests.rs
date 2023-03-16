@@ -241,8 +241,7 @@ fn write_iter_memtable_case(ctx: &TestContext) {
         &[(None, None), (Some(5), None), (None, None)], // values
     );
 
-    // 9 key value pairs (6 + 3).
-    assert_eq!(704, ctx.memtable.bytes_allocated());
+    assert_eq!(1872, ctx.memtable.bytes_allocated());
 
     let batch_sizes = [1, 4, 8, consts::READ_BATCH_SIZE];
     for batch_size in batch_sizes {
