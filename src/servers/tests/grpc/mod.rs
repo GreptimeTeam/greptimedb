@@ -24,6 +24,7 @@ use common_runtime::{Builder as RuntimeBuilder, Runtime};
 use servers::auth::UserProviderRef;
 use servers::error::{Result, StartGrpcSnafu, TcpBindSnafu};
 use servers::grpc::flight::FlightHandler;
+use servers::grpc::handler::GreptimeRequestHandler;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerRef;
 use servers::server::Server;
 use snafu::ResultExt;
@@ -54,11 +55,11 @@ impl MockGrpcServer {
     }
 
     fn create_service(&self) -> FlightServiceServer<impl FlightService> {
-        let service = FlightHandler::new(
+        let service = FlightHandler::new(Arc::new(GreptimeRequestHandler::new(
             self.query_handler.clone(),
             self.user_provider.clone(),
             self.runtime.clone(),
-        );
+        )));
         FlightServiceServer::new(service)
     }
 }
