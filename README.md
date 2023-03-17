@@ -148,7 +148,7 @@ You can always cleanup test database by removing `/tmp/greptimedb`.
 
 - [Pre-built Binaries](https://github.com/GreptimeTeam/greptimedb/releases):
   For Linux and MacOS, you can easily download pre-built binaries that are ready to use. In most cases, downloading the version without pyo3 is sufficient. However, if you plan to run scripts in CPython (and use Python packages like NumPy and Pandas), you will need to download the version with pyo3 and install a python with the same version as the python in the pyo3 version. We recommend using virtualenv for the installation process to manage multiple python versions.
-- [Docker Images](https://hub.docker.com/r/greptime/greptimedb): pre-built(recommended)
+- [Docker Images](https://hub.docker.com/r/greptime/greptimedb)(**recommended**): pre-built
   Docker images, this is the easiest way to try GreptimeDB. By default it runs cpython script with `pyo3_backend` enabled.
 - [`gtctl`](https://github.com/GreptimeTeam/gtctl): the command-line tool for
   Kubernetes deployment
