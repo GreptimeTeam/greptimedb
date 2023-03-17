@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 use std::sync::Arc;
-mod from_unixtime;
 mod to_unixtime;
 
 use to_unixtime::ToUnixtimeFunction;
@@ -22,7 +21,7 @@ use crate::scalars::function_registry::FunctionRegistry;
 pub(crate) struct TimestampFunction;
 
 impl TimestampFunction {
-    pub fn register(_registry: &FunctionRegistry) {
+    pub fn register(registry: &FunctionRegistry) {
         registry.register(Arc::new(ToUnixtimeFunction::default()));
     }
 }

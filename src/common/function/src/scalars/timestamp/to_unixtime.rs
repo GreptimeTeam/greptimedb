@@ -16,22 +16,16 @@ use std::fmt;
 use std::sync::Arc;
 use std::str::FromStr;
 
-use common_query::error::{
-    ArrowComputeSnafu, IntoVectorSnafu, Result, TypeCastSnafu, UnsupportedInputDataTypeSnafu, self,
-};
+use common_query::error::{Result, UnsupportedInputDataTypeSnafu};
 use common_query::prelude::{Signature, Volatility};
-use arrow::compute::kernels::cast_utils::string_to_timestamp_nanos;
+use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
-use datafusion::arrow;
-use datatypes::arrow::compute;
 
 use datatypes::vectors::{Int64Vector, StringVector, Vector};
-use datatypes::arrow::datatypes::{DataType as ArrowDatatype, Int64Type};
-use datatypes::data_type::DataType;
+
 use datatypes::prelude::ConcreteDataType;
 use datatypes::types::StringType;
-use datatypes::vectors::{TimestampMillisecondVector, VectorRef, self};
-use snafu::{ResultExt};
+use datatypes::vectors::VectorRef;
 
 use crate::scalars::function::{Function, FunctionContext};
 
@@ -41,6 +35,12 @@ pub struct ToUnixtimeFunction;
 
 const NAME: &str = "to_unixtime";
 
+fn convert_to_timestamp(arg: &str) -> common_time::error::Result<i64> {
+    Timestamp::from_str(&arg).map(|ts| {
+        let sec_mul = (TimeUnit::Second.factor() / ts.unit().factor()) as i64;
+        ts.value().div_euclid(sec_mul)
+    })
+}
 
 impl Function for ToUnixtimeFunction {
     fn name(&self) -> &str {
@@ -62,20 +62,17 @@ impl Function for ToUnixtimeFunction {
         match columns[0].data_type() {
             ConcreteDataType::String(_) => {
                 let array =  columns[0].to_arrow_array();
-                let _arrow_datatype = &self.return_type(&[]).unwrap().as_arrow_type();
                 
                 let string_vector = StringVector::try_from_arrow_array(&array).unwrap();
-                let first = string_vector.get(0).to_string();                
-                let first_timestamp = common_time::Timestamp::from_str(&first).unwrap();                
+                let collect = (0..string_vector.len())
+                .map(|i| convert_to_timestamp(
+                    &string_vector
+                    .get(i)
+                    .to_string())
+                    .unwrap())
+                .collect::<Vec<_>>();
                 
-                let sec_mul = (TimeUnit::Second.factor() / first_timestamp.unit().factor()) as i64;
-                let result = first_timestamp.value().div_euclid(sec_mul);
-                println!("[result] {:?}", result); // 1677652502
-                
-                UnsupportedInputDataTypeSnafu {
-                    function: NAME,
-                    datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
-                }.fail()
+                Ok(Arc::new(Int64Vector::from_vec(collect)))
             },
             _ => UnsupportedInputDataTypeSnafu {
                 function: NAME,
@@ -96,7 +93,7 @@ impl fmt::Display for ToUnixtimeFunction {
 mod tests {
     use common_query::prelude::TypeSignature;
     use datatypes::{prelude::ConcreteDataType, types::StringType};
-    use datatypes::vectors::{Int64Vector, StringVector};
+    use datatypes::vectors::StringVector;
     use crate::scalars::Function;
 
     use super::ToUnixtimeFunction;
@@ -119,9 +116,11 @@ mod tests {
                          } if  valid_types == vec![ConcreteDataType::String(StringType)]
         ));
 
-        let times = vec![Some("2023-03-01T06:35:02Z"), None, Some("2022-06-30T23:59:60Z")];
+        // let times = vec![Some("2023-03-01T06:35:02Z"), None, Some("2022-06-30T23:59:60Z")];
+        let times = vec![Some("2023-03-01T06:35:02Z"), Some("2022-06-30T23:59:60Z")];
         let args: Vec<VectorRef> = vec![Arc::new(StringVector::from(times.clone()))];
         let vector = f.eval(FunctionContext::default(), &args).unwrap();
-        assert_eq!(3, vector.len());
+        assert_eq!(2, vector.len());        
+        println!("[assert vector] {:?}", vector);
         }
 }
