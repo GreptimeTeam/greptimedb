@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use common_recordbatch::RecordBatch;
 use datatypes::vectors::{Helper, VectorRef};
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::types::{PyDict, PyList, PyModule, PyTuple};
 use pyo3::{pymethods, PyAny, PyCell, PyObject, PyResult, Python, ToPyObject};
 use snafu::{ensure, Backtrace, GenerateImplicitData, ResultExt};
@@ -164,6 +164,23 @@ coprocessor = copr
 /// Cast return of py script result to `Vec<VectorRef>`,
 /// constants will be broadcast to length of `col_len`
 fn py_any_to_vec(obj: &PyAny, col_len: usize) -> PyResult<Vec<VectorRef>> {
+    // 1. check if obj is of two types:
+    // tuples of PyVector
+    // a single PyVector
+    let check = if obj.is_instance_of::<PyTuple>()? {
+        let tuple = obj.downcast::<PyTuple>()?;
+
+        (0..tuple.len())
+            .map(|idx| tuple.get_item(idx).map(|i| i.is_instance_of::<PyVector>()))
+            .all(|i| i.and_then(|i| i).unwrap_or(false))
+    } else {
+        obj.is_instance_of::<PyVector>()?
+    };
+    if !check {
+        return Err(PyRuntimeError::new_err(format!(
+            "Expect a tuple of vectors or one single vector, found {obj}"
+        )));
+    }
     if let Ok(tuple) = obj.downcast::<PyTuple>() {
         let len = tuple.len();
         let v = (0..len)

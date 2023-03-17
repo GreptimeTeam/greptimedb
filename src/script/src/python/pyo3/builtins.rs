@@ -61,6 +61,7 @@ macro_rules! batch_import {
 #[pyo3(name = "greptime")]
 pub(crate) fn greptime_builtins(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_class::<PyVector>()?;
+    m.add_class::<PyDataFrame>()?;
     use self::query_engine;
     batch_import!(
         m,

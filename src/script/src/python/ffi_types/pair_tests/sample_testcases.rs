@@ -17,7 +17,9 @@ use std::f64::consts;
 use std::sync::Arc;
 
 use datatypes::prelude::ScalarVector;
-use datatypes::vectors::{BooleanVector, Float64Vector, Int32Vector, Int64Vector, VectorRef};
+use datatypes::vectors::{
+    BooleanVector, Float64Vector, Int32Vector, Int64Vector, UInt32Vector, VectorRef,
+};
 
 use super::CoprTestCase;
 use crate::python::ffi_types::pair_tests::CodeBlockTestCase;
@@ -71,6 +73,45 @@ def boolean_array() -> vector[f64]:
 "#
             .to_string(),
             expect: Some(ronish!("value": vector!(Float64Vector, [2.0f64]))),
+        },
+        CoprTestCase {
+            script: r#"
+@copr(returns=["value"], backend="rspy")
+def boolean_array() -> vector[f64]:
+    from greptime import vector
+    from greptime import query, dataframe
+    
+    try: 
+        print("query()=", query())
+    except KeyError as e:
+        print("query()=", e)
+    try: 
+        print("dataframe()=", dataframe())
+    except KeyError as e:
+        print("dataframe()=", e)
+
+    v = vector([1.0, 2.0, 3.0])
+    # This returns a vector([2.0])
+    return v[(v > 1) & (v < 3)]
+"#
+            .to_string(),
+            expect: Some(ronish!("value": vector!(Float64Vector, [2.0f64]))),
+        },
+        #[cfg(feature = "pyo3_backend")]
+        CoprTestCase {
+            script: r#"
+@copr(returns=["value"], backend="pyo3")
+def boolean_array() -> vector[f64]:
+    from greptime import vector
+    from greptime import query, dataframe, PyDataFrame
+    df = PyDataFrame.from_sql("select number from numbers limit 5")
+    print("df from sql=", df)
+    ret = df.collect()[0][0]
+    print("df.collect()=", ret)
+    return ret
+"#
+            .to_string(),
+            expect: Some(ronish!("value": vector!(UInt32Vector, [0, 1, 2, 3, 4]))),
         },
         #[cfg(feature = "pyo3_backend")]
         CoprTestCase {

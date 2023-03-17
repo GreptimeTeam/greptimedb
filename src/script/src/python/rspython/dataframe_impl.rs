@@ -24,6 +24,7 @@ pub(crate) fn init_data_frame(module_name: &str, vm: &mut VirtualMachine) {
 pub(crate) mod data_frame {
     use common_recordbatch::{DfRecordBatch, RecordBatch};
     use datafusion::dataframe::DataFrame as DfDataFrame;
+    use datafusion::execution::context::SessionContext;
     use datafusion_expr::Expr as DfExpr;
     use rustpython_vm::builtins::{PyList, PyListRef};
     use rustpython_vm::function::PyComparisonValue;
@@ -69,14 +70,14 @@ pub(crate) mod data_frame {
             let rb = query_engine.sql_to_rb(sql.clone()).map_err(|e| {
                 vm.new_runtime_error(format!("failed to execute sql: {:?}, error: {:?}", sql, e))
             })?;
-            let ctx = datafusion::execution::context::SessionContext::new();
+            let ctx = SessionContext::new();
             ctx.read_batch(rb.df_record_batch().clone())
                 .map_err(|e| vm.new_runtime_error(format!("{e:?}")))
                 .map(|df| df.into())
         }
         /// TODO(discord9): error handling
         fn from_record_batch(rb: &DfRecordBatch) -> crate::python::error::Result<Self> {
-            let ctx = datafusion::execution::context::SessionContext::new();
+            let ctx = SessionContext::new();
             let inner = ctx.read_batch(rb.clone()).context(DataFusionSnafu)?;
             Ok(Self { inner })
         }
