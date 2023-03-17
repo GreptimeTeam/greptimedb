@@ -343,20 +343,43 @@ pub(crate) enum Either {
     Rb(RecordBatches),
     AffectedRows(usize),
 }
+
+impl PyQueryEngine {
+    pub(crate) fn sql_to_rb(&self, sql: String) -> StdResult<RecordBatch, String> {
+        let res = self.query_with_new_thread(sql.clone())?;
+        match res {
+            Either::Rb(rbs) => {
+                let rb = compute::concat_batches(
+                    rbs.schema().arrow_schema(),
+                    rbs.iter().map(|r| r.df_record_batch()),
+                )
+                .map_err(|e| {
+                    format!(
+                        "Concat batches failed for query {sql}: {e}",
+                        sql = sql,
+                        e = e
+                    )
+                })?;
+                RecordBatch::try_from_df_record_batch(rbs.schema(), rb).map_err(|e|
+                    format!(
+                        "Convert datafusion record batch to record batch failed for query {sql}: {e}",
+                        sql = sql,
+                        e = e
+                    )
+                )
+            }
+            Either::AffectedRows(_) => Err(format!("Expect actual results from query {sql}")),
+        }
+    }
+}
+
 #[rspyclass]
 impl PyQueryEngine {
     pub(crate) fn from_weakref(inner: QueryEngineWeakRef) -> Self {
         Self { inner }
     }
-    #[cfg(feature = "pyo3_backend")]
-    pub(crate) fn get_ref(&self) -> Option<Arc<dyn QueryEngine>> {
-        self.inner.0.upgrade()
-    }
-    pub(crate) fn query_with_new_thread(
-        &self,
-        query: Option<Arc<dyn QueryEngine>>,
-        s: String,
-    ) -> StdResult<Either, String> {
+    pub(crate) fn query_with_new_thread(&self, s: String) -> StdResult<Either, String> {
+        let query = self.inner.0.upgrade();
         let thread_handle = std::thread::spawn(move || -> std::result::Result<_, String> {
             if let Some(engine) = query {
                 let stmt = QueryLanguageParser::parse_sql(&s).map_err(|e| e.to_string())?;
@@ -400,8 +423,7 @@ impl PyQueryEngine {
     /// return sql query results in List[List[PyVector]], or List[usize] for AffectedRows number if no recordbatches is returned
     #[pymethod]
     fn sql(&self, s: String, vm: &VirtualMachine) -> PyResult<PyListRef> {
-        let query = self.inner.0.upgrade();
-        self.query_with_new_thread(query, s)
+        self.query_with_new_thread(s)
             .map_err(|e| vm.new_system_error(e))
             .map(|rbs| match rbs {
                 Either::Rb(rbs) => {

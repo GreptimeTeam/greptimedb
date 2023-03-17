@@ -23,6 +23,7 @@ use snafu::ResultExt;
 
 use crate::python::error::DataFusionSnafu;
 use crate::python::ffi_types::PyVector;
+use crate::python::pyo3::builtins::query_engine;
 use crate::python::pyo3::utils::pyo3_obj_try_to_typed_scalar_value;
 use crate::python::utils::block_on_async;
 type PyExprRef = Py<PyExpr>;
@@ -50,14 +51,13 @@ impl PyDataFrame {
 #[pymethods]
 impl PyDataFrame {
     #[classmethod]
-    fn from_sql(_cls: &PyType, sql: String) -> PyResult<Self> {
-        block_on_async(async move {
-            let ctx = datafusion::execution::context::SessionContext::new();
-            ctx.sql(&sql).await
-        })
-        .map_err(|e| PyRuntimeError::new_err(format!("{e:?}")))?
-        .map_err(|e| PyRuntimeError::new_err(e.to_string()))
-        .map(|df| df.into())
+    fn from_sql(_cls: &PyType, py: Python, sql: String) -> PyResult<Self> {
+        let query = query_engine(py)?;
+        let rb = query.sql_to_rb(sql).map_err(PyRuntimeError::new_err)?;
+        let ctx = datafusion::execution::context::SessionContext::new();
+        ctx.read_batch(rb.df_record_batch().clone())
+            .map_err(|e| PyRuntimeError::new_err(format!("{e:?}")))
+            .map(Self::from)
     }
     fn __call__(&self) -> PyResult<Self> {
         Ok(self.clone())

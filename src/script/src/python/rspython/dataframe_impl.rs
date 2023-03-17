@@ -35,7 +35,7 @@ pub(crate) mod data_frame {
 
     use crate::python::error::DataFusionSnafu;
     use crate::python::ffi_types::PyVector;
-    use crate::python::rspython::builtins::greptime_builtin::lit;
+    use crate::python::rspython::builtins::greptime_builtin::{lit, query as get_query_engine};
     use crate::python::utils::block_on_async;
     #[rspyclass(module = "data_frame", name = "DataFrame")]
     #[derive(PyPayload, Debug, Clone)]
@@ -65,13 +65,14 @@ pub(crate) mod data_frame {
     impl PyDataFrame {
         #[pymethod]
         fn from_sql(sql: String, vm: &VirtualMachine) -> PyResult<Self> {
-            block_on_async(async move {
-                let ctx = datafusion::execution::context::SessionContext::new();
-                ctx.sql(&sql).await
-            })
-            .map_err(|e| vm.new_runtime_error(format!("{e:?}")))?
-            .map_err(|e| vm.new_runtime_error(e.to_string()))
-            .map(|df| df.into())
+            let query_engine = get_query_engine(vm)?;
+            let rb = query_engine.sql_to_rb(sql.clone()).map_err(|e| {
+                vm.new_runtime_error(format!("failed to execute sql: {:?}, error: {:?}", sql, e))
+            })?;
+            let ctx = datafusion::execution::context::SessionContext::new();
+            ctx.read_batch(rb.df_record_batch().clone())
+                .map_err(|e| vm.new_runtime_error(format!("{e:?}")))
+                .map(|df| df.into())
         }
         /// TODO(discord9): error handling
         fn from_record_batch(rb: &DfRecordBatch) -> crate::python::error::Result<Self> {

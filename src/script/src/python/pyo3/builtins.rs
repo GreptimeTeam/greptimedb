@@ -137,7 +137,7 @@ fn dataframe(py: Python) -> PyResult<PyDataFrame> {
 
 #[pyfunction]
 #[pyo3(name = "query")]
-fn query_engine(py: Python) -> PyResult<PyQueryEngine> {
+pub(crate) fn query_engine(py: Python) -> PyResult<PyQueryEngine> {
     let globals = get_globals(py)?;
     let query = globals
         .get_item("__query__")

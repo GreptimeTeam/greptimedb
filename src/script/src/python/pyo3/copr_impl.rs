@@ -31,9 +31,8 @@ use crate::python::pyo3::utils::{init_cpython_interpreter, pyo3_obj_try_to_typed
 impl PyQueryEngine {
     #[pyo3(name = "sql")]
     pub(crate) fn sql_pyo3(&self, py: Python<'_>, s: String) -> PyResult<PyObject> {
-        let query = self.get_ref();
         let res = self
-            .query_with_new_thread(query, s)
+            .query_with_new_thread(s)
             .map_err(PyValueError::new_err)?;
         match res {
             crate::python::ffi_types::copr::Either::Rb(rbs) => {

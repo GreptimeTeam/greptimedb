@@ -329,7 +329,7 @@ pub(crate) mod greptime_builtin {
     /// get `__query__` from globals and return it
     /// TODO(discord9): this is a terrible hack, we should find a better way to get `__query__`
     #[pyfunction]
-    fn query(vm: &VirtualMachine) -> PyResult<PyQueryEngine> {
+    pub(crate) fn query(vm: &VirtualMachine) -> PyResult<PyQueryEngine> {
         let query_engine = vm.current_globals().get_item("__query__", vm)?;
         let query_engine = query_engine.payload::<PyQueryEngine>().ok_or_else(|| {
             vm.new_type_error(format!("object {:?} is not a QueryEngine", query_engine))
