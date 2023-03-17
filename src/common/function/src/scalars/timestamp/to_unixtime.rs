@@ -14,16 +14,18 @@
 
 use std::fmt;
 use std::sync::Arc;
+use std::str::FromStr;
 
 use common_query::error::{
     ArrowComputeSnafu, IntoVectorSnafu, Result, TypeCastSnafu, UnsupportedInputDataTypeSnafu, self,
 };
 use common_query::prelude::{Signature, Volatility};
 use arrow::compute::kernels::cast_utils::string_to_timestamp_nanos;
+use common_time::timestamp::TimeUnit;
 use datafusion::arrow;
 use datatypes::arrow::compute;
 
-use datatypes::vectors::{Int64Vector, StringVector};
+use datatypes::vectors::{Int64Vector, StringVector, Vector};
 use datatypes::arrow::datatypes::{DataType as ArrowDatatype, Int64Type};
 use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
@@ -60,10 +62,16 @@ impl Function for ToUnixtimeFunction {
         match columns[0].data_type() {
             ConcreteDataType::String(_) => {
                 let array =  columns[0].to_arrow_array();
-                let _arrow_datatype = &self.return_type(&[]).unwrap().as_arrow_type();                
-                // TODO not sure how to implement the actual "2023-03-01T06:35:02Z" -> 1678269302 conversion
-                let try_from_arrow_array = TimestampMillisecondVector::try_from_arrow_array(array);
-                // left `UnsupportedInputDataTypeSnafu` here just to please the compilier
+                let _arrow_datatype = &self.return_type(&[]).unwrap().as_arrow_type();
+                
+                let string_vector = StringVector::try_from_arrow_array(&array).unwrap();
+                let first = string_vector.get(0).to_string();                
+                let first_timestamp = common_time::Timestamp::from_str(&first).unwrap();                
+                
+                let sec_mul = (TimeUnit::Second.factor() / first_timestamp.unit().factor()) as i64;
+                let result = first_timestamp.value().div_euclid(sec_mul);
+                println!("[result] {:?}", result); // 1677652502
+                
                 UnsupportedInputDataTypeSnafu {
                     function: NAME,
                     datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
