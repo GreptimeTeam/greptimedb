@@ -10,7 +10,8 @@ common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
 common-time = { path = "../common/time" }
 datatypes = { path = "../datatypes" }
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "3a715150563b89d5dfc81a5838eac1f66a5658a1" }
+# TODO(LFC): Use official repo when https://github.com/GreptimeTeam/greptime-proto/pull/15 get merged.
+greptime-proto = { git = "https://github.com/MichaelScofield/greptime-proto.git", rev = "38b89f99b71efa83976c59b2a5943cd765d2f709" }
 prost.workspace = true
 snafu = { version = "0.7", features = ["backtraces"] }
 tonic.workspace = true
