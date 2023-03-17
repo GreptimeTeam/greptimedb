@@ -47,8 +47,10 @@ impl Instance {
     }
 
     pub async fn stop(&self) -> Result<()> {
-        // TODO: handle frontend shutdown
-        Ok(())
+        self.frontend
+            .shutdown()
+            .await
+            .context(error::ShutdownFrontendSnafu)
     }
 }
 

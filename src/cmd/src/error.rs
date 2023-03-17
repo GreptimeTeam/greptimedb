@@ -26,8 +26,20 @@ pub enum Error {
         source: datanode::error::Error,
     },
 
+    #[snafu(display("Failed to shutdown datanode, source: {}", source))]
+    ShutdownDatanode {
+        #[snafu(backtrace)]
+        source: datanode::error::Error,
+    },
+
     #[snafu(display("Failed to start frontend, source: {}", source))]
     StartFrontend {
+        #[snafu(backtrace)]
+        source: frontend::error::Error,
+    },
+
+    #[snafu(display("Failed to shutdown frontend, source: {}", source))]
+    ShutdownFrontend {
         #[snafu(backtrace)]
         source: frontend::error::Error,
     },
@@ -40,6 +52,12 @@ pub enum Error {
 
     #[snafu(display("Failed to start meta server, source: {}", source))]
     StartMetaServer {
+        #[snafu(backtrace)]
+        source: meta_srv::error::Error,
+    },
+
+    #[snafu(display("Failed to shutdown meta server, source: {}", source))]
+    ShutdownMetaServer {
         #[snafu(backtrace)]
         source: meta_srv::error::Error,
     },
@@ -143,7 +161,10 @@ impl ErrorExt for Error {
         match self {
             Error::StartDatanode { source } => source.status_code(),
             Error::StartFrontend { source } => source.status_code(),
+            Error::ShutdownDatanode { source } => source.status_code(),
+            Error::ShutdownFrontend { source } => source.status_code(),
             Error::StartMetaServer { source } => source.status_code(),
+            Error::ShutdownMetaServer { source } => source.status_code(),
             Error::BuildMetaServer { source } => source.status_code(),
             Error::UnsupportedSelectorType { source, .. } => source.status_code(),
             Error::ReadConfig { .. } | Error::ParseConfig { .. } | Error::MissingConfig { .. } => {

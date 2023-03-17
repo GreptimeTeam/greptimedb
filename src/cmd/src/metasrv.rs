@@ -30,13 +30,14 @@ impl Instance {
         self.instance
             .start()
             .await
-            .context(error::StartMetaServerSnafu)?;
-        Ok(())
+            .context(error::StartMetaServerSnafu)
     }
 
     pub async fn stop(&self) -> Result<()> {
-        // TODO: handle metasrv shutdown
-        Ok(())
+        self.instance
+            .shutdown()
+            .await
+            .context(error::ShutdownMetaServerSnafu)
     }
 }
 

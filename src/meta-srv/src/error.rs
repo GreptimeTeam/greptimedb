@@ -15,12 +15,16 @@
 use std::string::FromUtf8Error;
 
 use common_error::prelude::*;
+use tokio::sync::mpsc::error::SendError;
 use tonic::codegen::http;
 use tonic::{Code, Status};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Failed to send shutdown signal"))]
+    SendShutdownSignal { source: SendError<()> },
+
     #[snafu(display("Error stream request next is None"))]
     StreamNone { backtrace: Backtrace },
 
@@ -312,6 +316,7 @@ impl ErrorExt for Error {
             | Error::LeaseGrant { .. }
             | Error::LockNotConfig { .. }
             | Error::ExceededRetryLimit { .. }
+            | Error::SendShutdownSignal { .. }
             | Error::StartGrpc { .. } => StatusCode::Internal,
             Error::EmptyKey { .. }
             | Error::MissingRequiredParameter { .. }
