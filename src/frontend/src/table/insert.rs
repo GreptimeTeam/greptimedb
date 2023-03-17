@@ -74,8 +74,7 @@ impl DistTable {
 
         let mut success = 0;
         for join in joins {
-            let object_result = join.await.context(error::JoinTaskSnafu)??;
-            let Output::AffectedRows(rows) = object_result else { unreachable!() };
+            let rows = join.await.context(error::JoinTaskSnafu)?? as usize;
             success += rows;
         }
         Ok(Output::AffectedRows(success))

@@ -47,7 +47,7 @@ impl DatanodeInstance {
         Self { table, db }
     }
 
-    pub(crate) async fn grpc_insert(&self, request: InsertRequest) -> client::Result<Output> {
+    pub(crate) async fn grpc_insert(&self, request: InsertRequest) -> client::Result<u32> {
         self.db.insert(request).await
     }
 
