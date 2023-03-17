@@ -18,7 +18,7 @@ use sqlparser::keywords::Keyword;
 
 use crate::error::{self, Result};
 use crate::parser::ParserContext;
-use crate::statements::copy::{CopyTable, CopyTableFrom, CopyTableTo, Format};
+use crate::statements::copy::{CopyTable, CopyTableArgument, Format};
 use crate::statements::statement::Statement;
 
 // COPY tbl TO 'output.parquet';
@@ -40,24 +40,24 @@ impl<'a> ParserContext<'a> {
                 })?;
 
         if self.parser.parse_keyword(Keyword::TO) {
-            self.parse_copy_table_to(table_name)
+            Ok(CopyTable::To(self.parse_copy_table_to(table_name)?))
         } else {
             self.parser
                 .expect_keyword(Keyword::FROM)
                 .context(error::SyntaxSnafu { sql: self.sql })?;
-            self.parse_copy_table_from(table_name)
+            Ok(CopyTable::From(self.parse_copy_table_from(table_name)?))
         }
     }
 
-    fn parse_copy_table_from(&mut self, table_name: ObjectName) -> Result<CopyTable> {
-        let uri = self
-            .parser
-            .parse_literal_string()
-            .with_context(|_| error::UnexpectedSnafu {
-                sql: self.sql,
-                expected: "a uri",
-                actual: self.peek_token_as_string(),
-            })?;
+    fn parse_copy_table_from(&mut self, table_name: ObjectName) -> Result<CopyTableArgument> {
+        let location =
+            self.parser
+                .parse_literal_string()
+                .with_context(|_| error::UnexpectedSnafu {
+                    sql: self.sql,
+                    expected: "a uri",
+                    actual: self.peek_token_as_string(),
+                })?;
 
         let options = self
             .parser
@@ -99,14 +99,17 @@ impl<'a> ParserContext<'a> {
                 }
             })
             .collect();
-
-        Ok(CopyTable::From(CopyTableFrom::new(
-            table_name, uri, format, pattern, connection,
-        )))
+        Ok(CopyTableArgument {
+            table_name,
+            format,
+            pattern,
+            connection,
+            location,
+        })
     }
 
-    fn parse_copy_table_to(&mut self, table_name: ObjectName) -> Result<CopyTable> {
-        let file_name =
+    fn parse_copy_table_to(&mut self, table_name: ObjectName) -> Result<CopyTableArgument> {
+        let location =
             self.parser
                 .parse_literal_string()
                 .with_context(|_| error::UnexpectedSnafu {
@@ -146,9 +149,13 @@ impl<'a> ParserContext<'a> {
             })
             .collect();
 
-        Ok(CopyTable::To(CopyTableTo::new(
-            table_name, file_name, format, connection,
-        )))
+        Ok(CopyTableArgument {
+            table_name,
+            format,
+            connection,
+            pattern: None,
+            location,
+        })
     }
 
     fn parse_option_string(value: Value) -> Option<String> {
@@ -197,7 +204,7 @@ mod tests {
                     assert_eq!("schema0", schema);
                     assert_eq!("tbl", table);
 
-                    let file_name = copy_table.file_name;
+                    let file_name = copy_table.location;
                     assert_eq!("tbl_file.parquet", file_name);
 
                     let format = copy_table.format;
@@ -240,7 +247,7 @@ mod tests {
                     assert_eq!("schema0", schema);
                     assert_eq!("tbl", table);
 
-                    let file_name = copy_table.from;
+                    let file_name = copy_table.location;
                     assert_eq!("tbl_file.parquet", file_name);
 
                     let format = copy_table.format;

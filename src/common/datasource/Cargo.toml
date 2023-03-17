@@ -1,0 +1,13 @@
+[package]
+name = "common-datasource"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+common-error = { path = "../error" }
+futures.workspace = true
+object-store = { path = "../../object-store" }
+regex = "1.7.1"
+snafu = { version = "0.7", features = ["backtraces"] }
+url = "2.3.1"
