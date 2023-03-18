@@ -121,11 +121,12 @@ jobs:
           sudo apt-get -y update
           sudo apt-get -y install libssl-dev pkg-config g++-aarch64-linux-gnu gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu wget
 
-      - name: Compile Python 3.10.10 from source for aarch64-linux
-        if: contains(matrix.arch, 'aarch64-unknown-linux-gnu') && contains(matrix.opts, 'pyo3_backend')
+      # FIXME(zyy17): Should we specify the version of python when building binary for darwin?
+      - name: Compile Python 3.10.10 from source for linux
+        if: contains(matrix.arch, 'linux') && contains(matrix.opts, 'pyo3_backend')
         run: |
           sudo chmod +x ./docker/aarch64/compile-python.sh
-          sudo ./docker/aarch64/compile-python.sh
+          sudo ./docker/aarch64/compile-python.sh ${{ matrix.arch }}
 
       - name: Install rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -144,13 +145,47 @@ jobs:
         if: contains(matrix.arch, 'aarch64-unknown-linux-gnu') && contains(matrix.opts, 'pyo3_backend')
         run: |
           # TODO(zyy17): We should make PYO3_CROSS_LIB_DIR configurable.
-          export PYO3_CROSS_LIB_DIR=$(pwd)/python_arm64_build/lib
+          export PYTHON_INSTALL_PATH_AMD64=${PWD}/python-3.10.10/amd64
+          export LD_LIBRARY_PATH=$PYTHON_INSTALL_PATH_AMD64/lib:$LD_LIBRARY_PATH
+          export LIBRARY_PATH=$PYTHON_INSTALL_PATH_AMD64/lib:$LIBRARY_PATH
+          export PATH=$PYTHON_INSTALL_PATH_AMD64/bin:$PATH
+
+          export PYO3_CROSS_LIB_DIR=${PWD}/python-3.10.10/aarch64
           echo "PYO3_CROSS_LIB_DIR: $PYO3_CROSS_LIB_DIR"
-          alias python=python3
+          alias python=$PYTHON_INSTALL_PATH_AMD64/bin/python3
+          alias pip=$PYTHON_INSTALL_PATH_AMD64/bin/python3-pip
+
+          cargo build --profile ${{ env.CARGO_PROFILE }} --locked --target ${{ matrix.arch }} ${{ matrix.opts }}
+
+      - name: Run cargo build with pyo3 for amd64-linux
+        if: contains(matrix.arch, 'x86_64-unknown-linux-gnu') && contains(matrix.opts, 'pyo3_backend')
+        run: |
+          export PYTHON_INSTALL_PATH_AMD64=${PWD}/python-3.10.10/amd64
+          export LD_LIBRARY_PATH=$PYTHON_INSTALL_PATH_AMD64/lib:$LD_LIBRARY_PATH
+          export LIBRARY_PATH=$PYTHON_INSTALL_PATH_AMD64/lib:$LIBRARY_PATH
+          export PATH=$PYTHON_INSTALL_PATH_AMD64/bin:$PATH
+          
+          echo "implementation=CPython" >> pyo3.config
+          echo "version=3.10" >> pyo3.config
+          echo "implementation=CPython" >> pyo3.config
+          echo "shared=true" >> pyo3.config
+          echo "abi3=true" >> pyo3.config
+          echo "lib_name=python3.10" >> pyo3.config
+          echo "lib_dir=$PYTHON_INSTALL_PATH_AMD64/lib" >> pyo3.config
+          echo "executable=$PYTHON_INSTALL_PATH_AMD64/bin/python3" >> pyo3.config
+          echo "pointer_width=64" >> pyo3.config
+          echo "build_flags=" >> pyo3.config
+          echo "suppress_build_script_link_lines=false" >> pyo3.config
+
+          cat pyo3.config
+          export PYO3_CONFIG_FILE=${PWD}/pyo3.config
+          alias python=$PYTHON_INSTALL_PATH_AMD64/bin/python3
+          alias pip=$PYTHON_INSTALL_PATH_AMD64/bin/python3-pip
+
           cargo build --profile ${{ env.CARGO_PROFILE }} --locked --target ${{ matrix.arch }} ${{ matrix.opts }}
 
       - name: Run cargo build
-        if: contains(matrix.arch, 'aarch64-unknown-linux-gnu') == false || contains(matrix.opts, 'pyo3_backend') == false
+        if: contains(matrix.arch, 'darwin') || contains(matrix.opts, 'pyo3_backend') == false
         run: cargo build --profile ${{ env.CARGO_PROFILE }} --locked --target ${{ matrix.arch }} ${{ matrix.opts }}
 
       - name: Calculate checksum and rename binary
