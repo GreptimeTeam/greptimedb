@@ -13,10 +13,13 @@
 // limitations under the License.
 
 //! Region manifest impl
+use async_trait::async_trait;
+
+use crate::error::Result;
 use crate::manifest::action::*;
 use crate::manifest::ManifestImpl;
 
-pub type RegionManifest = ManifestImpl<RegionMetaActionList>;
+pub type RegionManifest = ManifestImpl<RegionSnapshot, RegionMetaActionList>;
 
 #[cfg(test)]
 mod tests {

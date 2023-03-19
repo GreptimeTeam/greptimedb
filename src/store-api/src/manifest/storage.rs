@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 
@@ -53,3 +55,5 @@ pub trait ManifestLogStorage {
     /// Load the latest checkpoint
     async fn load_checkpoint(&self) -> Result<Option<(ManifestVersion, Vec<u8>)>, Self::Error>;
 }
+
+pub type ManifestLogStorageRef<E, I> = Arc<dyn ManifestLogStorage<Error = E, Iter = I>>;

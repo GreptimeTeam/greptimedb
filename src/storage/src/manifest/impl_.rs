@@ -25,17 +25,24 @@ use store_api::manifest::action::{self, ProtocolAction, ProtocolVersion};
 use store_api::manifest::*;
 
 use crate::error::{Error, ManifestProtocolForbidWriteSnafu, Result};
+use crate::manifest::checkpoint::Checkpointer;
 use crate::manifest::storage::{ManifestObjectStore, ObjectStoreLogIterator};
 
 #[derive(Clone, Debug)]
-pub struct ManifestImpl<M: MetaAction<Error = Error>> {
-    inner: Arc<ManifestImplInner<M>>,
+pub struct ManifestImpl<S: Snapshot<Error = Error>, M: MetaAction<Error = Error>> {
+    inner: Arc<ManifestImplInner<S, M>>,
+    checkpointer: Option<Arc<dyn Checkpointer<Snapshot = S, MetaAction = M>>>,
 }
 
-impl<M: MetaAction<Error = Error>> ManifestImpl<M> {
-    pub fn new(manifest_dir: &str, object_store: ObjectStore) -> Self {
+impl<S: Snapshot<Error = Error>, M: MetaAction<Error = Error>> ManifestImpl<S, M> {
+    pub fn new(
+        manifest_dir: &str,
+        object_store: ObjectStore,
+        checkpointer: Option<Arc<dyn Checkpointer<Snapshot = S, MetaAction = M>>>,
+    ) -> Self {
         ManifestImpl {
             inner: Arc::new(ManifestImplInner::new(manifest_dir, object_store)),
+            checkpointer,
         }
     }
 
@@ -46,8 +53,11 @@ impl<M: MetaAction<Error = Error>> ManifestImpl<M> {
 }
 
 #[async_trait]
-impl<M: 'static + MetaAction<Error = Error>> Manifest for ManifestImpl<M> {
+impl<S: 'static + Snapshot<Error = Error>, M: 'static + MetaAction<Error = Error>> Manifest
+    for ManifestImpl<S, M>
+{
     type Error = Error;
+    type Snapshot = S;
     type MetaAction = M;
     type MetaActionIterator = MetaActionIteratorImpl<M>;
 
@@ -63,8 +73,15 @@ impl<M: 'static + MetaAction<Error = Error>> Manifest for ManifestImpl<M> {
         self.inner.scan(start, end).await
     }
 
-    async fn checkpoint(&self) -> Result<ManifestVersion> {
+    async fn do_checkpoint(&self) -> Result<S> {
+        if let Some(cp) = &self.checkpointer {
+            return cp.do_checkpoint(&self).await;
+        }
         unimplemented!();
+    }
+
+    async fn last_snapshot(&self) -> Result<Option<S>> {
+        self.inner.last_snapshot().await
     }
 
     fn last_version(&self) -> ManifestVersion {
@@ -73,7 +90,7 @@ impl<M: 'static + MetaAction<Error = Error>> Manifest for ManifestImpl<M> {
 }
 
 #[derive(Debug)]
-struct ManifestImplInner<M: MetaAction<Error = Error>> {
+struct ManifestImplInner<S: Snapshot<Error = Error>, M: MetaAction<Error = Error>> {
     store: Arc<ManifestObjectStore>,
     version: AtomicU64,
     /// Current using protocol
@@ -81,7 +98,7 @@ struct ManifestImplInner<M: MetaAction<Error = Error>> {
     /// Current node supported protocols (reader_version, writer_version)
     supported_reader_version: ProtocolVersion,
     supported_writer_version: ProtocolVersion,
-    _phantom: PhantomData<M>,
+    _phantom: PhantomData<(S, M)>,
 }
 
 pub struct MetaActionIteratorImpl<M: MetaAction<Error = Error>> {
@@ -118,7 +135,7 @@ impl<M: MetaAction<Error = Error>> MetaActionIterator for MetaActionIteratorImpl
     }
 }
 
-impl<M: MetaAction<Error = Error>> ManifestImplInner<M> {
+impl<S: Snapshot<Error = Error>, M: MetaAction<Error = Error>> ManifestImplInner<S, M> {
     fn new(manifest_dir: &str, object_store: ObjectStore) -> Self {
         let (reader_version, writer_version) = action::supported_protocol_version();
 
@@ -200,5 +217,13 @@ impl<M: MetaAction<Error = Error>> ManifestImplInner<M> {
             last_protocol: None,
             _phantom: PhantomData,
         })
+    }
+
+    async fn last_snapshot(&self) -> Result<Option<S>> {
+        let protocol = self.protocol.load();
+        let last_checkpoint = self.store.load_checkpoint().await?;
+        last_checkpoint
+            .map(|(_, bytes)| S::decode(&bytes, protocol.min_reader_version))
+            .transpose()
     }
 }

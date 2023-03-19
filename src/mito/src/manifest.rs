@@ -16,10 +16,29 @@
 pub mod action;
 
 use storage::manifest::ManifestImpl;
+use store_api::manifest::action::{ProtocolAction, ProtocolVersion};
+use store_api::manifest::Snapshot;
 
 use crate::manifest::action::TableMetaActionList;
 
-pub type TableManifest = ManifestImpl<TableMetaActionList>;
+#[derive(Debug, Clone)]
+pub struct NoopSnapshot {}
+
+impl Snapshot for NoopSnapshot {
+    type Error = storage::error::Error;
+
+    fn set_protocol(&mut self, action: ProtocolAction) {}
+
+    fn encode(&self) -> Result<Vec<u8>, Self::Error> {
+        unreachable!();
+    }
+
+    fn decode(bs: &[u8], reader_version: ProtocolVersion) -> Result<Self, Self::Error> {
+        unreachable!();
+    }
+}
+
+pub type TableManifest = ManifestImpl<NoopSnapshot, TableMetaActionList>;
 
 #[cfg(test)]
 mod tests {
