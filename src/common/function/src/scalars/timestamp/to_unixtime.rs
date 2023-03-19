@@ -20,6 +20,7 @@ use common_query::error::{Result, UnsupportedInputDataTypeSnafu};
 use common_query::prelude::{Signature, Volatility};
 use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
+// use common_telemetry::error;
 
 use datatypes::vectors::{Int64Vector, StringVector, Vector};
 
@@ -35,11 +36,21 @@ pub struct ToUnixtimeFunction;
 
 const NAME: &str = "to_unixtime";
 
-fn convert_to_timestamp(arg: &str) -> common_time::error::Result<i64> {
-    Timestamp::from_str(&arg).map(|ts| {
-        let sec_mul = (TimeUnit::Second.factor() / ts.unit().factor()) as i64;
-        ts.value().div_euclid(sec_mul)
-    })
+fn to_timestamp(arg: &str) -> Option<Timestamp> {
+    match Timestamp::from_str(&arg) {
+        Ok(ts) => {
+            Some(ts)
+        },
+        Err(_err) => {
+            // error!("Failed to parse {} to Timestamp value", arg);
+            None
+        }
+    }
+}
+
+fn to_seconds(ts: Timestamp) -> i64 {
+    let sec_mul = (TimeUnit::Second.factor() / ts.unit().factor()) as i64;
+    ts.value().div_euclid(sec_mul)
 }
 
 impl Function for ToUnixtimeFunction {
@@ -64,15 +75,13 @@ impl Function for ToUnixtimeFunction {
                 let array =  columns[0].to_arrow_array();
                 
                 let string_vector = StringVector::try_from_arrow_array(&array).unwrap();
-                let collect = (0..string_vector.len())
-                .map(|i| convert_to_timestamp(
-                    &string_vector
-                    .get(i)
-                    .to_string())
-                    .unwrap())
-                .collect::<Vec<_>>();
-                
-                Ok(Arc::new(Int64Vector::from_vec(collect)))
+                let result = 
+                    (0..string_vector.len())
+                    .filter_map(|i| to_timestamp(&string_vector.get(i).to_string()))
+                    .map(|ts| to_seconds(ts))
+                    .collect::<Vec<_>>();                
+
+                Ok(Arc::new(Int64Vector::from_vec(result)))
             },
             _ => UnsupportedInputDataTypeSnafu {
                 function: NAME,
@@ -92,6 +101,7 @@ impl fmt::Display for ToUnixtimeFunction {
 #[cfg(test)]
 mod tests {
     use common_query::prelude::TypeSignature;
+    use datatypes::value::Value;
     use datatypes::{prelude::ConcreteDataType, types::StringType};
     use datatypes::vectors::StringVector;
     use crate::scalars::Function;
@@ -116,11 +126,22 @@ mod tests {
                          } if  valid_types == vec![ConcreteDataType::String(StringType)]
         ));
 
-        // let times = vec![Some("2023-03-01T06:35:02Z"), None, Some("2022-06-30T23:59:60Z")];
-        let times = vec![Some("2023-03-01T06:35:02Z"), Some("2022-06-30T23:59:60Z")];
+        let times = vec![Some("2023-03-01T06:35:02Z"), None, Some("2022-06-30T23:59:60Z")];
+        let results: Vec<i64> = vec![1677652502, 1656633600];
         let args: Vec<VectorRef> = vec![Arc::new(StringVector::from(times.clone()))];
         let vector = f.eval(FunctionContext::default(), &args).unwrap();
         assert_eq!(2, vector.len());        
         println!("[assert vector] {:?}", vector);
+        
+        for i in 0..vector.len() {
+            let v = vector.get(i);
+            match v {
+                Value::Int64(ts) => {
+                    let get = *results.get(i).unwrap();
+                    assert_eq!(ts, get);
+                }
+                _ => unreachable!(),
+            }
+        }
         }
 }
