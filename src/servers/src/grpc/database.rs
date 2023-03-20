@@ -15,10 +15,12 @@
 use std::sync::Arc;
 
 use api::v1::greptime_database_server::GreptimeDatabase;
-use api::v1::{greptime_response, AffectedRows, GreptimeRequest, GreptimeResponse};
+use api::v1::greptime_response::Response as RawResponse;
+use api::v1::{AffectedRows, GreptimeRequest, GreptimeResponse};
 use async_trait::async_trait;
 use common_query::Output;
-use tonic::{Request, Response, Status};
+use futures::StreamExt;
+use tonic::{Request, Response, Status, Streaming};
 
 use crate::grpc::handler::GreptimeRequestHandler;
 use crate::grpc::TonicResult;
@@ -44,13 +46,40 @@ impl GreptimeDatabase for DatabaseService {
         let response = match output {
             Output::AffectedRows(rows) => GreptimeResponse {
                 header: None,
-                response: Some(greptime_response::Response::AffectedRows(AffectedRows {
-                    value: rows as _,
-                })),
+                response: Some(RawResponse::AffectedRows(AffectedRows { value: rows as _ })),
             },
             Output::Stream(_) | Output::RecordBatches(_) => {
-                return Err(Status::unimplemented("GreptimeDatabase::handle for query"));
+                return Err(Status::unimplemented("GreptimeDatabase::Handle for query"));
             }
+        };
+        Ok(Response::new(response))
+    }
+
+    async fn handle_requests(
+        &self,
+        request: Request<Streaming<GreptimeRequest>>,
+    ) -> Result<Response<GreptimeResponse>, Status> {
+        let mut affected_rows = 0;
+
+        let mut stream = request.into_inner();
+        while let Some(request) = stream.next().await {
+            let request = request?;
+            let output = self.handler.handle_request(request).await?;
+            match output {
+                Output::AffectedRows(rows) => affected_rows += rows,
+                Output::Stream(_) | Output::RecordBatches(_) => {
+                    return Err(Status::unimplemented(
+                        "GreptimeDatabase::HandleRequests for query",
+                    ));
+                }
+            }
+        }
+
+        let response = GreptimeResponse {
+            header: None,
+            response: Some(RawResponse::AffectedRows(AffectedRows {
+                value: affected_rows as u32,
+            })),
         };
         Ok(Response::new(response))
     }
