@@ -3084,7 +3084,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/MichaelScofield/greptime-proto.git?rev=7d0358eee4fdc252faf6da20d6595d71977cfbf7#7d0358eee4fdc252faf6da20d6595d71977cfbf7"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=dcf253314a05c9821bd90e7e09a168256c84f250#dcf253314a05c9821bd90e7e09a168256c84f250"
 dependencies = [
  "prost",
  "tonic",
@@ -6893,7 +6893,6 @@ dependencies = [
  "hyper",
  "influxdb_line_protocol",
  "metrics",
- "mito",
  "mysql_async",
  "num_cpus",
  "once_cell",
