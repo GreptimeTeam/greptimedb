@@ -32,7 +32,7 @@ pub enum Error {
     DecodeInsert { source: DecodeError },
 
     #[snafu(display("Illegal insert data"))]
-    IllegalInsertData,
+    IllegalInsertData { backtrace: Backtrace },
 
     #[snafu(display("Column datatype error, source: {}", source))]
     ColumnDataType {
