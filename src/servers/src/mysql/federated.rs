@@ -273,6 +273,7 @@ fn check_others(query: &str, query_ctx: QueryContextRef) -> Option<Output> {
     recordbatches.map(Output::RecordBatches)
 }
 
+// TODO(yingwen): Skip check for insert statements
 // Check whether the query is a federated or driver setup command,
 // and return some faked results if there are any.
 pub(crate) fn check(query: &str, query_ctx: QueryContextRef) -> Option<Output> {

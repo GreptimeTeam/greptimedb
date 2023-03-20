@@ -39,7 +39,7 @@ use tokio::io::AsyncWrite;
 
 use crate::auth::{Identity, Password, UserProviderRef};
 use crate::error::{self, InvalidPrepareStatementSnafu, Result};
-use crate::mysql::writer::MysqlResultWriter;
+use crate::mysql::writer;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
 // An intermediate shim for executing MySQL queries.
@@ -208,7 +208,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         log::debug!("execute replaced query: {}", query);
 
         let outputs = self.do_query(&query).await;
-        write_output(w, &query, outputs).await?;
+        writer::write_output(w, &query, outputs).await?;
 
         Ok(())
     }
@@ -227,10 +227,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         writer: QueryResultWriter<'a, W>,
     ) -> Result<()> {
         let outputs = self.do_query(query).await;
-        let mut writer = MysqlResultWriter::new(writer);
-        for output in outputs {
-            writer.write(query, output).await?;
-        }
+        writer::write_output(writer, &query, outputs).await?;
         Ok(())
     }
 
@@ -316,18 +313,6 @@ async fn validate_query(query: &str) -> Result<Statement> {
     );
 
     Ok(statement)
-}
-
-async fn write_output<'a, W: AsyncWrite + Send + Sync + Unpin>(
-    w: QueryResultWriter<'a, W>,
-    query: &str,
-    outputs: Vec<Result<Output>>,
-) -> Result<()> {
-    let mut writer = MysqlResultWriter::new(w);
-    for output in outputs {
-        writer.write(query, output).await?;
-    }
-    Ok(())
 }
 
 // dummy columns to satisfy opensrv_mysql, just the number of params is useful
