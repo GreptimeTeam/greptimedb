@@ -82,7 +82,7 @@ pub struct RegionEdit {
 /// The region version snapshot
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionVersion {
-    pub region_version: VersionNumber,
+    pub manifest_version: ManifestVersion,
     pub flushed_sequence: Option<SequenceNumber>,
     pub files: HashMap<FileId, FileMeta>,
 }
@@ -120,12 +120,9 @@ impl RegionManifestBuilder {
         self.committed_sequence = change.committed_sequence;
     }
 
-    pub fn apply_edit(&mut self, edit: RegionEdit) {
+    pub fn apply_edit(&mut self, manifest_version: ManifestVersion, edit: RegionEdit) {
         if let Some(version) = &mut self.version {
-            assert!(edit.region_version >= version.region_version);
-            assert!(edit.flushed_sequence >= version.flushed_sequence);
-
-            version.region_version = edit.region_version;
+            version.manifest_version = manifest_version;
             version.flushed_sequence = edit.flushed_sequence;
             for file in edit.files_to_add {
                 version.files.insert(file.file_id, file);
@@ -135,7 +132,7 @@ impl RegionManifestBuilder {
             }
         } else {
             self.version = Some(RegionVersion {
-                region_version: edit.region_version,
+                manifest_version,
                 flushed_sequence: edit.flushed_sequence,
                 files: edit
                     .files_to_add
@@ -172,6 +169,10 @@ impl Snapshot for RegionSnapshot {
 
     fn set_protocol(&mut self, action: ProtocolAction) {
         self.protocol = action;
+    }
+
+    fn last_version(&self) -> ManifestVersion {
+        self.last_version
     }
 
     fn encode(&self) -> Result<Vec<u8>> {

@@ -17,7 +17,7 @@ pub mod action;
 
 use storage::manifest::ManifestImpl;
 use store_api::manifest::action::{ProtocolAction, ProtocolVersion};
-use store_api::manifest::Snapshot;
+use store_api::manifest::{ManifestVersion, Snapshot};
 
 use crate::manifest::action::TableMetaActionList;
 
@@ -28,6 +28,10 @@ impl Snapshot for NoopSnapshot {
     type Error = storage::error::Error;
 
     fn set_protocol(&mut self, _action: ProtocolAction) {}
+
+    fn last_version(&self) -> ManifestVersion {
+        unreachable!();
+    }
 
     fn encode(&self) -> Result<Vec<u8>, Self::Error> {
         unreachable!();

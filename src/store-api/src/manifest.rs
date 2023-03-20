@@ -55,6 +55,9 @@ pub trait Snapshot: Send + Sync + Clone + std::fmt::Debug {
     /// Set a protocol action into snapshot
     fn set_protocol(&mut self, action: ProtocolAction);
 
+    /// The last compacted action's version of snapshot
+    fn last_version(&self) -> ManifestVersion;
+
     /// Encode this snapshot into a byte vector
     fn encode(&self) -> Result<Vec<u8>, Self::Error>;
 

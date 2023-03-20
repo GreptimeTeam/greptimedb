@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
-use common_telemetry::logging;
+use common_telemetry::{debug, logging};
 use object_store::ObjectStore;
 use snafu::ensure;
 use store_api::manifest::action::{self, ProtocolAction, ProtocolVersion};
@@ -29,10 +29,13 @@ use crate::manifest::action::RegionSnapshot;
 use crate::manifest::checkpoint::Checkpointer;
 use crate::manifest::storage::{ManifestObjectStore, ObjectStoreLogIterator};
 
+const CHECKPOINT_ACTIONS_MARGIN: u64 = 10;
+
 #[derive(Clone, Debug)]
 pub struct ManifestImpl<S: Snapshot<Error = Error>, M: MetaAction<Error = Error>> {
     inner: Arc<ManifestImplInner<S, M>>,
     checkpointer: Option<Arc<dyn Checkpointer<Snapshot = S, MetaAction = M>>>,
+    last_checkpoint_version: Arc<AtomicU64>,
 }
 
 impl<S: Snapshot<Error = Error>, M: MetaAction<Error = Error>> ManifestImpl<S, M> {
@@ -44,7 +47,17 @@ impl<S: Snapshot<Error = Error>, M: MetaAction<Error = Error>> ManifestImpl<S, M
         ManifestImpl {
             inner: Arc::new(ManifestImplInner::new(manifest_dir, object_store)),
             checkpointer,
+            last_checkpoint_version: Arc::new(AtomicU64::new(MIN_VERSION)),
         }
+    }
+
+    pub fn checkpointer(&self) -> &Option<Arc<dyn Checkpointer<Snapshot = S, MetaAction = M>>> {
+        &self.checkpointer
+    }
+
+    pub fn set_last_checkpoint_version(&self, version: ManifestVersion) {
+        self.last_checkpoint_version
+            .store(version, Ordering::Relaxed);
     }
 
     /// Update inner state.
@@ -63,7 +76,6 @@ impl<S: Snapshot<Error = Error>, M: MetaAction<Error = Error>> ManifestImpl<S, M
             }
         );
         let bytes = snapshot.encode()?;
-
         self.manifest_store()
             .save_checkpoint(snapshot.last_version, &bytes)
             .await
@@ -85,7 +97,14 @@ impl<S: 'static + Snapshot<Error = Error>, M: 'static + MetaAction<Error = Error
     type MetaActionIterator = MetaActionIteratorImpl<M>;
 
     async fn update(&self, action_list: M) -> Result<ManifestVersion> {
-        self.inner.save(action_list).await
+        let version = self.inner.save(action_list).await?;
+        if version - self.last_checkpoint_version.load(Ordering::Relaxed)
+            >= CHECKPOINT_ACTIONS_MARGIN
+        {
+            let s = self.do_checkpoint().await?;
+            debug!("Manifest checkpoint, snapshot: {:#?}", s);
+        }
+        Ok(version)
     }
 
     async fn scan(
@@ -98,7 +117,11 @@ impl<S: 'static + Snapshot<Error = Error>, M: 'static + MetaAction<Error = Error
 
     async fn do_checkpoint(&self) -> Result<Option<S>> {
         if let Some(cp) = &self.checkpointer {
-            return cp.do_checkpoint(self).await;
+            let snapshot = cp.do_checkpoint(self).await?;
+            if let Some(snapshot) = &snapshot {
+                self.set_last_checkpoint_version(snapshot.last_version());
+            }
+            return Ok(snapshot);
         }
         UnsupportedCheckpointSnafu {}.fail()
     }

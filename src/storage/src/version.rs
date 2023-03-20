@@ -227,6 +227,26 @@ impl Version {
         self.flushed_sequence
     }
 
+    pub fn apply_snapshot(
+        &mut self,
+        flushed_sequence: Option<SequenceNumber>,
+        manifest_version: ManifestVersion,
+        files: impl Iterator<Item = FileMeta>,
+    ) {
+        self.flushed_sequence = flushed_sequence.unwrap_or(self.flushed_sequence);
+        self.manifest_version = manifest_version;
+        let ssts = self.ssts.merge(files, std::iter::empty());
+        info!(
+            "After apply snapshot, region: {}, flushed_sequence: {}, manifest_version: {}, SST files: {:?}",
+            self.metadata.id(),
+            self.flushed_sequence,
+            self.manifest_version,
+            ssts
+        );
+
+        self.ssts = Arc::new(ssts);
+    }
+
     pub fn apply_edit(&mut self, edit: VersionEdit) {
         let flushed_sequence = edit.flushed_sequence.unwrap_or(self.flushed_sequence);
         if self.flushed_sequence < flushed_sequence {

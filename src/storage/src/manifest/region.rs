@@ -13,12 +13,17 @@
 // limitations under the License.
 
 //! Region manifest impl
+use std::any::Any;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_telemetry::info;
 use object_store::ObjectStore;
 use store_api::manifest::action::ProtocolAction;
-use store_api::manifest::{Manifest, ManifestLogStorage, MetaActionIterator, MIN_VERSION};
+use store_api::manifest::{
+    Manifest, ManifestLogStorage, ManifestVersion, MetaActionIterator, MIN_VERSION,
+};
 
 use crate::error::Result;
 use crate::manifest::action::*;
@@ -28,9 +33,16 @@ use crate::manifest::ManifestImpl;
 pub type RegionManifest = ManifestImpl<RegionSnapshot, RegionMetaActionList>;
 
 #[derive(Debug)]
-pub struct RegionManifestCheckpointer {}
+pub struct RegionManifestCheckpointer {
+    flushed_manifest_version: AtomicU64,
+}
 
-impl RegionManifestCheckpointer {}
+impl RegionManifestCheckpointer {
+    pub(crate) fn set_flushed_manifest_version(&self, manifest_version: ManifestVersion) {
+        self.flushed_manifest_version
+            .store(manifest_version, Ordering::Relaxed);
+    }
+}
 
 #[async_trait]
 impl Checkpointer for RegionManifestCheckpointer {
@@ -58,7 +70,15 @@ impl Checkpointer for RegionManifestCheckpointer {
                 )
             };
 
-        let mut iter = manifest.scan(start_version, current_version).await?;
+        // Checkpoint can't exceed over flushed manifest version.
+        // We have to keep the region metadata which are not flushed for replaying WAL.
+        let end_version =
+            current_version.min(self.flushed_manifest_version.load(Ordering::Relaxed));
+        if start_version == end_version {
+            return Ok(None);
+        }
+
+        let mut iter = manifest.scan(start_version, end_version).await?;
 
         let mut last_version = start_version;
         let mut compacted_actions = 0;
@@ -66,7 +86,7 @@ impl Checkpointer for RegionManifestCheckpointer {
             for action in action_list.actions {
                 match action {
                     RegionMetaAction::Change(c) => manifest_builder.apply_change(c),
-                    RegionMetaAction::Edit(e) => manifest_builder.apply_edit(e),
+                    RegionMetaAction::Edit(e) => manifest_builder.apply_edit(version, e),
                     RegionMetaAction::Protocol(p) => protocol = p,
                     _ => todo!(),
                 }
@@ -93,7 +113,13 @@ impl Checkpointer for RegionManifestCheckpointer {
             .delete(start_version, last_version + 1)
             .await?;
 
+        info!("Region manifest checkpoint, start_version: {}, last_version: {}, compacted actions: {}", start_version, last_version, compacted_actions);
+
         Ok(Some(snapshot))
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -102,8 +128,21 @@ impl RegionManifest {
         Self::new(
             manifest_dir,
             object_store,
-            Some(Arc::new(RegionManifestCheckpointer {})),
+            Some(Arc::new(RegionManifestCheckpointer {
+                flushed_manifest_version: AtomicU64::new(0),
+            })),
         )
+    }
+
+    // Update flushed manifest version in checkpointer
+    pub fn set_flushed_manifest_version(&self, manifest_version: ManifestVersion) {
+        if let Some(checkpointer) = self.checkpointer() {
+            checkpointer
+                .as_any()
+                .downcast_ref::<RegionManifestCheckpointer>()
+                .expect("Failed to downcast region checkpointer")
+                .set_flushed_manifest_version(manifest_version);
+        }
     }
 }
 
