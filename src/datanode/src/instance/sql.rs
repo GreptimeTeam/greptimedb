@@ -28,12 +28,10 @@ use servers::prom::PromHandler;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::prelude::*;
 use sql::ast::ObjectName;
-use sql::statements::copy::CopyTable;
+use sql::statements::copy::{CopyTable, CopyTableArgument};
 use sql::statements::statement::Statement;
 use table::engine::TableReference;
-use table::requests::{
-    CopyTableFromRequest, CopyTableRequest, CreateDatabaseRequest, DropTableRequest,
-};
+use table::requests::{CopyDirection, CopyTableRequest, CreateDatabaseRequest, DropTableRequest};
 
 use crate::error::{
     self, BumpTableIdSnafu, ExecuteSqlSnafu, ExecuteStatementSnafu, PlanStatementSnafu, Result,
@@ -160,39 +158,54 @@ impl Instance {
             QueryStatement::Sql(Statement::ShowCreateTable(_show_create_table)) => {
                 unimplemented!("SHOW CREATE TABLE is unimplemented yet");
             }
-            QueryStatement::Sql(Statement::Copy(copy_table)) => match copy_table {
-                CopyTable::To(copy_table) => {
-                    let (catalog_name, schema_name, table_name) =
-                        table_idents_to_full_name(&copy_table.table_name, query_ctx.clone())?;
-                    let file_name = copy_table.file_name;
-                    let req = CopyTableRequest {
-                        catalog_name,
-                        schema_name,
-                        table_name,
-                        file_name,
-                        connection: copy_table.connection,
-                    };
+            QueryStatement::Sql(Statement::Copy(copy_table)) => {
+                let req = match copy_table {
+                    CopyTable::To(copy_table) => {
+                        let CopyTableArgument {
+                            location,
+                            connection,
+                            pattern,
+                            table_name,
+                            ..
+                        } = copy_table;
+                        let (catalog_name, schema_name, table_name) =
+                            table_idents_to_full_name(&table_name, query_ctx.clone())?;
+                        CopyTableRequest {
+                            catalog_name,
+                            schema_name,
+                            table_name,
+                            location,
+                            connection,
+                            pattern,
+                            direction: CopyDirection::Export,
+                        }
+                    }
+                    CopyTable::From(copy_table) => {
+                        let CopyTableArgument {
+                            location,
+                            connection,
+                            pattern,
+                            table_name,
+                            ..
+                        } = copy_table;
+                        let (catalog_name, schema_name, table_name) =
+                            table_idents_to_full_name(&table_name, query_ctx.clone())?;
+                        CopyTableRequest {
+                            catalog_name,
+                            schema_name,
+                            table_name,
+                            location,
+                            connection,
+                            pattern,
+                            direction: CopyDirection::Import,
+                        }
+                    }
+                };
 
-                    self.sql_handler
-                        .execute(SqlRequest::CopyTable(req), query_ctx)
-                        .await
-                }
-                CopyTable::From(copy_table) => {
-                    let (catalog_name, schema_name, table_name) =
-                        table_idents_to_full_name(&copy_table.table_name, query_ctx.clone())?;
-                    let req = CopyTableFromRequest {
-                        catalog_name,
-                        schema_name,
-                        table_name,
-                        connection: copy_table.connection,
-                        pattern: copy_table.pattern,
-                        from: copy_table.from,
-                    };
-                    self.sql_handler
-                        .execute(SqlRequest::CopyTableFrom(req), query_ctx)
-                        .await
-                }
-            },
+                self.sql_handler
+                    .execute(SqlRequest::CopyTable(req), query_ctx)
+                    .await
+            }
             QueryStatement::Sql(Statement::Query(_))
             | QueryStatement::Sql(Statement::Explain(_))
             | QueryStatement::Sql(Statement::Use(_))
