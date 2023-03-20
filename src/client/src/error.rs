@@ -66,12 +66,8 @@ pub enum Error {
         source: common_grpc::error::Error,
     },
 
-    /// Error deserialized from gRPC metadata
-    #[snafu(display("{}", msg))]
-    ExternalError { code: StatusCode, msg: String },
-
     // Server error carried in Tonic Status's metadata.
-    #[snafu(display("Server Error: {}, StatusCode = {}", msg, code))]
+    #[snafu(display("{}", msg))]
     Server { code: StatusCode, msg: String },
 
     #[snafu(display("Illegal Database response: {err_msg}"))]
@@ -94,7 +90,6 @@ impl ErrorExt for Error {
                 source.status_code()
             }
             Error::IllegalGrpcClientState { .. } => StatusCode::Unexpected,
-            Error::ExternalError { code, .. } => *code,
         }
     }
 
