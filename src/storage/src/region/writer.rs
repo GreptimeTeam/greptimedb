@@ -22,7 +22,7 @@ use futures::TryStreamExt;
 use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::manifest::{Manifest, ManifestVersion, MetaAction};
-use store_api::storage::{AlterRequest, SequenceNumber, WriteContext, WriteResponse};
+use store_api::storage::{AlterRequest, FlushContext, SequenceNumber, WriteContext, WriteResponse};
 use tokio::sync::Mutex;
 
 use crate::background::JobHandle;
@@ -261,12 +261,24 @@ impl RegionWriter {
     }
 
     /// Flush task manually  
-    pub async fn flush<S: LogStore>(&self, writer_ctx: WriterContext<'_, S>) -> Result<()> {
+    pub async fn flush<S: LogStore>(
+        &self,
+        writer_ctx: WriterContext<'_, S>,
+        ctx: &FlushContext,
+    ) -> Result<()> {
         let mut inner = self.inner.lock().await;
 
         ensure!(!inner.is_closed(), error::ClosedRegionSnafu);
 
-        inner.manual_flush(writer_ctx).await
+        inner.manual_flush(writer_ctx).await?;
+
+        if ctx.wait {
+            if let Some(handle) = inner.flush_handle.take() {
+                handle.join().await?;
+            }
+        }
+
+        Ok(())
     }
 
     /// Cancel flush task if any
@@ -278,19 +290,6 @@ impl RegionWriter {
                 .await
                 .map_err(BoxedError::new)
                 .context(error::CancelFlushSnafu)?;
-        }
-
-        Ok(())
-    }
-}
-
-// Private methods for tests.
-#[cfg(test)]
-impl RegionWriter {
-    pub async fn wait_flush_done(&self) -> Result<()> {
-        let mut inner = self.inner.lock().await;
-        if let Some(handle) = inner.flush_handle.take() {
-            handle.join().await?;
         }
 
         Ok(())

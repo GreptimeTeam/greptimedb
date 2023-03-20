@@ -27,8 +27,8 @@ use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::manifest::{self, Manifest, ManifestVersion, MetaActionIterator};
 use store_api::storage::{
-    AlterRequest, OpenOptions, ReadContext, Region, RegionId, SequenceNumber, WriteContext,
-    WriteResponse,
+    AlterRequest, FlushContext, OpenOptions, ReadContext, Region, RegionId, SequenceNumber,
+    WriteContext, WriteResponse,
 };
 
 use crate::compaction::CompactionSchedulerRef;
@@ -136,8 +136,8 @@ impl<S: LogStore> Region for RegionImpl<S> {
             .sum()
     }
 
-    async fn flush(&self) -> Result<()> {
-        self.inner.flush().await
+    async fn flush(&self, ctx: &FlushContext) -> Result<()> {
+        self.inner.flush(ctx).await
     }
 }
 
@@ -436,10 +436,6 @@ impl<S: LogStore> RegionImpl<S> {
         self.inner.version_control().current_manifest_version()
     }
 
-    async fn wait_flush_done(&self) -> Result<()> {
-        self.inner.writer.wait_flush_done().await
-    }
-
     /// Write to inner, also the `RegionWriter` directly.
     async fn write_inner(&self, ctx: &WriteContext, request: WriteBatch) -> Result<WriteResponse> {
         self.inner.write(ctx, request).await
@@ -565,7 +561,7 @@ impl<S: LogStore> RegionInner<S> {
         self.writer.close().await
     }
 
-    async fn flush(&self) -> Result<()> {
+    async fn flush(&self, ctx: &FlushContext) -> Result<()> {
         let writer_ctx = WriterContext {
             shared: &self.shared,
             flush_strategy: &self.flush_strategy,
@@ -576,6 +572,6 @@ impl<S: LogStore> RegionInner<S> {
             writer: &self.writer,
             manifest: &self.manifest,
         };
-        self.writer.flush(writer_ctx).await
+        self.writer.flush(writer_ctx, ctx).await
     }
 }

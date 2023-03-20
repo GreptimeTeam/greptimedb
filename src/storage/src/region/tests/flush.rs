@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use common_test_util::temp_dir::create_temp_dir;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
-use store_api::storage::{OpenOptions, Region, WriteResponse};
+use store_api::storage::{FlushContext, OpenOptions, Region, WriteResponse};
 
 use crate::engine;
 use crate::flush::FlushStrategyRef;
@@ -91,12 +91,9 @@ impl FlushTester {
         self.base().full_scan().await
     }
 
-    async fn wait_flush_done(&self) {
-        self.base().region.wait_flush_done().await.unwrap();
-    }
-
-    async fn flush(&self) {
-        self.base().region.flush().await.unwrap();
+    async fn flush(&self, wait: Option<bool>) {
+        let ctx = wait.map(|wait| FlushContext { wait }).unwrap_or_default();
+        self.base().region.flush(&ctx).await.unwrap();
     }
 }
 
@@ -146,8 +143,7 @@ async fn test_manual_flush() {
     let sst_dir = format!("{}/{}", store_dir, engine::region_sst_dir("", REGION_NAME));
     assert!(!has_parquet_file(&sst_dir));
 
-    tester.flush().await;
-    tester.wait_flush_done().await;
+    tester.flush(None).await;
 
     assert!(has_parquet_file(&sst_dir));
 }
@@ -160,15 +156,12 @@ async fn test_flush_empty() {
     let flush_switch = Arc::new(FlushSwitch::default());
     let tester = FlushTester::new(store_dir, flush_switch.clone()).await;
 
-    // Now set should flush to true to trigger flush.
-    flush_switch.set_should_flush(true);
+    // Flush empty table.
+    tester.flush(None).await;
     let data = [(1000, Some(100))];
     // Put element to trigger flush.
     tester.put(&data).await;
-    tester.wait_flush_done().await;
 
-    // Disable flush.
-    flush_switch.set_should_flush(false);
     // Put again.
     let data = [(2000, Some(200))];
     tester.put(&data).await;
@@ -197,12 +190,11 @@ async fn test_read_after_flush() {
     tester.put(&[(1000, Some(100))]).await;
     tester.put(&[(2000, Some(200))]).await;
 
-    // Now set should flush to true to trigger flush.
-    flush_switch.set_should_flush(true);
+    // Flush.
+    tester.flush(None).await;
 
-    // Put element to trigger flush.
+    // Put element again.
     tester.put(&[(3000, Some(300))]).await;
-    tester.wait_flush_done().await;
 
     let expect = vec![(1000, Some(100)), (2000, Some(200)), (3000, Some(300))];
 
@@ -230,24 +222,21 @@ async fn test_merge_read_after_flush() {
     tester.put(&[(3000, Some(300))]).await;
     tester.put(&[(2000, Some(200))]).await;
 
-    // Now set should flush to true to trigger flush.
-    flush_switch.set_should_flush(true);
+    // Flush content to SST1.
+    tester.flush(None).await;
 
-    // Put element to trigger flush (In SST2).
+    // Put element (In SST2).
     tester.put(&[(2000, Some(201))]).await;
-    tester.wait_flush_done().await;
 
-    // Disable flush.
-    flush_switch.set_should_flush(false);
     // In SST2.
     tester.put(&[(2000, Some(202))]).await;
     tester.put(&[(1000, Some(100))]).await;
 
-    // Enable flush.
-    flush_switch.set_should_flush(true);
-    // Trigger flush and overwrite row (In memtable).
+    // Trigger flush.
+    tester.flush(None).await;
+
+    // Overwrite row (In memtable).
     tester.put(&[(2000, Some(203))]).await;
-    tester.wait_flush_done().await;
 
     let expect = vec![(1000, Some(100)), (2000, Some(203)), (3000, Some(300))];
 

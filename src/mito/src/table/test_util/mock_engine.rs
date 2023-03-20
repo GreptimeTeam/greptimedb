@@ -26,9 +26,9 @@ use datatypes::schema::{ColumnSchema, Schema};
 use storage::metadata::{RegionMetaImpl, RegionMetadata};
 use storage::write_batch::WriteBatch;
 use store_api::storage::{
-    AlterRequest, Chunk, ChunkReader, CreateOptions, EngineContext, GetRequest, GetResponse,
-    OpenOptions, ReadContext, Region, RegionDescriptor, RegionId, ScanRequest, ScanResponse,
-    SchemaRef, Snapshot, StorageEngine, WriteContext, WriteResponse,
+    AlterRequest, Chunk, ChunkReader, CreateOptions, EngineContext, FlushContext, GetRequest,
+    GetResponse, OpenOptions, ReadContext, Region, RegionDescriptor, RegionId, ScanRequest,
+    ScanResponse, SchemaRef, Snapshot, StorageEngine, WriteContext, WriteResponse,
 };
 
 pub type Result<T> = std::result::Result<T, MockError>;
@@ -201,7 +201,7 @@ impl Region for MockRegion {
         0
     }
 
-    async fn flush(&self) -> Result<()> {
+    async fn flush(&self, _ctx: &FlushContext) -> Result<()> {
         unimplemented!()
     }
 }

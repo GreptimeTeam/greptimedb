@@ -216,6 +216,8 @@ pub struct FlushTableRequest {
     pub schema_name: String,
     pub table_name: Option<String>,
     pub region_number: Option<RegionNumber>,
+    /// Wait until the flush is done.
+    pub wait: Option<bool>,
 }
 
 #[cfg(test)]

@@ -77,7 +77,8 @@ pub trait Region: Send + Sync + Clone + std::fmt::Debug + 'static {
 
     fn disk_usage_bytes(&self) -> u64;
 
-    async fn flush(&self) -> Result<(), Self::Error>;
+    /// Flush memtable of the region to disk.
+    async fn flush(&self, ctx: &FlushContext) -> Result<(), Self::Error>;
 }
 
 /// Context for write operations.
@@ -87,5 +88,19 @@ pub struct WriteContext {}
 impl From<&OpenOptions> for WriteContext {
     fn from(_opts: &OpenOptions) -> WriteContext {
         WriteContext::default()
+    }
+}
+
+/// Context for flush operations.
+#[derive(Debug, Clone)]
+pub struct FlushContext {
+    /// If true, the flush will wait until the flush is done.
+    /// Default: true
+    pub wait: bool,
+}
+
+impl Default for FlushContext {
+    fn default() -> FlushContext {
+        FlushContext { wait: true }
     }
 }
