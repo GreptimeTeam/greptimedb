@@ -71,7 +71,7 @@ pub enum Error {
     ExternalError { code: StatusCode, msg: String },
 
     // Server error carried in Tonic Status's metadata.
-    #[snafu(display("{}", msg))]
+    #[snafu(display("Server Error: {}, StatusCode = {}", msg, code))]
     Server { code: StatusCode, msg: String },
 
     #[snafu(display("Illegal Database response: {err_msg}"))]
