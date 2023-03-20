@@ -58,11 +58,11 @@ impl Lister {
 
                 streamer
                     .try_filter(|f| {
-                        let res = if let Some(regex) = &self.regex {
-                            regex.is_match(f.name())
-                        } else {
-                            true
-                        };
+                        let res = self
+                            .regex
+                            .as_ref()
+                            .map(|x| x.is_match(f.name()))
+                            .unwrap_or(true);
                         future::ready(res)
                     })
                     .try_collect::<Vec<_>>()

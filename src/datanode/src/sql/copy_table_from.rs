@@ -49,12 +49,12 @@ impl SqlHandler {
 
         let (dir, filename) = find_dir_and_filename(&path);
 
-        let regex = if let Some(pattern) = req.pattern {
-            let regex = Regex::new(&pattern).context(error::BuildRegexSnafu)?;
-            Some(regex)
-        } else {
-            None
-        };
+        let regex = req
+            .pattern
+            .as_ref()
+            .map(|x| Regex::new(x))
+            .transpose()
+            .context(error::BuildRegexSnafu)?;
 
         let source = if let Some(filename) = filename {
             Source::Filename(filename)

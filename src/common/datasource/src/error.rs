@@ -38,7 +38,7 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to lists object in path: {}, source: {}", path, source))]
+    #[snafu(display("Failed to list object in path: {}, source: {}", path, source))]
     ListObjects {
         path: String,
         backtrace: Backtrace,
