@@ -8,6 +8,6 @@ license.workspace = true
 common-error = { path = "../error" }
 futures.workspace = true
 object-store = { path = "../../object-store" }
-regex = "1.7.1"
-snafu = { version = "0.7", features = ["backtraces"] }
-url = "2.3.1"
+regex = "1.7"
+snafu.workspace = true
+url = "2.3"

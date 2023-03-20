@@ -17,12 +17,12 @@ pub mod s3;
 use std::collections::HashMap;
 
 use object_store::ObjectStore;
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 use url::{ParseError, Url};
 
 use self::fs::build_fs_backend;
 use self::s3::build_s3_backend;
-use crate::error::{self, Error, Result};
+use crate::error::{self, Result};
 
 pub const FS_SCHEMA: &str = "FS";
 pub const S3_SCHEMA: &str = "S3";
@@ -39,10 +39,7 @@ pub fn parse_url(url: &str) -> Result<(String, Option<String>, String)> {
         Err(ParseError::RelativeUrlWithoutBase) => {
             Ok((FS_SCHEMA.to_string(), None, url.to_string()))
         }
-        Err(err) => Err(Error::InvalidUrl {
-            url: url.to_string(),
-            source: err,
-        }),
+        Err(err) => Err(err).context(error::InvalidUrlSnafu { url }),
     }
 }
 
@@ -58,9 +55,6 @@ pub fn build_backend(url: &str, connection: HashMap<String, String>) -> Result<O
         }
         FS_SCHEMA => Ok(build_fs_backend("/")?),
 
-        _ => error::UnsupportedBackendProtocolSnafu {
-            protocol: schema.to_string(),
-        }
-        .fail(),
+        _ => error::UnsupportedBackendProtocolSnafu { protocol: schema }.fail(),
     }
 }

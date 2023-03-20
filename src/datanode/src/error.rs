@@ -219,8 +219,8 @@ pub enum Error {
 
     #[snafu(display("Failed to build backend, source: {}", source))]
     BuildBackend {
+        #[snafu(backtrace)]
         source: DataSourceError,
-        backtrace: Backtrace,
     },
 
     #[snafu(display("Failed to parse url, source: {}", source))]
@@ -258,7 +258,7 @@ pub enum Error {
 
     #[snafu(display("Failed to list objects, source: {}", source))]
     ListObjects {
-        backtrace: Backtrace,
+        #[snafu(backtrace)]
         source: DataSourceError,
     },
 
