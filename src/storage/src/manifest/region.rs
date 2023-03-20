@@ -13,13 +13,99 @@
 // limitations under the License.
 
 //! Region manifest impl
+use std::sync::Arc;
+
 use async_trait::async_trait;
+use object_store::ObjectStore;
+use store_api::manifest::action::ProtocolAction;
+use store_api::manifest::{Manifest, ManifestLogStorage, MetaActionIterator, MIN_VERSION};
 
 use crate::error::Result;
 use crate::manifest::action::*;
+use crate::manifest::checkpoint::Checkpointer;
 use crate::manifest::ManifestImpl;
 
 pub type RegionManifest = ManifestImpl<RegionSnapshot, RegionMetaActionList>;
+
+#[derive(Debug)]
+pub struct RegionManifestCheckpointer {}
+
+impl RegionManifestCheckpointer {}
+
+#[async_trait]
+impl Checkpointer for RegionManifestCheckpointer {
+    type Snapshot = RegionSnapshot;
+    type MetaAction = RegionMetaActionList;
+
+    async fn do_checkpoint(
+        &self,
+        manifest: &ManifestImpl<RegionSnapshot, RegionMetaActionList>,
+    ) -> Result<Option<RegionSnapshot>> {
+        let last_snapshot = manifest.last_snapshot().await?;
+        let current_version = manifest.last_version();
+        let (start_version, mut protocol, mut manifest_builder) =
+            if let Some(snapshot) = last_snapshot {
+                (
+                    snapshot.last_version,
+                    snapshot.protocol,
+                    RegionManifestBuilder::with_snapshot(snapshot.snapshot),
+                )
+            } else {
+                (
+                    MIN_VERSION,
+                    ProtocolAction::default(),
+                    RegionManifestBuilder::default(),
+                )
+            };
+
+        let mut iter = manifest.scan(start_version, current_version).await?;
+
+        let mut last_version = start_version;
+        let mut compacted_actions = 0;
+        while let Some((version, action_list)) = iter.next_action().await? {
+            for action in action_list.actions {
+                match action {
+                    RegionMetaAction::Change(c) => manifest_builder.apply_change(c),
+                    RegionMetaAction::Edit(e) => manifest_builder.apply_edit(e),
+                    RegionMetaAction::Protocol(p) => protocol = p,
+                    _ => todo!(),
+                }
+            }
+            last_version = version;
+            compacted_actions += 1;
+        }
+
+        if last_version == start_version {
+            return Ok(None);
+        }
+
+        let region_manifest = manifest_builder.build();
+        let snapshot = RegionSnapshot {
+            protocol,
+            last_version,
+            compacted_actions,
+            snapshot: Some(region_manifest),
+        };
+
+        manifest.save_snapshot(&snapshot).await?;
+        manifest
+            .manifest_store()
+            .delete(start_version, last_version + 1)
+            .await?;
+
+        Ok(Some(snapshot))
+    }
+}
+
+impl RegionManifest {
+    pub fn with_checkpointer(manifest_dir: &str, object_store: ObjectStore) -> Self {
+        Self::new(
+            manifest_dir,
+            object_store,
+            Some(Arc::new(RegionManifestCheckpointer {})),
+        )
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -48,7 +134,7 @@ mod tests {
         )
         .finish();
 
-        let manifest = RegionManifest::new("/manifest/", object_store);
+        let manifest = RegionManifest::with_checkpointer("/manifest/", object_store);
 
         let region_meta = Arc::new(build_region_meta());
 

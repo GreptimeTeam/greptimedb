@@ -354,7 +354,7 @@ impl<S: LogStore> EngineInner<S> {
         let sst_dir = &region_sst_dir(&parent_dir, region_name);
         let sst_layer = Arc::new(FsAccessLayer::new(sst_dir, self.object_store.clone()));
         let manifest_dir = region_manifest_dir(&parent_dir, region_name);
-        let manifest = RegionManifest::new(&manifest_dir, self.object_store.clone(), None);
+        let manifest = RegionManifest::with_checkpointer(&manifest_dir, self.object_store.clone());
 
         let flush_strategy = write_buffer_size
             .map(|size| Arc::new(SizeBasedStrategy::new(size)) as Arc<_>)

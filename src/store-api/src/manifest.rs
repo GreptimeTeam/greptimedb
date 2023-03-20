@@ -92,7 +92,7 @@ pub trait Manifest: Send + Sync + Clone + 'static {
     ) -> Result<Self::MetaActionIterator, Self::Error>;
 
     /// Do a checkpoint, it will create a snapshot and compact actions.
-    async fn do_checkpoint(&self) -> Result<Self::Snapshot, Self::Error>;
+    async fn do_checkpoint(&self) -> Result<Option<Self::Snapshot>, Self::Error>;
 
     /// Returns the last success snapshot
     async fn last_snapshot(&self) -> Result<Option<Self::Snapshot>, Self::Error>;

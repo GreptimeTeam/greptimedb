@@ -1,7 +1,4 @@
-use std::sync::Arc;
-
 use async_trait::async_trait;
-use common_error::prelude::ErrorExt;
 use store_api::manifest::{MetaAction, Snapshot};
 
 use crate::error::{Error, Result};
@@ -15,5 +12,5 @@ pub trait Checkpointer: Send + Sync + std::fmt::Debug {
     async fn do_checkpoint(
         &self,
         manifest: &ManifestImpl<Self::Snapshot, Self::MetaAction>,
-    ) -> Result<Self::Snapshot>;
+    ) -> Result<Option<Self::Snapshot>>;
 }

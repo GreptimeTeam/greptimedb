@@ -46,7 +46,7 @@ pub async fn new_store_config(
     let accessor = Builder::default().root(store_dir).build().unwrap();
     let object_store = ObjectStore::new(accessor).finish();
     let sst_layer = Arc::new(FsAccessLayer::new(&sst_dir, object_store.clone()));
-    let manifest = RegionManifest::new(&manifest_dir, object_store);
+    let manifest = RegionManifest::with_checkpointer(&manifest_dir, object_store);
     let job_pool = Arc::new(JobPoolImpl {});
     let flush_scheduler = Arc::new(FlushSchedulerImpl::new(job_pool));
     let log_config = LogConfig {

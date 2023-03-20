@@ -27,13 +27,13 @@ pub struct NoopSnapshot {}
 impl Snapshot for NoopSnapshot {
     type Error = storage::error::Error;
 
-    fn set_protocol(&mut self, action: ProtocolAction) {}
+    fn set_protocol(&mut self, _action: ProtocolAction) {}
 
     fn encode(&self) -> Result<Vec<u8>, Self::Error> {
         unreachable!();
     }
 
-    fn decode(bs: &[u8], reader_version: ProtocolVersion) -> Result<Self, Self::Error> {
+    fn decode(_bs: &[u8], _reader_version: ProtocolVersion) -> Result<Self, Self::Error> {
         unreachable!();
     }
 }
@@ -76,7 +76,7 @@ mod tests {
     async fn test_table_manifest() {
         let (_dir, object_store) = test_util::new_test_object_store("test_table_manifest").await;
 
-        let manifest = TableManifest::new("manifest/", object_store);
+        let manifest = TableManifest::new("manifest/", object_store, None);
 
         let mut iter = manifest.scan(0, 100).await.unwrap();
         assert!(iter.next_action().await.unwrap().is_none());

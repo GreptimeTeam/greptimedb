@@ -440,6 +440,9 @@ pub enum Error {
         #[snafu(backtrace)]
         source: common_time::error::Error,
     },
+
+    #[snafu(display("Manifest checkpoint is not supported"))]
+    UnsupportedCheckpoint { backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -515,6 +518,7 @@ impl ErrorExt for Error {
             DeleteSst { .. } => StatusCode::StorageUnavailable,
             IllegalSchedulerState { .. } => StatusCode::Unexpected,
             TtlCalculation { source, .. } => source.status_code(),
+            UnsupportedCheckpoint { .. } => StatusCode::Unsupported,
         }
     }
 

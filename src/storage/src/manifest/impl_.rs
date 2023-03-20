@@ -24,7 +24,8 @@ use snafu::ensure;
 use store_api::manifest::action::{self, ProtocolAction, ProtocolVersion};
 use store_api::manifest::*;
 
-use crate::error::{Error, ManifestProtocolForbidWriteSnafu, Result};
+use crate::error::{Error, ManifestProtocolForbidWriteSnafu, Result, UnsupportedCheckpointSnafu};
+use crate::manifest::action::RegionSnapshot;
 use crate::manifest::checkpoint::Checkpointer;
 use crate::manifest::storage::{ManifestObjectStore, ObjectStoreLogIterator};
 
@@ -50,6 +51,28 @@ impl<S: Snapshot<Error = Error>, M: MetaAction<Error = Error>> ManifestImpl<S, M
     pub fn update_state(&self, version: ManifestVersion, protocol: Option<ProtocolAction>) {
         self.inner.update_state(version, protocol);
     }
+
+    pub async fn save_snapshot(&self, snapshot: &RegionSnapshot) -> Result<()> {
+        ensure!(
+            snapshot
+                .protocol
+                .is_writable(self.inner.supported_writer_version),
+            ManifestProtocolForbidWriteSnafu {
+                min_version: snapshot.protocol.min_writer_version,
+                supported_version: self.inner.supported_writer_version,
+            }
+        );
+        let bytes = snapshot.encode()?;
+
+        self.manifest_store()
+            .save_checkpoint(snapshot.last_version, &bytes)
+            .await
+    }
+
+    #[inline]
+    pub fn manifest_store(&self) -> &Arc<ManifestObjectStore> {
+        self.inner.manifest_store()
+    }
 }
 
 #[async_trait]
@@ -73,11 +96,11 @@ impl<S: 'static + Snapshot<Error = Error>, M: 'static + MetaAction<Error = Error
         self.inner.scan(start, end).await
     }
 
-    async fn do_checkpoint(&self) -> Result<S> {
+    async fn do_checkpoint(&self) -> Result<Option<S>> {
         if let Some(cp) = &self.checkpointer {
-            return cp.do_checkpoint(&self).await;
+            return cp.do_checkpoint(self).await;
         }
-        unimplemented!();
+        UnsupportedCheckpointSnafu {}.fail()
     }
 
     async fn last_snapshot(&self) -> Result<Option<S>> {
@@ -147,6 +170,11 @@ impl<S: Snapshot<Error = Error>, M: MetaAction<Error = Error>> ManifestImplInner
             supported_writer_version: writer_version,
             _phantom: PhantomData,
         }
+    }
+
+    #[inline]
+    fn manifest_store(&self) -> &Arc<ManifestObjectStore> {
+        &self.store
     }
 
     #[inline]

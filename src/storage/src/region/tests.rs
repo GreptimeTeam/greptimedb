@@ -286,7 +286,7 @@ async fn test_recover_region_manifets() {
     )
     .finish();
 
-    let manifest = RegionManifest::new("/manifest/", object_store.clone());
+    let manifest = RegionManifest::with_checkpointer("/manifest/", object_store.clone());
     let region_meta = Arc::new(build_region_meta());
 
     let sst_layer = Arc::new(FsAccessLayer::new("sst", object_store)) as _;
