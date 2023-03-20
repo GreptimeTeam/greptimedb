@@ -125,15 +125,15 @@ pub(crate) async fn create_datanode_client(
 
     // create a mock datanode grpc service, see example here:
     // https://github.com/hyperium/tonic/blob/master/examples/src/mock/mock.rs
-    let datanode_service = GrpcServer::new(
+    let grpc_server = GrpcServer::new(
         ServerGrpcQueryHandlerAdaptor::arc(datanode_instance),
         None,
         runtime,
-    )
-    .create_service();
+    );
     tokio::spawn(async move {
         Server::builder()
-            .add_service(datanode_service)
+            .add_service(grpc_server.create_flight_service())
+            .add_service(grpc_server.create_database_service())
             .serve_with_incoming(futures::stream::iter(vec![Ok::<_, std::io::Error>(server)]))
             .await
     });

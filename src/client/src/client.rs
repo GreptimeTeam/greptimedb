@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use api::v1::greptime_database_client::GreptimeDatabaseClient;
 use arrow_flight::flight_service_client::FlightServiceClient;
 use common_grpc::channel_manager::ChannelManager;
 use parking_lot::RwLock;
@@ -22,6 +23,10 @@ use tonic::transport::Channel;
 
 use crate::load_balance::{LoadBalance, Loadbalancer};
 use crate::{error, Result};
+
+pub(crate) struct DatabaseClient {
+    pub(crate) inner: GreptimeDatabaseClient<Channel>,
+}
 
 pub(crate) struct FlightClient {
     addr: String,
@@ -118,7 +123,7 @@ impl Client {
         self.inner.set_peers(urls);
     }
 
-    pub(crate) fn make_client(&self) -> Result<FlightClient> {
+    fn find_channel(&self) -> Result<(String, Channel)> {
         let addr = self
             .inner
             .get_peer()
@@ -131,9 +136,21 @@ impl Client {
             .channel_manager
             .get(&addr)
             .context(error::CreateChannelSnafu { addr: &addr })?;
+        Ok((addr, channel))
+    }
+
+    pub(crate) fn make_flight_client(&self) -> Result<FlightClient> {
+        let (addr, channel) = self.find_channel()?;
         Ok(FlightClient {
             addr,
             client: FlightServiceClient::new(channel),
+        })
+    }
+
+    pub(crate) fn make_database_client(&self) -> Result<DatabaseClient> {
+        let (_, channel) = self.find_channel()?;
+        Ok(DatabaseClient {
+            inner: GreptimeDatabaseClient::new(channel),
         })
     }
 }
