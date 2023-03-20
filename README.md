@@ -61,12 +61,12 @@ To compile GreptimeDB from source, you'll need:
   find an installation instructions [here](https://grpc.io/docs/protoc-installation/).
   **Note that `protoc` version needs to be >= 3.15** because we have used the `optional`
   keyword. You can check it with `protoc --version`.
-- python3-dev or python3-devel(Optional, only needed if you want to run scripts
-  in cpython): this install a Python shared library required for running python
+- python3-dev or python3-devel(Optional feature, only needed if you want to run scripts
+  in CPython, and also need to enable `pyo3_backend` feature when compiling(by `cargo run -F pyo3_backend` or add `pyo3_backend` to src/script/Cargo.toml 's `features.default` like `default = ["python", "pyo3_backend]`)): this install a Python shared library required for running Python
   scripting engine(In CPython Mode). This is available as `python3-dev` on
   ubuntu, you can install it with `sudo apt install python3-dev`, or
   `python3-devel` on RPM based distributions (e.g. Fedora, Red Hat, SuSE). Mac's
-  `Python3` package should have this shared library by default.
+  `Python3` package should have this shared library by default. More detail for compiling with PyO3 can be found in [PyO3](https://pyo3.rs/v0.18.1/building_and_distribution#configuring-the-python-version)'s documentation.
 
 #### Build with Docker
 
@@ -147,9 +147,9 @@ You can always cleanup test database by removing `/tmp/greptimedb`.
 ### Installation
 
 - [Pre-built Binaries](https://github.com/GreptimeTeam/greptimedb/releases):
-  downloadable pre-built binaries for Linux and MacOS
-- [Docker Images](https://hub.docker.com/r/greptime/greptimedb): pre-built
-  Docker images
+  For Linux and macOS, you can easily download pre-built binaries that are ready to use. In most cases, downloading the version without PyO3 is sufficient. However, if you plan to run scripts in CPython (and use Python packages like NumPy and Pandas), you will need to download the version with PyO3 and install a Python with the same version as the Python in the PyO3 version. We recommend using virtualenv for the installation process to manage multiple Python versions.
+- [Docker Images](https://hub.docker.com/r/greptime/greptimedb)(**recommended**): pre-built
+  Docker images, this is the easiest way to try GreptimeDB. By default it runs CPython script with `pyo3_backend` enabled.
 - [`gtctl`](https://github.com/GreptimeTeam/gtctl): the command-line tool for
   Kubernetes deployment
 
