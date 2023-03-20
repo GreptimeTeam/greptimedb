@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::{HeartbeatRequest, HeartbeatResponse, NodeStat, Peer};
-use catalog::{region_stats, CatalogManagerRef};
+use catalog::{datanode_stat, CatalogManagerRef};
 use common_telemetry::{error, info, warn};
 use meta_client::client::{HeartbeatSender, MetaClient};
 use snafu::ResultExt;
@@ -106,8 +106,8 @@ impl HeartbeatTask {
         let mut tx = Self::create_streams(&meta_client, running.clone()).await?;
         common_runtime::spawn_bg(async move {
             while running.load(Ordering::Acquire) {
-                let (region_num, region_stats) = match region_stats(&catalog_manager_clone).await {
-                    Ok(region_stats) => (region_stats.len() as i64, region_stats),
+                let (region_num, region_stats) = match datanode_stat(&catalog_manager_clone).await {
+                    Ok(datanode_stat) => (datanode_stat.0 as i64, datanode_stat.1),
                     Err(e) => {
                         error!("failed to get region status, err: {e:?}");
                         (-1, vec![])
