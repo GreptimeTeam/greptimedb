@@ -269,6 +269,12 @@ pub enum Error {
 
     #[snafu(display("Invalid flush argument: {}", err_msg))]
     InvalidFlushArgument { err_msg: String },
+
+    #[snafu(display("Failed to build gRPC reflection service, source: {}", source))]
+    GrpcReflectionService {
+        source: tonic_reflection::server::Error,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -287,6 +293,7 @@ impl ErrorExt for Error {
             | InvalidPromRemoteReadQueryResult { .. }
             | TcpBind { .. }
             | CatalogError { .. }
+            | GrpcReflectionService { .. }
             | BuildingContext { .. } => StatusCode::Internal,
 
             InsertScript { source, .. }

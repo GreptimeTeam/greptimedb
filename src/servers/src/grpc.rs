@@ -33,7 +33,9 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::Status;
 
 use crate::auth::UserProviderRef;
-use crate::error::{AlreadyStartedSnafu, Result, StartGrpcSnafu, TcpBindSnafu};
+use crate::error::{
+    AlreadyStartedSnafu, GrpcReflectionServiceSnafu, Result, StartGrpcSnafu, TcpBindSnafu,
+};
 use crate::grpc::database::DatabaseService;
 use crate::grpc::flight::FlightHandler;
 use crate::grpc::handler::GreptimeRequestHandler;
@@ -109,10 +111,17 @@ impl Server for GrpcServer {
             (listener, addr)
         };
 
+        let reflection_service = tonic_reflection::server::Builder::configure()
+            .register_encoded_file_descriptor_set(api::v1::GREPTIME_GRPC_DESC)
+            .with_service_name("greptime.v1.GreptimeDatabase")
+            .build()
+            .context(GrpcReflectionServiceSnafu)?;
+
         // Would block to serve requests.
         tonic::transport::Server::builder()
             .add_service(self.create_flight_service())
             .add_service(self.create_database_service())
+            .add_service(reflection_service)
             .serve_with_incoming_shutdown(TcpListenerStream::new(listener), rx.map(drop))
             .await
             .context(StartGrpcSnafu)?;
