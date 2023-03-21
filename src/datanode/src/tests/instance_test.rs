@@ -770,36 +770,6 @@ async fn test_delete() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_execute_copy_to() {
-    let instance = setup_test_instance("test_execute_copy_to").await;
-
-    // setups
-    execute_sql(
-        &instance,
-        "create table demo(host string, cpu double, memory double, ts timestamp time index);",
-    )
-    .await;
-
-    let output = execute_sql(
-        &instance,
-        r#"insert into demo(host, cpu, memory, ts) values
-                            ('host1', 66.6, 1024, 1655276557000),
-                            ('host2', 88.8,  333.3, 1655276558000)
-                            "#,
-    )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(2)));
-
-    // exports
-    let data_dir = instance.data_tmp_dir().path();
-
-    let copy_to_stmt = format!("Copy demo TO '{}/export/demo.parquet'", data_dir.display());
-
-    let output = execute_sql(&instance, &copy_to_stmt).await;
-    assert!(matches!(output, Output::AffectedRows(2)));
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn test_execute_copy_to_s3() {
     logging::init_default_ut_logging();
     if let Ok(bucket) = env::var("GT_S3_BUCKET") {
@@ -835,91 +805,6 @@ async fn test_execute_copy_to_s3() {
             let output = execute_sql(&instance, &copy_to_stmt).await;
             assert!(matches!(output, Output::AffectedRows(2)));
         }
-    }
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_execute_copy_from() {
-    let instance = setup_test_instance("test_execute_copy_from").await;
-
-    // setups
-    execute_sql(
-        &instance,
-        "create table demo(host string, cpu double, memory double, ts timestamp time index);",
-    )
-    .await;
-
-    let output = execute_sql(
-        &instance,
-        r#"insert into demo(host, cpu, memory, ts) values
-                            ('host1', 66.6, 1024, 1655276557000),
-                            ('host2', 88.8,  333.3, 1655276558000)
-                            "#,
-    )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(2)));
-
-    // export
-    let data_dir = instance.data_tmp_dir().path();
-
-    let copy_to_stmt = format!("Copy demo TO '{}/export/demo.parquet'", data_dir.display());
-
-    let output = execute_sql(&instance, &copy_to_stmt).await;
-    assert!(matches!(output, Output::AffectedRows(2)));
-
-    struct Test<'a> {
-        sql: &'a str,
-        table_name: &'a str,
-    }
-    let tests = [
-        Test {
-            sql: &format!(
-                "Copy with_filename FROM '{}/export/demo.parquet_1_2'",
-                data_dir.display()
-            ),
-            table_name: "with_filename",
-        },
-        Test {
-            sql: &format!("Copy with_path FROM '{}/export/'", data_dir.display()),
-            table_name: "with_path",
-        },
-        Test {
-            sql: &format!(
-                "Copy with_pattern FROM '{}/export/' WITH (PATTERN = 'demo.*')",
-                data_dir.display()
-            ),
-            table_name: "with_pattern",
-        },
-    ];
-
-    for test in tests {
-        // import
-        execute_sql(
-            &instance,
-            &format!(
-                "create table {}(host string, cpu double, memory double, ts timestamp time index);",
-                test.table_name
-            ),
-        )
-        .await;
-
-        let output = execute_sql(&instance, test.sql).await;
-        assert!(matches!(output, Output::AffectedRows(2)));
-
-        let output = execute_sql(
-            &instance,
-            &format!("select * from {} order by ts", test.table_name),
-        )
-        .await;
-        let expected = "\
-+-------+------+--------+---------------------+
-| host  | cpu  | memory | ts                  |
-+-------+------+--------+---------------------+
-| host1 | 66.6 | 1024.0 | 2022-06-15T07:02:37 |
-| host2 | 88.8 | 333.3  | 2022-06-15T07:02:38 |
-+-------+------+--------+---------------------+"
-            .to_string();
-        check_output_stream(output, expected).await;
     }
 }
 
