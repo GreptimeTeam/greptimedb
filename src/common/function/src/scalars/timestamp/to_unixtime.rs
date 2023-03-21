@@ -16,13 +16,14 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use common_query::error::{Result, UnsupportedInputDataTypeSnafu};
+use common_query::error::{self, Result, UnsupportedInputDataTypeSnafu};
 use common_query::prelude::{Signature, Volatility};
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::types::StringType;
 use datatypes::vectors::{Int64Vector, StringVector, Vector, VectorRef};
+use snafu::ensure;
 
 use crate::scalars::function::{Function, FunctionContext};
 
@@ -37,10 +38,7 @@ fn convert_to_seconds(arg: &str) -> Option<i64> {
             let sec_mul = (TimeUnit::Second.factor() / ts.unit().factor()) as i64;
             Some(ts.value().div_euclid(sec_mul))
         }
-        Err(_err) => {
-            // error!("Failed to parse {} to Timestamp value", arg);
-            None
-        }
+        Err(_err) => None,
     }
 }
 
@@ -50,7 +48,7 @@ impl Function for ToUnixtimeFunction {
     }
 
     fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::int64_datatype())
+        Ok(ConcreteDataType::timestamp_second_datatype())
     }
 
     fn signature(&self) -> Signature {
@@ -61,6 +59,16 @@ impl Function for ToUnixtimeFunction {
     }
 
     fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+        ensure!(
+            columns.len() == 1,
+            error::InvalidFuncArgsSnafu {
+                err_msg: format!(
+                    "The length of the args is not correct, expect exactly one, have: {}",
+                    columns.len()
+                ),
+            }
+        );
+
         match columns[0].data_type() {
             ConcreteDataType::String(_) => {
                 let array = columns[0].to_arrow_array();
@@ -102,7 +110,7 @@ mod tests {
         let f = ToUnixtimeFunction::default();
         assert_eq!("to_unixtime", f.name());
         assert_eq!(
-            ConcreteDataType::int64_datatype(),
+            ConcreteDataType::timestamp_second_datatype(),
             f.return_type(&[]).unwrap()
         );
 
