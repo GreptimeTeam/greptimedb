@@ -263,6 +263,7 @@ impl Instance {
                     schema_name,
                     table_name: None,
                     region_number: None,
+                    wait: Some(true),
                 })
             })
             .collect::<Vec<_>>();
