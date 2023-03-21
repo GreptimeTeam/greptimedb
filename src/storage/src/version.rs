@@ -237,7 +237,7 @@ impl Version {
         self.manifest_version = manifest_version;
         let ssts = self.ssts.merge(files, std::iter::empty());
         info!(
-            "After apply snapshot, region: {}, flushed_sequence: {}, manifest_version: {}, SST files: {:?}",
+            "After applying snapshot, region: {}, flushed_sequence: {}, manifest_version: {}, SST files: {:?}",
             self.metadata.id(),
             self.flushed_sequence,
             self.manifest_version,
@@ -269,7 +269,7 @@ impl Version {
             .merge(handles_to_add, edit.files_to_remove.into_iter());
 
         info!(
-            "After apply edit, region: {}, SST files: {:?}",
+            "After applying edit, region: {}, SST files: {:?}",
             self.metadata.id(),
             merged_ssts
         );
