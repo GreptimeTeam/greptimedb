@@ -89,6 +89,9 @@ pub struct TableIdent {
     pub version: TableVersion,
 }
 
+/// The table medatadata
+/// Note: if you add new fields to this struct, please ensure 'new_meta_builder' function works.
+/// TODO(dennis): find a better way to ensure 'new_meta_builder' works when adding new fields.
 #[derive(Clone, Debug, Builder, PartialEq, Eq)]
 #[builder(pattern = "mutable")]
 pub struct TableMeta {
@@ -197,6 +200,7 @@ impl TableMeta {
             .engine_options(self.engine_options.clone())
             .options(self.options.clone())
             .created_on(self.created_on)
+            .region_numbers(self.region_numbers.clone())
             .next_column_id(self.next_column_id);
 
         builder
@@ -572,6 +576,7 @@ mod tests {
             .unwrap();
 
         let new_meta = add_columns_to_meta(&meta);
+        assert_eq!(meta.region_numbers, new_meta.region_numbers);
 
         let names: Vec<String> = new_meta
             .schema
@@ -605,6 +610,8 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
+
+        assert_eq!(meta.region_numbers, new_meta.region_numbers);
 
         let names: Vec<String> = new_meta
             .schema

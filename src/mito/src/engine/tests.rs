@@ -523,6 +523,7 @@ async fn test_alter_table_add_column() {
     assert_eq!(new_schema.timestamp_column(), old_schema.timestamp_column());
     assert_eq!(new_schema.version(), old_schema.version() + 1);
     assert_eq!(new_meta.next_column_id, old_meta.next_column_id + 2);
+    assert_eq!(new_meta.region_numbers, old_meta.region_numbers);
 }
 
 #[tokio::test]
@@ -572,6 +573,7 @@ async fn test_alter_table_remove_column() {
     assert_eq!(&[1, 2], &new_meta.value_indices[..]);
     assert_eq!(new_schema.timestamp_column(), old_schema.timestamp_column());
     assert_eq!(new_schema.version(), old_schema.version() + 1);
+    assert_eq!(new_meta.region_numbers, old_meta.region_numbers);
 }
 
 #[tokio::test]
