@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
-use common_telemetry::{debug, logging};
+use common_telemetry::{debug, logging, warn};
 use object_store::ObjectStore;
 use snafu::ensure;
 use store_api::manifest::action::{self, ProtocolAction, ProtocolVersion};
@@ -273,8 +273,26 @@ impl<S: Snapshot<Error = Error>, M: MetaAction<Error = Error>> ManifestImplInner
     async fn last_snapshot(&self) -> Result<Option<S>> {
         let protocol = self.protocol.load();
         let last_checkpoint = self.store.load_checkpoint().await?;
-        last_checkpoint
-            .map(|(_, bytes)| S::decode(&bytes, protocol.min_reader_version))
-            .transpose()
+
+        if let Some((version, bytes)) = last_checkpoint {
+            let snapshot = S::decode(&bytes, protocol.min_reader_version)?;
+            assert!(snapshot.last_version() >= version);
+            if snapshot.last_version() > version {
+                // It happens when saving snapshot successfully, but failed at saving checkpoint metadata(the "__last_checkpoint" file).
+                // Then we try to use the old snapshot and do the checkpoint next time.
+                // If the old snapshot are deleted, it's fine that we return the latest snapshot.
+                // the only side effect is leaving some unused checkpoint snapshot files.
+                // TODO(dennis): delete unused snapshot files
+                warn!("The snapshot manifest version {} in {} is greater than checkpoint metadata version {}.", self.store.path(), snapshot.last_version(), version);
+
+                if let Some((_, bytes)) = self.store.load_checkpoint_by_version(version).await? {
+                    let old_snapshot = S::decode(&bytes, protocol.min_reader_version)?;
+                    return Ok(Some(old_snapshot));
+                }
+            }
+            Ok(Some(snapshot))
+        } else {
+            Ok(None)
+        }
     }
 }

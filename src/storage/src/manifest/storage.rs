@@ -112,6 +112,26 @@ impl ManifestObjectStore {
     fn last_checkpoint_path(&self) -> String {
         format!("{}{}", self.path, LAST_CHECKPOINT_FILE)
     }
+
+    pub(crate) fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub(crate) async fn load_checkpoint_by_version(
+        &self,
+        version: ManifestVersion,
+    ) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
+        let checkpoint = self
+            .object_store
+            .object(&self.checkpoint_file_path(version));
+
+        Ok(Some((
+            version,
+            checkpoint.read().await.context(ReadObjectSnafu {
+                path: checkpoint.path(),
+            })?,
+        )))
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -262,16 +282,8 @@ impl ManifestLogStorage for ManifestObjectStore {
                 checkpoint_metadata
             );
 
-            let checkpoint = self
-                .object_store
-                .object(&self.checkpoint_file_path(checkpoint_metadata.version));
-
-            Ok(Some((
-                checkpoint_metadata.version,
-                checkpoint.read().await.context(ReadObjectSnafu {
-                    path: checkpoint.path(),
-                })?,
-            )))
+            self.load_checkpoint_by_version(checkpoint_metadata.version)
+                .await
         } else {
             Ok(None)
         }

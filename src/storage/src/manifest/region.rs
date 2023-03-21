@@ -60,21 +60,21 @@ impl Checkpointer for RegionManifestCheckpointer {
                 (
                     snapshot.last_version,
                     snapshot.protocol,
-                    RegionManifestBuilder::with_snapshot(snapshot.snapshot),
+                    RegionManifestDataBuilder::with_snapshot(snapshot.snapshot),
                 )
             } else {
                 (
                     MIN_VERSION,
                     ProtocolAction::default(),
-                    RegionManifestBuilder::default(),
+                    RegionManifestDataBuilder::default(),
                 )
             };
 
         // Checkpoint can't exceed over flushed manifest version.
         // We have to keep the region metadata which are not flushed for replaying WAL.
         let end_version =
-            current_version.min(self.flushed_manifest_version.load(Ordering::Relaxed));
-        if start_version == end_version {
+            (current_version + 1).min(self.flushed_manifest_version.load(Ordering::Relaxed) + 1);
+        if start_version + 1 >= end_version {
             return Ok(None);
         }
 
@@ -95,7 +95,7 @@ impl Checkpointer for RegionManifestCheckpointer {
             compacted_actions += 1;
         }
 
-        if last_version == start_version {
+        if compacted_actions == 0 {
             return Ok(None);
         }
 
@@ -108,6 +108,7 @@ impl Checkpointer for RegionManifestCheckpointer {
         };
 
         manifest.save_snapshot(&snapshot).await?;
+        // TODO(dennis): background task to clean old manifest files.
         manifest
             .manifest_store()
             .delete(start_version, last_version + 1)
@@ -263,5 +264,163 @@ mod tests {
 
         // Reach end
         assert!(iter.next_action().await.unwrap().is_none());
+    }
+
+    async fn assert_scan(manifest: &RegionManifest, start_version: ManifestVersion, expected: u64) {
+        let mut iter = manifest.scan(0, MAX_VERSION).await.unwrap();
+        let mut actions = 0;
+        while let Some((v, _)) = iter.next_action().await.unwrap() {
+            assert_eq!(v, start_version + actions);
+            actions += 1;
+        }
+        assert_eq!(expected, actions);
+    }
+
+    #[tokio::test]
+    async fn test_region_manifest_checkpoint() {
+        common_telemetry::init_default_ut_logging();
+        let tmp_dir = create_temp_dir("test_region_manifest_checkpoint");
+        let object_store = ObjectStore::new(
+            Fs::default()
+                .root(&tmp_dir.path().to_string_lossy())
+                .build()
+                .unwrap(),
+        )
+        .finish();
+
+        let manifest = RegionManifest::with_checkpointer("/manifest/", object_store);
+
+        let region_meta = Arc::new(build_region_meta());
+        let new_region_meta = Arc::new(build_altered_region_meta());
+
+        let file = FileId::random();
+        let file_ids = vec![FileId::random(), FileId::random()];
+
+        let actions: Vec<RegionMetaActionList> = vec![
+            RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
+                metadata: region_meta.as_ref().into(),
+                committed_sequence: 1,
+            })),
+            RegionMetaActionList::new(vec![
+                RegionMetaAction::Edit(build_region_edit(2, &[file], &[])),
+                RegionMetaAction::Edit(build_region_edit(3, &file_ids, &[file])),
+            ]),
+            RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
+                metadata: new_region_meta.as_ref().into(),
+                committed_sequence: 99,
+            })),
+        ];
+
+        for action in actions {
+            manifest.update(action).await.unwrap();
+        }
+        assert!(manifest.last_snapshot().await.unwrap().is_none());
+        assert!(manifest.do_checkpoint().await.unwrap().is_none());
+        assert_scan(&manifest, 0, 3).await;
+        // update flushed manifest version for doing checkpoint
+        manifest.set_flushed_manifest_version(2);
+
+        // do a checkpoint
+        let snapshot = manifest.do_checkpoint().await.unwrap().unwrap();
+        let last_snapshot = manifest.last_snapshot().await.unwrap().unwrap();
+        assert_eq!(snapshot, last_snapshot);
+        assert_eq!(snapshot.compacted_actions, 3);
+        assert_eq!(snapshot.last_version, 2);
+        let alterd_raw_meta = RawRegionMetadata::from(new_region_meta.as_ref());
+        assert!(matches!(&snapshot.snapshot, Some(RegionManifestData {
+            committed_sequence: 99,
+            metadata,
+            version: Some(RegionVersion {
+                manifest_version: 1,
+                flushed_sequence: Some(3),
+                files,
+            }),
+        }) if files.len() == 2 &&
+                         files.contains_key(&file_ids[0]) &&
+                         files.contains_key(&file_ids[1]) &&
+                         *metadata == alterd_raw_meta));
+        // all actions were compacted
+        assert!(manifest
+            .scan(0, MAX_VERSION)
+            .await
+            .unwrap()
+            .next_action()
+            .await
+            .unwrap()
+            .is_none());
+
+        assert!(manifest.do_checkpoint().await.unwrap().is_none());
+        let last_snapshot = manifest.last_snapshot().await.unwrap().unwrap();
+        assert_eq!(snapshot, last_snapshot);
+
+        // add new actions
+        let new_file = FileId::random();
+        let actions: Vec<RegionMetaActionList> = vec![
+            RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
+                metadata: region_meta.as_ref().into(),
+                committed_sequence: 200,
+            })),
+            RegionMetaActionList::new(vec![RegionMetaAction::Edit(build_region_edit(
+                201,
+                &[new_file],
+                &file_ids,
+            ))]),
+        ];
+        for action in actions {
+            manifest.update(action).await.unwrap();
+        }
+
+        assert_scan(&manifest, 3, 2).await;
+        // do another checkpoints
+
+        // compacted RegionChange
+        manifest.set_flushed_manifest_version(3);
+        let snapshot = manifest.do_checkpoint().await.unwrap().unwrap();
+        let last_snapshot = manifest.last_snapshot().await.unwrap().unwrap();
+        assert_eq!(snapshot, last_snapshot);
+        assert_eq!(snapshot.compacted_actions, 1);
+        assert_eq!(snapshot.last_version, 3);
+        assert!(matches!(&snapshot.snapshot, Some(RegionManifestData {
+            committed_sequence: 200,
+            metadata,
+            version: Some(RegionVersion {
+                manifest_version: 1,
+                flushed_sequence: Some(3),
+                files,
+            }),
+        }) if files.len() == 2 &&
+                         files.contains_key(&file_ids[0]) &&
+                         files.contains_key(&file_ids[1]) &&
+                         *metadata == RawRegionMetadata::from(region_meta.as_ref())));
+
+        assert_scan(&manifest, 4, 1).await;
+        // compacted RegionEdit
+        manifest.set_flushed_manifest_version(4);
+        let snapshot = manifest.do_checkpoint().await.unwrap().unwrap();
+        let last_snapshot = manifest.last_snapshot().await.unwrap().unwrap();
+        assert_eq!(snapshot, last_snapshot);
+        assert_eq!(snapshot.compacted_actions, 1);
+        assert_eq!(snapshot.last_version, 4);
+        assert!(matches!(&snapshot.snapshot, Some(RegionManifestData {
+            committed_sequence: 200,
+            metadata,
+            version: Some(RegionVersion {
+                manifest_version: 4,
+                flushed_sequence: Some(201),
+                files,
+            }),
+        }) if files.len() == 1 &&
+                         files.contains_key(&new_file) &&
+                         *metadata == RawRegionMetadata::from(region_meta.as_ref())));
+
+        // all actions were compacted
+        assert!(manifest
+            .scan(0, MAX_VERSION)
+            .await
+            .unwrap()
+            .next_action()
+            .await
+            .unwrap()
+            .is_none());
     }
 }

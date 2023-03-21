@@ -89,21 +89,21 @@ pub struct RegionVersion {
 
 /// The region manifest data snapshot
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
-pub struct RegionManifest {
+pub struct RegionManifestData {
     pub committed_sequence: SequenceNumber,
     pub metadata: RawRegionMetadata,
     pub version: Option<RegionVersion>,
 }
 
 #[derive(Debug, Default)]
-pub struct RegionManifestBuilder {
+pub struct RegionManifestDataBuilder {
     committed_sequence: SequenceNumber,
     metadata: RawRegionMetadata,
     version: Option<RegionVersion>,
 }
 
-impl RegionManifestBuilder {
-    pub fn with_snapshot(snapshot: Option<RegionManifest>) -> Self {
+impl RegionManifestDataBuilder {
+    pub fn with_snapshot(snapshot: Option<RegionManifestData>) -> Self {
         if let Some(s) = snapshot {
             Self {
                 metadata: s.metadata,
@@ -142,8 +142,8 @@ impl RegionManifestBuilder {
             });
         }
     }
-    pub fn build(self) -> RegionManifest {
-        RegionManifest {
+    pub fn build(self) -> RegionManifestData {
+        RegionManifestData {
             metadata: self.metadata,
             version: self.version,
             committed_sequence: self.committed_sequence,
@@ -161,7 +161,7 @@ pub struct RegionSnapshot {
     // The number of manifest actions that this snapshot compacts.
     pub compacted_actions: usize,
     // The snapshot data
-    pub snapshot: Option<RegionManifest>,
+    pub snapshot: Option<RegionManifestData>,
 }
 
 impl Snapshot for RegionSnapshot {
@@ -368,7 +368,7 @@ mod tests {
             .build();
         let region_metadata: RegionMetadata = desc.try_into().unwrap();
 
-        let mut builder = RegionManifestBuilder::with_snapshot(None);
+        let mut builder = RegionManifestDataBuilder::with_snapshot(None);
 
         builder.apply_change(RegionChange {
             committed_sequence: 42,
@@ -413,7 +413,7 @@ mod tests {
             protocol: ProtocolAction::default(),
             last_version: 42,
             compacted_actions: 10,
-            snapshot: Some(RegionManifest {
+            snapshot: Some(RegionManifestData {
                 committed_sequence: 100,
                 metadata: RawRegionMetadata::default(),
                 version: Some(RegionVersion {
