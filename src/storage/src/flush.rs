@@ -15,6 +15,7 @@
 mod picker;
 mod scheduler;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use common_telemetry::{logging, timer};
@@ -34,30 +35,52 @@ use crate::region::{RegionWriterRef, SharedDataRef};
 use crate::sst::{AccessLayerRef, FileId, FileMeta, Source, SstInfo, WriteOptions};
 use crate::wal::Wal;
 
+/// Strategy to control whether to flush a region before writing to the region.
 pub trait FlushStrategy: Send + Sync + std::fmt::Debug {
+    /// Returns `true` if we need to flush the region.
     fn should_flush(
         &self,
         shared: &SharedDataRef,
         bytes_mutable: usize,
         bytes_total: usize,
     ) -> bool;
+
+    /// Reserves `mem` bytes.
+    fn reserve_mem(&self, mem: usize);
+
+    /// Tells the strategy we are freeing `mem` bytes.
+    ///
+    /// We are in the process of freeing `mem` bytes, so it is not considered
+    /// when checking the soft limit.
+    fn schedule_free_mem(&self, mem: usize);
+
+    /// We have freed `mem` bytes.
+    fn free_mem(&self, mem: usize);
 }
 
 pub type FlushStrategyRef = Arc<dyn FlushStrategy>;
 
+/// Flush strategy based on memory usage.
 #[derive(Debug)]
 pub struct SizeBasedStrategy {
     /// Write buffer size of memtable.
     max_write_buffer_size: usize,
     /// Mutable memtable memory size limitation
     mutable_limitation: usize,
+    /// Memory in used (e.g. used by mutable and immutable memtables).
+    memory_used: AtomicUsize,
+    /// Memory that hasn't been scheduled to free (e.g. used by mutable memtables).
+    memory_active: AtomicUsize,
 }
 
 impl SizeBasedStrategy {
+    /// Returns a new [SizeBasedStrategy] with specific `max_write_buffer_size`.
     pub fn new(max_write_buffer_size: usize) -> Self {
         Self {
             max_write_buffer_size,
             mutable_limitation: get_mutable_limitation(max_write_buffer_size),
+            memory_used: AtomicUsize::new(0),
+            memory_active: AtomicUsize::new(0),
         }
     }
 }
@@ -71,10 +94,13 @@ fn get_mutable_limitation(max_write_buffer_size: usize) -> usize {
 
 impl Default for SizeBasedStrategy {
     fn default() -> Self {
+        // TODO(yingwen): Use a larger value for global size.
         let max_write_buffer_size = DEFAULT_REGION_WRITE_BUFFER_SIZE.as_bytes() as usize;
         Self {
             max_write_buffer_size,
             mutable_limitation: get_mutable_limitation(max_write_buffer_size),
+            memory_used: AtomicUsize::new(0),
+            memory_active: AtomicUsize::new(0),
         }
     }
 }
@@ -123,6 +149,19 @@ impl FlushStrategy for SizeBasedStrategy {
         }
 
         should_flush
+    }
+
+    fn reserve_mem(&self, mem: usize) {
+        self.memory_used.fetch_add(mem, Ordering::Relaxed);
+        self.memory_active.fetch_add(mem, Ordering::Relaxed);
+    }
+
+    fn schedule_free_mem(&self, mem: usize) {
+        self.memory_active.fetch_sub(mem, Ordering::Relaxed);
+    }
+
+    fn free_mem(&self, mem: usize) {
+        self.memory_used.fetch_sub(mem, Ordering::Relaxed);
     }
 }
 

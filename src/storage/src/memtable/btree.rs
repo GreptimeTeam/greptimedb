@@ -16,7 +16,7 @@ use std::cmp::Ordering;
 use std::collections::{btree_map, BTreeMap};
 use std::fmt;
 use std::ops::Bound;
-use std::sync::atomic::Ordering as AtomicOrdering;
+use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
 use std::sync::{Arc, RwLock};
 
 use common_time::range::TimestampRange;
@@ -27,9 +27,10 @@ use datatypes::vectors::{UInt64Vector, UInt64VectorBuilder, UInt8Vector, UInt8Ve
 use store_api::storage::{OpType, SequenceNumber};
 
 use crate::error::Result;
+use crate::flush::FlushStrategyRef;
 use crate::memtable::{
-    BatchIterator, BoxedBatchIterator, IterContext, KeyValues, Memtable, MemtableId, MemtableStats,
-    RowOrdering,
+    AllocTracker, BatchIterator, BoxedBatchIterator, IterContext, KeyValues, Memtable, MemtableId,
+    MemtableStats, RowOrdering,
 };
 use crate::read::Batch;
 use crate::schema::compat::ReadAdapter;
@@ -44,16 +45,24 @@ pub struct BTreeMemtable {
     id: MemtableId,
     schema: RegionSchemaRef,
     map: Arc<RwLockMap>,
-    stats: MemtableStats,
+    alloc_tracker: AllocTracker,
+    max_timestamp: AtomicI64,
+    min_timestamp: AtomicI64,
 }
 
 impl BTreeMemtable {
-    pub fn new(id: MemtableId, schema: RegionSchemaRef) -> BTreeMemtable {
+    pub fn new(
+        id: MemtableId,
+        schema: RegionSchemaRef,
+        flush_strategy: Option<FlushStrategyRef>,
+    ) -> BTreeMemtable {
         BTreeMemtable {
             id,
             schema,
             map: Arc::new(RwLock::new(BTreeMap::new())),
-            stats: Default::default(),
+            alloc_tracker: AllocTracker::new(flush_strategy),
+            max_timestamp: AtomicI64::new(i64::MIN),
+            min_timestamp: AtomicI64::new(i64::MAX),
         }
     }
 
@@ -65,24 +74,20 @@ impl BTreeMemtable {
                 .as_timestamp()
                 .expect("Min timestamp must be a valid timestamp value")
                 .value();
-            let cur_min = self.stats.min_timestamp.load(AtomicOrdering::Relaxed);
+            let cur_min = self.min_timestamp.load(AtomicOrdering::Relaxed);
             if min_val < cur_min {
-                self.stats
-                    .min_timestamp
-                    .store(min_val, AtomicOrdering::Relaxed);
+                self.min_timestamp.store(min_val, AtomicOrdering::Relaxed);
             }
         }
 
         if let Some(max) = max {
-            let cur_max = self.stats.max_timestamp.load(AtomicOrdering::Relaxed);
+            let cur_max = self.max_timestamp.load(AtomicOrdering::Relaxed);
             let max_val = max
                 .as_timestamp()
                 .expect("Max timestamp must be a valid timestamp value")
                 .value();
             if max_val > cur_max {
-                self.stats
-                    .max_timestamp
-                    .store(max_val, AtomicOrdering::Relaxed);
+                self.max_timestamp.store(max_val, AtomicOrdering::Relaxed);
             }
         }
     }
@@ -97,7 +102,9 @@ impl fmt::Debug for BTreeMemtable {
             // Only show StoreSchema
             .field("schema", &self.schema)
             .field("rows", &len)
-            .field("stats", &self.stats)
+            .field("alloc_tracker", &self.alloc_tracker)
+            .field("max_timestamp", &self.max_timestamp)
+            .field("min_timestamp", &self.min_timestamp)
             .finish()
     }
 }
@@ -113,9 +120,7 @@ impl Memtable for BTreeMemtable {
 
     fn write(&self, kvs: &KeyValues) -> Result<()> {
         debug_assert!(kvs.timestamp.is_some());
-        self.stats
-            .estimated_bytes
-            .fetch_add(kvs.estimated_memory_size(), AtomicOrdering::Relaxed);
+        self.alloc_tracker.on_allocate(kvs.estimated_memory_size());
 
         let iter_row = IterRow::new(kvs);
         let mut map = self.map.write().unwrap();
@@ -136,6 +141,7 @@ impl Memtable for BTreeMemtable {
         }
 
         self.update_stats(min_ts, max_ts);
+
         Ok(())
     }
 
@@ -151,8 +157,16 @@ impl Memtable for BTreeMemtable {
         self.map.read().unwrap().len()
     }
 
-    fn stats(&self) -> &MemtableStats {
-        &self.stats
+    fn stats(&self) -> MemtableStats {
+        MemtableStats {
+            estimated_bytes: self.alloc_tracker.bytes_allocated(),
+            max_timestamp: self.max_timestamp.load(AtomicOrdering::Relaxed),
+            min_timestamp: self.min_timestamp.load(AtomicOrdering::Relaxed),
+        }
+    }
+
+    fn mark_immutable(&self) {
+        self.alloc_tracker.done_allocating();
     }
 }
 

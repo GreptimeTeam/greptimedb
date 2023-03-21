@@ -18,7 +18,8 @@ mod inserter;
 pub mod tests;
 mod version;
 
-use std::sync::atomic::{AtomicI64, AtomicU32, AtomicUsize, Ordering};
+use std::fmt;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use common_time::range::TimestampRange;
@@ -26,6 +27,7 @@ use datatypes::vectors::VectorRef;
 use store_api::storage::{consts, OpType, SequenceNumber};
 
 use crate::error::Result;
+use crate::flush::FlushStrategyRef;
 use crate::memtable::btree::BTreeMemtable;
 pub use crate::memtable::inserter::Inserter;
 pub use crate::memtable::version::MemtableVersion;
@@ -40,32 +42,21 @@ pub struct MemtableStats {
     /// The  estimated bytes allocated by this memtable from heap. Result
     /// of this method may be larger than the estimated based on [`num_rows`] because
     /// of the implementor's pre-alloc behavior.
-    estimated_bytes: AtomicUsize,
+    estimated_bytes: usize,
     /// The max timestamp that this memtable contains.
-    max_timestamp: AtomicI64,
+    pub max_timestamp: i64,
     /// The min timestamp that this memtable contains.
-    min_timestamp: AtomicI64,
+    pub min_timestamp: i64,
 }
 
 impl MemtableStats {
     pub fn bytes_allocated(&self) -> usize {
         self.estimated_bytes
-            .load(std::sync::atomic::Ordering::Relaxed)
-    }
-}
-
-impl Default for MemtableStats {
-    fn default() -> Self {
-        Self {
-            estimated_bytes: AtomicUsize::default(),
-            max_timestamp: AtomicI64::new(i64::MIN),
-            min_timestamp: AtomicI64::new(i64::MAX),
-        }
     }
 }
 
 /// In memory storage.
-pub trait Memtable: Send + Sync + std::fmt::Debug {
+pub trait Memtable: Send + Sync + fmt::Debug {
     /// Returns id of this memtable.
     fn id(&self) -> MemtableId;
 
@@ -87,7 +78,12 @@ pub trait Memtable: Send + Sync + std::fmt::Debug {
     fn num_rows(&self) -> usize;
 
     /// Returns stats of this memtable.
-    fn stats(&self) -> &MemtableStats;
+    fn stats(&self) -> MemtableStats;
+
+    /// Mark the memtable is immutable.
+    ///
+    /// The region MUST call this inside the region writer's write lock.
+    fn mark_immutable(&self);
 }
 
 pub type MemtableRef = Arc<dyn Memtable>;
@@ -153,7 +149,7 @@ pub trait BatchIterator: Iterator<Item = Result<Batch>> + Send + Sync {
 
 pub type BoxedBatchIterator = Box<dyn BatchIterator>;
 
-pub trait MemtableBuilder: Send + Sync + std::fmt::Debug {
+pub trait MemtableBuilder: Send + Sync + fmt::Debug {
     fn build(&self, schema: RegionSchemaRef) -> MemtableRef;
 }
 
@@ -200,14 +196,86 @@ impl KeyValues {
     }
 }
 
+/// Memtable memory allocation tracker.
+pub struct AllocTracker {
+    flush_strategy: Option<FlushStrategyRef>,
+    /// Bytes allocated by the tracker.
+    bytes_allocated: AtomicUsize,
+    /// Whether allocating is done.
+    is_done_allocating: AtomicBool,
+}
+
+impl fmt::Debug for AllocTracker {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("AllocTracker")
+            .field("bytes_allocated", &self.bytes_allocated)
+            .field("is_done_allocating", &self.is_done_allocating)
+            .finish()
+    }
+}
+
+impl AllocTracker {
+    /// Returns a new [AllocTracker].
+    fn new(flush_strategy: Option<FlushStrategyRef>) -> AllocTracker {
+        AllocTracker {
+            flush_strategy,
+            bytes_allocated: AtomicUsize::new(0),
+            is_done_allocating: AtomicBool::new(false),
+        }
+    }
+
+    /// Tracks `bytes` memory is allocated.
+    fn on_allocate(&self, bytes: usize) {
+        self.bytes_allocated.fetch_add(bytes, Ordering::Relaxed);
+        if let Some(flush_strategy) = &self.flush_strategy {
+            flush_strategy.reserve_mem(bytes);
+        }
+    }
+
+    /// Marks we have finished allocating memory so we can free it from
+    /// the write buffer's limit.
+    ///
+    /// The region MUST ensure that it calls this method inside the region writer's write lock.
+    fn done_allocating(&self) {
+        if let Some(flush_strategy) = &self.flush_strategy {
+            if self
+                .is_done_allocating
+                .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                flush_strategy.schedule_free_mem(self.bytes_allocated.load(Ordering::Relaxed));
+            }
+        }
+    }
+
+    /// Returns bytes allocated.
+    fn bytes_allocated(&self) -> usize {
+        self.bytes_allocated.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for AllocTracker {
+    fn drop(&mut self) {
+        if !self.is_done_allocating.load(Ordering::Relaxed) {
+            self.done_allocating();
+        }
+
+        // Memory tracked by this tracker is freed.
+        if let Some(flush_strategy) = &self.flush_strategy {
+            flush_strategy.free_mem(self.bytes_allocated.load(Ordering::Relaxed));
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct DefaultMemtableBuilder {
     memtable_id: AtomicU32,
+    flush_strategy: Option<FlushStrategyRef>,
 }
 
 impl MemtableBuilder for DefaultMemtableBuilder {
     fn build(&self, schema: RegionSchemaRef) -> MemtableRef {
         let id = self.memtable_id.fetch_add(1, Ordering::Relaxed);
-        Arc::new(BTreeMemtable::new(id, schema))
+        Arc::new(BTreeMemtable::new(id, schema, self.flush_strategy.clone()))
     }
 }

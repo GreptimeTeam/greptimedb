@@ -39,6 +39,12 @@ impl FlushStrategy for FlushSwitch {
     ) -> bool {
         self.should_flush.load(Ordering::Relaxed)
     }
+
+    fn reserve_mem(&self, _mem: usize) {}
+
+    fn schedule_free_mem(&self, _mem: usize) {}
+
+    fn free_mem(&self, _mem: usize) {}
 }
 
 pub fn has_parquet_file(sst_dir: &str) -> bool {

@@ -462,6 +462,7 @@ impl<S: LogStore> EngineInner<S> {
         );
         manifest.start().await?;
 
+        // FIXME(yingwen): Always use the global flush strategy.
         let flush_strategy = write_buffer_size
             .map(|size| Arc::new(SizeBasedStrategy::new(size)) as Arc<_>)
             .unwrap_or_else(|| self.flush_strategy.clone());
