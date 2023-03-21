@@ -290,6 +290,7 @@ pub(crate) mod greptime_builtin {
     use common_function::scalars::math::PowFunction;
     use common_function::scalars::{Function, FunctionRef, FUNCTION_REGISTRY};
     use datafusion::arrow::datatypes::DataType as ArrowDataType;
+    use datafusion::dataframe::DataFrame as DfDataFrame;
     use datafusion::physical_plan::expressions;
     use datafusion_expr::{ColumnarValue as DFColValue, Expr as DfExpr};
     use datafusion_physical_expr::math_expressions;
@@ -300,19 +301,28 @@ pub(crate) mod greptime_builtin {
     use paste::paste;
     use rustpython_vm::builtins::{PyFloat, PyFunction, PyInt, PyStr};
     use rustpython_vm::function::{FuncArgs, KwArgs, OptionalArg};
-    use rustpython_vm::{AsObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine};
-
-    use super::{
-        all_to_f64, eval_aggr_fn, from_df_err, try_into_columnar_value, try_into_py_obj,
-        type_cast_error,
+    use rustpython_vm::{
+        pyclass, AsObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
     };
+
     use crate::python::ffi_types::copr::PyQueryEngine;
     use crate::python::ffi_types::vector::val_to_pyobj;
     use crate::python::ffi_types::PyVector;
-    use crate::python::rspython::dataframe_impl::data_frame::{PyDataFrame, PyExpr, PyExprRef};
+    use crate::python::rspython::builtins::{
+        all_to_f64, eval_aggr_fn, from_df_err, try_into_columnar_value, try_into_py_obj,
+        type_cast_error,
+    };
+    use crate::python::rspython::dataframe_impl::data_frame::{PyExpr, PyExprRef};
     use crate::python::rspython::utils::{
         is_instance, py_obj_to_value, py_obj_to_vec, PyVectorRef,
     };
+
+    #[pyattr]
+    #[pyclass(module = "greptime_builtin", name = "PyDataFrame")]
+    #[derive(PyPayload, Debug, Clone)]
+    pub struct PyDataFrame {
+        pub inner: DfDataFrame,
+    }
 
     /// get `__dataframe__` from globals and return it
     /// TODO(discord9): this is a terrible hack, we should find a better way to get `__dataframe__`

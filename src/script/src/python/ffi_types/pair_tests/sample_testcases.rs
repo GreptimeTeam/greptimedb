@@ -17,12 +17,11 @@ use std::f64::consts;
 use std::sync::Arc;
 
 use datatypes::prelude::ScalarVector;
-use datatypes::vectors::{
-    BooleanVector, Float64Vector, Int32Vector, Int64Vector, UInt32Vector, VectorRef,
-};
+#[cfg(feature = "pyo3_backend")]
+use datatypes::vectors::UInt32Vector;
+use datatypes::vectors::{BooleanVector, Float64Vector, Int32Vector, Int64Vector, VectorRef};
 
-use super::CoprTestCase;
-use crate::python::ffi_types::pair_tests::CodeBlockTestCase;
+use crate::python::ffi_types::pair_tests::{CodeBlockTestCase, CoprTestCase};
 macro_rules! vector {
     ($ty: ident, $slice: expr) => {
         Arc::new($ty::from_slice($slice)) as VectorRef
@@ -79,8 +78,10 @@ def boolean_array() -> vector[f64]:
 @copr(returns=["value"], backend="rspy")
 def boolean_array() -> vector[f64]:
     from greptime import vector
-    from greptime import query, dataframe
+    from greptime import query, dataframe, PyDataFrame
     
+    df = PyDataFrame.from_sql("select number from numbers limit 5")
+    print("df from sql=", df)
     try: 
         print("query()=", query())
     except KeyError as e:

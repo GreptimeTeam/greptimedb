@@ -14,8 +14,10 @@
 
 use rustpython_vm::class::PyClassImpl;
 use rustpython_vm::{pymodule as rspymodule, VirtualMachine};
+
+use crate::python::rspython::builtins::greptime_builtin::PyDataFrame;
 pub(crate) fn init_data_frame(module_name: &str, vm: &mut VirtualMachine) {
-    data_frame::PyDataFrame::make_class(&vm.ctx);
+    PyDataFrame::make_class(&vm.ctx);
     data_frame::PyExpr::make_class(&vm.ctx);
     vm.add_native_module(module_name.to_owned(), Box::new(data_frame::make_module));
 }
@@ -36,13 +38,10 @@ pub(crate) mod data_frame {
 
     use crate::python::error::DataFusionSnafu;
     use crate::python::ffi_types::PyVector;
-    use crate::python::rspython::builtins::greptime_builtin::{lit, query as get_query_engine};
+    use crate::python::rspython::builtins::greptime_builtin::{
+        lit, query as get_query_engine, PyDataFrame,
+    };
     use crate::python::utils::block_on_async;
-    #[rspyclass(module = "data_frame", name = "DataFrame")]
-    #[derive(PyPayload, Debug, Clone)]
-    pub struct PyDataFrame {
-        pub inner: DfDataFrame,
-    }
 
     impl From<DfDataFrame> for PyDataFrame {
         fn from(inner: DfDataFrame) -> Self {
