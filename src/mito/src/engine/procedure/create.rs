@@ -115,12 +115,14 @@ impl<S: StorageEngine> CreateMitoTable<S> {
     /// Recover the procedure from json.
     fn from_json(json: &str, engine_inner: Arc<MitoEngineInner<S>>) -> Result<Self> {
         let data: CreateTableData = serde_json::from_str(json).context(FromJsonSnafu)?;
+        let table_schema =
+            Schema::try_from(data.request.schema.clone()).context(InvalidRawSchemaSnafu)?;
 
         Ok(CreateMitoTable {
             data,
             engine_inner,
             regions: HashMap::new(),
-            table_schema: None,
+            table_schema: Some(Arc::new(table_schema)),
         })
     }
 
