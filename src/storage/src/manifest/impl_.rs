@@ -280,7 +280,7 @@ impl<S: Snapshot<Error = Error>, M: MetaAction<Error = Error>> ManifestImplInner
             if snapshot.last_version() > version {
                 // It happens when saving snapshot successfully, but failed at saving checkpoint metadata(the "__last_checkpoint" file).
                 // Then we try to use the old snapshot and do the checkpoint next time.
-                // If the old snapshot are deleted, it's fine that we return the latest snapshot.
+                // If the old snapshot was deleted, it's fine that we return the latest snapshot.
                 // the only side effect is leaving some unused checkpoint snapshot files.
                 // TODO(dennis): delete unused snapshot files
                 warn!("The snapshot manifest version {} in {} is greater than checkpoint metadata version {}.", self.store.path(), snapshot.last_version(), version);

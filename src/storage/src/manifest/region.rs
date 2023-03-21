@@ -54,6 +54,7 @@ impl Checkpointer for RegionManifestCheckpointer {
         manifest: &ManifestImpl<RegionSnapshot, RegionMetaActionList>,
     ) -> Result<Option<RegionSnapshot>> {
         let last_snapshot = manifest.last_snapshot().await?;
+
         let current_version = manifest.last_version();
         let (start_version, mut protocol, mut manifest_builder) =
             if let Some(snapshot) = last_snapshot {
@@ -108,11 +109,17 @@ impl Checkpointer for RegionManifestCheckpointer {
         };
 
         manifest.save_snapshot(&snapshot).await?;
-        // TODO(dennis): background task to clean old manifest files.
+        // TODO(dennis): background task to clean old manifest actions and snapshots.
         manifest
             .manifest_store()
             .delete(start_version, last_version + 1)
             .await?;
+        if start_version > MIN_VERSION {
+            manifest
+                .manifest_store()
+                .delete_checkpoint(start_version)
+                .await?
+        }
 
         info!("Region manifest checkpoint, start_version: {}, last_version: {}, compacted actions: {}", start_version, last_version, compacted_actions);
 

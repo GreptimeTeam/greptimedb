@@ -132,6 +132,17 @@ impl ManifestObjectStore {
             })?,
         )))
     }
+
+    pub(crate) async fn delete_checkpoint(&self, version: ManifestVersion) -> Result<()> {
+        let checkpoint = self
+            .object_store
+            .object(&self.checkpoint_file_path(version));
+        checkpoint.delete().await.context(DeleteObjectSnafu {
+            path: checkpoint.path(),
+        })?;
+
+        Ok(())
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
