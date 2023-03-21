@@ -3,7 +3,7 @@
 ## Sqlness manual
 
 ### Case file
-Sqlness has three types of file
+Sqlness has two types of file
 - `.sql`: test input, SQL only
 - `.result`: expected test output, SQL and its results
 
