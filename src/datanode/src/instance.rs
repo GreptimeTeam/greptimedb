@@ -274,7 +274,7 @@ impl Instance {
         .await
         .map_err(BoxedError::new)
         .context(ShutdownInstanceSnafu);
-        info!("flush success: {}", flush_result.is_ok());
+        info!("Flushed all tables result: {}", flush_result.is_ok());
         flush_result?;
 
         Ok(())
