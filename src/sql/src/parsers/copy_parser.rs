@@ -18,7 +18,7 @@ use sqlparser::keywords::Keyword;
 
 use crate::error::{self, Result};
 use crate::parser::ParserContext;
-use crate::statements::copy::{CopyTable, CopyTableFrom, CopyTableTo, Format};
+use crate::statements::copy::{CopyTable, CopyTableArgument, Format};
 use crate::statements::statement::Statement;
 
 // COPY tbl TO 'output.parquet';
@@ -40,24 +40,24 @@ impl<'a> ParserContext<'a> {
                 })?;
 
         if self.parser.parse_keyword(Keyword::TO) {
-            self.parse_copy_table_to(table_name)
+            Ok(CopyTable::To(self.parse_copy_table_to(table_name)?))
         } else {
             self.parser
                 .expect_keyword(Keyword::FROM)
                 .context(error::SyntaxSnafu { sql: self.sql })?;
-            self.parse_copy_table_from(table_name)
+            Ok(CopyTable::From(self.parse_copy_table_from(table_name)?))
         }
     }
 
-    fn parse_copy_table_from(&mut self, table_name: ObjectName) -> Result<CopyTable> {
-        let uri = self
-            .parser
-            .parse_literal_string()
-            .with_context(|_| error::UnexpectedSnafu {
-                sql: self.sql,
-                expected: "a uri",
-                actual: self.peek_token_as_string(),
-            })?;
+    fn parse_copy_table_from(&mut self, table_name: ObjectName) -> Result<CopyTableArgument> {
+        let location =
+            self.parser
+                .parse_literal_string()
+                .with_context(|_| error::UnexpectedSnafu {
+                    sql: self.sql,
+                    expected: "a uri",
+                    actual: self.peek_token_as_string(),
+                })?;
 
         let options = self
             .parser
@@ -99,14 +99,17 @@ impl<'a> ParserContext<'a> {
                 }
             })
             .collect();
-
-        Ok(CopyTable::From(CopyTableFrom::new(
-            table_name, uri, format, pattern, connection,
-        )))
+        Ok(CopyTableArgument {
+            table_name,
+            format,
+            pattern,
+            connection,
+            location,
+        })
     }
 
-    fn parse_copy_table_to(&mut self, table_name: ObjectName) -> Result<CopyTable> {
-        let file_name =
+    fn parse_copy_table_to(&mut self, table_name: ObjectName) -> Result<CopyTableArgument> {
+        let location =
             self.parser
                 .parse_literal_string()
                 .with_context(|_| error::UnexpectedSnafu {
@@ -130,9 +133,29 @@ impl<'a> ParserContext<'a> {
             }
         }
 
-        Ok(CopyTable::To(CopyTableTo::new(
-            table_name, file_name, format,
-        )))
+        let connection_options = self
+            .parser
+            .parse_options(Keyword::CONNECTION)
+            .context(error::SyntaxSnafu { sql: self.sql })?;
+
+        let connection = connection_options
+            .into_iter()
+            .filter_map(|option| {
+                if let Some(v) = ParserContext::parse_option_string(option.value) {
+                    Some((option.name.value.to_uppercase(), v))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        Ok(CopyTableArgument {
+            table_name,
+            format,
+            connection,
+            pattern: None,
+            location,
+        })
     }
 
     fn parse_option_string(value: Value) -> Option<String> {
@@ -167,7 +190,7 @@ mod tests {
             match statement {
                 Statement::Copy(CopyTable::To(copy_table)) => {
                     let (catalog, schema, table) =
-                        if let [catalog, schema, table] = &copy_table.table_name().0[..] {
+                        if let [catalog, schema, table] = &copy_table.table_name.0[..] {
                             (
                                 catalog.value.clone(),
                                 schema.value.clone(),
@@ -181,11 +204,11 @@ mod tests {
                     assert_eq!("schema0", schema);
                     assert_eq!("tbl", table);
 
-                    let file_name = copy_table.file_name();
+                    let file_name = copy_table.location;
                     assert_eq!("tbl_file.parquet", file_name);
 
-                    let format = copy_table.format();
-                    assert_eq!(Format::Parquet, *format);
+                    let format = copy_table.format;
+                    assert_eq!(Format::Parquet, format);
                 }
                 _ => unreachable!(),
             }
@@ -224,7 +247,7 @@ mod tests {
                     assert_eq!("schema0", schema);
                     assert_eq!("tbl", table);
 
-                    let file_name = copy_table.from;
+                    let file_name = copy_table.location;
                     assert_eq!("tbl_file.parquet", file_name);
 
                     let format = copy_table.format;
@@ -268,6 +291,44 @@ mod tests {
                     if let Some(expected_pattern) = test.expected_pattern {
                         assert_eq!(copy_table.pattern.clone().unwrap(), expected_pattern);
                     }
+                    assert_eq!(copy_table.connection.clone(), test.expected_connection);
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_copy_table_to() {
+        struct Test<'a> {
+            sql: &'a str,
+            expected_connection: HashMap<String, String>,
+        }
+
+        let tests = [
+            Test {
+                sql: "COPY catalog0.schema0.tbl TO 'tbl_file.parquet' ",
+                expected_connection: HashMap::new(),
+            },
+            Test {
+                sql: "COPY catalog0.schema0.tbl TO 'tbl_file.parquet' CONNECTION (FOO='Bar', ONE='two')",
+                expected_connection: [("FOO","Bar"),("ONE","two")].into_iter().map(|(k,v)|{(k.to_string(),v.to_string())}).collect()
+            },
+            Test {
+                sql:"COPY catalog0.schema0.tbl TO 'tbl_file.parquet' WITH (FORMAT = 'parquet') CONNECTION (FOO='Bar', ONE='two')",
+                expected_connection: [("FOO","Bar"),("ONE","two")].into_iter().map(|(k,v)|{(k.to_string(),v.to_string())}).collect()
+            },
+        ];
+
+        for test in tests {
+            let mut result =
+                ParserContext::create_with_dialect(test.sql, &GenericDialect {}).unwrap();
+            assert_eq!(1, result.len());
+
+            let statement = result.remove(0);
+            assert_matches!(statement, Statement::Copy { .. });
+            match statement {
+                Statement::Copy(CopyTable::To(copy_table)) => {
                     assert_eq!(copy_table.connection.clone(), test.expected_connection);
                 }
                 _ => unreachable!(),

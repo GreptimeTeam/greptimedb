@@ -183,7 +183,7 @@ async fn insert_and_assert(db: &Database) {
         row_count: 4,
     };
     let result = db.insert(request).await;
-    result.unwrap();
+    assert_eq!(result.unwrap(), 4);
 
     let result = db
         .sql(

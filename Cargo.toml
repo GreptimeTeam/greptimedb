@@ -7,6 +7,7 @@ members = [
     "src/cmd",
     "src/common/base",
     "src/common/catalog",
+    "src/common/datasource",
     "src/common/error",
     "src/common/function",
     "src/common/function-macro",

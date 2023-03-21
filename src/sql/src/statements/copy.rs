@@ -20,65 +20,18 @@ use crate::error::{self, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CopyTable {
-    To(CopyTableTo),
-    From(CopyTableFrom),
+    To(CopyTableArgument),
+    From(CopyTableArgument),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CopyTableTo {
-    table_name: ObjectName,
-    file_name: String,
-    format: Format,
-}
-
-impl CopyTableTo {
-    pub(crate) fn new(table_name: ObjectName, file_name: String, format: Format) -> Self {
-        Self {
-            table_name,
-            file_name,
-            format,
-        }
-    }
-
-    pub fn table_name(&self) -> &ObjectName {
-        &self.table_name
-    }
-
-    pub fn file_name(&self) -> &str {
-        &self.file_name
-    }
-
-    pub fn format(&self) -> &Format {
-        &self.format
-    }
-}
-
-// TODO: To combine struct CopyTableFrom and CopyTableTo
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CopyTableFrom {
+pub struct CopyTableArgument {
     pub table_name: ObjectName,
     pub format: Format,
     pub connection: HashMap<String, String>,
     pub pattern: Option<String>,
-    pub from: String,
-}
-
-impl CopyTableFrom {
-    pub(crate) fn new(
-        table_name: ObjectName,
-        from: String,
-        format: Format,
-        pattern: Option<String>,
-        connection: HashMap<String, String>,
-    ) -> Self {
-        CopyTableFrom {
-            table_name,
-            format,
-            connection,
-            pattern,
-            from,
-        }
-    }
+    /// Copy tbl [To|From] 'location'.
+    pub location: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -12,16 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod date;
-pub mod datetime;
-pub mod error;
-pub mod range;
-pub mod timestamp;
-pub mod timestamp_millis;
-pub mod util;
+use object_store::services::Fs;
+use object_store::{ObjectStore, ObjectStoreBuilder};
+use snafu::ResultExt;
 
-pub use date::Date;
-pub use datetime::DateTime;
-pub use range::RangeMillis;
-pub use timestamp::Timestamp;
-pub use timestamp_millis::TimestampMillis;
+use crate::error::{self, Result};
+
+pub fn build_fs_backend(root: &str) -> Result<ObjectStore> {
+    let accessor = Fs::default()
+        .root(root)
+        .build()
+        .context(error::BuildBackendSnafu)?;
+
+    Ok(ObjectStore::new(accessor).finish())
+}

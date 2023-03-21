@@ -14,6 +14,7 @@
 
 use std::any::Any;
 
+use common_datasource::error::Error as DataSourceError;
 use common_error::prelude::*;
 use common_procedure::ProcedureId;
 use common_recordbatch::error::Error as RecordBatchError;
@@ -218,7 +219,13 @@ pub enum Error {
 
     #[snafu(display("Failed to build backend, source: {}", source))]
     BuildBackend {
-        source: object_store::Error,
+        #[snafu(backtrace)]
+        source: DataSourceError,
+    },
+
+    #[snafu(display("Failed to parse url, source: {}", source))]
+    ParseUrl {
+        source: DataSourceError,
         backtrace: Backtrace,
     },
 
@@ -247,6 +254,12 @@ pub enum Error {
     BuildRegex {
         backtrace: Backtrace,
         source: regex::Error,
+    },
+
+    #[snafu(display("Failed to list objects, source: {}", source))]
+    ListObjects {
+        #[snafu(backtrace)]
+        source: DataSourceError,
     },
 
     #[snafu(display("Failed to parse the data, source: {}", source))]
@@ -475,13 +488,6 @@ pub enum Error {
         source: object_store::Error,
     },
 
-    #[snafu(display("Failed to lists object in path: {}, source: {}", path, source))]
-    ListObjects {
-        path: String,
-        backtrace: Backtrace,
-        source: object_store::Error,
-    },
-
     #[snafu(display("Unrecognized table option: {}", source))]
     UnrecognizedTableOption {
         #[snafu(backtrace)]
@@ -584,7 +590,8 @@ impl ErrorExt for Error {
             | DatabaseNotFound { .. }
             | MissingNodeId { .. }
             | MissingMetasrvOpts { .. }
-            | ColumnNoneDefaultValue { .. } => StatusCode::InvalidArguments,
+            | ColumnNoneDefaultValue { .. }
+            | ParseUrl { .. } => StatusCode::InvalidArguments,
 
             // TODO(yingwen): Further categorize http error.
             StartServer { .. }

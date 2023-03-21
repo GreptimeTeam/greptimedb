@@ -77,6 +77,7 @@ impl Default for ObjectStoreConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct WalConfig {
     // wal directory
     pub dir: String,
@@ -108,6 +109,7 @@ impl Default for WalConfig {
 
 /// Options for table compaction
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(default)]
 pub struct CompactionConfig {
     /// Max task number that can concurrently run.
     pub max_inflight_tasks: usize,
@@ -253,7 +255,7 @@ impl Datanode {
         self.instance.clone()
     }
 
-    async fn shutdown_instance(&self) -> Result<()> {
+    pub async fn shutdown_instance(&self) -> Result<()> {
         self.instance.shutdown().await
     }
 

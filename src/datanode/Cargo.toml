@@ -20,6 +20,7 @@ catalog = { path = "../catalog" }
 common-base = { path = "../common/base" }
 common-catalog = { path = "../common/catalog" }
 common-error = { path = "../common/error" }
+common-datasource = { path = "../common/datasource" }
 common-grpc = { path = "../common/grpc" }
 common-grpc-expr = { path = "../common/grpc-expr" }
 common-procedure = { path = "../common/procedure" }
@@ -64,6 +65,7 @@ tonic.workspace = true
 tower = { version = "0.4", features = ["full"] }
 tower-http = { version = "0.3", features = ["full"] }
 url = "2.3.1"
+uuid.workspace = true
 
 [dev-dependencies]
 axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", branch = "patch-1" }

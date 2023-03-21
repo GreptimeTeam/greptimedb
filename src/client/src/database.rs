@@ -12,15 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::str::FromStr;
-
 use api::v1::auth_header::AuthScheme;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{
-    AlterExpr, AuthHeader, CreateTableExpr, DdlRequest, DropTableExpr, FlushTableExpr,
-    GreptimeRequest, InsertRequest, PromRangeQuery, QueryRequest, RequestHeader,
+    greptime_response, AffectedRows, AlterExpr, AuthHeader, CreateTableExpr, DdlRequest,
+    DropTableExpr, FlushTableExpr, GreptimeRequest, InsertRequest, PromRangeQuery, QueryRequest,
+    RequestHeader,
 };
 use arrow_flight::{FlightData, Ticket};
 use common_error::prelude::*;
@@ -31,7 +30,9 @@ use futures_util::{TryFutureExt, TryStreamExt};
 use prost::Message;
 use snafu::{ensure, ResultExt};
 
-use crate::error::{ConvertFlightDataSnafu, IllegalFlightMessagesSnafu};
+use crate::error::{
+    ConvertFlightDataSnafu, IllegalDatabaseResponseSnafu, IllegalFlightMessagesSnafu,
+};
 use crate::{error, Client, Result};
 
 #[derive(Clone, Debug)]
@@ -78,8 +79,26 @@ impl Database {
         });
     }
 
-    pub async fn insert(&self, request: InsertRequest) -> Result<Output> {
-        self.do_get(Request::Insert(request)).await
+    pub async fn insert(&self, request: InsertRequest) -> Result<u32> {
+        let mut client = self.client.make_database_client()?.inner;
+        let request = GreptimeRequest {
+            header: Some(RequestHeader {
+                catalog: self.catalog.clone(),
+                schema: self.schema.clone(),
+                authorization: self.ctx.auth_header.clone(),
+            }),
+            request: Some(Request::Insert(request)),
+        };
+        let response = client
+            .handle(request)
+            .await?
+            .into_inner()
+            .response
+            .context(IllegalDatabaseResponseSnafu {
+                err_msg: "GreptimeResponse is empty",
+            })?;
+        let greptime_response::Response::AffectedRows(AffectedRows { value }) = response;
+        Ok(value)
     }
 
     pub async fn sql(&self, sql: &str) -> Result<Output> {
@@ -155,7 +174,7 @@ impl Database {
             ticket: request.encode_to_vec().into(),
         };
 
-        let mut client = self.client.make_client()?;
+        let mut client = self.client.make_flight_client()?;
 
         // TODO(LFC): Streaming get flight data.
         let flight_data: Vec<FlightData> = client
@@ -164,22 +183,22 @@ impl Database {
             .and_then(|response| response.into_inner().try_collect())
             .await
             .map_err(|e| {
-                let code = get_metadata_value(&e, INNER_ERROR_CODE)
-                    .and_then(|s| StatusCode::from_str(&s).ok())
-                    .unwrap_or(StatusCode::Unknown);
-                let msg = get_metadata_value(&e, INNER_ERROR_MSG).unwrap_or(e.to_string());
-                error::ExternalSnafu { code, msg }
+                let tonic_code = e.code();
+                let e: error::Error = e.into();
+                let code = e.status_code();
+                let msg = e.to_string();
+                error::ServerSnafu { code, msg }
                     .fail::<()>()
                     .map_err(BoxedError::new)
                     .context(error::FlightGetSnafu {
-                        tonic_code: e.code(),
+                        tonic_code,
                         addr: client.addr(),
                     })
                     .map_err(|error| {
                         logging::error!(
                             "Failed to do Flight get, addr: {}, code: {}, source: {}",
                             client.addr(),
-                            e.code(),
+                            tonic_code,
                             error
                         );
                         error
@@ -208,12 +227,6 @@ impl Database {
         };
         Ok(output)
     }
-}
-
-fn get_metadata_value(e: &tonic::Status, key: &str) -> Option<String> {
-    e.metadata()
-        .get(key)
-        .and_then(|v| String::from_utf8(v.as_bytes().to_vec()).ok())
 }
 
 #[derive(Default, Debug, Clone)]

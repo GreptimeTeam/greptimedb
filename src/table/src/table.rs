@@ -96,8 +96,12 @@ pub trait Table: Send + Sync {
     }
 
     /// Flush table.
-    async fn flush(&self, region_number: Option<RegionNumber>) -> Result<()> {
-        let _ = region_number;
+    ///
+    /// Options:
+    /// - region_number: specify region to flush.
+    /// - wait: Whether to wait until flush is done.
+    async fn flush(&self, region_number: Option<RegionNumber>, wait: Option<bool>) -> Result<()> {
+        let _ = (region_number, wait);
         UnsupportedSnafu { operation: "FLUSH" }.fail()?
     }
 

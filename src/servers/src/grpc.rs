@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod database;
 pub mod flight;
+pub mod handler;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use api::v1::greptime_database_server::{GreptimeDatabase, GreptimeDatabaseServer};
 use arrow_flight::flight_service_server::{FlightService, FlightServiceServer};
 use async_trait::async_trait;
 use common_runtime::Runtime;
@@ -27,18 +30,21 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot::{self, Sender};
 use tokio::sync::Mutex;
 use tokio_stream::wrappers::TcpListenerStream;
+use tonic::Status;
 
 use crate::auth::UserProviderRef;
 use crate::error::{AlreadyStartedSnafu, Result, StartGrpcSnafu, TcpBindSnafu};
+use crate::grpc::database::DatabaseService;
 use crate::grpc::flight::FlightHandler;
+use crate::grpc::handler::GreptimeRequestHandler;
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 use crate::server::Server;
 
+type TonicResult<T> = std::result::Result<T, Status>;
+
 pub struct GrpcServer {
-    query_handler: ServerGrpcQueryHandlerRef,
-    user_provider: Option<UserProviderRef>,
     shutdown_tx: Mutex<Option<Sender<()>>>,
-    runtime: Arc<Runtime>,
+    request_handler: Arc<GreptimeRequestHandler>,
 }
 
 impl GrpcServer {
@@ -47,21 +53,23 @@ impl GrpcServer {
         user_provider: Option<UserProviderRef>,
         runtime: Arc<Runtime>,
     ) -> Self {
-        Self {
+        let request_handler = Arc::new(GreptimeRequestHandler::new(
             query_handler,
             user_provider,
-            shutdown_tx: Mutex::new(None),
             runtime,
+        ));
+        Self {
+            shutdown_tx: Mutex::new(None),
+            request_handler,
         }
     }
 
-    pub fn create_service(&self) -> FlightServiceServer<impl FlightService> {
-        let service = FlightHandler::new(
-            self.query_handler.clone(),
-            self.user_provider.clone(),
-            self.runtime.clone(),
-        );
-        FlightServiceServer::new(service)
+    pub fn create_flight_service(&self) -> FlightServiceServer<impl FlightService> {
+        FlightServiceServer::new(FlightHandler::new(self.request_handler.clone()))
+    }
+
+    pub fn create_database_service(&self) -> GreptimeDatabaseServer<impl GreptimeDatabase> {
+        GreptimeDatabaseServer::new(DatabaseService::new(self.request_handler.clone()))
     }
 }
 
@@ -103,7 +111,8 @@ impl Server for GrpcServer {
 
         // Would block to serve requests.
         tonic::transport::Server::builder()
-            .add_service(self.create_service())
+            .add_service(self.create_flight_service())
+            .add_service(self.create_database_service())
             .serve_with_incoming_shutdown(TcpListenerStream::new(listener), rx.map(drop))
             .await
             .context(StartGrpcSnafu)?;

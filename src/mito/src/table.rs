@@ -35,8 +35,8 @@ use object_store::ObjectStore;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::manifest::{self, Manifest, ManifestVersion, MetaActionIterator};
 use store_api::storage::{
-    AddColumn, AlterOperation, AlterRequest, ChunkReader, ReadContext, Region, RegionMeta,
-    RegionNumber, ScanRequest, SchemaRef, Snapshot, WriteContext, WriteRequest,
+    AddColumn, AlterOperation, AlterRequest, ChunkReader, FlushContext, ReadContext, Region,
+    RegionMeta, RegionNumber, ScanRequest, SchemaRef, Snapshot, WriteContext, WriteRequest,
 };
 use table::error as table_error;
 use table::error::{RegionSchemaMismatchSnafu, Result as TableResult, TableOperationSnafu};
@@ -323,20 +323,27 @@ impl<R: Region> Table for MitoTable<R> {
         Ok(rows_deleted)
     }
 
-    async fn flush(&self, region_number: Option<RegionNumber>) -> TableResult<()> {
+    async fn flush(
+        &self,
+        region_number: Option<RegionNumber>,
+        wait: Option<bool>,
+    ) -> TableResult<()> {
+        let flush_ctx = wait.map(|wait| FlushContext { wait }).unwrap_or_default();
         if let Some(region_number) = region_number {
             if let Some(region) = self.regions.get(&region_number) {
                 region
-                    .flush()
+                    .flush(&flush_ctx)
                     .await
                     .map_err(BoxedError::new)
                     .context(table_error::TableOperationSnafu)?;
             }
         } else {
-            futures::future::try_join_all(self.regions.values().map(|region| region.flush()))
-                .await
-                .map_err(BoxedError::new)
-                .context(table_error::TableOperationSnafu)?;
+            futures::future::try_join_all(
+                self.regions.values().map(|region| region.flush(&flush_ctx)),
+            )
+            .await
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)?;
         }
 
         Ok(())

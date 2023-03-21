@@ -14,6 +14,8 @@
 
 use std::pin::Pin;
 
+use common_datasource;
+use common_datasource::object_store::{build_backend, parse_url};
 use common_query::physical_plan::SessionContext;
 use common_query::Output;
 use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
@@ -22,8 +24,7 @@ use datafusion::parquet::basic::{Compression, Encoding};
 use datafusion::parquet::file::properties::WriterProperties;
 use datafusion::physical_plan::RecordBatchStream;
 use futures::TryStreamExt;
-use object_store::services::Fs as Builder;
-use object_store::{ObjectStore, ObjectStoreBuilder};
+use object_store::ObjectStore;
 use snafu::ResultExt;
 use table::engine::TableReference;
 use table::requests::CopyTableRequest;
@@ -32,7 +33,7 @@ use crate::error::{self, Result};
 use crate::sql::SqlHandler;
 
 impl SqlHandler {
-    pub(crate) async fn copy_table(&self, req: CopyTableRequest) -> Result<Output> {
+    pub(crate) async fn copy_table_to(&self, req: CopyTableRequest) -> Result<Output> {
         let table_ref = TableReference {
             catalog: &req.catalog_name,
             schema: &req.schema_name,
@@ -52,13 +53,11 @@ impl SqlHandler {
             .context(error::TableScanExecSnafu)?;
         let stream = Box::pin(DfRecordBatchStreamAdapter::new(stream));
 
-        let accessor = Builder::default()
-            .root("/")
-            .build()
-            .context(error::BuildBackendSnafu)?;
-        let object_store = ObjectStore::new(accessor).finish();
+        let (_schema, _host, path) = parse_url(&req.location).context(error::ParseUrlSnafu)?;
+        let object_store =
+            build_backend(&req.location, req.connection).context(error::BuildBackendSnafu)?;
 
-        let mut parquet_writer = ParquetWriter::new(req.file_name, stream, object_store);
+        let mut parquet_writer = ParquetWriter::new(path.to_string(), stream, object_store);
         // TODO(jiachun):
         // For now, COPY is implemented synchronously.
         // When copying large table, it will be blocked for a long time.

@@ -31,7 +31,6 @@ impl Instance {
     }
 
     pub async fn stop(&self) -> Result<()> {
-        // TODO: handle cli shutdown
         Ok(())
     }
 }

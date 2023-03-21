@@ -26,6 +26,7 @@ use snafu::{OptionExt, ResultExt};
 
 use crate::error;
 use crate::error::{ArithmeticOverflowSnafu, Error, ParseTimestampSnafu, TimestampOverflowSnafu};
+use crate::util::div_ceil;
 
 #[derive(Debug, Clone, Default, Copy, Serialize, Deserialize)]
 pub struct Timestamp {
@@ -143,7 +144,7 @@ impl Timestamp {
             Some(Timestamp::new(value, unit))
         } else {
             let mul = unit.factor() / self.unit().factor();
-            Some(Timestamp::new(self.value.div_ceil(mul as i64), unit))
+            Some(Timestamp::new(div_ceil(self.value, mul as i64), unit))
         }
     }
 

@@ -32,15 +32,13 @@ impl SqlHandler {
             })?;
 
         if let Some(table) = &req.table_name {
-            self.flush_table_inner(schema, table, req.region_number)
+            self.flush_table_inner(schema, table, req.region_number, req.wait)
                 .await?;
         } else {
             let all_table_names = schema.table_names().context(CatalogSnafu)?;
-            futures::future::join_all(
-                all_table_names
-                    .iter()
-                    .map(|table| self.flush_table_inner(schema.clone(), table, req.region_number)),
-            )
+            futures::future::join_all(all_table_names.iter().map(|table| {
+                self.flush_table_inner(schema.clone(), table, req.region_number, req.wait)
+            }))
             .await
             .into_iter()
             .collect::<Result<Vec<_>>>()?;
@@ -53,13 +51,14 @@ impl SqlHandler {
         schema: SchemaProviderRef,
         table_name: &str,
         region: Option<u32>,
+        wait: Option<bool>,
     ) -> Result<()> {
         schema
             .table(table_name)
             .await
             .context(error::FindTableSnafu { table_name })?
             .context(error::TableNotFoundSnafu { table_name })?
-            .flush(region)
+            .flush(region, wait)
             .await
             .context(error::FlushTableSnafu { table_name })
     }

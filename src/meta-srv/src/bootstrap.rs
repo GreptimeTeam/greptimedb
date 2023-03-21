@@ -22,6 +22,7 @@ use api::v1::meta::store_server::StoreServer;
 use etcd_client::Client;
 use snafu::ResultExt;
 use tokio::net::TcpListener;
+use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::server::Router;
 
@@ -44,44 +45,65 @@ pub struct MetaSrvInstance {
     meta_srv: MetaSrv,
 
     opts: MetaSrvOptions,
+
+    signal_sender: Option<Sender<()>>,
 }
 
 impl MetaSrvInstance {
     pub async fn new(opts: MetaSrvOptions) -> Result<MetaSrvInstance> {
         let meta_srv = build_meta_srv(&opts).await?;
 
-        Ok(MetaSrvInstance { meta_srv, opts })
+        Ok(MetaSrvInstance {
+            meta_srv,
+            opts,
+            signal_sender: None,
+        })
     }
 
-    pub async fn start(&self) -> Result<()> {
+    pub async fn start(&mut self) -> Result<()> {
         self.meta_srv.start().await;
-        bootstrap_meta_srv_with_router(&self.opts.bind_addr, router(self.meta_srv.clone())).await?;
+        let (tx, mut rx) = mpsc::channel::<()>(1);
+
+        self.signal_sender = Some(tx);
+
+        bootstrap_meta_srv_with_router(
+            &self.opts.bind_addr,
+            router(self.meta_srv.clone()),
+            &mut rx,
+        )
+        .await?;
 
         Ok(())
     }
 
-    pub async fn close(&self) -> Result<()> {
-        // TODO: shutdown the router
+    pub async fn shutdown(&self) -> Result<()> {
+        if let Some(signal) = &self.signal_sender {
+            signal
+                .send(())
+                .await
+                .context(error::SendShutdownSignalSnafu)?;
+        }
+
         self.meta_srv.shutdown();
 
         Ok(())
     }
 }
 
-// Bootstrap the rpc server to serve incoming request
-pub async fn bootstrap_meta_srv(opts: MetaSrvOptions) -> Result<()> {
-    let meta_srv = make_meta_srv(&opts).await?;
-    bootstrap_meta_srv_with_router(&opts.bind_addr, router(meta_srv)).await
-}
-
-pub async fn bootstrap_meta_srv_with_router(bind_addr: &str, router: Router) -> Result<()> {
+pub async fn bootstrap_meta_srv_with_router(
+    bind_addr: &str,
+    router: Router,
+    signal: &mut Receiver<()>,
+) -> Result<()> {
     let listener = TcpListener::bind(bind_addr)
         .await
         .context(error::TcpBindSnafu { addr: bind_addr })?;
     let listener = TcpListenerStream::new(listener);
 
     router
-        .serve_with_incoming(listener)
+        .serve_with_incoming_shutdown(listener, async {
+            signal.recv().await;
+        })
         .await
         .context(error::StartGrpcSnafu)?;
 

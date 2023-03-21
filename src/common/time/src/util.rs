@@ -17,6 +17,17 @@ pub fn current_time_millis() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
+/// Port of rust unstable features `int_roundings`.
+pub(crate) fn div_ceil(this: i64, rhs: i64) -> i64 {
+    let d = this / rhs;
+    let r = this % rhs;
+    if r > 0 && rhs > 0 {
+        d + 1
+    } else {
+        d
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{self, SystemTime};
@@ -41,5 +52,11 @@ mod tests {
         assert_eq!(datetime_std.day(), datetime_now.day());
         assert_eq!(datetime_std.hour(), datetime_now.hour());
         assert_eq!(datetime_std.minute(), datetime_now.minute());
+    }
+
+    #[test]
+    fn test_div_ceil() {
+        let v0 = 9223372036854676001;
+        assert_eq!(9223372036854677, div_ceil(v0, 1000));
     }
 }

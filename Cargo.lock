@@ -1486,6 +1486,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-datasource"
+version = "0.1.1"
+dependencies = [
+ "common-error",
+ "futures",
+ "object-store",
+ "regex",
+ "snafu",
+ "url",
+]
+
+[[package]]
 name = "common-error"
 version = "0.1.1"
 dependencies = [
@@ -2280,6 +2292,7 @@ dependencies = [
  "client",
  "common-base",
  "common-catalog",
+ "common-datasource",
  "common-error",
  "common-grpc",
  "common-grpc-expr",
@@ -2327,6 +2340,7 @@ dependencies = [
  "tower",
  "tower-http",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -2937,9 +2951,9 @@ dependencies = [
 
 [[package]]
 name = "futures-core"
-version = "0.3.26"
+version = "0.3.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec90ff4d0fe1f57d600049061dc6bb68ed03c7d2fbd697274c41805dcb3f8608"
+checksum = "86d7a0c1aa76363dac491de0ee99faf6941128376f1cf96f07db7603b7de69dd"
 
 [[package]]
 name = "futures-executor"
@@ -3083,7 +3097,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=3a715150563b89d5dfc81a5838eac1f66a5658a1#3a715150563b89d5dfc81a5838eac1f66a5658a1"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=dcf253314a05c9821bd90e7e09a168256c84f250#dcf253314a05c9821bd90e7e09a168256c84f250"
 dependencies = [
  "prost",
  "tonic",

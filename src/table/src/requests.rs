@@ -190,23 +190,22 @@ pub struct DeleteRequest {
     pub key_column_values: HashMap<String, VectorRef>,
 }
 
+#[derive(Debug)]
+pub enum CopyDirection {
+    Export,
+    Import,
+}
+
 /// Copy table request
 #[derive(Debug)]
 pub struct CopyTableRequest {
     pub catalog_name: String,
     pub schema_name: String,
     pub table_name: String,
-    pub file_name: String,
-}
-
-#[derive(Debug)]
-pub struct CopyTableFromRequest {
-    pub catalog_name: String,
-    pub schema_name: String,
-    pub table_name: String,
+    pub location: String,
     pub connection: HashMap<String, String>,
     pub pattern: Option<String>,
-    pub from: String,
+    pub direction: CopyDirection,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -215,6 +214,8 @@ pub struct FlushTableRequest {
     pub schema_name: String,
     pub table_name: Option<String>,
     pub region_number: Option<RegionNumber>,
+    /// Wait until the flush is done.
+    pub wait: Option<bool>,
 }
 
 #[cfg(test)]
