@@ -37,12 +37,14 @@ use object_store::services::{Fs as FsBuilder, Oss as OSSBuilder, S3 as S3Builder
 use object_store::{util, ObjectStore, ObjectStoreBuilder};
 use query::query_engine::{QueryEngineFactory, QueryEngineRef};
 use servers::Mode;
+use session::context::QueryContext;
 use snafu::prelude::*;
 use storage::compaction::{CompactionHandler, CompactionSchedulerRef, SimplePicker};
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::scheduler::{LocalScheduler, SchedulerConfig};
 use storage::EngineImpl;
 use store_api::logstore::LogStore;
+use table::requests::FlushTableRequest;
 use table::table::numbers::NumbersTable;
 use table::table::TableIdProviderRef;
 use table::Table;
@@ -56,7 +58,7 @@ use crate::error::{
 };
 use crate::heartbeat::HeartbeatTask;
 use crate::script::ScriptExecutor;
-use crate::sql::SqlHandler;
+use crate::sql::{SqlHandler, SqlRequest};
 
 mod grpc;
 mod script;
@@ -233,11 +235,50 @@ impl Instance {
                 .context(ShutdownInstanceSnafu)?;
         }
 
+        self.flush_tables().await?;
+
         self.sql_handler
             .close()
             .await
             .map_err(BoxedError::new)
             .context(ShutdownInstanceSnafu)
+    }
+
+    pub async fn flush_tables(&self) -> Result<()> {
+        info!("going to flush all schemas");
+        let schema_list = self
+            .catalog_manager
+            .catalog(DEFAULT_CATALOG_NAME)
+            .map_err(BoxedError::new)
+            .context(ShutdownInstanceSnafu)?
+            .expect("Default schema not found")
+            .schema_names()
+            .map_err(BoxedError::new)
+            .context(ShutdownInstanceSnafu)?;
+        let flush_requests = schema_list
+            .into_iter()
+            .map(|schema_name| {
+                SqlRequest::FlushTable(FlushTableRequest {
+                    catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                    schema_name,
+                    table_name: None,
+                    region_number: None,
+                    wait: Some(true),
+                })
+            })
+            .collect::<Vec<_>>();
+        let flush_result = futures::future::try_join_all(
+            flush_requests
+                .into_iter()
+                .map(|request| self.sql_handler.execute(request, QueryContext::arc())),
+        )
+        .await
+        .map_err(BoxedError::new)
+        .context(ShutdownInstanceSnafu);
+        info!("Flushed all tables result: {}", flush_result.is_ok());
+        flush_result?;
+
+        Ok(())
     }
 
     pub fn sql_handler(&self) -> &SqlHandler {
