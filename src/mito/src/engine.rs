@@ -175,7 +175,7 @@ pub(crate) struct MitoEngineInner<S: StorageEngine> {
     /// All tables opened by the engine. Map key is formatted [TableReference].
     ///
     /// Writing to `tables` should also hold the `table_mutex`.
-    tables: RwLock<HashMap<String, TableRef>>,
+    tables: RwLock<HashMap<String, Arc<MitoTable<S::Region>>>>,
     object_store: ObjectStore,
     storage_engine: S,
     /// Table mutex is used to protect the operations such as creating/opening/closing
@@ -551,6 +551,16 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             .unwrap()
             .get(&table_ref.to_string())
             .cloned()
+            .map(|table| table as _)
+    }
+
+    /// Returns the [MitoTable].
+    fn get_mito_table(&self, table_ref: &TableReference) -> Option<Arc<MitoTable<S::Region>>> {
+        self.tables
+            .read()
+            .unwrap()
+            .get(&table_ref.to_string())
+            .cloned()
     }
 
     async fn alter_table(&self, _ctx: &EngineContext, req: AlterTableRequest) -> Result<TableRef> {
@@ -579,7 +589,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             table: table_name,
         };
         let table = self
-            .get_table(&table_ref)
+            .get_mito_table(&table_ref)
             .context(error::TableNotFoundSnafu { table_name })?;
 
         logging::info!("start altering table {} with request {:?}", table_name, req);
