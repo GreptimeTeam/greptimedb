@@ -48,7 +48,7 @@ criterion = "0.3"
 common-test-util = { path = "../common/test-util" }
 datatypes = { path = "../datatypes", features = ["test"] }
 log-store = { path = "../log-store" }
-rand = "0.8"
+rand.workspace = true
 
 [build-dependencies]
 tonic-build = "0.8"

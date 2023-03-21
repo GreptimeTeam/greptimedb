@@ -50,7 +50,7 @@ postgres-types = { version = "0.2", features = ["with-chrono-0_4"] }
 promql-parser = "0.1.0"
 prost.workspace = true
 query = { path = "../query" }
-rand = "0.8"
+rand.workspace = true
 regex = "1.6"
 rustls = "0.20"
 rustls-pemfile = "1.0"
@@ -81,7 +81,7 @@ common-test-util = { path = "../common/test-util" }
 mysql_async = { version = "0.31", default-features = false, features = [
     "default-rustls",
 ] }
-rand = "0.8"
+rand.workspace = true
 script = { path = "../script", features = ["python"] }
 serde_json = "1.0"
 table = { path = "../table" }
