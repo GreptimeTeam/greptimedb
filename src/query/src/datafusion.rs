@@ -46,7 +46,7 @@ pub use crate::datafusion::catalog_adapter::DfCatalogListAdapter;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::error::{
     CatalogNotFoundSnafu, CatalogSnafu, CreateRecordBatchSnafu, DataFusionSnafu,
-    QueryExecutionSnafu, Result, SchemaNotFoundSnafu, TableNotFoundSnafu,
+    QueryExecutionSnafu, Result, SchemaNotFoundSnafu, TableNotFoundSnafu, UnsupportedExprSnafu,
 };
 use crate::executor::QueryExecutor;
 use crate::logical_optimizer::LogicalOptimizer;
@@ -165,7 +165,10 @@ impl QueryEngine for DatafusionQueryEngine {
         match plan {
             LogicalPlan::DfPlan(DfLogicalPlan::Dml(dml)) => match dml.op {
                 WriteOp::Insert => self.exec_insert_plan(&dml, query_ctx).await,
-                _ => unimplemented!(),
+                _ => UnsupportedExprSnafu {
+                    name: format!("DML op {}", dml.op),
+                }
+                .fail(),
             },
             _ => self.exec_query_plan(plan).await,
         }

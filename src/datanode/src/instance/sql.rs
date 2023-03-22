@@ -48,12 +48,9 @@ impl Instance {
     ) -> Result<Output> {
         match stmt {
             QueryStatement::Sql(Statement::Insert(insert)) => {
-                let request = SqlHandler::insert_to_request(
-                    self.catalog_manager.clone(),
-                    *insert,
-                    query_ctx.clone(),
-                )
-                .await?;
+                let request =
+                    SqlHandler::insert_to_request(self.catalog_manager.clone(), *insert, query_ctx)
+                        .await?;
                 self.sql_handler.insert(request).await
             }
             QueryStatement::Sql(Statement::Delete(delete)) => {

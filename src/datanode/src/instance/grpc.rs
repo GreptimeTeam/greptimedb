@@ -73,7 +73,7 @@ impl Instance {
                             .await
                             .context(PlanStatementSnafu)?;
                         self.query_engine
-                            .execute(plan, ctx.clone())
+                            .execute(plan, ctx)
                             .await
                             .context(ExecuteLogicalPlanSnafu)
                     }
