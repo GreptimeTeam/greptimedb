@@ -39,18 +39,18 @@ pub(crate) struct DatanodeHeartbeat {
     heartbeat_time: i64,
 }
 
-pub(crate) struct RegionFailureHandler {
+pub struct RegionFailureHandler {
     failure_detect_runner: FailureDetectRunner,
 }
 
 impl RegionFailureHandler {
-    pub(crate) fn new(election: Option<ElectionRef>) -> Self {
+    pub fn new(election: Option<ElectionRef>) -> Self {
         Self {
             failure_detect_runner: FailureDetectRunner::new(election),
         }
     }
 
-    pub(crate) async fn start(&mut self) {
+    pub async fn start(&mut self) {
         self.failure_detect_runner.start().await;
     }
 }

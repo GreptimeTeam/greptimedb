@@ -16,10 +16,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use crate::cluster::MetaPeerClient;
-use crate::handler::failure_handler::RegionFailureHandler;
 use crate::handler::{
     CheckLeaderHandler, CollectStatsHandler, HeartbeatHandlerGroup, KeepLeaseHandler,
-    OnLeaderStartHandler, PersistStatsHandler, ResponseHeaderHandler,
+    OnLeaderStartHandler, PersistStatsHandler, RegionFailureHandler, ResponseHeaderHandler,
 };
 use crate::lock::DistLockRef;
 use crate::metasrv::{ElectionRef, MetaSrv, MetaSrvOptions, SelectorRef, TABLE_ID_SEQ};
