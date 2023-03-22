@@ -145,13 +145,13 @@ impl RegionManifest {
     // Update flushed manifest version in checkpointer
     pub fn set_flushed_manifest_version(&self, manifest_version: ManifestVersion) {
         if let Some(checkpointer) = self.checkpointer() {
-            checkpointer
+            if let Some(checkpointer) = checkpointer
                 .as_any()
                 .downcast_ref::<RegionManifestCheckpointer>()
-                .expect("Failed to downcast region checkpointer")
-                .set_flushed_manifest_version(manifest_version);
+            {
+                checkpointer.set_flushed_manifest_version(manifest_version);
+            }
         }
-    }
 }
 
 #[cfg(test)]
