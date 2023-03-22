@@ -79,6 +79,8 @@ fn filter_by_addr(stat_vals: Vec<StatValue>, addr: &str) -> Vec<StatValue> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use crate::handler::node_stat::Stat;
     use crate::keys::StatValue;
     use crate::service::admin::heartbeat::filter_by_addr;
@@ -87,36 +89,36 @@ mod tests {
     async fn test_filter_by_addr() {
         let stat_value1 = StatValue {
             stats: vec![
-                Stat {
+                Arc::new(Stat {
                     addr: "127.0.0.1:3001".to_string(),
                     timestamp_millis: 1,
                     ..Default::default()
-                },
-                Stat {
+                }),
+                Arc::new(Stat {
                     addr: "127.0.0.1:3001".to_string(),
                     timestamp_millis: 2,
                     ..Default::default()
-                },
+                }),
             ],
         };
 
         let stat_value2 = StatValue {
             stats: vec![
-                Stat {
+                Arc::new(Stat {
                     addr: "127.0.0.1:3002".to_string(),
                     timestamp_millis: 3,
                     ..Default::default()
-                },
-                Stat {
+                }),
+                Arc::new(Stat {
                     addr: "127.0.0.1:3002".to_string(),
                     timestamp_millis: 4,
                     ..Default::default()
-                },
-                Stat {
+                }),
+                Arc::new(Stat {
                     addr: "127.0.0.1:3002".to_string(),
                     timestamp_millis: 5,
                     ..Default::default()
-                },
+                }),
             ],
         };
 

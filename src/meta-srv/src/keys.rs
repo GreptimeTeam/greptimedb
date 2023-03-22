@@ -23,7 +23,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error;
 use crate::error::Result;
-use crate::handler::node_stat::Stat;
+use crate::handler::node_stat::StatRef;
 
 pub(crate) const REMOVED_PREFIX: &str = "__removed";
 pub(crate) const DN_LEASE_PREFIX: &str = "__meta_dnlease";
@@ -229,7 +229,7 @@ impl TryFrom<Vec<u8>> for StatKey {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct StatValue {
-    pub stats: Vec<Stat>,
+    pub stats: Vec<StatRef>,
 }
 
 impl StatValue {
@@ -277,7 +277,10 @@ impl TryFrom<Vec<u8>> for StatValue {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::handler::node_stat::Stat;
 
     #[test]
     fn test_stat_key_round_trip() {
@@ -303,7 +306,9 @@ mod tests {
             ..Default::default()
         };
 
-        let stat_val = StatValue { stats: vec![stat] };
+        let stat_val = StatValue {
+            stats: vec![Arc::new(stat)],
+        };
 
         let bytes: Vec<u8> = stat_val.try_into().unwrap();
         let stat_val: StatValue = bytes.try_into().unwrap();
@@ -351,28 +356,28 @@ mod tests {
         assert!(region_num.is_none());
 
         let wrong = StatValue {
-            stats: vec![Stat {
+            stats: vec![Arc::new(Stat {
                 region_num: None,
                 ..Default::default()
-            }],
+            })],
         };
         let right = wrong.region_num();
         assert!(right.is_none());
 
         let stat_val = StatValue {
             stats: vec![
-                Stat {
+                Arc::new(Stat {
                     region_num: Some(1),
                     ..Default::default()
-                },
-                Stat {
+                }),
+                Arc::new(Stat {
                     region_num: None,
                     ..Default::default()
-                },
-                Stat {
+                }),
+                Arc::new(Stat {
                     region_num: Some(2),
                     ..Default::default()
-                },
+                }),
             ],
         };
         let region_num = stat_val.region_num().unwrap();

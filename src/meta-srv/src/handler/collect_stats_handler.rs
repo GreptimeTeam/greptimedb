@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use api::v1::meta::HeartbeatRequest;
 use common_telemetry::debug;
@@ -21,6 +22,7 @@ use dashmap::DashMap;
 
 use super::node_stat::Stat;
 use crate::error::Result;
+use crate::handler::node_stat::StatRef;
 use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
 
@@ -28,7 +30,7 @@ type StatKey = (u64, u64);
 
 pub struct CollectStatsHandler {
     max_cached_stats_per_key: usize,
-    cache: DashMap<StatKey, VecDeque<Stat>>,
+    cache: DashMap<StatKey, VecDeque<StatRef>>,
 }
 
 impl Default for CollectStatsHandler {
@@ -60,6 +62,7 @@ impl HeartbeatHandler for CollectStatsHandler {
 
         match Stat::try_from(req.clone()) {
             Ok(stat) => {
+                let stat = Arc::new(stat);
                 acc.stat = stat.clone();
 
                 let key = (stat.cluster_id, stat.id);

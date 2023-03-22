@@ -87,12 +87,12 @@ mod tests {
 
         let req = HeartbeatRequest::default();
         let mut acc = HeartbeatAccumulator {
-            stats: vec![Stat {
+            stats: vec![Arc::new(Stat {
                 cluster_id: 3,
                 id: 101,
                 region_num: Some(100),
                 ..Default::default()
-            }],
+            })],
             ..Default::default()
         };
 

@@ -37,8 +37,8 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::RwLock;
 
 use self::instruction::Instruction;
-use self::node_stat::Stat;
 use crate::error::Result;
+use crate::handler::node_stat::StatRef;
 use crate::metasrv::Context;
 
 #[async_trait::async_trait]
@@ -55,10 +55,10 @@ pub trait HeartbeatHandler: Send + Sync {
 pub struct HeartbeatAccumulator {
     pub header: Option<ResponseHeader>,
     /// current stat produced by [`collect_stats_handler`]
-    pub stat: Stat,
+    pub stat: StatRef,
     /// accumulated stats produced by [`collect_stats_handler`]
     /// every [`max_cached_stats_per_key`] heartbeats
-    pub stats: Vec<Stat>,
+    pub stats: Vec<StatRef>,
     pub instructions: Vec<Instruction>,
 }
 

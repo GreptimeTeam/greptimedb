@@ -237,6 +237,8 @@ fn need_retry(error: &error::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use api::v1::meta::{Error, ErrorCode, KeyValue, ResponseHeader};
 
     use super::{check_resp_header, to_stat_kv_map, Context};
@@ -258,7 +260,11 @@ mod tests {
             is_leader: true,
             ..Default::default()
         };
-        let stat_val = StatValue { stats: vec![stat] }.try_into().unwrap();
+        let stat_val = StatValue {
+            stats: vec![Arc::new(stat)],
+        }
+        .try_into()
+        .unwrap();
 
         let kv = KeyValue {
             key: stat_key.clone().into(),

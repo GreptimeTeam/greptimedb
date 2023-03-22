@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use api::v1::meta::HeartbeatRequest;
 use common_time::util as time_util;
 use serde::{Deserialize, Serialize};
@@ -68,6 +70,8 @@ impl Stat {
         }
     }
 }
+
+pub type StatRef = Arc<Stat>;
 
 impl TryFrom<HeartbeatRequest> for Stat {
     type Error = ();
