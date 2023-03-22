@@ -54,6 +54,10 @@ pub trait HeartbeatHandler: Send + Sync {
 #[derive(Debug, Default)]
 pub struct HeartbeatAccumulator {
     pub header: Option<ResponseHeader>,
+    /// current stat produced by [`collect_stats_handler`]
+    pub stat: Stat,
+    /// accumulated stats produced by [`collect_stats_handler`]
+    /// every [`max_cached_stats_per_key`] heartbeats
     pub stats: Vec<Stat>,
     pub instructions: Vec<Instruction>,
 }

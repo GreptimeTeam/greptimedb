@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::keys::StatKey;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Stat {
     pub timestamp_millis: i64,
     pub cluster_id: u64,
@@ -44,7 +44,7 @@ pub struct Stat {
     pub region_stats: Vec<RegionStat>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegionStat {
     pub id: u64,
     pub catalog: String,
