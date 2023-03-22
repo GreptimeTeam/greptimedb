@@ -25,7 +25,7 @@ use store_api::manifest::{
     Manifest, ManifestLogStorage, ManifestVersion, MetaActionIterator, MIN_VERSION,
 };
 
-use crate::error::Result;
+use crate::error::{ManifestCheckpointSnafu, Result};
 use crate::manifest::action::*;
 use crate::manifest::checkpoint::Checkpointer;
 use crate::manifest::ManifestImpl;
@@ -74,8 +74,8 @@ impl Checkpointer for RegionManifestCheckpointer {
         // Checkpoint can't exceed over flushed manifest version.
         // We have to keep the region metadata which is not flushed for replaying WAL.
         let end_version =
-            (current_version + 1).min(self.flushed_manifest_version.load(Ordering::Relaxed) + 1);
-        if start_version + 1 >= end_version {
+            current_version.min(self.flushed_manifest_version.load(Ordering::Relaxed)) + 1;
+        if start_version >= end_version - 1 {
             return Ok(None);
         }
 
@@ -89,7 +89,12 @@ impl Checkpointer for RegionManifestCheckpointer {
                     RegionMetaAction::Change(c) => manifest_builder.apply_change(c),
                     RegionMetaAction::Edit(e) => manifest_builder.apply_edit(version, e),
                     RegionMetaAction::Protocol(p) => protocol = p,
-                    _ => todo!(),
+                    action => {
+                        return ManifestCheckpointSnafu {
+                            msg: format!("can't apply region action: {:?}", action),
+                        }
+                        .fail();
+                    }
                 }
             }
             last_version = version;
@@ -152,6 +157,7 @@ impl RegionManifest {
                 checkpointer.set_flushed_manifest_version(manifest_version);
             }
         }
+    }
 }
 
 #[cfg(test)]

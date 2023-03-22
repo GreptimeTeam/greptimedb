@@ -241,7 +241,6 @@ impl Version {
             self.metadata.id(),
             self.flushed_sequence,
             self.manifest_version,
-            ssts
         );
 
         self.ssts = Arc::new(ssts);
