@@ -164,9 +164,9 @@ coprocessor = copr
 /// Cast return of py script result to `Vec<VectorRef>`,
 /// constants will be broadcast to length of `col_len`
 fn py_any_to_vec(obj: &PyAny, col_len: usize) -> PyResult<Vec<VectorRef>> {
-    // 1. check if obj is of two types:
-    // tuples of PyVector
-    // a single PyVector
+    // check if obj is of two types:
+    // 1. tuples of PyVector
+    // 2. a single PyVector
     let check = if obj.is_instance_of::<PyTuple>()? {
         let tuple = obj.downcast::<PyTuple>()?;
 
