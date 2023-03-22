@@ -72,7 +72,7 @@ impl Checkpointer for RegionManifestCheckpointer {
             };
 
         // Checkpoint can't exceed over flushed manifest version.
-        // We have to keep the region metadata which are not flushed for replaying WAL.
+        // We have to keep the region metadata which is not flushed for replaying WAL.
         let end_version =
             (current_version + 1).min(self.flushed_manifest_version.load(Ordering::Relaxed) + 1);
         if start_version + 1 >= end_version {
