@@ -25,7 +25,7 @@ pub trait Checkpointer: Send + Sync + std::fmt::Debug {
     type Snapshot: Snapshot<Error = Error>;
     type MetaAction: MetaAction<Error = Error>;
 
-    /// Try to do a checkpoint, return the snapshot if successes.
+    /// Try to create a checkpoint, return the snapshot if successes.
     async fn do_checkpoint(
         &self,
         manifest: &ManifestImpl<Self::Snapshot, Self::MetaAction>,
