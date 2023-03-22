@@ -82,6 +82,9 @@ def boolean_array() -> vector[f64]:
     
     df = PyDataFrame.from_sql("select number from numbers limit 5")
     print("df from sql=", df)
+    collected = df.collect()
+    print("df.collect()=", collected)
+    assert len(collected[0][0]) == 5
     try: 
         print("query()=", query())
     except KeyError as e:
@@ -107,9 +110,10 @@ def boolean_array() -> vector[f64]:
     from greptime import query, dataframe, PyDataFrame
     df = PyDataFrame.from_sql("select number from numbers limit 5")
     print("df from sql=", df)
-    ret = df.collect()[0][0]
+    ret = df.collect()
     print("df.collect()=", ret)
-    return ret
+    assert len(ret[0][0]) == 5
+    return ret[0][0]
 "#
             .to_string(),
             expect: Some(ronish!("value": vector!(UInt32Vector, [0, 1, 2, 3, 4]))),
@@ -228,6 +232,7 @@ def answer() -> vector[i64]:
     from greptime import vector
     import pyarrow as pa
     a = vector.from_pyarrow(pa.array([42, 43, 44]))
+    # slicing test
     return a[0:1]
 "#
             .to_string(),
@@ -239,6 +244,7 @@ def answer() -> vector[i64]:
 def answer() -> vector[i64]:
     from greptime import vector
     a = vector([42, 43, 44])
+    # slicing test
     return a[-2:-1]
 "#
             .to_string(),
