@@ -17,8 +17,6 @@ pub mod bootstrap;
 pub mod cluster;
 pub mod election;
 pub mod error;
-// TODO(LFC): TBC
-#[allow(dead_code)]
 mod failure_detector;
 pub mod handler;
 pub mod keys;

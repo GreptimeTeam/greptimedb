@@ -12,39 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::VecDeque;
-
 use api::v1::meta::HeartbeatRequest;
 use common_telemetry::debug;
-use dashmap::mapref::entry::Entry;
-use dashmap::DashMap;
 
 use super::node_stat::Stat;
 use crate::error::Result;
 use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
 
-type StatKey = (u64, u64);
-
-pub struct CollectStatsHandler {
-    max_cached_stats_per_key: usize,
-    cache: DashMap<StatKey, VecDeque<Stat>>,
-}
-
-impl Default for CollectStatsHandler {
-    fn default() -> Self {
-        Self::new(10)
-    }
-}
-
-impl CollectStatsHandler {
-    pub fn new(max_cached_stats_per_key: usize) -> Self {
-        Self {
-            max_cached_stats_per_key,
-            cache: DashMap::new(),
-        }
-    }
-}
+pub struct CollectStatsHandler;
 
 #[async_trait::async_trait]
 impl HeartbeatHandler for CollectStatsHandler {
@@ -60,21 +36,7 @@ impl HeartbeatHandler for CollectStatsHandler {
 
         match Stat::try_from(req.clone()) {
             Ok(stat) => {
-                let key = (stat.cluster_id, stat.id);
-                match self.cache.entry(key) {
-                    Entry::Occupied(mut e) => {
-                        let deque = e.get_mut();
-                        deque.push_front(stat);
-                        if deque.len() >= self.max_cached_stats_per_key {
-                            acc.stats = deque.drain(..).collect();
-                        }
-                    }
-                    Entry::Vacant(e) => {
-                        let mut stat_vec = VecDeque::with_capacity(self.max_cached_stats_per_key);
-                        stat_vec.push_front(stat);
-                        e.insert(stat_vec);
-                    }
-                }
+                let _ = acc.stat.insert(stat);
             }
             Err(_) => {
                 debug!("Incomplete heartbeat data: {:?}", req);

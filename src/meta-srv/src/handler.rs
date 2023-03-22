@@ -21,6 +21,7 @@ pub use response_header_handler::ResponseHeaderHandler;
 
 mod check_leader_handler;
 mod collect_stats_handler;
+pub(crate) mod failure_handler;
 mod instruction;
 mod keep_lease_handler;
 pub mod node_stat;
@@ -54,8 +55,8 @@ pub trait HeartbeatHandler: Send + Sync {
 #[derive(Debug, Default)]
 pub struct HeartbeatAccumulator {
     pub header: Option<ResponseHeader>,
-    pub stats: Vec<Stat>,
     pub instructions: Vec<Instruction>,
+    pub(crate) stat: Option<Stat>,
 }
 
 impl HeartbeatAccumulator {

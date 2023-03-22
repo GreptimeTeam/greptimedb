@@ -178,7 +178,7 @@ pub(crate) fn to_removed_key(key: &str) -> String {
     format!("{REMOVED_PREFIX}-{key}")
 }
 
-#[derive(Eq, PartialEq, Debug, Clone, Hash)]
+#[derive(Eq, PartialEq, Debug, Clone, Hash, Copy)]
 pub struct StatKey {
     pub cluster_id: u64,
     pub node_id: u64,

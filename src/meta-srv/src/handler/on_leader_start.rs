@@ -31,6 +31,7 @@ impl HeartbeatHandler for OnLeaderStartHandler {
     ) -> Result<()> {
         if let Some(election) = &ctx.election {
             if election.in_infancy() {
+                ctx.is_infancy = true;
                 ctx.reset_in_memory();
             }
         }

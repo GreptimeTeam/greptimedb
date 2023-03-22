@@ -16,6 +16,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use crate::cluster::MetaPeerClient;
+use crate::handler::failure_handler::RegionFailureHandler;
 use crate::handler::{
     CheckLeaderHandler, CollectStatsHandler, HeartbeatHandlerGroup, KeepLeaseHandler,
     OnLeaderStartHandler, PersistStatsHandler, ResponseHeaderHandler,
@@ -118,6 +119,9 @@ impl MetaSrvBuilder {
         let handler_group = match handler_group {
             Some(handler_group) => handler_group,
             None => {
+                let mut region_failure_handler = RegionFailureHandler::new(election.clone());
+                region_failure_handler.start().await;
+
                 let group = HeartbeatHandlerGroup::default();
                 let keep_lease_handler = KeepLeaseHandler::new(kv_store.clone());
                 group.add_handler(ResponseHeaderHandler::default()).await;
@@ -127,7 +131,8 @@ impl MetaSrvBuilder {
                 group.add_handler(keep_lease_handler).await;
                 group.add_handler(CheckLeaderHandler::default()).await;
                 group.add_handler(OnLeaderStartHandler::default()).await;
-                group.add_handler(CollectStatsHandler::default()).await;
+                group.add_handler(CollectStatsHandler).await;
+                group.add_handler(region_failure_handler).await;
                 group.add_handler(PersistStatsHandler::default()).await;
                 group
             }
