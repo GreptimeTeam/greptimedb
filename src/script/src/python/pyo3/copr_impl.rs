@@ -142,7 +142,7 @@ coprocessor = copr
             py_any_to_vec(result, col_len)
         })()
         .map_err(|err| error::Error::PyRuntime {
-            msg: err.to_string(),
+            msg: err.into_value(py).to_string(),
             backtrace: Backtrace::generate(),
         })?;
         ensure!(
@@ -172,7 +172,7 @@ fn py_any_to_vec(obj: &PyAny, col_len: usize) -> PyResult<Vec<VectorRef>> {
 
         (0..tuple.len())
             .map(|idx| tuple.get_item(idx).map(|i| i.is_instance_of::<PyVector>()))
-            .all(|i| i.and_then(|i| i).unwrap_or(false))
+            .all(|i| matches!(i, Ok(Ok(true))))
     } else {
         obj.is_instance_of::<PyVector>()?
     };

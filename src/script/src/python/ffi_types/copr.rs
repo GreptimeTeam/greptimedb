@@ -353,18 +353,10 @@ impl PyQueryEngine {
                     rbs.schema().arrow_schema(),
                     rbs.iter().map(|r| r.df_record_batch()),
                 )
-                .map_err(|e| {
-                    format!(
-                        "Concat batches failed for query {sql}: {e}",
-                        sql = sql,
-                        e = e
-                    )
-                })?;
+                .map_err(|e| format!("Concat batches failed for query {sql}: {e}"))?;
                 RecordBatch::try_from_df_record_batch(rbs.schema(), rb).map_err(|e|
                     format!(
-                        "Convert datafusion record batch to record batch failed for query {sql}: {e}",
-                        sql = sql,
-                        e = e
+                        "Convert datafusion record batch to record batch failed for query {sql}: {e}"
                     )
                 )
             }

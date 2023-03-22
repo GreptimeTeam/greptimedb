@@ -57,14 +57,14 @@ def boolean_array() -> vector[f64]:
     from greptime import vector
     from greptime import query, dataframe
     
-    try: 
-        print("query()=", query())
-    except KeyError as e:
-        print("query()=", e)
+    print("query()=", query())
+    assert "query_engine object at" in str(query())
     try: 
         print("dataframe()=", dataframe())
     except KeyError as e:
         print("dataframe()=", e)
+        print(str(e), type(str(e)), 'No __dataframe__' in str(e))
+        assert 'No __dataframe__' in str(e)
 
     v = vector([1.0, 2.0, 3.0])
     # This returns a vector([2.0])
@@ -77,7 +77,7 @@ def boolean_array() -> vector[f64]:
             script: r#"
 @copr(returns=["value"], backend="rspy")
 def boolean_array() -> vector[f64]:
-    from greptime import vector
+    from greptime import vector, col
     from greptime import query, dataframe, PyDataFrame
     
     df = PyDataFrame.from_sql("select number from numbers limit 5")
@@ -85,14 +85,17 @@ def boolean_array() -> vector[f64]:
     collected = df.collect()
     print("df.collect()=", collected)
     assert len(collected[0][0]) == 5
-    try: 
-        print("query()=", query())
-    except KeyError as e:
-        print("query()=", e)
+    df = PyDataFrame.from_sql("select number from numbers limit 5").filter(col("number") > 2)
+    collected = df.collect()
+    assert len(collected[0][0]) == 2
+    print("query()=", query())
+
+    assert "query_engine object at" in repr(query())
     try: 
         print("dataframe()=", dataframe())
     except KeyError as e:
         print("dataframe()=", e)
+        assert "__dataframe__" in str(e)
 
     v = vector([1.0, 2.0, 3.0])
     # This returns a vector([2.0])
@@ -107,12 +110,15 @@ def boolean_array() -> vector[f64]:
 @copr(returns=["value"], backend="pyo3")
 def boolean_array() -> vector[f64]:
     from greptime import vector
-    from greptime import query, dataframe, PyDataFrame
+    from greptime import query, dataframe, PyDataFrame, col
     df = PyDataFrame.from_sql("select number from numbers limit 5")
     print("df from sql=", df)
     ret = df.collect()
     print("df.collect()=", ret)
     assert len(ret[0][0]) == 5
+    df = PyDataFrame.from_sql("select number from numbers limit 5").filter(col("number") > 2)
+    collected = df.collect()
+    assert len(collected[0][0]) == 2
     return ret[0][0]
 "#
             .to_string(),
@@ -233,6 +239,11 @@ def answer() -> vector[i64]:
     import pyarrow as pa
     a = vector.from_pyarrow(pa.array([42, 43, 44]))
     # slicing test
+    assert a[0:2] == a[:-1]
+    assert len(a[:-1]) == 2
+    assert a[0:1] == a[:-2] 
+    assert len(a[:-2]) == 1
+    print("a[:-2]=", a[:-2])
     return a[0:1]
 "#
             .to_string(),
@@ -244,6 +255,10 @@ def answer() -> vector[i64]:
 def answer() -> vector[i64]:
     from greptime import vector
     a = vector([42, 43, 44])
+    assert a[0:2] == a[:-1]
+    assert len(a[:-1]) == 2
+    assert a[0:1] == a[:-2] 
+    assert len(a[:-2]) == 1
     # slicing test
     return a[-2:-1]
 "#

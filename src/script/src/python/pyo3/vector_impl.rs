@@ -301,7 +301,7 @@ impl PyVector {
             Ok(ret)
         } else if let Ok(slice) = needle.downcast::<PySlice>(py) {
             let indices = slice.indices(self.len() as i64)?;
-            let (start, stop, step, slicelength) = (
+            let (start, stop, step, _slicelength) = (
                 indices.start,
                 indices.stop,
                 indices.step,
@@ -319,8 +319,6 @@ impl PyVector {
                 .create_mutable_vector(indices.slicelength as usize);
             let v = if indices.slicelength == 0 {
                 buf.to_vector()
-            } else if step == 1 {
-                vector.slice(start as usize, slicelength as usize)
             } else {
                 if indices.step > 0 {
                     let range = if stop == -1 {
