@@ -72,8 +72,11 @@ pub enum Error {
     #[snafu(display("The SQL string has multiple statements, query: {}", query))]
     MultipleStatements { query: String, backtrace: Backtrace },
 
-    #[snafu(display("Failed to convert datatype: {}", source))]
-    Datatype { source: datatypes::error::Error },
+    #[snafu(display("Failed to convert Datafusion schema: {}", source))]
+    ConvertDatafusionSchema {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
 
     #[snafu(display("Failed to parse timestamp `{}`: {}", raw, source))]
     ParseTimestamp {
@@ -123,9 +126,10 @@ impl ErrorExt for Error {
             | ParseFloat { .. } => StatusCode::InvalidArguments,
             QueryAccessDenied { .. } => StatusCode::AccessDenied,
             Catalog { source } => source.status_code(),
-            VectorComputation { source } => source.status_code(),
+            VectorComputation { source } | ConvertDatafusionSchema { source } => {
+                source.status_code()
+            }
             CreateRecordBatch { source } => source.status_code(),
-            Datatype { source } => source.status_code(),
             QueryExecution { source } | QueryPlan { source } => source.status_code(),
             DataFusion { .. } => StatusCode::Internal,
             Sql { source } => source.status_code(),

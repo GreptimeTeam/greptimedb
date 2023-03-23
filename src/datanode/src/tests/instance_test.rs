@@ -22,7 +22,7 @@ use common_telemetry::logging;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::vectors::{Int64Vector, StringVector, UInt64Vector, VectorRef};
 use query::parser::{QueryLanguageParser, QueryStatement};
-use session::context::QueryContext;
+use session::context::{QueryContext, QueryContextRef};
 use snafu::ResultExt;
 use sql::statements::statement::Statement;
 
@@ -217,20 +217,20 @@ async fn test_execute_insert_by_select() {
         try_execute_sql(&instance, "insert into demo2(host) select * from demo1")
             .await
             .unwrap_err(),
-        Error::ColumnValuesNumberMismatch { .. }
+        Error::PlanStatement { .. }
     ));
     assert!(matches!(
         try_execute_sql(&instance, "insert into demo2 select cpu,memory from demo1")
             .await
             .unwrap_err(),
-        Error::ColumnValuesNumberMismatch { .. }
+        Error::PlanStatement { .. }
     ));
 
     assert!(matches!(
         try_execute_sql(&instance, "insert into demo2(ts) select memory from demo1")
             .await
             .unwrap_err(),
-        Error::ColumnTypeMismatch { .. }
+        Error::PlanStatement { .. }
     ));
 
     let output = execute_sql(&instance, "insert into demo2 select * from demo1").await;
@@ -962,16 +962,28 @@ async fn try_execute_sql_in_db(
 ) -> Result<Output, crate::error::Error> {
     let query_ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, db));
 
+    async fn plan_exec(
+        instance: &MockInstance,
+        stmt: QueryStatement,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output, Error> {
+        let engine = instance.inner().query_engine();
+        let plan = engine
+            .planner()
+            .plan(stmt, query_ctx.clone())
+            .await
+            .context(PlanStatementSnafu)?;
+        engine
+            .execute(plan, query_ctx)
+            .await
+            .context(ExecuteLogicalPlanSnafu)
+    }
+
     let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
     match stmt {
-        QueryStatement::Sql(Statement::Query(_)) => {
-            let engine = instance.inner().query_engine();
-            let plan = engine
-                .planner()
-                .plan(stmt, query_ctx)
-                .await
-                .context(PlanStatementSnafu)?;
-            engine.execute(&plan).await.context(ExecuteLogicalPlanSnafu)
+        QueryStatement::Sql(Statement::Query(_)) => plan_exec(instance, stmt, query_ctx).await,
+        QueryStatement::Sql(Statement::Insert(ref insert)) if insert.is_insert_select() => {
+            plan_exec(instance, stmt, query_ctx).await
         }
         _ => instance.inner().execute_stmt(stmt, query_ctx).await,
     }

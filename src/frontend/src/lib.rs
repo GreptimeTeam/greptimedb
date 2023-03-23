@@ -28,7 +28,6 @@ pub mod postgres;
 pub mod prom;
 pub mod prometheus;
 mod server;
-mod sql;
 mod table;
 #[cfg(test)]
 mod tests;

@@ -18,6 +18,7 @@ use common_error::prelude::*;
 use common_recordbatch::error::Error as RecordBatchError;
 use datafusion::error::DataFusionError;
 use datatypes::arrow::error::ArrowError;
+use datatypes::prelude::ConcreteDataType;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -114,6 +115,19 @@ pub enum Error {
         value: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display(
+        "Failed to cast vector of type '{:?}' to type '{:?}', source: {}",
+        from_type,
+        to_type,
+        source
+    ))]
+    CastVector {
+        from_type: ConcreteDataType,
+        to_type: ConcreteDataType,
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
 }
 
 impl ErrorExt for Error {
@@ -128,7 +142,9 @@ impl ErrorExt for Error {
             }
             Error::TablesRecordBatch { .. } => StatusCode::Unexpected,
             Error::ColumnExists { .. } => StatusCode::TableColumnExists,
-            Error::SchemaBuild { source, .. } => source.status_code(),
+            Error::SchemaBuild { source, .. } | Error::CastVector { source, .. } => {
+                source.status_code()
+            }
             Error::TableOperation { source } => source.status_code(),
             Error::ColumnNotExists { .. } => StatusCode::TableColumnNotFound,
             Error::RegionSchemaMismatch { .. } => StatusCode::StorageUnavailable,

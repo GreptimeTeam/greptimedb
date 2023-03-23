@@ -590,7 +590,7 @@ CREATE TABLE {table_name} (
                 .plan(stmt, QueryContext::arc())
                 .await
                 .unwrap();
-            let output = engine.execute(&plan).await.unwrap();
+            let output = engine.execute(plan, QueryContext::arc()).await.unwrap();
             let Output::Stream(stream) = output else { unreachable!() };
             let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
             let actual = recordbatches.pretty_print().unwrap();

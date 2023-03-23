@@ -35,6 +35,7 @@ use rustpython_compiler_core::CodeObject;
 use rustpython_vm as vm;
 #[cfg(test)]
 use serde::Deserialize;
+use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
 use vm::builtins::{PyList, PyListRef};
 use vm::convert::ToPyObject;
@@ -373,7 +374,7 @@ impl PyQueryEngine {
                         .map_err(|e| e.to_string())?;
                     let res = engine
                         .clone()
-                        .execute(&plan)
+                        .execute(plan, QueryContext::arc())
                         .await
                         .map_err(|e| e.to_string());
                     match res {

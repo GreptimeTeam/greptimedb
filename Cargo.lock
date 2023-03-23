@@ -2294,6 +2294,7 @@ dependencies = [
  "common-catalog",
  "common-datasource",
  "common-error",
+ "common-function",
  "common-grpc",
  "common-grpc-expr",
  "common-procedure",

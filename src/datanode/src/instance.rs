@@ -204,7 +204,6 @@ impl Instance {
             sql_handler: SqlHandler::new(
                 table_engine.clone(),
                 catalog_manager.clone(),
-                query_engine.clone(),
                 table_engine,
                 procedure_manager,
             ),

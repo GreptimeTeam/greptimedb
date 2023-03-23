@@ -77,7 +77,7 @@ async fn test_datafusion_query_engine() -> Result<()> {
         .unwrap(),
     );
 
-    let output = engine.execute(&plan).await?;
+    let output = engine.execute(plan, QueryContext::arc()).await?;
 
     let recordbatch = match output {
         Output::Stream(recordbatch) => recordbatch,

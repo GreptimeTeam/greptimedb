@@ -33,12 +33,21 @@ use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::timer;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion_common::ResolvedTableReference;
+use datafusion_expr::{DmlStatement, LogicalPlan as DfLogicalPlan, WriteOp};
 use datatypes::schema::Schema;
+use futures_util::StreamExt;
+use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
+use table::requests::InsertRequest;
+use table::TableRef;
 
 pub use crate::datafusion::catalog_adapter::DfCatalogListAdapter;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
-use crate::error::{DataFusionSnafu, QueryExecutionSnafu, Result};
+use crate::error::{
+    CatalogNotFoundSnafu, CatalogSnafu, CreateRecordBatchSnafu, DataFusionSnafu,
+    QueryExecutionSnafu, Result, SchemaNotFoundSnafu, TableNotFoundSnafu, UnsupportedExprSnafu,
+};
 use crate::executor::QueryExecutor;
 use crate::logical_optimizer::LogicalOptimizer;
 use crate::physical_optimizer::PhysicalOptimizer;
@@ -55,6 +64,83 @@ pub struct DatafusionQueryEngine {
 impl DatafusionQueryEngine {
     pub fn new(state: Arc<QueryEngineState>) -> Self {
         Self { state }
+    }
+
+    async fn exec_query_plan(&self, plan: LogicalPlan) -> Result<Output> {
+        let mut ctx = QueryEngineContext::new(self.state.session_state());
+
+        // `create_physical_plan` will optimize logical plan internally
+        let physical_plan = self.create_physical_plan(&mut ctx, &plan).await?;
+        let physical_plan = self.optimize_physical_plan(&mut ctx, physical_plan)?;
+
+        Ok(Output::Stream(self.execute_stream(&ctx, &physical_plan)?))
+    }
+
+    async fn exec_insert_plan(
+        &self,
+        dml: &DmlStatement,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let default_catalog = query_ctx.current_catalog();
+        let default_schema = query_ctx.current_schema();
+        let table_name = dml
+            .table_name
+            .as_table_reference()
+            .resolve(&default_catalog, &default_schema);
+        let table = self.find_table(&table_name).await?;
+
+        let output = self
+            .exec_query_plan(LogicalPlan::DfPlan((*dml.input).clone()))
+            .await?;
+        let mut stream = match output {
+            Output::RecordBatches(batches) => batches.as_stream(),
+            Output::Stream(stream) => stream,
+            _ => unreachable!(),
+        };
+
+        let mut affected_rows = 0;
+        while let Some(batch) = stream.next().await {
+            let batch = batch.context(CreateRecordBatchSnafu)?;
+            let request = InsertRequest::try_from_recordbatch(&table_name, table.schema(), batch)
+                .map_err(BoxedError::new)
+                .context(QueryExecutionSnafu)?;
+
+            let rows = table
+                .insert(request)
+                .await
+                .map_err(BoxedError::new)
+                .context(QueryExecutionSnafu)?;
+            affected_rows += rows;
+        }
+        Ok(Output::AffectedRows(affected_rows))
+    }
+
+    async fn find_table(&self, table_name: &ResolvedTableReference<'_>) -> Result<TableRef> {
+        let catalog_name = table_name.catalog.as_ref();
+        let schema_name = table_name.schema.as_ref();
+        let table_name = table_name.table.as_ref();
+
+        let catalog = self
+            .state
+            .catalog_list()
+            .catalog(catalog_name)
+            .context(CatalogSnafu)?
+            .context(CatalogNotFoundSnafu {
+                catalog: catalog_name,
+            })?;
+        let schema =
+            catalog
+                .schema(schema_name)
+                .context(CatalogSnafu)?
+                .context(SchemaNotFoundSnafu {
+                    schema: schema_name,
+                })?;
+        let table = schema
+            .table(table_name)
+            .await
+            .context(CatalogSnafu)?
+            .context(TableNotFoundSnafu { table: table_name })?;
+        Ok(table)
     }
 }
 
@@ -75,14 +161,17 @@ impl QueryEngine for DatafusionQueryEngine {
         optimised_plan.schema()
     }
 
-    async fn execute(&self, plan: &LogicalPlan) -> Result<Output> {
-        let logical_plan = self.optimize(plan)?;
-
-        let mut ctx = QueryEngineContext::new(self.state.session_state());
-        let physical_plan = self.create_physical_plan(&mut ctx, &logical_plan).await?;
-        let physical_plan = self.optimize_physical_plan(&mut ctx, physical_plan)?;
-
-        Ok(Output::Stream(self.execute_stream(&ctx, &physical_plan)?))
+    async fn execute(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
+        match plan {
+            LogicalPlan::DfPlan(DfLogicalPlan::Dml(dml)) => match dml.op {
+                WriteOp::Insert => self.exec_insert_plan(&dml, query_ctx).await,
+                _ => UnsupportedExprSnafu {
+                    name: format!("DML op {}", dml.op),
+                }
+                .fail(),
+            },
+            _ => self.exec_query_plan(plan).await,
+        }
     }
 
     fn register_udf(&self, udf: ScalarUdf) {
@@ -292,11 +381,11 @@ mod tests {
         let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
         let plan = engine
             .planner()
-            .plan(stmt, Arc::new(QueryContext::new()))
+            .plan(stmt, QueryContext::arc())
             .await
             .unwrap();
 
-        let output = engine.execute(&plan).await.unwrap();
+        let output = engine.execute(plan, QueryContext::arc()).await.unwrap();
 
         match output {
             Output::Stream(recordbatch) => {

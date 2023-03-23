@@ -167,7 +167,7 @@ impl ScriptsTable {
 
         let stream = match self
             .query_engine
-            .execute(&plan)
+            .execute(plan, QueryContext::arc())
             .await
             .context(FindScriptSnafu { name })?
         {

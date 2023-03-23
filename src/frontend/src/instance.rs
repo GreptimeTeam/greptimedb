@@ -428,45 +428,55 @@ fn parse_stmt(sql: &str) -> Result<Vec<Statement>> {
 }
 
 impl Instance {
+    async fn plan_exec(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
+        let planner = self.query_engine.planner();
+        let plan = planner
+            .plan(QueryStatement::Sql(stmt), query_ctx.clone())
+            .await
+            .context(PlanStatementSnafu)?;
+        self.query_engine
+            .execute(plan, query_ctx)
+            .await
+            .context(ExecLogicalPlanSnafu)
+    }
+
+    async fn execute_tql(&self, tql: Tql, query_ctx: QueryContextRef) -> Result<Output> {
+        let plan = match tql {
+            Tql::Eval(eval) => {
+                let promql = PromQuery {
+                    start: eval.start,
+                    end: eval.end,
+                    step: eval.step,
+                    query: eval.query,
+                };
+                let stmt = QueryLanguageParser::parse_promql(&promql).context(ParseQuerySnafu)?;
+                self.query_engine
+                    .planner()
+                    .plan(stmt, query_ctx.clone())
+                    .await
+                    .context(PlanStatementSnafu)?
+            }
+            Tql::Explain(_) => unimplemented!(),
+        };
+        self.query_engine
+            .execute(plan, query_ctx)
+            .await
+            .context(ExecLogicalPlanSnafu)
+    }
+
     async fn query_statement(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
         check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
 
-        let planner = self.query_engine.planner();
-
         match stmt {
-            Statement::Query(_) | Statement::Explain(_) => {
-                let plan = planner
-                    .plan(QueryStatement::Sql(stmt), query_ctx)
-                    .await
-                    .context(PlanStatementSnafu)?;
-                self.query_engine
-                    .execute(&plan)
-                    .await
-                    .context(ExecLogicalPlanSnafu)
+            Statement::Query(_) | Statement::Explain(_) => self.plan_exec(stmt, query_ctx).await,
+
+            // For performance consideration, only "insert with select" is executed by query engine.
+            // Plain insert ("insert with values") is still executed directly in statement.
+            Statement::Insert(ref insert) if insert.is_insert_select() => {
+                self.plan_exec(stmt, query_ctx).await
             }
-            Statement::Tql(tql) => {
-                let plan = match tql {
-                    Tql::Eval(eval) => {
-                        let promql = PromQuery {
-                            start: eval.start,
-                            end: eval.end,
-                            step: eval.step,
-                            query: eval.query,
-                        };
-                        let stmt =
-                            QueryLanguageParser::parse_promql(&promql).context(ParseQuerySnafu)?;
-                        planner
-                            .plan(stmt, query_ctx)
-                            .await
-                            .context(PlanStatementSnafu)?
-                    }
-                    Tql::Explain(_) => unimplemented!(),
-                };
-                self.query_engine
-                    .execute(&plan)
-                    .await
-                    .context(ExecLogicalPlanSnafu)
-            }
+
+            Statement::Tql(tql) => self.execute_tql(tql, query_ctx).await,
             Statement::CreateDatabase(_)
             | Statement::ShowDatabases(_)
             | Statement::CreateTable(_)
@@ -1086,7 +1096,7 @@ mod tests {
                 .plan(stmt.clone(), QueryContext::arc())
                 .await
                 .unwrap();
-            let output = engine.execute(&plan).await.unwrap();
+            let output = engine.execute(plan, QueryContext::arc()).await.unwrap();
             let Output::Stream(stream) = output else { unreachable!() };
             let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
             let actual = recordbatches.pretty_print().unwrap();

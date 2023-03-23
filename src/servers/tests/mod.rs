@@ -72,10 +72,10 @@ impl SqlQueryHandler for DummyInstance {
         let plan = self
             .query_engine
             .planner()
-            .plan(stmt, query_ctx)
+            .plan(stmt, query_ctx.clone())
             .await
             .unwrap();
-        let output = self.query_engine.execute(&plan).await.unwrap();
+        let output = self.query_engine.execute(plan, query_ctx).await.unwrap();
         vec![Ok(output)]
     }
 
