@@ -1,8 +1,8 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: light)" srcset="/docs/logo-text-padding.png">
-    <source media="(prefers-color-scheme: dark)" srcset="/docs/logo-text-padding-dark.png">
-    <img alt="GreptimeDB Logo" src="/docs/logo-text-padding.png" width="400px">
+    <source media="(prefers-color-scheme: light)" srcset="https://cdn.jsdelivr.net/gh/GreptimeTeam/greptimedb@develop/docs/logo-text-padding.png">
+    <source media="(prefers-color-scheme: dark)" srcset="https://cdn.jsdelivr.net/gh/GreptimeTeam/greptimedb@develop/docs/logo-text-padding-dark.png">
+    <img alt="GreptimeDB Logo" src="https://cdn.jsdelivr.net/gh/GreptimeTeam/greptimedb@develop/docs/logo-text-padding.png" width="400px">
   </picture>
 </p>
 
@@ -158,7 +158,7 @@ You can always cleanup test database by removing `/tmp/greptimedb`.
 - GreptimeDB [User Guide](https://docs.greptime.com/user-guide/concepts.html)
 - GreptimeDB [Developer
   Guide](https://docs.greptime.com/developer-guide/overview.html)
-- GreptimeDB [internal code document](greptimedb.rs)
+- GreptimeDB [internal code document](https://greptimedb.rs)
 
 ### Dashboard
 - [The dashboard UI for GreptimeDB](https://github.com/GreptimeTeam/dashboard)
