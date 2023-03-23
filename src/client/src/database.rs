@@ -18,8 +18,8 @@ use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{
     greptime_response, AffectedRows, AlterExpr, AuthHeader, CreateTableExpr, DdlRequest,
-    DropTableExpr, FlushTableExpr, GreptimeRequest, HealthCheckRequest, InsertRequest,
-    PromRangeQuery, QueryRequest, RequestHeader,
+    DropTableExpr, FlushTableExpr, GreptimeRequest, InsertRequest, PromRangeQuery, QueryRequest,
+    RequestHeader,
 };
 use arrow_flight::{FlightData, Ticket};
 use common_error::prelude::*;
@@ -188,13 +188,6 @@ impl Database {
             expr: Some(DdlExpr::FlushTable(expr)),
         }))
         .await
-    }
-
-    pub async fn healthcheck(&self) -> Result<()> {
-        let mut client = self.client.make_database_client()?.inner;
-        let request = HealthCheckRequest {};
-        client.health_check(request).await?;
-        Ok(())
     }
 
     async fn do_get(&self, request: Request) -> Result<Output> {
