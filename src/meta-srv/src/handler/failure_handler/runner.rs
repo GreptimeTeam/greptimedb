@@ -12,13 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::ops::DerefMut;
+use std::sync::Arc;
 use std::time::Duration;
 
 use common_telemetry::error;
 use common_time::util::current_time_millis;
+use dashmap::mapref::multiple::RefMulti;
+use dashmap::DashMap;
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::task::JoinHandle;
 
@@ -30,7 +32,7 @@ pub(crate) enum FailureDetectControl {
     Purge,
 
     #[cfg(test)]
-    Dump(tokio::sync::oneshot::Sender<Box<dyn FailureDetectorContainer>>),
+    Dump(tokio::sync::oneshot::Sender<FailureDetectorContainer>),
 }
 
 pub(crate) struct FailureDetectRunner {
@@ -42,6 +44,7 @@ pub(crate) struct FailureDetectRunner {
     control_tx: Sender<FailureDetectControl>,
     control_rx: Option<Receiver<FailureDetectControl>>,
 
+    receiver_handle: Option<JoinHandle<()>>,
     runner_handle: Option<JoinHandle<()>>,
 }
 
@@ -55,6 +58,7 @@ impl FailureDetectRunner {
             heartbeat_rx: Some(heartbeat_rx),
             control_tx,
             control_rx: Some(control_rx),
+            receiver_handle: None,
             runner_handle: None,
         }
     }
@@ -72,61 +76,54 @@ impl FailureDetectRunner {
     }
 
     pub(crate) async fn start(&mut self) {
-        let failure_detectors = Box::new(DefaultFailureDetectorContainer(HashMap::new()));
+        let failure_detectors = Arc::new(FailureDetectorContainer(DashMap::new()));
         self.start_with(failure_detectors).await
     }
 
-    async fn start_with(&mut self, failure_detectors: Box<dyn FailureDetectorContainer>) {
+    async fn start_with(&mut self, failure_detectors: Arc<FailureDetectorContainer>) {
         let Some(mut heartbeat_rx) = self.heartbeat_rx.take() else { return };
         let Some(mut control_rx) = self.control_rx.take() else { return };
 
-        let election = self.election.clone();
-        let mut failure_detectors = failure_detectors;
-        let handle = common_runtime::spawn_bg(async move {
+        let container = failure_detectors.clone();
+        let receiver_handle = common_runtime::spawn_bg(async move {
             loop {
-                loop {
-                    let maybe_control = control_rx.try_recv();
-                    match maybe_control {
-                        Ok(control) => match control {
-                            FailureDetectControl::Purge => failure_detectors.clear(),
+                tokio::select! {
+                    Some(control) = control_rx.recv() => {
+                        match control {
+                            FailureDetectControl::Purge => container.clear(),
 
                             #[cfg(test)]
                             FailureDetectControl::Dump(tx) => {
                                 // Drain any heartbeats that are not handled before dump.
                                 while let Ok(heartbeat) = heartbeat_rx.try_recv() {
                                     for ident in heartbeat.region_idents {
-                                        let detector =
-                                            failure_detectors.get_failure_detector(ident);
+                                        let mut detector = container.get_failure_detector(ident);
                                         detector.heartbeat(heartbeat.heartbeat_time);
                                     }
                                 }
-                                let _ = tx.send(failure_detectors.dump());
-                            }
-                        },
-                        Err(TryRecvError::Empty) => break,
-                        Err(TryRecvError::Disconnected) => return,
-                    }
-                }
-
-                loop {
-                    let maybe_heartbeat = heartbeat_rx.try_recv();
-                    match maybe_heartbeat {
-                        Ok(heartbeat) => {
-                            for ident in heartbeat.region_idents {
-                                let detector = failure_detectors.get_failure_detector(ident);
-                                detector.heartbeat(heartbeat.heartbeat_time);
+                                let _ = tx.send(container.dump());
                             }
                         }
-                        Err(TryRecvError::Empty) => break,
-                        Err(TryRecvError::Disconnected) => return,
+                    }
+                    Some(heartbeat) = heartbeat_rx.recv() => {
+                        for ident in heartbeat.region_idents {
+                            let mut detector = container.get_failure_detector(ident);
+                            detector.heartbeat(heartbeat.heartbeat_time);
+                        }
                     }
                 }
+            }
+        });
+        self.receiver_handle = Some(receiver_handle);
 
+        let election = self.election.clone();
+        let runner_handle = common_runtime::spawn_bg(async move {
+            loop {
                 let is_leader = election.as_ref().map(|x| x.is_leader()).unwrap_or(true);
                 if is_leader {
                     let now = current_time_millis();
-                    for detector in failure_detectors.iter() {
-                        if !detector.is_available(now) {
+                    for e in failure_detectors.iter() {
+                        if e.failure_detector().is_available(now) {
                             // TODO(LFC): TBC
                         }
                     }
@@ -135,54 +132,61 @@ impl FailureDetectRunner {
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         });
-        self.runner_handle = Some(handle);
+        self.runner_handle = Some(runner_handle);
     }
 
     #[cfg(test)]
     fn abort(&mut self) {
+        let Some(handle) = self.receiver_handle.take() else { return };
+        handle.abort();
+
         let Some(handle) = self.runner_handle.take() else { return };
         handle.abort();
     }
 
     #[cfg(test)]
-    pub(crate) async fn dump(&self) -> Box<dyn FailureDetectorContainer> {
+    pub(crate) async fn dump(&self) -> FailureDetectorContainer {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.send_control(FailureDetectControl::Dump(tx)).await;
         rx.await.unwrap()
     }
 }
 
-pub(crate) trait FailureDetectorContainer: Send {
-    fn get_failure_detector(&mut self, ident: RegionIdent) -> &mut PhiAccrualFailureDetector;
-    fn iter(&self) -> Box<dyn Iterator<Item = &PhiAccrualFailureDetector> + '_>;
-    fn clear(&mut self);
-
-    #[cfg(test)]
-    fn dump(&self) -> Box<dyn FailureDetectorContainer>;
+pub(crate) struct FailureDetectorEntry<'a> {
+    e: RefMulti<'a, RegionIdent, PhiAccrualFailureDetector>,
 }
 
-struct DefaultFailureDetectorContainer(HashMap<RegionIdent, PhiAccrualFailureDetector>);
+impl FailureDetectorEntry<'_> {
+    fn failure_detector(&self) -> &PhiAccrualFailureDetector {
+        self.e.value()
+    }
+}
 
-impl FailureDetectorContainer for DefaultFailureDetectorContainer {
-    fn get_failure_detector(&mut self, ident: RegionIdent) -> &mut PhiAccrualFailureDetector {
+pub(crate) struct FailureDetectorContainer(DashMap<RegionIdent, PhiAccrualFailureDetector>);
+
+impl FailureDetectorContainer {
+    fn get_failure_detector(
+        &self,
+        ident: RegionIdent,
+    ) -> impl DerefMut<Target = PhiAccrualFailureDetector> + '_ {
         self.0
             .entry(ident)
             .or_insert_with(PhiAccrualFailureDetector::default)
     }
 
-    fn iter(&self) -> Box<dyn Iterator<Item = &PhiAccrualFailureDetector> + '_> {
-        Box::new(self.0.values()) as _
+    pub(crate) fn iter(&self) -> Box<dyn Iterator<Item = FailureDetectorEntry> + '_> {
+        Box::new(self.0.iter().map(move |e| FailureDetectorEntry { e })) as _
     }
 
-    fn clear(&mut self) {
+    fn clear(&self) {
         self.0.clear()
     }
 
     #[cfg(test)]
-    fn dump(&self) -> Box<dyn FailureDetectorContainer> {
-        let mut m = HashMap::with_capacity(self.0.len());
-        m.extend(self.0.iter().map(|(k, v)| (k.clone(), v.clone())));
-        Box::new(Self(m))
+    fn dump(&self) -> FailureDetectorContainer {
+        let mut m = DashMap::with_capacity(self.0.len());
+        m.extend(self.0.iter().map(|x| (x.key().clone(), x.value().clone())));
+        Self(m)
     }
 }
 
@@ -194,7 +198,7 @@ mod tests {
 
     #[test]
     fn test_default_failure_detector_container() {
-        let mut container = DefaultFailureDetectorContainer(HashMap::new());
+        let container = FailureDetectorContainer(DashMap::new());
         let ident = RegionIdent {
             catalog: "a".to_string(),
             schema: "b".to_string(),
@@ -216,7 +220,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_control() {
-        let mut container = DefaultFailureDetectorContainer(HashMap::new());
+        let container = FailureDetectorContainer(DashMap::new());
 
         let ident = RegionIdent {
             catalog: "a".to_string(),
@@ -227,7 +231,7 @@ mod tests {
         container.get_failure_detector(ident.clone());
 
         let mut runner = FailureDetectRunner::new(None);
-        runner.start_with(Box::new(container)).await;
+        runner.start_with(Arc::new(container)).await;
 
         let dump = runner.dump().await;
         assert_eq!(dump.iter().collect::<Vec<_>>().len(), 1);
@@ -277,7 +281,8 @@ mod tests {
         let failure_detectors = dump.iter().collect::<Vec<_>>();
         assert_eq!(failure_detectors.len(), 3);
 
-        failure_detectors.iter().for_each(|fd| {
+        failure_detectors.iter().for_each(|e| {
+            let fd = e.failure_detector();
             let acceptable_heartbeat_pause_millis = fd.acceptable_heartbeat_pause_millis() as i64;
             let start = last_heartbeat_time;
 
