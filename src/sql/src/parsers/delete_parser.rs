@@ -31,7 +31,7 @@ impl<'a> ParserContext<'a> {
 
         match spstatement {
             SpStatement::Delete { .. } => {
-                Ok(Statement::Delete(Box::new(Delete::try_from(spstatement)?)))
+                Ok(Statement::Delete(Box::new(Delete { inner: spstatement })))
             }
             unexp => error::UnsupportedSnafu {
                 sql: self.sql.to_string(),

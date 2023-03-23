@@ -12,14 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use datatypes::schema::SchemaRef;
 use datatypes::value::Value;
 use datatypes::vectors::{Helper, VectorRef};
 use serde::ser::{Error, SerializeStruct};
 use serde::{Serialize, Serializer};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
-use crate::error::{self, Result};
+use crate::error::{self, CastVectorSnafu, ColumnNotExistsSnafu, Result};
 use crate::DfRecordBatch;
 
 /// A two-dimensional batch of column-oriented data with a defined schema.
@@ -107,6 +109,41 @@ impl RecordBatch {
     /// Create an iterator to traverse the data by row
     pub fn rows(&self) -> RecordBatchRowIterator<'_> {
         RecordBatchRowIterator::new(self)
+    }
+
+    pub fn column_vectors(
+        &self,
+        table_name: &str,
+        table_schema: SchemaRef,
+    ) -> Result<HashMap<String, VectorRef>> {
+        let mut vectors = HashMap::with_capacity(self.num_columns());
+
+        // column schemas in recordbatch must match its vectors, otherwise it's corrupted
+        for (vector_schema, vector) in self.schema.column_schemas().iter().zip(self.columns.iter())
+        {
+            let column_name = &vector_schema.name;
+            let column_schema =
+                table_schema
+                    .column_schema_by_name(column_name)
+                    .context(ColumnNotExistsSnafu {
+                        table_name,
+                        column_name,
+                    })?;
+            let vector = if vector_schema.data_type != column_schema.data_type {
+                vector
+                    .cast(&column_schema.data_type)
+                    .with_context(|_| CastVectorSnafu {
+                        from_type: vector.data_type(),
+                        to_type: column_schema.data_type.clone(),
+                    })?
+            } else {
+                vector.clone()
+            };
+
+            vectors.insert(column_name.clone(), vector);
+        }
+
+        Ok(vectors)
     }
 }
 
