@@ -92,6 +92,14 @@ impl FailureDetectRunner {
 
                             #[cfg(test)]
                             FailureDetectControl::Dump(tx) => {
+                                // Drain any heartbeats that are not handled before dump.
+                                while let Ok(heartbeat) = heartbeat_rx.try_recv() {
+                                    for ident in heartbeat.region_idents {
+                                        let detector =
+                                            failure_detectors.get_failure_detector(ident);
+                                        detector.heartbeat(heartbeat.heartbeat_time);
+                                    }
+                                }
                                 let _ = tx.send(failure_detectors.dump());
                             }
                         },

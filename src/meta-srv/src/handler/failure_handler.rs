@@ -98,8 +98,6 @@ impl HeartbeatHandler for RegionFailureHandler {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
     use crate::handler::node_stat::{RegionStat, Stat};
     use crate::metasrv::builder::MetaSrvBuilder;
@@ -138,7 +136,6 @@ mod tests {
         });
 
         handler.handle(req, &mut ctx, acc).await.unwrap();
-        tokio::time::sleep(Duration::from_secs(1)).await;
 
         let dump = handler.failure_detect_runner.dump().await;
         assert_eq!(dump.iter().collect::<Vec<_>>().len(), 3);
