@@ -32,7 +32,7 @@ use std::collections::VecDeque;
 ///
 /// where F is the cumulative distribution function of a normal distribution with mean
 /// and standard deviation estimated from historical heartbeat inter-arrival times.
-#[derive(Clone)]
+#[cfg_attr(test, derive(Clone))]
 pub(crate) struct PhiAccrualFailureDetector {
     /// A low threshold is prone to generate many wrong suspicions but ensures a quick detection
     /// in the event of a real crash. Conversely, a high threshold generates fewer mistakes but
