@@ -16,7 +16,9 @@ use std::sync::Arc;
 
 use api::v1::greptime_database_server::GreptimeDatabase;
 use api::v1::greptime_response::Response as RawResponse;
-use api::v1::{AffectedRows, GreptimeRequest, GreptimeResponse};
+use api::v1::{
+    AffectedRows, GreptimeRequest, GreptimeResponse, HealthCheckRequest, HealthCheckResponse,
+};
 use async_trait::async_trait;
 use common_query::Output;
 use futures::StreamExt;
@@ -82,5 +84,12 @@ impl GreptimeDatabase for DatabaseService {
             })),
         };
         Ok(Response::new(response))
+    }
+
+    async fn health_check(
+        &self,
+        _req: Request<HealthCheckRequest>,
+    ) -> TonicResult<Response<HealthCheckResponse>> {
+        Ok(Response::new(HealthCheckResponse {}))
     }
 }

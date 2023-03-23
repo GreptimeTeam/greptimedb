@@ -55,9 +55,51 @@ macro_rules! grpc_tests {
 
                 test_auto_create_table,
                 test_insert_and_select,
+                test_dbname,
             );
         )*
     };
+}
+
+#[tokio::test]
+pub async fn test_invalid_dbname() {
+    let (addr, mut guard, fe_grpc_server) =
+        setup_grpc_server(StorageType::File, "auto_create_table").await;
+
+    let grpc_client = Client::with_urls(vec![addr]);
+    let db = Database::new_with_dbname("tom", grpc_client);
+
+    let (expected_host_col, expected_cpu_col, expected_mem_col, expected_ts_col) = expect_data();
+    let request = InsertRequest {
+        table_name: "demo".to_string(),
+        region_number: 0,
+        columns: vec![
+            expected_host_col.clone(),
+            expected_cpu_col.clone(),
+            expected_mem_col.clone(),
+            expected_ts_col.clone(),
+        ],
+        row_count: 4,
+    };
+    let result = db.insert(request).await;
+    assert!(result.is_err());
+
+    let _ = fe_grpc_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_dbname(store_type: StorageType) {
+    let (addr, mut guard, fe_grpc_server) =
+        setup_grpc_server(store_type, "auto_create_table").await;
+
+    let grpc_client = Client::with_urls(vec![addr]);
+    let db = Database::new_with_dbname(
+        format!("{}-{}", DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
+        grpc_client,
+    );
+    insert_and_assert(&db).await;
+    let _ = fe_grpc_server.shutdown().await;
+    guard.remove_all().await;
 }
 
 pub async fn test_auto_create_table(store_type: StorageType) {

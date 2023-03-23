@@ -18,8 +18,8 @@ use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{
     greptime_response, AffectedRows, AlterExpr, AuthHeader, CreateTableExpr, DdlRequest,
-    DropTableExpr, FlushTableExpr, GreptimeRequest, InsertRequest, PromRangeQuery, QueryRequest,
-    RequestHeader,
+    DropTableExpr, FlushTableExpr, GreptimeRequest, HealthCheckRequest, InsertRequest,
+    PromRangeQuery, QueryRequest, RequestHeader,
 };
 use arrow_flight::{FlightData, Ticket};
 use common_error::prelude::*;
@@ -35,25 +35,44 @@ use crate::error::{
 };
 use crate::{error, Client, Result};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Database {
     // The "catalog" and "schema" to be used in processing the requests at the server side.
     // They are the "hint" or "context", just like how the "database" in "USE" statement is treated in MySQL.
     // They will be carried in the request header.
     catalog: String,
     schema: String,
+    // The dbname follows naming rule as out mysql, postgres and http
+    // protocol. The server treat dbname in priority of catalog/schema.
+    dbname: String,
 
     client: Client,
     ctx: FlightContext,
 }
 
 impl Database {
+    /// Create database service client using catalog and schema
     pub fn new(catalog: impl Into<String>, schema: impl Into<String>, client: Client) -> Self {
         Self {
             catalog: catalog.into(),
             schema: schema.into(),
             client,
-            ctx: FlightContext::default(),
+            ..Default::default()
+        }
+    }
+
+    /// Create database service client using dbname.
+    ///
+    /// This API is designed for external usage. `dbname` is:
+    ///
+    /// - the name of database when using GreptimeDB standalone or cluster
+    /// - the name provided by GreptimeCloud or other multi-tenant GreptimeDB
+    /// environment
+    pub fn new_with_dbname(dbname: impl Into<String>, client: Client) -> Self {
+        Self {
+            dbname: dbname.into(),
+            client,
+            ..Default::default()
         }
     }
 
@@ -73,6 +92,14 @@ impl Database {
         self.schema = schema.into();
     }
 
+    pub fn dbname(&self) -> &String {
+        &self.dbname
+    }
+
+    pub fn set_dbname(&mut self, dbname: impl Into<String>) {
+        self.dbname = dbname.into();
+    }
+
     pub fn set_auth(&mut self, auth: AuthScheme) {
         self.ctx.auth_header = Some(AuthHeader {
             auth_scheme: Some(auth),
@@ -86,6 +113,8 @@ impl Database {
                 catalog: self.catalog.clone(),
                 schema: self.schema.clone(),
                 authorization: self.ctx.auth_header.clone(),
+                dbname: self.dbname.clone(),
+                ..Default::default()
             }),
             request: Some(Request::Insert(request)),
         };
@@ -161,12 +190,21 @@ impl Database {
         .await
     }
 
+    pub async fn healthcheck(&self) -> Result<()> {
+        let mut client = self.client.make_database_client()?.inner;
+        let request = HealthCheckRequest {};
+        client.health_check(request).await?;
+        Ok(())
+    }
+
     async fn do_get(&self, request: Request) -> Result<Output> {
         let request = GreptimeRequest {
             header: Some(RequestHeader {
                 catalog: self.catalog.clone(),
                 schema: self.schema.clone(),
                 authorization: self.ctx.auth_header.clone(),
+                dbname: self.dbname.clone(),
+                ..Default::default()
             }),
             request: Some(request),
         };
