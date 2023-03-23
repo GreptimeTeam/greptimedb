@@ -369,11 +369,14 @@ async fn test_recover_region_manifets() {
     );
 
     // do a manifest checkpoint
-    let snapshot = manifest.do_checkpoint().await.unwrap().unwrap();
-    assert_eq!(1, snapshot.last_version);
-    assert_eq!(2, snapshot.compacted_actions);
-    assert_eq!(manifest.last_snapshot().await.unwrap().unwrap(), snapshot);
-    // recover from snapshot
+    let checkpoint = manifest.do_checkpoint().await.unwrap().unwrap();
+    assert_eq!(1, checkpoint.last_version);
+    assert_eq!(2, checkpoint.compacted_actions);
+    assert_eq!(
+        manifest.last_checkpoint().await.unwrap().unwrap(),
+        checkpoint
+    );
+    // recover from checkpoint
     let (version, recovered_metadata) = RegionImpl::<NoopLogStore>::recover_from_manifest(
         &manifest,
         &memtable_builder,

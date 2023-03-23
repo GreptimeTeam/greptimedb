@@ -227,7 +227,7 @@ impl Version {
         self.flushed_sequence
     }
 
-    pub fn apply_snapshot(
+    pub fn apply_checkpoint(
         &mut self,
         flushed_sequence: Option<SequenceNumber>,
         manifest_version: ManifestVersion,
@@ -237,7 +237,7 @@ impl Version {
         self.manifest_version = manifest_version;
         let ssts = self.ssts.merge(files, std::iter::empty());
         info!(
-            "After applying snapshot, region: {}, flushed_sequence: {}, manifest_version: {}",
+            "After applying checkpoint, region: {}, flushed_sequence: {}, manifest_version: {}",
             self.metadata.id(),
             self.flushed_sequence,
             self.manifest_version,

@@ -15,21 +15,21 @@
 use std::any::Any;
 
 use async_trait::async_trait;
-use store_api::manifest::{MetaAction, Snapshot};
+use store_api::manifest::{Checkpoint, MetaAction};
 
 use crate::error::{Error, Result};
 use crate::manifest::ManifestImpl;
 
 #[async_trait]
 pub trait Checkpointer: Send + Sync + std::fmt::Debug {
-    type Snapshot: Snapshot<Error = Error>;
+    type Checkpoint: Checkpoint<Error = Error>;
     type MetaAction: MetaAction<Error = Error>;
 
-    /// Try to create a checkpoint, return the snapshot if successes.
+    /// Try to create a checkpoint, return the checkpoint if successes.
     async fn do_checkpoint(
         &self,
-        manifest: &ManifestImpl<Self::Snapshot, Self::MetaAction>,
-    ) -> Result<Option<Self::Snapshot>>;
+        manifest: &ManifestImpl<Self::Checkpoint, Self::MetaAction>,
+    ) -> Result<Option<Self::Checkpoint>>;
 
     fn as_any(&self) -> &dyn Any;
 }

@@ -23,7 +23,7 @@ use store_api::manifest::ManifestVersion;
 use crate::error::{
     DecodeJsonSnafu, EncodeJsonSnafu, ManifestProtocolForbidReadSnafu, Result, Utf8Snafu,
 };
-use crate::manifest::action::RegionSnapshot;
+use crate::manifest::action::RegionCheckpoint;
 
 pub const NEWLINE: &[u8] = b"\n";
 
@@ -49,21 +49,21 @@ pub fn encode_actions<T: Serialize>(
     Ok(bytes)
 }
 
-pub fn encode_snapshot(snasphot: &RegionSnapshot) -> Result<Vec<u8>> {
+pub fn encode_checkpoint(snasphot: &RegionCheckpoint) -> Result<Vec<u8>> {
     let s = serde_json::to_string(snasphot).context(EncodeJsonSnafu)?;
     Ok(s.into_bytes())
 }
 
-pub fn decode_snapshot(bs: &[u8], reader_version: ProtocolVersion) -> Result<RegionSnapshot> {
+pub fn decode_checkpoint(bs: &[u8], reader_version: ProtocolVersion) -> Result<RegionCheckpoint> {
     let s = std::str::from_utf8(bs).context(Utf8Snafu)?;
-    let snapshot: RegionSnapshot = serde_json::from_str(s).context(DecodeJsonSnafu)?;
+    let checkpoint: RegionCheckpoint = serde_json::from_str(s).context(DecodeJsonSnafu)?;
     ensure!(
-        snapshot.protocol.is_readable(reader_version),
+        checkpoint.protocol.is_readable(reader_version),
         ManifestProtocolForbidReadSnafu {
-            min_version: snapshot.protocol.min_reader_version,
+            min_version: checkpoint.protocol.min_reader_version,
             supported_version: reader_version,
         }
     );
 
-    Ok(snapshot)
+    Ok(checkpoint)
 }

@@ -37,7 +37,7 @@ use crate::error::{self, Error, Result};
 use crate::file_purger::FilePurgerRef;
 use crate::flush::{FlushSchedulerRef, FlushStrategyRef};
 use crate::manifest::action::{
-    RawRegionMetadata, RegionChange, RegionMetaAction, RegionMetaActionList, RegionSnapshot,
+    RawRegionMetadata, RegionChange, RegionCheckpoint, RegionMetaAction, RegionMetaActionList,
 };
 use crate::manifest::region::RegionManifest;
 use crate::memtable::MemtableBuilderRef;
@@ -330,17 +330,17 @@ impl<S: LogStore> RegionImpl<S> {
         self.inner.shared.id()
     }
 
-    fn create_version_with_snapshot(
-        snapshot: RegionSnapshot,
+    fn create_version_with_checkpoint(
+        checkpoint: RegionCheckpoint,
         memtable_builder: &MemtableBuilderRef,
         sst_layer: &AccessLayerRef,
         file_purger: &FilePurgerRef,
     ) -> Result<Option<Version>> {
-        if snapshot.snapshot.is_none() {
+        if checkpoint.checkpoint.is_none() {
             return Ok(None);
         }
         // Safety: it's safe to unwrap here, checking it above.
-        let s = snapshot.snapshot.unwrap();
+        let s = checkpoint.checkpoint.unwrap();
 
         let region = s.metadata.name.clone();
         let region_metadata: RegionMetadata = s
@@ -351,14 +351,14 @@ impl<S: LogStore> RegionImpl<S> {
         let memtable = memtable_builder.build(region_metadata.schema().clone());
         let mut version = Version::with_manifest_version(
             Arc::new(region_metadata),
-            snapshot.last_version,
+            checkpoint.last_version,
             memtable,
             sst_layer.clone(),
             file_purger.clone(),
         );
 
         if let Some(v) = s.version {
-            version.apply_snapshot(
+            version.apply_checkpoint(
                 v.flushed_sequence,
                 v.manifest_version,
                 v.files.into_values(),
@@ -374,14 +374,14 @@ impl<S: LogStore> RegionImpl<S> {
         sst_layer: &AccessLayerRef,
         file_purger: &FilePurgerRef,
     ) -> Result<(Option<Version>, RecoveredMetadataMap)> {
-        let snapshot = manifest.last_snapshot().await?;
+        let checkpoint = manifest.last_checkpoint().await?;
 
-        let (start, end, mut version) = if let Some(snapshot) = snapshot {
+        let (start, end, mut version) = if let Some(checkpoint) = checkpoint {
             (
-                snapshot.last_version + 1,
+                checkpoint.last_version + 1,
                 manifest::MAX_VERSION,
-                Self::create_version_with_snapshot(
-                    snapshot,
+                Self::create_version_with_checkpoint(
+                    checkpoint,
                     memtable_builder,
                     sst_layer,
                     file_purger,

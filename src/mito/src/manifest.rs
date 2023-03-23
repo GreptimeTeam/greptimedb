@@ -17,14 +17,14 @@ pub mod action;
 
 use storage::manifest::ManifestImpl;
 use store_api::manifest::action::{ProtocolAction, ProtocolVersion};
-use store_api::manifest::{ManifestVersion, Snapshot};
+use store_api::manifest::{Checkpoint, ManifestVersion};
 
 use crate::manifest::action::TableMetaActionList;
 
 #[derive(Debug, Clone)]
-pub struct NoopSnapshot {}
+pub struct NoopCheckpoint {}
 
-impl Snapshot for NoopSnapshot {
+impl Checkpoint for NoopCheckpoint {
     type Error = storage::error::Error;
 
     fn set_protocol(&mut self, _action: ProtocolAction) {}
@@ -42,7 +42,7 @@ impl Snapshot for NoopSnapshot {
     }
 }
 
-pub type TableManifest = ManifestImpl<NoopSnapshot, TableMetaActionList>;
+pub type TableManifest = ManifestImpl<NoopCheckpoint, TableMetaActionList>;
 
 #[cfg(test)]
 mod tests {

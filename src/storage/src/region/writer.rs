@@ -131,8 +131,11 @@ impl RegionWriter {
         let mut action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
         action_list.set_prev_version(prev_version);
         let manifest_version = manifest.update(action_list).await?;
-        // Notify checkpointer the flushed manifest version.
-        manifest.set_flushed_manifest_version(manifest_version);
+
+        // Notify checkpointer the flushed manifest version after flusing memtable
+        if flushed_sequence.is_some() {
+            manifest.set_flushed_manifest_version(manifest_version);
+        }
 
         let version_edit = VersionEdit {
             files_to_add,

@@ -30,10 +30,13 @@ use crate::manifest::action::*;
 use crate::manifest::checkpoint::Checkpointer;
 use crate::manifest::ManifestImpl;
 
-pub type RegionManifest = ManifestImpl<RegionSnapshot, RegionMetaActionList>;
+pub type RegionManifest = ManifestImpl<RegionCheckpoint, RegionMetaActionList>;
 
 #[derive(Debug)]
 pub struct RegionManifestCheckpointer {
+    // The latest manifest version when flushing memtables.
+    // Checkpoint can't exceed over flushed manifest version because we have to keep
+    // the region metadata for replaying WAL to ensure correct data schema.
     flushed_manifest_version: AtomicU64,
 }
 
@@ -46,22 +49,22 @@ impl RegionManifestCheckpointer {
 
 #[async_trait]
 impl Checkpointer for RegionManifestCheckpointer {
-    type Snapshot = RegionSnapshot;
+    type Checkpoint = RegionCheckpoint;
     type MetaAction = RegionMetaActionList;
 
     async fn do_checkpoint(
         &self,
-        manifest: &ManifestImpl<RegionSnapshot, RegionMetaActionList>,
-    ) -> Result<Option<RegionSnapshot>> {
-        let last_snapshot = manifest.last_snapshot().await?;
+        manifest: &ManifestImpl<RegionCheckpoint, RegionMetaActionList>,
+    ) -> Result<Option<RegionCheckpoint>> {
+        let last_checkpoint = manifest.last_checkpoint().await?;
 
         let current_version = manifest.last_version();
         let (start_version, mut protocol, mut manifest_builder) =
-            if let Some(snapshot) = last_snapshot {
+            if let Some(checkpoint) = last_checkpoint {
                 (
-                    snapshot.last_version,
-                    snapshot.protocol,
-                    RegionManifestDataBuilder::with_snapshot(snapshot.snapshot),
+                    checkpoint.last_version,
+                    checkpoint.protocol,
+                    RegionManifestDataBuilder::with_checkpoint(checkpoint.checkpoint),
                 )
             } else {
                 (
@@ -71,8 +74,6 @@ impl Checkpointer for RegionManifestCheckpointer {
                 )
             };
 
-        // Checkpoint can't exceed over flushed manifest version.
-        // We have to keep the region metadata which is not flushed for replaying WAL.
         let end_version =
             current_version.min(self.flushed_manifest_version.load(Ordering::Relaxed)) + 1;
         if start_version >= end_version - 1 {
@@ -106,15 +107,15 @@ impl Checkpointer for RegionManifestCheckpointer {
         }
 
         let region_manifest = manifest_builder.build();
-        let snapshot = RegionSnapshot {
+        let checkpoint = RegionCheckpoint {
             protocol,
             last_version,
             compacted_actions,
-            snapshot: Some(region_manifest),
+            checkpoint: Some(region_manifest),
         };
 
-        manifest.save_snapshot(&snapshot).await?;
-        // TODO(dennis): background task to clean old manifest actions and snapshots.
+        manifest.save_checkpoint(&checkpoint).await?;
+        // TODO(dennis): background task to clean old manifest actions and checkpoints.
         manifest
             .manifest_store()
             .delete(start_version, last_version + 1)
@@ -128,7 +129,7 @@ impl Checkpointer for RegionManifestCheckpointer {
 
         info!("Region manifest checkpoint, start_version: {}, last_version: {}, compacted actions: {}", start_version, last_version, compacted_actions);
 
-        Ok(Some(snapshot))
+        Ok(Some(checkpoint))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -327,20 +328,20 @@ mod tests {
         for action in actions {
             manifest.update(action).await.unwrap();
         }
-        assert!(manifest.last_snapshot().await.unwrap().is_none());
+        assert!(manifest.last_checkpoint().await.unwrap().is_none());
         assert!(manifest.do_checkpoint().await.unwrap().is_none());
         assert_scan(&manifest, 0, 3).await;
         // update flushed manifest version for doing checkpoint
         manifest.set_flushed_manifest_version(2);
 
         // do a checkpoint
-        let snapshot = manifest.do_checkpoint().await.unwrap().unwrap();
-        let last_snapshot = manifest.last_snapshot().await.unwrap().unwrap();
-        assert_eq!(snapshot, last_snapshot);
-        assert_eq!(snapshot.compacted_actions, 3);
-        assert_eq!(snapshot.last_version, 2);
+        let checkpoint = manifest.do_checkpoint().await.unwrap().unwrap();
+        let last_checkpoint = manifest.last_checkpoint().await.unwrap().unwrap();
+        assert_eq!(checkpoint, last_checkpoint);
+        assert_eq!(checkpoint.compacted_actions, 3);
+        assert_eq!(checkpoint.last_version, 2);
         let alterd_raw_meta = RawRegionMetadata::from(new_region_meta.as_ref());
-        assert!(matches!(&snapshot.snapshot, Some(RegionManifestData {
+        assert!(matches!(&checkpoint.checkpoint, Some(RegionManifestData {
             committed_sequence: 99,
             metadata,
             version: Some(RegionVersion {
@@ -363,8 +364,8 @@ mod tests {
             .is_none());
 
         assert!(manifest.do_checkpoint().await.unwrap().is_none());
-        let last_snapshot = manifest.last_snapshot().await.unwrap().unwrap();
-        assert_eq!(snapshot, last_snapshot);
+        let last_checkpoint = manifest.last_checkpoint().await.unwrap().unwrap();
+        assert_eq!(checkpoint, last_checkpoint);
 
         // add new actions
         let new_file = FileId::random();
@@ -388,12 +389,12 @@ mod tests {
 
         // compacted RegionChange
         manifest.set_flushed_manifest_version(3);
-        let snapshot = manifest.do_checkpoint().await.unwrap().unwrap();
-        let last_snapshot = manifest.last_snapshot().await.unwrap().unwrap();
-        assert_eq!(snapshot, last_snapshot);
-        assert_eq!(snapshot.compacted_actions, 1);
-        assert_eq!(snapshot.last_version, 3);
-        assert!(matches!(&snapshot.snapshot, Some(RegionManifestData {
+        let checkpoint = manifest.do_checkpoint().await.unwrap().unwrap();
+        let last_checkpoint = manifest.last_checkpoint().await.unwrap().unwrap();
+        assert_eq!(checkpoint, last_checkpoint);
+        assert_eq!(checkpoint.compacted_actions, 1);
+        assert_eq!(checkpoint.last_version, 3);
+        assert!(matches!(&checkpoint.checkpoint, Some(RegionManifestData {
             committed_sequence: 200,
             metadata,
             version: Some(RegionVersion {
@@ -409,12 +410,12 @@ mod tests {
         assert_scan(&manifest, 4, 1).await;
         // compacted RegionEdit
         manifest.set_flushed_manifest_version(4);
-        let snapshot = manifest.do_checkpoint().await.unwrap().unwrap();
-        let last_snapshot = manifest.last_snapshot().await.unwrap().unwrap();
-        assert_eq!(snapshot, last_snapshot);
-        assert_eq!(snapshot.compacted_actions, 1);
-        assert_eq!(snapshot.last_version, 4);
-        assert!(matches!(&snapshot.snapshot, Some(RegionManifestData {
+        let checkpoint = manifest.do_checkpoint().await.unwrap().unwrap();
+        let last_checkpoint = manifest.last_checkpoint().await.unwrap().unwrap();
+        assert_eq!(checkpoint, last_checkpoint);
+        assert_eq!(checkpoint.compacted_actions, 1);
+        assert_eq!(checkpoint.last_version, 4);
+        assert!(matches!(&checkpoint.checkpoint, Some(RegionManifestData {
             committed_sequence: 200,
             metadata,
             version: Some(RegionVersion {

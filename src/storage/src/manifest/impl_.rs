@@ -24,25 +24,26 @@ use snafu::ensure;
 use store_api::manifest::action::{self, ProtocolAction, ProtocolVersion};
 use store_api::manifest::*;
 
-use crate::error::{Error, ManifestProtocolForbidWriteSnafu, Result, UnsupportedCheckpointSnafu};
-use crate::manifest::action::RegionSnapshot;
+use crate::error::{Error, ManifestProtocolForbidWriteSnafu, Result};
+use crate::manifest::action::RegionCheckpoint;
 use crate::manifest::checkpoint::Checkpointer;
 use crate::manifest::storage::{ManifestObjectStore, ObjectStoreLogIterator};
 
+// TODO(dennis): export this option to table options or storage options.
 const CHECKPOINT_ACTIONS_MARGIN: u64 = 10;
 
 #[derive(Clone, Debug)]
-pub struct ManifestImpl<S: Snapshot<Error = Error>, M: MetaAction<Error = Error>> {
+pub struct ManifestImpl<S: Checkpoint<Error = Error>, M: MetaAction<Error = Error>> {
     inner: Arc<ManifestImplInner<S, M>>,
-    checkpointer: Option<Arc<dyn Checkpointer<Snapshot = S, MetaAction = M>>>,
+    checkpointer: Option<Arc<dyn Checkpointer<Checkpoint = S, MetaAction = M>>>,
     last_checkpoint_version: Arc<AtomicU64>,
 }
 
-impl<S: Snapshot<Error = Error>, M: MetaAction<Error = Error>> ManifestImpl<S, M> {
+impl<S: Checkpoint<Error = Error>, M: MetaAction<Error = Error>> ManifestImpl<S, M> {
     pub fn new(
         manifest_dir: &str,
         object_store: ObjectStore,
-        checkpointer: Option<Arc<dyn Checkpointer<Snapshot = S, MetaAction = M>>>,
+        checkpointer: Option<Arc<dyn Checkpointer<Checkpoint = S, MetaAction = M>>>,
     ) -> Self {
         ManifestImpl {
             inner: Arc::new(ManifestImplInner::new(manifest_dir, object_store)),
@@ -51,7 +52,7 @@ impl<S: Snapshot<Error = Error>, M: MetaAction<Error = Error>> ManifestImpl<S, M
         }
     }
 
-    pub fn checkpointer(&self) -> &Option<Arc<dyn Checkpointer<Snapshot = S, MetaAction = M>>> {
+    pub fn checkpointer(&self) -> &Option<Arc<dyn Checkpointer<Checkpoint = S, MetaAction = M>>> {
         &self.checkpointer
     }
 
@@ -65,19 +66,19 @@ impl<S: Snapshot<Error = Error>, M: MetaAction<Error = Error>> ManifestImpl<S, M
         self.inner.update_state(version, protocol);
     }
 
-    pub async fn save_snapshot(&self, snapshot: &RegionSnapshot) -> Result<()> {
+    pub async fn save_checkpoint(&self, checkpoint: &RegionCheckpoint) -> Result<()> {
         ensure!(
-            snapshot
+            checkpoint
                 .protocol
                 .is_writable(self.inner.supported_writer_version),
             ManifestProtocolForbidWriteSnafu {
-                min_version: snapshot.protocol.min_writer_version,
+                min_version: checkpoint.protocol.min_writer_version,
                 supported_version: self.inner.supported_writer_version,
             }
         );
-        let bytes = snapshot.encode()?;
+        let bytes = checkpoint.encode()?;
         self.manifest_store()
-            .save_checkpoint(snapshot.last_version, &bytes)
+            .save_checkpoint(checkpoint.last_version, &bytes)
             .await
     }
 
@@ -88,11 +89,11 @@ impl<S: Snapshot<Error = Error>, M: MetaAction<Error = Error>> ManifestImpl<S, M
 }
 
 #[async_trait]
-impl<S: 'static + Snapshot<Error = Error>, M: 'static + MetaAction<Error = Error>> Manifest
+impl<S: 'static + Checkpoint<Error = Error>, M: 'static + MetaAction<Error = Error>> Manifest
     for ManifestImpl<S, M>
 {
     type Error = Error;
-    type Snapshot = S;
+    type Checkpoint = S;
     type MetaAction = M;
     type MetaActionIterator = MetaActionIteratorImpl<M>;
 
@@ -102,7 +103,7 @@ impl<S: 'static + Snapshot<Error = Error>, M: 'static + MetaAction<Error = Error
             >= CHECKPOINT_ACTIONS_MARGIN
         {
             let s = self.do_checkpoint().await?;
-            debug!("Manifest checkpoint, snapshot: {:#?}", s);
+            debug!("Manifest checkpoint, checkpoint: {:#?}", s);
         }
         Ok(version)
     }
@@ -117,17 +118,18 @@ impl<S: 'static + Snapshot<Error = Error>, M: 'static + MetaAction<Error = Error
 
     async fn do_checkpoint(&self) -> Result<Option<S>> {
         if let Some(cp) = &self.checkpointer {
-            let snapshot = cp.do_checkpoint(self).await?;
-            if let Some(snapshot) = &snapshot {
-                self.set_last_checkpoint_version(snapshot.last_version());
+            let checkpoint = cp.do_checkpoint(self).await?;
+            if let Some(checkpoint) = &checkpoint {
+                self.set_last_checkpoint_version(checkpoint.last_version());
             }
-            return Ok(snapshot);
+            return Ok(checkpoint);
         }
-        UnsupportedCheckpointSnafu {}.fail()
+
+        Ok(None)
     }
 
-    async fn last_snapshot(&self) -> Result<Option<S>> {
-        self.inner.last_snapshot().await
+    async fn last_checkpoint(&self) -> Result<Option<S>> {
+        self.inner.last_checkpoint().await
     }
 
     fn last_version(&self) -> ManifestVersion {
@@ -136,7 +138,7 @@ impl<S: 'static + Snapshot<Error = Error>, M: 'static + MetaAction<Error = Error
 }
 
 #[derive(Debug)]
-struct ManifestImplInner<S: Snapshot<Error = Error>, M: MetaAction<Error = Error>> {
+struct ManifestImplInner<S: Checkpoint<Error = Error>, M: MetaAction<Error = Error>> {
     store: Arc<ManifestObjectStore>,
     version: AtomicU64,
     /// Current using protocol
@@ -181,7 +183,7 @@ impl<M: MetaAction<Error = Error>> MetaActionIterator for MetaActionIteratorImpl
     }
 }
 
-impl<S: Snapshot<Error = Error>, M: MetaAction<Error = Error>> ManifestImplInner<S, M> {
+impl<S: Checkpoint<Error = Error>, M: MetaAction<Error = Error>> ManifestImplInner<S, M> {
     fn new(manifest_dir: &str, object_store: ObjectStore) -> Self {
         let (reader_version, writer_version) = action::supported_protocol_version();
 
@@ -270,27 +272,27 @@ impl<S: Snapshot<Error = Error>, M: MetaAction<Error = Error>> ManifestImplInner
         })
     }
 
-    async fn last_snapshot(&self) -> Result<Option<S>> {
+    async fn last_checkpoint(&self) -> Result<Option<S>> {
         let protocol = self.protocol.load();
         let last_checkpoint = self.store.load_last_checkpoint().await?;
 
         if let Some((version, bytes)) = last_checkpoint {
-            let snapshot = S::decode(&bytes, protocol.min_reader_version)?;
-            assert!(snapshot.last_version() >= version);
-            if snapshot.last_version() > version {
-                // It happens when saving snapshot successfully, but failed at saving checkpoint metadata(the "__last_checkpoint" file).
-                // Then we try to use the old snapshot and do the checkpoint next time.
-                // If the old snapshot was deleted, it's fine that we return the latest snapshot.
-                // the only side effect is leaving some unused checkpoint snapshot files.
-                // TODO(dennis): delete unused snapshot files
-                warn!("The snapshot manifest version {} in {} is greater than checkpoint metadata version {}.", self.store.path(), snapshot.last_version(), version);
+            let checkpoint = S::decode(&bytes, protocol.min_reader_version)?;
+            assert!(checkpoint.last_version() >= version);
+            if checkpoint.last_version() > version {
+                // It happens when saving checkpoint successfully, but failed at saving checkpoint metadata(the "__last_checkpoint" file).
+                // Then we try to use the old checkpoint and do the checkpoint next time.
+                // If the old checkpoint was deleted, it's fine that we return the latest checkpoint.
+                // the only side effect is leaving some unused checkpoint checkpoint files.
+                // TODO(dennis): delete unused checkpoint files
+                warn!("The checkpoint manifest version {} in {} is greater than checkpoint metadata version {}.", self.store.path(), checkpoint.last_version(), version);
 
                 if let Some((_, bytes)) = self.store.load_checkpoint(version).await? {
-                    let old_snapshot = S::decode(&bytes, protocol.min_reader_version)?;
-                    return Ok(Some(old_snapshot));
+                    let old_checkpoint = S::decode(&bytes, protocol.min_reader_version)?;
+                    return Ok(Some(old_checkpoint));
                 }
             }
-            Ok(Some(snapshot))
+            Ok(Some(checkpoint))
         } else {
             Ok(None)
         }

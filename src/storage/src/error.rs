@@ -441,9 +441,6 @@ pub enum Error {
         source: common_time::error::Error,
     },
 
-    #[snafu(display("Manifest checkpoint is not supported"))]
-    UnsupportedCheckpoint { backtrace: Backtrace },
-
     #[snafu(display("Failed to create a checkpoint: {}", msg))]
     ManifestCheckpoint { msg: String, backtrace: Backtrace },
 }
@@ -522,7 +519,6 @@ impl ErrorExt for Error {
             DeleteSst { .. } => StatusCode::StorageUnavailable,
             IllegalSchedulerState { .. } => StatusCode::Unexpected,
             TtlCalculation { source, .. } => source.status_code(),
-            UnsupportedCheckpoint { .. } => StatusCode::Unsupported,
         }
     }
 
