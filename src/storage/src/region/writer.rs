@@ -132,7 +132,7 @@ impl RegionWriter {
         action_list.set_prev_version(prev_version);
         let manifest_version = manifest.update(action_list).await?;
 
-        // Notify checkpointer the flushed manifest version after flusing memtable
+        // Notify checkpointer the flushed manifest version after flushing memtable
         if flushed_sequence.is_some() {
             manifest.set_flushed_manifest_version(manifest_version);
         }
