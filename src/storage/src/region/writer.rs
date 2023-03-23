@@ -23,7 +23,7 @@ use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::manifest::{Manifest, ManifestVersion, MetaAction};
 use store_api::storage::{AlterRequest, FlushContext, SequenceNumber, WriteContext, WriteResponse};
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
 
 use crate::background::JobHandle;
 use crate::compaction::{CompactionRequestImpl, CompactionSchedulerRef};
@@ -36,7 +36,9 @@ use crate::manifest::action::{
 use crate::memtable::{Inserter, MemtableBuilderRef, MemtableId, MemtableRef};
 use crate::metadata::RegionMetadataRef;
 use crate::proto::wal::WalHeader;
-use crate::region::{RecoverdMetadata, RecoveredMetadataMap, RegionManifest, SharedDataRef};
+use crate::region::{
+    CompactContext, RecoverdMetadata, RecoveredMetadataMap, RegionManifest, SharedDataRef,
+};
 use crate::schema::compat::CompatWrite;
 use crate::sst::AccessLayerRef;
 use crate::version::{VersionControl, VersionControlRef, VersionEdit, VersionRef};
@@ -284,6 +286,19 @@ impl RegionWriter {
         }
 
         Ok(())
+    }
+
+    /// Compact manually.
+    pub async fn compact<S: LogStore>(
+        &self,
+        writer_ctx: WriterContext<'_, S>,
+        ctx: CompactContext,
+    ) -> Result<()> {
+        let mut inner = self.inner.lock().await;
+
+        ensure!(!inner.is_closed(), error::ClosedRegionSnafu);
+
+        inner.manual_compact(writer_ctx, ctx).await
     }
 
     /// Cancel flush task if any
@@ -644,6 +659,61 @@ impl WriterInner {
         Ok(())
     }
 
+    async fn manual_compact<S: LogStore>(
+        &mut self,
+        writer_ctx: WriterContext<'_, S>,
+        compact_ctx: CompactContext,
+    ) -> Result<()> {
+        let region_id = writer_ctx.shared.id();
+        let mut compaction_request = CompactionRequestImpl {
+            region_id,
+            sst_layer: writer_ctx.sst_layer.clone(),
+            writer: writer_ctx.writer.clone(),
+            shared: writer_ctx.shared.clone(),
+            manifest: writer_ctx.manifest.clone(),
+            wal: writer_ctx.wal.clone(),
+            ttl: self.ttl,
+            sender: None,
+        };
+
+        let compaction_scheduler = writer_ctx.compaction_scheduler.clone();
+        let shared_data = writer_ctx.shared.clone();
+
+        logging::info!(
+            "Manual compact, region_id: {}, compact_ctx: {:?}",
+            region_id,
+            compact_ctx
+        );
+
+        if compact_ctx.wait {
+            let (sender, receiver) = oneshot::channel();
+            compaction_request.sender = Some(sender);
+
+            if Self::schedule_compaction(
+                shared_data,
+                compaction_scheduler,
+                compaction_request,
+                compact_ctx.max_files_in_l0,
+            )
+            .await
+            {
+                receiver
+                    .await
+                    .context(error::CompactTaskCancelSnafu { region_id })??;
+            }
+        } else {
+            Self::schedule_compaction(
+                shared_data,
+                compaction_scheduler,
+                compaction_request,
+                compact_ctx.max_files_in_l0,
+            )
+            .await;
+        }
+
+        Ok(())
+    }
+
     fn build_flush_callback<S: LogStore>(
         version: &VersionRef,
         ctx: &WriterContext<S>,
@@ -659,38 +729,61 @@ impl WriterInner {
             manifest: ctx.manifest.clone(),
             wal: ctx.wal.clone(),
             ttl,
+            sender: None,
         };
         let compaction_scheduler = ctx.compaction_scheduler.clone();
         let shared_data = ctx.shared.clone();
         let max_files_in_l0 = config.max_files_in_l0;
-        let schedule_compaction_cb = Box::pin(async move {
-            let level0_file_num = shared_data
-                .version_control
-                .current()
-                .ssts()
-                .level(0)
-                .file_num();
 
-            if level0_file_num <= max_files_in_l0 {
-                info!(
-                    "No enough SST files in level 0 (threshold: {}), skip compaction",
-                    max_files_in_l0
-                );
-                return;
-            }
-            match compaction_scheduler.schedule(compaction_request) {
-                Ok(scheduled) => {
-                    info!(
-                        "Schedule region {} compaction request result: {}",
-                        region_id, scheduled
-                    )
-                }
-                Err(e) => {
-                    error!(e;"Failed to schedule region compaction request {}", region_id);
-                }
-            }
+        let schedule_compaction_cb = Box::pin(async move {
+            Self::schedule_compaction(
+                shared_data,
+                compaction_scheduler,
+                compaction_request,
+                max_files_in_l0,
+            )
+            .await;
         });
         Some(schedule_compaction_cb)
+    }
+
+    /// Schedule compaction task, returns whether the task is scheduled.
+    async fn schedule_compaction<S: LogStore>(
+        shared_data: SharedDataRef,
+        compaction_scheduler: CompactionSchedulerRef<S>,
+        compaction_request: CompactionRequestImpl<S>,
+        max_files_in_l0: usize,
+    ) -> bool {
+        let region_id = shared_data.id();
+        let level0_file_num = shared_data
+            .version_control
+            .current()
+            .ssts()
+            .level(0)
+            .file_num();
+
+        if level0_file_num <= max_files_in_l0 {
+            info!(
+                "No enough SST files in level 0 (threshold: {}), skip compaction",
+                max_files_in_l0
+            );
+            return false;
+        }
+        match compaction_scheduler.schedule(compaction_request) {
+            Ok(scheduled) => {
+                info!(
+                    "Schedule region {} compaction request result: {}",
+                    region_id, scheduled
+                );
+
+                scheduled
+            }
+            Err(e) => {
+                error!(e;"Failed to schedule region compaction request {}", region_id);
+
+                false
+            }
+        }
     }
 
     async fn manual_flush<S: LogStore>(&mut self, writer_ctx: WriterContext<'_, S>) -> Result<()> {

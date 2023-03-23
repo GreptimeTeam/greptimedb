@@ -161,6 +161,23 @@ pub struct StoreConfig<S: LogStore> {
 pub type RecoverdMetadata = (SequenceNumber, (ManifestVersion, RawRegionMetadata));
 pub type RecoveredMetadataMap = BTreeMap<SequenceNumber, (ManifestVersion, RawRegionMetadata)>;
 
+#[derive(Debug)]
+pub struct CompactContext {
+    /// Whether to wait the compaction result.
+    pub wait: bool,
+    /// Max file number in level 0.
+    pub max_files_in_l0: usize,
+}
+
+impl Default for CompactContext {
+    fn default() -> CompactContext {
+        CompactContext {
+            wait: true,
+            max_files_in_l0: 1,
+        }
+    }
+}
+
 impl<S: LogStore> RegionImpl<S> {
     /// Create a new region and also persist the region metadata to manifest.
     ///
@@ -471,6 +488,11 @@ impl<S: LogStore> RegionImpl<S> {
             version
         }
     }
+
+    /// Compact the region manually.
+    pub async fn compact(&self, ctx: CompactContext) -> Result<()> {
+        self.inner.compact(ctx).await
+    }
 }
 
 // Private methods for tests.
@@ -622,5 +644,20 @@ impl<S: LogStore> RegionInner<S> {
             manifest: &self.manifest,
         };
         self.writer.flush(writer_ctx, ctx).await
+    }
+
+    /// Compact the region manually.
+    async fn compact(&self, ctx: CompactContext) -> Result<()> {
+        let writer_ctx = WriterContext {
+            shared: &self.shared,
+            flush_strategy: &self.flush_strategy,
+            flush_scheduler: &self.flush_scheduler,
+            compaction_scheduler: &self.compaction_scheduler,
+            sst_layer: &self.sst_layer,
+            wal: &self.wal,
+            writer: &self.writer,
+            manifest: &self.manifest,
+        };
+        self.writer.compact(writer_ctx, ctx).await
     }
 }

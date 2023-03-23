@@ -17,6 +17,7 @@
 mod alter;
 mod basic;
 mod close;
+mod compact;
 mod flush;
 mod projection;
 
@@ -38,6 +39,7 @@ use store_api::storage::{
 };
 
 use super::*;
+use crate::chunk::ChunkReaderImpl;
 use crate::file_purger::noop::NoopFilePurgeHandler;
 use crate::manifest::action::{RegionChange, RegionMetaActionList};
 use crate::manifest::test_utils::*;
@@ -157,6 +159,28 @@ impl<S: LogStore> TesterBase<S> {
         batch.delete(keys).unwrap();
 
         self.region.write(&self.write_ctx, batch).await.unwrap()
+    }
+
+    /// Returns a reader to scan all data.
+    pub async fn full_scan_reader(&self) -> ChunkReaderImpl {
+        let snapshot = self.region.snapshot(&self.read_ctx).unwrap();
+
+        let resp = snapshot
+            .scan(&self.read_ctx, ScanRequest::default())
+            .await
+            .unwrap();
+        resp.reader
+    }
+
+    /// Collect data from the reader.
+    pub async fn collect_reader(&self, mut reader: ChunkReaderImpl) -> Vec<(i64, Option<i64>)> {
+        let mut dst = Vec::new();
+        while let Some(chunk) = reader.next_chunk().await.unwrap() {
+            let chunk = reader.project_chunk(chunk);
+            append_chunk_to(&chunk, &mut dst);
+        }
+
+        dst
     }
 }
 
