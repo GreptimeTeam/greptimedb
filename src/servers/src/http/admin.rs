@@ -18,8 +18,7 @@ use api::v1::ddl_request::Expr;
 use api::v1::greptime_request::Request;
 use api::v1::{DdlRequest, FlushTableExpr};
 use axum::extract::{Query, RawBody, State};
-use axum::http::StatusCode as HttpStatusCode;
-use axum::Json;
+use axum::http::StatusCode;
 use session::context::QueryContext;
 use snafu::OptionExt;
 
@@ -32,21 +31,20 @@ pub async fn flush(
     State(grpc_handler): State<ServerGrpcQueryHandlerRef>,
     Query(params): Query<HashMap<String, String>>,
     RawBody(_): RawBody,
-) -> Result<(HttpStatusCode, Json<String>)> {
+) -> Result<(StatusCode, ())> {
     let catalog_name = params
-        .get("catalog_name")
+        .get("catalog")
         .cloned()
         .unwrap_or("greptime".to_string());
-    let schema_name =
-        params
-            .get("schema_name")
-            .cloned()
-            .context(error::InvalidFlushArgumentSnafu {
-                err_msg: "schema_name is not present",
-            })?;
+    let schema_name = params
+        .get("db")
+        .cloned()
+        .context(error::InvalidFlushArgumentSnafu {
+            err_msg: "db is not present",
+        })?;
 
     // if table name is not present, flush all tables inside schema
-    let table_name = params.get("table_name").cloned().unwrap_or_default();
+    let table_name = params.get("table").cloned().unwrap_or_default();
 
     let region_id: Option<u32> = params
         .get("region")
@@ -65,5 +63,5 @@ pub async fn flush(
     });
 
     grpc_handler.do_query(request, QueryContext::arc()).await?;
-    Ok((HttpStatusCode::OK, Json::from("hello, world".to_string())))
+    Ok((StatusCode::NO_CONTENT, ()))
 }
