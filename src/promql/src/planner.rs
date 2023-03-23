@@ -1597,7 +1597,6 @@ mod test {
     }
 
     #[tokio::test]
-    #[ignore = "wait for https://github.com/apache/arrow-datafusion/issues/5513"]
     async fn increase_aggr() {
         let query = "increase(some_metric[5m])";
         let expected = String::from(
@@ -1631,7 +1630,6 @@ mod test {
     }
 
     #[tokio::test]
-    #[ignore = "wait for https://github.com/apache/arrow-datafusion/issues/5513"]
     async fn count_over_time() {
         let query = "count_over_time(some_metric[5m])";
         let expected = String::from(
