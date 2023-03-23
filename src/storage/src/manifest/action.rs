@@ -156,7 +156,7 @@ impl RegionManifestDataBuilder {
 pub struct RegionCheckpoint {
     /// The snasphot protocol
     pub protocol: ProtocolAction,
-    /// The last manifest version that this checkpoint compacts.
+    /// The last manifest version that this checkpoint compacts(inclusive).
     pub last_version: ManifestVersion,
     // The number of manifest actions that this checkpoint compacts.
     pub compacted_actions: usize,

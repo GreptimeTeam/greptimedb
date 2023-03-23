@@ -62,7 +62,7 @@ impl Checkpointer for RegionManifestCheckpointer {
         let (start_version, mut protocol, mut manifest_builder) =
             if let Some(checkpoint) = last_checkpoint {
                 (
-                    checkpoint.last_version,
+                    checkpoint.last_version + 1,
                     checkpoint.protocol,
                     RegionManifestDataBuilder::with_checkpoint(checkpoint.checkpoint),
                 )
@@ -76,7 +76,7 @@ impl Checkpointer for RegionManifestCheckpointer {
 
         let end_version =
             current_version.min(self.flushed_manifest_version.load(Ordering::Relaxed)) + 1;
-        if start_version >= end_version - 1 {
+        if start_version >= end_version {
             return Ok(None);
         }
 
@@ -123,7 +123,7 @@ impl Checkpointer for RegionManifestCheckpointer {
         if start_version > MIN_VERSION {
             manifest
                 .manifest_store()
-                .delete_checkpoint(start_version)
+                .delete_checkpoint(start_version - 1)
                 .await?
         }
 
@@ -329,7 +329,6 @@ mod tests {
             manifest.update(action).await.unwrap();
         }
         assert!(manifest.last_checkpoint().await.unwrap().is_none());
-        assert!(manifest.do_checkpoint().await.unwrap().is_none());
         assert_scan(&manifest, 0, 3).await;
         // update flushed manifest version for doing checkpoint
         manifest.set_flushed_manifest_version(2);
