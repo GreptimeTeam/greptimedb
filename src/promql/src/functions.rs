@@ -13,8 +13,11 @@
 // limitations under the License.
 
 mod aggr_over_time;
+mod changes;
+mod deriv;
 mod idelta;
 mod increase;
+mod resets;
 #[cfg(test)]
 mod test_util;
 
