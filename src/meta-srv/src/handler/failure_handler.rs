@@ -31,9 +31,10 @@ pub(crate) struct RegionIdent {
 }
 
 // TODO(LFC): TBC
-#[allow(dead_code)]
 pub(crate) struct DatanodeHeartbeat {
+    #[allow(dead_code)]
     cluster_id: u64,
+    #[allow(dead_code)]
     node_id: u64,
     region_idents: Vec<RegionIdent>,
     heartbeat_time: i64,
