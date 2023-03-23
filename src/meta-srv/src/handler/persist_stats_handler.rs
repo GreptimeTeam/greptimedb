@@ -54,8 +54,7 @@ impl HeartbeatHandler for PersistStatsHandler {
             return Ok(());
         }
 
-        // take stats from &mut acc.stats, avoid clone of vec
-        let stats = std::mem::take(stats);
+        let stats = stats.drain(..).collect();
 
         let val = StatValue { stats };
 
