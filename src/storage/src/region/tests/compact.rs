@@ -14,26 +14,34 @@
 
 //! Region compaction tests.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use common_test_util::temp_dir::create_temp_dir;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use store_api::storage::{FlushContext, Region, WriteResponse};
+use tokio::sync::Notify;
 
 use crate::compaction::{CompactionHandler, SimplePicker};
 use crate::config::EngineConfig;
+use crate::error::Result;
+use crate::file_purger::{FilePurgeHandler, FilePurgeRequest};
 use crate::region::tests::{self, FileTesterBase};
 use crate::region::{CompactContext, RegionImpl};
-use crate::scheduler::{LocalScheduler, SchedulerConfig};
+use crate::scheduler::rate_limit::BoxedRateLimitToken;
+use crate::scheduler::{Handler, LocalScheduler, SchedulerConfig};
 use crate::test_util::config_util;
 
 const REGION_NAME: &str = "region-compact-0";
 
 /// Create a new region for compaction test
-async fn create_region_for_compaction(
+async fn create_region_for_compaction<
+    H: Handler<Request = FilePurgeRequest> + Send + Sync + 'static,
+>(
     store_dir: &str,
     enable_version_column: bool,
     engine_config: EngineConfig,
+    purge_handler: H,
 ) -> RegionImpl<RaftEngineLogStore> {
     let metadata = tests::new_metadata(REGION_NAME, enable_version_column);
 
@@ -42,22 +50,75 @@ async fn create_region_for_compaction(
     let picker = SimplePicker::default();
     let handler = CompactionHandler::new(picker);
     let config = SchedulerConfig::default();
+    // Overwrite test compaction scheduler and file purger.
     store_config.compaction_scheduler = Arc::new(LocalScheduler::new(config, handler));
+    store_config.file_purger = Arc::new(LocalScheduler::new(
+        SchedulerConfig {
+            max_inflight_tasks: store_config.engine_config.max_purge_tasks,
+        },
+        purge_handler,
+    ));
 
     RegionImpl::create(metadata, store_config).await.unwrap()
+}
+
+#[derive(Debug, Default, Clone)]
+struct MockFilePurgeHandler {
+    num_deleted: Arc<AtomicUsize>,
+    notifier: Arc<Notify>,
+}
+
+#[async_trait::async_trait]
+impl Handler for MockFilePurgeHandler {
+    type Request = FilePurgeRequest;
+
+    async fn handle_request(
+        &self,
+        req: Self::Request,
+        token: BoxedRateLimitToken,
+        finish_notifier: Arc<Notify>,
+    ) -> Result<()> {
+        let handler = FilePurgeHandler;
+        handler
+            .handle_request(req, token, finish_notifier)
+            .await
+            .unwrap();
+
+        self.num_deleted.fetch_add(1, Ordering::Relaxed);
+        self.notifier.notify_one();
+
+        Ok(())
+    }
+}
+
+impl MockFilePurgeHandler {
+    async fn wait_until_deleted(&self, num_deleted: usize) {
+        while self.num_deleted.load(Ordering::Relaxed) < num_deleted {
+            self.notifier.notified().await;
+        }
+    }
 }
 
 /// Tester for region compaction.
 struct CompactionTester {
     base: Option<FileTesterBase>,
+    purge_handler: MockFilePurgeHandler,
 }
 
 impl CompactionTester {
     async fn new(store_dir: &str, engine_config: EngineConfig) -> CompactionTester {
-        let region = create_region_for_compaction(store_dir, false, engine_config.clone()).await;
+        let purge_handler = MockFilePurgeHandler::default();
+        let region = create_region_for_compaction(
+            store_dir,
+            false,
+            engine_config.clone(),
+            purge_handler.clone(),
+        )
+        .await;
 
         CompactionTester {
             base: Some(FileTesterBase::with_region(region)),
+            purge_handler,
         }
     }
 
@@ -83,11 +144,16 @@ impl CompactionTester {
             .await
             .unwrap();
     }
+
+    async fn wait_until_deleted(&self, num_deleted: usize) {
+        self.purge_handler.wait_until_deleted(num_deleted).await
+    }
 }
 
 #[tokio::test]
 async fn test_compact_during_read() {
     common_telemetry::init_default_ut_logging();
+    use common_telemetry::logging;
 
     let dir = create_temp_dir("compact_read");
 
@@ -122,9 +188,15 @@ async fn test_compact_during_read() {
 
     // Trigger compaction.
     tester.compact().await;
+    // Wait until SST1 and SST2 are deleted.
+    tester.wait_until_deleted(2).await;
+
+    logging::info!("Collect reader begin");
 
     // Read from the reader.
     let output = tester.base().collect_reader(reader).await;
+
+    logging::info!("Collect reader end");
 
     let expect = vec![(1000, Some(100)), (2000, Some(202)), (3000, Some(300))];
     assert_eq!(expect, output);
