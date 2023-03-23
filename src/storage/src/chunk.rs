@@ -187,7 +187,7 @@ impl ChunkReaderBuilder {
                 );
                 continue;
             }
-            let reader = self.sst_layer.read_sst(file.file_id(), &read_opts).await?;
+            let reader = self.sst_layer.read_sst(file.clone(), &read_opts).await?;
 
             reader_builder = reader_builder.push_batch_reader(reader);
         }

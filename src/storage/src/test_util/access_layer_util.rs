@@ -13,13 +13,17 @@
 // limitations under the License.
 
 use crate::read::BoxedBatchReader;
-use crate::sst::{AccessLayer, FileId, ReadOptions, Source, SstInfo, WriteOptions};
+use crate::sst::{AccessLayer, FileHandle, FileId, ReadOptions, Source, SstInfo, WriteOptions};
 
 #[derive(Debug)]
 pub struct MockAccessLayer;
 
 #[async_trait::async_trait]
 impl AccessLayer for MockAccessLayer {
+    fn sst_file_path(&self, file_name: &str) -> String {
+        file_name.to_string()
+    }
+
     async fn write_sst(
         &self,
         _file_id: FileId,
@@ -31,7 +35,7 @@ impl AccessLayer for MockAccessLayer {
 
     async fn read_sst(
         &self,
-        _file_id: FileId,
+        _file_handle: FileHandle,
         _opts: &ReadOptions,
     ) -> crate::error::Result<BoxedBatchReader> {
         unimplemented!()
