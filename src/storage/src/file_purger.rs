@@ -145,6 +145,7 @@ mod tests {
         let sst_info = layer
             .write_sst(sst_file_id, Source::Iter(iter), &WriteOptions {})
             .await
+            .unwrap()
             .unwrap();
 
         (

@@ -996,7 +996,7 @@ mod tests {
         let schema = memtable_tests::schema_for_test();
         let memtable = DefaultMemtableBuilder::default().build(schema.clone());
 
-        let dir = TempDir::new("read-parquet-by-range").unwrap();
+        let dir = create_temp_dir("read-parquet-by-range");
         let path = dir.path().to_str().unwrap();
         let backend = Fs::default().root(path).build().unwrap();
         let object_store = ObjectStore::new(backend).finish();
