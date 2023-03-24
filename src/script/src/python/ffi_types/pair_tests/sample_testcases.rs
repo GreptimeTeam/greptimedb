@@ -238,12 +238,29 @@ def answer() -> vector[i64]:
     from greptime import vector
     import pyarrow as pa
     a = vector.from_pyarrow(pa.array([42, 43, 44]))
+    return a[0:1]
+"#
+            .to_string(),
+            expect: Some(ronish!("value": vector!(Int64Vector, [42]))),
+        },
+        #[cfg(feature = "pyo3_backend")]
+        CoprTestCase {
+            script: r#"
+@copr(returns=["value"], backend="pyo3")
+def answer() -> vector[i64]:
+    from greptime import vector
+    a = vector([42, 43, 44])
     # slicing test
     assert a[0:2] == a[:-1]
-    assert len(a[:-1]) == 2
+    assert len(a[:-1]) == vector([42,44])
     assert a[0:1] == a[:-2] 
-    assert len(a[:-2]) == 1
-    print("a[:-2]=", a[:-2])
+    assert a[0:1] == vector([42])
+    assert a[:-2] == vector([42])
+    assert a[:-1:2] == vector([42])
+    assert a[::2] == vector([42,44])
+    # negative step
+    assert a[-1::-2] == vector([44, 42])
+    assert a[-2::-2] == vector([44])
     return a[0:1]
 "#
             .to_string(),
@@ -255,11 +272,17 @@ def answer() -> vector[i64]:
 def answer() -> vector[i64]:
     from greptime import vector
     a = vector([42, 43, 44])
-    assert a[0:2] == a[:-1]
-    assert len(a[:-1]) == 2
-    assert a[0:1] == a[:-2] 
-    assert len(a[:-2]) == 1
     # slicing test
+    assert a[0:2] == a[:-1]
+    assert len(a[:-1]) == vector([42,44])
+    assert a[0:1] == a[:-2] 
+    assert a[0:1] == vector([42])
+    assert a[:-2] == vector([42])
+    assert a[:-1:2] == vector([42])
+    assert a[::2] == vector([42,44])
+    # negative step
+    assert a[-1::-2] == vector([44, 42])
+    assert a[-2::-2] == vector([44])
     return a[-2:-1]
 "#
             .to_string(),
