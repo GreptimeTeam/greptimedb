@@ -106,13 +106,7 @@ impl HeartbeatTask {
         let mut tx = Self::create_streams(&meta_client, running.clone()).await?;
         common_runtime::spawn_bg(async move {
             while running.load(Ordering::Acquire) {
-                let (region_num, region_stats) = match datanode_stat(&catalog_manager_clone).await {
-                    Ok(datanode_stat) => (datanode_stat.0 as i64, datanode_stat.1),
-                    Err(e) => {
-                        error!("failed to get region status, err: {e:?}");
-                        (-1, vec![])
-                    }
-                };
+                let (region_num, region_stats) = datanode_stat(&catalog_manager_clone).await;
 
                 let req = HeartbeatRequest {
                     peer: Some(Peer {
@@ -120,7 +114,7 @@ impl HeartbeatTask {
                         addr: addr.clone(),
                     }),
                     node_stat: Some(NodeStat {
-                        region_num,
+                        region_num: region_num as _,
                         ..Default::default()
                     }),
                     region_stats,

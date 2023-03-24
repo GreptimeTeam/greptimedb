@@ -14,6 +14,7 @@
 
 pub use check_leader_handler::CheckLeaderHandler;
 pub use collect_stats_handler::CollectStatsHandler;
+pub use failure_handler::RegionFailureHandler;
 pub use keep_lease_handler::KeepLeaseHandler;
 pub use on_leader_start::OnLeaderStartHandler;
 pub use persist_stats_handler::PersistStatsHandler;
@@ -21,6 +22,7 @@ pub use response_header_handler::ResponseHeaderHandler;
 
 mod check_leader_handler;
 mod collect_stats_handler;
+mod failure_handler;
 mod instruction;
 mod keep_lease_handler;
 pub mod node_stat;
@@ -54,8 +56,8 @@ pub trait HeartbeatHandler: Send + Sync {
 #[derive(Debug, Default)]
 pub struct HeartbeatAccumulator {
     pub header: Option<ResponseHeader>,
-    pub stats: Vec<Stat>,
     pub instructions: Vec<Instruction>,
+    pub stat: Option<Stat>,
 }
 
 impl HeartbeatAccumulator {

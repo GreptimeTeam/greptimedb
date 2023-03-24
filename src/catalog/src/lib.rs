@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use api::v1::meta::{RegionStat, TableName};
 use common_telemetry::{info, warn};
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineRef};
 use table::metadata::TableId;
 use table::requests::CreateTableRequest;
@@ -228,34 +228,25 @@ pub(crate) async fn handle_system_table_request<'a, M: CatalogManager>(
 
 /// The stat of regions in the datanode node.
 /// The number of regions can be got from len of vec.
-pub async fn datanode_stat(catalog_manager: &CatalogManagerRef) -> Result<(u64, Vec<RegionStat>)> {
+///
+/// Ignores any errors occurred during iterating regions. The intention of this method is to
+/// collect region stats that will be carried in Datanode's heartbeat to Metasrv, so it's a
+/// "try our best" job.
+pub async fn datanode_stat(catalog_manager: &CatalogManagerRef) -> (u64, Vec<RegionStat>) {
     let mut region_number: u64 = 0;
     let mut region_stats = Vec::new();
 
-    for catalog_name in catalog_manager.catalog_names()? {
-        let catalog =
-            catalog_manager
-                .catalog(&catalog_name)?
-                .context(error::CatalogNotFoundSnafu {
-                    catalog_name: &catalog_name,
-                })?;
+    let Ok(catalog_names) = catalog_manager.catalog_names() else { return (region_number, region_stats) };
+    for catalog_name in catalog_names {
+        let Ok(Some(catalog)) = catalog_manager.catalog(&catalog_name) else { continue };
 
-        for schema_name in catalog.schema_names()? {
-            let schema = catalog
-                .schema(&schema_name)?
-                .context(error::SchemaNotFoundSnafu {
-                    catalog: &catalog_name,
-                    schema: &schema_name,
-                })?;
+        let Ok(schema_names) = catalog.schema_names() else { continue };
+        for schema_name in schema_names {
+            let Ok(Some(schema)) = catalog.schema(&schema_name) else { continue };
 
-            for table_name in schema.table_names()? {
-                let table =
-                    schema
-                        .table(&table_name)
-                        .await?
-                        .context(error::TableNotFoundSnafu {
-                            table_info: &table_name,
-                        })?;
+            let Ok(table_names) = schema.table_names() else { continue };
+            for table_name in table_names {
+                let Ok(Some(table)) = schema.table(&table_name).await else { continue };
 
                 let region_numbers = &table.table_info().meta.region_numbers;
                 region_number += region_numbers.len() as u64;
@@ -282,6 +273,5 @@ pub async fn datanode_stat(catalog_manager: &CatalogManagerRef) -> Result<(u64, 
             }
         }
     }
-
-    Ok((region_number, region_stats))
+    (region_number, region_stats)
 }
