@@ -585,6 +585,7 @@ pub fn expression_from_df_expr(
             name: expr.to_string(),
         }
         .fail()?,
+        Expr::OuterReferenceColumn(_, _) => todo!(),
     };
 
     Ok(expression)

@@ -42,7 +42,7 @@ use snafu::{OptionExt, ResultExt};
 use table::requests::InsertRequest;
 use table::TableRef;
 
-pub use crate::datafusion::catalog_adapter::DfCatalogListAdapter;
+pub use crate::datafusion::catalog_adapter::{DfCatalogListAdapter, DfCatalogProviderAdapter};
 pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::error::{
     CatalogNotFoundSnafu, CatalogSnafu, CreateRecordBatchSnafu, DataFusionSnafu,
@@ -85,7 +85,8 @@ impl DatafusionQueryEngine {
         let default_schema = query_ctx.current_schema();
         let table_name = dml
             .table_name
-            .as_table_reference()
+            .clone()
+            // .as_table_reference()
             .resolve(&default_catalog, &default_schema);
         let table = self.find_table(&table_name).await?;
 

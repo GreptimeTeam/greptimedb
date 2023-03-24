@@ -18,6 +18,7 @@
 mod context;
 mod df_expr;
 mod df_logical;
+mod df_substrait;
 pub mod error;
 mod schema;
 mod types;
@@ -26,7 +27,7 @@ use async_trait::async_trait;
 use bytes::{Buf, Bytes};
 use catalog::CatalogManagerRef;
 
-pub use crate::df_logical::DFLogicalSubstraitConvertor;
+pub use crate::df_substrait::DFLogicalSubstraitConvertor;
 
 #[async_trait]
 pub trait SubstraitPlan {

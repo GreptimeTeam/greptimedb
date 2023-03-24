@@ -20,7 +20,9 @@ use std::task::{Context, Poll};
 
 use datafusion::arrow::array::Float64Array;
 use datafusion::arrow::datatypes::{DataType, TimeUnit};
-use datafusion::common::{DFField, DFSchema, DFSchemaRef, Result as DataFusionResult, Statistics};
+use datafusion::common::{
+    DFField, DFSchema, DFSchemaRef, OwnedTableReference, Result as DataFusionResult, Statistics,
+};
 use datafusion::error::DataFusionError;
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
@@ -56,12 +58,17 @@ impl EmptyMetric {
         let schema = Arc::new(DFSchema::new_with_metadata(
             vec![
                 DFField::new(
-                    None,
+                    None::<OwnedTableReference>,
                     &time_index_column_name,
                     DataType::Timestamp(TimeUnit::Millisecond, None),
                     false,
                 ),
-                DFField::new(None, &value_column_name, DataType::Float64, true),
+                DFField::new(
+                    None::<OwnedTableReference>,
+                    &value_column_name,
+                    DataType::Float64,
+                    true,
+                ),
             ],
             HashMap::new(),
         )?);

@@ -112,6 +112,18 @@ pub enum Error {
         #[snafu(backtrace)]
         source: catalog::error::Error,
     },
+
+    #[snafu(display("Failed to encode DataFusion plan, source: {}", source))]
+    EncodeDfPlan {
+        source: datafusion::error::DataFusionError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to decode DataFusion plan, source: {}", source))]
+    DecodeDfPlan {
+        source: datafusion::error::DataFusionError,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -132,7 +144,10 @@ impl ErrorExt for Error {
             | Error::InvalidParameters { .. }
             | Error::TableNotFound { .. }
             | Error::SchemaNotMatch { .. } => StatusCode::InvalidArguments,
-            Error::DFInternal { .. } | Error::Internal { .. } => StatusCode::Internal,
+            Error::DFInternal { .. }
+            | Error::Internal { .. }
+            | Error::EncodeDfPlan { .. }
+            | Error::DecodeDfPlan { .. } => StatusCode::Internal,
             Error::ConvertDfSchema { source } => source.status_code(),
             Error::ResolveTable { source, .. } => source.status_code(),
         }

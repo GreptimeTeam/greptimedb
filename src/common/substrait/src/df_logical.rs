@@ -48,10 +48,10 @@ use crate::error::{
 use crate::schema::{from_schema, to_schema};
 use crate::SubstraitPlan;
 
-pub struct DFLogicalSubstraitConvertor;
+pub struct DFLogicalSubstraitConvertorDeprecated;
 
 #[async_trait]
-impl SubstraitPlan for DFLogicalSubstraitConvertor {
+impl SubstraitPlan for DFLogicalSubstraitConvertorDeprecated {
     type Error = Error;
 
     type Plan = LogicalPlan;
@@ -75,7 +75,7 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
     }
 }
 
-impl DFLogicalSubstraitConvertor {
+impl DFLogicalSubstraitConvertorDeprecated {
     async fn convert_plan(
         &self,
         mut plan: Plan,
@@ -241,9 +241,9 @@ impl DFLogicalSubstraitConvertor {
             .map(|mask_expr| self.convert_mask_expression(mask_expr));
 
         let table_ref = OwnedTableReference::Full {
-            catalog: catalog_name.clone(),
-            schema: schema_name.clone(),
-            table: table_name.clone(),
+            catalog: catalog_name.clone().into(),
+            schema: schema_name.clone().into(),
+            table: table_name.clone().into(),
         };
         let adapter = table_provider
             .resolve_table(table_ref)
@@ -272,14 +272,14 @@ impl DFLogicalSubstraitConvertor {
         };
 
         // Calculate the projected schema
-        let qualified = &format_full_table_name(&catalog_name, &schema_name, &table_name);
+        let qualified = format_full_table_name(&catalog_name, &schema_name, &table_name);
         let projected_schema = Arc::new(
             project_schema(&stored_schema, projection.as_ref())
                 .and_then(|x| {
                     DFSchema::new_with_metadata(
                         x.fields()
                             .iter()
-                            .map(|f| DFField::from_qualified(qualified, f.clone()))
+                            .map(|f| DFField::from_qualified(qualified.clone(), f.clone()))
                             .collect(),
                         x.metadata().clone(),
                     )
@@ -291,7 +291,8 @@ impl DFLogicalSubstraitConvertor {
 
         // TODO(ruihang): Support limit(fetch)
         Ok(LogicalPlan::TableScan(TableScan {
-            table_name: qualified.to_string(),
+            // table_name: qualified.to_string(),
+            table_name: todo!(),
             source: adapter,
             projection,
             projected_schema,
@@ -311,7 +312,7 @@ impl DFLogicalSubstraitConvertor {
     }
 }
 
-impl DFLogicalSubstraitConvertor {
+impl DFLogicalSubstraitConvertorDeprecated {
     fn logical_plan_to_rel(
         &self,
         ctx: &mut ConvertorContext,
@@ -583,7 +584,7 @@ mod test {
     }
 
     async fn logical_plan_round_trip(plan: LogicalPlan, catalog: CatalogManagerRef) {
-        let convertor = DFLogicalSubstraitConvertor;
+        let convertor = DFLogicalSubstraitConvertorDeprecated;
 
         let proto = convertor.encode(plan.clone()).unwrap();
         let tripped_plan = convertor.decode(proto, catalog).await.unwrap();
@@ -621,9 +622,7 @@ mod test {
             Arc::new(DFSchema::new_with_metadata(projected_fields, Default::default()).unwrap());
 
         let table_scan_plan = LogicalPlan::TableScan(TableScan {
-            table_name: format!(
-                "{DEFAULT_CATALOG_NAME}.{DEFAULT_SCHEMA_NAME}.{DEFAULT_TABLE_NAME}",
-            ),
+            table_name: todo!(),
             source: adapter,
             projection: Some(projection),
             projected_schema,

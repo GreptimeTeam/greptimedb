@@ -75,18 +75,22 @@ impl QueryContext {
 
     pub fn set_current_schema(&self, schema: &str) {
         let last = self.current_schema.swap(Arc::new(schema.to_string()));
-        debug!(
-            "set new session default schema: {:?}, swap old: {:?}",
-            schema, last
-        )
+        if schema != last.as_str() {
+            debug!(
+                "set new session default schema: {:?}, swap old: {:?}",
+                schema, last
+            )
+        }
     }
 
     pub fn set_current_catalog(&self, catalog: &str) {
         let last = self.current_catalog.swap(Arc::new(catalog.to_string()));
-        debug!(
-            "set new session default catalog: {:?}, swap old: {:?}",
-            catalog, last
-        )
+        if catalog != last.as_str() {
+            debug!(
+                "set new session default catalog: {:?}, swap old: {:?}",
+                catalog, last
+            )
+        }
     }
 }
 

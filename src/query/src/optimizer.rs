@@ -298,7 +298,7 @@ fn string_to_timestamp_ms(string: &str) -> Result<ScalarValue> {
 mod tests {
     use std::collections::HashMap;
 
-    use datafusion_common::{Column, DFField, DFSchema};
+    use datafusion_common::{Column, DFField, DFSchema, OwnedTableReference};
 
     use super::*;
 
@@ -358,7 +358,7 @@ mod tests {
         let schema_ref = Arc::new(
             DFSchema::new_with_metadata(
                 vec![DFField::new(
-                    None,
+                    None::<OwnedTableReference>,
                     "ts",
                     DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
                     true,
@@ -390,7 +390,12 @@ mod tests {
         let col_name = "is_valid";
         let schema_ref = Arc::new(
             DFSchema::new_with_metadata(
-                vec![DFField::new(None, col_name, DataType::Boolean, false)],
+                vec![DFField::new(
+                    None::<OwnedTableReference>,
+                    col_name,
+                    DataType::Boolean,
+                    false,
+                )],
                 HashMap::new(),
             )
             .unwrap(),

@@ -30,6 +30,7 @@ use datafusion::logical_expr::{
 use datafusion::optimizer::utils;
 use datafusion::prelude::{Column, Expr as DfExpr, JoinType};
 use datafusion::scalar::ScalarValue;
+use datafusion::sql::TableReference;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use promql_parser::label::{MatchOp, Matchers, METRIC_NAME};
 use promql_parser::parser::{
@@ -555,14 +556,14 @@ impl PromPlanner {
         filter: Vec<DfExpr>,
     ) -> Result<LogicalPlan> {
         let table_ref = OwnedTableReference::Bare {
-            table: table_name.to_string(),
+            table: std::borrow::Cow::Owned(table_name.to_string()),
         };
         let provider = self
             .table_provider
-            .resolve_table(table_ref)
+            .resolve_table(table_ref.clone())
             .await
             .context(CatalogSnafu)?;
-        let result = LogicalPlanBuilder::scan_with_filters(table_name, provider, None, filter)
+        let result = LogicalPlanBuilder::scan_with_filters(table_ref, provider, None, filter)
             .context(DataFusionPlanningSnafu)?
             .build()
             .context(DataFusionPlanningSnafu)?;
@@ -579,7 +580,7 @@ impl PromPlanner {
         let table = self
             .table_provider
             .resolve_table(OwnedTableReference::Bare {
-                table: table_name.to_string(),
+                table: std::borrow::Cow::Owned(table_name.to_string()),
             })
             .await
             .context(CatalogSnafu)?

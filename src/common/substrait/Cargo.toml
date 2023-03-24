@@ -14,16 +14,18 @@ common-error = { path = "../error" }
 common-telemetry = { path = "../telemetry" }
 datafusion.workspace = true
 datafusion-expr.workspace = true
+datafusion-substrait.workspace = true
 datatypes = { path = "../../datatypes" }
 futures = "0.3"
 prost.workspace = true
 session = { path = "../../session" }
 snafu.workspace = true
 table = { path = "../../table" }
+query = { path = "../../query" }
 
 [dependencies.substrait_proto]
 package = "substrait"
-version = "0.4"
+version = "0.5"
 
 [dev-dependencies]
 datatypes = { path = "../../datatypes" }
