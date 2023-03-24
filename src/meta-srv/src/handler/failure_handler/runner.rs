@@ -14,7 +14,7 @@
 
 use std::ops::DerefMut;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common_telemetry::error;
 use common_time::util::current_time_millis;
@@ -119,17 +119,21 @@ impl FailureDetectRunner {
         let election = self.election.clone();
         let runner_handle = common_runtime::spawn_bg(async move {
             loop {
+                let start = Instant::now();
+
                 let is_leader = election.as_ref().map(|x| x.is_leader()).unwrap_or(true);
                 if is_leader {
-                    let now = current_time_millis();
                     for e in failure_detectors.iter() {
-                        if e.failure_detector().is_available(now) {
+                        if e.failure_detector().is_available(current_time_millis()) {
                             // TODO(LFC): TBC
                         }
                     }
                 }
 
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                let elapsed = Instant::now().duration_since(start);
+                if let Some(sleep) = Duration::from_secs(1).checked_sub(elapsed) {
+                    tokio::time::sleep(sleep).await;
+                } // else the elapsed time is exceeding one second, we should continue working immediately
             }
         });
         self.runner_handle = Some(runner_handle);
