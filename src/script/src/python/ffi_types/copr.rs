@@ -260,11 +260,12 @@ pub(crate) fn check_args_anno_real_type(
                 .unwrap_or(true),
             OtherSnafu {
                 reason: format!(
-                    "column {}'s Type annotation is {:?}, but actual type is {:?}",
+                    "column {}'s Type annotation is {:?}, but actual type is {:?} with nullable=={}",
                     // It's safe to unwrap here, we already ensure the args and types number is the same when parsing
                     copr.deco_args.arg_names.as_ref().unwrap()[idx],
                     anno_ty,
-                    real_ty
+                    real_ty,
+                    is_nullable
                 )
             }
         )
