@@ -17,6 +17,7 @@ use std::any::Any;
 
 use common_error::ext::BoxedError;
 use common_error::prelude::*;
+use datatypes::prelude::ConcreteDataType;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -70,6 +71,26 @@ pub enum Error {
         source: datafusion_common::DataFusionError,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Column {} not exists in table {}", column_name, table_name))]
+    ColumnNotExists {
+        column_name: String,
+        table_name: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display(
+        "Failed to cast vector of type '{:?}' to type '{:?}', source: {}",
+        from_type,
+        to_type,
+        source
+    ))]
+    CastVector {
+        from_type: ConcreteDataType,
+        to_type: ConcreteDataType,
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
 }
 
 impl ErrorExt for Error {
@@ -81,11 +102,14 @@ impl ErrorExt for Error {
             | Error::CreateRecordBatches { .. }
             | Error::PollStream { .. }
             | Error::Format { .. }
-            | Error::InitRecordbatchStream { .. } => StatusCode::Internal,
+            | Error::InitRecordbatchStream { .. }
+            | Error::ColumnNotExists { .. } => StatusCode::Internal,
 
             Error::External { source } => source.status_code(),
 
-            Error::SchemaConversion { source, .. } => source.status_code(),
+            Error::SchemaConversion { source, .. } | Error::CastVector { source, .. } => {
+                source.status_code()
+            }
         }
     }
 

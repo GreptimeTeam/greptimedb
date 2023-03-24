@@ -18,6 +18,7 @@ mod catalog_adapter;
 mod error;
 mod planner;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -35,18 +36,20 @@ use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::ResolvedTableReference;
 use datafusion_expr::{DmlStatement, LogicalPlan as DfLogicalPlan, WriteOp};
+use datatypes::prelude::VectorRef;
 use datatypes::schema::Schema;
 use futures_util::StreamExt;
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ResultExt};
-use table::requests::InsertRequest;
+use snafu::{ensure, OptionExt, ResultExt};
+use table::requests::{DeleteRequest, InsertRequest};
 use table::TableRef;
 
 pub use crate::datafusion::catalog_adapter::DfCatalogListAdapter;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::error::{
     CatalogNotFoundSnafu, CatalogSnafu, CreateRecordBatchSnafu, DataFusionSnafu,
-    QueryExecutionSnafu, Result, SchemaNotFoundSnafu, TableNotFoundSnafu, UnsupportedExprSnafu,
+    MissingTimestampColumnSnafu, QueryExecutionSnafu, Result, SchemaNotFoundSnafu,
+    TableNotFoundSnafu, UnsupportedExprSnafu,
 };
 use crate::executor::QueryExecutor;
 use crate::logical_optimizer::LogicalOptimizer;
@@ -76,11 +79,18 @@ impl DatafusionQueryEngine {
         Ok(Output::Stream(self.execute_stream(&ctx, &physical_plan)?))
     }
 
-    async fn exec_insert_plan(
+    async fn exec_dml_statement(
         &self,
-        dml: &DmlStatement,
+        dml: DmlStatement,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
+        ensure!(
+            matches!(dml.op, WriteOp::Insert | WriteOp::Delete),
+            UnsupportedExprSnafu {
+                name: format!("DML op {}", dml.op),
+            }
+        );
+
         let default_catalog = query_ctx.current_catalog();
         let default_schema = query_ctx.current_schema();
         let table_name = dml
@@ -101,18 +111,73 @@ impl DatafusionQueryEngine {
         let mut affected_rows = 0;
         while let Some(batch) = stream.next().await {
             let batch = batch.context(CreateRecordBatchSnafu)?;
-            let request = InsertRequest::try_from_recordbatch(&table_name, table.schema(), batch)
+            let column_vectors = batch
+                .column_vectors(&table_name.to_string(), table.schema())
                 .map_err(BoxedError::new)
                 .context(QueryExecutionSnafu)?;
 
-            let rows = table
-                .insert(request)
-                .await
-                .map_err(BoxedError::new)
-                .context(QueryExecutionSnafu)?;
+            let rows = match dml.op {
+                WriteOp::Insert => Self::insert(&table_name, &table, column_vectors).await?,
+                WriteOp::Delete => Self::delete(&table_name, &table, column_vectors).await?,
+                _ => unreachable!("guarded by the 'ensure!' at the beginning"),
+            };
             affected_rows += rows;
         }
         Ok(Output::AffectedRows(affected_rows))
+    }
+
+    async fn delete<'a>(
+        table_name: &ResolvedTableReference<'a>,
+        table: &TableRef,
+        column_vectors: HashMap<String, VectorRef>,
+    ) -> Result<usize> {
+        let table_schema = table.schema();
+        let ts_column = table_schema
+            .timestamp_column()
+            .map(|x| &x.name)
+            .with_context(|| MissingTimestampColumnSnafu {
+                table_name: table_name.to_string(),
+            })?;
+
+        let table_info = table.table_info();
+        let rowkey_columns = table_info
+            .meta
+            .row_key_column_names()
+            .collect::<Vec<&String>>();
+        let column_vectors = column_vectors
+            .into_iter()
+            .filter(|x| &x.0 == ts_column || rowkey_columns.contains(&&x.0))
+            .collect::<HashMap<_, _>>();
+
+        let request = DeleteRequest {
+            key_column_values: column_vectors,
+        };
+
+        table
+            .delete(request)
+            .await
+            .map_err(BoxedError::new)
+            .context(QueryExecutionSnafu)
+    }
+
+    async fn insert<'a>(
+        table_name: &ResolvedTableReference<'a>,
+        table: &TableRef,
+        column_vectors: HashMap<String, VectorRef>,
+    ) -> Result<usize> {
+        let request = InsertRequest {
+            catalog_name: table_name.catalog.to_string(),
+            schema_name: table_name.schema.to_string(),
+            table_name: table_name.table.to_string(),
+            columns_values: column_vectors,
+            region_number: 0,
+        };
+
+        table
+            .insert(request)
+            .await
+            .map_err(BoxedError::new)
+            .context(QueryExecutionSnafu)
     }
 
     async fn find_table(&self, table_name: &ResolvedTableReference<'_>) -> Result<TableRef> {
@@ -163,13 +228,9 @@ impl QueryEngine for DatafusionQueryEngine {
 
     async fn execute(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
         match plan {
-            LogicalPlan::DfPlan(DfLogicalPlan::Dml(dml)) => match dml.op {
-                WriteOp::Insert => self.exec_insert_plan(&dml, query_ctx).await,
-                _ => UnsupportedExprSnafu {
-                    name: format!("DML op {}", dml.op),
-                }
-                .fail(),
-            },
+            LogicalPlan::DfPlan(DfLogicalPlan::Dml(dml)) => {
+                self.exec_dml_statement(dml, query_ctx).await
+            }
             _ => self.exec_query_plan(plan).await,
         }
     }

@@ -751,7 +751,7 @@ async fn test_delete() {
 
     let output = execute_sql(
         &instance,
-        "delete from test_table where host = host1 and ts = 1655276557000 ",
+        "delete from test_table where host = 'host1' and ts = 1655276557000 ",
     )
     .await;
     assert!(matches!(output, Output::AffectedRows(1)));
@@ -981,7 +981,9 @@ async fn try_execute_sql_in_db(
 
     let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
     match stmt {
-        QueryStatement::Sql(Statement::Query(_)) => plan_exec(instance, stmt, query_ctx).await,
+        QueryStatement::Sql(Statement::Query(_)) | QueryStatement::Sql(Statement::Delete(_)) => {
+            plan_exec(instance, stmt, query_ctx).await
+        }
         QueryStatement::Sql(Statement::Insert(ref insert)) if insert.is_insert_select() => {
             plan_exec(instance, stmt, query_ctx).await
         }

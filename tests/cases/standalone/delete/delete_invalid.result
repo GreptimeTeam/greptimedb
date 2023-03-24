@@ -8,19 +8,19 @@ Affected Rows: 3
 
 delete from monitor where cpu = 66.6 and ts = 1655276557000;
 
-Error: 1004(InvalidArguments), Missing column host in write batch
+Affected Rows: 1
 
 delete from monitor where host = 'host1' or ts = 1655276557000;
 
-Error: 1004(InvalidArguments), Not support SQL, error: Not support sql expr:host = 'host1' OR ts = 1655276557000,correct format is tagkey1 = tagvalue1 and ts = value
+Affected Rows: 0
 
 delete from monitor where host = 'host1' or ts != 1655276557000;
 
-Error: 1004(InvalidArguments), Not support SQL, error: Not support sql expr:host = 'host1' OR ts <> 1655276557000,correct format is tagkey1 = tagvalue1 and ts = value
+Affected Rows: 2
 
 delete from monitor where  ts != 1655276557000;
 
-Error: 1004(InvalidArguments), Not support SQL, error: Not support sql expr:ts <> 1655276557000,correct format is tagkey1 = tagvalue1 and ts = value
+Affected Rows: 0
 
 drop table monitor;
 

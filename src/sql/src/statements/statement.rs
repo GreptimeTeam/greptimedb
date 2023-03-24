@@ -80,6 +80,7 @@ impl TryFrom<&Statement> for DfStatement {
             Statement::Query(query) => SpStatement::Query(Box::new(query.inner.clone())),
             Statement::Explain(explain) => explain.inner.clone(),
             Statement::Insert(insert) => insert.inner.clone(),
+            Statement::Delete(delete) => delete.inner.clone(),
             _ => {
                 return ConvertToDfStatementSnafu {
                     statement: format!("{s:?}"),
