@@ -173,6 +173,10 @@ fn decode_timestamp_range_inner(
         }
     };
 
+    if file_meta.row_groups.is_empty() {
+        return Ok(None);
+    }
+
     for rg in &file_meta.row_groups {
         let Some(ref metadata) = rg
             .columns
@@ -969,6 +973,28 @@ mod tests {
                 col_unit
             )
         )
+    }
+
+    #[tokio::test]
+    async fn test_write_empty_file() {
+        common_telemetry::init_default_ut_logging();
+        let schema = memtable_tests::schema_for_test();
+        let memtable = DefaultMemtableBuilder::default().build(schema.clone());
+
+        let dir = TempDir::new("read-parquet-by-range").unwrap();
+        let path = dir.path().to_str().unwrap();
+        let backend = Fs::default().root(path).build().unwrap();
+        let object_store = ObjectStore::new(backend).finish();
+        let sst_file_name = "test-read.parquet";
+        let iter = memtable.iter(&IterContext::default()).unwrap();
+        let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
+
+        let SstInfo { time_range } = writer
+            .write_sst(&sst::WriteOptions::default())
+            .await
+            .unwrap();
+
+        assert!(time_range.is_none());
     }
 
     #[test]
