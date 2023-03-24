@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use common_recordbatch::RecordBatch;
 use datatypes::vectors::{Helper, VectorRef};
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::types::{PyDict, PyList, PyModule, PyTuple};
 use pyo3::{pymethods, PyAny, PyCell, PyObject, PyResult, Python, ToPyObject};
 use snafu::{ensure, Backtrace, GenerateImplicitData, ResultExt};
@@ -31,9 +31,8 @@ use crate::python::pyo3::utils::{init_cpython_interpreter, pyo3_obj_try_to_typed
 impl PyQueryEngine {
     #[pyo3(name = "sql")]
     pub(crate) fn sql_pyo3(&self, py: Python<'_>, s: String) -> PyResult<PyObject> {
-        let query = self.get_ref();
         let res = self
-            .query_with_new_thread(query, s)
+            .query_with_new_thread(s)
             .map_err(PyValueError::new_err)?;
         match res {
             crate::python::ffi_types::copr::Either::Rb(rbs) => {
@@ -143,7 +142,7 @@ coprocessor = copr
             py_any_to_vec(result, col_len)
         })()
         .map_err(|err| error::Error::PyRuntime {
-            msg: err.to_string(),
+            msg: err.into_value(py).to_string(),
             backtrace: Backtrace::generate(),
         })?;
         ensure!(
@@ -165,6 +164,23 @@ coprocessor = copr
 /// Cast return of py script result to `Vec<VectorRef>`,
 /// constants will be broadcast to length of `col_len`
 fn py_any_to_vec(obj: &PyAny, col_len: usize) -> PyResult<Vec<VectorRef>> {
+    // check if obj is of two types:
+    // 1. tuples of PyVector
+    // 2. a single PyVector
+    let check = if obj.is_instance_of::<PyTuple>()? {
+        let tuple = obj.downcast::<PyTuple>()?;
+
+        (0..tuple.len())
+            .map(|idx| tuple.get_item(idx).map(|i| i.is_instance_of::<PyVector>()))
+            .all(|i| matches!(i, Ok(Ok(true))))
+    } else {
+        obj.is_instance_of::<PyVector>()?
+    };
+    if !check {
+        return Err(PyRuntimeError::new_err(format!(
+            "Expect a tuple of vectors or one single vector, found {obj}"
+        )));
+    }
     if let Ok(tuple) = obj.downcast::<PyTuple>() {
         let len = tuple.len();
         let v = (0..len)
@@ -219,7 +235,7 @@ def a(cpu, mem, **kwargs):
     for k, v in kwargs.items():
         print("%s == %s" % (k, v))
     print(dataframe().select([col("cpu")<lit(0.3)]).collect())
-    return (0.5 < cpu) & ~( cpu >= 0.75)
+    return (0.5 < cpu) & ~(cpu >= 0.75)
     "#;
         let cpu_array = Float32Vector::from_slice([0.9f32, 0.8, 0.7, 0.3]);
         let mem_array = Float64Vector::from_slice([0.1f64, 0.2, 0.3, 0.4]);

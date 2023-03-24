@@ -24,7 +24,7 @@ use datatypes::vectors::Helper;
 use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::pyclass::CompareOp;
-use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyString, PyType};
+use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PySlice, PyString, PyType};
 
 use super::utils::val_to_py_any;
 use crate::python::ffi_types::vector::{arrow_rtruediv, wrap_bool_result, wrap_result, PyVector};
@@ -299,6 +299,49 @@ impl PyVector {
             })?;
             let ret = Self::from(ret).into_py(py);
             Ok(ret)
+        } else if let Ok(slice) = needle.downcast::<PySlice>(py) {
+            let indices = slice.indices(self.len() as i64)?;
+            let (start, stop, step, _slicelength) = (
+                indices.start,
+                indices.stop,
+                indices.step,
+                indices.slicelength,
+            );
+            if start < 0 {
+                return Err(PyValueError::new_err(format!(
+                    "Negative start is not supported, found {start} in {indices:?}"
+                )));
+            } // Negative stop is supported, means from "indices.start" to the actual start of the vector
+            let vector = self.as_vector_ref();
+
+            let mut buf = vector
+                .data_type()
+                .create_mutable_vector(indices.slicelength as usize);
+            let v = if indices.slicelength == 0 {
+                buf.to_vector()
+            } else {
+                if indices.step > 0 {
+                    let range = if stop == -1 {
+                        start as usize..start as usize
+                    } else {
+                        start as usize..stop as usize
+                    };
+                    for i in range.step_by(step.unsigned_abs()) {
+                        buf.push_value_ref(vector.get_ref(i));
+                    }
+                } else {
+                    // if no-empty, then stop < start
+                    // note: start..stop is empty is start >= stop
+                    // stop>=-1
+                    let range = { (stop + 1) as usize..=start as usize };
+                    for i in range.rev().step_by(step.unsigned_abs()) {
+                        buf.push_value_ref(vector.get_ref(i));
+                    }
+                }
+                buf.to_vector()
+            };
+            let v: PyVector = v.into();
+            Ok(v.into_py(py))
         } else if let Ok(index) = needle.extract::<isize>(py) {
             // deal with negative index
             let len = self.len() as isize;
