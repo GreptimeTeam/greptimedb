@@ -202,28 +202,28 @@ impl<S: LogStore> FlushJob<S> {
             let sst_layer = self.sst_layer.clone();
 
             futures.push(async move {
-                let SstInfo {
-                    time_range,
-                    file_size,
-                } = sst_layer
+                Ok(sst_layer
                     .write_sst(file_id, Source::Iter(iter), &WriteOptions::default())
-                    .await?;
-
-                Ok(FileMeta {
-                    region_id,
-                    file_id,
-                    time_range,
-                    level: 0,
-                    file_size,
-                })
+                    .await?
+                    .map(
+                        |SstInfo {
+                             time_range,
+                             file_size,
+                         }| FileMeta {
+                            region_id,
+                            file_id,
+                            time_range,
+                            level: 0,
+                            file_size,
+                        },
+                    ))
             });
         }
 
-        let metas = futures_util::future::join_all(futures)
-            .await
+        let metas = futures_util::future::try_join_all(futures)
+            .await?
             .into_iter()
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
+            .filter_map(std::convert::identity)
             .collect();
 
         logging::info!("Successfully flush memtables to files: {:?}", metas);

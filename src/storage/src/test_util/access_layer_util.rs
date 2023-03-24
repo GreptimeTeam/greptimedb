@@ -29,7 +29,7 @@ impl AccessLayer for MockAccessLayer {
         _file_id: FileId,
         _source: Source,
         _opts: &WriteOptions,
-    ) -> crate::error::Result<SstInfo> {
+    ) -> crate::error::Result<Option<SstInfo>> {
         unimplemented!()
     }
 

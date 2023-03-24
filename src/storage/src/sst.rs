@@ -408,7 +408,7 @@ pub trait AccessLayer: Send + Sync + std::fmt::Debug {
         file_id: FileId,
         source: Source,
         opts: &WriteOptions,
-    ) -> Result<SstInfo>;
+    ) -> Result<Option<SstInfo>>;
 
     /// Read SST file with given `file_handle` and schema.
     async fn read_sst(
@@ -478,7 +478,7 @@ impl AccessLayer for FsAccessLayer {
         file_id: FileId,
         source: Source,
         opts: &WriteOptions,
-    ) -> Result<SstInfo> {
+    ) -> Result<Option<SstInfo>> {
         // Now we only supports parquet format. We may allow caller to specific SST format in
         // WriteOptions in the future.
         let file_path = self.sst_file_path(&file_id.as_parquet());
