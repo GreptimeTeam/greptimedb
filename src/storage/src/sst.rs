@@ -283,7 +283,7 @@ impl Drop for FileHandleInner {
                     );
                 }
                 Err(e) => {
-                    error!(e; "Failed to schedule SST purge task, region: {}, name: {}", 
+                    error!(e; "Failed to schedule SST purge task, region: {}, name: {}",
                     self.meta.region_id, self.meta.file_id.as_parquet());
                 }
             }
@@ -402,7 +402,8 @@ pub trait AccessLayer: Send + Sync + std::fmt::Debug {
     /// Returns the sst file path.
     fn sst_file_path(&self, file_name: &str) -> String;
 
-    /// Writes SST file with given `file_id`.
+    /// Writes SST file with given `file_id` and returns the SST info.
+    /// If source does not contain any data, `write_sst` will return `Ok(None)`.
     async fn write_sst(
         &self,
         file_id: FileId,
