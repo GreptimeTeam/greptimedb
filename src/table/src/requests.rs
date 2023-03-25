@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
 use common_query::AddColumnLocation;
+use common_time::range::TimestampRange;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::{ColumnSchema, RawSchema};
 use serde::{Deserialize, Serialize};
@@ -291,6 +292,13 @@ macro_rules! meter_insert_request {
             $req
         );
     };
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BackupDatabaseRequest {
+    pub catalog_name: String,
+    pub schema_name: String,
+    pub time_range: Option<TimestampRange>,
 }
 
 #[cfg(test)]
