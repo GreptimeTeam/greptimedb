@@ -223,7 +223,7 @@ impl<S: LogStore> FlushJob<S> {
         let metas = futures_util::future::try_join_all(futures)
             .await?
             .into_iter()
-            .filter_map(std::convert::identity)
+            .flatten()
             .collect();
 
         logging::info!("Successfully flush memtables to files: {:?}", metas);

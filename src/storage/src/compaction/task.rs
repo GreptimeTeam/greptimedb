@@ -83,7 +83,7 @@ impl<S: LogStore> CompactionTaskImpl<S> {
         let outputs = futures::future::try_join_all(futs)
             .await?
             .into_iter()
-            .filter_map(std::convert::identity)
+            .flatten()
             .collect();
         let inputs = compacted_inputs.into_iter().collect();
         Ok((outputs, inputs))
