@@ -20,6 +20,7 @@ pub mod prometheus;
 pub mod script;
 
 mod admin;
+mod dashboard;
 #[cfg(feature = "mem-prof")]
 pub mod mem_prof;
 
@@ -58,6 +59,7 @@ use self::influxdb::{influxdb_health, influxdb_ping, influxdb_write};
 use crate::auth::UserProviderRef;
 use crate::error::{AlreadyStartedSnafu, Result, StartHttpSnafu};
 use crate::http::admin::flush;
+use crate::http::dashboard::dashboard;
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::query_handler::{
@@ -476,6 +478,8 @@ impl HttpServer {
             "/health",
             routing::get(handler::health).post(handler::health),
         );
+
+        router = router.nest("/dashboard", dashboard());
 
         router
             // middlewares

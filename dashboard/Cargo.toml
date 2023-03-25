@@ -1,0 +1,8 @@
+[package]
+name = "dashboard"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rust-embed = { version = "6.6", features = ["debug-embed"] }
