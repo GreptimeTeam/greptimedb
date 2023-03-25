@@ -6,7 +6,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     python3.10-dev \
     python3-pip
 
-RUN python3 -m pip install pyarrow
+RUN python3 -m pip install pyarrow requests
 
 ARG TARGETARCH
 
