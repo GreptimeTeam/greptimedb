@@ -43,8 +43,10 @@ pub async fn new_store_config(
     let sst_dir = engine::region_sst_dir(parent_dir, region_name);
     let manifest_dir = engine::region_manifest_dir(parent_dir, region_name);
 
-    let accessor = Builder::default().root(store_dir).build().unwrap();
-    let object_store = ObjectStore::new(accessor).finish();
+    let mut builder = Builder::default();
+    builder.root(store_dir);
+
+    let object_store = ObjectStore::new(builder).unwrap().finish();
     let sst_layer = Arc::new(FsAccessLayer::new(&sst_dir, object_store.clone()));
     let manifest = RegionManifest::with_checkpointer(&manifest_dir, object_store);
     let job_pool = Arc::new(JobPoolImpl {});

@@ -40,8 +40,9 @@ impl TestEnv {
     pub fn new(prefix: &str) -> TestEnv {
         let dir = create_temp_dir(prefix);
         let store_dir = format!("{}/db", dir.path().to_string_lossy());
-        let accessor = Fs::default().root(&store_dir).build().unwrap();
-        let object_store = ObjectStore::new(accessor).finish();
+        let mut builder = Fs::default();
+        builder.root(&store_dir);
+        let object_store = ObjectStore::new(builder).unwrap().finish();
 
         let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
         let storage_engine = EngineImpl::new(
@@ -57,8 +58,9 @@ impl TestEnv {
         ));
 
         let procedure_dir = format!("{}/procedure", dir.path().to_string_lossy());
-        let accessor = Fs::default().root(&procedure_dir).build().unwrap();
-        let object_store = ObjectStore::new(accessor).finish();
+        let mut builder = Fs::default();
+        builder.root(&procedure_dir);
+        let object_store = ObjectStore::new(builder).unwrap().finish();
 
         let procedure_manager = Arc::new(LocalManager::new(ManagerConfig {
             object_store,

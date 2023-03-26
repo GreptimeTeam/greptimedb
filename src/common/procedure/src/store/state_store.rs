@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use async_stream::try_stream;
 use async_trait::async_trait;
-use futures::{Stream, StreamExt, TryStreamExt};
+use futures::{Stream, StreamExt};
 use object_store::{EntryMode, Metakey, ObjectStore};
 use snafu::ResultExt;
 
@@ -117,6 +117,7 @@ impl StateStore for ObjectStateStore {
 #[cfg(test)]
 mod tests {
     use common_test_util::temp_dir::create_temp_dir;
+    use futures_util::TryStreamExt;
     use object_store::services::Fs as Builder;
 
     use super::*;

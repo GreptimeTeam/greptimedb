@@ -286,13 +286,9 @@ async fn test_recover_region_manifets() {
     let tmp_dir = create_temp_dir("test_recover_region_manifets");
     let memtable_builder = Arc::new(DefaultMemtableBuilder::default()) as _;
 
-    let object_store = ObjectStore::new(
-        Fs::default()
-            .root(&tmp_dir.path().to_string_lossy())
-            .build()
-            .unwrap(),
-    )
-    .finish();
+    let mut builder = Fs::default();
+    builder.root(&tmp_dir.path().to_string_lossy());
+    let object_store = ObjectStore::new(builder).unwrap().finish();
 
     let manifest = RegionManifest::with_checkpointer("/manifest/", object_store.clone());
     let region_meta = Arc::new(build_region_meta());

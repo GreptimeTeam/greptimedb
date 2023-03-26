@@ -482,11 +482,9 @@ mod tests {
     pub async fn prepare_table_engine() -> (TempDir, TableEngineRef) {
         let dir = create_temp_dir("system-table-test");
         let store_dir = dir.path().to_string_lossy();
-        let accessor = object_store::services::Fs::default()
-            .root(&store_dir)
-            .build()
-            .unwrap();
-        let object_store = ObjectStore::new(accessor).finish();
+        let mut builder = object_store::services::Fs::default();
+        builder.root(&store_dir);
+        let object_store = ObjectStore::new(builder).unwrap().finish();
         let noop_compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
         let table_engine = Arc::new(MitoEngine::new(
             EngineConfig::default(),
