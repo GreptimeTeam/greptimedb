@@ -473,8 +473,7 @@ mod tests {
 
     async fn check_files(object_store: &ObjectStore, procedure_id: ProcedureId, files: &[&str]) {
         let dir = format!("{procedure_id}/");
-        let object = object_store.object(&dir);
-        let lister = object.list().await.unwrap();
+        let lister = object_store.list(&dir).await.unwrap();
         let mut files_in_dir: Vec<_> = lister
             .map_ok(|de| de.name().to_string())
             .try_collect()

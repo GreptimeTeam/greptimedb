@@ -29,7 +29,6 @@ impl TempFolder {
     }
 
     pub async fn remove_all(&mut self) -> Result<()> {
-        let batch = self.store.batch();
-        batch.remove_all(&self.path).await
+        self.store.remove_all(&self.path).await
     }
 }

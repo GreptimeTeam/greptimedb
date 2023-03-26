@@ -12,10 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub use opendal::raw::oio::Pager;
 pub use opendal::{
-    layers, services, Builder as ObjectStoreBuilder, Error, ErrorKind, Object, ObjectLister,
-    ObjectMetadata, ObjectMode, Operator as ObjectStore, Result,
+    layers, services, Builder as ObjectStoreBuilder, Entry, EntryMode, Error, ErrorKind, Metakey,
+    Operator as ObjectStore, Result,
 };
+
 pub mod cache_policy;
 pub mod test_util;
 pub mod util;

@@ -15,12 +15,13 @@
 use std::pin::Pin;
 use std::sync::Arc;
 
+use async_stream::try_stream;
 use async_trait::async_trait;
-use futures::{Stream, TryStreamExt};
-use object_store::{ObjectMode, ObjectStore};
+use futures::{Stream, StreamExt, TryStreamExt};
+use object_store::{EntryMode, Metakey, ObjectStore};
 use snafu::ResultExt;
 
-use crate::error::{DeleteStateSnafu, Error, PutStateSnafu, Result};
+use crate::error::{DeleteStateSnafu, Error, ListStateSnafu, PutStateSnafu, Result};
 
 /// Key value from state store.
 type KeyValue = (String, Vec<u8>);
@@ -64,49 +65,49 @@ impl ObjectStateStore {
 #[async_trait]
 impl StateStore for ObjectStateStore {
     async fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
-        let object = self.store.object(key);
-        object.write(value).await.context(PutStateSnafu { key })
+        self.store
+            .write(key, value)
+            .await
+            .context(PutStateSnafu { key })
     }
 
     async fn walk_top_down(&self, path: &str) -> Result<KeyValueStream> {
         let path_string = path.to_string();
 
-        let lister = self
-            .store
-            .object(path)
-            .scan()
-            .await
-            .map_err(|e| Error::ListState {
-                path: path_string.clone(),
-                source: e,
-            })?;
+        let mut lister = self.store.scan(path).await.map_err(|e| Error::ListState {
+            path: path_string.clone(),
+            source: e,
+        })?;
 
-        let stream = lister
-            .try_filter_map(|entry| async move {
+        let store = self.store.clone();
+
+        let stream = try_stream!({
+            while let Some(res) = lister.next().await {
+                let entry = res.context(ListStateSnafu { path: &path_string })?;
                 let key = entry.path();
-                let key_value = match entry.mode().await? {
-                    ObjectMode::FILE => {
-                        let value = entry.read().await?;
-
-                        Some((key.to_string(), value))
-                    }
-                    ObjectMode::DIR | ObjectMode::Unknown => None,
-                };
-
-                Ok(key_value)
-            })
-            .map_err(move |e| Error::ListState {
-                path: path_string.clone(),
-                source: e,
-            });
+                let metadata = store
+                    .metadata(&entry, Metakey::Mode)
+                    .await
+                    .context(ListStateSnafu { path: key })?;
+                if let EntryMode::FILE = metadata.mode() {
+                    let value = store
+                        .read(key)
+                        .await
+                        .context(ListStateSnafu { path: key })?;
+                    yield (key.to_string(), value);
+                }
+            }
+        });
 
         Ok(Box::pin(stream))
     }
 
     async fn delete(&self, keys: &[String]) -> Result<()> {
         for key in keys {
-            let object = self.store.object(key);
-            object.delete().await.context(DeleteStateSnafu { key })?;
+            self.store
+                .delete(key)
+                .await
+                .context(DeleteStateSnafu { key })?;
         }
 
         Ok(())
@@ -117,7 +118,6 @@ impl StateStore for ObjectStateStore {
 mod tests {
     use common_test_util::temp_dir::create_temp_dir;
     use object_store::services::Fs as Builder;
-    use object_store::ObjectStoreBuilder;
 
     use super::*;
 
@@ -125,8 +125,10 @@ mod tests {
     async fn test_object_state_store() {
         let dir = create_temp_dir("state_store");
         let store_dir = dir.path().to_str().unwrap();
-        let accessor = Builder::default().root(store_dir).build().unwrap();
-        let object_store = ObjectStore::new(accessor).finish();
+        let mut builder = Builder::default();
+        builder.root(store_dir);
+
+        let object_store = ObjectStore::new(builder).unwrap().finish();
         let state_store = ObjectStateStore::new(object_store);
 
         let data: Vec<_> = state_store

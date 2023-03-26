@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use common_telemetry::logging;
 use futures::TryStreamExt;
 use lazy_static::lazy_static;
-use object_store::{util, Object, ObjectStore};
+use object_store::{util, ObjectStore};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
