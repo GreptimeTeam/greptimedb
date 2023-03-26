@@ -256,7 +256,7 @@ mod tests {
     fn procedure_store_for_test(dir: &TempDir) -> ProcedureStore {
         let store_dir = dir.path().to_str().unwrap();
         let mut builder = Builder::default();
-        builder.root(store_dir).build().unwrap();
+        builder.root(store_dir);
         let object_store = ObjectStore::new(builder).unwrap().finish();
 
         ProcedureStore::from(object_store)

@@ -77,13 +77,6 @@ pub enum Error {
         source: object_store::Error,
     },
 
-    #[snafu(display("Fail to delete object in batch, msg: {}, source: {}", msg, source))]
-    BatchDeleteObject {
-        msg: String,
-        backtrace: Backtrace,
-        source: object_store::Error,
-    },
-
     #[snafu(display("Fail to list objects in path: {}, source: {}", path, source))]
     ListObjects {
         path: String,
@@ -502,7 +495,6 @@ impl ErrorExt for Error {
             | WriteObject { .. }
             | ListObjects { .. }
             | DeleteObject { .. }
-            | BatchDeleteObject { .. }
             | WriteWal { .. }
             | DecodeWalHeader { .. }
             | EncodeWalHeader { .. }

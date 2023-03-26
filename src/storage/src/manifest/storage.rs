@@ -26,7 +26,7 @@ use snafu::{ensure, ResultExt};
 use store_api::manifest::{LogIterator, ManifestLogStorage, ManifestVersion};
 
 use crate::error::{
-    BatchDeleteObjectSnafu, DecodeJsonSnafu, EncodeJsonSnafu, Error, InvalidScanIndexSnafu,
+    DecodeJsonSnafu, DeleteObjectSnafu, EncodeJsonSnafu, Error, InvalidScanIndexSnafu,
     ListObjectsSnafu, ReadObjectSnafu, Result, Utf8Snafu, WriteObjectSnafu,
 };
 
@@ -193,14 +193,15 @@ impl ManifestLogStorage for ManifestObjectStore {
     }
 
     async fn delete(&self, start: ManifestVersion, end: ManifestVersion) -> Result<()> {
-        self.object_store
-            .remove_via(futures::stream::iter(
-                (start..end).map(|v| self.delta_file_path(v)),
-            ))
-            .await
-            .with_context(|_| BatchDeleteObjectSnafu {
-                msg: format!("Manifest start:{}, end: {}", start, end),
-            })
+        //TODO(dennis): delete in batch or concurrently?
+        for v in start..end {
+            let path = self.delta_file_path(v);
+            self.object_store
+                .delete(&path)
+                .await
+                .context(DeleteObjectSnafu { path })?;
+        }
+        Ok(())
     }
 
     async fn save_checkpoint(&self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {
@@ -267,6 +268,7 @@ impl ManifestLogStorage for ManifestObjectStore {
     async fn load_last_checkpoint(&self) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
         let last_checkpoint = self.object_store.object(&self.last_checkpoint_path());
 
+        // TODO(hl): any better solution?
         let result = self.object_store.read(&last_checkpoint_path).await;
 
         let last_checkpoint_data = match result {
@@ -309,6 +311,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         let tmp_dir = create_temp_dir("test_manifest_log_store");
         let mut builder = Fs::default();
+        println!("tmp_dir: {:?}", tmp_dir);
         builder.root(&tmp_dir.path().to_string_lossy());
         let object_store = ObjectStore::new(builder).unwrap().finish();
 
