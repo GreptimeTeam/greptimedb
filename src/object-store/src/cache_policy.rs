@@ -99,9 +99,12 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
                 let size = rp.clone().into_metadata().content_length();
                 let (_, mut writer) = self.cache.write(&cache_path, OpWrite::new()).await?;
 
+                // Looks like we don't have any other choice than loading content from reader to memory
+                // given that writer *may* not support append.
                 let mut buf = vec![0; size as usize];
                 reader.read(&mut buf).await?;
                 writer.write(Bytes::from(buf)).await?;
+                writer.close().await?;
 
                 match self.cache.read(&cache_path, OpRead::default()).await {
                     Ok((rp, reader)) => {
@@ -174,23 +177,6 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
         self.inner.blocking_scan(path, args)
     }
 }
-
-// /// TODO: Workaround for output::Read doesn't implement input::Read
-// ///
-// /// Should be remove after opendal fixed it.
-// #[pin_project]
-// struct ReadWrapper<R>(R);
-//
-// impl<R: Read> AsyncRead for ReadWrapper<R> {
-//     fn poll_read(
-//         mut self: Pin<&mut Self>,
-//         cx: &mut Context<'_>,
-//         buf: &mut [u8],
-//     ) -> Poll<io::Result<usize>> {
-//         let this = self.project();
-//         (&this as &dyn Read).poll_read(cx, buf)
-//     }
-// }
 
 #[inline]
 fn to_output_reader<R: Read + 'static>(input: (RpRead, R)) -> (RpRead, Reader) {

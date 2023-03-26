@@ -248,7 +248,6 @@ mod tests {
     use async_trait::async_trait;
     use common_test_util::temp_dir::{create_temp_dir, TempDir};
     use object_store::services::Fs as Builder;
-    use object_store::ObjectStoreBuilder;
 
     use super::*;
     use crate::{Context, LockKey, Procedure, Status};

@@ -23,7 +23,7 @@ use object_store::services::{Fs, S3};
 use object_store::test_util::TempFolder;
 use object_store::{util, ObjectStore, ObjectStoreBuilder};
 use opendal::services::Oss;
-use opendal::{EntryMode, Operator};
+use opendal::{EntryMode, Operator, OperatorBuilder};
 
 async fn test_object_crud(store: &ObjectStore) -> Result<()> {
     // Create object handler.
@@ -181,34 +181,29 @@ async fn assert_cache_files(
 
 #[tokio::test]
 async fn test_object_store_cache_policy() -> Result<()> {
+    common_telemetry::init_default_ut_logging();
     // create file storage
     let root_dir = create_temp_dir("test_fs_backend");
-    let mut builder = Fs::default();
-    builder
-        .root(&root_dir.path().to_string_lossy())
-        .atomic_write_dir(&root_dir.path().to_string_lossy());
-
-    let store = ObjectStore::new(builder).unwrap().finish();
+    let store = OperatorBuilder::new(
+        Fs::default()
+            .root(&root_dir.path().to_string_lossy())
+            .atomic_write_dir(&root_dir.path().to_string_lossy())
+            .build()
+            .unwrap(),
+    )
+    .finish();
 
     // create file cache layer
     let cache_dir = create_temp_dir("test_fs_cache");
-
     let mut builder = Fs::default();
     builder
         .root(&cache_dir.path().to_string_lossy())
         .atomic_write_dir(&cache_dir.path().to_string_lossy());
-
-    let cache_store = ObjectStore::new(builder).unwrap().finish();
-
-    let mut builder = Fs::default();
-    builder
-        .root(&cache_dir.path().to_string_lossy())
-        .atomic_write_dir(&cache_dir.path().to_string_lossy());
-
-    let accessor = builder.build().unwrap();
+    let cache_accessor = Arc::new(builder.build().unwrap());
+    let cache_store = OperatorBuilder::new(cache_accessor.clone()).finish();
 
     // create operator for cache dir to verify cache file
-    let store = store.layer(LruCacheLayer::new(Arc::new(accessor), 3));
+    let store = store.layer(LruCacheLayer::new(Arc::new(cache_accessor), 3));
 
     // create several object handler.
     // write data into object;

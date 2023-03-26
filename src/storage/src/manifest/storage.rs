@@ -268,10 +268,7 @@ impl ManifestLogStorage for ManifestObjectStore {
     async fn load_last_checkpoint(&self) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
         let last_checkpoint = self.object_store.object(&self.last_checkpoint_path());
 
-        // TODO(hl): any better solution?
-        let result = self.object_store.read(&last_checkpoint_path).await;
-
-        let last_checkpoint_data = match result {
+        let last_checkpoint_data = match self.object_store.read(&last_checkpoint_path).await {
             Ok(last_checkpoint_data) => last_checkpoint_data,
             Err(e) if e.kind() == ErrorKind::NotFound => {
                 return Ok(None);
@@ -311,7 +308,6 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         let tmp_dir = create_temp_dir("test_manifest_log_store");
         let mut builder = Fs::default();
-        println!("tmp_dir: {:?}", tmp_dir);
         builder.root(&tmp_dir.path().to_string_lossy());
         let object_store = ObjectStore::new(builder).unwrap().finish();
 
