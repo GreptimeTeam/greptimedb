@@ -49,6 +49,8 @@ pub struct PyVector {
     pub(crate) vector: VectorRef,
 }
 
+pub(crate) type PyVectorRef = PyRef<PyVector>;
+
 impl From<VectorRef> for PyVector {
     fn from(vector: VectorRef) -> Self {
         Self { vector }
