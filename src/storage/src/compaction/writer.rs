@@ -227,6 +227,7 @@ mod tests {
         } = writer
             .write_sst(&sst::WriteOptions::default())
             .await
+            .unwrap()
             .unwrap();
         let handle = FileHandle::new(
             FileMeta {
@@ -415,6 +416,7 @@ mod tests {
         )
         .write_sst(&opts)
         .await
+        .unwrap()
         .unwrap();
         assert_eq!(
             Some((
@@ -431,6 +433,7 @@ mod tests {
         )
         .write_sst(&opts)
         .await
+        .unwrap()
         .unwrap();
         assert_eq!(
             Some((
@@ -447,6 +450,7 @@ mod tests {
         )
         .write_sst(&opts)
         .await
+        .unwrap()
         .unwrap();
 
         assert_eq!(

@@ -75,14 +75,17 @@ impl<'a> ParquetWriter<'a> {
         }
     }
 
-    pub async fn write_sst(self, _opts: &sst::WriteOptions) -> Result<SstInfo> {
+    pub async fn write_sst(self, _opts: &sst::WriteOptions) -> Result<Option<SstInfo>> {
         self.write_rows(None).await
     }
 
     /// Iterates memtable and writes rows to Parquet file.
     /// A chunk of records yielded from each iteration with a size given
     /// in config will be written to a single row group.
-    async fn write_rows(mut self, extra_meta: Option<HashMap<String, String>>) -> Result<SstInfo> {
+    async fn write_rows(
+        mut self,
+        extra_meta: Option<HashMap<String, String>>,
+    ) -> Result<Option<SstInfo>> {
         let projected_schema = self.source.projected_schema();
         let store_schema = projected_schema.schema_to_read();
         let schema = store_schema.arrow_schema().clone();
@@ -106,6 +109,7 @@ impl<'a> ParquetWriter<'a> {
         let mut arrow_writer = ArrowWriter::try_new(&mut buf, schema.clone(), Some(writer_props))
             .context(WriteParquetSnafu)?;
 
+        let mut batches_written = 0;
         while let Some(batch) = self.source.next_batch().await? {
             let arrow_batch = RecordBatch::try_new(
                 schema.clone(),
@@ -119,8 +123,13 @@ impl<'a> ParquetWriter<'a> {
             arrow_writer
                 .write(&arrow_batch)
                 .context(WriteParquetSnafu)?;
+            batches_written += 1;
         }
 
+        if batches_written == 0 {
+            // if the source does not contain any batch, we skip writing an empty parquet file.
+            return Ok(None);
+        }
         let file_meta = arrow_writer.close().context(WriteParquetSnafu)?;
 
         let time_range = decode_timestamp_range(&file_meta, store_schema)
@@ -137,10 +146,10 @@ impl<'a> ParquetWriter<'a> {
                 path: object.path(),
             })?
             .content_length();
-        Ok(SstInfo {
+        Ok(Some(SstInfo {
             time_range,
             file_size,
-        })
+        }))
     }
 }
 
@@ -210,6 +219,13 @@ fn decode_timestamp_range_inner(
         end = end.max(max);
     }
 
+    assert!(
+        start <= end,
+        "Illegal timestamp range decoded from SST file {:?}, start: {}, end: {}",
+        file_meta,
+        start,
+        end
+    );
     Ok(Some((
         Timestamp::new(start, unit),
         Timestamp::new(end, unit),
@@ -682,6 +698,7 @@ mod tests {
         } = writer
             .write_sst(&sst::WriteOptions::default())
             .await
+            .unwrap()
             .unwrap();
 
         assert_eq!(
@@ -779,6 +796,7 @@ mod tests {
         } = writer
             .write_sst(&sst::WriteOptions::default())
             .await
+            .unwrap()
             .unwrap();
 
         assert_eq!(
@@ -898,6 +916,7 @@ mod tests {
         } = writer
             .write_sst(&sst::WriteOptions::default())
             .await
+            .unwrap()
             .unwrap();
 
         assert_eq!(
@@ -969,6 +988,28 @@ mod tests {
                 col_unit
             )
         )
+    }
+
+    #[tokio::test]
+    async fn test_write_empty_file() {
+        common_telemetry::init_default_ut_logging();
+        let schema = memtable_tests::schema_for_test();
+        let memtable = DefaultMemtableBuilder::default().build(schema.clone());
+
+        let dir = create_temp_dir("read-parquet-by-range");
+        let path = dir.path().to_str().unwrap();
+        let backend = Fs::default().root(path).build().unwrap();
+        let object_store = ObjectStore::new(backend).finish();
+        let sst_file_name = "test-read.parquet";
+        let iter = memtable.iter(&IterContext::default()).unwrap();
+        let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
+
+        let sst_info_opt = writer
+            .write_sst(&sst::WriteOptions::default())
+            .await
+            .unwrap();
+
+        assert!(sst_info_opt.is_none());
     }
 
     #[test]

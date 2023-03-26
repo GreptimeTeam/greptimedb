@@ -80,10 +80,11 @@ impl<S: LogStore> CompactionTaskImpl<S> {
             });
         }
 
-        let outputs = futures::future::join_all(futs)
-            .await
+        let outputs = futures::future::try_join_all(futs)
+            .await?
             .into_iter()
-            .collect::<Result<_>>()?;
+            .flatten()
+            .collect();
         let inputs = compacted_inputs.into_iter().collect();
         Ok((outputs, inputs))
     }
@@ -162,7 +163,7 @@ impl CompactionOutput {
         region_id: RegionId,
         schema: RegionSchemaRef,
         sst_layer: AccessLayerRef,
-    ) -> Result<FileMeta> {
+    ) -> Result<Option<FileMeta>> {
         let reader = build_sst_reader(
             schema,
             sst_layer.clone(),
@@ -175,20 +176,21 @@ impl CompactionOutput {
         let output_file_id = FileId::random();
         let opts = WriteOptions {};
 
-        let SstInfo {
-            time_range,
-            file_size,
-        } = sst_layer
+        Ok(sst_layer
             .write_sst(output_file_id, Source::Reader(reader), &opts)
-            .await?;
-
-        Ok(FileMeta {
-            region_id,
-            file_id: output_file_id,
-            time_range,
-            level: self.output_level,
-            file_size,
-        })
+            .await?
+            .map(
+                |SstInfo {
+                     time_range,
+                     file_size,
+                 }| FileMeta {
+                    region_id,
+                    file_id: output_file_id,
+                    time_range,
+                    level: self.output_level,
+                    file_size,
+                },
+            ))
     }
 }
 

@@ -283,7 +283,7 @@ impl Drop for FileHandleInner {
                     );
                 }
                 Err(e) => {
-                    error!(e; "Failed to schedule SST purge task, region: {}, name: {}", 
+                    error!(e; "Failed to schedule SST purge task, region: {}, name: {}",
                     self.meta.region_id, self.meta.file_id.as_parquet());
                 }
             }
@@ -402,13 +402,14 @@ pub trait AccessLayer: Send + Sync + std::fmt::Debug {
     /// Returns the sst file path.
     fn sst_file_path(&self, file_name: &str) -> String;
 
-    /// Writes SST file with given `file_id`.
+    /// Writes SST file with given `file_id` and returns the SST info.
+    /// If source does not contain any data, `write_sst` will return `Ok(None)`.
     async fn write_sst(
         &self,
         file_id: FileId,
         source: Source,
         opts: &WriteOptions,
-    ) -> Result<SstInfo>;
+    ) -> Result<Option<SstInfo>>;
 
     /// Read SST file with given `file_handle` and schema.
     async fn read_sst(
@@ -478,7 +479,7 @@ impl AccessLayer for FsAccessLayer {
         file_id: FileId,
         source: Source,
         opts: &WriteOptions,
-    ) -> Result<SstInfo> {
+    ) -> Result<Option<SstInfo>> {
         // Now we only supports parquet format. We may allow caller to specific SST format in
         // WriteOptions in the future.
         let file_path = self.sst_file_path(&file_id.as_parquet());
