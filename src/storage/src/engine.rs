@@ -381,7 +381,6 @@ mod tests {
     use datatypes::type_id::LogicalTypeId;
     use log_store::test_util::log_store_util;
     use object_store::services::Fs;
-    use object_store::ObjectStoreBuilder;
     use store_api::storage::Region;
 
     use super::*;

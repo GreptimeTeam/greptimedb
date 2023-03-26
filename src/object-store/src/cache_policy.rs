@@ -99,7 +99,7 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
                 let size = rp.clone().into_metadata().content_length();
                 let (_, mut writer) = self.cache.write(&cache_path, OpWrite::new()).await?;
 
-                let mut buf = Vec::with_capacity(size as usize);
+                let mut buf = vec![0; size as usize];
                 reader.read(&mut buf).await?;
                 writer.write(Bytes::from(buf)).await?;
 

@@ -31,7 +31,7 @@ use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, VectorRef};
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::NoopLogStore;
 use object_store::services::Fs;
-use object_store::{ObjectStore, ObjectStoreBuilder};
+use object_store::ObjectStore;
 use store_api::manifest::MAX_VERSION;
 use store_api::storage::{
     consts, Chunk, ChunkReader, RegionMeta, ScanRequest, SequenceNumber, Snapshot, WriteRequest,

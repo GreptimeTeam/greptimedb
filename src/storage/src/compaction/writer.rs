@@ -93,7 +93,7 @@ mod tests {
         TimestampMillisecondVector, TimestampMillisecondVectorBuilder, UInt64VectorBuilder,
     };
     use object_store::services::Fs;
-    use object_store::{ObjectStore, ObjectStoreBuilder};
+    use object_store::ObjectStore;
     use store_api::storage::{ChunkReader, OpType, SequenceNumber};
 
     use super::*;

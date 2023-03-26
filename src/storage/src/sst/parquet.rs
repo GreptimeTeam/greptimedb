@@ -546,7 +546,6 @@ mod tests {
     use datatypes::types::{TimestampMillisecondType, TimestampType};
     use datatypes::vectors::TimestampMillisecondVector;
     use object_store::services::Fs;
-    use object_store::ObjectStoreBuilder;
     use store_api::storage::OpType;
 
     use super::*;

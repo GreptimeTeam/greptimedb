@@ -20,7 +20,6 @@ use common_telemetry::logging;
 use futures::TryStreamExt;
 use lazy_static::lazy_static;
 use object_store::{util, Entry, ErrorKind, ObjectStore};
-use regex::internal::Input;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
@@ -196,7 +195,7 @@ impl ManifestLogStorage for ManifestObjectStore {
     async fn delete(&self, start: ManifestVersion, end: ManifestVersion) -> Result<()> {
         self.object_store
             .remove_via(futures::stream::iter(
-                (start..end).into_iter().map(|v| self.delta_file_path(v)),
+                (start..end).map(|v| self.delta_file_path(v)),
             ))
             .await
             .with_context(|_| BatchDeleteObjectSnafu {
@@ -301,7 +300,7 @@ impl ManifestLogStorage for ManifestObjectStore {
 mod tests {
     use common_test_util::temp_dir::create_temp_dir;
     use object_store::services::Fs;
-    use object_store::{ObjectStore, ObjectStoreBuilder};
+    use object_store::ObjectStore;
 
     use super::*;
 
