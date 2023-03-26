@@ -981,8 +981,9 @@ mod tests {
 
         let dir = create_temp_dir("read-parquet-by-range");
         let path = dir.path().to_str().unwrap();
-        let backend = Fs::default().root(path).build().unwrap();
-        let object_store = ObjectStore::new(backend).finish();
+        let mut builder = Fs::default();
+        builder.root(path);
+        let object_store = ObjectStore::new(builder).unwrap().finish();
         let sst_file_name = "test-read.parquet";
         let iter = memtable.iter(&IterContext::default()).unwrap();
         let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
