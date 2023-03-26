@@ -112,7 +112,7 @@ impl Table for NumbersTable {
         Ok(Arc::new(SimpleTableScan::new(stream)))
     }
 
-    async fn flush(&self, region_number: Option<RegionNumber>, wait: Option<bool>) -> Result<()> {
+    async fn flush(&self, _region_number: Option<RegionNumber>, _wait: Option<bool>) -> Result<()> {
         Ok(())
     }
 }
