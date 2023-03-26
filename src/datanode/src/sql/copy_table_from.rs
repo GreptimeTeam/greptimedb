@@ -48,7 +48,6 @@ impl SqlHandler {
             build_backend(&req.location, req.connection).context(error::BuildBackendSnafu)?;
 
         let (dir, filename) = find_dir_and_filename(&path);
-
         let regex = req
             .pattern
             .as_ref()

@@ -24,7 +24,7 @@ use log_store::NoopLogStore;
 use mito::config::EngineConfig;
 use mito::engine::MitoEngine;
 use object_store::services::Fs;
-use object_store::{ObjectStore};
+use object_store::ObjectStore;
 use storage::compaction::noop::NoopCompactionScheduler;
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;

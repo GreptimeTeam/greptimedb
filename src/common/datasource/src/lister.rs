@@ -73,10 +73,10 @@ impl Lister {
                 let file_full_path = format!("{}{}", self.path, filename);
                 let _ = self.object_store.stat(&file_full_path).await.context(
                     error::ListObjectsSnafu {
-                        path: file_full_path,
+                        path: &file_full_path,
                     },
-                );
-                Ok(vec![Entry::new(&self.path)])
+                )?;
+                Ok(vec![Entry::new(&file_full_path)])
             }
         }
     }

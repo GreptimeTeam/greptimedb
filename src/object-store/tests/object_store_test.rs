@@ -53,28 +53,31 @@ async fn test_object_crud(store: &ObjectStore) -> Result<()> {
 async fn test_object_list(store: &ObjectStore) -> Result<()> {
     // Create  some object handlers.
     // Write something
-    store.write("test_file1", "Hello, object1!").await?;
-    store.write("test_file2", "Hello, object2!").await?;
-    store.write("test_file3", "Hello, object3!").await?;
+    let p1 = "test_file1";
+    let p2 = "test_file2";
+    let p3 = "test_file3";
+    store.write(p1, "Hello, object1!").await?;
+    store.write(p2, "Hello, object2!").await?;
+    store.write(p3, "Hello, object3!").await?;
 
     // List objects
     let lister = store.list("/").await?;
     let entries = util::collect(lister).await?;
     assert_eq!(3, entries.len());
 
-    store.delete(entries.get(0).unwrap().path()).await?;
-    store.delete(entries.get(2).unwrap().path()).await?;
+    store.delete(p1).await?;
+    store.delete(p3).await?;
 
-    // List obejcts again
+    // List objects again
+    // Only o2 is exists
     let entries = util::collect(store.list("/").await?).await?;
     assert_eq!(1, entries.len());
+    assert_eq!(p2, entries.get(0).unwrap().path());
 
-    // Only o2 is exists
-    let o2 = entries.get(0).unwrap();
-    let content = store.read(o2.path()).await?;
+    let content = store.read(p2).await?;
     assert_eq!("Hello, object2!", String::from_utf8(content)?);
 
-    store.delete(o2.path()).await?;
+    store.delete(p2).await?;
     let entries = util::collect(store.list("/").await?).await?;
     assert!(entries.is_empty());
     Ok(())

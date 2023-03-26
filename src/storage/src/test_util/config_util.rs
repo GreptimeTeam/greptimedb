@@ -17,7 +17,7 @@ use std::sync::Arc;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::LogConfig;
 use object_store::services::Fs as Builder;
-use object_store::{ObjectStore};
+use object_store::ObjectStore;
 
 use crate::background::JobPoolImpl;
 use crate::compaction::noop::NoopCompactionScheduler;
