@@ -58,12 +58,12 @@ impl EnvController for Env {
 
     /// Stop one [`Database`].
     async fn stop(&self, _mode: &str, mut database: Self::DB) {
-        let mut server = database.server_process;
+        let mut server = database.server_process.lock().await;
         Env::stop_server(&mut server).await;
         if let Some(mut metasrv) = database.metasrv_process.take() {
             Env::stop_server(&mut metasrv).await;
         }
-        if let Some(mut datanode) = database.datanode_process.take() {
+        if let Some(mut datanode) = database.frontend_process.take() {
             Env::stop_server(&mut datanode).await;
         }
         println!("Stopped DB.");
@@ -75,7 +75,9 @@ impl Env {
     pub async fn start_standalone() -> GreptimeDB {
         Self::build_db().await;
 
-        let mut server_process = Self::start_server("standalone", true);
+        let db_ctx = GreptimeDBContext::new();
+
+        let mut server_process = Self::start_server("standalone", &db_ctx, true);
 
         let is_up = util::check_port(SERVER_ADDR.parse().unwrap(), Duration::from_secs(10)).await;
         if !is_up {
@@ -88,22 +90,25 @@ impl Env {
         let db = DB::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
 
         GreptimeDB {
-            server_process,
+            server_process: Mutex::new(server_process),
             metasrv_process: None,
-            datanode_process: None,
+            frontend_process: None,
             client: Mutex::new(db),
+            ctx: db_ctx,
         }
     }
 
     pub async fn start_distributed() -> GreptimeDB {
         Self::build_db().await;
 
+        let db_ctx = GreptimeDBContext::new();
+
         // start a distributed GreptimeDB
-        let mut meta_server = Env::start_server("metasrv", true);
+        let mut meta_server = Env::start_server("metasrv", &db_ctx, true);
         // wait for election
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        let mut frontend = Env::start_server("frontend", true);
-        let mut datanode = Env::start_server("datanode", true);
+        let mut frontend = Env::start_server("frontend", &db_ctx, true);
+        let mut datanode = Env::start_server("datanode", &db_ctx, true);
 
         for addr in [DATANODE_ADDR, METASRV_ADDR, SERVER_ADDR].iter() {
             let is_up = util::check_port(addr.parse().unwrap(), Duration::from_secs(10)).await;
@@ -119,10 +124,11 @@ impl Env {
         let db = DB::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
 
         GreptimeDB {
-            server_process: frontend,
+            server_process: Mutex::new(datanode),
             metasrv_process: Some(meta_server),
-            datanode_process: Some(datanode),
+            frontend_process: Some(frontend),
             client: Mutex::new(db),
+            ctx: db_ctx,
         }
     }
 
@@ -131,7 +137,7 @@ impl Env {
         let _ = process.wait().await;
     }
 
-    fn start_server(subcommand: &str, truncate_log: bool) -> Child {
+    fn start_server(subcommand: &str, db_ctx: &GreptimeDBContext, truncate_log: bool) -> Child {
         let log_file_name = match subcommand {
             "datanode" => DATANODE_LOG_FILE,
             "frontend" => FRONTEND_LOG_FILE,
@@ -154,7 +160,7 @@ impl Env {
         match subcommand {
             "datanode" | "standalone" => {
                 args.push("-c".to_string());
-                args.push(Self::generate_config_file(subcommand));
+                args.push(Self::generate_config_file(subcommand, db_ctx));
             }
             "frontend" => args.push("--metasrv-addr=0.0.0.0:3002".to_string()),
             "metasrv" => args.push("--use-memory-store".to_string()),
@@ -167,14 +173,26 @@ impl Env {
             .args(args)
             .stdout(log_file)
             .spawn()
-            .expect(&format!(
-                "Failed to start the DB with subcommand {subcommand}"
-            ));
+            .unwrap_or_else(|_| panic!("Failed to start the DB with subcommand {subcommand}"));
         process
     }
 
+    /// stop and restart the server process
+    async fn restart_server(db: &GreptimeDB) {
+        let mut server_process = db.server_process.lock().await;
+        Env::stop_server(&mut server_process).await;
+        let new_server_process = Env::start_server("standalone", &db.ctx, false);
+        *server_process = new_server_process;
+
+        let is_up = util::check_port(SERVER_ADDR.parse().unwrap(), Duration::from_secs(2)).await;
+        if !is_up {
+            Env::stop_server(&mut server_process).await;
+            panic!("Server doesn't up in 10 seconds, quit.")
+        }
+    }
+
     /// Generate config file to `/tmp/{subcommand}-{current_time}.toml`
-    fn generate_config_file(subcommand: &str) -> String {
+    fn generate_config_file(subcommand: &str, db_ctx: &GreptimeDBContext) -> String {
         let mut tt = TinyTemplate::new();
 
         let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -188,15 +206,15 @@ impl Env {
             data_dir: String,
         }
 
-        let current_time = common_time::util::current_time_millis();
-        let greptimedb_dir = format!("/tmp/greptimedb-{subcommand}-{current_time}/");
+        // let current_time = common_time::util::current_time_millis();
+        let greptimedb_dir = format!("/tmp/greptimedb-{subcommand}-{}", db_ctx.time);
         let ctx = Context {
             wal_dir: format!("{greptimedb_dir}/wal/"),
             data_dir: format!("{greptimedb_dir}/data/"),
         };
         let rendered = tt.render(subcommand, &ctx).unwrap();
 
-        let conf_file = format!("/tmp/{subcommand}-{current_time}.toml");
+        let conf_file = format!("/tmp/{subcommand}-{}.toml", db_ctx.time);
         println!("Generating {subcommand} config file in {conf_file}, full content:\n{rendered}");
         std::fs::write(&conf_file, rendered).unwrap();
 
@@ -222,15 +240,20 @@ impl Env {
 }
 
 pub struct GreptimeDB {
-    server_process: Child,
+    server_process: Mutex<Child>,
     metasrv_process: Option<Child>,
-    datanode_process: Option<Child>,
+    frontend_process: Option<Child>,
     client: Mutex<DB>,
+    ctx: GreptimeDBContext,
 }
 
 #[async_trait]
 impl Database for GreptimeDB {
-    async fn query(&self, _ctx: QueryContext, query: String) -> Box<dyn Display> {
+    async fn query(&self, ctx: QueryContext, query: String) -> Box<dyn Display> {
+        if ctx.context.contains_key("restart") {
+            Env::restart_server(self).await;
+        }
+
         let mut client = self.client.lock().await;
         if query.trim().starts_with("USE ") {
             let database = query
@@ -243,6 +266,19 @@ impl Database for GreptimeDB {
 
         let result = client.sql(&query).await;
         Box::new(ResultDisplayer { result }) as _
+    }
+}
+
+struct GreptimeDBContext {
+    /// Start time in millisecond
+    time: i64,
+}
+
+impl GreptimeDBContext {
+    pub fn new() -> Self {
+        Self {
+            time: common_time::util::current_time_millis(),
+        }
     }
 }
 
