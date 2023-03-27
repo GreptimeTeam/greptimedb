@@ -90,6 +90,9 @@ impl Instance {
                     .execute(SqlRequest::CreateTable(request), query_ctx)
                     .await
             }
+            QueryStatement::Sql(Statement::CreateExternalTable(_create_external_table)) => {
+                unimplemented!()
+            }
             QueryStatement::Sql(Statement::Alter(alter_table)) => {
                 let name = alter_table.table_name().clone();
                 let (catalog, schema, table) = table_idents_to_full_name(&name, query_ctx.clone())?;
