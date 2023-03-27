@@ -236,6 +236,24 @@ impl PyVector {
     fn __invert__(&self) -> PyResult<Self> {
         Self::vector_invert(self).map_err(PyValueError::new_err)
     }
+
+    #[pyo3(name = "concat")]
+    fn pyo3_concat(&self, py: Python<'_>, other: &Self) -> PyResult<Self> {
+        py.allow_threads(|| {
+            let left = self.to_arrow_array();
+            let right = other.to_arrow_array();
+
+            let res = compute::concat(&[left.as_ref(), right.as_ref()]);
+            let res = res.map_err(|err| PyValueError::new_err(format!("Arrow Error: {err:#?}")))?;
+            let ret = Helper::try_into_vector(res.clone()).map_err(|e| {
+                PyValueError::new_err(format!(
+                    "Can't cast result into vector, result: {res:?}, err: {e:?}",
+                ))
+            })?;
+            Ok(ret.into())
+        })
+    }
+
     /// take a boolean array and filters the Array, returning elements matching the filter (i.e. where the values are true).
     #[pyo3(name = "filter")]
     fn pyo3_filter(&self, py: Python<'_>, other: &Self) -> PyResult<Self> {

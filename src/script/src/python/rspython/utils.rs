@@ -22,15 +22,13 @@ use datatypes::vectors::{
     BooleanVector, Float64Vector, Helper, Int64Vector, NullVector, StringVector, VectorRef,
 };
 use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyList, PyStr};
-use rustpython_vm::{PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine};
+use rustpython_vm::{PyObjectRef, PyPayload, PyResult, VirtualMachine};
 use snafu::{Backtrace, GenerateImplicitData, OptionExt, ResultExt};
 
 use crate::python::error;
 use crate::python::error::ret_other_error_with;
 use crate::python::ffi_types::PyVector;
 use crate::python::rspython::builtins::try_into_columnar_value;
-
-pub(crate) type PyVectorRef = PyRef<PyVector>;
 
 /// use `rustpython`'s `is_instance` method to check if a PyObject is a instance of class.
 /// if `PyResult` is Err, then this function return `false`

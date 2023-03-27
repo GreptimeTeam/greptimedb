@@ -380,7 +380,7 @@ import greptime as gt
 @copr(args=["number"], returns = ["number"], sql = "select * from numbers")
 def test(number) -> vector[u32]:
     from greptime import query
-    return query().sql("select * from numbers")[0][0]
+    return query().sql("select * from numbers")[0]
 "#;
         let script = script_engine
             .compile(script, CompileContext::default())

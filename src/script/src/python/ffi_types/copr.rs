@@ -356,11 +356,9 @@ impl PyQueryEngine {
                     rbs.iter().map(|r| r.df_record_batch()),
                 )
                 .map_err(|e| format!("Concat batches failed for query {sql}: {e}"))?;
-                RecordBatch::try_from_df_record_batch(rbs.schema(), rb).map_err(|e|
-                    format!(
-                        "Convert datafusion record batch to record batch failed for query {sql}: {e}"
-                    )
-                )
+
+                RecordBatch::try_from_df_record_batch(rbs.schema(), rb)
+                    .map_err(|e| format!("Convert datafusion record batch to record batch failed for query {sql}: {e}"))
             }
             Either::AffectedRows(_) => Err(format!("Expect actual results from query {sql}")),
         }
@@ -414,30 +412,36 @@ impl PyQueryEngine {
             .map_err(|e| format!("Dedicated thread for sql query panic: {e:?}"))?
     }
     // TODO(discord9): find a better way to call sql query api, now we don't if we are in async context or not
-    /// return sql query results in List[List[PyVector]], or List[usize] for AffectedRows number if no recordbatches is returned
+    /// return sql query results in List[PyVector], or List[usize] for AffectedRows number if no recordbatches is returned
     #[pymethod]
     fn sql(&self, s: String, vm: &VirtualMachine) -> PyResult<PyListRef> {
         self.query_with_new_thread(s)
             .map_err(|e| vm.new_system_error(e))
             .map(|rbs| match rbs {
                 Either::Rb(rbs) => {
-                    let mut top_vec = Vec::with_capacity(rbs.iter().count());
-                    for rb in rbs.iter() {
-                        let mut vec_of_vec = Vec::with_capacity(rb.columns().len());
-                        for v in rb.columns() {
-                            let v = PyVector::from(v.clone());
-                            vec_of_vec.push(v.to_pyobject(vm));
-                        }
-                        let vec_of_vec = PyList::new_ref(vec_of_vec, vm.as_ref()).to_pyobject(vm);
-                        top_vec.push(vec_of_vec);
-                    }
-                    let top_vec = PyList::new_ref(top_vec, vm.as_ref());
-                    top_vec
+                    let rb = compute::concat_batches(
+                        rbs.schema().arrow_schema(),
+                        rbs.iter().map(|rb| rb.df_record_batch()),
+                    )
+                    .map_err(|e| {
+                        vm.new_runtime_error(format!("Failed to concat batches: {e:#?}"))
+                    })?;
+                    let rb =
+                        RecordBatch::try_from_df_record_batch(rbs.schema(), rb).map_err(|e| {
+                            vm.new_runtime_error(format!("Failed to cast recordbatch: {e:#?}"))
+                        })?;
+                    let columns_vectors = rb
+                        .columns()
+                        .iter()
+                        .map(|v| PyVector::from(v.clone()).to_pyobject(vm))
+                        .collect::<Vec<_>>();
+                    Ok(PyList::new_ref(columns_vectors, vm.as_ref()))
                 }
-                Either::AffectedRows(cnt) => {
-                    PyList::new_ref(vec![vm.ctx.new_int(cnt).into()], vm.as_ref())
-                }
-            })
+                Either::AffectedRows(cnt) => Ok(PyList::new_ref(
+                    vec![vm.ctx.new_int(cnt).into()],
+                    vm.as_ref(),
+                )),
+            })?
     }
 }
 

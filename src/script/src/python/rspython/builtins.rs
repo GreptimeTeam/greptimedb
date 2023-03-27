@@ -307,15 +307,13 @@ pub(crate) mod greptime_builtin {
 
     use crate::python::ffi_types::copr::PyQueryEngine;
     use crate::python::ffi_types::vector::val_to_pyobj;
-    use crate::python::ffi_types::PyVector;
+    use crate::python::ffi_types::{PyVector, PyVectorRef};
     use crate::python::rspython::builtins::{
         all_to_f64, eval_aggr_fn, from_df_err, try_into_columnar_value, try_into_py_obj,
         type_cast_error,
     };
     use crate::python::rspython::dataframe_impl::data_frame::{PyExpr, PyExprRef};
-    use crate::python::rspython::utils::{
-        is_instance, py_obj_to_value, py_obj_to_vec, PyVectorRef,
-    };
+    use crate::python::rspython::utils::{is_instance, py_obj_to_value, py_obj_to_vec};
 
     #[pyattr]
     #[pyclass(module = "greptime_builtin", name = "PyDataFrame")]
