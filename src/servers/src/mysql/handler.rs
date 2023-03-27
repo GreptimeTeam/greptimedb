@@ -227,7 +227,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         writer: QueryResultWriter<'a, W>,
     ) -> Result<()> {
         let outputs = self.do_query(query).await;
-        writer::write_output(writer, &query, outputs).await?;
+        writer::write_output(writer, query, outputs).await?;
         Ok(())
     }
 
