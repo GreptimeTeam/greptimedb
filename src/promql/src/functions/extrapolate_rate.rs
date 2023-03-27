@@ -424,7 +424,7 @@ mod test {
             ts_range,
             value_range,
             timestamps,
-            // that two `2.0` is because `duration_to_start` are shrinked to to
+            // that two `2.0` is because `duration_to_start` are shrunk to to
             // `duration_to_zero`, and causes `duration_to_zero` less than
             // `extrapolation_threshold`.
             vec![2.0, 1.5, 1.5, 1.5, 2.0, 1.5, 1.5, 1.5],
