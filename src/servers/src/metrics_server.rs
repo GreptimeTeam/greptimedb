@@ -33,12 +33,12 @@ pub const METRIC_SERVER: &str = "METRIC_SERVER";
 /// a server that serves metrics
 /// only start when datanode starts in distributed mode
 #[derive(Default)]
-pub struct DatanodeMetricsServer {
+pub struct MetricsServer {
     shutdown_tx: Mutex<Option<Sender<()>>>,
 }
 
 #[async_trait]
-impl ServerTrait for DatanodeMetricsServer {
+impl ServerTrait for MetricsServer {
     async fn start(&self, listening: SocketAddr) -> Result<SocketAddr> {
         self.start(listening).await
     }
@@ -59,7 +59,7 @@ impl ServerTrait for DatanodeMetricsServer {
     }
 }
 
-impl DatanodeMetricsServer {
+impl MetricsServer {
     pub fn new() -> Self {
         Self {
             shutdown_tx: Mutex::new(None),

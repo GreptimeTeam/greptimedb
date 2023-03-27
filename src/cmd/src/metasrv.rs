@@ -80,6 +80,8 @@ struct StartCommand {
     selector: Option<String>,
     #[clap(long)]
     use_memory_store: bool,
+    #[clap(long)]
+    metrics_addr: Option<String>,
 }
 
 impl StartCommand {
@@ -128,6 +130,10 @@ impl TryFrom<StartCommand> for MetaSrvOptions {
             opts.use_memory_store = true;
         }
 
+        if let Some(metrics_addr) = cmd.metrics_addr {
+            opts.metrics_addr = metrics_addr;
+        }
+
         Ok(opts)
     }
 }
@@ -150,6 +156,7 @@ mod tests {
             config_file: None,
             selector: Some("LoadBased".to_string()),
             use_memory_store: false,
+            metrics_addr: None,
         };
         let options: MetaSrvOptions = cmd.try_into().unwrap();
         assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
@@ -178,6 +185,7 @@ mod tests {
             selector: None,
             config_file: Some(file.path().to_str().unwrap().to_string()),
             use_memory_store: false,
+            metrics_addr: None,
         };
         let options: MetaSrvOptions = cmd.try_into().unwrap();
         assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);

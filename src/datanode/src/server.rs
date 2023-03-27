@@ -17,8 +17,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use common_runtime::Builder as RuntimeBuilder;
-use servers::datanode_metrics_server::DatanodeMetricsServer;
 use servers::grpc::GrpcServer;
+use servers::metrics_server::MetricsServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
 use servers::server::Server;
 use servers::Mode;
@@ -36,7 +36,7 @@ pub mod grpc;
 /// All rpc services.
 pub struct Services {
     grpc_server: GrpcServer,
-    metrics_server: DatanodeMetricsServer,
+    metrics_server: MetricsServer,
 }
 
 impl Services {
@@ -54,7 +54,7 @@ impl Services {
                 None,
                 grpc_runtime,
             ),
-            metrics_server: DatanodeMetricsServer::new(),
+            metrics_server: MetricsServer::new(),
         })
     }
 
@@ -80,6 +80,10 @@ impl Services {
 
     pub async fn shutdown(&self) -> Result<()> {
         self.grpc_server
+            .shutdown()
+            .await
+            .context(ShutdownServerSnafu)?;
+        self.metrics_server
             .shutdown()
             .await
             .context(ShutdownServerSnafu)

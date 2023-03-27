@@ -44,6 +44,7 @@ pub struct MetaSrvOptions {
     pub datanode_lease_secs: i64,
     pub selector: SelectorType,
     pub use_memory_store: bool,
+    pub metrics_addr: String,
 }
 
 impl Default for MetaSrvOptions {
@@ -55,6 +56,7 @@ impl Default for MetaSrvOptions {
             datanode_lease_secs: 15,
             selector: SelectorType::default(),
             use_memory_store: false,
+            metrics_addr: "127.0.0.1:5000".to_string(),
         }
     }
 }

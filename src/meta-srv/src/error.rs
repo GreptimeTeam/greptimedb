@@ -25,6 +25,12 @@ pub enum Error {
     #[snafu(display("Failed to send shutdown signal"))]
     SendShutdownSignal { source: SendError<()> },
 
+    #[snafu(display("Failed to shutdown server, source: {}", source))]
+    ShutdownServer {
+        #[snafu(backtrace)]
+        source: servers::error::Error,
+    },
+
     #[snafu(display("Error stream request next is None"))]
     StreamNone { backtrace: Backtrace },
 
@@ -55,7 +61,16 @@ pub enum Error {
         source: tonic::transport::Error,
         backtrace: Backtrace,
     },
-
+    #[snafu(display("Failed to start gRPC server, source: {}", source))]
+    StartMetricsExport {
+        #[snafu(backtrace)]
+        source: servers::error::Error,
+    },
+    #[snafu(display("Failed to parse address {}, source: {}", addr, source))]
+    ParseAddr {
+        addr: String,
+        source: std::net::AddrParseError,
+    },
     #[snafu(display("Empty table name"))]
     EmptyTableName { backtrace: Backtrace },
 
@@ -323,6 +338,9 @@ impl ErrorExt for Error {
             | Error::LockNotConfig { .. }
             | Error::ExceededRetryLimit { .. }
             | Error::SendShutdownSignal { .. }
+            | Error::ShutdownServer { .. }
+            | Error::StartMetricsExport { .. }
+            | Error::ParseAddr { .. }
             | Error::StartGrpc { .. } => StatusCode::Internal,
             Error::EmptyKey { .. }
             | Error::MissingRequiredParameter { .. }

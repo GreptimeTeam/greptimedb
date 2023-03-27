@@ -19,13 +19,13 @@ use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use serde::{Deserialize, Serialize};
 
 pub mod auth;
-pub mod datanode_metrics_server;
 pub mod error;
 pub mod grpc;
 pub mod http;
 pub mod influxdb;
 pub mod interceptor;
 pub mod line_writer;
+pub mod metrics_server;
 pub mod mysql;
 pub mod opentsdb;
 pub mod postgres;

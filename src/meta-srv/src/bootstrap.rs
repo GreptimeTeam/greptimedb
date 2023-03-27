@@ -20,6 +20,8 @@ use api::v1::meta::lock_server::LockServer;
 use api::v1::meta::router_server::RouterServer;
 use api::v1::meta::store_server::StoreServer;
 use etcd_client::Client;
+use servers::metrics_server::MetricsServer;
+use servers::server::Server;
 use snafu::ResultExt;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{self, Receiver, Sender};
@@ -44,6 +46,8 @@ use crate::{error, Result};
 pub struct MetaSrvInstance {
     meta_srv: MetaSrv,
 
+    metrics_srv: Arc<MetricsServer>,
+
     opts: MetaSrvOptions,
 
     signal_sender: Option<Sender<()>>,
@@ -52,9 +56,10 @@ pub struct MetaSrvInstance {
 impl MetaSrvInstance {
     pub async fn new(opts: MetaSrvOptions) -> Result<MetaSrvInstance> {
         let meta_srv = build_meta_srv(&opts).await?;
-
+        let metrics_srv = Arc::new(MetricsServer::new());
         Ok(MetaSrvInstance {
             meta_srv,
+            metrics_srv,
             opts,
             signal_sender: None,
         })
@@ -73,6 +78,17 @@ impl MetaSrvInstance {
             &mut rx,
         )
         .await?;
+        let addr = self
+            .opts
+            .metrics_addr
+            .parse()
+            .context(error::ParseAddrSnafu {
+                addr: &self.opts.metrics_addr,
+            })?;
+        self.metrics_srv
+            .start(addr)
+            .await
+            .context(error::StartMetricsExportSnafu)?;
 
         Ok(())
     }
@@ -86,7 +102,10 @@ impl MetaSrvInstance {
         }
 
         self.meta_srv.shutdown();
-
+        self.metrics_srv
+            .shutdown()
+            .await
+            .context(error::ShutdownServerSnafu)?;
         Ok(())
     }
 }
