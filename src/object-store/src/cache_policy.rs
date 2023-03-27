@@ -99,8 +99,8 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
                 let size = rp.clone().into_metadata().content_length();
                 let (_, mut writer) = self.cache.write(&cache_path, OpWrite::new()).await?;
 
-                // Looks like we don't have any other choice than loading content from reader to memory
-                // given that writer *may* not support append.
+                // TODO(hl): We can use [Writer::append](https://docs.rs/opendal/0.30.4/opendal/struct.Writer.html#method.append)
+                // here to avoid loading whole file into memory once all our backend supports `Writer`.
                 let mut buf = vec![0; size as usize];
                 reader.read(&mut buf).await?;
                 writer.write(Bytes::from(buf)).await?;
