@@ -31,7 +31,7 @@ use common_query::prelude::ScalarUdf;
 use common_query::Output;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
-use common_telemetry::timer;
+use common_telemetry::{metrics, timer};
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::ResolvedTableReference;
@@ -58,7 +58,7 @@ use crate::physical_planner::PhysicalPlanner;
 use crate::plan::LogicalPlan;
 use crate::planner::{DfLogicalPlanner, LogicalPlanner};
 use crate::query_engine::{QueryEngineContext, QueryEngineState};
-use crate::{metric, QueryEngine};
+use crate::QueryEngine;
 
 pub struct DatafusionQueryEngine {
     state: Arc<QueryEngineState>,
@@ -254,7 +254,7 @@ impl QueryEngine for DatafusionQueryEngine {
 
 impl LogicalOptimizer for DatafusionQueryEngine {
     fn optimize(&self, plan: &LogicalPlan) -> Result<LogicalPlan> {
-        let _timer = timer!(metric::METRIC_OPTIMIZE_LOGICAL_ELAPSED);
+        let _timer = timer!(metrics::METRIC_OPTIMIZE_LOGICAL_ELAPSED);
         match plan {
             LogicalPlan::DfPlan(df_plan) => {
                 let optimized_plan = self
@@ -280,7 +280,7 @@ impl PhysicalPlanner for DatafusionQueryEngine {
         ctx: &mut QueryEngineContext,
         logical_plan: &LogicalPlan,
     ) -> Result<Arc<dyn PhysicalPlan>> {
-        let _timer = timer!(metric::METRIC_CREATE_PHYSICAL_ELAPSED);
+        let _timer = timer!(metrics::METRIC_CREATE_PHYSICAL_ELAPSED);
         match logical_plan {
             LogicalPlan::DfPlan(df_plan) => {
                 let state = ctx.state();
@@ -315,7 +315,7 @@ impl PhysicalOptimizer for DatafusionQueryEngine {
         ctx: &mut QueryEngineContext,
         plan: Arc<dyn PhysicalPlan>,
     ) -> Result<Arc<dyn PhysicalPlan>> {
-        let _timer = timer!(metric::METRIC_OPTIMIZE_PHYSICAL_ELAPSED);
+        let _timer = timer!(metrics::METRIC_OPTIMIZE_PHYSICAL_ELAPSED);
 
         let mut new_plan = plan
             .as_any()
@@ -342,7 +342,7 @@ impl QueryExecutor for DatafusionQueryEngine {
         ctx: &QueryEngineContext,
         plan: &Arc<dyn PhysicalPlan>,
     ) -> Result<SendableRecordBatchStream> {
-        let _timer = timer!(metric::METRIC_EXEC_PLAN_ELAPSED);
+        let _timer = timer!(metrics::METRIC_EXEC_PLAN_ELAPSED);
         match plan.output_partitioning().partition_count() {
             0 => Ok(Box::pin(EmptyRecordBatchStream::new(plan.schema()))),
             1 => Ok(plan

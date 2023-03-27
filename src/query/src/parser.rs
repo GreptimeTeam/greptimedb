@@ -18,6 +18,7 @@ use chrono::DateTime;
 use common_error::ext::PlainError;
 use common_error::prelude::BoxedError;
 use common_error::status_code::StatusCode;
+use common_telemetry::metrics::{METRIC_PARSE_PROMQL_ELAPSED, METRIC_PARSE_SQL_ELAPSED};
 use common_telemetry::timer;
 use promql_parser::parser::EvalStmt;
 use snafu::ResultExt;
@@ -28,7 +29,6 @@ use sql::statements::statement::Statement;
 use crate::error::{
     MultipleStatementsSnafu, ParseFloatSnafu, ParseTimestampSnafu, QueryParseSnafu, Result,
 };
-use crate::metric::{METRIC_PARSE_PROMQL_ELAPSED, METRIC_PARSE_SQL_ELAPSED};
 
 const DEFAULT_LOOKBACK: u64 = 5 * 60; // 5m
 

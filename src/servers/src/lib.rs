@@ -19,6 +19,7 @@ use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use serde::{Deserialize, Serialize};
 
 pub mod auth;
+pub mod datanode_metrics_server;
 pub mod error;
 pub mod grpc;
 pub mod http;

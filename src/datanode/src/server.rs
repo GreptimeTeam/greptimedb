@@ -17,10 +17,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use common_runtime::Builder as RuntimeBuilder;
+use servers::datanode_metrics_server::DatanodeMetricsServer;
 use servers::grpc::GrpcServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
 use servers::server::Server;
+use servers::Mode;
 use snafu::ResultExt;
+use tokio::select;
 
 use crate::datanode::DatanodeOptions;
 use crate::error::{
@@ -33,6 +36,7 @@ pub mod grpc;
 /// All rpc services.
 pub struct Services {
     grpc_server: GrpcServer,
+    metrics_server: DatanodeMetricsServer,
 }
 
 impl Services {
@@ -44,13 +48,13 @@ impl Services {
                 .build()
                 .context(RuntimeResourceSnafu)?,
         );
-
         Ok(Self {
             grpc_server: GrpcServer::new(
                 ServerGrpcQueryHandlerAdaptor::arc(instance),
                 None,
                 grpc_runtime,
             ),
+            metrics_server: DatanodeMetricsServer::new(),
         })
     }
 
@@ -58,10 +62,19 @@ impl Services {
         let grpc_addr: SocketAddr = opts.rpc_addr.parse().context(ParseAddrSnafu {
             addr: &opts.rpc_addr,
         })?;
-        self.grpc_server
-            .start(grpc_addr)
-            .await
-            .context(StartServerSnafu)?;
+        let metrics_listen_address = opts.metrics_addr.parse().context(ParseAddrSnafu {
+            addr: &opts.metrics_addr,
+        })?;
+        let grpc = self.grpc_server.start(grpc_addr);
+        if let Mode::Distributed = opts.mode {
+            let metrics_handler = self.metrics_server.start(metrics_listen_address);
+            select!(
+                v = grpc => v.context(StartServerSnafu)?,
+                v = metrics_handler => v.context(StartServerSnafu)?,);
+        } else {
+            grpc.await.context(StartServerSnafu)?;
+        }
+
         Ok(())
     }
 

@@ -228,6 +228,7 @@ pub struct DatanodeOptions {
     pub wal: WalConfig,
     pub storage: StorageConfig,
     pub procedure: Option<ProcedureConfig>,
+    pub metrics_addr: String,
 }
 
 impl Default for DatanodeOptions {
@@ -245,6 +246,7 @@ impl Default for DatanodeOptions {
             wal: WalConfig::default(),
             storage: StorageConfig::default(),
             procedure: None,
+            metrics_addr: "127.0.0.1:4000".to_string(),
         }
     }
 }

@@ -14,7 +14,7 @@
 
 pub mod error;
 mod global;
-pub mod metric;
+mod metrics;
 mod repeated_task;
 pub mod runtime;
 
