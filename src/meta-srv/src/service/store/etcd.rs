@@ -445,7 +445,7 @@ impl TryFrom<BatchGetRequest> for BatchGet {
     fn try_from(req: BatchGetRequest) -> Result<Self> {
         let BatchGetRequest { header, keys } = req;
 
-        let options = GetOptions::default().with_keys_only();
+        let options = GetOptions::default();
 
         Ok(BatchGet {
             cluster_id: header.map_or(0, |h| h.cluster_id),

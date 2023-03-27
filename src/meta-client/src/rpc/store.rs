@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use api::v1::meta::{
+    BatchDeleteRequest as PbBatchDeleteRequest, BatchDeleteResponse as PbBatchDeleteResponse,
     BatchGetRequest as PbBatchGetRequest, BatchGetResponse as PbBatchGetResponse,
     BatchPutRequest as PbBatchPutRequest, BatchPutResponse as PbBatchPutResponse,
     CompareAndPutRequest as PbCompareAndPutRequest,
@@ -363,6 +364,78 @@ impl TryFrom<PbBatchPutResponse> for BatchPutResponse {
 impl BatchPutResponse {
     #[inline]
     pub fn new(res: PbBatchPutResponse) -> Self {
+        Self(res)
+    }
+
+    #[inline]
+    pub fn take_header(&mut self) -> Option<ResponseHeader> {
+        self.0.header.take().map(ResponseHeader::new)
+    }
+
+    #[inline]
+    pub fn take_prev_kvs(&mut self) -> Vec<KeyValue> {
+        self.0.prev_kvs.drain(..).map(KeyValue::new).collect()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BatchDeleteRequest {
+    pub keys: Vec<Vec<u8>>,
+    /// If prev_kv is set, gets the previous key-value pairs before deleting it.
+    /// The previous key-value pairs will be returned in the batch delete response.
+    pub prev_kv: bool,
+}
+
+impl From<BatchDeleteRequest> for PbBatchDeleteRequest {
+    fn from(req: BatchDeleteRequest) -> Self {
+        Self {
+            header: None,
+            keys: req.keys,
+            prev_kv: req.prev_kv,
+        }
+    }
+}
+
+impl BatchDeleteRequest {
+    #[inline]
+    pub fn new() -> Self {
+        Self {
+            keys: vec![],
+            prev_kv: false,
+        }
+    }
+
+    #[inline]
+    pub fn add_key(mut self, key: impl Into<Vec<u8>>) -> Self {
+        self.keys.push(key.into());
+        self
+    }
+
+    /// If prev_kv is set, gets the previous key-value pair before deleting it.
+    /// The previous key-value pair will be returned in the batch delete response.
+    #[inline]
+    pub fn with_prev_kv(mut self) -> Self {
+        self.prev_kv = true;
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BatchDeleteResponse(PbBatchDeleteResponse);
+
+impl TryFrom<PbBatchDeleteResponse> for BatchDeleteResponse {
+    type Error = error::Error;
+
+    fn try_from(pb: PbBatchDeleteResponse) -> Result<Self> {
+        util::check_response_header(pb.header.as_ref())?;
+
+        Ok(Self::new(pb))
+    }
+}
+
+impl BatchDeleteResponse {
+    #[inline]
+    pub fn new(res: PbBatchDeleteResponse) -> Self {
         Self(res)
     }
 
@@ -826,6 +899,39 @@ mod tests {
         };
 
         let mut res = BatchPutResponse::new(pb_res);
+        assert!(res.take_header().is_none());
+        let kvs = res.take_prev_kvs();
+        assert_eq!(b"k1".to_vec(), kvs[0].key().to_vec());
+        assert_eq!(b"v1".to_vec(), kvs[0].value().to_vec());
+    }
+
+    #[test]
+    fn test_batch_delete_request_trans() {
+        let req = BatchDeleteRequest::new()
+            .add_key(b"test_key1".to_vec())
+            .add_key(b"test_key2".to_vec())
+            .add_key(b"test_key3".to_vec())
+            .with_prev_kv();
+
+        let into_req: PbBatchDeleteRequest = req.into();
+        assert!(into_req.header.is_none());
+        assert_eq!(&b"test_key1".to_vec(), into_req.keys.get(0).unwrap());
+        assert_eq!(&b"test_key2".to_vec(), into_req.keys.get(1).unwrap());
+        assert_eq!(&b"test_key3".to_vec(), into_req.keys.get(2).unwrap());
+        assert!(into_req.prev_kv);
+    }
+
+    #[test]
+    fn test_batch_delete_response_trans() {
+        let pb_res = PbBatchDeleteResponse {
+            header: None,
+            prev_kvs: vec![PbKeyValue {
+                key: b"k1".to_vec(),
+                value: b"v1".to_vec(),
+            }],
+        };
+
+        let mut res = BatchDeleteResponse::new(pb_res);
         assert!(res.take_header().is_none());
         let kvs = res.take_prev_kvs();
         assert_eq!(b"k1".to_vec(), kvs[0].key().to_vec());

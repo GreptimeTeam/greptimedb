@@ -1608,7 +1608,6 @@ dependencies = [
 name = "common-procedure"
 version = "0.1.1"
 dependencies = [
- "async-stream",
  "async-trait",
  "backon 0.4.0",
  "common-error",
@@ -3115,7 +3114,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=ff8c55bed0fa6e20577aa95af5b87f9c9e39b1e7#ff8c55bed0fa6e20577aa95af5b87f9c9e39b1e7"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=d3861c34f7920238869d0d4e50dc1e6b189d2a6b#d3861c34f7920238869d0d4e50dc1e6b189d2a6b"
 dependencies = [
  "prost",
  "tonic",
@@ -4582,13 +4581,11 @@ version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
- "bytes",
  "common-telemetry",
  "common-test-util",
  "futures",
  "lru 0.9.0",
  "opendal",
- "pin-project",
  "tokio",
  "uuid",
 ]
@@ -4627,9 +4624,9 @@ checksum = "0ab1bc2a289d34bd04a330323ac98a1b4bc82c9d9fcb1e66b63caa84da26b575"
 
 [[package]]
 name = "opendal"
-version = "0.30.4"
+version = "0.27.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc08c1c75e26f33f13f22c46b0c222132df5e12519fd67046ecf061b58e8c26f"
+checksum = "ef6f7b936f2f8483e19643357cb50d9ec9a49c506971ef69ca676913cf5afd91"
 dependencies = [
  "anyhow",
  "async-compat",
