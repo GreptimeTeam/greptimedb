@@ -6,7 +6,7 @@ set -e
 
 declare -r SCRIPT_DIR=$(cd $(dirname ${0}) >/dev/null 2>&1 && pwd)
 declare -r ROOT_DIR=$(dirname ${SCRIPT_DIR})
-declare -r STATIC_DIR="$ROOT_DIR/dashboard/static"
+declare -r STATIC_DIR="$ROOT_DIR/src/servers/dashboard"
 
 RELEASE_VERSION="$(cat $STATIC_DIR/VERSION)"
 
@@ -35,3 +35,5 @@ esac
 tar -xzf build.tar.gz -C "$STATIC_DIR"
 rm sha256.txt
 rm build.tar.gz
+
+echo "Successfully download dashboard assets to $STATIC_DIR"

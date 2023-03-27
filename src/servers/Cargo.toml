@@ -6,6 +6,7 @@ license.workspace = true
 
 [features]
 mem-prof = ["dep:common-mem-prof"]
+dashboard = []
 
 [dependencies]
 aide = { version = "0.9", features = ["axum"] }
@@ -29,7 +30,6 @@ common-recordbatch = { path = "../common/recordbatch" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
-dashboard = { path = "../../dashboard" }
 datatypes = { path = "../datatypes" }
 derive_builder = "0.12"
 digest = "0.10"
@@ -56,6 +56,7 @@ rand.workspace = true
 regex = "1.6"
 rustls = "0.20"
 rustls-pemfile = "1.0"
+rust-embed = { version = "6.6", features = ["debug-embed"] }
 schemars = "0.8"
 serde.workspace = true
 serde_json = "1.0"

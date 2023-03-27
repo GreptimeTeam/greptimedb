@@ -2106,13 +2106,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dashboard"
-version = "0.1.1"
-dependencies = [
- "rust-embed",
-]
-
-[[package]]
 name = "dashmap"
 version = "5.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6939,7 +6932,6 @@ dependencies = [
  "common-telemetry",
  "common-test-util",
  "common-time",
- "dashboard",
  "datatypes",
  "derive_builder 0.12.0",
  "digest",
@@ -6965,6 +6957,7 @@ dependencies = [
  "query",
  "rand",
  "regex",
+ "rust-embed",
  "rustls",
  "rustls-pemfile",
  "schemars",

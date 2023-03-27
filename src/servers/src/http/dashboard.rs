@@ -17,10 +17,14 @@ use axum::http::{header, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::Router;
 use common_telemetry::debug;
-use dashboard::Assets;
+use rust_embed::RustEmbed;
 use snafu::ResultExt;
 
 use crate::error::{BuildHttpResponseSnafu, Result};
+
+#[derive(RustEmbed)]
+#[folder = "dashboard/"]
+pub struct Assets;
 
 pub(crate) fn dashboard() -> Router {
     Router::new().fallback(static_handler)
