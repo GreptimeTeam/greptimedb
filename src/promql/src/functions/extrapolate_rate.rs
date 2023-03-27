@@ -114,7 +114,7 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
 
             // refer to functions.go L83-L110
             let mut result_value = values.last().unwrap() - values.first().unwrap();
-            if !IS_COUNTER {
+            if IS_COUNTER {
                 for window in values.windows(2) {
                     let prev = window[0];
                     let curr = window[1];
