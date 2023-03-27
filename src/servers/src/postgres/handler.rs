@@ -23,10 +23,10 @@ use common_recordbatch::RecordBatch;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::{Schema, SchemaRef};
 use futures::{future, stream, Stream, StreamExt};
-use pgwire::api::portal::Portal;
+use pgwire::api::portal::{Format, Portal};
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler, StatementOrPortal};
 use pgwire::api::results::{
-    DataRowEncoder, DescribeResponse, FieldFormat, FieldInfo, QueryResponse, Response, Tag,
+    DataRowEncoder, DescribeResponse, FieldInfo, QueryResponse, Response, Tag,
 };
 use pgwire::api::stmt::QueryParser;
 use pgwire::api::store::MemPortalStore;
@@ -53,7 +53,7 @@ impl SimpleQueryHandler for PostgresServerHandler {
         let mut results = Vec::with_capacity(outputs.len());
 
         for output in outputs {
-            let resp = output_to_query_response(output, FieldFormat::Text)?;
+            let resp = output_to_query_response(output, &Format::UnifiedText)?;
             results.push(resp);
         }
 
@@ -63,7 +63,7 @@ impl SimpleQueryHandler for PostgresServerHandler {
 
 fn output_to_query_response<'a>(
     output: Result<Output>,
-    field_format: FieldFormat,
+    field_format: &Format,
 ) -> PgWireResult<Response<'a>> {
     match output {
         Ok(Output::AffectedRows(rows)) => Ok(Response::Execution(Tag::new_for_execution(
@@ -89,7 +89,7 @@ fn output_to_query_response<'a>(
 fn recordbatches_to_query_response<'a, S>(
     recordbatches_stream: S,
     schema: SchemaRef,
-    field_format: FieldFormat,
+    field_format: &Format,
 ) -> PgWireResult<Response<'a>>
 where
     S: Stream<Item = RecordBatchResult<RecordBatch>> + Send + Unpin + 'static,
@@ -120,29 +120,24 @@ where
             })
         });
 
-    match field_format {
-        FieldFormat::Text => Ok(Response::Query(QueryResponse::new(
-            pg_schema,
-            data_row_stream,
-        ))),
-        FieldFormat::Binary => Ok(Response::Query(QueryResponse::new(
-            pg_schema,
-            data_row_stream,
-        ))),
-    }
+    Ok(Response::Query(QueryResponse::new(
+        pg_schema,
+        data_row_stream,
+    )))
 }
 
-fn schema_to_pg(origin: &Schema, field_format: FieldFormat) -> Result<Vec<FieldInfo>> {
+fn schema_to_pg(origin: &Schema, field_formats: &Format) -> Result<Vec<FieldInfo>> {
     origin
         .column_schemas()
         .iter()
-        .map(|col| {
+        .enumerate()
+        .map(|(idx, col)| {
             Ok(FieldInfo::new(
                 col.name.clone(),
                 None,
                 None,
                 type_gt_to_pg(&col.data_type)?,
-                field_format,
+                field_formats.format_for(idx),
             ))
         })
         .collect::<Result<Vec<FieldInfo>>>()
@@ -356,7 +351,7 @@ impl ExtendedQueryHandler for PostgresServerHandler {
             .await
             .remove(0);
 
-        output_to_query_response(output, FieldFormat::Binary)
+        output_to_query_response(output, portal.result_column_format())
     }
 
     async fn do_describe<C>(
@@ -367,12 +362,16 @@ impl ExtendedQueryHandler for PostgresServerHandler {
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
-        let (param_types, stmt) = match target {
+        let (param_types, stmt, format) = match target {
             StatementOrPortal::Statement(stmt) => {
                 let param_types = Some(stmt.parameter_types().clone());
-                (param_types, stmt.statement())
+                (param_types, stmt.statement(), &Format::UnifiedBinary)
             }
-            StatementOrPortal::Portal(portal) => (None, portal.statement().statement()),
+            StatementOrPortal::Portal(portal) => (
+                None,
+                portal.statement().statement(),
+                portal.result_column_format(),
+            ),
         };
         // get Statement part of the tuple
         let (stmt, _) = stmt;
@@ -383,7 +382,7 @@ impl ExtendedQueryHandler for PostgresServerHandler {
             .await
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?
         {
-            schema_to_pg(&schema, FieldFormat::Binary)
+            schema_to_pg(&schema, format)
                 .map(|fields| DescribeResponse::new(param_types, fields))
                 .map_err(|e| PgWireError::ApiError(Box::new(e)))
         } else {
@@ -396,7 +395,7 @@ impl ExtendedQueryHandler for PostgresServerHandler {
 mod test {
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::value::ListValue;
-    use pgwire::api::results::FieldInfo;
+    use pgwire::api::results::{FieldFormat, FieldInfo};
     use pgwire::api::Type;
 
     use super::*;
@@ -474,7 +473,7 @@ mod test {
             FieldInfo::new("dates".into(), None, None, Type::DATE, FieldFormat::Text),
         ];
         let schema = Schema::new(column_schemas);
-        let fs = schema_to_pg(&schema, FieldFormat::Text).unwrap();
+        let fs = schema_to_pg(&schema, &Format::UnifiedText).unwrap();
         assert_eq!(fs, pg_field_info);
     }
 
