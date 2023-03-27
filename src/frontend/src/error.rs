@@ -378,6 +378,12 @@ pub enum Error {
         #[snafu(backtrace)]
         source: table::error::Error,
     },
+
+    #[snafu(display("Failed to start script manager, source: {}", source))]
+    StartScriptManager {
+        #[snafu(backtrace)]
+        source: script::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -462,6 +468,8 @@ impl ErrorExt for Error {
                 source.status_code()
             }
             Error::UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
+
+            Error::StartScriptManager { source } => source.status_code(),
         }
     }
 

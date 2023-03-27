@@ -27,7 +27,7 @@ use datanode::datanode::{
     DatanodeOptions, FileConfig, ObjectStoreConfig, OssConfig, S3Config, StorageConfig, WalConfig,
 };
 use datanode::error::{CreateTableSnafu, Result};
-use datanode::instance::{Instance, InstanceRef};
+use datanode::instance::Instance;
 use datanode::sql::SqlHandler;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema};
@@ -255,16 +255,9 @@ pub async fn create_test_table(
     Ok(())
 }
 
-fn build_frontend_instance(datanode_instance: InstanceRef) -> FeInstance {
-    let mut frontend_instance = FeInstance::new_standalone(datanode_instance.clone());
-    frontend_instance.set_script_handler(datanode_instance);
-    frontend_instance
-}
-
 pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router, TestGuard) {
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
     let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
-    instance.start().await.unwrap();
     create_test_table(
         instance.catalog_manager(),
         instance.sql_handler(),
@@ -272,9 +265,13 @@ pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router
     )
     .await
     .unwrap();
+    let frontend_instance = FeInstance::try_new_standalone(instance.clone())
+        .await
+        .unwrap();
+    instance.start().await.unwrap();
     let http_server = HttpServerBuilder::new(HttpOptions::default())
         .with_sql_handler(ServerSqlQueryHandlerAdaptor::arc(Arc::new(
-            build_frontend_instance(instance.clone()),
+            frontend_instance,
         )))
         .with_grpc_handler(ServerGrpcQueryHandlerAdaptor::arc(instance.clone()))
         .with_metrics_handler(MetricsHandler)
@@ -288,7 +285,9 @@ pub async fn setup_test_http_app_with_frontend(
 ) -> (Router, TestGuard) {
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
     let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
-    let frontend = build_frontend_instance(instance.clone());
+    let frontend = FeInstance::try_new_standalone(instance.clone())
+        .await
+        .unwrap();
     instance.start().await.unwrap();
     create_test_table(
         frontend.catalog_manager(),
@@ -300,8 +299,8 @@ pub async fn setup_test_http_app_with_frontend(
     let frontend_ref = Arc::new(frontend);
     let http_server = HttpServerBuilder::new(HttpOptions::default())
         .with_sql_handler(ServerSqlQueryHandlerAdaptor::arc(frontend_ref.clone()))
-        .with_grpc_handler(ServerGrpcQueryHandlerAdaptor::arc(frontend_ref))
-        .with_script_handler(instance.clone())
+        .with_grpc_handler(ServerGrpcQueryHandlerAdaptor::arc(frontend_ref.clone()))
+        .with_script_handler(frontend_ref)
         .build();
     let app = http_server.make_app();
     (app, guard)
@@ -313,7 +312,9 @@ pub async fn setup_test_prom_app_with_frontend(
 ) -> (Router, TestGuard) {
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
     let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
-    let frontend = build_frontend_instance(instance.clone());
+    let frontend = FeInstance::try_new_standalone(instance.clone())
+        .await
+        .unwrap();
     instance.start().await.unwrap();
     create_test_table(
         frontend.catalog_manager(),
@@ -335,7 +336,6 @@ pub async fn setup_grpc_server(
 
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
     let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
-    instance.start().await.unwrap();
 
     let runtime = Arc::new(
         RuntimeBuilder::default()
@@ -347,7 +347,10 @@ pub async fn setup_grpc_server(
 
     let fe_grpc_addr = format!("127.0.0.1:{}", get_port());
 
-    let fe_instance = frontend::instance::Instance::new_standalone(instance.clone());
+    let fe_instance = FeInstance::try_new_standalone(instance.clone())
+        .await
+        .unwrap();
+    instance.start().await.unwrap();
     let fe_instance_ref = Arc::new(fe_instance);
     let fe_grpc_server = Arc::new(GrpcServer::new(
         ServerGrpcQueryHandlerAdaptor::arc(fe_instance_ref),

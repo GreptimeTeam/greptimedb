@@ -58,11 +58,9 @@ use crate::error::{
     NewCatalogSnafu, OpenLogStoreSnafu, RecoverProcedureSnafu, Result, ShutdownInstanceSnafu,
 };
 use crate::heartbeat::HeartbeatTask;
-use crate::script::ScriptExecutor;
 use crate::sql::{SqlHandler, SqlRequest};
 
 mod grpc;
-mod script;
 pub mod sql;
 
 pub(crate) type DefaultEngine = MitoEngine<EngineImpl<RaftEngineLogStore>>;
@@ -72,7 +70,6 @@ pub struct Instance {
     pub(crate) query_engine: QueryEngineRef,
     pub(crate) sql_handler: SqlHandler,
     pub(crate) catalog_manager: CatalogManagerRef,
-    pub(crate) script_executor: ScriptExecutor,
     pub(crate) table_id_provider: Option<TableIdProviderRef>,
     pub(crate) heartbeat_task: Option<HeartbeatTask>,
     procedure_manager: Option<ProcedureManagerRef>,
@@ -170,8 +167,6 @@ impl Instance {
 
         let factory = QueryEngineFactory::new(catalog_manager.clone());
         let query_engine = factory.query_engine();
-        let script_executor =
-            ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?;
 
         let heartbeat_task = match opts.mode {
             Mode::Standalone => None,
@@ -205,7 +200,6 @@ impl Instance {
                 procedure_manager.clone(),
             ),
             catalog_manager,
-            script_executor,
             heartbeat_task,
             table_id_provider,
             procedure_manager,
