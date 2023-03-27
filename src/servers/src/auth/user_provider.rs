@@ -108,7 +108,7 @@ impl UserProvider for StaticUserProvider {
         match input_id {
             Identity::UserId(username, _) => {
                 ensure!(
-                    username.len() > 0,
+                    !username.is_empty(),
                     IllegalParamSnafu {
                         msg: "blank username"
                     }
@@ -120,7 +120,7 @@ impl UserProvider for StaticUserProvider {
                 match input_pwd {
                     Password::PlainText(pwd) => {
                         ensure!(
-                            pwd.len() > 0,
+                            !pwd.is_empty(),
                             IllegalParamSnafu {
                                 msg: "blank password"
                             }
@@ -136,7 +136,7 @@ impl UserProvider for StaticUserProvider {
                     }
                     Password::MysqlNativePassword(auth_data, salt) => {
                         ensure!(
-                            auth_data.len() > 0,
+                            auth_data.len() == 20,
                             IllegalParamSnafu {
                                 msg: "blank password"
                             }
