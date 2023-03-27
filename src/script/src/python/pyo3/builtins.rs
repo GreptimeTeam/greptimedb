@@ -131,7 +131,7 @@ fn dataframe(py: Python) -> PyResult<PyDataFrame> {
     let globals = get_globals(py)?;
     let df = globals
         .get_item("__dataframe__")
-        .ok_or(PyKeyError::new_err("No __dataframe__ variable is found"))?
+        .ok_or_else(|| PyKeyError::new_err("No __dataframe__ variable is found"))?
         .extract::<PyDataFrame>()?;
     Ok(df)
 }
@@ -142,7 +142,7 @@ pub(crate) fn query_engine(py: Python) -> PyResult<PyQueryEngine> {
     let globals = get_globals(py)?;
     let query = globals
         .get_item("__query__")
-        .ok_or(PyKeyError::new_err("No __query__ variable is found"))?
+        .ok_or_else(|| PyKeyError::new_err("No __query__ variable is found"))?
         .extract::<PyQueryEngine>()?;
     Ok(query)
 }

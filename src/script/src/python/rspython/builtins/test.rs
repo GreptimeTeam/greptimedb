@@ -239,7 +239,7 @@ impl PyValue {
                 let vec_f64 = vec_f64
                     .as_any()
                     .downcast_ref::<Float64Array>()
-                    .ok_or(format!("Can't cast {vec_f64:#?} to Float64Array!"))?;
+                    .ok_or_else(|| format!("Can't cast {vec_f64:#?} to Float64Array!"))?;
                 let ret = vec_f64.into_iter().collect::<Vec<_>>();
                 if ret.iter().all(|x| x.is_some()) {
                     Ok(Self::FloatVec(
@@ -255,14 +255,14 @@ impl PyValue {
                 let vec_i64 = vec_int
                     .as_any()
                     .downcast_ref::<Int64Array>()
-                    .ok_or(format!("Can't cast {vec_int:#?} to Int64Array!"))?;
+                    .ok_or_else(|| format!("Can't cast {vec_int:#?} to Int64Array!"))?;
                 let ret: Vec<i64> = vec_i64
                     .into_iter()
                     .enumerate()
                     .map(|(idx, v)| {
-                        v.ok_or(format!(
-                            "No null element expected, found one in {idx} position"
-                        ))
+                        v.ok_or_else(|| {
+                            format!("No null element expected, found one in {idx} position")
+                        })
                     })
                     .collect::<Result<_, String>>()?;
                 Ok(Self::IntVec(ret))

@@ -244,12 +244,12 @@ pub(crate) fn check_args_anno_real_type(
         let anno_ty = copr.arg_types[idx].clone();
         let real_ty = arg.data_type();
         let arg_name = arg_names[idx].clone();
-        let col_idx = rb.schema.column_index_by_name(&arg_name).ok_or(
+        let col_idx = rb.schema.column_index_by_name(&arg_name).ok_or_else(|| {
             OtherSnafu {
                 reason: format!("Can't find column by name {arg_name}"),
             }
-            .build(),
-        )?;
+            .build()
+        })?;
         let is_nullable: bool = rb.schema.column_schemas()[col_idx].is_nullable();
         ensure!(
             anno_ty
