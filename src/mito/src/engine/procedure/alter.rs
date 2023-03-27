@@ -346,8 +346,26 @@ mod tests {
     use crate::engine::procedure::procedure_test_util::{self, TestEnv};
     use crate::table::test_util;
 
+    fn new_add_columns_req() -> AlterTableRequest {
+        let new_tag = ColumnSchema::new("my_tag", ConcreteDataType::string_datatype(), true);
+        let new_field = ColumnSchema::new("my_field", ConcreteDataType::string_datatype(), true);
+        let alter_kind = AlterKind::AddColumns {
+            columns: vec![
+                AddColumnRequest {
+                    column_schema: new_tag,
+                    is_key: true,
+                },
+                AddColumnRequest {
+                    column_schema: new_field,
+                    is_key: false,
+                },
+            ],
+        };
+        test_util::new_alter_request(alter_kind)
+    }
+
     #[tokio::test]
-    async fn test_add_column_by_procedure() {
+    async fn test_procedure_add_column() {
         common_telemetry::init_default_ut_logging();
 
         let TestEnv {
@@ -378,21 +396,7 @@ mod tests {
         let old_meta = &old_info.meta;
 
         // Alter the table.
-        let new_tag = ColumnSchema::new("my_tag", ConcreteDataType::string_datatype(), true);
-        let new_field = ColumnSchema::new("my_field", ConcreteDataType::string_datatype(), true);
-        let alter_kind = AlterKind::AddColumns {
-            columns: vec![
-                AddColumnRequest {
-                    column_schema: new_tag.clone(),
-                    is_key: true,
-                },
-                AddColumnRequest {
-                    column_schema: new_field.clone(),
-                    is_key: false,
-                },
-            ],
-        };
-        let request = test_util::new_alter_request(alter_kind);
+        let request = new_add_columns_req();
         let mut procedure = table_engine
             .alter_table_procedure(&engine_ctx, request.clone())
             .unwrap();
@@ -416,7 +420,72 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_rename_by_procedure() {
+    async fn test_procedure_drop_column() {
+        common_telemetry::init_default_ut_logging();
+
+        let TestEnv {
+            table_engine,
+            dir: _dir,
+        } = procedure_test_util::setup_test_engine("create_procedure").await;
+        let schema = Arc::new(test_util::schema_for_test());
+        let request = test_util::new_create_request(schema.clone());
+
+        let engine_ctx = EngineContext::default();
+        // Create table first.
+        let mut procedure = table_engine
+            .create_table_procedure(&engine_ctx, request.clone())
+            .unwrap();
+        procedure_test_util::execute_procedure_until_done(&mut procedure).await;
+
+        // Add columns.
+        let request = new_add_columns_req();
+        let mut procedure = table_engine
+            .alter_table_procedure(&engine_ctx, request.clone())
+            .unwrap();
+        procedure_test_util::execute_procedure_until_done(&mut procedure).await;
+
+        // Get metadata.
+        let table_ref = TableReference {
+            catalog: &request.catalog_name,
+            schema: &request.schema_name,
+            table: &request.table_name,
+        };
+        let table = table_engine
+            .get_table(&engine_ctx, &table_ref)
+            .unwrap()
+            .unwrap();
+        let old_info = table.table_info();
+        let old_meta = &old_info.meta;
+
+        // Then remove memory and my_field from the table.
+        let alter_kind = AlterKind::DropColumns {
+            names: vec![String::from("memory"), String::from("my_field")],
+        };
+        let request = test_util::new_alter_request(alter_kind);
+        let mut procedure = table_engine
+            .alter_table_procedure(&engine_ctx, request.clone())
+            .unwrap();
+        procedure_test_util::execute_procedure_until_done(&mut procedure).await;
+
+        // Validate.
+        let new_info = table.table_info();
+        let new_meta = &new_info.meta;
+        let new_schema = &new_meta.schema;
+
+        let remaining_names: Vec<String> = new_schema
+            .column_schemas()
+            .iter()
+            .map(|column_schema| column_schema.name.clone())
+            .collect();
+        assert_eq!(&["host", "cpu", "ts", "my_tag"], &remaining_names[..]);
+        assert_eq!(&[0, 3], &new_meta.primary_key_indices[..]);
+        assert_eq!(&[1, 2], &new_meta.value_indices[..]);
+        assert_eq!(new_schema.version(), old_meta.schema.version() + 1);
+        assert_eq!(new_meta.region_numbers, old_meta.region_numbers);
+    }
+
+    #[tokio::test]
+    async fn test_procedure_rename_table() {
         common_telemetry::init_default_ut_logging();
 
         let TestEnv {
