@@ -610,7 +610,7 @@ pub(crate) mod greptime_builtin {
             ApproxDistinct,
             vm,
             &[values.to_arrow_array()],
-            values.to_arrow_array().data_type(),
+            values.arrow_data_type(),
             expr0
         );
     }
@@ -621,7 +621,7 @@ pub(crate) mod greptime_builtin {
             Median,
             vm,
             &[values.to_arrow_array()],
-            values.to_arrow_array().data_type(),
+            values.arrow_data_type(),
             expr0
         );
     }
@@ -635,7 +635,7 @@ pub(crate) mod greptime_builtin {
         ApproxMedian,
         vm,
         &[values.to_arrow_array()],
-        values.to_arrow_array().data_type(),
+        values.arrow_data_type(),
         expr0
     );
     }
@@ -656,7 +656,7 @@ pub(crate) mod greptime_builtin {
                     Arc::new(percent) as _,
                 ],
                 "ApproxPercentileCont",
-                (values.to_arrow_array().data_type()).clone(),
+                values.arrow_data_type(),
             )
             .map_err(|err| from_df_err(err, vm))?,
             &[values.to_arrow_array()],
@@ -671,7 +671,7 @@ pub(crate) mod greptime_builtin {
             ArrayAgg,
             vm,
             &[values.to_arrow_array()],
-            values.to_arrow_array().data_type(),
+            values.arrow_data_type(),
             expr0
         );
     }
@@ -683,7 +683,7 @@ pub(crate) mod greptime_builtin {
             Avg,
             vm,
             &[values.to_arrow_array()],
-            values.to_arrow_array().data_type(),
+            values.arrow_data_type(),
             expr0
         );
     }
@@ -698,7 +698,7 @@ pub(crate) mod greptime_builtin {
             Correlation,
             vm,
             &[arg0.to_arrow_array(), arg1.to_arrow_array()],
-            arg0.to_arrow_array().data_type(),
+            arg0.arrow_data_type(),
             expr0,
             expr1
         );
@@ -710,7 +710,7 @@ pub(crate) mod greptime_builtin {
             Count,
             vm,
             &[values.to_arrow_array()],
-            values.to_arrow_array().data_type(),
+            values.arrow_data_type(),
             expr0
         );
     }
@@ -725,7 +725,7 @@ pub(crate) mod greptime_builtin {
             Covariance,
             vm,
             &[arg0.to_arrow_array(), arg1.to_arrow_array()],
-            arg0.to_arrow_array().data_type(),
+            arg0.arrow_data_type(),
             expr0,
             expr1
         );
@@ -741,7 +741,7 @@ pub(crate) mod greptime_builtin {
             CovariancePop,
             vm,
             &[arg0.to_arrow_array(), arg1.to_arrow_array()],
-            arg0.to_arrow_array().data_type(),
+            arg0.arrow_data_type(),
             expr0,
             expr1
         );
@@ -753,7 +753,7 @@ pub(crate) mod greptime_builtin {
             Max,
             vm,
             &[values.to_arrow_array()],
-            values.to_arrow_array().data_type(),
+            values.arrow_data_type(),
             expr0
         );
     }
@@ -764,7 +764,7 @@ pub(crate) mod greptime_builtin {
             Min,
             vm,
             &[values.to_arrow_array()],
-            values.to_arrow_array().data_type(),
+            values.arrow_data_type(),
             expr0
         );
     }
@@ -775,7 +775,7 @@ pub(crate) mod greptime_builtin {
             Stddev,
             vm,
             &[values.to_arrow_array()],
-            values.to_arrow_array().data_type(),
+            values.arrow_data_type(),
             expr0
         );
     }
@@ -786,7 +786,7 @@ pub(crate) mod greptime_builtin {
             StddevPop,
             vm,
             &[values.to_arrow_array()],
-            values.to_arrow_array().data_type(),
+            values.arrow_data_type(),
             expr0
         );
     }
@@ -797,7 +797,7 @@ pub(crate) mod greptime_builtin {
             Sum,
             vm,
             &[values.to_arrow_array()],
-            values.to_arrow_array().data_type(),
+            values.arrow_data_type(),
             expr0
         );
     }
@@ -808,7 +808,7 @@ pub(crate) mod greptime_builtin {
             Variance,
             vm,
             &[values.to_arrow_array()],
-            values.to_arrow_array().data_type(),
+            values.arrow_data_type(),
             expr0
         );
     }
@@ -819,7 +819,7 @@ pub(crate) mod greptime_builtin {
             VariancePop,
             vm,
             &[values.to_arrow_array()],
-            values.to_arrow_array().data_type(),
+            values.arrow_data_type(),
             expr0
         );
     }

@@ -20,7 +20,6 @@ use std::result::Result as StdResult;
 use std::sync::{Arc, Weak};
 
 use common_recordbatch::{RecordBatch, RecordBatches};
-use datatypes::arrow::array::Array;
 use datatypes::arrow::compute;
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
@@ -243,8 +242,7 @@ pub(crate) fn check_args_anno_real_type(
     );
     for (idx, arg) in args.iter().enumerate() {
         let anno_ty = copr.arg_types[idx].clone();
-        let real_ty = arg.to_arrow_array().data_type().clone();
-        let real_ty = ConcreteDataType::from_arrow_type(&real_ty);
+        let real_ty = arg.data_type();
         let arg_name = arg_names[idx].clone();
         let col_idx = rb.schema.column_index_by_name(&arg_name).ok_or(
             OtherSnafu {

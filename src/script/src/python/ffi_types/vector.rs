@@ -25,7 +25,7 @@ use datatypes::arrow::compute::kernels::{arithmetic, comparison};
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::arrow::error::Result as ArrowResult;
 use datatypes::data_type::DataType;
-use datatypes::prelude::Value;
+use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::value::{self, OrderedFloat};
 use datatypes::vectors::{Helper, NullVector, VectorRef};
 #[cfg(feature = "pyo3_backend")]
@@ -136,6 +136,16 @@ impl AsRef<PyVector> for PyVector {
 }
 
 impl PyVector {
+    #[inline]
+    pub(crate) fn data_type(&self) -> ConcreteDataType {
+        self.vector.data_type()
+    }
+
+    #[inline]
+    pub(crate) fn arrow_data_type(&self) -> ArrowDataType {
+        self.vector.data_type().as_arrow_type()
+    }
+
     pub(crate) fn vector_and(left: &Self, right: &Self) -> Result<Self, String> {
         let left = left.to_arrow_array();
         let right = right.to_arrow_array();
