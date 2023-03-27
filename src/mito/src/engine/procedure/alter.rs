@@ -188,42 +188,39 @@ impl<S: StorageEngine> AlterMitoTable<S> {
 
         let Some(alter_op) = create_alter_operation(table_name, &self.data.request.alter_kind, &mut new_info.meta)
             .map_err(Error::from_error_ext)? else {
+                // Don't need to alter the region.
+                self.data.state = AlterTableState::UpdateTableManifest;
+
                 return Ok(Status::executing(true));
             };
 
-        if let Some(alter_op) = create_alter_operation(
-            table_name,
-            &self.data.request.alter_kind,
-            &mut new_info.meta,
-        )
-        .map_err(Error::from_error_ext)?
-        {
-            let regions = self.table.regions();
-            // For each region, alter it if its version is not updated.
-            for region in regions.values() {
-                let region_meta = region.in_memory_metadata();
-                if u64::from(region_meta.version()) > self.data.table_version {
-                    // Region is already altered.
-                    continue;
-                }
-
-                let alter_req = AlterRequest {
-                    operation: alter_op.clone(),
-                    version: region_meta.version(),
-                };
-                // Alter the region.
-                logging::debug!(
-                    "start altering region {} of table {}, with request {:?}",
-                    region.name(),
-                    table_name,
-                    alter_req,
-                );
-                region
-                    .alter(alter_req)
-                    .await
-                    .map_err(Error::from_error_ext)?;
+        let regions = self.table.regions();
+        // For each region, alter it if its version is not updated.
+        for region in regions.values() {
+            let region_meta = region.in_memory_metadata();
+            if u64::from(region_meta.version()) > self.data.table_version {
+                // Region is already altered.
+                continue;
             }
+
+            let alter_req = AlterRequest {
+                operation: alter_op.clone(),
+                version: region_meta.version(),
+            };
+            // Alter the region.
+            logging::debug!(
+                "start altering region {} of table {}, with request {:?}",
+                region.name(),
+                table_name,
+                alter_req,
+            );
+            region
+                .alter(alter_req)
+                .await
+                .map_err(Error::from_error_ext)?;
         }
+
+        self.data.state = AlterTableState::UpdateTableManifest;
 
         Ok(Status::executing(true))
     }
@@ -264,6 +261,15 @@ impl<S: StorageEngine> AlterMitoTable<S> {
 
         // Update in memory metadata of the table.
         self.table.set_table_info(new_info.clone());
+
+        // Rename key in tables map.
+        if let AlterKind::RenameTable { new_table_name } = &self.data.request.alter_kind {
+            let mut table_ref = self.data.table_ref();
+            let mut tables = self.engine_inner.tables.write().unwrap();
+            tables.remove(&table_ref.to_string());
+            table_ref.table = new_table_name.as_str();
+            tables.insert(table_ref.to_string(), self.table.clone());
+        }
 
         Ok(Status::Done)
     }
@@ -326,5 +332,86 @@ impl AlterTableData {
             schema: &self.request.schema_name,
             table: &self.request.table_name,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+    use table::engine::{EngineContext, TableEngine, TableEngineProcedure};
+    use table::requests::AddColumnRequest;
+
+    use super::*;
+    use crate::engine::procedure::procedure_test_util::{self, TestEnv};
+    use crate::table::test_util;
+
+    #[tokio::test]
+    async fn test_alter_table_procedure() {
+        common_telemetry::init_default_ut_logging();
+
+        let TestEnv {
+            table_engine,
+            dir: _dir,
+        } = procedure_test_util::setup_test_engine("create_procedure").await;
+        let schema = Arc::new(test_util::schema_for_test());
+        let request = test_util::new_create_request(schema.clone());
+
+        let engine_ctx = EngineContext::default();
+        // Create table first.
+        let mut procedure = table_engine
+            .create_table_procedure(&engine_ctx, request.clone())
+            .unwrap();
+        procedure_test_util::execute_procedure_until_done(&mut procedure).await;
+
+        // Get metadata of the created table.
+        let table_ref = TableReference {
+            catalog: &request.catalog_name,
+            schema: &request.schema_name,
+            table: &request.table_name,
+        };
+        let table = table_engine
+            .get_table(&engine_ctx, &table_ref)
+            .unwrap()
+            .unwrap();
+        let old_info = table.table_info();
+        let old_meta = &old_info.meta;
+
+        // Alter the table.
+        let new_tag = ColumnSchema::new("my_tag", ConcreteDataType::string_datatype(), true);
+        let new_field = ColumnSchema::new("my_field", ConcreteDataType::string_datatype(), true);
+        let alter_kind = AlterKind::AddColumns {
+            columns: vec![
+                AddColumnRequest {
+                    column_schema: new_tag.clone(),
+                    is_key: true,
+                },
+                AddColumnRequest {
+                    column_schema: new_field.clone(),
+                    is_key: false,
+                },
+            ],
+        };
+        let request = test_util::new_alter_request(alter_kind);
+        let mut procedure = table_engine
+            .alter_table_procedure(&engine_ctx, request.clone())
+            .unwrap();
+        procedure_test_util::execute_procedure_until_done(&mut procedure).await;
+
+        // Validate.
+        let table = table_engine
+            .get_table(&engine_ctx, &table_ref)
+            .unwrap()
+            .unwrap();
+        let new_info = table.table_info();
+        let new_meta = &new_info.meta;
+        let new_schema = &new_meta.schema;
+
+        assert_eq!(&[0, 4], &new_meta.primary_key_indices[..]);
+        assert_eq!(&[1, 2, 3, 5], &new_meta.value_indices[..]);
+        assert!(new_schema.column_schema_by_name("my_tag").is_some());
+        assert!(new_schema.column_schema_by_name("my_field").is_some());
+        assert_eq!(new_schema.version(), schema.version() + 1);
+        assert_eq!(new_meta.next_column_id, old_meta.next_column_id + 2);
     }
 }

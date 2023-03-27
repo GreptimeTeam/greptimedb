@@ -136,7 +136,7 @@ pub struct OpenTableRequest {
 }
 
 /// Alter table request
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlterTableRequest {
     pub catalog_name: String,
     pub schema_name: String,

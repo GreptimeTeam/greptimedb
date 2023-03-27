@@ -47,7 +47,7 @@ use table::{error as table_error, Result as TableResult, Table};
 use tokio::sync::Mutex;
 
 use crate::config::EngineConfig;
-use crate::engine::procedure::CreateMitoTable;
+use crate::engine::procedure::{AlterMitoTable, CreateMitoTable};
 use crate::error::{
     self, BuildColumnDescriptorSnafu, BuildColumnFamilyDescriptorSnafu, BuildRegionDescriptorSnafu,
     BuildRowKeyDescriptorSnafu, InvalidPrimaryKeySnafu, InvalidRawSchemaSnafu,
@@ -167,6 +167,19 @@ impl<S: StorageEngine> TableEngineProcedure for MitoEngine<S> {
             .context(table_error::TableOperationSnafu)?;
 
         let procedure = Box::new(CreateMitoTable::new(request, self.inner.clone()));
+        Ok(procedure)
+    }
+
+    fn alter_table_procedure(
+        &self,
+        _ctx: &EngineContext,
+        request: AlterTableRequest,
+    ) -> TableResult<BoxedProcedure> {
+        let procedure = Box::new(
+            AlterMitoTable::new(request, self.inner.clone())
+                .map_err(BoxedError::new)
+                .context(table_error::TableOperationSnafu)?,
+        );
         Ok(procedure)
     }
 }

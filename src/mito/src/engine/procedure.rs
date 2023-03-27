@@ -17,6 +17,7 @@ mod create;
 
 use std::sync::Arc;
 
+pub(crate) use alter::AlterMitoTable;
 use common_procedure::ProcedureManager;
 pub(crate) use create::CreateMitoTable;
 use store_api::storage::StorageEngine;
