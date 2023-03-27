@@ -312,7 +312,7 @@ impl ParquetReader {
             }
         });
 
-        ChunkStream::new(adapter, Box::pin(chunk_stream))
+        ChunkStream::new(self.file_handle.clone(), adapter, Box::pin(chunk_stream))
     }
 
     /// Builds time range row filter.
@@ -515,13 +515,23 @@ impl ArrowPredicate for PlainTimestampRowFilter {
 pub type SendableChunkStream = Pin<Box<dyn Stream<Item = Result<RecordBatch>> + Send>>;
 
 pub struct ChunkStream {
+    // Holds the file handle in the stream to avoid the purger purge it.
+    _file_handle: FileHandle,
     adapter: ReadAdapter,
     stream: SendableChunkStream,
 }
 
 impl ChunkStream {
-    pub fn new(adapter: ReadAdapter, stream: SendableChunkStream) -> Result<Self> {
-        Ok(Self { adapter, stream })
+    pub fn new(
+        file_handle: FileHandle,
+        adapter: ReadAdapter,
+        stream: SendableChunkStream,
+    ) -> Result<Self> {
+        Ok(Self {
+            _file_handle: file_handle,
+            adapter,
+            stream,
+        })
     }
 }
 
