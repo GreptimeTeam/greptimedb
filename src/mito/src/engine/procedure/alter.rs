@@ -280,7 +280,7 @@ impl<S: StorageEngine> AlterMitoTable<S> {
         }
 
         let table_name = &current_info.name;
-        let mut new_info = TableInfo::clone(&*current_info);
+        let mut new_info = TableInfo::clone(current_info);
         // setup new table info
         match &self.data.request.alter_kind {
             AlterKind::RenameTable { new_table_name } => {
@@ -347,7 +347,7 @@ mod tests {
     use crate::table::test_util;
 
     #[tokio::test]
-    async fn test_alter_table_procedure() {
+    async fn test_add_column_by_procedure() {
         common_telemetry::init_default_ut_logging();
 
         let TestEnv {
@@ -413,5 +413,59 @@ mod tests {
         assert!(new_schema.column_schema_by_name("my_field").is_some());
         assert_eq!(new_schema.version(), schema.version() + 1);
         assert_eq!(new_meta.next_column_id, old_meta.next_column_id + 2);
+    }
+
+    #[tokio::test]
+    async fn test_rename_by_procedure() {
+        common_telemetry::init_default_ut_logging();
+
+        let TestEnv {
+            table_engine,
+            dir: _dir,
+        } = procedure_test_util::setup_test_engine("create_procedure").await;
+        let schema = Arc::new(test_util::schema_for_test());
+        let create_request = test_util::new_create_request(schema.clone());
+
+        let engine_ctx = EngineContext::default();
+        // Create table first.
+        let mut procedure = table_engine
+            .create_table_procedure(&engine_ctx, create_request.clone())
+            .unwrap();
+        procedure_test_util::execute_procedure_until_done(&mut procedure).await;
+
+        // Get metadata of the created table.
+        let mut table_ref = TableReference {
+            catalog: &create_request.catalog_name,
+            schema: &create_request.schema_name,
+            table: &create_request.table_name,
+        };
+        let table = table_engine
+            .get_table(&engine_ctx, &table_ref)
+            .unwrap()
+            .unwrap();
+
+        // Rename the table.
+        let new_name = "another_table".to_string();
+        let alter_kind = AlterKind::RenameTable {
+            new_table_name: new_name.clone(),
+        };
+        let alter_request = test_util::new_alter_request(alter_kind);
+        let mut procedure = table_engine
+            .alter_table_procedure(&engine_ctx, alter_request.clone())
+            .unwrap();
+        procedure_test_util::execute_procedure_until_done(&mut procedure).await;
+
+        // Validate.
+        let info = table.table_info();
+        assert_eq!(new_name, info.name);
+        assert!(table_engine
+            .get_table(&engine_ctx, &table_ref)
+            .unwrap()
+            .is_none());
+        table_ref.table = &new_name;
+        assert!(table_engine
+            .get_table(&engine_ctx, &table_ref)
+            .unwrap()
+            .is_some());
     }
 }
