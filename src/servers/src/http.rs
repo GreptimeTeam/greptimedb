@@ -20,6 +20,8 @@ pub mod prometheus;
 pub mod script;
 
 mod admin;
+#[cfg(feature = "dashboard")]
+mod dashboard;
 #[cfg(feature = "mem-prof")]
 pub mod mem_prof;
 
@@ -476,6 +478,11 @@ impl HttpServer {
             "/health",
             routing::get(handler::health).post(handler::health),
         );
+
+        #[cfg(feature = "dashboard")]
+        {
+            router = router.nest("/dashboard", dashboard::dashboard());
+        }
 
         router
             // middlewares
