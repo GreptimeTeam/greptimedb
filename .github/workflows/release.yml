@@ -252,9 +252,8 @@ jobs:
 
       - name: Unzip the amd64 artifacts
         run: |
-          cd amd64
-          tar xvf greptime-linux-amd64-pyo3.tgz
-          rm greptime-linux-amd64-pyo3.tgz
+          tar xvf amd64/greptime-linux-amd64-pyo3.tgz -C amd64/ && rm amd64/greptime-linux-amd64-pyo3.tgz
+          cp -r amd64 docker/ci
 
       - name: Download arm64 binary
         id: download-arm64
@@ -267,9 +266,8 @@ jobs:
         id: unzip-arm64
         if: success() || steps.download-arm64.conclusion == 'success'
         run: |
-          cd arm64
-          tar xvf greptime-linux-arm64-pyo3.tgz
-          rm greptime-linux-arm64-pyo3.tgz
+          tar xvf arm64/greptime-linux-arm64-pyo3.tgz -C arm64/ && rm arm64/greptime-linux-arm64-pyo3.tgz
+          cp -r arm64 docker/ci
 
       - name: Build and push all
         uses: docker/build-push-action@v3
