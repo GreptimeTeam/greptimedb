@@ -114,7 +114,6 @@ impl Database {
                 schema: self.schema.clone(),
                 authorization: self.ctx.auth_header.clone(),
                 dbname: self.dbname.clone(),
-                ..Default::default()
             }),
             request: Some(Request::Insert(request)),
         };
@@ -197,7 +196,6 @@ impl Database {
                 schema: self.schema.clone(),
                 authorization: self.ctx.auth_header.clone(),
                 dbname: self.dbname.clone(),
-                ..Default::default()
             }),
             request: Some(request),
         };

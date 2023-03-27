@@ -306,3 +306,16 @@ fn testing_create_expr() -> CreateTableExpr {
         region_ids: vec![0],
     }
 }
+
+#[tokio::test]
+pub async fn test_health_check() {
+    let (addr, mut guard, fe_grpc_server) =
+        setup_grpc_server(StorageType::File, "auto_create_table").await;
+
+    let grpc_client = Client::with_urls(vec![addr]);
+    let r = grpc_client.health_check().await;
+    assert!(r.is_ok());
+
+    let _ = fe_grpc_server.shutdown().await;
+    guard.remove_all().await;
+}
