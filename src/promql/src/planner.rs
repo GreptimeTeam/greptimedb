@@ -49,8 +49,8 @@ use crate::extension_plan::{
     EmptyMetric, InstantManipulate, Millisecond, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
 use crate::functions::{
-    AbsentOverTime, AvgOverTime, CountOverTime, IDelta, Increase, LastOverTime, MaxOverTime,
-    MinOverTime, PresentOverTime, SumOverTime,
+    AbsentOverTime, AvgOverTime, CountOverTime, Delta, IDelta, Increase, LastOverTime, MaxOverTime,
+    MinOverTime, PresentOverTime, Rate, SumOverTime,
 };
 
 const LEFT_PLAN_JOIN_ALIAS: &str = "lhs";
@@ -673,6 +673,12 @@ impl PromPlanner {
         let value_column_pos = 0;
         let scalar_func = match func.name {
             "increase" => ScalarFunc::ExtrapolateUdf(Increase::scalar_udf(
+                self.ctx.range.context(ExpectRangeSelectorSnafu)?,
+            )),
+            "rate" => ScalarFunc::ExtrapolateUdf(Rate::scalar_udf(
+                self.ctx.range.context(ExpectRangeSelectorSnafu)?,
+            )),
+            "delta" => ScalarFunc::ExtrapolateUdf(Delta::scalar_udf(
                 self.ctx.range.context(ExpectRangeSelectorSnafu)?,
             )),
             "idelta" => ScalarFunc::Udf(IDelta::<false>::scalar_udf()),

@@ -26,6 +26,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Implementations of `rate`, `increase` and `delta` functions in PromQL.
+
 use std::fmt::Display;
 use std::sync::Arc;
 
@@ -41,21 +43,22 @@ use crate::extension_plan::Millisecond;
 use crate::functions::extract_array;
 use crate::range_array::RangeArray;
 
+pub type Delta = ExtrapolatedRate<false, false>;
+pub type Rate = ExtrapolatedRate<true, true>;
+pub type Increase = ExtrapolatedRate<true, false>;
+
 /// Part of the `extrapolatedRate` in Promql,
 /// from https://github.com/prometheus/prometheus/blob/6bdecf377cea8e856509914f35234e948c4fcb80/promql/functions.go#L66
 #[derive(Debug)]
-pub struct Increase {
+pub struct ExtrapolatedRate<const IS_COUNTER: bool, const IS_RATE: bool> {
+    /// Range duration in millisecond
     range_length: i64,
 }
 
-impl Increase {
+impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, IS_RATE> {
     /// Constructor. Other public usage should use [`scalar_udf`] instead.
     fn new(range_length: i64) -> Self {
         Self { range_length }
-    }
-
-    pub fn name() -> &'static str {
-        "prom_increase"
     }
 
     fn input_type() -> Vec<DataType> {
@@ -111,21 +114,27 @@ impl Increase {
 
             // refer to functions.go L83-L110
             let mut result_value = values.last().unwrap() - values.first().unwrap();
-            for window in values.windows(2) {
-                let prev = window[0];
-                let curr = window[1];
-                if curr < prev {
-                    result_value += prev
+            if !IS_COUNTER {
+                for window in values.windows(2) {
+                    let prev = window[0];
+                    let curr = window[1];
+                    if curr < prev {
+                        result_value += prev
+                    }
                 }
             }
 
-            let factor = Self::extrapolate_factor(
+            let mut factor = Self::extrapolate_factor(
                 timestamps,
                 end_ts,
                 self.range_length,
-                Some(*values.first().unwrap()),
-                Some(result_value),
+                *values.first().unwrap(),
+                result_value,
             );
+
+            if IS_RATE {
+                factor /= self.range_length as f64 / 1000.0;
+            }
 
             result_array.push(Some(result_value * factor));
         }
@@ -140,8 +149,8 @@ impl Increase {
         range_length: Millisecond,
         // the following two parameters are for counters.
         // see functions.go L121 - L127
-        first_value: Option<f64>,
-        result_value: Option<f64>,
+        first_value: f64,
+        result_value: f64,
     ) -> f64 {
         // result_value
         // refer to functions.go extrapolatedRate fn
@@ -161,14 +170,10 @@ impl Increase {
         // take the zero point as the start of the series,
         // thereby avoiding extrapolation to negative counter
         // values.
-        if let Some(first_value) = first_value {
-            if let Some(result_value) = result_value {
-                if result_value > 0.0 && first_value > 0.0 {
-                    let duration_to_zero = sampled_interval * (first_value / result_value);
-                    if duration_to_zero < duration_to_start {
-                        duration_to_start = duration_to_zero;
-                    }
-                }
+        if IS_COUNTER && result_value > 0.0 && first_value >= 0.0 {
+            let duration_to_zero = sampled_interval * (first_value / result_value);
+            if duration_to_zero < duration_to_start {
+                duration_to_start = duration_to_zero;
             }
         }
 
@@ -188,6 +193,13 @@ impl Increase {
 
         extrapolate_to_interval / sampled_interval
     }
+}
+
+// delta
+impl ExtrapolatedRate<false, false> {
+    pub fn name() -> &'static str {
+        "prom_delta"
+    }
 
     pub fn scalar_udf(range_length: i64) -> ScalarUDF {
         ScalarUDF {
@@ -202,7 +214,57 @@ impl Increase {
     }
 }
 
-impl Display for Increase {
+// rate
+impl ExtrapolatedRate<true, true> {
+    pub fn name() -> &'static str {
+        "prom_rate"
+    }
+
+    pub fn scalar_udf(range_length: i64) -> ScalarUDF {
+        ScalarUDF {
+            name: Self::name().to_string(),
+            signature: Signature::new(
+                TypeSignature::Exact(Self::input_type()),
+                Volatility::Immutable,
+            ),
+            return_type: Arc::new(|_| Ok(Arc::new(Self::return_type()))),
+            fun: Arc::new(move |input| Self::new(range_length).calc(input)),
+        }
+    }
+}
+
+// increase
+impl ExtrapolatedRate<true, false> {
+    pub fn name() -> &'static str {
+        "prom_increase"
+    }
+
+    pub fn scalar_udf(range_length: i64) -> ScalarUDF {
+        ScalarUDF {
+            name: Self::name().to_string(),
+            signature: Signature::new(
+                TypeSignature::Exact(Self::input_type()),
+                Volatility::Immutable,
+            ),
+            return_type: Arc::new(|_| Ok(Arc::new(Self::return_type()))),
+            fun: Arc::new(move |input| Self::new(range_length).calc(input)),
+        }
+    }
+}
+
+impl Display for ExtrapolatedRate<false, false> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PromQL Delta Function")
+    }
+}
+
+impl Display for ExtrapolatedRate<true, true> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PromQL Rate Function")
+    }
+}
+
+impl Display for ExtrapolatedRate<true, false> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("PromQL Increase Function")
     }
