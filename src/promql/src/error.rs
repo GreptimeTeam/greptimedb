@@ -94,6 +94,9 @@ pub enum Error {
         #[snafu(backtrace)]
         source: catalog::error::Error,
     },
+
+    #[snafu(display("Expect a range selector, but not found"))]
+    ExpectRangeSelector { backtrace: Backtrace },
 }
 
 impl ErrorExt for Error {
@@ -105,7 +108,8 @@ impl ErrorExt for Error {
             | UnsupportedExpr { .. }
             | UnexpectedToken { .. }
             | MultipleVector { .. }
-            | ExpectExpr { .. } => StatusCode::InvalidArguments,
+            | ExpectExpr { .. }
+            | ExpectRangeSelector { .. } => StatusCode::InvalidArguments,
 
             UnknownTable { .. }
             | DataFusionPlanning { .. }
