@@ -26,8 +26,9 @@ use sha1::Sha1;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::auth::{
-    Error, HashedPassword, Identity, InvalidConfigSnafu, IoSnafu, Password, Result, Salt,
-    UnsupportedPasswordTypeSnafu, UserNotFoundSnafu, UserPasswordMismatchSnafu, UserProvider,
+    Error, HashedPassword, Identity, IllegalParamSnafu, InvalidConfigSnafu, IoSnafu, Password,
+    Result, Salt, UnsupportedPasswordTypeSnafu, UserNotFoundSnafu, UserPasswordMismatchSnafu,
+    UserProvider,
 };
 
 pub const STATIC_USER_PROVIDER: &str = "static_user_provider";
@@ -106,12 +107,24 @@ impl UserProvider for StaticUserProvider {
     ) -> Result<UserInfo> {
         match input_id {
             Identity::UserId(username, _) => {
+                ensure!(
+                    username.len() > 0,
+                    IllegalParamSnafu {
+                        msg: "blank username"
+                    }
+                );
                 let save_pwd = self.users.get(username).context(UserNotFoundSnafu {
                     username: username.to_string(),
                 })?;
 
                 match input_pwd {
                     Password::PlainText(pwd) => {
+                        ensure!(
+                            pwd.len() > 0,
+                            IllegalParamSnafu {
+                                msg: "blank password"
+                            }
+                        );
                         return if save_pwd == pwd.as_bytes() {
                             Ok(UserInfo::new(username))
                         } else {
@@ -119,9 +132,15 @@ impl UserProvider for StaticUserProvider {
                                 username: username.to_string(),
                             }
                             .fail()
-                        }
+                        };
                     }
                     Password::MysqlNativePassword(auth_data, salt) => {
+                        ensure!(
+                            auth_data.len() > 0,
+                            IllegalParamSnafu {
+                                msg: "blank password"
+                            }
+                        );
                         auth_mysql(auth_data, salt, username, save_pwd)
                             .map(|_| UserInfo::new(username))
                     }
