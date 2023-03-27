@@ -33,7 +33,8 @@ pub(crate) fn register_procedure_loaders<S: StorageEngine>(
     procedure_manager: &dyn ProcedureManager,
 ) {
     // The procedure names are expected to be unique, so we just panic on error.
-    CreateMitoTable::register_loader(engine_inner, procedure_manager);
+    CreateMitoTable::register_loader(engine_inner.clone(), procedure_manager.clone());
+    AlterMitoTable::register_loader(engine_inner, procedure_manager);
 }
 
 #[cfg(test)]
