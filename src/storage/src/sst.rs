@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub(crate) mod parquet;
+mod stream_writer;
 
 use std::collections::HashMap;
 use std::fmt;
