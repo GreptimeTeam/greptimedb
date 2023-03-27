@@ -440,6 +440,9 @@ pub enum Error {
         #[snafu(backtrace)]
         source: common_time::error::Error,
     },
+
+    #[snafu(display("Failed to create a checkpoint: {}", msg))]
+    ManifestCheckpoint { msg: String, backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -484,6 +487,7 @@ impl ErrorExt for Error {
             | BatchCorrupted { .. }
             | DecodeArrow { .. }
             | EncodeArrow { .. }
+            | ManifestCheckpoint { .. }
             | ParseSchema { .. } => StatusCode::Unexpected,
 
             WriteParquet { .. }

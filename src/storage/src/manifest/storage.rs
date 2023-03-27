@@ -98,12 +98,23 @@ impl ManifestObjectStore {
         }
     }
 
+    #[inline]
     fn delta_file_path(&self, version: ManifestVersion) -> String {
         format!("{}{}", self.path, delta_file(version))
     }
 
+    #[inline]
     fn checkpoint_file_path(&self, version: ManifestVersion) -> String {
         format!("{}{}", self.path, checkpoint_file(version))
+    }
+
+    #[inline]
+    fn last_checkpoint_path(&self) -> String {
+        format!("{}{}", self.path, LAST_CHECKPOINT_FILE)
+    }
+
+    pub(crate) fn path(&self) -> &str {
+        &self.path
     }
 }
 
@@ -209,9 +220,7 @@ impl ManifestLogStorage for ManifestObjectStore {
             path: object.path(),
         })?;
 
-        let last_checkpoint = self
-            .object_store
-            .object(&format!("{}{}", self.path, LAST_CHECKPOINT_FILE));
+        let last_checkpoint = self.object_store.object(&self.last_checkpoint_path());
 
         let checkpoint_metadata = CheckpointMetadata {
             size: bytes.len(),
@@ -237,10 +246,35 @@ impl ManifestLogStorage for ManifestObjectStore {
         Ok(())
     }
 
-    async fn load_checkpoint(&self) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
-        let last_checkpoint = self
+    async fn load_checkpoint(
+        &self,
+        version: ManifestVersion,
+    ) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
+        let checkpoint = self
             .object_store
-            .object(&format!("{}{}", self.path, LAST_CHECKPOINT_FILE));
+            .object(&self.checkpoint_file_path(version));
+
+        Ok(Some((
+            version,
+            checkpoint.read().await.context(ReadObjectSnafu {
+                path: checkpoint.path(),
+            })?,
+        )))
+    }
+
+    async fn delete_checkpoint(&self, version: ManifestVersion) -> Result<()> {
+        let checkpoint = self
+            .object_store
+            .object(&self.checkpoint_file_path(version));
+        checkpoint.delete().await.context(DeleteObjectSnafu {
+            path: checkpoint.path(),
+        })?;
+
+        Ok(())
+    }
+
+    async fn load_last_checkpoint(&self) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
+        let last_checkpoint = self.object_store.object(&self.last_checkpoint_path());
 
         let checkpoint_exists = last_checkpoint.is_exist().await.context(ReadObjectSnafu {
             path: last_checkpoint.path(),
@@ -259,16 +293,7 @@ impl ManifestLogStorage for ManifestObjectStore {
                 checkpoint_metadata
             );
 
-            let checkpoint = self
-                .object_store
-                .object(&self.checkpoint_file_path(checkpoint_metadata.version));
-
-            Ok(Some((
-                checkpoint_metadata.version,
-                checkpoint.read().await.context(ReadObjectSnafu {
-                    path: checkpoint.path(),
-                })?,
-            )))
+            self.load_checkpoint(checkpoint_metadata.version).await
         } else {
             Ok(None)
         }
@@ -333,13 +358,13 @@ mod tests {
         assert!(it.next_log().await.unwrap().is_none());
 
         // test checkpoint
-        assert!(log_store.load_checkpoint().await.unwrap().is_none());
+        assert!(log_store.load_last_checkpoint().await.unwrap().is_none());
         log_store
             .save_checkpoint(3, "checkpoint".as_bytes())
             .await
             .unwrap();
 
-        let (v, checkpoint) = log_store.load_checkpoint().await.unwrap().unwrap();
+        let (v, checkpoint) = log_store.load_last_checkpoint().await.unwrap().unwrap();
         assert_eq!(checkpoint, "checkpoint".as_bytes());
         assert_eq!(3, v);
     }

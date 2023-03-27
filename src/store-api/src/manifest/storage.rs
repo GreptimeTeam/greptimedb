@@ -51,5 +51,14 @@ pub trait ManifestLogStorage {
     ) -> Result<(), Self::Error>;
 
     /// Load the latest checkpoint
-    async fn load_checkpoint(&self) -> Result<Option<(ManifestVersion, Vec<u8>)>, Self::Error>;
+    async fn load_last_checkpoint(&self)
+        -> Result<Option<(ManifestVersion, Vec<u8>)>, Self::Error>;
+    /// Delete the checkpoint by version
+    async fn delete_checkpoint(&self, version: ManifestVersion) -> Result<(), Self::Error>;
+
+    /// Load the checkpoint by version
+    async fn load_checkpoint(
+        &self,
+        version: ManifestVersion,
+    ) -> Result<Option<(ManifestVersion, Vec<u8>)>, Self::Error>;
 }

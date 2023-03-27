@@ -227,6 +227,25 @@ impl Version {
         self.flushed_sequence
     }
 
+    pub fn apply_checkpoint(
+        &mut self,
+        flushed_sequence: Option<SequenceNumber>,
+        manifest_version: ManifestVersion,
+        files: impl Iterator<Item = FileMeta>,
+    ) {
+        self.flushed_sequence = flushed_sequence.unwrap_or(self.flushed_sequence);
+        self.manifest_version = manifest_version;
+        let ssts = self.ssts.merge(files, std::iter::empty());
+        info!(
+            "After applying checkpoint, region: {}, flushed_sequence: {}, manifest_version: {}",
+            self.metadata.id(),
+            self.flushed_sequence,
+            self.manifest_version,
+        );
+
+        self.ssts = Arc::new(ssts);
+    }
+
     pub fn apply_edit(&mut self, edit: VersionEdit) {
         let flushed_sequence = edit.flushed_sequence.unwrap_or(self.flushed_sequence);
         if self.flushed_sequence < flushed_sequence {
@@ -249,7 +268,7 @@ impl Version {
             .merge(handles_to_add, edit.files_to_remove.into_iter());
 
         info!(
-            "After apply edit, region: {}, SST files: {:?}",
+            "After applying edit, region: {}, SST files: {:?}",
             self.metadata.id(),
             merged_ssts
         );

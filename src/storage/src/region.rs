@@ -37,7 +37,7 @@ use crate::error::{self, Error, Result};
 use crate::file_purger::FilePurgerRef;
 use crate::flush::{FlushSchedulerRef, FlushStrategyRef};
 use crate::manifest::action::{
-    RawRegionMetadata, RegionChange, RegionMetaAction, RegionMetaActionList,
+    RawRegionMetadata, RegionChange, RegionCheckpoint, RegionMetaAction, RegionMetaActionList,
 };
 use crate::manifest::region::RegionManifest;
 use crate::memtable::MemtableBuilderRef;
@@ -330,16 +330,69 @@ impl<S: LogStore> RegionImpl<S> {
         self.inner.shared.id()
     }
 
+    fn create_version_with_checkpoint(
+        checkpoint: RegionCheckpoint,
+        memtable_builder: &MemtableBuilderRef,
+        sst_layer: &AccessLayerRef,
+        file_purger: &FilePurgerRef,
+    ) -> Result<Option<Version>> {
+        if checkpoint.checkpoint.is_none() {
+            return Ok(None);
+        }
+        // Safety: it's safe to unwrap here, checking it above.
+        let s = checkpoint.checkpoint.unwrap();
+
+        let region = s.metadata.name.clone();
+        let region_metadata: RegionMetadata = s
+            .metadata
+            .try_into()
+            .context(error::InvalidRawRegionSnafu { region })?;
+
+        let memtable = memtable_builder.build(region_metadata.schema().clone());
+        let mut version = Version::with_manifest_version(
+            Arc::new(region_metadata),
+            checkpoint.last_version,
+            memtable,
+            sst_layer.clone(),
+            file_purger.clone(),
+        );
+
+        if let Some(v) = s.version {
+            version.apply_checkpoint(
+                v.flushed_sequence,
+                v.manifest_version,
+                v.files.into_values(),
+            );
+        }
+
+        Ok(Some(version))
+    }
+
     async fn recover_from_manifest(
         manifest: &RegionManifest,
         memtable_builder: &MemtableBuilderRef,
         sst_layer: &AccessLayerRef,
         file_purger: &FilePurgerRef,
     ) -> Result<(Option<Version>, RecoveredMetadataMap)> {
-        let (start, end) = Self::manifest_scan_range();
+        let checkpoint = manifest.last_checkpoint().await?;
+
+        let (start, end, mut version) = if let Some(checkpoint) = checkpoint {
+            (
+                checkpoint.last_version + 1,
+                manifest::MAX_VERSION,
+                Self::create_version_with_checkpoint(
+                    checkpoint,
+                    memtable_builder,
+                    sst_layer,
+                    file_purger,
+                )?,
+            )
+        } else {
+            (manifest::MIN_VERSION, manifest::MAX_VERSION, None)
+        };
+
         let mut iter = manifest.scan(start, end).await?;
 
-        let mut version = None;
         let mut actions = Vec::new();
         let mut last_manifest_version = manifest::MIN_VERSION;
         let mut recovered_metadata = BTreeMap::new();
@@ -387,18 +440,14 @@ impl<S: LogStore> RegionImpl<S> {
 
         assert!(actions.is_empty() || version.is_none());
 
-        if version.is_some() {
+        if let Some(version) = &version {
             // update manifest state after recovering
             let protocol = iter.last_protocol();
             manifest.update_state(last_manifest_version + 1, protocol.clone());
+            manifest.set_flushed_manifest_version(version.manifest_version());
         }
 
         Ok((version, recovered_metadata))
-    }
-
-    fn manifest_scan_range() -> (ManifestVersion, ManifestVersion) {
-        // TODO(dennis): use manifest version in WAL
-        (manifest::MIN_VERSION, manifest::MAX_VERSION)
     }
 
     fn replay_edit(
