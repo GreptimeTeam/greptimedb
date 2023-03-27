@@ -31,10 +31,11 @@ use crate::config::EngineConfig;
 use crate::error::Result;
 use crate::file_purger::{FilePurgeHandler, FilePurgeRequest};
 use crate::region::tests::{self, FileTesterBase};
-use crate::region::{CompactContext, RegionImpl};
+use crate::region::{CompactContext, FlushStrategyRef, RegionImpl};
 use crate::scheduler::rate_limit::BoxedRateLimitToken;
 use crate::scheduler::{Handler, LocalScheduler, SchedulerConfig};
 use crate::test_util::config_util;
+use crate::test_util::flush_switch::FlushSwitch;
 
 const REGION_NAME: &str = "region-compact-0";
 
@@ -71,6 +72,7 @@ async fn create_region_for_compaction<
     enable_version_column: bool,
     engine_config: EngineConfig,
     purge_handler: H,
+    flush_strategy: FlushStrategyRef,
     s3_bucket: Option<String>,
 ) -> (RegionImpl<RaftEngineLogStore>, ObjectStore) {
     let metadata = tests::new_metadata(REGION_NAME, enable_version_column);
@@ -84,6 +86,8 @@ async fn create_region_for_compaction<
     )
     .await;
     store_config.engine_config = Arc::new(engine_config);
+    store_config.flush_strategy = flush_strategy;
+
     let picker = SimplePicker::default();
     let handler = CompactionHandler::new(picker);
     let config = SchedulerConfig::default();
@@ -118,6 +122,12 @@ impl Handler for MockFilePurgeHandler {
         token: BoxedRateLimitToken,
         finish_notifier: Arc<Notify>,
     ) -> Result<()> {
+        logging::info!(
+            "Try to delete file: {:?}, num_deleted: {:?}",
+            req.file_id,
+            self.num_deleted
+        );
+
         let handler = FilePurgeHandler;
         handler
             .handle_request(req, token, finish_notifier)
@@ -154,6 +164,7 @@ impl CompactionTester {
     async fn new(
         store_dir: &str,
         engine_config: EngineConfig,
+        flush_strategy: FlushStrategyRef,
         s3_bucket: Option<String>,
     ) -> CompactionTester {
         let purge_handler = MockFilePurgeHandler::default();
@@ -162,6 +173,7 @@ impl CompactionTester {
             false,
             engine_config.clone(),
             purge_handler.clone(),
+            flush_strategy,
             s3_bucket,
         )
         .await;
@@ -224,24 +236,23 @@ async fn compact_during_read(s3_bucket: Option<String>) {
             max_files_in_l0: 100,
             ..Default::default()
         },
+        Arc::new(FlushSwitch::default()),
         s3_bucket,
     )
     .await;
 
-    let expect: Vec<_> = (0..2048).map(|v| (v, Some(v))).collect();
+    let expect: Vec<_> = (0..200).map(|v| (v, Some(v))).collect();
     // Put elements so we have content to flush (In SST1).
-    tester.put(&expect[0..1024]).await;
+    tester.put(&expect[0..100]).await;
 
     // Flush content to SST1.
     tester.flush(None).await;
 
     // Put element (In SST2).
-    tester.put(&expect[1024..2048]).await;
+    tester.put(&expect[100..200]).await;
 
     // Flush content to SST2.
     tester.flush(None).await;
-
-    logging::info!("Create reader");
 
     tester.base_mut().read_ctx.batch_size = 1;
     // Create a reader.
@@ -249,21 +260,19 @@ async fn compact_during_read(s3_bucket: Option<String>) {
 
     assert_eq!(0, tester.purge_handler.num_deleted());
 
-    logging::info!("Compact begin");
-
     // Trigger compaction.
     tester.compact().await;
-    // Wait until SST1 and SST2 are deleted.
-    tester.wait_until_deleted(2).await;
 
-    logging::info!("Collect reader begin");
+    // The files are still referenced.
+    assert_eq!(0, tester.purge_handler.num_deleted());
 
     // Read from the reader.
     let output = tester.base().collect_reader(reader).await;
 
-    logging::info!("Collect reader end");
-
     assert_eq!(expect.len(), output.len());
+
+    // Wait until SST1 and SST2 are deleted.
+    tester.wait_until_deleted(2).await;
 
     tester.clean_up().await;
 }
@@ -277,6 +286,8 @@ async fn test_compact_during_read_on_fs() {
 
 #[tokio::test]
 async fn test_compact_during_read_on_s3() {
+    common_telemetry::init_default_ut_logging();
+
     if let Ok(bucket) = env::var("GT_S3_BUCKET") {
         if !bucket.is_empty() {
             compact_during_read(Some(bucket)).await;
