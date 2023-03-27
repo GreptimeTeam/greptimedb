@@ -19,9 +19,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 use lru::LruCache;
-use opendal::ops::*;
+use opendal::ops::{OpDelete, OpList, OpRead, OpScan, OpWrite};
 use opendal::raw::oio::{Read, Reader, Write};
-use opendal::raw::*;
+use opendal::raw::{Accessor, Layer, LayeredAccessor, RpDelete, RpList, RpRead, RpScan, RpWrite};
 use opendal::{ErrorKind, Result};
 use tokio::sync::Mutex;
 
