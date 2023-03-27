@@ -122,7 +122,7 @@ pub trait TableEngineProcedure: Send + Sync {
         request: CreateTableRequest,
     ) -> Result<BoxedProcedure>;
 
-    /// Returns a procedure that alter table by specific `request`.
+    /// Returns a procedure that alters table by specific `request`.
     fn alter_table_procedure(
         &self,
         ctx: &EngineContext,

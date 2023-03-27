@@ -166,7 +166,11 @@ impl<S: StorageEngine> TableEngineProcedure for MitoEngine<S> {
             .map_err(BoxedError::new)
             .context(table_error::TableOperationSnafu)?;
 
-        let procedure = Box::new(CreateMitoTable::new(request, self.inner.clone()));
+        let procedure = Box::new(
+            CreateMitoTable::new(request, self.inner.clone())
+                .map_err(BoxedError::new)
+                .context(table_error::TableOperationSnafu)?,
+        );
         Ok(procedure)
     }
 
