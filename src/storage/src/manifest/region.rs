@@ -290,13 +290,9 @@ mod tests {
     async fn test_region_manifest_checkpoint() {
         common_telemetry::init_default_ut_logging();
         let tmp_dir = create_temp_dir("test_region_manifest_checkpoint");
-        let object_store = ObjectStore::new(
-            Fs::default()
-                .root(&tmp_dir.path().to_string_lossy())
-                .build()
-                .unwrap(),
-        )
-        .finish();
+        let mut builder = Fs::default();
+        builder.root(&tmp_dir.path().to_string_lossy());
+        let object_store = ObjectStore::new(builder).unwrap().finish();
 
         let manifest = RegionManifest::with_checkpointer("/manifest/", object_store);
 

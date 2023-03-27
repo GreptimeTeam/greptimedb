@@ -242,31 +242,27 @@ impl ManifestLogStorage for ManifestObjectStore {
         &self,
         version: ManifestVersion,
     ) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
+        let path = self.checkpoint_file_path(version);
         let checkpoint = self
             .object_store
-            .object(&self.checkpoint_file_path(version));
+            .read(&path)
+            .await
+            .context(ReadObjectSnafu { path })?;
 
-        Ok(Some((
-            version,
-            checkpoint.read().await.context(ReadObjectSnafu {
-                path: checkpoint.path(),
-            })?,
-        )))
+        Ok(Some((version, checkpoint)))
     }
 
     async fn delete_checkpoint(&self, version: ManifestVersion) -> Result<()> {
-        let checkpoint = self
-            .object_store
-            .object(&self.checkpoint_file_path(version));
-        checkpoint.delete().await.context(DeleteObjectSnafu {
-            path: checkpoint.path(),
-        })?;
-
+        let path = self.checkpoint_file_path(version);
+        self.object_store
+            .delete(&path)
+            .await
+            .context(DeleteObjectSnafu { path })?;
         Ok(())
     }
 
     async fn load_last_checkpoint(&self) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
-        let last_checkpoint = self.object_store.object(&self.last_checkpoint_path());
+        let last_checkpoint_path = self.last_checkpoint_path();
 
         let last_checkpoint_data = match self.object_store.read(&last_checkpoint_path).await {
             Ok(last_checkpoint_data) => last_checkpoint_data,
@@ -283,15 +279,12 @@ impl ManifestLogStorage for ManifestObjectStore {
         let checkpoint_metadata = CheckpointMetadata::decode(&last_checkpoint_data)?;
 
         logging::debug!(
-            "Load checkpoint in path: {},  metadata: {:?}",
+            "Load checkpoint in path: {}, metadata: {:?}",
             last_checkpoint_path,
             checkpoint_metadata
         );
 
         self.load_checkpoint(checkpoint_metadata.version).await
-        } else {
-            Ok(None)
-        }
     }
 }
 
