@@ -36,7 +36,7 @@ use crate::util;
 const DATANODE_ADDR: &str = "127.0.0.1:4100";
 const METASRV_ADDR: &str = "127.0.0.1:3002";
 const SERVER_ADDR: &str = "127.0.0.1:4001";
-const SERVER_LOG_FILE: &str = "/tmp/greptime-sqlness.log";
+const STANDALONE_LOG_FILE: &str = "/tmp/greptime-sqlness-standalone.log";
 const METASRV_LOG_FILE: &str = "/tmp/greptime-sqlness-metasrv.log";
 const FRONTEND_LOG_FILE: &str = "/tmp/greptime-sqlness-frontend.log";
 const DATANODE_LOG_FILE: &str = "/tmp/greptime-sqlness-datanode.log";
@@ -73,43 +73,16 @@ impl EnvController for Env {
 #[allow(clippy::print_stdout)]
 impl Env {
     pub async fn start_standalone() -> GreptimeDB {
-        // Build the DB with `cargo build --bin greptime`
-        println!("Going to build the DB...");
-        let cargo_build_result = Command::new("cargo")
-            .current_dir(util::get_workspace_root())
-            .args(["build", "--bin", "greptime"])
-            .stdout(Stdio::null())
-            .output()
-            .await
-            .expect("Failed to start GreptimeDB")
-            .status;
-        if !cargo_build_result.success() {
-            panic!("Failed to build GreptimeDB (`cargo build` fails)");
-        }
-        println!("Build finished, starting...");
+        Self::build_db().await;
 
-        // Open log file (build logs will be truncated).
-        let log_file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(SERVER_LOG_FILE)
-            .unwrap_or_else(|_| panic!("Cannot open log file at {SERVER_LOG_FILE}"));
-
-        let conf = Self::generate_standalone_config_file();
-        // Start the DB
-        let server_process = Command::new("./greptime")
-            .current_dir(util::get_binary_dir("debug"))
-            .args(["--log-level=debug", "standalone", "start", "-c", &conf])
-            .stdout(log_file)
-            .spawn()
-            .expect("Failed to start the DB");
+        let mut server_process = Self::start_server("standalone", true);
 
         let is_up = util::check_port(SERVER_ADDR.parse().unwrap(), Duration::from_secs(10)).await;
         if !is_up {
+            Env::stop_server(&mut server_process).await;
             panic!("Server doesn't up in 10 seconds, quit.")
         }
-        println!("Started, going to test. Log will be write to {SERVER_LOG_FILE}");
+        println!("Started, going to test. Log will be write to {STANDALONE_LOG_FILE}");
 
         let client = Client::with_urls(vec![SERVER_ADDR]);
         let db = DB::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
@@ -122,54 +95,15 @@ impl Env {
         }
     }
 
-    fn generate_standalone_config_file() -> String {
-        let mut tt = TinyTemplate::new();
-
-        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        path.push("../conf/standalone-test.toml.template");
-        let template = std::fs::read_to_string(path).unwrap();
-        tt.add_template("standalone", &template).unwrap();
-
-        #[derive(Serialize)]
-        struct Context {
-            wal_dir: String,
-            data_dir: String,
-        }
-
-        let current_time = common_time::util::current_time_millis();
-        let greptimedb_dir = format!("/tmp/greptimedb-{current_time}");
-        let ctx = Context {
-            wal_dir: format!("{greptimedb_dir}/wal/"),
-            data_dir: format!("{greptimedb_dir}/data/"),
-        };
-        let rendered = tt.render("standalone", &ctx).unwrap();
-
-        let conf_file = format!("/tmp/standalone-{current_time}.toml");
-        println!("Generating standalone config file in {conf_file}, full content:\n{rendered}");
-        std::fs::write(&conf_file, rendered).unwrap();
-
-        conf_file
-    }
-
     pub async fn start_distributed() -> GreptimeDB {
-        let cargo_build_result = Command::new("cargo")
-            .current_dir(util::get_workspace_root())
-            .args(["build", "--bin", "greptime"])
-            .stdout(Stdio::null())
-            .output()
-            .await
-            .expect("Failed to start GreptimeDB")
-            .status;
-        if !cargo_build_result.success() {
-            panic!("Failed to build GreptimeDB (`cargo build` fails)");
-        }
+        Self::build_db().await;
 
         // start a distributed GreptimeDB
-        let mut meta_server = Env::start_server("metasrv");
+        let mut meta_server = Env::start_server("metasrv", true);
         // wait for election
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        let mut frontend = Env::start_server("frontend");
-        let mut datanode = Env::start_server("datanode");
+        let mut frontend = Env::start_server("frontend", true);
+        let mut datanode = Env::start_server("datanode", true);
 
         for addr in [DATANODE_ADDR, METASRV_ADDR, SERVER_ADDR].iter() {
             let is_up = util::check_port(addr.parse().unwrap(), Duration::from_secs(10)).await;
@@ -197,46 +131,56 @@ impl Env {
         let _ = process.wait().await;
     }
 
-    fn start_server(subcommand: &str) -> Child {
+    fn start_server(subcommand: &str, truncate_log: bool) -> Child {
         let log_file_name = match subcommand {
             "datanode" => DATANODE_LOG_FILE,
             "frontend" => FRONTEND_LOG_FILE,
             "metasrv" => METASRV_LOG_FILE,
+            "standalone" => STANDALONE_LOG_FILE,
             _ => panic!("Unexpected subcommand: {subcommand}"),
         };
         let log_file = OpenOptions::new()
             .create(true)
             .write(true)
-            .truncate(true)
+            .truncate(truncate_log)
             .open(log_file_name)
             .unwrap_or_else(|_| panic!("Cannot open log file at {log_file_name}"));
 
-        let mut args = vec![subcommand.to_string(), "start".to_string()];
-        if subcommand == "frontend" {
-            args.push("--metasrv-addr=0.0.0.0:3002".to_string())
-        } else if subcommand == "datanode" {
-            args.push("-c".to_string());
-            args.push(Self::generate_datanode_config_file());
-        } else if subcommand == "metasrv" {
-            args.push("--use-memory-store".to_string());
-        };
+        let mut args = vec![
+            "--log-level=debug".to_string(),
+            subcommand.to_string(),
+            "start".to_string(),
+        ];
+        match subcommand {
+            "datanode" | "standalone" => {
+                args.push("-c".to_string());
+                args.push(Self::generate_config_file(subcommand));
+            }
+            "frontend" => args.push("--metasrv-addr=0.0.0.0:3002".to_string()),
+            "metasrv" => args.push("--use-memory-store".to_string()),
+
+            _ => panic!("Unexpected subcommand: {subcommand}"),
+        }
 
         let process = Command::new("./greptime")
             .current_dir(util::get_binary_dir("debug"))
             .args(args)
             .stdout(log_file)
             .spawn()
-            .expect("Failed to start the DB");
+            .expect(&format!(
+                "Failed to start the DB with subcommand {subcommand}"
+            ));
         process
     }
 
-    fn generate_datanode_config_file() -> String {
+    /// Generate config file to `/tmp/{subcommand}-{current_time}.toml`
+    fn generate_config_file(subcommand: &str) -> String {
         let mut tt = TinyTemplate::new();
 
         let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        path.push("../conf/datanode-test.toml.template");
+        path.push(format!("../conf/{subcommand}-test.toml.template"));
         let template = std::fs::read_to_string(path).unwrap();
-        tt.add_template("datanode", &template).unwrap();
+        tt.add_template(subcommand, &template).unwrap();
 
         #[derive(Serialize)]
         struct Context {
@@ -245,18 +189,35 @@ impl Env {
         }
 
         let current_time = common_time::util::current_time_millis();
-        let greptimedb_dir = format!("/tmp/greptimedb-datanode-{current_time}/");
+        let greptimedb_dir = format!("/tmp/greptimedb-{subcommand}-{current_time}/");
         let ctx = Context {
             wal_dir: format!("{greptimedb_dir}/wal/"),
             data_dir: format!("{greptimedb_dir}/data/"),
         };
-        let rendered = tt.render("datanode", &ctx).unwrap();
+        let rendered = tt.render(subcommand, &ctx).unwrap();
 
-        let conf_file = format!("/tmp/datanode-{current_time}.toml");
-        println!("Generating datanode config file in {conf_file}, full content:\n{rendered}");
+        let conf_file = format!("/tmp/{subcommand}-{current_time}.toml");
+        println!("Generating {subcommand} config file in {conf_file}, full content:\n{rendered}");
         std::fs::write(&conf_file, rendered).unwrap();
 
         conf_file
+    }
+
+    /// Build the DB with `cargo build --bin greptime`
+    async fn build_db() {
+        println!("Going to build the DB...");
+        let cargo_build_result = Command::new("cargo")
+            .current_dir(util::get_workspace_root())
+            .args(["build", "--bin", "greptime"])
+            .stdout(Stdio::null())
+            .output()
+            .await
+            .expect("Failed to start GreptimeDB")
+            .status;
+        if !cargo_build_result.success() {
+            panic!("Failed to build GreptimeDB (`cargo build` fails)");
+        }
+        println!("Build finished, starting...");
     }
 }
 
