@@ -278,7 +278,7 @@ mod test {
     use super::*;
 
     /// Range length is fixed to 5
-    fn increase_runner(
+    fn extrapolated_rate_runner<const IS_COUNTER: bool, const IS_RATE: bool>(
         ts_range: RangeArray,
         value_range: RangeArray,
         timestamps: ArrayRef,
@@ -289,18 +289,22 @@ mod test {
             ColumnarValue::Array(Arc::new(value_range.into_dict())),
             ColumnarValue::Array(timestamps),
         ];
-        let output = extract_array(&Increase::new(5).calc(&input).unwrap())
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap()
-            .values()
-            .to_vec();
+        let output = extract_array(
+            &ExtrapolatedRate::<IS_COUNTER, IS_RATE>::new(5)
+                .calc(&input)
+                .unwrap(),
+        )
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap()
+        .values()
+        .to_vec();
         assert_eq!(output, expected);
     }
 
     #[test]
-    fn abnormal_input() {
+    fn increase_abnormal_input() {
         let ts_array = Arc::new(TimestampMillisecondArray::from_iter(
             [1, 2, 3, 4, 5, 6, 7, 8, 9].into_iter().map(Some),
         ));
@@ -318,7 +322,7 @@ mod test {
             Some(9),
             None,
         ])) as _;
-        increase_runner(
+        extrapolated_rate_runner::<true, false>(
             ts_range,
             value_range,
             timestamps,
@@ -327,7 +331,7 @@ mod test {
     }
 
     #[test]
-    fn normal_input() {
+    fn increase_normal_input() {
         let ts_array = Arc::new(TimestampMillisecondArray::from_iter(
             [1, 2, 3, 4, 5, 6, 7, 8, 9].into_iter().map(Some),
         ));
@@ -349,7 +353,7 @@ mod test {
         let timestamps = Arc::new(TimestampMillisecondArray::from_iter(
             [2, 3, 4, 5, 6, 7, 8, 9].into_iter().map(Some),
         )) as _;
-        increase_runner(
+        extrapolated_rate_runner::<true, false>(
             ts_range,
             value_range,
             timestamps,
@@ -359,7 +363,7 @@ mod test {
     }
 
     #[test]
-    fn short_input() {
+    fn increase_short_input() {
         let ts_array = Arc::new(TimestampMillisecondArray::from_iter(
             [1, 2, 3, 4, 5, 6, 7, 8, 9].into_iter().map(Some),
         ));
@@ -388,7 +392,7 @@ mod test {
             None,
             Some(9),
         ])) as _;
-        increase_runner(
+        extrapolated_rate_runner::<true, false>(
             ts_range,
             value_range,
             timestamps,
@@ -397,7 +401,7 @@ mod test {
     }
 
     #[test]
-    fn counter_reset() {
+    fn increase_counter_reset() {
         let ts_array = Arc::new(TimestampMillisecondArray::from_iter(
             [1, 2, 3, 4, 5, 6, 7, 8, 9].into_iter().map(Some),
         ));
@@ -420,7 +424,7 @@ mod test {
         let timestamps = Arc::new(TimestampMillisecondArray::from_iter(
             [2, 3, 4, 5, 6, 7, 8, 9].into_iter().map(Some),
         )) as _;
-        increase_runner(
+        extrapolated_rate_runner::<true, false>(
             ts_range,
             value_range,
             timestamps,
@@ -428,6 +432,133 @@ mod test {
             // `duration_to_zero`, and causes `duration_to_zero` less than
             // `extrapolation_threshold`.
             vec![2.0, 1.5, 1.5, 1.5, 2.0, 1.5, 1.5, 1.5],
+        );
+    }
+
+    #[test]
+    fn rate_counter_reset() {
+        let ts_array = Arc::new(TimestampMillisecondArray::from_iter(
+            [1, 2, 3, 4, 5, 6, 7, 8, 9].into_iter().map(Some),
+        ));
+        // this series should be treated like [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+        let values_array = Arc::new(Float64Array::from_iter([
+            1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0, 5.0,
+        ]));
+        let ranges = [
+            (0, 2),
+            (1, 2),
+            (2, 2),
+            (3, 2),
+            (4, 2),
+            (5, 2),
+            (6, 2),
+            (7, 2),
+        ];
+        let ts_range = RangeArray::from_ranges(ts_array, ranges).unwrap();
+        let value_range = RangeArray::from_ranges(values_array, ranges).unwrap();
+        let timestamps = Arc::new(TimestampMillisecondArray::from_iter(
+            [2, 3, 4, 5, 6, 7, 8, 9].into_iter().map(Some),
+        )) as _;
+        extrapolated_rate_runner::<true, true>(
+            ts_range,
+            value_range,
+            timestamps,
+            vec![400.0, 300.0, 300.0, 300.0, 400.0, 300.0, 300.0, 300.0],
+        );
+    }
+
+    #[test]
+    fn rate_normal_input() {
+        let ts_array = Arc::new(TimestampMillisecondArray::from_iter(
+            [1, 2, 3, 4, 5, 6, 7, 8, 9].into_iter().map(Some),
+        ));
+        let values_array = Arc::new(Float64Array::from_iter([
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0,
+        ]));
+        let ranges = [
+            (0, 2),
+            (1, 2),
+            (2, 2),
+            (3, 2),
+            (4, 2),
+            (5, 2),
+            (6, 2),
+            (7, 2),
+        ];
+        let ts_range = RangeArray::from_ranges(ts_array, ranges).unwrap();
+        let value_range = RangeArray::from_ranges(values_array, ranges).unwrap();
+        let timestamps = Arc::new(TimestampMillisecondArray::from_iter(
+            [2, 3, 4, 5, 6, 7, 8, 9].into_iter().map(Some),
+        )) as _;
+        extrapolated_rate_runner::<true, true>(
+            ts_range,
+            value_range,
+            timestamps,
+            vec![400.0, 300.0, 300.0, 300.0, 300.0, 300.0, 300.0, 300.0],
+        );
+    }
+
+    #[test]
+    fn delta_counter_reset() {
+        let ts_array = Arc::new(TimestampMillisecondArray::from_iter(
+            [1, 2, 3, 4, 5, 6, 7, 8, 9].into_iter().map(Some),
+        ));
+        // this series should be treated like [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+        let values_array = Arc::new(Float64Array::from_iter([
+            1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0, 5.0,
+        ]));
+        let ranges = [
+            (0, 2),
+            (1, 2),
+            (2, 2),
+            (3, 2),
+            (4, 2),
+            (5, 2),
+            (6, 2),
+            (7, 2),
+        ];
+        let ts_range = RangeArray::from_ranges(ts_array, ranges).unwrap();
+        let value_range = RangeArray::from_ranges(values_array, ranges).unwrap();
+        let timestamps = Arc::new(TimestampMillisecondArray::from_iter(
+            [2, 3, 4, 5, 6, 7, 8, 9].into_iter().map(Some),
+        )) as _;
+        extrapolated_rate_runner::<false, false>(
+            ts_range,
+            value_range,
+            timestamps,
+            // delta doesn't handle counter reset, thus there is a negative value
+            vec![1.5, 1.5, 1.5, -4.5, 1.5, 1.5, 1.5, 1.5],
+        );
+    }
+
+    #[test]
+    fn delta_normal_input() {
+        let ts_array = Arc::new(TimestampMillisecondArray::from_iter(
+            [1, 2, 3, 4, 5, 6, 7, 8, 9].into_iter().map(Some),
+        ));
+        let values_array = Arc::new(Float64Array::from_iter([
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0,
+        ]));
+        let ranges = [
+            (0, 2),
+            (1, 2),
+            (2, 2),
+            (3, 2),
+            (4, 2),
+            (5, 2),
+            (6, 2),
+            (7, 2),
+        ];
+        let ts_range = RangeArray::from_ranges(ts_array, ranges).unwrap();
+        let value_range = RangeArray::from_ranges(values_array, ranges).unwrap();
+        let timestamps = Arc::new(TimestampMillisecondArray::from_iter(
+            [2, 3, 4, 5, 6, 7, 8, 9].into_iter().map(Some),
+        )) as _;
+        extrapolated_rate_runner::<false, false>(
+            ts_range,
+            value_range,
+            timestamps,
+            vec![1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5],
         );
     }
 }
