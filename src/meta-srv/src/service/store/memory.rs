@@ -17,9 +17,10 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 
 use api::v1::meta::{
-    BatchGetRequest, BatchGetResponse, BatchPutRequest, BatchPutResponse, CompareAndPutRequest,
-    CompareAndPutResponse, DeleteRangeRequest, DeleteRangeResponse, KeyValue, MoveValueRequest,
-    MoveValueResponse, PutRequest, PutResponse, RangeRequest, RangeResponse, ResponseHeader,
+    BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
+    BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
+    DeleteRangeResponse, KeyValue, MoveValueRequest, MoveValueResponse, PutRequest, PutResponse,
+    RangeRequest, RangeResponse, ResponseHeader,
 };
 use parking_lot::RwLock;
 
@@ -161,6 +162,34 @@ impl KvStore for MemStore {
         let cluster_id = header.map_or(0, |h| h.cluster_id);
         let header = Some(ResponseHeader::success(cluster_id));
         Ok(BatchPutResponse { header, prev_kvs })
+    }
+
+    async fn batch_delete(&self, req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
+        let BatchDeleteRequest {
+            header,
+            keys,
+            prev_kv,
+        } = req;
+
+        let mut memory = self.inner.write();
+        let prev_kvs = if prev_kv {
+            keys.into_iter()
+                .map(|key| (key.clone(), memory.remove(&key)))
+                .filter(|(_, v)| v.is_some())
+                .map(|(key, value)| KeyValue {
+                    key,
+                    value: value.unwrap(),
+                })
+                .collect()
+        } else {
+            for key in keys.into_iter() {
+                memory.remove(&key);
+            }
+            vec![]
+        };
+        let cluster_id = header.map_or(0, |h| h.cluster_id);
+        let header = Some(ResponseHeader::success(cluster_id));
+        Ok(BatchDeleteResponse { header, prev_kvs })
     }
 
     async fn compare_and_put(&self, req: CompareAndPutRequest) -> Result<CompareAndPutResponse> {
