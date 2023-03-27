@@ -23,7 +23,7 @@ use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
 use servers::server::Server;
 use servers::Mode;
 use snafu::ResultExt;
-use tokio::select;
+use tokio::join;
 
 use crate::datanode::DatanodeOptions;
 use crate::error::{
@@ -66,11 +66,11 @@ impl Services {
             addr: &opts.metrics_addr,
         })?;
         let grpc = self.grpc_server.start(grpc_addr);
-        if let Mode::Distributed = opts.mode {
+        if let Mode::Standalone = opts.mode {
             let metrics_handler = self.metrics_server.start(metrics_listen_address);
-            select!(
-                v = grpc => v.context(StartServerSnafu)?,
-                v = metrics_handler => v.context(StartServerSnafu)?,);
+            let (grpc_result, metrics_result) = join!(grpc, metrics_handler);
+            grpc_result.context(StartServerSnafu)?;
+            metrics_result.context(StartServerSnafu)?;
         } else {
             grpc.await.context(StartServerSnafu)?;
         }

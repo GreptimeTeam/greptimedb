@@ -224,11 +224,11 @@ pub struct DatanodeOptions {
     pub rpc_runtime_size: usize,
     pub mysql_addr: String,
     pub mysql_runtime_size: usize,
+    pub metrics_addr: String,
     pub meta_client_options: Option<MetaClientOptions>,
     pub wal: WalConfig,
     pub storage: StorageConfig,
     pub procedure: Option<ProcedureConfig>,
-    pub metrics_addr: String,
 }
 
 impl Default for DatanodeOptions {
@@ -242,11 +242,11 @@ impl Default for DatanodeOptions {
             rpc_runtime_size: 8,
             mysql_addr: "127.0.0.1:4406".to_string(),
             mysql_runtime_size: 2,
+            metrics_addr: "127.0.0.1:5000".to_string(),
             meta_client_options: None,
             wal: WalConfig::default(),
             storage: StorageConfig::default(),
             procedure: None,
-            metrics_addr: "127.0.0.1:4000".to_string(),
         }
     }
 }
