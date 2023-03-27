@@ -288,6 +288,56 @@ def answer() -> vector[i64]:
             .to_string(),
             expect: Some(ronish!("value": vector!(Int64Vector, [43]))),
         },
+        CoprTestCase {
+            script: r#"
+import math
+
+def normalize0(x):
+    if x is None or math.isnan(x):
+        return 0
+    elif x > 100:
+        return 100
+    elif x < 0:
+        return 0
+    else:
+        return x
+
+@coprocessor(args=["number"], sql="select number from numbers limit 10", returns=["value"], backend="rspy")
+def normalize(v) -> vector[i64]:
+    return [normalize0(x) for x in v]
+            
+"#
+            .to_string(),
+            expect: Some(ronish!(
+                "value": vector!(Int64Vector, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9,])
+            )),
+        },
+        #[cfg(feature = "pyo3_backend")]
+        CoprTestCase {
+            script: r#"
+import math
+from greptime import vector
+
+def normalize0(x):
+    if x is None or math.isnan(x):
+        return 0
+    elif x > 100:
+        return 100
+    elif x < 0:
+        return 0
+    else:
+        return x
+
+@coprocessor(args=["number"], sql="select number from numbers limit 10", returns=["value"], backend="pyo3")
+def normalize(v) -> vector[i64]:
+    return vector([normalize0(x) for x in v])
+            
+"#
+            .to_string(),
+            expect: Some(ronish!(
+                "value": vector!(Int64Vector, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9,])
+            )),
+        },
     ]
 }
 

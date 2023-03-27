@@ -88,7 +88,6 @@ coprocessor = copr
 ";
             let gen_call = format!("\n_return_from_coprocessor = {}(*_args_for_coprocessor, **_kwargs_for_coprocessor)", copr.name);
             let script = format!("{}{}{}", dummy_decorator, copr.script, gen_call);
-
             let args = args
                 .clone()
                 .into_iter()
@@ -106,7 +105,7 @@ coprocessor = copr
             let py_main = PyModule::import(py, "__main__")?;
             let globals = py_main.dict();
 
-            let locals = PyDict::new(py);
+            let locals = py_main.dict();
 
             if let Some(engine) = &copr.query_engine {
                 let query_engine = PyQueryEngine::from_weakref(engine.clone());
