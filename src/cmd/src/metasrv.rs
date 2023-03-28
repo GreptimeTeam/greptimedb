@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Duration;
+
 use clap::Parser;
 use common_telemetry::{info, logging, warn};
 use meta_srv::bootstrap::MetaSrvInstance;
@@ -81,7 +83,9 @@ struct StartCommand {
     #[clap(long)]
     use_memory_store: bool,
     #[clap(long)]
-    metrics_addr: Option<String>,
+    http_addr: Option<String>,
+    #[clap(long)]
+    http_timeout: Option<u64>,
 }
 
 impl StartCommand {
@@ -130,8 +134,11 @@ impl TryFrom<StartCommand> for MetaSrvOptions {
             opts.use_memory_store = true;
         }
 
-        if let Some(metrics_addr) = cmd.metrics_addr {
-            opts.metrics_addr = metrics_addr;
+        if let Some(http_addr) = cmd.http_addr {
+            opts.http_opts.addr = http_addr;
+        }
+        if let Some(http_timeout) = cmd.http_timeout {
+            opts.http_opts.timeout = Duration::from_secs(http_timeout);
         }
 
         Ok(opts)
@@ -156,7 +163,8 @@ mod tests {
             config_file: None,
             selector: Some("LoadBased".to_string()),
             use_memory_store: false,
-            metrics_addr: None,
+            http_addr: None,
+            http_timeout: None,
         };
         let options: MetaSrvOptions = cmd.try_into().unwrap();
         assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
@@ -185,7 +193,8 @@ mod tests {
             selector: None,
             config_file: Some(file.path().to_str().unwrap().to_string()),
             use_memory_store: false,
-            metrics_addr: None,
+            http_addr: None,
+            http_timeout: None,
         };
         let options: MetaSrvOptions = cmd.try_into().unwrap();
         assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);

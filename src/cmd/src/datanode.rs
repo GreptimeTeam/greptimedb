@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Duration;
+
 use clap::Parser;
 use common_telemetry::logging;
 use datanode::datanode::{
@@ -86,6 +88,10 @@ struct StartCommand {
     wal_dir: Option<String>,
     #[clap(long)]
     procedure_dir: Option<String>,
+    #[clap(long)]
+    http_addr: Option<String>,
+    #[clap(long)]
+    http_timeout: Option<u64>,
 }
 
 impl StartCommand {
@@ -154,6 +160,12 @@ impl TryFrom<StartCommand> for DatanodeOptions {
         }
         if let Some(procedure_dir) = cmd.procedure_dir {
             opts.procedure = Some(ProcedureConfig::from_file_path(procedure_dir));
+        }
+        if let Some(http_addr) = cmd.http_addr {
+            opts.http_opts.addr = http_addr
+        }
+        if let Some(http_timeout) = cmd.http_timeout {
+            opts.http_opts.timeout = Duration::from_secs(http_timeout)
         }
 
         Ok(opts)

@@ -23,6 +23,7 @@ use common_telemetry::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use tokio::sync::broadcast::error::RecvError;
+use servers::http::HttpOptions;
 
 use crate::cluster::MetaPeerClient;
 use crate::election::{Election, LeaderChangeMessage};
@@ -45,6 +46,7 @@ pub struct MetaSrvOptions {
     pub selector: SelectorType,
     pub use_memory_store: bool,
     pub metrics_addr: String,
+    pub http_opts: HttpOptions,
 }
 
 impl Default for MetaSrvOptions {
@@ -57,6 +59,7 @@ impl Default for MetaSrvOptions {
             selector: SelectorType::default(),
             use_memory_store: false,
             metrics_addr: "127.0.0.1:5000".to_string(),
+            http_opts: HttpOptions::default(),
         }
     }
 }

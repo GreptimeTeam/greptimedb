@@ -60,6 +60,7 @@ use self::influxdb::{influxdb_health, influxdb_ping, influxdb_write};
 use crate::auth::UserProviderRef;
 use crate::error::{AlreadyStartedSnafu, Result, StartHttpSnafu};
 use crate::http::admin::flush;
+use crate::metrics_handler::MetricsHandler;
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::query_handler::{
@@ -100,8 +101,8 @@ pub const HTTP_API_PREFIX: &str = "/v1/";
 pub static PUBLIC_APIS: [&str; 2] = ["/v1/influxdb/ping", "/v1/influxdb/health"];
 
 pub struct HttpServer {
-    sql_handler: ServerSqlQueryHandlerRef,
-    grpc_handler: ServerGrpcQueryHandlerRef,
+    sql_handler: Option<ServerSqlQueryHandlerRef>,
+    grpc_handler: Option<ServerGrpcQueryHandlerRef>,
     options: HttpOptions,
     influxdb_handler: Option<InfluxdbLineProtocolHandlerRef>,
     opentsdb_handler: Option<OpentsdbProtocolHandlerRef>,
@@ -109,9 +110,11 @@ pub struct HttpServer {
     script_handler: Option<ScriptHandlerRef>,
     shutdown_tx: Mutex<Option<Sender<()>>>,
     user_provider: Option<UserProviderRef>,
+    metrics_handler: Option<MetricsHandler>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct HttpOptions {
     pub addr: String,
     #[serde(with = "humantime_serde")]
@@ -360,17 +363,47 @@ impl HttpServer {
         grpc_handler: ServerGrpcQueryHandlerRef,
         options: HttpOptions,
     ) -> Self {
+        let mut server = Self::new_empty(options);
+        server.set_sql_handler(sql_handler);
+        server.set_grpc_handler(grpc_handler);
+        server
+    }
+
+    pub fn new_empty(options: HttpOptions) -> Self {
         Self {
-            sql_handler,
-            grpc_handler,
+            sql_handler: None,
+            grpc_handler: None,
             options,
             opentsdb_handler: None,
             influxdb_handler: None,
             prom_handler: None,
             user_provider: None,
             script_handler: None,
+            metrics_handler: None,
             shutdown_tx: Mutex::new(None),
         }
+    }
+
+    pub fn new_with_metrics_handler(metrics_handler: MetricsHandler, options: HttpOptions) -> Self {
+        let mut server = Self::new_empty(options);
+        server.set_metrics_handler(metrics_handler);
+        server
+    }
+
+    pub fn set_sql_handler(&mut self, handler: ServerSqlQueryHandlerRef) {
+        debug_assert!(
+            self.sql_handler.is_none(),
+            "SQL handler can be set only once!"
+        );
+        self.sql_handler.get_or_insert(handler);
+    }
+
+    pub fn set_grpc_handler(&mut self, handler: ServerGrpcQueryHandlerRef) {
+        debug_assert!(
+            self.grpc_handler.is_none(),
+            "gRPC handler can be set only once!"
+        );
+        self.grpc_handler.get_or_insert(handler);
     }
 
     pub fn set_opentsdb_handler(&mut self, handler: OpentsdbProtocolHandlerRef) {
@@ -413,6 +446,14 @@ impl HttpServer {
         self.user_provider.get_or_insert(user_provider);
     }
 
+    pub fn set_metrics_handler(&mut self, handler: MetricsHandler) {
+        debug_assert!(
+            self.metrics_handler.is_none(),
+            "User provider can be set only once!"
+        );
+        self.metrics_handler.get_or_insert(handler);
+    }
+
     pub fn make_app(&self) -> Router {
         let mut api = OpenApi {
             info: Info {
@@ -428,19 +469,25 @@ impl HttpServer {
             ..OpenApi::default()
         };
 
-        let sql_router = self
-            .route_sql(ApiState {
-                sql_handler: self.sql_handler.clone(),
-                script_handler: self.script_handler.clone(),
-            })
-            .finish_api(&mut api)
-            .layer(Extension(api));
+        let mut router = Router::new();
 
-        let mut router = Router::new().nest(&format!("/{HTTP_API_VERSION}"), sql_router);
-        router = router.nest(
-            &format!("/{HTTP_API_VERSION}/admin"),
-            self.route_admin(self.grpc_handler.clone()),
-        );
+        if let Some(sql_handler) = self.sql_handler.clone() {
+            let sql_router = self
+                .route_sql(ApiState {
+                    sql_handler,
+                    script_handler: self.script_handler.clone(),
+                })
+                .finish_api(&mut api)
+                .layer(Extension(api));
+            router = router.nest(&format!("/{HTTP_API_VERSION}"), sql_router);
+        }
+
+        if let Some(grpc_handler) = self.grpc_handler.clone() {
+            router = router.nest(
+                &format!("/{HTTP_API_VERSION}/admin"),
+                self.route_admin(grpc_handler.clone()),
+            );
+        }
 
         if let Some(opentsdb_handler) = self.opentsdb_handler.clone() {
             router = router.nest(
@@ -472,7 +519,9 @@ impl HttpServer {
             );
         }
 
-        router = router.route("/metrics", routing::get(handler::metrics));
+        if let Some(metrics_handler) = self.metrics_handler.clone() {
+            router = router.nest("", self.route_metrics(metrics_handler));
+        }
 
         router = router.route(
             "/health",
@@ -496,6 +545,12 @@ impl HttpServer {
                         HttpAuth::<BoxBody>::new(self.user_provider.clone()),
                     )),
             )
+    }
+
+    fn route_metrics<S>(&self, metrics_handler: MetricsHandler) -> Router<S> {
+        Router::new()
+            .route("/metrics", routing::get(handler::metrics))
+            .with_state(metrics_handler)
     }
 
     fn route_sql<S>(&self, api_state: ApiState) -> ApiRouter<S> {

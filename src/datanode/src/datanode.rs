@@ -20,6 +20,7 @@ use common_telemetry::info;
 use meta_client::MetaClientOptions;
 use serde::{Deserialize, Serialize};
 use servers::Mode;
+use servers::http::HttpOptions;
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::scheduler::SchedulerConfig;
 
@@ -224,7 +225,7 @@ pub struct DatanodeOptions {
     pub rpc_runtime_size: usize,
     pub mysql_addr: String,
     pub mysql_runtime_size: usize,
-    pub metrics_addr: String,
+    pub http_opts: HttpOptions,
     pub meta_client_options: Option<MetaClientOptions>,
     pub wal: WalConfig,
     pub storage: StorageConfig,
@@ -242,7 +243,7 @@ impl Default for DatanodeOptions {
             rpc_runtime_size: 8,
             mysql_addr: "127.0.0.1:4406".to_string(),
             mysql_runtime_size: 2,
-            metrics_addr: "127.0.0.1:5000".to_string(),
+            http_opts: HttpOptions::default(),
             meta_client_options: None,
             wal: WalConfig::default(),
             storage: StorageConfig::default(),

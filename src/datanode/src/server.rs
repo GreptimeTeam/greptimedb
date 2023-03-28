@@ -17,13 +17,15 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use common_runtime::Builder as RuntimeBuilder;
+use common_telemetry::info;
 use servers::grpc::GrpcServer;
-use servers::metrics_server::MetricsServer;
+use servers::http::{HttpOptions, HttpServer};
+use servers::metrics_handler::MetricsHandler;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
 use servers::server::Server;
 use servers::Mode;
 use snafu::ResultExt;
-use tokio::join;
+use tokio::select;
 
 use crate::datanode::DatanodeOptions;
 use crate::error::{
@@ -36,7 +38,7 @@ pub mod grpc;
 /// All rpc services.
 pub struct Services {
     grpc_server: GrpcServer,
-    metrics_server: MetricsServer,
+    http_server: Option<HttpServer>,
 }
 
 impl Services {
@@ -48,13 +50,20 @@ impl Services {
                 .build()
                 .context(RuntimeResourceSnafu)?,
         );
+
         Ok(Self {
             grpc_server: GrpcServer::new(
                 ServerGrpcQueryHandlerAdaptor::arc(instance),
                 None,
                 grpc_runtime,
             ),
-            metrics_server: MetricsServer::new(),
+            http_server: match opts.mode {
+                Mode::Standalone => Some(HttpServer::new_with_metrics_handler(
+                    MetricsHandler,
+                    HttpOptions::default(),
+                )),
+                Mode::Distributed => None,
+            },
         })
     }
 
@@ -62,15 +71,15 @@ impl Services {
         let grpc_addr: SocketAddr = opts.rpc_addr.parse().context(ParseAddrSnafu {
             addr: &opts.rpc_addr,
         })?;
-        let metrics_listen_address = opts.metrics_addr.parse().context(ParseAddrSnafu {
-            addr: &opts.metrics_addr,
+        let http_addr = opts.http_opts.addr.parse().context(ParseAddrSnafu {
+            addr: &opts.http_opts.addr,
         })?;
         let grpc = self.grpc_server.start(grpc_addr);
-        if let Mode::Standalone = opts.mode {
-            let metrics_handler = self.metrics_server.start(metrics_listen_address);
-            let (grpc_result, metrics_result) = join!(grpc, metrics_handler);
-            grpc_result.context(StartServerSnafu)?;
-            metrics_result.context(StartServerSnafu)?;
+        if let Some(ref http_server) = self.http_server {
+            let http = http_server.start(http_addr);
+            select!(
+                v = grpc => v.context(StartServerSnafu)?,
+                v= http => v.context(StartServerSnafu)?,);
         } else {
             grpc.await.context(StartServerSnafu)?;
         }
@@ -83,9 +92,9 @@ impl Services {
             .shutdown()
             .await
             .context(ShutdownServerSnafu)?;
-        self.metrics_server
-            .shutdown()
-            .await
-            .context(ShutdownServerSnafu)
+        if let Some(ref http_server) = self.http_server {
+            http_server.shutdown().await.context(ShutdownServerSnafu)?;
+        }
+        Ok(())
     }
 }
