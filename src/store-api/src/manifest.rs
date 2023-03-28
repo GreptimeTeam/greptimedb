@@ -102,4 +102,13 @@ pub trait Manifest: Send + Sync + Clone + 'static {
 
     /// Returns the last(or latest) manifest version.
     fn last_version(&self) -> ManifestVersion;
+
+    /// Start the service
+    async fn start(&self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+    /// Stop the service
+    async fn stop(&self) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }

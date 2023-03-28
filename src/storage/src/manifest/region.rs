@@ -115,7 +115,6 @@ impl Checkpointer for RegionManifestCheckpointer {
         };
 
         manifest.save_checkpoint(&checkpoint).await?;
-        // TODO(dennis): background task to clean old manifest actions and checkpoints.
         manifest
             .manifest_store()
             .delete(start_version, last_version + 1)

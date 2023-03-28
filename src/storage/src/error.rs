@@ -423,6 +423,15 @@ pub enum Error {
     #[snafu(display("Cannot schedule request, scheduler's already stopped"))]
     IllegalSchedulerState { backtrace: Backtrace },
 
+    #[snafu(display("Region manifest not started yet"))]
+    IllegalRegionManifestState { backtrace: Backtrace },
+
+    #[snafu(display("Failed to wait for gc task to stop, source: {}", source))]
+    WaitGcTaskStop {
+        source: JoinError,
+        backtrace: Backtrace,
+    },
+
     #[snafu(display("Failed to stop scheduler, source: {}", source))]
     StopScheduler {
         source: JoinError,
@@ -488,6 +497,7 @@ impl ErrorExt for Error {
             | DecodeArrow { .. }
             | EncodeArrow { .. }
             | ManifestCheckpoint { .. }
+            | WaitGcTaskStop { .. }
             | ParseSchema { .. } => StatusCode::Unexpected,
 
             WriteParquet { .. }
@@ -517,7 +527,9 @@ impl ErrorExt for Error {
             RateLimited { .. } => StatusCode::Internal,
             StopScheduler { .. } => StatusCode::Internal,
             DeleteSst { .. } => StatusCode::StorageUnavailable,
-            IllegalSchedulerState { .. } => StatusCode::Unexpected,
+            IllegalRegionManifestState { .. } | IllegalSchedulerState { .. } => {
+                StatusCode::Unexpected
+            }
             TtlCalculation { source, .. } => source.status_code(),
         }
     }

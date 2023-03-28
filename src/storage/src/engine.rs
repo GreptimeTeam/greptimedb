@@ -21,6 +21,7 @@ use common_telemetry::logging::info;
 use object_store::{util, ObjectStore};
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
+use store_api::manifest::Manifest;
 use store_api::storage::{
     CreateOptions, EngineContext, OpenOptions, Region, RegionDescriptor, StorageEngine,
 };
@@ -290,13 +291,15 @@ impl<S: LogStore> EngineInner<S> {
 
         let mut guard = SlotGuard::new(name, &self.regions);
 
-        let store_config = self.region_store_config(
-            &opts.parent_dir,
-            opts.write_buffer_size,
-            name,
-            self.config.manifest_checkpoint_margin,
-            opts.ttl,
-        );
+        let store_config = self
+            .region_store_config(
+                &opts.parent_dir,
+                opts.write_buffer_size,
+                name,
+                self.config.manifest_checkpoint_margin,
+                opts.ttl,
+            )
+            .await?;
 
         let region = match RegionImpl::open(name.to_string(), store_config, opts).await? {
             None => return Ok(None),
@@ -326,13 +329,15 @@ impl<S: LogStore> EngineInner<S> {
                 .context(error::InvalidRegionDescSnafu {
                     region: &region_name,
                 })?;
-        let store_config = self.region_store_config(
-            &opts.parent_dir,
-            opts.write_buffer_size,
-            &region_name,
-            self.config.manifest_checkpoint_margin,
-            opts.ttl,
-        );
+        let store_config = self
+            .region_store_config(
+                &opts.parent_dir,
+                opts.write_buffer_size,
+                &region_name,
+                self.config.manifest_checkpoint_margin,
+                opts.ttl,
+            )
+            .await?;
 
         let region = RegionImpl::create(metadata, store_config).await?;
 
@@ -348,14 +353,14 @@ impl<S: LogStore> EngineInner<S> {
         slot.get_ready_region()
     }
 
-    fn region_store_config(
+    async fn region_store_config(
         &self,
         parent_dir: &str,
         write_buffer_size: Option<usize>,
         region_name: &str,
         manifest_checkpoint_margin: Option<u16>,
         ttl: Option<Duration>,
-    ) -> StoreConfig<S> {
+    ) -> Result<StoreConfig<S>> {
         let parent_dir = util::normalize_dir(parent_dir);
 
         let sst_dir = &region_sst_dir(&parent_dir, region_name);
@@ -366,12 +371,13 @@ impl<S: LogStore> EngineInner<S> {
             self.object_store.clone(),
             manifest_checkpoint_margin,
         );
+        manifest.start().await?;
 
         let flush_strategy = write_buffer_size
             .map(|size| Arc::new(SizeBasedStrategy::new(size)) as Arc<_>)
             .unwrap_or_else(|| self.flush_strategy.clone());
 
-        StoreConfig {
+        Ok(StoreConfig {
             log_store: self.log_store.clone(),
             sst_layer,
             manifest,
@@ -382,7 +388,7 @@ impl<S: LogStore> EngineInner<S> {
             engine_config: self.config.clone(),
             file_purger: self.file_purger.clone(),
             ttl,
-        }
+        })
     }
 }
 

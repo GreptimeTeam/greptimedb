@@ -31,7 +31,8 @@ use crate::error::{
 };
 
 lazy_static! {
-    static ref RE: Regex = Regex::new("^\\d+\\.json$").unwrap();
+    static ref DELTA_RE: Regex = Regex::new("^\\d+\\.json$").unwrap();
+    static ref CHECKPOINT_RE: Regex = Regex::new("^\\d+\\.checkpoint").unwrap();
 }
 
 const LAST_CHECKPOINT_FILE: &str = "_last_checkpoint";
@@ -46,20 +47,24 @@ pub fn checkpoint_file(version: ManifestVersion) -> String {
     format!("{version:020}.checkpoint")
 }
 
-/// Return's the delta file version from path
+/// Return's the file manifest version from path
 ///
 /// # Panics
-/// Panics if the file path is not a valid delta file.
+/// Panics if the file path is not a valid delta or checkpoint file.
 #[inline]
-pub fn delta_version(path: &str) -> ManifestVersion {
+pub fn file_version(path: &str) -> ManifestVersion {
     let s = path.split('.').next().unwrap();
-    s.parse()
-        .unwrap_or_else(|_| panic!("Invalid delta file: {path}"))
+    s.parse().unwrap_or_else(|_| panic!("Invalid file: {path}"))
 }
 
 #[inline]
 pub fn is_delta_file(file_name: &str) -> bool {
-    RE.is_match(file_name)
+    DELTA_RE.is_match(file_name)
+}
+
+#[inline]
+pub fn is_checkpoint_file(file_name: &str) -> bool {
+    CHECKPOINT_RE.is_match(file_name)
 }
 
 pub struct ObjectStoreLogIterator {
@@ -162,7 +167,7 @@ impl ManifestLogStorage for ManifestObjectStore {
             .try_filter_map(|e| async move {
                 let file_name = e.name();
                 if is_delta_file(file_name) {
-                    let version = delta_version(file_name);
+                    let version = file_version(file_name);
                     if version >= start && version < end {
                         Ok(Some((version, e)))
                     } else {
@@ -182,6 +187,45 @@ impl ManifestLogStorage for ManifestObjectStore {
             object_store: self.object_store.clone(),
             iter: Box::new(entries.into_iter()),
         })
+    }
+
+    async fn delete_until(&self, end: ManifestVersion) -> Result<()> {
+        let streamer = self
+            .object_store
+            .list(&self.path)
+            .await
+            .context(ListObjectsSnafu { path: &self.path })?;
+
+        let paths: Vec<_> = streamer
+            .try_filter_map(|e| async move {
+                let file_name = e.name();
+                if is_delta_file(file_name) || is_checkpoint_file(file_name) {
+                    let version = file_version(file_name);
+                    if version < end {
+                        Ok(Some(e.path().to_string()))
+                    } else {
+                        Ok(None)
+                    }
+                } else {
+                    Ok(None)
+                }
+            })
+            .try_collect::<Vec<_>>()
+            .await
+            .context(ListObjectsSnafu { path: &self.path })?;
+
+        logging::debug!(
+            "Deleting {} logs from manifest storage path {}.",
+            paths.len(),
+            self.path
+        );
+
+        self.object_store
+            .remove(paths)
+            .await
+            .with_context(|_| DeleteObjectSnafu {
+                path: self.path.clone(),
+            })
     }
 
     async fn save(&self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {
