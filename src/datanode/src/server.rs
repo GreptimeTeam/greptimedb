@@ -57,11 +57,11 @@ impl Services {
                 grpc_runtime,
             ),
             http_server: match opts.mode {
-                Mode::Standalone => Some(HttpServer::new_with_metrics_handler(
+                Mode::Distributed => Some(HttpServer::new_with_metrics_handler(
                     MetricsHandler,
                     HttpOptions::default(),
                 )),
-                Mode::Distributed => None,
+                Mode::Standalone => None,
             },
         })
     }
