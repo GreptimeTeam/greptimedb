@@ -16,7 +16,7 @@ use std::ops::DerefMut;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use common_telemetry::error;
+use common_telemetry::{error, warn};
 use common_time::util::current_time_millis;
 use dashmap::mapref::multiple::RefMulti;
 use dashmap::DashMap;
@@ -110,6 +110,10 @@ impl FailureDetectRunner {
                             let mut detector = container.get_failure_detector(ident);
                             detector.heartbeat(heartbeat.heartbeat_time);
                         }
+                    }
+                    else => {
+                        warn!("Both control and heartbeat senders are closed, quit receiving.");
+                        break;
                     }
                 }
             }
