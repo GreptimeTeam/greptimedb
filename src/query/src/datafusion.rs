@@ -31,7 +31,7 @@ use common_query::prelude::ScalarUdf;
 use common_query::Output;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
-use common_telemetry::{metrics, timer};
+use common_telemetry::timer;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::ResolvedTableReference;
@@ -58,7 +58,7 @@ use crate::physical_planner::PhysicalPlanner;
 use crate::plan::LogicalPlan;
 use crate::planner::{DfLogicalPlanner, LogicalPlanner};
 use crate::query_engine::{QueryEngineContext, QueryEngineState};
-use crate::QueryEngine;
+use crate::{metrics, QueryEngine};
 
 pub struct DatafusionQueryEngine {
     state: Arc<QueryEngineState>,

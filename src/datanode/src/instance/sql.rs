@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use common_error::prelude::BoxedError;
 use common_query::Output;
 use common_telemetry::logging::info;
-use common_telemetry::{metrics, timer};
+use common_telemetry::timer;
 use query::error::QueryExecutionSnafu;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::query_engine::StatementHandler;
@@ -37,6 +37,7 @@ use crate::error::{
     TableIdProviderNotFoundSnafu,
 };
 use crate::instance::Instance;
+use crate::metrics;
 use crate::sql::{SqlHandler, SqlRequest};
 
 impl Instance {

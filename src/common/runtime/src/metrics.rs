@@ -12,17 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
-#![feature(trait_upcasting)]
-
-pub mod datanode;
-pub mod error;
-mod heartbeat;
-pub mod instance;
-pub mod metrics;
-mod mock;
-mod script;
-pub mod server;
-pub mod sql;
-#[cfg(test)]
-mod tests;
+//! Runtime metrics
+pub const THREAD_NAME_LABEL: &str = "thread.name";
+pub const METRIC_RUNTIME_THREADS_ALIVE: &str = "runtime.threads.alive";
+pub const METRIC_RUNTIME_THREADS_IDLE: &str = "runtime.threads.idle";

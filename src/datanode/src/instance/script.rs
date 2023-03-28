@@ -16,10 +16,11 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use common_query::Output;
-use common_telemetry::{metrics, timer};
+use common_telemetry::timer;
 use servers::query_handler::ScriptHandler;
 
 use crate::instance::Instance;
+use crate::metrics;
 
 #[async_trait]
 impl ScriptHandler for Instance {

@@ -15,7 +15,6 @@
 pub mod logging;
 mod macros;
 pub mod metric;
-pub mod metrics;
 mod panic_hook;
 
 pub use logging::{init_default_ut_logging, init_global_logging};
