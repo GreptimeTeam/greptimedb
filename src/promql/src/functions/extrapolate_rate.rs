@@ -133,6 +133,7 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
             );
 
             if IS_RATE {
+                // safety: range_length is checked to be non-zero in the planner.
                 factor /= self.range_length as f64 / 1000.0;
             }
 

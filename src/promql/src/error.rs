@@ -97,6 +97,9 @@ pub enum Error {
 
     #[snafu(display("Expect a range selector, but not found"))]
     ExpectRangeSelector { backtrace: Backtrace },
+
+    #[snafu(display("Zero range in range selector"))]
+    ZeroRangeSelector { backtrace: Backtrace },
 }
 
 impl ErrorExt for Error {
@@ -109,7 +112,8 @@ impl ErrorExt for Error {
             | UnexpectedToken { .. }
             | MultipleVector { .. }
             | ExpectExpr { .. }
-            | ExpectRangeSelector { .. } => StatusCode::InvalidArguments,
+            | ExpectRangeSelector { .. }
+            | ZeroRangeSelector { .. } => StatusCode::InvalidArguments,
 
             UnknownTable { .. }
             | DataFusionPlanning { .. }

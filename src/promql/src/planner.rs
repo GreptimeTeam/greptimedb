@@ -44,6 +44,7 @@ use crate::error::{
     CatalogSnafu, DataFusionPlanningSnafu, ExpectExprSnafu, ExpectRangeSelectorSnafu,
     MultipleVectorSnafu, Result, TableNameNotFoundSnafu, TimeIndexNotFoundSnafu,
     UnexpectedTokenSnafu, UnknownTableSnafu, UnsupportedExprSnafu, ValueNotFoundSnafu,
+    ZeroRangeSelectorSnafu,
 };
 use crate::extension_plan::{
     EmptyMetric, InstantManipulate, Millisecond, RangeManipulate, SeriesDivide, SeriesNormalize,
@@ -319,8 +320,11 @@ impl PromPlanner {
                 } = vector_selector;
                 let matchers = self.preprocess_label_matchers(matchers)?;
                 self.setup_context().await?;
+
+                ensure!(!range.is_zero(), ZeroRangeSelectorSnafu);
                 let range_ms = range.as_millis() as _;
                 self.ctx.range = Some(range_ms);
+
                 let normalize = self
                     .selector_to_series_normalize_plan(offset, matchers)
                     .await?;
