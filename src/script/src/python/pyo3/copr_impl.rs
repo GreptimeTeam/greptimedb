@@ -170,21 +170,26 @@ coprocessor = copr
 /// Cast return of py script result to `Vec<VectorRef>`,
 /// constants will be broadcast to length of `col_len`
 /// accept and convert if obj is of two types:
-/// 1. tuples of PyVector
+/// 1. tuples of PyVector or a tuple of PyList of same type Literals
+/// or a mixed tuple of PyVector and PyList of same type Literals
 /// 2. a single PyVector
 /// 3. a PyList of same type Literals
 fn py_any_to_vec(obj: &PyAny, col_len: usize) -> PyResult<Vec<VectorRef>> {
     let check = if obj.is_instance_of::<PyTuple>()? {
         let tuple = obj.downcast::<PyTuple>()?;
         (0..tuple.len())
-            .map(|idx| tuple.get_item(idx).map(|i| i.is_instance_of::<PyVector>()))
+            .map(|idx| {
+                tuple.get_item(idx).map(|i| -> PyResult<bool> {
+                    Ok(i.is_instance_of::<PyVector>()? || i.is_instance_of::<PyList>()?)
+                })
+            })
             .all(|i| matches!(i, Ok(Ok(true))))
     } else {
         obj.is_instance_of::<PyVector>()? || obj.is_instance_of::<PyList>()?
     };
     if !check {
         return Err(PyRuntimeError::new_err(format!(
-            "Expect a tuple of vectors or one single vector or a list of same type literals, found {obj}"
+            "Expect a tuple of vectors(or lists) or one single vector or a list of same type literals, found {obj}"
         )));
     }
 
@@ -193,58 +198,19 @@ fn py_any_to_vec(obj: &PyAny, col_len: usize) -> PyResult<Vec<VectorRef>> {
         let v = (0..len)
             .map(|idx| tuple.get_item(idx))
             .map(|elem| {
-                elem.map(|any| py_obj_broadcast_to_vec(any, col_len))
-                    .and_then(|v| v)
+                elem.map(|any| {
+                    if let Ok(list) = any.downcast::<PyList>() {
+                        py_list_to_vec(list)
+                    } else {
+                        py_obj_broadcast_to_vec(any, col_len)
+                    }
+                })
+                .and_then(|v| v)
             })
             .collect::<PyResult<Vec<_>>>()?;
         Ok(v)
     } else if let Ok(list) = obj.downcast::<PyList>() {
-        // make sure elements of list is all of same type: bool/int/float/string
-        #[derive(PartialEq, Eq, Debug, Copy, Clone)]
-        enum ExpectType {
-            Bool,
-            Int,
-            Float,
-            String,
-        }
-        let mut expected_type = None;
-        let mut v = Vec::new();
-        for (idx, elem) in list.iter().enumerate() {
-            let (elem_ty, con_type) = if elem.is_instance_of::<PyBool>()? {
-                (ExpectType::Bool, ConcreteDataType::boolean_datatype())
-            } else if elem.is_instance_of::<PyInt>()? {
-                (ExpectType::Int, ConcreteDataType::int64_datatype())
-            } else if elem.is_instance_of::<PyFloat>()? {
-                (ExpectType::Float, ConcreteDataType::float64_datatype())
-            } else if elem.is_instance_of::<PyString>()? {
-                (ExpectType::String, ConcreteDataType::string_datatype())
-            } else {
-                return Err(PyRuntimeError::new_err(format!(
-                    "Expect list contains bool or int or float or string, found <{obj}>"
-                )));
-            };
-            if let Some(ty) = expected_type {
-                if ty != elem_ty {
-                    return Err(PyRuntimeError::new_err(format!(
-                        "Expect a list of same type elements, found {obj} in position {idx} in list"
-                    )));
-                }
-            } else {
-                expected_type = Some(elem_ty);
-            }
-            // push into a vector buffer
-            let val = pyo3_obj_try_to_typed_val(elem, Some(con_type))?;
-            let scalar = val.try_to_scalar_value(&val.data_type()).map_err(|err| {
-                PyRuntimeError::new_err(format!("Can't convert value to scalar value: {}", err))
-            })?;
-            v.push(scalar);
-        }
-        let array = ScalarValue::iter_to_array(v.into_iter()).map_err(|err| {
-            PyRuntimeError::new_err(format!("Can't convert scalar value list to array: {}", err))
-        })?;
-        let ret = Helper::try_into_vector(array).map_err(|err| {
-            PyRuntimeError::new_err(format!("Can't convert array to vector: {}", err))
-        })?;
+        let ret = py_list_to_vec(list)?;
         Ok(vec![ret])
     } else {
         let ret = py_obj_broadcast_to_vec(obj, col_len)?;
@@ -252,7 +218,61 @@ fn py_any_to_vec(obj: &PyAny, col_len: usize) -> PyResult<Vec<VectorRef>> {
     }
 }
 
+/// Convert a python list to a [`VectorRef`] all of same type: bool/int/float/string
+fn py_list_to_vec(list: &PyList) -> PyResult<VectorRef> {
+    /// make sure elements of list is all of same type: bool/int/float/string
+    #[derive(PartialEq, Eq, Debug, Copy, Clone)]
+    enum ExpectType {
+        Bool,
+        Int,
+        Float,
+        String,
+    }
+    let mut expected_type = None;
+    let mut v = Vec::new();
+    for (idx, elem) in list.iter().enumerate() {
+        let (elem_ty, con_type) = if elem.is_instance_of::<PyBool>()? {
+            (ExpectType::Bool, ConcreteDataType::boolean_datatype())
+        } else if elem.is_instance_of::<PyInt>()? {
+            (ExpectType::Int, ConcreteDataType::int64_datatype())
+        } else if elem.is_instance_of::<PyFloat>()? {
+            (ExpectType::Float, ConcreteDataType::float64_datatype())
+        } else if elem.is_instance_of::<PyString>()? {
+            (ExpectType::String, ConcreteDataType::string_datatype())
+        } else {
+            return Err(PyRuntimeError::new_err(format!(
+                "Expect list contains bool or int or float or string, found <{list}>"
+            )));
+        };
+        if let Some(ty) = expected_type {
+            if ty != elem_ty {
+                return Err(PyRuntimeError::new_err(format!(
+                    "Expect a list of same type elements, found {list} in position {idx} in list"
+                )));
+            }
+        } else {
+            expected_type = Some(elem_ty);
+        }
+        // push into a vector buffer
+        let val = pyo3_obj_try_to_typed_val(elem, Some(con_type))?;
+        let scalar = val.try_to_scalar_value(&val.data_type()).map_err(|err| {
+            PyRuntimeError::new_err(format!("Can't convert value to scalar value: {}", err))
+        })?;
+        v.push(scalar);
+    }
+    let array = ScalarValue::iter_to_array(v.into_iter()).map_err(|err| {
+        PyRuntimeError::new_err(format!("Can't convert scalar value list to array: {}", err))
+    })?;
+    let ret = Helper::try_into_vector(array).map_err(|err| {
+        PyRuntimeError::new_err(format!("Can't convert array to vector: {}", err))
+    })?;
+    Ok(ret)
+}
+
 /// broadcast a single Python Object to a Vector of same object with length `col_len`
+/// obj is either:
+/// 1. a PyVector
+/// 2. a single Literal
 fn py_obj_broadcast_to_vec(obj: &PyAny, col_len: usize) -> PyResult<VectorRef> {
     if let Ok(v) = obj.extract::<PyVector>() {
         Ok(v.as_vector_ref())
