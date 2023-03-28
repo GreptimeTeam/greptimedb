@@ -27,12 +27,12 @@ env:
   RUST_TOOLCHAIN: nightly-2023-02-26
 
 jobs:
-  # typos:
-  #   name: Spell Check with Typos
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v3
-  #     - uses: crate-ci/typos@v1.13.10
+  typos:
+    name: Spell Check with Typos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: crate-ci/typos@v1.13.10
 
   check:
     name: Check
@@ -52,22 +52,22 @@ jobs:
       - name: Run cargo check
         run: cargo check --workspace --all-targets
 
-  # toml:
-  #   name: Toml Check
-  #   if: github.event.pull_request.draft == false
-  #   runs-on: ubuntu-latest
-  #   timeout-minutes: 60
-  #   steps:
-  #     - uses: actions/checkout@v3
-  #     - uses: dtolnay/rust-toolchain@master
-  #       with:
-  #         toolchain: ${{ env.RUST_TOOLCHAIN }}
-  #     - name: Rust Cache
-  #       uses: Swatinem/rust-cache@v2
-  #     - name: Install taplo
-  #       run: cargo install taplo-cli --version ^0.8 --locked
-  #     - name: Run taplo
-  #       run: taplo format --check --option "indent_string=    "
+  toml:
+    name: Toml Check
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v3
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+      - name: Install taplo
+        run: cargo install taplo-cli --version ^0.8 --locked
+      - name: Run taplo
+        run: taplo format --check --option "indent_string=    "
 
   # Use coverage to run test.
   # test:
@@ -111,41 +111,41 @@ jobs:
   #         GT_S3_ACCESS_KEY: ${{ secrets.S3_ACCESS_KEY }}
   #         UNITTEST_LOG_DIR: "__unittest_logs"
 
-  # sqlness:
-  #   name: Sqlness Test
-  #   if: github.event.pull_request.draft == false
-  #   runs-on: ubuntu-latest-8-cores
-  #   timeout-minutes: 60
-  #   needs: [clippy]
-  #   steps:
-  #     - uses: actions/checkout@v3
-  #     - uses: arduino/setup-protoc@v1
-  #       with:
-  #         repo-token: ${{ secrets.GITHUB_TOKEN }}
-  #     - uses: dtolnay/rust-toolchain@master
-  #       with:
-  #         toolchain: ${{ env.RUST_TOOLCHAIN }}
-  #     - name: Rust Cache
-  #       uses: Swatinem/rust-cache@v2
-  #     - name: Run etcd
-  #       run: |
-  #         ETCD_VER=v3.5.7
-  #         DOWNLOAD_URL=https://github.com/etcd-io/etcd/releases/download
-  #         curl -L ${DOWNLOAD_URL}/${ETCD_VER}/etcd-${ETCD_VER}-linux-amd64.tar.gz -o /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz
-  #         mkdir -p /tmp/etcd-download
-  #         tar xzvf /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz -C /tmp/etcd-download --strip-components=1
-  #         rm -f /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz
+  sqlness:
+    name: Sqlness Test
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest-8-cores
+    timeout-minutes: 60
+    needs: [clippy]
+    steps:
+      - uses: actions/checkout@v3
+      - uses: arduino/setup-protoc@v1
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+      - name: Run etcd
+        run: |
+          ETCD_VER=v3.5.7
+          DOWNLOAD_URL=https://github.com/etcd-io/etcd/releases/download
+          curl -L ${DOWNLOAD_URL}/${ETCD_VER}/etcd-${ETCD_VER}-linux-amd64.tar.gz -o /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz
+          mkdir -p /tmp/etcd-download
+          tar xzvf /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz -C /tmp/etcd-download --strip-components=1
+          rm -f /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz
 
-  #         sudo cp -a /tmp/etcd-download/etcd* /usr/local/bin/
-  #         nohup etcd >/tmp/etcd.log 2>&1 &
-  #     - name: Run sqlness
-  #       run: cargo sqlness && ls /tmp
-  #     - name: Upload sqlness logs
-  #       uses: actions/upload-artifact@v3
-  #       with:
-  #         name: sqlness-logs
-  #         path: /tmp/greptime-*.log
-  #         retention-days: 3
+          sudo cp -a /tmp/etcd-download/etcd* /usr/local/bin/
+          nohup etcd >/tmp/etcd.log 2>&1 &
+      - name: Run sqlness
+        run: cargo sqlness && ls /tmp
+      - name: Upload sqlness logs
+        uses: actions/upload-artifact@v3
+        with:
+          name: sqlness-logs
+          path: /tmp/greptime-*.log
+          retention-days: 3
 
   fmt:
     name: Rustfmt
@@ -203,20 +203,20 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: llvm-tools-preview
-      # - name: Rust Cache
-      #   uses: Swatinem/rust-cache@v2
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
       - name: Install latest nextest release
         uses: taiki-e/install-action@nextest
-      # - name: Install Python
-      #   uses: actions/setup-python@v4
-      #   with:
-      #     python-version: '3.10'
-      # - name: Install PyArrow Package
-      #   run: pip install pyarrow
-      # - name: Install cargo-llvm-cov
-      #   uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Install Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Install PyArrow Package
+        run: pip install pyarrow
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
       - name: Collect coverage data
-        run: cargo nextest run -p storage test_compact_during_read
+        run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info -F pyo3_backend
         env:
           CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
           RUST_BACKTRACE: 1
@@ -225,11 +225,11 @@ jobs:
           GT_S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
           GT_S3_ACCESS_KEY: ${{ secrets.S3_ACCESS_KEY }}
           UNITTEST_LOG_DIR: "__unittest_logs"
-      # - name: Codecov upload
-      #   uses: codecov/codecov-action@v2
-      #   with:
-      #     token: ${{ secrets.CODECOV_TOKEN }}
-      #     files: ./lcov.info
-      #     flags: rust
-      #     fail_ci_if_error: false
-      #     verbose: true
+      - name: Codecov upload
+        uses: codecov/codecov-action@v2
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./lcov.info
+          flags: rust
+          fail_ci_if_error: false
+          verbose: true
