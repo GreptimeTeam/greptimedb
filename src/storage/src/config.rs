@@ -16,6 +16,7 @@
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
+    pub manifest_checkpoint_margin: Option<u16>,
     pub max_files_in_l0: usize,
     pub max_purge_tasks: usize,
 }
@@ -23,6 +24,7 @@ pub struct EngineConfig {
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
+            manifest_checkpoint_margin: Some(10),
             max_files_in_l0: 8,
             max_purge_tasks: 32,
         }

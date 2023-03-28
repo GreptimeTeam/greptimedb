@@ -63,6 +63,7 @@ impl MockInstance {
         opts.procedure = Some(ProcedureConfig {
             store: ObjectStoreConfig::File(FileConfig {
                 data_dir: procedure_dir.path().to_str().unwrap().to_string(),
+                ..Default::default()
             }),
             max_retry_times: 3,
             retry_delay: Duration::from_millis(500),
@@ -132,6 +133,7 @@ fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) 
         },
         storage: ObjectStoreConfig::File(FileConfig {
             data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
+            ..Default::default()
         }),
         mode: Mode::Standalone,
         ..Default::default()

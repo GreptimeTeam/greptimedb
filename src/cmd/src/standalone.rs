@@ -129,7 +129,6 @@ impl StandaloneOptions {
             enable_memory_catalog: self.enable_memory_catalog,
             wal: self.wal,
             storage: self.storage,
-            compaction: self.compaction,
             procedure: self.procedure,
             ..Default::default()
         }

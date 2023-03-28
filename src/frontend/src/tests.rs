@@ -97,6 +97,7 @@ fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) 
         },
         storage: ObjectStoreConfig::File(FileConfig {
             data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
+            ..Default::default()
         }),
         mode: Mode::Standalone,
         ..Default::default()
@@ -184,6 +185,7 @@ async fn create_distributed_datanode(
         },
         storage: ObjectStoreConfig::File(FileConfig {
             data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
+            ..Default::default()
         }),
         mode: Mode::Distributed,
         ..Default::default()

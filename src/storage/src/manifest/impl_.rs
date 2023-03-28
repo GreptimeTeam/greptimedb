@@ -29,25 +29,28 @@ use crate::manifest::action::RegionCheckpoint;
 use crate::manifest::checkpoint::Checkpointer;
 use crate::manifest::storage::{ManifestObjectStore, ObjectStoreLogIterator};
 
-// TODO(dennis): export this option to table options or storage options.
-const CHECKPOINT_ACTIONS_MARGIN: u64 = 10;
+const CHECKPOINT_ACTIONS_MARGIN: u16 = 10;
 
 #[derive(Clone, Debug)]
 pub struct ManifestImpl<S: Checkpoint<Error = Error>, M: MetaAction<Error = Error>> {
     inner: Arc<ManifestImplInner<S, M>>,
     checkpointer: Option<Arc<dyn Checkpointer<Checkpoint = S, MetaAction = M>>>,
     last_checkpoint_version: Arc<AtomicU64>,
+    checkpoint_actions_margin: u16,
 }
 
 impl<S: Checkpoint<Error = Error>, M: MetaAction<Error = Error>> ManifestImpl<S, M> {
     pub fn new(
         manifest_dir: &str,
         object_store: ObjectStore,
+        checkpoint_actions_margin: Option<u16>,
         checkpointer: Option<Arc<dyn Checkpointer<Checkpoint = S, MetaAction = M>>>,
     ) -> Self {
         ManifestImpl {
             inner: Arc::new(ManifestImplInner::new(manifest_dir, object_store)),
             checkpointer,
+            checkpoint_actions_margin: checkpoint_actions_margin
+                .unwrap_or(CHECKPOINT_ACTIONS_MARGIN),
             last_checkpoint_version: Arc::new(AtomicU64::new(MIN_VERSION)),
         }
     }
@@ -100,7 +103,7 @@ impl<S: 'static + Checkpoint<Error = Error>, M: 'static + MetaAction<Error = Err
     async fn update(&self, action_list: M) -> Result<ManifestVersion> {
         let version = self.inner.save(action_list).await?;
         if version - self.last_checkpoint_version.load(Ordering::Relaxed)
-            >= CHECKPOINT_ACTIONS_MARGIN
+            >= self.checkpoint_actions_margin as u64
         {
             let s = self.do_checkpoint().await?;
             debug!("Manifest checkpoint, checkpoint: {:#?}", s);

@@ -290,7 +290,7 @@ async fn test_recover_region_manifets() {
     builder.root(&tmp_dir.path().to_string_lossy());
     let object_store = ObjectStore::new(builder).unwrap().finish();
 
-    let manifest = RegionManifest::with_checkpointer("/manifest/", object_store.clone());
+    let manifest = RegionManifest::with_checkpointer("/manifest/", object_store.clone(), None);
     let region_meta = Arc::new(build_region_meta());
 
     let sst_layer = Arc::new(FsAccessLayer::new("sst", object_store)) as _;

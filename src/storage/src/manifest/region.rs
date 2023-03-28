@@ -138,10 +138,15 @@ impl Checkpointer for RegionManifestCheckpointer {
 }
 
 impl RegionManifest {
-    pub fn with_checkpointer(manifest_dir: &str, object_store: ObjectStore) -> Self {
+    pub fn with_checkpointer(
+        manifest_dir: &str,
+        object_store: ObjectStore,
+        checkpoint_actions_margin: Option<u16>,
+    ) -> Self {
         Self::new(
             manifest_dir,
             object_store,
+            checkpoint_actions_margin,
             Some(Arc::new(RegionManifestCheckpointer {
                 flushed_manifest_version: AtomicU64::new(0),
             })),
@@ -184,7 +189,7 @@ mod tests {
         builder.root(&tmp_dir.path().to_string_lossy());
         let object_store = ObjectStore::new(builder).unwrap().finish();
 
-        let manifest = RegionManifest::with_checkpointer("/manifest/", object_store);
+        let manifest = RegionManifest::with_checkpointer("/manifest/", object_store, None);
 
         let region_meta = Arc::new(build_region_meta());
 
@@ -294,7 +299,7 @@ mod tests {
         builder.root(&tmp_dir.path().to_string_lossy());
         let object_store = ObjectStore::new(builder).unwrap().finish();
 
-        let manifest = RegionManifest::with_checkpointer("/manifest/", object_store);
+        let manifest = RegionManifest::with_checkpointer("/manifest/", object_store, None);
 
         let region_meta = Arc::new(build_region_meta());
         let new_region_meta = Arc::new(build_altered_region_meta());

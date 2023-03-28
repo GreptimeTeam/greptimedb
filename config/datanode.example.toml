@@ -37,10 +37,16 @@ type = "File"
 data_dir = "/tmp/greptimedb/data/"
 
 # Compaction options, see `standalone.example.toml`.
-[compaction]
+[storage.compaction]
 max_inflight_tasks = 4
 max_files_in_level0 = 8
 max_purge_tasks = 32
+
+# Storage manifest options
+[storage.manifest]
+# Checkpoint actions margin.
+# Create a checkpoint every <manifest_checkpoint_margin> actions.
+manifest_checkpoint_margin = 10
 
 # Procedure storage options, see `standalone.example.toml`.
 # [procedure.store]

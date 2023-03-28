@@ -100,8 +100,7 @@ fn get_test_store_config(
                 access_key_secret: env::var("GT_OSS_ACCESS_KEY").unwrap(),
                 bucket: env::var("GT_OSS_BUCKET").unwrap(),
                 endpoint: env::var("GT_OSS_ENDPOINT").unwrap(),
-                cache_path: None,
-                cache_capacity: None,
+                ..Default::default()
             };
 
             let mut builder = Oss::default();
@@ -127,10 +126,7 @@ fn get_test_store_config(
                 access_key_id: env::var("GT_S3_ACCESS_KEY_ID").unwrap(),
                 secret_access_key: env::var("GT_S3_ACCESS_KEY").unwrap(),
                 bucket: env::var("GT_S3_BUCKET").unwrap(),
-                endpoint: None,
-                region: None,
-                cache_path: None,
-                cache_capacity: None,
+                ..Default::default()
             };
 
             let mut builder = S3::default();
@@ -152,6 +148,7 @@ fn get_test_store_config(
             (
                 ObjectStoreConfig::File(FileConfig {
                     data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
+                    ..Default::default()
                 }),
                 Some(TempDirGuard::File(data_tmp_dir)),
             )

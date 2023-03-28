@@ -41,6 +41,8 @@ pub enum ObjectStoreConfig {
 #[serde(default)]
 pub struct FileConfig {
     pub data_dir: String,
+    pub compaction: CompactionConfig,
+    pub manifest: RegionManifestConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Default, Deserialize)]
@@ -54,6 +56,8 @@ pub struct S3Config {
     pub region: Option<String>,
     pub cache_path: Option<String>,
     pub cache_capacity: Option<ReadableSize>,
+    pub compaction: CompactionConfig,
+    pub manifest: RegionManifestConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Default, Deserialize)]
@@ -66,13 +70,34 @@ pub struct OssConfig {
     pub endpoint: String,
     pub cache_path: Option<String>,
     pub cache_capacity: Option<ReadableSize>,
+    pub compaction: CompactionConfig,
+    pub manifest: RegionManifestConfig,
 }
 
 impl Default for ObjectStoreConfig {
     fn default() -> Self {
         ObjectStoreConfig::File(FileConfig {
             data_dir: "/tmp/greptimedb/data/".to_string(),
+            ..Default::default()
         })
+    }
+}
+
+impl ObjectStoreConfig {
+    pub fn compaction(&self) -> &CompactionConfig {
+        match self {
+            ObjectStoreConfig::File(FileConfig { compaction, .. }) => compaction,
+            ObjectStoreConfig::S3(S3Config { compaction, .. }) => compaction,
+            ObjectStoreConfig::Oss(OssConfig { compaction, .. }) => compaction,
+        }
+    }
+
+    pub fn manifest(&self) -> &RegionManifestConfig {
+        match self {
+            ObjectStoreConfig::File(FileConfig { manifest, .. }) => manifest,
+            ObjectStoreConfig::S3(S3Config { manifest, .. }) => manifest,
+            ObjectStoreConfig::Oss(OssConfig { manifest, .. }) => manifest,
+        }
     }
 }
 
@@ -107,6 +132,23 @@ impl Default for WalConfig {
     }
 }
 
+/// Options for region manifest
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(default)]
+pub struct RegionManifestConfig {
+    /// Region manifest checkpoint actions margin.
+    /// Manifest service create a checkpint every [manifest_checkpoint_margin] actions.
+    pub manifest_checkpoint_margin: Option<u16>,
+}
+
+impl Default for RegionManifestConfig {
+    fn default() -> Self {
+        Self {
+            manifest_checkpoint_margin: Some(10u16),
+        }
+    }
+}
+
 /// Options for table compaction
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(default)]
@@ -132,7 +174,7 @@ impl Default for CompactionConfig {
 impl From<&DatanodeOptions> for SchedulerConfig {
     fn from(value: &DatanodeOptions) -> Self {
         Self {
-            max_inflight_tasks: value.compaction.max_inflight_tasks,
+            max_inflight_tasks: value.storage.compaction().max_inflight_tasks,
         }
     }
 }
@@ -140,8 +182,9 @@ impl From<&DatanodeOptions> for SchedulerConfig {
 impl From<&DatanodeOptions> for StorageEngineConfig {
     fn from(value: &DatanodeOptions) -> Self {
         Self {
-            max_files_in_l0: value.compaction.max_files_in_level0,
-            max_purge_tasks: value.compaction.max_purge_tasks,
+            manifest_checkpoint_margin: value.storage.manifest().manifest_checkpoint_margin,
+            max_files_in_l0: value.storage.compaction().max_files_in_level0,
+            max_purge_tasks: value.storage.compaction().max_purge_tasks,
         }
     }
 }
@@ -163,6 +206,7 @@ impl Default for ProcedureConfig {
         ProcedureConfig {
             store: ObjectStoreConfig::File(FileConfig {
                 data_dir: "/tmp/greptimedb/procedure/".to_string(),
+                ..Default::default()
             }),
             max_retry_times: 3,
             retry_delay: Duration::from_millis(500),
@@ -173,7 +217,10 @@ impl Default for ProcedureConfig {
 impl ProcedureConfig {
     pub fn from_file_path(path: String) -> ProcedureConfig {
         ProcedureConfig {
-            store: ObjectStoreConfig::File(FileConfig { data_dir: path }),
+            store: ObjectStoreConfig::File(FileConfig {
+                data_dir: path,
+                ..Default::default()
+            }),
             ..Default::default()
         }
     }
@@ -193,7 +240,6 @@ pub struct DatanodeOptions {
     pub meta_client_options: Option<MetaClientOptions>,
     pub wal: WalConfig,
     pub storage: ObjectStoreConfig,
-    pub compaction: CompactionConfig,
     pub procedure: Option<ProcedureConfig>,
 }
 
@@ -211,7 +257,6 @@ impl Default for DatanodeOptions {
             meta_client_options: None,
             wal: WalConfig::default(),
             storage: ObjectStoreConfig::default(),
-            compaction: CompactionConfig::default(),
             procedure: None,
         }
     }
