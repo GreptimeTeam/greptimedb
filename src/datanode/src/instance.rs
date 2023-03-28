@@ -430,15 +430,23 @@ pub(crate) async fn new_fs_object_store(store_config: &ObjectStoreConfig) -> Res
     info!("The file storage directory is: {}", &data_dir);
 
     let atomic_write_dir = format!("{data_dir}/.tmp/");
+    if path::Path::new(&atomic_write_dir).exists() {
+        fs::remove_dir_all(&atomic_write_dir).context(error::RemoveDirSnafu {
+            dir: &atomic_write_dir,
+        })?;
+        info!("Cleaned temp storage directory: {}", &atomic_write_dir);
+    }
 
     let mut builder = FsBuilder::default();
     builder.root(&data_dir).atomic_write_dir(&atomic_write_dir);
 
-    Ok(ObjectStore::new(builder)
+    let object_store = ObjectStore::new(builder)
         .context(error::InitBackendSnafu {
             config: store_config.clone(),
         })?
-        .finish())
+        .finish();
+
+    Ok(object_store)
 }
 
 /// Create metasrv client instance and spawn heartbeat loop.

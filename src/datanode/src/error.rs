@@ -181,6 +181,9 @@ pub enum Error {
     #[snafu(display("Failed to create directory {}, source: {}", dir, source))]
     CreateDir { dir: String, source: std::io::Error },
 
+    #[snafu(display("Failed to remove directory {}, source: {}", dir, source))]
+    RemoveDir { dir: String, source: std::io::Error },
+
     #[snafu(display("Failed to open log store, source: {}", source))]
     OpenLogStore {
         #[snafu(backtrace)]
@@ -576,6 +579,7 @@ impl ErrorExt for Error {
             | TcpBind { .. }
             | StartGrpc { .. }
             | CreateDir { .. }
+            | RemoveDir { .. }
             | InsertSystemCatalog { .. }
             | RenameTable { .. }
             | Catalog { .. }
