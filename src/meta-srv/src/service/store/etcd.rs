@@ -176,6 +176,8 @@ impl KvStore for EtcdStore {
             options,
         } = req.try_into()?;
 
+        let mut prev_kvs = Vec::with_capacity(keys.len());
+
         let delete_ops = keys
             .into_iter()
             .map(|k| TxnOp::delete(k, options.clone()))
@@ -188,8 +190,6 @@ impl KvStore for EtcdStore {
             .txn(txn)
             .await
             .context(error::EtcdFailedSnafu)?;
-
-        let mut prev_kvs = vec![];
 
         for op_res in txn_res.op_responses() {
             match op_res {
