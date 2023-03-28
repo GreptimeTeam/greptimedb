@@ -41,16 +41,17 @@ use snafu::{ensure, OptionExt, ResultExt};
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::error::{
-    CatalogSnafu, DataFusionPlanningSnafu, ExpectExprSnafu, MultipleVectorSnafu, Result,
-    TableNameNotFoundSnafu, TimeIndexNotFoundSnafu, UnexpectedTokenSnafu, UnknownTableSnafu,
-    UnsupportedExprSnafu, ValueNotFoundSnafu,
+    CatalogSnafu, DataFusionPlanningSnafu, ExpectExprSnafu, ExpectRangeSelectorSnafu,
+    MultipleVectorSnafu, Result, TableNameNotFoundSnafu, TimeIndexNotFoundSnafu,
+    UnexpectedTokenSnafu, UnknownTableSnafu, UnsupportedExprSnafu, ValueNotFoundSnafu,
+    ZeroRangeSelectorSnafu,
 };
 use crate::extension_plan::{
     EmptyMetric, InstantManipulate, Millisecond, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
 use crate::functions::{
-    AbsentOverTime, AvgOverTime, CountOverTime, IDelta, Increase, LastOverTime, MaxOverTime,
-    MinOverTime, PresentOverTime, SumOverTime,
+    AbsentOverTime, AvgOverTime, CountOverTime, Delta, IDelta, Increase, LastOverTime, MaxOverTime,
+    MinOverTime, PresentOverTime, Rate, SumOverTime,
 };
 
 const LEFT_PLAN_JOIN_ALIAS: &str = "lhs";
@@ -74,6 +75,8 @@ struct PromPlannerContext {
     time_index_column: Option<String>,
     value_columns: Vec<String>,
     tag_columns: Vec<String>,
+    /// The range in millisecond of range selector. None if there is no range selector.
+    range: Option<Millisecond>,
 }
 
 impl PromPlannerContext {
@@ -317,6 +320,11 @@ impl PromPlanner {
                 } = vector_selector;
                 let matchers = self.preprocess_label_matchers(matchers)?;
                 self.setup_context().await?;
+
+                ensure!(!range.is_zero(), ZeroRangeSelectorSnafu);
+                let range_ms = range.as_millis() as _;
+                self.ctx.range = Some(range_ms);
+
                 let normalize = self
                     .selector_to_series_normalize_plan(offset, matchers)
                     .await?;
@@ -325,7 +333,7 @@ impl PromPlanner {
                     self.ctx.end,
                     self.ctx.interval,
                     // TODO(ruihang): convert via Timestamp datatypes to support different time units
-                    range.as_millis() as _,
+                    range_ms,
                     self.ctx
                         .time_index_column
                         .clone()
@@ -668,7 +676,15 @@ impl PromPlanner {
         // TODO(ruihang): set this according to in-param list
         let value_column_pos = 0;
         let scalar_func = match func.name {
-            "increase" => ScalarFunc::Udf(Increase::scalar_udf()),
+            "increase" => ScalarFunc::ExtrapolateUdf(Increase::scalar_udf(
+                self.ctx.range.context(ExpectRangeSelectorSnafu)?,
+            )),
+            "rate" => ScalarFunc::ExtrapolateUdf(Rate::scalar_udf(
+                self.ctx.range.context(ExpectRangeSelectorSnafu)?,
+            )),
+            "delta" => ScalarFunc::ExtrapolateUdf(Delta::scalar_udf(
+                self.ctx.range.context(ExpectRangeSelectorSnafu)?,
+            )),
             "idelta" => ScalarFunc::Udf(IDelta::<false>::scalar_udf()),
             "irate" => ScalarFunc::Udf(IDelta::<true>::scalar_udf()),
             "avg_over_time" => ScalarFunc::Udf(AvgOverTime::scalar_udf()),
@@ -717,6 +733,25 @@ impl PromPlanner {
                         args: other_input_exprs.clone(),
                     };
                     exprs.push(fn_expr);
+                    other_input_exprs.remove(value_column_pos + 1);
+                    other_input_exprs.remove(value_column_pos);
+                }
+                ScalarFunc::ExtrapolateUdf(fun) => {
+                    let ts_range_expr = DfExpr::Column(Column::from_name(
+                        RangeManipulate::build_timestamp_range_name(
+                            self.ctx.time_index_column.as_ref().unwrap(),
+                        ),
+                    ));
+                    other_input_exprs.insert(value_column_pos, ts_range_expr);
+                    other_input_exprs.insert(value_column_pos + 1, col_expr);
+                    other_input_exprs
+                        .insert(value_column_pos + 2, self.create_time_index_column_expr()?);
+                    let fn_expr = DfExpr::ScalarUDF {
+                        fun: Arc::new(fun),
+                        args: other_input_exprs.clone(),
+                    };
+                    exprs.push(fn_expr);
+                    other_input_exprs.remove(value_column_pos + 2);
                     other_input_exprs.remove(value_column_pos + 1);
                     other_input_exprs.remove(value_column_pos);
                 }
@@ -1032,6 +1067,9 @@ struct FunctionArgs {
 enum ScalarFunc {
     DataFusionBuiltin(BuiltinScalarFunction),
     Udf(ScalarUDF),
+    // todo(ruihang): maybe merge with Udf later
+    /// UDF that require extra information like range length to be evaluated.
+    ExtrapolateUdf(ScalarUDF),
 }
 
 #[cfg(test)]
@@ -1600,8 +1638,8 @@ mod test {
     async fn increase_aggr() {
         let query = "increase(some_metric[5m])";
         let expected = String::from(
-            "Filter: prom_increase(timestamp_range,field_0) IS NOT NULL [timestamp:Timestamp(Millisecond, None), prom_increase(timestamp_range,field_0):Float64;N, tag_0:Utf8]\
-            \n  Projection: some_metric.timestamp, prom_increase(timestamp_range, field_0) AS prom_increase(timestamp_range,field_0), some_metric.tag_0 [timestamp:Timestamp(Millisecond, None), prom_increase(timestamp_range,field_0):Float64;N, tag_0:Utf8]\
+            "Filter: prom_increase(timestamp_range,field_0,timestamp) IS NOT NULL [timestamp:Timestamp(Millisecond, None), prom_increase(timestamp_range,field_0,timestamp):Float64;N, tag_0:Utf8]\
+            \n  Projection: some_metric.timestamp, prom_increase(timestamp_range, field_0, some_metric.timestamp) AS prom_increase(timestamp_range,field_0,timestamp), some_metric.tag_0 [timestamp:Timestamp(Millisecond, None), prom_increase(timestamp_range,field_0,timestamp):Float64;N, tag_0:Utf8]\
             \n    PromRangeManipulate: req range=[0..100000000], interval=[5000], eval range=[300000], time index=[timestamp], values=[\"field_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Dictionary(Int64, Float64);N, timestamp_range:Dictionary(Int64, Timestamp(Millisecond, None))]\
             \n      PromSeriesNormalize: offset=[0], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n        PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\

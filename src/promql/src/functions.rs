@@ -15,8 +15,8 @@
 mod aggr_over_time;
 mod changes;
 mod deriv;
+mod extrapolate_rate;
 mod idelta;
-mod increase;
 mod resets;
 #[cfg(test)]
 mod test_util;
@@ -28,8 +28,8 @@ pub use aggr_over_time::{
 use datafusion::arrow::array::ArrayRef;
 use datafusion::error::DataFusionError;
 use datafusion::physical_plan::ColumnarValue;
+pub use extrapolate_rate::{Delta, Increase, Rate};
 pub use idelta::IDelta;
-pub use increase::Increase;
 
 pub(crate) fn extract_array(columnar_value: &ColumnarValue) -> Result<ArrayRef, DataFusionError> {
     if let ColumnarValue::Array(array) = columnar_value {
