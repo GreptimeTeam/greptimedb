@@ -22,8 +22,8 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema};
 use meta_client::client::MetaClientBuilder;
 use meta_client::rpc::{
-    BatchPutRequest, CompareAndPutRequest, CreateRequest, DeleteRangeRequest, Partition,
-    PutRequest, RangeRequest, TableName,
+    BatchDeleteRequest, BatchGetRequest, BatchPutRequest, CompareAndPutRequest, CreateRequest,
+    DeleteRangeRequest, Partition, PutRequest, RangeRequest, TableName,
 };
 use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
 use table::requests::TableOptions;
@@ -146,6 +146,30 @@ async fn run() {
     // get none
     let res = meta_client.range(range).await.unwrap();
     event!(Level::INFO, "get range result: {:#?}", res);
+
+    // batch delete
+    // put two
+    let batch_put = BatchPutRequest::new()
+        .add_kv(b"batch_put1".to_vec(), b"batch_put_v1".to_vec())
+        .add_kv(b"batch_put2".to_vec(), b"batch_put_v2".to_vec())
+        .with_prev_kv();
+    let res = meta_client.batch_put(batch_put).await.unwrap();
+    event!(Level::INFO, "batch put result: {:#?}", res);
+
+    // delete one
+    let batch_delete = BatchDeleteRequest::new()
+        .add_key(b"batch_put1".to_vec())
+        .with_prev_kv();
+    let res = meta_client.batch_delete(batch_delete).await.unwrap();
+    event!(Level::INFO, "batch delete result: {:#?}", res);
+
+    // get other one
+    let batch_get = BatchGetRequest::new()
+        .add_key(b"batch_put1".to_vec())
+        .add_key(b"batch_put2".to_vec());
+
+    let res = meta_client.batch_get(batch_get).await.unwrap();
+    event!(Level::INFO, "batch get result: {:#?}", res);
 }
 
 fn new_table_info() -> RawTableInfo {
