@@ -189,7 +189,7 @@ impl ManifestLogStorage for ManifestObjectStore {
         })
     }
 
-    async fn delete_until(&self, end: ManifestVersion) -> Result<()> {
+    async fn delete_until(&self, end: ManifestVersion) -> Result<usize> {
         let streamer = self
             .object_store
             .list(&self.path)
@@ -213,10 +213,11 @@ impl ManifestLogStorage for ManifestObjectStore {
             .try_collect::<Vec<_>>()
             .await
             .context(ListObjectsSnafu { path: &self.path })?;
+        let ret = paths.len();
 
         logging::debug!(
             "Deleting {} logs from manifest storage path {}.",
-            paths.len(),
+            ret,
             self.path
         );
 
@@ -225,7 +226,9 @@ impl ManifestLogStorage for ManifestObjectStore {
             .await
             .with_context(|_| DeleteObjectSnafu {
                 path: self.path.clone(),
-            })
+            })?;
+
+        Ok(ret)
     }
 
     async fn save(&self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {

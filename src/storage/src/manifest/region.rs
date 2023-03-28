@@ -119,12 +119,6 @@ impl Checkpointer for RegionManifestCheckpointer {
             .manifest_store()
             .delete(start_version, last_version + 1)
             .await?;
-        if start_version > MIN_VERSION {
-            manifest
-                .manifest_store()
-                .delete_checkpoint(start_version - 1)
-                .await?
-        }
 
         info!("Region manifest checkpoint, start_version: {}, last_version: {}, compacted actions: {}", start_version, last_version, compacted_actions);
 

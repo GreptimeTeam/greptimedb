@@ -232,7 +232,12 @@ impl<S: Checkpoint<Error = Error>, M: MetaAction<Error = Error>> ManifestImplInn
     async fn gc_manifest_checkpoint(store: Arc<ManifestObjectStore>) -> Result<()> {
         if let Some((last_version, _)) = store.load_last_checkpoint().await? {
             // Purge all manifest and checkpoint files before last_version.
-            store.delete_until(last_version).await?;
+            let deleted = store.delete_until(last_version).await?;
+            debug!(
+                "Deleted {} logs from region manifest storage(path={}).",
+                deleted,
+                store.path()
+            );
         }
 
         Ok(())
