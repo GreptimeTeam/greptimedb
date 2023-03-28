@@ -316,7 +316,6 @@ def normalize(v) -> vector[i64]:
         CoprTestCase {
             script: r#"
 import math
-from greptime import vector
 
 def normalize0(x):
     if x is None or math.isnan(x):
@@ -330,7 +329,7 @@ def normalize0(x):
 
 @coprocessor(args=["number"], sql="select number from numbers limit 10", returns=["value"], backend="pyo3")
 def normalize(v) -> vector[i64]:
-    return vector([normalize0(x) for x in v])
+    return [normalize0(x) for x in v]
             
 "#
             .to_string(),
