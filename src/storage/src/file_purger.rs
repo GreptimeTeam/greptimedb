@@ -18,6 +18,7 @@ use common_telemetry::{debug, error};
 use store_api::storage::RegionId;
 use tokio::sync::Notify;
 
+use crate::error::Result;
 use crate::scheduler::rate_limit::{BoxedRateLimitToken, RateLimitToken};
 use crate::scheduler::{Handler, LocalScheduler, Request};
 use crate::sst::{AccessLayerRef, FileId};
@@ -34,6 +35,8 @@ impl Request for FilePurgeRequest {
     fn key(&self) -> Self::Key {
         format!("{}/{}", self.region_id, self.file_id)
     }
+
+    fn complete(self, _result: Result<()>) {}
 }
 
 pub struct FilePurgeHandler;
@@ -47,7 +50,7 @@ impl Handler for FilePurgeHandler {
         req: Self::Request,
         token: BoxedRateLimitToken,
         finish_notifier: Arc<Notify>,
-    ) -> crate::error::Result<()> {
+    ) -> Result<()> {
         req.sst_layer.delete_sst(req.file_id).await.map_err(|e| {
             error!(e; "Failed to delete SST file, file: {}, region: {}", 
                 req.file_id.as_parquet(), req.region_id);
@@ -72,6 +75,7 @@ pub mod noop {
 
     use tokio::sync::Notify;
 
+    use crate::error::Result;
     use crate::file_purger::{FilePurgeRequest, FilePurgerRef};
     use crate::scheduler::rate_limit::{BoxedRateLimitToken, RateLimitToken};
     use crate::scheduler::{Handler, LocalScheduler, SchedulerConfig};
@@ -95,7 +99,7 @@ pub mod noop {
             _req: Self::Request,
             token: BoxedRateLimitToken,
             finish_notifier: Arc<Notify>,
-        ) -> crate::error::Result<()> {
+        ) -> Result<()> {
             token.try_release();
             finish_notifier.notify_one();
             Ok(())

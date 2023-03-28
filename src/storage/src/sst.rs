@@ -256,13 +256,22 @@ impl FileHandle {
 /// Actually data of [FileHandle].
 ///
 /// Contains meta of the file, and other mutable info like metrics.
-#[derive(Debug)]
 struct FileHandleInner {
     meta: FileMeta,
     compacting: AtomicBool,
     deleted: AtomicBool,
     sst_layer: AccessLayerRef,
     file_purger: FilePurgerRef,
+}
+
+impl fmt::Debug for FileHandleInner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FileHandleInner")
+            .field("meta", &self.meta)
+            .field("compacting", &self.compacting)
+            .field("deleted", &self.deleted)
+            .finish()
+    }
 }
 
 impl Drop for FileHandleInner {
@@ -452,10 +461,17 @@ impl Source {
 }
 
 /// Sst access layer.
-#[derive(Debug)]
 pub struct FsAccessLayer {
     sst_dir: String,
     object_store: ObjectStore,
+}
+
+impl fmt::Debug for FsAccessLayer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FsAccessLayer")
+            .field("sst_dir", &self.sst_dir)
+            .finish()
+    }
 }
 
 impl FsAccessLayer {

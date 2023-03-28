@@ -443,6 +443,12 @@ pub enum Error {
 
     #[snafu(display("Failed to create a checkpoint: {}", msg))]
     ManifestCheckpoint { msg: String, backtrace: Backtrace },
+
+    #[snafu(display("The compaction task is cancelled, region_id: {}", region_id))]
+    CompactTaskCancel {
+        region_id: RegionId,
+        source: tokio::sync::oneshot::error::RecvError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -514,8 +520,9 @@ impl ErrorExt for Error {
             ConvertChunk { source, .. } => source.status_code(),
             MarkWalObsolete { source, .. } => source.status_code(),
             DecodeParquetTimeRange { .. } => StatusCode::Unexpected,
-            RateLimited { .. } => StatusCode::Internal,
-            StopScheduler { .. } => StatusCode::Internal,
+            RateLimited { .. } | StopScheduler { .. } | CompactTaskCancel { .. } => {
+                StatusCode::Internal
+            }
             DeleteSst { .. } => StatusCode::StorageUnavailable,
             IllegalSchedulerState { .. } => StatusCode::Unexpected,
             TtlCalculation { source, .. } => source.status_code(),
