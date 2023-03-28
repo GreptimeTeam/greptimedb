@@ -203,19 +203,19 @@ impl CoprStream {
     ) -> Result<Self> {
         let mut schema = vec![];
         for (ty, name) in copr.return_types.iter().zip(&copr.deco_args.ret_names) {
-            let ty = ty.clone().ok_or(
+            let ty = ty.clone().ok_or_else(|| {
                 PyRuntimeSnafu {
                     msg: "return type not annotated, can't generate schema",
                 }
-                .build(),
-            )?;
+                .build()
+            })?;
             let is_nullable = ty.is_nullable;
-            let ty = ty.datatype.ok_or(
+            let ty = ty.datatype.ok_or_else(|| {
                 PyRuntimeSnafu {
                     msg: "return type not annotated, can't generate schema",
                 }
-                .build(),
-            )?;
+                .build()
+            })?;
             let col_schema = ColumnSchema::new(name, ty, is_nullable);
             schema.push(col_schema);
         }

@@ -131,7 +131,7 @@ fn dataframe(py: Python) -> PyResult<PyDataFrame> {
     let globals = get_globals(py)?;
     let df = globals
         .get_item("__dataframe__")
-        .ok_or(PyKeyError::new_err("No __dataframe__ variable is found"))?
+        .ok_or_else(|| PyKeyError::new_err("No __dataframe__ variable is found"))?
         .extract::<PyDataFrame>()?;
     Ok(df)
 }
@@ -142,7 +142,7 @@ pub(crate) fn query_engine(py: Python) -> PyResult<PyQueryEngine> {
     let globals = get_globals(py)?;
     let query = globals
         .get_item("__query__")
-        .ok_or(PyKeyError::new_err("No __query__ variable is found"))?
+        .ok_or_else(|| PyKeyError::new_err("No __query__ variable is found"))?
         .extract::<PyQueryEngine>()?;
     Ok(query)
 }
@@ -310,7 +310,7 @@ macro_rules! bind_aggr_expr {
                         Arc::new(expressions::Column::new(stringify!($EXPR), $idx)) as _,
                     )*
                         stringify!($AGGR_FUNC),
-                        $ARG_TY.to_arrow_array().data_type().to_owned()),
+                        $ARG_TY.arrow_data_type().to_owned()),
                 &[$($ARG.to_arrow_array()),*]
             )
         }
@@ -326,7 +326,7 @@ fn approx_distinct(py: Python<'_>, v0: &PyVector) -> PyResult<PyObject> {
         expressions::ApproxDistinct::new(
             Arc::new(expressions::Column::new("expr0", 0)) as _,
             "ApproxDistinct",
-            v0.to_arrow_array().data_type().to_owned(),
+            v0.arrow_data_type().to_owned(),
         ),
         &[v0.to_arrow_array()],
     );
@@ -349,7 +349,7 @@ fn approx_percentile_cont(py: Python<'_>, values: &PyVector, percent: f64) -> Py
                 Arc::new(percent) as _,
             ],
             "ApproxPercentileCont",
-            (values.to_arrow_array().data_type()).to_owned(),
+            values.arrow_data_type().to_owned(),
         )
         .map_err(|e| PyValueError::new_err(format!("{e:?}")))?,
         &[values.to_arrow_array()],

@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 
 use common_recordbatch::RecordBatch;
+use common_telemetry::timer;
 use datatypes::vectors::{Helper, VectorRef};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::types::{PyDict, PyList, PyModule, PyTuple};
@@ -24,6 +25,7 @@ use snafu::{ensure, Backtrace, GenerateImplicitData, ResultExt};
 use crate::python::error::{self, NewRecordBatchSnafu, OtherSnafu, Result};
 use crate::python::ffi_types::copr::PyQueryEngine;
 use crate::python::ffi_types::{check_args_anno_real_type, select_from_rb, Coprocessor, PyVector};
+use crate::python::metric;
 use crate::python::pyo3::dataframe_impl::PyDataFrame;
 use crate::python::pyo3::utils::{init_cpython_interpreter, pyo3_obj_try_to_typed_val};
 
@@ -62,6 +64,7 @@ pub(crate) fn pyo3_exec_parsed(
     rb: &Option<RecordBatch>,
     params: &HashMap<String, String>,
 ) -> Result<RecordBatch> {
+    let _t = timer!(metric::METRIC_PYO3_EXEC_TOTAL_ELAPSED);
     // i.e params or use `vector(..)` to construct a PyVector
     let arg_names = &copr.deco_args.arg_names.clone().unwrap_or(vec![]);
     let args: Vec<PyVector> = if let Some(rb) = rb {
@@ -74,6 +77,8 @@ pub(crate) fn pyo3_exec_parsed(
     // Just in case cpython is not inited
     init_cpython_interpreter().unwrap();
     Python::with_gil(|py| -> Result<_> {
+        let _t = timer!(metric::METRIC_PYO3_EXEC_ELAPSED);
+
         let mut cols = (|| -> PyResult<_> {
             let dummy_decorator = "
 # Postponed evaluation of annotations(PEP 563) so annotation can be set freely
@@ -135,7 +140,7 @@ coprocessor = copr
             // could generate a call in python code and use Python::run to run it, just like in RustPython
             // Expect either: a PyVector Or a List/Tuple of PyVector
             py.run(&script, Some(globals), Some(locals))?;
-            let result = locals.get_item("_return_from_coprocessor").ok_or(PyValueError::new_err("Can't find return value of coprocessor function"))?;
+            let result = locals.get_item("_return_from_coprocessor").ok_or_else(|| PyValueError::new_err("Can't find return value of coprocessor function"))?;
 
             let col_len = rb.as_ref().map(|rb| rb.num_rows()).unwrap_or(1);
             py_any_to_vec(result, col_len)
