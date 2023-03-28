@@ -366,6 +366,7 @@ impl HttpServer {
         let mut server = Self::new_empty(options);
         server.set_sql_handler(sql_handler);
         server.set_grpc_handler(grpc_handler);
+        server.set_metrics_handler(MetricsHandler);
         server
     }
 
