@@ -126,11 +126,20 @@ impl GreptimeRequestHandler {
 fn create_query_context(header: Option<&RequestHeader>) -> QueryContextRef {
     let ctx = QueryContext::arc();
     if let Some(header) = header {
-        if !header.catalog.is_empty() {
-            ctx.set_current_catalog(&header.catalog);
-        }
-        if !header.schema.is_empty() {
-            ctx.set_current_schema(&header.schema);
+        // We provide dbname field in newer versions of protos/sdks
+        // parse dbname from header in priority
+        if !header.dbname.is_empty() {
+            let (catalog, schema) =
+                crate::parse_catalog_and_schema_from_client_database_name(&header.dbname);
+            ctx.set_current_catalog(catalog);
+            ctx.set_current_schema(schema);
+        } else {
+            if !header.catalog.is_empty() {
+                ctx.set_current_catalog(&header.catalog);
+            }
+            if !header.schema.is_empty() {
+                ctx.set_current_schema(&header.schema);
+            }
         }
     };
     ctx
