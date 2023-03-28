@@ -174,12 +174,7 @@ impl KvStore for MemStore {
         let mut memory = self.inner.write();
         let prev_kvs = if prev_kv {
             keys.into_iter()
-                .map(|key| (key.clone(), memory.remove(&key)))
-                .filter(|(_, v)| v.is_some())
-                .map(|(key, value)| KeyValue {
-                    key,
-                    value: value.unwrap(),
-                })
+                .filter_map(|key| memory.remove(&key).map(|value| KeyValue { key, value }))
                 .collect()
         } else {
             for key in keys.into_iter() {
