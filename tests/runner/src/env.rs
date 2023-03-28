@@ -206,7 +206,6 @@ impl Env {
             data_dir: String,
         }
 
-        // let current_time = common_time::util::current_time_millis();
         let greptimedb_dir = format!("/tmp/greptimedb-{subcommand}-{}", db_ctx.time);
         let ctx = Context {
             wal_dir: format!("{greptimedb_dir}/wal/"),
