@@ -29,26 +29,48 @@ use tokio::io::AsyncWrite;
 
 use crate::error::{self, Error, Result};
 
+/// Try to write multiple output to the writer if possible.
+pub async fn write_output<'a, W: AsyncWrite + Send + Sync + Unpin>(
+    w: QueryResultWriter<'a, W>,
+    query: &str,
+    outputs: Vec<Result<Output>>,
+) -> Result<()> {
+    let mut writer = Some(MysqlResultWriter::new(w));
+    for output in outputs {
+        let result_writer = writer.take().context(error::InternalSnafu {
+            err_msg: "Sending multiple result set is unsupported",
+        })?;
+        writer = result_writer.try_write_one(query, output).await?;
+    }
+
+    if let Some(result_writer) = writer {
+        result_writer.finish().await?;
+    }
+    Ok(())
+}
+
 struct QueryResult {
     recordbatches: Vec<RecordBatch>,
     schema: SchemaRef,
 }
 
 pub struct MysqlResultWriter<'a, W: AsyncWrite + Unpin> {
-    // `QueryResultWriter` will be consumed when the write completed (see
-    // QueryResultWriter::completed), thus we use an option to wrap it.
-    inner: Option<QueryResultWriter<'a, W>>,
+    writer: QueryResultWriter<'a, W>,
 }
 
 impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
-    pub fn new(inner: QueryResultWriter<'a, W>) -> MysqlResultWriter<'a, W> {
-        MysqlResultWriter::<'a, W> { inner: Some(inner) }
+    pub fn new(writer: QueryResultWriter<'a, W>) -> MysqlResultWriter<'a, W> {
+        MysqlResultWriter::<'a, W> { writer }
     }
 
-    pub async fn write(&mut self, query: &str, output: Result<Output>) -> Result<()> {
-        let writer = self.inner.take().context(error::InternalSnafu {
-            err_msg: "inner MySQL writer is consumed",
-        })?;
+    /// Try to write one result set. If there are more than one result set, return `Some`.
+    pub async fn try_write_one(
+        self,
+        query: &str,
+        output: Result<Output>,
+    ) -> Result<Option<MysqlResultWriter<'a, W>>> {
+        // We don't support sending multiple query result because the RowWriter's lifetime is bound to
+        // a local variable.
         match output {
             Ok(output) => match output {
                 Output::Stream(stream) => {
@@ -60,29 +82,42 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                         recordbatches,
                         schema,
                     };
-                    Self::write_query_result(query, query_result, writer).await?
+                    Self::write_query_result(query, query_result, self.writer).await?;
                 }
                 Output::RecordBatches(recordbatches) => {
                     let query_result = QueryResult {
                         schema: recordbatches.schema(),
                         recordbatches: recordbatches.take(),
                     };
-                    Self::write_query_result(query, query_result, writer).await?
+                    Self::write_query_result(query, query_result, self.writer).await?;
                 }
-                Output::AffectedRows(rows) => Self::write_affected_rows(writer, rows).await?,
+                Output::AffectedRows(rows) => {
+                    let next_writer = Self::write_affected_rows(self.writer, rows).await?;
+                    return Ok(Some(MysqlResultWriter::new(next_writer)));
+                }
             },
-            Err(error) => Self::write_query_error(query, error, writer).await?,
+            Err(error) => Self::write_query_error(query, error, self.writer).await?,
         }
+        Ok(None)
+    }
+
+    /// Indicate no more result set to write. No need to call this if there is only one result set.
+    pub async fn finish(self) -> Result<()> {
+        self.writer.no_more_results().await?;
         Ok(())
     }
 
-    async fn write_affected_rows(w: QueryResultWriter<'a, W>, rows: usize) -> Result<()> {
-        w.completed(OkResponse {
-            affected_rows: rows as u64,
-            ..Default::default()
-        })
-        .await?;
-        Ok(())
+    async fn write_affected_rows(
+        w: QueryResultWriter<'a, W>,
+        rows: usize,
+    ) -> Result<QueryResultWriter<'a, W>> {
+        let next_writer = w
+            .complete_one(OkResponse {
+                affected_rows: rows as u64,
+                ..Default::default()
+            })
+            .await?;
+        Ok(next_writer)
     }
 
     async fn write_query_result(
@@ -92,6 +127,8 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
     ) -> Result<()> {
         match create_mysql_column_def(&query_result.schema) {
             Ok(column_def) => {
+                // The RowWriter's lifetime is bound to `column_def` thus we can't use finish_one()
+                // to return a new QueryResultWriter.
                 let mut row_writer = writer.start(&column_def).await?;
                 for recordbatch in &query_result.recordbatches {
                     Self::write_recordbatch(&mut row_writer, recordbatch).await?;
