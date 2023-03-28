@@ -107,7 +107,7 @@ pub mod noop {
 mod tests {
     use common_test_util::temp_dir::create_temp_dir;
     use object_store::services::Fs;
-    use object_store::{ObjectStore, ObjectStoreBuilder};
+    use object_store::ObjectStore;
     use store_api::storage::OpType;
 
     use super::*;
@@ -168,13 +168,9 @@ mod tests {
     #[tokio::test]
     async fn test_file_purger_handler() {
         let dir = create_temp_dir("file-purge");
-        let object_store = ObjectStore::new(
-            Fs::default()
-                .root(dir.path().to_str().unwrap())
-                .build()
-                .unwrap(),
-        )
-        .finish();
+        let mut builder = Fs::default();
+        builder.root(dir.path().to_str().unwrap());
+        let object_store = ObjectStore::new(builder).unwrap().finish();
 
         let sst_file_id = FileId::random();
 
@@ -198,22 +194,20 @@ mod tests {
             .unwrap();
 
         notify.notified().await;
-
-        let object = object_store.object(&format!("{}/{}", path, sst_file_id.as_parquet()));
-        assert!(!object.is_exist().await.unwrap());
+        let exists = object_store
+            .is_exist(&format!("{}/{}", path, sst_file_id.as_parquet()))
+            .await
+            .unwrap();
+        assert!(!exists);
     }
 
     #[tokio::test]
     async fn test_file_purge_loop() {
         common_telemetry::init_default_ut_logging();
         let dir = create_temp_dir("file-purge");
-        let object_store = ObjectStore::new(
-            Fs::default()
-                .root(dir.path().to_str().unwrap())
-                .build()
-                .unwrap(),
-        )
-        .finish();
+        let mut builder = Fs::default();
+        builder.root(dir.path().to_str().unwrap());
+        let object_store = ObjectStore::new(builder).unwrap().finish();
         let sst_file_id = FileId::random();
         let scheduler = Arc::new(LocalScheduler::new(
             SchedulerConfig::default(),
@@ -228,9 +222,9 @@ mod tests {
             drop(handle);
         }
         scheduler.stop(true).await.unwrap();
+
         assert!(!object_store
-            .object(&format!("{}/{}", path, sst_file_id.as_parquet()))
-            .is_exist()
+            .is_exist(&format!("{}/{}", path, sst_file_id.as_parquet()))
             .await
             .unwrap());
     }

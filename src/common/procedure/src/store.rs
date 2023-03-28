@@ -248,15 +248,15 @@ mod tests {
     use async_trait::async_trait;
     use common_test_util::temp_dir::{create_temp_dir, TempDir};
     use object_store::services::Fs as Builder;
-    use object_store::ObjectStoreBuilder;
 
     use super::*;
     use crate::{Context, LockKey, Procedure, Status};
 
     fn procedure_store_for_test(dir: &TempDir) -> ProcedureStore {
         let store_dir = dir.path().to_str().unwrap();
-        let accessor = Builder::default().root(store_dir).build().unwrap();
-        let object_store = ObjectStore::new(accessor).finish();
+        let mut builder = Builder::default();
+        builder.root(store_dir);
+        let object_store = ObjectStore::new(builder).unwrap().finish();
 
         ProcedureStore::from(object_store)
     }

@@ -136,10 +136,10 @@ impl ParquetWriter {
             // "file_name_1_1000000"        (row num: 1 ~ 1000000),
             // "file_name_1000001_xxx"      (row num: 1000001 ~ xxx)
             let file_name = format!("{}_{}_{}", self.file_name, start_row_num, total_rows);
-            let object = self.object_store.object(&file_name);
-            object.write(buf).await.context(error::WriteObjectSnafu {
-                path: object.path(),
-            })?;
+            self.object_store
+                .write(&file_name, buf)
+                .await
+                .context(error::WriteObjectSnafu { path: file_name })?;
 
             if end_loop {
                 return Ok(total_rows);

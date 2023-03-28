@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 use object_store::services::S3;
-use object_store::{ObjectStore, ObjectStoreBuilder};
+use object_store::ObjectStore;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
@@ -73,7 +73,7 @@ pub fn build_s3_backend(
         }
     }
 
-    let accessor = builder.build().context(error::BuildBackendSnafu)?;
-
-    Ok(ObjectStore::new(accessor).finish())
+    Ok(ObjectStore::new(builder)
+        .context(error::BuildBackendSnafu)?
+        .finish())
 }

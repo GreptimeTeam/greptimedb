@@ -13,10 +13,9 @@
 // limitations under the License.
 
 use futures::TryStreamExt;
+use opendal::{Entry, Lister};
 
-use crate::{Object, ObjectLister};
-
-pub async fn collect(stream: ObjectLister) -> Result<Vec<Object>, opendal::Error> {
+pub async fn collect(stream: Lister) -> Result<Vec<Entry>, opendal::Error> {
     stream.try_collect::<Vec<_>>().await
 }
 

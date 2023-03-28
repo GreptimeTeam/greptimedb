@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use futures::{future, TryStreamExt};
-use object_store::{Object, ObjectStore};
+use object_store::{Entry, ObjectStore};
 use regex::Regex;
 use snafu::ResultExt;
 
@@ -46,13 +46,12 @@ impl Lister {
         }
     }
 
-    pub async fn list(&self) -> Result<Vec<Object>> {
+    pub async fn list(&self) -> Result<Vec<Entry>> {
         match &self.source {
             Source::Dir => {
                 let streamer = self
                     .object_store
-                    .object(&self.path)
-                    .list()
+                    .list(&self.path)
                     .await
                     .context(error::ListObjectsSnafu { path: &self.path })?;
 
@@ -70,11 +69,14 @@ impl Lister {
                     .context(error::ListObjectsSnafu { path: &self.path })
             }
             Source::Filename(filename) => {
-                let obj = self
-                    .object_store
-                    .object(&format!("{}{}", self.path, filename));
-
-                Ok(vec![obj])
+                // make sure this file exists
+                let file_full_path = format!("{}{}", self.path, filename);
+                let _ = self.object_store.stat(&file_full_path).await.context(
+                    error::ListObjectsSnafu {
+                        path: &file_full_path,
+                    },
+                )?;
+                Ok(vec![Entry::new(&file_full_path)])
             }
         }
     }

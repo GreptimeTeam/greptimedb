@@ -89,7 +89,6 @@ impl<'a> ParquetWriter<'a> {
         let projected_schema = self.source.projected_schema();
         let store_schema = projected_schema.schema_to_read();
         let schema = store_schema.arrow_schema().clone();
-        let object = self.object_store.object(self.file_path);
 
         let writer_props = WriterProperties::builder()
             .set_compression(Compression::ZSTD)
@@ -136,16 +135,16 @@ impl<'a> ParquetWriter<'a> {
             .ok()
             .flatten();
 
-        object.write(buf).await.context(WriteObjectSnafu {
-            path: object.path(),
-        })?;
-        let file_size = object
-            .metadata()
+        // object_store.write will make sure all bytes are written or an error is raised.
+        let buf_len = buf.len() as u64;
+        self.object_store
+            .write(self.file_path, buf)
             .await
             .context(WriteObjectSnafu {
-                path: object.path(),
-            })?
-            .content_length();
+                path: self.file_path,
+            })?;
+
+        let file_size = buf_len;
         Ok(Some(SstInfo {
             time_range,
             file_size,
@@ -261,9 +260,9 @@ impl ParquetReader {
     pub async fn chunk_stream(&self) -> Result<ChunkStream> {
         let file_path = self.file_handle.file_path();
         let operator = self.object_store.clone();
+
         let reader = operator
-            .object(&file_path)
-            .reader()
+            .reader(&file_path)
             .await
             .context(ReadObjectSnafu { path: &file_path })?
             .compat();
@@ -547,7 +546,6 @@ mod tests {
     use datatypes::types::{TimestampMillisecondType, TimestampType};
     use datatypes::vectors::TimestampMillisecondVector;
     use object_store::services::Fs;
-    use object_store::ObjectStoreBuilder;
     use store_api::storage::OpType;
 
     use super::*;
@@ -557,6 +555,12 @@ mod tests {
     };
     use crate::schema::ProjectedSchema;
     use crate::sst::{FileId, FileMeta};
+
+    fn create_object_store(root: &str) -> ObjectStore {
+        let mut builder = Fs::default();
+        builder.root(root);
+        ObjectStore::new(builder).unwrap().finish()
+    }
 
     #[tokio::test]
     async fn test_parquet_writer() {
@@ -587,8 +591,8 @@ mod tests {
 
         let dir = create_temp_dir("write_parquet");
         let path = dir.path().to_str().unwrap();
-        let backend = Fs::default().root(path).build().unwrap();
-        let object_store = ObjectStore::new(backend).finish();
+
+        let object_store = create_object_store(path);
         let sst_file_name = "test-flush.parquet";
         let iter = memtable.iter(&IterContext::default()).unwrap();
         let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
@@ -599,14 +603,7 @@ mod tests {
             .unwrap();
 
         // verify parquet file
-        let reader = BufReader::new(
-            object_store
-                .object(sst_file_name)
-                .reader()
-                .await
-                .unwrap()
-                .compat(),
-        );
+        let reader = BufReader::new(object_store.reader(sst_file_name).await.unwrap().compat());
 
         let builder = ParquetRecordBatchStreamBuilder::new(reader).await.unwrap();
 
@@ -685,8 +682,7 @@ mod tests {
 
         let dir = create_temp_dir("write_parquet");
         let path = dir.path().to_str().unwrap();
-        let backend = Fs::default().root(path).build().unwrap();
-        let object_store = ObjectStore::new(backend).finish();
+        let object_store = create_object_store(path);
         let sst_file_handle = new_file_handle(FileId::random());
         let sst_file_name = sst_file_handle.file_name();
         let iter = memtable.iter(&IterContext::default()).unwrap();
@@ -709,13 +705,7 @@ mod tests {
             time_range
         );
         assert_ne!(file_size, 0);
-        let operator = ObjectStore::new(
-            Fs::default()
-                .root(dir.path().to_str().unwrap())
-                .build()
-                .unwrap(),
-        )
-        .finish();
+        let operator = create_object_store(dir.path().to_str().unwrap());
 
         let projected_schema = Arc::new(ProjectedSchema::new(schema, Some(vec![1])).unwrap());
         let reader = ParquetReader::new(
@@ -783,8 +773,8 @@ mod tests {
 
         let dir = create_temp_dir("write_parquet");
         let path = dir.path().to_str().unwrap();
-        let backend = Fs::default().root(path).build().unwrap();
-        let object_store = ObjectStore::new(backend).finish();
+
+        let object_store = create_object_store(path);
         let file_handle = new_file_handle(FileId::random());
         let sst_file_name = file_handle.file_name();
         let iter = memtable.iter(&IterContext::default()).unwrap();
@@ -807,13 +797,7 @@ mod tests {
             time_range
         );
         assert_ne!(file_size, 0);
-        let operator = ObjectStore::new(
-            Fs::default()
-                .root(dir.path().to_str().unwrap())
-                .build()
-                .unwrap(),
-        )
-        .finish();
+        let operator = create_object_store(dir.path().to_str().unwrap());
 
         let projected_schema = Arc::new(ProjectedSchema::new(schema, Some(vec![1])).unwrap());
         let reader = ParquetReader::new(
@@ -903,8 +887,7 @@ mod tests {
 
         let dir = create_temp_dir("read-parquet-by-range");
         let path = dir.path().to_str().unwrap();
-        let backend = Fs::default().root(path).build().unwrap();
-        let object_store = ObjectStore::new(backend).finish();
+        let object_store = create_object_store(path);
         let sst_file_handle = new_file_handle(FileId::random());
         let sst_file_name = sst_file_handle.file_name();
         let iter = memtable.iter(&IterContext::default()).unwrap();
@@ -998,8 +981,9 @@ mod tests {
 
         let dir = create_temp_dir("read-parquet-by-range");
         let path = dir.path().to_str().unwrap();
-        let backend = Fs::default().root(path).build().unwrap();
-        let object_store = ObjectStore::new(backend).finish();
+        let mut builder = Fs::default();
+        builder.root(path);
+        let object_store = ObjectStore::new(builder).unwrap().finish();
         let sst_file_name = "test-read.parquet";
         let iter = memtable.iter(&IterContext::default()).unwrap();
         let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());

@@ -330,18 +330,20 @@ pub(crate) async fn new_oss_object_store(store_config: &ObjectStoreConfig) -> Re
     );
 
     let mut builder = OSSBuilder::default();
-    let builder = builder
+    builder
         .root(&root)
         .bucket(&oss_config.bucket)
         .endpoint(&oss_config.endpoint)
         .access_key_id(&oss_config.access_key_id)
         .access_key_secret(&oss_config.access_key_secret);
 
-    let accessor = builder.build().with_context(|_| error::InitBackendSnafu {
-        config: store_config.clone(),
-    })?;
+    let object_store = ObjectStore::new(builder)
+        .with_context(|_| error::InitBackendSnafu {
+            config: store_config.clone(),
+        })?
+        .finish();
 
-    create_object_store_with_cache(ObjectStore::new(accessor).finish(), store_config)
+    create_object_store_with_cache(object_store, store_config)
 }
 
 fn create_object_store_with_cache(
@@ -394,24 +396,27 @@ pub(crate) async fn new_s3_object_store(store_config: &ObjectStoreConfig) -> Res
     );
 
     let mut builder = S3Builder::default();
-    let mut builder = builder
+    builder
         .root(&root)
         .bucket(&s3_config.bucket)
         .access_key_id(&s3_config.access_key_id)
         .secret_access_key(&s3_config.secret_access_key);
 
     if s3_config.endpoint.is_some() {
-        builder = builder.endpoint(s3_config.endpoint.as_ref().unwrap());
+        builder.endpoint(s3_config.endpoint.as_ref().unwrap());
     }
     if s3_config.region.is_some() {
-        builder = builder.region(s3_config.region.as_ref().unwrap());
+        builder.region(s3_config.region.as_ref().unwrap());
     }
 
-    let accessor = builder.build().with_context(|_| error::InitBackendSnafu {
-        config: store_config.clone(),
-    })?;
-
-    create_object_store_with_cache(ObjectStore::new(accessor).finish(), store_config)
+    create_object_store_with_cache(
+        ObjectStore::new(builder)
+            .with_context(|_| error::InitBackendSnafu {
+                config: store_config.clone(),
+            })?
+            .finish(),
+        store_config,
+    )
 }
 
 pub(crate) async fn new_fs_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {
@@ -426,15 +431,14 @@ pub(crate) async fn new_fs_object_store(store_config: &ObjectStoreConfig) -> Res
 
     let atomic_write_dir = format!("{data_dir}/.tmp/");
 
-    let accessor = FsBuilder::default()
-        .root(&data_dir)
-        .atomic_write_dir(&atomic_write_dir)
-        .build()
+    let mut builder = FsBuilder::default();
+    builder.root(&data_dir).atomic_write_dir(&atomic_write_dir);
+
+    Ok(ObjectStore::new(builder)
         .context(error::InitBackendSnafu {
             config: store_config.clone(),
-        })?;
-
-    Ok(ObjectStore::new(accessor).finish())
+        })?
+        .finish())
 }
 
 /// Create metasrv client instance and spawn heartbeat loop.

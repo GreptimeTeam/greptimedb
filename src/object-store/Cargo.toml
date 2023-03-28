@@ -7,8 +7,10 @@ license.workspace = true
 [dependencies]
 lru = "0.9"
 async-trait = "0.1"
+bytes = "1.4"
 futures = { version = "0.3" }
-opendal = { version = "0.27", features = ["layers-tracing", "layers-metrics"] }
+opendal = { version = "0.30", features = ["layers-tracing", "layers-metrics"] }
+pin-project = "1.0"
 tokio.workspace = true
 
 [dev-dependencies]

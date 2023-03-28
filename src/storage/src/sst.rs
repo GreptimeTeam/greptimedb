@@ -508,8 +508,10 @@ impl AccessLayer for FsAccessLayer {
     /// Deletes a SST file with given file id.
     async fn delete_sst(&self, file_id: FileId) -> Result<()> {
         let path = self.sst_file_path(&file_id.as_parquet());
-        let object = self.object_store.object(&path);
-        object.delete().await.context(DeleteSstSnafu)
+        self.object_store
+            .delete(&path)
+            .await
+            .context(DeleteSstSnafu)
     }
 }
 

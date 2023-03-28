@@ -12,18 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::io;
 use std::num::NonZeroUsize;
 use std::ops::DerefMut;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 
 use async_trait::async_trait;
-use futures::AsyncRead;
+use bytes::Bytes;
 use lru::LruCache;
-use opendal::ops::*;
-use opendal::raw::*;
+use opendal::ops::{OpDelete, OpList, OpRead, OpScan, OpWrite};
+use opendal::raw::oio::{Read, Reader, Write};
+use opendal::raw::{Accessor, Layer, LayeredAccessor, RpDelete, RpList, RpRead, RpScan, RpWrite};
 use opendal::{ErrorKind, Result};
 use tokio::sync::Mutex;
 
@@ -68,11 +66,15 @@ impl<I, C> LruCacheAccessor<I, C> {
     }
 }
 
+use opendal::raw::oio::ReadExt;
+
 #[async_trait]
 impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
     type Inner = I;
-    type Reader = output::Reader;
+    type Reader = Box<dyn Read>;
     type BlockingReader = I::BlockingReader;
+    type Writer = I::Writer;
+    type BlockingWriter = I::BlockingWriter;
     type Pager = I::Pager;
     type BlockingPager = I::BlockingPager;
 
@@ -92,17 +94,18 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
                 lru_cache.get_or_insert(cache_path.clone(), || ());
                 Ok(to_output_reader((rp, r)))
             }
-            Err(err) if err.kind() == ErrorKind::ObjectNotFound => {
-                let (rp, reader) = self.inner.read(&path, args.clone()).await?;
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                let (rp, mut reader) = self.inner.read(&path, args.clone()).await?;
                 let size = rp.clone().into_metadata().content_length();
-                let _ = self
-                    .cache
-                    .write(
-                        &cache_path,
-                        OpWrite::new(size),
-                        Box::new(ReadWrapper(reader)),
-                    )
-                    .await?;
+                let (_, mut writer) = self.cache.write(&cache_path, OpWrite::new()).await?;
+
+                // TODO(hl): We can use [Writer::append](https://docs.rs/opendal/0.30.4/opendal/struct.Writer.html#method.append)
+                // here to avoid loading whole file into memory once all our backend supports `Writer`.
+                let mut buf = vec![0; size as usize];
+                reader.read(&mut buf).await?;
+                writer.write(Bytes::from(buf)).await?;
+                writer.close().await?;
+
                 match self.cache.read(&cache_path, OpRead::default()).await {
                     Ok((rp, reader)) => {
                         let r = {
@@ -123,8 +126,8 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
         }
     }
 
-    fn blocking_read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::BlockingReader)> {
-        self.inner.blocking_read(path, args)
+    async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
+        self.inner.write(path, args).await
     }
 
     async fn delete(&self, path: &str, args: OpDelete) -> Result<RpDelete> {
@@ -158,6 +161,14 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
         self.inner.scan(path, args).await
     }
 
+    fn blocking_read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::BlockingReader)> {
+        self.inner.blocking_read(path, args)
+    }
+
+    fn blocking_write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::BlockingWriter)> {
+        self.inner.blocking_write(path, args)
+    }
+
     fn blocking_list(&self, path: &str, args: OpList) -> Result<(RpList, Self::BlockingPager)> {
         self.inner.blocking_list(path, args)
     }
@@ -167,22 +178,7 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
     }
 }
 
-/// TODO: Workaround for output::Read doesn't implement input::Read
-///
-/// Should be remove after opendal fixed it.
-struct ReadWrapper<R>(R);
-
-impl<R: output::Read> AsyncRead for ReadWrapper<R> {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
-        self.0.poll_read(cx, buf)
-    }
-}
-
 #[inline]
-fn to_output_reader<R: output::Read + 'static>(input: (RpRead, R)) -> (RpRead, output::Reader) {
+fn to_output_reader<R: Read + 'static>(input: (RpRead, R)) -> (RpRead, Reader) {
     (input.0, Box::new(input.1))
 }

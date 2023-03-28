@@ -167,7 +167,7 @@ mod tests {
 
     use common_test_util::temp_dir::create_temp_dir;
     use object_store::services::Fs;
-    use object_store::{ObjectStore, ObjectStoreBuilder};
+    use object_store::ObjectStore;
     use store_api::manifest::action::ProtocolAction;
     use store_api::manifest::{Manifest, MetaActionIterator, MAX_VERSION};
 
@@ -180,13 +180,9 @@ mod tests {
     async fn test_region_manifest() {
         common_telemetry::init_default_ut_logging();
         let tmp_dir = create_temp_dir("test_region_manifest");
-        let object_store = ObjectStore::new(
-            Fs::default()
-                .root(&tmp_dir.path().to_string_lossy())
-                .build()
-                .unwrap(),
-        )
-        .finish();
+        let mut builder = Fs::default();
+        builder.root(&tmp_dir.path().to_string_lossy());
+        let object_store = ObjectStore::new(builder).unwrap().finish();
 
         let manifest = RegionManifest::with_checkpointer("/manifest/", object_store);
 
@@ -294,13 +290,9 @@ mod tests {
     async fn test_region_manifest_checkpoint() {
         common_telemetry::init_default_ut_logging();
         let tmp_dir = create_temp_dir("test_region_manifest_checkpoint");
-        let object_store = ObjectStore::new(
-            Fs::default()
-                .root(&tmp_dir.path().to_string_lossy())
-                .build()
-                .unwrap(),
-        )
-        .finish();
+        let mut builder = Fs::default();
+        builder.root(&tmp_dir.path().to_string_lossy());
+        let object_store = ObjectStore::new(builder).unwrap().finish();
 
         let manifest = RegionManifest::with_checkpointer("/manifest/", object_store);
 
