@@ -13,24 +13,22 @@
 // limitations under the License.
 
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
+use common_runtime::{RepeatedTask, TaskFunction};
 use common_telemetry::{debug, logging, warn};
 use object_store::ObjectStore;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{ensure, ResultExt};
 use store_api::manifest::action::{self, ProtocolAction, ProtocolVersion};
 use store_api::manifest::*;
-use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 
 use crate::error::{
-    Error, IllegalRegionManifestStateSnafu, ManifestProtocolForbidWriteSnafu, Result,
-    WaitGcTaskStopSnafu,
+    Error, ManifestProtocolForbidWriteSnafu, Result, StartManifestGcTaskSnafu,
+    StopManifestGcTaskSnafu,
 };
 use crate::manifest::action::RegionCheckpoint;
 use crate::manifest::checkpoint::Checkpointer;
@@ -44,21 +42,35 @@ pub struct ManifestImpl<S: Checkpoint<Error = Error>, M: MetaAction<Error = Erro
     checkpointer: Option<Arc<dyn Checkpointer<Checkpoint = S, MetaAction = M>>>,
     last_checkpoint_version: Arc<AtomicU64>,
     checkpoint_actions_margin: u16,
+    gc_task: Option<Arc<RepeatedTask<Error>>>,
 }
 
-impl<S: Checkpoint<Error = Error>, M: MetaAction<Error = Error>> ManifestImpl<S, M> {
+impl<S: 'static + Checkpoint<Error = Error>, M: 'static + MetaAction<Error = Error>>
+    ManifestImpl<S, M>
+{
     pub fn new(
         manifest_dir: &str,
         object_store: ObjectStore,
         checkpoint_actions_margin: Option<u16>,
         checkpointer: Option<Arc<dyn Checkpointer<Checkpoint = S, MetaAction = M>>>,
     ) -> Self {
+        let inner = Arc::new(ManifestImplInner::new(manifest_dir, object_store));
+        let gc_task = if checkpointer.is_some() {
+            // only start gc task when checkpoint is enabled.
+            Some(Arc::new(RepeatedTask::new(
+                Duration::from_secs(60),
+                inner.clone() as _,
+            )))
+        } else {
+            None
+        };
         ManifestImpl {
-            inner: Arc::new(ManifestImplInner::new(manifest_dir, object_store)),
+            inner,
             checkpointer,
             checkpoint_actions_margin: checkpoint_actions_margin
                 .unwrap_or(CHECKPOINT_ACTIONS_MARGIN),
             last_checkpoint_version: Arc::new(AtomicU64::new(MIN_VERSION)),
+            gc_task,
         }
     }
 
@@ -147,16 +159,18 @@ impl<S: 'static + Checkpoint<Error = Error>, M: 'static + MetaAction<Error = Err
     }
 
     async fn start(&self) -> Result<()> {
-        if self.checkpointer.is_some() {
-            self.inner.start().await?;
+        if let Some(task) = &self.gc_task {
+            task.start(common_runtime::bg_runtime())
+                .await
+                .context(StartManifestGcTaskSnafu)?;
         }
 
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
-        if self.checkpointer.is_some() {
-            self.inner.stop().await?;
+        if let Some(task) = &self.gc_task {
+            task.stop().await.context(StopManifestGcTaskSnafu)?;
         }
 
         Ok(())
@@ -173,9 +187,6 @@ struct ManifestImplInner<S: Checkpoint<Error = Error>, M: MetaAction<Error = Err
     supported_reader_version: ProtocolVersion,
     supported_writer_version: ProtocolVersion,
     _phantom: PhantomData<(S, M)>,
-    cancel_token: Mutex<Option<CancellationToken>>,
-    gc_task_handle: Mutex<Option<JoinHandle<()>>>,
-    started: AtomicBool,
 }
 
 pub struct MetaActionIteratorImpl<M: MetaAction<Error = Error>> {
@@ -212,6 +223,29 @@ impl<M: MetaAction<Error = Error>> MetaActionIterator for MetaActionIteratorImpl
     }
 }
 
+#[async_trait::async_trait]
+impl<S: Checkpoint<Error = Error>, M: MetaAction<Error = Error>> TaskFunction<Error>
+    for ManifestImplInner<S, M>
+{
+    fn name(&self) -> &str {
+        "region-manifest-gc"
+    }
+
+    async fn call(&self) -> Result<()> {
+        if let Some((last_version, _)) = self.store.load_last_checkpoint().await? {
+            // Purge all manifest and checkpoint files before last_version.
+            let deleted = self.store.delete_until(last_version).await?;
+            debug!(
+                "Deleted {} logs from region manifest storage(path={}).",
+                deleted,
+                self.store.path()
+            );
+        }
+
+        Ok(())
+    }
+}
+
 impl<S: Checkpoint<Error = Error>, M: MetaAction<Error = Error>> ManifestImplInner<S, M> {
     fn new(manifest_dir: &str, object_store: ObjectStore) -> Self {
         let (reader_version, writer_version) = action::supported_protocol_version();
@@ -223,88 +257,7 @@ impl<S: Checkpoint<Error = Error>, M: MetaAction<Error = Error>> ManifestImplInn
             supported_reader_version: reader_version,
             supported_writer_version: writer_version,
             _phantom: PhantomData,
-            cancel_token: Mutex::new(None),
-            gc_task_handle: Mutex::new(None),
-            started: AtomicBool::new(false),
         }
-    }
-
-    async fn gc_manifest_checkpoint(store: Arc<ManifestObjectStore>) -> Result<()> {
-        if let Some((last_version, _)) = store.load_last_checkpoint().await? {
-            // Purge all manifest and checkpoint files before last_version.
-            let deleted = store.delete_until(last_version).await?;
-            debug!(
-                "Deleted {} logs from region manifest storage(path={}).",
-                deleted,
-                store.path()
-            );
-        }
-
-        Ok(())
-    }
-
-    async fn start(&self) -> Result<()> {
-        let token = CancellationToken::new();
-        let child = token.child_token();
-        let interval = Duration::from_secs(60);
-        let store = self.store.clone();
-        let store_path = store.path().to_string();
-
-        let handle = common_runtime::spawn_bg(async move {
-            loop {
-                tokio::select! {
-                    _ = tokio::time::sleep(interval) => {}
-                    _ = child.cancelled() => {
-                        debug!("Region manifest(path={}) gc task has been cancelled",
-                               store_path);
-                        return;
-                    }
-                }
-                if let Err(e) = Self::gc_manifest_checkpoint(store.clone()).await {
-                    logging::error!(e; "Failed to purge files in region manifest(path={}).",
-                           store.path(),
-                    );
-                }
-            }
-        });
-
-        *self.cancel_token.lock().await = Some(token);
-        *self.gc_task_handle.lock().await = Some(handle);
-        self.started.store(true, Ordering::Relaxed);
-        debug!(
-            "Region manifest(path={}) gc task started.",
-            self.store.path()
-        );
-
-        Ok(())
-    }
-
-    async fn stop(&self) -> Result<()> {
-        ensure!(
-            self.started
-                .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok(),
-            IllegalRegionManifestStateSnafu
-        );
-        let handle = self
-            .gc_task_handle
-            .lock()
-            .await
-            .take()
-            .context(IllegalRegionManifestStateSnafu)?;
-        let token = self
-            .cancel_token
-            .lock()
-            .await
-            .take()
-            .context(IllegalRegionManifestStateSnafu)?;
-        token.cancel();
-        handle.await.context(WaitGcTaskStopSnafu)?;
-        debug!(
-            "Region manifest(path={}) service stopped.",
-            self.store.path()
-        );
-        Ok(())
     }
 
     #[inline]

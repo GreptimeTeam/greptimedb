@@ -15,6 +15,7 @@
 use std::any::Any;
 
 use common_error::prelude::*;
+use tokio::task::JoinError;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -24,6 +25,15 @@ pub enum Error {
     #[snafu(display("Failed to build runtime, source: {}", source))]
     BuildRuntime {
         source: std::io::Error,
+        backtrace: Backtrace,
+    },
+    #[snafu(display("Repeated task {} not started yet", name))]
+    IllegalState { name: String, backtrace: Backtrace },
+
+    #[snafu(display("Failed to wait for repated task {} to stop, source: {}", name, source))]
+    WaitGcTaskStop {
+        name: String,
+        source: JoinError,
         backtrace: Backtrace,
     },
 }

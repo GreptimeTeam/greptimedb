@@ -17,6 +17,7 @@ use std::io::Error as IoError;
 use std::str::Utf8Error;
 
 use common_error::prelude::*;
+use common_runtime::error::Error as RuntimeError;
 use datatypes::arrow::error::ArrowError;
 use datatypes::prelude::ConcreteDataType;
 use serde_json::error::Error as JsonError;
@@ -423,13 +424,16 @@ pub enum Error {
     #[snafu(display("Cannot schedule request, scheduler's already stopped"))]
     IllegalSchedulerState { backtrace: Backtrace },
 
-    #[snafu(display("Region manifest not started yet"))]
-    IllegalRegionManifestState { backtrace: Backtrace },
+    #[snafu(display("Failed to start manifest gc task"))]
+    StartManifestGcTask {
+        #[snafu(backtrace)]
+        source: RuntimeError,
+    },
 
-    #[snafu(display("Failed to wait for gc task to stop, source: {}", source))]
-    WaitGcTaskStop {
-        source: JoinError,
-        backtrace: Backtrace,
+    #[snafu(display("Failed to stop manifest gc task"))]
+    StopManifestGcTask {
+        #[snafu(backtrace)]
+        source: RuntimeError,
     },
 
     #[snafu(display("Failed to stop scheduler, source: {}", source))]
@@ -497,7 +501,6 @@ impl ErrorExt for Error {
             | DecodeArrow { .. }
             | EncodeArrow { .. }
             | ManifestCheckpoint { .. }
-            | WaitGcTaskStop { .. }
             | ParseSchema { .. } => StatusCode::Unexpected,
 
             WriteParquet { .. }
@@ -527,9 +530,11 @@ impl ErrorExt for Error {
             RateLimited { .. } => StatusCode::Internal,
             StopScheduler { .. } => StatusCode::Internal,
             DeleteSst { .. } => StatusCode::StorageUnavailable,
-            IllegalRegionManifestState { .. } | IllegalSchedulerState { .. } => {
-                StatusCode::Unexpected
-            }
+
+            StartManifestGcTask { .. }
+            | StopManifestGcTask { .. }
+            | IllegalSchedulerState { .. } => StatusCode::Unexpected,
+
             TtlCalculation { source, .. } => source.status_code(),
         }
     }
