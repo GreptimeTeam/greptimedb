@@ -17,7 +17,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use common_runtime::Builder as RuntimeBuilder;
-use common_telemetry::info;
 use servers::grpc::GrpcServer;
 use servers::http::{HttpOptions, HttpServer};
 use servers::metrics_handler::MetricsHandler;

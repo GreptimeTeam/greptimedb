@@ -19,7 +19,6 @@ use aide::transform::TransformOperation;
 use axum::extract::{Json, Query, State};
 use axum::{Extension, Form};
 use common_error::status_code::StatusCode;
-use common_telemetry::metric;
 use query::parser::PromQuery;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

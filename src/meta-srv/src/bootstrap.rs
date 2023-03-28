@@ -20,7 +20,7 @@ use api::v1::meta::lock_server::LockServer;
 use api::v1::meta::router_server::RouterServer;
 use api::v1::meta::store_server::StoreServer;
 use etcd_client::Client;
-use servers::http::{HttpOptions, HttpServer};
+use servers::http::HttpServer;
 use servers::metrics_handler::MetricsHandler;
 use servers::server::Server;
 use snafu::ResultExt;

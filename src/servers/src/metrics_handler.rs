@@ -12,24 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::default::Default;
-use std::net::SocketAddr;
-use std::sync::Arc;
-
-use async_trait::async_trait;
-use common_telemetry::metric::try_handle;
-use common_telemetry::{info, metric};
-use hyper::server::Server;
-use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Response, StatusCode};
-use snafu::{ensure, ResultExt};
-use tokio::sync::oneshot::{self, Sender};
-use tokio::sync::Mutex;
-
-use crate::error::{AlreadyStartedSnafu, HyperSnafu, Result};
-use crate::server::Server as ServerTrait;
-
-pub const METRIC_SERVER: &str = "METRIC_SERVER";
+use common_telemetry::metric;
 
 /// a server that serves metrics
 /// only start when datanode starts in distributed mode

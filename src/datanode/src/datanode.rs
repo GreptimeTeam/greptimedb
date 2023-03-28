@@ -19,8 +19,8 @@ use common_base::readable_size::ReadableSize;
 use common_telemetry::info;
 use meta_client::MetaClientOptions;
 use serde::{Deserialize, Serialize};
-use servers::Mode;
 use servers::http::HttpOptions;
+use servers::Mode;
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::scheduler::SchedulerConfig;
 
