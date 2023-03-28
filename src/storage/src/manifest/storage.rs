@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use common_telemetry::logging;
 use futures::TryStreamExt;
 use lazy_static::lazy_static;
-use object_store::{util, Entry, ErrorKind, ObjectStore};
+use object_store::{raw_normalize_path, util, Entry, ErrorKind, ObjectStore};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
@@ -193,14 +193,22 @@ impl ManifestLogStorage for ManifestObjectStore {
     }
 
     async fn delete(&self, start: ManifestVersion, end: ManifestVersion) -> Result<()> {
-        //TODO(dennis): delete in batch or concurrently?
-        for v in start..end {
-            let path = self.delta_file_path(v);
-            self.object_store
-                .delete(&path)
-                .await
-                .context(DeleteObjectSnafu { path })?;
-        }
+        let raw_paths = (start..end)
+            .map(|v| self.delta_file_path(v))
+            .collect::<Vec<_>>();
+
+        let paths = raw_paths
+            .iter()
+            .map(|p| raw_normalize_path(p))
+            .collect::<Vec<_>>();
+
+        self.object_store
+            .remove(paths)
+            .await
+            .with_context(|_| DeleteObjectSnafu {
+                path: raw_paths.join(","),
+            })?;
+
         Ok(())
     }
 
