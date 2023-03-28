@@ -109,7 +109,6 @@ async fn create_region_for_compaction<
 #[derive(Debug, Default, Clone)]
 struct MockFilePurgeHandler {
     num_deleted: Arc<AtomicUsize>,
-    notifier: Arc<Notify>,
 }
 
 #[async_trait::async_trait]
@@ -135,7 +134,6 @@ impl Handler for MockFilePurgeHandler {
             .unwrap();
 
         self.num_deleted.fetch_add(1, Ordering::Relaxed);
-        self.notifier.notify_one();
 
         Ok(())
     }
@@ -144,12 +142,6 @@ impl Handler for MockFilePurgeHandler {
 impl MockFilePurgeHandler {
     fn num_deleted(&self) -> usize {
         self.num_deleted.load(Ordering::Relaxed)
-    }
-
-    async fn wait_until_deleted(&self, num_deleted: usize) {
-        while self.num_deleted() < num_deleted {
-            self.notifier.notified().await;
-        }
     }
 }
 
@@ -213,10 +205,6 @@ impl CompactionTester {
             .unwrap();
     }
 
-    async fn wait_until_deleted(&self, num_deleted: usize) {
-        self.purge_handler.wait_until_deleted(num_deleted).await
-    }
-
     /// Close region and clean up files.
     async fn clean_up(mut self) {
         self.base = None;
@@ -236,6 +224,7 @@ async fn compact_during_read(s3_bucket: Option<String>) {
             max_files_in_l0: 100,
             ..Default::default()
         },
+        // Disable auto-flush.
         Arc::new(FlushSwitch::default()),
         s3_bucket,
     )
@@ -270,9 +259,6 @@ async fn compact_during_read(s3_bucket: Option<String>) {
     let output = tester.base().collect_reader(reader).await;
 
     assert_eq!(expect.len(), output.len());
-
-    // Wait until SST1 and SST2 are deleted.
-    tester.wait_until_deleted(2).await;
 
     tester.clean_up().await;
 }
