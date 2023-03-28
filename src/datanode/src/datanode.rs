@@ -137,7 +137,7 @@ impl Default for WalConfig {
 #[serde(default)]
 pub struct RegionManifestConfig {
     /// Region manifest checkpoint actions margin.
-    /// Manifest service create a checkpint every [manifest_checkpoint_margin] actions.
+    /// Manifest service create a checkpoint every [manifest_checkpoint_margin] actions.
     pub manifest_checkpoint_margin: Option<u16>,
 }
 

@@ -424,13 +424,13 @@ pub enum Error {
     #[snafu(display("Cannot schedule request, scheduler's already stopped"))]
     IllegalSchedulerState { backtrace: Backtrace },
 
-    #[snafu(display("Failed to start manifest gc task"))]
+    #[snafu(display("Failed to start manifest gc task: {}", source))]
     StartManifestGcTask {
         #[snafu(backtrace)]
         source: RuntimeError,
     },
 
-    #[snafu(display("Failed to stop manifest gc task"))]
+    #[snafu(display("Failed to stop manifest gc task: {}", source))]
     StopManifestGcTask {
         #[snafu(backtrace)]
         source: RuntimeError,

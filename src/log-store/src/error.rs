@@ -27,7 +27,7 @@ pub enum Error {
         source: RuntimeError,
     },
 
-    #[snafu(display("Failed to start log store gc task, source: {}", source))]
+    #[snafu(display("Failed to stop log store gc task, source: {}", source))]
     StopGcTask {
         #[snafu(backtrace)]
         source: RuntimeError,

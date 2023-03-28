@@ -35,6 +35,7 @@ use crate::manifest::checkpoint::Checkpointer;
 use crate::manifest::storage::{ManifestObjectStore, ObjectStoreLogIterator};
 
 const CHECKPOINT_ACTIONS_MARGIN: u16 = 10;
+const CHECKPOINT_GC_DURATION_SECS: u64 = 60;
 
 #[derive(Clone, Debug)]
 pub struct ManifestImpl<S: Checkpoint<Error = Error>, M: MetaAction<Error = Error>> {
@@ -58,7 +59,7 @@ impl<S: 'static + Checkpoint<Error = Error>, M: 'static + MetaAction<Error = Err
         let gc_task = if checkpointer.is_some() {
             // only start gc task when checkpoint is enabled.
             Some(Arc::new(RepeatedTask::new(
-                Duration::from_secs(60),
+                Duration::from_secs(CHECKPOINT_GC_DURATION_SECS),
                 inner.clone() as _,
             )))
         } else {
