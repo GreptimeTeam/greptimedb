@@ -138,7 +138,7 @@ impl UserProvider for StaticUserProvider {
                         ensure!(
                             auth_data.len() == 20,
                             IllegalParamSnafu {
-                                msg: "blank password"
+                                msg: "Illegal MySQL native password format, length != 20"
                             }
                         );
                         auth_mysql(auth_data, salt, username, save_pwd)
