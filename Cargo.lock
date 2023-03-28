@@ -1608,6 +1608,7 @@ dependencies = [
 name = "common-procedure"
 version = "0.1.1"
 dependencies = [
+ "async-stream",
  "async-trait",
  "backon 0.4.0",
  "common-error",
@@ -4581,11 +4582,13 @@ version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bytes",
  "common-telemetry",
  "common-test-util",
  "futures",
  "lru 0.9.0",
  "opendal",
+ "pin-project",
  "tokio",
  "uuid",
 ]
@@ -4624,9 +4627,9 @@ checksum = "0ab1bc2a289d34bd04a330323ac98a1b4bc82c9d9fcb1e66b63caa84da26b575"
 
 [[package]]
 name = "opendal"
-version = "0.27.2"
+version = "0.30.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef6f7b936f2f8483e19643357cb50d9ec9a49c506971ef69ca676913cf5afd91"
+checksum = "bc08c1c75e26f33f13f22c46b0c222132df5e12519fd67046ecf061b58e8c26f"
 dependencies = [
  "anyhow",
  "async-compat",
