@@ -139,7 +139,7 @@ pub struct RegionManifestConfig {
     /// Region manifest checkpoint actions margin.
     /// Manifest service create a checkpoint every [checkpoint_margin] actions.
     pub checkpoint_margin: Option<u16>,
-    /// Region manifest logs and checkpoints gc task exeuction duration.
+    /// Region manifest logs and checkpoints gc task execution duration.
     #[serde(with = "humantime_serde")]
     pub gc_duration: Option<Duration>,
 }
