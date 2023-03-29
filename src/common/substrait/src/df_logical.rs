@@ -279,7 +279,7 @@ impl DFLogicalSubstraitConvertorDeprecated {
                     DFSchema::new_with_metadata(
                         x.fields()
                             .iter()
-                            .map(|f| DFField::from_qualified(qualified.clone(), f.clone()))
+                            .map(|f| DFField::from_qualified(&qualified, f.clone()))
                             .collect(),
                         x.metadata().clone(),
                     )

@@ -23,7 +23,7 @@ use datafusion::arrow::compute;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::error::ArrowError;
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::common::{DFField, DFSchema, DFSchemaRef, OwnedTableReference};
+use datafusion::common::{DFField, DFSchema, DFSchemaRef};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
@@ -97,7 +97,7 @@ impl RangeManipulate {
         // process time index column
         // the raw timestamp field is preserved. And a new timestamp_range field is appended to the last.
         let Some(index) = input_schema.index_of_column_by_name(None, time_index)? else {
-            return Err(datafusion::common::field_not_found(None::<OwnedTableReference>, time_index, input_schema.as_ref()))
+            return Err(datafusion::common::field_not_found(None, time_index, input_schema.as_ref()))
         };
         let timestamp_range_field = columns[index]
             .field()
@@ -110,7 +110,7 @@ impl RangeManipulate {
         // process value columns
         for name in value_columns {
             let Some(index) = input_schema.index_of_column_by_name(None, name)? else {
-                return Err(datafusion::common::field_not_found(None::<OwnedTableReference>, name, input_schema.as_ref()))
+                return Err(datafusion::common::field_not_found(None, name, input_schema.as_ref()))
             };
             columns[index] = DFField::from(RangeArray::convert_field(columns[index].field()));
         }

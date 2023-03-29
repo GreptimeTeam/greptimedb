@@ -90,7 +90,7 @@ impl DfTableSourceProvider {
         table_ref: OwnedTableReference,
     ) -> Result<Arc<dyn TableSource>> {
         // let table_ref = table_ref.as_table_reference();
-        let table_ref = self.resolve_table_ref(table_ref)?;
+        let table_ref = self.resolve_table_ref(table_ref.as_table_reference())?;
 
         let resolved_name = table_ref.to_string();
         if let Some(table) = self.resolved_tables.get(&resolved_name) {
