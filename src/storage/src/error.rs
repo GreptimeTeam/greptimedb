@@ -418,7 +418,7 @@ pub enum Error {
     DecodeParquetTimeRange { msg: String, backtrace: Backtrace },
 
     #[snafu(display("Scheduler rate limited, msg: {}", msg))]
-    RateLimited { msg: String, backtrace: Backtrace },
+    RateLimited { msg: String },
 
     #[snafu(display("Cannot schedule request, scheduler's already stopped"))]
     IllegalSchedulerState { backtrace: Backtrace },
