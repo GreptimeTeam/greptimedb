@@ -66,6 +66,7 @@ impl<S: 'static + Checkpoint<Error = Error>, M: 'static + MetaAction<Error = Err
         } else {
             None
         };
+
         ManifestImpl {
             inner,
             checkpointer,

@@ -416,7 +416,7 @@ mod tests {
         let mut it = log_store.scan(0, 11).await.unwrap();
         let (version, bytes) = it.next_log().await.unwrap().unwrap();
         assert_eq!(4, version);
-        assert_eq!(format!("hello, 4").as_bytes(), bytes);
+        assert_eq!("hello, 4".as_bytes(), bytes);
         assert!(it.next_log().await.unwrap().is_none());
 
         // delete all logs and checkpoints
