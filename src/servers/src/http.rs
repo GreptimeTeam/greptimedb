@@ -100,6 +100,7 @@ pub const HTTP_API_PREFIX: &str = "/v1/";
 // TODO(fys): This is a temporary workaround, it will be improved later
 pub static PUBLIC_APIS: [&str; 2] = ["/v1/influxdb/ping", "/v1/influxdb/health"];
 
+#[derive(Default)]
 pub struct HttpServer {
     sql_handler: Option<ServerSqlQueryHandlerRef>,
     grpc_handler: Option<ServerGrpcQueryHandlerRef>,
@@ -357,104 +358,106 @@ pub struct ApiState {
     pub script_handler: Option<ScriptHandlerRef>,
 }
 
-impl HttpServer {
-    pub fn new(
-        sql_handler: ServerSqlQueryHandlerRef,
-        grpc_handler: ServerGrpcQueryHandlerRef,
-        options: HttpOptions,
-    ) -> Self {
-        let mut server = Self::new_empty(options);
-        server.set_sql_handler(sql_handler);
-        server.set_grpc_handler(grpc_handler);
-        server.set_metrics_handler(MetricsHandler);
-        server
-    }
+#[derive(Default)]
+pub struct HttpServerBuilder {
+    inner: HttpServer,
+}
 
-    pub fn new_empty(options: HttpOptions) -> Self {
+impl HttpServerBuilder {
+    pub fn new(options: HttpOptions) -> Self {
         Self {
-            sql_handler: None,
-            grpc_handler: None,
-            options,
-            opentsdb_handler: None,
-            influxdb_handler: None,
-            prom_handler: None,
-            user_provider: None,
-            script_handler: None,
-            metrics_handler: None,
-            shutdown_tx: Mutex::new(None),
+            inner: HttpServer {
+                sql_handler: None,
+                grpc_handler: None,
+                options,
+                opentsdb_handler: None,
+                influxdb_handler: None,
+                prom_handler: None,
+                user_provider: None,
+                script_handler: None,
+                metrics_handler: None,
+                shutdown_tx: Mutex::new(None),
+            },
         }
     }
 
-    pub fn new_with_metrics_handler(metrics_handler: MetricsHandler, options: HttpOptions) -> Self {
-        let mut server = Self::new_empty(options);
-        server.set_metrics_handler(metrics_handler);
-        server
-    }
-
-    pub fn set_sql_handler(&mut self, handler: ServerSqlQueryHandlerRef) {
+    pub fn with_sql_handler(&mut self, handler: ServerSqlQueryHandlerRef) -> &mut Self {
         debug_assert!(
-            self.sql_handler.is_none(),
-            "SQL handler can be set only once!"
+            self.inner.sql_handler.is_none(),
+            "SQL handler can be with only once!"
         );
-        self.sql_handler.get_or_insert(handler);
+        self.inner.sql_handler.get_or_insert(handler);
+        self
     }
 
-    pub fn set_grpc_handler(&mut self, handler: ServerGrpcQueryHandlerRef) {
+    pub fn with_grpc_handler(&mut self, handler: ServerGrpcQueryHandlerRef) -> &mut Self {
         debug_assert!(
-            self.grpc_handler.is_none(),
+            self.inner.grpc_handler.is_none(),
             "gRPC handler can be set only once!"
         );
-        self.grpc_handler.get_or_insert(handler);
+        self.inner.grpc_handler.get_or_insert(handler);
+        self
     }
 
-    pub fn set_opentsdb_handler(&mut self, handler: OpentsdbProtocolHandlerRef) {
+    pub fn with_opentsdb_handler(&mut self, handler: OpentsdbProtocolHandlerRef) -> &mut Self {
         debug_assert!(
-            self.opentsdb_handler.is_none(),
+            self.inner.opentsdb_handler.is_none(),
             "OpenTSDB handler can be set only once!"
         );
-        self.opentsdb_handler.get_or_insert(handler);
+        self.inner.opentsdb_handler.get_or_insert(handler);
+        self
     }
 
-    pub fn set_script_handler(&mut self, handler: ScriptHandlerRef) {
+    pub fn with_script_handler(&mut self, handler: ScriptHandlerRef) -> &mut Self {
         debug_assert!(
-            self.script_handler.is_none(),
+            self.inner.script_handler.is_none(),
             "Script handler can be set only once!"
         );
-        self.script_handler.get_or_insert(handler);
+        self.inner.script_handler.get_or_insert(handler);
+        self
     }
 
-    pub fn set_influxdb_handler(&mut self, handler: InfluxdbLineProtocolHandlerRef) {
+    pub fn with_influxdb_handler(&mut self, handler: InfluxdbLineProtocolHandlerRef) -> &mut Self {
         debug_assert!(
-            self.influxdb_handler.is_none(),
+            self.inner.influxdb_handler.is_none(),
             "Influxdb line protocol handler can be set only once!"
         );
-        self.influxdb_handler.get_or_insert(handler);
+        self.inner.influxdb_handler.get_or_insert(handler);
+        self
     }
 
-    pub fn set_prom_handler(&mut self, handler: PrometheusProtocolHandlerRef) {
+    pub fn with_prom_handler(&mut self, handler: PrometheusProtocolHandlerRef) -> &mut Self {
         debug_assert!(
-            self.prom_handler.is_none(),
+            self.inner.prom_handler.is_none(),
             "Prometheus protocol handler can be set only once!"
         );
-        self.prom_handler.get_or_insert(handler);
+        self.inner.prom_handler.get_or_insert(handler);
+        self
     }
 
-    pub fn set_user_provider(&mut self, user_provider: UserProviderRef) {
+    pub fn with_user_provider(&mut self, user_provider: UserProviderRef) -> &mut Self {
         debug_assert!(
-            self.user_provider.is_none(),
+            self.inner.user_provider.is_none(),
             "User provider can be set only once!"
         );
-        self.user_provider.get_or_insert(user_provider);
+        self.inner.user_provider.get_or_insert(user_provider);
+        self
     }
 
-    pub fn set_metrics_handler(&mut self, handler: MetricsHandler) {
+    pub fn with_metrics_handler(&mut self, handler: MetricsHandler) -> &mut Self {
         debug_assert!(
-            self.metrics_handler.is_none(),
-            "User provider can be set only once!"
+            self.inner.metrics_handler.is_none(),
+            "MetricsHandler can be set only once!"
         );
-        self.metrics_handler.get_or_insert(handler);
+        self.inner.metrics_handler.get_or_insert(handler);
+        self
     }
+    pub fn build(&mut self) -> HttpServer {
+        std::mem::take(self).inner
+    }
+}
 
+impl HttpServer {
     pub fn make_app(&self) -> Router {
         let mut api = OpenApi {
             info: Info {
@@ -520,7 +523,7 @@ impl HttpServer {
             );
         }
 
-        if let Some(metrics_handler) = self.metrics_handler.clone() {
+        if let Some(metrics_handler) = self.metrics_handler {
             router = router.nest("", self.route_metrics(metrics_handler));
         }
 
@@ -736,8 +739,10 @@ mod test {
         let instance = Arc::new(DummyInstance { _tx: tx });
         let sql_instance = ServerSqlQueryHandlerAdaptor::arc(instance.clone());
         let grpc_instance = ServerGrpcQueryHandlerAdaptor::arc(instance);
-
-        let server = HttpServer::new(sql_instance, grpc_instance, HttpOptions::default());
+        let server = HttpServerBuilder::new(HttpOptions::default())
+            .with_sql_handler(sql_instance)
+            .with_grpc_handler(grpc_instance)
+            .build();
         server.make_app().route(
             "/test/timeout",
             get(forever.layer(

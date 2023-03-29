@@ -20,7 +20,7 @@ use api::v1::meta::lock_server::LockServer;
 use api::v1::meta::router_server::RouterServer;
 use api::v1::meta::store_server::StoreServer;
 use etcd_client::Client;
-use servers::http::HttpServer;
+use servers::http::{HttpServer, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::server::Server;
 use snafu::ResultExt;
@@ -58,10 +58,11 @@ pub struct MetaSrvInstance {
 impl MetaSrvInstance {
     pub async fn new(opts: MetaSrvOptions) -> Result<MetaSrvInstance> {
         let meta_srv = build_meta_srv(&opts).await?;
-        let http_srv = Arc::new(HttpServer::new_with_metrics_handler(
-            MetricsHandler,
-            opts.http_opts.clone(),
-        ));
+        let http_srv = Arc::new(
+            HttpServerBuilder::new(opts.http_opts.clone())
+                .with_metrics_handler(MetricsHandler)
+                .build(),
+        );
         Ok(MetaSrvInstance {
             meta_srv,
             http_srv,
@@ -88,7 +89,7 @@ impl MetaSrvInstance {
             .addr
             .parse()
             .context(error::ParseAddrSnafu {
-                addr: &self.opts.metrics_addr,
+                addr: &self.opts.http_opts.addr,
             })?;
         let http_srv = self.http_srv.start(addr);
         select! {
@@ -111,7 +112,9 @@ impl MetaSrvInstance {
         self.http_srv
             .shutdown()
             .await
-            .context(error::ShutdownServerSnafu)?;
+            .context(error::ShutdownServerSnafu {
+                service: self.http_srv.name(),
+            })?;
         Ok(())
     }
 }

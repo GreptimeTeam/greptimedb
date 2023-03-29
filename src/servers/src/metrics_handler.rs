@@ -16,7 +16,7 @@ use common_telemetry::metric;
 
 /// a server that serves metrics
 /// only start when datanode starts in distributed mode
-#[derive(Clone)]
+#[derive(Copy, Clone)]
 pub struct MetricsHandler;
 
 impl MetricsHandler {

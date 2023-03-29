@@ -255,14 +255,17 @@ impl Default for DatanodeOptions {
 /// Datanode service.
 pub struct Datanode {
     opts: DatanodeOptions,
-    services: Services,
+    services: Option<Services>,
     instance: InstanceRef,
 }
 
 impl Datanode {
     pub async fn new(opts: DatanodeOptions) -> Result<Datanode> {
         let instance = Arc::new(Instance::new(&opts).await?);
-        let services = Services::try_new(instance.clone(), &opts).await?;
+        let services = match opts.mode {
+            Mode::Distributed => Some(Services::try_new(instance.clone(), &opts).await?),
+            Mode::Standalone => None,
+        };
         Ok(Self {
             opts,
             services,
@@ -283,7 +286,11 @@ impl Datanode {
 
     /// Start services of datanode. This method call will block until services are shutdown.
     pub async fn start_services(&mut self) -> Result<()> {
-        self.services.start(&self.opts).await
+        if let Some(service) = self.services.as_mut() {
+            service.start(&self.opts).await
+        } else {
+            Ok(())
+        }
     }
 
     pub fn get_instance(&self) -> InstanceRef {
@@ -295,7 +302,11 @@ impl Datanode {
     }
 
     async fn shutdown_services(&self) -> Result<()> {
-        self.services.shutdown().await
+        if let Some(service) = self.services.as_ref() {
+            service.shutdown().await
+        } else {
+            Ok(())
+        }
     }
 
     pub async fn shutdown(&self) -> Result<()> {

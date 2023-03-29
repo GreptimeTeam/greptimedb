@@ -25,10 +25,11 @@ pub enum Error {
     #[snafu(display("Failed to send shutdown signal"))]
     SendShutdownSignal { source: SendError<()> },
 
-    #[snafu(display("Failed to shutdown server, source: {}", source))]
+    #[snafu(display("Failed to shutdown {} server, source: {}", service, source))]
     ShutdownServer {
         #[snafu(backtrace)]
         source: servers::error::Error,
+        service: String,
     },
 
     #[snafu(display("Error stream request next is None"))]
@@ -338,8 +339,6 @@ impl ErrorExt for Error {
             | Error::LockNotConfig { .. }
             | Error::ExceededRetryLimit { .. }
             | Error::SendShutdownSignal { .. }
-            | Error::ShutdownServer { .. }
-            | Error::StartMetricsExport { .. }
             | Error::ParseAddr { .. }
             | Error::StartGrpc { .. } => StatusCode::Internal,
             Error::EmptyKey { .. }
@@ -366,6 +365,8 @@ impl ErrorExt for Error {
             Error::InvalidCatalogValue { source, .. } => source.status_code(),
             Error::MetaInternal { source } => source.status_code(),
             Error::RecoverProcedure { source } => source.status_code(),
+            Error::ShutdownServer { source, .. } => source.status_code(),
+            Error::StartMetricsExport { source } => source.status_code(),
         }
     }
 }

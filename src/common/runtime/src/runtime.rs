@@ -24,7 +24,7 @@ use tokio::sync::oneshot;
 pub use tokio::task::{JoinError, JoinHandle};
 
 use crate::error::*;
-use crate::metrics as constant_metrics;
+use crate::metrics::*;
 
 /// A runtime to run future tasks
 #[derive(Clone, Debug)]
@@ -152,29 +152,29 @@ impl Builder {
 
 fn on_thread_start(thread_name: String) -> impl Fn() + 'static {
     move || {
-        let labels = [(constant_metrics::THREAD_NAME_LABEL, thread_name.clone())];
-        increment_gauge!(constant_metrics::METRIC_RUNTIME_THREADS_ALIVE, 1.0, &labels);
+        let labels = [(THREAD_NAME_LABEL, thread_name.clone())];
+        increment_gauge!(METRIC_RUNTIME_THREADS_ALIVE, 1.0, &labels);
     }
 }
 
 fn on_thread_stop(thread_name: String) -> impl Fn() + 'static {
     move || {
-        let labels = [(constant_metrics::THREAD_NAME_LABEL, thread_name.clone())];
-        decrement_gauge!(constant_metrics::METRIC_RUNTIME_THREADS_ALIVE, 1.0, &labels);
+        let labels = [(THREAD_NAME_LABEL, thread_name.clone())];
+        decrement_gauge!(METRIC_RUNTIME_THREADS_ALIVE, 1.0, &labels);
     }
 }
 
 fn on_thread_park(thread_name: String) -> impl Fn() + 'static {
     move || {
-        let labels = [(constant_metrics::THREAD_NAME_LABEL, thread_name.clone())];
-        increment_gauge!(constant_metrics::METRIC_RUNTIME_THREADS_IDLE, 1.0, &labels);
+        let labels = [(THREAD_NAME_LABEL, thread_name.clone())];
+        increment_gauge!(METRIC_RUNTIME_THREADS_IDLE, 1.0, &labels);
     }
 }
 
 fn on_thread_unpark(thread_name: String) -> impl Fn() + 'static {
     move || {
-        let labels = [(constant_metrics::THREAD_NAME_LABEL, thread_name.clone())];
-        decrement_gauge!(constant_metrics::METRIC_RUNTIME_THREADS_IDLE, 1.0, &labels);
+        let labels = [(THREAD_NAME_LABEL, thread_name.clone())];
+        decrement_gauge!(METRIC_RUNTIME_THREADS_IDLE, 1.0, &labels);
     }
 }
 
