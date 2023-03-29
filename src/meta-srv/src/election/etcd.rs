@@ -16,11 +16,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use common_telemetry::{info, warn};
+use common_telemetry::{error, info, warn};
 use etcd_client::Client;
 use snafu::{OptionExt, ResultExt};
+use tokio::sync::broadcast;
+use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::broadcast::Receiver;
 
-use crate::election::{Election, ELECTION_KEY, KEEP_ALIVE_PERIOD_SECS, LEASE_SECS};
+use crate::election::{
+    Election, LeaderChangeMessage, ELECTION_KEY, KEEP_ALIVE_PERIOD_SECS, LEASE_SECS,
+};
 use crate::error;
 use crate::error::Result;
 use crate::metasrv::{ElectionRef, LeaderValue};
@@ -30,6 +35,7 @@ pub struct EtcdElection {
     client: Client,
     is_leader: AtomicBool,
     infancy: AtomicBool,
+    leader_watcher: broadcast::Sender<LeaderChangeMessage>,
 }
 
 impl EtcdElection {
@@ -42,20 +48,50 @@ impl EtcdElection {
             .await
             .context(error::ConnectEtcdSnafu)?;
 
-        Self::with_etcd_client(leader_value, client)
+        Self::with_etcd_client(leader_value, client).await
     }
 
-    pub fn with_etcd_client<E>(leader_value: E, client: Client) -> Result<ElectionRef>
+    pub async fn with_etcd_client<E>(leader_value: E, client: Client) -> Result<ElectionRef>
     where
         E: AsRef<str>,
     {
-        let leader_value = leader_value.as_ref().into();
+        let leader_value: String = leader_value.as_ref().into();
+
+        let leader_ident = leader_value.clone();
+        let (tx, mut rx) = broadcast::channel(1024);
+        common_runtime::spawn_bg(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(msg) => match msg {
+                        LeaderChangeMessage::Elected(key) => {
+                            info!(
+                                "[{leader_ident}] is elected as leader: {:?}, lease: {}",
+                                key.name_str(),
+                                key.lease()
+                            );
+                        }
+                        LeaderChangeMessage::StepDown(key) => {
+                            warn!(
+                                "[{leader_ident}] is stepping down: {:?}, lease: {}",
+                                key.name_str(),
+                                key.lease()
+                            );
+                        }
+                    },
+                    Err(RecvError::Lagged(_)) => {
+                        warn!("Log printing is too slow or leader changed too fast!");
+                    }
+                    Err(RecvError::Closed) => break,
+                }
+            }
+        });
 
         Ok(Arc::new(Self {
             leader_value,
             client,
             is_leader: AtomicBool::new(false),
             infancy: AtomicBool::new(false),
+            leader_watcher: tx,
         }))
     }
 }
@@ -120,18 +156,21 @@ impl Election for EtcdElection {
                             .is_ok()
                         {
                             self.infancy.store(true, Ordering::Relaxed);
-                            info!(
-                                "[{}] becoming leader: {:?}, lease: {}",
-                                &self.leader_value,
-                                leader.name_str(),
-                                leader.lease()
-                            );
+
+                            if let Err(e) = self
+                                .leader_watcher
+                                .send(LeaderChangeMessage::Elected(Box::new(leader.clone())))
+                            {
+                                error!("Failed to send leader change message, error: {e}");
+                            }
                         }
                     } else {
-                        warn!(
-                            "Failed to keep-alive, lease: {}, will re-initiate election",
-                            leader.lease()
-                        );
+                        if let Err(e) = self
+                            .leader_watcher
+                            .send(LeaderChangeMessage::StepDown(Box::new(leader.clone())))
+                        {
+                            error!("Failed to send leader change message, error: {e}");
+                        }
                         break;
                     }
                 }
@@ -161,5 +200,9 @@ impl Election for EtcdElection {
 
     async fn resign(&self) -> Result<()> {
         todo!()
+    }
+
+    fn subscribe_leader_change(&self) -> Receiver<LeaderChangeMessage> {
+        self.leader_watcher.subscribe()
     }
 }

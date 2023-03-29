@@ -24,14 +24,14 @@ use snafu::ResultExt;
 use crate::error::{DeleteStateSnafu, Error, ListStateSnafu, PutStateSnafu, Result};
 
 /// Key value from state store.
-type KeyValue = (String, Vec<u8>);
+pub type KeyValue = (String, Vec<u8>);
 
 /// Stream that yields [KeyValue].
-type KeyValueStream = Pin<Box<dyn Stream<Item = Result<KeyValue>> + Send>>;
+pub type KeyValueStream = Pin<Box<dyn Stream<Item = Result<KeyValue>> + Send>>;
 
 /// Storage layer for persisting procedure's state.
 #[async_trait]
-pub(crate) trait StateStore: Send + Sync {
+pub trait StateStore: Send + Sync {
     /// Puts `key` and `value` into the store.
     async fn put(&self, key: &str, value: Vec<u8>) -> Result<()>;
 
@@ -51,13 +51,13 @@ pub(crate) type StateStoreRef = Arc<dyn StateStore>;
 
 /// [StateStore] based on [ObjectStore].
 #[derive(Debug)]
-pub(crate) struct ObjectStateStore {
+pub struct ObjectStateStore {
     store: ObjectStore,
 }
 
 impl ObjectStateStore {
     /// Returns a new [ObjectStateStore] with specific `store`.
-    pub(crate) fn new(store: ObjectStore) -> ObjectStateStore {
+    pub fn new(store: ObjectStore) -> ObjectStateStore {
         ObjectStateStore { store }
     }
 }
@@ -65,10 +65,13 @@ impl ObjectStateStore {
 #[async_trait]
 impl StateStore for ObjectStateStore {
     async fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
-        self.store
-            .write(key, value)
-            .await
-            .context(PutStateSnafu { key })
+        self.store.write(key, value).await.map_err(|e| {
+            PutStateSnafu {
+                key,
+                err_msg: e.to_string(),
+            }
+            .build()
+        })
     }
 
     async fn walk_top_down(&self, path: &str) -> Result<KeyValueStream> {
@@ -76,24 +79,36 @@ impl StateStore for ObjectStateStore {
 
         let mut lister = self.store.scan(path).await.map_err(|e| Error::ListState {
             path: path_string.clone(),
-            source: e,
+            err_msg: e.to_string(),
         })?;
 
         let store = self.store.clone();
 
         let stream = try_stream!({
             while let Some(res) = lister.next().await {
-                let entry = res.context(ListStateSnafu { path: &path_string })?;
+                let entry = res.map_err(|e| {
+                    ListStateSnafu {
+                        path: &path_string,
+                        err_msg: e.to_string(),
+                    }
+                    .build()
+                })?;
                 let key = entry.path();
-                let metadata = store
-                    .metadata(&entry, Metakey::Mode)
-                    .await
-                    .context(ListStateSnafu { path: key })?;
+                let metadata = store.metadata(&entry, Metakey::Mode).await.map_err(|e| {
+                    ListStateSnafu {
+                        path: key,
+                        err_msg: e.to_string(),
+                    }
+                    .build()
+                })?;
                 if let EntryMode::FILE = metadata.mode() {
-                    let value = store
-                        .read(key)
-                        .await
-                        .context(ListStateSnafu { path: key })?;
+                    let value = store.read(key).await.map_err(|e| {
+                        ListStateSnafu {
+                            path: key,
+                            err_msg: e.to_string(),
+                        }
+                        .build()
+                    })?;
                     yield (key.to_string(), value);
                 }
             }

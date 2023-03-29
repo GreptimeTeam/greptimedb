@@ -26,7 +26,7 @@ use crate::error::{Result, ToJsonSnafu};
 pub(crate) use crate::store::state_store::{ObjectStateStore, StateStoreRef};
 use crate::{BoxedProcedure, ProcedureId};
 
-mod state_store;
+pub mod state_store;
 
 /// Serialized data of a procedure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

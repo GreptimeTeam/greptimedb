@@ -17,7 +17,7 @@
 pub mod error;
 pub mod local;
 mod procedure;
-mod store;
+pub mod store;
 pub mod watcher;
 
 pub use crate::error::{Error, Result};

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::string::FromUtf8Error;
 use std::sync::Arc;
 
 use common_error::prelude::*;
@@ -47,11 +48,8 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to put {}, source: {}", key, source))]
-    PutState {
-        key: String,
-        source: object_store::Error,
-    },
+    #[snafu(display("Failed to put state, key: '{key}', error: {err_msg}"))]
+    PutState { key: String, err_msg: String },
 
     #[snafu(display("Failed to delete {}, source: {}", key, source))]
     DeleteState {
@@ -59,11 +57,11 @@ pub enum Error {
         source: object_store::Error,
     },
 
-    #[snafu(display("Failed to list {}, source: {}", path, source))]
-    ListState {
-        path: String,
-        source: object_store::Error,
-    },
+    #[snafu(display("Failed to delete keys: '{keys}', error: {err_msg}"))]
+    DeleteStates { keys: String, err_msg: String },
+
+    #[snafu(display("Failed to list state, path: '{path}', error: {err_msg}"))]
+    ListState { path: String, err_msg: String },
 
     #[snafu(display("Failed to read {}, source: {}", key, source))]
     ReadState {
@@ -107,6 +105,9 @@ pub enum Error {
         source: Arc<Error>,
         procedure_id: ProcedureId,
     },
+
+    #[snafu(display("Corrupted data, error: {source}"))]
+    CorruptedData { source: FromUtf8Error },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -118,6 +119,7 @@ impl ErrorExt for Error {
             Error::ToJson { .. }
             | Error::PutState { .. }
             | Error::DeleteState { .. }
+            | Error::DeleteStates { .. }
             | Error::ListState { .. }
             | Error::ReadState { .. }
             | Error::FromJson { .. }
@@ -127,7 +129,7 @@ impl ErrorExt for Error {
             Error::LoaderConflict { .. } | Error::DuplicateProcedure { .. } => {
                 StatusCode::InvalidArguments
             }
-            Error::ProcedurePanic { .. } => StatusCode::Unexpected,
+            Error::ProcedurePanic { .. } | Error::CorruptedData { .. } => StatusCode::Unexpected,
             Error::ProcedureExec { source, .. } => source.status_code(),
         }
     }
