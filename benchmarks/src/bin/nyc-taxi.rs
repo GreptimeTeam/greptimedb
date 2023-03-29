@@ -126,6 +126,7 @@ fn convert_record_batch(record_batch: RecordBatch) -> (Vec<Column>, u32) {
 
     for (array, field) in record_batch.columns().iter().zip(fields.iter()) {
         let (values, datatype) = build_values(array);
+
         let column = Column {
             column_name: field.name().to_owned(),
             values: Some(values),
@@ -182,10 +183,10 @@ fn build_values(column: &ArrayRef) -> (Values, ColumnDataType) {
             let values = array.values();
             (
                 Values {
-                    i64_values: values.to_vec(),
+                    ts_microsecond_values: values.to_vec(),
                     ..Default::default()
                 },
-                ColumnDataType::Int64,
+                ColumnDataType::TimestampMicrosecond,
             )
         }
         DataType::Utf8 => {
@@ -252,13 +253,13 @@ fn create_table_expr() -> CreateTableExpr {
             },
             ColumnDef {
                 name: "tpep_pickup_datetime".to_string(),
-                datatype: ColumnDataType::Int64 as i32,
+                datatype: ColumnDataType::TimestampMicrosecond as i32,
                 is_nullable: true,
                 default_constraint: vec![],
             },
             ColumnDef {
                 name: "tpep_dropoff_datetime".to_string(),
-                datatype: ColumnDataType::Int64 as i32,
+                datatype: ColumnDataType::TimestampMicrosecond as i32,
                 is_nullable: true,
                 default_constraint: vec![],
             },

@@ -30,6 +30,8 @@ use crate::sst::{
 };
 use crate::wal::Wal;
 
+const MAX_PARALLEL_COMPACTION: usize = 8;
+
 #[async_trait::async_trait]
 pub trait CompactionTask: Debug + Send + Sync + 'static {
     async fn run(self) -> Result<()>;
@@ -80,11 +82,18 @@ impl<S: LogStore> CompactionTaskImpl<S> {
             });
         }
 
-        let outputs = futures::future::try_join_all(futs)
-            .await?
-            .into_iter()
-            .flatten()
-            .collect();
+        let mut outputs = HashSet::with_capacity(futs.len());
+        while !futs.is_empty() {
+            let mut task_chunk = Vec::with_capacity(MAX_PARALLEL_COMPACTION);
+            for _ in 0..MAX_PARALLEL_COMPACTION {
+                if let Some(task) = futs.pop() {
+                    task_chunk.push(task);
+                }
+            }
+            let metas = futures::future::try_join_all(task_chunk).await?;
+            outputs.extend(metas.into_iter().flatten());
+        }
+
         let inputs = compacted_inputs.into_iter().collect();
         Ok((outputs, inputs))
     }
