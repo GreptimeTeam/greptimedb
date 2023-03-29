@@ -16,6 +16,7 @@
 use std::any::Any;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use common_telemetry::info;
@@ -135,11 +136,13 @@ impl RegionManifest {
         manifest_dir: &str,
         object_store: ObjectStore,
         checkpoint_actions_margin: Option<u16>,
+        gc_duration: Option<Duration>,
     ) -> Self {
         Self::new(
             manifest_dir,
             object_store,
             checkpoint_actions_margin,
+            gc_duration,
             Some(Arc::new(RegionManifestCheckpointer {
                 flushed_manifest_version: AtomicU64::new(0),
             })),
@@ -182,7 +185,7 @@ mod tests {
         builder.root(&tmp_dir.path().to_string_lossy());
         let object_store = ObjectStore::new(builder).unwrap().finish();
 
-        let manifest = RegionManifest::with_checkpointer("/manifest/", object_store, None);
+        let manifest = RegionManifest::with_checkpointer("/manifest/", object_store, None, None);
 
         let region_meta = Arc::new(build_region_meta());
 
@@ -292,7 +295,7 @@ mod tests {
         builder.root(&tmp_dir.path().to_string_lossy());
         let object_store = ObjectStore::new(builder).unwrap().finish();
 
-        let manifest = RegionManifest::with_checkpointer("/manifest/", object_store, None);
+        let manifest = RegionManifest::with_checkpointer("/manifest/", object_store, None, None);
 
         let region_meta = Arc::new(build_region_meta());
         let new_region_meta = Arc::new(build_altered_region_meta());

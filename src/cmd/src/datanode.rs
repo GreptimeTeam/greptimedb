@@ -212,7 +212,8 @@ mod tests {
             max_purge_tasks = 32
 
             [storage.manifest]
-            manifest_checkpoint_margin = 9
+            checkpoint_margin = 9
+            gc_duration = '7s'
         "#;
         write!(file, "{}", toml_str).unwrap();
 
@@ -261,7 +262,8 @@ mod tests {
         );
         assert_eq!(
             RegionManifestConfig {
-                manifest_checkpoint_margin: Some(9),
+                checkpoint_margin: Some(9),
+                gc_duration: Some(Duration::from_secs(7)),
             },
             *options.storage.manifest(),
         );

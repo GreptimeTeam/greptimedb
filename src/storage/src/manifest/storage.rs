@@ -298,13 +298,15 @@ impl ManifestLogStorage for ManifestObjectStore {
         version: ManifestVersion,
     ) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
         let path = self.checkpoint_file_path(version);
-        let checkpoint = self
-            .object_store
-            .read(&path)
-            .await
-            .context(ReadObjectSnafu { path })?;
-
-        Ok(Some((version, checkpoint)))
+        match self.object_store.read(&path).await {
+            Ok(checkpoint) => Ok(Some((version, checkpoint))),
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                return Ok(None);
+            }
+            Err(e) => {
+                return Err(e).context(ReadObjectSnafu { path });
+            }
+        }
     }
 
     async fn delete_checkpoint(&self, version: ManifestVersion) -> Result<()> {
@@ -406,5 +408,22 @@ mod tests {
         let (v, checkpoint) = log_store.load_last_checkpoint().await.unwrap().unwrap();
         assert_eq!(checkpoint, "checkpoint".as_bytes());
         assert_eq!(3, v);
+
+        //delete (,4) logs and checkpoints
+        log_store.delete_until(4).await.unwrap();
+        assert!(log_store.load_checkpoint(3).await.unwrap().is_none());
+        assert!(log_store.load_last_checkpoint().await.unwrap().is_none());
+        let mut it = log_store.scan(0, 11).await.unwrap();
+        let (version, bytes) = it.next_log().await.unwrap().unwrap();
+        assert_eq!(4, version);
+        assert_eq!(format!("hello, 4").as_bytes(), bytes);
+        assert!(it.next_log().await.unwrap().is_none());
+
+        // delete all logs and checkpoints
+        log_store.delete_until(11).await.unwrap();
+        assert!(log_store.load_checkpoint(3).await.unwrap().is_none());
+        assert!(log_store.load_last_checkpoint().await.unwrap().is_none());
+        let mut it = log_store.scan(0, 11).await.unwrap();
+        assert!(it.next_log().await.unwrap().is_none());
     }
 }

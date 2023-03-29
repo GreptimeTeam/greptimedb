@@ -296,7 +296,7 @@ impl<S: LogStore> EngineInner<S> {
                 &opts.parent_dir,
                 opts.write_buffer_size,
                 name,
-                self.config.manifest_checkpoint_margin,
+                &self.config,
                 opts.ttl,
             )
             .await?;
@@ -334,7 +334,7 @@ impl<S: LogStore> EngineInner<S> {
                 &opts.parent_dir,
                 opts.write_buffer_size,
                 &region_name,
-                self.config.manifest_checkpoint_margin,
+                &self.config,
                 opts.ttl,
             )
             .await?;
@@ -358,7 +358,7 @@ impl<S: LogStore> EngineInner<S> {
         parent_dir: &str,
         write_buffer_size: Option<usize>,
         region_name: &str,
-        manifest_checkpoint_margin: Option<u16>,
+        config: &EngineConfig,
         ttl: Option<Duration>,
     ) -> Result<StoreConfig<S>> {
         let parent_dir = util::normalize_dir(parent_dir);
@@ -369,7 +369,8 @@ impl<S: LogStore> EngineInner<S> {
         let manifest = RegionManifest::with_checkpointer(
             &manifest_dir,
             self.object_store.clone(),
-            manifest_checkpoint_margin,
+            config.manifest_checkpoint_margin,
+            config.manifest_gc_duration,
         );
         manifest.start().await?;
 

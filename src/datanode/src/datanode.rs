@@ -137,14 +137,18 @@ impl Default for WalConfig {
 #[serde(default)]
 pub struct RegionManifestConfig {
     /// Region manifest checkpoint actions margin.
-    /// Manifest service create a checkpoint every [manifest_checkpoint_margin] actions.
-    pub manifest_checkpoint_margin: Option<u16>,
+    /// Manifest service create a checkpoint every [checkpoint_margin] actions.
+    pub checkpoint_margin: Option<u16>,
+    /// Region manifest logs and checkpoints gc task exeuction duration.
+    #[serde(with = "humantime_serde")]
+    pub gc_duration: Option<Duration>,
 }
 
 impl Default for RegionManifestConfig {
     fn default() -> Self {
         Self {
-            manifest_checkpoint_margin: Some(10u16),
+            checkpoint_margin: Some(10u16),
+            gc_duration: Some(Duration::from_secs(30)),
         }
     }
 }
@@ -182,7 +186,8 @@ impl From<&DatanodeOptions> for SchedulerConfig {
 impl From<&DatanodeOptions> for StorageEngineConfig {
     fn from(value: &DatanodeOptions) -> Self {
         Self {
-            manifest_checkpoint_margin: value.storage.manifest().manifest_checkpoint_margin,
+            manifest_checkpoint_margin: value.storage.manifest().checkpoint_margin,
+            manifest_gc_duration: value.storage.manifest().gc_duration,
             max_files_in_l0: value.storage.compaction().max_files_in_level0,
             max_purge_tasks: value.storage.compaction().max_purge_tasks,
         }

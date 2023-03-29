@@ -80,7 +80,7 @@ mod tests {
     async fn test_table_manifest() {
         let (_dir, object_store) = test_util::new_test_object_store("test_table_manifest").await;
 
-        let manifest = TableManifest::new("manifest/", object_store, None, None);
+        let manifest = TableManifest::create("manifest/", object_store);
 
         let mut iter = manifest.scan(0, 100).await.unwrap();
         assert!(iter.next_action().await.unwrap().is_none());

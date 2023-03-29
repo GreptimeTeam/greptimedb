@@ -44,9 +44,11 @@ max_purge_tasks = 32
 
 # Storage manifest options
 [storage.manifest]
-# Checkpoint actions margin.
-# Create a checkpoint every <manifest_checkpoint_margin> actions.
-manifest_checkpoint_margin = 10
+# Region checkpoint actions margin.
+# Create a checkpoint every <checkpoint_margin> actions.
+checkpoint_margin = 10
+# Region manifest logs and checkpoints gc execution duration
+gc_duration = '30s'
 
 # Procedure storage options, see `standalone.example.toml`.
 # [procedure.store]

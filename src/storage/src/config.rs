@@ -14,9 +14,12 @@
 
 //! storage engine config
 
+use std::time::Duration;
+
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     pub manifest_checkpoint_margin: Option<u16>,
+    pub manifest_gc_duration: Option<Duration>,
     pub max_files_in_l0: usize,
     pub max_purge_tasks: usize,
 }
@@ -25,6 +28,7 @@ impl Default for EngineConfig {
     fn default() -> Self {
         Self {
             manifest_checkpoint_margin: Some(10),
+            manifest_gc_duration: Some(Duration::from_secs(30)),
             max_files_in_l0: 8,
             max_purge_tasks: 32,
         }

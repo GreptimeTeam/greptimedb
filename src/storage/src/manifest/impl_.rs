@@ -35,7 +35,7 @@ use crate::manifest::checkpoint::Checkpointer;
 use crate::manifest::storage::{ManifestObjectStore, ObjectStoreLogIterator};
 
 const CHECKPOINT_ACTIONS_MARGIN: u16 = 10;
-const CHECKPOINT_GC_DURATION_SECS: u64 = 60;
+const GC_DURATION_SECS: u64 = 30;
 
 #[derive(Clone, Debug)]
 pub struct ManifestImpl<S: Checkpoint<Error = Error>, M: MetaAction<Error = Error>> {
@@ -53,13 +53,14 @@ impl<S: 'static + Checkpoint<Error = Error>, M: 'static + MetaAction<Error = Err
         manifest_dir: &str,
         object_store: ObjectStore,
         checkpoint_actions_margin: Option<u16>,
+        gc_duration: Option<Duration>,
         checkpointer: Option<Arc<dyn Checkpointer<Checkpoint = S, MetaAction = M>>>,
     ) -> Self {
         let inner = Arc::new(ManifestImplInner::new(manifest_dir, object_store));
         let gc_task = if checkpointer.is_some() {
             // only start gc task when checkpoint is enabled.
             Some(Arc::new(RepeatedTask::new(
-                Duration::from_secs(CHECKPOINT_GC_DURATION_SECS),
+                gc_duration.unwrap_or_else(|| Duration::from_secs(GC_DURATION_SECS)),
                 inner.clone() as _,
             )))
         } else {
@@ -73,6 +74,10 @@ impl<S: 'static + Checkpoint<Error = Error>, M: 'static + MetaAction<Error = Err
             last_checkpoint_version: Arc::new(AtomicU64::new(MIN_VERSION)),
             gc_task,
         }
+    }
+
+    pub fn create(manifest_dir: &str, object_store: ObjectStore) -> Self {
+        Self::new(manifest_dir, object_store, None, None, None)
     }
 
     pub fn checkpointer(&self) -> &Option<Arc<dyn Checkpointer<Checkpoint = S, MetaAction = M>>> {
