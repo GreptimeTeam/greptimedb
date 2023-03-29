@@ -252,13 +252,13 @@ fn create_table_expr() -> CreateTableExpr {
             },
             ColumnDef {
                 name: "tpep_pickup_datetime".to_string(),
-                datatype: ColumnDataType::Int64 as i32,
+                datatype: ColumnDataType::TimestampMicrosecond as i32,
                 is_nullable: true,
                 default_constraint: vec![],
             },
             ColumnDef {
                 name: "tpep_dropoff_datetime".to_string(),
-                datatype: ColumnDataType::Int64 as i32,
+                datatype: ColumnDataType::TimestampMicrosecond as i32,
                 is_nullable: true,
                 default_constraint: vec![],
             },
