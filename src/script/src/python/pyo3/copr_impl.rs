@@ -170,22 +170,31 @@ coprocessor = copr
 /// Cast return of py script result to `Vec<VectorRef>`,
 /// constants will be broadcast to length of `col_len`
 /// accept and convert if obj is of two types:
-/// 1. tuples of PyVector or a tuple of PyList of same type Literals
+/// 1. tuples of PyVector/PyList of literals/single literal of same type
 /// or a mixed tuple of PyVector and PyList of same type Literals
 /// 2. a single PyVector
 /// 3. a PyList of same type Literals
+/// 4. a single constant, will be expanded to a PyVector of length of `col_len`
 fn py_any_to_vec(obj: &PyAny, col_len: usize) -> PyResult<Vec<VectorRef>> {
+    let is_literal = |obj: &PyAny| -> PyResult<bool> {
+        Ok(obj.is_instance_of::<PyInt>()?
+            || obj.is_instance_of::<PyFloat>()?
+            || obj.is_instance_of::<PyString>()?
+            || obj.is_instance_of::<PyBool>()?)
+    };
     let check = if obj.is_instance_of::<PyTuple>()? {
         let tuple = obj.downcast::<PyTuple>()?;
         (0..tuple.len())
             .map(|idx| {
                 tuple.get_item(idx).map(|i| -> PyResult<bool> {
-                    Ok(i.is_instance_of::<PyVector>()? || i.is_instance_of::<PyList>()?)
+                    Ok(i.is_instance_of::<PyVector>()?
+                        || i.is_instance_of::<PyList>()?
+                        || is_literal(i)?)
                 })
             })
             .all(|i| matches!(i, Ok(Ok(true))))
     } else {
-        obj.is_instance_of::<PyVector>()? || obj.is_instance_of::<PyList>()?
+        obj.is_instance_of::<PyVector>()? || obj.is_instance_of::<PyList>()? || is_literal(obj)?
     };
     if !check {
         return Err(PyRuntimeError::new_err(format!(

@@ -99,7 +99,9 @@ async fn integrated_py_copr_test() {
                 actual_result.insert(col_sch.name.clone(), col.clone());
             }
             for (name, col) in expect_result {
-                let actual_col = actual_result.get(&name).expect("Column with this name");
+                let actual_col = actual_result.get(&name).unwrap_or_else(|| {
+                    panic!("Expect column with name: {name} in {actual_result:?}")
+                });
                 if !check_equal(col.clone(), actual_col.clone()) {
                     panic!("Column {name} doesn't match, expect {col:?}, found {actual_col:?}")
                 }
