@@ -15,7 +15,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
+use common_catalog::consts::{
+    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID, MITO_ENGINE,
+};
 use common_query::Output;
 use common_recordbatch::util;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
@@ -29,6 +31,7 @@ use session::context::QueryContext;
 use snafu::ResultExt;
 use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
+use table::engine::manager::MemoryTableEngineManager;
 use table::engine::{EngineContext, TableEngineRef};
 use table::requests::{CreateTableRequest, TableOptions};
 
@@ -200,8 +203,12 @@ pub async fn create_mock_sql_handler() -> SqlHandler {
         MockEngine::default(),
         object_store,
     ));
+    let engine_manager = Arc::new(MemoryTableEngineManager::new(
+        MITO_ENGINE,
+        mock_engine.clone(),
+    ));
     let catalog_manager = Arc::new(
-        catalog::local::LocalCatalogManager::try_new(mock_engine.clone())
+        catalog::local::LocalCatalogManager::try_new(engine_manager)
             .await
             .unwrap(),
     );

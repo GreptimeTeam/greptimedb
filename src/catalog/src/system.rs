@@ -17,8 +17,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_catalog::consts::{
-    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_NAME,
-    SYSTEM_CATALOG_TABLE_ID, SYSTEM_CATALOG_TABLE_NAME,
+    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, MITO_ENGINE,
+    SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_ID, SYSTEM_CATALOG_TABLE_NAME,
 };
 use common_query::logical_plan::Expr;
 use common_query::physical_plan::{PhysicalPlanRef, SessionContext};
@@ -194,12 +194,13 @@ pub fn build_table_insert_request(
     schema: String,
     table_name: String,
     table_id: TableId,
+    engine: Option<String>,
 ) -> InsertRequest {
     let entry_key = format_table_entry_key(&catalog, &schema, table_id);
     build_insert_request(
         EntryType::Table,
         entry_key.as_bytes(),
-        serde_json::to_string(&TableEntryValue { table_name })
+        serde_json::to_string(&TableEntryValue { table_name, engine })
             .unwrap()
             .as_bytes(),
     )
@@ -330,6 +331,7 @@ pub fn decode_system_catalog(
                 schema_name: table_parts[1].to_string(),
                 table_name: table_meta.table_name,
                 table_id,
+                engine: table_meta.engine.unwrap_or(MITO_ENGINE.to_string()),
             }))
         }
     }
@@ -385,11 +387,14 @@ pub struct TableEntry {
     pub schema_name: String,
     pub table_name: String,
     pub table_id: TableId,
+    // None stands for mito engine
+    pub engine: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TableEntryValue {
     pub table_name: String,
+    pub engine: Option<String>,
 }
 
 #[cfg(test)]
@@ -399,7 +404,7 @@ mod tests {
     use datatypes::value::Value;
     use log_store::NoopLogStore;
     use mito::config::EngineConfig;
-    use mito::engine::MitoEngine;
+    use mito::engine::{MitoEngine, MITO_ENGINE};
     use object_store::ObjectStore;
     use storage::compaction::noop::NoopCompactionScheduler;
     use storage::config::EngineConfig as StorageEngineConfig;
@@ -528,6 +533,7 @@ mod tests {
             DEFAULT_SCHEMA_NAME.to_string(),
             "my_table".to_string(),
             1,
+            None,
         );
         let result = catalog_table.insert(table_insertion).await.unwrap();
         assert_eq!(result, 1);
@@ -548,6 +554,7 @@ mod tests {
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: "my_table".to_string(),
             table_id: 1,
+            engine: MITO_ENGINE.to_string(),
         });
         assert_eq!(entry, expected);
 

@@ -27,9 +27,10 @@ mod tests {
         KvBackend, KvBackendRef, RemoteCatalogManager, RemoteCatalogProvider, RemoteSchemaProvider,
     };
     use catalog::{CatalogList, CatalogManager, RegisterTableRequest};
-    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
     use datatypes::schema::RawSchema;
     use futures_util::StreamExt;
+    use table::engine::manager::MemoryTableEngineManager;
     use table::engine::{EngineContext, TableEngineRef};
     use table::requests::CreateTableRequest;
 
@@ -80,8 +81,11 @@ mod tests {
     ) -> (KvBackendRef, TableEngineRef, Arc<RemoteCatalogManager>) {
         let backend = Arc::new(MockKvBackend::default()) as KvBackendRef;
         let table_engine = Arc::new(MockTableEngine::default());
-        let catalog_manager =
-            RemoteCatalogManager::new(table_engine.clone(), node_id, backend.clone());
+        let engine_manager = Arc::new(MemoryTableEngineManager::new(
+            MITO_ENGINE,
+            table_engine.clone(),
+        ));
+        let catalog_manager = RemoteCatalogManager::new(engine_manager, node_id, backend.clone());
         catalog_manager.start().await.unwrap();
         (backend, table_engine, Arc::new(catalog_manager))
     }

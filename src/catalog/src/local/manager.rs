@@ -27,7 +27,8 @@ use datatypes::prelude::ScalarVector;
 use datatypes::vectors::{BinaryVector, UInt8Vector};
 use futures_util::lock::Mutex;
 use snafu::{ensure, OptionExt, ResultExt};
-use table::engine::{EngineContext, TableEngineRef};
+use table::engine::manager::TableEngineManagerRef;
+use table::engine::EngineContext;
 use table::metadata::TableId;
 use table::requests::OpenTableRequest;
 use table::table::numbers::NumbersTable;
@@ -35,9 +36,9 @@ use table::table::TableIdProvider;
 use table::TableRef;
 
 use crate::error::{
-    self, CatalogNotFoundSnafu, IllegalManagerStateSnafu, OpenTableSnafu, ReadSystemCatalogSnafu,
-    Result, SchemaExistsSnafu, SchemaNotFoundSnafu, SystemCatalogSnafu,
-    SystemCatalogTypeMismatchSnafu, TableExistsSnafu, TableNotFoundSnafu,
+    self, CatalogNotFoundSnafu, EngineNotFoundSnafu, IllegalManagerStateSnafu, OpenTableSnafu,
+    ReadSystemCatalogSnafu, Result, SchemaExistsSnafu, SchemaNotFoundSnafu, SystemCatalogSnafu,
+    SystemCatalogTypeMismatchSnafu, TableExistsSnafu, TableNotExistSnafu, TableNotFoundSnafu,
 };
 use crate::local::memory::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
 use crate::system::{
@@ -55,7 +56,7 @@ use crate::{
 pub struct LocalCatalogManager {
     system: Arc<SystemCatalog>,
     catalogs: Arc<MemoryCatalogManager>,
-    engine: TableEngineRef,
+    engine_manager: TableEngineManagerRef,
     next_table_id: AtomicU32,
     init_lock: Mutex<bool>,
     register_lock: Mutex<()>,
@@ -64,18 +65,15 @@ pub struct LocalCatalogManager {
 
 impl LocalCatalogManager {
     /// Create a new [CatalogManager] with given user catalogs and table engine
-    pub async fn try_new(engine: TableEngineRef) -> Result<Self> {
+    pub async fn try_new(engine_manager: TableEngineManagerRef) -> Result<Self> {
+        let engine = engine_manager.default();
         let table = SystemCatalogTable::new(engine.clone()).await?;
         let memory_catalog_list = crate::local::memory::new_memory_catalog_list()?;
-        let system_catalog = Arc::new(SystemCatalog::new(
-            table,
-            memory_catalog_list.clone(),
-            engine.clone(),
-        ));
+        let system_catalog = Arc::new(SystemCatalog::new(table, memory_catalog_list.clone()));
         Ok(Self {
             system: system_catalog,
             catalogs: memory_catalog_list,
-            engine,
+            engine_manager,
             next_table_id: AtomicU32::new(MIN_USER_TABLE_ID),
             init_lock: Mutex::new(false),
             register_lock: Mutex::new(()),
@@ -100,7 +98,8 @@ impl LocalCatalogManager {
 
         // Processing system table hooks
         let mut sys_table_requests = self.system_table_requests.lock().await;
-        handle_system_table_request(self, self.engine.clone(), &mut sys_table_requests).await?;
+        let engine = self.engine_manager.default();
+        handle_system_table_request(self, engine, &mut sys_table_requests).await?;
         Ok(())
     }
 
@@ -253,9 +252,14 @@ impl LocalCatalogManager {
             table_name: t.table_name.clone(),
             table_id: t.table_id,
         };
+        let engine = self
+            .engine_manager
+            .engine(&t.engine)
+            .context(EngineNotFoundSnafu {
+                engine: t.engine.to_string(),
+            })?;
 
-        let option = self
-            .engine
+        let option = engine
             .open_table(&context, request)
             .await
             .with_context(|_| OpenTableSnafu {
@@ -364,6 +368,7 @@ impl CatalogManager for LocalCatalogManager {
                 // Try to register table with same table id, just ignore.
                 Ok(false)
             } else {
+                let engine = request.table.table_info().meta.engine.to_owned();
                 // table does not exist
                 self.system
                     .register_table(
@@ -371,6 +376,7 @@ impl CatalogManager for LocalCatalogManager {
                         schema_name.clone(),
                         request.table_name.clone(),
                         request.table_id,
+                        Some(engine),
                     )
                     .await?;
                 schema.register_table(request.table_name, request.table)?;
@@ -404,6 +410,14 @@ impl CatalogManager for LocalCatalogManager {
                 schema: schema_name,
             })?;
 
+        let old_table = schema
+            .table(&request.table_name)
+            .await?
+            .context(TableNotExistSnafu {
+                table: request.table_name.to_string(),
+            })?;
+
+        let engine = old_table.table_info().meta.engine.to_owned();
         // rename table in system catalog
         self.system
             .register_table(
@@ -411,6 +425,7 @@ impl CatalogManager for LocalCatalogManager {
                 schema_name.clone(),
                 request.new_table_name.clone(),
                 request.table_id,
+                Some(engine),
             )
             .await?;
         Ok(schema
@@ -530,6 +545,8 @@ impl CatalogManager for LocalCatalogManager {
 mod tests {
     use std::assert_matches::assert_matches;
 
+    use mito::engine::MITO_ENGINE;
+
     use super::*;
     use crate::system::{CatalogEntry, SchemaEntry};
 
@@ -541,6 +558,7 @@ mod tests {
                 schema_name: "S1".to_string(),
                 table_name: "T1".to_string(),
                 table_id: 1,
+                engine: MITO_ENGINE.to_string(),
             }),
             Entry::Catalog(CatalogEntry {
                 catalog_name: "C2".to_string(),
@@ -561,6 +579,7 @@ mod tests {
                 schema_name: "S1".to_string(),
                 table_name: "T2".to_string(),
                 table_id: 2,
+                engine: MITO_ENGINE.to_string(),
             }),
         ];
         let res = LocalCatalogManager::sort_entries(vec);

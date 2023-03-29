@@ -82,6 +82,12 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
+    #[snafu(display("Cannot find engine {}", engine))]
+    EngineNotFound {
+        engine: String,
+        backtrace: Backtrace,
+    },
+
     #[snafu(display("Cannot find catalog by name: {}", catalog_name))]
     CatalogNotFound {
         catalog_name: String,
@@ -231,7 +237,8 @@ impl ErrorExt for Error {
             | Error::TableNotFound { .. }
             | Error::IllegalManagerState { .. }
             | Error::CatalogNotFound { .. }
-            | Error::InvalidEntryType { .. } => StatusCode::Unexpected,
+            | Error::InvalidEntryType { .. }
+            | Error::EngineNotFound { .. } => StatusCode::Unexpected,
 
             Error::SystemCatalog { .. }
             | Error::EmptyValue { .. }
