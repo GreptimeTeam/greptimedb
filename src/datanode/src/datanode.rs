@@ -40,6 +40,7 @@ pub enum ObjectStoreConfig {
 
 /// Storage engine config
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct StorageConfig {
     #[serde(flatten)]
     pub store: ObjectStoreConfig,
