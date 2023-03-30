@@ -20,7 +20,6 @@ use datafusion::optimizer::optimizer::OptimizerRule;
 use datafusion::optimizer::OptimizerConfig;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRewriter};
 use datafusion_common::{DFSchemaRef, DataFusionError, Result, ScalarValue};
-// use datafusion_expr::expr_rewriter::{ExprRewritable, TreeNodeRewriter};
 use datafusion_expr::{
     Between, BinaryExpr, Expr, ExprSchemable, Filter, LogicalPlan, Operator, TableScan,
 };

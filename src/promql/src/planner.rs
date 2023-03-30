@@ -563,9 +563,6 @@ impl PromPlanner {
         table_name: &str,
         filter: Vec<DfExpr>,
     ) -> Result<LogicalPlan> {
-        // let table_ref = OwnedTableReference::Bare {
-        //     table: table_name.to_string(),
-        // };
         let table_ref = OwnedTableReference::bare(table_name.to_string());
         let provider = self
             .table_provider

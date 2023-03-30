@@ -241,11 +241,6 @@ impl DFLogicalSubstraitConvertor {
             .projection
             .map(|mask_expr| self.convert_mask_expression(mask_expr));
 
-        // let table_ref = OwnedTableReference::Full {
-        //     catalog: catalog_name.clone(),
-        //     schema: schema_name.clone(),
-        //     table: table_name.clone(),
-        // };
         let table_ref = TableReference::full(
             catalog_name.clone(),
             schema_name.clone(),
@@ -278,7 +273,6 @@ impl DFLogicalSubstraitConvertor {
         };
 
         // Calculate the projected schema
-        // let qualified = &format_full_table_name(&catalog_name, &schema_name, &table_name);
         let projected_schema = Arc::new(
             project_schema(&stored_schema, projection.as_ref())
                 .and_then(|x| {
