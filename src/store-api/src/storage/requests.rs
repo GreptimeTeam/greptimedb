@@ -162,6 +162,7 @@ mod tests {
             .name("test")
             .row_key(row_key)
             .default_cf(default_cf)
+            .compaction_time_window(Some(1677652502))
             .build()
             .unwrap()
     }
