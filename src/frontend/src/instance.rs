@@ -480,6 +480,7 @@ impl Instance {
 
             Statement::Tql(tql) => self.execute_tql(tql, query_ctx).await,
             Statement::CreateDatabase(_)
+            | Statement::CreateExternalTable(_)
             | Statement::ShowDatabases(_)
             | Statement::CreateTable(_)
             | Statement::ShowTables(_)
@@ -663,7 +664,8 @@ pub fn check_permission(
         // database ops won't be checked
         Statement::CreateDatabase(_) | Statement::ShowDatabases(_) | Statement::Use(_) => {}
         // show create table and alter are not supported yet
-        Statement::ShowCreateTable(_) | Statement::Alter(_) => {}
+        Statement::ShowCreateTable(_) | Statement::CreateExternalTable(_) | Statement::Alter(_) => {
+        }
 
         Statement::Insert(insert) => {
             validate_param(insert.table_name(), query_ctx)?;
