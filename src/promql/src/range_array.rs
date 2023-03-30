@@ -14,6 +14,7 @@
 
 //！An extended "array" based on [DictionaryArray].
 
+use datafusion::arrow::buffer::NullBuffer;
 use datafusion::arrow::datatypes::Field;
 use datatypes::arrow::array::{Array, ArrayData, ArrayRef, DictionaryArray, Int64Array};
 use datatypes::arrow::datatypes::{DataType, Int64Type};
@@ -124,10 +125,10 @@ impl RangeArray {
         .len(key_array.len())
         .add_buffer(key_array.data().buffers()[0].clone())
         .add_child_data(values.data().clone());
-        match key_array.data().null_buffer() {
+        match key_array.data().nulls() {
             Some(buffer) if key_array.data().null_count() > 0 => {
                 data = data
-                    .null_bit_buffer(Some(buffer.clone()))
+                    .nulls(Some(buffer.clone()))
                     .null_count(key_array.data().null_count());
             }
             _ => data = data.null_count(0),
@@ -222,6 +223,18 @@ impl Array for RangeArray {
 
     fn into_data(self) -> ArrayData {
         self.array.into_data()
+    }
+
+    fn to_data(&self) -> ArrayData {
+        self.array.to_data()
+    }
+
+    fn slice(&self, offset: usize, length: usize) -> ArrayRef {
+        self.array.slice(offset, length)
+    }
+
+    fn nulls(&self) -> Option<&NullBuffer> {
+        self.array.nulls()
     }
 }
 

@@ -581,7 +581,7 @@ pub fn expression_from_df_expr(
         | Expr::ScalarSubquery(..)
         | Expr::Placeholder { .. }
         | Expr::QualifiedWildcard { .. } => todo!(),
-        Expr::GroupingSet(_) => UnsupportedExprSnafu {
+        Expr::GroupingSet(_) | Expr::OuterReferenceColumn(_, _) => UnsupportedExprSnafu {
             name: expr.to_string(),
         }
         .fail()?,

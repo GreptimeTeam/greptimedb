@@ -194,7 +194,7 @@ SELECT a-10 AS k FROM test UNION SELECT a-10 AS l FROM test ORDER BY k;
 
 SELECT a-10 AS k FROM test UNION SELECT a-10 AS l FROM test ORDER BY l;
 
-Error: 3000(PlanQuery), No field named 'l'. Valid fields are 'k'.
+Error: 3000(PlanQuery), No field named "l". Valid fields are "k".
 
 SELECT a-10 AS k FROM test UNION SELECT a-10 AS l FROM test ORDER BY 1-k;
 

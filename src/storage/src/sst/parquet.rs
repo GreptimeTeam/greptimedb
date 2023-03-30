@@ -39,7 +39,7 @@ use futures_util::{Stream, StreamExt, TryStreamExt};
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::{ArrowPredicate, RowFilter};
 use parquet::arrow::{ArrowWriter, ParquetRecordBatchStreamBuilder, ProjectionMask};
-use parquet::basic::{Compression, Encoding};
+use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 use parquet::format::FileMetaData;
@@ -91,7 +91,7 @@ impl<'a> ParquetWriter<'a> {
         let schema = store_schema.arrow_schema().clone();
 
         let writer_props = WriterProperties::builder()
-            .set_compression(Compression::ZSTD)
+            .set_compression(Compression::ZSTD(ZstdLevel::default()))
             .set_encoding(Encoding::PLAIN)
             .set_max_row_group_size(self.max_row_group_size)
             .set_key_value_metadata(extra_meta.map(|map| {
