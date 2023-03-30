@@ -19,7 +19,6 @@ common-recordbatch = { path = "../common/recordbatch" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
-crossbeam = "0.8"
 datatypes = { path = "../datatypes" }
 datafusion-common.workspace = true
 datafusion-expr.workspace = true

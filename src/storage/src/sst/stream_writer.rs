@@ -93,7 +93,7 @@ impl BufferedWriter {
     /// Write a record batch to stream writer.
     pub async fn write(&mut self, batch: &RecordBatch) -> error::Result<()> {
         self.arrow_writer.write(batch).context(WriteParquetSnafu)?;
-        let writen = Self::try_flush(
+        let written = Self::try_flush(
             &self.path,
             &self.buffer,
             &mut self.object_writer,
@@ -102,7 +102,7 @@ impl BufferedWriter {
             self.threshold,
         )
         .await?;
-        self.bytes_written.fetch_add(writen, Ordering::Relaxed);
+        self.bytes_written.fetch_add(written, Ordering::Relaxed);
         Ok(())
     }
 

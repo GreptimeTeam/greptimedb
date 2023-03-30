@@ -7484,7 +7484,6 @@ dependencies = [
  "common-test-util",
  "common-time",
  "criterion 0.3.6",
- "crossbeam",
  "datafusion-common",
  "datafusion-expr",
  "datatypes",
