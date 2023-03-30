@@ -5,6 +5,7 @@ on:
   schedule:
     # At 00:00 on Monday.
     - cron: '0 0 * * 1'
+  # Mannually trigger only builds binaries.
   workflow_dispatch:
 
 name: Release
@@ -212,7 +213,7 @@ jobs:
     name: Build docker image
     needs: [build]
     runs-on: ubuntu-latest
-    if: github.repository == 'GreptimeTeam/greptimedb'
+    if: github.repository == 'GreptimeTeam/greptimedb' && github.event_name != 'workflow_dispatch'
     steps:
       - name: Checkout sources
         uses: actions/checkout@v3
@@ -298,7 +299,7 @@ jobs:
     # Release artifacts only when all the artifacts are built successfully.
     needs: [build,docker]
     runs-on: ubuntu-latest
-    if: github.repository == 'GreptimeTeam/greptimedb'
+    if: github.repository == 'GreptimeTeam/greptimedb' && github.event_name != 'workflow_dispatch'
     steps:
       - name: Checkout sources
         uses: actions/checkout@v3
@@ -341,7 +342,7 @@ jobs:
     name: Push docker image to UCloud Container Registry
     needs: [docker]
     runs-on: ubuntu-latest
-    if: github.repository == 'GreptimeTeam/greptimedb'
+    if: github.repository == 'GreptimeTeam/greptimedb' && github.event_name != 'workflow_dispatch'
     # Push to uhub may fail(500 error), but we don't want to block the release process. The failed job will be retried manually.
     continue-on-error: true
     steps:
