@@ -109,14 +109,14 @@ impl<E: ErrorExt + 'static> RepeatedTask<E> {
                 .is_ok(),
             IllegalStateSnafu { name }
         );
-        let handle = self
-            .gc_task_handle
+        let token = self
+            .cancel_token
             .lock()
             .await
             .take()
             .context(IllegalStateSnafu { name })?;
-        let token = self
-            .cancel_token
+        let handle = self
+            .gc_task_handle
             .lock()
             .await
             .take()
