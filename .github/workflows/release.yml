@@ -33,38 +33,42 @@ jobs:
             os: ubuntu-2004-16-cores
             file: greptime-linux-amd64
             continue-on-error: false
+            opts: "-F servers/dashboard"
           - arch: aarch64-unknown-linux-gnu
             os: ubuntu-2004-16-cores
             file: greptime-linux-arm64
             continue-on-error: false
+            opts: "-F servers/dashboard"
           - arch: aarch64-apple-darwin
             os: macos-latest
             file: greptime-darwin-arm64
             continue-on-error: false
+            opts: "-F servers/dashboard"
           - arch: x86_64-apple-darwin
             os: macos-latest
             file: greptime-darwin-amd64
             continue-on-error: false
+            opts: "-F servers/dashboard"
           - arch: x86_64-unknown-linux-gnu
             os: ubuntu-2004-16-cores
             file: greptime-linux-amd64-pyo3
             continue-on-error: false
-            opts: "-F pyo3_backend"
+            opts: "-F pyo3_backend,servers/dashboard"
           - arch: aarch64-unknown-linux-gnu
             os: ubuntu-2004-16-cores
             file: greptime-linux-arm64-pyo3
             continue-on-error: false
-            opts: "-F pyo3_backend"
+            opts: "-F pyo3_backend,servers/dashboard"
           - arch: aarch64-apple-darwin
             os: macos-latest
             file: greptime-darwin-arm64-pyo3
             continue-on-error: false
-            opts: "-F pyo3_backend"
+            opts: "-F pyo3_backend,servers/dashboard"
           - arch: x86_64-apple-darwin
             os: macos-latest
             file: greptime-darwin-amd64-pyo3
             continue-on-error: false
-            opts: "-F pyo3_backend"
+            opts: "-F pyo3_backend,servers/dashboard"
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.continue-on-error }}
     if: github.repository == 'GreptimeTeam/greptimedb'
@@ -165,7 +169,7 @@ jobs:
           export LD_LIBRARY_PATH=$PYTHON_INSTALL_PATH_AMD64/lib:$LD_LIBRARY_PATH
           export LIBRARY_PATH=$PYTHON_INSTALL_PATH_AMD64/lib:$LIBRARY_PATH
           export PATH=$PYTHON_INSTALL_PATH_AMD64/bin:$PATH
-          
+
           echo "implementation=CPython" >> pyo3.config
           echo "version=3.10" >> pyo3.config
           echo "implementation=CPython" >> pyo3.config
