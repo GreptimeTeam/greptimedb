@@ -61,7 +61,7 @@ impl DfLogicalPlanner {
         )
         .await?;
 
-        let config_options = self.session_state.config().config_options();
+        let config_options = self.session_state.config().options();
         let parser_options = ParserOptions {
             enable_ident_normalization: config_options.sql_parser.enable_ident_normalization,
             parse_float_as_decimal: config_options.sql_parser.parse_float_as_decimal,

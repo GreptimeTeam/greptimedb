@@ -79,7 +79,7 @@ async fn resolve_tables(
 
     for table_name in table_names {
         let resolved_name = table_provider
-            .resolve_table_ref(table_name.as_table_reference())
+            .resolve_table_ref(table_name.clone())
             .context(CatalogSnafu)?;
 
         if let Entry::Vacant(v) = tables.entry(resolved_name.to_string()) {

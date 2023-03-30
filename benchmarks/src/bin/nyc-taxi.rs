@@ -132,7 +132,7 @@ fn convert_record_batch(record_batch: RecordBatch) -> (Vec<Column>, u32) {
             values: Some(values),
             null_mask: array
                 .data()
-                .null_bitmap()
+                .nulls()
                 .map(|bitmap| bitmap.buffer().as_slice().to_vec())
                 .unwrap_or_default(),
             datatype: datatype.into(),

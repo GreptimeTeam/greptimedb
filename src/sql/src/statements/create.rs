@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use crate::ast::{ColumnDef, Ident, ObjectName, SqlOption, TableConstraint, Value as SqlValue};
 
 /// Time index name, used in table constraints.
@@ -49,4 +51,14 @@ pub struct CreateDatabase {
     pub name: ObjectName,
     /// Create if not exists
     pub if_not_exists: bool,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct CreateExternalTable {
+    /// Table name
+    pub name: ObjectName,
+    pub columns: Vec<ColumnDef>,
+    pub constraints: Vec<TableConstraint>,
+    /// Table options in `WITH`.
+    pub options: HashMap<String, String>,
 }

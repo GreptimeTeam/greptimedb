@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_catalog::format_full_table_name;
-use datafusion::common::{OwnedTableReference, ResolvedTableReference, TableReference};
+use datafusion::common::{ResolvedTableReference, TableReference};
 use datafusion::datasource::provider_as_source;
 use datafusion::logical_expr::TableSource;
 use session::context::QueryContext;
@@ -87,9 +87,8 @@ impl DfTableSourceProvider {
 
     pub async fn resolve_table(
         &mut self,
-        table_ref: OwnedTableReference,
+        table_ref: TableReference<'_>,
     ) -> Result<Arc<dyn TableSource>> {
-        let table_ref = table_ref.as_table_reference();
         let table_ref = self.resolve_table_ref(table_ref)?;
 
         let resolved_name = table_ref.to_string();

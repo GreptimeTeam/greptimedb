@@ -13,13 +13,14 @@
 // limitations under the License.
 
 use snafu::ResultExt;
-use sqlparser::ast::{ObjectName, Value};
+use sqlparser::ast::ObjectName;
 use sqlparser::keywords::Keyword;
 
 use crate::error::{self, Result};
 use crate::parser::ParserContext;
 use crate::statements::copy::{CopyTable, CopyTableArgument, Format};
 use crate::statements::statement::Statement;
+use crate::util::parse_option_string;
 
 // COPY tbl TO 'output.parquet';
 impl<'a> ParserContext<'a> {
@@ -70,12 +71,12 @@ impl<'a> ParserContext<'a> {
         for option in options {
             match option.name.value.to_ascii_uppercase().as_str() {
                 "FORMAT" => {
-                    if let Some(fmt_str) = ParserContext::parse_option_string(option.value) {
+                    if let Some(fmt_str) = parse_option_string(option.value) {
                         format = Format::try_from(fmt_str)?;
                     }
                 }
                 "PATTERN" => {
-                    if let Some(v) = ParserContext::parse_option_string(option.value) {
+                    if let Some(v) = parse_option_string(option.value) {
                         pattern = Some(v);
                     }
                 }
@@ -92,7 +93,7 @@ impl<'a> ParserContext<'a> {
         let connection = connection_options
             .into_iter()
             .filter_map(|option| {
-                if let Some(v) = ParserContext::parse_option_string(option.value) {
+                if let Some(v) = parse_option_string(option.value) {
                     Some((option.name.value.to_uppercase(), v))
                 } else {
                     None
@@ -127,7 +128,7 @@ impl<'a> ParserContext<'a> {
         let mut format = Format::Parquet;
         for option in options {
             if option.name.value.eq_ignore_ascii_case("FORMAT") {
-                if let Some(fmt_str) = ParserContext::parse_option_string(option.value) {
+                if let Some(fmt_str) = parse_option_string(option.value) {
                     format = Format::try_from(fmt_str)?;
                 }
             }
@@ -141,7 +142,7 @@ impl<'a> ParserContext<'a> {
         let connection = connection_options
             .into_iter()
             .filter_map(|option| {
-                if let Some(v) = ParserContext::parse_option_string(option.value) {
+                if let Some(v) = parse_option_string(option.value) {
                     Some((option.name.value.to_uppercase(), v))
                 } else {
                     None
@@ -156,13 +157,6 @@ impl<'a> ParserContext<'a> {
             pattern: None,
             location,
         })
-    }
-
-    fn parse_option_string(value: Value) -> Option<String> {
-        match value {
-            Value::SingleQuotedString(v) | Value::DoubleQuotedString(v) => Some(v),
-            _ => None,
-        }
     }
 }
 

@@ -22,9 +22,10 @@ use catalog::CatalogManagerRef;
 use common_catalog::format_full_table_name;
 use common_telemetry::debug;
 use datafusion::arrow::datatypes::SchemaRef as ArrowSchemaRef;
-use datafusion::common::{DFField, DFSchema, OwnedTableReference};
+use datafusion::common::{DFField, DFSchema};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::physical_plan::project_schema;
+use datafusion::sql::TableReference;
 use datafusion_expr::{Filter, LogicalPlan, TableScan};
 use prost::Message;
 use session::context::QueryContext;
@@ -240,13 +241,13 @@ impl DFLogicalSubstraitConvertor {
             .projection
             .map(|mask_expr| self.convert_mask_expression(mask_expr));
 
-        let table_ref = OwnedTableReference::Full {
-            catalog: catalog_name.clone(),
-            schema: schema_name.clone(),
-            table: table_name.clone(),
-        };
+        let table_ref = TableReference::full(
+            catalog_name.clone(),
+            schema_name.clone(),
+            table_name.clone(),
+        );
         let adapter = table_provider
-            .resolve_table(table_ref)
+            .resolve_table(table_ref.clone())
             .await
             .with_context(|_| ResolveTableSnafu {
                 table_name: format_full_table_name(&catalog_name, &schema_name, &table_name),
@@ -272,14 +273,13 @@ impl DFLogicalSubstraitConvertor {
         };
 
         // Calculate the projected schema
-        let qualified = &format_full_table_name(&catalog_name, &schema_name, &table_name);
         let projected_schema = Arc::new(
             project_schema(&stored_schema, projection.as_ref())
                 .and_then(|x| {
                     DFSchema::new_with_metadata(
                         x.fields()
                             .iter()
-                            .map(|f| DFField::from_qualified(qualified, f.clone()))
+                            .map(|f| DFField::from_qualified(table_ref.clone(), f.clone()))
                             .collect(),
                         x.metadata().clone(),
                     )
@@ -291,7 +291,7 @@ impl DFLogicalSubstraitConvertor {
 
         // TODO(ruihang): Support limit(fetch)
         Ok(LogicalPlan::TableScan(TableScan {
-            table_name: qualified.to_string(),
+            table_name: table_ref,
             source: adapter,
             projection,
             projected_schema,
@@ -620,10 +620,13 @@ mod test {
         let projected_schema =
             Arc::new(DFSchema::new_with_metadata(projected_fields, Default::default()).unwrap());
 
+        let table_name = TableReference::full(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+            DEFAULT_TABLE_NAME,
+        );
         let table_scan_plan = LogicalPlan::TableScan(TableScan {
-            table_name: format!(
-                "{DEFAULT_CATALOG_NAME}.{DEFAULT_SCHEMA_NAME}.{DEFAULT_TABLE_NAME}",
-            ),
+            table_name,
             source: adapter,
             projection: Some(projection),
             projected_schema,

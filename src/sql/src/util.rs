@@ -11,13 +11,12 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-#![feature(box_patterns)]
-#![feature(assert_matches)]
 
-pub mod ast;
-pub mod dialect;
-pub mod error;
-pub mod parser;
-pub mod parsers;
-pub mod statements;
-mod util;
+use sqlparser::ast::Value;
+
+pub fn parse_option_string(value: Value) -> Option<String> {
+    match value {
+        Value::SingleQuotedString(v) | Value::DoubleQuotedString(v) => Some(v),
+        _ => None,
+    }
+}
