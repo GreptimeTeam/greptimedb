@@ -33,7 +33,9 @@ use table::requests::{CreateTableRequest, OpenTableRequest};
 use table::table::numbers::NumbersTable;
 use table::TableRef;
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 
+use crate::error::Error::ParallelOpenTable;
 use crate::error::{
     CatalogNotFoundSnafu, CreateTableSnafu, InvalidCatalogValueSnafu, OpenTableSnafu, Result,
     SchemaNotFoundSnafu, TableExistsSnafu, UnimplementedSnafu,
@@ -250,15 +252,38 @@ impl RemoteCatalogManager {
     ) -> Result<()> {
         info!("initializing tables in {}.{}", catalog_name, schema_name);
         let mut table_num = 0;
-        let mut tables = self.iter_remote_tables(catalog_name, schema_name).await;
-        while let Some(r) = tables.next().await {
-            let (table_key, table_value) = r?;
-            let table_ref = self.open_or_create_table(&table_key, &table_value).await?;
-            schema.register_table(table_key.table_name.to_string(), table_ref)?;
-            info!("Registered table {}", &table_key.table_name);
-            max_table_id = max_table_id.max(table_value.table_id());
-            table_num += 1;
+        let tables = self.iter_remote_tables(catalog_name, schema_name).await;
+        let kvs = tables.collect::<Vec<_>>().await;
+        let mut joins = Vec::with_capacity(kvs.len());
+
+        let node_id = self.node_id;
+        for kv in kvs {
+            let (table_key, table_value) = kv?;
+            let engine = self.engine.clone();
+            let schema = schema.clone();
+            let join: JoinHandle<Result<TableId>> = tokio::spawn(async move {
+                let table_ref =
+                    open_or_create_table(node_id, engine, &table_key, &table_value).await?;
+                schema.register_table(table_key.table_name.to_string(), table_ref)?;
+                info!("Registered table {}", &table_key.table_name);
+                Ok(table_value.table_id())
+            });
+            joins.push(join);
         }
+
+        while !joins.is_empty() {
+            match futures::future::select_all(joins).await {
+                (Ok(join_re), _, remaining) => {
+                    joins = remaining;
+                    max_table_id = max_table_id.max(join_re?);
+                    table_num += 1;
+                }
+                (Err(e), _, _) => {
+                    return Err(ParallelOpenTable { msg: e.to_string() });
+                }
+            }
+        }
+
         info!(
             "initialized tables in {}.{}, total: {}",
             catalog_name, schema_name, table_num
@@ -300,81 +325,81 @@ impl RemoteCatalogManager {
         info!("Registered default catalog");
         Ok(default_catalog)
     }
+}
 
-    async fn open_or_create_table(
-        &self,
-        table_key: &TableGlobalKey,
-        table_value: &TableGlobalValue,
-    ) -> Result<TableRef> {
-        let context = EngineContext {};
-        let TableGlobalKey {
-            catalog_name,
-            schema_name,
-            table_name,
-            ..
-        } = table_key;
+async fn open_or_create_table(
+    node_id: u64,
+    engine: TableEngineRef,
+    table_key: &TableGlobalKey,
+    table_value: &TableGlobalValue,
+) -> Result<TableRef> {
+    let context = EngineContext {};
+    let TableGlobalKey {
+        catalog_name,
+        schema_name,
+        table_name,
+        ..
+    } = table_key;
 
-        let table_id = table_value.table_id();
+    let table_id = table_value.table_id();
 
-        let TableGlobalValue {
-            table_info,
-            regions_id_map,
-            ..
-        } = table_value;
+    let TableGlobalValue {
+        table_info,
+        regions_id_map,
+        ..
+    } = table_value;
 
-        // unwrap safety: checked in yielding this table when `iter_remote_tables`
-        let region_numbers = regions_id_map.get(&self.node_id).unwrap();
+    // unwrap safety: checked in yielding this table when `iter_remote_tables`
+    let region_numbers = regions_id_map.get(&node_id).unwrap();
 
-        let request = OpenTableRequest {
-            catalog_name: catalog_name.clone(),
-            schema_name: schema_name.clone(),
-            table_name: table_name.clone(),
-            table_id,
-        };
-        match self
-            .engine
-            .open_table(&context, request)
-            .await
-            .with_context(|_| OpenTableSnafu {
-                table_info: format!("{catalog_name}.{schema_name}.{table_name}, id:{table_id}"),
-            })? {
-            Some(table) => {
-                info!(
-                    "Table opened: {}.{}.{}",
-                    catalog_name, schema_name, table_name
-                );
-                Ok(table)
-            }
-            None => {
-                info!(
-                    "Try create table: {}.{}.{}",
-                    catalog_name, schema_name, table_name
-                );
+    let request = OpenTableRequest {
+        catalog_name: catalog_name.clone(),
+        schema_name: schema_name.clone(),
+        table_name: table_name.clone(),
+        table_id,
+    };
+    match engine
+        .open_table(&context, request)
+        .await
+        .with_context(|_| OpenTableSnafu {
+            table_info: format!("{catalog_name}.{schema_name}.{table_name}, id:{table_id}"),
+        })? {
+        Some(table) => {
+            info!(
+                "Table opened: {}.{}.{}",
+                catalog_name, schema_name, table_name
+            );
+            Ok(table)
+        }
+        None => {
+            info!(
+                "Try create table: {}.{}.{}",
+                catalog_name, schema_name, table_name
+            );
 
-                let meta = &table_info.meta;
-                let req = CreateTableRequest {
-                    id: table_id,
-                    catalog_name: catalog_name.clone(),
-                    schema_name: schema_name.clone(),
-                    table_name: table_name.clone(),
-                    desc: None,
-                    schema: meta.schema.clone(),
-                    region_numbers: region_numbers.clone(),
-                    primary_key_indices: meta.primary_key_indices.clone(),
-                    create_if_not_exists: true,
-                    table_options: meta.options.clone(),
-                };
+            let meta = &table_info.meta;
+            let req = CreateTableRequest {
+                id: table_id,
+                catalog_name: catalog_name.clone(),
+                schema_name: schema_name.clone(),
+                table_name: table_name.clone(),
+                desc: None,
+                schema: meta.schema.clone(),
+                region_numbers: region_numbers.clone(),
+                primary_key_indices: meta.primary_key_indices.clone(),
+                create_if_not_exists: true,
+                table_options: meta.options.clone(),
+            };
 
-                self.engine
-                    .create_table(&context, req)
-                    .await
-                    .context(CreateTableSnafu {
-                        table_info: format!(
-                            "{}.{}.{}, id:{}",
-                            &catalog_name, &schema_name, &table_name, table_id
-                        ),
-                    })
-            }
+            engine
+                .create_table(&context, req)
+                .await
+                .context(CreateTableSnafu {
+                    table_info: format!(
+                        "{}.{}.{}, id:{}",
+                        &catalog_name, &schema_name, &table_name, table_id
+                    ),
+                })
         }
     }
 }

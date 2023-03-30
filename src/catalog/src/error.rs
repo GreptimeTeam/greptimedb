@@ -120,6 +120,9 @@ pub enum Error {
         source: table::error::Error,
     },
 
+    #[snafu(display("Failed parallel to open table, msg: {}", msg))]
+    ParallelOpenTable { msg: String },
+
     #[snafu(display("Table not found while opening table, table info: {}", table_info))]
     TableNotFound {
         table_info: String,
@@ -244,7 +247,9 @@ impl ErrorExt for Error {
             | Error::EmptyValue { .. }
             | Error::ValueDeserialize { .. } => StatusCode::StorageUnavailable,
 
-            Error::SystemCatalogTypeMismatch { .. } => StatusCode::Internal,
+            Error::SystemCatalogTypeMismatch { .. } | Error::ParallelOpenTable { .. } => {
+                StatusCode::Internal
+            }
 
             Error::ReadSystemCatalog { source, .. } => source.status_code(),
             Error::InvalidCatalogValue { source, .. } | Error::CatalogEntrySerde { source } => {
