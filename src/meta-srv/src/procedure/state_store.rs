@@ -15,6 +15,7 @@
 use api::v1::meta::{BatchDeleteRequest, PutRequest, RangeRequest};
 use async_stream::try_stream;
 use async_trait::async_trait;
+use common_error::prelude::BoxedError;
 use common_procedure::error::{
     CorruptedDataSnafu, DeleteStatesSnafu, ListStateSnafu, PutStateSnafu,
 };
@@ -60,13 +61,8 @@ impl StateStore for MetaStateStore {
                 ..Default::default()
             })
             .await
-            .map_err(|e| {
-                PutStateSnafu {
-                    key,
-                    err_msg: e.to_string(),
-                }
-                .build()
-            })?;
+            .map_err(BoxedError::new)
+            .context(PutStateSnafu { key })?;
         Ok(())
     }
 
@@ -86,10 +82,8 @@ impl StateStore for MetaStateStore {
                     limit,
                     ..Default::default()
                 };
-                let resp = kv_store.range(req).await.map_err(|e| ListStateSnafu {
-                        path: path.clone(),
-                        err_msg: e.to_string(),
-                    }.build()
+                let resp = kv_store.range(req).await.map_err(BoxedError::new).with_context(|_|
+                    ListStateSnafu { path: path.clone() }
                 )?;
 
                 let mut no_more_data = true;
@@ -126,12 +120,9 @@ impl StateStore for MetaStateStore {
                 ..Default::default()
             })
             .await
-            .map_err(|e| {
-                DeleteStatesSnafu {
-                    keys: format!("{:?}", keys.to_vec()),
-                    err_msg: e.to_string(),
-                }
-                .build()
+            .map_err(BoxedError::new)
+            .with_context(|_| DeleteStatesSnafu {
+                keys: format!("{:?}", keys.to_vec()),
             })?;
         Ok(())
     }

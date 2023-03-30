@@ -58,7 +58,7 @@ impl EtcdElection {
         let leader_value: String = leader_value.as_ref().into();
 
         let leader_ident = leader_value.clone();
-        let (tx, mut rx) = broadcast::channel(1024);
+        let (tx, mut rx) = broadcast::channel(100);
         common_runtime::spawn_bg(async move {
             loop {
                 match rx.recv().await {

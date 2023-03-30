@@ -17,11 +17,13 @@ use std::sync::Arc;
 
 use async_stream::try_stream;
 use async_trait::async_trait;
+use common_error::ext::PlainError;
+use common_error::prelude::{BoxedError, StatusCode};
 use futures::{Stream, StreamExt};
 use object_store::{EntryMode, Metakey, ObjectStore};
 use snafu::ResultExt;
 
-use crate::error::{DeleteStateSnafu, Error, ListStateSnafu, PutStateSnafu, Result};
+use crate::error::{DeleteStateSnafu, ListStateSnafu, PutStateSnafu, Result};
 
 /// Key value from state store.
 pub type KeyValue = (String, Vec<u8>);
@@ -65,50 +67,69 @@ impl ObjectStateStore {
 #[async_trait]
 impl StateStore for ObjectStateStore {
     async fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
-        self.store.write(key, value).await.map_err(|e| {
-            PutStateSnafu {
-                key,
-                err_msg: e.to_string(),
-            }
-            .build()
-        })
+        self.store
+            .write(key, value)
+            .await
+            .map_err(|e| {
+                BoxedError::new(PlainError::new(
+                    e.to_string(),
+                    StatusCode::StorageUnavailable,
+                ))
+            })
+            .context(PutStateSnafu { key })
     }
 
     async fn walk_top_down(&self, path: &str) -> Result<KeyValueStream> {
         let path_string = path.to_string();
 
-        let mut lister = self.store.scan(path).await.map_err(|e| Error::ListState {
-            path: path_string.clone(),
-            err_msg: e.to_string(),
-        })?;
+        let mut lister = self
+            .store
+            .scan(path)
+            .await
+            .map_err(|e| {
+                BoxedError::new(PlainError::new(
+                    e.to_string(),
+                    StatusCode::StorageUnavailable,
+                ))
+            })
+            .with_context(|_| ListStateSnafu {
+                path: path_string.clone(),
+            })?;
 
         let store = self.store.clone();
 
         let stream = try_stream!({
             while let Some(res) = lister.next().await {
-                let entry = res.map_err(|e| {
-                    ListStateSnafu {
-                        path: &path_string,
-                        err_msg: e.to_string(),
-                    }
-                    .build()
-                })?;
+                let entry = res
+                    .map_err(|e| {
+                        BoxedError::new(PlainError::new(
+                            e.to_string(),
+                            StatusCode::StorageUnavailable,
+                        ))
+                    })
+                    .context(ListStateSnafu { path: &path_string })?;
                 let key = entry.path();
-                let metadata = store.metadata(&entry, Metakey::Mode).await.map_err(|e| {
-                    ListStateSnafu {
-                        path: key,
-                        err_msg: e.to_string(),
-                    }
-                    .build()
-                })?;
+                let metadata = store
+                    .metadata(&entry, Metakey::Mode)
+                    .await
+                    .map_err(|e| {
+                        BoxedError::new(PlainError::new(
+                            e.to_string(),
+                            StatusCode::StorageUnavailable,
+                        ))
+                    })
+                    .context(ListStateSnafu { path: key })?;
                 if let EntryMode::FILE = metadata.mode() {
-                    let value = store.read(key).await.map_err(|e| {
-                        ListStateSnafu {
-                            path: key,
-                            err_msg: e.to_string(),
-                        }
-                        .build()
-                    })?;
+                    let value = store
+                        .read(key)
+                        .await
+                        .map_err(|e| {
+                            BoxedError::new(PlainError::new(
+                                e.to_string(),
+                                StatusCode::StorageUnavailable,
+                            ))
+                        })
+                        .context(ListStateSnafu { path: key })?;
                     yield (key.to_string(), value);
                 }
             }

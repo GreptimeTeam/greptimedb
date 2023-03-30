@@ -48,8 +48,12 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to put state, key: '{key}', error: {err_msg}"))]
-    PutState { key: String, err_msg: String },
+    #[snafu(display("Failed to put state, key: '{key}', source: {source}"))]
+    PutState {
+        key: String,
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
 
     #[snafu(display("Failed to delete {}, source: {}", key, source))]
     DeleteState {
@@ -57,11 +61,19 @@ pub enum Error {
         source: object_store::Error,
     },
 
-    #[snafu(display("Failed to delete keys: '{keys}', error: {err_msg}"))]
-    DeleteStates { keys: String, err_msg: String },
+    #[snafu(display("Failed to delete keys: '{keys}', source: {source}"))]
+    DeleteStates {
+        keys: String,
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
 
-    #[snafu(display("Failed to list state, path: '{path}', error: {err_msg}"))]
-    ListState { path: String, err_msg: String },
+    #[snafu(display("Failed to list state, path: '{path}', source: {source}"))]
+    ListState {
+        path: String,
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
 
     #[snafu(display("Failed to read {}, source: {}", key, source))]
     ReadState {
@@ -115,12 +127,13 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::External { source } => source.status_code(),
+            Error::External { source }
+            | Error::PutState { source, .. }
+            | Error::DeleteStates { source, .. }
+            | Error::ListState { source, .. } => source.status_code(),
+
             Error::ToJson { .. }
-            | Error::PutState { .. }
             | Error::DeleteState { .. }
-            | Error::DeleteStates { .. }
-            | Error::ListState { .. }
             | Error::ReadState { .. }
             | Error::FromJson { .. }
             | Error::RetryTimesExceeded { .. }
