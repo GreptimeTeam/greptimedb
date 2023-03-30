@@ -36,7 +36,7 @@ pub type TaskFunctionRef<E> = Arc<dyn TaskFunction<E> + Send + Sync>;
 
 pub struct RepeatedTask<E> {
     cancel_token: Mutex<Option<CancellationToken>>,
-    gc_task_handle: Mutex<Option<JoinHandle<()>>>,
+    task_handle: Mutex<Option<JoinHandle<()>>>,
     started: AtomicBool,
     interval: Duration,
     task_fn: TaskFunctionRef<E>,
