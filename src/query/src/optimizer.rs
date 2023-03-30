@@ -18,8 +18,9 @@ use std::sync::Arc;
 use common_time::timestamp::{TimeUnit, Timestamp};
 use datafusion::optimizer::optimizer::OptimizerRule;
 use datafusion::optimizer::OptimizerConfig;
+use datafusion_common::tree_node::{TreeNode, TreeNodeRewriter};
 use datafusion_common::{DFSchemaRef, DataFusionError, Result, ScalarValue};
-use datafusion_expr::expr_rewriter::{ExprRewritable, ExprRewriter};
+// use datafusion_expr::expr_rewriter::{ExprRewritable, TreeNodeRewriter};
 use datafusion_expr::{
     Between, BinaryExpr, Expr, ExprSchemable, Filter, LogicalPlan, Operator, TableScan,
 };
@@ -200,7 +201,9 @@ impl<'a> TypeConverter<'a> {
     }
 }
 
-impl<'a> ExprRewriter for TypeConverter<'a> {
+impl<'a> TreeNodeRewriter for TypeConverter<'a> {
+    type N = Expr;
+
     fn mutate(&mut self, expr: Expr) -> Result<Expr> {
         let new_expr = match expr {
             Expr::BinaryExpr(BinaryExpr { left, op, right }) => match op {
@@ -299,6 +302,7 @@ mod tests {
     use std::collections::HashMap;
 
     use datafusion_common::{Column, DFField, DFSchema};
+    use datafusion_sql::TableReference;
 
     use super::*;
 
@@ -358,7 +362,7 @@ mod tests {
         let schema_ref = Arc::new(
             DFSchema::new_with_metadata(
                 vec![DFField::new(
-                    None,
+                    None::<TableReference>,
                     "ts",
                     DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
                     true,
@@ -390,7 +394,12 @@ mod tests {
         let col_name = "is_valid";
         let schema_ref = Arc::new(
             DFSchema::new_with_metadata(
-                vec![DFField::new(None, col_name, DataType::Boolean, false)],
+                vec![DFField::new(
+                    None::<TableReference>,
+                    col_name,
+                    DataType::Boolean,
+                    false,
+                )],
                 HashMap::new(),
             )
             .unwrap(),
