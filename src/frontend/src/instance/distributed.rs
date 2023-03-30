@@ -46,7 +46,7 @@ use partition::partition::{PartitionBound, PartitionDef};
 use query::error::QueryExecutionSnafu;
 use query::parser::QueryStatement;
 use query::query_engine::StatementHandler;
-use query::sql::{describe_table, show_databases, show_tables};
+use query::sql::{show_databases, show_tables};
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::Value as SqlValue;
@@ -346,20 +346,6 @@ impl DistInstance {
             Statement::ShowDatabases(stmt) => show_databases(stmt, self.catalog_manager.clone()),
             Statement::ShowTables(stmt) => {
                 show_tables(stmt, self.catalog_manager.clone(), query_ctx)
-            }
-            Statement::DescribeTable(stmt) => {
-                let (catalog, schema, table) = table_idents_to_full_name(stmt.name(), query_ctx)
-                    .map_err(BoxedError::new)
-                    .context(error::ExternalSnafu)?;
-                let table = self
-                    .catalog_manager
-                    .table(&catalog, &schema, &table)
-                    .await
-                    .context(CatalogSnafu)?
-                    .with_context(|| TableNotFoundSnafu {
-                        table_name: stmt.name().to_string(),
-                    })?;
-                describe_table(table)
             }
             Statement::Insert(insert) => {
                 let (catalog, schema, table) =

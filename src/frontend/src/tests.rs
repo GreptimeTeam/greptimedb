@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod instance_test;
+mod test_util;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;

@@ -12,6 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// TODO(LFC): These tests should be moved to frontend crate. They are actually standalone instance tests.
-mod promql_test;
-pub(crate) mod test_util;
+use common_query::Output;
+use common_recordbatch::util;
+
+pub(crate) async fn check_output_stream(output: Output, expected: String) {
+    let recordbatches = match output {
+        Output::Stream(stream) => util::collect_batches(stream).await.unwrap(),
+        Output::RecordBatches(recordbatches) => recordbatches,
+        _ => unreachable!(),
+    };
+    let pretty_print = recordbatches.pretty_print().unwrap();
+    assert_eq!(pretty_print, expected, "{}", pretty_print);
+}

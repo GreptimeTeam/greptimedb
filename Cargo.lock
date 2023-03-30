@@ -2429,7 +2429,6 @@ dependencies = [
  "tower",
  "tower-http",
  "url",
- "uuid",
 ]
 
 [[package]]
@@ -2911,6 +2910,7 @@ dependencies = [
  "itertools",
  "meta-client",
  "meta-srv",
+ "mito",
  "moka",
  "openmetrics-parser",
  "partition",
@@ -2931,6 +2931,7 @@ dependencies = [
  "toml",
  "tonic",
  "tower",
+ "uuid",
 ]
 
 [[package]]

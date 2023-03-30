@@ -65,15 +65,17 @@ use snafu::prelude::*;
 use sql::dialect::GenericDialect;
 use sql::parser::ParserContext;
 use sql::statements::copy::CopyTable;
+use sql::statements::describe::DescribeTable;
 use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
-    self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExecuteStatementSnafu, ExternalSnafu,
-    InvalidInsertRequestSnafu, MissingMetasrvOptsSnafu, NotSupportedSnafu, ParseQuerySnafu,
-    ParseSqlSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
+    self, CatalogSnafu, DescribeStatementSnafu, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu,
+    ExecuteStatementSnafu, ExternalSnafu, InvalidInsertRequestSnafu, MissingMetasrvOptsSnafu,
+    NotSupportedSnafu, ParseQuerySnafu, ParseSqlSnafu, PlanStatementSnafu, Result,
+    SqlExecInterceptedSnafu, TableNotFoundSnafu,
 };
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::FrontendOptions;
@@ -464,6 +466,27 @@ impl Instance {
             .context(ExecLogicalPlanSnafu)
     }
 
+    async fn describe_table(
+        &self,
+        stmt: DescribeTable,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let (catalog, schema, table) = table_idents_to_full_name(stmt.name(), query_ctx)
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+
+        let table = self
+            .catalog_manager
+            .table(&catalog, &schema, &table)
+            .await
+            .context(CatalogSnafu)?
+            .with_context(|| TableNotFoundSnafu {
+                table_name: stmt.name().to_string(),
+            })?;
+
+        query::sql::describe_table(table).context(DescribeStatementSnafu)
+    }
+
     async fn query_statement(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
         check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
 
@@ -479,12 +502,14 @@ impl Instance {
             }
 
             Statement::Tql(tql) => self.execute_tql(tql, query_ctx).await,
+
+            Statement::DescribeTable(stmt) => self.describe_table(stmt, query_ctx).await,
+
             Statement::CreateDatabase(_)
             | Statement::CreateExternalTable(_)
             | Statement::ShowDatabases(_)
             | Statement::CreateTable(_)
             | Statement::ShowTables(_)
-            | Statement::DescribeTable(_)
             | Statement::Insert(_)
             | Statement::Alter(_)
             | Statement::DropTable(_)
