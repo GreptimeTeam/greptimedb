@@ -17,9 +17,7 @@ use std::sync::Arc;
 use clap::Parser;
 use common_base::Plugins;
 use common_telemetry::info;
-use datanode::datanode::{
-    CompactionConfig, Datanode, DatanodeOptions, ProcedureConfig, StorageConfig, WalConfig,
-};
+use datanode::datanode::{Datanode, DatanodeOptions, ProcedureConfig, StorageConfig, WalConfig};
 use datanode::instance::InstanceRef;
 use frontend::frontend::FrontendOptions;
 use frontend::grpc::GrpcOptions;
@@ -83,7 +81,6 @@ pub struct StandaloneOptions {
     pub prom_options: Option<PromOptions>,
     pub wal: WalConfig,
     pub storage: StorageConfig,
-    pub compaction: CompactionConfig,
     pub procedure: Option<ProcedureConfig>,
 }
 
@@ -102,7 +99,6 @@ impl Default for StandaloneOptions {
             prom_options: Some(PromOptions::default()),
             wal: WalConfig::default(),
             storage: StorageConfig::default(),
-            compaction: CompactionConfig::default(),
             procedure: None,
         }
     }
