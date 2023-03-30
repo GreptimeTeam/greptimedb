@@ -349,7 +349,7 @@ fn approx_percentile_cont(py: Python<'_>, values: &PyVector, percent: f64) -> Py
                 Arc::new(percent) as _,
             ],
             "ApproxPercentileCont",
-            values.arrow_data_type().to_owned(),
+            values.arrow_data_type(),
         )
         .map_err(|e| PyValueError::new_err(format!("{e:?}")))?,
         &[values.to_arrow_array()],
