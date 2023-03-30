@@ -17,6 +17,7 @@ mod changes;
 mod deriv;
 mod extrapolate_rate;
 mod idelta;
+mod quantile;
 mod resets;
 #[cfg(test)]
 mod test_util;
@@ -30,6 +31,7 @@ use datafusion::error::DataFusionError;
 use datafusion::physical_plan::ColumnarValue;
 pub use extrapolate_rate::{Delta, Increase, Rate};
 pub use idelta::IDelta;
+pub use quantile::QuantileOverTime;
 
 pub(crate) fn extract_array(columnar_value: &ColumnarValue) -> Result<ArrayRef, DataFusionError> {
     if let ColumnarValue::Array(array) = columnar_value {
