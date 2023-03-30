@@ -431,6 +431,10 @@ pub(crate) async fn new_fs_object_store(store_config: &ObjectStoreConfig) -> Res
 
     let atomic_write_dir = format!("{data_dir}/.tmp/");
     if path::Path::new(&atomic_write_dir).exists() {
+        info!(
+            "Begin to clean temp storage directory: {}",
+            &atomic_write_dir
+        );
         fs::remove_dir_all(&atomic_write_dir).context(error::RemoveDirSnafu {
             dir: &atomic_write_dir,
         })?;
