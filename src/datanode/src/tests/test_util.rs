@@ -32,7 +32,9 @@ use sql::statements::tql::Tql;
 use table::engine::{EngineContext, TableEngineRef};
 use table::requests::{CreateTableRequest, TableOptions};
 
-use crate::datanode::{DatanodeOptions, FileConfig, ObjectStoreConfig, ProcedureConfig, WalConfig};
+use crate::datanode::{
+    DatanodeOptions, FileConfig, ObjectStoreConfig, ProcedureConfig, StorageConfig, WalConfig,
+};
 use crate::error::{CreateTableSnafu, Result};
 use crate::instance::Instance;
 use crate::sql::SqlHandler;
@@ -63,7 +65,6 @@ impl MockInstance {
         opts.procedure = Some(ProcedureConfig {
             store: ObjectStoreConfig::File(FileConfig {
                 data_dir: procedure_dir.path().to_str().unwrap().to_string(),
-                ..Default::default()
             }),
             max_retry_times: 3,
             retry_delay: Duration::from_millis(500),
@@ -131,10 +132,12 @@ fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) 
             dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
             ..Default::default()
         },
-        storage: ObjectStoreConfig::File(FileConfig {
-            data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
+        storage: StorageConfig {
+            store: ObjectStoreConfig::File(FileConfig {
+                data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
+            }),
             ..Default::default()
-        }),
+        },
         mode: Mode::Standalone,
         ..Default::default()
     };

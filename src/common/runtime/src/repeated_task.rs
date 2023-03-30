@@ -60,7 +60,7 @@ impl<E: ErrorExt + 'static> RepeatedTask<E> {
     pub fn new(interval: Duration, task_fn: TaskFunctionRef<E>) -> Self {
         Self {
             cancel_token: Mutex::new(None),
-            gc_task_handle: Mutex::new(None),
+            task_handle: Mutex::new(None),
             started: AtomicBool::new(false),
             interval,
             task_fn,
@@ -91,7 +91,7 @@ impl<E: ErrorExt + 'static> RepeatedTask<E> {
             }
         });
         *self.cancel_token.lock().await = Some(token);
-        *self.gc_task_handle.lock().await = Some(handle);
+        *self.task_handle.lock().await = Some(handle);
         self.started.store(true, Ordering::Relaxed);
 
         logging::info!(
@@ -118,7 +118,7 @@ impl<E: ErrorExt + 'static> RepeatedTask<E> {
             .take()
             .context(IllegalStateSnafu { name })?;
         let handle = self
-            .gc_task_handle
+            .task_handle
             .lock()
             .await
             .take()

@@ -146,10 +146,7 @@ impl TryFrom<StartCommand> for DatanodeOptions {
         }
 
         if let Some(data_dir) = cmd.data_dir {
-            opts.storage = ObjectStoreConfig::File(FileConfig {
-                data_dir,
-                ..Default::default()
-            });
+            opts.storage.store = ObjectStoreConfig::File(FileConfig { data_dir });
         }
 
         if let Some(wal_dir) = cmd.wal_dir {
@@ -244,7 +241,7 @@ mod tests {
         assert_eq!(3000, timeout_millis);
         assert!(tcp_nodelay);
 
-        match &options.storage {
+        match &options.storage.store {
             ObjectStoreConfig::File(FileConfig { data_dir, .. }) => {
                 assert_eq!("/tmp/greptimedb/data/", data_dir)
             }
@@ -258,14 +255,14 @@ mod tests {
                 max_files_in_level0: 7,
                 max_purge_tasks: 32,
             },
-            *options.storage.compaction(),
+            options.storage.compaction,
         );
         assert_eq!(
             RegionManifestConfig {
                 checkpoint_margin: Some(9),
                 gc_duration: Some(Duration::from_secs(7)),
             },
-            *options.storage.manifest(),
+            options.storage.manifest,
         );
     }
 

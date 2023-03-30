@@ -104,7 +104,7 @@ impl Instance {
         meta_client: Option<Arc<MetaClient>>,
         compaction_scheduler: CompactionSchedulerRef<RaftEngineLogStore>,
     ) -> Result<Self> {
-        let object_store = new_object_store(&opts.storage).await?;
+        let object_store = new_object_store(&opts.storage.store).await?;
         let log_store = Arc::new(create_log_store(&opts.wal).await?);
 
         let table_engine = Arc::new(DefaultEngine::new(

@@ -29,6 +29,7 @@ use crate::server::Services;
 
 pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize(1024);
 
+/// Object storage config
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ObjectStoreConfig {
@@ -37,12 +38,19 @@ pub enum ObjectStoreConfig {
     Oss(OssConfig),
 }
 
+/// Storage engine config
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StorageConfig {
+    #[serde(flatten)]
+    pub store: ObjectStoreConfig,
+    pub compaction: CompactionConfig,
+    pub manifest: RegionManifestConfig,
+}
+
 #[derive(Debug, Clone, Serialize, Default, Deserialize)]
 #[serde(default)]
 pub struct FileConfig {
     pub data_dir: String,
-    pub compaction: CompactionConfig,
-    pub manifest: RegionManifestConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Default, Deserialize)]
@@ -56,8 +64,6 @@ pub struct S3Config {
     pub region: Option<String>,
     pub cache_path: Option<String>,
     pub cache_capacity: Option<ReadableSize>,
-    pub compaction: CompactionConfig,
-    pub manifest: RegionManifestConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Default, Deserialize)]
@@ -70,34 +76,13 @@ pub struct OssConfig {
     pub endpoint: String,
     pub cache_path: Option<String>,
     pub cache_capacity: Option<ReadableSize>,
-    pub compaction: CompactionConfig,
-    pub manifest: RegionManifestConfig,
 }
 
 impl Default for ObjectStoreConfig {
     fn default() -> Self {
         ObjectStoreConfig::File(FileConfig {
             data_dir: "/tmp/greptimedb/data/".to_string(),
-            ..Default::default()
         })
-    }
-}
-
-impl ObjectStoreConfig {
-    pub fn compaction(&self) -> &CompactionConfig {
-        match self {
-            ObjectStoreConfig::File(FileConfig { compaction, .. }) => compaction,
-            ObjectStoreConfig::S3(S3Config { compaction, .. }) => compaction,
-            ObjectStoreConfig::Oss(OssConfig { compaction, .. }) => compaction,
-        }
-    }
-
-    pub fn manifest(&self) -> &RegionManifestConfig {
-        match self {
-            ObjectStoreConfig::File(FileConfig { manifest, .. }) => manifest,
-            ObjectStoreConfig::S3(S3Config { manifest, .. }) => manifest,
-            ObjectStoreConfig::Oss(OssConfig { manifest, .. }) => manifest,
-        }
     }
 }
 
@@ -178,7 +163,7 @@ impl Default for CompactionConfig {
 impl From<&DatanodeOptions> for SchedulerConfig {
     fn from(value: &DatanodeOptions) -> Self {
         Self {
-            max_inflight_tasks: value.storage.compaction().max_inflight_tasks,
+            max_inflight_tasks: value.storage.compaction.max_inflight_tasks,
         }
     }
 }
@@ -186,10 +171,10 @@ impl From<&DatanodeOptions> for SchedulerConfig {
 impl From<&DatanodeOptions> for StorageEngineConfig {
     fn from(value: &DatanodeOptions) -> Self {
         Self {
-            manifest_checkpoint_margin: value.storage.manifest().checkpoint_margin,
-            manifest_gc_duration: value.storage.manifest().gc_duration,
-            max_files_in_l0: value.storage.compaction().max_files_in_level0,
-            max_purge_tasks: value.storage.compaction().max_purge_tasks,
+            manifest_checkpoint_margin: value.storage.manifest.checkpoint_margin,
+            manifest_gc_duration: value.storage.manifest.gc_duration,
+            max_files_in_l0: value.storage.compaction.max_files_in_level0,
+            max_purge_tasks: value.storage.compaction.max_purge_tasks,
         }
     }
 }
@@ -211,7 +196,6 @@ impl Default for ProcedureConfig {
         ProcedureConfig {
             store: ObjectStoreConfig::File(FileConfig {
                 data_dir: "/tmp/greptimedb/procedure/".to_string(),
-                ..Default::default()
             }),
             max_retry_times: 3,
             retry_delay: Duration::from_millis(500),
@@ -222,10 +206,7 @@ impl Default for ProcedureConfig {
 impl ProcedureConfig {
     pub fn from_file_path(path: String) -> ProcedureConfig {
         ProcedureConfig {
-            store: ObjectStoreConfig::File(FileConfig {
-                data_dir: path,
-                ..Default::default()
-            }),
+            store: ObjectStoreConfig::File(FileConfig { data_dir: path }),
             ..Default::default()
         }
     }
@@ -244,7 +225,7 @@ pub struct DatanodeOptions {
     pub mysql_runtime_size: usize,
     pub meta_client_options: Option<MetaClientOptions>,
     pub wal: WalConfig,
-    pub storage: ObjectStoreConfig,
+    pub storage: StorageConfig,
     pub procedure: Option<ProcedureConfig>,
 }
 
@@ -261,7 +242,7 @@ impl Default for DatanodeOptions {
             mysql_runtime_size: 2,
             meta_client_options: None,
             wal: WalConfig::default(),
-            storage: ObjectStoreConfig::default(),
+            storage: StorageConfig::default(),
             procedure: None,
         }
     }

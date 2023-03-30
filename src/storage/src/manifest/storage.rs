@@ -300,12 +300,8 @@ impl ManifestLogStorage for ManifestObjectStore {
         let path = self.checkpoint_file_path(version);
         match self.object_store.read(&path).await {
             Ok(checkpoint) => Ok(Some((version, checkpoint))),
-            Err(e) if e.kind() == ErrorKind::NotFound => {
-                return Ok(None);
-            }
-            Err(e) => {
-                return Err(e).context(ReadObjectSnafu { path });
-            }
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e).context(ReadObjectSnafu { path }),
         }
     }
 

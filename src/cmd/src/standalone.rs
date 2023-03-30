@@ -18,7 +18,7 @@ use clap::Parser;
 use common_base::Plugins;
 use common_telemetry::info;
 use datanode::datanode::{
-    CompactionConfig, Datanode, DatanodeOptions, ObjectStoreConfig, ProcedureConfig, WalConfig,
+    CompactionConfig, Datanode, DatanodeOptions, ProcedureConfig, StorageConfig, WalConfig,
 };
 use datanode::instance::InstanceRef;
 use frontend::frontend::FrontendOptions;
@@ -82,7 +82,7 @@ pub struct StandaloneOptions {
     pub prometheus_options: Option<PrometheusOptions>,
     pub prom_options: Option<PromOptions>,
     pub wal: WalConfig,
-    pub storage: ObjectStoreConfig,
+    pub storage: StorageConfig,
     pub compaction: CompactionConfig,
     pub procedure: Option<ProcedureConfig>,
 }
@@ -101,7 +101,7 @@ impl Default for StandaloneOptions {
             prometheus_options: Some(PrometheusOptions::default()),
             prom_options: Some(PromOptions::default()),
             wal: WalConfig::default(),
-            storage: ObjectStoreConfig::default(),
+            storage: StorageConfig::default(),
             compaction: CompactionConfig::default(),
             procedure: None,
         }
