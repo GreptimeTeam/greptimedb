@@ -159,7 +159,7 @@ impl Election for EtcdElection {
 
                             if let Err(e) = self
                                 .leader_watcher
-                                .send(LeaderChangeMessage::Elected(Box::new(leader.clone())))
+                                .send(LeaderChangeMessage::Elected(Arc::new(leader.clone())))
                             {
                                 error!("Failed to send leader change message, error: {e}");
                             }
@@ -167,7 +167,7 @@ impl Election for EtcdElection {
                     } else {
                         if let Err(e) = self
                             .leader_watcher
-                            .send(LeaderChangeMessage::StepDown(Box::new(leader.clone())))
+                            .send(LeaderChangeMessage::StepDown(Arc::new(leader.clone())))
                         {
                             error!("Failed to send leader change message, error: {e}");
                         }

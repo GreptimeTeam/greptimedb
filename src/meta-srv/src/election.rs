@@ -14,6 +14,8 @@
 
 pub mod etcd;
 
+use std::sync::Arc;
+
 use etcd_client::LeaderKey;
 use tokio::sync::broadcast::Receiver;
 
@@ -25,8 +27,8 @@ pub const ELECTION_KEY: &str = "__meta_srv_election";
 
 #[derive(Clone)]
 pub enum LeaderChangeMessage {
-    Elected(Box<LeaderKey>),
-    StepDown(Box<LeaderKey>),
+    Elected(Arc<LeaderKey>),
+    StepDown(Arc<LeaderKey>),
 }
 
 #[async_trait::async_trait]
