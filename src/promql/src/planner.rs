@@ -994,8 +994,7 @@ impl PromPlanner {
             .chain(self.ctx.time_index_column.iter())
             .map(|col| {
                 Ok(DfExpr::Column(Column::new(
-                    // self.ctx.table_name.clone(),
-                    None::<String>,
+                    self.ctx.table_name.clone(),
                     col,
                 )))
             });
