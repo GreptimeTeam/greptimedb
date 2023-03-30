@@ -238,7 +238,7 @@ fn py_list_to_vec(list: &PyList) -> PyResult<VectorRef> {
         String,
     }
     let mut expected_type = None;
-    let mut v = Vec::new();
+    let mut v = Vec::with_capacity(list.len());
     for (idx, elem) in list.iter().enumerate() {
         let (elem_ty, con_type) = if elem.is_instance_of::<PyBool>()? {
             (ExpectType::Bool, ConcreteDataType::boolean_datatype())
