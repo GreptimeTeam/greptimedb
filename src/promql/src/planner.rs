@@ -695,7 +695,7 @@ impl PromPlanner {
             "quantile_over_time" => {
                 let quantile_expr = match other_input_exprs.get(0) {
                     Some(DfExpr::Literal(ScalarValue::Float64(Some(quantile)))) => *quantile,
-                    other @ _ => UnexpectedPlanExprSnafu {
+                    other => UnexpectedPlanExprSnafu {
                         desc: format!("expect f64 literal as quantile, but found {:?}", other),
                     }
                     .fail()?,
