@@ -209,6 +209,7 @@ impl<S: LogStore> FlushJob<S> {
                         |SstInfo {
                              time_range,
                              file_size,
+                             ..
                          }| FileMeta {
                             region_id,
                             file_id,

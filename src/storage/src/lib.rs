@@ -31,7 +31,7 @@ pub mod region;
 pub mod scheduler;
 pub mod schema;
 mod snapshot;
-mod sst;
+pub mod sst;
 mod sync;
 #[cfg(test)]
 mod test_util;
@@ -41,3 +41,6 @@ pub mod write_batch;
 
 pub use engine::EngineImpl;
 mod file_purger;
+
+pub use sst::parquet::ParquetWriter;
+pub use sst::Source;

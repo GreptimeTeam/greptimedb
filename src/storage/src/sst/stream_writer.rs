@@ -16,17 +16,18 @@ use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use arrow::datatypes::SchemaRef;
 use arrow_array::RecordBatch;
 use bytes::{BufMut, BytesMut};
-use object_store::Writer;
+use datatypes::schema::SchemaRef;
+use object_store::{ObjectStore, Writer};
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 use parquet::format::FileMetaData;
 use snafu::ResultExt;
 
 use crate::error;
-use crate::error::{WriteObjectSnafu, WriteParquetSnafu};
+use crate::error::{NewRecordBatchSnafu, WriteObjectSnafu, WriteParquetSnafu};
+use crate::read::Batch;
 
 #[derive(Clone, Default)]
 struct Buffer {
@@ -65,19 +66,26 @@ pub struct BufferedWriter {
     bytes_written: AtomicU64,
     flushed: bool,
     threshold: usize,
+    arrow_schema: arrow::datatypes::SchemaRef,
 }
 
 impl BufferedWriter {
-    pub fn try_new(
+    pub async fn try_new(
         path: String,
-        writer: Writer,
-        arrow_schema: SchemaRef,
+        store: ObjectStore,
+        schema: &SchemaRef,
         props: Option<WriterProperties>,
         buffer_threshold: usize,
     ) -> error::Result<Self> {
+        let arrow_schema = schema.arrow_schema();
         let buffer = Buffer::with_capacity(buffer_threshold);
-        let arrow_writer =
-            ArrowWriter::try_new(buffer.clone(), arrow_schema, props).context(WriteParquetSnafu)?;
+        let writer = store
+            .writer(&path)
+            .await
+            .context(WriteObjectSnafu { path: &path })?;
+
+        let arrow_writer = ArrowWriter::try_new(buffer.clone(), arrow_schema.clone(), props)
+            .context(WriteParquetSnafu)?;
 
         Ok(Self {
             path,
@@ -87,12 +95,24 @@ impl BufferedWriter {
             bytes_written: Default::default(),
             flushed: false,
             threshold: buffer_threshold,
+            arrow_schema: arrow_schema.clone(),
         })
     }
 
     /// Write a record batch to stream writer.
-    pub async fn write(&mut self, batch: &RecordBatch) -> error::Result<()> {
-        self.arrow_writer.write(batch).context(WriteParquetSnafu)?;
+    pub async fn write(&mut self, batch: &Batch) -> error::Result<()> {
+        let arrow_batch = RecordBatch::try_new(
+            self.arrow_schema.clone(),
+            batch
+                .columns()
+                .iter()
+                .map(|v| v.to_arrow_array())
+                .collect::<Vec<_>>(),
+        )
+        .context(NewRecordBatchSnafu)?;
+        self.arrow_writer
+            .write(&arrow_batch)
+            .context(WriteParquetSnafu)?;
         let written = Self::try_flush(
             &self.path,
             &self.buffer,

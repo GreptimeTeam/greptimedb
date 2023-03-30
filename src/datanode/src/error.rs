@@ -439,12 +439,6 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to write parquet file, source: {}", source))]
-    WriteParquet {
-        source: parquet::errors::ParquetError,
-        backtrace: Backtrace,
-    },
-
     #[snafu(display("Failed to poll stream, source: {}", source))]
     PollStream {
         source: datafusion_common::DataFusionError,
@@ -513,6 +507,11 @@ pub enum Error {
     ShutdownInstance {
         #[snafu(backtrace)]
         source: BoxedError,
+    },
+    #[snafu(display("Failed to copy table to parquet file, source: {}", source))]
+    WriteParquet {
+        #[snafu(backtrace)]
+        source: storage::error::Error,
     },
 }
 

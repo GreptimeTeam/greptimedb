@@ -224,6 +224,7 @@ mod tests {
         let SstInfo {
             time_range,
             file_size,
+            ..
         } = writer
             .write_sst(&sst::WriteOptions::default())
             .await

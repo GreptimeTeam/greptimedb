@@ -74,12 +74,7 @@ impl<S: LogStore> CompactionTaskImpl<S> {
             compacted_inputs.extend(output.inputs.iter().map(FileHandle::meta));
 
             // TODO(hl): Maybe spawn to runtime to exploit in-job parallelism.
-            futs.push(async move {
-                match output.build(region_id, schema, sst_layer).await {
-                    Ok(meta) => Ok(meta),
-                    Err(e) => Err(e),
-                }
-            });
+            futs.push(async move { output.build(region_id, schema, sst_layer).await });
         }
 
         let mut outputs = HashSet::with_capacity(futs.len());
@@ -192,6 +187,7 @@ impl CompactionOutput {
                 |SstInfo {
                      time_range,
                      file_size,
+                     ..
                  }| FileMeta {
                     region_id,
                     file_id: output_file_id,

@@ -6,7 +6,7 @@ Copy demo TO '/tmp/demo/export/demo.parquet';
 
 CREATE TABLE with_filename(host string, cpu double, memory double, ts timestamp time index);
 
-Copy with_filename FROM '/tmp/demo/export/demo.parquet_1_2';
+Copy with_filename FROM '/tmp/demo/export/demo.parquet';
 
 select * from with_filename order by ts;
 

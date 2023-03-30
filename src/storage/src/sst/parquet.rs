@@ -48,13 +48,10 @@ use snafu::{OptionExt, ResultExt};
 use table::predicate::Predicate;
 use tokio::io::BufReader;
 
-use crate::error::{
-    self, DecodeParquetTimeRangeSnafu, NewRecordBatchSnafu, ReadObjectSnafu, ReadParquetSnafu,
-    Result, WriteObjectSnafu,
-};
+use crate::error::{self, DecodeParquetTimeRangeSnafu, ReadObjectSnafu, ReadParquetSnafu, Result};
 use crate::read::{Batch, BatchReader};
 use crate::schema::compat::ReadAdapter;
-use crate::schema::{ProjectedSchemaRef, StoreSchema, StoreSchemaRef};
+use crate::schema::{ProjectedSchemaRef, StoreSchema};
 use crate::sst;
 use crate::sst::stream_writer::BufferedWriter;
 use crate::sst::{FileHandle, Source, SstInfo};
@@ -88,10 +85,7 @@ impl<'a> ParquetWriter<'a> {
         mut self,
         extra_meta: Option<HashMap<String, String>>,
     ) -> Result<Option<SstInfo>> {
-        let projected_schema = self.source.projected_schema();
-        let store_schema = projected_schema.schema_to_read();
-        let schema = store_schema.arrow_schema().clone();
-
+        let schema = self.source.schema();
         let writer_props = WriterProperties::builder()
             .set_compression(Compression::ZSTD(ZstdLevel::default()))
             .set_encoding(Encoding::PLAIN)
@@ -103,40 +97,24 @@ impl<'a> ParquetWriter<'a> {
             }))
             .build();
 
-        let writer = self
-            .object_store
-            .writer(self.file_path)
-            .await
-            .context(WriteObjectSnafu {
-                path: self.file_path,
-            })?;
-
-        let mut stream_writer = BufferedWriter::try_new(
+        let mut buffered_writer = BufferedWriter::try_new(
             self.file_path.to_string(),
-            writer,
-            schema.clone(),
+            self.object_store.clone(),
+            &schema,
             Some(writer_props),
             4 * 1024 * 1024,
-        )?;
-        let mut batches_written = 0;
+        )
+        .await?;
+        let mut rows_written = 0;
 
         while let Some(batch) = self.source.next_batch().await? {
-            let arrow_batch = RecordBatch::try_new(
-                schema.clone(),
-                batch
-                    .columns()
-                    .iter()
-                    .map(|v| v.to_arrow_array())
-                    .collect::<Vec<_>>(),
-            )
-            .context(NewRecordBatchSnafu)?;
-            stream_writer.write(&arrow_batch).await?;
-            batches_written += 1;
+            buffered_writer.write(&batch).await?;
+            rows_written += batch.num_rows();
         }
 
-        if batches_written == 0 {
+        if rows_written == 0 {
             // if the source does not contain any batch, we skip writing an empty parquet file.
-            if !stream_writer.abort().await {
+            if !buffered_writer.abort().await {
                 warn!(
                     "Partial file {} has been uploaded to remote storage",
                     self.file_path
@@ -145,24 +123,22 @@ impl<'a> ParquetWriter<'a> {
             return Ok(None);
         }
 
-        let (file_meta, file_size) = stream_writer.close().await?;
-        let time_range = decode_timestamp_range(&file_meta, store_schema)
-            .ok()
-            .flatten();
+        let (file_meta, file_size) = buffered_writer.close().await?;
+        let time_range = decode_timestamp_range(&file_meta, &schema).ok().flatten();
 
         // object_store.write will make sure all bytes are written or an error is raised.
         Ok(Some(SstInfo {
             time_range,
             file_size,
+            num_rows: rows_written,
         }))
     }
 }
 
 fn decode_timestamp_range(
     file_meta: &FileMetaData,
-    store_schema: &StoreSchemaRef,
+    schema: &datatypes::schema::SchemaRef,
 ) -> Result<Option<(Timestamp, Timestamp)>> {
-    let schema = store_schema.schema();
     let (Some(ts_col_idx), Some(ts_col)) = (schema.timestamp_index(), schema.timestamp_column()) else { return Ok(None); };
     let ts_datatype = &ts_col.data_type;
     decode_timestamp_range_inner(file_meta, ts_col_idx, ts_datatype)
@@ -708,6 +684,7 @@ mod tests {
         let SstInfo {
             time_range,
             file_size,
+            ..
         } = writer
             .write_sst(&sst::WriteOptions::default())
             .await
@@ -800,6 +777,7 @@ mod tests {
         let SstInfo {
             time_range,
             file_size,
+            ..
         } = writer
             .write_sst(&sst::WriteOptions::default())
             .await
@@ -913,6 +891,7 @@ mod tests {
         let SstInfo {
             time_range,
             file_size,
+            ..
         } = writer
             .write_sst(&sst::WriteOptions::default())
             .await
