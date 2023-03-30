@@ -142,7 +142,7 @@ impl Table for Tables {
 fn tables_to_record_batch(
     catalog_name: &str,
     schema_name: &str,
-    tables: Vec<Arc<dyn Table>>,
+    tables: Vec<TableRef>,
 ) -> Vec<VectorRef> {
     let mut catalog_vec = ConcreteDataType::string_datatype().create_mutable_vector(tables.len());
     let mut schema_vec = ConcreteDataType::string_datatype().create_mutable_vector(tables.len());

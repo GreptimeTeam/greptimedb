@@ -18,10 +18,11 @@ mod tests {
 
     use catalog::local::LocalCatalogManager;
     use catalog::{CatalogManager, RegisterTableRequest, RenameTableRequest};
-    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_telemetry::{error, info};
     use mito::config::EngineConfig;
     use table::engine::manager::MemoryTableEngineManager;
+    use table::engine::TableEngine;
     use table::table::numbers::NumbersTable;
     use table::TableRef;
     use tokio::sync::Mutex;
@@ -35,7 +36,7 @@ mod tests {
             object_store,
         ));
         let engine_manager = Arc::new(MemoryTableEngineManager::new(
-            MITO_ENGINE,
+            mock_engine.name(),
             mock_engine.clone(),
         ));
         let catalog_manager = LocalCatalogManager::try_new(engine_manager).await.unwrap();

@@ -114,11 +114,11 @@ impl ScriptManager {
 #[cfg(test)]
 mod tests {
     use catalog::CatalogManager;
-    use common_catalog::consts::MITO_ENGINE;
     use mito::config::EngineConfig as TableEngineConfig;
     use mito::table::test_util::new_test_object_store;
     use query::QueryEngineFactory;
     use table::engine::manager::MemoryTableEngineManager;
+    use table::engine::TableEngine;
 
     use super::*;
     type DefaultEngine = MitoEngine<EngineImpl<RaftEngineLogStore>>;
@@ -156,7 +156,7 @@ mod tests {
             object_store,
         ));
         let engine_manager = Arc::new(MemoryTableEngineManager::new(
-            MITO_ENGINE,
+            mock_engine.name(),
             mock_engine.clone(),
         ));
         let catalog_manager = Arc::new(

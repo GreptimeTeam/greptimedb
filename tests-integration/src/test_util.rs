@@ -223,7 +223,10 @@ pub async fn create_test_table(
     ];
 
     let table_name = "demo";
-    let table_engine: TableEngineRef = sql_handler.table_engine_manager().default();
+    let table_engine: TableEngineRef = sql_handler
+        .table_engine_manager()
+        .engine(MITO_ENGINE)
+        .unwrap();
     let table = table_engine
         .create_table(
             &EngineContext::default(),

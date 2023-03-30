@@ -19,9 +19,7 @@ use std::{fs, path};
 use catalog::remote::MetaKvBackend;
 use catalog::{CatalogManager, CatalogManagerRef, RegisterTableRequest};
 use common_base::readable_size::ReadableSize;
-use common_catalog::consts::{
-    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID, MITO_ENGINE,
-};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use common_error::prelude::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_procedure::local::{LocalManager, ManagerConfig};
@@ -47,6 +45,7 @@ use storage::scheduler::{LocalScheduler, SchedulerConfig};
 use storage::EngineImpl;
 use store_api::logstore::LogStore;
 use table::engine::manager::MemoryTableEngineManager;
+use table::engine::TableEngine;
 use table::requests::FlushTableRequest;
 use table::table::numbers::NumbersTable;
 use table::table::TableIdProviderRef;
@@ -121,6 +120,11 @@ impl Instance {
             object_store,
         ));
 
+        let engine_manager = Arc::new(MemoryTableEngineManager::new(
+            table_engine.name(),
+            table_engine.clone(),
+        ));
+
         // create remote catalog manager
         let (catalog_manager, table_id_provider) = match opts.mode {
             Mode::Standalone => {
@@ -144,10 +148,6 @@ impl Instance {
                         Some(catalog as TableIdProviderRef),
                     )
                 } else {
-                    let engine_manager = Arc::new(MemoryTableEngineManager::new(
-                        MITO_ENGINE,
-                        table_engine.clone(),
-                    ));
                     let catalog = Arc::new(
                         catalog::local::LocalCatalogManager::try_new(engine_manager)
                             .await
@@ -162,10 +162,6 @@ impl Instance {
             }
 
             Mode::Distributed => {
-                let engine_manager = Arc::new(MemoryTableEngineManager::new(
-                    MITO_ENGINE,
-                    table_engine.clone(),
-                ));
                 let catalog = Arc::new(catalog::remote::RemoteCatalogManager::new(
                     engine_manager,
                     opts.node_id.context(MissingNodeIdSnafu)?,
@@ -214,7 +210,7 @@ impl Instance {
             query_engine: query_engine.clone(),
             sql_handler: SqlHandler::new(
                 Arc::new(MemoryTableEngineManager::new(
-                    MITO_ENGINE,
+                    table_engine.name(),
                     table_engine.clone(),
                 )),
                 catalog_manager.clone(),

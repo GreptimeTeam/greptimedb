@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, MIN_USER_TABLE_ID,
-    SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_NAME,
+    MITO_ENGINE, SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_NAME,
 };
 use common_catalog::format_full_table_name;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
@@ -36,9 +36,10 @@ use table::table::TableIdProvider;
 use table::TableRef;
 
 use crate::error::{
-    self, CatalogNotFoundSnafu, EngineNotFoundSnafu, IllegalManagerStateSnafu, OpenTableSnafu,
-    ReadSystemCatalogSnafu, Result, SchemaExistsSnafu, SchemaNotFoundSnafu, SystemCatalogSnafu,
-    SystemCatalogTypeMismatchSnafu, TableExistsSnafu, TableNotExistSnafu, TableNotFoundSnafu,
+    self, CatalogNotFoundSnafu, IllegalManagerStateSnafu, OpenTableSnafu, ReadSystemCatalogSnafu,
+    Result, SchemaExistsSnafu, SchemaNotFoundSnafu, SystemCatalogSnafu,
+    SystemCatalogTypeMismatchSnafu, TableEngineSnafu, TableExistsSnafu, TableNotExistSnafu,
+    TableNotFoundSnafu,
 };
 use crate::local::memory::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
 use crate::system::{
@@ -66,7 +67,9 @@ pub struct LocalCatalogManager {
 impl LocalCatalogManager {
     /// Create a new [CatalogManager] with given user catalogs and table engine
     pub async fn try_new(engine_manager: TableEngineManagerRef) -> Result<Self> {
-        let engine = engine_manager.default();
+        let engine = engine_manager
+            .engine(MITO_ENGINE)
+            .context(TableEngineSnafu)?;
         let table = SystemCatalogTable::new(engine.clone()).await?;
         let memory_catalog_list = crate::local::memory::new_memory_catalog_list()?;
         let system_catalog = Arc::new(SystemCatalog::new(table, memory_catalog_list.clone()));
@@ -98,7 +101,10 @@ impl LocalCatalogManager {
 
         // Processing system table hooks
         let mut sys_table_requests = self.system_table_requests.lock().await;
-        let engine = self.engine_manager.default();
+        let engine = self
+            .engine_manager
+            .engine(MITO_ENGINE)
+            .context(TableEngineSnafu)?;
         handle_system_table_request(self, engine, &mut sys_table_requests).await?;
         Ok(())
     }
@@ -255,9 +261,7 @@ impl LocalCatalogManager {
         let engine = self
             .engine_manager
             .engine(&t.engine)
-            .context(EngineNotFoundSnafu {
-                engine: t.engine.to_string(),
-            })?;
+            .context(TableEngineSnafu)?;
 
         let option = engine
             .open_table(&context, request)

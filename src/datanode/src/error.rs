@@ -101,9 +101,9 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Engine not found: {}", engine_name))]
-    EngineNotFound {
-        engine_name: String,
+    #[snafu(display("Failed to get engine : {}", source))]
+    TableEngine {
+        source: table::error::Error,
         backtrace: Backtrace,
     },
 
@@ -596,7 +596,6 @@ impl ErrorExt for Error {
             | IncorrectInternalState { .. }
             | ShutdownServer { .. }
             | ShutdownInstance { .. }
-            | EngineNotFound { .. }
             | CloseTableEngine { .. } => StatusCode::Internal,
 
             BuildBackend { .. }
@@ -617,7 +616,7 @@ impl ErrorExt for Error {
             ColumnDefaultValue { source, .. } => source.status_code(),
             CopyTable { source, .. } => source.status_code(),
             TableScanExec { source, .. } => source.status_code(),
-            UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
+            UnrecognizedTableOption { .. } | TableEngine { .. } => StatusCode::InvalidArguments,
             RecoverProcedure { source, .. } | SubmitProcedure { source, .. } => {
                 source.status_code()
             }

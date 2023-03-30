@@ -32,9 +32,9 @@ use table_procedure::CreateTableProcedure;
 
 use crate::error::{
     self, CatalogNotFoundSnafu, CatalogSnafu, ConstraintNotSupportedSnafu, CreateTableSnafu,
-    EngineNotFoundSnafu, IllegalPrimaryKeysDefSnafu, InsertSystemCatalogSnafu,
-    KeyColumnNotFoundSnafu, RegisterSchemaSnafu, Result, SchemaExistsSnafu, SchemaNotFoundSnafu,
-    SubmitProcedureSnafu, UnrecognizedTableOptionSnafu, WaitProcedureSnafu,
+    IllegalPrimaryKeysDefSnafu, InsertSystemCatalogSnafu, KeyColumnNotFoundSnafu,
+    RegisterSchemaSnafu, Result, SchemaExistsSnafu, SchemaNotFoundSnafu, SubmitProcedureSnafu,
+    TableEngineSnafu, UnrecognizedTableOptionSnafu, WaitProcedureSnafu,
 };
 use crate::sql::SqlHandler;
 
@@ -107,12 +107,10 @@ impl SqlHandler {
 
         // determine catalog and schema from the very beginning
         let table_name = req.table_name.clone();
-        let table_engine =
-            self.table_engine_manager
-                .engine(&req.engine)
-                .context(EngineNotFoundSnafu {
-                    engine_name: req.engine.to_string(),
-                })?;
+        let table_engine = self
+            .table_engine_manager
+            .engine(&req.engine)
+            .context(TableEngineSnafu)?;
 
         let table = table_engine
             .create_table(&ctx, req)
@@ -144,12 +142,10 @@ impl SqlHandler {
         req: CreateTableRequest,
     ) -> Result<Output> {
         let table_name = req.table_name.clone();
-        let table_engine =
-            self.table_engine_manager
-                .engine(&req.engine)
-                .context(EngineNotFoundSnafu {
-                    engine_name: req.engine.to_string(),
-                })?;
+        let table_engine = self
+            .table_engine_manager
+            .engine(&req.engine)
+            .context(TableEngineSnafu)?;
         let procedure = CreateTableProcedure::new(
             req,
             self.catalog_manager.clone(),

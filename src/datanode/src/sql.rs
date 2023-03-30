@@ -28,7 +28,9 @@ use table::engine::{TableEngineProcedureRef, TableEngineRef, TableReference};
 use table::requests::*;
 use table::{Table, TableRef};
 
-use crate::error::{self, CloseTableEngineSnafu, ExecuteSqlSnafu, Result, TableNotFoundSnafu};
+use crate::error::{
+    self, CloseTableEngineSnafu, ExecuteSqlSnafu, Result, TableEngineSnafu, TableNotFoundSnafu,
+};
 use crate::instance::sql::table_idents_to_full_name;
 
 mod alter;
@@ -127,12 +129,10 @@ impl SqlHandler {
 
     pub fn table_engine(&self, table: Arc<dyn Table>) -> Result<TableEngineRef> {
         let engine_name = &table.table_info().meta.engine;
-        let engine =
-            self.table_engine_manager
-                .engine(engine_name)
-                .context(error::EngineNotFoundSnafu {
-                    engine_name: engine_name.to_string(),
-                })?;
+        let engine = self
+            .table_engine_manager
+            .engine(engine_name)
+            .context(TableEngineSnafu)?;
         Ok(engine)
     }
 

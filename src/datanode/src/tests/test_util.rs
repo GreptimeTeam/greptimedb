@@ -32,7 +32,7 @@ use snafu::ResultExt;
 use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
 use table::engine::manager::MemoryTableEngineManager;
-use table::engine::{EngineContext, TableEngineRef};
+use table::engine::{EngineContext, TableEngine, TableEngineRef};
 use table::requests::{CreateTableRequest, TableOptions};
 
 use crate::datanode::{
@@ -165,7 +165,11 @@ pub(crate) async fn create_test_table(
     ];
 
     let table_name = "demo";
-    let table_engine: TableEngineRef = instance.sql_handler().table_engine_manager().default();
+    let table_engine: TableEngineRef = instance
+        .sql_handler()
+        .table_engine_manager()
+        .engine(MITO_ENGINE)
+        .unwrap();
     let table = table_engine
         .create_table(
             &EngineContext::default(),
@@ -205,7 +209,7 @@ pub async fn create_mock_sql_handler() -> SqlHandler {
         object_store,
     ));
     let engine_manager = Arc::new(MemoryTableEngineManager::new(
-        MITO_ENGINE,
+        mock_engine.name(),
         mock_engine.clone(),
     ));
     let catalog_manager = Arc::new(

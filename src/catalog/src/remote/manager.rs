@@ -20,7 +20,9 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use async_stream::stream;
 use async_trait::async_trait;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
+use common_catalog::consts::{
+    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID, MITO_ENGINE,
+};
 use common_telemetry::{debug, error, info};
 use dashmap::DashMap;
 use futures::Stream;
@@ -36,8 +38,8 @@ use table::TableRef;
 use tokio::sync::Mutex;
 
 use crate::error::{
-    CatalogNotFoundSnafu, CreateTableSnafu, EngineNotFoundSnafu, InvalidCatalogValueSnafu,
-    OpenTableSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu, UnimplementedSnafu,
+    CatalogNotFoundSnafu, CreateTableSnafu, InvalidCatalogValueSnafu, OpenTableSnafu, Result,
+    SchemaNotFoundSnafu, TableEngineSnafu, TableExistsSnafu, UnimplementedSnafu,
 };
 use crate::helper::{
     build_catalog_prefix, build_schema_prefix, build_table_global_prefix, CatalogKey, CatalogValue,
@@ -335,9 +337,7 @@ impl RemoteCatalogManager {
         let engine = self
             .engine_manager
             .engine(&table_info.meta.engine)
-            .context(EngineNotFoundSnafu {
-                engine: table_info.meta.engine.to_string(),
-            })?;
+            .context(TableEngineSnafu)?;
         match engine
             .open_table(&context, request)
             .await
@@ -405,7 +405,10 @@ impl CatalogManager for RemoteCatalogManager {
         info!("Max table id allocated: {}", max_table_id);
 
         let mut system_table_requests = self.system_table_requests.lock().await;
-        let engine = self.engine_manager.default();
+        let engine = self
+            .engine_manager
+            .engine(MITO_ENGINE)
+            .context(TableEngineSnafu)?;
         handle_system_table_request(self, engine, &mut system_table_requests).await?;
         info!("All system table opened");
 

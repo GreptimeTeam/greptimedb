@@ -82,9 +82,9 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Cannot find engine {}", engine))]
-    EngineNotFound {
-        engine: String,
+    #[snafu(display("Failed to get engine: {}", source))]
+    TableEngine {
+        source: table::error::Error,
         backtrace: Backtrace,
     },
 
@@ -237,8 +237,7 @@ impl ErrorExt for Error {
             | Error::TableNotFound { .. }
             | Error::IllegalManagerState { .. }
             | Error::CatalogNotFound { .. }
-            | Error::InvalidEntryType { .. }
-            | Error::EngineNotFound { .. } => StatusCode::Unexpected,
+            | Error::InvalidEntryType { .. } => StatusCode::Unexpected,
 
             Error::SystemCatalog { .. }
             | Error::EmptyValue { .. }
@@ -253,7 +252,7 @@ impl ErrorExt for Error {
 
             Error::TableExists { .. } => StatusCode::TableAlreadyExists,
             Error::TableNotExist { .. } => StatusCode::TableNotFound,
-            Error::SchemaExists { .. } => StatusCode::InvalidArguments,
+            Error::SchemaExists { .. } | Error::TableEngine { .. } => StatusCode::InvalidArguments,
 
             Error::OpenSystemCatalog { source, .. }
             | Error::CreateSystemCatalog { source, .. }
