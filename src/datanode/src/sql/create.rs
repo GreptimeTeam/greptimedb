@@ -32,9 +32,9 @@ use table_procedure::CreateTableProcedure;
 
 use crate::error::{
     self, CatalogNotFoundSnafu, CatalogSnafu, ConstraintNotSupportedSnafu, CreateTableSnafu,
-    IllegalPrimaryKeysDefSnafu, InsertSystemCatalogSnafu, KeyColumnNotFoundSnafu,
-    RegisterSchemaSnafu, Result, SchemaExistsSnafu, SchemaNotFoundSnafu, SubmitProcedureSnafu,
-    UnrecognizedTableOptionSnafu, WaitProcedureSnafu,
+    EngineNotFoundSnafu, IllegalPrimaryKeysDefSnafu, InsertSystemCatalogSnafu,
+    KeyColumnNotFoundSnafu, RegisterSchemaSnafu, Result, SchemaExistsSnafu, SchemaNotFoundSnafu,
+    SubmitProcedureSnafu, UnrecognizedTableOptionSnafu, WaitProcedureSnafu,
 };
 use crate::sql::SqlHandler;
 
@@ -107,8 +107,14 @@ impl SqlHandler {
 
         // determine catalog and schema from the very beginning
         let table_name = req.table_name.clone();
-        let table = self
-            .table_engine
+        let table_engine =
+            self.table_engine_manager
+                .engine(&req.engine)
+                .context(EngineNotFoundSnafu {
+                    engine_name: req.engine.to_string(),
+                })?;
+
+        let table = table_engine
             .create_table(&ctx, req)
             .await
             .with_context(|_| CreateTableSnafu {
@@ -138,10 +144,16 @@ impl SqlHandler {
         req: CreateTableRequest,
     ) -> Result<Output> {
         let table_name = req.table_name.clone();
+        let table_engine =
+            self.table_engine_manager
+                .engine(&req.engine)
+                .context(EngineNotFoundSnafu {
+                    engine_name: req.engine.to_string(),
+                })?;
         let procedure = CreateTableProcedure::new(
             req,
             self.catalog_manager.clone(),
-            self.table_engine.clone(),
+            table_engine.clone(),
             self.engine_procedure.clone(),
         );
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
@@ -286,6 +298,7 @@ impl SqlHandler {
             primary_key_indices: primary_keys,
             create_if_not_exists: stmt.if_not_exists,
             table_options,
+            engine: stmt.engine,
         };
         Ok(request)
     }

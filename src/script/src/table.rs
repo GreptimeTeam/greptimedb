@@ -17,7 +17,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use catalog::{CatalogManagerRef, RegisterSystemTableRequest};
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, SCRIPTS_TABLE_ID};
+use common_catalog::consts::{
+    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE, SCRIPTS_TABLE_ID,
+};
 use common_catalog::format_full_table_name;
 use common_query::Output;
 use common_recordbatch::util as record_util;
@@ -65,6 +67,7 @@ impl ScriptsTable {
             primary_key_indices: vec![0, 1],
             create_if_not_exists: true,
             table_options: TableOptions::default(),
+            engine: MITO_ENGINE.to_string(),
         };
 
         catalog_manager

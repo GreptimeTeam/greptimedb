@@ -165,7 +165,7 @@ pub(crate) async fn create_test_table(
     ];
 
     let table_name = "demo";
-    let table_engine: TableEngineRef = instance.sql_handler().table_engine();
+    let table_engine: TableEngineRef = instance.sql_handler().table_engine_manager().default();
     let table = table_engine
         .create_table(
             &EngineContext::default(),
@@ -180,6 +180,7 @@ pub(crate) async fn create_test_table(
                 primary_key_indices: vec![0], // "host" is in primary keys
                 table_options: TableOptions::default(),
                 region_numbers: vec![0],
+                engine: MITO_ENGINE.to_string(),
             },
         )
         .await
@@ -208,11 +209,11 @@ pub async fn create_mock_sql_handler() -> SqlHandler {
         mock_engine.clone(),
     ));
     let catalog_manager = Arc::new(
-        catalog::local::LocalCatalogManager::try_new(engine_manager)
+        catalog::local::LocalCatalogManager::try_new(engine_manager.clone())
             .await
             .unwrap(),
     );
-    SqlHandler::new(mock_engine.clone(), catalog_manager, mock_engine, None)
+    SqlHandler::new(engine_manager, catalog_manager, mock_engine, None)
 }
 
 pub(crate) async fn setup_test_instance(test_name: &str) -> MockInstance {

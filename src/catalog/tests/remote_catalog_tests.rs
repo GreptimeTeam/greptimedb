@@ -135,6 +135,7 @@ mod tests {
                     primary_key_indices: vec![],
                     create_if_not_exists: false,
                     table_options: Default::default(),
+                    engine: MITO_ENGINE.to_string(),
                 },
             )
             .await
@@ -195,6 +196,7 @@ mod tests {
                     primary_key_indices: vec![],
                     create_if_not_exists: false,
                     table_options: Default::default(),
+                    engine: MITO_ENGINE.to_string(),
                 },
             )
             .await
@@ -255,6 +257,7 @@ mod tests {
                     primary_key_indices: vec![],
                     create_if_not_exists: false,
                     table_options: Default::default(),
+                    engine: MITO_ENGINE.to_string(),
                 },
             )
             .await

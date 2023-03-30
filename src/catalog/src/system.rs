@@ -112,6 +112,7 @@ impl SystemCatalogTable {
                 primary_key_indices: vec![ENTRY_TYPE_INDEX, KEY_INDEX],
                 create_if_not_exists: true,
                 table_options: TableOptions::default(),
+                engine: engine.name().to_string(),
             };
 
             let table = engine

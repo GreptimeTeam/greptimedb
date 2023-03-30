@@ -12,11 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use catalog::error::TableNotExistSnafu;
 use catalog::DeregisterTableRequest;
 use common_error::prelude::BoxedError;
 use common_query::Output;
 use common_telemetry::info;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use table::engine::{EngineContext, TableReference};
 use table::requests::DropTableRequest;
 
@@ -38,6 +39,19 @@ impl SqlHandler {
         };
         let table_full_name = table_reference.to_string();
 
+        let table = self
+            .catalog_manager
+            .table(&req.catalog_name, &req.schema_name, &req.table_name)
+            .await
+            .context(error::CatalogSnafu)?
+            .with_context(|| TableNotExistSnafu {
+                table: table_full_name.clone(),
+            })
+            .map_err(BoxedError::new)
+            .context(error::DropTableSnafu {
+                table_name: table_full_name.clone(),
+            })?;
+
         self.catalog_manager
             .deregister_table(deregister_table_req)
             .await
@@ -47,7 +61,10 @@ impl SqlHandler {
             })?;
 
         let ctx = EngineContext {};
-        self.table_engine()
+
+        let engine = self.table_engine(table)?;
+
+        engine
             .drop_table(&ctx, req)
             .await
             .map_err(BoxedError::new)

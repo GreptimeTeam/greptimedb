@@ -20,7 +20,9 @@ use std::time::Duration;
 
 use axum::Router;
 use catalog::CatalogManagerRef;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
+use common_catalog::consts::{
+    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID, MITO_ENGINE,
+};
 use common_runtime::Builder as RuntimeBuilder;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datanode::datanode::{
@@ -221,7 +223,7 @@ pub async fn create_test_table(
     ];
 
     let table_name = "demo";
-    let table_engine: TableEngineRef = sql_handler.table_engine();
+    let table_engine: TableEngineRef = sql_handler.table_engine_manager().default();
     let table = table_engine
         .create_table(
             &EngineContext::default(),
@@ -236,6 +238,7 @@ pub async fn create_test_table(
                 primary_key_indices: vec![0], // "host" is in primary keys
                 table_options: TableOptions::default(),
                 region_numbers: vec![0],
+                engine: MITO_ENGINE.to_string(),
             },
         )
         .await

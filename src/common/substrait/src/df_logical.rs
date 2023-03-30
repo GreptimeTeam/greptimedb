@@ -580,6 +580,7 @@ mod test {
             primary_key_indices: vec![],
             create_if_not_exists: true,
             table_options: Default::default(),
+            engine: MITO_ENGINE.to_string(),
         }
     }
 

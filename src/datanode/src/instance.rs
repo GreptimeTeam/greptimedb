@@ -213,7 +213,10 @@ impl Instance {
         Ok(Self {
             query_engine: query_engine.clone(),
             sql_handler: SqlHandler::new(
-                table_engine.clone(),
+                Arc::new(MemoryTableEngineManager::new(
+                    MITO_ENGINE,
+                    table_engine.clone(),
+                )),
                 catalog_manager.clone(),
                 table_engine,
                 procedure_manager,

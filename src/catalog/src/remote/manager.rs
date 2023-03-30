@@ -369,6 +369,7 @@ impl RemoteCatalogManager {
                     primary_key_indices: meta.primary_key_indices.clone(),
                     create_if_not_exists: true,
                     table_options: meta.options.clone(),
+                    engine: engine.name().to_string(),
                 };
 
                 engine

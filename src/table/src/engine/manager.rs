@@ -15,12 +15,17 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use crate::engine::TableEngineRef;
+use async_trait::async_trait;
 
+use crate::engine::TableEngineRef;
+use crate::error::Result;
+
+#[async_trait::async_trait]
 pub trait TableEngineManager: Send + Sync {
     fn engine(&self, name: &str) -> Option<TableEngineRef>;
     fn register_engine(&self, name: &str, engine: TableEngineRef);
     fn default(&self) -> TableEngineRef;
+    async fn close(&self) -> Result<()>;
 }
 pub type TableEngineManagerRef = Arc<dyn TableEngineManager>;
 
@@ -44,6 +49,7 @@ impl MemoryTableEngineManager {
     }
 }
 
+#[async_trait]
 impl TableEngineManager for MemoryTableEngineManager {
     fn engine(&self, name: &str) -> Option<TableEngineRef> {
         let engines = self.engines.read().unwrap();
@@ -58,9 +64,19 @@ impl TableEngineManager for MemoryTableEngineManager {
     }
 
     fn default(&self) -> TableEngineRef {
-        let engines = self.engines.read().unwrap();
-        // it's safe to unwrap
-        engines.get(&self.default_token).unwrap().clone()
+        // safe to unwrap
+        self.engine(&self.default_token).unwrap()
+    }
+
+    async fn close(&self) -> Result<()> {
+        let engines = {
+            let engines = self.engines.write().unwrap();
+            engines.values().cloned().collect::<Vec<_>>()
+        };
+
+        futures::future::try_join_all(engines.iter().map(|engine| engine.close()))
+            .await
+            .map(|_| ())
     }
 }
 

@@ -14,7 +14,7 @@
 
 use api::v1::alter_expr::Kind;
 use api::v1::{column_def, AlterExpr, CreateTableExpr, DropColumns, RenameTable};
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
 use datatypes::schema::{ColumnSchema, RawSchema};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::TableId;
@@ -178,6 +178,8 @@ pub fn create_expr_to_request(
         primary_key_indices,
         create_if_not_exists: expr.create_if_not_exists,
         table_options,
+        // TODO(weny): remove hard-code
+        engine: MITO_ENGINE.to_string(),
     })
 }
 

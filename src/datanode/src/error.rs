@@ -101,6 +101,12 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Engine not found: {}", engine_name))]
+    EngineNotFound {
+        engine_name: String,
+        backtrace: Backtrace,
+    },
+
     #[snafu(display("Table not found: {}", table_name))]
     TableNotFound {
         table_name: String,
@@ -590,6 +596,7 @@ impl ErrorExt for Error {
             | IncorrectInternalState { .. }
             | ShutdownServer { .. }
             | ShutdownInstance { .. }
+            | EngineNotFound { .. }
             | CloseTableEngine { .. } => StatusCode::Internal,
 
             BuildBackend { .. }

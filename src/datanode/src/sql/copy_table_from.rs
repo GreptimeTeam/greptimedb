@@ -40,7 +40,7 @@ impl SqlHandler {
             schema: &req.schema_name,
             table: &req.table_name,
         };
-        let table = self.get_table(&table_ref)?;
+        let table = self.get_table(&table_ref).await?;
 
         let (_schema, _host, path) = parse_url(&req.location).context(error::ParseUrlSnafu)?;
 

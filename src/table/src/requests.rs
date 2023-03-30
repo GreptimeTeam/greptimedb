@@ -47,6 +47,7 @@ pub struct CreateTableRequest {
     pub primary_key_indices: Vec<usize>,
     pub create_if_not_exists: bool,
     pub table_options: TableOptions,
+    pub engine: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
