@@ -30,7 +30,11 @@ pub enum Error {
     #[snafu(display("Repeated task {} not started yet", name))]
     IllegalState { name: String, backtrace: Backtrace },
 
-    #[snafu(display("Failed to wait for repeated task {} to stop, source: {}", name, source))]
+    #[snafu(display(
+        "Failed to wait for repeated task {} to stop, source: {}",
+        name,
+        source
+    ))]
     WaitGcTaskStop {
         name: String,
         source: JoinError,

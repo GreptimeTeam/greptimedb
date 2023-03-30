@@ -50,7 +50,9 @@ impl<E: ErrorExt> std::fmt::Display for RepeatedTask<E> {
 
 impl<E: ErrorExt> std::fmt::Debug for RepeatedTask<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("RepeatedTask").field(&self.task_fn.name()).finish()
+        f.debug_tuple("RepeatedTask")
+            .field(&self.task_fn.name())
+            .finish()
     }
 }
 
