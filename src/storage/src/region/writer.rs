@@ -693,6 +693,7 @@ impl WriterInner {
             manifest: writer_ctx.manifest.clone(),
             wal: writer_ctx.wal.clone(),
             ttl: self.ttl,
+            compaction_time_window: self.compaction_time_window,
             sender: None,
             sst_write_buffer_size,
         };
@@ -751,7 +752,7 @@ impl WriterInner {
             manifest: ctx.manifest.clone(),
             wal: ctx.wal.clone(),
             ttl,
-            compaction_time_window
+            compaction_time_window,
             sender: None,
             sst_write_buffer_size: config.sst_write_buffer_size,
         };
