@@ -260,13 +260,10 @@ impl RemoteCatalogManager {
         for kv in kvs {
             let (table_key, table_value) = kv?;
             let engine = self.engine.clone();
-            let schema = schema.clone();
-            let join: JoinHandle<Result<TableId>> = tokio::spawn(async move {
+            let join: JoinHandle<Result<TableRef>> = tokio::spawn(async move {
                 let table_ref =
                     open_or_create_table(node_id, engine, &table_key, &table_value).await?;
-                schema.register_table(table_key.table_name.to_string(), table_ref)?;
-                info!("Registered table {}", &table_key.table_name);
-                Ok(table_value.table_id())
+                Ok(table_ref)
             });
             joins.push(join);
         }
@@ -275,7 +272,13 @@ impl RemoteCatalogManager {
             match futures::future::select_all(joins).await {
                 (Ok(join_re), _, remaining) => {
                     joins = remaining;
-                    max_table_id = max_table_id.max(join_re?);
+                    let table_ref = join_re?;
+
+                    let table_name = table_ref.table_info().name.clone();
+                    let table_id = table_ref.table_info().ident.table_id;
+                    schema.register_table(table_name.clone(), table_ref)?;
+                    info!("Registered table {}", &table_name);
+                    max_table_id = max_table_id.max(table_id);
                     table_num += 1;
                 }
                 (Err(e), _, _) => {
