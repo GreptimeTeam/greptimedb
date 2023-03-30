@@ -27,7 +27,7 @@ use arrow_array::{
 use async_compat::CompatExt;
 use async_stream::try_stream;
 use async_trait::async_trait;
-use common_telemetry::error;
+use common_telemetry::{error, warn};
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
@@ -50,13 +50,15 @@ use tokio::io::BufReader;
 
 use crate::error::{
     self, DecodeParquetTimeRangeSnafu, NewRecordBatchSnafu, ReadObjectSnafu, ReadParquetSnafu,
-    Result, WriteObjectSnafu, WriteParquetSnafu,
+    Result, WriteObjectSnafu,
 };
 use crate::read::{Batch, BatchReader};
 use crate::schema::compat::ReadAdapter;
 use crate::schema::{ProjectedSchemaRef, StoreSchema, StoreSchemaRef};
 use crate::sst;
+use crate::sst::stream_writer::BufferedWriter;
 use crate::sst::{FileHandle, Source, SstInfo};
+
 /// Parquet sst writer.
 pub struct ParquetWriter<'a> {
     file_path: &'a str,
@@ -101,14 +103,23 @@ impl<'a> ParquetWriter<'a> {
             }))
             .build();
 
-        // TODO(hl): Since OpenDAL's writer is async and ArrowWriter requires a `std::io::Write`,
-        // here we use a Vec<u8> to buffer all parquet bytes in memory and write to object store
-        // at a time. Maybe we should find a better way to bridge ArrowWriter and OpenDAL's object.
-        let mut buf = vec![];
-        let mut arrow_writer = ArrowWriter::try_new(&mut buf, schema.clone(), Some(writer_props))
-            .context(WriteParquetSnafu)?;
+        let writer = self
+            .object_store
+            .writer(self.file_path)
+            .await
+            .context(WriteObjectSnafu {
+                path: self.file_path,
+            })?;
 
+        let mut stream_writer = BufferedWriter::try_new(
+            self.file_path.to_string(),
+            writer,
+            schema.clone(),
+            Some(writer_props),
+            4 * 1024 * 1024,
+        )?;
         let mut batches_written = 0;
+
         while let Some(batch) = self.source.next_batch().await? {
             let arrow_batch = RecordBatch::try_new(
                 schema.clone(),
@@ -119,32 +130,27 @@ impl<'a> ParquetWriter<'a> {
                     .collect::<Vec<_>>(),
             )
             .context(NewRecordBatchSnafu)?;
-            arrow_writer
-                .write(&arrow_batch)
-                .context(WriteParquetSnafu)?;
+            stream_writer.write(&arrow_batch).await?;
             batches_written += 1;
         }
 
         if batches_written == 0 {
             // if the source does not contain any batch, we skip writing an empty parquet file.
+            if !stream_writer.abort().await {
+                warn!(
+                    "Partial file {} has been uploaded to remote storage",
+                    self.file_path
+                );
+            }
             return Ok(None);
         }
-        let file_meta = arrow_writer.close().context(WriteParquetSnafu)?;
 
+        let (file_meta, file_size) = stream_writer.close().await?;
         let time_range = decode_timestamp_range(&file_meta, store_schema)
             .ok()
             .flatten();
 
         // object_store.write will make sure all bytes are written or an error is raised.
-        let buf_len = buf.len() as u64;
-        self.object_store
-            .write(self.file_path, buf)
-            .await
-            .context(WriteObjectSnafu {
-                path: self.file_path,
-            })?;
-
-        let file_size = buf_len;
         Ok(Some(SstInfo {
             time_range,
             file_size,
@@ -574,6 +580,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_parquet_writer() {
+        common_telemetry::init_default_ut_logging();
         let schema = memtable_tests::schema_for_test();
         let memtable = DefaultMemtableBuilder::default().build(schema);
 
