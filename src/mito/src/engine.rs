@@ -38,7 +38,6 @@ use table::engine::{
     region_id, region_name, table_dir, EngineContext, TableEngine, TableEngineProcedure,
     TableReference,
 };
-use table::error::TableOperationSnafu;
 use table::metadata::{TableInfo, TableInfoBuilder, TableMetaBuilder, TableType, TableVersion};
 use table::requests::{
     AlterKind, AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest,
@@ -498,7 +497,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             let Some((manifest, table_info)) = self
                 .recover_table_manifest_and_info(table_name, &table_dir)
                 .await.map_err(BoxedError::new)
-                .context(TableOperationSnafu)? else { return Ok(None) };
+                .context(table_error::TableOperationSnafu)? else { return Ok(None) };
 
             let opts = OpenOptions {
                 parent_dir: table_dir.to_string(),
@@ -656,7 +655,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         )
         .await
         .map_err(BoxedError::new)
-        .context(TableOperationSnafu)?;
+        .context(table_error::TableOperationSnafu)?;
 
         Ok(())
     }
