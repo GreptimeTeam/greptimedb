@@ -315,11 +315,22 @@ pub(crate) async fn new_object_store(store_config: &ObjectStoreConfig) -> Result
         ObjectStoreConfig::Oss { .. } => new_oss_object_store(store_config).await,
     };
 
+    // Don't enable retry layer when using local file backend.
+    let object_store = if !matches!(store_config, ObjectStoreConfig::File(..)) {
+        object_store.map(|object_store| object_store.layer(RetryLayer::new().with_jitter()))
+    } else {
+        object_store
+    };
+
     object_store.map(|object_store| {
         object_store
-            .layer(RetryLayer::new().with_jitter())
             .layer(MetricsLayer)
-            .layer(LoggingLayer::default())
+            .layer(
+                LoggingLayer::default()
+                    // Print the expected error only in DEBUG level.
+                    // See https://docs.rs/opendal/latest/opendal/layers/struct.LoggingLayer.html#method.with_error_level
+                    .with_error_level(Some(log::Level::Debug)),
+            )
             .layer(TracingLayer)
     })
 }

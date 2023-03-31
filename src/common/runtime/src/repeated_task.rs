@@ -94,7 +94,7 @@ impl<E: ErrorExt + 'static> RepeatedTask<E> {
         *self.task_handle.lock().await = Some(handle);
         self.started.store(true, Ordering::Relaxed);
 
-        logging::info!(
+        logging::debug!(
             "Repeated task {} started with interval: {:?}",
             self.task_fn.name(),
             self.interval
@@ -127,7 +127,7 @@ impl<E: ErrorExt + 'static> RepeatedTask<E> {
         token.cancel();
         handle.await.context(WaitGcTaskStopSnafu { name })?;
 
-        logging::info!("Repeated task {} stopped", name);
+        logging::debug!("Repeated task {} stopped", name);
         Ok(())
     }
 }
