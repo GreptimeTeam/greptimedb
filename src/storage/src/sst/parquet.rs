@@ -74,8 +74,8 @@ impl<'a> ParquetWriter<'a> {
         }
     }
 
-    pub async fn write_sst(self, _opts: &sst::WriteOptions) -> Result<Option<SstInfo>> {
-        self.write_rows(None).await
+    pub async fn write_sst(self, opts: &sst::WriteOptions) -> Result<Option<SstInfo>> {
+        self.write_rows(None, opts).await
     }
 
     /// Iterates memtable and writes rows to Parquet file.
@@ -84,6 +84,7 @@ impl<'a> ParquetWriter<'a> {
     async fn write_rows(
         mut self,
         extra_meta: Option<HashMap<String, String>>,
+        opts: &sst::WriteOptions,
     ) -> Result<Option<SstInfo>> {
         let schema = self.source.schema();
         let writer_props = WriterProperties::builder()
@@ -102,7 +103,7 @@ impl<'a> ParquetWriter<'a> {
             self.object_store.clone(),
             &schema,
             Some(writer_props),
-            4 * 1024 * 1024, // this value is optimal for multipart upload.
+            opts.sst_write_buffer_size.as_bytes() as usize,
         )
         .await?;
         let mut rows_written = 0;

@@ -132,6 +132,7 @@ impl<S: LogStore> Picker for SimplePicker<S> {
                 wal: req.wal.clone(),
                 manifest: req.manifest.clone(),
                 expired_ssts,
+                sst_write_buffer_size: req.sst_write_buffer_size,
             }));
         }
 

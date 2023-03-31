@@ -52,7 +52,7 @@ impl SqlHandler {
         let writer = ParquetWriter::new(&path, Source::Stream(stream), object_store);
 
         let rows_copied = writer
-            .write_sst(&storage::sst::WriteOptions {})
+            .write_sst(&storage::sst::WriteOptions::default())
             .await
             .context(WriteParquetSnafu)?
             .map(|SstInfo { num_rows, .. }| num_rows)

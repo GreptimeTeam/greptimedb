@@ -15,6 +15,7 @@
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 
+use common_base::readable_size::ReadableSize;
 use common_telemetry::{error, info};
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
@@ -46,6 +47,7 @@ pub struct CompactionTaskImpl<S: LogStore> {
     pub wal: Wal<S>,
     pub manifest: RegionManifest,
     pub expired_ssts: Vec<FileHandle>,
+    pub sst_write_buffer_size: ReadableSize,
 }
 
 impl<S: LogStore> Debug for CompactionTaskImpl<S> {
@@ -71,10 +73,15 @@ impl<S: LogStore> CompactionTaskImpl<S> {
         for output in self.outputs.drain(..) {
             let schema = self.schema.clone();
             let sst_layer = self.sst_layer.clone();
+            let sst_write_buffer_size = self.sst_write_buffer_size;
             compacted_inputs.extend(output.inputs.iter().map(FileHandle::meta));
 
             // TODO(hl): Maybe spawn to runtime to exploit in-job parallelism.
-            futs.push(async move { output.build(region_id, schema, sst_layer).await });
+            futs.push(async move {
+                output
+                    .build(region_id, schema, sst_layer, sst_write_buffer_size)
+                    .await
+            });
         }
 
         let mut outputs = HashSet::with_capacity(futs.len());
@@ -167,6 +174,7 @@ impl CompactionOutput {
         region_id: RegionId,
         schema: RegionSchemaRef,
         sst_layer: AccessLayerRef,
+        sst_write_buffer_size: ReadableSize,
     ) -> Result<Option<FileMeta>> {
         let reader = build_sst_reader(
             schema,
@@ -178,7 +186,9 @@ impl CompactionOutput {
         .await?;
 
         let output_file_id = FileId::random();
-        let opts = WriteOptions {};
+        let opts = WriteOptions {
+            sst_write_buffer_size,
+        };
 
         Ok(sst_layer
             .write_sst(output_file_id, Source::Reader(reader), &opts)

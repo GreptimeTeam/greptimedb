@@ -23,6 +23,7 @@ use store_api::storage::consts::WRITE_ROW_GROUP_SIZE;
 use store_api::storage::SequenceNumber;
 
 use crate::background::{Context, Job, JobHandle, JobPoolRef};
+use crate::config::EngineConfig;
 use crate::error::{CancelledSnafu, Result};
 use crate::manifest::action::*;
 use crate::manifest::region::RegionManifest;
@@ -174,6 +175,8 @@ pub struct FlushJob<S: LogStore> {
     pub manifest: RegionManifest,
     /// Callbacks that get invoked on flush success.
     pub on_success: Option<FlushCallback>,
+    /// Storage engine config
+    pub engine_config: Arc<EngineConfig>,
 }
 
 impl<S: LogStore> FlushJob<S> {
@@ -190,6 +193,7 @@ impl<S: LogStore> FlushJob<S> {
             batch_size: WRITE_ROW_GROUP_SIZE,
             ..Default::default()
         };
+
         for m in &self.memtables {
             // skip empty memtable
             if m.num_rows() == 0 {
@@ -200,10 +204,12 @@ impl<S: LogStore> FlushJob<S> {
             // TODO(hl): Check if random file name already exists in meta.
             let iter = m.iter(&iter_ctx)?;
             let sst_layer = self.sst_layer.clone();
-
+            let write_options = WriteOptions {
+                sst_write_buffer_size: self.engine_config.sst_write_buffer_size,
+            };
             futures.push(async move {
                 Ok(sst_layer
-                    .write_sst(file_id, Source::Iter(iter), &WriteOptions::default())
+                    .write_sst(file_id, Source::Iter(iter), &write_options)
                     .await?
                     .map(
                         |SstInfo {

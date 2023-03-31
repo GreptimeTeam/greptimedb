@@ -15,6 +15,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, error, info};
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
@@ -60,6 +61,8 @@ pub struct CompactionRequestImpl<S: LogStore> {
     pub ttl: Option<Duration>,
     /// Compaction result sender.
     pub sender: Option<Sender<Result<()>>>,
+
+    pub sst_write_buffer_size: ReadableSize,
 }
 
 impl<S: LogStore> CompactionRequestImpl<S> {

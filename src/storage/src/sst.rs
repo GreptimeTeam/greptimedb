@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_base::readable_size::ReadableSize;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{error, info};
 use common_time::range::TimestampRange;
@@ -390,9 +391,18 @@ where
     FileId::from_str(stripped).map_err(<D::Error as serde::de::Error>::custom)
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct WriteOptions {
     // TODO(yingwen): [flush] row group size.
+    pub sst_write_buffer_size: ReadableSize,
+}
+
+impl Default for WriteOptions {
+    fn default() -> Self {
+        Self {
+            sst_write_buffer_size: ReadableSize::mb(8),
+        }
+    }
 }
 
 pub struct ReadOptions {

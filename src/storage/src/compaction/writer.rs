@@ -85,6 +85,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
 
+    use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_temp_dir;
     use common_time::Timestamp;
     use datatypes::prelude::{LogicalTypeId, ScalarVector, ScalarVectorBuilder};
@@ -412,7 +413,9 @@ mod tests {
             .await
             .unwrap();
 
-        let opts = WriteOptions {};
+        let opts = WriteOptions {
+            sst_write_buffer_size: ReadableSize::mb(8),
+        };
         let s1 = ParquetWriter::new(
             &output_file_ids[0].as_parquet(),
             Source::Reader(reader1),
