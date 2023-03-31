@@ -1730,6 +1730,7 @@ dependencies = [
 name = "common-runtime"
 version = "0.1.1"
 dependencies = [
+ "async-trait",
  "common-error",
  "common-telemetry",
  "metrics",
@@ -1738,6 +1739,7 @@ dependencies = [
  "snafu",
  "tokio",
  "tokio-test",
+ "tokio-util",
 ]
 
 [[package]]

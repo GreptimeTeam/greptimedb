@@ -629,7 +629,8 @@ impl<S: LogStore> RegionInner<S> {
     }
 
     async fn close(&self) -> Result<()> {
-        self.writer.close().await
+        self.writer.close().await?;
+        self.manifest.stop().await
     }
 
     async fn flush(&self, ctx: &FlushContext) -> Result<()> {

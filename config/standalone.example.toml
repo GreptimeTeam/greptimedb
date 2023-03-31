@@ -99,13 +99,22 @@ type = "File"
 data_dir = "/tmp/greptimedb/data/"
 
 # Compaction options.
-[compaction]
+[storage.compaction]
 # Max task number that can concurrently run.
 max_inflight_tasks = 4
 # Max files in level 0 to trigger compaction.
 max_files_in_level0 = 8
 # Max task number for SST purge task after compaction.
 max_purge_tasks = 32
+
+# Storage manifest options
+[storage.manifest]
+# Region checkpoint actions margin.
+# Create a checkpoint every <checkpoint_margin> actions.
+checkpoint_margin = 10
+# Region manifest logs and checkpoints gc execution duration
+gc_duration = '30s'
+
 
 # Procedure storage options.
 # Uncomment to enable.

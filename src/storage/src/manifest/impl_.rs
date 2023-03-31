@@ -15,41 +15,70 @@
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
+use common_runtime::{RepeatedTask, TaskFunction};
 use common_telemetry::{debug, logging, warn};
 use object_store::ObjectStore;
-use snafu::ensure;
+use snafu::{ensure, ResultExt};
 use store_api::manifest::action::{self, ProtocolAction, ProtocolVersion};
 use store_api::manifest::*;
 
-use crate::error::{Error, ManifestProtocolForbidWriteSnafu, Result};
+use crate::error::{
+    Error, ManifestProtocolForbidWriteSnafu, Result, StartManifestGcTaskSnafu,
+    StopManifestGcTaskSnafu,
+};
 use crate::manifest::action::RegionCheckpoint;
 use crate::manifest::checkpoint::Checkpointer;
 use crate::manifest::storage::{ManifestObjectStore, ObjectStoreLogIterator};
 
-// TODO(dennis): export this option to table options or storage options.
-const CHECKPOINT_ACTIONS_MARGIN: u64 = 10;
+const CHECKPOINT_ACTIONS_MARGIN: u16 = 10;
+const GC_DURATION_SECS: u64 = 30;
 
 #[derive(Clone, Debug)]
 pub struct ManifestImpl<S: Checkpoint<Error = Error>, M: MetaAction<Error = Error>> {
     inner: Arc<ManifestImplInner<S, M>>,
     checkpointer: Option<Arc<dyn Checkpointer<Checkpoint = S, MetaAction = M>>>,
     last_checkpoint_version: Arc<AtomicU64>,
+    checkpoint_actions_margin: u16,
+    gc_task: Option<Arc<RepeatedTask<Error>>>,
 }
 
-impl<S: Checkpoint<Error = Error>, M: MetaAction<Error = Error>> ManifestImpl<S, M> {
+impl<S: 'static + Checkpoint<Error = Error>, M: 'static + MetaAction<Error = Error>>
+    ManifestImpl<S, M>
+{
     pub fn new(
         manifest_dir: &str,
         object_store: ObjectStore,
+        checkpoint_actions_margin: Option<u16>,
+        gc_duration: Option<Duration>,
         checkpointer: Option<Arc<dyn Checkpointer<Checkpoint = S, MetaAction = M>>>,
     ) -> Self {
+        let inner = Arc::new(ManifestImplInner::new(manifest_dir, object_store));
+        let gc_task = if checkpointer.is_some() {
+            // only start gc task when checkpoint is enabled.
+            Some(Arc::new(RepeatedTask::new(
+                gc_duration.unwrap_or_else(|| Duration::from_secs(GC_DURATION_SECS)),
+                inner.clone() as _,
+            )))
+        } else {
+            None
+        };
+
         ManifestImpl {
-            inner: Arc::new(ManifestImplInner::new(manifest_dir, object_store)),
+            inner,
             checkpointer,
+            checkpoint_actions_margin: checkpoint_actions_margin
+                .unwrap_or(CHECKPOINT_ACTIONS_MARGIN),
             last_checkpoint_version: Arc::new(AtomicU64::new(MIN_VERSION)),
+            gc_task,
         }
+    }
+
+    pub fn create(manifest_dir: &str, object_store: ObjectStore) -> Self {
+        Self::new(manifest_dir, object_store, None, None, None)
     }
 
     pub fn checkpointer(&self) -> &Option<Arc<dyn Checkpointer<Checkpoint = S, MetaAction = M>>> {
@@ -100,7 +129,7 @@ impl<S: 'static + Checkpoint<Error = Error>, M: 'static + MetaAction<Error = Err
     async fn update(&self, action_list: M) -> Result<ManifestVersion> {
         let version = self.inner.save(action_list).await?;
         if version - self.last_checkpoint_version.load(Ordering::Relaxed)
-            >= CHECKPOINT_ACTIONS_MARGIN
+            >= self.checkpoint_actions_margin as u64
         {
             let s = self.do_checkpoint().await?;
             debug!("Manifest checkpoint, checkpoint: {:#?}", s);
@@ -134,6 +163,24 @@ impl<S: 'static + Checkpoint<Error = Error>, M: 'static + MetaAction<Error = Err
 
     fn last_version(&self) -> ManifestVersion {
         self.inner.last_version()
+    }
+
+    async fn start(&self) -> Result<()> {
+        if let Some(task) = &self.gc_task {
+            task.start(common_runtime::bg_runtime())
+                .await
+                .context(StartManifestGcTaskSnafu)?;
+        }
+
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        if let Some(task) = &self.gc_task {
+            task.stop().await.context(StopManifestGcTaskSnafu)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -180,6 +227,29 @@ impl<M: MetaAction<Error = Error>> MetaActionIterator for MetaActionIteratorImpl
             }
             None => Ok(None),
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl<S: Checkpoint<Error = Error>, M: MetaAction<Error = Error>> TaskFunction<Error>
+    for ManifestImplInner<S, M>
+{
+    fn name(&self) -> &str {
+        "region-manifest-gc"
+    }
+
+    async fn call(&self) -> Result<()> {
+        if let Some((last_version, _)) = self.store.load_last_checkpoint().await? {
+            // Purge all manifest and checkpoint files before last_version.
+            let deleted = self.store.delete_until(last_version).await?;
+            debug!(
+                "Deleted {} logs from region manifest storage(path={}).",
+                deleted,
+                self.store.path()
+            );
+        }
+
+        Ok(())
     }
 }
 
@@ -283,8 +353,8 @@ impl<S: Checkpoint<Error = Error>, M: MetaAction<Error = Error>> ManifestImplInn
                 // It happens when saving checkpoint successfully, but failed at saving checkpoint metadata(the "__last_checkpoint" file).
                 // Then we try to use the old checkpoint and do the checkpoint next time.
                 // If the old checkpoint was deleted, it's fine that we return the latest checkpoint.
-                // the only side effect is leaving some unused checkpoint checkpoint files.
-                // TODO(dennis): delete unused checkpoint files
+                // the only side effect is leaving some unused checkpoint checkpoint files,
+                // and they will be purged by gc task.
                 warn!("The checkpoint manifest version {} in {} is greater than checkpoint metadata version {}.", self.store.path(), checkpoint.last_version(), version);
 
                 if let Some((_, bytes)) = self.store.load_checkpoint(version).await? {

@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use common_telemetry::logging;
 use futures::TryStreamExt;
 use lazy_static::lazy_static;
-use object_store::{util, Entry, ErrorKind, ObjectStore};
+use object_store::{raw_normalize_path, util, Entry, ErrorKind, ObjectStore};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
@@ -31,7 +31,8 @@ use crate::error::{
 };
 
 lazy_static! {
-    static ref RE: Regex = Regex::new("^\\d+\\.json$").unwrap();
+    static ref DELTA_RE: Regex = Regex::new("^\\d+\\.json$").unwrap();
+    static ref CHECKPOINT_RE: Regex = Regex::new("^\\d+\\.checkpoint").unwrap();
 }
 
 const LAST_CHECKPOINT_FILE: &str = "_last_checkpoint";
@@ -46,20 +47,24 @@ pub fn checkpoint_file(version: ManifestVersion) -> String {
     format!("{version:020}.checkpoint")
 }
 
-/// Return's the delta file version from path
+/// Return's the file manifest version from path
 ///
 /// # Panics
-/// Panics if the file path is not a valid delta file.
+/// Panics if the file path is not a valid delta or checkpoint file.
 #[inline]
-pub fn delta_version(path: &str) -> ManifestVersion {
+pub fn file_version(path: &str) -> ManifestVersion {
     let s = path.split('.').next().unwrap();
-    s.parse()
-        .unwrap_or_else(|_| panic!("Invalid delta file: {path}"))
+    s.parse().unwrap_or_else(|_| panic!("Invalid file: {path}"))
 }
 
 #[inline]
 pub fn is_delta_file(file_name: &str) -> bool {
-    RE.is_match(file_name)
+    DELTA_RE.is_match(file_name)
+}
+
+#[inline]
+pub fn is_checkpoint_file(file_name: &str) -> bool {
+    CHECKPOINT_RE.is_match(file_name)
 }
 
 pub struct ObjectStoreLogIterator {
@@ -162,7 +167,7 @@ impl ManifestLogStorage for ManifestObjectStore {
             .try_filter_map(|e| async move {
                 let file_name = e.name();
                 if is_delta_file(file_name) {
-                    let version = delta_version(file_name);
+                    let version = file_version(file_name);
                     if version >= start && version < end {
                         Ok(Some((version, e)))
                     } else {
@@ -184,6 +189,48 @@ impl ManifestLogStorage for ManifestObjectStore {
         })
     }
 
+    async fn delete_until(&self, end: ManifestVersion) -> Result<usize> {
+        let streamer = self
+            .object_store
+            .list(&self.path)
+            .await
+            .context(ListObjectsSnafu { path: &self.path })?;
+
+        let paths: Vec<_> = streamer
+            .try_filter_map(|e| async move {
+                let file_name = e.name();
+                if is_delta_file(file_name) || is_checkpoint_file(file_name) {
+                    let version = file_version(file_name);
+                    if version < end {
+                        Ok(Some(e.path().to_string()))
+                    } else {
+                        Ok(None)
+                    }
+                } else {
+                    Ok(None)
+                }
+            })
+            .try_collect::<Vec<_>>()
+            .await
+            .context(ListObjectsSnafu { path: &self.path })?;
+        let ret = paths.len();
+
+        logging::debug!(
+            "Deleting {} logs from manifest storage path {}.",
+            ret,
+            self.path
+        );
+
+        self.object_store
+            .remove(paths)
+            .await
+            .with_context(|_| DeleteObjectSnafu {
+                path: self.path.clone(),
+            })?;
+
+        Ok(ret)
+    }
+
     async fn save(&self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {
         let path = self.delta_file_path(version);
         self.object_store
@@ -193,14 +240,22 @@ impl ManifestLogStorage for ManifestObjectStore {
     }
 
     async fn delete(&self, start: ManifestVersion, end: ManifestVersion) -> Result<()> {
-        //TODO(dennis): delete in batch or concurrently?
-        for v in start..end {
-            let path = self.delta_file_path(v);
-            self.object_store
-                .delete(&path)
-                .await
-                .context(DeleteObjectSnafu { path })?;
-        }
+        let raw_paths = (start..end)
+            .map(|v| self.delta_file_path(v))
+            .collect::<Vec<_>>();
+
+        let paths = raw_paths
+            .iter()
+            .map(|p| raw_normalize_path(p))
+            .collect::<Vec<_>>();
+
+        self.object_store
+            .remove(paths)
+            .await
+            .with_context(|_| DeleteObjectSnafu {
+                path: raw_paths.join(","),
+            })?;
+
         Ok(())
     }
 
@@ -243,13 +298,11 @@ impl ManifestLogStorage for ManifestObjectStore {
         version: ManifestVersion,
     ) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
         let path = self.checkpoint_file_path(version);
-        let checkpoint = self
-            .object_store
-            .read(&path)
-            .await
-            .context(ReadObjectSnafu { path })?;
-
-        Ok(Some((version, checkpoint)))
+        match self.object_store.read(&path).await {
+            Ok(checkpoint) => Ok(Some((version, checkpoint))),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e).context(ReadObjectSnafu { path }),
+        }
     }
 
     async fn delete_checkpoint(&self, version: ManifestVersion) -> Result<()> {
@@ -351,5 +404,22 @@ mod tests {
         let (v, checkpoint) = log_store.load_last_checkpoint().await.unwrap().unwrap();
         assert_eq!(checkpoint, "checkpoint".as_bytes());
         assert_eq!(3, v);
+
+        //delete (,4) logs and checkpoints
+        log_store.delete_until(4).await.unwrap();
+        assert!(log_store.load_checkpoint(3).await.unwrap().is_none());
+        assert!(log_store.load_last_checkpoint().await.unwrap().is_none());
+        let mut it = log_store.scan(0, 11).await.unwrap();
+        let (version, bytes) = it.next_log().await.unwrap().unwrap();
+        assert_eq!(4, version);
+        assert_eq!("hello, 4".as_bytes(), bytes);
+        assert!(it.next_log().await.unwrap().is_none());
+
+        // delete all logs and checkpoints
+        log_store.delete_until(11).await.unwrap();
+        assert!(log_store.load_checkpoint(3).await.unwrap().is_none());
+        assert!(log_store.load_last_checkpoint().await.unwrap().is_none());
+        let mut it = log_store.scan(0, 11).await.unwrap();
+        assert!(it.next_log().await.unwrap().is_none());
     }
 }

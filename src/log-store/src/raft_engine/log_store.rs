@@ -13,25 +13,22 @@
 // limitations under the License.
 
 use std::fmt::{Debug, Formatter};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_stream::stream;
+use common_runtime::{RepeatedTask, TaskFunction};
 use common_telemetry::{error, info};
 use raft_engine::{Config, Engine, LogBatch, MessageExt, ReadableSize, RecoveryMode};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{ensure, ResultExt};
 use store_api::logstore::entry::Id;
 use store_api::logstore::entry_stream::SendableEntryStream;
 use store_api::logstore::namespace::Namespace as NamespaceTrait;
 use store_api::logstore::{AppendResponse, LogStore};
-use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 
 use crate::config::LogConfig;
 use crate::error::{
     AddEntryLogBatchSnafu, Error, FetchEntrySnafu, IllegalNamespaceSnafu, IllegalStateSnafu,
-    RaftEngineSnafu, WaitGcTaskStopSnafu,
+    RaftEngineSnafu, StartGcTaskSnafu, StopGcTaskSnafu,
 };
 use crate::raft_engine::protos::logstore::{EntryImpl as Entry, NamespaceImpl as Namespace};
 
@@ -41,9 +38,36 @@ const SYSTEM_NAMESPACE: u64 = 0;
 pub struct RaftEngineLogStore {
     config: LogConfig,
     engine: Arc<Engine>,
-    cancel_token: Mutex<Option<CancellationToken>>,
-    gc_task_handle: Mutex<Option<JoinHandle<()>>>,
-    started: AtomicBool,
+    gc_task: RepeatedTask<Error>,
+}
+
+pub struct PurgeExpiredFilesFunction {
+    engine: Arc<Engine>,
+}
+
+#[async_trait::async_trait]
+impl TaskFunction<Error> for PurgeExpiredFilesFunction {
+    fn name(&self) -> &str {
+        "RaftEngineLogStore-gc-task"
+    }
+
+    async fn call(&self) -> Result<(), Error> {
+        match self.engine.purge_expired_files().context(RaftEngineSnafu) {
+            Ok(res) => {
+                // TODO(hl): the retval of purge_expired_files indicates the namespaces need to be compact,
+                // which is useful when monitoring regions failed to flush it's memtable to SSTs.
+                info!(
+                    "Successfully purged logstore files, namespaces need compaction: {:?}",
+                    res
+                );
+            }
+            Err(e) => {
+                error!(e; "Failed to purge files in logstore");
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl RaftEngineLogStore {
@@ -58,56 +82,31 @@ impl RaftEngineLogStore {
             ..Default::default()
         };
         let engine = Arc::new(Engine::open(raft_engine_config).context(RaftEngineSnafu)?);
+        let gc_task = RepeatedTask::new(
+            config.purge_interval,
+            Arc::new(PurgeExpiredFilesFunction {
+                engine: engine.clone(),
+            }),
+        );
+
         let log_store = Self {
             config,
             engine,
-            cancel_token: Mutex::new(None),
-            gc_task_handle: Mutex::new(None),
-            started: AtomicBool::new(false),
+            gc_task,
         };
         log_store.start().await?;
         Ok(log_store)
     }
 
     pub fn started(&self) -> bool {
-        self.started.load(Ordering::Relaxed)
+        self.gc_task.started()
     }
 
     async fn start(&self) -> Result<(), Error> {
-        let engine_clone = self.engine.clone();
-        let interval = self.config.purge_interval;
-        let token = CancellationToken::new();
-        let child = token.child_token();
-        // TODO(hl): Maybe spawn to a blocking runtime.
-        let handle = common_runtime::spawn_bg(async move {
-            loop {
-                tokio::select! {
-                    _ = tokio::time::sleep(interval) => {}
-                    _ = child.cancelled() => {
-                        info!("LogStore gc task has been cancelled");
-                        return;
-                    }
-                }
-                match engine_clone.purge_expired_files().context(RaftEngineSnafu) {
-                    Ok(res) => {
-                        // TODO(hl): the retval of purge_expired_files indicates the namespaces need to be compact,
-                        // which is useful when monitoring regions failed to flush it's memtable to SSTs.
-                        info!(
-                            "Successfully purged logstore files, namespaces need compaction: {:?}",
-                            res
-                        );
-                    }
-                    Err(e) => {
-                        error!(e; "Failed to purge files in logstore");
-                    }
-                }
-            }
-        });
-        *self.cancel_token.lock().await = Some(token);
-        *self.gc_task_handle.lock().await = Some(handle);
-        self.started.store(true, Ordering::Relaxed);
-        info!("RaftEngineLogStore started with config: {:?}", self.config);
-        Ok(())
+        self.gc_task
+            .start(common_runtime::bg_runtime())
+            .await
+            .context(StartGcTaskSnafu)
     }
 }
 
@@ -115,7 +114,7 @@ impl Debug for RaftEngineLogStore {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RaftEngineLogsStore")
             .field("config", &self.config)
-            .field("started", &self.started.load(Ordering::Relaxed))
+            .field("started", &self.gc_task.started())
             .finish()
     }
 }
@@ -127,28 +126,7 @@ impl LogStore for RaftEngineLogStore {
     type Entry = Entry;
 
     async fn stop(&self) -> Result<(), Self::Error> {
-        ensure!(
-            self.started
-                .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok(),
-            IllegalStateSnafu
-        );
-        let handle = self
-            .gc_task_handle
-            .lock()
-            .await
-            .take()
-            .context(IllegalStateSnafu)?;
-        let token = self
-            .cancel_token
-            .lock()
-            .await
-            .take()
-            .context(IllegalStateSnafu)?;
-        token.cancel();
-        handle.await.context(WaitGcTaskStopSnafu)?;
-        info!("RaftEngineLogStore stopped");
-        Ok(())
+        self.gc_task.stop().await.context(StopGcTaskSnafu)
     }
 
     /// Append an entry to logstore. Currently of existence of entry's namespace is not checked.

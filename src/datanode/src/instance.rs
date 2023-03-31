@@ -104,7 +104,7 @@ impl Instance {
         meta_client: Option<Arc<MetaClient>>,
         compaction_scheduler: CompactionSchedulerRef<RaftEngineLogStore>,
     ) -> Result<Self> {
-        let object_store = new_object_store(&opts.storage).await?;
+        let object_store = new_object_store(&opts.storage.store).await?;
         let log_store = Arc::new(create_log_store(&opts.wal).await?);
 
         let table_engine = Arc::new(DefaultEngine::new(
@@ -430,15 +430,27 @@ pub(crate) async fn new_fs_object_store(store_config: &ObjectStoreConfig) -> Res
     info!("The file storage directory is: {}", &data_dir);
 
     let atomic_write_dir = format!("{data_dir}/.tmp/");
+    if path::Path::new(&atomic_write_dir).exists() {
+        info!(
+            "Begin to clean temp storage directory: {}",
+            &atomic_write_dir
+        );
+        fs::remove_dir_all(&atomic_write_dir).context(error::RemoveDirSnafu {
+            dir: &atomic_write_dir,
+        })?;
+        info!("Cleaned temp storage directory: {}", &atomic_write_dir);
+    }
 
     let mut builder = FsBuilder::default();
     builder.root(&data_dir).atomic_write_dir(&atomic_write_dir);
 
-    Ok(ObjectStore::new(builder)
+    let object_store = ObjectStore::new(builder)
         .context(error::InitBackendSnafu {
             config: store_config.clone(),
         })?
-        .finish())
+        .finish();
+
+    Ok(object_store)
 }
 
 /// Create metasrv client instance and spawn heartbeat loop.

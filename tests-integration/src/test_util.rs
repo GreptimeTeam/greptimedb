@@ -24,7 +24,7 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER
 use common_runtime::Builder as RuntimeBuilder;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datanode::datanode::{
-    DatanodeOptions, FileConfig, ObjectStoreConfig, OssConfig, S3Config, WalConfig,
+    DatanodeOptions, FileConfig, ObjectStoreConfig, OssConfig, S3Config, StorageConfig, WalConfig,
 };
 use datanode::error::{CreateTableSnafu, Result};
 use datanode::instance::{Instance, InstanceRef};
@@ -100,8 +100,7 @@ fn get_test_store_config(
                 access_key_secret: env::var("GT_OSS_ACCESS_KEY").unwrap(),
                 bucket: env::var("GT_OSS_BUCKET").unwrap(),
                 endpoint: env::var("GT_OSS_ENDPOINT").unwrap(),
-                cache_path: None,
-                cache_capacity: None,
+                ..Default::default()
             };
 
             let mut builder = Oss::default();
@@ -127,10 +126,7 @@ fn get_test_store_config(
                 access_key_id: env::var("GT_S3_ACCESS_KEY_ID").unwrap(),
                 secret_access_key: env::var("GT_S3_ACCESS_KEY").unwrap(),
                 bucket: env::var("GT_S3_BUCKET").unwrap(),
-                endpoint: None,
-                region: None,
-                cache_path: None,
-                cache_capacity: None,
+                ..Default::default()
             };
 
             let mut builder = S3::default();
@@ -189,14 +185,17 @@ pub fn create_tmp_dir_and_datanode_opts(
 ) -> (DatanodeOptions, TestGuard) {
     let wal_tmp_dir = create_temp_dir(&format!("gt_wal_{name}"));
 
-    let (storage, data_tmp_dir) = get_test_store_config(&store_type, name);
+    let (store, data_tmp_dir) = get_test_store_config(&store_type, name);
 
     let opts = DatanodeOptions {
         wal: WalConfig {
             dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
             ..Default::default()
         },
-        storage,
+        storage: StorageConfig {
+            store,
+            ..Default::default()
+        },
         mode: Mode::Standalone,
         ..Default::default()
     };

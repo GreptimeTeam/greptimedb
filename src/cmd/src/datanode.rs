@@ -146,7 +146,7 @@ impl TryFrom<StartCommand> for DatanodeOptions {
         }
 
         if let Some(data_dir) = cmd.data_dir {
-            opts.storage = ObjectStoreConfig::File(FileConfig { data_dir });
+            opts.storage.store = ObjectStoreConfig::File(FileConfig { data_dir });
         }
 
         if let Some(wal_dir) = cmd.wal_dir {
@@ -167,7 +167,7 @@ mod tests {
     use std::time::Duration;
 
     use common_test_util::temp_dir::create_named_temp_file;
-    use datanode::datanode::{CompactionConfig, ObjectStoreConfig};
+    use datanode::datanode::{CompactionConfig, ObjectStoreConfig, RegionManifestConfig};
     use servers::Mode;
 
     use super::*;
@@ -203,10 +203,14 @@ mod tests {
             type = "File"
             data_dir = "/tmp/greptimedb/data/"
 
-            [compaction]
-            max_inflight_tasks = 4
-            max_files_in_level0 = 8
+            [storage.compaction]
+            max_inflight_tasks = 3
+            max_files_in_level0 = 7
             max_purge_tasks = 32
+
+            [storage.manifest]
+            checkpoint_margin = 9
+            gc_duration = '7s'
         "#;
         write!(file, "{}", toml_str).unwrap();
 
@@ -237,9 +241,9 @@ mod tests {
         assert_eq!(3000, timeout_millis);
         assert!(tcp_nodelay);
 
-        match options.storage {
-            ObjectStoreConfig::File(FileConfig { data_dir }) => {
-                assert_eq!("/tmp/greptimedb/data/".to_string(), data_dir)
+        match &options.storage.store {
+            ObjectStoreConfig::File(FileConfig { data_dir, .. }) => {
+                assert_eq!("/tmp/greptimedb/data/", data_dir)
             }
             ObjectStoreConfig::S3 { .. } => unreachable!(),
             ObjectStoreConfig::Oss { .. } => unreachable!(),
@@ -247,11 +251,18 @@ mod tests {
 
         assert_eq!(
             CompactionConfig {
-                max_inflight_tasks: 4,
-                max_files_in_level0: 8,
+                max_inflight_tasks: 3,
+                max_files_in_level0: 7,
                 max_purge_tasks: 32,
             },
-            options.compaction
+            options.storage.compaction,
+        );
+        assert_eq!(
+            RegionManifestConfig {
+                checkpoint_margin: Some(9),
+                gc_duration: Some(Duration::from_secs(7)),
+            },
+            options.storage.manifest,
         );
     }
 

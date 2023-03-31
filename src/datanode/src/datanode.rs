@@ -29,12 +29,23 @@ use crate::server::Services;
 
 pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize(1024);
 
+/// Object storage config
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ObjectStoreConfig {
     File(FileConfig),
     S3(S3Config),
     Oss(OssConfig),
+}
+
+/// Storage engine config
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct StorageConfig {
+    #[serde(flatten)]
+    pub store: ObjectStoreConfig,
+    pub compaction: CompactionConfig,
+    pub manifest: RegionManifestConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Default, Deserialize)]
@@ -107,6 +118,27 @@ impl Default for WalConfig {
     }
 }
 
+/// Options for region manifest
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(default)]
+pub struct RegionManifestConfig {
+    /// Region manifest checkpoint actions margin.
+    /// Manifest service create a checkpoint every [checkpoint_margin] actions.
+    pub checkpoint_margin: Option<u16>,
+    /// Region manifest logs and checkpoints gc task execution duration.
+    #[serde(with = "humantime_serde")]
+    pub gc_duration: Option<Duration>,
+}
+
+impl Default for RegionManifestConfig {
+    fn default() -> Self {
+        Self {
+            checkpoint_margin: Some(10u16),
+            gc_duration: Some(Duration::from_secs(30)),
+        }
+    }
+}
+
 /// Options for table compaction
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(default)]
@@ -132,7 +164,7 @@ impl Default for CompactionConfig {
 impl From<&DatanodeOptions> for SchedulerConfig {
     fn from(value: &DatanodeOptions) -> Self {
         Self {
-            max_inflight_tasks: value.compaction.max_inflight_tasks,
+            max_inflight_tasks: value.storage.compaction.max_inflight_tasks,
         }
     }
 }
@@ -140,8 +172,10 @@ impl From<&DatanodeOptions> for SchedulerConfig {
 impl From<&DatanodeOptions> for StorageEngineConfig {
     fn from(value: &DatanodeOptions) -> Self {
         Self {
-            max_files_in_l0: value.compaction.max_files_in_level0,
-            max_purge_tasks: value.compaction.max_purge_tasks,
+            manifest_checkpoint_margin: value.storage.manifest.checkpoint_margin,
+            manifest_gc_duration: value.storage.manifest.gc_duration,
+            max_files_in_l0: value.storage.compaction.max_files_in_level0,
+            max_purge_tasks: value.storage.compaction.max_purge_tasks,
         }
     }
 }
@@ -192,8 +226,7 @@ pub struct DatanodeOptions {
     pub mysql_runtime_size: usize,
     pub meta_client_options: Option<MetaClientOptions>,
     pub wal: WalConfig,
-    pub storage: ObjectStoreConfig,
-    pub compaction: CompactionConfig,
+    pub storage: StorageConfig,
     pub procedure: Option<ProcedureConfig>,
 }
 
@@ -210,8 +243,7 @@ impl Default for DatanodeOptions {
             mysql_runtime_size: 2,
             meta_client_options: None,
             wal: WalConfig::default(),
-            storage: ObjectStoreConfig::default(),
-            compaction: CompactionConfig::default(),
+            storage: StorageConfig::default(),
             procedure: None,
         }
     }

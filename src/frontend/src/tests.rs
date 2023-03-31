@@ -24,7 +24,9 @@ use client::Client;
 use common_grpc::channel_manager::ChannelManager;
 use common_runtime::Builder as RuntimeBuilder;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
-use datanode::datanode::{DatanodeOptions, FileConfig, ObjectStoreConfig, WalConfig};
+use datanode::datanode::{
+    DatanodeOptions, FileConfig, ObjectStoreConfig, StorageConfig, WalConfig,
+};
 use datanode::instance::Instance as DatanodeInstance;
 use meta_client::client::MetaClientBuilder;
 use meta_client::rpc::Peer;
@@ -98,9 +100,12 @@ fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) 
             dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
             ..Default::default()
         },
-        storage: ObjectStoreConfig::File(FileConfig {
-            data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
-        }),
+        storage: StorageConfig {
+            store: ObjectStoreConfig::File(FileConfig {
+                data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
+            }),
+            ..Default::default()
+        },
         mode: Mode::Standalone,
         ..Default::default()
     };
@@ -185,9 +190,12 @@ async fn create_distributed_datanode(
             dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
             ..Default::default()
         },
-        storage: ObjectStoreConfig::File(FileConfig {
-            data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
-        }),
+        storage: StorageConfig {
+            store: ObjectStoreConfig::File(FileConfig {
+                data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
+            }),
+            ..Default::default()
+        },
         mode: Mode::Distributed,
         ..Default::default()
     };

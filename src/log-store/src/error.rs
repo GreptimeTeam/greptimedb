@@ -15,16 +15,22 @@
 use std::any::Any;
 
 use common_error::prelude::{ErrorExt, Snafu};
+use common_runtime::error::Error as RuntimeError;
 use snafu::{Backtrace, ErrorCompat};
-use tokio::task::JoinError;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Failed to wait for gc task to stop, source: {}", source))]
-    WaitGcTaskStop {
-        source: JoinError,
-        backtrace: Backtrace,
+    #[snafu(display("Failed to start log store gc task, source: {}", source))]
+    StartGcTask {
+        #[snafu(backtrace)]
+        source: RuntimeError,
+    },
+
+    #[snafu(display("Failed to stop log store gc task, source: {}", source))]
+    StopGcTask {
+        #[snafu(backtrace)]
+        source: RuntimeError,
     },
 
     #[snafu(display("Failed to add entry to LogBatch, source: {}", source))]

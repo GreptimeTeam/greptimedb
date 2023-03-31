@@ -17,6 +17,7 @@ use std::io::Error as IoError;
 use std::str::Utf8Error;
 
 use common_error::prelude::*;
+use common_runtime::error::Error as RuntimeError;
 use datatypes::arrow::error::ArrowError;
 use datatypes::prelude::ConcreteDataType;
 use serde_json::error::Error as JsonError;
@@ -423,6 +424,18 @@ pub enum Error {
     #[snafu(display("Cannot schedule request, scheduler's already stopped"))]
     IllegalSchedulerState { backtrace: Backtrace },
 
+    #[snafu(display("Failed to start manifest gc task: {}", source))]
+    StartManifestGcTask {
+        #[snafu(backtrace)]
+        source: RuntimeError,
+    },
+
+    #[snafu(display("Failed to stop manifest gc task: {}", source))]
+    StopManifestGcTask {
+        #[snafu(backtrace)]
+        source: RuntimeError,
+    },
+
     #[snafu(display("Failed to stop scheduler, source: {}", source))]
     StopScheduler {
         source: JoinError,
@@ -524,7 +537,11 @@ impl ErrorExt for Error {
                 StatusCode::Internal
             }
             DeleteSst { .. } => StatusCode::StorageUnavailable,
-            IllegalSchedulerState { .. } => StatusCode::Unexpected,
+
+            StartManifestGcTask { .. }
+            | StopManifestGcTask { .. }
+            | IllegalSchedulerState { .. } => StatusCode::Unexpected,
+
             TtlCalculation { source, .. } => source.status_code(),
         }
     }
