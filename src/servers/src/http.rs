@@ -382,73 +382,41 @@ impl HttpServerBuilder {
     }
 
     pub fn with_sql_handler(&mut self, handler: ServerSqlQueryHandlerRef) -> &mut Self {
-        debug_assert!(
-            self.inner.sql_handler.is_none(),
-            "SQL handler can be with only once!"
-        );
         self.inner.sql_handler.get_or_insert(handler);
         self
     }
 
     pub fn with_grpc_handler(&mut self, handler: ServerGrpcQueryHandlerRef) -> &mut Self {
-        debug_assert!(
-            self.inner.grpc_handler.is_none(),
-            "gRPC handler can be set only once!"
-        );
         self.inner.grpc_handler.get_or_insert(handler);
         self
     }
 
     pub fn with_opentsdb_handler(&mut self, handler: OpentsdbProtocolHandlerRef) -> &mut Self {
-        debug_assert!(
-            self.inner.opentsdb_handler.is_none(),
-            "OpenTSDB handler can be set only once!"
-        );
         self.inner.opentsdb_handler.get_or_insert(handler);
         self
     }
 
     pub fn with_script_handler(&mut self, handler: ScriptHandlerRef) -> &mut Self {
-        debug_assert!(
-            self.inner.script_handler.is_none(),
-            "Script handler can be set only once!"
-        );
         self.inner.script_handler.get_or_insert(handler);
         self
     }
 
     pub fn with_influxdb_handler(&mut self, handler: InfluxdbLineProtocolHandlerRef) -> &mut Self {
-        debug_assert!(
-            self.inner.influxdb_handler.is_none(),
-            "Influxdb line protocol handler can be set only once!"
-        );
         self.inner.influxdb_handler.get_or_insert(handler);
         self
     }
 
     pub fn with_prom_handler(&mut self, handler: PrometheusProtocolHandlerRef) -> &mut Self {
-        debug_assert!(
-            self.inner.prom_handler.is_none(),
-            "Prometheus protocol handler can be set only once!"
-        );
         self.inner.prom_handler.get_or_insert(handler);
         self
     }
 
     pub fn with_user_provider(&mut self, user_provider: UserProviderRef) -> &mut Self {
-        debug_assert!(
-            self.inner.user_provider.is_none(),
-            "User provider can be set only once!"
-        );
         self.inner.user_provider.get_or_insert(user_provider);
         self
     }
 
     pub fn with_metrics_handler(&mut self, handler: MetricsHandler) -> &mut Self {
-        debug_assert!(
-            self.inner.metrics_handler.is_none(),
-            "MetricsHandler can be set only once!"
-        );
         self.inner.metrics_handler.get_or_insert(handler);
         self
     }

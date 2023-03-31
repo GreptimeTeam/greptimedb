@@ -113,7 +113,7 @@ impl MetaSrvInstance {
             .shutdown()
             .await
             .context(error::ShutdownServerSnafu {
-                service: self.http_srv.name(),
+                server: self.http_srv.name(),
             })?;
         Ok(())
     }
