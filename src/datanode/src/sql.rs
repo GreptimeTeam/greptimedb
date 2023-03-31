@@ -17,17 +17,16 @@ use common_error::prelude::BoxedError;
 use common_procedure::ProcedureManagerRef;
 use common_query::Output;
 use common_telemetry::error;
-use query::sql::{describe_table, show_databases, show_tables};
+use query::sql::{show_databases, show_tables};
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
-use sql::statements::describe::DescribeTable;
 use sql::statements::show::{ShowDatabases, ShowTables};
 use table::engine::{EngineContext, TableEngineProcedureRef, TableEngineRef, TableReference};
 use table::requests::*;
 use table::TableRef;
 
 use crate::error::{
-    self, CloseTableEngineSnafu, ExecuteSqlSnafu, GetTableSnafu, Result, TableNotFoundSnafu,
+    CloseTableEngineSnafu, ExecuteSqlSnafu, GetTableSnafu, Result, TableNotFoundSnafu,
 };
 use crate::instance::sql::table_idents_to_full_name;
 
@@ -48,7 +47,6 @@ pub enum SqlRequest {
     FlushTable(FlushTableRequest),
     ShowDatabases(ShowDatabases),
     ShowTables(ShowTables),
-    DescribeTable(DescribeTable),
     CopyTable(CopyTableRequest),
 }
 
@@ -96,19 +94,6 @@ impl SqlHandler {
             SqlRequest::ShowTables(req) => {
                 show_tables(req, self.catalog_manager.clone(), query_ctx.clone())
                     .context(ExecuteSqlSnafu)
-            }
-            SqlRequest::DescribeTable(req) => {
-                let (catalog, schema, table) =
-                    table_idents_to_full_name(req.name(), query_ctx.clone())?;
-                let table = self
-                    .catalog_manager
-                    .table(&catalog, &schema, &table)
-                    .await
-                    .context(error::CatalogSnafu)?
-                    .with_context(|| TableNotFoundSnafu {
-                        table_name: req.name().to_string(),
-                    })?;
-                describe_table(table).context(ExecuteSqlSnafu)
             }
             SqlRequest::FlushTable(req) => self.flush_table(req).await,
         };

@@ -30,6 +30,7 @@ futures = "0.3"
 futures-util.workspace = true
 itertools = "0.10"
 meta-client = { path = "../meta-client" }
+mito = { path = "../mito", features = ["test"] }
 moka = { version = "0.9", features = ["future"] }
 openmetrics-parser = "0.4"
 partition = { path = "../partition" }
@@ -56,3 +57,4 @@ meta-srv = { path = "../meta-srv", features = ["mock"] }
 strfmt = "0.2"
 toml = "0.5"
 tower = "0.4"
+uuid.workspace = true

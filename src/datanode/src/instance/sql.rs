@@ -124,11 +124,6 @@ impl Instance {
                     .execute(SqlRequest::ShowTables(show_tables), query_ctx)
                     .await
             }
-            QueryStatement::Sql(Statement::DescribeTable(describe_table)) => {
-                self.sql_handler
-                    .execute(SqlRequest::DescribeTable(describe_table), query_ctx)
-                    .await
-            }
             QueryStatement::Sql(Statement::ShowCreateTable(_show_create_table)) => {
                 unimplemented!("SHOW CREATE TABLE is unimplemented yet");
             }
@@ -185,6 +180,7 @@ impl Instance {
             | QueryStatement::Sql(Statement::Use(_))
             | QueryStatement::Sql(Statement::Tql(_))
             | QueryStatement::Sql(Statement::Delete(_))
+            | QueryStatement::Sql(Statement::DescribeTable(_))
             | QueryStatement::Promql(_) => unreachable!(),
         }
     }

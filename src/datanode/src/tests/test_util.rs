@@ -207,16 +207,6 @@ pub(crate) async fn setup_test_instance(test_name: &str) -> MockInstance {
     MockInstance::new(test_name).await
 }
 
-pub async fn check_output_stream(output: Output, expected: String) {
-    let recordbatches = match output {
-        Output::Stream(stream) => util::collect_batches(stream).await.unwrap(),
-        Output::RecordBatches(recordbatches) => recordbatches,
-        _ => unreachable!(),
-    };
-    let pretty_print = recordbatches.pretty_print().unwrap();
-    assert_eq!(pretty_print, expected, "{}", pretty_print);
-}
-
 pub async fn check_unordered_output_stream(output: Output, expected: String) {
     let sort_table = |table: String| -> String {
         let replaced = table.replace("\\n", "\n");
