@@ -20,6 +20,7 @@ use common_error::prelude::{Snafu, StatusCode};
 use datafusion::error::DataFusionError;
 use datatypes::prelude::ConcreteDataType;
 use snafu::{Backtrace, ErrorCompat};
+use tokio::task::JoinError;
 
 use crate::DeregisterTableRequest;
 
@@ -120,8 +121,8 @@ pub enum Error {
         source: table::error::Error,
     },
 
-    #[snafu(display("Failed parallel to open table, msg: {}", msg))]
-    ParallelOpenTable { msg: String },
+    #[snafu(display("Failed parallel to open table, source: {}", source))]
+    ParallelOpenTable { source: JoinError },
 
     #[snafu(display("Table not found while opening table, table info: {}", table_info))]
     TableNotFound {

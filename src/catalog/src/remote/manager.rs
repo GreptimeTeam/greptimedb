@@ -273,16 +273,17 @@ impl RemoteCatalogManager {
                 (Ok(join_re), _, remaining) => {
                     joins = remaining;
                     let table_ref = join_re?;
+                    let table_info = table_ref.table_info();
 
-                    let table_name = table_ref.table_info().name.clone();
-                    let table_id = table_ref.table_info().ident.table_id;
+                    let table_name = table_info.name.clone();
+                    let table_id = table_info.ident.table_id;
                     schema.register_table(table_name.clone(), table_ref)?;
                     info!("Registered table {}", &table_name);
                     max_table_id = max_table_id.max(table_id);
                     table_num += 1;
                 }
-                (Err(e), _, _) => {
-                    return Err(ParallelOpenTable { msg: e.to_string() });
+                (Err(source), _, _) => {
+                    return Err(ParallelOpenTable { source });
                 }
             }
         }
