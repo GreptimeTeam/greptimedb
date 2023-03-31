@@ -42,7 +42,7 @@ pub(crate) fn extract_array(columnar_value: &ColumnarValue) -> Result<ArrayRef, 
 }
 
 #[allow(dead_code)]
-pub(crate) fn kahan_sum_inc(inc: f64, sum: f64, mut c: f64) -> (f64, f64) {
+pub(crate) fn compensated_sum_inc(inc: f64, sum: f64, mut c: f64) -> (f64, f64) {
     let t = sum + inc;
     if sum.abs() >= inc.abs() {
         c += (sum - t) + inc;

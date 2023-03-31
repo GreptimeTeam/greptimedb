@@ -24,7 +24,7 @@ use datatypes::arrow::array::Array;
 use datatypes::arrow::compute;
 use datatypes::arrow::datatypes::DataType;
 
-use crate::functions::{extract_array, kahan_sum_inc};
+use crate::functions::{compensated_sum_inc, extract_array};
 use crate::range_array::RangeArray;
 
 /// The average value of all points in the specified interval.
@@ -138,10 +138,10 @@ pub fn stddev_over_time(_: &TimestampMillisecondArray, values: &Float64Array) ->
             count += 1.0;
             let current_value = v.unwrap();
             let delta = current_value - (mean + comp_mean);
-            let (new_mean, new_comp_mean) = kahan_sum_inc(delta / count, mean, comp_mean);
+            let (new_mean, new_comp_mean) = compensated_sum_inc(delta / count, mean, comp_mean);
             mean = new_mean;
             comp_mean = new_comp_mean;
-            let (new_deviations_sum_sq, new_comp_deviations_sum_sq) = kahan_sum_inc(
+            let (new_deviations_sum_sq, new_comp_deviations_sum_sq) = compensated_sum_inc(
                 delta * (current_value - (mean + comp_mean)),
                 deviations_sum_sq,
                 comp_deviations_sum_sq,
@@ -390,11 +390,9 @@ mod test {
 
         // add more assertions
         let ts_array = Arc::new(TimestampMillisecondArray::from_iter(
-            [
-                1000i64, 3000, 5000, 7000, 9000, 11000, 13000, 15000,
-            ]
-            .into_iter()
-            .map(Some),
+            [1000i64, 3000, 5000, 7000, 9000, 11000, 13000, 15000]
+                .into_iter()
+                .map(Some),
         ));
         let values_array = Arc::new(Float64Array::from_iter([
             1.5990505637277868,
