@@ -25,6 +25,7 @@ datafusion.workspace = true
 datafusion-common.workspace = true
 datatypes = { path = "../datatypes" }
 futures.workspace = true
+key-lock = "0.1"
 log-store = { path = "../log-store" }
 object-store = { path = "../object-store" }
 serde = { version = "1.0", features = ["derive"] }

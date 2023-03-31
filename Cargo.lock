@@ -3658,6 +3658,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "key-lock"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "792fd2ded02f283f704cda2c8127e256a012beb48e87c9f09bf459e3db051873"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
 name = "lalrpop"
 version = "0.19.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4274,6 +4283,7 @@ dependencies = [
  "datafusion-common",
  "datatypes",
  "futures",
+ "key-lock",
  "log-store",
  "object-store",
  "serde",

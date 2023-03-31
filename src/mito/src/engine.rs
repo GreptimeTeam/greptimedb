@@ -26,6 +26,7 @@ use common_procedure::{BoxedProcedure, ProcedureManager};
 use common_telemetry::tracing::log::info;
 use common_telemetry::{debug, logging};
 use datatypes::schema::Schema;
+use key_lock::KeyLock;
 use object_store::ObjectStore;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{
@@ -43,8 +44,7 @@ use table::requests::{
     AlterKind, AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest,
 };
 use table::table::{AlterContext, TableRef};
-use table::{error as table_error, Result as TableResult, Table};
-use tokio::sync::Mutex;
+use table::{Result as TableResult, Table};
 
 use crate::config::EngineConfig;
 use crate::engine::procedure::{AlterMitoTable, CreateMitoTable};
@@ -100,7 +100,7 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
             .create_table(ctx, request)
             .await
             .map_err(BoxedError::new)
-            .context(table_error::TableOperationSnafu)
+            .context(TableOperationSnafu)
     }
 
     async fn open_table(
@@ -112,7 +112,7 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
             .open_table(ctx, request)
             .await
             .map_err(BoxedError::new)
-            .context(table_error::TableOperationSnafu)
+            .context(TableOperationSnafu)
     }
 
     async fn alter_table(
@@ -124,7 +124,7 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
             .alter_table(ctx, req)
             .await
             .map_err(BoxedError::new)
-            .context(table_error::TableOperationSnafu)
+            .context(TableOperationSnafu)
     }
 
     fn get_table(
@@ -148,7 +148,7 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
             .drop_table(request)
             .await
             .map_err(BoxedError::new)
-            .context(table_error::TableOperationSnafu)
+            .context(TableOperationSnafu)
     }
 
     async fn close(&self) -> TableResult<()> {
@@ -164,7 +164,7 @@ impl<S: StorageEngine> TableEngineProcedure for MitoEngine<S> {
     ) -> TableResult<BoxedProcedure> {
         validate_create_table_request(&request)
             .map_err(BoxedError::new)
-            .context(table_error::TableOperationSnafu)?;
+            .context(TableOperationSnafu)?;
 
         let procedure = Box::new(
             CreateMitoTable::new(request, self.inner.clone())
@@ -197,7 +197,8 @@ pub(crate) struct MitoEngineInner<S: StorageEngine> {
     storage_engine: S,
     /// Table mutex is used to protect the operations such as creating/opening/closing
     /// a table, to avoid things like opening the same table simultaneously.
-    table_mutex: Mutex<()>,
+    // table_mutex: Mutex<()>,
+    table_mutex: Arc<KeyLock<String>>,
 }
 
 fn build_row_key_desc(
@@ -376,7 +377,8 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         let table_dir = table_dir(catalog_name, schema_name, table_id);
         let mut regions = HashMap::with_capacity(request.region_numbers.len());
 
-        let _lock = self.table_mutex.lock().await;
+        let _lock = self.table_mutex.lock(table_ref.to_string()).await;
+        // let _lock = self.table_mutex.lock().await;
         // Checks again, read lock should be enough since we are guarded by the mutex.
         if let Some(table) = self.get_table(&table_ref) {
             return if request.create_if_not_exists {
@@ -481,7 +483,9 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
         // Acquires the mutex before opening a new table.
         let table = {
-            let _lock = self.table_mutex.lock().await;
+            let _lock = self.table_mutex.lock(table_ref.to_string()).await;
+
+            // let _lock = self.table_mutex.lock().await;
             // Checks again, read lock should be enough since we are guarded by the mutex.
             if let Some(table) = self.get_table(&table_ref) {
                 return Ok(Some(table));
@@ -519,7 +523,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                     .open_region(&engine_ctx, &region_name, &opts)
                     .await
                     .map_err(BoxedError::new)
-                    .context(table_error::TableOperationSnafu)?
+                    .context(TableOperationSnafu)?
                     .with_context(|| RegionNotFoundSnafu {
                         table: format!(
                             "{}.{}.{}",
@@ -528,7 +532,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                         region: *region_number,
                     })
                     .map_err(BoxedError::new)
-                    .context(table_error::TableOperationSnafu)?;
+                    .context(TableOperationSnafu)?;
                 regions.insert(*region_number, region);
             }
 
@@ -641,17 +645,32 @@ impl<S: StorageEngine> MitoEngineInner<S> {
     }
 
     async fn close(&self) -> TableResult<()> {
-        let _lock = self.table_mutex.lock().await;
+        // let _lock = self.table_mutex.lock().await;
 
         let tables = self.tables.write().unwrap().clone();
 
-        futures::future::try_join_all(tables.values().map(|t| t.close()))
-            .await
-            .map_err(BoxedError::new)
-            .context(table_error::TableOperationSnafu)?;
+        futures::future::try_join_all(
+            tables
+                .values()
+                .map(|t| close_table(self.table_mutex.clone(), t.clone())),
+        )
+        .await
+        .map_err(BoxedError::new)
+        .context(TableOperationSnafu)?;
 
         Ok(())
     }
+}
+
+async fn close_table(lock: Arc<KeyLock<String>>, table: TableRef) -> TableResult<()> {
+    let info = table.table_info();
+    let table_ref = TableReference {
+        catalog: &info.catalog_name,
+        schema: &info.schema_name,
+        table: &info.name,
+    };
+    let _lock = lock.lock(table_ref.to_string()).await;
+    table.close().await
 }
 
 impl<S: StorageEngine> MitoEngineInner<S> {
@@ -660,7 +679,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             tables: RwLock::new(HashMap::default()),
             storage_engine,
             object_store,
-            table_mutex: Mutex::new(()),
+            table_mutex: Arc::new(KeyLock::new()),
         }
     }
 }
