@@ -44,7 +44,7 @@ use table::requests::{
     AlterKind, AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest,
 };
 use table::table::{AlterContext, TableRef};
-use table::{Result as TableResult, Table};
+use table::{error as table_error, Result as TableResult, Table};
 
 use crate::config::EngineConfig;
 use crate::engine::procedure::{AlterMitoTable, CreateMitoTable};
@@ -100,7 +100,7 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
             .create_table(ctx, request)
             .await
             .map_err(BoxedError::new)
-            .context(TableOperationSnafu)
+            .context(table_error::TableOperationSnafu)
     }
 
     async fn open_table(
@@ -112,7 +112,7 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
             .open_table(ctx, request)
             .await
             .map_err(BoxedError::new)
-            .context(TableOperationSnafu)
+            .context(table_error::TableOperationSnafu)
     }
 
     async fn alter_table(
@@ -124,7 +124,7 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
             .alter_table(ctx, req)
             .await
             .map_err(BoxedError::new)
-            .context(TableOperationSnafu)
+            .context(table_error::TableOperationSnafu)
     }
 
     fn get_table(
@@ -148,7 +148,7 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
             .drop_table(request)
             .await
             .map_err(BoxedError::new)
-            .context(TableOperationSnafu)
+            .context(table_error::TableOperationSnafu)
     }
 
     async fn close(&self) -> TableResult<()> {
@@ -164,7 +164,7 @@ impl<S: StorageEngine> TableEngineProcedure for MitoEngine<S> {
     ) -> TableResult<BoxedProcedure> {
         validate_create_table_request(&request)
             .map_err(BoxedError::new)
-            .context(TableOperationSnafu)?;
+            .context(table_error::TableOperationSnafu)?;
 
         let procedure = Box::new(
             CreateMitoTable::new(request, self.inner.clone())
@@ -523,7 +523,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                     .open_region(&engine_ctx, &region_name, &opts)
                     .await
                     .map_err(BoxedError::new)
-                    .context(TableOperationSnafu)?
+                    .context(table_error::TableOperationSnafu)?
                     .with_context(|| RegionNotFoundSnafu {
                         table: format!(
                             "{}.{}.{}",
@@ -532,7 +532,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                         region: *region_number,
                     })
                     .map_err(BoxedError::new)
-                    .context(TableOperationSnafu)?;
+                    .context(table_error::TableOperationSnafu)?;
                 regions.insert(*region_number, region);
             }
 
