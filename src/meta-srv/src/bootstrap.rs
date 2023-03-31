@@ -61,7 +61,8 @@ impl MetaSrvInstance {
     }
 
     pub async fn start(&mut self) -> Result<()> {
-        self.meta_srv.start().await;
+        self.meta_srv.try_start().await?;
+
         let (tx, mut rx) = mpsc::channel::<()>(1);
 
         self.signal_sender = Some(tx);
@@ -131,10 +132,7 @@ pub async fn build_meta_srv(opts: &MetaSrvOptions) -> Result<MetaSrv> {
             .context(error::ConnectEtcdSnafu)?;
         (
             EtcdStore::with_etcd_client(etcd_client.clone())?,
-            Some(EtcdElection::with_etcd_client(
-                &opts.server_addr,
-                etcd_client.clone(),
-            )?),
+            Some(EtcdElection::with_etcd_client(&opts.server_addr, etcd_client.clone()).await?),
             Some(EtcdLock::with_etcd_client(etcd_client)?),
         )
     };
@@ -172,7 +170,7 @@ pub async fn build_meta_srv(opts: &MetaSrvOptions) -> Result<MetaSrv> {
 pub async fn make_meta_srv(opts: &MetaSrvOptions) -> Result<MetaSrv> {
     let meta_srv = build_meta_srv(opts).await?;
 
-    meta_srv.start().await;
+    meta_srv.try_start().await?;
 
     Ok(meta_srv)
 }

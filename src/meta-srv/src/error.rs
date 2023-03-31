@@ -274,6 +274,12 @@ pub enum Error {
 
     #[snafu(display("Missing required parameter, param: {:?}", param))]
     MissingRequiredParameter { param: String },
+
+    #[snafu(display("Failed to recover procedure, source: {source}"))]
+    RecoverProcedure {
+        #[snafu(backtrace)]
+        source: common_procedure::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -341,6 +347,7 @@ impl ErrorExt for Error {
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::InvalidCatalogValue { source, .. } => source.status_code(),
             Error::MetaInternal { source } => source.status_code(),
+            Error::RecoverProcedure { source } => source.status_code(),
         }
     }
 }

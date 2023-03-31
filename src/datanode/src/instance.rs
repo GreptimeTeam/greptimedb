@@ -23,6 +23,7 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER
 use common_error::prelude::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_procedure::local::{LocalManager, ManagerConfig};
+use common_procedure::store::state_store::ObjectStateStore;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::info;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
@@ -522,11 +523,15 @@ pub(crate) async fn create_procedure_manager(
     );
 
     let object_store = new_object_store(&procedure_config.store).await?;
+    let state_store = Arc::new(ObjectStateStore::new(object_store));
+
     let manager_config = ManagerConfig {
-        object_store,
         max_retry_times: procedure_config.max_retry_times,
         retry_delay: procedure_config.retry_delay,
     };
 
-    Ok(Some(Arc::new(LocalManager::new(manager_config))))
+    Ok(Some(Arc::new(LocalManager::new(
+        manager_config,
+        state_store,
+    ))))
 }
