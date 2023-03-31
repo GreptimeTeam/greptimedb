@@ -4279,6 +4279,7 @@ dependencies = [
  "common-telemetry",
  "common-test-util",
  "common-time",
+ "dashmap",
  "datafusion",
  "datafusion-common",
  "datatypes",

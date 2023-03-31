@@ -254,10 +254,9 @@ impl<S: StorageEngine> CreateMitoTable<S> {
         {
             let table = Arc::new(MitoTable::new(table_info, self.regions.clone(), manifest));
 
+            let _lock = self.engine_inner.table_mutex.lock(table_ref.to_string());
             self.engine_inner
                 .tables
-                .write()
-                .unwrap()
                 .insert(table_ref.to_string(), table);
             return Ok(Status::Done);
         }
@@ -265,10 +264,10 @@ impl<S: StorageEngine> CreateMitoTable<S> {
         // We need to persist the table manifest and create the table.
         let table = self.write_manifest_and_create_table(&table_dir).await?;
         let table = Arc::new(table);
+
+        let _lock = self.engine_inner.table_mutex.lock(table_ref.to_string());
         self.engine_inner
             .tables
-            .write()
-            .unwrap()
             .insert(table_ref.to_string(), table);
 
         Ok(Status::Done)

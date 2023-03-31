@@ -17,7 +17,7 @@ mod procedure;
 mod tests;
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_catalog::format_full_table_name;
@@ -25,6 +25,7 @@ use common_error::ext::BoxedError;
 use common_procedure::{BoxedProcedure, ProcedureManager};
 use common_telemetry::tracing::log::info;
 use common_telemetry::{debug, logging};
+use dashmap::DashMap;
 use datatypes::schema::Schema;
 use key_lock::KeyLock;
 use object_store::ObjectStore;
@@ -191,7 +192,8 @@ pub(crate) struct MitoEngineInner<S: StorageEngine> {
     /// All tables opened by the engine. Map key is formatted [TableReference].
     ///
     /// Writing to `tables` should also hold the `table_mutex`.
-    tables: RwLock<HashMap<String, Arc<MitoTable<S::Region>>>>,
+    tables: DashMap<String, Arc<MitoTable<S::Region>>>,
+    // tables: RwLock<HashMap<String, Arc<MitoTable<S::Region>>>>,
     object_store: ObjectStore,
     storage_engine: S,
     /// Table mutex is used to protect the operations such as creating/opening/closing
@@ -453,10 +455,8 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
         logging::info!("Mito engine created table: {:?}.", table.table_info());
 
-        self.tables
-            .write()
-            .unwrap()
-            .insert(table_ref.to_string(), table.clone());
+        // already locked
+        self.tables.insert(table_ref.to_string(), table.clone());
 
         Ok(table)
     }
@@ -537,10 +537,8 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
             let table = Arc::new(MitoTable::new(table_info, regions, manifest));
 
-            self.tables
-                .write()
-                .unwrap()
-                .insert(table_ref.to_string(), table.clone());
+            // already locked
+            self.tables.insert(table_ref.to_string(), table.clone());
             Some(table as _)
         };
 
@@ -567,20 +565,15 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
     fn get_table(&self, table_ref: &TableReference) -> Option<TableRef> {
         self.tables
-            .read()
-            .unwrap()
             .get(&table_ref.to_string())
-            .cloned()
-            .map(|table| table as _)
+            .map(|en| en.value().clone() as _)
     }
 
     /// Returns the [MitoTable].
     fn get_mito_table(&self, table_ref: &TableReference) -> Option<Arc<MitoTable<S::Region>>> {
         self.tables
-            .read()
-            .unwrap()
             .get(&table_ref.to_string())
-            .cloned()
+            .map(|en| en.value().clone())
     }
 
     async fn alter_table(&self, _ctx: &EngineContext, req: AlterTableRequest) -> Result<TableRef> {
@@ -619,10 +612,17 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             .context(error::AlterTableSnafu { table_name })?;
 
         if let AlterKind::RenameTable { new_table_name } = &req.alter_kind {
-            let mut tables = self.tables.write().unwrap();
-            tables.remove(&table_ref.to_string());
+            // two step lock
+            // should we lock two table names together first?
+            {
+                let _lock = self.table_mutex.lock(table_ref.to_string()).await;
+                self.tables.remove(&table_ref.to_string());
+            }
             table_ref.table = new_table_name.as_str();
-            tables.insert(table_ref.to_string(), table.clone());
+            {
+                let _lock = self.table_mutex.lock(table_ref.to_string()).await;
+                self.tables.insert(table_ref.to_string(), table.clone());
+            }
         }
         Ok(table)
     }
@@ -635,23 +635,15 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             table: &req.table_name,
         };
         // todo(ruihang): reclaim persisted data
-        Ok(self
-            .tables
-            .write()
-            .unwrap()
-            .remove(&table_reference.to_string())
-            .is_some())
+        let _lock = self.table_mutex.lock(table_reference.to_string()).await;
+        Ok(self.tables.remove(&table_reference.to_string()).is_some())
     }
 
     async fn close(&self) -> TableResult<()> {
-        // let _lock = self.table_mutex.lock().await;
-
-        let tables = self.tables.write().unwrap().clone();
-
         futures::future::try_join_all(
-            tables
-                .values()
-                .map(|t| close_table(self.table_mutex.clone(), t.clone())),
+            self.tables
+                .iter()
+                .map(|item| close_table(self.table_mutex.clone(), item.value().clone())),
         )
         .await
         .map_err(BoxedError::new)
@@ -675,7 +667,7 @@ async fn close_table(lock: Arc<KeyLock<String>>, table: TableRef) -> TableResult
 impl<S: StorageEngine> MitoEngineInner<S> {
     fn new(_config: EngineConfig, storage_engine: S, object_store: ObjectStore) -> Self {
         Self {
-            tables: RwLock::new(HashMap::default()),
+            tables: DashMap::new(),
             storage_engine,
             object_store,
             table_mutex: Arc::new(KeyLock::new()),

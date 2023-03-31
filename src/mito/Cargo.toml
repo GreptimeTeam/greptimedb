@@ -21,6 +21,7 @@ common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
+dashmap = "5.4"
 datafusion.workspace = true
 datafusion-common.workspace = true
 datatypes = { path = "../datatypes" }
