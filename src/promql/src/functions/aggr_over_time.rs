@@ -117,7 +117,36 @@ pub fn present_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -
     }
 }
 
-// TODO(ruihang): support quantile_over_time, stddev_over_time, and stdvar_over_time
+/// the population standard variance of the values in the specified interval.
+#[range_fn(
+    name = "StdvarOverTime",
+    ret = "Float64Array",
+    display_name = "prom_stdvar_over_time"
+)]
+pub fn stdvar_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
+    if values.is_empty() {
+        None
+    } else {
+        let mut count = 0;
+        let mut mean: f64 = 0.0;
+        let mut result: f64 = 0.0;
+        for value in values {
+            let value = value.unwrap();
+            let new_count = count + 1;
+            let delta1 = value - mean;
+            let new_mean = delta1 / new_count as f64 + mean;
+            let delta2 = value - new_mean;
+            let new_result = result + delta1 * delta2;
+
+            count += 1;
+            mean = new_mean;
+            result = new_result;
+        }
+        Some(result / count as f64)
+    }
+}
+
+// TODO(ruihang): support quantile_over_time and stddev_over_time
 
 #[cfg(test)]
 mod test {
@@ -328,6 +357,28 @@ mod test {
                 Some(1.0),
                 Some(1.0),
                 Some(1.0),
+                None,
+            ],
+        );
+    }
+
+    #[test]
+    fn calculate_stdvar_over_time() {
+        let (ts_array, value_array) = build_test_range_arrays();
+        simple_range_udf_runner(
+            StdvarOverTime::scalar_udf(),
+            ts_array,
+            value_array,
+            vec![
+                Some(1417.8479276253622),
+                Some(808.999919713209),
+                Some(0.0),
+                None,
+                None,
+                Some(328.3638826418587),
+                Some(143.5964181766362),
+                Some(130.91830542386285),
+                Some(0.0),
                 None,
             ],
         );
