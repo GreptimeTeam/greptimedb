@@ -2402,6 +2402,7 @@ dependencies = [
  "futures-util",
  "humantime-serde",
  "hyper",
+ "log",
  "log-store",
  "meta-client",
  "meta-srv",
