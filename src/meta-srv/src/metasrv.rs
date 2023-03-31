@@ -21,9 +21,9 @@ use api::v1::meta::Peer;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::{error, info, warn};
 use serde::{Deserialize, Serialize};
+use servers::http::HttpOptions;
 use snafu::ResultExt;
 use tokio::sync::broadcast::error::RecvError;
-use servers::http::HttpOptions;
 
 use crate::cluster::MetaPeerClient;
 use crate::election::{Election, LeaderChangeMessage};
