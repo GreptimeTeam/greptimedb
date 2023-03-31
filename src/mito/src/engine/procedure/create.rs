@@ -43,7 +43,7 @@ pub(crate) struct CreateMitoTable<S: StorageEngine> {
     /// Created regions of the table.
     regions: HashMap<RegionNumber, S::Region>,
     /// Schema of the table.
-    table_schema: Option<SchemaRef>,
+    table_schema: SchemaRef,
 }
 
 #[async_trait]
@@ -81,8 +81,14 @@ impl<S: StorageEngine> CreateMitoTable<S> {
     const TYPE_NAME: &str = "mito::CreateMitoTable";
 
     /// Returns a new [CreateMitoTable].
-    pub(crate) fn new(request: CreateTableRequest, engine_inner: Arc<MitoEngineInner<S>>) -> Self {
-        CreateMitoTable {
+    pub(crate) fn new(
+        request: CreateTableRequest,
+        engine_inner: Arc<MitoEngineInner<S>>,
+    ) -> Result<Self> {
+        let table_schema =
+            Schema::try_from(request.schema.clone()).context(InvalidRawSchemaSnafu)?;
+
+        Ok(CreateMitoTable {
             data: CreateTableData {
                 state: CreateTableState::Prepare,
                 request,
@@ -90,8 +96,8 @@ impl<S: StorageEngine> CreateMitoTable<S> {
             },
             engine_inner,
             regions: HashMap::new(),
-            table_schema: None,
-        }
+            table_schema: Arc::new(table_schema),
+        })
     }
 
     /// Register the loader of this procedure to the `procedure_manager`.
@@ -115,12 +121,14 @@ impl<S: StorageEngine> CreateMitoTable<S> {
     /// Recover the procedure from json.
     fn from_json(json: &str, engine_inner: Arc<MitoEngineInner<S>>) -> Result<Self> {
         let data: CreateTableData = serde_json::from_str(json).context(FromJsonSnafu)?;
+        let table_schema =
+            Schema::try_from(data.request.schema.clone()).context(InvalidRawSchemaSnafu)?;
 
         Ok(CreateMitoTable {
             data,
             engine_inner,
             regions: HashMap::new(),
-            table_schema: None,
+            table_schema: Arc::new(table_schema),
         })
     }
 
@@ -166,19 +174,17 @@ impl<S: StorageEngine> CreateMitoTable<S> {
             ttl,
         };
 
-        let table_schema =
-            Schema::try_from(self.data.request.schema.clone()).context(InvalidRawSchemaSnafu)?;
         let primary_key_indices = &self.data.request.primary_key_indices;
         let (next_column_id, default_cf) = engine::build_column_family(
             engine::INIT_COLUMN_ID,
             &self.data.request.table_name,
-            &table_schema,
+            &self.table_schema,
             primary_key_indices,
         )?;
         let (next_column_id, row_key) = engine::build_row_key_desc(
             next_column_id,
             &self.data.request.table_name,
-            &table_schema,
+            &self.table_schema,
             primary_key_indices,
         )?;
         self.data.next_column_id = Some(next_column_id);
@@ -228,7 +234,6 @@ impl<S: StorageEngine> CreateMitoTable<S> {
 
         // All regions are created, moves to the next step.
         self.data.state = CreateTableState::WriteTableManifest;
-        self.table_schema = Some(Arc::new(table_schema));
 
         Ok(Status::executing(true))
     }
@@ -276,10 +281,9 @@ impl<S: StorageEngine> CreateMitoTable<S> {
     ) -> Result<MitoTable<S::Region>> {
         // Safety: We are in `WriteTableManifest` state.
         let next_column_id = self.data.next_column_id.unwrap();
-        let table_schema = self.table_schema.clone().unwrap();
 
         let table_meta = TableMetaBuilder::default()
-            .schema(table_schema)
+            .schema(self.table_schema.clone())
             .engine(engine::MITO_ENGINE)
             .next_column_id(next_column_id)
             .primary_key_indices(self.data.request.primary_key_indices.clone())

@@ -74,6 +74,7 @@ pub struct Instance {
     pub(crate) script_executor: ScriptExecutor,
     pub(crate) table_id_provider: Option<TableIdProviderRef>,
     pub(crate) heartbeat_task: Option<HeartbeatTask>,
+    procedure_manager: Option<ProcedureManagerRef>,
 }
 
 pub type InstanceRef = Arc<Instance>;
@@ -183,6 +184,7 @@ impl Instance {
         };
 
         let procedure_manager = create_procedure_manager(&opts.procedure).await?;
+        // Register all procedures.
         if let Some(procedure_manager) = &procedure_manager {
             table_engine.register_procedure_loaders(&**procedure_manager);
             table_procedure::register_procedure_loaders(
@@ -191,12 +193,6 @@ impl Instance {
                 table_engine.clone(),
                 &**procedure_manager,
             );
-
-            // Recover procedures.
-            procedure_manager
-                .recover()
-                .await
-                .context(RecoverProcedureSnafu)?;
         }
 
         Ok(Self {
@@ -205,12 +201,13 @@ impl Instance {
                 table_engine.clone(),
                 catalog_manager.clone(),
                 table_engine,
-                procedure_manager,
+                procedure_manager.clone(),
             ),
             catalog_manager,
             script_executor,
             heartbeat_task,
             table_id_provider,
+            procedure_manager,
         })
     }
 
@@ -221,6 +218,15 @@ impl Instance {
             .context(NewCatalogSnafu)?;
         if let Some(task) = &self.heartbeat_task {
             task.start().await?;
+        }
+
+        // Recover procedures after the catalog manager is started, so we can
+        // ensure we can access all tables from the catalog manager.
+        if let Some(procedure_manager) = &self.procedure_manager {
+            procedure_manager
+                .recover()
+                .await
+                .context(RecoverProcedureSnafu)?;
         }
         Ok(())
     }

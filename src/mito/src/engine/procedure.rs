@@ -12,10 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod alter;
 mod create;
 
 use std::sync::Arc;
 
+pub(crate) use alter::AlterMitoTable;
 use common_procedure::ProcedureManager;
 pub(crate) use create::CreateMitoTable;
 use store_api::storage::StorageEngine;
@@ -31,7 +33,8 @@ pub(crate) fn register_procedure_loaders<S: StorageEngine>(
     procedure_manager: &dyn ProcedureManager,
 ) {
     // The procedure names are expected to be unique, so we just panic on error.
-    CreateMitoTable::register_loader(engine_inner, procedure_manager);
+    CreateMitoTable::register_loader(engine_inner.clone(), procedure_manager);
+    AlterMitoTable::register_loader(engine_inner, procedure_manager);
 }
 
 #[cfg(test)]
