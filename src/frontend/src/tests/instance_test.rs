@@ -20,16 +20,21 @@ use common_query::Output;
 use common_recordbatch::util;
 use common_telemetry::logging;
 use datatypes::vectors::{Int64Vector, StringVector, UInt64Vector, VectorRef};
+use rstest::rstest;
+use rstest_reuse::apply;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContext;
 
 use crate::error::Error;
-use crate::tests::test_util::check_output_stream;
-use crate::tests::{create_standalone_instance, MockStandaloneInstance};
+use crate::instance::Instance;
+use crate::tests::test_util::{
+    both_instances_cases, check_output_stream, distributed, standalone, standalone_instance_case,
+    MockInstance,
+};
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_create_database_and_insert_query() {
-    let instance = create_standalone_instance("create_database_and_insert_query").await;
+#[apply(both_instances_cases)]
+async fn test_create_database_and_insert_query(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
 
     let output = execute_sql(&instance, "create database test").await;
     assert!(matches!(output, Output::AffectedRows(1)));
@@ -74,10 +79,9 @@ async fn test_create_database_and_insert_query() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_issue477_same_table_name_in_different_databases() {
-    let instance =
-        create_standalone_instance("test_issue477_same_table_name_in_different_databases").await;
+#[apply(both_instances_cases)]
+async fn test_issue477_same_table_name_in_different_databases(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
 
     // Create database a and b
     let output = execute_sql(&instance, "create database a").await;
@@ -144,7 +148,7 @@ async fn test_issue477_same_table_name_in_different_databases() {
     .await;
 }
 
-async fn assert_query_result(instance: &MockStandaloneInstance, sql: &str, ts: i64, host: &str) {
+async fn assert_query_result(instance: &Arc<Instance>, sql: &str, ts: i64, host: &str) {
     let query_output = execute_sql(instance, sql).await;
     match query_output {
         Output::Stream(s) => {
@@ -164,9 +168,9 @@ async fn assert_query_result(instance: &MockStandaloneInstance, sql: &str, ts: i
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_execute_insert() {
-    let instance = create_standalone_instance("test_execute_insert").await;
+#[apply(both_instances_cases)]
+async fn test_execute_insert(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
 
     // create table
     execute_sql(
@@ -186,9 +190,9 @@ async fn test_execute_insert() {
     assert!(matches!(output, Output::AffectedRows(2)));
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_execute_insert_by_select() {
-    let instance = create_standalone_instance("test_execute_insert_by_select").await;
+#[apply(both_instances_cases)]
+async fn test_execute_insert_by_select(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
 
     // create table
     execute_sql(
@@ -247,9 +251,9 @@ async fn test_execute_insert_by_select() {
     check_output_stream(output, expected).await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_execute_insert_query_with_i64_timestamp() {
-    let instance = create_standalone_instance("insert_query_i64_timestamp").await;
+#[apply(both_instances_cases)]
+async fn test_execute_insert_query_with_i64_timestamp(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
 
     execute_sql(
         &instance,
@@ -299,9 +303,9 @@ async fn test_execute_insert_query_with_i64_timestamp() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_execute_query() {
-    let instance = create_standalone_instance("execute_query").await;
+#[apply(standalone_instance_case)]
+async fn test_execute_query(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
 
     let output = execute_sql(&instance, "select sum(number) from numbers limit 20").await;
     match output {
@@ -319,9 +323,11 @@ async fn test_execute_query() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_execute_show_databases_tables() {
-    let instance = create_standalone_instance("execute_show_databases_tables").await;
+#[apply(both_instances_cases)]
+async fn test_execute_show_databases_tables(instance: Arc<dyn MockInstance>) {
+    let is_distributed_mode = instance.is_distributed_mode();
+
+    let instance = instance.frontend();
 
     let output = execute_sql(&instance, "show databases").await;
     match output {
@@ -353,12 +359,13 @@ async fn test_execute_show_databases_tables() {
         _ => unreachable!(),
     }
 
+    let expected_tables = if is_distributed_mode { 0 } else { 2 };
     let output = execute_sql(&instance, "show tables").await;
     match output {
         Output::RecordBatches(databases) => {
             let databases = databases.take();
             assert_eq!(1, databases[0].num_columns());
-            assert_eq!(databases[0].column(0).len(), 2);
+            assert_eq!(databases[0].column(0).len(), expected_tables);
         }
         _ => unreachable!(),
     }
@@ -373,7 +380,7 @@ async fn test_execute_show_databases_tables() {
         Output::RecordBatches(databases) => {
             let databases = databases.take();
             assert_eq!(1, databases[0].num_columns());
-            assert_eq!(databases[0].column(0).len(), 3);
+            assert_eq!(databases[0].column(0).len(), expected_tables + 1);
         }
         _ => unreachable!(),
     }
@@ -395,9 +402,9 @@ async fn test_execute_show_databases_tables() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-pub async fn test_execute_create() {
-    let instance = create_standalone_instance("execute_create").await;
+#[apply(both_instances_cases)]
+async fn test_execute_create(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
 
     let output = execute_sql(
         &instance,
@@ -414,9 +421,9 @@ pub async fn test_execute_create() {
     assert!(matches!(output, Output::AffectedRows(0)));
 }
 
-#[tokio::test]
-async fn test_rename_table() {
-    let instance = create_standalone_instance("test_rename_table_local").await;
+#[apply(standalone_instance_case)]
+async fn test_rename_table(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
 
     let output = execute_sql(&instance, "create database db").await;
     assert!(matches!(output, Output::AffectedRows(1)));
@@ -470,9 +477,10 @@ async fn test_rename_table() {
         .expect_err("no table found in expect");
 }
 
-#[tokio::test]
-async fn test_create_table_after_rename_table() {
-    let instance = create_standalone_instance("test_rename_table_local").await;
+// should apply to both instances. tracked in #723
+#[apply(standalone_instance_case)]
+async fn test_create_table_after_rename_table(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
 
     let output = execute_sql(&instance, "create database db").await;
     assert!(matches!(output, Output::AffectedRows(1)));
@@ -520,9 +528,9 @@ async fn test_create_table_after_rename_table() {
     check_output_stream(output, expect).await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_alter_table() {
-    let instance = create_standalone_instance("test_alter_table").await;
+#[apply(both_instances_cases)]
+async fn test_alter_table(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
 
     // create table
     execute_sql(
@@ -608,11 +616,10 @@ async fn test_alter_table() {
     check_output_stream(output, expected).await;
 }
 
-async fn test_insert_with_default_value_for_type(type_name: &str) {
-    let instance = create_standalone_instance("execute_create").await;
-
+async fn test_insert_with_default_value_for_type(instance: Arc<Instance>, type_name: &str) {
+    let table_name = format!("test_table_with_{type_name}");
     let create_sql = format!(
-        r#"create table test_table(
+        r#"create table {table_name}(
         host string,
         ts {type_name} DEFAULT CURRENT_TIMESTAMP,
         cpu double default 0,
@@ -626,7 +633,7 @@ async fn test_insert_with_default_value_for_type(type_name: &str) {
     // Insert with ts.
     let output = execute_sql(
         &instance,
-        "insert into test_table(host, cpu, ts) values ('host1', 1.1, 1000)",
+        &format!("insert into {table_name}(host, cpu, ts) values ('host1', 1.1, 1000)"),
     )
     .await;
     assert!(matches!(output, Output::AffectedRows(1)));
@@ -634,12 +641,12 @@ async fn test_insert_with_default_value_for_type(type_name: &str) {
     // Insert without ts, so it should be filled by default value.
     let output = execute_sql(
         &instance,
-        "insert into test_table(host, cpu) values ('host2', 2.2)",
+        &format!("insert into {table_name}(host, cpu) values ('host2', 2.2)"),
     )
     .await;
     assert!(matches!(output, Output::AffectedRows(1)));
 
-    let output = execute_sql(&instance, "select host, cpu from test_table").await;
+    let output = execute_sql(&instance, &format!("select host, cpu from {table_name}")).await;
     let expected = "\
 +-------+-----+
 | host  | cpu |
@@ -652,15 +659,17 @@ async fn test_insert_with_default_value_for_type(type_name: &str) {
     check_output_stream(output, expected).await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_insert_with_default_value() {
-    test_insert_with_default_value_for_type("timestamp").await;
-    test_insert_with_default_value_for_type("bigint").await;
+// should apply to both instances. tracked in #1293
+#[apply(standalone_instance_case)]
+async fn test_insert_with_default_value(instance: Arc<dyn MockInstance>) {
+    test_insert_with_default_value_for_type(instance.frontend(), "timestamp").await;
+    test_insert_with_default_value_for_type(instance.frontend(), "bigint").await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_use_database() {
-    let instance = create_standalone_instance("test_use_database").await;
+// should apply to both instance. tracked in #1294
+#[apply(standalone_instance_case)]
+async fn test_use_database(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
 
     let output = execute_sql(&instance, "create database db1").await;
     assert!(matches!(output, Output::AffectedRows(1)));
@@ -717,9 +726,10 @@ async fn test_use_database() {
     check_output_stream(output, expected).await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_delete() {
-    let instance = create_standalone_instance("test_delete").await;
+// should apply to both instances. tracked in #755
+#[apply(standalone_instance_case)]
+async fn test_delete(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
 
     let output = execute_sql(
         &instance,
@@ -766,12 +776,11 @@ async fn test_delete() {
     check_output_stream(output, expect).await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_execute_copy_to_s3() {
-    logging::init_default_ut_logging();
+#[apply(standalone_instance_case)]
+async fn test_execute_copy_to_s3(instance: Arc<dyn MockInstance>) {
     if let Ok(bucket) = env::var("GT_S3_BUCKET") {
         if !bucket.is_empty() {
-            let instance = create_standalone_instance("test_execute_copy_to_s3").await;
+            let instance = instance.frontend();
 
             // setups
             execute_sql(
@@ -805,12 +814,12 @@ async fn test_execute_copy_to_s3() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_execute_copy_from_s3() {
+#[apply(standalone_instance_case)]
+async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
     logging::init_default_ut_logging();
     if let Ok(bucket) = env::var("GT_S3_BUCKET") {
         if !bucket.is_empty() {
-            let instance = create_standalone_instance("test_execute_copy_from_s3").await;
+            let instance = instance.frontend();
 
             // setups
             execute_sql(
@@ -905,26 +914,26 @@ async fn test_execute_copy_from_s3() {
     }
 }
 
-async fn execute_sql(instance: &MockStandaloneInstance, sql: &str) -> Output {
+async fn execute_sql(instance: &Arc<Instance>, sql: &str) -> Output {
     execute_sql_in_db(instance, sql, DEFAULT_SCHEMA_NAME).await
 }
 
 async fn try_execute_sql(
-    instance: &MockStandaloneInstance,
+    instance: &Arc<Instance>,
     sql: &str,
 ) -> Result<Output, crate::error::Error> {
     try_execute_sql_in_db(instance, sql, DEFAULT_SCHEMA_NAME).await
 }
 
 async fn try_execute_sql_in_db(
-    instance: &MockStandaloneInstance,
+    instance: &Arc<Instance>,
     sql: &str,
     db: &str,
 ) -> Result<Output, crate::error::Error> {
     let query_ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, db));
-    instance.instance.do_query(sql, query_ctx).await.remove(0)
+    instance.do_query(sql, query_ctx).await.remove(0)
 }
 
-async fn execute_sql_in_db(instance: &MockStandaloneInstance, sql: &str, db: &str) -> Output {
+async fn execute_sql_in_db(instance: &Arc<Instance>, sql: &str, db: &str) -> Output {
     try_execute_sql_in_db(instance, sql, db).await.unwrap()
 }

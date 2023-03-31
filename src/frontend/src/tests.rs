@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod instance_test;
+mod promql_test;
 mod test_util;
 
 use std::collections::HashMap;
