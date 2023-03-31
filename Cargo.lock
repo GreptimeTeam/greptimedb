@@ -8267,7 +8267,7 @@ dependencies = [
  "query",
  "session",
  "snafu",
- "substrait 0.4.2",
+ "substrait 0.5.4",
  "table",
  "tokio",
 ]
