@@ -327,7 +327,8 @@ pub(crate) async fn new_object_store(store_config: &ObjectStoreConfig) -> Result
             .layer(MetricsLayer)
             .layer(
                 LoggingLayer::default()
-                    // Print expected error only in DEBUG level.
+                    // Print the expected error only in DEBUG level.
+                    // See https://docs.rs/opendal/latest/opendal/layers/struct.LoggingLayer.html#method.with_error_level
                     .with_error_level(Some(log::Level::Debug)),
             )
             .layer(TracingLayer)
