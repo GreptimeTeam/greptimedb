@@ -24,7 +24,7 @@ use datatypes::arrow::array::Array;
 use datatypes::arrow::compute;
 use datatypes::arrow::datatypes::DataType;
 
-use crate::functions::extract_array;
+use crate::functions::{extract_array, kahan_sum_inc};
 use crate::range_array::RangeArray;
 
 /// The average value of all points in the specified interval.
@@ -129,17 +129,27 @@ pub fn stddev_over_time(_: &TimestampMillisecondArray, values: &Float64Array) ->
     if values.is_empty() {
         None
     } else {
-        let count = values.len();
-        let sum = compute::sum(values);
-        let sum_sq = compute::sum(
-            &values
-                .into_iter()
-                .map(|val| val.map(|v| v * v))
-                .collect::<Float64Array>(),
-        );
-        let mean = sum.map(|v| v / count as f64).unwrap();
-        let variance = sum_sq.map(|v| v / count as f64 - mean * mean);
-        variance.map(|v| v.sqrt())
+        let mut count = 0.0;
+        let mut mean = 0.0;
+        let mut comp_mean = 0.0;
+        let mut deviations_sum_sq = 0.0;
+        let mut comp_deviations_sum_sq = 0.0;
+        for v in values {
+            count += 1.0;
+            let current_value = v.unwrap();
+            let delta = current_value - (mean + comp_mean);
+            let (new_mean, new_comp_mean) = kahan_sum_inc(delta / count, mean, comp_mean);
+            mean = new_mean;
+            comp_mean = new_comp_mean;
+            let (new_deviations_sum_sq, new_comp_deviations_sum_sq) = kahan_sum_inc(
+                delta * (current_value - (mean + comp_mean)),
+                deviations_sum_sq,
+                comp_deviations_sum_sq,
+            );
+            deviations_sum_sq = new_deviations_sum_sq;
+            comp_deviations_sum_sq = new_comp_deviations_sum_sq;
+        }
+        Some(((deviations_sum_sq + comp_deviations_sum_sq) / count).sqrt())
     }
 }
 
@@ -365,17 +375,43 @@ mod test {
             ts_array,
             value_array,
             vec![
-                Some(37.65432149999999),
-                Some(28.44292389528912),
+                Some(37.6543215),
+                Some(28.442923895289123),
                 Some(0.0),
                 None,
                 None,
                 Some(18.12081352042062),
                 Some(11.983172291869804),
-                Some(11.441953741554038),
+                Some(11.441953741554055),
                 Some(0.0),
                 None,
             ],
+        );
+
+        // add more assertions
+        let ts_array = Arc::new(TimestampMillisecondArray::from_iter(
+            [
+                1000i64, 3000, 5000, 7000, 9000, 11000, 13000, 15000,
+            ]
+            .into_iter()
+            .map(Some),
+        ));
+        let values_array = Arc::new(Float64Array::from_iter([
+            1.5990505637277868,
+            1.5990505637277868,
+            1.5990505637277868,
+            0.0,
+            8.0,
+            8.0,
+            2.0,
+            3.0,
+        ]));
+        let ranges = [(0, 3), (3, 5)];
+        simple_range_udf_runner(
+            StddevOverTime::scalar_udf(),
+            RangeArray::from_ranges(ts_array, ranges).unwrap(),
+            RangeArray::from_ranges(values_array, ranges).unwrap(),
+            vec![Some(0.0), Some(3.249615361854384)],
         );
     }
 }
