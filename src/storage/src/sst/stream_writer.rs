@@ -52,6 +52,8 @@ impl Write for Buffer {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
+        // This flush implementation is intentionally left to blank.
+        // The actual flush is in `BufferedWriter::try_flush`
         Ok(())
     }
 }

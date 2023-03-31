@@ -102,7 +102,7 @@ impl<'a> ParquetWriter<'a> {
             self.object_store.clone(),
             &schema,
             Some(writer_props),
-            4 * 1024 * 1024,
+            4 * 1024 * 1024, // this value is optimal for multipart upload.
         )
         .await?;
         let mut rows_written = 0;

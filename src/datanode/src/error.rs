@@ -508,6 +508,7 @@ pub enum Error {
         #[snafu(backtrace)]
         source: BoxedError,
     },
+
     #[snafu(display("Failed to copy table to parquet file, source: {}", source))]
     WriteParquet {
         #[snafu(backtrace)]
