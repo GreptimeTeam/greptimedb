@@ -120,6 +120,7 @@ pub fn present_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -
 // TODO(ruihang): support quantile_over_time, and stdvar_over_time
 
 /// the population standard deviation of the values in the specified interval.
+/// Prometheus's implementation: https://github.com/prometheus/prometheus/blob/f55ab2217984770aa1eecd0f2d5f54580029b1c0/promql/functions.go#L556-L569
 #[range_fn(
     name = "StddevOverTime",
     ret = "Float64Array",
