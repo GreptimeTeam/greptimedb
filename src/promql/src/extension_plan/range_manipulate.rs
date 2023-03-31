@@ -33,6 +33,7 @@ use datafusion::physical_plan::{
     DisplayFormatType, ExecutionPlan, Partitioning, RecordBatchStream, SendableRecordBatchStream,
     Statistics,
 };
+use datafusion::sql::TableReference;
 use futures::{Stream, StreamExt};
 
 use crate::extension_plan::Millisecond;
@@ -42,6 +43,11 @@ use crate::range_array::RangeArray;
 ///
 /// This plan will "fold" time index and value columns into [RangeArray]s, and truncate
 /// other columns to the same length with the "folded" [RangeArray] column.
+///
+/// To pass runtime information to the execution plan (or the range function), This plan
+/// will add those extra columns:
+/// - timestamp range with type [RangeArray], which is the folded timestamp column.
+/// - end of current range with the same type as the timestamp column. (todo)
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct RangeManipulate {
     start: Millisecond,
@@ -79,12 +85,16 @@ impl RangeManipulate {
         })
     }
 
-    pub fn range_timestamp_name(&self) -> String {
-        Self::build_timestamp_range_name(&self.time_index)
-    }
-
     pub fn build_timestamp_range_name(time_index: &str) -> String {
         format!("{time_index}_range")
+    }
+
+    pub fn internal_range_end_col_name() -> String {
+        "__internal_range_end".to_string()
+    }
+
+    fn range_timestamp_name(&self) -> String {
+        Self::build_timestamp_range_name(&self.time_index)
     }
 
     fn calculate_output_schema(
@@ -96,10 +106,10 @@ impl RangeManipulate {
 
         // process time index column
         // the raw timestamp field is preserved. And a new timestamp_range field is appended to the last.
-        let Some(index) = input_schema.index_of_column_by_name(None, time_index)? else {
-            return Err(datafusion::common::field_not_found(None, time_index, input_schema.as_ref()))
+        let Some(ts_col_index) = input_schema.index_of_column_by_name(None, time_index)? else {
+            return Err(datafusion::common::field_not_found(None::<TableReference>, time_index, input_schema.as_ref()))
         };
-        let timestamp_range_field = columns[index]
+        let timestamp_range_field = columns[ts_col_index]
             .field()
             .clone()
             .with_name(Self::build_timestamp_range_name(time_index));
@@ -110,7 +120,7 @@ impl RangeManipulate {
         // process value columns
         for name in value_columns {
             let Some(index) = input_schema.index_of_column_by_name(None, name)? else {
-                return Err(datafusion::common::field_not_found(None, name, input_schema.as_ref()))
+                return Err(datafusion::common::field_not_found(None::<TableReference>, name, input_schema.as_ref()))
             };
             columns[index] = DFField::from(RangeArray::convert_field(columns[index].field()));
         }

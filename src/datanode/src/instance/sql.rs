@@ -53,10 +53,6 @@ impl Instance {
                         .await?;
                 self.sql_handler.insert(request).await
             }
-            QueryStatement::Sql(Statement::Delete(delete)) => {
-                let request = SqlRequest::Delete(*delete);
-                self.sql_handler.execute(request, query_ctx).await
-            }
             QueryStatement::Sql(Statement::CreateDatabase(create_database)) => {
                 let request = CreateDatabaseRequest {
                     db_name: create_database.name.to_string(),
@@ -93,6 +89,9 @@ impl Instance {
                 self.sql_handler
                     .execute(SqlRequest::CreateTable(request), query_ctx)
                     .await
+            }
+            QueryStatement::Sql(Statement::CreateExternalTable(_create_external_table)) => {
+                unimplemented!()
             }
             QueryStatement::Sql(Statement::Alter(alter_table)) => {
                 let name = alter_table.table_name().clone();
@@ -185,6 +184,7 @@ impl Instance {
             | QueryStatement::Sql(Statement::Explain(_))
             | QueryStatement::Sql(Statement::Use(_))
             | QueryStatement::Sql(Statement::Tql(_))
+            | QueryStatement::Sql(Statement::Delete(_))
             | QueryStatement::Promql(_) => unreachable!(),
         }
     }

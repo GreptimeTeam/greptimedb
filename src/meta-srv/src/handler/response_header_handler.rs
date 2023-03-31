@@ -65,6 +65,7 @@ mod tests {
             catalog: None,
             schema: None,
             table: None,
+            is_infancy: false,
         };
 
         let req = HeartbeatRequest {

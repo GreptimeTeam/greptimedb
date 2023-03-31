@@ -418,7 +418,7 @@ pub enum Error {
     DecodeParquetTimeRange { msg: String, backtrace: Backtrace },
 
     #[snafu(display("Scheduler rate limited, msg: {}", msg))]
-    RateLimited { msg: String, backtrace: Backtrace },
+    RateLimited { msg: String },
 
     #[snafu(display("Cannot schedule request, scheduler's already stopped"))]
     IllegalSchedulerState { backtrace: Backtrace },
@@ -439,6 +439,15 @@ pub enum Error {
     TtlCalculation {
         #[snafu(backtrace)]
         source: common_time::error::Error,
+    },
+
+    #[snafu(display("Failed to create a checkpoint: {}", msg))]
+    ManifestCheckpoint { msg: String, backtrace: Backtrace },
+
+    #[snafu(display("The compaction task is cancelled, region_id: {}", region_id))]
+    CompactTaskCancel {
+        region_id: RegionId,
+        source: tokio::sync::oneshot::error::RecvError,
     },
 }
 
@@ -484,6 +493,7 @@ impl ErrorExt for Error {
             | BatchCorrupted { .. }
             | DecodeArrow { .. }
             | EncodeArrow { .. }
+            | ManifestCheckpoint { .. }
             | ParseSchema { .. } => StatusCode::Unexpected,
 
             WriteParquet { .. }
@@ -510,8 +520,9 @@ impl ErrorExt for Error {
             ConvertChunk { source, .. } => source.status_code(),
             MarkWalObsolete { source, .. } => source.status_code(),
             DecodeParquetTimeRange { .. } => StatusCode::Unexpected,
-            RateLimited { .. } => StatusCode::Internal,
-            StopScheduler { .. } => StatusCode::Internal,
+            RateLimited { .. } | StopScheduler { .. } | CompactTaskCancel { .. } => {
+                StatusCode::Internal
+            }
             DeleteSst { .. } => StatusCode::StorageUnavailable,
             IllegalSchedulerState { .. } => StatusCode::Unexpected,
             TtlCalculation { source, .. } => source.status_code(),

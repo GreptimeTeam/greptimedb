@@ -21,73 +21,65 @@ use common_test_util::temp_dir::create_temp_dir;
 use object_store::cache_policy::LruCacheLayer;
 use object_store::services::{Fs, S3};
 use object_store::test_util::TempFolder;
-use object_store::{util, Object, ObjectLister, ObjectMode, ObjectStore, ObjectStoreBuilder};
+use object_store::{util, ObjectStore, ObjectStoreBuilder};
 use opendal::services::Oss;
-use opendal::Operator;
+use opendal::{EntryMode, Operator, OperatorBuilder};
 
 async fn test_object_crud(store: &ObjectStore) -> Result<()> {
     // Create object handler.
-    let object = store.object("test_file");
-
     // Write data info object;
-    assert!(object.write("Hello, World!").await.is_ok());
+    let file_name = "test_file";
+    store.write(file_name, "Hello, World!").await?;
 
     // Read data from object;
-    let bs = object.read().await?;
+    let bs = store.read(file_name).await?;
     assert_eq!("Hello, World!", String::from_utf8(bs)?);
 
     // Read range from object;
-    let bs = object.range_read(1..=11).await?;
+    let bs = store.range_read(file_name, 1..=11).await?;
     assert_eq!("ello, World", String::from_utf8(bs)?);
 
     // Get object's Metadata
-    let meta = object.metadata().await?;
-    assert_eq!("test_file", object.path());
-    assert_eq!(ObjectMode::FILE, meta.mode());
+    let meta = store.stat(file_name).await?;
+    assert_eq!(EntryMode::FILE, meta.mode());
     assert_eq!(13, meta.content_length());
 
     // Delete object.
-    assert!(object.delete().await.is_ok());
-    assert!(object.read().await.is_err());
-
+    store.delete(file_name).await.unwrap();
+    store.read(file_name).await.unwrap_err();
     Ok(())
 }
 
 async fn test_object_list(store: &ObjectStore) -> Result<()> {
     // Create  some object handlers.
-    let o1 = store.object("test_file1");
-    let o2 = store.object("test_file2");
-    let o3 = store.object("test_file3");
-
     // Write something
-    assert!(o1.write("Hello, object1!").await.is_ok());
-    assert!(o2.write("Hello, object2!").await.is_ok());
-    assert!(o3.write("Hello, object3!").await.is_ok());
+    let p1 = "test_file1";
+    let p2 = "test_file2";
+    let p3 = "test_file3";
+    store.write(p1, "Hello, object1!").await?;
+    store.write(p2, "Hello, object2!").await?;
+    store.write(p3, "Hello, object3!").await?;
 
     // List objects
-    let o: Object = store.object("/");
-    let obs: ObjectLister = o.list().await?;
-    let objects = util::collect(obs).await?;
-    assert_eq!(3, objects.len());
+    let lister = store.list("/").await?;
+    let entries = util::collect(lister).await?;
+    assert_eq!(3, entries.len());
 
-    // Delete o1, o3
-    assert!(o1.delete().await.is_ok());
-    assert!(o3.delete().await.is_ok());
+    store.delete(p1).await?;
+    store.delete(p3).await?;
 
-    // List obejcts again
-    let objects = util::collect(o.list().await?).await?;
-    assert_eq!(1, objects.len());
-
+    // List objects again
     // Only o2 is exists
-    let o2 = &objects[0].clone();
-    let bs = o2.read().await?;
-    assert_eq!("Hello, object2!", String::from_utf8(bs)?);
-    // Delete o2
-    assert!(o2.delete().await.is_ok());
+    let entries = util::collect(store.list("/").await?).await?;
+    assert_eq!(1, entries.len());
+    assert_eq!(p2, entries.get(0).unwrap().path());
 
-    let objects = util::collect(o.list().await?).await?;
-    assert!(objects.is_empty());
+    let content = store.read(p2).await?;
+    assert_eq!("Hello, object2!", String::from_utf8(content)?);
 
+    store.delete(p2).await?;
+    let entries = util::collect(store.list("/").await?).await?;
+    assert!(entries.is_empty());
     Ok(())
 }
 
@@ -95,13 +87,12 @@ async fn test_object_list(store: &ObjectStore) -> Result<()> {
 async fn test_fs_backend() -> Result<()> {
     let data_dir = create_temp_dir("test_fs_backend");
     let tmp_dir = create_temp_dir("test_fs_backend");
-    let store = ObjectStore::new(
-        Fs::default()
-            .root(&data_dir.path().to_string_lossy())
-            .atomic_write_dir(&tmp_dir.path().to_string_lossy())
-            .build()?,
-    )
-    .finish();
+    let mut builder = Fs::default();
+    builder
+        .root(&data_dir.path().to_string_lossy())
+        .atomic_write_dir(&tmp_dir.path().to_string_lossy());
+
+    let store = ObjectStore::new(builder).unwrap().finish();
 
     test_object_crud(&store).await?;
     test_object_list(&store).await?;
@@ -118,14 +109,14 @@ async fn test_s3_backend() -> Result<()> {
 
             let root = uuid::Uuid::new_v4().to_string();
 
-            let accessor = S3::default()
+            let mut builder = S3::default();
+            builder
                 .root(&root)
                 .access_key_id(&env::var("GT_S3_ACCESS_KEY_ID")?)
                 .secret_access_key(&env::var("GT_S3_ACCESS_KEY")?)
-                .bucket(&bucket)
-                .build()?;
+                .bucket(&bucket);
 
-            let store = ObjectStore::new(accessor).finish();
+            let store = ObjectStore::new(builder).unwrap().finish();
 
             let mut guard = TempFolder::new(&store, "/");
             test_object_crud(&store).await?;
@@ -146,14 +137,14 @@ async fn test_oss_backend() -> Result<()> {
 
             let root = uuid::Uuid::new_v4().to_string();
 
-            let accessor = Oss::default()
+            let mut builder = Oss::default();
+            builder
                 .root(&root)
                 .access_key_id(&env::var("GT_OSS_ACCESS_KEY_ID")?)
                 .access_key_secret(&env::var("GT_OSS_ACCESS_KEY")?)
-                .bucket(&bucket)
-                .build()?;
+                .bucket(&bucket);
 
-            let store = ObjectStore::new(accessor).finish();
+            let store = ObjectStore::new(builder).unwrap().finish();
 
             let mut guard = TempFolder::new(&store, "/");
             test_object_crud(&store).await?;
@@ -170,8 +161,7 @@ async fn assert_cache_files(
     file_names: &[&str],
     file_contents: &[&str],
 ) -> Result<()> {
-    let o = store.object("/");
-    let obs = o.list().await?;
+    let obs = store.list("/").await?;
     let objects = util::collect(obs).await?;
 
     // compare the cache file with the expected cache file; ignore orders
@@ -180,7 +170,7 @@ async fn assert_cache_files(
         assert!(position.is_some(), "file not found: {}", o.name());
 
         let position = position.unwrap();
-        let bs = o.read().await?;
+        let bs = store.read(o.path()).await.unwrap();
         assert_eq!(
             file_contents[position],
             String::from_utf8(bs.clone())?,
@@ -194,40 +184,42 @@ async fn assert_cache_files(
 
 #[tokio::test]
 async fn test_object_store_cache_policy() -> Result<()> {
+    common_telemetry::init_default_ut_logging();
     // create file storage
     let root_dir = create_temp_dir("test_fs_backend");
-    let store = ObjectStore::new(
+    let store = OperatorBuilder::new(
         Fs::default()
             .root(&root_dir.path().to_string_lossy())
             .atomic_write_dir(&root_dir.path().to_string_lossy())
-            .build()?,
-    );
+            .build()
+            .unwrap(),
+    )
+    .finish();
 
     // create file cache layer
     let cache_dir = create_temp_dir("test_fs_cache");
-    let cache_acc = Fs::default()
+    let mut builder = Fs::default();
+    builder
         .root(&cache_dir.path().to_string_lossy())
-        .atomic_write_dir(&cache_dir.path().to_string_lossy())
-        .build()?;
-    let cache_store = ObjectStore::new(cache_acc.clone()).finish();
+        .atomic_write_dir(&cache_dir.path().to_string_lossy());
+    let cache_accessor = Arc::new(builder.build().unwrap());
+    let cache_store = OperatorBuilder::new(cache_accessor.clone()).finish();
+
     // create operator for cache dir to verify cache file
-    let store = store
-        .layer(LruCacheLayer::new(Arc::new(cache_acc), 3))
-        .finish();
+    let store = store.layer(LruCacheLayer::new(Arc::new(cache_accessor), 3));
 
     // create several object handler.
-    let o1 = store.object("test_file1");
-    let o2 = store.object("test_file2");
-
     // write data into object;
-    assert!(o1.write("Hello, object1!").await.is_ok());
-    assert!(o2.write("Hello, object2!").await.is_ok());
+    let p1 = "test_file1";
+    let p2 = "test_file2";
+    store.write(p1, "Hello, object1!").await.unwrap();
+    store.write(p2, "Hello, object2!").await.unwrap();
 
-    // crate cache by read object
-    o1.range_read(7..).await?;
-    o1.read().await?;
-    o2.range_read(7..).await?;
-    o2.read().await?;
+    // create cache by read object
+    store.range_read(p1, 0..).await?;
+    store.read(p1).await?;
+    store.range_read(p2, 0..).await?;
+    store.read(p2).await?;
 
     assert_cache_files(
         &cache_store,
@@ -240,7 +232,7 @@ async fn test_object_store_cache_policy() -> Result<()> {
     )
     .await?;
 
-    assert!(o2.delete().await.is_ok());
+    store.delete(p2).await.unwrap();
 
     assert_cache_files(
         &cache_store,
@@ -249,11 +241,11 @@ async fn test_object_store_cache_policy() -> Result<()> {
     )
     .await?;
 
-    let o3 = store.object("test_file3");
-    assert!(o3.write("Hello, object3!").await.is_ok());
+    let p3 = "test_file3";
+    store.write(p3, "Hello, object3!").await.unwrap();
 
-    o3.read().await?;
-    o3.range_read(0..5).await?;
+    store.read(p3).await.unwrap();
+    store.range_read(p3, 0..5).await.unwrap();
 
     assert_cache_files(
         &cache_store,

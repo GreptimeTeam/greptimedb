@@ -15,15 +15,19 @@
 use std::collections::HashMap;
 
 use common_recordbatch::RecordBatch;
+use common_telemetry::timer;
+use datafusion_common::ScalarValue;
+use datatypes::prelude::ConcreteDataType;
 use datatypes::vectors::{Helper, VectorRef};
-use pyo3::exceptions::PyValueError;
-use pyo3::types::{PyDict, PyList, PyModule, PyTuple};
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyModule, PyString, PyTuple};
 use pyo3::{pymethods, PyAny, PyCell, PyObject, PyResult, Python, ToPyObject};
 use snafu::{ensure, Backtrace, GenerateImplicitData, ResultExt};
 
 use crate::python::error::{self, NewRecordBatchSnafu, OtherSnafu, Result};
 use crate::python::ffi_types::copr::PyQueryEngine;
 use crate::python::ffi_types::{check_args_anno_real_type, select_from_rb, Coprocessor, PyVector};
+use crate::python::metric;
 use crate::python::pyo3::dataframe_impl::PyDataFrame;
 use crate::python::pyo3::utils::{init_cpython_interpreter, pyo3_obj_try_to_typed_val};
 
@@ -31,9 +35,8 @@ use crate::python::pyo3::utils::{init_cpython_interpreter, pyo3_obj_try_to_typed
 impl PyQueryEngine {
     #[pyo3(name = "sql")]
     pub(crate) fn sql_pyo3(&self, py: Python<'_>, s: String) -> PyResult<PyObject> {
-        let query = self.get_ref();
         let res = self
-            .query_with_new_thread(query, s)
+            .query_with_new_thread(s)
             .map_err(PyValueError::new_err)?;
         match res {
             crate::python::ffi_types::copr::Either::Rb(rbs) => {
@@ -63,6 +66,7 @@ pub(crate) fn pyo3_exec_parsed(
     rb: &Option<RecordBatch>,
     params: &HashMap<String, String>,
 ) -> Result<RecordBatch> {
+    let _t = timer!(metric::METRIC_PYO3_EXEC_TOTAL_ELAPSED);
     // i.e params or use `vector(..)` to construct a PyVector
     let arg_names = &copr.deco_args.arg_names.clone().unwrap_or(vec![]);
     let args: Vec<PyVector> = if let Some(rb) = rb {
@@ -75,6 +79,8 @@ pub(crate) fn pyo3_exec_parsed(
     // Just in case cpython is not inited
     init_cpython_interpreter().unwrap();
     Python::with_gil(|py| -> Result<_> {
+        let _t = timer!(metric::METRIC_PYO3_EXEC_ELAPSED);
+
         let mut cols = (|| -> PyResult<_> {
             let dummy_decorator = "
 # Postponed evaluation of annotations(PEP 563) so annotation can be set freely
@@ -89,7 +95,6 @@ coprocessor = copr
 ";
             let gen_call = format!("\n_return_from_coprocessor = {}(*_args_for_coprocessor, **_kwargs_for_coprocessor)", copr.name);
             let script = format!("{}{}{}", dummy_decorator, copr.script, gen_call);
-
             let args = args
                 .clone()
                 .into_iter()
@@ -107,7 +112,7 @@ coprocessor = copr
             let py_main = PyModule::import(py, "__main__")?;
             let globals = py_main.dict();
 
-            let locals = PyDict::new(py);
+            let locals = py_main.dict();
 
             if let Some(engine) = &copr.query_engine {
                 let query_engine = PyQueryEngine::from_weakref(engine.clone());
@@ -137,13 +142,13 @@ coprocessor = copr
             // could generate a call in python code and use Python::run to run it, just like in RustPython
             // Expect either: a PyVector Or a List/Tuple of PyVector
             py.run(&script, Some(globals), Some(locals))?;
-            let result = locals.get_item("_return_from_coprocessor").ok_or(PyValueError::new_err("Can't find return value of coprocessor function"))?;
+            let result = locals.get_item("_return_from_coprocessor").ok_or_else(|| PyValueError::new_err("Can't find return value of coprocessor function"))?;
 
             let col_len = rb.as_ref().map(|rb| rb.num_rows()).unwrap_or(1);
             py_any_to_vec(result, col_len)
         })()
         .map_err(|err| error::Error::PyRuntime {
-            msg: err.to_string(),
+            msg: err.into_value(py).to_string(),
             backtrace: Backtrace::generate(),
         })?;
         ensure!(
@@ -164,23 +169,119 @@ coprocessor = copr
 
 /// Cast return of py script result to `Vec<VectorRef>`,
 /// constants will be broadcast to length of `col_len`
+/// accept and convert if obj is of two types:
+/// 1. tuples of PyVector/PyList of literals/single literal of same type
+/// or a mixed tuple of PyVector and PyList of same type Literals
+/// 2. a single PyVector
+/// 3. a PyList of same type Literals
+/// 4. a single constant, will be expanded to a PyVector of length of `col_len`
 fn py_any_to_vec(obj: &PyAny, col_len: usize) -> PyResult<Vec<VectorRef>> {
+    let is_literal = |obj: &PyAny| -> PyResult<bool> {
+        Ok(obj.is_instance_of::<PyInt>()?
+            || obj.is_instance_of::<PyFloat>()?
+            || obj.is_instance_of::<PyString>()?
+            || obj.is_instance_of::<PyBool>()?)
+    };
+    let check = if obj.is_instance_of::<PyTuple>()? {
+        let tuple = obj.downcast::<PyTuple>()?;
+        (0..tuple.len())
+            .map(|idx| {
+                tuple.get_item(idx).map(|i| -> PyResult<bool> {
+                    Ok(i.is_instance_of::<PyVector>()?
+                        || i.is_instance_of::<PyList>()?
+                        || is_literal(i)?)
+                })
+            })
+            .all(|i| matches!(i, Ok(Ok(true))))
+    } else {
+        obj.is_instance_of::<PyVector>()? || obj.is_instance_of::<PyList>()? || is_literal(obj)?
+    };
+    if !check {
+        return Err(PyRuntimeError::new_err(format!(
+            "Expect a tuple of vectors(or lists) or one single vector or a list of same type literals, found {obj}"
+        )));
+    }
+
     if let Ok(tuple) = obj.downcast::<PyTuple>() {
         let len = tuple.len();
         let v = (0..len)
             .map(|idx| tuple.get_item(idx))
             .map(|elem| {
-                elem.map(|any| py_obj_broadcast_to_vec(any, col_len))
-                    .and_then(|v| v)
+                elem.map(|any| {
+                    if let Ok(list) = any.downcast::<PyList>() {
+                        py_list_to_vec(list)
+                    } else {
+                        py_obj_broadcast_to_vec(any, col_len)
+                    }
+                })
+                .and_then(|v| v)
             })
             .collect::<PyResult<Vec<_>>>()?;
         Ok(v)
+    } else if let Ok(list) = obj.downcast::<PyList>() {
+        let ret = py_list_to_vec(list)?;
+        Ok(vec![ret])
     } else {
         let ret = py_obj_broadcast_to_vec(obj, col_len)?;
         Ok(vec![ret])
     }
 }
 
+/// Convert a python list to a [`VectorRef`] all of same type: bool/int/float/string
+fn py_list_to_vec(list: &PyList) -> PyResult<VectorRef> {
+    /// make sure elements of list is all of same type: bool/int/float/string
+    #[derive(PartialEq, Eq, Debug, Copy, Clone)]
+    enum ExpectType {
+        Bool,
+        Int,
+        Float,
+        String,
+    }
+    let mut expected_type = None;
+    let mut v = Vec::with_capacity(list.len());
+    for (idx, elem) in list.iter().enumerate() {
+        let (elem_ty, con_type) = if elem.is_instance_of::<PyBool>()? {
+            (ExpectType::Bool, ConcreteDataType::boolean_datatype())
+        } else if elem.is_instance_of::<PyInt>()? {
+            (ExpectType::Int, ConcreteDataType::int64_datatype())
+        } else if elem.is_instance_of::<PyFloat>()? {
+            (ExpectType::Float, ConcreteDataType::float64_datatype())
+        } else if elem.is_instance_of::<PyString>()? {
+            (ExpectType::String, ConcreteDataType::string_datatype())
+        } else {
+            return Err(PyRuntimeError::new_err(format!(
+                "Expect list contains bool or int or float or string, found <{list}>"
+            )));
+        };
+        if let Some(ty) = expected_type {
+            if ty != elem_ty {
+                return Err(PyRuntimeError::new_err(format!(
+                    "Expect a list of same type elements, found {list} in position {idx} in list"
+                )));
+            }
+        } else {
+            expected_type = Some(elem_ty);
+        }
+        // push into a vector buffer
+        let val = pyo3_obj_try_to_typed_val(elem, Some(con_type))?;
+        let scalar = val.try_to_scalar_value(&val.data_type()).map_err(|err| {
+            PyRuntimeError::new_err(format!("Can't convert value to scalar value: {}", err))
+        })?;
+        v.push(scalar);
+    }
+    let array = ScalarValue::iter_to_array(v.into_iter()).map_err(|err| {
+        PyRuntimeError::new_err(format!("Can't convert scalar value list to array: {}", err))
+    })?;
+    let ret = Helper::try_into_vector(array).map_err(|err| {
+        PyRuntimeError::new_err(format!("Can't convert array to vector: {}", err))
+    })?;
+    Ok(ret)
+}
+
+/// broadcast a single Python Object to a Vector of same object with length `col_len`
+/// obj is either:
+/// 1. a PyVector
+/// 2. a single Literal
 fn py_obj_broadcast_to_vec(obj: &PyAny, col_len: usize) -> PyResult<VectorRef> {
     if let Ok(v) = obj.extract::<PyVector>() {
         Ok(v.as_vector_ref())
@@ -219,7 +320,7 @@ def a(cpu, mem, **kwargs):
     for k, v in kwargs.items():
         print("%s == %s" % (k, v))
     print(dataframe().select([col("cpu")<lit(0.3)]).collect())
-    return (0.5 < cpu) & ~( cpu >= 0.75)
+    return (0.5 < cpu) & ~(cpu >= 0.75)
     "#;
         let cpu_array = Float32Vector::from_slice([0.9f32, 0.8, 0.7, 0.3]);
         let mem_array = Float64Vector::from_slice([0.1f64, 0.2, 0.3, 0.4]);

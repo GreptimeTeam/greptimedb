@@ -16,6 +16,6 @@ pub(crate) mod copr;
 pub(crate) mod utils;
 pub(crate) mod vector;
 pub(crate) use copr::{check_args_anno_real_type, select_from_rb, Coprocessor};
-pub(crate) use vector::PyVector;
+pub(crate) use vector::{PyVector, PyVectorRef};
 #[cfg(test)]
 mod pair_tests;

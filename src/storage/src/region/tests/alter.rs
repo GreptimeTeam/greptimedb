@@ -22,8 +22,8 @@ use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, VectorRef};
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use store_api::storage::{
     AddColumn, AlterOperation, AlterRequest, Chunk, ChunkReader, ColumnDescriptor,
-    ColumnDescriptorBuilder, ColumnId, Region, RegionMeta, ScanRequest, SchemaRef, Snapshot,
-    WriteRequest, WriteResponse,
+    ColumnDescriptorBuilder, ColumnId, FlushContext, Region, RegionMeta, ScanRequest, SchemaRef,
+    Snapshot, WriteRequest, WriteResponse,
 };
 
 use crate::region::tests::{self, FileTesterBase};
@@ -115,6 +115,15 @@ impl AlterTester {
             .unwrap()
             .unwrap();
         self.base = Some(FileTesterBase::with_region(region));
+    }
+
+    async fn flush(&self, wait: Option<bool>) {
+        let ctx = wait.map(|wait| FlushContext { wait }).unwrap_or_default();
+        self.base().region.flush(&ctx).await.unwrap();
+    }
+
+    async fn checkpoint_manifest(&self) {
+        self.base().checkpoint_manifest().await
     }
 
     #[inline]
@@ -264,6 +273,11 @@ fn check_schema_names(schema: &SchemaRef, names: &[&str]) {
 
 #[tokio::test]
 async fn test_alter_region_with_reopen() {
+    test_alter_region_with_reopen0(true).await;
+    test_alter_region_with_reopen0(false).await;
+}
+
+async fn test_alter_region_with_reopen0(flush_and_checkpoint: bool) {
     common_telemetry::init_default_ut_logging();
 
     let dir = create_temp_dir("alter-region");
@@ -290,6 +304,11 @@ async fn test_alter_region_with_reopen() {
         DataRow::new(Some(10002), 1005, Some(105), Some(203)),
     ];
     tester.put(&data).await;
+
+    if flush_and_checkpoint {
+        tester.flush(None).await;
+        tester.checkpoint_manifest().await;
+    }
 
     // Scan with new schema before reopen.
     let mut expect = vec![
@@ -321,6 +340,11 @@ async fn test_alter_region_with_reopen() {
 
     let req = drop_column_req(&["v2", "v3"]);
     tester.alter(req).await;
+
+    if flush_and_checkpoint {
+        tester.flush(None).await;
+        tester.checkpoint_manifest().await;
+    }
 
     // reopen and write again
     tester.reopen().await;

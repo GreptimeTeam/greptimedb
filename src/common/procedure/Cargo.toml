@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+async-stream.workspace = true
 common-error = { path = "../error" }
 common-runtime = { path = "../runtime" }
 common-telemetry = { path = "../telemetry" }

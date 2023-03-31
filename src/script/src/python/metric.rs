@@ -12,18 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
-use promql_parser::parser::{Expr, Value};
-
-use crate::engine::Context;
-use crate::error::Result;
-
-/// An evaluator evaluates given expressions over given fixed timestamps.
-pub struct Evaluator {}
-
-impl Evaluator {
-    pub fn eval(_ctx: &Context, _expr: &Expr) -> Result<Arc<dyn Value>> {
-        unimplemented!();
-    }
-}
+//! Script engine metrics
+pub static METRIC_RSPY_INIT_ELAPSED: &str = "script.rspy.init_elapsed";
+pub static METRIC_RSPY_EXEC_ELAPSED: &str = "script.rspy.exec_elapsed";
+pub static METRIC_RSPY_EXEC_TOTAL_ELAPSED: &str = "script.rspy.exec_total_elapsed";
+#[cfg(feature = "pyo3_backend")]
+pub static METRIC_PYO3_EXEC_ELAPSED: &str = "script.pyo3.exec_elapsed";
+#[cfg(feature = "pyo3_backend")]
+pub static METRIC_PYO3_INIT_ELAPSED: &str = "script.pyo3.init_elapsed";
+#[cfg(feature = "pyo3_backend")]
+pub static METRIC_PYO3_EXEC_TOTAL_ELAPSED: &str = "script.pyo3.exec_total_elapsed";

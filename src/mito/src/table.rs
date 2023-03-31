@@ -471,7 +471,7 @@ impl<R: Region> MitoTable<R> {
         regions: HashMap<RegionNumber, R>,
         object_store: ObjectStore,
     ) -> Result<MitoTable<R>> {
-        let manifest = TableManifest::new(&table_manifest_dir(table_dir), object_store);
+        let manifest = TableManifest::new(&table_manifest_dir(table_dir), object_store, None);
 
         // TODO(dennis): save manifest version into catalog?
         let _manifest_version = manifest
@@ -487,7 +487,7 @@ impl<R: Region> MitoTable<R> {
     }
 
     pub(crate) fn build_manifest(table_dir: &str, object_store: ObjectStore) -> TableManifest {
-        TableManifest::new(&table_manifest_dir(table_dir), object_store)
+        TableManifest::new(&table_manifest_dir(table_dir), object_store, None)
     }
 
     pub(crate) async fn recover_table_info(

@@ -468,7 +468,9 @@ impl Instance {
         check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
 
         match stmt {
-            Statement::Query(_) | Statement::Explain(_) => self.plan_exec(stmt, query_ctx).await,
+            Statement::Query(_) | Statement::Explain(_) | Statement::Delete(_) => {
+                self.plan_exec(stmt, query_ctx).await
+            }
 
             // For performance consideration, only "insert with select" is executed by query engine.
             // Plain insert ("insert with values") is still executed directly in statement.
@@ -478,12 +480,12 @@ impl Instance {
 
             Statement::Tql(tql) => self.execute_tql(tql, query_ctx).await,
             Statement::CreateDatabase(_)
+            | Statement::CreateExternalTable(_)
             | Statement::ShowDatabases(_)
             | Statement::CreateTable(_)
             | Statement::ShowTables(_)
             | Statement::DescribeTable(_)
             | Statement::Insert(_)
-            | Statement::Delete(_)
             | Statement::Alter(_)
             | Statement::DropTable(_)
             | Statement::Copy(_) => self
@@ -657,12 +659,13 @@ pub fn check_permission(
     }
 
     match stmt {
-        // query,explain and tql will be checked in QueryEngineState
-        Statement::Query(_) | Statement::Explain(_) | Statement::Tql(_) => {}
+        // These are executed by query engine, and will be checked there.
+        Statement::Query(_) | Statement::Explain(_) | Statement::Tql(_) | Statement::Delete(_) => {}
         // database ops won't be checked
         Statement::CreateDatabase(_) | Statement::ShowDatabases(_) | Statement::Use(_) => {}
         // show create table and alter are not supported yet
-        Statement::ShowCreateTable(_) | Statement::Alter(_) => {}
+        Statement::ShowCreateTable(_) | Statement::CreateExternalTable(_) | Statement::Alter(_) => {
+        }
 
         Statement::Insert(insert) => {
             validate_param(insert.table_name(), query_ctx)?;
@@ -682,9 +685,6 @@ pub fn check_permission(
         }
         Statement::DescribeTable(stmt) => {
             validate_param(stmt.name(), query_ctx)?;
-        }
-        Statement::Delete(delete) => {
-            validate_param(delete.table_name(), query_ctx)?;
         }
         Statement::Copy(stmd) => match stmd {
             CopyTable::To(copy_table_to) => validate_param(&copy_table_to.table_name, query_ctx)?,

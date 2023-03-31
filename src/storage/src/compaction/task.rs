@@ -30,6 +30,8 @@ use crate::sst::{
 };
 use crate::wal::Wal;
 
+const MAX_PARALLEL_COMPACTION: usize = 8;
+
 #[async_trait::async_trait]
 pub trait CompactionTask: Debug + Send + Sync + 'static {
     async fn run(self) -> Result<()>;
@@ -80,10 +82,18 @@ impl<S: LogStore> CompactionTaskImpl<S> {
             });
         }
 
-        let outputs = futures::future::join_all(futs)
-            .await
-            .into_iter()
-            .collect::<Result<_>>()?;
+        let mut outputs = HashSet::with_capacity(futs.len());
+        while !futs.is_empty() {
+            let mut task_chunk = Vec::with_capacity(MAX_PARALLEL_COMPACTION);
+            for _ in 0..MAX_PARALLEL_COMPACTION {
+                if let Some(task) = futs.pop() {
+                    task_chunk.push(task);
+                }
+            }
+            let metas = futures::future::try_join_all(task_chunk).await?;
+            outputs.extend(metas.into_iter().flatten());
+        }
+
         let inputs = compacted_inputs.into_iter().collect();
         Ok((outputs, inputs))
     }
@@ -162,7 +172,7 @@ impl CompactionOutput {
         region_id: RegionId,
         schema: RegionSchemaRef,
         sst_layer: AccessLayerRef,
-    ) -> Result<FileMeta> {
+    ) -> Result<Option<FileMeta>> {
         let reader = build_sst_reader(
             schema,
             sst_layer.clone(),
@@ -175,20 +185,21 @@ impl CompactionOutput {
         let output_file_id = FileId::random();
         let opts = WriteOptions {};
 
-        let SstInfo {
-            time_range,
-            file_size,
-        } = sst_layer
+        Ok(sst_layer
             .write_sst(output_file_id, Source::Reader(reader), &opts)
-            .await?;
-
-        Ok(FileMeta {
-            region_id,
-            file_id: output_file_id,
-            time_range,
-            level: self.output_level,
-            file_size,
-        })
+            .await?
+            .map(
+                |SstInfo {
+                     time_range,
+                     file_size,
+                 }| FileMeta {
+                    region_id,
+                    file_id: output_file_id,
+                    time_range,
+                    level: self.output_level,
+                    file_size,
+                },
+            ))
     }
 }
 

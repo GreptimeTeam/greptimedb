@@ -39,7 +39,7 @@ use futures_util::{Stream, StreamExt, TryStreamExt};
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::{ArrowPredicate, RowFilter};
 use parquet::arrow::{ArrowWriter, ParquetRecordBatchStreamBuilder, ProjectionMask};
-use parquet::basic::{Compression, Encoding};
+use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 use parquet::format::FileMetaData;
@@ -56,7 +56,7 @@ use crate::read::{Batch, BatchReader};
 use crate::schema::compat::ReadAdapter;
 use crate::schema::{ProjectedSchemaRef, StoreSchema, StoreSchemaRef};
 use crate::sst;
-use crate::sst::{Source, SstInfo};
+use crate::sst::{FileHandle, Source, SstInfo};
 /// Parquet sst writer.
 pub struct ParquetWriter<'a> {
     file_path: &'a str,
@@ -75,21 +75,23 @@ impl<'a> ParquetWriter<'a> {
         }
     }
 
-    pub async fn write_sst(self, _opts: &sst::WriteOptions) -> Result<SstInfo> {
+    pub async fn write_sst(self, _opts: &sst::WriteOptions) -> Result<Option<SstInfo>> {
         self.write_rows(None).await
     }
 
     /// Iterates memtable and writes rows to Parquet file.
     /// A chunk of records yielded from each iteration with a size given
     /// in config will be written to a single row group.
-    async fn write_rows(mut self, extra_meta: Option<HashMap<String, String>>) -> Result<SstInfo> {
+    async fn write_rows(
+        mut self,
+        extra_meta: Option<HashMap<String, String>>,
+    ) -> Result<Option<SstInfo>> {
         let projected_schema = self.source.projected_schema();
         let store_schema = projected_schema.schema_to_read();
         let schema = store_schema.arrow_schema().clone();
-        let object = self.object_store.object(self.file_path);
 
         let writer_props = WriterProperties::builder()
-            .set_compression(Compression::ZSTD)
+            .set_compression(Compression::ZSTD(ZstdLevel::default()))
             .set_encoding(Encoding::PLAIN)
             .set_max_row_group_size(self.max_row_group_size)
             .set_key_value_metadata(extra_meta.map(|map| {
@@ -106,6 +108,7 @@ impl<'a> ParquetWriter<'a> {
         let mut arrow_writer = ArrowWriter::try_new(&mut buf, schema.clone(), Some(writer_props))
             .context(WriteParquetSnafu)?;
 
+        let mut batches_written = 0;
         while let Some(batch) = self.source.next_batch().await? {
             let arrow_batch = RecordBatch::try_new(
                 schema.clone(),
@@ -119,28 +122,33 @@ impl<'a> ParquetWriter<'a> {
             arrow_writer
                 .write(&arrow_batch)
                 .context(WriteParquetSnafu)?;
+            batches_written += 1;
         }
 
+        if batches_written == 0 {
+            // if the source does not contain any batch, we skip writing an empty parquet file.
+            return Ok(None);
+        }
         let file_meta = arrow_writer.close().context(WriteParquetSnafu)?;
 
         let time_range = decode_timestamp_range(&file_meta, store_schema)
             .ok()
             .flatten();
 
-        object.write(buf).await.context(WriteObjectSnafu {
-            path: object.path(),
-        })?;
-        let file_size = object
-            .metadata()
+        // object_store.write will make sure all bytes are written or an error is raised.
+        let buf_len = buf.len() as u64;
+        self.object_store
+            .write(self.file_path, buf)
             .await
             .context(WriteObjectSnafu {
-                path: object.path(),
-            })?
-            .content_length();
-        Ok(SstInfo {
+                path: self.file_path,
+            })?;
+
+        let file_size = buf_len;
+        Ok(Some(SstInfo {
             time_range,
             file_size,
-        })
+        }))
     }
 }
 
@@ -210,30 +218,38 @@ fn decode_timestamp_range_inner(
         end = end.max(max);
     }
 
+    assert!(
+        start <= end,
+        "Illegal timestamp range decoded from SST file {:?}, start: {}, end: {}",
+        file_meta,
+        start,
+        end
+    );
     Ok(Some((
         Timestamp::new(start, unit),
         Timestamp::new(end, unit),
     )))
 }
 
-pub struct ParquetReader<'a> {
-    file_path: &'a str,
+pub struct ParquetReader {
+    // Holds the file handle to avoid the file purge purge it.
+    file_handle: FileHandle,
     object_store: ObjectStore,
     projected_schema: ProjectedSchemaRef,
     predicate: Predicate,
     time_range: TimestampRange,
 }
 
-impl<'a> ParquetReader<'a> {
+impl ParquetReader {
     pub fn new(
-        file_path: &str,
+        file_handle: FileHandle,
         object_store: ObjectStore,
         projected_schema: ProjectedSchemaRef,
         predicate: Predicate,
         time_range: TimestampRange,
     ) -> ParquetReader {
         ParquetReader {
-            file_path,
+            file_handle,
             object_store,
             projected_schema,
             predicate,
@@ -242,28 +258,24 @@ impl<'a> ParquetReader<'a> {
     }
 
     pub async fn chunk_stream(&self) -> Result<ChunkStream> {
+        let file_path = self.file_handle.file_path();
         let operator = self.object_store.clone();
+
         let reader = operator
-            .object(self.file_path)
-            .reader()
+            .reader(&file_path)
             .await
-            .context(ReadObjectSnafu {
-                path: self.file_path,
-            })?
+            .context(ReadObjectSnafu { path: &file_path })?
             .compat();
         let buf_reader = BufReader::new(reader);
         let builder = ParquetRecordBatchStreamBuilder::new(buf_reader)
             .await
-            .context(ReadParquetSnafu {
-                file: self.file_path,
-            })?;
+            .context(ReadParquetSnafu { file: &file_path })?;
         let arrow_schema = builder.schema().clone();
 
-        let store_schema = Arc::new(StoreSchema::try_from(arrow_schema).context(
-            error::ConvertStoreSchemaSnafu {
-                file: self.file_path,
-            },
-        )?);
+        let store_schema = Arc::new(
+            StoreSchema::try_from(arrow_schema)
+                .context(error::ConvertStoreSchemaSnafu { file: &file_path })?,
+        );
 
         let adapter = ReadAdapter::new(store_schema.clone(), self.projected_schema.clone())?;
 
@@ -290,18 +302,17 @@ impl<'a> ParquetReader<'a> {
             builder = builder.with_row_filter(row_filter);
         }
 
-        let mut stream = builder.build().context(ReadParquetSnafu {
-            file: self.file_path,
-        })?;
+        let mut stream = builder
+            .build()
+            .context(ReadParquetSnafu { file: &file_path })?;
 
-        let file_name = self.file_path.to_string();
         let chunk_stream = try_stream!({
             while let Some(res) = stream.next().await {
-                yield res.context(ReadParquetSnafu { file: &file_name })?
+                yield res.context(ReadParquetSnafu { file: &file_path })?
             }
         });
 
-        ChunkStream::new(adapter, Box::pin(chunk_stream))
+        ChunkStream::new(self.file_handle.clone(), adapter, Box::pin(chunk_stream))
     }
 
     /// Builds time range row filter.
@@ -504,13 +515,23 @@ impl ArrowPredicate for PlainTimestampRowFilter {
 pub type SendableChunkStream = Pin<Box<dyn Stream<Item = Result<RecordBatch>> + Send>>;
 
 pub struct ChunkStream {
+    // Holds the file handle in the stream to avoid the purger purge it.
+    _file_handle: FileHandle,
     adapter: ReadAdapter,
     stream: SendableChunkStream,
 }
 
 impl ChunkStream {
-    pub fn new(adapter: ReadAdapter, stream: SendableChunkStream) -> Result<Self> {
-        Ok(Self { adapter, stream })
+    pub fn new(
+        file_handle: FileHandle,
+        adapter: ReadAdapter,
+        stream: SendableChunkStream,
+    ) -> Result<Self> {
+        Ok(Self {
+            _file_handle: file_handle,
+            adapter,
+            stream,
+        })
     }
 }
 
@@ -535,14 +556,21 @@ mod tests {
     use datatypes::types::{TimestampMillisecondType, TimestampType};
     use datatypes::vectors::TimestampMillisecondVector;
     use object_store::services::Fs;
-    use object_store::ObjectStoreBuilder;
     use store_api::storage::OpType;
 
     use super::*;
+    use crate::file_purger::noop::new_noop_file_purger;
     use crate::memtable::{
         tests as memtable_tests, DefaultMemtableBuilder, IterContext, MemtableBuilder,
     };
     use crate::schema::ProjectedSchema;
+    use crate::sst::{FileId, FileMeta};
+
+    fn create_object_store(root: &str) -> ObjectStore {
+        let mut builder = Fs::default();
+        builder.root(root);
+        ObjectStore::new(builder).unwrap().finish()
+    }
 
     #[tokio::test]
     async fn test_parquet_writer() {
@@ -573,8 +601,8 @@ mod tests {
 
         let dir = create_temp_dir("write_parquet");
         let path = dir.path().to_str().unwrap();
-        let backend = Fs::default().root(path).build().unwrap();
-        let object_store = ObjectStore::new(backend).finish();
+
+        let object_store = create_object_store(path);
         let sst_file_name = "test-flush.parquet";
         let iter = memtable.iter(&IterContext::default()).unwrap();
         let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
@@ -585,14 +613,7 @@ mod tests {
             .unwrap();
 
         // verify parquet file
-        let reader = BufReader::new(
-            object_store
-                .object(sst_file_name)
-                .reader()
-                .await
-                .unwrap()
-                .compat(),
-        );
+        let reader = BufReader::new(object_store.reader(sst_file_name).await.unwrap().compat());
 
         let builder = ParquetRecordBatchStreamBuilder::new(reader).await.unwrap();
 
@@ -671,11 +692,11 @@ mod tests {
 
         let dir = create_temp_dir("write_parquet");
         let path = dir.path().to_str().unwrap();
-        let backend = Fs::default().root(path).build().unwrap();
-        let object_store = ObjectStore::new(backend).finish();
-        let sst_file_name = "test-read-large.parquet";
+        let object_store = create_object_store(path);
+        let sst_file_handle = new_file_handle(FileId::random());
+        let sst_file_name = sst_file_handle.file_name();
         let iter = memtable.iter(&IterContext::default()).unwrap();
-        let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
+        let writer = ParquetWriter::new(&sst_file_name, Source::Iter(iter), object_store.clone());
 
         let SstInfo {
             time_range,
@@ -683,6 +704,7 @@ mod tests {
         } = writer
             .write_sst(&sst::WriteOptions::default())
             .await
+            .unwrap()
             .unwrap();
 
         assert_eq!(
@@ -693,17 +715,11 @@ mod tests {
             time_range
         );
         assert_ne!(file_size, 0);
-        let operator = ObjectStore::new(
-            Fs::default()
-                .root(dir.path().to_str().unwrap())
-                .build()
-                .unwrap(),
-        )
-        .finish();
+        let operator = create_object_store(dir.path().to_str().unwrap());
 
         let projected_schema = Arc::new(ProjectedSchema::new(schema, Some(vec![1])).unwrap());
         let reader = ParquetReader::new(
-            "test-read-large.parquet",
+            sst_file_handle,
             operator,
             projected_schema,
             Predicate::empty(),
@@ -716,6 +732,25 @@ mod tests {
             rows_fetched += res.num_rows();
         }
         assert_eq!(rows_total, rows_fetched);
+    }
+
+    fn new_file_handle(file_id: FileId) -> FileHandle {
+        let file_purger = new_noop_file_purger();
+        let layer = Arc::new(crate::test_util::access_layer_util::MockAccessLayer {});
+        FileHandle::new(
+            FileMeta {
+                region_id: 0,
+                file_id,
+                time_range: Some((
+                    Timestamp::new_millisecond(0),
+                    Timestamp::new_millisecond(1000),
+                )),
+                level: 0,
+                file_size: 0,
+            },
+            layer,
+            file_purger,
+        )
     }
 
     #[tokio::test]
@@ -748,11 +783,12 @@ mod tests {
 
         let dir = create_temp_dir("write_parquet");
         let path = dir.path().to_str().unwrap();
-        let backend = Fs::default().root(path).build().unwrap();
-        let object_store = ObjectStore::new(backend).finish();
-        let sst_file_name = "test-read.parquet";
+
+        let object_store = create_object_store(path);
+        let file_handle = new_file_handle(FileId::random());
+        let sst_file_name = file_handle.file_name();
         let iter = memtable.iter(&IterContext::default()).unwrap();
-        let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
+        let writer = ParquetWriter::new(&sst_file_name, Source::Iter(iter), object_store.clone());
 
         let SstInfo {
             time_range,
@@ -760,6 +796,7 @@ mod tests {
         } = writer
             .write_sst(&sst::WriteOptions::default())
             .await
+            .unwrap()
             .unwrap();
 
         assert_eq!(
@@ -770,17 +807,11 @@ mod tests {
             time_range
         );
         assert_ne!(file_size, 0);
-        let operator = ObjectStore::new(
-            Fs::default()
-                .root(dir.path().to_str().unwrap())
-                .build()
-                .unwrap(),
-        )
-        .finish();
+        let operator = create_object_store(dir.path().to_str().unwrap());
 
         let projected_schema = Arc::new(ProjectedSchema::new(schema, Some(vec![1])).unwrap());
         let reader = ParquetReader::new(
-            "test-read.parquet",
+            file_handle,
             operator,
             projected_schema,
             Predicate::empty(),
@@ -801,17 +832,18 @@ mod tests {
     }
 
     async fn check_range_read(
-        file_name: &str,
+        file_handle: FileHandle,
         object_store: ObjectStore,
         schema: ProjectedSchemaRef,
         range: TimestampRange,
         expect: Vec<i64>,
     ) {
-        let reader = ParquetReader::new(file_name, object_store, schema, Predicate::empty(), range);
+        let reader =
+            ParquetReader::new(file_handle, object_store, schema, Predicate::empty(), range);
         let mut stream = reader.chunk_stream().await.unwrap();
         let result = stream.next_batch().await;
 
-        let Some(batch) = result.unwrap()  else {
+        let Some(batch) = result.unwrap() else {
             // if batch does not contain any row
             assert!(expect.is_empty());
             return;
@@ -865,11 +897,11 @@ mod tests {
 
         let dir = create_temp_dir("read-parquet-by-range");
         let path = dir.path().to_str().unwrap();
-        let backend = Fs::default().root(path).build().unwrap();
-        let object_store = ObjectStore::new(backend).finish();
-        let sst_file_name = "test-read.parquet";
+        let object_store = create_object_store(path);
+        let sst_file_handle = new_file_handle(FileId::random());
+        let sst_file_name = sst_file_handle.file_name();
         let iter = memtable.iter(&IterContext::default()).unwrap();
-        let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
+        let writer = ParquetWriter::new(&sst_file_name, Source::Iter(iter), object_store.clone());
 
         let SstInfo {
             time_range,
@@ -877,6 +909,7 @@ mod tests {
         } = writer
             .write_sst(&sst::WriteOptions::default())
             .await
+            .unwrap()
             .unwrap();
 
         assert_eq!(
@@ -892,7 +925,7 @@ mod tests {
             Arc::new(ProjectedSchema::new(schema, Some(vec![1, 0, 3, 2])).unwrap());
 
         check_range_read(
-            sst_file_name,
+            sst_file_handle.clone(),
             object_store.clone(),
             projected_schema.clone(),
             TimestampRange::with_unit(1000, 2003, TimeUnit::Millisecond).unwrap(),
@@ -901,7 +934,7 @@ mod tests {
         .await;
 
         check_range_read(
-            sst_file_name,
+            sst_file_handle.clone(),
             object_store.clone(),
             projected_schema.clone(),
             TimestampRange::with_unit(2002, 3001, TimeUnit::Millisecond).unwrap(),
@@ -911,7 +944,7 @@ mod tests {
 
         // read a range without any rows.
         check_range_read(
-            sst_file_name,
+            sst_file_handle.clone(),
             object_store.clone(),
             projected_schema.clone(),
             TimestampRange::with_unit(3002, 3003, TimeUnit::Millisecond).unwrap(),
@@ -921,7 +954,7 @@ mod tests {
 
         //
         check_range_read(
-            sst_file_name,
+            sst_file_handle.clone(),
             object_store.clone(),
             projected_schema.clone(),
             TimestampRange::with_unit(1000, 3000, TimeUnit::Millisecond).unwrap(),
@@ -931,7 +964,7 @@ mod tests {
 
         // read full range
         check_range_read(
-            sst_file_name,
+            sst_file_handle,
             object_store,
             projected_schema,
             TimestampRange::min_to_max(),
@@ -948,6 +981,29 @@ mod tests {
                 col_unit
             )
         )
+    }
+
+    #[tokio::test]
+    async fn test_write_empty_file() {
+        common_telemetry::init_default_ut_logging();
+        let schema = memtable_tests::schema_for_test();
+        let memtable = DefaultMemtableBuilder::default().build(schema.clone());
+
+        let dir = create_temp_dir("read-parquet-by-range");
+        let path = dir.path().to_str().unwrap();
+        let mut builder = Fs::default();
+        builder.root(path);
+        let object_store = ObjectStore::new(builder).unwrap().finish();
+        let sst_file_name = "test-read.parquet";
+        let iter = memtable.iter(&IterContext::default()).unwrap();
+        let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
+
+        let sst_info_opt = writer
+            .write_sst(&sst::WriteOptions::default())
+            .await
+            .unwrap();
+
+        assert!(sst_info_opt.is_none());
     }
 
     #[test]

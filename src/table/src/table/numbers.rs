@@ -26,6 +26,7 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use futures::task::{Context, Poll};
 use futures::Stream;
+use store_api::storage::RegionNumber;
 
 use crate::error::Result;
 use crate::metadata::{TableId, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType};
@@ -109,6 +110,10 @@ impl Table for NumbersTable {
             already_run: false,
         });
         Ok(Arc::new(SimpleTableScan::new(stream)))
+    }
+
+    async fn flush(&self, _region_number: Option<RegionNumber>, _wait: Option<bool>) -> Result<()> {
+        Ok(())
     }
 }
 

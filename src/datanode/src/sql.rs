@@ -20,7 +20,6 @@ use common_telemetry::error;
 use query::sql::{describe_table, show_databases, show_tables};
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
-use sql::statements::delete::Delete;
 use sql::statements::describe::DescribeTable;
 use sql::statements::show::{ShowDatabases, ShowTables};
 use table::engine::{EngineContext, TableEngineProcedureRef, TableEngineRef, TableReference};
@@ -36,7 +35,6 @@ mod alter;
 mod copy_table_from;
 mod copy_table_to;
 mod create;
-mod delete;
 mod drop_table;
 mod flush_table;
 pub(crate) mod insert;
@@ -51,7 +49,6 @@ pub enum SqlRequest {
     ShowDatabases(ShowDatabases),
     ShowTables(ShowTables),
     DescribeTable(DescribeTable),
-    Delete(Delete),
     CopyTable(CopyTableRequest),
 }
 
@@ -89,7 +86,6 @@ impl SqlHandler {
             SqlRequest::CreateDatabase(req) => self.create_database(req, query_ctx.clone()).await,
             SqlRequest::Alter(req) => self.alter(req).await,
             SqlRequest::DropTable(req) => self.drop_table(req).await,
-            SqlRequest::Delete(req) => self.delete(query_ctx.clone(), req).await,
             SqlRequest::CopyTable(req) => match req.direction {
                 CopyDirection::Export => self.copy_table_to(req).await,
                 CopyDirection::Import => self.copy_table_from(req).await,

@@ -17,6 +17,7 @@
 mod alter;
 mod basic;
 mod close;
+mod compact;
 mod flush;
 mod projection;
 
@@ -31,12 +32,14 @@ use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, VectorRef};
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::NoopLogStore;
 use object_store::services::Fs;
-use object_store::{ObjectStore, ObjectStoreBuilder};
+use object_store::ObjectStore;
+use store_api::manifest::MAX_VERSION;
 use store_api::storage::{
     consts, Chunk, ChunkReader, RegionMeta, ScanRequest, SequenceNumber, Snapshot, WriteRequest,
 };
 
 use super::*;
+use crate::chunk::ChunkReaderImpl;
 use crate::file_purger::noop::NoopFilePurgeHandler;
 use crate::manifest::action::{RegionChange, RegionMetaActionList};
 use crate::manifest::test_utils::*;
@@ -69,6 +72,12 @@ impl<S: LogStore> TesterBase<S> {
             write_ctx: WriteContext::default(),
             read_ctx: ReadContext::default(),
         }
+    }
+
+    pub async fn checkpoint_manifest(&self) {
+        let manifest = &self.region.inner.manifest;
+        manifest.set_flushed_manifest_version(manifest.last_version() - 1);
+        manifest.do_checkpoint().await.unwrap().unwrap();
     }
 
     pub async fn close(&self) {
@@ -150,6 +159,28 @@ impl<S: LogStore> TesterBase<S> {
         batch.delete(keys).unwrap();
 
         self.region.write(&self.write_ctx, batch).await.unwrap()
+    }
+
+    /// Returns a reader to scan all data.
+    pub async fn full_scan_reader(&self) -> ChunkReaderImpl {
+        let snapshot = self.region.snapshot(&self.read_ctx).unwrap();
+
+        let resp = snapshot
+            .scan(&self.read_ctx, ScanRequest::default())
+            .await
+            .unwrap();
+        resp.reader
+    }
+
+    /// Collect data from the reader.
+    pub async fn collect_reader(&self, mut reader: ChunkReaderImpl) -> Vec<(i64, Option<i64>)> {
+        let mut dst = Vec::new();
+        while let Some(chunk) = reader.next_chunk().await.unwrap() {
+            let chunk = reader.project_chunk(chunk);
+            append_chunk_to(&chunk, &mut dst);
+        }
+
+        dst
     }
 }
 
@@ -275,18 +306,15 @@ async fn test_new_region() {
 
 #[tokio::test]
 async fn test_recover_region_manifets() {
-    let tmp_dir = create_temp_dir("test_new_region");
+    common_telemetry::init_default_ut_logging();
+    let tmp_dir = create_temp_dir("test_recover_region_manifets");
     let memtable_builder = Arc::new(DefaultMemtableBuilder::default()) as _;
 
-    let object_store = ObjectStore::new(
-        Fs::default()
-            .root(&tmp_dir.path().to_string_lossy())
-            .build()
-            .unwrap(),
-    )
-    .finish();
+    let mut builder = Fs::default();
+    builder.root(&tmp_dir.path().to_string_lossy());
+    let object_store = ObjectStore::new(builder).unwrap().finish();
 
-    let manifest = RegionManifest::new("/manifest/", object_store.clone());
+    let manifest = RegionManifest::with_checkpointer("/manifest/", object_store.clone());
     let region_meta = Arc::new(build_region_meta());
 
     let sst_layer = Arc::new(FsAccessLayer::new("sst", object_store)) as _;
@@ -351,9 +379,62 @@ async fn test_recover_region_manifets() {
     .await
     .unwrap();
 
+    assert_recovered_manifest(
+        version,
+        recovered_metadata,
+        &file_id_a,
+        &file_id_b,
+        &file_id_c,
+        &region_meta,
+    );
+
+    // do a manifest checkpoint
+    let checkpoint = manifest.do_checkpoint().await.unwrap().unwrap();
+    assert_eq!(1, checkpoint.last_version);
+    assert_eq!(2, checkpoint.compacted_actions);
+    assert_eq!(
+        manifest.last_checkpoint().await.unwrap().unwrap(),
+        checkpoint
+    );
+    // recover from checkpoint
+    let (version, recovered_metadata) = RegionImpl::<NoopLogStore>::recover_from_manifest(
+        &manifest,
+        &memtable_builder,
+        &sst_layer,
+        &file_purger,
+    )
+    .await
+    .unwrap();
+
+    assert_recovered_manifest(
+        version,
+        recovered_metadata,
+        &file_id_a,
+        &file_id_b,
+        &file_id_c,
+        &region_meta,
+    );
+
+    // check manifest state
+    assert_eq!(3, manifest.last_version());
+    let mut iter = manifest.scan(0, MAX_VERSION).await.unwrap();
+    let (version, action) = iter.next_action().await.unwrap().unwrap();
+    assert_eq!(2, version);
+    assert!(matches!(action.actions[0], RegionMetaAction::Change(..)));
+    assert!(iter.next_action().await.unwrap().is_none());
+}
+
+fn assert_recovered_manifest(
+    version: Option<Version>,
+    recovered_metadata: RecoveredMetadataMap,
+    file_id_a: &FileId,
+    file_id_b: &FileId,
+    file_id_c: &FileId,
+    region_meta: &Arc<RegionMetadata>,
+) {
     assert_eq!(42, *recovered_metadata.first_key_value().unwrap().0);
     let version = version.unwrap();
-    assert_eq!(*version.metadata(), region_meta);
+    assert_eq!(*version.metadata(), *region_meta);
     assert_eq!(version.flushed_sequence(), 2);
     assert_eq!(version.manifest_version(), 1);
     let ssts = version.ssts();
@@ -370,7 +451,4 @@ async fn test_recover_region_manifets() {
         ]),
         files
     );
-
-    // check manifest state
-    assert_eq!(3, manifest.last_version());
 }

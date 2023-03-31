@@ -354,7 +354,7 @@ impl<S: LogStore> EngineInner<S> {
         let sst_dir = &region_sst_dir(&parent_dir, region_name);
         let sst_layer = Arc::new(FsAccessLayer::new(sst_dir, self.object_store.clone()));
         let manifest_dir = region_manifest_dir(&parent_dir, region_name);
-        let manifest = RegionManifest::new(&manifest_dir, self.object_store.clone());
+        let manifest = RegionManifest::with_checkpointer(&manifest_dir, self.object_store.clone());
 
         let flush_strategy = write_buffer_size
             .map(|size| Arc::new(SizeBasedStrategy::new(size)) as Arc<_>)
@@ -381,7 +381,6 @@ mod tests {
     use datatypes::type_id::LogicalTypeId;
     use log_store::test_util::log_store_util;
     use object_store::services::Fs;
-    use object_store::ObjectStoreBuilder;
     use store_api::storage::Region;
 
     use super::*;
@@ -396,8 +395,9 @@ mod tests {
         let dir = create_temp_dir("test_create_new_region");
         let store_dir = dir.path().to_string_lossy();
 
-        let accessor = Fs::default().root(&store_dir).build().unwrap();
-        let object_store = ObjectStore::new(accessor).finish();
+        let mut builder = Fs::default();
+        builder.root(&store_dir);
+        let object_store = ObjectStore::new(builder).unwrap().finish();
 
         let config = EngineConfig::default();
 

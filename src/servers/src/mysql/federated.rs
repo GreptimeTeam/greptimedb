@@ -276,6 +276,12 @@ fn check_others(query: &str, query_ctx: QueryContextRef) -> Option<Output> {
 // Check whether the query is a federated or driver setup command,
 // and return some faked results if there are any.
 pub(crate) fn check(query: &str, query_ctx: QueryContextRef) -> Option<Output> {
+    // INSERT don't need MySQL federated check. We assume the query doesn't contain
+    // federated or driver setup command if it starts with a 'INSERT' statement.
+    if query.len() > 6 && query[..6].eq_ignore_ascii_case("INSERT") {
+        return None;
+    }
+
     // First to check the query is like "select @@variables".
     let output = check_select_variable(query);
     if output.is_some() {

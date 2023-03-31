@@ -178,7 +178,16 @@ pub(crate) fn to_removed_key(key: &str) -> String {
     format!("{REMOVED_PREFIX}-{key}")
 }
 
-#[derive(Eq, PartialEq, Debug, Clone, Hash)]
+pub fn build_table_route_prefix(catalog: impl AsRef<str>, schema: impl AsRef<str>) -> String {
+    format!(
+        "{}-{}-{}-",
+        TABLE_ROUTE_PREFIX,
+        catalog.as_ref(),
+        schema.as_ref()
+    )
+}
+
+#[derive(Eq, PartialEq, Debug, Clone, Hash, Copy)]
 pub struct StatKey {
     pub cluster_id: u64,
     pub node_id: u64,
@@ -278,6 +287,14 @@ impl TryFrom<Vec<u8>> for StatValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_build_prefix() {
+        assert_eq!(
+            "__meta_table_route-CATALOG-SCHEMA-",
+            build_table_route_prefix("CATALOG", "SCHEMA")
+        )
+    }
 
     #[test]
     fn test_stat_key_round_trip() {

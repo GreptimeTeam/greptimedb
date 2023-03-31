@@ -150,7 +150,9 @@ impl Inner {
 mod tests {
     use std::sync::Arc;
 
-    use api::v1::meta::{BatchGetRequest, BatchGetResponse};
+    use api::v1::meta::{
+        BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse,
+    };
 
     use super::*;
     use crate::service::store::kv::KvStore;
@@ -216,6 +218,10 @@ mod tests {
                 &self,
                 _: api::v1::meta::MoveValueRequest,
             ) -> Result<api::v1::meta::MoveValueResponse> {
+                unreachable!()
+            }
+
+            async fn batch_delete(&self, _: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
                 unreachable!()
             }
         }

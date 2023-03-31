@@ -13,7 +13,6 @@
 // limitations under the License.
 
 //! Table and TableEngine requests
-mod insert;
 
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -22,7 +21,6 @@ use std::time::Duration;
 use common_base::readable_size::ReadableSize;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::{ColumnSchema, RawSchema};
-pub use insert::InsertRequest;
 use serde::{Deserialize, Serialize};
 use store_api::storage::RegionNumber;
 
@@ -172,6 +170,15 @@ pub struct DropTableRequest {
     pub catalog_name: String,
     pub schema_name: String,
     pub table_name: String,
+}
+
+#[derive(Debug)]
+pub struct InsertRequest {
+    pub catalog_name: String,
+    pub schema_name: String,
+    pub table_name: String,
+    pub columns_values: HashMap<String, VectorRef>,
+    pub region_number: RegionNumber,
 }
 
 /// Delete (by primary key) request

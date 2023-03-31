@@ -12,4 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! PromQL functions
+use sqlparser::ast::Value;
+
+pub fn parse_option_string(value: Value) -> Option<String> {
+    match value {
+        Value::SingleQuotedString(v) | Value::DoubleQuotedString(v) => Some(v),
+        _ => None,
+    }
+}

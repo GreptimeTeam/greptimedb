@@ -18,7 +18,7 @@ use sqlparser::ast::Statement as SpStatement;
 use crate::error::{ConvertToDfStatementSnafu, Error};
 use crate::statements::alter::AlterTable;
 use crate::statements::copy::CopyTable;
-use crate::statements::create::{CreateDatabase, CreateTable};
+use crate::statements::create::{CreateDatabase, CreateExternalTable, CreateTable};
 use crate::statements::delete::Delete;
 use crate::statements::describe::DescribeTable;
 use crate::statements::drop::DropTable;
@@ -40,6 +40,8 @@ pub enum Statement {
     Delete(Box<Delete>),
     /// CREATE TABLE
     CreateTable(CreateTable),
+    // CREATE EXTERNAL TABLE
+    CreateExternalTable(CreateExternalTable),
     // DROP TABLE
     DropTable(DropTable),
     // CREATE DATABASE
@@ -80,6 +82,7 @@ impl TryFrom<&Statement> for DfStatement {
             Statement::Query(query) => SpStatement::Query(Box::new(query.inner.clone())),
             Statement::Explain(explain) => explain.inner.clone(),
             Statement::Insert(insert) => insert.inner.clone(),
+            Statement::Delete(delete) => delete.inner.clone(),
             _ => {
                 return ConvertToDfStatementSnafu {
                     statement: format!("{s:?}"),

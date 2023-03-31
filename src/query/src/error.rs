@@ -110,6 +110,12 @@ pub enum Error {
         source: DataFusionError,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Timestamp column for table '{table_name}' is missing!"))]
+    MissingTimestampColumn {
+        table_name: String,
+        backtrace: Backtrace,
+    },
 }
 
 impl ErrorExt for Error {
@@ -131,7 +137,7 @@ impl ErrorExt for Error {
             }
             CreateRecordBatch { source } => source.status_code(),
             QueryExecution { source } | QueryPlan { source } => source.status_code(),
-            DataFusion { .. } => StatusCode::Internal,
+            DataFusion { .. } | MissingTimestampColumn { .. } => StatusCode::Internal,
             Sql { source } => source.status_code(),
             PlanSql { .. } => StatusCode::PlanQuery,
         }

@@ -23,7 +23,7 @@ use datatypes::schema::{ColumnSchema, RawSchema, Schema, SchemaBuilder, SchemaRe
 use datatypes::vectors::{Float64Vector, StringVector, TimestampMillisecondVector, VectorRef};
 use log_store::NoopLogStore;
 use object_store::services::Fs as Builder;
-use object_store::{ObjectStore, ObjectStoreBuilder};
+use object_store::ObjectStore;
 use storage::compaction::noop::NoopCompactionScheduler;
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
@@ -98,8 +98,9 @@ pub fn build_test_table_info() -> TableInfo {
 pub async fn new_test_object_store(prefix: &str) -> (TempDir, ObjectStore) {
     let dir = create_temp_dir(prefix);
     let store_dir = dir.path().to_string_lossy();
-    let accessor = Builder::default().root(&store_dir).build().unwrap();
-    (dir, ObjectStore::new(accessor).finish())
+    let mut builder = Builder::default();
+    builder.root(&store_dir);
+    (dir, ObjectStore::new(builder).unwrap().finish())
 }
 
 pub fn new_create_request(schema: SchemaRef) -> CreateTableRequest {

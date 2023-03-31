@@ -20,7 +20,7 @@ use common_query::physical_plan::SessionContext;
 use common_query::Output;
 use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
 use datafusion::parquet::arrow::ArrowWriter;
-use datafusion::parquet::basic::{Compression, Encoding};
+use datafusion::parquet::basic::{Compression, Encoding, ZstdLevel};
 use datafusion::parquet::file::properties::WriterProperties;
 use datafusion::physical_plan::RecordBatchStream;
 use futures::TryStreamExt;
@@ -94,7 +94,7 @@ impl ParquetWriter {
     pub async fn flush(&mut self) -> Result<usize> {
         let schema = self.stream.as_ref().schema();
         let writer_props = WriterProperties::builder()
-            .set_compression(Compression::ZSTD)
+            .set_compression(Compression::ZSTD(ZstdLevel::default()))
             .set_encoding(Encoding::PLAIN)
             .set_max_row_group_size(self.max_row_group_size)
             .build();
@@ -136,10 +136,10 @@ impl ParquetWriter {
             // "file_name_1_1000000"        (row num: 1 ~ 1000000),
             // "file_name_1000001_xxx"      (row num: 1000001 ~ xxx)
             let file_name = format!("{}_{}_{}", self.file_name, start_row_num, total_rows);
-            let object = self.object_store.object(&file_name);
-            object.write(buf).await.context(error::WriteObjectSnafu {
-                path: object.path(),
-            })?;
+            self.object_store
+                .write(&file_name, buf)
+                .await
+                .context(error::WriteObjectSnafu { path: file_name })?;
 
             if end_loop {
                 return Ok(total_rows);

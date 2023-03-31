@@ -13,13 +13,13 @@
 // limitations under the License.
 
 use arrow::array::ArrayData;
-use arrow::bitmap::Bitmap;
+use arrow::buffer::NullBuffer;
 
 #[derive(Debug, PartialEq)]
 enum ValidityKind<'a> {
     /// Whether the array slot is valid or not (null).
     Slots {
-        bitmap: &'a Bitmap,
+        bitmap: &'a NullBuffer,
         len: usize,
         null_count: usize,
     },
@@ -38,7 +38,7 @@ pub struct Validity<'a> {
 impl<'a> Validity<'a> {
     /// Creates a `Validity` from [`ArrayData`].
     pub fn from_array_data(data: &'a ArrayData) -> Validity<'a> {
-        match data.null_bitmap() {
+        match data.nulls() {
             Some(bitmap) => Validity {
                 kind: ValidityKind::Slots {
                     bitmap,
@@ -67,7 +67,7 @@ impl<'a> Validity<'a> {
     /// Returns whether `i-th` bit is set.
     pub fn is_set(&self, i: usize) -> bool {
         match self.kind {
-            ValidityKind::Slots { bitmap, .. } => bitmap.is_set(i),
+            ValidityKind::Slots { bitmap, .. } => bitmap.is_valid(i),
             ValidityKind::AllValid { len } => i < len,
             ValidityKind::AllNull { .. } => false,
         }

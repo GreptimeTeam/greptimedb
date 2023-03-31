@@ -17,9 +17,10 @@ use std::sync::Arc;
 
 use api::v1::meta::store_client::StoreClient;
 use api::v1::meta::{
-    BatchGetRequest, BatchGetResponse, BatchPutRequest, BatchPutResponse, CompareAndPutRequest,
-    CompareAndPutResponse, DeleteRangeRequest, DeleteRangeResponse, MoveValueRequest,
-    MoveValueResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
+    BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
+    BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
+    DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest, PutResponse,
+    RangeRequest, RangeResponse,
 };
 use common_grpc::channel_manager::ChannelManager;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -78,6 +79,11 @@ impl Client {
     pub async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
         let inner = self.inner.read().await;
         inner.batch_put(req).await
+    }
+
+    pub async fn batch_delete(&self, req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
+        let inner = self.inner.read().await;
+        inner.batch_delete(req).await
     }
 
     pub async fn compare_and_put(
@@ -163,6 +169,17 @@ impl Inner {
         req.set_header(self.id);
         let res = client
             .batch_put(req)
+            .await
+            .context(error::TonicStatusSnafu)?;
+
+        Ok(res.into_inner())
+    }
+
+    async fn batch_delete(&self, mut req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
+        let mut client = self.random_client()?;
+        req.set_header(self.id);
+        let res = client
+            .batch_delete(req)
             .await
             .context(error::TonicStatusSnafu)?;
 

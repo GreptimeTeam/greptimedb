@@ -16,10 +16,33 @@
 pub mod action;
 
 use storage::manifest::ManifestImpl;
+use store_api::manifest::action::{ProtocolAction, ProtocolVersion};
+use store_api::manifest::{Checkpoint, ManifestVersion};
 
 use crate::manifest::action::TableMetaActionList;
 
-pub type TableManifest = ManifestImpl<TableMetaActionList>;
+#[derive(Debug, Clone)]
+pub struct NoopCheckpoint {}
+
+impl Checkpoint for NoopCheckpoint {
+    type Error = storage::error::Error;
+
+    fn set_protocol(&mut self, _action: ProtocolAction) {}
+
+    fn last_version(&self) -> ManifestVersion {
+        unreachable!();
+    }
+
+    fn encode(&self) -> Result<Vec<u8>, Self::Error> {
+        unreachable!();
+    }
+
+    fn decode(_bs: &[u8], _reader_version: ProtocolVersion) -> Result<Self, Self::Error> {
+        unreachable!();
+    }
+}
+
+pub type TableManifest = ManifestImpl<NoopCheckpoint, TableMetaActionList>;
 
 #[cfg(test)]
 mod tests {
@@ -57,7 +80,7 @@ mod tests {
     async fn test_table_manifest() {
         let (_dir, object_store) = test_util::new_test_object_store("test_table_manifest").await;
 
-        let manifest = TableManifest::new("manifest/", object_store);
+        let manifest = TableManifest::new("manifest/", object_store, None);
 
         let mut iter = manifest.scan(0, 100).await.unwrap();
         assert!(iter.next_action().await.unwrap().is_none());

@@ -32,10 +32,10 @@ use crate::error::Result;
 use crate::rpc::lock::{LockRequest, LockResponse, UnlockRequest};
 use crate::rpc::router::DeleteRequest;
 use crate::rpc::{
-    BatchGetRequest, BatchGetResponse, BatchPutRequest, BatchPutResponse, CompareAndPutRequest,
-    CompareAndPutResponse, CreateRequest, DeleteRangeRequest, DeleteRangeResponse,
-    MoveValueRequest, MoveValueResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
-    RouteRequest, RouteResponse,
+    BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
+    BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, CreateRequest,
+    DeleteRangeRequest, DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest,
+    PutResponse, RangeRequest, RangeResponse, RouteRequest, RouteResponse,
 };
 
 pub type Id = (u64, u64);
@@ -254,6 +254,14 @@ impl MetaClient {
     /// BatchPut atomically puts the given keys into the key-value store.
     pub async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
         self.store_client()?.batch_put(req.into()).await?.try_into()
+    }
+
+    /// BatchDelete atomically deletes the given keys from the key-value store.
+    pub async fn batch_delete(&self, req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
+        self.store_client()?
+            .batch_delete(req.into())
+            .await?
+            .try_into()
     }
 
     /// CompareAndPut atomically puts the value to the given updated

@@ -5,6 +5,7 @@ on:
   schedule:
     # At 00:00 on Monday.
     - cron: '0 0 * * 1'
+  # Mannually trigger only builds binaries.
   workflow_dispatch:
 
 name: Release
@@ -32,38 +33,42 @@ jobs:
             os: ubuntu-2004-16-cores
             file: greptime-linux-amd64
             continue-on-error: false
+            opts: "-F servers/dashboard"
           - arch: aarch64-unknown-linux-gnu
             os: ubuntu-2004-16-cores
             file: greptime-linux-arm64
             continue-on-error: false
+            opts: "-F servers/dashboard"
           - arch: aarch64-apple-darwin
             os: macos-latest
             file: greptime-darwin-arm64
             continue-on-error: false
+            opts: "-F servers/dashboard"
           - arch: x86_64-apple-darwin
             os: macos-latest
             file: greptime-darwin-amd64
             continue-on-error: false
+            opts: "-F servers/dashboard"
           - arch: x86_64-unknown-linux-gnu
             os: ubuntu-2004-16-cores
             file: greptime-linux-amd64-pyo3
             continue-on-error: false
-            opts: "-F pyo3_backend"
+            opts: "-F pyo3_backend,servers/dashboard"
           - arch: aarch64-unknown-linux-gnu
             os: ubuntu-2004-16-cores
             file: greptime-linux-arm64-pyo3
             continue-on-error: false
-            opts: "-F pyo3_backend"
+            opts: "-F pyo3_backend,servers/dashboard"
           - arch: aarch64-apple-darwin
             os: macos-latest
             file: greptime-darwin-arm64-pyo3
             continue-on-error: false
-            opts: "-F pyo3_backend"
+            opts: "-F pyo3_backend,servers/dashboard"
           - arch: x86_64-apple-darwin
             os: macos-latest
             file: greptime-darwin-amd64-pyo3
             continue-on-error: false
-            opts: "-F pyo3_backend"
+            opts: "-F pyo3_backend,servers/dashboard"
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.continue-on-error }}
     if: github.repository == 'GreptimeTeam/greptimedb'
@@ -164,7 +169,7 @@ jobs:
           export LD_LIBRARY_PATH=$PYTHON_INSTALL_PATH_AMD64/lib:$LD_LIBRARY_PATH
           export LIBRARY_PATH=$PYTHON_INSTALL_PATH_AMD64/lib:$LIBRARY_PATH
           export PATH=$PYTHON_INSTALL_PATH_AMD64/bin:$PATH
-          
+
           echo "implementation=CPython" >> pyo3.config
           echo "version=3.10" >> pyo3.config
           echo "implementation=CPython" >> pyo3.config
@@ -212,7 +217,7 @@ jobs:
     name: Build docker image
     needs: [build]
     runs-on: ubuntu-latest
-    if: github.repository == 'GreptimeTeam/greptimedb'
+    if: github.repository == 'GreptimeTeam/greptimedb' && github.event_name != 'workflow_dispatch'
     steps:
       - name: Checkout sources
         uses: actions/checkout@v3
@@ -252,9 +257,8 @@ jobs:
 
       - name: Unzip the amd64 artifacts
         run: |
-          cd amd64
-          tar xvf greptime-linux-amd64-pyo3.tgz
-          rm greptime-linux-amd64-pyo3.tgz
+          tar xvf amd64/greptime-linux-amd64-pyo3.tgz -C amd64/ && rm amd64/greptime-linux-amd64-pyo3.tgz
+          cp -r amd64 docker/ci
 
       - name: Download arm64 binary
         id: download-arm64
@@ -267,15 +271,14 @@ jobs:
         id: unzip-arm64
         if: success() || steps.download-arm64.conclusion == 'success'
         run: |
-          cd arm64
-          tar xvf greptime-linux-arm64-pyo3.tgz
-          rm greptime-linux-arm64-pyo3.tgz
+          tar xvf arm64/greptime-linux-arm64-pyo3.tgz -C arm64/ && rm arm64/greptime-linux-arm64-pyo3.tgz
+          cp -r arm64 docker/ci
 
       - name: Build and push all
         uses: docker/build-push-action@v3
         if: success() || steps.unzip-arm64.conclusion == 'success' # Build and push all platform if unzip-arm64 succeeds
         with:
-          context: .
+          context: ./docker/ci/
           file: ./docker/ci/Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
@@ -287,7 +290,7 @@ jobs:
         uses: docker/build-push-action@v3
         if: success() || steps.download-arm64.conclusion == 'failure' # Only build and push amd64 platform if download-arm64 fails
         with:
-          context: .
+          context: ./docker/ci/
           file: ./docker/ci/Dockerfile
           push: true
           platforms: linux/amd64
@@ -300,7 +303,7 @@ jobs:
     # Release artifacts only when all the artifacts are built successfully.
     needs: [build,docker]
     runs-on: ubuntu-latest
-    if: github.repository == 'GreptimeTeam/greptimedb'
+    if: github.repository == 'GreptimeTeam/greptimedb' && github.event_name != 'workflow_dispatch'
     steps:
       - name: Checkout sources
         uses: actions/checkout@v3
@@ -343,7 +346,7 @@ jobs:
     name: Push docker image to UCloud Container Registry
     needs: [docker]
     runs-on: ubuntu-latest
-    if: github.repository == 'GreptimeTeam/greptimedb'
+    if: github.repository == 'GreptimeTeam/greptimedb' && github.event_name != 'workflow_dispatch'
     # Push to uhub may fail(500 error), but we don't want to block the release process. The failed job will be retried manually.
     continue-on-error: true
     steps:

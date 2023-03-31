@@ -51,23 +51,23 @@ edition = "2021"
 license = "Apache-2.0"
 
 [workspace.dependencies]
-arrow = { version = "34.0" }
-arrow-array = "34.0"
-arrow-flight = "34.0"
-arrow-schema = { version = "34.0", features = ["serde"] }
+arrow = { version = "36.0" }
+arrow-array = "36.0"
+arrow-flight = "36.0"
+arrow-schema = { version = "36.0", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
-datafusion = { git = "https://github.com/apache/arrow-datafusion.git", rev = "146a949218ec970784974137277cde3b4e547d0a" }
-datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", rev = "146a949218ec970784974137277cde3b4e547d0a" }
-datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "146a949218ec970784974137277cde3b4e547d0a" }
-datafusion-optimizer = { git = "https://github.com/apache/arrow-datafusion.git", rev = "146a949218ec970784974137277cde3b4e547d0a" }
-datafusion-physical-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "146a949218ec970784974137277cde3b4e547d0a" }
-datafusion-sql = { git = "https://github.com/apache/arrow-datafusion.git", rev = "146a949218ec970784974137277cde3b4e547d0a" }
-datafusion-substrait = { git = "https://github.com/apache/arrow-datafusion.git", rev = "146a949218ec970784974137277cde3b4e547d0a" }
+datafusion = { git = "https://github.com/apache/arrow-datafusion.git", rev = "8e125d2ecf242b4f4b81f06839900dbb2037cc2a" }
+datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", rev = "8e125d2ecf242b4f4b81f06839900dbb2037cc2a" }
+datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "8e125d2ecf242b4f4b81f06839900dbb2037cc2a" }
+datafusion-optimizer = { git = "https://github.com/apache/arrow-datafusion.git", rev = "8e125d2ecf242b4f4b81f06839900dbb2037cc2a" }
+datafusion-physical-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "8e125d2ecf242b4f4b81f06839900dbb2037cc2a" }
+datafusion-sql = { git = "https://github.com/apache/arrow-datafusion.git", rev = "8e125d2ecf242b4f4b81f06839900dbb2037cc2a" }
+datafusion-substrait = { git = "https://github.com/apache/arrow-datafusion.git", rev = "8e125d2ecf242b4f4b81f06839900dbb2037cc2a" }
 futures = "0.3"
 futures-util = "0.3"
-parquet = "34.0"
+parquet = "36.0"
 paste = "1.0"
 prost = "0.11"
 rand = "0.8"

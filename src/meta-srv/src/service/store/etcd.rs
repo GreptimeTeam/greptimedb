@@ -15,9 +15,10 @@
 use std::sync::Arc;
 
 use api::v1::meta::{
-    BatchGetRequest, BatchGetResponse, BatchPutRequest, BatchPutResponse, CompareAndPutRequest,
-    CompareAndPutResponse, DeleteRangeRequest, DeleteRangeResponse, KeyValue, MoveValueRequest,
-    MoveValueResponse, PutRequest, PutResponse, RangeRequest, RangeResponse, ResponseHeader,
+    BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
+    BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
+    DeleteRangeResponse, KeyValue, MoveValueRequest, MoveValueResponse, PutRequest, PutResponse,
+    RangeRequest, RangeResponse, ResponseHeader,
 };
 use common_error::prelude::*;
 use common_telemetry::warn;
@@ -166,6 +167,44 @@ impl KvStore for EtcdStore {
 
         let header = Some(ResponseHeader::success(cluster_id));
         Ok(BatchPutResponse { header, prev_kvs })
+    }
+
+    async fn batch_delete(&self, req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
+        let BatchDelete {
+            cluster_id,
+            keys,
+            options,
+        } = req.try_into()?;
+
+        let mut prev_kvs = Vec::with_capacity(keys.len());
+
+        let delete_ops = keys
+            .into_iter()
+            .map(|k| TxnOp::delete(k, options.clone()))
+            .collect::<Vec<_>>();
+        let txn = Txn::new().and_then(delete_ops);
+
+        let txn_res = self
+            .client
+            .kv_client()
+            .txn(txn)
+            .await
+            .context(error::EtcdFailedSnafu)?;
+
+        for op_res in txn_res.op_responses() {
+            match op_res {
+                TxnOpResponse::Delete(delete_res) => {
+                    delete_res.prev_kvs().iter().for_each(|kv| {
+                        prev_kvs.push(KvPair::to_kv(kv));
+                    });
+                }
+                _ => unreachable!(), // never get here
+            }
+        }
+
+        let header = Some(ResponseHeader::success(cluster_id));
+
+        Ok(BatchDeleteResponse { header, prev_kvs })
     }
 
     async fn compare_and_put(&self, req: CompareAndPutRequest) -> Result<CompareAndPutResponse> {
@@ -406,7 +445,7 @@ impl TryFrom<BatchGetRequest> for BatchGet {
     fn try_from(req: BatchGetRequest) -> Result<Self> {
         let BatchGetRequest { header, keys } = req;
 
-        let options = GetOptions::default().with_keys_only();
+        let options = GetOptions::default();
 
         Ok(BatchGet {
             cluster_id: header.map_or(0, |h| h.cluster_id),
@@ -440,6 +479,35 @@ impl TryFrom<BatchPutRequest> for BatchPut {
         Ok(BatchPut {
             cluster_id: header.map_or(0, |h| h.cluster_id),
             kvs,
+            options: Some(options),
+        })
+    }
+}
+
+struct BatchDelete {
+    cluster_id: u64,
+    keys: Vec<Vec<u8>>,
+    options: Option<DeleteOptions>,
+}
+
+impl TryFrom<BatchDeleteRequest> for BatchDelete {
+    type Error = error::Error;
+
+    fn try_from(req: BatchDeleteRequest) -> Result<Self> {
+        let BatchDeleteRequest {
+            header,
+            keys,
+            prev_kv,
+        } = req;
+
+        let mut options = DeleteOptions::default();
+        if prev_kv {
+            options = options.with_prev_key();
+        }
+
+        Ok(BatchDelete {
+            cluster_id: header.map_or(0, |h| h.cluster_id),
+            keys,
             options: Some(options),
         })
     }
@@ -626,6 +694,23 @@ mod tests {
         assert_eq!(b"test_key".to_vec(), batch_put.kvs.get(0).unwrap().key);
         assert_eq!(b"test_value".to_vec(), batch_put.kvs.get(0).unwrap().value);
         assert!(batch_put.options.is_some());
+    }
+
+    #[test]
+    fn test_parse_batch_delete() {
+        let req = BatchDeleteRequest {
+            keys: vec![b"k1".to_vec(), b"k2".to_vec(), b"k3".to_vec()],
+            prev_kv: true,
+            ..Default::default()
+        };
+
+        let batch_delete: BatchDelete = req.try_into().unwrap();
+
+        assert_eq!(batch_delete.keys.len(), 3);
+        assert_eq!(b"k1".to_vec(), batch_delete.keys.get(0).unwrap().to_vec());
+        assert_eq!(b"k2".to_vec(), batch_delete.keys.get(1).unwrap().to_vec());
+        assert_eq!(b"k3".to_vec(), batch_delete.keys.get(2).unwrap().to_vec());
+        assert!(batch_delete.options.is_some());
     }
 
     #[test]

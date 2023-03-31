@@ -39,6 +39,16 @@ pub struct ProtocolAction {
     pub min_writer_version: ProtocolVersion,
 }
 
+impl std::fmt::Display for ProtocolAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Protocol({}, {})",
+            &self.min_reader_version, &self.min_writer_version,
+        )
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct VersionHeader {
     pub prev_version: ManifestVersion,

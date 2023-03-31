@@ -34,7 +34,7 @@ use datatypes::schema::{ColumnSchema, RawSchema};
 use frontend::instance::Instance as FeInstance;
 use object_store::services::{Oss, S3};
 use object_store::test_util::TempFolder;
-use object_store::{ObjectStore, ObjectStoreBuilder};
+use object_store::ObjectStore;
 use once_cell::sync::OnceCell;
 use rand::Rng;
 use servers::grpc::GrpcServer;
@@ -104,18 +104,17 @@ fn get_test_store_config(
                 cache_capacity: None,
             };
 
-            let accessor = Oss::default()
+            let mut builder = Oss::default();
+            builder
                 .root(&oss_config.root)
                 .endpoint(&oss_config.endpoint)
                 .access_key_id(&oss_config.access_key_id)
                 .access_key_secret(&oss_config.access_key_secret)
-                .bucket(&oss_config.bucket)
-                .build()
-                .unwrap();
+                .bucket(&oss_config.bucket);
 
             let config = ObjectStoreConfig::Oss(oss_config);
 
-            let store = ObjectStore::new(accessor).finish();
+            let store = ObjectStore::new(builder).unwrap().finish();
 
             (
                 config,
@@ -134,17 +133,16 @@ fn get_test_store_config(
                 cache_capacity: None,
             };
 
-            let accessor = S3::default()
+            let mut builder = S3::default();
+            builder
                 .root(&s3_config.root)
                 .access_key_id(&s3_config.access_key_id)
                 .secret_access_key(&s3_config.secret_access_key)
-                .bucket(&s3_config.bucket)
-                .build()
-                .unwrap();
+                .bucket(&s3_config.bucket);
 
             let config = ObjectStoreConfig::S3(s3_config);
 
-            let store = ObjectStore::new(accessor).finish();
+            let store = ObjectStore::new(builder).unwrap().finish();
 
             (config, Some(TempDirGuard::S3(TempFolder::new(&store, "/"))))
         }

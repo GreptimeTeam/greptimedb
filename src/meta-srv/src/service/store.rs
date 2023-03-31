@@ -18,9 +18,10 @@ pub mod kv;
 pub mod memory;
 
 use api::v1::meta::{
-    store_server, BatchGetRequest, BatchGetResponse, BatchPutRequest, BatchPutResponse,
-    CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest, DeleteRangeResponse,
-    MoveValueRequest, MoveValueResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
+    store_server, BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse,
+    BatchPutRequest, BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse,
+    DeleteRangeRequest, DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest,
+    PutResponse, RangeRequest, RangeResponse,
 };
 use tonic::{Request, Response};
 
@@ -54,6 +55,15 @@ impl store_server::Store for MetaSrv {
         let req = req.into_inner();
         let res = self.kv_store().batch_put(req).await?;
 
+        Ok(Response::new(res))
+    }
+
+    async fn batch_delete(
+        &self,
+        req: Request<BatchDeleteRequest>,
+    ) -> GrpcResult<BatchDeleteResponse> {
+        let req = req.into_inner();
+        let res = self.kv_store().batch_delete(req).await?;
         Ok(Response::new(res))
     }
 
@@ -140,6 +150,18 @@ mod tests {
 
         let req = BatchPutRequest::default();
         let res = meta_srv.batch_put(req.into_request()).await;
+
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_batch_delete() {
+        let kv_store = Arc::new(MemStore::new());
+
+        let meta_srv = MetaSrvBuilder::new().kv_store(kv_store).build().await;
+
+        let req = BatchDeleteRequest::default();
+        let res = meta_srv.batch_delete(req.into_request()).await;
 
         assert!(res.is_ok());
     }

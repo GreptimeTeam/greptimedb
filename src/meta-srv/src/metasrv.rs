@@ -66,6 +66,7 @@ pub struct Context {
     pub catalog: Option<String>,
     pub schema: Option<String>,
     pub table: Option<String>,
+    pub is_infancy: bool,
 }
 
 impl Context {
@@ -199,6 +200,7 @@ impl MetaSrv {
             catalog: None,
             schema: None,
             table: None,
+            is_infancy: false,
         }
     }
 }

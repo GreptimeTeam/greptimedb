@@ -48,7 +48,6 @@ impl SqlHandler {
             build_backend(&req.location, req.connection).context(error::BuildBackendSnafu)?;
 
         let (dir, filename) = find_dir_and_filename(&path);
-
         let regex = req
             .pattern
             .as_ref()
@@ -62,16 +61,18 @@ impl SqlHandler {
             Source::Dir
         };
 
-        let lister = Lister::new(object_store, source, dir, regex);
+        let lister = Lister::new(object_store.clone(), source, dir, regex);
 
-        let objects = lister.list().await.context(error::ListObjectsSnafu)?;
+        let entries = lister.list().await.context(error::ListObjectsSnafu)?;
 
         let mut buf: Vec<RecordBatch> = Vec::new();
 
-        for obj in objects.iter() {
-            let reader = obj.reader().await.context(error::ReadObjectSnafu {
-                path: &obj.path().to_string(),
-            })?;
+        for entry in entries.iter() {
+            let path = entry.path();
+            let reader = object_store
+                .reader(path)
+                .await
+                .context(error::ReadObjectSnafu { path })?;
 
             let buf_reader = BufReader::new(reader.compat());
 

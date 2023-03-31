@@ -50,6 +50,8 @@ pub enum Mode {
 /// and switch database using `USE` command
 /// - Postgres `database` parameter in Postgres wire protocol, required
 /// - HTTP RESTful API: the database parameter, optional
+/// - gRPC: the dbname field in header, optional but has a higher priority than
+/// original catalog/schema
 ///
 /// When database name is provided, we attempt to parse catalog and schema from
 /// it. We assume the format `[<catalog>-]<schema>`:

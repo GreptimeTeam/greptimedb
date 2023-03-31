@@ -6,7 +6,9 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     python3.10-dev \
     python3-pip
 
-RUN python3 -m pip install pyarrow
+COPY requirements.txt /etc/greptime/requirements.txt
+
+RUN python3 -m pip install -r /etc/greptime/requirements.txt
 
 ARG TARGETARCH
 

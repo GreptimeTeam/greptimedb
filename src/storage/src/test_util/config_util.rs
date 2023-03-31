@@ -16,8 +16,8 @@ use std::sync::Arc;
 
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::LogConfig;
-use object_store::services::Fs as Builder;
-use object_store::{ObjectStore, ObjectStoreBuilder};
+use object_store::services::Fs;
+use object_store::ObjectStore;
 
 use crate::background::JobPoolImpl;
 use crate::compaction::noop::NoopCompactionScheduler;
@@ -39,14 +39,25 @@ pub async fn new_store_config(
     region_name: &str,
     store_dir: &str,
 ) -> StoreConfig<RaftEngineLogStore> {
+    let mut builder = Fs::default();
+    builder.root(store_dir);
+    let object_store = ObjectStore::new(builder).unwrap().finish();
+
+    new_store_config_with_object_store(region_name, store_dir, object_store).await
+}
+
+/// Create a new StoreConfig with given object store.
+pub async fn new_store_config_with_object_store(
+    region_name: &str,
+    store_dir: &str,
+    object_store: ObjectStore,
+) -> StoreConfig<RaftEngineLogStore> {
     let parent_dir = "";
     let sst_dir = engine::region_sst_dir(parent_dir, region_name);
     let manifest_dir = engine::region_manifest_dir(parent_dir, region_name);
 
-    let accessor = Builder::default().root(store_dir).build().unwrap();
-    let object_store = ObjectStore::new(accessor).finish();
     let sst_layer = Arc::new(FsAccessLayer::new(&sst_dir, object_store.clone()));
-    let manifest = RegionManifest::new(&manifest_dir, object_store);
+    let manifest = RegionManifest::with_checkpointer(&manifest_dir, object_store);
     let job_pool = Arc::new(JobPoolImpl {});
     let flush_scheduler = Arc::new(FlushSchedulerImpl::new(job_pool));
     let log_config = LogConfig {

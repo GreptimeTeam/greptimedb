@@ -204,6 +204,13 @@ impl FileHandle {
     }
 
     #[inline]
+    pub fn file_path(&self) -> String {
+        self.inner
+            .sst_layer
+            .sst_file_path(&self.inner.meta.file_id.as_parquet())
+    }
+
+    #[inline]
     pub fn file_id(&self) -> FileId {
         self.inner.meta.file_id
     }
@@ -249,13 +256,22 @@ impl FileHandle {
 /// Actually data of [FileHandle].
 ///
 /// Contains meta of the file, and other mutable info like metrics.
-#[derive(Debug)]
 struct FileHandleInner {
     meta: FileMeta,
     compacting: AtomicBool,
     deleted: AtomicBool,
     sst_layer: AccessLayerRef,
     file_purger: FilePurgerRef,
+}
+
+impl fmt::Debug for FileHandleInner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FileHandleInner")
+            .field("meta", &self.meta)
+            .field("compacting", &self.compacting)
+            .field("deleted", &self.deleted)
+            .finish()
+    }
 }
 
 impl Drop for FileHandleInner {
@@ -276,7 +292,7 @@ impl Drop for FileHandleInner {
                     );
                 }
                 Err(e) => {
-                    error!(e; "Failed to schedule SST purge task, region: {}, name: {}", 
+                    error!(e; "Failed to schedule SST purge task, region: {}, name: {}",
                     self.meta.region_id, self.meta.file_id.as_parquet());
                 }
             }
@@ -392,16 +408,24 @@ pub struct SstInfo {
 /// SST access layer.
 #[async_trait]
 pub trait AccessLayer: Send + Sync + std::fmt::Debug {
-    /// Writes SST file with given `file_name`.
+    /// Returns the sst file path.
+    fn sst_file_path(&self, file_name: &str) -> String;
+
+    /// Writes SST file with given `file_id` and returns the SST info.
+    /// If source does not contain any data, `write_sst` will return `Ok(None)`.
     async fn write_sst(
         &self,
         file_id: FileId,
         source: Source,
         opts: &WriteOptions,
-    ) -> Result<SstInfo>;
+    ) -> Result<Option<SstInfo>>;
 
-    /// Read SST file with given `file_name` and schema.
-    async fn read_sst(&self, file_id: FileId, opts: &ReadOptions) -> Result<BoxedBatchReader>;
+    /// Read SST file with given `file_handle` and schema.
+    async fn read_sst(
+        &self,
+        file_handle: FileHandle,
+        opts: &ReadOptions,
+    ) -> Result<BoxedBatchReader>;
 
     /// Deletes a SST file with given name.
     async fn delete_sst(&self, file_id: FileId) -> Result<()>;
@@ -436,11 +460,18 @@ impl Source {
     }
 }
 
-/// Sst access layer based on local file system.
-#[derive(Debug)]
+/// Sst access layer.
 pub struct FsAccessLayer {
     sst_dir: String,
     object_store: ObjectStore,
+}
+
+impl fmt::Debug for FsAccessLayer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FsAccessLayer")
+            .field("sst_dir", &self.sst_dir)
+            .finish()
+    }
 }
 
 impl FsAccessLayer {
@@ -450,21 +481,21 @@ impl FsAccessLayer {
             object_store,
         }
     }
-
-    #[inline]
-    fn sst_file_path(&self, file_name: &str) -> String {
-        format!("{}{}", self.sst_dir, file_name)
-    }
 }
 
 #[async_trait]
 impl AccessLayer for FsAccessLayer {
+    fn sst_file_path(&self, file_name: &str) -> String {
+        format!("{}{}", self.sst_dir, file_name)
+    }
+
+    /// Writes SST file with given `file_id`.
     async fn write_sst(
         &self,
         file_id: FileId,
         source: Source,
         opts: &WriteOptions,
-    ) -> Result<SstInfo> {
+    ) -> Result<Option<SstInfo>> {
         // Now we only supports parquet format. We may allow caller to specific SST format in
         // WriteOptions in the future.
         let file_path = self.sst_file_path(&file_id.as_parquet());
@@ -472,10 +503,14 @@ impl AccessLayer for FsAccessLayer {
         writer.write_sst(opts).await
     }
 
-    async fn read_sst(&self, file_id: FileId, opts: &ReadOptions) -> Result<BoxedBatchReader> {
-        let file_path = self.sst_file_path(&file_id.as_parquet());
+    /// Read SST file with given `file_handle` and schema.
+    async fn read_sst(
+        &self,
+        file_handle: FileHandle,
+        opts: &ReadOptions,
+    ) -> Result<BoxedBatchReader> {
         let reader = ParquetReader::new(
-            &file_path,
+            file_handle,
             self.object_store.clone(),
             opts.projected_schema.clone(),
             opts.predicate.clone(),
@@ -486,10 +521,13 @@ impl AccessLayer for FsAccessLayer {
         Ok(Box::new(stream))
     }
 
+    /// Deletes a SST file with given file id.
     async fn delete_sst(&self, file_id: FileId) -> Result<()> {
         let path = self.sst_file_path(&file_id.as_parquet());
-        let object = self.object_store.object(&path);
-        object.delete().await.context(DeleteSstSnafu)
+        self.object_store
+            .delete(&path)
+            .await
+            .context(DeleteSstSnafu)
     }
 }
 

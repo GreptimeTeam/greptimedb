@@ -18,7 +18,7 @@ use std::string::FromUtf8Error;
 
 use axum::http::StatusCode as HttpStatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
+use axum::{http, Json};
 use base64::DecodeError;
 use catalog;
 use common_error::prelude::*;
@@ -275,6 +275,12 @@ pub enum Error {
         source: tonic_reflection::server::Error,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to build HTTP response, source: {source}"))]
+    BuildHttpResponse {
+        source: http::Error,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -294,7 +300,8 @@ impl ErrorExt for Error {
             | TcpBind { .. }
             | CatalogError { .. }
             | GrpcReflectionService { .. }
-            | BuildingContext { .. } => StatusCode::Internal,
+            | BuildingContext { .. }
+            | BuildHttpResponse { .. } => StatusCode::Internal,
 
             InsertScript { source, .. }
             | ExecuteScript { source, .. }
