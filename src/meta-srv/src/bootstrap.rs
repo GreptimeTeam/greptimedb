@@ -20,8 +20,12 @@ use api::v1::meta::lock_server::LockServer;
 use api::v1::meta::router_server::RouterServer;
 use api::v1::meta::store_server::StoreServer;
 use etcd_client::Client;
+use servers::http::{HttpServer, HttpServerBuilder};
+use servers::metrics_handler::MetricsHandler;
+use servers::server::Server;
 use snafu::ResultExt;
 use tokio::net::TcpListener;
+use tokio::select;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::server::Router;
@@ -44,6 +48,8 @@ use crate::{error, Result};
 pub struct MetaSrvInstance {
     meta_srv: MetaSrv,
 
+    http_srv: Arc<HttpServer>,
+
     opts: MetaSrvOptions,
 
     signal_sender: Option<Sender<()>>,
@@ -52,9 +58,14 @@ pub struct MetaSrvInstance {
 impl MetaSrvInstance {
     pub async fn new(opts: MetaSrvOptions) -> Result<MetaSrvInstance> {
         let meta_srv = build_meta_srv(&opts).await?;
-
+        let http_srv = Arc::new(
+            HttpServerBuilder::new(opts.http_opts.clone())
+                .with_metrics_handler(MetricsHandler)
+                .build(),
+        );
         Ok(MetaSrvInstance {
             meta_srv,
+            http_srv,
             opts,
             signal_sender: None,
         })
@@ -67,12 +78,24 @@ impl MetaSrvInstance {
 
         self.signal_sender = Some(tx);
 
-        bootstrap_meta_srv_with_router(
+        let meta_srv = bootstrap_meta_srv_with_router(
             &self.opts.bind_addr,
             router(self.meta_srv.clone()),
             &mut rx,
-        )
-        .await?;
+        );
+        let addr = self
+            .opts
+            .http_opts
+            .addr
+            .parse()
+            .context(error::ParseAddrSnafu {
+                addr: &self.opts.http_opts.addr,
+            })?;
+        let http_srv = self.http_srv.start(addr);
+        select! {
+            v = meta_srv => v?,
+            v = http_srv => v.map(|_| ()).context(error::StartMetricsExportSnafu)?,
+        }
 
         Ok(())
     }
@@ -86,7 +109,12 @@ impl MetaSrvInstance {
         }
 
         self.meta_srv.shutdown();
-
+        self.http_srv
+            .shutdown()
+            .await
+            .context(error::ShutdownServerSnafu {
+                server: self.http_srv.name(),
+            })?;
         Ok(())
     }
 }

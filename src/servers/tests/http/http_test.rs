@@ -14,17 +14,20 @@
 
 use axum::Router;
 use axum_test_helper::TestClient;
-use servers::http::{HttpOptions, HttpServer};
+use servers::http::{HttpOptions, HttpServerBuilder};
 use table::test_util::MemTable;
 
 use crate::{create_testing_grpc_query_handler, create_testing_sql_query_handler};
 
 fn make_test_app() -> Router {
-    let server = HttpServer::new(
-        create_testing_sql_query_handler(MemTable::default_numbers_table()),
-        create_testing_grpc_query_handler(MemTable::default_numbers_table()),
-        HttpOptions::default(),
-    );
+    let server = HttpServerBuilder::new(HttpOptions::default())
+        .with_sql_handler(create_testing_sql_query_handler(
+            MemTable::default_numbers_table(),
+        ))
+        .with_grpc_handler(create_testing_grpc_query_handler(
+            MemTable::default_numbers_table(),
+        ))
+        .build();
     server.make_app()
 }
 

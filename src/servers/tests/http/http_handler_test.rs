@@ -20,6 +20,7 @@ use axum::Form;
 use common_telemetry::metric;
 use metrics::counter;
 use servers::http::{handler as http_handler, script as script_handler, ApiState, JsonOutput};
+use servers::metrics_handler::MetricsHandler;
 use session::context::UserInfo;
 use table::test_util::MemTable;
 
@@ -146,8 +147,8 @@ async fn test_metrics() {
     metric::init_default_metrics_recorder();
 
     counter!("test_metrics", 1);
-
-    let text = http_handler::metrics(Query(HashMap::default())).await;
+    let stats = MetricsHandler;
+    let text = http_handler::metrics(axum::extract::State(stats), Query(HashMap::default())).await;
     assert!(text.contains("test_metrics counter"));
 }
 

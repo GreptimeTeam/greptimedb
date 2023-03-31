@@ -28,7 +28,7 @@ use sql::statements::statement::Statement;
 use crate::error::{
     MultipleStatementsSnafu, ParseFloatSnafu, ParseTimestampSnafu, QueryParseSnafu, Result,
 };
-use crate::metric::{METRIC_PARSE_PROMQL_ELAPSED, METRIC_PARSE_SQL_ELAPSED};
+use crate::metrics::{METRIC_PARSE_PROMQL_ELAPSED, METRIC_PARSE_SQL_ELAPSED};
 
 const DEFAULT_LOOKBACK: u64 = 5 * 60; // 5m
 

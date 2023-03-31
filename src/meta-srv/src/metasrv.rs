@@ -21,6 +21,7 @@ use api::v1::meta::Peer;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::{error, info, warn};
 use serde::{Deserialize, Serialize};
+use servers::http::HttpOptions;
 use snafu::ResultExt;
 use tokio::sync::broadcast::error::RecvError;
 
@@ -44,6 +45,7 @@ pub struct MetaSrvOptions {
     pub datanode_lease_secs: i64,
     pub selector: SelectorType,
     pub use_memory_store: bool,
+    pub http_opts: HttpOptions,
 }
 
 impl Default for MetaSrvOptions {
@@ -55,6 +57,7 @@ impl Default for MetaSrvOptions {
             datanode_lease_secs: 15,
             selector: SelectorType::default(),
             use_memory_store: false,
+            http_opts: HttpOptions::default(),
         }
     }
 }

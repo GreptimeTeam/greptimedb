@@ -23,7 +23,7 @@ use common_query::Output;
 use datatypes::schema::Schema;
 use query::parser::PromQuery;
 use servers::error::{Error, Result};
-use servers::http::{HttpOptions, HttpServer};
+use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::influxdb::InfluxdbRequest;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
@@ -94,7 +94,9 @@ impl SqlQueryHandler for DummyInstance {
 
 fn make_test_app(tx: Arc<mpsc::Sender<(String, String)>>, db_name: Option<&str>) -> Router {
     let instance = Arc::new(DummyInstance { tx });
-    let mut server = HttpServer::new(instance.clone(), instance.clone(), HttpOptions::default());
+    let mut server_builder = HttpServerBuilder::new(HttpOptions::default());
+    server_builder.with_sql_handler(instance.clone());
+    server_builder.with_grpc_handler(instance.clone());
     let mut user_provider = MockUserProvider::default();
     if let Some(name) = db_name {
         user_provider.set_authorization_info(DatabaseAuthInfo {
@@ -103,9 +105,10 @@ fn make_test_app(tx: Arc<mpsc::Sender<(String, String)>>, db_name: Option<&str>)
             username: "greptime",
         })
     }
-    server.set_user_provider(Arc::new(user_provider));
+    server_builder.with_user_provider(Arc::new(user_provider));
 
-    server.set_influxdb_handler(instance);
+    server_builder.with_influxdb_handler(instance);
+    let server = server_builder.build();
     server.make_app()
 }
 

@@ -19,6 +19,7 @@ use common_base::readable_size::ReadableSize;
 use common_telemetry::info;
 use meta_client::MetaClientOptions;
 use serde::{Deserialize, Serialize};
+use servers::http::HttpOptions;
 use servers::Mode;
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::scheduler::SchedulerConfig;
@@ -224,6 +225,7 @@ pub struct DatanodeOptions {
     pub rpc_runtime_size: usize,
     pub mysql_addr: String,
     pub mysql_runtime_size: usize,
+    pub http_opts: HttpOptions,
     pub meta_client_options: Option<MetaClientOptions>,
     pub wal: WalConfig,
     pub storage: StorageConfig,
@@ -241,6 +243,7 @@ impl Default for DatanodeOptions {
             rpc_runtime_size: 8,
             mysql_addr: "127.0.0.1:4406".to_string(),
             mysql_runtime_size: 2,
+            http_opts: HttpOptions::default(),
             meta_client_options: None,
             wal: WalConfig::default(),
             storage: StorageConfig::default(),
@@ -252,14 +255,17 @@ impl Default for DatanodeOptions {
 /// Datanode service.
 pub struct Datanode {
     opts: DatanodeOptions,
-    services: Services,
+    services: Option<Services>,
     instance: InstanceRef,
 }
 
 impl Datanode {
     pub async fn new(opts: DatanodeOptions) -> Result<Datanode> {
         let instance = Arc::new(Instance::new(&opts).await?);
-        let services = Services::try_new(instance.clone(), &opts).await?;
+        let services = match opts.mode {
+            Mode::Distributed => Some(Services::try_new(instance.clone(), &opts).await?),
+            Mode::Standalone => None,
+        };
         Ok(Self {
             opts,
             services,
@@ -280,7 +286,11 @@ impl Datanode {
 
     /// Start services of datanode. This method call will block until services are shutdown.
     pub async fn start_services(&mut self) -> Result<()> {
-        self.services.start(&self.opts).await
+        if let Some(service) = self.services.as_mut() {
+            service.start(&self.opts).await
+        } else {
+            Ok(())
+        }
     }
 
     pub fn get_instance(&self) -> InstanceRef {
@@ -292,7 +302,11 @@ impl Datanode {
     }
 
     async fn shutdown_services(&self) -> Result<()> {
-        self.services.shutdown().await
+        if let Some(service) = self.services.as_ref() {
+            service.shutdown().await
+        } else {
+            Ok(())
+        }
     }
 
     pub async fn shutdown(&self) -> Result<()> {

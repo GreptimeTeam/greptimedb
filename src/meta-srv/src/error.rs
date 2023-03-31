@@ -25,6 +25,13 @@ pub enum Error {
     #[snafu(display("Failed to send shutdown signal"))]
     SendShutdownSignal { source: SendError<()> },
 
+    #[snafu(display("Failed to shutdown {} server, source: {}", server, source))]
+    ShutdownServer {
+        #[snafu(backtrace)]
+        source: servers::error::Error,
+        server: String,
+    },
+
     #[snafu(display("Error stream request next is None"))]
     StreamNone { backtrace: Backtrace },
 
@@ -55,7 +62,16 @@ pub enum Error {
         source: tonic::transport::Error,
         backtrace: Backtrace,
     },
-
+    #[snafu(display("Failed to start gRPC server, source: {}", source))]
+    StartMetricsExport {
+        #[snafu(backtrace)]
+        source: servers::error::Error,
+    },
+    #[snafu(display("Failed to parse address {}, source: {}", addr, source))]
+    ParseAddr {
+        addr: String,
+        source: std::net::AddrParseError,
+    },
     #[snafu(display("Empty table name"))]
     EmptyTableName { backtrace: Backtrace },
 
@@ -323,6 +339,7 @@ impl ErrorExt for Error {
             | Error::LockNotConfig { .. }
             | Error::ExceededRetryLimit { .. }
             | Error::SendShutdownSignal { .. }
+            | Error::ParseAddr { .. }
             | Error::StartGrpc { .. } => StatusCode::Internal,
             Error::EmptyKey { .. }
             | Error::MissingRequiredParameter { .. }
@@ -348,6 +365,9 @@ impl ErrorExt for Error {
             Error::InvalidCatalogValue { source, .. } => source.status_code(),
             Error::MetaInternal { source } => source.status_code(),
             Error::RecoverProcedure { source } => source.status_code(),
+            Error::ShutdownServer { source, .. } | Error::StartMetricsExport { source } => {
+                source.status_code()
+            }
         }
     }
 }

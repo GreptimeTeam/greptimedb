@@ -22,7 +22,7 @@ use common_query::Output;
 use datatypes::schema::Schema;
 use query::parser::PromQuery;
 use servers::error::{self, Result};
-use servers::http::{HttpOptions, HttpServer};
+use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::opentsdb::codec::DataPoint;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
@@ -92,8 +92,11 @@ impl SqlQueryHandler for DummyInstance {
 
 fn make_test_app(tx: mpsc::Sender<String>) -> Router {
     let instance = Arc::new(DummyInstance { tx });
-    let mut server = HttpServer::new(instance.clone(), instance.clone(), HttpOptions::default());
-    server.set_opentsdb_handler(instance);
+    let server = HttpServerBuilder::new(HttpOptions::default())
+        .with_grpc_handler(instance.clone())
+        .with_sql_handler(instance.clone())
+        .with_opentsdb_handler(instance)
+        .build();
     server.make_app()
 }
 
