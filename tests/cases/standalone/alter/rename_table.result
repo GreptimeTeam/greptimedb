@@ -50,6 +50,7 @@ DESC TABLE new_table;
 | j     | Int64 | NO   |         | TIME INDEX    |
 +-------+-------+------+---------+---------------+
 
+-- SQLNESS ARG restart=true
 SELECT * FROM new_table;
 
 +---+---+
