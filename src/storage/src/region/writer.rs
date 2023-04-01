@@ -15,6 +15,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use common_base::readable_size::ReadableSize;
 use common_error::prelude::BoxedError;
 use common_telemetry::tracing::log::info;
 use common_telemetry::{error, logging};
@@ -297,8 +298,10 @@ impl RegionWriter {
         let mut inner = self.inner.lock().await;
 
         ensure!(!inner.is_closed(), error::ClosedRegionSnafu);
-
-        inner.manual_compact(writer_ctx, ctx).await
+        let sst_write_buffer_size = inner.engine_config.sst_write_buffer_size;
+        inner
+            .manual_compact(writer_ctx, ctx, sst_write_buffer_size)
+            .await
     }
 
     /// Cancel flush task if any
@@ -648,6 +651,7 @@ impl WriterInner {
             wal: ctx.wal.clone(),
             manifest: ctx.manifest.clone(),
             on_success: cb,
+            engine_config: self.engine_config.clone(),
         };
 
         let flush_handle = ctx
@@ -663,6 +667,7 @@ impl WriterInner {
         &mut self,
         writer_ctx: WriterContext<'_, S>,
         compact_ctx: CompactContext,
+        sst_write_buffer_size: ReadableSize,
     ) -> Result<()> {
         let region_id = writer_ctx.shared.id();
         let mut compaction_request = CompactionRequestImpl {
@@ -674,6 +679,7 @@ impl WriterInner {
             wal: writer_ctx.wal.clone(),
             ttl: self.ttl,
             sender: None,
+            sst_write_buffer_size,
         };
 
         let compaction_scheduler = writer_ctx.compaction_scheduler.clone();
@@ -730,6 +736,7 @@ impl WriterInner {
             wal: ctx.wal.clone(),
             ttl,
             sender: None,
+            sst_write_buffer_size: config.sst_write_buffer_size,
         };
         let compaction_scheduler = ctx.compaction_scheduler.clone();
         let shared_data = ctx.shared.clone();

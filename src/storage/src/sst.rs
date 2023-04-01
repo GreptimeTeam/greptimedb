@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub(crate) mod parquet;
+mod stream_writer;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -21,9 +22,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_base::readable_size::ReadableSize;
+use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{error, info};
 use common_time::range::TimestampRange;
 use common_time::Timestamp;
+use datatypes::schema::SchemaRef;
+use futures_util::StreamExt;
 use object_store::{util, ObjectStore};
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{ResultExt, Snafu};
@@ -32,6 +37,7 @@ use table::predicate::Predicate;
 use uuid::Uuid;
 
 use crate::chunk::ChunkReaderImpl;
+use crate::error;
 use crate::error::{DeleteSstSnafu, Result};
 use crate::file_purger::{FilePurgeRequest, FilePurgerRef};
 use crate::memtable::BoxedBatchIterator;
@@ -44,6 +50,8 @@ use crate::sst::parquet::{ParquetReader, ParquetWriter};
 pub const MAX_LEVEL: u8 = 2;
 
 pub type Level = u8;
+
+pub use crate::sst::stream_writer::BufferedWriter;
 
 // We only has fixed number of level, so we use array to hold elements. This implementation
 // detail of LevelMetaVec should not be exposed to the user of [LevelMetas].
@@ -383,9 +391,18 @@ where
     FileId::from_str(stripped).map_err(<D::Error as serde::de::Error>::custom)
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct WriteOptions {
     // TODO(yingwen): [flush] row group size.
+    pub sst_write_buffer_size: ReadableSize,
+}
+
+impl Default for WriteOptions {
+    fn default() -> Self {
+        Self {
+            sst_write_buffer_size: ReadableSize::mb(8),
+        }
+    }
 }
 
 pub struct ReadOptions {
@@ -403,6 +420,7 @@ pub struct ReadOptions {
 pub struct SstInfo {
     pub time_range: Option<(Timestamp, Timestamp)>,
     pub file_size: u64,
+    pub num_rows: usize,
 }
 
 /// SST access layer.
@@ -439,6 +457,8 @@ pub enum Source {
     Iter(BoxedBatchIterator),
     /// Writes row from ChunkReaderImpl (maybe a set of SSTs) to parquet.
     Reader(ChunkReaderImpl),
+    /// Record batch stream yielded by table scan
+    Stream(SendableRecordBatchStream),
 }
 
 impl Source {
@@ -449,13 +469,23 @@ impl Source {
                 .next_chunk()
                 .await
                 .map(|p| p.map(|chunk| Batch::new(chunk.columns))),
+            Source::Stream(stream) => stream
+                .next()
+                .await
+                .transpose()
+                .map(|r| r.map(|r| Batch::new(r.columns().to_vec())))
+                .context(error::CreateRecordBatchSnafu),
         }
     }
 
-    fn projected_schema(&self) -> ProjectedSchemaRef {
+    fn schema(&self) -> SchemaRef {
         match self {
-            Source::Iter(iter) => iter.schema(),
-            Source::Reader(reader) => reader.projected_schema().clone(),
+            Source::Iter(iter) => {
+                let projected_schema = iter.schema();
+                projected_schema.schema_to_read().schema().clone()
+            }
+            Source::Reader(reader) => reader.projected_schema().schema_to_read().schema().clone(),
+            Source::Stream(stream) => stream.schema(),
         }
     }
 }

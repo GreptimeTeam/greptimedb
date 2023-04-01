@@ -147,7 +147,7 @@ mod tests {
         let sst_path = "table1";
         let layer = Arc::new(FsAccessLayer::new(sst_path, os.clone()));
         let sst_info = layer
-            .write_sst(sst_file_id, Source::Iter(iter), &WriteOptions {})
+            .write_sst(sst_file_id, Source::Iter(iter), &WriteOptions::default())
             .await
             .unwrap()
             .unwrap();

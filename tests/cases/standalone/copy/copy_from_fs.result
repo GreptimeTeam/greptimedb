@@ -14,7 +14,7 @@ CREATE TABLE with_filename(host string, cpu double, memory double, ts timestamp 
 
 Affected Rows: 0
 
-Copy with_filename FROM '/tmp/demo/export/demo.parquet_1_2';
+Copy with_filename FROM '/tmp/demo/export/demo.parquet';
 
 Affected Rows: 2
 
