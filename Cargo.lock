@@ -1154,6 +1154,7 @@ dependencies = [
  "datatypes",
  "futures",
  "futures-util",
+ "key-lock",
  "lazy_static",
  "log-store",
  "meta-client",

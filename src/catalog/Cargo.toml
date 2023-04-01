@@ -23,6 +23,7 @@ datafusion.workspace = true
 datatypes = { path = "../datatypes" }
 futures = "0.3"
 futures-util.workspace = true
+key-lock = "0.1"
 lazy_static = "1.4"
 meta-client = { path = "../meta-client" }
 parking_lot = "0.12"

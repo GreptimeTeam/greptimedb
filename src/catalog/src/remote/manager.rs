@@ -25,6 +25,7 @@ use common_telemetry::{debug, error, info};
 use dashmap::DashMap;
 use futures::Stream;
 use futures_util::StreamExt;
+use key_lock::KeyLock;
 use parking_lot::RwLock;
 use snafu::{OptionExt, ResultExt};
 use table::engine::{EngineContext, TableEngineRef};
@@ -753,8 +754,9 @@ pub struct RemoteSchemaProvider {
     schema_name: String,
     node_id: u64,
     backend: KvBackendRef,
-    tables: Arc<ArcSwap<HashMap<String, TableRef>>>,
-    mutex: Arc<Mutex<()>>,
+    tables: Arc<ArcSwap<DashMap<String, TableRef>>>,
+    mutex: Arc<KeyLock<String>>,
+    // mutex: Arc<Mutex<()>>,
 }
 
 impl RemoteSchemaProvider {
@@ -791,11 +793,16 @@ impl SchemaProvider for RemoteSchemaProvider {
     }
 
     fn table_names(&self) -> Result<Vec<String>> {
-        Ok(self.tables.load().keys().cloned().collect::<Vec<_>>())
+        Ok(self
+            .tables
+            .load()
+            .iter()
+            .map(|en| en.key().clone())
+            .collect::<Vec<_>>())
     }
 
     async fn table(&self, name: &str) -> Result<Option<TableRef>> {
-        Ok(self.tables.load().get(name).cloned())
+        Ok(self.tables.load().get(name).map(|en| en.value().clone()))
     }
 
     fn register_table(&self, name: String, table: TableRef) -> Result<Option<TableRef>> {
@@ -812,7 +819,7 @@ impl SchemaProvider for RemoteSchemaProvider {
 
         let prev = std::thread::spawn(move || {
             common_runtime::block_on_read(async move {
-                let _guard = mutex.lock().await;
+                let _guard = mutex.lock(table_key.clone()).await;
                 backend
                     .set(
                         table_key.as_bytes(),
@@ -824,11 +831,8 @@ impl SchemaProvider for RemoteSchemaProvider {
                     table_key, table_value
                 );
 
-                let prev_tables = tables.load();
-                let mut new_tables = HashMap::with_capacity(prev_tables.len() + 1);
-                new_tables.clone_from(&prev_tables);
-                let prev = new_tables.insert(name, table);
-                tables.store(Arc::new(new_tables));
+                let tables = tables.load();
+                let prev = tables.insert(name, table);
                 Ok(prev)
             })
         })
@@ -852,18 +856,15 @@ impl SchemaProvider for RemoteSchemaProvider {
         let tables = self.tables.clone();
         let prev = std::thread::spawn(move || {
             common_runtime::block_on_read(async move {
-                let _guard = mutex.lock().await;
+                let _guard = mutex.lock(table_key.clone()).await;
                 backend.delete(table_key.as_bytes()).await?;
                 debug!(
                     "Successfully deleted catalog table entry, key: {}",
                     table_key
                 );
 
-                let prev_tables = tables.load();
-                let mut new_tables = HashMap::with_capacity(prev_tables.len() + 1);
-                new_tables.clone_from(&prev_tables);
-                let prev = new_tables.remove(&table_name);
-                tables.store(Arc::new(new_tables));
+                let tables = tables.load();
+                let prev = tables.remove(&table_name).map(|en| en.1);
                 Ok(prev)
             })
         })
