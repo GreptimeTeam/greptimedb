@@ -849,7 +849,7 @@ async fn test_execute_copy_from_s3() {
             let tests = [
                 Test {
                     sql: &format!(
-                        "Copy with_filename FROM 's3://{}/{}/export/demo.parquet_1_2'",
+                        "Copy with_filename FROM 's3://{}/{}/export/demo.parquet'",
                         bucket, root
                     ),
                     table_name: "with_filename",
