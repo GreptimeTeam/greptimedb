@@ -419,7 +419,7 @@ mod test {
                 None,
             ],
         );
-        
+
         // add more assertions
         let ts_array = Arc::new(TimestampMillisecondArray::from_iter(
             [1000i64, 3000, 5000, 7000, 9000, 11000, 13000, 15000]
@@ -444,7 +444,7 @@ mod test {
             vec![Some(0.0), Some(10.559999999999999)],
         );
     }
-    
+
     #[test]
     fn calculate_std_dev_over_time() {
         let (ts_array, value_array) = build_test_range_arrays();

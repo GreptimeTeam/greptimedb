@@ -23,7 +23,7 @@ mod test_util;
 
 pub use aggr_over_time::{
     AbsentOverTime, AvgOverTime, CountOverTime, LastOverTime, MaxOverTime, MinOverTime,
-    PresentOverTime, StddevOverTime, SumOverTime,
+    PresentOverTime, StddevOverTime, StdvarOverTime, SumOverTime,
 };
 use datafusion::arrow::array::ArrayRef;
 use datafusion::error::DataFusionError;
