@@ -48,7 +48,7 @@ impl SqlHandler {
                 table: table_full_name.clone(),
             })
             .map_err(BoxedError::new)
-            .context(error::DropTableSnafu {
+            .with_context(|_| error::DropTableSnafu {
                 table_name: table_full_name.clone(),
             })?;
 
@@ -56,7 +56,7 @@ impl SqlHandler {
             .deregister_table(deregister_table_req)
             .await
             .map_err(BoxedError::new)
-            .context(error::DropTableSnafu {
+            .with_context(|_| error::DropTableSnafu {
                 table_name: table_full_name.clone(),
             })?;
 
@@ -68,7 +68,7 @@ impl SqlHandler {
             .drop_table(&ctx, req)
             .await
             .map_err(BoxedError::new)
-            .context(error::DropTableSnafu {
+            .with_context(|_| error::DropTableSnafu {
                 table_name: table_full_name.clone(),
             })?;
 

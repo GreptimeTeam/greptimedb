@@ -39,7 +39,7 @@ use tokio::sync::Mutex;
 
 use crate::error::{
     CatalogNotFoundSnafu, CreateTableSnafu, InvalidCatalogValueSnafu, OpenTableSnafu, Result,
-    SchemaNotFoundSnafu, TableEngineSnafu, TableExistsSnafu, UnimplementedSnafu,
+    SchemaNotFoundSnafu, TableEngineNotFoundSnafu, TableExistsSnafu, UnimplementedSnafu,
 };
 use crate::helper::{
     build_catalog_prefix, build_schema_prefix, build_table_global_prefix, CatalogKey, CatalogValue,
@@ -337,7 +337,7 @@ impl RemoteCatalogManager {
         let engine = self
             .engine_manager
             .engine(&table_info.meta.engine)
-            .context(TableEngineSnafu)?;
+            .context(TableEngineNotFoundSnafu)?;
         match engine
             .open_table(&context, request)
             .await
@@ -408,7 +408,7 @@ impl CatalogManager for RemoteCatalogManager {
         let engine = self
             .engine_manager
             .engine(MITO_ENGINE)
-            .context(TableEngineSnafu)?;
+            .context(TableEngineNotFoundSnafu)?;
         handle_system_table_request(self, engine, &mut system_table_requests).await?;
         info!("All system table opened");
 

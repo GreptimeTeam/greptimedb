@@ -258,7 +258,7 @@ impl SystemCatalog {
         schema: String,
         table_name: String,
         table_id: TableId,
-        engine: Option<String>,
+        engine: String,
     ) -> crate::error::Result<usize> {
         let request = build_table_insert_request(catalog, schema, table_name, table_id, engine);
         self.information_schema

@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
+use common_telemetry::error;
 use snafu::{ensure, OptionExt};
 
 use crate::engine::TableEngineRef;
@@ -40,10 +41,13 @@ pub struct MemoryTableEngineManager {
 }
 
 impl MemoryTableEngineManager {
-    pub fn new(default: &str, engine: TableEngineRef) -> Self {
+    pub fn new(default_name: &str, engine: TableEngineRef) -> Self {
         let engines = RwLock::new(HashMap::new());
         // it's safe to unwrap
-        engines.write().unwrap().insert(default.to_string(), engine);
+        engines
+            .write()
+            .unwrap()
+            .insert(default_name.to_string(), engine);
 
         MemoryTableEngineManager { engines }
     }
@@ -53,9 +57,12 @@ impl MemoryTableEngineManager {
 impl TableEngineManager for MemoryTableEngineManager {
     fn engine(&self, name: &str) -> Result<TableEngineRef> {
         let engines = self.engines.read().unwrap();
-        engines.get(name).cloned().context(EngineNotFoundSnafu {
-            engine: name.to_string(),
-        })
+        engines
+            .get(name)
+            .cloned()
+            .with_context(|| EngineNotFoundSnafu {
+                engine: name.to_string(),
+            })
     }
 
     fn register_engine(&self, name: &str, engine: TableEngineRef) -> Result<()> {
@@ -79,9 +86,13 @@ impl TableEngineManager for MemoryTableEngineManager {
             engines.values().cloned().collect::<Vec<_>>()
         };
 
-        futures::future::try_join_all(engines.iter().map(|engine| engine.close()))
-            .await
-            .map(|_| ())
+        if let Err(err) =
+            futures::future::try_join_all(engines.iter().map(|engine| engine.close())).await
+        {
+            error!("Failed to close engine: {}", err);
+        }
+
+        Ok(())
     }
 }
 

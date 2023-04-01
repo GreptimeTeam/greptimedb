@@ -29,7 +29,8 @@ use table::requests::*;
 use table::{Table, TableRef};
 
 use crate::error::{
-    self, CloseTableEngineSnafu, ExecuteSqlSnafu, Result, TableEngineSnafu, TableNotFoundSnafu,
+    self, CloseTableEngineSnafu, ExecuteSqlSnafu, Result, TableEngineNotFoundSnafu,
+    TableNotFoundSnafu,
 };
 use crate::instance::sql::table_idents_to_full_name;
 
@@ -132,7 +133,7 @@ impl SqlHandler {
         let engine = self
             .table_engine_manager
             .engine(engine_name)
-            .context(TableEngineSnafu)?;
+            .context(TableEngineNotFoundSnafu)?;
         Ok(engine)
     }
 

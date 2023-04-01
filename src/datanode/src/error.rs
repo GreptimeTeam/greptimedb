@@ -102,9 +102,9 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to get engine : {}", source))]
-    TableEngine {
+    TableEngineNotFound {
+        #[snafu(backtrace)]
         source: table::error::Error,
-        backtrace: Backtrace,
     },
 
     #[snafu(display("Table not found: {}", table_name))]
@@ -545,6 +545,7 @@ impl ErrorExt for Error {
 
             Insert { source, .. } => source.status_code(),
             Delete { source, .. } => source.status_code(),
+            TableEngineNotFound { source, .. } => source.status_code(),
             TableNotFound { .. } => StatusCode::TableNotFound,
             ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
 
@@ -616,7 +617,7 @@ impl ErrorExt for Error {
             ColumnDefaultValue { source, .. } => source.status_code(),
             CopyTable { source, .. } => source.status_code(),
             TableScanExec { source, .. } => source.status_code(),
-            UnrecognizedTableOption { .. } | TableEngine { .. } => StatusCode::InvalidArguments,
+            UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
             RecoverProcedure { source, .. } | SubmitProcedure { source, .. } => {
                 source.status_code()
             }

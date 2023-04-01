@@ -195,7 +195,7 @@ pub fn build_table_insert_request(
     schema: String,
     table_name: String,
     table_id: TableId,
-    engine: Option<String>,
+    engine: String,
 ) -> InsertRequest {
     let entry_key = format_table_entry_key(&catalog, &schema, table_id);
     build_insert_request(
@@ -332,7 +332,7 @@ pub fn decode_system_catalog(
                 schema_name: table_parts[1].to_string(),
                 table_name: table_meta.table_name,
                 table_id,
-                engine: table_meta.engine.unwrap_or(MITO_ENGINE.to_string()),
+                engine: table_meta.engine,
             }))
         }
     }
@@ -388,14 +388,19 @@ pub struct TableEntry {
     pub schema_name: String,
     pub table_name: String,
     pub table_id: TableId,
-    // None stands for mito engine
     pub engine: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TableEntryValue {
     pub table_name: String,
-    pub engine: Option<String>,
+
+    #[serde(default = "mito_engine")]
+    pub engine: String,
+}
+
+fn mito_engine() -> String {
+    MITO_ENGINE.to_string()
 }
 
 #[cfg(test)]
@@ -534,7 +539,7 @@ mod tests {
             DEFAULT_SCHEMA_NAME.to_string(),
             "my_table".to_string(),
             1,
-            None,
+            MITO_ENGINE.to_string(),
         );
         let result = catalog_table.insert(table_insertion).await.unwrap();
         assert_eq!(result, 1);

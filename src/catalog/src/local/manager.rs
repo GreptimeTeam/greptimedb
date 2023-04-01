@@ -38,7 +38,7 @@ use table::TableRef;
 use crate::error::{
     self, CatalogNotFoundSnafu, IllegalManagerStateSnafu, OpenTableSnafu, ReadSystemCatalogSnafu,
     Result, SchemaExistsSnafu, SchemaNotFoundSnafu, SystemCatalogSnafu,
-    SystemCatalogTypeMismatchSnafu, TableEngineSnafu, TableExistsSnafu, TableNotExistSnafu,
+    SystemCatalogTypeMismatchSnafu, TableEngineNotFoundSnafu, TableExistsSnafu, TableNotExistSnafu,
     TableNotFoundSnafu,
 };
 use crate::local::memory::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
@@ -65,11 +65,11 @@ pub struct LocalCatalogManager {
 }
 
 impl LocalCatalogManager {
-    /// Create a new [CatalogManager] with given user catalogs and table engine
+    /// Create a new [CatalogManager] with given user catalogs and mito engine
     pub async fn try_new(engine_manager: TableEngineManagerRef) -> Result<Self> {
         let engine = engine_manager
             .engine(MITO_ENGINE)
-            .context(TableEngineSnafu)?;
+            .context(TableEngineNotFoundSnafu)?;
         let table = SystemCatalogTable::new(engine.clone()).await?;
         let memory_catalog_list = crate::local::memory::new_memory_catalog_list()?;
         let system_catalog = Arc::new(SystemCatalog::new(table, memory_catalog_list.clone()));
@@ -104,7 +104,7 @@ impl LocalCatalogManager {
         let engine = self
             .engine_manager
             .engine(MITO_ENGINE)
-            .context(TableEngineSnafu)?;
+            .context(TableEngineNotFoundSnafu)?;
         handle_system_table_request(self, engine, &mut sys_table_requests).await?;
         Ok(())
     }
@@ -261,7 +261,7 @@ impl LocalCatalogManager {
         let engine = self
             .engine_manager
             .engine(&t.engine)
-            .context(TableEngineSnafu)?;
+            .context(TableEngineNotFoundSnafu)?;
 
         let option = engine
             .open_table(&context, request)
@@ -372,7 +372,7 @@ impl CatalogManager for LocalCatalogManager {
                 // Try to register table with same table id, just ignore.
                 Ok(false)
             } else {
-                let engine = request.table.table_info().meta.engine.to_owned();
+                let engine = request.table.table_info().meta.engine.to_string();
                 // table does not exist
                 self.system
                     .register_table(
@@ -380,7 +380,7 @@ impl CatalogManager for LocalCatalogManager {
                         schema_name.clone(),
                         request.table_name.clone(),
                         request.table_id,
-                        Some(engine),
+                        engine,
                     )
                     .await?;
                 schema.register_table(request.table_name, request.table)?;
@@ -421,7 +421,7 @@ impl CatalogManager for LocalCatalogManager {
                 table: request.table_name.to_string(),
             })?;
 
-        let engine = old_table.table_info().meta.engine.to_owned();
+        let engine = old_table.table_info().meta.engine.to_string();
         // rename table in system catalog
         self.system
             .register_table(
@@ -429,7 +429,7 @@ impl CatalogManager for LocalCatalogManager {
                 schema_name.clone(),
                 request.new_table_name.clone(),
                 request.table_id,
-                Some(engine),
+                engine,
             )
             .await?;
         Ok(schema

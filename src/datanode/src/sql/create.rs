@@ -34,7 +34,7 @@ use crate::error::{
     self, CatalogNotFoundSnafu, CatalogSnafu, ConstraintNotSupportedSnafu, CreateTableSnafu,
     IllegalPrimaryKeysDefSnafu, InsertSystemCatalogSnafu, KeyColumnNotFoundSnafu,
     RegisterSchemaSnafu, Result, SchemaExistsSnafu, SchemaNotFoundSnafu, SubmitProcedureSnafu,
-    TableEngineSnafu, UnrecognizedTableOptionSnafu, WaitProcedureSnafu,
+    TableEngineNotFoundSnafu, UnrecognizedTableOptionSnafu, WaitProcedureSnafu,
 };
 use crate::sql::SqlHandler;
 
@@ -110,7 +110,7 @@ impl SqlHandler {
         let table_engine = self
             .table_engine_manager
             .engine(&req.engine)
-            .context(TableEngineSnafu)?;
+            .context(TableEngineNotFoundSnafu)?;
 
         let table = table_engine
             .create_table(&ctx, req)
@@ -145,7 +145,7 @@ impl SqlHandler {
         let table_engine = self
             .table_engine_manager
             .engine(&req.engine)
-            .context(TableEngineSnafu)?;
+            .context(TableEngineNotFoundSnafu)?;
         let procedure = CreateTableProcedure::new(
             req,
             self.catalog_manager.clone(),
