@@ -17,7 +17,7 @@ use std::any::Any;
 use common_error::ext::BoxedError;
 use common_error::prelude::*;
 use store_api::storage::RegionNumber;
-use table::metadata::{TableInfoBuilderError, TableMetaBuilderError};
+use table::metadata::{TableInfoBuilderError, TableMetaBuilderError, TableVersion};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -187,6 +187,12 @@ pub enum Error {
 
     #[snafu(display("Invalid schema, source: {}", source))]
     InvalidRawSchema { source: datatypes::error::Error },
+
+    #[snafu(display("Table version changed, expect: {}, actual: {}", expect, actual))]
+    VersionChanged {
+        expect: TableVersion,
+        actual: TableVersion,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -211,7 +217,8 @@ impl ErrorExt for Error {
             | InvalidPrimaryKey { .. }
             | MissingTimestampIndex { .. }
             | TableNotFound { .. }
-            | InvalidRawSchema { .. } => StatusCode::InvalidArguments,
+            | InvalidRawSchema { .. }
+            | VersionChanged { .. } => StatusCode::InvalidArguments,
 
             TableInfoNotFound { .. } | ConvertRaw { .. } => StatusCode::Unexpected,
 

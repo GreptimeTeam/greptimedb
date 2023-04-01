@@ -47,7 +47,7 @@ use table::{error as table_error, Result as TableResult, Table};
 use tokio::sync::Mutex;
 
 use crate::config::EngineConfig;
-use crate::engine::procedure::CreateMitoTable;
+use crate::engine::procedure::{AlterMitoTable, CreateMitoTable};
 use crate::error::{
     self, BuildColumnDescriptorSnafu, BuildColumnFamilyDescriptorSnafu, BuildRegionDescriptorSnafu,
     BuildRowKeyDescriptorSnafu, InvalidPrimaryKeySnafu, InvalidRawSchemaSnafu,
@@ -166,7 +166,24 @@ impl<S: StorageEngine> TableEngineProcedure for MitoEngine<S> {
             .map_err(BoxedError::new)
             .context(table_error::TableOperationSnafu)?;
 
-        let procedure = Box::new(CreateMitoTable::new(request, self.inner.clone()));
+        let procedure = Box::new(
+            CreateMitoTable::new(request, self.inner.clone())
+                .map_err(BoxedError::new)
+                .context(table_error::TableOperationSnafu)?,
+        );
+        Ok(procedure)
+    }
+
+    fn alter_table_procedure(
+        &self,
+        _ctx: &EngineContext,
+        request: AlterTableRequest,
+    ) -> TableResult<BoxedProcedure> {
+        let procedure = Box::new(
+            AlterMitoTable::new(request, self.inner.clone())
+                .map_err(BoxedError::new)
+                .context(table_error::TableOperationSnafu)?,
+        );
         Ok(procedure)
     }
 }
@@ -175,7 +192,7 @@ pub(crate) struct MitoEngineInner<S: StorageEngine> {
     /// All tables opened by the engine. Map key is formatted [TableReference].
     ///
     /// Writing to `tables` should also hold the `table_mutex`.
-    tables: RwLock<HashMap<String, TableRef>>,
+    tables: RwLock<HashMap<String, Arc<MitoTable<S::Region>>>>,
     object_store: ObjectStore,
     storage_engine: S,
     /// Table mutex is used to protect the operations such as creating/opening/closing
@@ -551,6 +568,16 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             .unwrap()
             .get(&table_ref.to_string())
             .cloned()
+            .map(|table| table as _)
+    }
+
+    /// Returns the [MitoTable].
+    fn get_mito_table(&self, table_ref: &TableReference) -> Option<Arc<MitoTable<S::Region>>> {
+        self.tables
+            .read()
+            .unwrap()
+            .get(&table_ref.to_string())
+            .cloned()
     }
 
     async fn alter_table(&self, _ctx: &EngineContext, req: AlterTableRequest) -> Result<TableRef> {
@@ -579,7 +606,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             table: table_name,
         };
         let table = self
-            .get_table(&table_ref)
+            .get_mito_table(&table_ref)
             .context(error::TableNotFoundSnafu { table_name })?;
 
         logging::info!("start altering table {} with request {:?}", table_name, req);

@@ -23,6 +23,7 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER
 use common_error::prelude::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_procedure::local::{LocalManager, ManagerConfig};
+use common_procedure::store::state_store::ObjectStateStore;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::info;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
@@ -74,6 +75,7 @@ pub struct Instance {
     pub(crate) script_executor: ScriptExecutor,
     pub(crate) table_id_provider: Option<TableIdProviderRef>,
     pub(crate) heartbeat_task: Option<HeartbeatTask>,
+    procedure_manager: Option<ProcedureManagerRef>,
 }
 
 pub type InstanceRef = Arc<Instance>;
@@ -183,6 +185,7 @@ impl Instance {
         };
 
         let procedure_manager = create_procedure_manager(&opts.procedure).await?;
+        // Register all procedures.
         if let Some(procedure_manager) = &procedure_manager {
             table_engine.register_procedure_loaders(&**procedure_manager);
             table_procedure::register_procedure_loaders(
@@ -191,12 +194,6 @@ impl Instance {
                 table_engine.clone(),
                 &**procedure_manager,
             );
-
-            // Recover procedures.
-            procedure_manager
-                .recover()
-                .await
-                .context(RecoverProcedureSnafu)?;
         }
 
         Ok(Self {
@@ -205,12 +202,13 @@ impl Instance {
                 table_engine.clone(),
                 catalog_manager.clone(),
                 table_engine,
-                procedure_manager,
+                procedure_manager.clone(),
             ),
             catalog_manager,
             script_executor,
             heartbeat_task,
             table_id_provider,
+            procedure_manager,
         })
     }
 
@@ -221,6 +219,15 @@ impl Instance {
             .context(NewCatalogSnafu)?;
         if let Some(task) = &self.heartbeat_task {
             task.start().await?;
+        }
+
+        // Recover procedures after the catalog manager is started, so we can
+        // ensure we can access all tables from the catalog manager.
+        if let Some(procedure_manager) = &self.procedure_manager {
+            procedure_manager
+                .recover()
+                .await
+                .context(RecoverProcedureSnafu)?;
         }
         Ok(())
     }
@@ -308,11 +315,22 @@ pub(crate) async fn new_object_store(store_config: &ObjectStoreConfig) -> Result
         ObjectStoreConfig::Oss { .. } => new_oss_object_store(store_config).await,
     };
 
+    // Don't enable retry layer when using local file backend.
+    let object_store = if !matches!(store_config, ObjectStoreConfig::File(..)) {
+        object_store.map(|object_store| object_store.layer(RetryLayer::new().with_jitter()))
+    } else {
+        object_store
+    };
+
     object_store.map(|object_store| {
         object_store
-            .layer(RetryLayer::new().with_jitter())
             .layer(MetricsLayer)
-            .layer(LoggingLayer::default())
+            .layer(
+                LoggingLayer::default()
+                    // Print the expected error only in DEBUG level.
+                    // See https://docs.rs/opendal/latest/opendal/layers/struct.LoggingLayer.html#method.with_error_level
+                    .with_error_level(Some(log::Level::Debug)),
+            )
             .layer(TracingLayer)
     })
 }
@@ -516,11 +534,15 @@ pub(crate) async fn create_procedure_manager(
     );
 
     let object_store = new_object_store(&procedure_config.store).await?;
+    let state_store = Arc::new(ObjectStateStore::new(object_store));
+
     let manager_config = ManagerConfig {
-        object_store,
         max_retry_times: procedure_config.max_retry_times,
         retry_delay: procedure_config.retry_delay,
     };
 
-    Ok(Some(Arc::new(LocalManager::new(manager_config))))
+    Ok(Some(Arc::new(LocalManager::new(
+        manager_config,
+        state_store,
+    ))))
 }

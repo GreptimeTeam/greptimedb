@@ -23,7 +23,7 @@ mod test_util;
 
 pub use aggr_over_time::{
     AbsentOverTime, AvgOverTime, CountOverTime, LastOverTime, MaxOverTime, MinOverTime,
-    PresentOverTime, SumOverTime,
+    PresentOverTime, StddevOverTime, SumOverTime,
 };
 use datafusion::arrow::array::ArrayRef;
 use datafusion::error::DataFusionError;
@@ -39,4 +39,20 @@ pub(crate) fn extract_array(columnar_value: &ColumnarValue) -> Result<ArrayRef, 
             "expect array as input, found scalar value".to_string(),
         ))
     }
+}
+
+/// compensation(Kahan) summation algorithm - a technique for reducing the numerical error
+/// in floating-point arithmetic. The algorithm also includes the modification ("Neumaier improvement")
+/// that reduces the numerical error further in cases
+/// where the numbers being summed have a large difference in magnitude
+/// Prometheus's implementation:
+/// https://github.com/prometheus/prometheus/blob/f55ab2217984770aa1eecd0f2d5f54580029b1c0/promql/functions.go#L782)
+pub(crate) fn compensated_sum_inc(inc: f64, sum: f64, mut compensation: f64) -> (f64, f64) {
+    let new_sum = sum + inc;
+    if sum.abs() >= inc.abs() {
+        compensation += (sum - new_sum) + inc;
+    } else {
+        compensation += (inc - new_sum) + sum;
+    }
+    (new_sum, compensation)
 }

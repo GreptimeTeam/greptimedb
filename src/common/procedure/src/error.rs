@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::string::FromUtf8Error;
 use std::sync::Arc;
 
 use common_error::prelude::*;
@@ -47,10 +48,11 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to put {}, source: {}", key, source))]
+    #[snafu(display("Failed to put state, key: '{key}', source: {source}"))]
     PutState {
         key: String,
-        source: object_store::Error,
+        #[snafu(backtrace)]
+        source: BoxedError,
     },
 
     #[snafu(display("Failed to delete {}, source: {}", key, source))]
@@ -59,10 +61,18 @@ pub enum Error {
         source: object_store::Error,
     },
 
-    #[snafu(display("Failed to list {}, source: {}", path, source))]
+    #[snafu(display("Failed to delete keys: '{keys}', source: {source}"))]
+    DeleteStates {
+        keys: String,
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to list state, path: '{path}', source: {source}"))]
     ListState {
         path: String,
-        source: object_store::Error,
+        #[snafu(backtrace)]
+        source: BoxedError,
     },
 
     #[snafu(display("Failed to read {}, source: {}", key, source))]
@@ -107,6 +117,9 @@ pub enum Error {
         source: Arc<Error>,
         procedure_id: ProcedureId,
     },
+
+    #[snafu(display("Corrupted data, error: {source}"))]
+    CorruptedData { source: FromUtf8Error },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -114,11 +127,13 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::External { source } => source.status_code(),
+            Error::External { source }
+            | Error::PutState { source, .. }
+            | Error::DeleteStates { source, .. }
+            | Error::ListState { source, .. } => source.status_code(),
+
             Error::ToJson { .. }
-            | Error::PutState { .. }
             | Error::DeleteState { .. }
-            | Error::ListState { .. }
             | Error::ReadState { .. }
             | Error::FromJson { .. }
             | Error::RetryTimesExceeded { .. }
@@ -127,7 +142,7 @@ impl ErrorExt for Error {
             Error::LoaderConflict { .. } | Error::DuplicateProcedure { .. } => {
                 StatusCode::InvalidArguments
             }
-            Error::ProcedurePanic { .. } => StatusCode::Unexpected,
+            Error::ProcedurePanic { .. } | Error::CorruptedData { .. } => StatusCode::Unexpected,
             Error::ProcedureExec { source, .. } => source.status_code(),
         }
     }

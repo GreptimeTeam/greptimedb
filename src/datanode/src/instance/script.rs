@@ -20,7 +20,7 @@ use common_telemetry::timer;
 use servers::query_handler::ScriptHandler;
 
 use crate::instance::Instance;
-use crate::metric;
+use crate::metrics;
 
 #[async_trait]
 impl ScriptHandler for Instance {
@@ -30,7 +30,7 @@ impl ScriptHandler for Instance {
         name: &str,
         script: &str,
     ) -> servers::error::Result<()> {
-        let _timer = timer!(metric::METRIC_HANDLE_SCRIPTS_ELAPSED);
+        let _timer = timer!(metrics::METRIC_HANDLE_SCRIPTS_ELAPSED);
         self.script_executor
             .insert_script(schema, name, script)
             .await
@@ -42,7 +42,7 @@ impl ScriptHandler for Instance {
         name: &str,
         params: HashMap<String, String>,
     ) -> servers::error::Result<Output> {
-        let _timer = timer!(metric::METRIC_RUN_SCRIPT_ELAPSED);
+        let _timer = timer!(metrics::METRIC_RUN_SCRIPT_ELAPSED);
         self.script_executor
             .execute_script(schema, name, params)
             .await

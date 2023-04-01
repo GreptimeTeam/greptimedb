@@ -161,10 +161,16 @@ impl Env {
             "datanode" | "standalone" => {
                 args.push("-c".to_string());
                 args.push(Self::generate_config_file(subcommand, db_ctx));
+                args.push("--http-addr=0.0.0.0:5001".to_string());
             }
-            "frontend" => args.push("--metasrv-addr=0.0.0.0:3002".to_string()),
-            "metasrv" => args.push("--use-memory-store".to_string()),
-
+            "frontend" => {
+                args.push("--metasrv-addr=0.0.0.0:3002".to_string());
+                args.push("--http-addr=0.0.0.0:5000".to_string());
+            }
+            "metasrv" => {
+                args.push("--use-memory-store".to_string());
+                args.push("--http-addr=0.0.0.0:5002".to_string());
+            }
             _ => panic!("Unexpected subcommand: {subcommand}"),
         }
 

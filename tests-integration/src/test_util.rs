@@ -38,7 +38,8 @@ use object_store::ObjectStore;
 use once_cell::sync::OnceCell;
 use rand::Rng;
 use servers::grpc::GrpcServer;
-use servers::http::{HttpOptions, HttpServer};
+use servers::http::{HttpOptions, HttpServerBuilder};
+use servers::metrics_handler::MetricsHandler;
 use servers::prom::PromServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
 use servers::query_handler::sql::ServerSqlQueryHandlerAdaptor;
@@ -271,11 +272,13 @@ pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router
     )
     .await
     .unwrap();
-    let http_server = HttpServer::new(
-        ServerSqlQueryHandlerAdaptor::arc(Arc::new(build_frontend_instance(instance.clone()))),
-        ServerGrpcQueryHandlerAdaptor::arc(instance.clone()),
-        HttpOptions::default(),
-    );
+    let http_server = HttpServerBuilder::new(HttpOptions::default())
+        .with_sql_handler(ServerSqlQueryHandlerAdaptor::arc(Arc::new(
+            build_frontend_instance(instance.clone()),
+        )))
+        .with_grpc_handler(ServerGrpcQueryHandlerAdaptor::arc(instance.clone()))
+        .with_metrics_handler(MetricsHandler)
+        .build();
     (http_server.make_app(), guard)
 }
 
@@ -295,12 +298,11 @@ pub async fn setup_test_http_app_with_frontend(
     .await
     .unwrap();
     let frontend_ref = Arc::new(frontend);
-    let mut http_server = HttpServer::new(
-        ServerSqlQueryHandlerAdaptor::arc(frontend_ref.clone()),
-        ServerGrpcQueryHandlerAdaptor::arc(frontend_ref),
-        HttpOptions::default(),
-    );
-    http_server.set_script_handler(instance.clone());
+    let http_server = HttpServerBuilder::new(HttpOptions::default())
+        .with_sql_handler(ServerSqlQueryHandlerAdaptor::arc(frontend_ref.clone()))
+        .with_grpc_handler(ServerGrpcQueryHandlerAdaptor::arc(frontend_ref))
+        .with_script_handler(instance.clone())
+        .build();
     let app = http_server.make_app();
     (app, guard)
 }
