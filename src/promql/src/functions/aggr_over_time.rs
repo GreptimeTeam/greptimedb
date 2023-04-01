@@ -118,6 +118,8 @@ pub fn present_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -
 }
 
 /// the population standard variance of the values in the specified interval.
+/// DataFusion's implementation:
+/// https://github.com/apache/arrow-datafusion/blob/292eb954fc0bad3a1febc597233ba26cb60bda3e/datafusion/physical-expr/src/aggregate/variance.rs#L224-#L241
 #[range_fn(
     name = "StdvarOverTime",
     ret = "Float64Array",
@@ -381,6 +383,30 @@ mod test {
                 Some(0.0),
                 None,
             ],
+        );
+
+        // add more assertions
+        let ts_array = Arc::new(TimestampMillisecondArray::from_iter(
+            [1000i64, 3000, 5000, 7000, 9000, 11000, 13000, 15000]
+                .into_iter()
+                .map(Some),
+        ));
+        let values_array = Arc::new(Float64Array::from_iter([
+            1.5990505637277868,
+            1.5990505637277868,
+            1.5990505637277868,
+            0.0,
+            8.0,
+            8.0,
+            2.0,
+            3.0,
+        ]));
+        let ranges = [(0, 3), (3, 5)];
+        simple_range_udf_runner(
+            StdvarOverTime::scalar_udf(),
+            RangeArray::from_ranges(ts_array, ranges).unwrap(),
+            RangeArray::from_ranges(values_array, ranges).unwrap(),
+            vec![Some(0.0), Some(10.559999999999999)],
         );
     }
 }
