@@ -30,7 +30,6 @@ use datafusion::physical_plan::{
     DisplayFormatType, ExecutionPlan, Partitioning, RecordBatchStream, SendableRecordBatchStream,
 };
 use datafusion::prelude::Expr;
-use datafusion::sql::TableReference;
 use datatypes::arrow::array::TimestampMillisecondArray;
 use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::RecordBatch;
@@ -57,17 +56,12 @@ impl EmptyMetric {
         let schema = Arc::new(DFSchema::new_with_metadata(
             vec![
                 DFField::new(
-                    None::<TableReference>,
+                    Some(""),
                     &time_index_column_name,
                     DataType::Timestamp(TimeUnit::Millisecond, None),
                     false,
                 ),
-                DFField::new(
-                    None::<TableReference>,
-                    &value_column_name,
-                    DataType::Float64,
-                    true,
-                ),
+                DFField::new(Some(""), &value_column_name, DataType::Float64, true),
             ],
             HashMap::new(),
         )?);
@@ -81,7 +75,6 @@ impl EmptyMetric {
     }
 
     pub fn to_execution_plan(&self) -> Arc<dyn ExecutionPlan> {
-        // let schema =  self.schema.to
         Arc::new(EmptyMetricExec {
             start: self.start,
             end: self.end,
