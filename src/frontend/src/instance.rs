@@ -41,7 +41,6 @@ use common_telemetry::timer;
 use datafusion::sql::sqlparser::ast::ObjectName;
 use datanode::instance::sql::table_idents_to_full_name;
 use datanode::instance::InstanceRef as DnInstanceRef;
-use datanode::metrics;
 use datatypes::schema::Schema;
 use distributed::DistInstance;
 use meta_client::client::{MetaClient, MetaClientBuilder};
@@ -541,7 +540,7 @@ impl SqlQueryHandler for Instance {
     type Error = Error;
 
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
-        let _timer = timer!(metrics::METRIC_HANDLE_SQL_ELAPSED);
+        let _timer = timer!(metric::METRIC_HANDLE_SQL_ELAPSED);
 
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query = match query_interceptor.pre_parsing(query, query_ctx.clone()) {
