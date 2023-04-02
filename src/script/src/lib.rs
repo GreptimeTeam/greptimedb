@@ -18,4 +18,4 @@ pub mod error;
 pub mod manager;
 #[cfg(feature = "python")]
 pub mod python;
-mod table;
+pub mod table;

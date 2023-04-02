@@ -105,19 +105,23 @@ impl Env {
 
         // start a distributed GreptimeDB
         let mut meta_server = Env::start_server("metasrv", &db_ctx, true);
-        // wait for election
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        let mut frontend = Env::start_server("frontend", &db_ctx, true);
-        let mut datanode = Env::start_server("datanode", &db_ctx, true);
+        if !util::check_port(METASRV_ADDR.parse().unwrap(), Duration::from_secs(10)).await {
+            Env::stop_server(&mut meta_server).await;
+            panic!("Metasrv doesn't up in 10 seconds, quit.")
+        }
 
-        for addr in [DATANODE_ADDR, METASRV_ADDR, SERVER_ADDR].iter() {
-            let is_up = util::check_port(addr.parse().unwrap(), Duration::from_secs(10)).await;
-            if !is_up {
-                Env::stop_server(&mut meta_server).await;
-                Env::stop_server(&mut frontend).await;
-                Env::stop_server(&mut datanode).await;
-                panic!("Server {addr} doesn't up in 10 seconds, quit.")
-            }
+        let mut datanode = Env::start_server("datanode", &db_ctx, true);
+        // Wait for default catalog and schema being created.
+        // Can be removed once #1265 resolved, and merged with Frontend start checking below.
+        if !util::check_port(DATANODE_ADDR.parse().unwrap(), Duration::from_secs(10)).await {
+            Env::stop_server(&mut datanode).await;
+            panic!("Datanode doesn't up in 10 seconds, quit.")
+        }
+
+        let mut frontend = Env::start_server("frontend", &db_ctx, true);
+        if !util::check_port(SERVER_ADDR.parse().unwrap(), Duration::from_secs(10)).await {
+            Env::stop_server(&mut frontend).await;
+            panic!("Frontend doesn't up in 10 seconds, quit.")
         }
 
         let client = Client::with_urls(vec![SERVER_ADDR]);

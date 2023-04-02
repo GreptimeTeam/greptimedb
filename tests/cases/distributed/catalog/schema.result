@@ -46,10 +46,11 @@ SHOW TABLES FROM test_public_schema;
 
 SHOW TABLES FROM public;
 
-+--------+
-| Tables |
-+--------+
-+--------+
++---------+
+| Tables  |
++---------+
+| scripts |
++---------+
 
 INSERT INTO hello VALUES (2), (3), (4);
 
@@ -90,10 +91,11 @@ SHOW TABLES FROM test_public_schema;
 
 SHOW TABLES FROM public;
 
-+--------+
-| Tables |
-+--------+
-+--------+
++---------+
+| Tables  |
++---------+
+| scripts |
++---------+
 
 DROP SCHEMA test_public_schema;
 

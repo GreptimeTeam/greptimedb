@@ -314,12 +314,6 @@ pub enum Error {
         source: sql::error::Error,
     },
 
-    #[snafu(display("Failed to start script manager, source: {}", source))]
-    StartScriptManager {
-        #[snafu(backtrace)]
-        source: script::error::Error,
-    },
-
     #[snafu(display(
         "Failed to parse string to timestamp, string: {}, source: {}",
         raw,
@@ -601,7 +595,6 @@ impl ErrorExt for Error {
             | WriteObject { .. }
             | ListObjects { .. } => StatusCode::StorageUnavailable,
             OpenLogStore { source } => source.status_code(),
-            StartScriptManager { source } => source.status_code(),
             OpenStorageEngine { source } => source.status_code(),
             RuntimeResource { .. } => StatusCode::RuntimeResourcesExhausted,
             MetaClientInit { source, .. } => source.status_code(),

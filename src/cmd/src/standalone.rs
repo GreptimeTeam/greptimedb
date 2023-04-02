@@ -236,8 +236,9 @@ async fn build_frontend(
     plugins: Arc<Plugins>,
     datanode_instance: InstanceRef,
 ) -> Result<FeInstance> {
-    let mut frontend_instance = FeInstance::new_standalone(datanode_instance.clone());
-    frontend_instance.set_script_handler(datanode_instance);
+    let mut frontend_instance = FeInstance::try_new_standalone(datanode_instance.clone())
+        .await
+        .context(StartFrontendSnafu)?;
     frontend_instance.set_plugins(plugins.clone());
     Ok(frontend_instance)
 }

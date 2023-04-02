@@ -205,7 +205,7 @@ impl ScriptsTable {
 }
 
 /// Build scripts table
-fn build_scripts_schema() -> RawSchema {
+pub fn build_scripts_schema() -> RawSchema {
     let cols = vec![
         ColumnSchema::new(
             "schema".to_string(),

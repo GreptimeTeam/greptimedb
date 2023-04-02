@@ -17,6 +17,7 @@ mod grpc;
 mod influxdb;
 mod opentsdb;
 mod prometheus;
+mod script;
 mod standalone;
 
 use std::collections::HashMap;
@@ -40,7 +41,6 @@ use common_telemetry::timer;
 use datafusion::sql::sqlparser::ast::ObjectName;
 use datanode::instance::sql::table_idents_to_full_name;
 use datanode::instance::InstanceRef as DnInstanceRef;
-use datanode::metrics;
 use datatypes::schema::Schema;
 use distributed::DistInstance;
 use meta_client::client::{MetaClient, MetaClientBuilder};
@@ -58,7 +58,6 @@ use servers::query_handler::grpc::{GrpcQueryHandler, GrpcQueryHandlerRef};
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::{
     InfluxdbLineProtocolHandler, OpentsdbProtocolHandler, PrometheusProtocolHandler, ScriptHandler,
-    ScriptHandlerRef,
 };
 use session::context::QueryContextRef;
 use snafu::prelude::*;
@@ -80,6 +79,8 @@ use crate::error::{
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::FrontendOptions;
 use crate::instance::standalone::StandaloneGrpcQueryHandler;
+use crate::metric;
+use crate::script::ScriptExecutor;
 use crate::server::{start_server, ServerHandlers, Services};
 
 #[async_trait]
@@ -103,9 +104,7 @@ pub type FrontendInstanceRef = Arc<dyn FrontendInstance>;
 #[derive(Clone)]
 pub struct Instance {
     catalog_manager: CatalogManagerRef,
-
-    /// Script handler is None in distributed mode, only works on standalone mode.
-    script_handler: Option<ScriptHandlerRef>,
+    script_executor: Arc<ScriptExecutor>,
     statement_handler: StatementHandlerRef,
     query_engine: QueryEngineRef,
     grpc_query_handler: GrpcQueryHandlerRef<Error>,
@@ -134,23 +133,29 @@ impl Instance {
         let partition_manager = Arc::new(PartitionRuleManager::new(table_routes));
         let datanode_clients = Arc::new(DatanodeClients::default());
 
-        let catalog_manager = Arc::new(FrontendCatalogManager::new(
-            meta_backend,
-            partition_manager,
-            datanode_clients.clone(),
-        ));
+        let mut catalog_manager =
+            FrontendCatalogManager::new(meta_backend, partition_manager, datanode_clients.clone());
 
-        let dist_instance =
-            DistInstance::new(meta_client, catalog_manager.clone(), datanode_clients);
+        let dist_instance = DistInstance::new(
+            meta_client,
+            Arc::new(catalog_manager.clone()),
+            datanode_clients,
+        );
         let dist_instance = Arc::new(dist_instance);
+
+        catalog_manager.set_dist_instance(dist_instance.clone());
+        let catalog_manager = Arc::new(catalog_manager);
 
         let query_engine =
             QueryEngineFactory::new_with_plugins(catalog_manager.clone(), plugins.clone())
                 .query_engine();
 
+        let script_executor =
+            Arc::new(ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?);
+
         Ok(Instance {
             catalog_manager,
-            script_handler: None,
+            script_executor,
             create_expr_factory: Arc::new(DefaultCreateExprFactory),
             statement_handler: dist_instance.clone(),
             query_engine,
@@ -191,18 +196,22 @@ impl Instance {
         Ok(Arc::new(meta_client))
     }
 
-    pub fn new_standalone(dn_instance: DnInstanceRef) -> Self {
-        Instance {
-            catalog_manager: dn_instance.catalog_manager().clone(),
-            script_handler: None,
+    pub async fn try_new_standalone(dn_instance: DnInstanceRef) -> Result<Self> {
+        let catalog_manager = dn_instance.catalog_manager();
+        let query_engine = dn_instance.query_engine();
+        let script_executor =
+            Arc::new(ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?);
+        Ok(Instance {
+            catalog_manager: catalog_manager.clone(),
+            script_executor,
             create_expr_factory: Arc::new(DefaultCreateExprFactory),
             statement_handler: dn_instance.clone(),
-            query_engine: dn_instance.query_engine(),
+            query_engine,
             grpc_query_handler: StandaloneGrpcQueryHandler::arc(dn_instance.clone()),
             promql_handler: Some(dn_instance.clone()),
             plugins: Default::default(),
             servers: Arc::new(HashMap::new()),
-        }
+        })
     }
 
     pub async fn build_servers(
@@ -217,12 +226,19 @@ impl Instance {
     }
 
     #[cfg(test)]
-    pub(crate) fn new_distributed(dist_instance: Arc<DistInstance>) -> Self {
-        let catalog_manager = dist_instance.catalog_manager();
+    pub(crate) async fn new_distributed(
+        catalog_manager: CatalogManagerRef,
+        dist_instance: Arc<DistInstance>,
+    ) -> Self {
         let query_engine = QueryEngineFactory::new(catalog_manager.clone()).query_engine();
+        let script_executor = Arc::new(
+            ScriptExecutor::new(catalog_manager.clone(), query_engine.clone())
+                .await
+                .unwrap(),
+        );
         Instance {
             catalog_manager,
-            script_handler: None,
+            script_executor,
             statement_handler: dist_instance.clone(),
             query_engine,
             create_expr_factory: Arc::new(DefaultCreateExprFactory),
@@ -235,14 +251,6 @@ impl Instance {
 
     pub fn catalog_manager(&self) -> &CatalogManagerRef {
         &self.catalog_manager
-    }
-
-    pub fn set_script_handler(&mut self, handler: ScriptHandlerRef) {
-        debug_assert!(
-            self.script_handler.is_none(),
-            "Script handler can be set only once!"
-        );
-        self.script_handler = Some(handler);
     }
 
     /// Handle batch inserts
@@ -532,7 +540,7 @@ impl SqlQueryHandler for Instance {
     type Error = Error;
 
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
-        let _timer = timer!(metrics::METRIC_HANDLE_SQL_ELAPSED);
+        let _timer = timer!(metric::METRIC_HANDLE_SQL_ELAPSED);
 
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query = match query_interceptor.pre_parsing(query, query_ctx.clone()) {
@@ -617,41 +625,6 @@ impl SqlQueryHandler for Instance {
             .schema(catalog, schema)
             .map(|s| s.is_some())
             .context(error::CatalogSnafu)
-    }
-}
-
-#[async_trait]
-impl ScriptHandler for Instance {
-    async fn insert_script(
-        &self,
-        schema: &str,
-        name: &str,
-        script: &str,
-    ) -> server_error::Result<()> {
-        if let Some(handler) = &self.script_handler {
-            handler.insert_script(schema, name, script).await
-        } else {
-            server_error::NotSupportedSnafu {
-                feat: "Script execution in Frontend",
-            }
-            .fail()
-        }
-    }
-
-    async fn execute_script(
-        &self,
-        schema: &str,
-        script: &str,
-        params: HashMap<String, String>,
-    ) -> server_error::Result<Output> {
-        if let Some(handler) = &self.script_handler {
-            handler.execute_script(schema, script, params).await
-        } else {
-            server_error::NotSupportedSnafu {
-                feat: "Script execution in Frontend",
-            }
-            .fail()
-        }
     }
 }
 

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #![feature(assert_matches)]
+#![feature(trait_upcasting)]
 
 pub mod catalog;
 pub mod datanode;
@@ -22,11 +23,13 @@ pub mod frontend;
 pub mod grpc;
 pub mod influxdb;
 pub mod instance;
+pub(crate) mod metric;
 pub mod mysql;
 pub mod opentsdb;
 pub mod postgres;
 pub mod prom;
 pub mod prometheus;
+mod script;
 mod server;
 mod table;
 #[cfg(test)]

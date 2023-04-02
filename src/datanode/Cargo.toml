@@ -4,10 +4,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[features]
-default = ["python"]
-python = ["dep:script"]
-
 [dependencies]
 async-compat = "0.2"
 async-stream.workspace = true
@@ -49,7 +45,6 @@ pin-project = "1.0"
 prost.workspace = true
 query = { path = "../query" }
 regex = "1.6"
-script = { path = "../script", features = ["python"], optional = true }
 serde = "1.0"
 serde_json = "1.0"
 servers = { path = "../servers" }
