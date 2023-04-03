@@ -95,6 +95,7 @@ mod test {
         InsertRequest, QueryRequest,
     };
     use catalog::helper::{TableGlobalKey, TableGlobalValue};
+    use common_catalog::consts::MITO_ENGINE;
     use common_query::Output;
     use common_recordbatch::RecordBatches;
     use query::parser::QueryLanguageParser;
@@ -162,6 +163,7 @@ mod test {
                     },
                 ],
                 time_index: "ts".to_string(),
+                engine: MITO_ENGINE.to_string(),
                 ..Default::default()
             })),
         });
