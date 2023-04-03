@@ -201,17 +201,9 @@ fn new_level_meta_vec() -> LevelMetaVec {
         .unwrap() // safety: LevelMetaVec is a fixed length array with length MAX_LEVEL
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct FileHandle {
     inner: Arc<FileHandleInner>,
-}
-
-impl std::fmt::Debug for FileHandle {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FileHandle")
-            .field("inner", &self.inner)
-            .finish()
-    }
 }
 
 impl FileHandle {
