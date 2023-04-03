@@ -44,20 +44,20 @@ impl SqlHandler {
             .table(&req.catalog_name, &req.schema_name, &req.table_name)
             .await
             .context(error::CatalogSnafu)?
-            .with_context(|| TableNotExistSnafu {
-                table: table_full_name.clone(),
+            .context(TableNotExistSnafu {
+                table: &table_full_name,
             })
             .map_err(BoxedError::new)
-            .with_context(|_| error::DropTableSnafu {
-                table_name: table_full_name.clone(),
+            .context(error::DropTableSnafu {
+                table_name: &table_full_name,
             })?;
 
         self.catalog_manager
             .deregister_table(deregister_table_req)
             .await
             .map_err(BoxedError::new)
-            .with_context(|_| error::DropTableSnafu {
-                table_name: table_full_name.clone(),
+            .context(error::DropTableSnafu {
+                table_name: &table_full_name,
             })?;
 
         let ctx = EngineContext {};

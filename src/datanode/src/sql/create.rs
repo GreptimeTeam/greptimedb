@@ -15,7 +15,6 @@
 use std::collections::HashMap;
 
 use catalog::{RegisterSchemaRequest, RegisterTableRequest};
-use common_catalog::consts::MITO_ENGINE;
 use common_procedure::{watcher, ProcedureManagerRef, ProcedureWithId};
 use common_query::Output;
 use common_telemetry::tracing::{error, info};
@@ -108,12 +107,12 @@ impl SqlHandler {
 
         // determine catalog and schema from the very beginning
         let table_name = req.table_name.clone();
-        let table_engine = self
-            .table_engine_manager
-            .engine(&req.engine)
-            .with_context(|_| TableEngineNotFoundSnafu {
-                engine_name: MITO_ENGINE.to_string(),
-            })?;
+        let table_engine =
+            self.table_engine_manager
+                .engine(&req.engine)
+                .context(TableEngineNotFoundSnafu {
+                    engine_name: &req.engine,
+                })?;
 
         let table = table_engine
             .create_table(&ctx, req)
@@ -145,12 +144,12 @@ impl SqlHandler {
         req: CreateTableRequest,
     ) -> Result<Output> {
         let table_name = req.table_name.clone();
-        let table_engine = self
-            .table_engine_manager
-            .engine(&req.engine)
-            .with_context(|_| TableEngineNotFoundSnafu {
-                engine_name: req.engine.to_string(),
-            })?;
+        let table_engine =
+            self.table_engine_manager
+                .engine(&req.engine)
+                .context(TableEngineNotFoundSnafu {
+                    engine_name: &req.engine,
+                })?;
         let procedure = CreateTableProcedure::new(
             req,
             self.catalog_manager.clone(),

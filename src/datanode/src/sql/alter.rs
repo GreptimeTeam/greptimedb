@@ -37,7 +37,7 @@ impl SqlHandler {
 
         // fetches table via catalog
         let table = self.get_table(&table_ref).await?;
-        // checks table exists in table engine
+        // checks the table engine exist
         let table_engine = self.table_engine(table)?;
         ensure!(
             table_engine.table_exists(&ctx, &table_ref),

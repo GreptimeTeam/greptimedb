@@ -61,9 +61,7 @@ impl TableEngineManager for MemoryTableEngineManager {
         engines
             .get(name)
             .cloned()
-            .with_context(|| EngineNotFoundSnafu {
-                engine: name.to_string(),
-            })
+            .context(EngineNotFoundSnafu { engine: name })
     }
 
     fn register_engine(&self, name: &str, engine: TableEngineRef) -> Result<()> {
@@ -71,9 +69,7 @@ impl TableEngineManager for MemoryTableEngineManager {
 
         ensure!(
             !engines.contains_key(name),
-            EngineExistSnafu {
-                engine: name.to_string()
-            }
+            EngineExistSnafu { engine: name }
         );
 
         engines.insert(name.to_string(), engine);
