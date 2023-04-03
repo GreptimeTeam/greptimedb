@@ -67,9 +67,12 @@ pub struct LocalCatalogManager {
 impl LocalCatalogManager {
     /// Create a new [CatalogManager] with given user catalogs and mito engine
     pub async fn try_new(engine_manager: TableEngineManagerRef) -> Result<Self> {
-        let engine = engine_manager
-            .engine(MITO_ENGINE)
-            .context(TableEngineNotFoundSnafu)?;
+        let engine =
+            engine_manager
+                .engine(MITO_ENGINE)
+                .with_context(|_| TableEngineNotFoundSnafu {
+                    engine_name: MITO_ENGINE.to_string(),
+                })?;
         let table = SystemCatalogTable::new(engine.clone()).await?;
         let memory_catalog_list = crate::local::memory::new_memory_catalog_list()?;
         let system_catalog = Arc::new(SystemCatalog::new(table, memory_catalog_list.clone()));
@@ -101,10 +104,13 @@ impl LocalCatalogManager {
 
         // Processing system table hooks
         let mut sys_table_requests = self.system_table_requests.lock().await;
-        let engine = self
-            .engine_manager
-            .engine(MITO_ENGINE)
-            .context(TableEngineNotFoundSnafu)?;
+        let engine =
+            self.engine_manager
+                .engine(MITO_ENGINE)
+                .with_context(|_| TableEngineNotFoundSnafu {
+                    engine_name: MITO_ENGINE.to_string(),
+                })?;
+
         handle_system_table_request(self, engine, &mut sys_table_requests).await?;
         Ok(())
     }
@@ -258,10 +264,12 @@ impl LocalCatalogManager {
             table_name: t.table_name.clone(),
             table_id: t.table_id,
         };
-        let engine = self
-            .engine_manager
-            .engine(&t.engine)
-            .context(TableEngineNotFoundSnafu)?;
+        let engine =
+            self.engine_manager
+                .engine(&t.engine)
+                .with_context(|_| TableEngineNotFoundSnafu {
+                    engine_name: MITO_ENGINE.to_string(),
+                })?;
 
         let option = engine
             .open_table(&context, request)
@@ -414,12 +422,13 @@ impl CatalogManager for LocalCatalogManager {
                 schema: schema_name,
             })?;
 
-        let old_table = schema
-            .table(&request.table_name)
-            .await?
-            .context(TableNotExistSnafu {
-                table: request.table_name.to_string(),
-            })?;
+        let old_table =
+            schema
+                .table(&request.table_name)
+                .await?
+                .with_context(|| TableNotExistSnafu {
+                    table: request.table_name.to_string(),
+                })?;
 
         let engine = old_table.table_info().meta.engine.to_string();
         // rename table in system catalog

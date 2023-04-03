@@ -46,7 +46,6 @@ use storage::scheduler::{LocalScheduler, SchedulerConfig};
 use storage::EngineImpl;
 use store_api::logstore::LogStore;
 use table::engine::manager::MemoryTableEngineManager;
-use table::engine::TableEngine;
 use table::requests::FlushTableRequest;
 use table::table::numbers::NumbersTable;
 use table::table::TableIdProviderRef;
@@ -119,10 +118,7 @@ impl Instance {
             object_store,
         ));
 
-        let engine_manager = Arc::new(MemoryTableEngineManager::new(
-            table_engine.name(),
-            table_engine.clone(),
-        ));
+        let engine_manager = Arc::new(MemoryTableEngineManager::new(table_engine.clone()));
 
         // create remote catalog manager
         let (catalog_manager, table_id_provider) = match opts.mode {
@@ -201,10 +197,7 @@ impl Instance {
         Ok(Self {
             query_engine: query_engine.clone(),
             sql_handler: SqlHandler::new(
-                Arc::new(MemoryTableEngineManager::new(
-                    table_engine.name(),
-                    table_engine.clone(),
-                )),
+                Arc::new(MemoryTableEngineManager::new(table_engine.clone())),
                 catalog_manager.clone(),
                 table_engine,
                 procedure_manager.clone(),

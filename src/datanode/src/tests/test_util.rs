@@ -26,7 +26,7 @@ use mito::table::test_util::{new_test_object_store, MockEngine, MockMitoEngine};
 use servers::Mode;
 use snafu::ResultExt;
 use table::engine::manager::MemoryTableEngineManager;
-use table::engine::{EngineContext, TableEngine, TableEngineRef};
+use table::engine::{EngineContext, TableEngineRef};
 use table::requests::{CreateTableRequest, TableOptions};
 
 use crate::datanode::{
@@ -168,10 +168,7 @@ pub async fn create_mock_sql_handler() -> SqlHandler {
         MockEngine::default(),
         object_store,
     ));
-    let engine_manager = Arc::new(MemoryTableEngineManager::new(
-        mock_engine.name(),
-        mock_engine.clone(),
-    ));
+    let engine_manager = Arc::new(MemoryTableEngineManager::new(mock_engine.clone()));
     let catalog_manager = Arc::new(
         catalog::local::LocalCatalogManager::try_new(engine_manager.clone())
             .await

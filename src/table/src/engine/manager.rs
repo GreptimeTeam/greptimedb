@@ -41,9 +41,13 @@ pub struct MemoryTableEngineManager {
 }
 
 impl MemoryTableEngineManager {
-    pub fn new(default_name: &str, engine: TableEngineRef) -> Self {
+    pub fn new(engine: TableEngineRef) -> Self {
+        MemoryTableEngineManager::alias(engine.name().to_string(), engine)
+    }
+
+    pub fn alias(name: String, engine: TableEngineRef) -> Self {
         let mut engines = HashMap::new();
-        engines.insert(default_name.to_string(), engine);
+        engines.insert(name, engine);
         let engines = RwLock::new(engines);
 
         MemoryTableEngineManager { engines }
@@ -106,14 +110,13 @@ mod tests {
     fn test_table_engine_manager() {
         let table_engine = MockTableEngine::new();
         let table_engine_ref = Arc::new(table_engine);
-        let table_engine_manager =
-            MemoryTableEngineManager::new("mock_mito", table_engine_ref.clone());
+        let table_engine_manager = MemoryTableEngineManager::new(table_engine_ref.clone());
 
         table_engine_manager
             .register_engine("yet_another", table_engine_ref.clone())
             .unwrap();
 
-        let got = table_engine_manager.engine("mock_mito");
+        let got = table_engine_manager.engine(table_engine_ref.name());
 
         assert_eq!(got.unwrap().name(), table_engine_ref.name());
 

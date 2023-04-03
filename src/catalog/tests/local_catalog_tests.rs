@@ -22,7 +22,6 @@ mod tests {
     use common_telemetry::{error, info};
     use mito::config::EngineConfig;
     use table::engine::manager::MemoryTableEngineManager;
-    use table::engine::TableEngine;
     use table::table::numbers::NumbersTable;
     use table::TableRef;
     use tokio::sync::Mutex;
@@ -35,10 +34,7 @@ mod tests {
             mito::table::test_util::MockEngine::default(),
             object_store,
         ));
-        let engine_manager = Arc::new(MemoryTableEngineManager::new(
-            mock_engine.name(),
-            mock_engine.clone(),
-        ));
+        let engine_manager = Arc::new(MemoryTableEngineManager::new(mock_engine.clone()));
         let catalog_manager = LocalCatalogManager::try_new(engine_manager).await.unwrap();
         catalog_manager.start().await?;
         Ok(catalog_manager)

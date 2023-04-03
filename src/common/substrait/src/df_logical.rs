@@ -550,8 +550,8 @@ mod test {
 
     async fn build_mock_catalog_manager() -> CatalogManagerRef {
         let mock_table_engine = Arc::new(MockTableEngine::new());
-        let engine_manager = Arc::new(MemoryTableEngineManager::new(
-            MITO_ENGINE,
+        let engine_manager = Arc::new(MemoryTableEngineManager::alias(
+            MITO_ENGINE.to_string(),
             mock_table_engine.clone(),
         ));
         let catalog_manager = Arc::new(LocalCatalogManager::try_new(engine_manager).await.unwrap());

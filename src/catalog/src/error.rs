@@ -82,8 +82,9 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to get engine: {}", source))]
+    #[snafu(display("Table engine not found: {}, source: {}", engine_name, source))]
     TableEngineNotFound {
+        engine_name: String,
         #[snafu(backtrace)]
         source: table::error::Error,
     },

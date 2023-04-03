@@ -81,8 +81,8 @@ mod tests {
     ) -> (KvBackendRef, TableEngineRef, Arc<RemoteCatalogManager>) {
         let backend = Arc::new(MockKvBackend::default()) as KvBackendRef;
         let table_engine = Arc::new(MockTableEngine::default());
-        let engine_manager = Arc::new(MemoryTableEngineManager::new(
-            MITO_ENGINE,
+        let engine_manager = Arc::new(MemoryTableEngineManager::alias(
+            MITO_ENGINE.to_string(),
             table_engine.clone(),
         ));
         let catalog_manager = RemoteCatalogManager::new(engine_manager, node_id, backend.clone());

@@ -337,7 +337,9 @@ impl RemoteCatalogManager {
         let engine = self
             .engine_manager
             .engine(&table_info.meta.engine)
-            .context(TableEngineNotFoundSnafu)?;
+            .with_context(|_| TableEngineNotFoundSnafu {
+                engine_name: MITO_ENGINE.to_string(),
+            })?;
         match engine
             .open_table(&context, request)
             .await
@@ -405,10 +407,12 @@ impl CatalogManager for RemoteCatalogManager {
         info!("Max table id allocated: {}", max_table_id);
 
         let mut system_table_requests = self.system_table_requests.lock().await;
-        let engine = self
-            .engine_manager
-            .engine(MITO_ENGINE)
-            .context(TableEngineNotFoundSnafu)?;
+        let engine =
+            self.engine_manager
+                .engine(MITO_ENGINE)
+                .with_context(|_| TableEngineNotFoundSnafu {
+                    engine_name: MITO_ENGINE.to_string(),
+                })?;
         handle_system_table_request(self, engine, &mut system_table_requests).await?;
         info!("All system table opened");
 

@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
+use common_catalog::consts::MITO_ENGINE;
 use common_error::prelude::BoxedError;
 use common_procedure::ProcedureManagerRef;
 use common_query::Output;
@@ -133,7 +134,9 @@ impl SqlHandler {
         let engine = self
             .table_engine_manager
             .engine(engine_name)
-            .context(TableEngineNotFoundSnafu)?;
+            .with_context(|_| TableEngineNotFoundSnafu {
+                engine_name: MITO_ENGINE.to_string(),
+            })?;
         Ok(engine)
     }
 
