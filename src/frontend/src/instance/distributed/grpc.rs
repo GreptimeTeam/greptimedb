@@ -49,7 +49,8 @@ impl GrpcQueryHandler for DistInstance {
                     DdlExpr::CreateTable(mut expr) => {
                         // TODO(LFC): Support creating distributed table through GRPC interface.
                         // Currently only SQL supports it; how to design the fields in CreateTableExpr?
-                        self.create_table(&mut expr, None).await
+                        let _ = self.create_table(&mut expr, None).await;
+                        Ok(Output::AffectedRows(0))
                     }
                     DdlExpr::Alter(expr) => self.handle_alter_table(expr).await,
                     DdlExpr::DropTable(expr) => {

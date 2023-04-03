@@ -44,15 +44,15 @@ use table::table::adapter::DfTableProviderAdapter;
 use crate::error::{
     CatalogSnafu, DataFusionPlanningSnafu, ExpectExprSnafu, ExpectRangeSelectorSnafu,
     MultipleVectorSnafu, Result, TableNameNotFoundSnafu, TimeIndexNotFoundSnafu,
-    UnexpectedTokenSnafu, UnknownTableSnafu, UnsupportedExprSnafu, ValueNotFoundSnafu,
-    ZeroRangeSelectorSnafu,
+    UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu, UnsupportedExprSnafu,
+    ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
 };
 use crate::extension_plan::{
     EmptyMetric, InstantManipulate, Millisecond, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
 use crate::functions::{
     AbsentOverTime, AvgOverTime, CountOverTime, Delta, IDelta, Increase, LastOverTime, MaxOverTime,
-    MinOverTime, PresentOverTime, Rate, SumOverTime,
+    MinOverTime, PresentOverTime, QuantileOverTime, Rate, SumOverTime,
 };
 
 const LEFT_PLAN_JOIN_ALIAS: &str = "lhs";
@@ -692,6 +692,16 @@ impl PromPlanner {
             "last_over_time" => ScalarFunc::Udf(LastOverTime::scalar_udf()),
             "absent_over_time" => ScalarFunc::Udf(AbsentOverTime::scalar_udf()),
             "present_over_time" => ScalarFunc::Udf(PresentOverTime::scalar_udf()),
+            "quantile_over_time" => {
+                let quantile_expr = match other_input_exprs.get(0) {
+                    Some(DfExpr::Literal(ScalarValue::Float64(Some(quantile)))) => *quantile,
+                    other => UnexpectedPlanExprSnafu {
+                        desc: format!("expect f64 literal as quantile, but found {:?}", other),
+                    }
+                    .fail()?,
+                };
+                ScalarFunc::Udf(QuantileOverTime::scalar_udf(quantile_expr))
+            }
             _ => ScalarFunc::DataFusionBuiltin(
                 BuiltinScalarFunction::from_str(func.name).map_err(|_| {
                     UnsupportedExprSnafu {

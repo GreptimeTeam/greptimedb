@@ -383,8 +383,6 @@ CREATE TABLE {table_name} (
         // Wait for previous task finished
         flush_table(frontend, "greptime", "public", table_name, None).await;
 
-        let table_id = 1024;
-
         let table = instance
             .frontend
             .catalog_manager()
@@ -394,7 +392,7 @@ CREATE TABLE {table_name} (
             .unwrap();
         let table = table.as_any().downcast_ref::<DistTable>().unwrap();
 
-        let TableGlobalValue { regions_id_map, .. } = table
+        let tgv = table
             .table_global_value(&TableGlobalKey {
                 catalog_name: "greptime".to_string(),
                 schema_name: "public".to_string(),
@@ -403,7 +401,10 @@ CREATE TABLE {table_name} (
             .await
             .unwrap()
             .unwrap();
-        let region_to_dn_map = regions_id_map
+        let table_id = tgv.table_id();
+
+        let region_to_dn_map = tgv
+            .regions_id_map
             .iter()
             .map(|(k, v)| (v[0], *k))
             .collect::<HashMap<u32, u64>>();

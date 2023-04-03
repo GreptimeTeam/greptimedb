@@ -17,21 +17,23 @@ use std::sync::Arc;
 
 use async_stream::try_stream;
 use async_trait::async_trait;
+use common_error::ext::PlainError;
+use common_error::prelude::{BoxedError, StatusCode};
 use futures::{Stream, StreamExt};
 use object_store::{EntryMode, Metakey, ObjectStore};
 use snafu::ResultExt;
 
-use crate::error::{DeleteStateSnafu, Error, ListStateSnafu, PutStateSnafu, Result};
+use crate::error::{DeleteStateSnafu, ListStateSnafu, PutStateSnafu, Result};
 
 /// Key value from state store.
-type KeyValue = (String, Vec<u8>);
+pub type KeyValue = (String, Vec<u8>);
 
 /// Stream that yields [KeyValue].
-type KeyValueStream = Pin<Box<dyn Stream<Item = Result<KeyValue>> + Send>>;
+pub type KeyValueStream = Pin<Box<dyn Stream<Item = Result<KeyValue>> + Send>>;
 
 /// Storage layer for persisting procedure's state.
 #[async_trait]
-pub(crate) trait StateStore: Send + Sync {
+pub trait StateStore: Send + Sync {
     /// Puts `key` and `value` into the store.
     async fn put(&self, key: &str, value: Vec<u8>) -> Result<()>;
 
@@ -51,13 +53,13 @@ pub(crate) type StateStoreRef = Arc<dyn StateStore>;
 
 /// [StateStore] based on [ObjectStore].
 #[derive(Debug)]
-pub(crate) struct ObjectStateStore {
+pub struct ObjectStateStore {
     store: ObjectStore,
 }
 
 impl ObjectStateStore {
     /// Returns a new [ObjectStateStore] with specific `store`.
-    pub(crate) fn new(store: ObjectStore) -> ObjectStateStore {
+    pub fn new(store: ObjectStore) -> ObjectStateStore {
         ObjectStateStore { store }
     }
 }
@@ -68,31 +70,65 @@ impl StateStore for ObjectStateStore {
         self.store
             .write(key, value)
             .await
+            .map_err(|e| {
+                BoxedError::new(PlainError::new(
+                    e.to_string(),
+                    StatusCode::StorageUnavailable,
+                ))
+            })
             .context(PutStateSnafu { key })
     }
 
     async fn walk_top_down(&self, path: &str) -> Result<KeyValueStream> {
         let path_string = path.to_string();
 
-        let mut lister = self.store.scan(path).await.map_err(|e| Error::ListState {
-            path: path_string.clone(),
-            source: e,
-        })?;
+        let mut lister = self
+            .store
+            .scan(path)
+            .await
+            .map_err(|e| {
+                BoxedError::new(PlainError::new(
+                    e.to_string(),
+                    StatusCode::StorageUnavailable,
+                ))
+            })
+            .with_context(|_| ListStateSnafu {
+                path: path_string.clone(),
+            })?;
 
         let store = self.store.clone();
 
         let stream = try_stream!({
             while let Some(res) = lister.next().await {
-                let entry = res.context(ListStateSnafu { path: &path_string })?;
+                let entry = res
+                    .map_err(|e| {
+                        BoxedError::new(PlainError::new(
+                            e.to_string(),
+                            StatusCode::StorageUnavailable,
+                        ))
+                    })
+                    .context(ListStateSnafu { path: &path_string })?;
                 let key = entry.path();
                 let metadata = store
                     .metadata(&entry, Metakey::Mode)
                     .await
+                    .map_err(|e| {
+                        BoxedError::new(PlainError::new(
+                            e.to_string(),
+                            StatusCode::StorageUnavailable,
+                        ))
+                    })
                     .context(ListStateSnafu { path: key })?;
                 if let EntryMode::FILE = metadata.mode() {
                     let value = store
                         .read(key)
                         .await
+                        .map_err(|e| {
+                            BoxedError::new(PlainError::new(
+                                e.to_string(),
+                                StatusCode::StorageUnavailable,
+                            ))
+                        })
                         .context(ListStateSnafu { path: key })?;
                     yield (key.to_string(), value);
                 }

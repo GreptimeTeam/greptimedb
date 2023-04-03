@@ -18,19 +18,13 @@ use std::time::Duration;
 use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID, MITO_ENGINE,
 };
-use common_query::Output;
-use common_recordbatch::util;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema};
 use mito::config::EngineConfig;
 use mito::table::test_util::{new_test_object_store, MockEngine, MockMitoEngine};
-use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use servers::Mode;
-use session::context::QueryContext;
 use snafu::ResultExt;
-use sql::statements::statement::Statement;
-use sql::statements::tql::Tql;
 use table::engine::manager::MemoryTableEngineManager;
 use table::engine::{EngineContext, TableEngine, TableEngineRef};
 use table::requests::{CreateTableRequest, TableOptions};
@@ -80,40 +74,6 @@ impl MockInstance {
             instance,
             _guard,
             _procedure_dir: Some(procedure_dir),
-        }
-    }
-
-    pub(crate) async fn execute_sql(&self, sql: &str) -> Output {
-        let engine = self.inner().query_engine();
-        let planner = engine.planner();
-
-        let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
-        match stmt {
-            QueryStatement::Sql(Statement::Query(_)) => {
-                let plan = planner.plan(stmt, QueryContext::arc()).await.unwrap();
-                engine.execute(plan, QueryContext::arc()).await.unwrap()
-            }
-            QueryStatement::Sql(Statement::Tql(tql)) => {
-                let plan = match tql {
-                    Tql::Eval(eval) => {
-                        let promql = PromQuery {
-                            start: eval.start,
-                            end: eval.end,
-                            step: eval.step,
-                            query: eval.query,
-                        };
-                        let stmt = QueryLanguageParser::parse_promql(&promql).unwrap();
-                        planner.plan(stmt, QueryContext::arc()).await.unwrap()
-                    }
-                    Tql::Explain(_) => unimplemented!(),
-                };
-                engine.execute(plan, QueryContext::arc()).await.unwrap()
-            }
-            _ => self
-                .inner()
-                .execute_stmt(stmt, QueryContext::arc())
-                .await
-                .unwrap(),
         }
     }
 
@@ -218,30 +178,4 @@ pub async fn create_mock_sql_handler() -> SqlHandler {
             .unwrap(),
     );
     SqlHandler::new(engine_manager, catalog_manager, mock_engine, None)
-}
-
-pub(crate) async fn setup_test_instance(test_name: &str) -> MockInstance {
-    MockInstance::new(test_name).await
-}
-
-pub async fn check_unordered_output_stream(output: Output, expected: String) {
-    let sort_table = |table: String| -> String {
-        let replaced = table.replace("\\n", "\n");
-        let mut lines = replaced.split('\n').collect::<Vec<_>>();
-        lines.sort();
-        lines
-            .into_iter()
-            .map(|s| s.to_string())
-            .reduce(|acc, e| format!("{acc}\\n{e}"))
-            .unwrap()
-    };
-
-    let recordbatches = match output {
-        Output::Stream(stream) => util::collect_batches(stream).await.unwrap(),
-        Output::RecordBatches(recordbatches) => recordbatches,
-        _ => unreachable!(),
-    };
-    let pretty_print = sort_table(recordbatches.pretty_print().unwrap());
-    let expected = sort_table(expected);
-    assert_eq!(pretty_print, expected);
 }

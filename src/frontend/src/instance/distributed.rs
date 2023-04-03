@@ -56,6 +56,7 @@ use sql::statements::statement::Statement;
 use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
 use table::requests::TableOptions;
 use table::table::AlterContext;
+use table::TableRef;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
@@ -93,14 +94,14 @@ impl DistInstance {
         &self,
         create_table: &mut CreateTableExpr,
         partitions: Option<Partitions>,
-    ) -> Result<Output> {
+    ) -> Result<TableRef> {
         let table_name = TableName::new(
             &create_table.catalog_name,
             &create_table.schema_name,
             &create_table.table_name,
         );
 
-        if self
+        if let Some(table) = self
             .catalog_manager
             .table(
                 &table_name.catalog_name,
@@ -109,10 +110,9 @@ impl DistInstance {
             )
             .await
             .context(CatalogSnafu)?
-            .is_some()
         {
             return if create_table.create_if_not_exists {
-                Ok(Output::AffectedRows(0))
+                Ok(table)
             } else {
                 TableAlreadyExistSnafu {
                     table: table_name.to_string(),
@@ -153,20 +153,20 @@ impl DistInstance {
 
         create_table.table_id = Some(TableId { id: table_id });
 
-        let table = DistTable::new(
+        let table = Arc::new(DistTable::new(
             table_name.clone(),
             table_info,
             self.catalog_manager.partition_manager(),
             self.catalog_manager.datanode_clients(),
             self.catalog_manager.backend(),
-        );
+        ));
 
         let request = RegisterTableRequest {
             catalog: table_name.catalog_name.clone(),
             schema: table_name.schema_name.clone(),
             table_name: table_name.table_name.clone(),
             table_id,
-            table: Arc::new(table),
+            table: table.clone(),
         };
         ensure!(
             self.catalog_manager
@@ -196,9 +196,7 @@ impl DistInstance {
                 .await
                 .context(RequestDatanodeSnafu)?;
         }
-
-        // Checked in real MySQL, it truly returns "0 rows affected".
-        Ok(Output::AffectedRows(0))
+        Ok(table)
     }
 
     async fn drop_table(&self, table_name: TableName) -> Result<Output> {
@@ -329,7 +327,8 @@ impl DistInstance {
             }
             Statement::CreateTable(stmt) => {
                 let create_expr = &mut expr_factory::create_to_expr(&stmt, query_ctx)?;
-                Ok(self.create_table(create_expr, stmt.partitions).await?)
+                let _ = self.create_table(create_expr, stmt.partitions).await?;
+                Ok(Output::AffectedRows(0))
             }
             Statement::Alter(alter_table) => {
                 let expr = grpc::to_alter_expr(alter_table, query_ctx)?;

@@ -18,11 +18,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use api::v1::meta::Peer;
-use common_telemetry::{info, warn};
+use common_procedure::ProcedureManagerRef;
+use common_telemetry::{error, info, warn};
 use serde::{Deserialize, Serialize};
+use servers::http::HttpOptions;
+use snafu::ResultExt;
+use tokio::sync::broadcast::error::RecvError;
 
 use crate::cluster::MetaPeerClient;
-use crate::election::Election;
+use crate::election::{Election, LeaderChangeMessage};
+use crate::error::{RecoverProcedureSnafu, Result};
 use crate::handler::HeartbeatHandlerGroup;
 use crate::lock::DistLockRef;
 use crate::selector::{Selector, SelectorType};
@@ -40,6 +45,7 @@ pub struct MetaSrvOptions {
     pub datanode_lease_secs: i64,
     pub selector: SelectorType,
     pub use_memory_store: bool,
+    pub http_opts: HttpOptions,
 }
 
 impl Default for MetaSrvOptions {
@@ -51,6 +57,7 @@ impl Default for MetaSrvOptions {
             datanode_lease_secs: 15,
             selector: SelectorType::default(),
             use_memory_store: false,
+            http_opts: HttpOptions::default(),
         }
     }
 }
@@ -102,20 +109,51 @@ pub struct MetaSrv {
     election: Option<ElectionRef>,
     meta_peer_client: Option<MetaPeerClient>,
     lock: Option<DistLockRef>,
+    procedure_manager: ProcedureManagerRef,
 }
 
 impl MetaSrv {
-    pub async fn start(&self) {
+    pub async fn try_start(&self) -> Result<()> {
         if self
             .started
             .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
             .is_err()
         {
             warn!("MetaSrv already started");
-            return;
+            return Ok(());
         }
 
         if let Some(election) = self.election() {
+            let procedure_manager = self.procedure_manager.clone();
+            let mut rx = election.subscribe_leader_change();
+            common_runtime::spawn_bg(async move {
+                loop {
+                    match rx.recv().await {
+                        Ok(msg) => {
+                            match msg {
+                                LeaderChangeMessage::Elected(_) => {
+                                    if let Err(e) = procedure_manager.recover().await {
+                                        error!("Failed to recover procedures, error: {e}");
+                                    }
+                                }
+                                LeaderChangeMessage::StepDown(_) => {
+                                    // TODO(LFC): TBC
+                                    unimplemented!()
+                                }
+                            }
+                        }
+                        Err(RecvError::Closed) => {
+                            error!("Not expected, is leader election loop still running?");
+                            break;
+                        }
+                        Err(RecvError::Lagged(_)) => {
+                            // TODO(LFC): TBC
+                            break;
+                        }
+                    }
+                }
+            });
+
             let election = election.clone();
             let started = self.started.clone();
             common_runtime::spawn_bg(async move {
@@ -128,9 +166,15 @@ impl MetaSrv {
                 }
                 info!("MetaSrv stopped");
             });
+        } else {
+            self.procedure_manager
+                .recover()
+                .await
+                .context(RecoverProcedureSnafu)?;
         }
 
         info!("MetaSrv started");
+        Ok(())
     }
 
     pub fn shutdown(&self) {

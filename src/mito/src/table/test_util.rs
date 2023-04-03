@@ -29,7 +29,9 @@ use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
 use table::engine::{EngineContext, TableEngine};
 use table::metadata::{TableInfo, TableInfoBuilder, TableMetaBuilder, TableType};
-use table::requests::{CreateTableRequest, InsertRequest, TableOptions};
+use table::requests::{
+    AlterKind, AlterTableRequest, CreateTableRequest, InsertRequest, TableOptions,
+};
 use table::{Table, TableRef};
 
 use crate::config::EngineConfig;
@@ -116,6 +118,15 @@ pub fn new_create_request(schema: SchemaRef) -> CreateTableRequest {
         primary_key_indices: vec![0],
         table_options: TableOptions::default(),
         engine: MITO_ENGINE.to_string(),
+    }
+}
+
+pub fn new_alter_request(alter_kind: AlterKind) -> AlterTableRequest {
+    AlterTableRequest {
+        catalog_name: "greptime".to_string(),
+        schema_name: "public".to_string(),
+        table_name: TABLE_NAME.to_string(),
+        alter_kind,
     }
 }
 

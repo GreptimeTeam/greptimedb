@@ -22,7 +22,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use backon::ExponentialBuilder;
 use common_telemetry::logging;
-use object_store::ObjectStore;
 use snafu::ensure;
 use tokio::sync::watch::{self, Receiver, Sender};
 use tokio::sync::Notify;
@@ -31,7 +30,7 @@ use crate::error::{DuplicateProcedureSnafu, LoaderConflictSnafu, Result};
 use crate::local::lock::LockMap;
 use crate::local::runner::Runner;
 use crate::procedure::BoxedProcedureLoader;
-use crate::store::{ObjectStateStore, ProcedureMessage, ProcedureStore, StateStoreRef};
+use crate::store::{ProcedureMessage, ProcedureStore, StateStoreRef};
 use crate::{
     BoxedProcedure, ContextProvider, LockKey, ProcedureId, ProcedureManager, ProcedureState,
     ProcedureWithId, Watcher,
@@ -291,10 +290,17 @@ impl ManagerContext {
 /// Config for [LocalManager].
 #[derive(Debug)]
 pub struct ManagerConfig {
-    /// Object store
-    pub object_store: ObjectStore,
     pub max_retry_times: usize,
     pub retry_delay: Duration,
+}
+
+impl Default for ManagerConfig {
+    fn default() -> Self {
+        Self {
+            max_retry_times: 3,
+            retry_delay: Duration::from_millis(500),
+        }
+    }
 }
 
 /// A [ProcedureManager] that maintains procedure states locally.
@@ -307,10 +313,10 @@ pub struct LocalManager {
 
 impl LocalManager {
     /// Create a new [LocalManager] with specific `config`.
-    pub fn new(config: ManagerConfig) -> LocalManager {
+    pub fn new(config: ManagerConfig, state_store: StateStoreRef) -> LocalManager {
         LocalManager {
             manager_ctx: Arc::new(ManagerContext::new()),
-            state_store: Arc::new(ObjectStateStore::new(config.object_store)),
+            state_store,
             max_retry_times: config.max_retry_times,
             retry_delay: config.retry_delay,
         }
@@ -423,6 +429,7 @@ impl ProcedureManager for LocalManager {
 mod test_util {
     use common_test_util::temp_dir::TempDir;
     use object_store::services::Fs as Builder;
+    use object_store::ObjectStore;
 
     use super::*;
 
@@ -446,6 +453,7 @@ mod tests {
 
     use super::*;
     use crate::error::Error;
+    use crate::store::ObjectStateStore;
     use crate::{Context, Procedure, Status};
 
     #[test]
@@ -554,11 +562,11 @@ mod tests {
     fn test_register_loader() {
         let dir = create_temp_dir("register");
         let config = ManagerConfig {
-            object_store: test_util::new_object_store(&dir),
             max_retry_times: 3,
             retry_delay: Duration::from_millis(500),
         };
-        let manager = LocalManager::new(config);
+        let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
+        let manager = LocalManager::new(config, state_store);
 
         manager
             .register_loader("ProcedureToLoad", ProcedureToLoad::loader())
@@ -575,11 +583,11 @@ mod tests {
         let dir = create_temp_dir("recover");
         let object_store = test_util::new_object_store(&dir);
         let config = ManagerConfig {
-            object_store: object_store.clone(),
             max_retry_times: 3,
             retry_delay: Duration::from_millis(500),
         };
-        let manager = LocalManager::new(config);
+        let state_store = Arc::new(ObjectStateStore::new(object_store.clone()));
+        let manager = LocalManager::new(config, state_store);
 
         manager
             .register_loader("ProcedureToLoad", ProcedureToLoad::loader())
@@ -621,11 +629,11 @@ mod tests {
     async fn test_submit_procedure() {
         let dir = create_temp_dir("submit");
         let config = ManagerConfig {
-            object_store: test_util::new_object_store(&dir),
             max_retry_times: 3,
             retry_delay: Duration::from_millis(500),
         };
-        let manager = LocalManager::new(config);
+        let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
+        let manager = LocalManager::new(config, state_store);
 
         let procedure_id = ProcedureId::random();
         assert!(manager
@@ -669,11 +677,11 @@ mod tests {
     async fn test_state_changed_on_err() {
         let dir = create_temp_dir("on_err");
         let config = ManagerConfig {
-            object_store: test_util::new_object_store(&dir),
             max_retry_times: 3,
             retry_delay: Duration::from_millis(500),
         };
-        let manager = LocalManager::new(config);
+        let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
+        let manager = LocalManager::new(config, state_store);
 
         #[derive(Debug)]
         struct MockProcedure {

@@ -22,6 +22,7 @@ use axum::{http, Json};
 use base64::DecodeError;
 use catalog;
 use common_error::prelude::*;
+use query::parser::PromQuery;
 use serde_json::json;
 use tonic::codegen::http::{HeaderMap, HeaderValue};
 use tonic::metadata::MetadataMap;
@@ -281,6 +282,13 @@ pub enum Error {
         source: http::Error,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to parse PromQL: {query:?}, source: {source}"))]
+    ParsePromQL {
+        query: PromQuery,
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -346,6 +354,8 @@ impl ErrorExt for Error {
             #[cfg(feature = "mem-prof")]
             DumpProfileData { source, .. } => source.status_code(),
             InvalidFlushArgument { .. } => StatusCode::InvalidArguments,
+
+            ParsePromQL { source, .. } => source.status_code(),
         }
     }
 

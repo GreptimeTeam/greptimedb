@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! query engine metrics
-
 pub static METRIC_PARSE_SQL_ELAPSED: &str = "query.parse_sql_elapsed";
 pub static METRIC_PARSE_PROMQL_ELAPSED: &str = "query.parse_promql_elapsed";
 pub static METRIC_OPTIMIZE_LOGICAL_ELAPSED: &str = "query.optimize_logicalplan_elapsed";

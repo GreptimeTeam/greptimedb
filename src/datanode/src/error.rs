@@ -320,12 +320,6 @@ pub enum Error {
         source: sql::error::Error,
     },
 
-    #[snafu(display("Failed to start script manager, source: {}", source))]
-    StartScriptManager {
-        #[snafu(backtrace)]
-        source: script::error::Error,
-    },
-
     #[snafu(display(
         "Failed to parse string to timestamp, string: {}, source: {}",
         raw,
@@ -445,12 +439,6 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to write parquet file, source: {}", source))]
-    WriteParquet {
-        source: parquet::errors::ParquetError,
-        backtrace: Backtrace,
-    },
-
     #[snafu(display("Failed to poll stream, source: {}", source))]
     PollStream {
         source: datafusion_common::DataFusionError,
@@ -519,6 +507,12 @@ pub enum Error {
     ShutdownInstance {
         #[snafu(backtrace)]
         source: BoxedError,
+    },
+
+    #[snafu(display("Failed to copy table to parquet file, source: {}", source))]
+    WriteParquet {
+        #[snafu(backtrace)]
+        source: storage::error::Error,
     },
 }
 
@@ -608,7 +602,6 @@ impl ErrorExt for Error {
             | WriteObject { .. }
             | ListObjects { .. } => StatusCode::StorageUnavailable,
             OpenLogStore { source } => source.status_code(),
-            StartScriptManager { source } => source.status_code(),
             OpenStorageEngine { source } => source.status_code(),
             RuntimeResource { .. } => StatusCode::RuntimeResourcesExhausted,
             MetaClientInit { source, .. } => source.status_code(),

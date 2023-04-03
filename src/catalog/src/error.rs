@@ -225,6 +225,12 @@ pub enum Error {
         #[snafu(backtrace)]
         source: table::error::Error,
     },
+
+    #[snafu(display("Invalid system table definition: {err_msg}"))]
+    InvalidSystemTableDef {
+        err_msg: String,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -237,7 +243,8 @@ impl ErrorExt for Error {
             | Error::TableNotFound { .. }
             | Error::IllegalManagerState { .. }
             | Error::CatalogNotFound { .. }
-            | Error::InvalidEntryType { .. } => StatusCode::Unexpected,
+            | Error::InvalidEntryType { .. }
+            | Error::InvalidSystemTableDef { .. } => StatusCode::Unexpected,
 
             Error::SystemCatalog { .. }
             | Error::EmptyValue { .. }

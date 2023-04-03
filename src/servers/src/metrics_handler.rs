@@ -12,17 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod error;
-mod global;
-mod metrics;
-mod repeated_task;
-pub mod runtime;
+use common_telemetry::metric;
 
-pub use global::{
-    bg_runtime, block_on_bg, block_on_read, block_on_write, create_runtime, init_global_runtimes,
-    read_runtime, spawn_bg, spawn_blocking_bg, spawn_blocking_read, spawn_blocking_write,
-    spawn_read, spawn_write, write_runtime,
-};
+/// a server that serves metrics
+/// only start when datanode starts in distributed mode
+#[derive(Copy, Clone)]
+pub struct MetricsHandler;
 
-pub use crate::repeated_task::{RepeatedTask, TaskFunction, TaskFunctionRef};
-pub use crate::runtime::{Builder, JoinError, JoinHandle, Runtime};
+impl MetricsHandler {
+    pub fn render(&self) -> String {
+        if let Some(handle) = metric::try_handle() {
+            handle.render()
+        } else {
+            "Prometheus handle not initialized.".to_owned()
+        }
+    }
+}

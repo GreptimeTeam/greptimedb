@@ -22,9 +22,7 @@ use common_telemetry::timer;
 use query::error::QueryExecutionSnafu;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::query_engine::StatementHandler;
-use servers::error as server_error;
-use servers::prom::PromHandler;
-use session::context::{QueryContext, QueryContextRef};
+use session::context::QueryContextRef;
 use snafu::prelude::*;
 use sql::ast::ObjectName;
 use sql::statements::copy::{CopyTable, CopyTableArgument};
@@ -37,7 +35,7 @@ use crate::error::{
     TableIdProviderNotFoundSnafu,
 };
 use crate::instance::Instance;
-use crate::metric;
+use crate::metrics;
 use crate::sql::{SqlHandler, SqlRequest};
 
 impl Instance {
@@ -190,7 +188,7 @@ impl Instance {
         promql: &PromQuery,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        let _timer = timer!(metric::METRIC_HANDLE_PROMQL_ELAPSED);
+        let _timer = timer!(metrics::METRIC_HANDLE_PROMQL_ELAPSED);
 
         let stmt = QueryLanguageParser::parse_promql(promql).context(ExecuteSqlSnafu)?;
 
@@ -288,23 +286,6 @@ impl StatementHandler for Instance {
             .await
             .map_err(BoxedError::new)
             .context(QueryExecutionSnafu)
-    }
-}
-
-#[async_trait]
-impl PromHandler for Instance {
-    async fn do_query(&self, query: &PromQuery) -> server_error::Result<Output> {
-        let _timer = timer!(metric::METRIC_HANDLE_PROMQL_ELAPSED);
-
-        self.execute_promql(query, QueryContext::arc())
-            .await
-            .map_err(BoxedError::new)
-            .with_context(|_| {
-                let query_literal = format!("{query:?}");
-                server_error::ExecuteQuerySnafu {
-                    query: query_literal,
-                }
-            })
     }
 }
 

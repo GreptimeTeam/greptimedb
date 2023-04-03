@@ -26,7 +26,7 @@ use datatypes::schema::Schema;
 use prost::Message;
 use query::parser::PromQuery;
 use servers::error::{Error, Result};
-use servers::http::{HttpOptions, HttpServer};
+use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::prometheus;
 use servers::prometheus::{snappy_compress, Metrics};
 use servers::query_handler::grpc::GrpcQueryHandler;
@@ -117,8 +117,11 @@ impl SqlQueryHandler for DummyInstance {
 
 fn make_test_app(tx: mpsc::Sender<(String, Vec<u8>)>) -> Router {
     let instance = Arc::new(DummyInstance { tx });
-    let mut server = HttpServer::new(instance.clone(), instance.clone(), HttpOptions::default());
-    server.set_prom_handler(instance);
+    let server = HttpServerBuilder::new(HttpOptions::default())
+        .with_grpc_handler(instance.clone())
+        .with_sql_handler(instance.clone())
+        .with_prom_handler(instance)
+        .build();
     server.make_app()
 }
 

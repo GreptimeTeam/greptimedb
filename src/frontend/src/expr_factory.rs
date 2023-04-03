@@ -187,7 +187,12 @@ fn columns_to_expr(
         .iter()
         .map(|c| column_def_to_schema(c, c.name.to_string() == time_index).context(ParseSqlSnafu))
         .collect::<Result<Vec<ColumnSchema>>>()?;
+    column_schemas_to_defs(column_schemas)
+}
 
+pub(crate) fn column_schemas_to_defs(
+    column_schemas: Vec<ColumnSchema>,
+) -> Result<Vec<api::v1::ColumnDef>> {
     let column_datatypes = column_schemas
         .iter()
         .map(|c| {

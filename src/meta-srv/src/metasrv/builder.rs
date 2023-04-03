@@ -15,6 +15,8 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+use common_procedure::local::{LocalManager, ManagerConfig};
+
 use crate::cluster::MetaPeerClient;
 use crate::handler::{
     CheckLeaderHandler, CollectStatsHandler, HeartbeatHandlerGroup, KeepLeaseHandler,
@@ -22,6 +24,7 @@ use crate::handler::{
 };
 use crate::lock::DistLockRef;
 use crate::metasrv::{ElectionRef, MetaSrv, MetaSrvOptions, SelectorRef, TABLE_ID_SEQ};
+use crate::procedure::state_store::MetaStateStore;
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::sequence::Sequence;
 use crate::service::store::kv::{KvStoreRef, ResettableKvStoreRef};
@@ -139,6 +142,10 @@ impl MetaSrvBuilder {
 
         let table_id_sequence = Arc::new(Sequence::new(TABLE_ID_SEQ, 1024, 10, kv_store.clone()));
 
+        let config = ManagerConfig::default();
+        let state_store = Arc::new(MetaStateStore::new(kv_store.clone()));
+        let procedure_manager = Arc::new(LocalManager::new(config, state_store));
+
         MetaSrv {
             started,
             options,
@@ -150,6 +157,7 @@ impl MetaSrvBuilder {
             election,
             meta_peer_client,
             lock,
+            procedure_manager,
         }
     }
 }

@@ -19,13 +19,13 @@ use aide::transform::TransformOperation;
 use axum::extract::{Json, Query, State};
 use axum::{Extension, Form};
 use common_error::status_code::StatusCode;
-use common_telemetry::metric;
 use query::parser::PromQuery;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use session::context::UserInfo;
 
 use crate::http::{ApiState, JsonResponse};
+use crate::metrics_handler::MetricsHandler;
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct SqlQuery {
@@ -114,12 +114,11 @@ pub(crate) fn sql_docs(op: TransformOperation) -> TransformOperation {
 
 /// Handler to export metrics
 #[axum_macros::debug_handler]
-pub async fn metrics(Query(_params): Query<HashMap<String, String>>) -> String {
-    if let Some(handle) = metric::try_handle() {
-        handle.render()
-    } else {
-        "Prometheus handle not initialized.".to_owned()
-    }
+pub async fn metrics(
+    State(state): State<MetricsHandler>,
+    Query(_params): Query<HashMap<String, String>>,
+) -> String {
+    state.render()
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]

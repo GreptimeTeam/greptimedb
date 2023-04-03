@@ -558,7 +558,7 @@ impl<R: Region> MitoTable<R> {
 }
 
 /// Create [`AlterOperation`] according to given `alter_kind`.
-fn create_alter_operation(
+pub(crate) fn create_alter_operation(
     table_name: &str,
     alter_kind: &AlterKind,
     table_meta: &mut TableMeta,

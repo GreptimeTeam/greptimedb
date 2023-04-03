@@ -24,7 +24,7 @@ use tokio::sync::oneshot;
 pub use tokio::task::{JoinError, JoinHandle};
 
 use crate::error::*;
-use crate::metric::*;
+use crate::metrics::*;
 
 /// A runtime to run future tasks
 #[derive(Clone, Debug)]

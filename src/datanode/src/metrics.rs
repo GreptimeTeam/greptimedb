@@ -12,17 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod error;
-mod global;
-mod metrics;
-mod repeated_task;
-pub mod runtime;
+//! datanode metrics
 
-pub use global::{
-    bg_runtime, block_on_bg, block_on_read, block_on_write, create_runtime, init_global_runtimes,
-    read_runtime, spawn_bg, spawn_blocking_bg, spawn_blocking_read, spawn_blocking_write,
-    spawn_read, spawn_write, write_runtime,
-};
-
-pub use crate::repeated_task::{RepeatedTask, TaskFunction, TaskFunctionRef};
-pub use crate::runtime::{Builder, JoinError, JoinHandle, Runtime};
+pub const METRIC_HANDLE_SQL_ELAPSED: &str = "datanode.handle_sql_elapsed";
+pub const METRIC_HANDLE_PROMQL_ELAPSED: &str = "datanode.handle_promql_elapsed";

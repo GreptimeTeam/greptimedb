@@ -27,7 +27,7 @@ use arrow_array::{
 use async_compat::CompatExt;
 use async_stream::try_stream;
 use async_trait::async_trait;
-use common_telemetry::error;
+use common_telemetry::{error, warn};
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
@@ -38,7 +38,7 @@ use datatypes::prelude::ConcreteDataType;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::{ArrowPredicate, RowFilter};
-use parquet::arrow::{ArrowWriter, ParquetRecordBatchStreamBuilder, ProjectionMask};
+use parquet::arrow::{ParquetRecordBatchStreamBuilder, ProjectionMask};
 use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
@@ -48,15 +48,14 @@ use snafu::{OptionExt, ResultExt};
 use table::predicate::Predicate;
 use tokio::io::BufReader;
 
-use crate::error::{
-    self, DecodeParquetTimeRangeSnafu, NewRecordBatchSnafu, ReadObjectSnafu, ReadParquetSnafu,
-    Result, WriteObjectSnafu, WriteParquetSnafu,
-};
+use crate::error::{self, DecodeParquetTimeRangeSnafu, ReadObjectSnafu, ReadParquetSnafu, Result};
 use crate::read::{Batch, BatchReader};
 use crate::schema::compat::ReadAdapter;
-use crate::schema::{ProjectedSchemaRef, StoreSchema, StoreSchemaRef};
+use crate::schema::{ProjectedSchemaRef, StoreSchema};
 use crate::sst;
+use crate::sst::stream_writer::BufferedWriter;
 use crate::sst::{FileHandle, Source, SstInfo};
+
 /// Parquet sst writer.
 pub struct ParquetWriter<'a> {
     file_path: &'a str,
@@ -75,8 +74,8 @@ impl<'a> ParquetWriter<'a> {
         }
     }
 
-    pub async fn write_sst(self, _opts: &sst::WriteOptions) -> Result<Option<SstInfo>> {
-        self.write_rows(None).await
+    pub async fn write_sst(self, opts: &sst::WriteOptions) -> Result<Option<SstInfo>> {
+        self.write_rows(None, opts).await
     }
 
     /// Iterates memtable and writes rows to Parquet file.
@@ -85,11 +84,9 @@ impl<'a> ParquetWriter<'a> {
     async fn write_rows(
         mut self,
         extra_meta: Option<HashMap<String, String>>,
+        opts: &sst::WriteOptions,
     ) -> Result<Option<SstInfo>> {
-        let projected_schema = self.source.projected_schema();
-        let store_schema = projected_schema.schema_to_read();
-        let schema = store_schema.arrow_schema().clone();
-
+        let schema = self.source.schema();
         let writer_props = WriterProperties::builder()
             .set_compression(Compression::ZSTD(ZstdLevel::default()))
             .set_encoding(Encoding::PLAIN)
@@ -101,62 +98,48 @@ impl<'a> ParquetWriter<'a> {
             }))
             .build();
 
-        // TODO(hl): Since OpenDAL's writer is async and ArrowWriter requires a `std::io::Write`,
-        // here we use a Vec<u8> to buffer all parquet bytes in memory and write to object store
-        // at a time. Maybe we should find a better way to bridge ArrowWriter and OpenDAL's object.
-        let mut buf = vec![];
-        let mut arrow_writer = ArrowWriter::try_new(&mut buf, schema.clone(), Some(writer_props))
-            .context(WriteParquetSnafu)?;
+        let mut buffered_writer = BufferedWriter::try_new(
+            self.file_path.to_string(),
+            self.object_store.clone(),
+            &schema,
+            Some(writer_props),
+            opts.sst_write_buffer_size.as_bytes() as usize,
+        )
+        .await?;
+        let mut rows_written = 0;
 
-        let mut batches_written = 0;
         while let Some(batch) = self.source.next_batch().await? {
-            let arrow_batch = RecordBatch::try_new(
-                schema.clone(),
-                batch
-                    .columns()
-                    .iter()
-                    .map(|v| v.to_arrow_array())
-                    .collect::<Vec<_>>(),
-            )
-            .context(NewRecordBatchSnafu)?;
-            arrow_writer
-                .write(&arrow_batch)
-                .context(WriteParquetSnafu)?;
-            batches_written += 1;
+            buffered_writer.write(&batch).await?;
+            rows_written += batch.num_rows();
         }
 
-        if batches_written == 0 {
+        if rows_written == 0 {
             // if the source does not contain any batch, we skip writing an empty parquet file.
+            if !buffered_writer.abort().await {
+                warn!(
+                    "Partial file {} has been uploaded to remote storage",
+                    self.file_path
+                );
+            }
             return Ok(None);
         }
-        let file_meta = arrow_writer.close().context(WriteParquetSnafu)?;
 
-        let time_range = decode_timestamp_range(&file_meta, store_schema)
-            .ok()
-            .flatten();
+        let (file_meta, file_size) = buffered_writer.close().await?;
+        let time_range = decode_timestamp_range(&file_meta, &schema).ok().flatten();
 
         // object_store.write will make sure all bytes are written or an error is raised.
-        let buf_len = buf.len() as u64;
-        self.object_store
-            .write(self.file_path, buf)
-            .await
-            .context(WriteObjectSnafu {
-                path: self.file_path,
-            })?;
-
-        let file_size = buf_len;
         Ok(Some(SstInfo {
             time_range,
             file_size,
+            num_rows: rows_written,
         }))
     }
 }
 
 fn decode_timestamp_range(
     file_meta: &FileMetaData,
-    store_schema: &StoreSchemaRef,
+    schema: &datatypes::schema::SchemaRef,
 ) -> Result<Option<(Timestamp, Timestamp)>> {
-    let schema = store_schema.schema();
     let (Some(ts_col_idx), Some(ts_col)) = (schema.timestamp_index(), schema.timestamp_column()) else { return Ok(None); };
     let ts_datatype = &ts_col.data_type;
     decode_timestamp_range_inner(file_meta, ts_col_idx, ts_datatype)
@@ -574,6 +557,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_parquet_writer() {
+        common_telemetry::init_default_ut_logging();
         let schema = memtable_tests::schema_for_test();
         let memtable = DefaultMemtableBuilder::default().build(schema);
 
@@ -701,6 +685,7 @@ mod tests {
         let SstInfo {
             time_range,
             file_size,
+            ..
         } = writer
             .write_sst(&sst::WriteOptions::default())
             .await
@@ -793,6 +778,7 @@ mod tests {
         let SstInfo {
             time_range,
             file_size,
+            ..
         } = writer
             .write_sst(&sst::WriteOptions::default())
             .await
@@ -906,6 +892,7 @@ mod tests {
         let SstInfo {
             time_range,
             file_size,
+            ..
         } = writer
             .write_sst(&sst::WriteOptions::default())
             .await
