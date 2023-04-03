@@ -56,7 +56,6 @@ async fn create_insert_query_assert(
         .plan_exec(QueryStatement::Promql(eval_stmt), QueryContext::arc())
         .await
         .unwrap();
-    let expected = String::from(expected);
     check_unordered_output_stream(query_output, expected).await;
 }
 
@@ -76,7 +75,6 @@ async fn create_insert_tql_assert(
         .await
         .remove(0)
         .unwrap();
-    let expected = String::from(expected);
     check_unordered_output_stream(query_output, expected).await;
 }
 

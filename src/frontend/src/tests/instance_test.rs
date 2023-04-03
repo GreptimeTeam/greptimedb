@@ -28,8 +28,8 @@ use session::context::QueryContext;
 use crate::error::Error;
 use crate::instance::Instance;
 use crate::tests::test_util::{
-    both_instances_cases, check_output_stream, distributed, standalone, standalone_instance_case,
-    MockInstance,
+    both_instances_cases, check_output_stream, check_unordered_output_stream, distributed,
+    standalone, standalone_instance_case, MockInstance,
 };
 
 #[apply(both_instances_cases)]
@@ -359,16 +359,26 @@ async fn test_execute_show_databases_tables(instance: Arc<dyn MockInstance>) {
         _ => unreachable!(),
     }
 
-    let expected_tables = if is_distributed_mode { 0 } else { 2 };
+    let expected = if is_distributed_mode {
+        "\
++---------+
+| Tables  |
++---------+
+| scripts |
++---------+\
+"
+    } else {
+        "\
++---------+
+| Tables  |
++---------+
+| numbers |
+| scripts |
++---------+\
+"
+    };
     let output = execute_sql(&instance, "show tables").await;
-    match output {
-        Output::RecordBatches(databases) => {
-            let databases = databases.take();
-            assert_eq!(1, databases[0].num_columns());
-            assert_eq!(databases[0].column(0).len(), expected_tables);
-        }
-        _ => unreachable!(),
-    }
+    check_unordered_output_stream(output, expected).await;
 
     execute_sql(
         &instance,
@@ -376,14 +386,27 @@ async fn test_execute_show_databases_tables(instance: Arc<dyn MockInstance>) {
     ).await;
 
     let output = execute_sql(&instance, "show tables").await;
-    match output {
-        Output::RecordBatches(databases) => {
-            let databases = databases.take();
-            assert_eq!(1, databases[0].num_columns());
-            assert_eq!(databases[0].column(0).len(), expected_tables + 1);
-        }
-        _ => unreachable!(),
-    }
+    let expected = if is_distributed_mode {
+        "\
++---------+
+| Tables  |
++---------+
+| demo    |
+| scripts |
++---------+\
+"
+    } else {
+        "\
++---------+
+| Tables  |
++---------+
+| demo    |
+| numbers |
+| scripts |
++---------+\
+"
+    };
+    check_unordered_output_stream(output, expected).await;
 
     // show tables like [string]
     let output = execute_sql(&instance, "show tables like 'de%'").await;

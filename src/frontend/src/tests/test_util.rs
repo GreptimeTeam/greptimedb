@@ -97,8 +97,8 @@ pub(crate) async fn check_output_stream(output: Output, expected: String) {
     assert_eq!(pretty_print, expected, "{}", pretty_print);
 }
 
-pub(crate) async fn check_unordered_output_stream(output: Output, expected: String) {
-    let sort_table = |table: String| -> String {
+pub(crate) async fn check_unordered_output_stream(output: Output, expected: &str) {
+    let sort_table = |table: &str| -> String {
         let replaced = table.replace("\\n", "\n");
         let mut lines = replaced.split('\n').collect::<Vec<_>>();
         lines.sort();
@@ -114,7 +114,7 @@ pub(crate) async fn check_unordered_output_stream(output: Output, expected: Stri
         Output::RecordBatches(recordbatches) => recordbatches,
         _ => unreachable!(),
     };
-    let pretty_print = sort_table(recordbatches.pretty_print().unwrap());
+    let pretty_print = sort_table(&recordbatches.pretty_print().unwrap());
     let expected = sort_table(expected);
     assert_eq!(pretty_print, expected);
 }
