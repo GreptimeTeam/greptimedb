@@ -15,7 +15,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
+use common_catalog::consts::{
+    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID, MITO_ENGINE,
+};
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema};
@@ -23,6 +25,7 @@ use mito::config::EngineConfig;
 use mito::table::test_util::{new_test_object_store, MockEngine, MockMitoEngine};
 use servers::Mode;
 use snafu::ResultExt;
+use table::engine::manager::MemoryTableEngineManager;
 use table::engine::{EngineContext, TableEngineRef};
 use table::requests::{CreateTableRequest, TableOptions};
 
@@ -122,7 +125,11 @@ pub(crate) async fn create_test_table(
     ];
 
     let table_name = "demo";
-    let table_engine: TableEngineRef = instance.sql_handler().table_engine();
+    let table_engine: TableEngineRef = instance
+        .sql_handler()
+        .table_engine_manager()
+        .engine(MITO_ENGINE)
+        .unwrap();
     let table = table_engine
         .create_table(
             &EngineContext::default(),
@@ -137,6 +144,7 @@ pub(crate) async fn create_test_table(
                 primary_key_indices: vec![0], // "host" is in primary keys
                 table_options: TableOptions::default(),
                 region_numbers: vec![0],
+                engine: MITO_ENGINE.to_string(),
             },
         )
         .await
@@ -160,10 +168,11 @@ pub async fn create_mock_sql_handler() -> SqlHandler {
         MockEngine::default(),
         object_store,
     ));
+    let engine_manager = Arc::new(MemoryTableEngineManager::new(mock_engine.clone()));
     let catalog_manager = Arc::new(
-        catalog::local::LocalCatalogManager::try_new(mock_engine.clone())
+        catalog::local::LocalCatalogManager::try_new(engine_manager.clone())
             .await
             .unwrap(),
     );
-    SqlHandler::new(mock_engine.clone(), catalog_manager, mock_engine, None)
+    SqlHandler::new(engine_manager, catalog_manager, mock_engine, None)
 }

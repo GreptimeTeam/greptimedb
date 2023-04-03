@@ -117,6 +117,7 @@ pub fn new_create_request(schema: SchemaRef) -> CreateTableRequest {
         create_if_not_exists: true,
         primary_key_indices: vec![0],
         table_options: TableOptions::default(),
+        engine: MITO_ENGINE.to_string(),
     }
 }
 

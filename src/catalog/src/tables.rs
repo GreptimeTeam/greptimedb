@@ -33,7 +33,6 @@ use datatypes::value::ValueRef;
 use datatypes::vectors::VectorRef;
 use futures::Stream;
 use snafu::ResultExt;
-use table::engine::TableEngineRef;
 use table::error::TablesRecordBatchSnafu;
 use table::metadata::{TableId, TableInfoRef};
 use table::table::scan::SimpleTableScan;
@@ -52,15 +51,13 @@ use crate::{
 pub struct Tables {
     schema: SchemaRef,
     catalogs: CatalogListRef,
-    engine_name: String,
 }
 
 impl Tables {
-    pub fn new(catalogs: CatalogListRef, engine_name: String) -> Self {
+    pub fn new(catalogs: CatalogListRef) -> Self {
         Self {
             schema: Arc::new(build_schema_for_tables()),
             catalogs,
-            engine_name,
         }
     }
 }
@@ -87,7 +84,6 @@ impl Table for Tables {
     ) -> table::error::Result<PhysicalPlanRef> {
         let catalogs = self.catalogs.clone();
         let schema_ref = self.schema.clone();
-        let engine_name = self.engine_name.clone();
 
         let stream = stream!({
             for catalog_name in catalogs
@@ -105,32 +101,29 @@ impl Table for Tables {
                     .map_err(BoxedError::new)
                     .context(TablesRecordBatchSnafu)?
                 {
-                    let mut tables_in_schema = Vec::with_capacity(
-                        catalog
-                            .schema_names()
-                            .map_err(BoxedError::new)
-                            .context(TablesRecordBatchSnafu)?
-                            .len(),
-                    );
                     let schema = catalog
                         .schema(&schema_name)
                         .map_err(BoxedError::new)
                         .context(TablesRecordBatchSnafu)?
                         .unwrap();
-                    for table_name in schema
+                    let names = schema
                         .table_names()
                         .map_err(BoxedError::new)
-                        .context(TablesRecordBatchSnafu)?
-                    {
-                        tables_in_schema.push(table_name);
+                        .context(TablesRecordBatchSnafu)?;
+                    let mut tables = Vec::with_capacity(names.len());
+
+                    for name in names {
+                        let table = schema
+                            .table(&name)
+                            .await
+                            .map_err(BoxedError::new)
+                            .context(TablesRecordBatchSnafu)?
+                            .unwrap();
+
+                        tables.push(table);
                     }
 
-                    let vec = tables_to_record_batch(
-                        &catalog_name,
-                        &schema_name,
-                        tables_in_schema,
-                        &engine_name,
-                    );
+                    let vec = tables_to_record_batch(&catalog_name, &schema_name, tables);
                     let record_batch_res = RecordBatch::new(schema_ref.clone(), vec);
                     yield record_batch_res;
                 }
@@ -149,23 +142,21 @@ impl Table for Tables {
 fn tables_to_record_batch(
     catalog_name: &str,
     schema_name: &str,
-    table_names: Vec<String>,
-    engine: &str,
+    tables: Vec<TableRef>,
 ) -> Vec<VectorRef> {
-    let mut catalog_vec =
-        ConcreteDataType::string_datatype().create_mutable_vector(table_names.len());
-    let mut schema_vec =
-        ConcreteDataType::string_datatype().create_mutable_vector(table_names.len());
+    let mut catalog_vec = ConcreteDataType::string_datatype().create_mutable_vector(tables.len());
+    let mut schema_vec = ConcreteDataType::string_datatype().create_mutable_vector(tables.len());
     let mut table_name_vec =
-        ConcreteDataType::string_datatype().create_mutable_vector(table_names.len());
-    let mut engine_vec =
-        ConcreteDataType::string_datatype().create_mutable_vector(table_names.len());
+        ConcreteDataType::string_datatype().create_mutable_vector(tables.len());
+    let mut engine_vec = ConcreteDataType::string_datatype().create_mutable_vector(tables.len());
 
-    for table_name in table_names {
+    for table in tables {
+        let name = &table.table_info().name;
+        let engine = &table.table_info().meta.engine;
         // Safety: All these vectors are string type.
         catalog_vec.push_value_ref(ValueRef::String(catalog_name));
         schema_vec.push_value_ref(ValueRef::String(schema_name));
-        table_name_vec.push_value_ref(ValueRef::String(&table_name));
+        table_name_vec.push_value_ref(ValueRef::String(name));
         engine_vec.push_value_ref(ValueRef::String(engine));
     }
 
@@ -251,13 +242,9 @@ pub struct SystemCatalog {
 }
 
 impl SystemCatalog {
-    pub fn new(
-        system: SystemCatalogTable,
-        catalogs: CatalogListRef,
-        engine: TableEngineRef,
-    ) -> Self {
+    pub fn new(system: SystemCatalogTable, catalogs: CatalogListRef) -> Self {
         let schema = InformationSchema {
-            tables: Arc::new(Tables::new(catalogs, engine.name().to_string())),
+            tables: Arc::new(Tables::new(catalogs)),
             system: Arc::new(system),
         };
         Self {
@@ -271,8 +258,9 @@ impl SystemCatalog {
         schema: String,
         table_name: String,
         table_id: TableId,
+        engine: String,
     ) -> crate::error::Result<usize> {
-        let request = build_table_insert_request(catalog, schema, table_name, table_id);
+        let request = build_table_insert_request(catalog, schema, table_name, table_id, engine);
         self.information_schema
             .system
             .insert(request)
@@ -383,10 +371,13 @@ mod tests {
             .unwrap()
             .unwrap();
         schema
-            .register_table("test_table".to_string(), Arc::new(NumbersTable::default()))
+            .register_table(
+                "test_table".to_string(),
+                Arc::new(NumbersTable::with_name(1, "test_table".to_string())),
+            )
             .unwrap();
 
-        let tables = Tables::new(catalog_list, "test_engine".to_string());
+        let tables = Tables::new(catalog_list);
         let tables_stream = tables.scan(None, &[], None).await.unwrap();
         let session_ctx = SessionContext::new();
         let mut tables_stream = tables_stream.execute(0, session_ctx.task_ctx()).unwrap();

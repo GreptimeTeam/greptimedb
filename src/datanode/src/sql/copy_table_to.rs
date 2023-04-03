@@ -32,7 +32,7 @@ impl SqlHandler {
             schema: &req.schema_name,
             table: &req.table_name,
         };
-        let table = self.get_table(&table_ref)?;
+        let table = self.get_table(&table_ref).await?;
 
         let stream = table
             .scan(None, &[], None)

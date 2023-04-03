@@ -20,14 +20,17 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use async_stream::stream;
 use async_trait::async_trait;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
+use common_catalog::consts::{
+    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID, MITO_ENGINE,
+};
 use common_telemetry::{debug, error, info};
 use dashmap::DashMap;
 use futures::Stream;
 use futures_util::StreamExt;
 use parking_lot::RwLock;
 use snafu::{OptionExt, ResultExt};
-use table::engine::{EngineContext, TableEngineRef};
+use table::engine::manager::TableEngineManagerRef;
+use table::engine::EngineContext;
 use table::metadata::TableId;
 use table::requests::{CreateTableRequest, OpenTableRequest};
 use table::table::numbers::NumbersTable;
@@ -36,7 +39,7 @@ use tokio::sync::Mutex;
 
 use crate::error::{
     CatalogNotFoundSnafu, CreateTableSnafu, InvalidCatalogValueSnafu, OpenTableSnafu, Result,
-    SchemaNotFoundSnafu, TableExistsSnafu, UnimplementedSnafu,
+    SchemaNotFoundSnafu, TableEngineNotFoundSnafu, TableExistsSnafu, UnimplementedSnafu,
 };
 use crate::helper::{
     build_catalog_prefix, build_schema_prefix, build_table_global_prefix, CatalogKey, CatalogValue,
@@ -55,14 +58,14 @@ pub struct RemoteCatalogManager {
     node_id: u64,
     backend: KvBackendRef,
     catalogs: Arc<RwLock<DashMap<String, CatalogProviderRef>>>,
-    engine: TableEngineRef,
+    engine_manager: TableEngineManagerRef,
     system_table_requests: Mutex<Vec<RegisterSystemTableRequest>>,
 }
 
 impl RemoteCatalogManager {
-    pub fn new(engine: TableEngineRef, node_id: u64, backend: KvBackendRef) -> Self {
+    pub fn new(engine_manager: TableEngineManagerRef, node_id: u64, backend: KvBackendRef) -> Self {
         Self {
-            engine,
+            engine_manager,
             node_id,
             backend,
             catalogs: Default::default(),
@@ -331,8 +334,13 @@ impl RemoteCatalogManager {
             table_name: table_name.clone(),
             table_id,
         };
-        match self
-            .engine
+        let engine = self
+            .engine_manager
+            .engine(&table_info.meta.engine)
+            .context(TableEngineNotFoundSnafu {
+                engine_name: &table_info.meta.engine,
+            })?;
+        match engine
             .open_table(&context, request)
             .await
             .with_context(|_| OpenTableSnafu {
@@ -363,9 +371,10 @@ impl RemoteCatalogManager {
                     primary_key_indices: meta.primary_key_indices.clone(),
                     create_if_not_exists: true,
                     table_options: meta.options.clone(),
+                    engine: engine.name().to_string(),
                 };
 
-                self.engine
+                engine
                     .create_table(&context, req)
                     .await
                     .context(CreateTableSnafu {
@@ -398,7 +407,13 @@ impl CatalogManager for RemoteCatalogManager {
         info!("Max table id allocated: {}", max_table_id);
 
         let mut system_table_requests = self.system_table_requests.lock().await;
-        handle_system_table_request(self, self.engine.clone(), &mut system_table_requests).await?;
+        let engine = self
+            .engine_manager
+            .engine(MITO_ENGINE)
+            .context(TableEngineNotFoundSnafu {
+                engine_name: MITO_ENGINE,
+            })?;
+        handle_system_table_request(self, engine, &mut system_table_requests).await?;
         info!("All system table opened");
 
         self.catalog(DEFAULT_CATALOG_NAME)

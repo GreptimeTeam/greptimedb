@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
+pub use common_catalog::consts::MITO_ENGINE;
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
 use common_procedure::{BoxedProcedure, ProcedureManager};
@@ -55,8 +56,6 @@ use crate::error::{
 };
 use crate::manifest::TableManifest;
 use crate::table::MitoTable;
-
-pub const MITO_ENGINE: &str = "mito";
 pub const INIT_COLUMN_ID: ColumnId = 0;
 const INIT_TABLE_VERSION: TableVersion = 0;
 

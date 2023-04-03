@@ -43,6 +43,18 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
+    #[snafu(display("Engine not found: {}", engine))]
+    EngineNotFound {
+        engine: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Engine exist: {}", engine))]
+    EngineExist {
+        engine: String,
+        backtrace: Backtrace,
+    },
+
     #[snafu(display("Table projection error, source: {}", source))]
     TableProjection {
         source: ArrowError,
@@ -133,7 +145,9 @@ impl ErrorExt for Error {
             Error::ColumnNotExists { .. } => StatusCode::TableColumnNotFound,
             Error::RegionSchemaMismatch { .. } => StatusCode::StorageUnavailable,
             Error::Unsupported { .. } => StatusCode::Unsupported,
-            Error::ParseTableOption { .. } => StatusCode::InvalidArguments,
+            Error::ParseTableOption { .. }
+            | Error::EngineNotFound { .. }
+            | Error::EngineExist { .. } => StatusCode::InvalidArguments,
         }
     }
 

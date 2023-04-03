@@ -22,6 +22,7 @@ use crate::error::Result;
 use crate::metadata::TableId;
 use crate::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
 use crate::TableRef;
+pub mod manager;
 
 /// Represents a resolved path to a table of the form “catalog.schema.table”
 #[derive(Debug, PartialEq)]

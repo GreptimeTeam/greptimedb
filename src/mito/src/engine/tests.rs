@@ -98,6 +98,7 @@ async fn setup_table_with_column_default_constraint() -> (TempDir, String, Table
                 primary_key_indices: Vec::default(),
                 table_options: TableOptions::default(),
                 region_numbers: vec![0],
+                engine: MITO_ENGINE.to_string(),
             },
         )
         .await
@@ -212,6 +213,7 @@ fn test_validate_create_table_request() {
         primary_key_indices: vec![0, 1],
         table_options: TableOptions::default(),
         region_numbers: vec![0],
+        engine: MITO_ENGINE.to_string(),
     };
 
     let err = validate_create_table_request(&request).unwrap_err();
@@ -373,6 +375,7 @@ async fn test_create_if_not_exists() {
         primary_key_indices: Vec::default(),
         table_options: TableOptions::default(),
         region_numbers: vec![0],
+        engine: MITO_ENGINE.to_string(),
     };
 
     let created_table = table_engine.create_table(&ctx, request).await.unwrap();
@@ -390,6 +393,7 @@ async fn test_create_if_not_exists() {
         primary_key_indices: Vec::default(),
         table_options: TableOptions::default(),
         region_numbers: vec![0],
+        engine: MITO_ENGINE.to_string(),
     };
 
     let result = table_engine.create_table(&ctx, request).await;
@@ -600,6 +604,7 @@ async fn test_alter_rename_table() {
         primary_key_indices: vec![0],
         create_if_not_exists: true,
         table_options: TableOptions::default(),
+        engine: MITO_ENGINE.to_string(),
     };
     table_engine
         .create_table(&ctx, req)
@@ -684,6 +689,7 @@ async fn test_drop_table() {
         primary_key_indices: Vec::default(),
         table_options: TableOptions::default(),
         region_numbers: vec![0],
+        engine: MITO_ENGINE.to_string(),
     };
 
     let created_table = table_engine
@@ -717,6 +723,7 @@ async fn test_drop_table() {
         primary_key_indices: Vec::default(),
         table_options: TableOptions::default(),
         region_numbers: vec![0],
+        engine: MITO_ENGINE.to_string(),
     };
     table_engine.create_table(&ctx, request).await.unwrap();
     assert!(table_engine.table_exists(&engine_ctx, &table_reference));
