@@ -18,7 +18,6 @@ mod tests;
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use async_trait::async_trait;
 use common_catalog::format_full_table_name;
@@ -519,7 +518,6 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             let mut regions = HashMap::with_capacity(table_info.meta.region_numbers.len());
             for region_number in &table_info.meta.region_numbers {
                 let region_name = region_name(table_id, *region_number);
-                let start = SystemTime::now();
                 let region = self
                     .storage_engine
                     .open_region(&engine_ctx, &region_name, &opts)
@@ -535,11 +533,6 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                     })
                     .map_err(BoxedError::new)
                     .context(table_error::TableOperationSnafu)?;
-                let rt = SystemTime::now().duration_since(start).unwrap().as_millis();
-                info!(
-                    "[perf_log]{}/{} open in {}ms",
-                    &table_name_key, &region_name, rt
-                );
                 regions.insert(*region_number, region);
             }
 

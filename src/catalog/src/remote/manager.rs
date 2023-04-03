@@ -16,7 +16,6 @@ use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use arc_swap::ArcSwap;
 use async_stream::stream;
@@ -263,14 +262,8 @@ impl RemoteCatalogManager {
             let (table_key, table_value) = kv?;
             let engine = self.engine.clone();
             let join: JoinHandle<Result<TableRef>> = tokio::spawn(async move {
-                let start = SystemTime::now();
                 let table_ref =
                     open_or_create_table(node_id, engine, &table_key, &table_value).await?;
-                info!(
-                    "[perf_log]{} open in {}ms",
-                    table_key,
-                    SystemTime::now().duration_since(start).unwrap().as_millis()
-                );
                 Ok(table_ref)
             });
             joins.push(join);
@@ -285,13 +278,7 @@ impl RemoteCatalogManager {
 
                     let table_name = table_info.name.clone();
                     let table_id = table_info.ident.table_id;
-                    let start = SystemTime::now();
                     schema.register_table(table_name.clone(), table_ref)?;
-                    info!(
-                        "[perf_log]{} register in {}ms",
-                        table_name,
-                        SystemTime::now().duration_since(start).unwrap().as_millis()
-                    );
                     info!("Registered table {}", &table_name);
                     max_table_id = max_table_id.max(table_id);
                     table_num += 1;

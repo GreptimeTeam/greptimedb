@@ -307,7 +307,9 @@ impl<S: LogStore> EngineInner<S> {
             Some(v) => v,
         };
         let rt = SystemTime::now().duration_since(start).unwrap().as_millis();
-        info!("[perf_log]{} region act open in {}ms", name, rt);
+        if rt > 1000 {
+            info!("[perf_log]{} region act open in {}ms", name, rt);
+        }
         guard.update(RegionSlot::Ready(region.clone()));
         info!("Storage engine open region {}", region.id());
         Ok(Some(region))

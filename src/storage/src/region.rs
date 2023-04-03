@@ -19,10 +19,10 @@ mod writer;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
-use common_telemetry::logging;
+use common_telemetry::{info, logging};
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::manifest::{self, Manifest, ManifestVersion, MetaActionIterator};
@@ -253,6 +253,7 @@ impl<S: LogStore> RegionImpl<S> {
         _opts: &OpenOptions,
     ) -> Result<Option<RegionImpl<S>>> {
         // Load version meta data from manifest.
+        let start = SystemTime::now();
         let (version, mut recovered_metadata) = match Self::recover_from_manifest(
             &store_config.manifest,
             &store_config.memtable_builder,
@@ -264,6 +265,10 @@ impl<S: LogStore> RegionImpl<S> {
             (None, _) => return Ok(None),
             (Some(v), m) => (v, m),
         };
+        let log_name = &name.clone();
+        let recovered = SystemTime::now();
+        let rt = recovered.duration_since(start).unwrap().as_millis();
+        info!("[pref_log]{} recover from manifest {}ms", log_name, rt);
 
         logging::debug!(
             "Region recovered version from manifest, version: {:?}",
@@ -339,6 +344,11 @@ impl<S: LogStore> RegionImpl<S> {
             manifest: store_config.manifest,
         });
 
+        let rt = SystemTime::now()
+            .duration_since(recovered)
+            .unwrap()
+            .as_millis();
+        info!("[pref_log]{} rest work done in {}ms", log_name, rt);
         Ok(Some(RegionImpl { inner }))
     }
 
