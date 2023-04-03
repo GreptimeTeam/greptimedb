@@ -538,7 +538,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 let rt = SystemTime::now().duration_since(start).unwrap().as_millis();
                 info!(
                     "[perf_log]{}/{} open in {}ms",
-                    &table_name_key, region_number, rt
+                    &table_name_key, &region_name, rt
                 );
                 regions.insert(*region_number, region);
             }
