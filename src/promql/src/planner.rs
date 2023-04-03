@@ -51,8 +51,9 @@ use crate::extension_plan::{
     EmptyMetric, InstantManipulate, Millisecond, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
 use crate::functions::{
-    AbsentOverTime, AvgOverTime, CountOverTime, Delta, IDelta, Increase, LastOverTime, MaxOverTime,
-    MinOverTime, PresentOverTime, QuantileOverTime, Rate, SumOverTime,
+    AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, IDelta, Increase, LastOverTime,
+    MaxOverTime, MinOverTime, PresentOverTime, QuantileOverTime, Rate, Resets, StddevOverTime,
+    StdvarOverTime, SumOverTime,
 };
 
 const LEFT_PLAN_JOIN_ALIAS: &str = "lhs";
@@ -684,6 +685,8 @@ impl PromPlanner {
             )),
             "idelta" => ScalarFunc::Udf(IDelta::<false>::scalar_udf()),
             "irate" => ScalarFunc::Udf(IDelta::<true>::scalar_udf()),
+            "resets" => ScalarFunc::Udf(Resets::scalar_udf()),
+            "changes" => ScalarFunc::Udf(Changes::scalar_udf()),
             "avg_over_time" => ScalarFunc::Udf(AvgOverTime::scalar_udf()),
             "min_over_time" => ScalarFunc::Udf(MinOverTime::scalar_udf()),
             "max_over_time" => ScalarFunc::Udf(MaxOverTime::scalar_udf()),
@@ -692,6 +695,8 @@ impl PromPlanner {
             "last_over_time" => ScalarFunc::Udf(LastOverTime::scalar_udf()),
             "absent_over_time" => ScalarFunc::Udf(AbsentOverTime::scalar_udf()),
             "present_over_time" => ScalarFunc::Udf(PresentOverTime::scalar_udf()),
+            "stddev_over_time" => ScalarFunc::Udf(StddevOverTime::scalar_udf()),
+            "stdvar_over_time" => ScalarFunc::Udf(StdvarOverTime::scalar_udf()),
             "quantile_over_time" => {
                 let quantile_expr = match other_input_exprs.get(0) {
                     Some(DfExpr::Literal(ScalarValue::Float64(Some(quantile)))) => *quantile,
