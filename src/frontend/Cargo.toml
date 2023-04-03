@@ -59,6 +59,8 @@ common-test-util = { path = "../common/test-util" }
 datanode = { path = "../datanode" }
 futures = "0.3"
 meta-srv = { path = "../meta-srv", features = ["mock"] }
+rstest = "0.17"
+rstest_reuse = "0.5"
 strfmt = "0.2"
 toml = "0.5"
 tower = "0.4"

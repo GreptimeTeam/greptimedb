@@ -52,14 +52,15 @@ use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
 use query::query_engine::StatementHandlerRef;
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error as server_error;
+use servers::error::{ExecuteQuerySnafu, ParsePromQLSnafu};
 use servers::interceptor::{SqlQueryInterceptor, SqlQueryInterceptorRef};
-use servers::prom::{PromHandler, PromHandlerRef};
+use servers::prom::PromHandler;
 use servers::query_handler::grpc::{GrpcQueryHandler, GrpcQueryHandlerRef};
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::{
     InfluxdbLineProtocolHandler, OpentsdbProtocolHandler, PrometheusProtocolHandler, ScriptHandler,
 };
-use session::context::QueryContextRef;
+use session::context::{QueryContext, QueryContextRef};
 use snafu::prelude::*;
 use sql::dialect::GenericDialect;
 use sql::parser::ParserContext;
@@ -108,7 +109,6 @@ pub struct Instance {
     statement_handler: StatementHandlerRef,
     query_engine: QueryEngineRef,
     grpc_query_handler: GrpcQueryHandlerRef<Error>,
-    promql_handler: Option<PromHandlerRef>,
 
     create_expr_factory: CreateExprFactoryRef,
 
@@ -160,7 +160,6 @@ impl Instance {
             statement_handler: dist_instance.clone(),
             query_engine,
             grpc_query_handler: dist_instance,
-            promql_handler: None,
             plugins: plugins.clone(),
             servers: Arc::new(HashMap::new()),
         })
@@ -208,7 +207,6 @@ impl Instance {
             statement_handler: dn_instance.clone(),
             query_engine,
             grpc_query_handler: StandaloneGrpcQueryHandler::arc(dn_instance.clone()),
-            promql_handler: Some(dn_instance.clone()),
             plugins: Default::default(),
             servers: Arc::new(HashMap::new()),
         })
@@ -243,7 +241,6 @@ impl Instance {
             query_engine,
             create_expr_factory: Arc::new(DefaultCreateExprFactory),
             grpc_query_handler: dist_instance,
-            promql_handler: None,
             plugins: Default::default(),
             servers: Arc::new(HashMap::new()),
         }
@@ -438,10 +435,14 @@ fn parse_stmt(sql: &str) -> Result<Vec<Statement>> {
 }
 
 impl Instance {
-    async fn plan_exec(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
+    pub(crate) async fn plan_exec(
+        &self,
+        stmt: QueryStatement,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
         let planner = self.query_engine.planner();
         let plan = planner
-            .plan(QueryStatement::Sql(stmt), query_ctx.clone())
+            .plan(stmt, query_ctx.clone())
             .await
             .context(PlanStatementSnafu)?;
         self.query_engine
@@ -500,13 +501,13 @@ impl Instance {
 
         match stmt {
             Statement::Query(_) | Statement::Explain(_) | Statement::Delete(_) => {
-                self.plan_exec(stmt, query_ctx).await
+                self.plan_exec(QueryStatement::Sql(stmt), query_ctx).await
             }
 
             // For performance consideration, only "insert with select" is executed by query engine.
             // Plain insert ("insert with values") is still executed directly in statement.
             Statement::Insert(ref insert) if insert.is_insert_select() => {
-                self.plan_exec(stmt, query_ctx).await
+                self.plan_exec(QueryStatement::Sql(stmt), query_ctx).await
             }
 
             Statement::Tql(tql) => self.execute_tql(tql, query_ctx).await,
@@ -582,20 +583,13 @@ impl SqlQueryHandler for Instance {
     }
 
     async fn do_promql_query(&self, query: &PromQuery, _: QueryContextRef) -> Vec<Result<Output>> {
-        if let Some(handler) = &self.promql_handler {
-            let result = handler.do_query(query).await.with_context(|_| {
-                let query_literal = format!("{query:?}");
-                ExecutePromqlSnafu {
-                    query: query_literal,
-                }
-            });
-            vec![result]
-        } else {
-            vec![Err(NotSupportedSnafu {
-                feat: "PromQL Query",
-            }
-            .build())]
-        }
+        let result =
+            PromHandler::do_query(self, query)
+                .await
+                .with_context(|_| ExecutePromqlSnafu {
+                    query: format!("{query:?}"),
+                });
+        vec![result]
     }
 
     async fn do_describe(
@@ -631,14 +625,15 @@ impl SqlQueryHandler for Instance {
 #[async_trait]
 impl PromHandler for Instance {
     async fn do_query(&self, query: &PromQuery) -> server_error::Result<Output> {
-        if let Some(promql_handler) = &self.promql_handler {
-            promql_handler.do_query(query).await
-        } else {
-            server_error::NotSupportedSnafu {
-                feat: "PromQL query in Frontend",
-            }
-            .fail()
-        }
+        let stmt = QueryLanguageParser::parse_promql(query).with_context(|_| ParsePromQLSnafu {
+            query: query.clone(),
+        })?;
+        self.plan_exec(stmt, QueryContext::arc())
+            .await
+            .map_err(BoxedError::new)
+            .with_context(|_| ExecuteQuerySnafu {
+                query: format!("{query:?}"),
+            })
     }
 }
 
