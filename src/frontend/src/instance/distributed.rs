@@ -31,7 +31,7 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::format_full_table_name;
 use common_error::prelude::BoxedError;
 use common_query::Output;
-use common_telemetry::{debug, info};
+use common_telemetry::debug;
 use datanode::instance::sql::table_idents_to_full_name;
 use datanode::sql::SqlHandler;
 use datatypes::prelude::ConcreteDataType;
@@ -134,7 +134,7 @@ impl DistInstance {
             }
         );
         let table_route = table_routes.first().unwrap();
-        info!(
+        debug!(
             "Creating distributed table {table_name} with table routes: {}",
             serde_json::to_string_pretty(table_route)
                 .unwrap_or_else(|_| format!("{table_route:#?}"))

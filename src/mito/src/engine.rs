@@ -415,7 +415,11 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 .await
                 .map_err(BoxedError::new)
                 .context(error::CreateRegionSnafu)?;
-            info!("Mito engine created region: {:?}", region.id());
+            info!(
+                "Mito engine created region: {}, id: {}",
+                region.name(),
+                region.id()
+            );
             regions.insert(*region_number, region);
         }
 
@@ -450,7 +454,12 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             .await?,
         );
 
-        logging::info!("Mito engine created table: {:?}.", table.table_info());
+        logging::info!(
+            "Mito engine created table: {} in schema: {}, table_id: {}.",
+            table_name,
+            schema_name,
+            table_id
+        );
 
         self.tables
             .write()
@@ -541,7 +550,11 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             Some(table as _)
         };
 
-        logging::info!("Mito engine opened table {}", table_name);
+        logging::info!(
+            "Mito engine opened table: {} in schema: {}",
+            table_name,
+            schema_name
+        );
 
         Ok(table)
     }
