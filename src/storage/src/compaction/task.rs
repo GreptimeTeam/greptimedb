@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 
 use common_base::readable_size::ReadableSize;
-use common_telemetry::{error, info};
+use common_telemetry::{debug, error};
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
@@ -115,7 +115,7 @@ impl<S: LogStore> CompactionTaskImpl<S> {
             files_to_add: Vec::from_iter(output.into_iter()),
             files_to_remove: Vec::from_iter(input.into_iter()),
         };
-        info!(
+        debug!(
             "Compacted region: {}, region edit: {:?}",
             version.metadata().name(),
             edit

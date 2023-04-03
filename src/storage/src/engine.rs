@@ -17,7 +17,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use common_telemetry::logging::info;
+use common_telemetry::logging::debug;
 use object_store::{util, ObjectStore};
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
@@ -306,7 +306,11 @@ impl<S: LogStore> EngineInner<S> {
             Some(v) => v,
         };
         guard.update(RegionSlot::Ready(region.clone()));
-        info!("Storage engine open region {}", region.id());
+        debug!(
+            "Storage engine open region {}, id: {}",
+            region.name(),
+            region.id()
+        );
         Ok(Some(region))
     }
 
@@ -343,7 +347,11 @@ impl<S: LogStore> EngineInner<S> {
 
         guard.update(RegionSlot::Ready(region.clone()));
 
-        info!("Storage engine create region {}", region.id());
+        debug!(
+            "Storage engine create region {}, id: {}",
+            region.name(),
+            region.id()
+        );
 
         Ok(region)
     }

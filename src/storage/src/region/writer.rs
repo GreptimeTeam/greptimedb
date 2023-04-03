@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
 use common_error::prelude::BoxedError;
-use common_telemetry::tracing::log::info;
+use common_telemetry::tracing::log::{debug, info};
 use common_telemetry::{error, logging};
 use futures::TryStreamExt;
 use snafu::{ensure, ResultExt};
@@ -770,7 +770,7 @@ impl WriterInner {
             .file_num();
 
         if level0_file_num <= max_files_in_l0 {
-            info!(
+            debug!(
                 "No enough SST files in level 0 (threshold: {}), skip compaction",
                 max_files_in_l0
             );
