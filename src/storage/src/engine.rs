@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use common_telemetry::logging::info;
@@ -301,15 +301,10 @@ impl<S: LogStore> EngineInner<S> {
             )
             .await?;
 
-        let start = SystemTime::now();
         let region = match RegionImpl::open(name.to_string(), store_config, opts).await? {
             None => return Ok(None),
             Some(v) => v,
         };
-        let rt = SystemTime::now().duration_since(start).unwrap().as_millis();
-        if rt > 1000 {
-            info!("[perf_log]{} region act open in {}ms", name, rt);
-        }
         guard.update(RegionSlot::Ready(region.clone()));
         info!("Storage engine open region {}", region.id());
         Ok(Some(region))

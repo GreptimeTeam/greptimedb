@@ -19,10 +19,10 @@ mod writer;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use async_trait::async_trait;
-use common_telemetry::{info, logging};
+use common_telemetry::logging;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::manifest::{self, Manifest, ManifestVersion, MetaActionIterator};
@@ -270,8 +270,6 @@ impl<S: LogStore> RegionImpl<S> {
             version
         );
 
-        let log_name = &name.clone();
-
         let metadata = version.metadata().clone();
         let flushed_sequence = version.flushed_sequence();
         let version_control = Arc::new(VersionControl::with_version(version));
@@ -288,16 +286,10 @@ impl<S: LogStore> RegionImpl<S> {
             let mutable_memtable = store_config
                 .memtable_builder
                 .build(metadata.schema().clone());
-            let start = SystemTime::now();
             version_control.freeze_mutable_and_apply_metadata(
                 metadata,
                 manifest_version,
                 mutable_memtable,
-            );
-            info!(
-                "[perf_log]{} freeze in {}ms",
-                log_name,
-                SystemTime::now().duration_since(start).unwrap().as_millis()
             );
 
             logging::debug!(
@@ -308,14 +300,8 @@ impl<S: LogStore> RegionImpl<S> {
             );
         }
 
-        let start = SystemTime::now();
         let wal = Wal::new(metadata.id(), store_config.log_store);
         wal.obsolete(flushed_sequence).await?;
-        info!(
-            "[perf_log]{} obsolete in {}ms",
-            log_name,
-            SystemTime::now().duration_since(start).unwrap().as_millis()
-        );
         let shared = Arc::new(SharedData {
             id: metadata.id(),
             name,
@@ -338,15 +324,9 @@ impl<S: LogStore> RegionImpl<S> {
             manifest: &store_config.manifest,
         };
         // Replay all unflushed data.
-        let start = SystemTime::now();
         writer
             .replay(recovered_metadata_after_flushed, writer_ctx)
             .await?;
-        info!(
-            "[perf_log]{} replay in {}ms",
-            log_name,
-            SystemTime::now().duration_since(start).unwrap().as_millis()
-        );
 
         let inner = Arc::new(RegionInner {
             shared,
