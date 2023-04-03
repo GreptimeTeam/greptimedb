@@ -42,12 +42,9 @@ pub struct MemoryTableEngineManager {
 
 impl MemoryTableEngineManager {
     pub fn new(default_name: &str, engine: TableEngineRef) -> Self {
-        let engines = RwLock::new(HashMap::new());
-        // it's safe to unwrap
-        engines
-            .write()
-            .unwrap()
-            .insert(default_name.to_string(), engine);
+        let mut engines = HashMap::new();
+        engines.insert(default_name.to_string(), engine);
+        let engines = RwLock::new(engines);
 
         MemoryTableEngineManager { engines }
     }
