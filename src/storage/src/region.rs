@@ -253,7 +253,6 @@ impl<S: LogStore> RegionImpl<S> {
         _opts: &OpenOptions,
     ) -> Result<Option<RegionImpl<S>>> {
         // Load version meta data from manifest.
-        let start = SystemTime::now();
         let (version, mut recovered_metadata) = match Self::recover_from_manifest(
             &store_config.manifest,
             &store_config.memtable_builder,
@@ -265,15 +264,13 @@ impl<S: LogStore> RegionImpl<S> {
             (None, _) => return Ok(None),
             (Some(v), m) => (v, m),
         };
-        let log_name = &name.clone();
-        let recovered = SystemTime::now();
-        let rt = recovered.duration_since(start).unwrap().as_millis();
-        info!("[pref_log]{} recover from manifest {}ms", log_name, rt);
 
         logging::debug!(
             "Region recovered version from manifest, version: {:?}",
             version
         );
+
+        let log_name = &name.clone();
 
         let metadata = version.metadata().clone();
         let flushed_sequence = version.flushed_sequence();
@@ -291,10 +288,16 @@ impl<S: LogStore> RegionImpl<S> {
             let mutable_memtable = store_config
                 .memtable_builder
                 .build(metadata.schema().clone());
+            let start = SystemTime::now();
             version_control.freeze_mutable_and_apply_metadata(
                 metadata,
                 manifest_version,
                 mutable_memtable,
+            );
+            info!(
+                "[perf_log]{} freeze in {}ms",
+                log_name,
+                SystemTime::now().duration_since(start).unwrap().as_millis()
             );
 
             logging::debug!(
@@ -305,8 +308,14 @@ impl<S: LogStore> RegionImpl<S> {
             );
         }
 
+        let start = SystemTime::now();
         let wal = Wal::new(metadata.id(), store_config.log_store);
         wal.obsolete(flushed_sequence).await?;
+        info!(
+            "[perf_log]{} obsolete in {}ms",
+            log_name,
+            SystemTime::now().duration_since(start).unwrap().as_millis()
+        );
         let shared = Arc::new(SharedData {
             id: metadata.id(),
             name,
@@ -329,9 +338,15 @@ impl<S: LogStore> RegionImpl<S> {
             manifest: &store_config.manifest,
         };
         // Replay all unflushed data.
+        let start = SystemTime::now();
         writer
             .replay(recovered_metadata_after_flushed, writer_ctx)
             .await?;
+        info!(
+            "[perf_log]{} replay in {}ms",
+            log_name,
+            SystemTime::now().duration_since(start).unwrap().as_millis()
+        );
 
         let inner = Arc::new(RegionInner {
             shared,
@@ -344,11 +359,6 @@ impl<S: LogStore> RegionImpl<S> {
             manifest: store_config.manifest,
         });
 
-        let rt = SystemTime::now()
-            .duration_since(recovered)
-            .unwrap()
-            .as_millis();
-        info!("[pref_log]{} rest work done in {}ms", log_name, rt);
         Ok(Some(RegionImpl { inner }))
     }
 
