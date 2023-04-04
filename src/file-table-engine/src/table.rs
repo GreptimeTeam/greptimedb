@@ -12,14 +12,4 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! manifest storage
-pub(crate) mod action;
-pub mod checkpoint;
-pub mod helper;
-mod impl_;
-pub mod region;
-pub(crate) mod storage;
-#[cfg(test)]
-pub mod test_utils;
-pub use self::impl_::*;
-pub use self::storage::ImmutableManifestObjectStore;
+pub mod immutable;

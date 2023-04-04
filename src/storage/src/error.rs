@@ -55,6 +55,16 @@ pub enum Error {
         source: ArrowError,
     },
 
+    #[snafu(display("Failed to check object from path: {}, source: {}", path, source))]
+    CheckObject {
+        path: String,
+        location: Location,
+        source: object_store::Error,
+    },
+
+    #[snafu(display("Failed to write immutable file, path: {}", path))]
+    WriteImmutable { path: String, location: Location },
+
     #[snafu(display("Fail to read object from path: {}, source: {}", path, source))]
     ReadObject {
         path: String,
@@ -468,7 +478,8 @@ impl ErrorExt for Error {
             | TypeMismatch { .. }
             | HasNull { .. }
             | UnequalLengths { .. }
-            | MoreColumnThanExpected { .. } => StatusCode::InvalidArguments,
+            | MoreColumnThanExpected { .. }
+            | WriteImmutable { .. } => StatusCode::InvalidArguments,
 
             Utf8 { .. }
             | EncodeJson { .. }
@@ -500,6 +511,7 @@ impl ErrorExt for Error {
             | WriteObject { .. }
             | ListObjects { .. }
             | DeleteObject { .. }
+            | CheckObject { .. }
             | WriteWal { .. }
             | DecodeWalHeader { .. }
             | EncodeWalHeader { .. }
