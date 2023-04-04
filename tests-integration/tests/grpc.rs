@@ -18,7 +18,7 @@ use api::v1::{
     InsertRequest, TableId,
 };
 use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_catalog::consts::MIN_USER_TABLE_ID;
+use common_catalog::consts::{MIN_USER_TABLE_ID, MITO_ENGINE};
 use common_query::Output;
 use servers::server::Server;
 use tests_integration::test_util::{setup_grpc_server, StorageType};
@@ -304,6 +304,7 @@ fn testing_create_expr() -> CreateTableExpr {
             id: MIN_USER_TABLE_ID,
         }),
         region_ids: vec![0],
+        engine: MITO_ENGINE.to_string(),
     }
 }
 

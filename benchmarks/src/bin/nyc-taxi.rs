@@ -366,6 +366,7 @@ fn create_table_expr() -> CreateTableExpr {
         table_options: Default::default(),
         region_ids: vec![0],
         table_id: None,
+        engine: "mito".to_string(),
     }
 }
 

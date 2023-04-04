@@ -32,6 +32,7 @@ use async_trait::async_trait;
 use catalog::remote::MetaKvBackend;
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
+use common_catalog::consts::MITO_ENGINE;
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_query::Output;
@@ -298,7 +299,7 @@ impl Instance {
                     "Table {}.{}.{} does not exist, try create table",
                     catalog_name, schema_name, table_name,
                 );
-                self.create_table_by_columns(ctx, table_name, columns)
+                self.create_table_by_columns(ctx, table_name, columns, MITO_ENGINE)
                     .await?;
                 info!(
                     "Successfully created table on insertion: {}.{}.{}",
@@ -335,6 +336,7 @@ impl Instance {
         ctx: QueryContextRef,
         table_name: &str,
         columns: &[Column],
+        engine: &str,
     ) -> Result<Output> {
         let catalog_name = &ctx.current_catalog();
         let schema_name = &ctx.current_schema();
@@ -342,7 +344,7 @@ impl Instance {
         // Create table automatically, build schema from data.
         let create_expr = self
             .create_expr_factory
-            .create_expr_by_columns(catalog_name, schema_name, table_name, columns)
+            .create_expr_by_columns(catalog_name, schema_name, table_name, columns, engine)
             .await?;
 
         info!(

@@ -193,6 +193,7 @@ impl CatalogManager for FrontendCatalogManager {
                 table_options: (&request.table_options).into(),
                 table_id: None, // Should and will be assigned by Meta.
                 region_ids: vec![0],
+                engine: request.engine,
             };
 
             let table = dist_instance

@@ -106,7 +106,7 @@ impl Instance {
 #[cfg(test)]
 mod tests {
     use api::v1::{column_def, ColumnDataType, ColumnDef, TableId};
-    use common_catalog::consts::MIN_USER_TABLE_ID;
+    use common_catalog::consts::{MIN_USER_TABLE_ID, MITO_ENGINE};
     use common_grpc_expr::create_table_schema;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, RawSchema};
@@ -237,6 +237,7 @@ mod tests {
                 id: MIN_USER_TABLE_ID,
             }),
             region_ids: vec![0],
+            engine: MITO_ENGINE.to_string(),
         }
     }
 

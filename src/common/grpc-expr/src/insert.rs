@@ -195,6 +195,7 @@ pub fn build_create_expr_from_insertion(
     table_id: Option<TableId>,
     table_name: &str,
     columns: &[Column],
+    engine: &str,
 ) -> Result<CreateTableExpr> {
     let mut new_columns: HashSet<String> = HashSet::default();
     let mut column_defs = Vec::default();
@@ -256,6 +257,7 @@ pub fn build_create_expr_from_insertion(
         table_options: Default::default(),
         table_id: table_id.map(|id| api::v1::TableId { id }),
         region_ids: vec![0], // TODO:(hl): region id should be allocated by frontend
+        engine: engine.to_string(),
     };
 
     Ok(expr)
@@ -455,6 +457,7 @@ mod tests {
     use api::v1::column::{self, SemanticType, Values};
     use api::v1::{Column, ColumnDataType};
     use common_base::BitVec;
+    use common_catalog::consts::MITO_ENGINE;
     use common_query::physical_plan::PhysicalPlanRef;
     use common_query::prelude::Expr;
     use common_time::timestamp::Timestamp;
@@ -493,13 +496,22 @@ mod tests {
         let table_id = Some(10);
         let table_name = "test_metric";
 
-        assert!(build_create_expr_from_insertion("", "", table_id, table_name, &[]).is_err());
+        assert!(
+            build_create_expr_from_insertion("", "", table_id, table_name, &[], MITO_ENGINE)
+                .is_err()
+        );
 
         let insert_batch = mock_insert_batch();
 
-        let create_expr =
-            build_create_expr_from_insertion("", "", table_id, table_name, &insert_batch.0)
-                .unwrap();
+        let create_expr = build_create_expr_from_insertion(
+            "",
+            "",
+            table_id,
+            table_name,
+            &insert_batch.0,
+            MITO_ENGINE,
+        )
+        .unwrap();
 
         assert_eq!(table_id, create_expr.table_id.map(|x| x.id));
         assert_eq!(table_name, create_expr.table_name);

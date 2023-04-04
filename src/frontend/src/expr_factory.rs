@@ -43,6 +43,7 @@ pub trait CreateExprFactory {
         schema_name: &str,
         table_name: &str,
         columns: &[Column],
+        engine: &str,
     ) -> crate::error::Result<CreateTableExpr>;
 }
 
@@ -57,6 +58,7 @@ impl CreateExprFactory for DefaultCreateExprFactory {
         schema_name: &str,
         table_name: &str,
         columns: &[Column],
+        engine: &str,
     ) -> Result<CreateTableExpr> {
         let table_id = None;
         let create_expr = common_grpc_expr::build_create_expr_from_insertion(
@@ -65,6 +67,7 @@ impl CreateExprFactory for DefaultCreateExprFactory {
             table_id,
             table_name,
             columns,
+            engine,
         )
         .context(BuildCreateExprOnInsertionSnafu)?;
 
@@ -96,6 +99,7 @@ pub(crate) fn create_to_expr(
         table_options,
         table_id: None,
         region_ids: vec![],
+        engine: create.engine.to_string(),
     };
     Ok(expr)
 }
