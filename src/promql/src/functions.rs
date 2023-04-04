@@ -29,6 +29,7 @@ pub use aggr_over_time::{
 use datafusion::arrow::array::ArrayRef;
 use datafusion::error::DataFusionError;
 use datafusion::physical_plan::ColumnarValue;
+pub use deriv::Deriv;
 pub use extrapolate_rate::{Delta, Increase, Rate};
 pub use idelta::IDelta;
 pub use quantile::QuantileOverTime;
