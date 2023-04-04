@@ -22,7 +22,7 @@ use datatypes::vectors::{Helper, VectorRef};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyModule, PyString, PyTuple};
 use pyo3::{pymethods, PyAny, PyCell, PyObject, PyResult, Python, ToPyObject};
-use snafu::{ensure, Backtrace, GenerateImplicitData, ResultExt};
+use snafu::{ensure, Location, ResultExt};
 
 use crate::python::error::{self, NewRecordBatchSnafu, OtherSnafu, Result};
 use crate::python::ffi_types::copr::PyQueryEngine;
@@ -149,7 +149,7 @@ coprocessor = copr
         })()
         .map_err(|err| error::Error::PyRuntime {
             msg: err.into_value(py).to_string(),
-            location: Location::generate(),
+            location: snafu::location!(),
         })?;
         ensure!(
             cols.len() == copr.deco_args.ret_names.len(),
