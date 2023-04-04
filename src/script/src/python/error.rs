@@ -47,29 +47,29 @@ pub enum Error {
 
     #[snafu(display("Failed to parse script, source: {}", source))]
     PyParse {
-        backtrace: Backtrace,
+        location: Location,
         source: ParseError,
     },
 
     #[snafu(display("Failed to compile script, source: {}", source))]
     PyCompile {
-        backtrace: Backtrace,
+        location: Location,
         source: CodegenError,
     },
 
     /// rustpython problem, using python virtual machines' backtrace instead
     #[snafu(display("Python Runtime error, error: {}", msg))]
-    PyRuntime { msg: String, backtrace: Backtrace },
+    PyRuntime { msg: String, location: Location },
 
     #[snafu(display("Arrow error: {}", source))]
     Arrow {
-        backtrace: Backtrace,
+        location: Location,
         source: ArrowError,
     },
 
     #[snafu(display("DataFusion error: {}", source))]
     DataFusion {
-        backtrace: Backtrace,
+        location: Location,
         source: DataFusionError,
     },
 
@@ -81,7 +81,7 @@ pub enum Error {
                         "".into()
                     }))]
     CoprParse {
-        backtrace: Backtrace,
+        location: Location,
         reason: String,
         // location is option because maybe errors can't give a clear location?
         loc: Option<Location>,
@@ -89,16 +89,13 @@ pub enum Error {
 
     /// Other types of error that isn't any of above
     #[snafu(display("Coprocessor's Internal error: {}", reason))]
-    Other {
-        backtrace: Backtrace,
-        reason: String,
-    },
+    Other { location: Location, reason: String },
 
     #[snafu(display("Unsupported sql in coprocessor: {}", sql))]
-    UnsupportedSql { sql: String, backtrace: Backtrace },
+    UnsupportedSql { sql: String, location: Location },
 
     #[snafu(display("Missing sql in coprocessor"))]
-    MissingSql { backtrace: Backtrace },
+    MissingSql { location: Location },
 
     #[snafu(display("Failed to retrieve record batches, source: {}", source))]
     RecordBatch {

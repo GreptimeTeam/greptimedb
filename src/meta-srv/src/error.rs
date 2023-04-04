@@ -33,34 +33,34 @@ pub enum Error {
     },
 
     #[snafu(display("Error stream request next is None"))]
-    StreamNone { backtrace: Backtrace },
+    StreamNone { location: Location },
 
     #[snafu(display("Empty key is not allowed"))]
-    EmptyKey { backtrace: Backtrace },
+    EmptyKey { location: Location },
 
     #[snafu(display("Failed to execute via Etcd, source: {}", source))]
     EtcdFailed {
         source: etcd_client::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to connect to Etcd, source: {}", source))]
     ConnectEtcd {
         source: etcd_client::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to bind address {}, source: {}", addr, source))]
     TcpBind {
         addr: String,
         source: std::io::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to start gRPC server, source: {}", source))]
     StartGrpc {
         source: tonic::transport::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
     #[snafu(display("Failed to start gRPC server, source: {}", source))]
     StartMetricsExport {
@@ -73,70 +73,64 @@ pub enum Error {
         source: std::net::AddrParseError,
     },
     #[snafu(display("Empty table name"))]
-    EmptyTableName { backtrace: Backtrace },
+    EmptyTableName { location: Location },
 
     #[snafu(display("Invalid datanode lease key: {}", key))]
-    InvalidLeaseKey { key: String, backtrace: Backtrace },
+    InvalidLeaseKey { key: String, location: Location },
 
     #[snafu(display("Invalid datanode stat key: {}", key))]
-    InvalidStatKey { key: String, backtrace: Backtrace },
+    InvalidStatKey { key: String, location: Location },
 
     #[snafu(display("Failed to parse datanode lease key from utf8: {}", source))]
     LeaseKeyFromUtf8 {
         source: std::string::FromUtf8Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to parse datanode lease value from utf8: {}", source))]
     LeaseValueFromUtf8 {
         source: std::string::FromUtf8Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to parse datanode stat key from utf8: {}", source))]
     StatKeyFromUtf8 {
         source: std::string::FromUtf8Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to parse datanode stat value from utf8: {}", source))]
     StatValueFromUtf8 {
         source: std::string::FromUtf8Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to serialize to json: {}", input))]
     SerializeToJson {
         input: String,
         source: serde_json::error::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to deserialize from json: {}", input))]
     DeserializeFromJson {
         input: String,
         source: serde_json::error::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to parse number: {}, source: {}", err_msg, source))]
     ParseNum {
         err_msg: String,
         source: std::num::ParseIntError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Invalid arguments: {}", err_msg))]
-    InvalidArguments {
-        err_msg: String,
-        backtrace: Backtrace,
-    },
+    InvalidArguments { err_msg: String, location: Location },
 
     #[snafu(display("Invalid result with a txn response: {}", err_msg))]
-    InvalidTxnResult {
-        err_msg: String,
-        backtrace: Backtrace,
-    },
+    InvalidTxnResult { err_msg: String, location: Location },
 
     #[snafu(display("Cannot parse catalog value, source: {}", source))]
     InvalidCatalogValue {
@@ -145,61 +139,55 @@ pub enum Error {
     },
 
     #[snafu(display("Unexcepted sequence value: {}", err_msg))]
-    UnexceptedSequenceValue {
-        err_msg: String,
-        backtrace: Backtrace,
-    },
+    UnexceptedSequenceValue { err_msg: String, location: Location },
 
     #[snafu(display("Failed to decode table route, source: {}", source))]
     DecodeTableRoute {
         source: prost::DecodeError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Table route not found: {}", key))]
-    TableRouteNotFound { key: String, backtrace: Backtrace },
+    TableRouteNotFound { key: String, location: Location },
 
     #[snafu(display("Failed to get sequence: {}", err_msg))]
-    NextSequence {
-        err_msg: String,
-        backtrace: Backtrace,
-    },
+    NextSequence { err_msg: String, location: Location },
 
     #[snafu(display("MetaSrv has no leader at this moment"))]
-    NoLeader { backtrace: Backtrace },
+    NoLeader { location: Location },
 
     #[snafu(display("Table {} not found", name))]
-    TableNotFound { name: String, backtrace: Backtrace },
+    TableNotFound { name: String, location: Location },
 
     #[snafu(display(
         "Failed to move the value of {} because other clients caused a race condition",
         key
     ))]
-    MoveValue { key: String, backtrace: Backtrace },
+    MoveValue { key: String, location: Location },
 
     #[snafu(display("Unsupported selector type, {}", selector_type))]
     UnsupportedSelectorType {
         selector_type: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to decode table global value, source: {}", source))]
     DecodeTableGlobalValue {
         source: prost::DecodeError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Unexpected, violated: {}", violated))]
     Unexpected {
         violated: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Invalid KVs length, expected: {}, actual: {}", expected, actual))]
     InvalidKvsLength {
         expected: usize,
         actual: usize,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to create gRPC channel, source: {}", source))]
@@ -214,7 +202,7 @@ pub enum Error {
     ))]
     BatchGet {
         source: tonic::Status,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display(
@@ -223,25 +211,25 @@ pub enum Error {
     ))]
     Range {
         source: tonic::Status,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Response header not found"))]
-    ResponseHeaderNotFound { backtrace: Backtrace },
+    ResponseHeaderNotFound { location: Location },
 
     #[snafu(display("The requested meta node is not leader, node addr: {}", node_addr))]
     IsNotLeader {
         node_addr: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("MetaSrv has no meta peer client"))]
-    NoMetaPeerClient { backtrace: Backtrace },
+    NoMetaPeerClient { location: Location },
 
     #[snafu(display("Invalid http body, source: {}", source))]
     InvalidHttpBody {
         source: http::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display(
@@ -252,7 +240,7 @@ pub enum Error {
     ExceededRetryLimit {
         func_name: String,
         retry_num: usize,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("An error occurred in Meta, source: {}", source))]
@@ -264,28 +252,28 @@ pub enum Error {
     #[snafu(display("Failed to lock based on etcd, source: {}", source))]
     Lock {
         source: etcd_client::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to unlock based on etcd, source: {}", source))]
     Unlock {
         source: etcd_client::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to grant lease, source: {}", source))]
     LeaseGrant {
         source: etcd_client::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Distributed lock is not configured"))]
-    LockNotConfig { backtrace: Backtrace },
+    LockNotConfig { location: Location },
 
     #[snafu(display("Invalid utf-8 value, source: {:?}", source))]
     InvalidUtf8Value {
         source: FromUtf8Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Missing required parameter, param: {:?}", param))]

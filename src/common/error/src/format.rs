@@ -68,7 +68,7 @@ mod tests {
     #[derive(Debug, Snafu)]
     #[snafu(display("This is a leaf with backtrace"))]
     struct LeafWithBacktrace {
-        backtrace: Backtrace,
+        location: Location,
     }
 
     impl ErrorExt for LeafWithBacktrace {
@@ -86,7 +86,7 @@ mod tests {
     struct Internal {
         #[snafu(source)]
         source: Leaf,
-        backtrace: Backtrace,
+        location: Location,
     }
 
     impl ErrorExt for Internal {
@@ -107,7 +107,7 @@ mod tests {
         assert_eq!("This is a leaf error.", msg);
 
         let err = LeafWithBacktrace {
-            backtrace: Backtrace::generate(),
+            location: Location::generate(),
         };
 
         let msg = format!("{:?}", DebugFormat::new(&err));
@@ -115,7 +115,7 @@ mod tests {
 
         let err = Internal {
             source: Leaf,
-            backtrace: Backtrace::generate(),
+            location: Location::generate(),
         };
 
         let msg = format!("{:?}", DebugFormat::new(&err));

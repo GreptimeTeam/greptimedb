@@ -27,16 +27,16 @@ pub enum Error {
     ParseDateStr { raw: String, source: ParseError },
 
     #[snafu(display("Failed to parse a string into Timestamp, raw string: {}", raw))]
-    ParseTimestamp { raw: String, backtrace: Backtrace },
+    ParseTimestamp { raw: String, location: Location },
 
     #[snafu(display("Current timestamp overflow, source: {}", source))]
     TimestampOverflow {
         source: TryFromIntError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Timestamp arithmetic overflow, msg: {}", msg))]
-    ArithmeticOverflow { msg: String, backtrace: Backtrace },
+    ArithmeticOverflow { msg: String, location: Location },
 }
 
 impl ErrorExt for Error {

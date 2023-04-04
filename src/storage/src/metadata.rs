@@ -38,16 +38,16 @@ use crate::schema::{RegionSchema, RegionSchemaRef};
 #[snafu(visibility(pub(crate)))]
 pub enum Error {
     #[snafu(display("Column name {} already exists", name))]
-    ColNameExists { name: String, backtrace: Backtrace },
+    ColNameExists { name: String, location: Location },
 
     #[snafu(display("Column family name {} already exists", name))]
-    CfNameExists { name: String, backtrace: Backtrace },
+    CfNameExists { name: String, location: Location },
 
     #[snafu(display("Column family id {} already exists", id))]
-    CfIdExists { id: ColumnId, backtrace: Backtrace },
+    CfIdExists { id: ColumnId, location: Location },
 
     #[snafu(display("Column id {} already exists", id))]
-    ColIdExists { id: ColumnId, backtrace: Backtrace },
+    ColIdExists { id: ColumnId, location: Location },
 
     #[snafu(display("Failed to build schema, source: {}", source))]
     InvalidSchema {
@@ -56,10 +56,10 @@ pub enum Error {
     },
 
     #[snafu(display("Column name {} is reserved by the system", name))]
-    ReservedColumn { name: String, backtrace: Backtrace },
+    ReservedColumn { name: String, location: Location },
 
     #[snafu(display("Missing timestamp key column"))]
-    MissingTimestamp { backtrace: Backtrace },
+    MissingTimestamp { location: Location },
 
     // Variants for validating `AlterRequest`, which won't have a backtrace.
     #[snafu(display("Expect altering metadata with version {}, given {}", expect, given))]
@@ -99,16 +99,16 @@ pub enum Error {
         // Store key and value in one string to reduce the enum size.
         key_value: String,
         source: std::num::ParseIntError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Metadata of {} not found", key))]
-    MetaNotFound { key: String, backtrace: Backtrace },
+    MetaNotFound { key: String, location: Location },
 
     #[snafu(display("Failed to build column descriptor, source: {}", source))]
     BuildColumnDescriptor {
         source: ColumnDescriptorBuilderError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to convert from arrow schema, source: {}", source))]
@@ -118,7 +118,7 @@ pub enum Error {
     },
 
     #[snafu(display("Invalid internal column index in arrow schema"))]
-    InvalidIndex { backtrace: Backtrace },
+    InvalidIndex { location: Location },
 
     #[snafu(display(
         "Failed to convert arrow chunk to batch, name: {}, source: {}",
@@ -138,7 +138,7 @@ pub enum Error {
     },
 
     #[snafu(display("Invalid projection, {}", msg))]
-    InvalidProjection { msg: String, backtrace: Backtrace },
+    InvalidProjection { msg: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

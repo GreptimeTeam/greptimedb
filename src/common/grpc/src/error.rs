@@ -29,11 +29,11 @@ pub enum Error {
     #[snafu(display("Invalid config file path, {}", source))]
     InvalidConfigFilePath {
         source: io::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Missing required field in protobuf, field: {}", field))]
-    MissingField { field: String, backtrace: Backtrace },
+    MissingField { field: String, location: Location },
 
     #[snafu(display(
         "Write type mismatch, column name: {}, expected: {}, actual: {}",
@@ -45,13 +45,13 @@ pub enum Error {
         column_name: String,
         expected: String,
         actual: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to create gRPC channel, source: {}", source))]
     CreateChannel {
         source: tonic::transport::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to create RecordBatch, source: {}", source))]
@@ -61,7 +61,7 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to convert Arrow type: {}", from))]
-    Conversion { from: String, backtrace: Backtrace },
+    Conversion { from: String, location: Location },
 
     #[snafu(display("Column datatype error, source: {}", source))]
     ColumnDataType {
@@ -72,14 +72,11 @@ pub enum Error {
     #[snafu(display("Failed to decode FlightData, source: {}", source))]
     DecodeFlightData {
         source: api::DecodeError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Invalid FlightData, reason: {}", reason))]
-    InvalidFlightData {
-        reason: String,
-        backtrace: Backtrace,
-    },
+    InvalidFlightData { reason: String, location: Location },
 
     #[snafu(display("Failed to convert Arrow Schema, source: {}", source))]
     ConvertArrowSchema {

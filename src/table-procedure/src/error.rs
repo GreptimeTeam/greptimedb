@@ -23,13 +23,13 @@ pub enum Error {
     #[snafu(display("Failed to serialize procedure to json, source: {}", source))]
     SerializeProcedure {
         source: serde_json::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to deserialize procedure from json, source: {}", source))]
     DeserializeProcedure {
         source: serde_json::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Invalid raw schema, source: {}", source))]
@@ -53,7 +53,7 @@ pub enum Error {
     #[snafu(display("Subprocedure {} failed", subprocedure_id))]
     SubprocedureFailed {
         subprocedure_id: ProcedureId,
-        backtrace: Backtrace,
+        location: Location,
     },
 }
 

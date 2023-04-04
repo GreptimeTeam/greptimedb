@@ -30,7 +30,7 @@ pub enum Error {
     ProfilingNotEnabled,
 
     #[snafu(display("Failed to build temp file from given path: {:?}", path))]
-    BuildTempPath { path: PathBuf, backtrace: Backtrace },
+    BuildTempPath { path: PathBuf, location: Location },
 
     #[snafu(display("Failed to open temp file: {}", path))]
     OpenTempFile {

@@ -91,7 +91,7 @@ pub enum Error {
     #[snafu(display("IO error, source: {}", source))]
     Io {
         source: std::io::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Auth failed, source: {}", source))]

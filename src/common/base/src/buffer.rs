@@ -31,16 +31,16 @@ pub enum Error {
     Overflow {
         src_len: usize,
         dst_len: usize,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Buffer underflow"))]
-    Underflow { backtrace: Backtrace },
+    Underflow { location: Location },
 
     #[snafu(display("IO operation reach EOF, source: {}", source))]
     Eof {
         source: std::io::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 }
 

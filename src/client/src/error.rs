@@ -22,10 +22,7 @@ use tonic::{Code, Status};
 #[snafu(visibility(pub))]
 pub enum Error {
     #[snafu(display("Illegal Flight messages, reason: {}", reason))]
-    IllegalFlightMessages {
-        reason: String,
-        backtrace: Backtrace,
-    },
+    IllegalFlightMessages { reason: String, location: Location },
 
     #[snafu(display("Failed to do Flight get, code: {}, source: {}", tonic_code, source))]
     FlightGet {
@@ -47,13 +44,10 @@ pub enum Error {
     },
 
     #[snafu(display("Illegal GRPC client state: {}", err_msg))]
-    IllegalGrpcClientState {
-        err_msg: String,
-        backtrace: Backtrace,
-    },
+    IllegalGrpcClientState { err_msg: String, location: Location },
 
     #[snafu(display("Missing required field in protobuf, field: {}", field))]
-    MissingField { field: String, backtrace: Backtrace },
+    MissingField { field: String, location: Location },
 
     #[snafu(display(
         "Failed to create gRPC channel, peer address: {}, source: {}",

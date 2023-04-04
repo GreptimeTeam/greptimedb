@@ -25,10 +25,10 @@ pub enum Error {
     #[snafu(display("Failed to build runtime, source: {}", source))]
     BuildRuntime {
         source: std::io::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
     #[snafu(display("Repeated task {} not started yet", name))]
-    IllegalState { name: String, backtrace: Backtrace },
+    IllegalState { name: String, location: Location },
 
     #[snafu(display(
         "Failed to wait for repeated task {} to stop, source: {}",
@@ -38,7 +38,7 @@ pub enum Error {
     WaitGcTaskStop {
         name: String,
         source: JoinError,
-        backtrace: Backtrace,
+        location: Location,
     },
 }
 

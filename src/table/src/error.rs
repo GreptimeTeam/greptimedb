@@ -28,37 +28,31 @@ pub enum Error {
     #[snafu(display("Datafusion error: {}", source))]
     Datafusion {
         source: DataFusionError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Poll stream failed, source: {}", source))]
     PollStream {
         source: ArrowError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to convert Arrow schema, source: {}", source))]
     SchemaConversion {
         source: datatypes::error::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Engine not found: {}", engine))]
-    EngineNotFound {
-        engine: String,
-        backtrace: Backtrace,
-    },
+    EngineNotFound { engine: String, location: Location },
 
     #[snafu(display("Engine exist: {}", engine))]
-    EngineExist {
-        engine: String,
-        backtrace: Backtrace,
-    },
+    EngineExist { engine: String, location: Location },
 
     #[snafu(display("Table projection error, source: {}", source))]
     TableProjection {
         source: ArrowError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to create record batch for Tables, source: {}", source))]
@@ -71,7 +65,7 @@ pub enum Error {
     ColumnExists {
         column_name: String,
         table_name: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to build schema, msg: {}, source: {}", msg, source))]
@@ -85,7 +79,7 @@ pub enum Error {
     ColumnNotExists {
         column_name: String,
         table_name: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display(
@@ -96,7 +90,7 @@ pub enum Error {
     RemoveColumnInIndex {
         column_name: String,
         table_name: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display(
@@ -109,10 +103,10 @@ pub enum Error {
         source: store_api::storage::ColumnDescriptorBuilderError,
         table_name: String,
         column_name: String,
-        backtrace: Backtrace,
+        location: Location,
     },
     #[snafu(display("Regions schemas mismatch in table: {}", table))]
-    RegionSchemaMismatch { table: String, backtrace: Backtrace },
+    RegionSchemaMismatch { table: String, location: Location },
 
     #[snafu(display("Failed to operate table, source: {}", source))]
     TableOperation { source: BoxedError },
@@ -124,7 +118,7 @@ pub enum Error {
     ParseTableOption {
         key: String,
         value: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 }
 

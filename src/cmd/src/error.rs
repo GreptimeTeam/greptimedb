@@ -66,20 +66,20 @@ pub enum Error {
     ReadConfig {
         path: String,
         source: std::io::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to parse config, source: {}", source))]
     ParseConfig {
         source: toml::de::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Missing config, msg: {}", msg))]
-    MissingConfig { msg: String, backtrace: Backtrace },
+    MissingConfig { msg: String, location: Location },
 
     #[snafu(display("Illegal config: {}", msg))]
-    IllegalConfig { msg: String, backtrace: Backtrace },
+    IllegalConfig { msg: String, location: Location },
 
     #[snafu(display("Illegal auth config: {}", source))]
     IllegalAuthConfig {
@@ -100,13 +100,13 @@ pub enum Error {
     #[snafu(display("Cannot create REPL: {}", source))]
     ReplCreation {
         source: ReadlineError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Error reading command: {}", source))]
     Readline {
         source: ReadlineError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to request database, sql: {sql}, source: {source}"))]

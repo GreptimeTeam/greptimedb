@@ -31,7 +31,7 @@ pub enum Error {
     PyUdf {
         // TODO(discord9): find a way that prevent circle depend(query<-script<-query) and can use script's error type
         msg: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display(
@@ -46,20 +46,20 @@ pub enum Error {
     #[snafu(display("Fail to execute function, source: {}", source))]
     ExecuteFunction {
         source: DataFusionError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Unsupported input datatypes {:?} in function {}", datatypes, function))]
     UnsupportedInputDataType {
         function: String,
         datatypes: Vec<ConcreteDataType>,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Fail to generate function, source: {}", source))]
     GenerateFunction {
         source: StatsError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Fail to cast scalar value into vector: {}", source))]
@@ -88,10 +88,7 @@ pub enum Error {
     DowncastVector { err_msg: String },
 
     #[snafu(display("Bad accumulator implementation: {}", err_msg))]
-    BadAccumulatorImpl {
-        err_msg: String,
-        backtrace: Backtrace,
-    },
+    BadAccumulatorImpl { err_msg: String, location: Location },
 
     #[snafu(display("Invalid input type: {}", err_msg))]
     InvalidInputType {
@@ -103,24 +100,24 @@ pub enum Error {
     #[snafu(display(
         "Illegal input_types status, check if DataFusion has changed its UDAF execution logic"
     ))]
-    InvalidInputState { backtrace: Backtrace },
+    InvalidInputState { location: Location },
 
     #[snafu(display("unexpected: not constant column"))]
-    InvalidInputCol { backtrace: Backtrace },
+    InvalidInputCol { location: Location },
 
     #[snafu(display("Not expected to run ExecutionPlan more than once"))]
-    ExecuteRepeatedly { backtrace: Backtrace },
+    ExecuteRepeatedly { location: Location },
 
     #[snafu(display("General DataFusion error, source: {}", source))]
     GeneralDataFusion {
         source: DataFusionError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to execute DataFusion ExecutionPlan, source: {}", source))]
     DataFusionExecutionPlan {
         source: DataFusionError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display(
@@ -148,7 +145,7 @@ pub enum Error {
     TypeCast {
         source: ArrowError,
         typ: arrow::datatypes::DataType,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display(
@@ -157,7 +154,7 @@ pub enum Error {
     ))]
     ArrowCompute {
         source: ArrowError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Query engine fail to cast value: {}", source))]
@@ -173,10 +170,7 @@ pub enum Error {
     },
 
     #[snafu(display("Invalid function args: {}", err_msg))]
-    InvalidFuncArgs {
-        err_msg: String,
-        backtrace: Backtrace,
-    },
+    InvalidFuncArgs { err_msg: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -286,7 +280,7 @@ mod tests {
         let result: std::result::Result<i32, common_recordbatch::error::Error> =
             Err(common_recordbatch::error::Error::PollStream {
                 source: DataFusionError::Internal("blabla".to_string()),
-                backtrace: Backtrace::generate(),
+                location: Location::generate(),
             });
         let error = result
             .context(ConvertDfRecordBatchStreamSnafu)
@@ -299,7 +293,7 @@ mod tests {
     fn raise_datatype_error() -> std::result::Result<(), DataTypeError> {
         Err(DataTypeError::Conversion {
             from: "test".to_string(),
-            backtrace: Backtrace::generate(),
+            location: Location::generate(),
         })
     }
 

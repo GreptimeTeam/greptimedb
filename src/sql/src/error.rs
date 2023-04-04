@@ -142,7 +142,7 @@ pub enum Error {
     #[snafu(display("Unable to convert statement {} to DataFusion statement", statement))]
     ConvertToDfStatement {
         statement: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 }
 

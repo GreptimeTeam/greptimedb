@@ -23,44 +23,44 @@ pub enum Error {
     #[snafu(display("Failed to serialize data, source: {}", source))]
     Serialize {
         source: serde_json::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to deserialize data, source: {}, json: {}", source, json))]
     Deserialize {
         source: serde_json::Error,
-        backtrace: Backtrace,
+        location: Location,
         json: String,
     },
 
     #[snafu(display("Failed to convert datafusion type: {}", from))]
-    Conversion { from: String, backtrace: Backtrace },
+    Conversion { from: String, location: Location },
 
     #[snafu(display("Bad array access, Index out of bounds: {}, size: {}", index, size))]
     BadArrayAccess {
         index: usize,
         size: usize,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Unknown vector, {}", msg))]
-    UnknownVector { msg: String, backtrace: Backtrace },
+    UnknownVector { msg: String, location: Location },
 
     #[snafu(display("Unsupported arrow data type, type: {:?}", arrow_type))]
     UnsupportedArrowType {
         arrow_type: arrow::datatypes::DataType,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Unsupported operation: {} for vector: {}", op, vector_type))]
     UnsupportedOperation {
         op: String,
         vector_type: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Timestamp column {} not found", name,))]
-    TimestampNotFound { name: String, backtrace: Backtrace },
+    TimestampNotFound { name: String, location: Location },
 
     #[snafu(display(
         "Failed to parse version in schema meta, value: {}, source: {}",
@@ -70,48 +70,42 @@ pub enum Error {
     ParseSchemaVersion {
         value: String,
         source: std::num::ParseIntError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Invalid timestamp index: {}", index))]
-    InvalidTimestampIndex { index: usize, backtrace: Backtrace },
+    InvalidTimestampIndex { index: usize, location: Location },
 
     #[snafu(display("Duplicate timestamp index, exists: {}, new: {}", exists, new))]
     DuplicateTimestampIndex {
         exists: usize,
         new: usize,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("{}", msg))]
-    CastType { msg: String, backtrace: Backtrace },
+    CastType { msg: String, location: Location },
 
     #[snafu(display("Arrow failed to compute, source: {}", source))]
     ArrowCompute {
         source: arrow::error::ArrowError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Unsupported column default constraint expression: {}", expr))]
-    UnsupportedDefaultExpr { expr: String, backtrace: Backtrace },
+    UnsupportedDefaultExpr { expr: String, location: Location },
 
     #[snafu(display("Default value should not be null for non null column"))]
-    NullDefault { backtrace: Backtrace },
+    NullDefault { location: Location },
 
     #[snafu(display("Incompatible default value type, reason: {}", reason))]
-    DefaultValueType {
-        reason: String,
-        backtrace: Backtrace,
-    },
+    DefaultValueType { reason: String, location: Location },
 
     #[snafu(display("Duplicated metadata for {}", key))]
-    DuplicateMeta { key: String, backtrace: Backtrace },
+    DuplicateMeta { key: String, location: Location },
 
     #[snafu(display("Failed to convert value into scalar value, reason: {}", reason))]
-    ToScalarValue {
-        reason: String,
-        backtrace: Backtrace,
-    },
+    ToScalarValue { reason: String, location: Location },
 }
 
 impl ErrorExt for Error {

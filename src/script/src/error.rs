@@ -34,7 +34,7 @@ pub enum Error {
     },
 
     #[snafu(display("Scripts table not found"))]
-    ScriptsTableNotFound { backtrace: Backtrace },
+    ScriptsTableNotFound { location: Location },
 
     #[snafu(display(
         "Failed to insert script to scripts table, name: {}, source: {}",
@@ -62,7 +62,7 @@ pub enum Error {
     },
 
     #[snafu(display("Script not found, name: {}", name))]
-    ScriptNotFound { backtrace: Backtrace, name: String },
+    ScriptNotFound { location: Location, name: String },
 
     #[snafu(display("Failed to find script by name: {}", name))]
     FindScript {
@@ -78,7 +78,7 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to cast type, msg: {}", msg))]
-    CastType { msg: String, backtrace: Backtrace },
+    CastType { msg: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

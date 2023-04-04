@@ -59,7 +59,7 @@ pub enum Error {
     },
 
     #[snafu(display("Incorrect internal state: {}", state))]
-    IncorrectInternalState { state: String, backtrace: Backtrace },
+    IncorrectInternalState { state: String, location: Location },
 
     #[snafu(display("Failed to create catalog list, source: {}", source))]
     NewCatalog {
@@ -68,10 +68,10 @@ pub enum Error {
     },
 
     #[snafu(display("Catalog not found: {}", name))]
-    CatalogNotFound { name: String, backtrace: Backtrace },
+    CatalogNotFound { name: String, location: Location },
 
     #[snafu(display("Schema not found: {}", name))]
-    SchemaNotFound { name: String, backtrace: Backtrace },
+    SchemaNotFound { name: String, location: Location },
 
     #[snafu(display("Failed to create table: {}, source: {}", table_name, source))]
     CreateTable {
@@ -111,7 +111,7 @@ pub enum Error {
     #[snafu(display("Table not found: {}", table_name))]
     TableNotFound {
         table_name: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Column {} not found in table {}", column_name, table_name))]
@@ -121,7 +121,7 @@ pub enum Error {
     },
 
     #[snafu(display("Missing timestamp column in request"))]
-    MissingTimestampColumn { backtrace: Backtrace },
+    MissingTimestampColumn { location: Location },
 
     #[snafu(display(
         "Columns and values number mismatch, columns: {}, values: {}",
@@ -137,7 +137,7 @@ pub enum Error {
     },
 
     #[snafu(display("Missing insert body"))]
-    MissingInsertBody { backtrace: Backtrace },
+    MissingInsertBody { location: Location },
 
     #[snafu(display("Failed to insert value to table: {}, source: {}", table_name, source))]
     Insert {
@@ -204,7 +204,7 @@ pub enum Error {
     InitBackend {
         config: Box<ObjectStoreConfig>,
         source: object_store::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to build backend, source: {}", source))]
@@ -216,7 +216,7 @@ pub enum Error {
     #[snafu(display("Failed to parse url, source: {}", source))]
     ParseUrl {
         source: DataSourceError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Runtime resource error, source: {}", source))]
@@ -242,7 +242,7 @@ pub enum Error {
 
     #[snafu(display("Failed to regex, source: {}", source))]
     BuildRegex {
-        backtrace: Backtrace,
+        location: Location,
         source: regex::Error,
     },
 
@@ -268,10 +268,10 @@ pub enum Error {
     },
 
     #[snafu(display("Specified timestamp key or primary key column not found: {}", name))]
-    KeyColumnNotFound { name: String, backtrace: Backtrace },
+    KeyColumnNotFound { name: String, location: Location },
 
     #[snafu(display("Illegal primary keys definition: {}", msg))]
-    IllegalPrimaryKeysDef { msg: String, backtrace: Backtrace },
+    IllegalPrimaryKeysDef { msg: String, location: Location },
 
     #[snafu(display(
         "Constraint in CREATE TABLE statement is not supported yet: {}",
@@ -279,7 +279,7 @@ pub enum Error {
     ))]
     ConstraintNotSupported {
         constraint: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to insert into system catalog table, source: {}", source))]
@@ -301,7 +301,7 @@ pub enum Error {
     },
 
     #[snafu(display("Schema {} already exists", name))]
-    SchemaExists { name: String, backtrace: Backtrace },
+    SchemaExists { name: String, location: Location },
 
     #[snafu(display("Failed to convert alter expr to request: {}", source))]
     AlterExprToRequest {
@@ -359,7 +359,7 @@ pub enum Error {
     #[snafu(display(
         "Table id provider not found, cannot execute SQL directly on datanode in distributed mode"
     ))]
-    TableIdProviderNotFound { backtrace: Backtrace },
+    TableIdProviderNotFound { location: Location },
 
     #[snafu(display("Failed to bump table id, source: {}", source))]
     BumpTableId {
@@ -374,13 +374,13 @@ pub enum Error {
     },
 
     #[snafu(display("Missing node id option in distributed mode"))]
-    MissingNodeId { backtrace: Backtrace },
+    MissingNodeId { location: Location },
 
     #[snafu(display("Missing node id option in distributed mode"))]
-    MissingMetasrvOpts { backtrace: Backtrace },
+    MissingMetasrvOpts { location: Location },
 
     #[snafu(display("Missing required field: {}", name))]
-    MissingRequiredField { name: String, backtrace: Backtrace },
+    MissingRequiredField { name: String, location: Location },
 
     #[snafu(display("Cannot find requested database: {}-{}", catalog, schema))]
     DatabaseNotFound { catalog: String, schema: String },
@@ -400,10 +400,7 @@ pub enum Error {
         "No valid default value can be built automatically, column: {}",
         column,
     ))]
-    ColumnNoneDefaultValue {
-        column: String,
-        backtrace: Backtrace,
-    },
+    ColumnNoneDefaultValue { column: String, location: Location },
 
     #[snafu(display("Failed to describe schema for given statement, source: {}", source))]
     DescribeStatement {
@@ -437,32 +434,32 @@ pub enum Error {
     #[snafu(display("Failed to read parquet file, source: {}", source))]
     ReadParquet {
         source: parquet::errors::ParquetError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to poll stream, source: {}", source))]
     PollStream {
         source: datafusion_common::DataFusionError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to build parquet record batch stream, source: {}", source))]
     BuildParquetRecordBatchStream {
-        backtrace: Backtrace,
+        location: Location,
         source: parquet::errors::ParquetError,
     },
 
     #[snafu(display("Failed to read object in path: {}, source: {}", path, source))]
     ReadObject {
         path: String,
-        backtrace: Backtrace,
+        location: Location,
         source: object_store::Error,
     },
 
     #[snafu(display("Failed to write object into path: {}, source: {}", path, source))]
     WriteObject {
         path: String,
-        backtrace: Backtrace,
+        location: Location,
         source: object_store::Error,
     },
 

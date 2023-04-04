@@ -63,7 +63,7 @@ pub enum Error {
     },
 
     #[snafu(display("Missing insert values"))]
-    MissingInsertValues { backtrace: Backtrace },
+    MissingInsertValues { location: Location },
 
     #[snafu(display("Column datatype error, source: {}", source))]
     ColumnDataType {
@@ -94,46 +94,34 @@ pub enum Error {
     },
 
     #[snafu(display("Invalid SQL, error: {}", err_msg))]
-    InvalidSql {
-        err_msg: String,
-        backtrace: Backtrace,
-    },
+    InvalidSql { err_msg: String, location: Location },
 
     #[snafu(display("Illegal Frontend state: {}", err_msg))]
-    IllegalFrontendState {
-        err_msg: String,
-        backtrace: Backtrace,
-    },
+    IllegalFrontendState { err_msg: String, location: Location },
 
     #[snafu(display("Incomplete GRPC result: {}", err_msg))]
-    IncompleteGrpcResult {
-        err_msg: String,
-        backtrace: Backtrace,
-    },
+    IncompleteGrpcResult { err_msg: String, location: Location },
 
     #[snafu(display("Failed to find Datanode by region: {:?}", region))]
     FindDatanode {
         region: RegionId,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Invalid InsertRequest, reason: {}", reason))]
-    InvalidInsertRequest {
-        reason: String,
-        backtrace: Backtrace,
-    },
+    InvalidInsertRequest { reason: String, location: Location },
 
     #[snafu(display("Table `{}` not exist", table_name))]
     TableNotFound {
         table_name: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Column {} not found in table {}", column_name, table_name))]
     ColumnNotFound {
         column_name: String,
         table_name: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display(
@@ -144,13 +132,13 @@ pub enum Error {
     ColumnValuesNumberMismatch {
         columns: usize,
         values: usize,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to join task, source: {}", source))]
     JoinTask {
         source: common_runtime::JoinError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("General catalog error: {}", source))]
@@ -180,7 +168,7 @@ pub enum Error {
     #[snafu(display("Failed to create table route for table {}", table_name))]
     CreateTableRoute {
         table_name: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to find table route for table {}", table_name))]
@@ -214,17 +202,17 @@ pub enum Error {
     #[snafu(display("Failed to find catalog by name: {}", catalog_name))]
     CatalogNotFound {
         catalog_name: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to find schema, schema info: {}", schema_info))]
     SchemaNotFound {
         schema_info: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Schema {} already exists", name))]
-    SchemaExists { name: String, backtrace: Backtrace },
+    SchemaExists { name: String, location: Location },
 
     #[snafu(display("Table occurs error, source: {}", source))]
     Table {
@@ -235,11 +223,11 @@ pub enum Error {
     #[snafu(display("Failed to find region route for table {}", table_name))]
     FindRegionRoute {
         table_name: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Cannot find primary key column by name: {}", msg))]
-    PrimaryKeyNotFound { msg: String, backtrace: Backtrace },
+    PrimaryKeyNotFound { msg: String, location: Location },
 
     #[snafu(display("Failed to execute statement, source: {}", source))]
     ExecuteStatement {
@@ -268,7 +256,7 @@ pub enum Error {
     #[snafu(display("Failed to build DataFusion logical plan, source: {}", source))]
     BuildDfLogicalPlan {
         source: datafusion_common::DataFusionError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("{source}"))]
@@ -278,7 +266,7 @@ pub enum Error {
     },
 
     #[snafu(display("Missing meta_client_options section in config"))]
-    MissingMetasrvOpts { backtrace: Backtrace },
+    MissingMetasrvOpts { location: Location },
 
     #[snafu(display("Failed to convert AlterExpr to AlterRequest, source: {}", source))]
     AlterExprToRequest {
@@ -287,10 +275,10 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to find leaders when altering table, table: {}", table))]
-    LeaderNotFound { table: String, backtrace: Backtrace },
+    LeaderNotFound { table: String, location: Location },
 
     #[snafu(display("Table already exists: `{}`", table))]
-    TableAlreadyExist { table: String, backtrace: Backtrace },
+    TableAlreadyExist { table: String, location: Location },
 
     #[snafu(display("Failed to encode Substrait logical plan, source: {}", source))]
     EncodeSubstraitLogicalPlan {
@@ -299,7 +287,7 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to found context value: {}", key))]
-    ContextValueNotFound { key: String, backtrace: Backtrace },
+    ContextValueNotFound { key: String, location: Location },
 
     #[snafu(display(
         "Failed to build table meta for table: {}, source: {}",
@@ -309,7 +297,7 @@ pub enum Error {
     BuildTableMeta {
         table_name: String,
         source: table::metadata::TableMetaBuilderError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Not supported: {}", feat))]
@@ -336,10 +324,7 @@ pub enum Error {
         "No valid default value can be built automatically, column: {}",
         column,
     ))]
-    ColumnNoneDefaultValue {
-        column: String,
-        backtrace: Backtrace,
-    },
+    ColumnNoneDefaultValue { column: String, location: Location },
 
     #[snafu(display("SQL execution intercepted, source: {}", source))]
     SqlExecIntercepted {
@@ -371,7 +356,7 @@ pub enum Error {
     },
 
     #[snafu(display("Illegal primary keys definition: {}", msg))]
-    IllegalPrimaryKeysDef { msg: String, backtrace: Backtrace },
+    IllegalPrimaryKeysDef { msg: String, location: Location },
 
     #[snafu(display("Unrecognized table option: {}", source))]
     UnrecognizedTableOption {

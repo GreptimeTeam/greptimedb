@@ -41,13 +41,13 @@ pub fn format_py_error(excep: PyBaseExceptionRef, vm: &VirtualMachine) -> error:
     if let Err(e) = vm.write_exception(&mut msg, &excep) {
         return error::Error::PyRuntime {
             msg: format!("Failed to write exception msg, err: {e}"),
-            backtrace: Backtrace::generate(),
+            location: Location::generate(),
         };
     }
 
     error::Error::PyRuntime {
         msg,
-        backtrace: Backtrace::generate(),
+        location: Location::generate(),
     }
 }
 

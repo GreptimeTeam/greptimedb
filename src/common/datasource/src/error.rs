@@ -35,13 +35,13 @@ pub enum Error {
     #[snafu(display("Failed to build backend, source: {}", source))]
     BuildBackend {
         source: object_store::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to list object in path: {}, source: {}", path, source))]
     ListObjects {
         path: String,
-        backtrace: Backtrace,
+        location: Location,
         source: object_store::Error,
     },
 

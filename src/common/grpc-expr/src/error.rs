@@ -32,7 +32,7 @@ pub enum Error {
     DecodeInsert { source: DecodeError },
 
     #[snafu(display("Illegal insert data"))]
-    IllegalInsertData { backtrace: Backtrace },
+    IllegalInsertData { location: Location },
 
     #[snafu(display("Column datatype error, source: {}", source))]
     ColumnDataType {
@@ -48,17 +48,14 @@ pub enum Error {
     DuplicatedTimestampColumn {
         exists: String,
         duplicated: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Missing timestamp column, msg: {}", msg))]
-    MissingTimestampColumn { msg: String, backtrace: Backtrace },
+    MissingTimestampColumn { msg: String, location: Location },
 
     #[snafu(display("Invalid column proto: {}", err_msg))]
-    InvalidColumnProto {
-        err_msg: String,
-        backtrace: Backtrace,
-    },
+    InvalidColumnProto { err_msg: String, location: Location },
     #[snafu(display("Failed to create vector, source: {}", source))]
     CreateVector {
         #[snafu(backtrace)]
@@ -66,7 +63,7 @@ pub enum Error {
     },
 
     #[snafu(display("Missing required field in protobuf, field: {}", field))]
-    MissingField { field: String, backtrace: Backtrace },
+    MissingField { field: String, location: Location },
 
     #[snafu(display("Invalid column default constraint, source: {}", source))]
     ColumnDefaultConstraint {

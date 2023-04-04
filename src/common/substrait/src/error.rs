@@ -24,55 +24,52 @@ use snafu::{Backtrace, ErrorCompat, Snafu};
 #[snafu(visibility(pub))]
 pub enum Error {
     #[snafu(display("Unsupported physical plan: {}", name))]
-    UnsupportedPlan { name: String, backtrace: Backtrace },
+    UnsupportedPlan { name: String, location: Location },
 
     #[snafu(display("Unsupported expr: {}", name))]
-    UnsupportedExpr { name: String, backtrace: Backtrace },
+    UnsupportedExpr { name: String, location: Location },
 
     #[snafu(display("Unsupported concrete type: {:?}", ty))]
     UnsupportedConcreteType {
         ty: ConcreteDataType,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Unsupported substrait type: {}", ty))]
-    UnsupportedSubstraitType { ty: String, backtrace: Backtrace },
+    UnsupportedSubstraitType { ty: String, location: Location },
 
     #[snafu(display("Failed to decode substrait relation, source: {}", source))]
     DecodeRel {
         source: DecodeError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to encode substrait relation, source: {}", source))]
     EncodeRel {
         source: EncodeError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Input plan is empty"))]
-    EmptyPlan { backtrace: Backtrace },
+    EmptyPlan { location: Location },
 
     #[snafu(display("Input expression is empty"))]
-    EmptyExpr { backtrace: Backtrace },
+    EmptyExpr { location: Location },
 
     #[snafu(display("Missing required field in protobuf, field: {}, plan: {}", field, plan))]
     MissingField {
         field: String,
         plan: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Invalid parameters: {}", reason))]
-    InvalidParameters {
-        reason: String,
-        backtrace: Backtrace,
-    },
+    InvalidParameters { reason: String, location: Location },
 
     #[snafu(display("Internal error from DataFusion: {}", source))]
     DFInternal {
         source: DataFusionError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Internal error: {}", source))]
@@ -82,10 +79,10 @@ pub enum Error {
     },
 
     #[snafu(display("Table querying not found: {}", name))]
-    TableNotFound { name: String, backtrace: Backtrace },
+    TableNotFound { name: String, location: Location },
 
     #[snafu(display("Cannot convert plan doesn't belong to GreptimeDB"))]
-    UnknownPlan { backtrace: Backtrace },
+    UnknownPlan { location: Location },
 
     #[snafu(display(
         "Schema from Substrait proto doesn't match with the schema in storage.
@@ -97,7 +94,7 @@ pub enum Error {
     SchemaNotMatch {
         substrait_schema: datafusion::arrow::datatypes::SchemaRef,
         storage_schema: datafusion::arrow::datatypes::SchemaRef,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to convert DataFusion schema, source: {}", source))]

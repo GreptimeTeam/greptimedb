@@ -149,7 +149,7 @@ coprocessor = copr
         })()
         .map_err(|err| error::Error::PyRuntime {
             msg: err.into_value(py).to_string(),
-            backtrace: Backtrace::generate(),
+            location: Location::generate(),
         })?;
         ensure!(
             cols.len() == copr.deco_args.ret_names.len(),

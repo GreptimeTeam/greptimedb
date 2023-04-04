@@ -58,10 +58,7 @@ pub enum Error {
     StartGrpc { source: tonic::transport::Error },
 
     #[snafu(display("{} server is already started", server))]
-    AlreadyStarted {
-        server: String,
-        backtrace: Backtrace,
-    },
+    AlreadyStarted { server: String, location: Location },
 
     #[snafu(display("Failed to bind address {}, source: {}", addr, source))]
     TcpBind {
@@ -122,10 +119,7 @@ pub enum Error {
     NotSupported { feat: String },
 
     #[snafu(display("Invalid query: {}", reason))]
-    InvalidQuery {
-        reason: String,
-        backtrace: Backtrace,
-    },
+    InvalidQuery { reason: String, location: Location },
 
     #[snafu(display("Failed to parse InfluxDB line protocol, source: {}", source))]
     InfluxdbLineProtocol {
@@ -140,10 +134,10 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to convert time precision, name: {}", name))]
-    TimePrecision { name: String, backtrace: Backtrace },
+    TimePrecision { name: String, location: Location },
 
     #[snafu(display("Connection reset by peer"))]
-    ConnResetByPeer { backtrace: Backtrace },
+    ConnResetByPeer { location: Location },
 
     #[snafu(display("Hyper error, source: {}", source))]
     Hyper { source: hyper::Error },
@@ -151,13 +145,13 @@ pub enum Error {
     #[snafu(display("Invalid OpenTSDB line, source: {}", source))]
     InvalidOpentsdbLine {
         source: FromUtf8Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Invalid OpenTSDB Json request, source: {}", source))]
     InvalidOpentsdbJsonRequest {
         source: serde_json::error::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display(
@@ -173,26 +167,26 @@ pub enum Error {
 
     #[snafu(display("Failed to decode prometheus remote request, source: {}", source))]
     DecodePromRemoteRequest {
-        backtrace: Backtrace,
+        location: Location,
         source: prost::DecodeError,
     },
 
     #[snafu(display("Failed to decompress prometheus remote request, source: {}", source))]
     DecompressPromRemoteRequest {
-        backtrace: Backtrace,
+        location: Location,
         source: snap::Error,
     },
 
     #[snafu(display("Invalid prometheus remote request, msg: {}", msg))]
-    InvalidPromRemoteRequest { msg: String, backtrace: Backtrace },
+    InvalidPromRemoteRequest { msg: String, location: Location },
 
     #[snafu(display("Invalid prometheus remote read query result, msg: {}", msg))]
-    InvalidPromRemoteReadQueryResult { msg: String, backtrace: Backtrace },
+    InvalidPromRemoteReadQueryResult { msg: String, location: Location },
 
     #[snafu(display("Invalid Flight ticket, source: {}", source))]
     InvalidFlightTicket {
         source: api::DecodeError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to start frontend service, source: {}", source))]
@@ -202,10 +196,7 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to build context, msg: {}", err_msg))]
-    BuildingContext {
-        err_msg: String,
-        backtrace: Backtrace,
-    },
+    BuildingContext { err_msg: String, location: Location },
 
     #[snafu(display("Tls is required for {}, plain connection is rejected", server))]
     TlsRequired { server: String },
@@ -225,25 +216,25 @@ pub enum Error {
     #[snafu(display("Invalid visibility ASCII chars, source: {}", source))]
     InvisibleASCII {
         source: hyper::header::ToStrError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Unsupported http auth scheme, name: {}", name))]
     UnsupportedAuthScheme { name: String },
 
     #[snafu(display("Invalid http authorization header"))]
-    InvalidAuthorizationHeader { backtrace: Backtrace },
+    InvalidAuthorizationHeader { location: Location },
 
     #[snafu(display("Invalid base64 value, source: {:?}", source))]
     InvalidBase64Value {
         source: DecodeError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Invalid utf-8 value, source: {:?}", source))]
     InvalidUtf8Value {
         source: FromUtf8Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Error accessing catalog: {}", source))]
@@ -274,13 +265,13 @@ pub enum Error {
     #[snafu(display("Failed to build gRPC reflection service, source: {}", source))]
     GrpcReflectionService {
         source: tonic_reflection::server::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to build HTTP response, source: {source}"))]
     BuildHttpResponse {
         source: http::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to parse PromQL: {query:?}, source: {source}"))]

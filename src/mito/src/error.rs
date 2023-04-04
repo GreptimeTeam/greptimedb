@@ -36,7 +36,7 @@ pub enum Error {
     BuildTableMeta {
         source: TableMetaBuilderError,
         table_name: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display(
@@ -47,16 +47,16 @@ pub enum Error {
     BuildTableInfo {
         source: TableInfoBuilderError,
         table_name: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Invalid primary key: {}", msg))]
-    InvalidPrimaryKey { msg: String, backtrace: Backtrace },
+    InvalidPrimaryKey { msg: String, location: Location },
 
     #[snafu(display("Missing timestamp index for table: {}", table_name))]
     MissingTimestampIndex {
         table_name: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display(
@@ -67,7 +67,7 @@ pub enum Error {
     BuildRowKeyDescriptor {
         source: store_api::storage::RowKeyDescriptorBuilderError,
         table_name: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display(
@@ -80,7 +80,7 @@ pub enum Error {
         source: store_api::storage::ColumnDescriptorBuilderError,
         table_name: String,
         column_name: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display(
@@ -91,7 +91,7 @@ pub enum Error {
     BuildColumnFamilyDescriptor {
         source: store_api::storage::ColumnFamilyDescriptorBuilderError,
         table_name: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display(
@@ -104,7 +104,7 @@ pub enum Error {
         source: store_api::storage::RegionDescriptorBuilderError,
         table_name: String,
         region_name: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display(
@@ -131,19 +131,19 @@ pub enum Error {
 
     #[snafu(display("Table info not found in manifest, table: {}", table_name))]
     TableInfoNotFound {
-        backtrace: Backtrace,
+        location: Location,
         table_name: String,
     },
 
     #[snafu(display("Table already exists: {}", table_name))]
     TableExists {
-        backtrace: Backtrace,
+        location: Location,
         table_name: String,
     },
 
     #[snafu(display("Table not found: {}", table_name))]
     TableNotFound {
-        backtrace: Backtrace,
+        location: Location,
         table_name: String,
     },
 
@@ -159,7 +159,7 @@ pub enum Error {
         column_qualified_name
     ))]
     ProjectedColumnNotFound {
-        backtrace: Backtrace,
+        location: Location,
         column_qualified_name: String,
     },
 
@@ -176,13 +176,13 @@ pub enum Error {
     RegionNotFound {
         table: String,
         region: RegionNumber,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Invalid region name: {}", region_name))]
     InvalidRegionName {
         region_name: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Invalid schema, source: {}", source))]

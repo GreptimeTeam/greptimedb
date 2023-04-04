@@ -22,7 +22,7 @@ use snafu::{Backtrace, ErrorCompat, Snafu};
 #[snafu(visibility(pub))]
 pub enum Error {
     #[snafu(display("Unsupported expr type: {}", name))]
-    UnsupportedExpr { name: String, backtrace: Backtrace },
+    UnsupportedExpr { name: String, location: Location },
 
     #[snafu(display("General catalog error: {}", source))]
     Catalog {
@@ -31,19 +31,13 @@ pub enum Error {
     },
 
     #[snafu(display("Catalog not found: {}", catalog))]
-    CatalogNotFound {
-        catalog: String,
-        backtrace: Backtrace,
-    },
+    CatalogNotFound { catalog: String, location: Location },
 
     #[snafu(display("Schema not found: {}", schema))]
-    SchemaNotFound {
-        schema: String,
-        backtrace: Backtrace,
-    },
+    SchemaNotFound { schema: String, location: Location },
 
     #[snafu(display("Table not found: {}", table))]
-    TableNotFound { table: String, backtrace: Backtrace },
+    TableNotFound { table: String, location: Location },
 
     #[snafu(display("Failed to do vector computation, source: {}", source))]
     VectorComputation {
@@ -70,7 +64,7 @@ pub enum Error {
     QueryAccessDenied { catalog: String, schema: String },
 
     #[snafu(display("The SQL string has multiple statements, query: {}", query))]
-    MultipleStatements { query: String, backtrace: Backtrace },
+    MultipleStatements { query: String, location: Location },
 
     #[snafu(display("Failed to convert Datafusion schema: {}", source))]
     ConvertDatafusionSchema {
@@ -82,20 +76,20 @@ pub enum Error {
     ParseTimestamp {
         raw: String,
         source: chrono::ParseError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to parse float number `{}`: {}", raw, source))]
     ParseFloat {
         raw: String,
         source: std::num::ParseFloatError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("DataFusion error: {}", source))]
     DataFusion {
         source: DataFusionError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("General SQL error: {}", source))]
@@ -108,13 +102,13 @@ pub enum Error {
     PlanSql {
         sql: String,
         source: DataFusionError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Timestamp column for table '{table_name}' is missing!"))]
     MissingTimestampColumn {
         table_name: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 }
 

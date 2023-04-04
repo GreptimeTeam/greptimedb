@@ -25,11 +25,11 @@ pub enum InnerError {
     Datafusion {
         msg: &'static str,
         source: DataFusionError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("PhysicalPlan downcast failed"))]
-    PhysicalPlanDowncast { backtrace: Backtrace },
+    PhysicalPlanDowncast { location: Location },
 
     #[snafu(display("Fail to convert arrow schema, source: {}", source))]
     ConvertSchema {

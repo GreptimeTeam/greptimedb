@@ -27,7 +27,7 @@ pub enum Error {
     #[snafu(display("Fail to create datafusion record batch, source: {}", source))]
     NewDfRecordBatch {
         source: datatypes::arrow::error::ArrowError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Data types error, source: {}", source))]
@@ -43,40 +43,37 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to create RecordBatches, reason: {}", reason))]
-    CreateRecordBatches {
-        reason: String,
-        backtrace: Backtrace,
-    },
+    CreateRecordBatches { reason: String, location: Location },
 
     #[snafu(display("Failed to convert Arrow schema, source: {}", source))]
     SchemaConversion {
         source: datatypes::error::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to poll stream, source: {}", source))]
     PollStream {
         source: datafusion::error::DataFusionError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Fail to format record batch, source: {}", source))]
     Format {
         source: datatypes::arrow::error::ArrowError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to init Recordbatch stream, source: {}", source))]
     InitRecordbatchStream {
         source: datafusion_common::DataFusionError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Column {} not exists in table {}", column_name, table_name))]
     ColumnNotExists {
         column_name: String,
         table_name: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display(
