@@ -246,8 +246,7 @@ async fn test_execute_insert_by_select(instance: Arc<dyn MockInstance>) {
 +-------+------+--------+---------------------+
 | host1 | 66.6 | 1024.0 | 2022-06-15T07:02:37 |
 | host2 | 88.8 | 333.3  | 2022-06-15T07:02:38 |
-+-------+------+--------+---------------------+"
-        .to_string();
++-------+------+--------+---------------------+";
     check_output_stream(output, expected).await;
 }
 
@@ -478,9 +477,7 @@ async fn test_rename_table(instance: Arc<dyn MockInstance>) {
 | Tables     |
 +------------+
 | test_table |
-+------------+\
-"
-    .to_string();
++------------+";
     check_output_stream(output, expect).await;
 
     let output = execute_sql_in_db(&instance, "select * from test_table order by ts", "db").await;
@@ -490,9 +487,7 @@ async fn test_rename_table(instance: Arc<dyn MockInstance>) {
 +-------+-----+--------+---------------------+
 | host1 | 1.1 | 100.0  | 1970-01-01T00:00:01 |
 | host2 | 2.2 | 200.0  | 1970-01-01T00:00:02 |
-+-------+-----+--------+---------------------+\
-"
-    .to_string();
++-------+-----+--------+---------------------+";
     check_output_stream(output, expected).await;
 
     try_execute_sql_in_db(&instance, "select * from demo", "db")
@@ -544,9 +539,7 @@ async fn test_create_table_after_rename_table(instance: Arc<dyn MockInstance>) {
 +------------+
 | demo       |
 | test_table |
-+------------+\
-"
-    .to_string();
++------------+";
     let output = execute_sql_in_db(&instance, "show tables", "db").await;
     check_output_stream(output, expect).await;
 }
@@ -594,9 +587,7 @@ async fn test_alter_table(instance: Arc<dyn MockInstance>) {
 | host1 | 1.1 | 100.0  | 1970-01-01T00:00:01 |        |
 | host2 | 2.2 | 200.0  | 1970-01-01T00:00:02 | hello  |
 | host3 | 3.3 | 300.0  | 1970-01-01T00:00:03 |        |
-+-------+-----+--------+---------------------+--------+\
-    "
-    .to_string();
++-------+-----+--------+---------------------+--------+";
     check_output_stream(output, expected).await;
 
     // Drop a column
@@ -611,9 +602,7 @@ async fn test_alter_table(instance: Arc<dyn MockInstance>) {
 | host1 | 1.1 | 1970-01-01T00:00:01 |        |
 | host2 | 2.2 | 1970-01-01T00:00:02 | hello  |
 | host3 | 3.3 | 1970-01-01T00:00:03 |        |
-+-------+-----+---------------------+--------+\
-    "
-    .to_string();
++-------+-----+---------------------+--------+";
     check_output_stream(output, expected).await;
 
     // insert a new row
@@ -633,9 +622,7 @@ async fn test_alter_table(instance: Arc<dyn MockInstance>) {
 | host2 | 2.2   | 1970-01-01T00:00:02 | hello  |
 | host3 | 3.3   | 1970-01-01T00:00:03 |        |
 | host4 | 400.0 | 1970-01-01T00:00:04 | world  |
-+-------+-------+---------------------+--------+\
-    "
-    .to_string();
++-------+-------+---------------------+--------+";
     check_output_stream(output, expected).await;
 }
 
@@ -676,9 +663,7 @@ async fn test_insert_with_default_value_for_type(instance: Arc<Instance>, type_n
 +-------+-----+
 | host1 | 1.1 |
 | host2 | 2.2 |
-+-------+-----+\
-    "
-    .to_string();
++-------+-----+";
     check_output_stream(output, expected).await;
 }
 
@@ -711,9 +696,7 @@ async fn test_use_database(instance: Arc<dyn MockInstance>) {
 | Tables |
 +--------+
 | tb1    |
-+--------+\
-    "
-    .to_string();
++--------+";
     check_output_stream(output, expected).await;
 
     let output = execute_sql_in_db(
@@ -730,9 +713,7 @@ async fn test_use_database(instance: Arc<dyn MockInstance>) {
 | col_i32 |
 +---------+
 | 1       |
-+---------+\
-    "
-    .to_string();
++---------+";
     check_output_stream(output, expected).await;
 
     // Making a particular database the default by means of the USE statement does not preclude
@@ -743,9 +724,7 @@ async fn test_use_database(instance: Arc<dyn MockInstance>) {
 | number |
 +--------+
 | 0      |
-+--------+\
-    "
-    .to_string();
++--------+";
     check_output_stream(output, expected).await;
 }
 
@@ -793,9 +772,7 @@ async fn test_delete(instance: Arc<dyn MockInstance>) {
 +-------+---------------------+------+--------+
 | host2 | 2022-06-15T07:02:38 | 77.7 | 2048.0 |
 | host3 | 2022-06-15T07:02:39 | 88.8 | 3072.0 |
-+-------+---------------------+------+--------+\
-"
-    .to_string();
++-------+---------------------+------+--------+";
     check_output_stream(output, expect).await;
 }
 
@@ -929,12 +906,27 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
 +-------+------+--------+---------------------+
 | host1 | 66.6 | 1024.0 | 2022-06-15T07:02:37 |
 | host2 | 88.8 | 333.3  | 2022-06-15T07:02:38 |
-+-------+------+--------+---------------------+"
-                    .to_string();
++-------+------+--------+---------------------+";
                 check_output_stream(output, expected).await;
             }
         }
     }
+}
+
+#[apply(both_instances_cases)]
+async fn test_information_schema(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+
+    let sql = "select distinct table_schema from information_schema.tables where table_type != 'SYSTEM VIEW' order by table_schema";
+    let output = execute_sql(&instance, sql).await;
+    let expected = "\
++--------------------+
+| table_schema       |
++--------------------+
+| information_schema |
+| public             |
++--------------------+";
+    check_output_stream(output, expected).await;
 }
 
 async fn execute_sql(instance: &Arc<Instance>, sql: &str) -> Output {

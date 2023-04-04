@@ -226,6 +226,19 @@ pub enum Error {
 
     #[snafu(display("Invalid system table definition: {err_msg}"))]
     InvalidSystemTableDef { err_msg: String, location: Location },
+
+    #[snafu(display("{}: {}", msg, source))]
+    Datafusion {
+        msg: &'static str,
+        source: DataFusionError,
+        location: Location,
+    },
+
+    #[snafu(display("Table schema mismatch, source: {}", source))]
+    TableSchemaMismatch {
+        #[snafu(backtrace)]
+        source: table::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -264,7 +277,8 @@ impl ErrorExt for Error {
             | Error::OpenTable { source, .. }
             | Error::CreateTable { source, .. }
             | Error::DeregisterTable { source, .. }
-            | Error::RegionStats { source, .. } => source.status_code(),
+            | Error::RegionStats { source, .. }
+            | Error::TableSchemaMismatch { source } => source.status_code(),
 
             Error::MetaSrv { source, .. } => source.status_code(),
             Error::SystemCatalogTableScan { source } => source.status_code(),
@@ -276,6 +290,7 @@ impl ErrorExt for Error {
 
             Error::Unimplemented { .. } => StatusCode::Unsupported,
             Error::QueryAccessDenied { .. } => StatusCode::AccessDenied,
+            Error::Datafusion { .. } => StatusCode::EngineExecuteQuery,
         }
     }
 

@@ -305,9 +305,7 @@ impl CatalogList for LocalCatalogManager {
     }
 
     fn catalog_names(&self) -> Result<Vec<String>> {
-        let mut res = self.catalogs.catalog_names()?;
-        res.push(SYSTEM_CATALOG_NAME.to_string());
-        Ok(res)
+        self.catalogs.catalog_names()
     }
 
     fn catalog(&self, name: &str) -> Result<Option<CatalogProviderRef>> {

@@ -87,7 +87,7 @@ pub(crate) fn standalone_instance_case(
 ) {
 }
 
-pub(crate) async fn check_output_stream(output: Output, expected: String) {
+pub(crate) async fn check_output_stream(output: Output, expected: &str) {
     let recordbatches = match output {
         Output::Stream(stream) => util::collect_batches(stream).await.unwrap(),
         Output::RecordBatches(recordbatches) => recordbatches,

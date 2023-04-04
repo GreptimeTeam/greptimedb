@@ -14,7 +14,6 @@
 
 //! Planner, QueryEngine implementations based on DataFusion.
 
-mod catalog_adapter;
 mod error;
 mod planner;
 
@@ -22,6 +21,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+pub use catalog::datafusion::catalog_adapter::DfCatalogListAdapter;
 use common_error::prelude::BoxedError;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::udf::create_udf;
@@ -44,7 +44,6 @@ use snafu::{ensure, OptionExt, ResultExt};
 use table::requests::{DeleteRequest, InsertRequest};
 use table::TableRef;
 
-pub use crate::datafusion::catalog_adapter::DfCatalogListAdapter;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::error::{
     CatalogNotFoundSnafu, CatalogSnafu, CreateRecordBatchSnafu, DataFusionSnafu,

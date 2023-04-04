@@ -187,6 +187,10 @@ impl RecordBatchStream for TablesRecordBatchStream {
     }
 }
 
+// TODO(LFC): Merge this with DataFusion's implementation,
+// or delete it. I intentionally left our `InformationSchema` untouched, because it's likely we'll
+// add more custom functionalities or columns to the "information schema", which can't be made into
+// DataFusion.
 pub struct InformationSchema {
     pub tables: Arc<Tables>,
     pub system: Arc<SystemCatalogTable>,

@@ -15,7 +15,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use common_catalog::consts::INFORMATION_SCHEMA_NAME;
 use common_catalog::format_full_table_name;
+use datafusion::catalog::information_schema::InformationSchemaProvider;
+use datafusion::catalog::schema::SchemaProvider;
 use datafusion::common::{ResolvedTableReference, TableReference};
 use datafusion::datasource::provider_as_source;
 use datafusion::logical_expr::TableSource;
@@ -23,6 +26,7 @@ use session::context::QueryContext;
 use snafu::{ensure, OptionExt};
 use table::table::adapter::DfTableProviderAdapter;
 
+use crate::datafusion::catalog_adapter::DfCatalogListAdapter;
 use crate::error::{
     CatalogNotFoundSnafu, QueryAccessDeniedSnafu, Result, SchemaNotFoundSnafu, TableNotExistSnafu,
 };
@@ -91,14 +95,25 @@ impl DfTableSourceProvider {
     ) -> Result<Arc<dyn TableSource>> {
         let table_ref = self.resolve_table_ref(table_ref)?;
 
+        let catalog_name = table_ref.catalog.as_ref();
+        let schema_name = table_ref.schema.as_ref();
+        let table_name = table_ref.table.as_ref();
+
+        if schema_name == INFORMATION_SCHEMA_NAME {
+            let catalog_list = Arc::new(DfCatalogListAdapter::new(self.catalog_list.clone()));
+            let schema = InformationSchemaProvider::new(catalog_list);
+            let table = schema
+                .table(table_name)
+                .await
+                .context(TableNotExistSnafu { table: table_name })?;
+            let table = provider_as_source(table);
+            return Ok(table);
+        }
+
         let resolved_name = table_ref.to_string();
         if let Some(table) = self.resolved_tables.get(&resolved_name) {
             return Ok(table.clone());
         }
-
-        let catalog_name = table_ref.catalog.as_ref();
-        let schema_name = table_ref.schema.as_ref();
-        let table_name = table_ref.table.as_ref();
 
         let catalog = self
             .catalog_list
