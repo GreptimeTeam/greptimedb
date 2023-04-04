@@ -146,9 +146,6 @@ impl ErrorExt for Error {
             | Error::MissingSql { .. } => StatusCode::InvalidArguments,
         }
     }
-    fn backtrace_opt(&self) -> Option<&common_error::snafu::Backtrace> {
-        ErrorCompat::backtrace(self)
-    }
 
     fn as_any(&self) -> &dyn std::any::Any {
         self

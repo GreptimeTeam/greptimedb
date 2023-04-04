@@ -38,15 +38,15 @@ macro_rules! error {
     ($e:expr; target: $target:expr, $($arg:tt)+) => ({
         use $crate::common_error::ext::ErrorExt;
         use std::error::Error;
-        match ($e.source(), $e.backtrace_opt()) {
-            (Some(source), Some(backtrace)) => {
+        match ($e.source(), $e.location_opt()) {
+            (Some(source), Some(location)) => {
                 $crate::log!(
                     target: $target,
                     $crate::logging::Level::ERROR,
                     err.msg = %$e,
                     err.code = %$e.status_code(),
                     err.source = source,
-                    err.backtrace = %backtrace,
+                    err.location = %location,
                     $($arg)+
                 )
             },
@@ -60,13 +60,13 @@ macro_rules! error {
                     $($arg)+
                 )
             },
-            (None, Some(backtrace)) => {
+            (None, Some(location)) => {
                 $crate::log!(
                     target: $target,
                     $crate::logging::Level::ERROR,
                     err.msg = %$e,
                     err.code = %$e.status_code(),
-                    err.backtrace = %backtrace,
+                    err.location = %location,
                     $($arg)+
                 )
             },
@@ -86,14 +86,14 @@ macro_rules! error {
     ($e:expr; $($arg:tt)+) => ({
         use std::error::Error;
         use $crate::common_error::ext::ErrorExt;
-        match ($e.source(), $e.backtrace_opt()) {
-            (Some(source), Some(backtrace)) => {
+        match ($e.source(), $e.location_opt()) {
+            (Some(source), Some(location)) => {
                 $crate::log!(
                     $crate::logging::Level::ERROR,
                     err.msg = %$e,
                     err.code = %$e.status_code(),
                     err.source = source,
-                    err.backtrace = %backtrace,
+                    err.location = %location,
                     $($arg)+
                 )
             },
@@ -106,12 +106,12 @@ macro_rules! error {
                     $($arg)+
                 )
             },
-            (None, Some(backtrace)) => {
+            (None, Some(location)) => {
                 $crate::log!(
                     $crate::logging::Level::ERROR,
                     err.msg = %$e,
                     err.code = %$e.status_code(),
-                    err.backtrace = %backtrace,
+                    err.location = %location,
                     $($arg)+
                 )
             },
@@ -262,9 +262,6 @@ mod tests {
         error!(err_ref; target: "my_target", "hello {}", "world");
         error!(err_ref2; "hello {}", "world");
         error!("hello {}", "world");
-
-        let err = MockError::with_backtrace(StatusCode::Internal);
-        error!(err; "Error with backtrace hello {}", "world");
 
         let root_err = MockError::with_source(err);
         error!(root_err; "Error with source hello {}", "world");

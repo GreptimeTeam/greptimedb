@@ -114,10 +114,6 @@ impl ErrorExt for Error {
         StatusCode::Internal
     }
 
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        ErrorCompat::backtrace(self)
-    }
-
     fn as_any(&self) -> &dyn Any {
         self
     }

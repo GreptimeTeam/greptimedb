@@ -33,9 +33,9 @@ impl<'a, E: ErrorExt + ?Sized> fmt::Debug for DebugFormat<'a, E> {
             // Source error use debug format for more verbose info.
             write!(f, " Caused by: {source:?}")?;
         }
-        if let Some(backtrace) = self.0.backtrace_opt() {
+        if let Some(location) = self.0.location_opt() {
             // Add a newline to separate causes and backtrace.
-            write!(f, "\nBacktrace:\n{backtrace}")?;
+            write!(f, " at: {location}")?;
         }
 
         Ok(())
@@ -47,7 +47,7 @@ mod tests {
     use std::any::Any;
 
     use snafu::prelude::*;
-    use snafu::{Backtrace, GenerateImplicitData, Location};
+    use snafu::{GenerateImplicitData, Location};
 
     use super::*;
 
@@ -56,7 +56,7 @@ mod tests {
     struct Leaf;
 
     impl ErrorExt for Leaf {
-        fn backtrace_opt(&self) -> Option<&Backtrace> {
+        fn location_opt(&self) -> Option<Location> {
             None
         }
 
@@ -66,14 +66,14 @@ mod tests {
     }
 
     #[derive(Debug, Snafu)]
-    #[snafu(display("This is a leaf with backtrace"))]
-    struct LeafWithBacktrace {
-        backtrace: Backtrace,
+    #[snafu(display("This is a leaf with location"))]
+    struct LeafWithLocation {
+        location: Location,
     }
 
-    impl ErrorExt for LeafWithBacktrace {
-        fn backtrace_opt(&self) -> Option<&Backtrace> {
-            Some(&self.backtrace)
+    impl ErrorExt for LeafWithLocation {
+        fn location_opt(&self) -> Option<Location> {
+            None
         }
 
         fn as_any(&self) -> &dyn Any {
@@ -90,7 +90,7 @@ mod tests {
     }
 
     impl ErrorExt for Internal {
-        fn backtrace_opt(&self) -> Option<&Backtrace> {
+        fn location_opt(&self) -> Option<Location> {
             None
         }
 
@@ -106,19 +106,21 @@ mod tests {
         let msg = format!("{:?}", DebugFormat::new(&err));
         assert_eq!("This is a leaf error.", msg);
 
-        let err = LeafWithBacktrace {
-            backtrace: Backtrace::generate(),
+        let err = LeafWithLocation {
+            location: Location::generate(),
         };
 
+        // TODO(ruihang): display location here
         let msg = format!("{:?}", DebugFormat::new(&err));
-        assert!(msg.starts_with("This is a leaf with backtrace.\nBacktrace:\n"));
+        assert!(msg.starts_with("This is a leaf with location."));
 
         let err = Internal {
             source: Leaf,
             location: Location::generate(),
         };
 
+        // TODO(ruihang): display location here
         let msg = format!("{:?}", DebugFormat::new(&err));
-        assert!(msg.contains("Internal error. Caused by: Leaf\nBacktrace:\n"));
+        assert!(msg.contains("Internal error. Caused by: Leaf"));
     }
 }

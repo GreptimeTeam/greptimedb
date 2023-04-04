@@ -23,10 +23,12 @@ pub trait ErrorExt: std::error::Error {
         StatusCode::Unknown
     }
 
-    /// Get the reference to the backtrace of this error, None if the backtrace is unavailable.
-    // Add `_opt` suffix to avoid confusing with similar method in `std::error::Error`, once backtrace
-    // in std is stable, we can deprecate this method.
-    fn backtrace_opt(&self) -> Option<&crate::snafu::Backtrace>;
+    // TODO(ruihang): remove this default implementation
+    /// Get the location of this error, None if the location is unavailable.
+    /// Add `_opt` suffix to avoid confusing with similar method in `std::error::Error`
+    fn location_opt(&self) -> Option<crate::snafu::Location> {
+        None
+    }
 
     /// Returns the error as [Any](std::any::Any) so that it can be
     /// downcast to a specific implementation.
@@ -71,8 +73,8 @@ impl crate::ext::ErrorExt for BoxedError {
         self.inner.status_code()
     }
 
-    fn backtrace_opt(&self) -> Option<&crate::snafu::Backtrace> {
-        self.inner.backtrace_opt()
+    fn location_opt(&self) -> Option<crate::snafu::Location> {
+        self.inner.location_opt()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -84,7 +86,7 @@ impl crate::ext::ErrorExt for BoxedError {
 // via `ErrorCompat::backtrace()`.
 impl crate::snafu::ErrorCompat for BoxedError {
     fn backtrace(&self) -> Option<&crate::snafu::Backtrace> {
-        self.inner.backtrace_opt()
+        None
     }
 }
 
@@ -118,70 +120,11 @@ impl crate::ext::ErrorExt for PlainError {
         self.status_code
     }
 
-    fn backtrace_opt(&self) -> Option<&crate::snafu::Backtrace> {
+    fn location_opt(&self) -> Option<crate::snafu::Location> {
         None
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
         self as _
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::error::Error;
-
-    use snafu::ErrorCompat;
-
-    use super::*;
-    use crate::format::DebugFormat;
-    use crate::mock::MockError;
-
-    #[test]
-    fn test_opaque_error_without_backtrace() {
-        let err = BoxedError::new(MockError::new(StatusCode::Internal));
-        assert!(err.backtrace_opt().is_none());
-        assert_eq!(StatusCode::Internal, err.status_code());
-        assert!(err.as_any().downcast_ref::<MockError>().is_some());
-        assert!(err.source().is_none());
-
-        assert!(ErrorCompat::backtrace(&err).is_none());
-    }
-
-    #[test]
-    fn test_opaque_error_with_backtrace() {
-        let err = BoxedError::new(MockError::with_backtrace(StatusCode::Internal));
-        assert!(err.backtrace_opt().is_some());
-        assert_eq!(StatusCode::Internal, err.status_code());
-        assert!(err.as_any().downcast_ref::<MockError>().is_some());
-        assert!(err.source().is_none());
-
-        assert!(ErrorCompat::backtrace(&err).is_some());
-
-        let msg = format!("{err:?}");
-        assert!(msg.contains("\nBacktrace:\n"));
-        let fmt_msg = format!("{:?}", DebugFormat::new(&err));
-        assert_eq!(msg, fmt_msg);
-
-        let msg = err.to_string();
-        msg.contains("Internal");
-    }
-
-    #[test]
-    fn test_opaque_error_with_source() {
-        let leaf_err = MockError::with_backtrace(StatusCode::Internal);
-        let internal_err = MockError::with_source(leaf_err);
-        let err = BoxedError::new(internal_err);
-
-        assert!(err.backtrace_opt().is_some());
-        assert_eq!(StatusCode::Internal, err.status_code());
-        assert!(err.as_any().downcast_ref::<MockError>().is_some());
-        assert!(err.source().is_some());
-
-        let msg = format!("{err:?}");
-        assert!(msg.contains("\nBacktrace:\n"));
-        assert!(msg.contains("Caused by"));
-
-        assert!(ErrorCompat::backtrace(&err).is_some());
     }
 }

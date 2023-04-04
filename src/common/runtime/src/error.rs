@@ -44,11 +44,15 @@ pub enum Error {
 }
 
 impl ErrorExt for Error {
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        ErrorCompat::backtrace(self)
-    }
-
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn location_opt(&self) -> Option<common_error::snafu::Location> {
+        match self {
+            Error::BuildRuntime { location, .. }
+            | Error::IllegalState { location, .. }
+            | Error::WaitGcTaskStop { location, .. } => Some(*location),
+        }
     }
 }

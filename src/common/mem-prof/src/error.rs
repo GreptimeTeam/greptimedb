@@ -56,10 +56,6 @@ impl ErrorExt for Error {
         }
     }
 
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        snafu::ErrorCompat::backtrace(self)
-    }
-
     fn as_any(&self) -> &dyn Any {
         self
     }

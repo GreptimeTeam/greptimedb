@@ -76,10 +76,6 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl ErrorExt for Error {
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        ErrorCompat::backtrace(self)
-    }
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }

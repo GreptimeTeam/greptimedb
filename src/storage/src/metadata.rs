@@ -148,10 +148,6 @@ impl ErrorExt for Error {
         StatusCode::InvalidArguments
     }
 
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        ErrorCompat::backtrace(self)
-    }
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }

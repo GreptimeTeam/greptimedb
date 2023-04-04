@@ -74,10 +74,6 @@ impl ErrorExt for Error {
         }
     }
 
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        ErrorCompat::backtrace(self)
-    }
-
     fn as_any(&self) -> &dyn Any {
         self
     }

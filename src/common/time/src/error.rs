@@ -18,7 +18,7 @@ use std::num::TryFromIntError;
 use chrono::ParseError;
 use common_error::ext::ErrorExt;
 use common_error::prelude::StatusCode;
-use snafu::{Backtrace, ErrorCompat, Location, Snafu};
+use snafu::{Location, Snafu};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -50,12 +50,17 @@ impl ErrorExt for Error {
         }
     }
 
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        ErrorCompat::backtrace(self)
-    }
-
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn location_opt(&self) -> Option<common_error::snafu::Location> {
+        match self {
+            Error::ParseTimestamp { location, .. }
+            | Error::TimestampOverflow { location, .. }
+            | Error::ArithmeticOverflow { location, .. } => Some(*location),
+            Error::ParseDateStr { .. } => None,
+        }
     }
 }
 

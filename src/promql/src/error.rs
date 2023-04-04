@@ -125,9 +125,6 @@ impl ErrorExt for Error {
             Catalog { source } => source.status_code(),
         }
     }
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        ErrorCompat::backtrace(self)
-    }
 
     fn as_any(&self) -> &dyn Any {
         self

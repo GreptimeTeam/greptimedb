@@ -18,7 +18,7 @@ use std::io::{Read, Write};
 use bytes::{Buf, BufMut, BytesMut};
 use common_error::prelude::ErrorExt;
 use paste::paste;
-use snafu::{ensure, Backtrace, ErrorCompat, Location, ResultExt, Snafu};
+use snafu::{ensure, Location, ResultExt, Snafu};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -47,12 +47,16 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl ErrorExt for Error {
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        ErrorCompat::backtrace(self)
-    }
-
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn location_opt(&self) -> Option<common_error::snafu::Location> {
+        match self {
+            Error::Overflow { location, .. } => Some(*location),
+            Error::Underflow { location, .. } => Some(*location),
+            Error::Eof { location, .. } => Some(*location),
+        }
     }
 }
 
