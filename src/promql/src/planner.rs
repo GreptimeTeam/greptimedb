@@ -505,7 +505,7 @@ impl PromPlanner {
                 .chain(self.create_tag_column_exprs()?.into_iter())
                 .chain(Some(self.create_time_index_column_expr()?))
                 .collect::<Vec<_>>();
-            // reuse this variable for simplicy
+            // reuse this variable for simplicity
             table_scan = LogicalPlanBuilder::from(table_scan)
                 .project(exprs)
                 .context(DataFusionPlanningSnafu)?
