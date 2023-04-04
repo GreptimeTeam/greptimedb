@@ -64,8 +64,8 @@ const SPECIAL_TIME_FUNCTION: &str = "time";
 /// default value column name for empty metric
 const DEFAULT_VALUE_COLUMN: &str = "value";
 
-/// Special modifier to project value columns under multi-value mode
-const VALUE_COLUMN_MATCHER: &str = "__value__";
+/// Special modifier to project field columns under multi-field mode
+const FIELD_COLUMN_MATCHER: &str = "__field__";
 
 #[derive(Default, Debug, Clone)]
 struct PromPlannerContext {
@@ -404,7 +404,7 @@ impl PromPlanner {
             // TODO(ruihang): support other metric match ops
             if matcher.name == METRIC_NAME && matches!(matcher.op, MatchOp::Equal) {
                 self.ctx.table_name = Some(matcher.value.clone());
-            } else if matcher.name == VALUE_COLUMN_MATCHER {
+            } else if matcher.name == FIELD_COLUMN_MATCHER {
                 self.ctx
                     .value_column_matcher
                     .get_or_insert_default()
@@ -1789,7 +1789,7 @@ mod test {
         let cases = [
             // single equal matcher
             (
-                r#"some_metric{__value__="field_1"}"#,
+                r#"some_metric{__field__="field_1"}"#,
                 vec![
                     "some_metric.field_1",
                     "some_metric.tag_0",
@@ -1800,7 +1800,7 @@ mod test {
             ),
             // two equal matchers
             (
-                r#"some_metric{__value__="field_1", __value__="field_0"}"#,
+                r#"some_metric{__field__="field_1", __field__="field_0"}"#,
                 vec![
                     "some_metric.field_0",
                     "some_metric.field_1",
@@ -1812,7 +1812,7 @@ mod test {
             ),
             // single not_eq mathcer
             (
-                r#"some_metric{__value__!="field_1"}"#,
+                r#"some_metric{__field__!="field_1"}"#,
                 vec![
                     "some_metric.field_0",
                     "some_metric.field_2",
@@ -1824,7 +1824,7 @@ mod test {
             ),
             // two not_eq mathcers
             (
-                r#"some_metric{__value__!="field_1", __value__!="field_2"}"#,
+                r#"some_metric{__field__!="field_1", __field__!="field_2"}"#,
                 vec![
                     "some_metric.field_0",
                     "some_metric.tag_0",
@@ -1835,7 +1835,7 @@ mod test {
             ),
             // equal and not_eq matchers (no conflict)
             (
-                r#"some_metric{__value__="field_1", __value__!="field_0"}"#,
+                r#"some_metric{__field__="field_1", __field__!="field_0"}"#,
                 vec![
                     "some_metric.field_1",
                     "some_metric.tag_0",
@@ -1846,7 +1846,7 @@ mod test {
             ),
             // equal and not_eq matchers (conflict)
             (
-                r#"some_metric{__value__="field_2", __value__!="field_2"}"#,
+                r#"some_metric{__field__="field_2", __field__!="field_2"}"#,
                 vec![
                     "some_metric.tag_0",
                     "some_metric.tag_1",
@@ -1856,7 +1856,7 @@ mod test {
             ),
             // single regex eq matcher
             (
-                r#"some_metric{__value__=~"field_1|field_2"}"#,
+                r#"some_metric{__field__=~"field_1|field_2"}"#,
                 vec![
                     "some_metric.field_1",
                     "some_metric.field_2",
@@ -1868,7 +1868,7 @@ mod test {
             ),
             // single regex not_eq matcher
             (
-                r#"some_metric{__value__!~"field_1|field_2"}"#,
+                r#"some_metric{__field__!~"field_1|field_2"}"#,
                 vec![
                     "some_metric.field_0",
                     "some_metric.tag_0",
