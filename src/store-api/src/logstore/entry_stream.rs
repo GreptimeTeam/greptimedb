@@ -44,7 +44,7 @@ mod tests {
     }
 
     use common_error::prelude::{ErrorExt, Snafu};
-    use snafu::{Backtrace, ErrorCompat};
+    
 
     #[derive(Debug, Snafu)]
     #[snafu(visibility(pub))]

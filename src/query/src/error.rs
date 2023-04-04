@@ -16,7 +16,7 @@ use std::any::Any;
 
 use common_error::prelude::*;
 use datafusion::error::DataFusionError;
-use snafu::{Backtrace, ErrorCompat, Location, Snafu};
+use snafu::{Location, Snafu};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]

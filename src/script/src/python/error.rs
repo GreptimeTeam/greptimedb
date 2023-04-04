@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_error::prelude::{ErrorCompat, ErrorExt, StatusCode};
+use common_error::prelude::{ErrorExt, StatusCode};
 use console::{style, Style};
 use datafusion::error::DataFusionError;
 use datatypes::arrow::error::ArrowError;

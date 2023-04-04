@@ -18,7 +18,7 @@ use common_error::ext::BoxedError;
 use common_error::prelude::ErrorExt;
 use common_error::status_code::StatusCode;
 use session::context::UserInfo;
-use snafu::{Backtrace, ErrorCompat, Location, OptionExt, Snafu};
+use snafu::{Location, OptionExt, Snafu};
 
 use crate::auth::user_provider::StaticUserProvider;
 
