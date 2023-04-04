@@ -100,6 +100,9 @@ pub enum Error {
 
     #[snafu(display("Zero range in range selector"))]
     ZeroRangeSelector { backtrace: Backtrace },
+
+    #[snafu(display("Cannot find column {col}"))]
+    ColumnNotFound { col: String, backtrace: Backtrace },
 }
 
 impl ErrorExt for Error {
@@ -113,7 +116,8 @@ impl ErrorExt for Error {
             | MultipleVector { .. }
             | ExpectExpr { .. }
             | ExpectRangeSelector { .. }
-            | ZeroRangeSelector { .. } => StatusCode::InvalidArguments,
+            | ZeroRangeSelector { .. }
+            | ColumnNotFound { .. } => StatusCode::InvalidArguments,
 
             UnknownTable { .. }
             | DataFusionPlanning { .. }
