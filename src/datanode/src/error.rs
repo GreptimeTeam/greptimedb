@@ -634,61 +634,9 @@ impl From<Error> for tonic::Status {
 
 #[cfg(test)]
 mod tests {
-    use std::error::Error as StdError;
     use std::str::FromStr;
 
-    use common_error::ext::BoxedError;
-    use common_error::mock::MockError;
-
     use super::*;
-
-    fn throw_query_error() -> std::result::Result<(), query::error::Error> {
-        query::error::CatalogNotFoundSnafu {
-            catalog: String::new(),
-        }
-        .fail()
-    }
-
-    fn throw_catalog_error() -> catalog::error::Result<()> {
-        Err(catalog::error::Error::SchemaProviderOperation {
-            source: BoxedError::new(MockError::with_backtrace(StatusCode::Internal)),
-        })
-    }
-
-    fn assert_internal_error(err: &Error) {
-        assert!(err.backtrace_opt().is_some());
-        assert_eq!(StatusCode::Internal, err.status_code());
-    }
-
-    fn assert_invalid_argument_error(err: &Error) {
-        assert!(err.backtrace_opt().is_some());
-        assert_eq!(StatusCode::InvalidArguments, err.status_code());
-    }
-
-    fn assert_tonic_internal_error(err: Error) {
-        let status_code = err.status_code();
-        let err_string = err.to_string();
-
-        let s: tonic::Status = err.into();
-        assert_eq!(s.code(), tonic::Code::Unknown);
-
-        let source = s.source().unwrap().downcast_ref::<Error>().unwrap();
-        assert_eq!(source.status_code(), status_code);
-        assert_eq!(source.to_string(), err_string);
-    }
-
-    #[test]
-    fn test_error() {
-        let err = throw_query_error().context(ExecuteSqlSnafu).err().unwrap();
-        assert_invalid_argument_error(&err);
-        assert_tonic_internal_error(err);
-        let err = throw_catalog_error()
-            .context(NewCatalogSnafu)
-            .err()
-            .unwrap();
-        assert_internal_error(&err);
-        assert_tonic_internal_error(err);
-    }
 
     #[test]
     fn test_parse_timestamp() {

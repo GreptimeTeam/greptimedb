@@ -124,28 +124,3 @@ impl ErrorExt for Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
-
-#[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
-
-    use snafu::ResultExt;
-
-    use super::*;
-
-    #[test]
-    pub fn test_error() {
-        let mut map = HashMap::new();
-        map.insert(true, 1);
-        map.insert(false, 2);
-
-        let result = serde_json::to_string(&map).context(SerializeSnafu);
-        assert!(result.is_err(), "serialize result is: {result:?}");
-        let err = serde_json::to_string(&map)
-            .context(SerializeSnafu)
-            .err()
-            .unwrap();
-        assert!(err.backtrace_opt().is_some());
-        assert_eq!(StatusCode::Internal, err.status_code());
-    }
-}

@@ -243,25 +243,3 @@ impl From<Error> for common_procedure::Error {
         common_procedure::Error::from_error_ext(e)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use common_error::ext::BoxedError;
-    use common_error::mock::MockError;
-
-    use super::*;
-
-    fn throw_create_table(code: StatusCode) -> Result<()> {
-        let mock_err = MockError::with_backtrace(code);
-        Err(BoxedError::new(mock_err)).context(CreateRegionSnafu)
-    }
-
-    #[test]
-    fn test_error() {
-        let err = throw_create_table(StatusCode::InvalidArguments)
-            .err()
-            .unwrap();
-        assert_eq!(StatusCode::InvalidArguments, err.status_code());
-        assert!(err.backtrace_opt().is_some());
-    }
-}

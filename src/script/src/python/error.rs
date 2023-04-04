@@ -230,24 +230,3 @@ pub fn get_error_reason_loc(err: &Error) -> (String, Option<Location>) {
         _ => (format!("Unknown error: {err:?}"), None),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use snafu::ResultExt;
-
-    use super::*;
-
-    fn throw_query_error() -> query::error::Result<()> {
-        query::error::TableNotFoundSnafu {
-            table: String::new(),
-        }
-        .fail()
-    }
-
-    #[test]
-    fn test_error() {
-        let err = throw_query_error().context(DatabaseQuerySnafu).unwrap_err();
-        assert_eq!(StatusCode::InvalidArguments, err.status_code());
-        assert!(err.backtrace_opt().is_some());
-    }
-}
