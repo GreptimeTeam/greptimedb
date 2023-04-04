@@ -59,7 +59,7 @@ DESC TABLE test1;
 +-------+-------+------+---------+---------------+
 | Field | Type  | Null | Default | Semantic Type |
 +-------+-------+------+---------+---------------+
-| i     | Int32 | YES  |         | VALUE         |
+| i     | Int32 | YES  |         | FIELD         |
 | j     | Int64 | NO   |         | TIME INDEX    |
 +-------+-------+------+---------+---------------+
 
@@ -68,7 +68,7 @@ DESC TABLE test2;
 +-------+-------+------+---------+---------------+
 | Field | Type  | Null | Default | Semantic Type |
 +-------+-------+------+---------+---------------+
-| i     | Int32 | YES  |         | VALUE         |
+| i     | Int32 | YES  |         | FIELD         |
 | j     | Int64 | NO   |         | TIME INDEX    |
 +-------+-------+------+---------+---------------+
 
@@ -99,7 +99,7 @@ DESC TABLE test_pk;
 +-----------+---------+------+---------+---------------+
 | timestamp | Int64   | NO   |         | TIME INDEX    |
 | host      | String  | YES  |         | PRIMARY KEY   |
-| value     | Float64 | YES  |         | VALUE         |
+| value     | Float64 | YES  |         | FIELD         |
 +-----------+---------+------+---------+---------------+
 
 DROP TABLE test_pk;
