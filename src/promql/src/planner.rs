@@ -1892,5 +1892,18 @@ mod test {
             expected.sort();
             assert_eq!(fields, expected, "case: {:?}", case.0);
         }
+
+        let bad_cases = [
+            r#"some_metric{__field__="nonexistent"}"#,
+            r#"some_metric{__field__!="nonexistent"}"#,
+        ];
+
+        for case in bad_cases {
+            let prom_expr = parser::parse(case).unwrap();
+            eval_stmt.expr = prom_expr;
+            let table_provider = build_test_table_provider("some_metric".to_string(), 3, 3).await;
+            let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt.clone()).await;
+            assert!(plan.is_err(), "case: {:?}", case);
+        }
     }
 }
