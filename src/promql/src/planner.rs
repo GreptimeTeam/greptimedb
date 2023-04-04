@@ -80,7 +80,7 @@ struct PromPlannerContext {
     time_index_column: Option<String>,
     value_columns: Vec<String>,
     tag_columns: Vec<String>,
-    value_column_matcher: Option<Vec<Matcher>>,
+    field_column_matcher: Option<Vec<Matcher>>,
     /// The range in millisecond of range selector. None if there is no range selector.
     range: Option<Millisecond>,
 }
@@ -406,7 +406,7 @@ impl PromPlanner {
                 self.ctx.table_name = Some(matcher.value.clone());
             } else if matcher.name == FIELD_COLUMN_MATCHER {
                 self.ctx
-                    .value_column_matcher
+                    .field_column_matcher
                     .get_or_insert_default()
                     .push(matcher.clone());
             } else {
@@ -445,14 +445,14 @@ impl PromPlanner {
             .create_table_scan_plan(&table_name, filters.clone())
             .await?;
 
-        // make a projection plan if there is any `__value__` matcher
-        if let Some(value_matchers) = &self.ctx.value_column_matcher {
+        // make a projection plan if there is any `__field__` matcher
+        if let Some(field_matchers) = &self.ctx.field_column_matcher {
             let col_set = self.ctx.value_columns.iter().collect::<HashSet<_>>();
             // opt-in set
             let mut result_set = HashSet::new();
             // opt-out set
             let mut reverse_set = HashSet::new();
-            for matcher in value_matchers {
+            for matcher in field_matchers {
                 match &matcher.op {
                     MatchOp::Equal => {
                         if col_set.contains(&matcher.value) {
