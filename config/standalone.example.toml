@@ -114,7 +114,8 @@ max_purge_tasks = 32
 checkpoint_margin = 10
 # Region manifest logs and checkpoints gc execution duration
 gc_duration = '30s'
-
+# Whether to try creating a manifest checkpoint on region opening
+checkpoint_on_startup = false
 
 # Procedure storage options.
 # Uncomment to enable.

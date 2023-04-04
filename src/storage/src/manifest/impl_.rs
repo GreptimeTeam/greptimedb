@@ -81,11 +81,15 @@ impl<S: 'static + Checkpoint<Error = Error>, M: 'static + MetaAction<Error = Err
         Self::new(manifest_dir, object_store, None, None, None)
     }
 
-    pub fn checkpointer(&self) -> &Option<Arc<dyn Checkpointer<Checkpoint = S, MetaAction = M>>> {
+    #[inline]
+    pub(crate) fn checkpointer(
+        &self,
+    ) -> &Option<Arc<dyn Checkpointer<Checkpoint = S, MetaAction = M>>> {
         &self.checkpointer
     }
 
-    pub fn set_last_checkpoint_version(&self, version: ManifestVersion) {
+    #[inline]
+    pub(crate) fn set_last_checkpoint_version(&self, version: ManifestVersion) {
         self.last_checkpoint_version
             .store(version, Ordering::Relaxed);
     }
@@ -95,7 +99,7 @@ impl<S: 'static + Checkpoint<Error = Error>, M: 'static + MetaAction<Error = Err
         self.inner.update_state(version, protocol);
     }
 
-    pub async fn save_checkpoint(&self, checkpoint: &RegionCheckpoint) -> Result<()> {
+    pub(crate) async fn save_checkpoint(&self, checkpoint: &RegionCheckpoint) -> Result<()> {
         ensure!(
             checkpoint
                 .protocol
@@ -111,8 +115,19 @@ impl<S: 'static + Checkpoint<Error = Error>, M: 'static + MetaAction<Error = Err
             .await
     }
 
+    pub(crate) async fn may_do_checkpoint(&self, version: ManifestVersion) -> Result<()> {
+        if version - self.last_checkpoint_version.load(Ordering::Relaxed)
+            >= self.checkpoint_actions_margin as u64
+        {
+            let s = self.do_checkpoint().await?;
+            debug!("Manifest checkpoint, checkpoint: {:#?}", s);
+        }
+
+        Ok(())
+    }
+
     #[inline]
-    pub fn manifest_store(&self) -> &Arc<ManifestObjectStore> {
+    pub(crate) fn manifest_store(&self) -> &Arc<ManifestObjectStore> {
         self.inner.manifest_store()
     }
 }
@@ -128,12 +143,8 @@ impl<S: 'static + Checkpoint<Error = Error>, M: 'static + MetaAction<Error = Err
 
     async fn update(&self, action_list: M) -> Result<ManifestVersion> {
         let version = self.inner.save(action_list).await?;
-        if version - self.last_checkpoint_version.load(Ordering::Relaxed)
-            >= self.checkpoint_actions_margin as u64
-        {
-            let s = self.do_checkpoint().await?;
-            debug!("Manifest checkpoint, checkpoint: {:#?}", s);
-        }
+
+        self.may_do_checkpoint(version).await?;
         Ok(version)
     }
 

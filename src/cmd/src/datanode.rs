@@ -224,6 +224,7 @@ mod tests {
             [storage.manifest]
             checkpoint_margin = 9
             gc_duration = '7s'
+            checkpoint_on_startup = true
         "#;
         write!(file, "{}", toml_str).unwrap();
 
@@ -275,6 +276,7 @@ mod tests {
             RegionManifestConfig {
                 checkpoint_margin: Some(9),
                 gc_duration: Some(Duration::from_secs(7)),
+                checkpoint_on_startup: true,
             },
             options.storage.manifest,
         );

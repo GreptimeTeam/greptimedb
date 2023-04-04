@@ -20,6 +20,7 @@ use common_base::readable_size::ReadableSize;
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
+    pub manifest_checkpoint_on_startup: bool,
     pub manifest_checkpoint_margin: Option<u16>,
     pub manifest_gc_duration: Option<Duration>,
     pub max_files_in_l0: usize,
@@ -30,6 +31,7 @@ pub struct EngineConfig {
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
+            manifest_checkpoint_on_startup: false,
             manifest_checkpoint_margin: Some(10),
             manifest_gc_duration: Some(Duration::from_secs(30)),
             max_files_in_l0: 8,
