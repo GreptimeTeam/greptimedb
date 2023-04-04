@@ -328,6 +328,12 @@ impl<S: LogStore> RegionImpl<S> {
             .replay(recovered_metadata_after_flushed, writer_ctx)
             .await?;
 
+        // Try to do a manifest checkpoint on opening
+        if store_config.engine_config.manifest_checkpoint_on_startup {
+            let manifest = &store_config.manifest;
+            manifest.may_do_checkpoint(manifest.last_version()).await?;
+        }
+
         let inner = Arc::new(RegionInner {
             shared,
             writer,
