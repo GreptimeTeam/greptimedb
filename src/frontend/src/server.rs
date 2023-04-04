@@ -23,6 +23,7 @@ use servers::auth::UserProviderRef;
 use servers::error::Error::InternalIo;
 use servers::grpc::GrpcServer;
 use servers::http::HttpServerBuilder;
+use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::opentsdb::OpentsdbServer;
 use servers::postgres::PostgresServer;
@@ -175,6 +176,7 @@ impl Services {
             ) {
                 http_server_builder.with_prom_handler(instance.clone());
             }
+            http_server_builder.with_metrics_handler(MetricsHandler);
             http_server_builder.with_script_handler(instance.clone());
             let http_server = http_server_builder.build();
             result.push((Box::new(http_server), http_addr));
