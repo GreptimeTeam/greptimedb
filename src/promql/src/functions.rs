@@ -26,12 +26,14 @@ pub use aggr_over_time::{
     AbsentOverTime, AvgOverTime, CountOverTime, LastOverTime, MaxOverTime, MinOverTime,
     PresentOverTime, StddevOverTime, StdvarOverTime, SumOverTime,
 };
+pub use changes::Changes;
 use datafusion::arrow::array::ArrayRef;
 use datafusion::error::DataFusionError;
 use datafusion::physical_plan::ColumnarValue;
 pub use extrapolate_rate::{Delta, Increase, Rate};
 pub use idelta::IDelta;
 pub use quantile::QuantileOverTime;
+pub use resets::Resets;
 
 pub(crate) fn extract_array(columnar_value: &ColumnarValue) -> Result<ArrayRef, DataFusionError> {
     if let ColumnarValue::Array(array) = columnar_value {

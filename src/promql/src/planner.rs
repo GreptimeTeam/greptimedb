@@ -32,7 +32,7 @@ use datafusion::prelude::{Column, Expr as DfExpr, JoinType};
 use datafusion::scalar::ScalarValue;
 use datafusion::sql::TableReference;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
-use promql_parser::label::{MatchOp, Matchers, METRIC_NAME};
+use promql_parser::label::{MatchOp, Matcher, Matchers, METRIC_NAME};
 use promql_parser::parser::{
     token, AggModifier, AggregateExpr, BinaryExpr as PromBinaryExpr, Call, EvalStmt,
     Expr as PromExpr, Function, MatrixSelector, NumberLiteral, Offset, ParenExpr, StringLiteral,
@@ -42,17 +42,18 @@ use snafu::{ensure, OptionExt, ResultExt};
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::error::{
-    CatalogSnafu, DataFusionPlanningSnafu, ExpectExprSnafu, ExpectRangeSelectorSnafu,
-    MultipleVectorSnafu, Result, TableNameNotFoundSnafu, TimeIndexNotFoundSnafu,
-    UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu, UnsupportedExprSnafu,
-    ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
+    CatalogSnafu, ColumnNotFoundSnafu, DataFusionPlanningSnafu, ExpectExprSnafu,
+    ExpectRangeSelectorSnafu, MultipleVectorSnafu, Result, TableNameNotFoundSnafu,
+    TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu,
+    UnsupportedExprSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
 };
 use crate::extension_plan::{
     EmptyMetric, InstantManipulate, Millisecond, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
 use crate::functions::{
-    AbsentOverTime, AvgOverTime, CountOverTime, Delta, IDelta, Increase, LastOverTime, MaxOverTime,
-    MinOverTime, PresentOverTime, QuantileOverTime, Rate, SumOverTime,
+    AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, IDelta, Increase, LastOverTime,
+    MaxOverTime, MinOverTime, PresentOverTime, QuantileOverTime, Rate, Resets, StddevOverTime,
+    StdvarOverTime, SumOverTime,
 };
 
 const LEFT_PLAN_JOIN_ALIAS: &str = "lhs";
@@ -62,6 +63,9 @@ const SPECIAL_TIME_FUNCTION: &str = "time";
 
 /// default value column name for empty metric
 const DEFAULT_VALUE_COLUMN: &str = "value";
+
+/// Special modifier to project field columns under multi-field mode
+const FIELD_COLUMN_MATCHER: &str = "__field__";
 
 #[derive(Default, Debug, Clone)]
 struct PromPlannerContext {
@@ -76,6 +80,7 @@ struct PromPlannerContext {
     time_index_column: Option<String>,
     value_columns: Vec<String>,
     tag_columns: Vec<String>,
+    field_column_matcher: Option<Vec<Matcher>>,
     /// The range in millisecond of range selector. None if there is no range selector.
     range: Option<Millisecond>,
 }
@@ -399,6 +404,11 @@ impl PromPlanner {
             // TODO(ruihang): support other metric match ops
             if matcher.name == METRIC_NAME && matches!(matcher.op, MatchOp::Equal) {
                 self.ctx.table_name = Some(matcher.value.clone());
+            } else if matcher.name == FIELD_COLUMN_MATCHER {
+                self.ctx
+                    .field_column_matcher
+                    .get_or_insert_default()
+                    .push(matcher.clone());
             } else {
                 matchers.insert(matcher.clone());
             }
@@ -431,9 +441,77 @@ impl PromPlanner {
         )));
 
         // make table scan with filter exprs
-        let table_scan = self
+        let mut table_scan = self
             .create_table_scan_plan(&table_name, filters.clone())
             .await?;
+
+        // make a projection plan if there is any `__field__` matcher
+        if let Some(field_matchers) = &self.ctx.field_column_matcher {
+            let col_set = self.ctx.value_columns.iter().collect::<HashSet<_>>();
+            // opt-in set
+            let mut result_set = HashSet::new();
+            // opt-out set
+            let mut reverse_set = HashSet::new();
+            for matcher in field_matchers {
+                match &matcher.op {
+                    MatchOp::Equal => {
+                        if col_set.contains(&matcher.value) {
+                            result_set.insert(matcher.value.clone());
+                        } else {
+                            return Err(ColumnNotFoundSnafu {
+                                col: self.ctx.table_name.clone().unwrap(),
+                            }
+                            .build());
+                        }
+                    }
+                    MatchOp::NotEqual => {
+                        if col_set.contains(&matcher.value) {
+                            reverse_set.insert(matcher.value.clone());
+                        } else {
+                            return Err(ValueNotFoundSnafu {
+                                table: self.ctx.table_name.clone().unwrap(),
+                            }
+                            .build());
+                        }
+                    }
+                    MatchOp::Re(regex) => {
+                        for col in &self.ctx.value_columns {
+                            if regex.is_match(col) {
+                                result_set.insert(col.clone());
+                            }
+                        }
+                    }
+                    MatchOp::NotRe(regex) => {
+                        for col in &self.ctx.value_columns {
+                            if regex.is_match(col) {
+                                reverse_set.insert(col.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            // merge two set
+            if result_set.is_empty() {
+                result_set = col_set.into_iter().cloned().collect();
+            }
+            for col in reverse_set {
+                result_set.remove(&col);
+            }
+
+            self.ctx.value_columns = result_set.iter().cloned().collect();
+            let exprs = result_set
+                .into_iter()
+                .map(|col| DfExpr::Column(col.into()))
+                .chain(self.create_tag_column_exprs()?.into_iter())
+                .chain(Some(self.create_time_index_column_expr()?))
+                .collect::<Vec<_>>();
+            // reuse this variable for simplicity
+            table_scan = LogicalPlanBuilder::from(table_scan)
+                .project(exprs)
+                .context(DataFusionPlanningSnafu)?
+                .build()
+                .context(DataFusionPlanningSnafu)?;
+        }
 
         // make filter and sort plan
         let sort_plan = LogicalPlanBuilder::from(table_scan)
@@ -684,6 +762,8 @@ impl PromPlanner {
             )),
             "idelta" => ScalarFunc::Udf(IDelta::<false>::scalar_udf()),
             "irate" => ScalarFunc::Udf(IDelta::<true>::scalar_udf()),
+            "resets" => ScalarFunc::Udf(Resets::scalar_udf()),
+            "changes" => ScalarFunc::Udf(Changes::scalar_udf()),
             "avg_over_time" => ScalarFunc::Udf(AvgOverTime::scalar_udf()),
             "min_over_time" => ScalarFunc::Udf(MinOverTime::scalar_udf()),
             "max_over_time" => ScalarFunc::Udf(MaxOverTime::scalar_udf()),
@@ -692,6 +772,8 @@ impl PromPlanner {
             "last_over_time" => ScalarFunc::Udf(LastOverTime::scalar_udf()),
             "absent_over_time" => ScalarFunc::Udf(AbsentOverTime::scalar_udf()),
             "present_over_time" => ScalarFunc::Udf(PresentOverTime::scalar_udf()),
+            "stddev_over_time" => ScalarFunc::Udf(StddevOverTime::scalar_udf()),
+            "stdvar_over_time" => ScalarFunc::Udf(StdvarOverTime::scalar_udf()),
             "quantile_over_time" => {
                 let quantile_expr = match other_input_exprs.get(0) {
                     Some(DfExpr::Literal(ScalarValue::Float64(Some(quantile)))) => *quantile,
@@ -1689,5 +1771,139 @@ mod test {
         );
 
         indie_query_plan_compare(query, expected).await;
+    }
+
+    #[tokio::test]
+    async fn value_matcher() {
+        // template
+        let mut eval_stmt = EvalStmt {
+            expr: PromExpr::NumberLiteral(NumberLiteral { val: 1.0 }),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let cases = [
+            // single equal matcher
+            (
+                r#"some_metric{__field__="field_1"}"#,
+                vec![
+                    "some_metric.field_1",
+                    "some_metric.tag_0",
+                    "some_metric.tag_1",
+                    "some_metric.tag_2",
+                    "some_metric.timestamp",
+                ],
+            ),
+            // two equal matchers
+            (
+                r#"some_metric{__field__="field_1", __field__="field_0"}"#,
+                vec![
+                    "some_metric.field_0",
+                    "some_metric.field_1",
+                    "some_metric.tag_0",
+                    "some_metric.tag_1",
+                    "some_metric.tag_2",
+                    "some_metric.timestamp",
+                ],
+            ),
+            // single not_eq mathcer
+            (
+                r#"some_metric{__field__!="field_1"}"#,
+                vec![
+                    "some_metric.field_0",
+                    "some_metric.field_2",
+                    "some_metric.tag_0",
+                    "some_metric.tag_1",
+                    "some_metric.tag_2",
+                    "some_metric.timestamp",
+                ],
+            ),
+            // two not_eq mathcers
+            (
+                r#"some_metric{__field__!="field_1", __field__!="field_2"}"#,
+                vec![
+                    "some_metric.field_0",
+                    "some_metric.tag_0",
+                    "some_metric.tag_1",
+                    "some_metric.tag_2",
+                    "some_metric.timestamp",
+                ],
+            ),
+            // equal and not_eq matchers (no conflict)
+            (
+                r#"some_metric{__field__="field_1", __field__!="field_0"}"#,
+                vec![
+                    "some_metric.field_1",
+                    "some_metric.tag_0",
+                    "some_metric.tag_1",
+                    "some_metric.tag_2",
+                    "some_metric.timestamp",
+                ],
+            ),
+            // equal and not_eq matchers (conflict)
+            (
+                r#"some_metric{__field__="field_2", __field__!="field_2"}"#,
+                vec![
+                    "some_metric.tag_0",
+                    "some_metric.tag_1",
+                    "some_metric.tag_2",
+                    "some_metric.timestamp",
+                ],
+            ),
+            // single regex eq matcher
+            (
+                r#"some_metric{__field__=~"field_1|field_2"}"#,
+                vec![
+                    "some_metric.field_1",
+                    "some_metric.field_2",
+                    "some_metric.tag_0",
+                    "some_metric.tag_1",
+                    "some_metric.tag_2",
+                    "some_metric.timestamp",
+                ],
+            ),
+            // single regex not_eq matcher
+            (
+                r#"some_metric{__field__!~"field_1|field_2"}"#,
+                vec![
+                    "some_metric.field_0",
+                    "some_metric.tag_0",
+                    "some_metric.tag_1",
+                    "some_metric.tag_2",
+                    "some_metric.timestamp",
+                ],
+            ),
+        ];
+
+        for case in cases {
+            let prom_expr = parser::parse(case.0).unwrap();
+            eval_stmt.expr = prom_expr;
+            let table_provider = build_test_table_provider("some_metric".to_string(), 3, 3).await;
+            let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt.clone())
+                .await
+                .unwrap();
+            let mut fields = plan.schema().field_names();
+            let mut expected = case.1.into_iter().map(String::from).collect::<Vec<_>>();
+            fields.sort();
+            expected.sort();
+            assert_eq!(fields, expected, "case: {:?}", case.0);
+        }
+
+        let bad_cases = [
+            r#"some_metric{__field__="nonexistent"}"#,
+            r#"some_metric{__field__!="nonexistent"}"#,
+        ];
+
+        for case in bad_cases {
+            let prom_expr = parser::parse(case).unwrap();
+            eval_stmt.expr = prom_expr;
+            let table_provider = build_test_table_provider("some_metric".to_string(), 3, 3).await;
+            let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt.clone()).await;
+            assert!(plan.is_err(), "case: {:?}", case);
+        }
     }
 }
