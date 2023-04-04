@@ -40,6 +40,9 @@ pub fn drive(times: &TimestampMillisecondArray, values: &Float64Array) -> Option
     }
 }
 
+/// linear_regression performs a least-square linear regression analysis on the
+/// times and values. It return the slope and intercept based on times and values.
+/// Prometheus's implementation: https://github.com/prometheus/prometheus/blob/90b2f7a540b8a70d8d81372e6692dcbb67ccbaaa/promql/functions.go#L793-L837
 fn linear_regression(
     times: &TimestampMillisecondArray,
     values: &Float64Array,
