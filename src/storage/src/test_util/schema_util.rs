@@ -58,9 +58,9 @@ pub fn new_schema_ref(column_defs: &[ColumnDef], timestamp_index: Option<usize>)
     Arc::new(new_schema(column_defs, timestamp_index))
 }
 
-pub fn new_region_schema(version: u32, num_value_columns: usize) -> RegionSchema {
+pub fn new_region_schema(version: u32, num_field_columns: usize) -> RegionSchema {
     let metadata: RegionMetadata =
-        descriptor_util::desc_with_value_columns("REGION_NAME", num_value_columns)
+        descriptor_util::desc_with_field_columns("REGION_NAME", num_field_columns)
             .try_into()
             .unwrap();
 

@@ -51,7 +51,7 @@ impl EmptyMetric {
         end: Millisecond,
         interval: Millisecond,
         time_index_column_name: String,
-        value_column_name: String,
+        field_column_name: String,
     ) -> DataFusionResult<Self> {
         let schema = Arc::new(DFSchema::new_with_metadata(
             vec![
@@ -61,7 +61,7 @@ impl EmptyMetric {
                     DataType::Timestamp(TimeUnit::Millisecond, None),
                     false,
                 ),
-                DFField::new(Some(""), &value_column_name, DataType::Float64, true),
+                DFField::new(Some(""), &field_column_name, DataType::Float64, true),
             ],
             HashMap::new(),
         )?);
@@ -253,11 +253,11 @@ mod test {
         end: Millisecond,
         interval: Millisecond,
         time_column_name: String,
-        value_column_name: String,
+        field_column_name: String,
         expected: String,
     ) {
         let empty_metric =
-            EmptyMetric::new(start, end, interval, time_column_name, value_column_name).unwrap();
+            EmptyMetric::new(start, end, interval, time_column_name, field_column_name).unwrap();
         let empty_metric_exec = empty_metric.to_execution_plan();
 
         let session_context = SessionContext::default();

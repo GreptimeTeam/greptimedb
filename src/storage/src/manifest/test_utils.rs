@@ -27,7 +27,7 @@ pub fn build_region_meta() -> RegionMetadata {
     let desc = RegionDescBuilder::new(region_name)
         .id(0)
         .push_key_column(("k1", LogicalTypeId::Int32, false))
-        .push_value_column(("v1", LogicalTypeId::Float32, true))
+        .push_field_column(("v1", LogicalTypeId::Float32, true))
         .build();
     desc.try_into().unwrap()
 }
@@ -37,8 +37,8 @@ pub fn build_altered_region_meta() -> RegionMetadata {
     let desc = RegionDescBuilder::new(region_name)
         .id(0)
         .push_key_column(("k1", LogicalTypeId::Int32, false))
-        .push_value_column(("v1", LogicalTypeId::Float32, true))
-        .push_value_column(("v2", LogicalTypeId::Float32, true))
+        .push_field_column(("v1", LogicalTypeId::Float32, true))
+        .push_field_column(("v2", LogicalTypeId::Float32, true))
         .build();
     desc.try_into().unwrap()
 }

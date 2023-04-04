@@ -388,11 +388,11 @@ mod test {
             180_000, 240_000, // every 60s
             241_000, 271_000, 291_000, // others
         ])) as _;
-        let value_column = Arc::new(Float64Array::from_slice([1.0; 10])) as _;
+        let field_column = Arc::new(Float64Array::from_slice([1.0; 10])) as _;
         let path_column = Arc::new(StringArray::from_slice(["foo"; 10])) as _;
         let data = RecordBatch::try_new(
             schema.clone(),
-            vec![timestamp_column, value_column, path_column],
+            vec![timestamp_column, field_column, path_column],
         )
         .unwrap();
 
