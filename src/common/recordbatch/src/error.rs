@@ -18,6 +18,7 @@ use std::any::Any;
 use common_error::ext::BoxedError;
 use common_error::prelude::*;
 use datatypes::prelude::ConcreteDataType;
+use snafu::Location;
 
 pub type Result<T> = std::result::Result<T, Error>;
 

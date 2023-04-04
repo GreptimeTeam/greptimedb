@@ -21,7 +21,7 @@ use common_error::prelude::*;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Metadata};
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt};
+use snafu::{ensure, Location, OptionExt};
 use store_api::storage::consts::{self, ReservedColumnId};
 use store_api::storage::{
     AddColumn, AlterOperation, AlterRequest, ColumnDescriptor, ColumnDescriptorBuilder,

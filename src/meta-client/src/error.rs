@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use common_error::prelude::*;
+use snafu::Location;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]

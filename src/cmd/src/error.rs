@@ -16,6 +16,7 @@ use std::any::Any;
 
 use common_error::prelude::*;
 use rustyline::error::ReadlineError;
+use snafu::Location;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]

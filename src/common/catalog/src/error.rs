@@ -16,7 +16,7 @@ use std::any::Any;
 
 use common_error::ext::ErrorExt;
 use common_error::prelude::{Snafu, StatusCode};
-use snafu::{Backtrace, ErrorCompat};
+use snafu::{Backtrace, ErrorCompat, Location};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]

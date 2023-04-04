@@ -17,6 +17,7 @@ use std::string::FromUtf8Error;
 use std::sync::Arc;
 
 use common_error::prelude::*;
+use snafu::Location;
 
 use crate::procedure::ProcedureId;
 

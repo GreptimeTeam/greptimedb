@@ -15,6 +15,7 @@
 use std::any::Any;
 
 use common_error::prelude::*;
+use snafu::Location;
 use store_api::storage::RegionId;
 
 #[derive(Debug, Snafu)]

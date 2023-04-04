@@ -15,6 +15,7 @@
 use std::any::Any;
 
 use common_error::prelude::*;
+use snafu::Location;
 use tokio::task::JoinError;
 
 pub type Result<T> = std::result::Result<T, Error>;

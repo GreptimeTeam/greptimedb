@@ -18,7 +18,7 @@ use std::io::{Read, Write};
 use bytes::{Buf, BufMut, BytesMut};
 use common_error::prelude::ErrorExt;
 use paste::paste;
-use snafu::{ensure, Backtrace, ErrorCompat, ResultExt, Snafu};
+use snafu::{ensure, Backtrace, ErrorCompat, Location, ResultExt, Snafu};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]

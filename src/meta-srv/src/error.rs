@@ -15,6 +15,7 @@
 use std::string::FromUtf8Error;
 
 use common_error::prelude::*;
+use snafu::Location;
 use tokio::sync::mpsc::error::SendError;
 use tonic::codegen::http;
 use tonic::{Code, Status};

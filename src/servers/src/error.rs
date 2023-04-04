@@ -24,6 +24,7 @@ use catalog;
 use common_error::prelude::*;
 use query::parser::PromQuery;
 use serde_json::json;
+use snafu::Location;
 use tonic::codegen::http::{HeaderMap, HeaderValue};
 use tonic::metadata::MetadataMap;
 use tonic::Code;

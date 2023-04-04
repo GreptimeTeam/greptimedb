@@ -18,6 +18,7 @@ use common_error::prelude::*;
 use common_recordbatch::error::Error as RecordBatchError;
 use datafusion::error::DataFusionError;
 use datatypes::arrow::error::ArrowError;
+use snafu::Location;
 
 pub type Result<T> = std::result::Result<T, Error>;
 

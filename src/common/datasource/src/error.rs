@@ -15,6 +15,7 @@
 use std::any::Any;
 
 use common_error::prelude::*;
+use snafu::Location;
 use url::ParseError;
 
 #[derive(Debug, Snafu)]

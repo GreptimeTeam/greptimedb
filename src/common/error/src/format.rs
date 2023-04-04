@@ -47,7 +47,7 @@ mod tests {
     use std::any::Any;
 
     use snafu::prelude::*;
-    use snafu::{Backtrace, GenerateImplicitData};
+    use snafu::{Backtrace, GenerateImplicitData, Location};
 
     use super::*;
 
@@ -68,7 +68,7 @@ mod tests {
     #[derive(Debug, Snafu)]
     #[snafu(display("This is a leaf with backtrace"))]
     struct LeafWithBacktrace {
-        location: Location,
+        backtrace: Backtrace,
     }
 
     impl ErrorExt for LeafWithBacktrace {
@@ -91,7 +91,7 @@ mod tests {
 
     impl ErrorExt for Internal {
         fn backtrace_opt(&self) -> Option<&Backtrace> {
-            Some(&self.backtrace)
+            None
         }
 
         fn as_any(&self) -> &dyn Any {
@@ -107,7 +107,7 @@ mod tests {
         assert_eq!("This is a leaf error.", msg);
 
         let err = LeafWithBacktrace {
-            location: Location::generate(),
+            backtrace: Backtrace::generate(),
         };
 
         let msg = format!("{:?}", DebugFormat::new(&err));

@@ -18,7 +18,7 @@ use std::num::TryFromIntError;
 use chrono::ParseError;
 use common_error::ext::ErrorExt;
 use common_error::prelude::StatusCode;
-use snafu::{Backtrace, ErrorCompat, Snafu};
+use snafu::{Backtrace, ErrorCompat, Location, Snafu};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]

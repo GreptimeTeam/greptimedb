@@ -23,7 +23,7 @@ use rustpython_parser::ast::Location;
 use rustpython_parser::error::ParseError;
 pub use snafu::ensure;
 use snafu::prelude::Snafu;
-use snafu::Backtrace;
+use snafu::{Backtrace, Location as SnafuLocation};
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub(crate) fn ret_other_error_with(reason: String) -> OtherSnafu<String> {
@@ -47,29 +47,32 @@ pub enum Error {
 
     #[snafu(display("Failed to parse script, source: {}", source))]
     PyParse {
-        location: Location,
+        location: SnafuLocation,
         source: ParseError,
     },
 
     #[snafu(display("Failed to compile script, source: {}", source))]
     PyCompile {
-        location: Location,
+        location: SnafuLocation,
         source: CodegenError,
     },
 
     /// rustpython problem, using python virtual machines' backtrace instead
     #[snafu(display("Python Runtime error, error: {}", msg))]
-    PyRuntime { msg: String, location: Location },
+    PyRuntime {
+        msg: String,
+        location: SnafuLocation,
+    },
 
     #[snafu(display("Arrow error: {}", source))]
     Arrow {
-        location: Location,
+        location: SnafuLocation,
         source: ArrowError,
     },
 
     #[snafu(display("DataFusion error: {}", source))]
     DataFusion {
-        location: Location,
+        location: SnafuLocation,
         source: DataFusionError,
     },
 
@@ -81,7 +84,7 @@ pub enum Error {
                         "".into()
                     }))]
     CoprParse {
-        location: Location,
+        location: SnafuLocation,
         reason: String,
         // location is option because maybe errors can't give a clear location?
         loc: Option<Location>,
@@ -89,13 +92,19 @@ pub enum Error {
 
     /// Other types of error that isn't any of above
     #[snafu(display("Coprocessor's Internal error: {}", reason))]
-    Other { location: Location, reason: String },
+    Other {
+        location: SnafuLocation,
+        reason: String,
+    },
 
     #[snafu(display("Unsupported sql in coprocessor: {}", sql))]
-    UnsupportedSql { sql: String, location: Location },
+    UnsupportedSql {
+        sql: String,
+        location: SnafuLocation,
+    },
 
     #[snafu(display("Missing sql in coprocessor"))]
-    MissingSql { location: Location },
+    MissingSql { location: SnafuLocation },
 
     #[snafu(display("Failed to retrieve record batches, source: {}", source))]
     RecordBatch {

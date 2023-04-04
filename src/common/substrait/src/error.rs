@@ -18,7 +18,7 @@ use common_error::prelude::{BoxedError, ErrorExt, StatusCode};
 use datafusion::error::DataFusionError;
 use datatypes::prelude::ConcreteDataType;
 use prost::{DecodeError, EncodeError};
-use snafu::{Backtrace, ErrorCompat, Snafu};
+use snafu::{Backtrace, ErrorCompat, Location, Snafu};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]

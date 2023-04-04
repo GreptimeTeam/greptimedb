@@ -16,7 +16,7 @@ use std::any::Any;
 use std::io;
 
 use common_error::prelude::{ErrorExt, StatusCode};
-use snafu::{Backtrace, ErrorCompat, Snafu};
+use snafu::{Backtrace, ErrorCompat, Location, Snafu};
 
 pub type Result<T> = std::result::Result<T, Error>;
 

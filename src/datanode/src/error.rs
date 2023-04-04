@@ -18,6 +18,7 @@ use common_datasource::error::Error as DataSourceError;
 use common_error::prelude::*;
 use common_procedure::ProcedureId;
 use datafusion::parquet;
+use snafu::Location;
 use storage::error::Error as StorageError;
 use table::error::Error as TableError;
 use url::ParseError;

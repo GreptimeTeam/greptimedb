@@ -21,6 +21,7 @@ use common_runtime::error::Error as RuntimeError;
 use datatypes::arrow::error::ArrowError;
 use datatypes::prelude::ConcreteDataType;
 use serde_json::error::Error as JsonError;
+use snafu::Location;
 use store_api::manifest::action::ProtocolVersion;
 use store_api::manifest::ManifestVersion;
 use store_api::storage::{RegionId, SequenceNumber};

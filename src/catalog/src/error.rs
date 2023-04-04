@@ -19,7 +19,7 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::prelude::{Snafu, StatusCode};
 use datafusion::error::DataFusionError;
 use datatypes::prelude::ConcreteDataType;
-use snafu::{Backtrace, ErrorCompat};
+use snafu::{Backtrace, ErrorCompat, Location};
 
 use crate::DeregisterTableRequest;
 

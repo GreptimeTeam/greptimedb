@@ -16,6 +16,7 @@ use std::any::Any;
 
 use common_error::ext::BoxedError;
 use common_error::prelude::*;
+use snafu::Location;
 use store_api::storage::RegionNumber;
 use table::metadata::{TableInfoBuilderError, TableMetaBuilderError, TableVersion};
 
