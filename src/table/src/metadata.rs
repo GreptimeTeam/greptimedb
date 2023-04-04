@@ -138,7 +138,7 @@ impl TableMeta {
             .map(|idx| &columns_schemas[*idx].name)
     }
 
-    pub fn value_column_names(&self) -> impl Iterator<Item = &String> {
+    pub fn field_column_names(&self) -> impl Iterator<Item = &String> {
         let columns_schemas = &self.schema.column_schemas();
         self.value_indices.iter().filter_map(|idx| {
             let column = &columns_schemas[*idx];

@@ -32,7 +32,7 @@ use crate::write_batch::WriteBatch;
 
 /// Create metadata with schema (k0, timestamp, v0, v1)
 fn new_metadata(region_name: &str) -> RegionMetadata {
-    let desc = descriptor_util::desc_with_value_columns(region_name, 2);
+    let desc = descriptor_util::desc_with_field_columns(region_name, 2);
     desc.try_into().unwrap()
 }
 

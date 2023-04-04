@@ -32,8 +32,8 @@ pub fn schema_for_test() -> RegionSchemaRef {
     // Just build a region desc and use its columns metadata.
     let desc = RegionDescBuilder::new("test")
         .enable_version_column(true)
-        .push_value_column(("v0", LogicalTypeId::UInt64, true))
-        .push_value_column(("v1", LogicalTypeId::UInt64, true))
+        .push_field_column(("v0", LogicalTypeId::UInt64, true))
+        .push_field_column(("v1", LogicalTypeId::UInt64, true))
         .build();
     let metadata: RegionMetadata = desc.try_into().unwrap();
 

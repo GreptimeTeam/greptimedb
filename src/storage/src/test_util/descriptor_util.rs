@@ -76,7 +76,7 @@ impl RegionDescBuilder {
         self
     }
 
-    pub fn push_value_column(mut self, column_def: ColumnDef) -> Self {
+    pub fn push_field_column(mut self, column_def: ColumnDef) -> Self {
         let column = self.new_column(column_def);
         self.default_cf_builder = self.default_cf_builder.push_column(column);
         self
@@ -125,12 +125,12 @@ impl RegionDescBuilder {
 }
 
 /// Create desc with schema (k0, timestamp, v0, ... vn-1)
-pub fn desc_with_value_columns(region_name: &str, num_value_columns: usize) -> RegionDescriptor {
+pub fn desc_with_field_columns(region_name: &str, num_field_columns: usize) -> RegionDescriptor {
     let mut builder =
         RegionDescBuilder::new(region_name).push_key_column(("k0", LogicalTypeId::Int64, false));
-    for i in 0..num_value_columns {
+    for i in 0..num_field_columns {
         let name = format!("v{i}");
-        builder = builder.push_value_column((&name, LogicalTypeId::Int64, true));
+        builder = builder.push_field_column((&name, LogicalTypeId::Int64, true));
     }
     builder.build()
 }

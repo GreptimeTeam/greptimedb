@@ -18,7 +18,7 @@ use api::v1::{column, Column, ColumnDataType, InsertRequest as GrpcInsertRequest
 use crate::error::{self, Result};
 
 pub const OPENTSDB_TIMESTAMP_COLUMN_NAME: &str = "greptime_timestamp";
-pub const OPENTSDB_VALUE_COLUMN_NAME: &str = "greptime_value";
+pub const OPENTSDB_FIELD_COLUMN_NAME: &str = "greptime_value";
 
 #[derive(Debug)]
 pub struct DataPoint {
@@ -139,8 +139,8 @@ impl DataPoint {
         };
         columns.push(ts_column);
 
-        let value_column = Column {
-            column_name: OPENTSDB_VALUE_COLUMN_NAME.to_string(),
+        let field_column = Column {
+            column_name: OPENTSDB_FIELD_COLUMN_NAME.to_string(),
             values: Some(column::Values {
                 f64_values: vec![self.value],
                 ..Default::default()
@@ -149,7 +149,7 @@ impl DataPoint {
             datatype: ColumnDataType::Float64 as i32,
             ..Default::default()
         };
-        columns.push(value_column);
+        columns.push(field_column);
 
         for (tagk, tagv) in self.tags.iter() {
             columns.push(Column {
@@ -273,7 +273,7 @@ mod test {
             vec![1000]
         );
 
-        assert_eq!(columns[1].column_name, OPENTSDB_VALUE_COLUMN_NAME);
+        assert_eq!(columns[1].column_name, OPENTSDB_FIELD_COLUMN_NAME);
         assert_eq!(columns[1].values.as_ref().unwrap().f64_values, vec![1.0]);
 
         assert_eq!(columns[2].column_name, "tagk1");

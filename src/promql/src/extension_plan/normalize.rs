@@ -299,12 +299,12 @@ mod test {
         let timestamp_column = Arc::new(TimestampMillisecondArray::from_slice([
             60_000, 120_000, 0, 30_000, 90_000,
         ])) as _;
-        let value_column = Arc::new(Float64Array::from_slice([0.0, 1.0, 10.0, 100.0, 1000.0])) as _;
+        let field_column = Arc::new(Float64Array::from_slice([0.0, 1.0, 10.0, 100.0, 1000.0])) as _;
         let path_column =
             Arc::new(StringArray::from_slice(["foo", "foo", "foo", "foo", "foo"])) as _;
         let data = RecordBatch::try_new(
             schema.clone(),
-            vec![timestamp_column, value_column, path_column],
+            vec![timestamp_column, field_column, path_column],
         )
         .unwrap();
 
