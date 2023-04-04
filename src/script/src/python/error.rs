@@ -23,7 +23,7 @@ use rustpython_parser::ast::Location;
 use rustpython_parser::error::ParseError;
 pub use snafu::ensure;
 use snafu::prelude::Snafu;
-use snafu::{Backtrace, Location as SnafuLocation};
+use snafu::Location as SnafuLocation;
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub(crate) fn ret_other_error_with(reason: String) -> OtherSnafu<String> {
