@@ -18,7 +18,7 @@ use common_error::ext::ErrorExt;
 use common_error::prelude::StatusCode;
 use datatypes::prelude::ConcreteDataType;
 use snafu::prelude::*;
-use snafu::{Location};
+use snafu::Location;
 
 pub type Result<T> = std::result::Result<T, Error>;
 

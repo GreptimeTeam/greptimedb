@@ -16,7 +16,6 @@ use futures::Future;
 use once_cell::sync::OnceCell;
 use rustpython_vm::builtins::PyBaseExceptionRef;
 use rustpython_vm::{PyObjectRef, PyPayload, VirtualMachine};
-
 use tokio::runtime::Runtime;
 
 use crate::python::error;
