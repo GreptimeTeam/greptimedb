@@ -28,6 +28,7 @@ use snafu::OptionExt;
 
 use crate::data_type::ConcreteDataType;
 use crate::error;
+use crate::error::InvalidTimestampPrecisionSnafu;
 use crate::prelude::{
     DataType, LogicalTypeId, MutableVector, ScalarVectorBuilder, Value, ValueRef, Vector,
 };
@@ -48,6 +49,29 @@ pub enum TimestampType {
     Millisecond(TimestampMillisecondType),
     Microsecond(TimestampMicrosecondType),
     Nanosecond(TimestampNanosecondType),
+}
+
+impl TryFrom<u64> for TimestampType {
+    type Error = error::Error;
+
+    /// Convert fractional timestamp precision to timestamp types. Supported precisions are:
+    /// - 0: second
+    /// - 3: millisecond
+    /// - 6: microsecond
+    /// - 9: nanosecond
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(TimestampType::Second(TimestampSecondType::default())),
+            3 => Ok(TimestampType::Millisecond(
+                TimestampMillisecondType::default(),
+            )),
+            6 => Ok(TimestampType::Microsecond(
+                TimestampMicrosecondType::default(),
+            )),
+            9 => Ok(TimestampType::Nanosecond(TimestampNanosecondType::default())),
+            _ => InvalidTimestampPrecisionSnafu { precision: value }.fail(),
+        }
+    }
 }
 
 impl TimestampType {
