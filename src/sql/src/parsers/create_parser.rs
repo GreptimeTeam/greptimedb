@@ -392,7 +392,7 @@ impl<'a> ParserContext<'a> {
             ALL_KEYWORDS.binary_search(&name.value.to_uppercase().as_str()).is_ok()
         {
             return Err(ParserError::ParserError(format!(
-                "Cannot use keyword '{}' as column name!",
+                "Cannot use keyword '{}' as column name. Hint: add quotes to the name.",
                 &name.value
             )));
         }
