@@ -97,16 +97,16 @@ impl TryFrom<&HashMap<String, String>> for TableOptions {
             options.ttl = Some(ttl_value);
         }
         if let Some(compaction_time_window) = value.get(COMPACTION_TIME_WINDOW_KEY) {
-            options.compaction_time_window = compaction_time_window
-                .parse::<i64>()
-                .map_err(|_| {
-                    ParseTableOptionSnafu {
+            options.compaction_time_window = match compaction_time_window.parse::<i64>() {
+                Ok(t) => Some(t),
+                Err(_) => {
+                    return ParseTableOptionSnafu {
                         key: COMPACTION_TIME_WINDOW_KEY,
                         value: compaction_time_window,
                     }
-                    .build()
-                })
-                .ok();
+                    .fail()
+                }
+            };
         }
         options.extra_options = HashMap::from_iter(value.iter().filter_map(|(k, v)| {
             if k != WRITE_BUFFER_SIZE_KEY && k != TTL_KEY && k != COMPACTION_TIME_WINDOW_KEY {
