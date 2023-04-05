@@ -1460,7 +1460,7 @@ ENGINE=mito";
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("Cannot use keyword 'user' as column name!"));
+            .contains("Cannot use keyword 'user' as column name"));
 
         // If column name is quoted, it's valid even same with keyword.
         let sql = r#"
