@@ -42,6 +42,11 @@ use crate::vectors::{
     TimestampNanosecondVectorBuilder, TimestampSecondVector, TimestampSecondVectorBuilder,
 };
 
+const SECOND_VARIATION: u64 = 0;
+const MILLISECOND_VARIATION: u64 = 3;
+const MICROSECOND_VARIATION: u64 = 6;
+const NANOSECOND_VARIATION: u64 = 9;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[enum_dispatch(DataType)]
 pub enum TimestampType {
@@ -61,14 +66,16 @@ impl TryFrom<u64> for TimestampType {
     /// - 9: nanosecond
     fn try_from(value: u64) -> Result<Self, Self::Error> {
         match value {
-            0 => Ok(TimestampType::Second(TimestampSecondType::default())),
-            3 => Ok(TimestampType::Millisecond(
+            SECOND_VARIATION => Ok(TimestampType::Second(TimestampSecondType::default())),
+            MILLISECOND_VARIATION => Ok(TimestampType::Millisecond(
                 TimestampMillisecondType::default(),
             )),
-            6 => Ok(TimestampType::Microsecond(
+            MICROSECOND_VARIATION => Ok(TimestampType::Microsecond(
                 TimestampMicrosecondType::default(),
             )),
-            9 => Ok(TimestampType::Nanosecond(TimestampNanosecondType::default())),
+            NANOSECOND_VARIATION => {
+                Ok(TimestampType::Nanosecond(TimestampNanosecondType::default()))
+            }
             _ => InvalidTimestampPrecisionSnafu { precision: value }.fail(),
         }
     }
@@ -82,6 +89,15 @@ impl TimestampType {
             TimestampType::Millisecond(_) => TimeUnit::Millisecond,
             TimestampType::Microsecond(_) => TimeUnit::Microsecond,
             TimestampType::Nanosecond(_) => TimeUnit::Nanosecond,
+        }
+    }
+
+    pub fn precision(&self) -> u64 {
+        match self {
+            TimestampType::Second(_) => SECOND_VARIATION,
+            TimestampType::Millisecond(_) => MILLISECOND_VARIATION,
+            TimestampType::Microsecond(_) => MICROSECOND_VARIATION,
+            TimestampType::Nanosecond(_) => NANOSECOND_VARIATION,
         }
     }
 }
