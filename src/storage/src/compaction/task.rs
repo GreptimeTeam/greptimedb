@@ -102,6 +102,7 @@ impl<S: LogStore> CompactionTaskImpl<S> {
     }
 
     /// Writes updated SST info into manifest.
+    // TODO(etolbakov): we are not persisting inferred compaction_time_window (#1083)[https://github.com/GreptimeTeam/greptimedb/pull/1083]
     async fn write_manifest_and_apply(
         &self,
         output: HashSet<FileMeta>,
