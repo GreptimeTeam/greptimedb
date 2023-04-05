@@ -176,8 +176,8 @@ async fn sql_insert_promql_query_ceil(instance: Arc<dyn MockInstance>) {
 const AGGREGATORS_CREATE_TABLE: &str = r#"create table http_requests (
     job string,
     instance string,
-    group string,
-    value double,
+    "group" string,
+    "value" double,
     ts timestamp TIME INDEX,
     PRIMARY KEY (job, instance, group),
 );"#;
