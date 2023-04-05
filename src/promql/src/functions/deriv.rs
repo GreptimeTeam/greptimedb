@@ -110,7 +110,7 @@ mod test {
             .into_iter()
             .map(Some),
         ));
-        let ranges = [(0, 11)];
+        let ranges = [(0, 11), (0, 1)];
 
         let values_array = Arc::new(Float64Array::from_iter([
             0.0, 10.0, 20.0, 30.0, 40.0, 0.0, 10.0, 20.0, 30.0, 40.0, 50.0,
@@ -129,7 +129,7 @@ mod test {
             Deriv::scalar_udf(),
             ts_array,
             value_array,
-            vec![Some(0.010606060606060607)],
+            vec![Some(0.010606060606060607), None],
         );
     }
 }
