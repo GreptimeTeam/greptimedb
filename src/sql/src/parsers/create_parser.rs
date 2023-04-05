@@ -20,6 +20,7 @@ use once_cell::sync::Lazy;
 use snafu::{ensure, OptionExt, ResultExt};
 use sqlparser::ast::{ColumnOption, ColumnOptionDef, DataType, Value};
 use sqlparser::dialect::keywords::Keyword;
+use sqlparser::keywords::ALL_KEYWORDS;
 use sqlparser::parser::IsOptional::Mandatory;
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, TokenWithLocation, Word};
@@ -386,6 +387,16 @@ impl<'a> ParserContext<'a> {
         let parser = &mut self.parser;
 
         let name = parser.parse_identifier()?;
+        if name.quote_style.is_none() &&
+            // "ALL_KEYWORDS" are sorted.
+            ALL_KEYWORDS.binary_search(&name.value.to_uppercase().as_str()).is_ok()
+        {
+            return Err(ParserError::ParserError(format!(
+                "Cannot use keyword '{}' as column name!",
+                &name.value
+            )));
+        }
+
         let data_type = parser.parse_data_type()?;
         let collation = if parser.parse_keyword(Keyword::COLLATE) {
             Some(parser.parse_object_name()?)
@@ -1440,5 +1451,22 @@ ENGINE=mito";
         let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
         assert!(result.is_err());
         assert_matches!(result, Err(crate::error::Error::InvalidTimeIndex { .. }));
+    }
+
+    #[test]
+    fn test_invalid_column_name() {
+        let sql = "create table foo(user string, i bigint time index)";
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Cannot use keyword 'user' as column name!"));
+
+        // If column name is quoted, it's valid even same with keyword.
+        let sql = r#"
+            create table foo("user" string, i bigint time index)
+        "#;
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        assert!(result.is_ok());
     }
 }
