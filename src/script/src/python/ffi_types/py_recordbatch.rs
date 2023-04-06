@@ -4,10 +4,11 @@
 
 use common_recordbatch::RecordBatch;
 use crossbeam_utils::atomic::AtomicCell;
-use pyo3::exceptions::{PyKeyError, PyRuntimeError};
 #[cfg(feature = "pyo3_backend")]
-use pyo3::pyclass as pyo3class;
-use pyo3::{pymethods, PyObject, PyResult, Python};
+use pyo3::{
+    exceptions::{PyKeyError, PyRuntimeError},
+    pyclass as pyo3class, pymethods, PyObject, PyResult, Python,
+};
 use rustpython_vm::builtins::PyStr;
 use rustpython_vm::protocol::PyMappingMethods;
 use rustpython_vm::types::AsMapping;
