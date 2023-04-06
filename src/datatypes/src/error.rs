@@ -112,6 +112,12 @@ pub enum Error {
         reason: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Invalid timestamp precision: {}", precision))]
+    InvalidTimestampPrecision {
+        precision: u64,
+        backtrace: Backtrace,
+    },
 }
 
 impl ErrorExt for Error {

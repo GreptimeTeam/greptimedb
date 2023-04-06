@@ -17,8 +17,6 @@ use std::ops::Deref;
 use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
 use common_telemetry::error;
-use common_time::datetime::DateTime;
-use common_time::timestamp::TimeUnit;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use opensrv_mysql::{
@@ -163,10 +161,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                     Value::Binary(v) => row_writer.write_col(v.deref())?,
                     Value::Date(v) => row_writer.write_col(v.val())?,
                     Value::DateTime(v) => row_writer.write_col(v.val())?,
-                    Value::Timestamp(v) => row_writer.write_col(
-                        // safety: converting timestamp with whatever unit to second will not cause overflow
-                        DateTime::new(v.convert_to(TimeUnit::Second).unwrap().value()).to_string(),
-                    )?,
+                    Value::Timestamp(v) => row_writer.write_col(v.to_iso8601_string())?,
                     Value::List(_) => {
                         return Err(Error::Internal {
                             err_msg: format!(
@@ -213,7 +208,7 @@ fn create_mysql_column(column_schema: &ColumnSchema) -> Result<Column> {
         ConcreteDataType::Binary(_) | ConcreteDataType::String(_) => {
             Ok(ColumnType::MYSQL_TYPE_VARCHAR)
         }
-        ConcreteDataType::Timestamp(_) => Ok(ColumnType::MYSQL_TYPE_DATETIME),
+        ConcreteDataType::Timestamp(_) => Ok(ColumnType::MYSQL_TYPE_TIMESTAMP),
         _ => error::InternalSnafu {
             err_msg: format!(
                 "not implemented for column datatype {:?}",
