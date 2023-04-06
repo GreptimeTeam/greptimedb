@@ -94,7 +94,7 @@ impl MetaSrvInstance {
         let http_srv = self.http_srv.start(addr);
         select! {
             v = meta_srv => v?,
-            v = http_srv => v.map(|_| ()).context(error::StartMetricsExportSnafu)?,
+            v = http_srv => v.map(|_| ()).context(error::StartHttpSnafu)?,
         }
 
         Ok(())

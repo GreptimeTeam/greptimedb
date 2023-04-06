@@ -298,6 +298,7 @@ impl<S: LogStore> EngineInner<S> {
                 name,
                 &self.config,
                 opts.ttl,
+                opts.compaction_time_window,
             )
             .await?;
 
@@ -340,6 +341,7 @@ impl<S: LogStore> EngineInner<S> {
                 &region_name,
                 &self.config,
                 opts.ttl,
+                opts.compaction_time_window,
             )
             .await?;
 
@@ -368,6 +370,7 @@ impl<S: LogStore> EngineInner<S> {
         region_name: &str,
         config: &EngineConfig,
         ttl: Option<Duration>,
+        compaction_time_window: Option<i64>,
     ) -> Result<StoreConfig<S>> {
         let parent_dir = util::normalize_dir(parent_dir);
 
@@ -397,6 +400,7 @@ impl<S: LogStore> EngineInner<S> {
             engine_config: self.config.clone(),
             file_purger: self.file_purger.clone(),
             ttl,
+            compaction_time_window,
         })
     }
 }
@@ -439,7 +443,7 @@ mod tests {
         let region_name = "region-0";
         let desc = RegionDescBuilder::new(region_name)
             .push_key_column(("k1", LogicalTypeId::Int32, false))
-            .push_value_column(("v1", LogicalTypeId::Float32, true))
+            .push_field_column(("v1", LogicalTypeId::Float32, true))
             .build();
         let ctx = EngineContext::default();
         let region = engine

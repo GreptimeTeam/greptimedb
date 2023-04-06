@@ -63,8 +63,8 @@ pub enum Error {
         source: tonic::transport::Error,
         location: Location,
     },
-    #[snafu(display("Failed to start gRPC server, source: {}", source))]
-    StartMetricsExport {
+    #[snafu(display("Failed to start http server, source: {}", source))]
+    StartHttp {
         #[snafu(backtrace)]
         source: servers::error::Error,
     },
@@ -350,7 +350,7 @@ impl ErrorExt for Error {
             Error::InvalidCatalogValue { source, .. } => source.status_code(),
             Error::MetaInternal { source } => source.status_code(),
             Error::RecoverProcedure { source } => source.status_code(),
-            Error::ShutdownServer { source, .. } | Error::StartMetricsExport { source } => {
+            Error::ShutdownServer { source, .. } | Error::StartHttp { source } => {
                 source.status_code()
             }
         }

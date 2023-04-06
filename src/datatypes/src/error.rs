@@ -106,6 +106,9 @@ pub enum Error {
 
     #[snafu(display("Failed to convert value into scalar value, reason: {}", reason))]
     ToScalarValue { reason: String, location: Location },
+
+    #[snafu(display("Invalid timestamp precision: {}", precision))]
+    InvalidTimestampPrecision { precision: u64, location: Location },
 }
 
 impl ErrorExt for Error {

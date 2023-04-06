@@ -54,7 +54,7 @@ impl RegionDescBuilder {
         self
     }
 
-    pub fn push_value_column(mut self, column_def: ColumnDef) -> Self {
+    pub fn push_field_column(mut self, column_def: ColumnDef) -> Self {
         let column = self.new_column(column_def);
         self.default_cf_builder = self.default_cf_builder.push_column(column);
         self
@@ -67,6 +67,7 @@ impl RegionDescBuilder {
             row_key: self.key_builder.build().unwrap(),
             default_cf: self.default_cf_builder.build().unwrap(),
             extra_cfs: Vec::new(),
+            compaction_time_window: None,
         }
     }
 

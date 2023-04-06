@@ -194,6 +194,8 @@ pub struct RegionMetadata {
     pub columns: ColumnsMetadataRef,
     column_families: ColumnFamiliesMetadata,
     version: VersionNumber,
+    /// Time window for compaction
+    compaction_time_window: Option<i64>,
 }
 
 impl RegionMetadata {
@@ -210,6 +212,11 @@ impl RegionMetadata {
     #[inline]
     pub fn schema(&self) -> &RegionSchemaRef {
         &self.schema
+    }
+
+    #[inline]
+    pub fn compaction_time_window(&self) -> Option<i64> {
+        self.compaction_time_window
     }
 
     #[inline]
@@ -313,7 +320,8 @@ impl RegionMetadata {
         let mut builder = RegionDescriptorBuilder::default()
             .id(self.id)
             .name(&self.name)
-            .row_key(row_key);
+            .row_key(row_key)
+            .compaction_time_window(self.compaction_time_window);
 
         for (cf_id, cf) in &self.column_families.id_to_cfs {
             let mut cf_builder = ColumnFamilyDescriptorBuilder::default()
@@ -346,6 +354,7 @@ impl From<&RegionMetadata> for RawRegionMetadata {
             columns: RawColumnsMetadata::from(&*data.columns),
             column_families: RawColumnFamiliesMetadata::from(&data.column_families),
             version: data.version,
+            compaction_time_window: data.compaction_time_window,
         }
     }
 }
@@ -364,6 +373,7 @@ impl TryFrom<RawRegionMetadata> for RegionMetadata {
             columns,
             column_families: raw.column_families.into(),
             version: raw.version,
+            compaction_time_window: raw.compaction_time_window,
         })
     }
 }
@@ -490,7 +500,7 @@ impl ColumnsMetadata {
     }
 
     /// Returns an iterator to all value columns (internal columns are excluded).
-    pub fn iter_value_columns(&self) -> impl Iterator<Item = &ColumnMetadata> {
+    pub fn iter_field_columns(&self) -> impl Iterator<Item = &ColumnMetadata> {
         self.columns[self.row_key_end..self.user_column_end].iter()
     }
 
@@ -509,7 +519,7 @@ impl ColumnsMetadata {
     }
 
     #[inline]
-    pub fn num_value_columns(&self) -> usize {
+    pub fn num_field_columns(&self) -> usize {
         self.user_column_end - self.row_key_end
     }
 
@@ -631,6 +641,7 @@ impl TryFrom<RegionDescriptor> for RegionMetadataBuilder {
             .name(desc.name)
             .id(desc.id)
             .row_key(desc.row_key)?
+            .compaction_time_window(desc.compaction_time_window)
             .add_column_family(desc.default_cf)?;
         for cf in desc.extra_cfs {
             builder = builder.add_column_family(cf)?;
@@ -688,16 +699,16 @@ impl ColumnsMetadataBuilder {
     }
 
     fn push_row_key_column(&mut self, desc: ColumnDescriptor) -> Result<&mut Self> {
-        self.push_value_column(consts::KEY_CF_ID, desc)
+        self.push_field_column(consts::KEY_CF_ID, desc)
     }
 
-    fn push_value_column(
+    fn push_field_column(
         &mut self,
         cf_id: ColumnFamilyId,
         desc: ColumnDescriptor,
     ) -> Result<&mut Self> {
         ensure!(
-            !is_internal_value_column(&desc.name),
+            !is_internal_field_column(&desc.name),
             ReservedColumnSnafu { name: &desc.name }
         );
 
@@ -787,6 +798,7 @@ struct RegionMetadataBuilder {
     columns_meta_builder: ColumnsMetadataBuilder,
     cfs_meta_builder: ColumnFamiliesMetadataBuilder,
     version: VersionNumber,
+    compaction_time_window: Option<i64>,
 }
 
 impl Default for RegionMetadataBuilder {
@@ -803,6 +815,7 @@ impl RegionMetadataBuilder {
             columns_meta_builder: ColumnsMetadataBuilder::default(),
             cfs_meta_builder: ColumnFamiliesMetadataBuilder::default(),
             version: Schema::INITIAL_VERSION,
+            compaction_time_window: None,
         }
     }
 
@@ -827,6 +840,11 @@ impl RegionMetadataBuilder {
         Ok(self)
     }
 
+    fn compaction_time_window(mut self, compaction_time_window: Option<i64>) -> Self {
+        self.compaction_time_window = compaction_time_window;
+        self
+    }
+
     fn add_column_family(mut self, cf: ColumnFamilyDescriptor) -> Result<Self> {
         let column_index_start = self.columns_meta_builder.columns.len();
         let column_index_end = column_index_start + cf.columns.len();
@@ -840,7 +858,7 @@ impl RegionMetadataBuilder {
         self.cfs_meta_builder.add_column_family(cf_meta)?;
 
         for col in cf.columns {
-            self.columns_meta_builder.push_value_column(cf.cf_id, col)?;
+            self.columns_meta_builder.push_field_column(cf.cf_id, col)?;
         }
 
         Ok(self)
@@ -857,6 +875,7 @@ impl RegionMetadataBuilder {
             columns,
             column_families: self.cfs_meta_builder.build(),
             version: self.version,
+            compaction_time_window: self.compaction_time_window,
         })
     }
 }
@@ -895,7 +914,7 @@ fn internal_column_descs() -> [ColumnDescriptor; 2] {
 
 /// Returns true if this is an internal column for value column.
 #[inline]
-fn is_internal_value_column(column_name: &str) -> bool {
+fn is_internal_field_column(column_name: &str) -> bool {
     matches!(
         column_name,
         consts::SEQUENCE_COLUMN_NAME | consts::OP_TYPE_COLUMN_NAME
@@ -925,7 +944,7 @@ mod tests {
             .timestamp(("ts", LogicalTypeId::TimestampMillisecond, false))
             .enable_version_column(false)
             .push_key_column(("k1", LogicalTypeId::Int32, false))
-            .push_value_column(("v1", LogicalTypeId::Float32, true))
+            .push_field_column(("v1", LogicalTypeId::Float32, true))
             .build();
 
         let expect_schema = schema_util::new_schema_ref(
@@ -941,7 +960,7 @@ mod tests {
         assert_eq!(region_name, metadata.name);
         assert_eq!(expect_schema, *metadata.user_schema());
         assert_eq!(2, metadata.columns.num_row_key_columns());
-        assert_eq!(1, metadata.columns.num_value_columns());
+        assert_eq!(1, metadata.columns.num_field_columns());
     }
 
     #[test]
@@ -1061,6 +1080,7 @@ mod tests {
             .unwrap();
         RegionMetadataBuilder::new()
             .name(TEST_REGION)
+            .compaction_time_window(None)
             .row_key(row_key)
             .unwrap()
             .add_column_family(cf)
@@ -1096,10 +1116,10 @@ mod tests {
             .collect();
         assert_eq!(["k1", "ts"], &row_key_names[..]);
         // 1 value column
-        assert_eq!(1, metadata.columns.num_value_columns());
+        assert_eq!(1, metadata.columns.num_field_columns());
         let value_names: Vec<_> = metadata
             .columns
-            .iter_value_columns()
+            .iter_field_columns()
             .map(|column| &column.desc.name)
             .collect();
         assert_eq!(["v1"], &value_names[..]);
@@ -1147,10 +1167,10 @@ mod tests {
             &row_key_names[..]
         );
         // 1 value column
-        assert_eq!(1, metadata.columns.num_value_columns());
+        assert_eq!(1, metadata.columns.num_field_columns());
         let value_names: Vec<_> = metadata
             .columns
-            .iter_value_columns()
+            .iter_field_columns()
             .map(|column| &column.desc.name)
             .collect();
         assert_eq!(["v1"], &value_names[..]);
@@ -1175,7 +1195,7 @@ mod tests {
         let builder = RegionDescBuilder::new(region_name)
             .enable_version_column(false)
             .push_key_column(("k1", LogicalTypeId::Int32, false))
-            .push_value_column(("v1", LogicalTypeId::Float32, true));
+            .push_field_column(("v1", LogicalTypeId::Float32, true));
         let last_column_id = builder.last_column_id();
         let metadata: RegionMetadata = builder.build().try_into().unwrap();
 
@@ -1212,9 +1232,9 @@ mod tests {
         let builder: RegionMetadataBuilder = RegionDescBuilder::new(region_name)
             .enable_version_column(false)
             .push_key_column(("k1", LogicalTypeId::Int32, false))
-            .push_value_column(("v1", LogicalTypeId::Float32, true))
+            .push_field_column(("v1", LogicalTypeId::Float32, true))
             .push_key_column(("k2", LogicalTypeId::Int32, true))
-            .push_value_column(("v2", LogicalTypeId::Float32, true))
+            .push_field_column(("v2", LogicalTypeId::Float32, true))
             .build()
             .try_into()
             .unwrap();
@@ -1229,8 +1249,8 @@ mod tests {
             .enable_version_column(false)
             .push_key_column(("k1", LogicalTypeId::Int32, false))
             .push_key_column(("k2", LogicalTypeId::Int32, false))
-            .push_value_column(("v1", LogicalTypeId::Float32, true))
-            .push_value_column(("v2", LogicalTypeId::Float32, true))
+            .push_field_column(("v1", LogicalTypeId::Float32, true))
+            .push_field_column(("v2", LogicalTypeId::Float32, true))
             .build()
             .try_into()
             .unwrap();
@@ -1253,7 +1273,7 @@ mod tests {
         let last_column_id = builder.last_column_id() + 1;
         let builder: RegionMetadataBuilder = builder
             .set_last_column_id(last_column_id) // This id is reserved for v1
-            .push_value_column(("v2", LogicalTypeId::Float32, true))
+            .push_field_column(("v2", LogicalTypeId::Float32, true))
             .build()
             .try_into()
             .unwrap();
@@ -1267,8 +1287,8 @@ mod tests {
             .enable_version_column(false)
             .timestamp(("ts", LogicalTypeId::TimestampMillisecond, false))
             .push_key_column(("k0", LogicalTypeId::Int32, false))
-            .push_value_column(("v0", LogicalTypeId::Float32, true))
-            .push_value_column(("v1", LogicalTypeId::Float32, true));
+            .push_field_column(("v0", LogicalTypeId::Float32, true))
+            .push_field_column(("v1", LogicalTypeId::Float32, true));
         let last_column_id = builder.last_column_id();
         let metadata: RegionMetadata = builder.build().try_into().unwrap();
 

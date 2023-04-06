@@ -91,8 +91,8 @@ impl RegionSchema {
     }
 
     #[inline]
-    pub fn value_columns(&self) -> impl Iterator<Item = &ColumnMetadata> {
-        self.columns.iter_value_columns()
+    pub fn field_columns(&self) -> impl Iterator<Item = &ColumnMetadata> {
+        self.columns.iter_field_columns()
     }
 
     #[inline]
@@ -101,8 +101,8 @@ impl RegionSchema {
     }
 
     #[inline]
-    pub fn num_value_columns(&self) -> usize {
-        self.columns.num_value_columns()
+    pub fn num_field_columns(&self) -> usize {
+        self.columns.num_field_columns()
     }
 
     #[inline]
@@ -193,10 +193,10 @@ mod tests {
         assert_eq!(2, region_schema.num_row_key_columns());
 
         // Checks value column.
-        let mut values = region_schema.value_columns();
+        let mut values = region_schema.field_columns();
         assert_eq!("v0", values.next().unwrap().desc.name);
         assert_eq!(None, values.next());
-        assert_eq!(1, region_schema.num_value_columns());
+        assert_eq!(1, region_schema.num_field_columns());
 
         // Checks version.
         assert_eq!(123, region_schema.version());

@@ -37,13 +37,13 @@ mod tests {
         new_batch_with_num_values(1)
     }
 
-    pub(crate) fn new_batch_with_num_values(num_value_columns: usize) -> Batch {
+    pub(crate) fn new_batch_with_num_values(num_field_columns: usize) -> Batch {
         let k0 = Int64Vector::from_slice([1, 2, 3]);
         let timestamp = TimestampMillisecondVector::from_vec(vec![4, 5, 6]);
 
         let mut columns: Vec<VectorRef> = vec![Arc::new(k0), Arc::new(timestamp)];
 
-        for i in 0..num_value_columns {
+        for i in 0..num_field_columns {
             let vi = Int64Vector::from_slice([i as i64, i as i64, i as i64]);
             columns.push(Arc::new(vi));
         }

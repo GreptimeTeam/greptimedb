@@ -38,7 +38,7 @@ const COLUMN_DEFAULT_COLUMN: &str = "Default";
 const COLUMN_SEMANTIC_TYPE_COLUMN: &str = "Semantic Type";
 
 const SEMANTIC_TYPE_PRIMARY_KEY: &str = "PRIMARY KEY";
-const SEMANTIC_TYPE_VALUE: &str = "VALUE";
+const SEMANTIC_TYPE_FIELD: &str = "FIELD";
 const SEMANTIC_TYPE_TIME_INDEX: &str = "TIME INDEX";
 
 const NULLABLE_YES: &str = "YES";
@@ -217,7 +217,7 @@ fn describe_column_semantic_types(
                 } else if cs.is_time_index() {
                     String::from(SEMANTIC_TYPE_TIME_INDEX)
                 } else {
-                    String::from(SEMANTIC_TYPE_VALUE)
+                    String::from(SEMANTIC_TYPE_FIELD)
                 }
             })
             .collect::<Vec<String>>(),
@@ -242,7 +242,7 @@ mod test {
     use crate::error::Result;
     use crate::sql::{
         describe_table, DESCRIBE_TABLE_OUTPUT_SCHEMA, NULLABLE_NO, NULLABLE_YES,
-        SEMANTIC_TYPE_TIME_INDEX, SEMANTIC_TYPE_VALUE,
+        SEMANTIC_TYPE_FIELD, SEMANTIC_TYPE_TIME_INDEX,
     };
 
     #[test]
@@ -271,7 +271,7 @@ mod test {
             Arc::new(StringVector::from(vec![NULLABLE_YES, NULLABLE_NO])) as _,
             Arc::new(StringVector::from(vec!["", "current_timestamp()"])) as _,
             Arc::new(StringVector::from(vec![
-                SEMANTIC_TYPE_VALUE,
+                SEMANTIC_TYPE_FIELD,
                 SEMANTIC_TYPE_TIME_INDEX,
             ])) as _,
         ];

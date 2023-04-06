@@ -190,7 +190,7 @@ impl BTreeIterator {
             .map(|column_meta| column_meta.desc.data_type.clone());
         let value_data_types = self
             .schema
-            .value_columns()
+            .field_columns()
             .map(|column_meta| column_meta.desc.data_type.clone());
 
         let key_columns = rows_to_vectors(
@@ -198,7 +198,7 @@ impl BTreeIterator {
             self.adapter.source_key_needed(),
             keys.as_slice(),
         );
-        let value_columns = rows_to_vectors(
+        let field_columns = rows_to_vectors(
             value_data_types,
             self.adapter.source_value_needed(),
             values.as_slice(),
@@ -206,7 +206,7 @@ impl BTreeIterator {
 
         let batch = self.adapter.batch_from_parts(
             key_columns,
-            value_columns,
+            field_columns,
             Arc::new(sequences),
             Arc::new(op_types),
         )?;
