@@ -83,5 +83,6 @@ pub async fn new_store_config_with_object_store(
         engine_config: Default::default(),
         file_purger,
         ttl: None,
+        compaction_time_window: None,
     }
 }

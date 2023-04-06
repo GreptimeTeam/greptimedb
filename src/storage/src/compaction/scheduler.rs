@@ -22,7 +22,7 @@ use store_api::storage::RegionId;
 use tokio::sync::oneshot::Sender;
 use tokio::sync::Notify;
 
-use crate::compaction::picker::{Picker, PickerContext};
+use crate::compaction::picker::Picker;
 use crate::compaction::task::CompactionTask;
 use crate::error::Result;
 use crate::manifest::region::RegionManifest;
@@ -59,6 +59,7 @@ pub struct CompactionRequestImpl<S: LogStore> {
     pub manifest: RegionManifest,
     pub wal: Wal<S>,
     pub ttl: Option<Duration>,
+    pub compaction_time_window: Option<i64>,
     /// Compaction result sender.
     pub sender: Option<Sender<Result<()>>>,
 
@@ -101,7 +102,7 @@ where
         finish_notifier: Arc<Notify>,
     ) -> Result<()> {
         let region_id = req.key();
-        let Some(task) = self.picker.pick(&PickerContext {}, &req)? else {
+        let Some(task) = self.picker.pick(&req)? else {
             info!("No file needs compaction in region: {:?}", region_id);
             req.complete(Ok(()));
             return Ok(());

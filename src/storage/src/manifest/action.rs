@@ -38,6 +38,8 @@ pub struct RawRegionMetadata {
     pub columns: RawColumnsMetadata,
     pub column_families: RawColumnFamiliesMetadata,
     pub version: VersionNumber,
+    /// Time window for compaction
+    pub compaction_time_window: Option<i64>,
 }
 
 /// Minimal data that could be used to persist and recover [ColumnsMetadata](crate::metadata::ColumnsMetadata).

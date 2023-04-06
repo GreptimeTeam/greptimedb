@@ -149,6 +149,8 @@ pub struct RegionDescriptor {
     /// Extra column families defined by user.
     #[builder(default, setter(each(name = "push_extra_column_family")))]
     pub extra_cfs: Vec<ColumnFamilyDescriptor>,
+    /// Time window for compaction
+    pub compaction_time_window: Option<i64>,
 }
 
 impl RowKeyDescriptorBuilder {

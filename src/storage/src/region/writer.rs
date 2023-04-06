@@ -68,9 +68,15 @@ impl RegionWriter {
         memtable_builder: MemtableBuilderRef,
         config: Arc<EngineConfig>,
         ttl: Option<Duration>,
+        compaction_time_window: Option<i64>,
     ) -> RegionWriter {
         RegionWriter {
-            inner: Mutex::new(WriterInner::new(memtable_builder, config, ttl)),
+            inner: Mutex::new(WriterInner::new(
+                memtable_builder,
+                config,
+                ttl,
+                compaction_time_window,
+            )),
             version_mutex: Mutex::new(()),
         }
     }
@@ -361,6 +367,7 @@ struct WriterInner {
     closed: bool,
     engine_config: Arc<EngineConfig>,
     ttl: Option<Duration>,
+    compaction_time_window: Option<i64>,
 }
 
 impl WriterInner {
@@ -368,6 +375,7 @@ impl WriterInner {
         memtable_builder: MemtableBuilderRef,
         engine_config: Arc<EngineConfig>,
         ttl: Option<Duration>,
+        compaction_time_window: Option<i64>,
     ) -> WriterInner {
         WriterInner {
             memtable_builder,
@@ -375,6 +383,7 @@ impl WriterInner {
             engine_config,
             closed: false,
             ttl,
+            compaction_time_window,
         }
     }
 
@@ -638,7 +647,13 @@ impl WriterInner {
             return Ok(());
         }
 
-        let cb = Self::build_flush_callback(&current_version, ctx, &self.engine_config, self.ttl);
+        let cb = Self::build_flush_callback(
+            &current_version,
+            ctx,
+            &self.engine_config,
+            self.ttl,
+            self.compaction_time_window,
+        );
 
         let flush_req = FlushJob {
             max_memtable_id: max_memtable_id.unwrap(),
@@ -678,6 +693,7 @@ impl WriterInner {
             manifest: writer_ctx.manifest.clone(),
             wal: writer_ctx.wal.clone(),
             ttl: self.ttl,
+            compaction_time_window: self.compaction_time_window,
             sender: None,
             sst_write_buffer_size,
         };
@@ -725,6 +741,7 @@ impl WriterInner {
         ctx: &WriterContext<S>,
         config: &Arc<EngineConfig>,
         ttl: Option<Duration>,
+        compaction_time_window: Option<i64>,
     ) -> Option<FlushCallback> {
         let region_id = version.metadata().id();
         let compaction_request = CompactionRequestImpl {
@@ -735,6 +752,7 @@ impl WriterInner {
             manifest: ctx.manifest.clone(),
             wal: ctx.wal.clone(),
             ttl,
+            compaction_time_window,
             sender: None,
             sst_write_buffer_size: config.sst_write_buffer_size,
         };

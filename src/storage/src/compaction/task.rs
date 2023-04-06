@@ -48,6 +48,7 @@ pub struct CompactionTaskImpl<S: LogStore> {
     pub manifest: RegionManifest,
     pub expired_ssts: Vec<FileHandle>,
     pub sst_write_buffer_size: ReadableSize,
+    pub compaction_time_window: Option<i64>,
 }
 
 impl<S: LogStore> Debug for CompactionTaskImpl<S> {
@@ -101,6 +102,7 @@ impl<S: LogStore> CompactionTaskImpl<S> {
     }
 
     /// Writes updated SST info into manifest.
+    // TODO(etolbakov): we are not persisting inferred compaction_time_window (#1083)[https://github.com/GreptimeTeam/greptimedb/pull/1083]
     async fn write_manifest_and_apply(
         &self,
         output: HashSet<FileMeta>,
