@@ -8,7 +8,7 @@
 
 
 <h3 align="center">
-    The next-generation hybrid timeseries/analytics processing database in the cloud
+    The next-generation hybrid time-series/analytics processing database in the cloud
 </h3>
 
 <p align="center">
@@ -36,11 +36,11 @@ Our core developers have been building time-series data platform
 for years. Based on their best-practices, GreptimeDB is born to give you:
 
 - A standalone binary that scales to highly-available distributed cluster, providing a transparent experience for cluster users
-- Optimized columnar layout for handling time-series data; compacted, compressed, stored on various storage backends
-- Flexible index options, tackling high cardinality issues down
+- Optimized columnar layout for handling time-series data; compacted, compressed, and stored on various storage backends
+- Flexible indexes, tackling high cardinality issues down
 - Distributed, parallel query execution, leveraging elastic computing resource
 - Native SQL, and Python scripting for advanced analytical scenarios
-- Widely adopted database protocols and APIs
+- Widely adopted database protocols and APIs, native PromQL supports
 - Extensible table engine architecture for extensive workloads
 
 ## Quick Start
