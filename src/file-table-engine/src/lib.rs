@@ -16,5 +16,3 @@ pub mod engine;
 pub mod error;
 pub mod manifest;
 pub mod table;
-
-const IMMUTABLE_MANIFEST_FILE: &str = "_immutable_manifest";

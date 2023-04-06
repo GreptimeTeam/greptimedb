@@ -78,6 +78,7 @@ pub enum Error {
     RecoverTableManifest {
         source: BoxedError,
         table_name: String,
+        location: Location,
     },
 
     #[snafu(display(
@@ -88,7 +89,7 @@ pub enum Error {
     BuildTableMeta {
         source: TableMetaBuilderError,
         table_name: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display(
@@ -99,23 +100,12 @@ pub enum Error {
     BuildTableInfo {
         source: TableInfoBuilderError,
         table_name: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Table already exists: {}", table_name))]
     TableExists {
-        backtrace: Backtrace,
-        table_name: String,
-    },
-
-    #[snafu(display(
-        "Failed to scan table metadata from manifest,  table: {}, source: {}",
-        table_name,
-        source,
-    ))]
-    ScanTableManifest {
-        #[snafu(backtrace)]
-        source: storage::error::Error,
+        location: Location,
         table_name: String,
     },
 
@@ -127,6 +117,9 @@ pub enum Error {
         #[snafu(backtrace)]
         source: table::metadata::ConvertError,
     },
+
+    #[snafu(display("Invalid schema, source: {}", source))]
+    InvalidRawSchema { source: datatypes::error::Error },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -136,12 +129,12 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            TableExists { .. } | BuildTableMeta { .. } | BuildTableInfo { .. } => {
-                StatusCode::InvalidArguments
-            }
+            TableExists { .. }
+            | BuildTableMeta { .. }
+            | BuildTableInfo { .. }
+            | InvalidRawSchema { .. } => StatusCode::InvalidArguments,
 
-            ScanTableManifest { .. }
-            | ReadTableManifest { .. }
+            ReadTableManifest { .. }
             | WriteTableManifest { .. }
             | CreateTableManifest { .. }
             | DeleteTableManifest { .. }

@@ -24,7 +24,7 @@ use crate::error::{
     DecodeJsonSnafu, DeleteTableManifestSnafu, EncodeJsonSnafu, ReadTableManifestSnafu, Result,
     WriteTableManifestSnafu,
 };
-use crate::IMMUTABLE_MANIFEST_FILE;
+const IMMUTABLE_MANIFEST_FILE: &str = "_immutable_manifest";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ImmutableMetadata {

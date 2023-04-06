@@ -19,6 +19,7 @@ use async_trait::async_trait;
 use common_catalog::consts::IMMUTABLE_FILE_ENGINE;
 use common_error::prelude::BoxedError;
 use common_telemetry::{debug, logging};
+use datatypes::schema::Schema;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 use table::engine::{table_dir, EngineContext, TableEngine, TableReference};
@@ -30,7 +31,8 @@ use tokio::sync::Mutex;
 
 use crate::engine::INIT_TABLE_VERSION;
 use crate::error::{
-    BuildTableInfoSnafu, BuildTableMetaSnafu, DropTableSnafu, Result, TableExistsSnafu,
+    BuildTableInfoSnafu, BuildTableMetaSnafu, DropTableSnafu, InvalidRawSchemaSnafu, Result,
+    TableExistsSnafu,
 };
 use crate::manifest::immutable::ImmutableManifest;
 use crate::table::immutable::{ImmutableFileTable, ImmutableFileTableRef};
@@ -151,15 +153,29 @@ impl EngineInner {
             };
         }
 
+        let table_schema =
+            Arc::new(Schema::try_from(request.schema).context(InvalidRawSchemaSnafu)?);
+
         let table_id = request.id;
         let table_dir = table_dir(&catalog_name, &schema_name, table_id);
 
+        let _lock = self.table_mutex.lock().await;
+        // Checks again, read lock should be enough since we are guarded by the mutex.
+        if let Some(table) = self.get_table(&table_ref) {
+            return if request.create_if_not_exists {
+                Ok(table)
+            } else {
+                TableExistsSnafu { table_name }.fail()
+            };
+        }
+
         let table_meta = TableMetaBuilder::new_external_table()
+            .schema(table_schema)
             .engine(IMMUTABLE_FILE_ENGINE)
             .options(table_options)
             .build()
-            .context(BuildTableMetaSnafu {
-                table_name: &table_name,
+            .with_context(|_| BuildTableMetaSnafu {
+                table_name: table_ref.to_string(),
             })?;
 
         let table_info = TableInfoBuilder::new(&table_name, table_meta)
@@ -170,8 +186,8 @@ impl EngineInner {
             .schema_name(schema_name.to_string())
             .desc(request.desc)
             .build()
-            .context(BuildTableInfoSnafu {
-                table_name: &table_name,
+            .with_context(|_| BuildTableInfoSnafu {
+                table_name: table_ref.to_string(),
             })?;
 
         let table = Arc::new(
@@ -259,7 +275,7 @@ impl EngineInner {
         };
 
         logging::info!(
-            "Mito engine opened table: {} in schema: {}",
+            "Immutable file engine opened table: {} in schema: {}",
             table_name,
             schema_name
         );
@@ -299,12 +315,15 @@ impl EngineInner {
     async fn close(&self) -> TableResult<()> {
         let _lock = self.table_mutex.lock().await;
 
-        let tables = self.tables.write().unwrap().clone();
+        let mut tables = self.tables.write().unwrap().clone();
 
         futures::future::try_join_all(tables.values().map(|t| t.close()))
             .await
             .map_err(BoxedError::new)
             .context(table_error::TableOperationSnafu)?;
+
+        // Releases all closed table
+        tables.clear();
 
         Ok(())
     }
