@@ -349,7 +349,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_table_with_options() {
-        let sql = r#"CREATE TABLE demo_table (timestamp BIGINT TIME INDEX, value DOUBLE, host STRING PRIMARY KEY) engine=mito with(regions=1, ttl='7days',write_buffer_size='32MB',some='other');"#;
+        let sql = r#"
+            CREATE TABLE demo_table (
+                "timestamp" BIGINT TIME INDEX, 
+                "value" DOUBLE,
+                host STRING PRIMARY KEY
+            ) engine=mito with(regions=1, ttl='7days',write_buffer_size='32MB',some='other');"#;
         let parsed_stmt = sql_to_statement(sql);
         let handler = create_mock_sql_handler().await;
         let c = handler
@@ -368,7 +373,12 @@ mod tests {
     pub async fn test_create_with_inline_primary_key() {
         let handler = create_mock_sql_handler().await;
         let parsed_stmt = sql_to_statement(
-            r#"CREATE TABLE demo_table (timestamp BIGINT TIME INDEX, value DOUBLE, host STRING PRIMARY KEY) engine=mito with(regions=1);"#,
+            r#"
+            CREATE TABLE demo_table(
+                "timestamp" BIGINT TIME INDEX, 
+                "value" DOUBLE,
+                host STRING PRIMARY KEY
+            ) engine=mito with(regions=1);"#,
         );
         let c = handler
             .create_to_request(42, parsed_stmt, &TableReference::bare("demo_table"))
@@ -407,8 +417,8 @@ mod tests {
         let handler = create_mock_sql_handler().await;
         let parsed_stmt = sql_to_statement(
             r#"create table demo_table (
-                      timestamp BIGINT TIME INDEX,
-                      value DOUBLE,
+                      "timestamp" BIGINT TIME INDEX,
+                      "value" DOUBLE,
                       host STRING PRIMARY KEY,
                       PRIMARY KEY(host)) engine=mito with(regions=1);"#,
         );
@@ -423,8 +433,8 @@ mod tests {
         let handler = create_mock_sql_handler().await;
         let parsed_stmt = sql_to_statement(
             r#"create table demo_table (
-                      timestamp BIGINT TIME INDEX,
-                      value DOUBLE PRIMARY KEY,
+                      "timestamp" BIGINT TIME INDEX,
+                      "value" DOUBLE PRIMARY KEY,
                       host STRING PRIMARY KEY) engine=mito with(regions=1);"#,
         );
         let error = handler
