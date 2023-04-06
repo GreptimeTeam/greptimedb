@@ -13,24 +13,25 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::future::Future;
 
 use async_compat::CompatExt;
+use common_base::readable_size::ReadableSize;
 use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::{build_backend, parse_url};
 use common_datasource::util::find_dir_and_filename;
 use common_query::Output;
 use common_recordbatch::error::DataTypesSnafu;
 use datafusion::parquet::arrow::ParquetRecordBatchStreamBuilder;
-use datatypes::arrow::record_batch::RecordBatch;
-use datatypes::vectors::{Helper, VectorRef};
-use futures_util::TryStreamExt;
+use datatypes::vectors::Helper;
+use futures_util::StreamExt;
 use regex::Regex;
 use snafu::{ensure, ResultExt};
 use table::engine::TableReference;
 use table::requests::{CopyTableRequest, InsertRequest};
 use tokio::io::BufReader;
 
-use crate::error::{self, Result};
+use crate::error::{self, ParseDataTypesSnafu, Result};
 use crate::sql::SqlHandler;
 
 impl SqlHandler {
@@ -65,8 +66,15 @@ impl SqlHandler {
 
         let entries = lister.list().await.context(error::ListObjectsSnafu)?;
 
-        let mut buf: Vec<RecordBatch> = Vec::new();
+        let fields = table
+            .schema()
+            .arrow_schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().to_string())
+            .collect::<Vec<_>>();
 
+        let mut rows_inserted = 0;
         for entry in entries.iter() {
             let path = entry.path();
             let reader = object_store
@@ -88,58 +96,64 @@ impl SqlHandler {
                 }
             );
 
-            let stream = builder
+            let mut stream = builder
                 .build()
                 .context(error::BuildParquetRecordBatchStreamSnafu)?;
 
-            let chunk = stream
-                .try_collect::<Vec<_>>()
-                .await
-                .context(error::ReadParquetSnafu)?;
+            // TODO(hl): make this configurable through options.
+            let pending_mem_threshold = ReadableSize::mb(32).as_bytes();
+            let mut pending_mem_size = 0;
+            let mut pending = vec![];
 
-            buf.extend(chunk.into_iter());
+            while let Some(r) = stream.next().await {
+                let record_batch = r.context(error::ReadParquetSnafu)?;
+                let vectors = Helper::try_into_vectors(record_batch.columns())
+                    .context(DataTypesSnafu)
+                    .context(ParseDataTypesSnafu)?;
+
+                pending_mem_size += vectors.iter().map(|v| v.memory_size()).sum::<usize>();
+
+                let columns_values = fields
+                    .iter()
+                    .cloned()
+                    .zip(vectors.into_iter())
+                    .collect::<HashMap<_, _>>();
+
+                pending.push(table.insert(InsertRequest {
+                    catalog_name: req.catalog_name.to_string(),
+                    schema_name: req.schema_name.to_string(),
+                    table_name: req.table_name.to_string(),
+                    columns_values,
+                    //TODO: support multi-regions
+                    region_number: 0,
+                }));
+
+                if pending_mem_size as u64 >= pending_mem_threshold {
+                    rows_inserted += batch_insert(&mut pending, &req.table_name).await?;
+                }
+            }
+
+            if !pending.is_empty() {
+                rows_inserted += batch_insert(&mut pending, &req.table_name).await?;
+            }
         }
 
-        let fields = table
-            .schema()
-            .arrow_schema()
-            .fields()
-            .iter()
-            .map(|f| f.name().to_string())
-            .collect::<Vec<_>>();
-
-        // Vec<Columns>
-        let column_chunks = buf
-            .into_iter()
-            .map(|c| Helper::try_into_vectors(c.columns()).context(DataTypesSnafu))
-            .collect::<Vec<_>>();
-
-        let mut futs = Vec::with_capacity(column_chunks.len());
-
-        for column_chunk in column_chunks.into_iter() {
-            let column_chunk = column_chunk.context(error::ParseDataTypesSnafu)?;
-            let columns_values = fields
-                .iter()
-                .cloned()
-                .zip(column_chunk.into_iter())
-                .collect::<HashMap<String, VectorRef>>();
-
-            futs.push(table.insert(InsertRequest {
-                catalog_name: req.catalog_name.to_string(),
-                schema_name: req.schema_name.to_string(),
-                table_name: req.table_name.to_string(),
-                columns_values,
-                //TODO: support multi-regions
-                region_number: 0,
-            }))
-        }
-
-        let result = futures::future::try_join_all(futs)
-            .await
-            .context(error::InsertSnafu {
-                table_name: req.table_name.to_string(),
-            })?;
-
-        Ok(Output::AffectedRows(result.iter().sum()))
+        Ok(Output::AffectedRows(rows_inserted))
     }
+}
+
+/// Executes all pending inserts all at once
+async fn batch_insert(
+    pending: &mut Vec<impl Future<Output = table::error::Result<usize>>>,
+    table_name: &str,
+) -> Result<usize> {
+    let batch = pending.drain(..);
+    let res: usize = futures::future::try_join_all(batch)
+        .await
+        .context(error::InsertSnafu {
+            table_name: table_name.to_string(),
+        })?
+        .iter()
+        .sum();
+    Ok(res)
 }
