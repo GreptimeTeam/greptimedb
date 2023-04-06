@@ -24,7 +24,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_base::readable_size::ReadableSize;
 use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::{error, info};
+use common_telemetry::{debug, error};
 use common_time::range::TimestampRange;
 use common_time::Timestamp;
 use datatypes::schema::SchemaRef;
@@ -60,11 +60,19 @@ type LevelMetaVec = [LevelMeta; MAX_LEVEL as usize];
 /// Metadata of all SSTs under a region.
 ///
 /// Files are organized into multiple level, though there may be only one level.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LevelMetas {
     levels: LevelMetaVec,
     sst_layer: AccessLayerRef,
     file_purger: FilePurgerRef,
+}
+
+impl std::fmt::Debug for LevelMetas {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LevelMetas")
+            .field("levels", &self.levels)
+            .finish()
+    }
 }
 
 impl LevelMetas {
@@ -119,13 +127,22 @@ impl LevelMetas {
 }
 
 /// Metadata of files in same SST level.
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct LevelMeta {
     level: Level,
     /// Handles to the files in this level.
     // TODO(yingwen): Now for simplicity, files are unordered, maybe sort the files by time range
     // or use another structure to hold them.
     files: HashMap<FileId, FileHandle>,
+}
+
+impl std::fmt::Debug for LevelMeta {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LevelMeta")
+            .field("level", &self.level)
+            .field("files", &self.files.keys())
+            .finish()
+    }
 }
 
 impl LevelMeta {
@@ -292,7 +309,7 @@ impl Drop for FileHandleInner {
             };
             match self.file_purger.schedule(request) {
                 Ok(res) => {
-                    info!(
+                    debug!(
                         "Scheduled SST purge task, region: {}, name: {}, res: {}",
                         self.meta.region_id,
                         self.meta.file_id.as_parquet(),
@@ -301,7 +318,7 @@ impl Drop for FileHandleInner {
                 }
                 Err(e) => {
                     error!(e; "Failed to schedule SST purge task, region: {}, name: {}",
-                    self.meta.region_id, self.meta.file_id.as_parquet());
+                           self.meta.region_id, self.meta.file_id.as_parquet());
                 }
             }
         }

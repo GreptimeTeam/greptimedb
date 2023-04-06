@@ -117,6 +117,7 @@ mod tests {
     use mito::config::EngineConfig as TableEngineConfig;
     use mito::table::test_util::new_test_object_store;
     use query::QueryEngineFactory;
+    use table::engine::manager::MemoryTableEngineManager;
 
     use super::*;
     type DefaultEngine = MitoEngine<EngineImpl<RaftEngineLogStore>>;
@@ -153,9 +154,9 @@ mod tests {
             ),
             object_store,
         ));
-
+        let engine_manager = Arc::new(MemoryTableEngineManager::new(mock_engine.clone()));
         let catalog_manager = Arc::new(
-            catalog::local::LocalCatalogManager::try_new(mock_engine.clone())
+            catalog::local::LocalCatalogManager::try_new(engine_manager)
                 .await
                 .unwrap(),
         );

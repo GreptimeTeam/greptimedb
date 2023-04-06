@@ -32,7 +32,7 @@ use datafusion::prelude::{Column, Expr as DfExpr, JoinType};
 use datafusion::scalar::ScalarValue;
 use datafusion::sql::TableReference;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
-use promql_parser::label::{MatchOp, Matchers, METRIC_NAME};
+use promql_parser::label::{MatchOp, Matcher, Matchers, METRIC_NAME};
 use promql_parser::parser::{
     token, AggModifier, AggregateExpr, BinaryExpr as PromBinaryExpr, Call, EvalStmt,
     Expr as PromExpr, Function, MatrixSelector, NumberLiteral, Offset, ParenExpr, StringLiteral,
@@ -42,17 +42,18 @@ use snafu::{ensure, OptionExt, ResultExt};
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::error::{
-    CatalogSnafu, DataFusionPlanningSnafu, ExpectExprSnafu, ExpectRangeSelectorSnafu,
-    MultipleVectorSnafu, Result, TableNameNotFoundSnafu, TimeIndexNotFoundSnafu,
-    UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu, UnsupportedExprSnafu,
-    ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
+    CatalogSnafu, ColumnNotFoundSnafu, DataFusionPlanningSnafu, ExpectExprSnafu,
+    ExpectRangeSelectorSnafu, MultipleVectorSnafu, Result, TableNameNotFoundSnafu,
+    TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu,
+    UnsupportedExprSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
 };
 use crate::extension_plan::{
     EmptyMetric, InstantManipulate, Millisecond, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
 use crate::functions::{
-    AbsentOverTime, AvgOverTime, CountOverTime, Delta, IDelta, Increase, LastOverTime, MaxOverTime,
-    MinOverTime, PresentOverTime, QuantileOverTime, Rate, SumOverTime,
+    AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, IDelta, Increase, LastOverTime,
+    MaxOverTime, MinOverTime, PresentOverTime, QuantileOverTime, Rate, Resets, StddevOverTime,
+    StdvarOverTime, SumOverTime,
 };
 
 const LEFT_PLAN_JOIN_ALIAS: &str = "lhs";
@@ -61,7 +62,10 @@ const LEFT_PLAN_JOIN_ALIAS: &str = "lhs";
 const SPECIAL_TIME_FUNCTION: &str = "time";
 
 /// default value column name for empty metric
-const DEFAULT_VALUE_COLUMN: &str = "value";
+const DEFAULT_FIELD_COLUMN: &str = "value";
+
+/// Special modifier to project field columns under multi-field mode
+const FIELD_COLUMN_MATCHER: &str = "__field__";
 
 #[derive(Default, Debug, Clone)]
 struct PromPlannerContext {
@@ -74,8 +78,9 @@ struct PromPlannerContext {
     // planner states
     table_name: Option<String>,
     time_index_column: Option<String>,
-    value_columns: Vec<String>,
+    field_columns: Vec<String>,
     tag_columns: Vec<String>,
+    field_column_matcher: Option<Vec<Matcher>>,
     /// The range in millisecond of range selector. None if there is no range selector.
     range: Option<Millisecond>,
 }
@@ -151,7 +156,7 @@ impl PromPlanner {
             PromExpr::Unary(UnaryExpr { expr }) => {
                 // Unary Expr in PromQL implys the `-` operator
                 let input = self.prom_expr_to_plan(*expr.clone()).await?;
-                self.projection_for_each_value_column(input, |col| {
+                self.projection_for_each_field_column(input, |col| {
                     Ok(DfExpr::Negative(Box::new(DfExpr::Column(col.into()))))
                 })?
             }
@@ -199,9 +204,9 @@ impl PromPlanner {
                             Ok(binary_expr)
                         };
                         if is_comparison_op && !should_return_bool {
-                            self.filter_on_value_column(input, bin_expr_builder)?
+                            self.filter_on_field_column(input, bin_expr_builder)?
                         } else {
-                            self.projection_for_each_value_column(input, bin_expr_builder)?
+                            self.projection_for_each_field_column(input, bin_expr_builder)?
                         }
                     }
                     // lhs is a column, rhs is a literal
@@ -222,27 +227,27 @@ impl PromPlanner {
                             Ok(binary_expr)
                         };
                         if is_comparison_op && !should_return_bool {
-                            self.filter_on_value_column(input, bin_expr_builder)?
+                            self.filter_on_field_column(input, bin_expr_builder)?
                         } else {
-                            self.projection_for_each_value_column(input, bin_expr_builder)?
+                            self.projection_for_each_field_column(input, bin_expr_builder)?
                         }
                     }
                     // both are columns. join them on time index
                     (None, None) => {
                         let left_input = self.prom_expr_to_plan(*lhs.clone()).await?;
-                        let left_value_columns = self.ctx.value_columns.clone();
+                        let left_field_columns = self.ctx.field_columns.clone();
                         let left_schema = left_input.schema().clone();
 
                         let right_input = self.prom_expr_to_plan(*rhs.clone()).await?;
-                        let right_value_columns = self.ctx.value_columns.clone();
+                        let right_field_columns = self.ctx.field_columns.clone();
                         let right_schema = right_input.schema().clone();
 
-                        let mut value_columns =
-                            left_value_columns.iter().zip(right_value_columns.iter());
-                        // the new ctx.value_columns for the generated join plan
-                        let join_plan = self.join_on_non_value_columns(left_input, right_input)?;
+                        let mut field_columns =
+                            left_field_columns.iter().zip(right_field_columns.iter());
+                        // the new ctx.field_columns for the generated join plan
+                        let join_plan = self.join_on_non_field_columns(left_input, right_input)?;
                         let bin_expr_builder = |_: &String| {
-                            let (left_col_name, right_col_name) = value_columns.next().unwrap();
+                            let (left_col_name, right_col_name) = field_columns.next().unwrap();
                             let left_col = left_schema
                                 .field_with_name(None, left_col_name)
                                 .context(DataFusionPlanningSnafu)?
@@ -266,9 +271,9 @@ impl PromPlanner {
                             Ok(binary_expr)
                         };
                         if is_comparison_op && !should_return_bool {
-                            self.filter_on_value_column(join_plan, bin_expr_builder)?
+                            self.filter_on_field_column(join_plan, bin_expr_builder)?
                         } else {
-                            self.projection_for_each_value_column(join_plan, bin_expr_builder)?
+                            self.projection_for_each_field_column(join_plan, bin_expr_builder)?
                         }
                     }
                 }
@@ -339,7 +344,7 @@ impl PromPlanner {
                         .time_index_column
                         .clone()
                         .expect("time index should be set in `setup_context`"),
-                    self.ctx.value_columns.clone(),
+                    self.ctx.field_columns.clone(),
                     normalize,
                 )
                 .context(DataFusionPlanningSnafu)?;
@@ -352,7 +357,7 @@ impl PromPlanner {
                 // TODO(ruihang): refactor this, transform the AST in advance to include an empty metric table.
                 if func.name == SPECIAL_TIME_FUNCTION {
                     self.ctx.time_index_column = Some(SPECIAL_TIME_FUNCTION.to_string());
-                    self.ctx.value_columns = vec![DEFAULT_VALUE_COLUMN.to_string()];
+                    self.ctx.field_columns = vec![DEFAULT_FIELD_COLUMN.to_string()];
                     self.ctx.table_name = Some(String::new());
 
                     return Ok(LogicalPlan::Extension(Extension {
@@ -362,7 +367,7 @@ impl PromPlanner {
                                 self.ctx.end,
                                 self.ctx.interval,
                                 SPECIAL_TIME_FUNCTION.to_string(),
-                                DEFAULT_VALUE_COLUMN.to_string(),
+                                DEFAULT_FIELD_COLUMN.to_string(),
                             )
                             .context(DataFusionPlanningSnafu)?,
                         ),
@@ -399,6 +404,11 @@ impl PromPlanner {
             // TODO(ruihang): support other metric match ops
             if matcher.name == METRIC_NAME && matches!(matcher.op, MatchOp::Equal) {
                 self.ctx.table_name = Some(matcher.value.clone());
+            } else if matcher.name == FIELD_COLUMN_MATCHER {
+                self.ctx
+                    .field_column_matcher
+                    .get_or_insert_default()
+                    .push(matcher.clone());
             } else {
                 matchers.insert(matcher.clone());
             }
@@ -431,9 +441,77 @@ impl PromPlanner {
         )));
 
         // make table scan with filter exprs
-        let table_scan = self
+        let mut table_scan = self
             .create_table_scan_plan(&table_name, filters.clone())
             .await?;
+
+        // make a projection plan if there is any `__field__` matcher
+        if let Some(field_matchers) = &self.ctx.field_column_matcher {
+            let col_set = self.ctx.field_columns.iter().collect::<HashSet<_>>();
+            // opt-in set
+            let mut result_set = HashSet::new();
+            // opt-out set
+            let mut reverse_set = HashSet::new();
+            for matcher in field_matchers {
+                match &matcher.op {
+                    MatchOp::Equal => {
+                        if col_set.contains(&matcher.value) {
+                            result_set.insert(matcher.value.clone());
+                        } else {
+                            return Err(ColumnNotFoundSnafu {
+                                col: self.ctx.table_name.clone().unwrap(),
+                            }
+                            .build());
+                        }
+                    }
+                    MatchOp::NotEqual => {
+                        if col_set.contains(&matcher.value) {
+                            reverse_set.insert(matcher.value.clone());
+                        } else {
+                            return Err(ValueNotFoundSnafu {
+                                table: self.ctx.table_name.clone().unwrap(),
+                            }
+                            .build());
+                        }
+                    }
+                    MatchOp::Re(regex) => {
+                        for col in &self.ctx.field_columns {
+                            if regex.is_match(col) {
+                                result_set.insert(col.clone());
+                            }
+                        }
+                    }
+                    MatchOp::NotRe(regex) => {
+                        for col in &self.ctx.field_columns {
+                            if regex.is_match(col) {
+                                reverse_set.insert(col.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            // merge two set
+            if result_set.is_empty() {
+                result_set = col_set.into_iter().cloned().collect();
+            }
+            for col in reverse_set {
+                result_set.remove(&col);
+            }
+
+            self.ctx.field_columns = result_set.iter().cloned().collect();
+            let exprs = result_set
+                .into_iter()
+                .map(|col| DfExpr::Column(col.into()))
+                .chain(self.create_tag_column_exprs()?.into_iter())
+                .chain(Some(self.create_time_index_column_expr()?))
+                .collect::<Vec<_>>();
+            // reuse this variable for simplicity
+            table_scan = LogicalPlanBuilder::from(table_scan)
+                .project(exprs)
+                .context(DataFusionPlanningSnafu)?
+                .build()
+                .context(DataFusionPlanningSnafu)?;
+        }
 
         // make filter and sort plan
         let sort_plan = LogicalPlanBuilder::from(table_scan)
@@ -511,7 +589,7 @@ impl PromPlanner {
                 if let Some(time_index) = &self.ctx.time_index_column {
                     all_fields.remove(time_index);
                 }
-                for value in &self.ctx.value_columns {
+                for value in &self.ctx.field_columns {
                     all_fields.remove(value);
                 }
 
@@ -610,10 +688,10 @@ impl PromPlanner {
         let values = table
             .table_info()
             .meta
-            .value_column_names()
+            .field_column_names()
             .cloned()
             .collect();
-        self.ctx.value_columns = values;
+        self.ctx.field_columns = values;
 
         // set primary key (tag) columns
         let tags = table
@@ -671,7 +749,7 @@ impl PromPlanner {
         // TODO(ruihang): check function args list
 
         // TODO(ruihang): set this according to in-param list
-        let value_column_pos = 0;
+        let field_column_pos = 0;
         let scalar_func = match func.name {
             "increase" => ScalarFunc::ExtrapolateUdf(Increase::scalar_udf(
                 self.ctx.range.context(ExpectRangeSelectorSnafu)?,
@@ -684,6 +762,8 @@ impl PromPlanner {
             )),
             "idelta" => ScalarFunc::Udf(IDelta::<false>::scalar_udf()),
             "irate" => ScalarFunc::Udf(IDelta::<true>::scalar_udf()),
+            "resets" => ScalarFunc::Udf(Resets::scalar_udf()),
+            "changes" => ScalarFunc::Udf(Changes::scalar_udf()),
             "avg_over_time" => ScalarFunc::Udf(AvgOverTime::scalar_udf()),
             "min_over_time" => ScalarFunc::Udf(MinOverTime::scalar_udf()),
             "max_over_time" => ScalarFunc::Udf(MaxOverTime::scalar_udf()),
@@ -692,6 +772,8 @@ impl PromPlanner {
             "last_over_time" => ScalarFunc::Udf(LastOverTime::scalar_udf()),
             "absent_over_time" => ScalarFunc::Udf(AbsentOverTime::scalar_udf()),
             "present_over_time" => ScalarFunc::Udf(PresentOverTime::scalar_udf()),
+            "stddev_over_time" => ScalarFunc::Udf(StddevOverTime::scalar_udf()),
+            "stdvar_over_time" => ScalarFunc::Udf(StdvarOverTime::scalar_udf()),
             "quantile_over_time" => {
                 let quantile_expr = match other_input_exprs.get(0) {
                     Some(DfExpr::Literal(ScalarValue::Float64(Some(quantile)))) => *quantile,
@@ -713,19 +795,19 @@ impl PromPlanner {
         };
 
         // TODO(ruihang): handle those functions doesn't require input
-        let mut exprs = Vec::with_capacity(self.ctx.value_columns.len());
-        for value in &self.ctx.value_columns {
+        let mut exprs = Vec::with_capacity(self.ctx.field_columns.len());
+        for value in &self.ctx.field_columns {
             let col_expr = DfExpr::Column(Column::from_name(value));
 
             match scalar_func.clone() {
                 ScalarFunc::DataFusionBuiltin(fun) => {
-                    other_input_exprs.insert(value_column_pos, col_expr);
+                    other_input_exprs.insert(field_column_pos, col_expr);
                     let fn_expr = DfExpr::ScalarFunction {
                         fun,
                         args: other_input_exprs.clone(),
                     };
                     exprs.push(fn_expr);
-                    other_input_exprs.remove(value_column_pos);
+                    other_input_exprs.remove(field_column_pos);
                 }
                 ScalarFunc::Udf(fun) => {
                     let ts_range_expr = DfExpr::Column(Column::from_name(
@@ -733,15 +815,15 @@ impl PromPlanner {
                             self.ctx.time_index_column.as_ref().unwrap(),
                         ),
                     ));
-                    other_input_exprs.insert(value_column_pos, ts_range_expr);
-                    other_input_exprs.insert(value_column_pos + 1, col_expr);
+                    other_input_exprs.insert(field_column_pos, ts_range_expr);
+                    other_input_exprs.insert(field_column_pos + 1, col_expr);
                     let fn_expr = DfExpr::ScalarUDF {
                         fun: Arc::new(fun),
                         args: other_input_exprs.clone(),
                     };
                     exprs.push(fn_expr);
-                    other_input_exprs.remove(value_column_pos + 1);
-                    other_input_exprs.remove(value_column_pos);
+                    other_input_exprs.remove(field_column_pos + 1);
+                    other_input_exprs.remove(field_column_pos);
                 }
                 ScalarFunc::ExtrapolateUdf(fun) => {
                     let ts_range_expr = DfExpr::Column(Column::from_name(
@@ -749,34 +831,34 @@ impl PromPlanner {
                             self.ctx.time_index_column.as_ref().unwrap(),
                         ),
                     ));
-                    other_input_exprs.insert(value_column_pos, ts_range_expr);
-                    other_input_exprs.insert(value_column_pos + 1, col_expr);
+                    other_input_exprs.insert(field_column_pos, ts_range_expr);
+                    other_input_exprs.insert(field_column_pos + 1, col_expr);
                     other_input_exprs
-                        .insert(value_column_pos + 2, self.create_time_index_column_expr()?);
+                        .insert(field_column_pos + 2, self.create_time_index_column_expr()?);
                     let fn_expr = DfExpr::ScalarUDF {
                         fun: Arc::new(fun),
                         args: other_input_exprs.clone(),
                     };
                     exprs.push(fn_expr);
-                    other_input_exprs.remove(value_column_pos + 2);
-                    other_input_exprs.remove(value_column_pos + 1);
-                    other_input_exprs.remove(value_column_pos);
+                    other_input_exprs.remove(field_column_pos + 2);
+                    other_input_exprs.remove(field_column_pos + 1);
+                    other_input_exprs.remove(field_column_pos);
                 }
             }
         }
 
         // update value columns' name, and alias them to remove qualifiers
-        let mut new_value_columns = Vec::with_capacity(exprs.len());
+        let mut new_field_columns = Vec::with_capacity(exprs.len());
         exprs = exprs
             .into_iter()
             .map(|expr| {
                 let display_name = expr.display_name()?;
-                new_value_columns.push(display_name.clone());
+                new_field_columns.push(display_name.clone());
                 Ok(expr.alias(display_name))
             })
             .collect::<std::result::Result<Vec<_>, _>>()
             .context(DataFusionPlanningSnafu)?;
-        self.ctx.value_columns = new_value_columns;
+        self.ctx.field_columns = new_field_columns;
 
         Ok(exprs)
     }
@@ -811,8 +893,8 @@ impl PromPlanner {
     }
 
     fn create_empty_values_filter_expr(&self) -> Result<DfExpr> {
-        let mut exprs = Vec::with_capacity(self.ctx.value_columns.len());
-        for value in &self.ctx.value_columns {
+        let mut exprs = Vec::with_capacity(self.ctx.field_columns.len());
+        for value in &self.ctx.field_columns {
             let expr = DfExpr::Column(Column::from_name(value)).is_not_null();
             exprs.push(expr);
         }
@@ -854,7 +936,7 @@ impl PromPlanner {
         // perform aggregate operation to each value column
         let exprs: Vec<DfExpr> = self
             .ctx
-            .value_columns
+            .field_columns
             .iter()
             .map(|col| {
                 DfExpr::AggregateFunction(AggregateFunction {
@@ -867,13 +949,13 @@ impl PromPlanner {
             .collect();
 
         // update value column name according to the aggregators
-        let mut new_value_columns = Vec::with_capacity(self.ctx.value_columns.len());
+        let mut new_field_columns = Vec::with_capacity(self.ctx.field_columns.len());
         let normalized_exprs =
             normalize_cols(exprs.iter().cloned(), input_plan).context(DataFusionPlanningSnafu)?;
         for expr in normalized_exprs {
-            new_value_columns.push(expr.display_name().context(DataFusionPlanningSnafu)?);
+            new_field_columns.push(expr.display_name().context(DataFusionPlanningSnafu)?);
         }
-        self.ctx.value_columns = new_value_columns;
+        self.ctx.field_columns = new_field_columns;
 
         Ok(exprs)
     }
@@ -946,7 +1028,7 @@ impl PromPlanner {
 
     /// Build a inner join on time index column and tag columns to concat two logical plans.
     /// The left plan will be alised as [`LEFT_PLAN_JOIN_ALIAS`].
-    fn join_on_non_value_columns(
+    fn join_on_non_field_columns(
         &self,
         left: LogicalPlan,
         right: LogicalPlan,
@@ -986,7 +1068,7 @@ impl PromPlanner {
     ///
     /// This function will update the value columns in the context. Those new column names
     /// don't contains qualifier.
-    fn projection_for_each_value_column<F>(
+    fn projection_for_each_field_column<F>(
         &mut self,
         input: LogicalPlan,
         name_to_expr: F,
@@ -994,7 +1076,7 @@ impl PromPlanner {
     where
         F: FnMut(&String) -> Result<DfExpr>,
     {
-        let non_value_columns_iter = self
+        let non_field_columns_iter = self
             .ctx
             .tag_columns
             .iter()
@@ -1007,27 +1089,27 @@ impl PromPlanner {
             });
 
         // build computation exprs
-        let result_value_columns = self
+        let result_field_columns = self
             .ctx
-            .value_columns
+            .field_columns
             .iter()
             .map(name_to_expr)
             .collect::<Result<Vec<_>>>()?;
 
         // alias the computation exprs to remove qualifier
-        self.ctx.value_columns = result_value_columns
+        self.ctx.field_columns = result_field_columns
             .iter()
             .map(|expr| expr.display_name())
             .collect::<DfResult<Vec<_>>>()
             .context(DataFusionPlanningSnafu)?;
-        let value_columns_iter = result_value_columns
+        let field_columns_iter = result_field_columns
             .into_iter()
-            .zip(self.ctx.value_columns.iter())
+            .zip(self.ctx.field_columns.iter())
             .map(|(expr, name)| Ok(DfExpr::Alias(Box::new(expr), name.to_string())));
 
         // chain non-value columns (unchanged) and value columns (applied computation then alias)
-        let project_fields = non_value_columns_iter
-            .chain(value_columns_iter)
+        let project_fields = non_field_columns_iter
+            .chain(field_columns_iter)
             .collect::<Result<Vec<_>>>()?;
 
         LogicalPlanBuilder::from(input)
@@ -1039,7 +1121,7 @@ impl PromPlanner {
 
     /// Build a filter plan that filter on value column. Notice that only one value column
     /// is expected.
-    fn filter_on_value_column<F>(
+    fn filter_on_field_column<F>(
         &self,
         input: LogicalPlan,
         mut name_to_expr: F,
@@ -1048,16 +1130,16 @@ impl PromPlanner {
         F: FnMut(&String) -> Result<DfExpr>,
     {
         ensure!(
-            self.ctx.value_columns.len() == 1,
+            self.ctx.field_columns.len() == 1,
             UnsupportedExprSnafu {
                 name: "filter on multi-value input"
             }
         );
 
-        let value_column_filter = name_to_expr(&self.ctx.value_columns[0])?;
+        let field_column_filter = name_to_expr(&self.ctx.field_columns[0])?;
 
         LogicalPlanBuilder::from(input)
-            .filter(value_column_filter)
+            .filter(field_column_filter)
             .context(DataFusionPlanningSnafu)?
             .build()
             .context(DataFusionPlanningSnafu)
@@ -1689,5 +1771,139 @@ mod test {
         );
 
         indie_query_plan_compare(query, expected).await;
+    }
+
+    #[tokio::test]
+    async fn value_matcher() {
+        // template
+        let mut eval_stmt = EvalStmt {
+            expr: PromExpr::NumberLiteral(NumberLiteral { val: 1.0 }),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let cases = [
+            // single equal matcher
+            (
+                r#"some_metric{__field__="field_1"}"#,
+                vec![
+                    "some_metric.field_1",
+                    "some_metric.tag_0",
+                    "some_metric.tag_1",
+                    "some_metric.tag_2",
+                    "some_metric.timestamp",
+                ],
+            ),
+            // two equal matchers
+            (
+                r#"some_metric{__field__="field_1", __field__="field_0"}"#,
+                vec![
+                    "some_metric.field_0",
+                    "some_metric.field_1",
+                    "some_metric.tag_0",
+                    "some_metric.tag_1",
+                    "some_metric.tag_2",
+                    "some_metric.timestamp",
+                ],
+            ),
+            // single not_eq mathcer
+            (
+                r#"some_metric{__field__!="field_1"}"#,
+                vec![
+                    "some_metric.field_0",
+                    "some_metric.field_2",
+                    "some_metric.tag_0",
+                    "some_metric.tag_1",
+                    "some_metric.tag_2",
+                    "some_metric.timestamp",
+                ],
+            ),
+            // two not_eq mathcers
+            (
+                r#"some_metric{__field__!="field_1", __field__!="field_2"}"#,
+                vec![
+                    "some_metric.field_0",
+                    "some_metric.tag_0",
+                    "some_metric.tag_1",
+                    "some_metric.tag_2",
+                    "some_metric.timestamp",
+                ],
+            ),
+            // equal and not_eq matchers (no conflict)
+            (
+                r#"some_metric{__field__="field_1", __field__!="field_0"}"#,
+                vec![
+                    "some_metric.field_1",
+                    "some_metric.tag_0",
+                    "some_metric.tag_1",
+                    "some_metric.tag_2",
+                    "some_metric.timestamp",
+                ],
+            ),
+            // equal and not_eq matchers (conflict)
+            (
+                r#"some_metric{__field__="field_2", __field__!="field_2"}"#,
+                vec![
+                    "some_metric.tag_0",
+                    "some_metric.tag_1",
+                    "some_metric.tag_2",
+                    "some_metric.timestamp",
+                ],
+            ),
+            // single regex eq matcher
+            (
+                r#"some_metric{__field__=~"field_1|field_2"}"#,
+                vec![
+                    "some_metric.field_1",
+                    "some_metric.field_2",
+                    "some_metric.tag_0",
+                    "some_metric.tag_1",
+                    "some_metric.tag_2",
+                    "some_metric.timestamp",
+                ],
+            ),
+            // single regex not_eq matcher
+            (
+                r#"some_metric{__field__!~"field_1|field_2"}"#,
+                vec![
+                    "some_metric.field_0",
+                    "some_metric.tag_0",
+                    "some_metric.tag_1",
+                    "some_metric.tag_2",
+                    "some_metric.timestamp",
+                ],
+            ),
+        ];
+
+        for case in cases {
+            let prom_expr = parser::parse(case.0).unwrap();
+            eval_stmt.expr = prom_expr;
+            let table_provider = build_test_table_provider("some_metric".to_string(), 3, 3).await;
+            let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt.clone())
+                .await
+                .unwrap();
+            let mut fields = plan.schema().field_names();
+            let mut expected = case.1.into_iter().map(String::from).collect::<Vec<_>>();
+            fields.sort();
+            expected.sort();
+            assert_eq!(fields, expected, "case: {:?}", case.0);
+        }
+
+        let bad_cases = [
+            r#"some_metric{__field__="nonexistent"}"#,
+            r#"some_metric{__field__!="nonexistent"}"#,
+        ];
+
+        for case in bad_cases {
+            let prom_expr = parser::parse(case).unwrap();
+            eval_stmt.expr = prom_expr;
+            let table_provider = build_test_table_provider("some_metric".to_string(), 3, 3).await;
+            let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt.clone()).await;
+            assert!(plan.is_err(), "case: {:?}", case);
+        }
     }
 }

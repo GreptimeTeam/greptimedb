@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 
 use common_base::readable_size::ReadableSize;
-use common_telemetry::{error, info};
+use common_telemetry::{debug, error};
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
@@ -48,6 +48,7 @@ pub struct CompactionTaskImpl<S: LogStore> {
     pub manifest: RegionManifest,
     pub expired_ssts: Vec<FileHandle>,
     pub sst_write_buffer_size: ReadableSize,
+    pub compaction_time_window: Option<i64>,
 }
 
 impl<S: LogStore> Debug for CompactionTaskImpl<S> {
@@ -101,6 +102,7 @@ impl<S: LogStore> CompactionTaskImpl<S> {
     }
 
     /// Writes updated SST info into manifest.
+    // TODO(etolbakov): we are not persisting inferred compaction_time_window (#1083)[https://github.com/GreptimeTeam/greptimedb/pull/1083]
     async fn write_manifest_and_apply(
         &self,
         output: HashSet<FileMeta>,
@@ -115,7 +117,7 @@ impl<S: LogStore> CompactionTaskImpl<S> {
             files_to_add: Vec::from_iter(output.into_iter()),
             files_to_remove: Vec::from_iter(input.into_iter()),
         };
-        info!(
+        debug!(
             "Compacted region: {}, region edit: {:?}",
             version.metadata().name(),
             edit

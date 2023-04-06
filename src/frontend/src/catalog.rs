@@ -193,6 +193,7 @@ impl CatalogManager for FrontendCatalogManager {
                 table_options: (&request.table_options).into(),
                 table_id: None, // Should and will be assigned by Meta.
                 region_ids: vec![0],
+                engine: request.engine,
             };
 
             let table = dist_instance
@@ -435,7 +436,7 @@ impl SchemaProvider for FrontendSchemaProvider {
 
 #[cfg(test)]
 mod tests {
-    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
     use script::table::{build_scripts_schema, SCRIPTS_TABLE_NAME};
     use table::requests::{CreateTableRequest, TableOptions};
 
@@ -460,6 +461,7 @@ mod tests {
             primary_key_indices: vec![0, 1],
             create_if_not_exists: true,
             table_options: TableOptions::default(),
+            engine: MITO_ENGINE.to_string(),
         };
 
         let result = instance

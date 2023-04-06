@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+pub use common_catalog::consts::MITO_ENGINE;
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
 use common_procedure::{BoxedProcedure, ProcedureManager};
@@ -55,8 +56,6 @@ use crate::error::{
 };
 use crate::manifest::TableManifest;
 use crate::table::MitoTable;
-
-pub const MITO_ENGINE: &str = "mito";
 pub const INIT_COLUMN_ID: ColumnId = 0;
 const INIT_TABLE_VERSION: TableVersion = 0;
 
@@ -397,6 +396,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 .id(region_id)
                 .name(&region_name)
                 .row_key(row_key.clone())
+                .compaction_time_window(request.table_options.compaction_time_window)
                 .default_cf(default_cf.clone())
                 .build()
                 .context(BuildRegionDescriptorSnafu {
@@ -410,6 +410,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                     .write_buffer_size
                     .map(|size| size.0 as usize),
                 ttl: request.table_options.ttl,
+                compaction_time_window: request.table_options.compaction_time_window,
             };
 
             let region = self
@@ -418,7 +419,11 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 .await
                 .map_err(BoxedError::new)
                 .context(error::CreateRegionSnafu)?;
-            info!("Mito engine created region: {:?}", region.id());
+            info!(
+                "Mito engine created region: {}, id: {}",
+                region.name(),
+                region.id()
+            );
             regions.insert(*region_number, region);
         }
 
@@ -453,7 +458,12 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             .await?,
         );
 
-        logging::info!("Mito engine created table: {:?}.", table.table_info());
+        logging::info!(
+            "Mito engine created table: {} in schema: {}, table_id: {}.",
+            table_name,
+            schema_name,
+            table_id
+        );
 
         // already locked
         self.tables.insert(table_ref.to_string(), table.clone());
@@ -508,6 +518,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                     .write_buffer_size
                     .map(|s| s.0 as usize),
                 ttl: table_info.meta.options.ttl,
+                compaction_time_window: table_info.meta.options.compaction_time_window,
             };
 
             debug!(
@@ -543,7 +554,11 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             Some(table as _)
         };
 
-        logging::info!("Mito engine opened table {}", table_name);
+        logging::info!(
+            "Mito engine opened table: {} in schema: {}",
+            table_name,
+            schema_name
+        );
 
         Ok(table)
     }

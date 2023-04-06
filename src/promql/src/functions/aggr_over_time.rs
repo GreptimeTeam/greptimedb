@@ -183,8 +183,6 @@ pub fn stddev_over_time(_: &TimestampMillisecondArray, values: &Float64Array) ->
     }
 }
 
-// TODO(ruihang): support quantile_over_time
-
 #[cfg(test)]
 mod test {
     use super::*;

@@ -35,20 +35,24 @@ impl SqlHandler {
 
         let full_table_name = table_ref.to_string();
 
+        // fetches table via catalog
+        let table = self.get_table(&table_ref).await?;
+        // checks the table engine exist
+        let table_engine = self.table_engine(table)?;
         ensure!(
-            self.table_engine.table_exists(&ctx, &table_ref),
+            table_engine.table_exists(&ctx, &table_ref),
             error::TableNotFoundSnafu {
                 table_name: &full_table_name,
             }
         );
         let is_rename = req.is_rename_table();
-        let table =
-            self.table_engine
-                .alter_table(&ctx, req)
-                .await
-                .context(error::AlterTableSnafu {
-                    table_name: full_table_name,
-                })?;
+
+        let table = table_engine
+            .alter_table(&ctx, req)
+            .await
+            .context(error::AlterTableSnafu {
+                table_name: full_table_name,
+            })?;
         if is_rename {
             let table_info = &table.table_info();
             let rename_table_req = RenameTableRequest {

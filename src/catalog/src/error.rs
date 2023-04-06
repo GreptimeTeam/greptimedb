@@ -83,6 +83,13 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
+    #[snafu(display("Table engine not found: {}, source: {}", engine_name, source))]
+    TableEngineNotFound {
+        engine_name: String,
+        #[snafu(backtrace)]
+        source: table::error::Error,
+    },
+
     #[snafu(display("Cannot find catalog by name: {}", catalog_name))]
     CatalogNotFound {
         catalog_name: String,
@@ -259,7 +266,9 @@ impl ErrorExt for Error {
 
             Error::TableExists { .. } => StatusCode::TableAlreadyExists,
             Error::TableNotExist { .. } => StatusCode::TableNotFound,
-            Error::SchemaExists { .. } => StatusCode::InvalidArguments,
+            Error::SchemaExists { .. } | Error::TableEngineNotFound { .. } => {
+                StatusCode::InvalidArguments
+            }
 
             Error::OpenSystemCatalog { source, .. }
             | Error::CreateSystemCatalog { source, .. }

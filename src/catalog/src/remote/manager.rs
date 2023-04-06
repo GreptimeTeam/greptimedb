@@ -20,7 +20,9 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use async_stream::stream;
 use async_trait::async_trait;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
+use common_catalog::consts::{
+    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID, MITO_ENGINE,
+};
 use common_telemetry::{debug, error, info};
 use dashmap::DashMap;
 use futures::Stream;
@@ -28,7 +30,8 @@ use futures_util::StreamExt;
 use key_lock::KeyLock;
 use parking_lot::RwLock;
 use snafu::{OptionExt, ResultExt};
-use table::engine::{EngineContext, TableEngineRef};
+use table::engine::manager::TableEngineManagerRef;
+use table::engine::EngineContext;
 use table::metadata::TableId;
 use table::requests::{CreateTableRequest, OpenTableRequest};
 use table::table::numbers::NumbersTable;
@@ -39,7 +42,7 @@ use tokio::task::JoinHandle;
 use crate::error::Error::ParallelOpenTable;
 use crate::error::{
     CatalogNotFoundSnafu, CreateTableSnafu, InvalidCatalogValueSnafu, OpenTableSnafu, Result,
-    SchemaNotFoundSnafu, TableExistsSnafu, UnimplementedSnafu,
+    SchemaNotFoundSnafu, TableEngineNotFoundSnafu, TableExistsSnafu, UnimplementedSnafu,
 };
 use crate::helper::{
     build_catalog_prefix, build_schema_prefix, build_table_global_prefix, CatalogKey, CatalogValue,
@@ -58,14 +61,14 @@ pub struct RemoteCatalogManager {
     node_id: u64,
     backend: KvBackendRef,
     catalogs: Arc<RwLock<DashMap<String, CatalogProviderRef>>>,
-    engine: TableEngineRef,
+    engine_manager: TableEngineManagerRef,
     system_table_requests: Mutex<Vec<RegisterSystemTableRequest>>,
 }
 
 impl RemoteCatalogManager {
-    pub fn new(engine: TableEngineRef, node_id: u64, backend: KvBackendRef) -> Self {
+    pub fn new(engine_manager: TableEngineManagerRef, node_id: u64, backend: KvBackendRef) -> Self {
         Self {
-            engine,
+            engine_manager,
             node_id,
             backend,
             catalogs: Default::default(),
@@ -260,10 +263,10 @@ impl RemoteCatalogManager {
         let node_id = self.node_id;
         for kv in kvs {
             let (table_key, table_value) = kv?;
-            let engine = self.engine.clone();
+            let engine_manager = self.engine_manager.clone();
             let join: JoinHandle<Result<TableRef>> = tokio::spawn(async move {
                 let table_ref =
-                    open_or_create_table(node_id, engine, &table_key, &table_value).await?;
+                    open_or_create_table(node_id, engine_manager, &table_key, &table_value).await?;
                 Ok(table_ref)
             });
             joins.push(join);
@@ -334,7 +337,7 @@ impl RemoteCatalogManager {
 
 async fn open_or_create_table(
     node_id: u64,
-    engine: TableEngineRef,
+    engine_manager: TableEngineManagerRef,
     table_key: &TableGlobalKey,
     table_value: &TableGlobalValue,
 ) -> Result<TableRef> {
@@ -363,6 +366,12 @@ async fn open_or_create_table(
         table_name: table_name.clone(),
         table_id,
     };
+    let engine =
+        engine_manager
+            .engine(&table_info.meta.engine)
+            .context(TableEngineNotFoundSnafu {
+                engine_name: &table_info.meta.engine,
+            })?;
     match engine
         .open_table(&context, request)
         .await
@@ -394,6 +403,7 @@ async fn open_or_create_table(
                 primary_key_indices: meta.primary_key_indices.clone(),
                 create_if_not_exists: true,
                 table_options: meta.options.clone(),
+                engine: engine.name().to_string(),
             };
 
             engine
@@ -428,7 +438,13 @@ impl CatalogManager for RemoteCatalogManager {
         info!("Max table id allocated: {}", max_table_id);
 
         let mut system_table_requests = self.system_table_requests.lock().await;
-        handle_system_table_request(self, self.engine.clone(), &mut system_table_requests).await?;
+        let engine = self
+            .engine_manager
+            .engine(MITO_ENGINE)
+            .context(TableEngineNotFoundSnafu {
+                engine_name: MITO_ENGINE,
+            })?;
+        handle_system_table_request(self, engine, &mut system_table_requests).await?;
         info!("All system table opened");
 
         self.catalog(DEFAULT_CATALOG_NAME)

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use catalog::CatalogManagerRef;
 use common_error::prelude::BoxedError;
 use common_procedure::ProcedureManagerRef;
@@ -21,12 +23,14 @@ use query::sql::{show_databases, show_tables};
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use sql::statements::show::{ShowDatabases, ShowTables};
-use table::engine::{EngineContext, TableEngineProcedureRef, TableEngineRef, TableReference};
+use table::engine::manager::TableEngineManagerRef;
+use table::engine::{TableEngineProcedureRef, TableEngineRef, TableReference};
 use table::requests::*;
-use table::TableRef;
+use table::{Table, TableRef};
 
 use crate::error::{
-    CloseTableEngineSnafu, ExecuteSqlSnafu, GetTableSnafu, Result, TableNotFoundSnafu,
+    self, CloseTableEngineSnafu, ExecuteSqlSnafu, Result, TableEngineNotFoundSnafu,
+    TableNotFoundSnafu,
 };
 use crate::instance::sql::table_idents_to_full_name;
 
@@ -53,7 +57,7 @@ pub enum SqlRequest {
 // Handler to execute SQL except query
 #[derive(Clone)]
 pub struct SqlHandler {
-    table_engine: TableEngineRef,
+    table_engine_manager: TableEngineManagerRef,
     catalog_manager: CatalogManagerRef,
     engine_procedure: TableEngineProcedureRef,
     procedure_manager: Option<ProcedureManagerRef>,
@@ -61,13 +65,13 @@ pub struct SqlHandler {
 
 impl SqlHandler {
     pub fn new(
-        table_engine: TableEngineRef,
+        table_engine_manager: TableEngineManagerRef,
         catalog_manager: CatalogManagerRef,
         engine_procedure: TableEngineProcedureRef,
         procedure_manager: Option<ProcedureManagerRef>,
     ) -> Self {
         Self {
-            table_engine,
+            table_engine_manager,
             catalog_manager,
             engine_procedure,
             procedure_manager,
@@ -103,23 +107,38 @@ impl SqlHandler {
         result
     }
 
-    pub(crate) fn get_table(&self, table_ref: &TableReference) -> Result<TableRef> {
-        self.table_engine
-            .get_table(&EngineContext::default(), table_ref)
-            .with_context(|_| GetTableSnafu {
-                table_name: table_ref.to_string(),
-            })?
+    pub async fn get_table(&self, table_ref: &TableReference<'_>) -> Result<TableRef> {
+        let TableReference {
+            catalog,
+            schema,
+            table,
+        } = table_ref;
+        let table = self
+            .catalog_manager
+            .table(catalog, schema, table)
+            .await
+            .context(error::CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {
                 table_name: table_ref.to_string(),
-            })
+            })?;
+        Ok(table)
     }
 
-    pub fn table_engine(&self) -> TableEngineRef {
-        self.table_engine.clone()
+    pub fn table_engine_manager(&self) -> TableEngineManagerRef {
+        self.table_engine_manager.clone()
+    }
+
+    pub fn table_engine(&self, table: Arc<dyn Table>) -> Result<TableEngineRef> {
+        let engine_name = &table.table_info().meta.engine;
+        let engine = self
+            .table_engine_manager
+            .engine(engine_name)
+            .context(TableEngineNotFoundSnafu { engine_name })?;
+        Ok(engine)
     }
 
     pub async fn close(&self) -> Result<()> {
-        self.table_engine
+        self.table_engine_manager
             .close()
             .await
             .map_err(BoxedError::new)

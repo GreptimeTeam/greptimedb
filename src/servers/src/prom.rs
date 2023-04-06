@@ -250,7 +250,7 @@ impl PromJsonResponse {
         // TODO(ruihang): wish there is a better way to do this.
         let mut timestamp_column_index = None;
         let mut tag_column_indices = Vec::new();
-        let mut first_value_column_index = None;
+        let mut first_field_column_index = None;
 
         for (i, column) in batches.schema().column_schemas().iter().enumerate() {
             match column.data_type {
@@ -260,8 +260,8 @@ impl PromJsonResponse {
                     }
                 }
                 ConcreteDataType::Float64(_) => {
-                    if first_value_column_index.is_none() {
-                        first_value_column_index = Some(i);
+                    if first_field_column_index.is_none() {
+                        first_field_column_index = Some(i);
                     }
                 }
                 ConcreteDataType::String(_) => {
@@ -274,7 +274,7 @@ impl PromJsonResponse {
         let timestamp_column_index = timestamp_column_index.context(InternalSnafu {
             err_msg: "no timestamp column found".to_string(),
         })?;
-        let first_value_column_index = first_value_column_index.context(InternalSnafu {
+        let first_field_column_index = first_field_column_index.context(InternalSnafu {
             err_msg: "no value column found".to_string(),
         })?;
 
@@ -302,8 +302,8 @@ impl PromJsonResponse {
                 .as_any()
                 .downcast_ref::<TimestampMillisecondVector>()
                 .unwrap();
-            let value_column = batch
-                .column(first_value_column_index)
+            let field_column = batch
+                .column(first_field_column_index)
                 .as_any()
                 .downcast_ref::<Float64Vector>()
                 .unwrap();
@@ -324,7 +324,7 @@ impl PromJsonResponse {
 
                 // retrieve value
                 let value =
-                    Into::<f64>::into(value_column.get_data(row_index).unwrap()).to_string();
+                    Into::<f64>::into(field_column.get_data(row_index).unwrap()).to_string();
 
                 buffer.entry(tags).or_default().push((timestamp, value));
             }

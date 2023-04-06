@@ -163,15 +163,18 @@ impl<S: StorageEngine> CreateMitoTable<S> {
         let table_options = &self.data.request.table_options;
         let write_buffer_size = table_options.write_buffer_size.map(|size| size.0 as usize);
         let ttl = table_options.ttl;
+        let compaction_time_window = table_options.compaction_time_window;
         let open_opts = OpenOptions {
             parent_dir: table_dir.clone(),
             write_buffer_size,
             ttl,
+            compaction_time_window,
         };
         let create_opts = CreateOptions {
             parent_dir: table_dir,
             write_buffer_size,
             ttl,
+            compaction_time_window,
         };
 
         let primary_key_indices = &self.data.request.primary_key_indices;
@@ -216,6 +219,7 @@ impl<S: StorageEngine> CreateMitoTable<S> {
                 .name(region_name.clone())
                 .row_key(row_key.clone())
                 .default_cf(default_cf.clone())
+                .compaction_time_window(compaction_time_window)
                 .build()
                 .context(BuildRegionDescriptorSnafu {
                     table_name: &self.data.request.table_name,

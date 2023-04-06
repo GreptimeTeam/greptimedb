@@ -129,6 +129,8 @@ pub struct RegionManifestConfig {
     /// Region manifest logs and checkpoints gc task execution duration.
     #[serde(with = "humantime_serde")]
     pub gc_duration: Option<Duration>,
+    /// Whether to try creating a manifest checkpoint on region opening
+    pub checkpoint_on_startup: bool,
 }
 
 impl Default for RegionManifestConfig {
@@ -136,6 +138,7 @@ impl Default for RegionManifestConfig {
         Self {
             checkpoint_margin: Some(10u16),
             gc_duration: Some(Duration::from_secs(30)),
+            checkpoint_on_startup: false,
         }
     }
 }
@@ -176,6 +179,7 @@ impl From<&DatanodeOptions> for SchedulerConfig {
 impl From<&DatanodeOptions> for StorageEngineConfig {
     fn from(value: &DatanodeOptions) -> Self {
         Self {
+            manifest_checkpoint_on_startup: value.storage.manifest.checkpoint_on_startup,
             manifest_checkpoint_margin: value.storage.manifest.checkpoint_margin,
             manifest_gc_duration: value.storage.manifest.gc_duration,
             max_files_in_l0: value.storage.compaction.max_files_in_level0,

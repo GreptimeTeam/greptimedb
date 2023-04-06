@@ -7,7 +7,7 @@ DESC TABLE t;
 +-------+-------+------+---------+---------------+
 | Field | Type  | Null | Default | Semantic Type |
 +-------+-------+------+---------+---------------+
-| i     | Int32 | YES  |         | VALUE         |
+| i     | Int32 | YES  |         | FIELD         |
 | j     | Int64 | NO   |         | TIME INDEX    |
 +-------+-------+------+---------+---------------+
 
@@ -46,7 +46,7 @@ DESC TABLE new_table;
 +-------+-------+------+---------+---------------+
 | Field | Type  | Null | Default | Semantic Type |
 +-------+-------+------+---------+---------------+
-| i     | Int32 | YES  |         | VALUE         |
+| i     | Int32 | YES  |         | FIELD         |
 | j     | Int64 | NO   |         | TIME INDEX    |
 +-------+-------+------+---------+---------------+
 

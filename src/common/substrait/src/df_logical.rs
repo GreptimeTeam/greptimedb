@@ -535,10 +535,11 @@ fn same_schema_without_metadata(lhs: &ArrowSchemaRef, rhs: &ArrowSchemaRef) -> b
 mod test {
     use catalog::local::{LocalCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
     use catalog::{CatalogList, CatalogProvider, RegisterTableRequest};
-    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
     use datafusion::common::{DFSchema, ToDFSchema};
     use datafusion_expr::TableSource;
     use datatypes::schema::RawSchema;
+    use table::engine::manager::MemoryTableEngineManager;
     use table::requests::CreateTableRequest;
     use table::test_util::{EmptyTable, MockTableEngine};
 
@@ -549,11 +550,11 @@ mod test {
 
     async fn build_mock_catalog_manager() -> CatalogManagerRef {
         let mock_table_engine = Arc::new(MockTableEngine::new());
-        let catalog_manager = Arc::new(
-            LocalCatalogManager::try_new(mock_table_engine)
-                .await
-                .unwrap(),
-        );
+        let engine_manager = Arc::new(MemoryTableEngineManager::alias(
+            MITO_ENGINE.to_string(),
+            mock_table_engine.clone(),
+        ));
+        let catalog_manager = Arc::new(LocalCatalogManager::try_new(engine_manager).await.unwrap());
         let schema_provider = Arc::new(MemorySchemaProvider::new());
         let catalog_provider = Arc::new(MemoryCatalogProvider::new());
         catalog_provider
@@ -579,6 +580,7 @@ mod test {
             primary_key_indices: vec![],
             create_if_not_exists: true,
             table_options: Default::default(),
+            engine: MITO_ENGINE.to_string(),
         }
     }
 

@@ -17,7 +17,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use common_telemetry::logging::info;
+use common_telemetry::logging::debug;
 use object_store::{util, ObjectStore};
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
@@ -298,6 +298,7 @@ impl<S: LogStore> EngineInner<S> {
                 name,
                 &self.config,
                 opts.ttl,
+                opts.compaction_time_window,
             )
             .await?;
 
@@ -306,7 +307,11 @@ impl<S: LogStore> EngineInner<S> {
             Some(v) => v,
         };
         guard.update(RegionSlot::Ready(region.clone()));
-        info!("Storage engine open region {}", region.id());
+        debug!(
+            "Storage engine open region {}, id: {}",
+            region.name(),
+            region.id()
+        );
         Ok(Some(region))
     }
 
@@ -336,6 +341,7 @@ impl<S: LogStore> EngineInner<S> {
                 &region_name,
                 &self.config,
                 opts.ttl,
+                opts.compaction_time_window,
             )
             .await?;
 
@@ -343,7 +349,11 @@ impl<S: LogStore> EngineInner<S> {
 
         guard.update(RegionSlot::Ready(region.clone()));
 
-        info!("Storage engine create region {}", region.id());
+        debug!(
+            "Storage engine create region {}, id: {}",
+            region.name(),
+            region.id()
+        );
 
         Ok(region)
     }
@@ -360,6 +370,7 @@ impl<S: LogStore> EngineInner<S> {
         region_name: &str,
         config: &EngineConfig,
         ttl: Option<Duration>,
+        compaction_time_window: Option<i64>,
     ) -> Result<StoreConfig<S>> {
         let parent_dir = util::normalize_dir(parent_dir);
 
@@ -389,6 +400,7 @@ impl<S: LogStore> EngineInner<S> {
             engine_config: self.config.clone(),
             file_purger: self.file_purger.clone(),
             ttl,
+            compaction_time_window,
         })
     }
 }
@@ -431,7 +443,7 @@ mod tests {
         let region_name = "region-0";
         let desc = RegionDescBuilder::new(region_name)
             .push_key_column(("k1", LogicalTypeId::Int32, false))
-            .push_value_column(("v1", LogicalTypeId::Float32, true))
+            .push_field_column(("v1", LogicalTypeId::Float32, true))
             .build();
         let ctx = EngineContext::default();
         let region = engine

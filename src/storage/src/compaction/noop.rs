@@ -17,7 +17,7 @@ use std::marker::PhantomData;
 
 use store_api::storage::RegionId;
 
-use crate::compaction::{CompactionTask, Picker, PickerContext};
+use crate::compaction::{CompactionTask, Picker};
 use crate::error::Result;
 use crate::scheduler::{Request, Scheduler};
 
@@ -49,7 +49,7 @@ impl Picker for NoopCompactionPicker {
     type Request = NoopCompactionRequest;
     type Task = NoopCompactionTask;
 
-    fn pick(&self, _ctx: &PickerContext, _req: &Self::Request) -> Result<Option<Self::Task>> {
+    fn pick(&self, _req: &Self::Request) -> Result<Option<Self::Task>> {
         Ok(None)
     }
 }

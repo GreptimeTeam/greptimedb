@@ -111,7 +111,7 @@ mod tests {
         // Just build a region desc and use its columns metadata.
         let desc = RegionDescBuilder::new("test")
             .enable_version_column(false)
-            .push_value_column(("v", LogicalTypeId::UInt64, true))
+            .push_field_column(("v", LogicalTypeId::UInt64, true))
             .build();
         let metadata: RegionMetadata = desc.try_into().unwrap();
         metadata.schema().clone()

@@ -45,6 +45,7 @@ use storage::config::EngineConfig as StorageEngineConfig;
 use storage::scheduler::{LocalScheduler, SchedulerConfig};
 use storage::EngineImpl;
 use store_api::logstore::LogStore;
+use table::engine::manager::MemoryTableEngineManager;
 use table::requests::FlushTableRequest;
 use table::table::numbers::NumbersTable;
 use table::table::TableIdProviderRef;
@@ -117,6 +118,8 @@ impl Instance {
             object_store,
         ));
 
+        let engine_manager = Arc::new(MemoryTableEngineManager::new(table_engine.clone()));
+
         // create remote catalog manager
         let (catalog_manager, table_id_provider) = match opts.mode {
             Mode::Standalone => {
@@ -141,7 +144,7 @@ impl Instance {
                     )
                 } else {
                     let catalog = Arc::new(
-                        catalog::local::LocalCatalogManager::try_new(table_engine.clone())
+                        catalog::local::LocalCatalogManager::try_new(engine_manager)
                             .await
                             .context(CatalogSnafu)?,
                     );
@@ -155,7 +158,7 @@ impl Instance {
 
             Mode::Distributed => {
                 let catalog = Arc::new(catalog::remote::RemoteCatalogManager::new(
-                    table_engine.clone(),
+                    engine_manager,
                     opts.node_id.context(MissingNodeIdSnafu)?,
                     Arc::new(MetaKvBackend {
                         client: meta_client.as_ref().unwrap().clone(),
@@ -194,7 +197,7 @@ impl Instance {
         Ok(Self {
             query_engine: query_engine.clone(),
             sql_handler: SqlHandler::new(
-                table_engine.clone(),
+                Arc::new(MemoryTableEngineManager::new(table_engine.clone())),
                 catalog_manager.clone(),
                 table_engine,
                 procedure_manager.clone(),

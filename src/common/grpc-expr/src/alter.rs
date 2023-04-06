@@ -178,6 +178,7 @@ pub fn create_expr_to_request(
         primary_key_indices,
         create_if_not_exists: expr.create_if_not_exists,
         table_options,
+        engine: expr.engine,
     })
 }
 

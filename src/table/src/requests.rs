@@ -47,6 +47,7 @@ pub struct CreateTableRequest {
     pub primary_key_indices: Vec<usize>,
     pub create_if_not_exists: bool,
     pub table_options: TableOptions,
+    pub engine: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -59,10 +60,13 @@ pub struct TableOptions {
     pub ttl: Option<Duration>,
     /// Extra options that may not applicable to all table engines.
     pub extra_options: HashMap<String, String>,
+    /// Time window for compaction
+    pub compaction_time_window: Option<i64>,
 }
 
 pub const WRITE_BUFFER_SIZE_KEY: &str = "write_buffer_size";
 pub const TTL_KEY: &str = "ttl";
+pub const COMPACTION_TIME_WINDOW_KEY: &str = "compaction_time_window";
 
 impl TryFrom<&HashMap<String, String>> for TableOptions {
     type Error = error::Error;
@@ -93,8 +97,20 @@ impl TryFrom<&HashMap<String, String>> for TableOptions {
                 .into();
             options.ttl = Some(ttl_value);
         }
+        if let Some(compaction_time_window) = value.get(COMPACTION_TIME_WINDOW_KEY) {
+            options.compaction_time_window = match compaction_time_window.parse::<i64>() {
+                Ok(t) => Some(t),
+                Err(_) => {
+                    return ParseTableOptionSnafu {
+                        key: COMPACTION_TIME_WINDOW_KEY,
+                        value: compaction_time_window,
+                    }
+                    .fail()
+                }
+            };
+        }
         options.extra_options = HashMap::from_iter(value.iter().filter_map(|(k, v)| {
-            if k != WRITE_BUFFER_SIZE_KEY && k != TTL_KEY {
+            if k != WRITE_BUFFER_SIZE_KEY && k != TTL_KEY && k != COMPACTION_TIME_WINDOW_KEY {
                 Some((k.clone(), v.clone()))
             } else {
                 None
@@ -116,6 +132,12 @@ impl From<&TableOptions> for HashMap<String, String> {
         if let Some(ttl) = opts.ttl {
             let ttl_str = humantime::format_duration(ttl).to_string();
             res.insert(TTL_KEY.to_string(), ttl_str);
+        }
+        if let Some(compaction_time_window) = opts.compaction_time_window {
+            res.insert(
+                COMPACTION_TIME_WINDOW_KEY.to_string(),
+                compaction_time_window.to_string(),
+            );
         }
         res.extend(
             opts.extra_options
@@ -228,6 +250,7 @@ mod tests {
             write_buffer_size: None,
             ttl: Some(Duration::from_secs(1000)),
             extra_options: HashMap::new(),
+            compaction_time_window: Some(1677652502),
         };
         let serialized = serde_json::to_string(&options).unwrap();
         let deserialized: TableOptions = serde_json::from_str(&serialized).unwrap();
@@ -240,6 +263,7 @@ mod tests {
             write_buffer_size: Some(ReadableSize::mb(128)),
             ttl: Some(Duration::from_secs(1000)),
             extra_options: HashMap::new(),
+            compaction_time_window: Some(1677652502),
         };
         let serialized_map = HashMap::from(&options);
         let serialized = TableOptions::try_from(&serialized_map).unwrap();
@@ -249,6 +273,7 @@ mod tests {
             write_buffer_size: None,
             ttl: None,
             extra_options: HashMap::new(),
+            compaction_time_window: None,
         };
         let serialized_map = HashMap::from(&options);
         let serialized = TableOptions::try_from(&serialized_map).unwrap();
@@ -258,6 +283,7 @@ mod tests {
             write_buffer_size: Some(ReadableSize::mb(128)),
             ttl: Some(Duration::from_secs(1000)),
             extra_options: HashMap::from([("a".to_string(), "A".to_string())]),
+            compaction_time_window: Some(1677652502),
         };
         let serialized_map = HashMap::from(&options);
         let serialized = TableOptions::try_from(&serialized_map).unwrap();

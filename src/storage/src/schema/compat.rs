@@ -125,10 +125,10 @@ impl ReadAdapter {
             // `dest_schema` might be projected, so we need to find out value columns that not be read
             // by the `dest_schema`.
 
-            for (offset, value_column) in source_schema.value_columns().iter().enumerate() {
+            for (offset, field_column) in source_schema.field_columns().iter().enumerate() {
                 // Iterate value columns in source and mark those not in destination as unneeded.
-                if !dest_schema.is_needed(value_column.id()) {
-                    is_source_needed[source_schema.value_column_index_by_offset(offset)] = false;
+                if !dest_schema.is_needed(field_column.id()) {
+                    is_source_needed[source_schema.field_column_index_by_offset(offset)] = false;
                 }
             }
         }
@@ -204,7 +204,7 @@ impl ReadAdapter {
     pub fn batch_from_parts(
         &self,
         row_key_columns: Vec<VectorRef>,
-        mut value_columns: Vec<VectorRef>,
+        mut field_columns: Vec<VectorRef>,
         sequences: VectorRef,
         op_types: VectorRef,
     ) -> Result<Batch> {
@@ -213,8 +213,8 @@ impl ReadAdapter {
 
         let mut source = row_key_columns;
         // Reserve space for value, sequence and op_type
-        source.reserve(value_columns.len() + 2);
-        source.append(&mut value_columns);
+        source.reserve(field_columns.len() + 2);
+        source.append(&mut field_columns);
         // Internal columns are push in sequence, op_type order.
         source.push(sequences);
         source.push(op_types);
@@ -318,12 +318,12 @@ mod tests {
     fn call_batch_from_parts(
         adapter: &ReadAdapter,
         batch: &Batch,
-        num_value_columns: usize,
+        num_field_columns: usize,
     ) -> Batch {
         let key = batch.columns()[0..2].to_vec();
-        let value = batch.columns()[2..2 + num_value_columns].to_vec();
-        let sequence = batch.column(2 + num_value_columns).clone();
-        let op_type = batch.column(2 + num_value_columns + 1).clone();
+        let value = batch.columns()[2..2 + num_field_columns].to_vec();
+        let sequence = batch.column(2 + num_field_columns).clone();
+        let op_type = batch.column(2 + num_field_columns + 1).clone();
 
         adapter
             .batch_from_parts(key, value, sequence, op_type)
@@ -333,9 +333,9 @@ mod tests {
     fn check_batch_from_parts_without_padding(
         adapter: &ReadAdapter,
         batch: &Batch,
-        num_value_columns: usize,
+        num_field_columns: usize,
     ) {
-        let new_batch = call_batch_from_parts(adapter, batch, num_value_columns);
+        let new_batch = call_batch_from_parts(adapter, batch, num_field_columns);
         assert_eq!(*batch, new_batch);
     }
 
@@ -495,7 +495,7 @@ mod tests {
         // (k0, timestamp, v0, v1) with version 0.
         let region_schema_old = Arc::new(schema_util::new_region_schema(0, 2));
 
-        let mut descriptor = descriptor_util::desc_with_value_columns(tests::REGION_NAME, 2);
+        let mut descriptor = descriptor_util::desc_with_field_columns(tests::REGION_NAME, 2);
         // Assign a much larger column id to v0.
         descriptor.default_cf.columns[0].id = descriptor.default_cf.columns.last().unwrap().id + 10;
         let metadata: RegionMetadata = descriptor.try_into().unwrap();
