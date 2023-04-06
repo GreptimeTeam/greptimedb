@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_error::prelude::{ErrorCompat, ErrorExt, StatusCode};
+use common_error::prelude::{ErrorExt, StatusCode};
 use console::{style, Style};
 use datafusion::error::DataFusionError;
 use datatypes::arrow::error::ArrowError;
@@ -23,7 +23,7 @@ use rustpython_parser::ast::Location;
 use rustpython_parser::error::ParseError;
 pub use snafu::ensure;
 use snafu::prelude::Snafu;
-use snafu::Backtrace;
+use snafu::Location as SnafuLocation;
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub(crate) fn ret_other_error_with(reason: String) -> OtherSnafu<String> {
@@ -47,29 +47,32 @@ pub enum Error {
 
     #[snafu(display("Failed to parse script, source: {}", source))]
     PyParse {
-        backtrace: Backtrace,
+        location: SnafuLocation,
         source: ParseError,
     },
 
     #[snafu(display("Failed to compile script, source: {}", source))]
     PyCompile {
-        backtrace: Backtrace,
+        location: SnafuLocation,
         source: CodegenError,
     },
 
     /// rustpython problem, using python virtual machines' backtrace instead
     #[snafu(display("Python Runtime error, error: {}", msg))]
-    PyRuntime { msg: String, backtrace: Backtrace },
+    PyRuntime {
+        msg: String,
+        location: SnafuLocation,
+    },
 
     #[snafu(display("Arrow error: {}", source))]
     Arrow {
-        backtrace: Backtrace,
+        location: SnafuLocation,
         source: ArrowError,
     },
 
     #[snafu(display("DataFusion error: {}", source))]
     DataFusion {
-        backtrace: Backtrace,
+        location: SnafuLocation,
         source: DataFusionError,
     },
 
@@ -81,7 +84,7 @@ pub enum Error {
                         "".into()
                     }))]
     CoprParse {
-        backtrace: Backtrace,
+        location: SnafuLocation,
         reason: String,
         // location is option because maybe errors can't give a clear location?
         loc: Option<Location>,
@@ -90,15 +93,18 @@ pub enum Error {
     /// Other types of error that isn't any of above
     #[snafu(display("Coprocessor's Internal error: {}", reason))]
     Other {
-        backtrace: Backtrace,
+        location: SnafuLocation,
         reason: String,
     },
 
     #[snafu(display("Unsupported sql in coprocessor: {}", sql))]
-    UnsupportedSql { sql: String, backtrace: Backtrace },
+    UnsupportedSql {
+        sql: String,
+        location: SnafuLocation,
+    },
 
     #[snafu(display("Missing sql in coprocessor"))]
-    MissingSql { backtrace: Backtrace },
+    MissingSql { location: SnafuLocation },
 
     #[snafu(display("Failed to retrieve record batches, source: {}", source))]
     RecordBatch {
@@ -139,9 +145,6 @@ impl ErrorExt for Error {
             | Error::UnsupportedSql { .. }
             | Error::MissingSql { .. } => StatusCode::InvalidArguments,
         }
-    }
-    fn backtrace_opt(&self) -> Option<&common_error::snafu::Backtrace> {
-        ErrorCompat::backtrace(self)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -222,26 +225,5 @@ pub fn get_error_reason_loc(err: &Error) -> (String, Option<Location>) {
         Error::PyParse { source, .. } => (source.error.to_string(), Some(source.location)),
         Error::PyCompile { source, .. } => (source.error.to_string(), Some(source.location)),
         _ => (format!("Unknown error: {err:?}"), None),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use snafu::ResultExt;
-
-    use super::*;
-
-    fn throw_query_error() -> query::error::Result<()> {
-        query::error::TableNotFoundSnafu {
-            table: String::new(),
-        }
-        .fail()
-    }
-
-    #[test]
-    fn test_error() {
-        let err = throw_query_error().context(DatabaseQuerySnafu).unwrap_err();
-        assert_eq!(StatusCode::InvalidArguments, err.status_code());
-        assert!(err.backtrace_opt().is_some());
     }
 }

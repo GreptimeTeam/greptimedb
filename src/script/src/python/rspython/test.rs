@@ -255,7 +255,7 @@ def calc_rvs(open_time, close):
     .unwrap();
     let ret = exec_coprocessor(python_source, &Some(rb));
     if let Err(Error::PyParse {
-        backtrace: _,
+        location: _,
         source,
     }) = ret
     {
@@ -305,7 +305,7 @@ def a(cpu, mem):
     .unwrap();
     let ret = exec_coprocessor(python_source, &Some(rb));
     if let Err(Error::PyParse {
-        backtrace: _,
+        location: _,
         source,
     }) = ret
     {

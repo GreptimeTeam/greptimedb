@@ -396,7 +396,6 @@ mod tests {
         let other_table = NumbersTable::new(12);
         let result = provider.register_table(table_name.to_string(), Arc::new(other_table));
         let err = result.err().unwrap();
-        assert!(err.backtrace_opt().is_some());
         assert_eq!(StatusCode::TableAlreadyExists, err.status_code());
     }
 

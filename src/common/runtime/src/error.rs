@@ -15,6 +15,7 @@
 use std::any::Any;
 
 use common_error::prelude::*;
+use snafu::Location;
 use tokio::task::JoinError;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -25,10 +26,10 @@ pub enum Error {
     #[snafu(display("Failed to build runtime, source: {}", source))]
     BuildRuntime {
         source: std::io::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
     #[snafu(display("Repeated task {} not started yet", name))]
-    IllegalState { name: String, backtrace: Backtrace },
+    IllegalState { name: String, location: Location },
 
     #[snafu(display(
         "Failed to wait for repeated task {} to stop, source: {}",
@@ -38,16 +39,20 @@ pub enum Error {
     WaitGcTaskStop {
         name: String,
         source: JoinError,
-        backtrace: Backtrace,
+        location: Location,
     },
 }
 
 impl ErrorExt for Error {
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        ErrorCompat::backtrace(self)
-    }
-
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn location_opt(&self) -> Option<common_error::snafu::Location> {
+        match self {
+            Error::BuildRuntime { location, .. }
+            | Error::IllegalState { location, .. }
+            | Error::WaitGcTaskStop { location, .. } => Some(*location),
+        }
     }
 }

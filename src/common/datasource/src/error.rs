@@ -15,6 +15,7 @@
 use std::any::Any;
 
 use common_error::prelude::*;
+use snafu::Location;
 use url::ParseError;
 
 #[derive(Debug, Snafu)]
@@ -35,13 +36,13 @@ pub enum Error {
     #[snafu(display("Failed to build backend, source: {}", source))]
     BuildBackend {
         source: object_store::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to list object in path: {}, source: {}", path, source))]
     ListObjects {
         path: String,
-        backtrace: Backtrace,
+        location: Location,
         source: object_store::Error,
     },
 
@@ -65,11 +66,19 @@ impl ErrorExt for Error {
         }
     }
 
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        ErrorCompat::backtrace(self)
-    }
-
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn location_opt(&self) -> Option<common_error::snafu::Location> {
+        match self {
+            Error::BuildBackend { location, .. } => Some(*location),
+            Error::ListObjects { location, .. } => Some(*location),
+            Error::UnsupportedBackendProtocol { .. }
+            | Error::EmptyHostPath { .. }
+            | Error::InvalidPath { .. }
+            | Error::InvalidUrl { .. }
+            | Error::InvalidConnection { .. } => None,
+        }
     }
 }

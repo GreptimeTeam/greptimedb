@@ -16,7 +16,7 @@ use std::any::Any;
 use std::path::PathBuf;
 
 use common_error::prelude::{ErrorExt, StatusCode};
-use snafu::{Backtrace, Snafu};
+use snafu::{Location, Snafu};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -30,7 +30,7 @@ pub enum Error {
     ProfilingNotEnabled,
 
     #[snafu(display("Failed to build temp file from given path: {:?}", path))]
-    BuildTempPath { path: PathBuf, backtrace: Backtrace },
+    BuildTempPath { path: PathBuf, location: Location },
 
     #[snafu(display("Failed to open temp file: {}", path))]
     OpenTempFile {
@@ -54,10 +54,6 @@ impl ErrorExt for Error {
             Error::OpenTempFile { .. } => StatusCode::StorageUnavailable,
             Error::DumpProfileData { .. } => StatusCode::StorageUnavailable,
         }
-    }
-
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        snafu::ErrorCompat::backtrace(self)
     }
 
     fn as_any(&self) -> &dyn Any {

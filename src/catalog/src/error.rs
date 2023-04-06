@@ -19,7 +19,7 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::prelude::{Snafu, StatusCode};
 use datafusion::error::DataFusionError;
 use datatypes::prelude::ConcreteDataType;
-use snafu::{Backtrace, ErrorCompat};
+use snafu::Location;
 
 use crate::DeregisterTableRequest;
 
@@ -50,7 +50,7 @@ pub enum Error {
     },
 
     #[snafu(display("System catalog is not valid: {}", msg))]
-    SystemCatalog { msg: String, backtrace: Backtrace },
+    SystemCatalog { msg: String, location: Location },
 
     #[snafu(display(
         "System catalog table type mismatch, expected: binary, found: {:?}",
@@ -58,28 +58,28 @@ pub enum Error {
     ))]
     SystemCatalogTypeMismatch {
         data_type: ConcreteDataType,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Invalid system catalog entry type: {:?}", entry_type))]
     InvalidEntryType {
         entry_type: Option<u8>,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Invalid system catalog key: {:?}", key))]
     InvalidKey {
         key: Option<String>,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Catalog value is not present"))]
-    EmptyValue { backtrace: Backtrace },
+    EmptyValue { location: Location },
 
     #[snafu(display("Failed to deserialize value, source: {}", source))]
     ValueDeserialize {
         source: serde_json::error::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Table engine not found: {}, source: {}", engine_name, source))]
@@ -92,32 +92,29 @@ pub enum Error {
     #[snafu(display("Cannot find catalog by name: {}", catalog_name))]
     CatalogNotFound {
         catalog_name: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Cannot find schema {} in catalog {}", schema, catalog))]
     SchemaNotFound {
         catalog: String,
         schema: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Table `{}` already exists", table))]
-    TableExists { table: String, backtrace: Backtrace },
+    TableExists { table: String, location: Location },
 
     #[snafu(display("Table `{}` not exist", table))]
-    TableNotExist { table: String, backtrace: Backtrace },
+    TableNotExist { table: String, location: Location },
 
     #[snafu(display("Schema {} already exists", schema))]
-    SchemaExists {
-        schema: String,
-        backtrace: Backtrace,
-    },
+    SchemaExists { schema: String, location: Location },
 
     #[snafu(display("Operation {} not implemented yet", operation))]
     Unimplemented {
         operation: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to open table, table info: {}, source: {}", table_info, source))]
@@ -130,7 +127,7 @@ pub enum Error {
     #[snafu(display("Table not found while opening table, table info: {}", table_info))]
     TableNotFound {
         table_info: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to read system catalog table records"))]
@@ -160,7 +157,7 @@ pub enum Error {
     },
 
     #[snafu(display("Illegal catalog manager state: {}", msg))]
-    IllegalManagerState { backtrace: Backtrace, msg: String },
+    IllegalManagerState { location: Location, msg: String },
 
     #[snafu(display("Failed to scan system catalog table, source: {}", source))]
     SystemCatalogTableScan {
@@ -228,10 +225,7 @@ pub enum Error {
     },
 
     #[snafu(display("Invalid system table definition: {err_msg}"))]
-    InvalidSystemTableDef {
-        err_msg: String,
-        backtrace: Backtrace,
-    },
+    InvalidSystemTableDef { err_msg: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -285,10 +279,6 @@ impl ErrorExt for Error {
         }
     }
 
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        ErrorCompat::backtrace(self)
-    }
-
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -312,7 +302,7 @@ mod tests {
             StatusCode::TableAlreadyExists,
             Error::TableExists {
                 table: "some_table".to_string(),
-                backtrace: Backtrace::generate(),
+                location: Location::generate(),
             }
             .status_code()
         );
@@ -326,7 +316,7 @@ mod tests {
             StatusCode::StorageUnavailable,
             Error::SystemCatalog {
                 msg: "".to_string(),
-                backtrace: Backtrace::generate(),
+                location: Location::generate(),
             }
             .status_code()
         );
@@ -335,7 +325,7 @@ mod tests {
             StatusCode::Internal,
             Error::SystemCatalogTypeMismatch {
                 data_type: ConcreteDataType::binary_datatype(),
-                backtrace: Backtrace::generate(),
+                location: Location::generate(),
             }
             .status_code()
         );
@@ -349,7 +339,7 @@ mod tests {
     pub fn test_errors_to_datafusion_error() {
         let e: DataFusionError = Error::TableExists {
             table: "test_table".to_string(),
-            backtrace: Backtrace::generate(),
+            location: Location::generate(),
         }
         .into();
         match e {

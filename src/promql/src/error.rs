@@ -17,36 +17,37 @@ use std::any::Any;
 use common_error::prelude::*;
 use datafusion::error::DataFusionError;
 use promql_parser::parser::{Expr as PromExpr, TokenType};
+use snafu::Location;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
     #[snafu(display("Unsupported expr type: {}", name))]
-    UnsupportedExpr { name: String, backtrace: Backtrace },
+    UnsupportedExpr { name: String, location: Location },
 
     #[snafu(display("Unexpected token: {:?}", token))]
     UnexpectedToken {
         token: TokenType,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Internal error during build DataFusion plan, error: {}", source))]
     DataFusionPlanning {
         source: datafusion::error::DataFusionError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Unexpected plan or expression: {}", desc))]
-    UnexpectedPlanExpr { desc: String, backtrace: Backtrace },
+    UnexpectedPlanExpr { desc: String, location: Location },
 
     #[snafu(display("Unknown table type, downcast failed"))]
-    UnknownTable { backtrace: Backtrace },
+    UnknownTable { location: Location },
 
     #[snafu(display("Cannot find time index column in table {}", table))]
-    TimeIndexNotFound { table: String, backtrace: Backtrace },
+    TimeIndexNotFound { table: String, location: Location },
 
     #[snafu(display("Cannot find value columns in table {}", table))]
-    ValueNotFound { table: String, backtrace: Backtrace },
+    ValueNotFound { table: String, location: Location },
 
     #[snafu(display("Cannot find the table {}", table))]
     TableNotFound {
@@ -58,16 +59,10 @@ pub enum Error {
         "Cannot accept multiple vector as function input, PromQL expr: {:?}",
         expr
     ))]
-    MultipleVector {
-        expr: PromExpr,
-        backtrace: Backtrace,
-    },
+    MultipleVector { expr: PromExpr, location: Location },
 
     #[snafu(display("Expect a PromQL expr but not found, input expr: {:?}", expr))]
-    ExpectExpr {
-        expr: PromExpr,
-        backtrace: Backtrace,
-    },
+    ExpectExpr { expr: PromExpr, location: Location },
     #[snafu(display(
         "Illegal range: offset {}, length {}, array len {}",
         offset,
@@ -78,16 +73,16 @@ pub enum Error {
         offset: u32,
         length: u32,
         len: usize,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Empty range is not expected"))]
-    EmptyRange { backtrace: Backtrace },
+    EmptyRange { location: Location },
 
     #[snafu(display(
         "Table (metric) name not found, this indicates a procedure error in PromQL planner"
     ))]
-    TableNameNotFound { backtrace: Backtrace },
+    TableNameNotFound { location: Location },
 
     #[snafu(display("General catalog error: {source}"))]
     Catalog {
@@ -96,13 +91,13 @@ pub enum Error {
     },
 
     #[snafu(display("Expect a range selector, but not found"))]
-    ExpectRangeSelector { backtrace: Backtrace },
+    ExpectRangeSelector { location: Location },
 
     #[snafu(display("Zero range in range selector"))]
-    ZeroRangeSelector { backtrace: Backtrace },
+    ZeroRangeSelector { location: Location },
 
     #[snafu(display("Cannot find column {col}"))]
-    ColumnNotFound { col: String, backtrace: Backtrace },
+    ColumnNotFound { col: String, location: Location },
 }
 
 impl ErrorExt for Error {
@@ -129,9 +124,6 @@ impl ErrorExt for Error {
 
             Catalog { source } => source.status_code(),
         }
-    }
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        ErrorCompat::backtrace(self)
     }
 
     fn as_any(&self) -> &dyn Any {

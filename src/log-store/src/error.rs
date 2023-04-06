@@ -16,7 +16,7 @@ use std::any::Any;
 
 use common_error::prelude::{ErrorExt, Snafu};
 use common_runtime::error::Error as RuntimeError;
-use snafu::{Backtrace, ErrorCompat};
+use snafu::Location;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -36,20 +36,20 @@ pub enum Error {
     #[snafu(display("Failed to add entry to LogBatch, source: {}", source))]
     AddEntryLogBatch {
         source: raft_engine::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to perform raft-engine operation, source: {}", source))]
     RaftEngine {
         source: raft_engine::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Log store not started yet"))]
-    IllegalState { backtrace: Backtrace },
+    IllegalState { location: Location },
 
     #[snafu(display("Namespace is illegal: {}", ns))]
-    IllegalNamespace { ns: u64, backtrace: Backtrace },
+    IllegalNamespace { ns: u64, location: Location },
 
     #[snafu(display(
         "Failed to fetch entries from namespace: {}, start: {}, end: {}, max size: {}, source: {}",
@@ -65,15 +65,11 @@ pub enum Error {
         end: u64,
         max_size: usize,
         source: raft_engine::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 }
 
 impl ErrorExt for Error {
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        ErrorCompat::backtrace(self)
-    }
-
     fn as_any(&self) -> &dyn Any {
         self
     }

@@ -18,7 +18,7 @@ use common_error::ext::BoxedError;
 use common_error::prelude::ErrorExt;
 use common_error::status_code::StatusCode;
 use session::context::UserInfo;
-use snafu::{Backtrace, ErrorCompat, OptionExt, Snafu};
+use snafu::{Location, OptionExt, Snafu};
 
 use crate::auth::user_provider::StaticUserProvider;
 
@@ -91,7 +91,7 @@ pub enum Error {
     #[snafu(display("IO error, source: {}", source))]
     Io {
         source: std::io::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Auth failed, source: {}", source))]
@@ -136,10 +136,6 @@ impl ErrorExt for Error {
             Error::UserPasswordMismatch { .. } => StatusCode::UserPasswordMismatch,
             Error::AccessDenied { .. } => StatusCode::AccessDenied,
         }
-    }
-
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        ErrorCompat::backtrace(self)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
