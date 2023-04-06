@@ -126,6 +126,7 @@ fn get_globals(py: Python) -> PyResult<&PyDict> {
     Ok(globals)
 }
 
+// TODO(discord9): deprecate this
 #[pyfunction]
 fn dataframe(py: Python) -> PyResult<PyDataFrame> {
     let globals = get_globals(py)?;

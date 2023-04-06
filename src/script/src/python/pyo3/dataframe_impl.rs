@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use arrow::compute;
 use common_recordbatch::DfRecordBatch;
 use datafusion::dataframe::DataFrame as DfDataFrame;
 use datafusion_expr::Expr as DfExpr;
@@ -210,32 +211,29 @@ impl PyDataFrame {
             .map_err(|e| PyValueError::new_err(e.to_string()))?
             .into())
     }
-    /// collect `DataFrame` results into `List[List[Vector]]`
+    /// collect `DataFrame` results into `List[Vector]`
     fn collect<'a>(&self, py: Python<'a>) -> PyResult<&'a PyList> {
         let inner = self.inner.clone();
         let res = block_on_async(async { inner.collect().await });
         let res = res
             .map_err(|e| PyValueError::new_err(format!("{e:?}")))?
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let outer_list: Vec<PyObject> = res
+        let concat_rb = compute::concat_batches(&res[0].schema(), res.iter()).map_err(|e| {
+            PyRuntimeError::new_err(format!("Concat batches failed for dataframe {self:?}: {e}"))
+        })?;
+        // TODO(discord9): wrap RecordBatch in a dict-like type
+        let vector_list: Vec<_> = concat_rb
+            .columns()
             .iter()
-            .map(|elem| -> PyResult<_> {
-                let inner_list: Vec<_> = elem
-                    .columns()
-                    .iter()
-                    .map(|arr| -> PyResult<_> {
-                        datatypes::vectors::Helper::try_into_vector(arr)
-                            .map(PyVector::from)
-                            .map(|v| PyCell::new(py, v))
-                            .map_err(|e| PyValueError::new_err(e.to_string()))
-                            .and_then(|x| x)
-                    })
-                    .collect::<Result<_, _>>()?;
-                let inner_list = PyList::new(py, inner_list);
-                Ok(inner_list.into())
+            .map(|arr| -> PyResult<_> {
+                datatypes::vectors::Helper::try_into_vector(arr)
+                    .map(PyVector::from)
+                    .map(|v| PyCell::new(py, v))
+                    .map_err(|e| PyValueError::new_err(e.to_string()))
+                    .and_then(|x| x)
             })
             .collect::<Result<_, _>>()?;
-        Ok(PyList::new(py, outer_list))
+        Ok(PyList::new(py, vector_list))
     }
 }
 

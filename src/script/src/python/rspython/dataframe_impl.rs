@@ -235,31 +235,31 @@ pub(crate) mod data_frame {
         }
 
         #[pymethod]
-        /// collect `DataFrame` results into `List[List[Vector]]`
+        /// collect `DataFrame` results into `List[Vector]`
         fn collect(&self, vm: &VirtualMachine) -> PyResult<PyListRef> {
             let inner = self.inner.clone();
             let res = block_on_async(async { inner.collect().await });
             let res = res
                 .map_err(|e| vm.new_runtime_error(format!("{e:?}")))?
                 .map_err(|e| vm.new_runtime_error(e.to_string()))?;
-            let outer_list: Vec<_> = res
+            let concat_rb =
+                arrow::compute::concat_batches(&res[0].schema(), res.iter()).map_err(|e| {
+                    vm.new_runtime_error(format!(
+                        "Concat batches failed for dataframe {self:?}: {e}"
+                    ))
+                })?;
+            // TODO(discord9): wrap RecordBatch in a dict-like type
+            let vector_list: Vec<_> = concat_rb
+                .columns()
                 .iter()
-                .map(|elem| -> PyResult<_> {
-                    let inner_list: Vec<_> = elem
-                        .columns()
-                        .iter()
-                        .map(|arr| -> PyResult<_> {
-                            datatypes::vectors::Helper::try_into_vector(arr)
-                                .map(PyVector::from)
-                                .map(|v| vm.new_pyobj(v))
-                                .map_err(|e| vm.new_runtime_error(e.to_string()))
-                        })
-                        .collect::<Result<_, _>>()?;
-                    let inner_list = PyList::new_ref(inner_list, vm.as_ref());
-                    Ok(inner_list.into())
+                .map(|arr| {
+                    datatypes::vectors::Helper::try_into_vector(arr)
+                        .map(PyVector::from)
+                        .map(|v| vm.new_pyobj(v))
+                        .map_err(|e| vm.new_runtime_error(e.to_string()))
                 })
                 .collect::<Result<_, _>>()?;
-            Ok(PyList::new_ref(outer_list, vm.as_ref()))
+            Ok(PyList::new_ref(vector_list, vm.as_ref()))
         }
     }
 

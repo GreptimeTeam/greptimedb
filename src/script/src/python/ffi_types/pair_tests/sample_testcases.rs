@@ -443,10 +443,10 @@ def boolean_array() -> vector[f64]:
     print("df from sql=", df)
     collected = df.collect()
     print("df.collect()=", collected)
-    assert len(collected[0][0]) == 5
+    assert len(collected[0]) == 5
     df = PyDataFrame.from_sql("select number from numbers limit 5").filter(col("number") > 2)
     collected = df.collect()
-    assert len(collected[0][0]) == 2
+    assert len(collected[0]) == 2
     print("query()=", query())
 
     assert "query_engine object at" in repr(query())
@@ -474,11 +474,11 @@ def boolean_array() -> vector[f64]:
     print("df from sql=", df)
     ret = df.collect()
     print("df.collect()=", ret)
-    assert len(ret[0][0]) == 5
+    assert len(ret[0]) == 5
     df = PyDataFrame.from_sql("select number from numbers limit 5").filter(col("number") > 2)
     collected = df.collect()
-    assert len(collected[0][0]) == 2
-    return ret[0][0]
+    assert len(collected[0]) == 2
+    return ret[0]
 "#
             .to_string(),
             expect: Some(ronish!("value": vector!(UInt32Vector, [0, 1, 2, 3, 4]))),
@@ -569,7 +569,7 @@ def answer() -> vector[i64]:
 def answer() -> vector[i64]:
     from greptime import vector, col, lit, dataframe
     expr_0 = (col("number")<lit(3)) & (col("number")>0)
-    ret = dataframe().select([col("number")]).filter(expr_0).collect()[0][0]
+    ret = dataframe().select([col("number")]).filter(expr_0).collect()[0]
     return ret
 "#
             .to_string(),
@@ -583,7 +583,7 @@ def answer() -> vector[i64]:
     from greptime import vector, col, lit, dataframe
     # Bitwise Operator  pred comparison operator
     expr_0 = (col("number")<lit(3)) & (col("number")>0)
-    ret = dataframe().select([col("number")]).filter(expr_0).collect()[0][0]
+    ret = dataframe().select([col("number")]).filter(expr_0).collect()[0]
     return ret
 "#
             .to_string(),
@@ -690,6 +690,31 @@ def normalize0(x):
 @coprocessor(args=["number"], sql="select number from numbers limit 10", returns=["value"], backend="pyo3")
 def normalize(v) -> vector[i64]:
     return [normalize0(x) for x in v]
+            
+"#
+            .to_string(),
+            expect: Some(ronish!(
+                "value": vector!(Int64Vector, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9,])
+            )),
+        },
+        #[cfg(feature = "pyo3_backend")]
+        CoprTestCase {
+            script: r#"
+import math
+
+@coprocessor(args=[], returns=["value"], backend="pyo3")
+def test_numpy() -> vector[i64]:
+    import numpy as np
+    import pyarrow as pa
+    from greptime import vector
+    v = np.array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9,])
+    v = pa.array(v)
+    v = vector.from_pyarrow(v)
+    v = vector.from_numpy(v.numpy())
+    v = v.to_pyarrow()
+    v = v.to_numpy()
+    v = vector.from_numpy(v)
+    return v
             
 "#
             .to_string(),

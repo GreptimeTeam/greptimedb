@@ -24,7 +24,7 @@ use datatypes::vectors::Helper;
 use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::pyclass::CompareOp;
-use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PySlice, PyString, PyType};
+use pyo3::types::{PyBool, PyFloat, PyInt, PySequence, PySlice, PyString, PyType};
 
 use super::utils::val_to_py_any;
 use crate::python::ffi_types::vector::{arrow_rtruediv, wrap_bool_result, wrap_result, PyVector};
@@ -93,12 +93,28 @@ impl PyVector {
 
 #[pymethods]
 impl PyVector {
+    /// convert from numpy array to [`PyVector`]
+    #[classmethod]
+    fn from_numpy(cls: &PyType, py: Python<'_>, obj: PyObject) -> PyResult<PyObject> {
+        let pa = py.import("pyarrow")?;
+        let obj = pa.call_method1("array", (obj,))?;
+        let zelf = Self::from_pyarrow(cls, py, obj.into())?;
+        Ok(zelf.into_py(py))
+    }
+
+    fn numpy(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let pa_arrow = self.to_arrow_array().data().to_pyarrow(py)?;
+        let ndarray = pa_arrow.call_method0(py, "to_numpy")?;
+        Ok(ndarray)
+    }
+
     /// create a `PyVector` with a `PyList` that contains only elements of same type
     #[new]
-    pub(crate) fn py_new(iterable: &PyList) -> PyResult<Self> {
+    pub(crate) fn py_new(iterable: PyObject, py: Python<'_>) -> PyResult<Self> {
+        let iterable = iterable.downcast::<PySequence>(py)?;
         let dtype = get_py_type(iterable.get_item(0)?)?;
-        let mut buf = dtype.create_mutable_vector(iterable.len());
-        for i in 0..iterable.len() {
+        let mut buf = dtype.create_mutable_vector(iterable.len()?);
+        for i in 0..iterable.len()? {
             let element = iterable.get_item(i)?;
             let val = pyo3_obj_try_to_typed_val(element, Some(dtype.clone()))?;
             buf.push_value_ref(val.as_value_ref());
