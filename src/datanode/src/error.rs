@@ -423,11 +423,13 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "File Schema mismatch, expected table schema: {} but found :{}",
+        "File schema mismatch at index {}, expected table schema: {} but found :{}",
+        index,
         table_schema,
         file_schema
     ))]
     InvalidSchema {
+        index: usize,
         table_schema: String,
         file_schema: String,
     },

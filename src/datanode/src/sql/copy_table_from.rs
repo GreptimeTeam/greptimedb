@@ -23,10 +23,12 @@ use common_datasource::util::find_dir_and_filename;
 use common_query::Output;
 use common_recordbatch::error::DataTypesSnafu;
 use datafusion::parquet::arrow::ParquetRecordBatchStreamBuilder;
+use datatypes::arrow::datatypes::{DataType, SchemaRef};
+use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::vectors::Helper;
 use futures_util::StreamExt;
 use regex::Regex;
-use snafu::{ensure, ResultExt};
+use snafu::ResultExt;
 use table::engine::TableReference;
 use table::requests::{CopyTableRequest, InsertRequest};
 use tokio::io::BufReader;
@@ -88,13 +90,7 @@ impl SqlHandler {
                 .await
                 .context(error::ReadParquetSnafu)?;
 
-            ensure!(
-                builder.schema() == table.schema().arrow_schema(),
-                error::InvalidSchemaSnafu {
-                    table_schema: table.schema().arrow_schema().to_string(),
-                    file_schema: (*(builder.schema())).to_string()
-                }
-            );
+            ensure_schema_matches_ignore_timezone(builder.schema(), table.schema().arrow_schema())?;
 
             let mut stream = builder
                 .build()
@@ -158,4 +154,138 @@ async fn batch_insert(
         .sum();
     *pending_bytes = 0;
     Ok(res)
+}
+
+fn ensure_schema_matches_ignore_timezone(left: &SchemaRef, right: &SchemaRef) -> Result<()> {
+    let not_match = left
+        .fields
+        .iter()
+        .zip(right.fields.iter())
+        .map(|(l, r)| (l.data_type(), r.data_type()))
+        .enumerate()
+        .find(|(_, (l, r))| !data_type_equals_ignore_timezone(l, r));
+
+    if let Some((index, _)) = not_match {
+        error::InvalidSchemaSnafu {
+            index,
+            table_schema: left.to_string(),
+            file_schema: right.to_string(),
+        }
+        .fail()
+    } else {
+        Ok(())
+    }
+}
+
+fn data_type_equals_ignore_timezone(l: &DataType, r: &DataType) -> bool {
+    match (l, r) {
+        (DataType::List(a), DataType::List(b))
+        | (DataType::LargeList(a), DataType::LargeList(b)) => {
+            a.is_nullable() == b.is_nullable()
+                && data_type_equals_ignore_timezone(a.data_type(), b.data_type())
+        }
+        (DataType::FixedSizeList(a, a_size), DataType::FixedSizeList(b, b_size)) => {
+            a_size == b_size
+                && a.is_nullable() == b.is_nullable()
+                && data_type_equals_ignore_timezone(a.data_type(), b.data_type())
+        }
+        (DataType::Struct(a), DataType::Struct(b)) => {
+            a.len() == b.len()
+                && a.iter().zip(b).all(|(a, b)| {
+                    a.is_nullable() == b.is_nullable()
+                        && data_type_equals_ignore_timezone(a.data_type(), b.data_type())
+                })
+        }
+        (DataType::Map(a_field, a_is_sorted), DataType::Map(b_field, b_is_sorted)) => {
+            a_field == b_field && a_is_sorted == b_is_sorted
+        }
+        (DataType::Timestamp(l_unit, _), DataType::Timestamp(r_unit, _)) => l_unit == r_unit,
+        _ => l == r,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use datatypes::arrow::datatypes::{Field, Schema};
+
+    use super::*;
+
+    fn test_schema_matches(l: (DataType, bool), r: (DataType, bool), matches: bool) {
+        let s1 = Arc::new(Schema::new(vec![Field::new("col", l.0, l.1)]));
+        let s2 = Arc::new(Schema::new(vec![Field::new("col", r.0, r.1)]));
+        let res = ensure_schema_matches_ignore_timezone(&s1, &s2);
+        assert_eq!(matches, res.is_ok())
+    }
+
+    #[test]
+    fn test_ensure_datatype_matches_ignore_timezone() {
+        test_schema_matches(
+            (
+                DataType::Timestamp(datatypes::arrow::datatypes::TimeUnit::Second, None),
+                true,
+            ),
+            (
+                DataType::Timestamp(datatypes::arrow::datatypes::TimeUnit::Second, None),
+                true,
+            ),
+            true,
+        );
+
+        test_schema_matches(
+            (
+                DataType::Timestamp(
+                    datatypes::arrow::datatypes::TimeUnit::Second,
+                    Some("UTC".to_string()),
+                ),
+                true,
+            ),
+            (
+                DataType::Timestamp(datatypes::arrow::datatypes::TimeUnit::Second, None),
+                true,
+            ),
+            true,
+        );
+
+        test_schema_matches(
+            (
+                DataType::Timestamp(
+                    datatypes::arrow::datatypes::TimeUnit::Second,
+                    Some("UTC".to_string()),
+                ),
+                true,
+            ),
+            (
+                DataType::Timestamp(
+                    datatypes::arrow::datatypes::TimeUnit::Second,
+                    Some("PDT".to_string()),
+                ),
+                true,
+            ),
+            true,
+        );
+
+        test_schema_matches(
+            (
+                DataType::Timestamp(
+                    datatypes::arrow::datatypes::TimeUnit::Second,
+                    Some("UTC".to_string()),
+                ),
+                true,
+            ),
+            (
+                DataType::Timestamp(
+                    datatypes::arrow::datatypes::TimeUnit::Millisecond,
+                    Some("UTC".to_string()),
+                ),
+                true,
+            ),
+            false,
+        );
+
+        test_schema_matches((DataType::Int8, true), (DataType::Int8, true), true);
+
+        test_schema_matches((DataType::Int8, true), (DataType::Int16, true), false);
+    }
 }

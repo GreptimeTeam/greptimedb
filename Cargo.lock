@@ -2441,6 +2441,7 @@ name = "datatypes"
 version = "0.1.1"
 dependencies = [
  "arrow",
+ "arrow-array",
  "arrow-schema",
  "common-base",
  "common-error",

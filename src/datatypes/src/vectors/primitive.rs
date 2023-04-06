@@ -18,7 +18,10 @@ use std::sync::Arc;
 
 use arrow::array::{
     Array, ArrayBuilder, ArrayData, ArrayIter, ArrayRef, PrimitiveArray, PrimitiveBuilder,
+    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    TimestampSecondArray,
 };
+use arrow_schema::DataType;
 use serde_json::Value as JsonValue;
 use snafu::OptionExt;
 
@@ -67,6 +70,48 @@ impl<T: LogicalPrimitiveType> PrimitiveVector<T> {
             .data()
             .clone();
         let concrete_array = PrimitiveArray::<T::ArrowPrimitive>::from(data);
+        Ok(Self::new(concrete_array))
+    }
+
+    /// Converts arrow timestamp array to vectors, ignoring time zone info.
+    pub fn try_from_arrow_timestamp_array(array: impl AsRef<dyn Array>) -> Result<Self> {
+        let array = array.as_ref();
+        let array_data = match array.data_type() {
+            DataType::Timestamp(unit, _) => match unit {
+                arrow_schema::TimeUnit::Second => array
+                    .as_any()
+                    .downcast_ref::<TimestampSecondArray>()
+                    .unwrap()
+                    .with_timezone_opt(None)
+                    .data()
+                    .clone(),
+                arrow_schema::TimeUnit::Millisecond => array
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .unwrap()
+                    .with_timezone_opt(None)
+                    .data()
+                    .clone(),
+                arrow_schema::TimeUnit::Microsecond => array
+                    .as_any()
+                    .downcast_ref::<TimestampMicrosecondArray>()
+                    .unwrap()
+                    .with_timezone_opt(None)
+                    .data()
+                    .clone(),
+                arrow_schema::TimeUnit::Nanosecond => array
+                    .as_any()
+                    .downcast_ref::<TimestampNanosecondArray>()
+                    .unwrap()
+                    .with_timezone_opt(None)
+                    .data()
+                    .clone(),
+            },
+            _ => {
+                unreachable!()
+            }
+        };
+        let concrete_array = PrimitiveArray::<T::ArrowPrimitive>::from(array_data);
         Ok(Self::new(concrete_array))
     }
 
