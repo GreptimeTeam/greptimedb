@@ -13,17 +13,18 @@
 // limitations under the License.
 
 use arrow::compute;
-use common_recordbatch::DfRecordBatch;
+use common_recordbatch::{DfRecordBatch, RecordBatch};
 use datafusion::dataframe::DataFrame as DfDataFrame;
 use datafusion_expr::Expr as DfExpr;
+use datatypes::schema::Schema;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::pyclass::CompareOp;
-use pyo3::types::{PyList, PyType};
+use pyo3::types::PyType;
 use snafu::ResultExt;
 
 use crate::python::error::DataFusionSnafu;
-use crate::python::ffi_types::PyVector;
+use crate::python::ffi_types::py_recordbatch::PyRecordBatch;
 use crate::python::pyo3::builtins::query_engine;
 use crate::python::pyo3::utils::pyo3_obj_try_to_typed_scalar_value;
 use crate::python::utils::block_on_async;
@@ -212,7 +213,7 @@ impl PyDataFrame {
             .into())
     }
     /// collect `DataFrame` results into `List[Vector]`
-    fn collect<'a>(&self, py: Python<'a>) -> PyResult<&'a PyList> {
+    fn collect(&self) -> PyResult<PyRecordBatch> {
         let inner = self.inner.clone();
         let res = block_on_async(async { inner.collect().await });
         let res = res
@@ -221,19 +222,19 @@ impl PyDataFrame {
         let concat_rb = compute::concat_batches(&res[0].schema(), res.iter()).map_err(|e| {
             PyRuntimeError::new_err(format!("Concat batches failed for dataframe {self:?}: {e}"))
         })?;
-        // TODO(discord9): wrap RecordBatch in a dict-like type
-        let vector_list: Vec<_> = concat_rb
-            .columns()
-            .iter()
-            .map(|arr| -> PyResult<_> {
-                datatypes::vectors::Helper::try_into_vector(arr)
-                    .map(PyVector::from)
-                    .map(|v| PyCell::new(py, v))
-                    .map_err(|e| PyValueError::new_err(e.to_string()))
-                    .and_then(|x| x)
-            })
-            .collect::<Result<_, _>>()?;
-        Ok(PyList::new(py, vector_list))
+
+        let schema = Schema::try_from(concat_rb.schema()).map_err(|e| {
+            PyRuntimeError::new_err(format!(
+                "Convert to Schema failed for dataframe {self:?}: {e}"
+            ))
+        })?;
+        let rb = RecordBatch::try_from_df_record_batch(schema.into(), concat_rb).map_err(|e| {
+            PyRuntimeError::new_err(format!(
+                "Convert to RecordBatch failed for dataframe {self:?}: {e}"
+            ))
+        })?;
+        let rb = PyRecordBatch::new(rb);
+        Ok(rb)
     }
 }
 

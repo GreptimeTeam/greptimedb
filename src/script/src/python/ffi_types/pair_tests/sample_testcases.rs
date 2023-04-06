@@ -447,6 +447,7 @@ def boolean_array() -> vector[f64]:
     df = PyDataFrame.from_sql("select number from numbers limit 5").filter(col("number") > 2)
     collected = df.collect()
     assert len(collected[0]) == 2
+    assert collected[0] == collected["number"]
     print("query()=", query())
 
     assert "query_engine object at" in repr(query())
@@ -478,6 +479,7 @@ def boolean_array() -> vector[f64]:
     df = PyDataFrame.from_sql("select number from numbers limit 5").filter(col("number") > 2)
     collected = df.collect()
     assert len(collected[0]) == 2
+    assert collected[0] == collected["number"]
     return ret[0]
 "#
             .to_string(),
