@@ -44,9 +44,7 @@ use meta_client::rpc::{
 };
 use partition::partition::{PartitionBound, PartitionDef};
 use query::error::QueryExecutionSnafu;
-use query::parser::QueryStatement;
-use query::query_engine::StatementHandler;
-use query::sql::{show_databases, show_tables};
+use query::query_engine::StatementExecutorExt;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::Value as SqlValue;
@@ -62,10 +60,10 @@ use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogEntrySerdeSnafu, CatalogSnafu, ColumnDataTypeSnafu,
-    DeserializePartitionSnafu, InvokeDatanodeSnafu, NotSupportedSnafu, ParseSqlSnafu,
-    PrimaryKeyNotFoundSnafu, RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaExistsSnafu,
-    StartMetaClientSnafu, TableAlreadyExistSnafu, TableNotFoundSnafu, TableSnafu,
-    ToTableInsertRequestSnafu, UnrecognizedTableOptionSnafu,
+    DeserializePartitionSnafu, InvokeDatanodeSnafu, ParseSqlSnafu, PrimaryKeyNotFoundSnafu,
+    RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaExistsSnafu, StartMetaClientSnafu,
+    TableAlreadyExistSnafu, TableNotFoundSnafu, TableSnafu, ToTableInsertRequestSnafu,
+    UnrecognizedTableOptionSnafu,
 };
 use crate::expr_factory;
 use crate::table::DistTable;
@@ -342,10 +340,6 @@ impl DistInstance {
                 let table_name = TableName::new(catalog, schema, table);
                 return self.drop_table(table_name).await;
             }
-            Statement::ShowDatabases(stmt) => show_databases(stmt, self.catalog_manager.clone()),
-            Statement::ShowTables(stmt) => {
-                show_tables(stmt, self.catalog_manager.clone(), query_ctx)
-            }
             Statement::Insert(insert) => {
                 let (catalog, schema, table) =
                     table_idents_to_full_name(insert.table_name(), query_ctx.clone())
@@ -521,21 +515,16 @@ impl DistInstance {
 }
 
 #[async_trait]
-impl StatementHandler for DistInstance {
-    async fn handle_statement(
+impl StatementExecutorExt for DistInstance {
+    async fn execute_sql(
         &self,
-        stmt: QueryStatement,
+        stmt: Statement,
         query_ctx: QueryContextRef,
     ) -> query::error::Result<Output> {
-        match stmt {
-            QueryStatement::Sql(stmt) => self.handle_statement(stmt, query_ctx).await,
-            QueryStatement::Promql(_) => NotSupportedSnafu {
-                feat: "distributed execute promql".to_string(),
-            }
-            .fail(),
-        }
-        .map_err(BoxedError::new)
-        .context(QueryExecutionSnafu)
+        self.handle_statement(stmt, query_ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(QueryExecutionSnafu)
     }
 }
 
@@ -693,16 +682,12 @@ fn find_partition_columns(
 
 #[cfg(test)]
 mod test {
-    use itertools::Itertools;
-    use query::parser::QueryLanguageParser;
-    use query::query_engine::StatementHandlerRef;
     use session::context::QueryContext;
     use sql::dialect::GenericDialect;
     use sql::parser::ParserContext;
     use sql::statements::statement::Statement;
 
     use super::*;
-    use crate::instance::parse_stmt;
 
     #[tokio::test]
     async fn test_parse_partitions() {
@@ -742,109 +727,6 @@ ENGINE=mito",
                 }
                 _ => unreachable!(),
             }
-        }
-    }
-
-    async fn handle_sql(instance: &Arc<DistInstance>, sql: &str) -> Output {
-        let stmt = parse_stmt(sql).unwrap().remove(0);
-        instance
-            .handle_statement(stmt, QueryContext::arc())
-            .await
-            .unwrap()
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_show_databases() {
-        let instance = crate::tests::create_distributed_instance("test_show_databases").await;
-        let dist_instance = &instance.dist_instance;
-
-        let sql = "create database test_show_databases";
-        let output = handle_sql(dist_instance, sql).await;
-        match output {
-            Output::AffectedRows(rows) => assert_eq!(rows, 1),
-            _ => unreachable!(),
-        }
-
-        let sql = "show databases";
-        let output = handle_sql(dist_instance, sql).await;
-        match output {
-            Output::RecordBatches(r) => {
-                let expected1 = vec![
-                    "+---------------------+",
-                    "| Schemas             |",
-                    "+---------------------+",
-                    "| public              |",
-                    "| test_show_databases |",
-                    "+---------------------+",
-                ]
-                .into_iter()
-                .join("\n");
-                let expected2 = vec![
-                    "+---------------------+",
-                    "| Schemas             |",
-                    "+---------------------+",
-                    "| test_show_databases |",
-                    "| public              |",
-                    "+---------------------+",
-                ]
-                .into_iter()
-                .join("\n");
-                let lines = r.pretty_print().unwrap();
-                assert!(lines == expected1 || lines == expected2)
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_show_tables() {
-        let instance = crate::tests::create_distributed_instance("test_show_tables").await;
-        let dist_instance = &instance.dist_instance;
-        let datanode_instances = instance.datanodes;
-
-        let sql = "create database test_show_tables";
-        handle_sql(dist_instance, sql).await;
-
-        let sql = "
-            CREATE TABLE greptime.test_show_tables.dist_numbers (
-                ts BIGINT,
-                n INT,
-                TIME INDEX (ts),
-            )
-            PARTITION BY RANGE COLUMNS (n) (
-                PARTITION r0 VALUES LESS THAN (10),
-                PARTITION r1 VALUES LESS THAN (20),
-                PARTITION r2 VALUES LESS THAN (50),
-                PARTITION r3 VALUES LESS THAN (MAXVALUE),
-            )
-            ENGINE=mito";
-        handle_sql(dist_instance, sql).await;
-
-        async fn assert_show_tables(handler: StatementHandlerRef) {
-            let sql = "show tables in test_show_tables";
-            let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
-            let output = handler
-                .handle_statement(stmt, QueryContext::arc())
-                .await
-                .unwrap();
-            match output {
-                Output::RecordBatches(r) => {
-                    let expected = r#"+--------------+
-| Tables       |
-+--------------+
-| dist_numbers |
-+--------------+"#;
-                    assert_eq!(r.pretty_print().unwrap(), expected);
-                }
-                _ => unreachable!(),
-            }
-        }
-
-        assert_show_tables(dist_instance.clone()).await;
-
-        // Asserts that new table is created in Datanode as well.
-        for x in datanode_instances.values() {
-            assert_show_tables(x.clone()).await
         }
     }
 }
