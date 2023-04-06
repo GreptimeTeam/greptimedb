@@ -37,7 +37,8 @@ use datatypes::value::Value;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::ast::{
-    ColumnDef, ColumnOption, ColumnOptionDef, DataType as SqlDataType, Expr, Value as SqlValue,
+    ColumnDef, ColumnOption, ColumnOptionDef, DataType as SqlDataType, Expr, TimezoneInfo,
+    Value as SqlValue,
 };
 use crate::error::{
     self, ColumnTypeMismatchSnafu, ConvertToGrpcDataTypeSnafu, InvalidSqlValueSnafu,
@@ -321,6 +322,28 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
             t: data_type.clone(),
         }
         .fail(),
+    }
+}
+
+pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Result<SqlDataType> {
+    match data_type {
+        ConcreteDataType::Int64(_) => Ok(SqlDataType::BigInt(None)),
+        ConcreteDataType::UInt64(_) => Ok(SqlDataType::UnsignedBigInt(None)),
+        ConcreteDataType::Int32(_) => Ok(SqlDataType::Int(None)),
+        ConcreteDataType::UInt32(_) => Ok(SqlDataType::UnsignedInt(None)),
+        ConcreteDataType::Int16(_) => Ok(SqlDataType::SmallInt(None)),
+        ConcreteDataType::UInt16(_) => Ok(SqlDataType::UnsignedSmallInt(None)),
+        ConcreteDataType::Int8(_) => Ok(SqlDataType::TinyInt(None)),
+        ConcreteDataType::UInt8(_) => Ok(SqlDataType::UnsignedTinyInt(None)),
+        ConcreteDataType::String(_) => Ok(SqlDataType::String),
+        ConcreteDataType::Float32(_) => Ok(SqlDataType::Float(None)),
+        ConcreteDataType::Float64(_) => Ok(SqlDataType::Double),
+        ConcreteDataType::Boolean(_) => Ok(SqlDataType::Boolean),
+        ConcreteDataType::Date(_) => Ok(SqlDataType::Date),
+        ConcreteDataType::DateTime(_) => Ok(SqlDataType::Datetime(None)),
+        ConcreteDataType::Timestamp(_) => Ok(SqlDataType::Timestamp(None, TimezoneInfo::None)),
+        ConcreteDataType::Binary(_) => Ok(SqlDataType::Varbinary(None)),
+        _ => todo!(),
     }
 }
 
