@@ -548,6 +548,11 @@ def answer() -> vector[i64]:
 @copr(returns=["value"], backend="pyo3")
 def answer() -> vector[i64]:
     from greptime import vector
+    try:
+        import pyarrow as pa
+    except ImportError:
+        # Python didn't have pyarrow
+        return vector([42, 43, 44])
     return vector.from_pyarrow(vector([42, 43, 44]).to_pyarrow())
 "#
             .to_string(),
@@ -559,7 +564,11 @@ def answer() -> vector[i64]:
 @copr(returns=["value"], backend="pyo3")
 def answer() -> vector[i64]:
     from greptime import vector
-    import pyarrow as pa
+    try:
+        import pyarrow as pa
+    except ImportError:
+        # Python didn't have pyarrow
+        return vector([42, 43, 44])
     return vector.from_pyarrow(pa.array([42, 43, 44]))
 "#
             .to_string(),
@@ -597,8 +606,12 @@ def answer() -> vector[i64]:
 @copr(returns=["value"], backend="pyo3")
 def answer() -> vector[i64]:
     from greptime import vector
-    import pyarrow as pa
-    a = vector.from_pyarrow(pa.array([42, 43, 44]))
+    try:
+        import pyarrow as pa
+    except ImportError:
+        # Python didn't have pyarrow
+        return vector([42, 43, 44])
+    a = vector.from_pyarrow(pa.array([42]))
     return a[0:1]
 "#
             .to_string(),
@@ -706,8 +719,12 @@ import math
 
 @coprocessor(args=[], returns=["value"], backend="pyo3")
 def test_numpy() -> vector[i64]:
-    import numpy as np
-    import pyarrow as pa
+    try:
+        import numpy as np
+        import pyarrow as pa
+    except ImportError:
+        # Python didn't have numpy or pyarrow
+        return vector([0, 1, 2, 3, 4, 5, 6, 7, 8, 9,])
     from greptime import vector
     v = np.array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9,])
     v = pa.array(v)
