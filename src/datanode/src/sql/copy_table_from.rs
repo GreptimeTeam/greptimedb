@@ -129,12 +129,14 @@ impl SqlHandler {
                 }));
 
                 if pending_mem_size as u64 >= pending_mem_threshold {
-                    rows_inserted += batch_insert(&mut pending, &req.table_name).await?;
+                    rows_inserted +=
+                        batch_insert(&mut pending, &mut pending_mem_size, &req.table_name).await?;
                 }
             }
 
             if !pending.is_empty() {
-                rows_inserted += batch_insert(&mut pending, &req.table_name).await?;
+                rows_inserted +=
+                    batch_insert(&mut pending, &mut pending_mem_size, &req.table_name).await?;
             }
         }
 
@@ -142,9 +144,10 @@ impl SqlHandler {
     }
 }
 
-/// Executes all pending inserts all at once
+/// Executes all pending inserts all at once, drain pending requests and reset pending bytes.
 async fn batch_insert(
     pending: &mut Vec<impl Future<Output = table::error::Result<usize>>>,
+    pending_bytes: &mut usize,
     table_name: &str,
 ) -> Result<usize> {
     let batch = pending.drain(..);
@@ -155,5 +158,6 @@ async fn batch_insert(
         })?
         .iter()
         .sum();
+    *pending_bytes = 0;
     Ok(res)
 }
