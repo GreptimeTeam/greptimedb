@@ -300,7 +300,7 @@ impl PromPlanner {
                 let matchers = self.preprocess_label_matchers(matchers)?;
                 self.setup_context().await?;
                 let normalize = self
-                    .selector_to_series_normalize_plan(offset, matchers)
+                    .selector_to_series_normalize_plan(offset, matchers, false)
                     .await?;
                 let manipulate = InstantManipulate::new(
                     self.ctx.start,
@@ -311,6 +311,7 @@ impl PromPlanner {
                         .time_index_column
                         .clone()
                         .expect("time index should be set in `setup_context`"),
+                    self.ctx.field_columns.get(0).cloned(),
                     normalize,
                 );
                 LogicalPlan::Extension(Extension {
@@ -332,7 +333,7 @@ impl PromPlanner {
                 self.ctx.range = Some(range_ms);
 
                 let normalize = self
-                    .selector_to_series_normalize_plan(offset, matchers)
+                    .selector_to_series_normalize_plan(offset, matchers, true)
                     .await?;
                 let manipulate = RangeManipulate::new(
                     self.ctx.start,
@@ -420,6 +421,7 @@ impl PromPlanner {
         &mut self,
         offset: &Option<Offset>,
         label_matchers: Matchers,
+        is_range_selector: bool,
     ) -> Result<LogicalPlan> {
         let table_name = self.ctx.table_name.clone().unwrap();
 
@@ -535,6 +537,7 @@ impl PromPlanner {
                 .time_index_column
                 .clone()
                 .with_context(|| TimeIndexNotFoundSnafu { table: table_name })?,
+            is_range_selector,
             divide_plan,
         );
         let logical_plan = LogicalPlan::Extension(Extension {
