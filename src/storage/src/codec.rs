@@ -31,3 +31,8 @@ pub trait Decoder {
     /// Decodes a message from the bytes buffer.
     fn decode(&self, src: &[u8]) -> Result<Self::Item, Self::Error>;
 }
+
+pub trait Codec<T, E: ErrorExt>:
+    Encoder<Item = T, Error = E> + Decoder<Item = T, Error = E> + std::fmt::Debug + Sync + Send
+{
+}

@@ -34,7 +34,7 @@ use crate::error::{
     BuildTableInfoSnafu, BuildTableMetaSnafu, DropTableSnafu, InvalidRawSchemaSnafu, Result,
     TableExistsSnafu,
 };
-use crate::manifest::immutable::ImmutableManifest;
+use crate::manifest::immutable::{build_manifest, delete_manifest, ImmutableManifest};
 use crate::table::immutable::{ImmutableFileTable, ImmutableFileTableRef};
 
 ///  [TableEngine] implementation.
@@ -289,13 +289,11 @@ impl EngineInner {
             schema: &req.schema_name,
             table: &req.table_name,
         };
-
         let _lock = self.table_mutex.lock().await;
-
         if let Some(table) = self.get_table(&table_reference) {
             let table_id = table.table_info().ident.table_id;
             let table_dir = table_dir(&req.catalog_name, &req.schema_name, table_id);
-            ImmutableManifest::delete(&table_dir, self.object_store.clone())
+            delete_manifest(&table_dir, self.object_store.clone())
                 .await
                 .map_err(BoxedError::new)
                 .with_context(|_| DropTableSnafu {
@@ -333,7 +331,7 @@ impl EngineInner {
         table_name: &str,
         table_dir: &str,
     ) -> Result<Option<(ImmutableManifest, TableInfo)>> {
-        let manifest = ImmutableManifest::new(table_dir, self.object_store.clone());
+        let manifest = build_manifest(table_dir, self.object_store.clone());
 
         let Some(table_info) =
         ImmutableFileTable::recover_table_info(table_name, &manifest)

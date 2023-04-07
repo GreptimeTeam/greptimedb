@@ -15,43 +15,12 @@
 use std::any::Any;
 
 use common_error::prelude::*;
-use serde_json::error::Error as JsonError;
 use snafu::Location;
 use table::metadata::{TableInfoBuilderError, TableMetaBuilderError};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Fail to encode object into json , source: {}", source))]
-    EncodeJson {
-        location: Location,
-        source: JsonError,
-    },
-
-    #[snafu(display("Fail to decode object from json , source: {}", source))]
-    DecodeJson {
-        location: Location,
-        source: JsonError,
-    },
-
-    #[snafu(display("Failed to write table metadata to manifest, source: {}", source,))]
-    WriteTableManifest {
-        source: storage::error::Error,
-        location: Location,
-    },
-
-    #[snafu(display("Failed to read table manifest,  source: {}", source,))]
-    ReadTableManifest {
-        source: storage::error::Error,
-        location: Location,
-    },
-
-    #[snafu(display("Failed to delete table table manifest, source: {}", source,))]
-    DeleteTableManifest {
-        source: object_store::Error,
-        location: Location,
-    },
-
     #[snafu(display("Failed to drop table, table :{}, source: {}", table_name, source,))]
     DropTable {
         source: BoxedError,
@@ -60,7 +29,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to create table metadata to manifest,  table: {}, source: {}",
+        "Failed to create table manifest,  table: {}, source: {}",
         table_name,
         source,
     ))]
@@ -70,8 +39,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to delete table table manifest, source: {}", source,))]
+    DeleteTableManifest {
+        source: storage::error::Error,
+        location: Location,
+    },
+
     #[snafu(display(
-        "Failed to recover table metadata to manifest,  table: {}, source: {}",
+        "Failed to recover table manifest,  table: {}, source: {}",
         table_name,
         source,
     ))]
@@ -134,15 +109,11 @@ impl ErrorExt for Error {
             | BuildTableInfo { .. }
             | InvalidRawSchema { .. } => StatusCode::InvalidArguments,
 
-            ReadTableManifest { .. }
-            | WriteTableManifest { .. }
-            | CreateTableManifest { .. }
+            CreateTableManifest { .. }
             | DeleteTableManifest { .. }
             | RecoverTableManifest { .. } => StatusCode::StorageUnavailable,
 
-            ConvertRaw { .. } | EncodeJson { .. } | DecodeJson { .. } | DropTable { .. } => {
-                StatusCode::Unexpected
-            }
+            ConvertRaw { .. } | DropTable { .. } => StatusCode::Unexpected,
         }
     }
 

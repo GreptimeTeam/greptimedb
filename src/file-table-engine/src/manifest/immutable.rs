@@ -17,13 +17,14 @@ use std::sync::Arc;
 use object_store::ObjectStore;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
-use storage::manifest::ImmutableManifestObjectStore;
+use storage::codec::{Codec, Decoder, Encoder};
+use storage::error::{
+    DecodeJsonSnafu, EncodeJsonSnafu, Error as StorageError, Result as StorageResult,
+};
+use storage::manifest::ImmutableManifestImpl;
 use table::metadata::RawTableInfo;
 
-use crate::error::{
-    DecodeJsonSnafu, DeleteTableManifestSnafu, EncodeJsonSnafu, ReadTableManifestSnafu, Result,
-    WriteTableManifestSnafu,
-};
+use crate::error::{DeleteTableManifestSnafu, Result};
 const IMMUTABLE_MANIFEST_FILE: &str = "_immutable_manifest";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -31,46 +32,48 @@ pub struct ImmutableMetadata {
     pub table_info: RawTableInfo,
 }
 
-pub fn encode_immutable_metadata(metadata: &ImmutableMetadata) -> Result<Vec<u8>> {
-    serde_json::to_vec(metadata).context(DecodeJsonSnafu)
+#[derive(Default, Debug)]
+pub struct ImmutableMetadataCodec {}
+
+impl ImmutableMetadataCodec {
+    pub fn new() -> Self {
+        ImmutableMetadataCodec::default()
+    }
 }
 
-pub fn decode_immutable_metadata(bs: &[u8]) -> Result<ImmutableMetadata> {
-    serde_json::from_slice(bs).context(EncodeJsonSnafu)
+impl Encoder for ImmutableMetadataCodec {
+    type Item = ImmutableMetadata;
+    type Error = StorageError;
+
+    fn encode(&self, item: &Self::Item, dst: &mut Vec<u8>) -> StorageResult<()> {
+        serde_json::to_writer(dst, &item).context(EncodeJsonSnafu)
+    }
 }
 
-#[derive(Clone, Debug)]
-pub struct ImmutableManifest {
-    store: Arc<ImmutableManifestObjectStore>,
+impl Decoder for ImmutableMetadataCodec {
+    type Item = ImmutableMetadata;
+    type Error = StorageError;
+
+    fn decode(&self, src: &[u8]) -> StorageResult<Self::Item> {
+        serde_json::from_slice(src).context(DecodeJsonSnafu)
+    }
 }
 
-impl ImmutableManifest {
-    pub fn new(dir: &str, object_store: ObjectStore) -> Self {
-        ImmutableManifest {
-            store: Arc::new(ImmutableManifestObjectStore::new(
-                dir,
-                IMMUTABLE_MANIFEST_FILE,
-                object_store,
-            )),
-        }
-    }
+impl Codec<ImmutableMetadata, StorageError> for ImmutableMetadataCodec {}
 
-    pub async fn write(&self, metadata: &ImmutableMetadata) -> Result<()> {
-        let bs = encode_immutable_metadata(metadata)?;
+pub type ImmutableManifest = ImmutableManifestImpl<ImmutableMetadata>;
 
-        self.store.write(&bs).await.context(WriteTableManifestSnafu)
-    }
+pub(crate) fn build_manifest(dir: &str, object_store: ObjectStore) -> ImmutableManifest {
+    ImmutableManifestImpl::new(
+        dir,
+        IMMUTABLE_MANIFEST_FILE,
+        object_store,
+        Arc::new(ImmutableMetadataCodec::new()),
+    )
+}
 
-    pub async fn read(&self) -> Result<ImmutableMetadata> {
-        let bs = self.store.read().await.context(ReadTableManifestSnafu)?;
-
-        decode_immutable_metadata(&bs)
-    }
-
-    pub(crate) async fn delete(dir: &str, object_store: ObjectStore) -> Result<()> {
-        object_store
-            .delete(&format!("{}{}", dir, IMMUTABLE_MANIFEST_FILE))
-            .await
-            .context(DeleteTableManifestSnafu)
-    }
+pub(crate) async fn delete_manifest(dir: &str, object_store: ObjectStore) -> Result<()> {
+    ImmutableManifest::delete(dir, IMMUTABLE_MANIFEST_FILE, object_store)
+        .await
+        .context(DeleteTableManifestSnafu)
 }

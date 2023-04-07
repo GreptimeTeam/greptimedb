@@ -28,7 +28,7 @@ use table::metadata::{RawTableInfo, TableInfo, TableInfoRef, TableType};
 use table::Table;
 
 use crate::error::{ConvertRawSnafu, CreateTableManifestSnafu, RecoverTableManifestSnafu, Result};
-use crate::manifest::immutable::{ImmutableManifest, ImmutableMetadata};
+use crate::manifest::immutable::{build_manifest, ImmutableManifest, ImmutableMetadata};
 use crate::manifest::table_manifest_dir;
 
 pub struct ImmutableFileTable {
@@ -99,7 +99,7 @@ impl ImmutableFileTable {
         table_info: TableInfo,
         object_store: ObjectStore,
     ) -> Result<ImmutableFileTable> {
-        let manifest = ImmutableManifest::new(&table_manifest_dir(table_dir), object_store);
+        let manifest = build_manifest(&table_manifest_dir(table_dir), object_store);
 
         manifest
             .write(&ImmutableMetadata {

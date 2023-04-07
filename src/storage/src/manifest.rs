@@ -21,5 +21,5 @@ pub mod region;
 pub(crate) mod storage;
 #[cfg(test)]
 pub mod test_utils;
+
 pub use self::impl_::*;
-pub use self::storage::ImmutableManifestObjectStore;
