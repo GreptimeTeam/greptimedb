@@ -118,9 +118,11 @@ pub struct HttpServer {
 #[serde(default)]
 pub struct HttpOptions {
     pub addr: String,
+
     #[serde(with = "humantime_serde")]
     pub timeout: Duration,
 
+    #[serde(skip)]
     pub disable_dashboard: bool,
 }
 
