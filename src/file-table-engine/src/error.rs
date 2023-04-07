@@ -94,7 +94,10 @@ pub enum Error {
     },
 
     #[snafu(display("Invalid schema, source: {}", source))]
-    InvalidRawSchema { source: datatypes::error::Error },
+    InvalidRawSchema {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
