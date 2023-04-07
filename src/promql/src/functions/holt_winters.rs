@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Implementation of [`holt_winters`](https://prometheus.io/docs/prometheus/latest/querying/functions/#holt_winters) in PromQL. Refer to the [original
+//! implementation](https://github.com/prometheus/prometheus/blob/8dba9163f1e923ec213f0f4d5c185d9648e387f0/promql/functions.go#L299).
+
 use std::sync::Arc;
 
 use datafusion::arrow::array::Float64Array;
@@ -26,28 +29,18 @@ use crate::error;
 use crate::functions::extract_array;
 use crate::range_array::RangeArray;
 
-/// The Holt-Winters algorithm(a.k.a the "triple exponential smoothing") is used to model and forecast time-series data that exhibit trends and seasonality.
-/// It is an extension of the exponential smoothing method,
-/// which is a simple but effective method for smoothing out noise and detecting trends in time-series data.
-/// Exponential smoothing works by assigning a weight to each observation in the time series,
-/// with more recent observations receiving a higher weight.
-/// The weighted average of the observations is then used to make predictions for future time periods.
-/// The Holt-Winters algorithm extends exponential smoothing by incorporating two additional components:
-/// trend and seasonality. The trend component captures the long-term changes in the time series,
-/// while the seasonality component captures the periodic fluctuations that occur over shorter time periods (e.g. weekly, monthly, or yearly).
-//
-// There are three variants of the Holt-Winters algorithm, each of which incorporates different combinations of the three components:
-//
-// Simple exponential smoothing: This variant uses only the level component (i.e. the weighted average of the observations) to make forecasts.
-// It is used for time-series data that do not exhibit trend or seasonality.
-//
-// Holt's linear method: This variant incorporates both the level and trend components to make forecasts.
-// It is used for time-series data that exhibit trend but not seasonality.
-//
-// Holt-Winters' method: This variant incorporates all 3 components: level, trend, and seasonality,
-// to make forecasts. It is used for time-series data that exhibit both trend and seasonality.
-//
-// The Holt-Winters algorithm is a popular and widely-used method for time-series forecasting. It is relatively simple to implement and can be used to make accurate forecasts for a wide range of time-series data.
+/// There are 3 variants of smoothing functions:
+/// 1) "Simple exponential smoothing": only the `level` component (the weighted average of the observations) is used to make forecasts.
+///   This method is applied for time-series data that does not exhibit trend or seasonality.
+/// 2) "Holt's linear method" (a.k.a. "double exponential smoothing"): `level` and `trend` components are used to make forecasts.
+///   This method is applied for time-series data that exhibits trend but not seasonality.
+/// 3) "Holt-Winter's method" (a.k.a. "triple exponential smoothing"): `level`, `trend`, and `seasonality` are used to make forecasts.
+///   This method is applied for time-series data that exhibits both trend and seasonality.
+///
+/// In order to keep the parity with the Prometheus functions we had to follow the same naming ("HoltWinters"), however
+/// the "Holt's linear"("double exponential smoothing") suits better and reflects implementation.
+/// There's the [discussion](https://github.com/prometheus/prometheus/issues/2458) in the Prometheus Github that dates back
+/// to 2017 highlighting the naming/implementation mismatch.
 
 pub struct HoltWinters {
     sf: f64,
