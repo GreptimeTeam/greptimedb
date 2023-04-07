@@ -431,10 +431,11 @@ impl PromPlanner {
             Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
             None => 0,
         };
+        let range_ms = self.ctx.range.unwrap_or_default();
         let mut scan_filters = self.matchers_to_expr(label_matchers.clone())?;
         scan_filters.push(self.create_time_index_column_expr()?.gt_eq(DfExpr::Literal(
             ScalarValue::TimestampMillisecond(
-                Some(self.ctx.start - offset_duration - self.ctx.lookback_delta),
+                Some(self.ctx.start - offset_duration - self.ctx.lookback_delta - range_ms),
                 None,
             ),
         )));
