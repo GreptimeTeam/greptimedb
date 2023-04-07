@@ -153,9 +153,7 @@ async fn batch_insert(
     let batch = pending.drain(..);
     let res: usize = futures::future::try_join_all(batch)
         .await
-        .context(error::InsertSnafu {
-            table_name: table_name.to_string(),
-        })?
+        .context(error::InsertSnafu { table_name })?
         .iter()
         .sum();
     *pending_bytes = 0;
