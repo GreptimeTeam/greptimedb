@@ -220,7 +220,7 @@ impl SeriesNormalizeStream {
             ts_column.clone()
         } else {
             TimestampMillisecondArray::from_iter(
-                ts_column.iter().map(|ts| ts.map(|ts| ts - self.offset)),
+                ts_column.iter().map(|ts| ts.map(|ts| ts + self.offset)),
             )
         };
         let mut columns = input.columns().to_vec();
@@ -235,12 +235,17 @@ impl SeriesNormalizeStream {
         let ordered_batch = RecordBatch::try_new(input.schema(), ordered_columns)?;
 
         // TODO(ruihang): consider the "special NaN"
+        const STALE_NAN: u64 = 0x7ff0000000000002;
         // filter out NaN
         let mut filter = vec![true; input.num_rows()];
         for column in ordered_batch.columns() {
             if let Some(float_column) = column.as_any().downcast_ref::<Float64Array>() {
+                let mut staled = false;
                 for (i, flag) in filter.iter_mut().enumerate() {
-                    if float_column.value(i).is_nan() {
+                    if !staled && float_column.value(i).to_bits() == STALE_NAN {
+                        // staled = true;
+                    }
+                    if staled || float_column.value(i).is_nan() {
                         *flag = false;
                     }
                 }

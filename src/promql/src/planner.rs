@@ -424,25 +424,28 @@ impl PromPlanner {
         let table_name = self.ctx.table_name.clone().unwrap();
 
         // make filter exprs
-        let offset_duration = -match offset {
+        let offset_duration = match offset {
             Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
             Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
             None => 0,
         };
-        let mut filters = self.matchers_to_expr(label_matchers)?;
-        filters.push(self.create_time_index_column_expr()?.gt_eq(DfExpr::Literal(
+        let mut scan_filters = self.matchers_to_expr(label_matchers.clone())?;
+        scan_filters.push(self.create_time_index_column_expr()?.gt_eq(DfExpr::Literal(
             ScalarValue::TimestampMillisecond(
                 Some(self.ctx.start - offset_duration - self.ctx.lookback_delta),
                 None,
             ),
         )));
-        filters.push(self.create_time_index_column_expr()?.lt_eq(DfExpr::Literal(
-            ScalarValue::TimestampMillisecond(Some(self.ctx.end - offset_duration), None),
+        scan_filters.push(self.create_time_index_column_expr()?.lt_eq(DfExpr::Literal(
+            ScalarValue::TimestampMillisecond(
+                Some(self.ctx.end - offset_duration + self.ctx.lookback_delta),
+                None,
+            ),
         )));
 
         // make table scan with filter exprs
         let mut table_scan = self
-            .create_table_scan_plan(&table_name, filters.clone())
+            .create_table_scan_plan(&table_name, scan_filters.clone())
             .await?;
 
         // make a projection plan if there is any `__field__` matcher
@@ -515,8 +518,6 @@ impl PromPlanner {
 
         // make filter and sort plan
         let sort_plan = LogicalPlanBuilder::from(table_scan)
-            .filter(utils::conjunction(filters.into_iter()).unwrap())
-            .context(DataFusionPlanningSnafu)?
             .sort(self.create_tag_and_time_index_column_sort_exprs()?)
             .context(DataFusionPlanningSnafu)?
             .build()
@@ -540,7 +541,15 @@ impl PromPlanner {
             node: Arc::new(series_normalize),
         });
 
-        Ok(logical_plan)
+        let accurate_filters = self.matchers_to_expr(label_matchers)?;
+        if accurate_filters.is_empty() {
+            return Ok(logical_plan);
+        }
+        LogicalPlanBuilder::from(logical_plan)
+            .filter(utils::conjunction(accurate_filters).unwrap())
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)
     }
 
     /// Convert [AggModifier] to [Column] exprs for aggregation.

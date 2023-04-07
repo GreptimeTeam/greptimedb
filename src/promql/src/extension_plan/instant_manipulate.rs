@@ -282,6 +282,9 @@ impl InstantManipulateStream {
             .downcast_ref::<TimestampMillisecondArray>()
             .unwrap();
 
+        // TODO(ruihang): don't do this in non-prometheus compatible mode
+        // let first_value_column = input.column(self)
+
         let mut cursor = 0;
         let aligned_ts = (self.start..=self.end)
             .step_by(self.interval as usize)
