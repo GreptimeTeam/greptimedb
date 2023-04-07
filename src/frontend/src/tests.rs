@@ -20,7 +20,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use catalog::remote::MetaKvBackend;
+use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
+use catalog::remote::{MetaKvBackend, RemoteCatalogManager};
+use catalog::CatalogProvider;
 use client::Client;
 use common_grpc::channel_manager::ChannelManager;
 use common_runtime::Builder as RuntimeBuilder;
@@ -87,6 +89,20 @@ pub(crate) async fn create_standalone_instance(test_name: &str) -> MockStandalon
     let frontend_instance = Instance::try_new_standalone(dn_instance.clone())
         .await
         .unwrap();
+
+    // create another catalog and schema for testing
+    let another_catalog = Arc::new(MemoryCatalogProvider::new());
+    let _ = another_catalog
+        .register_schema(
+            "another_schema".to_string(),
+            Arc::new(MemorySchemaProvider::new()),
+        )
+        .unwrap();
+    let _ = dn_instance
+        .catalog_manager()
+        .register_catalog("another_catalog".to_string(), another_catalog)
+        .unwrap();
+
     dn_instance.start().await.unwrap();
     MockStandaloneInstance {
         instance: Arc::new(frontend_instance),
@@ -208,6 +224,16 @@ async fn create_distributed_datanode(
             .unwrap(),
     );
     instance.start().await.unwrap();
+
+    // create another catalog and schema for testing
+    let _ = instance
+        .catalog_manager()
+        .as_any()
+        .downcast_ref::<RemoteCatalogManager>()
+        .unwrap()
+        .create_catalog_and_schema("another_catalog", "another_schema")
+        .await
+        .unwrap();
 
     (
         instance,

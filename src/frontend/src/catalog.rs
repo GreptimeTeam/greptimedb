@@ -413,22 +413,6 @@ impl SchemaProvider for FrontendSchemaProvider {
         Ok(Some(table))
     }
 
-    fn register_table(
-        &self,
-        _name: String,
-        _table: TableRef,
-    ) -> catalog::error::Result<Option<TableRef>> {
-        unimplemented!("Frontend schema provider does not support register table")
-    }
-
-    fn rename_table(&self, _name: &str, _new_name: String) -> catalog_err::Result<TableRef> {
-        unimplemented!("Frontend schema provider does not support rename table")
-    }
-
-    fn deregister_table(&self, _name: &str) -> catalog::error::Result<Option<TableRef>> {
-        unimplemented!("Frontend schema provider does not support deregister table")
-    }
-
     fn table_exist(&self, name: &str) -> catalog::error::Result<bool> {
         Ok(self.table_names()?.contains(&name.to_string()))
     }

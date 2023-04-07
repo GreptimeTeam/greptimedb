@@ -74,7 +74,7 @@ impl LocalCatalogManager {
             })?;
         let table = SystemCatalogTable::new(engine.clone()).await?;
         let memory_catalog_list = crate::local::memory::new_memory_catalog_list()?;
-        let system_catalog = Arc::new(SystemCatalog::new(table, memory_catalog_list.clone()));
+        let system_catalog = Arc::new(SystemCatalog::new(table));
         Ok(Self {
             system: system_catalog,
             catalogs: memory_catalog_list,
