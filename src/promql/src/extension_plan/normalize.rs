@@ -72,8 +72,8 @@ impl UserDefinedLogicalNodeCore for SeriesNormalize {
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
             f,
-            "PromSeriesNormalize: offset=[{}], time index=[{}]",
-            self.offset, self.time_index_column_name
+            "PromSeriesNormalize: offset=[{}], time index=[{}], filter NaN: [{}]",
+            self.offset, self.time_index_column_name, self.need_filter_out_nan
         )
     }
 
@@ -188,8 +188,8 @@ impl ExecutionPlan for SeriesNormalizeExec {
             DisplayFormatType::Default => {
                 write!(
                     f,
-                    "PromSeriesNormalizeExec: offset=[{}], time index=[{}]",
-                    self.offset, self.time_index_column_name
+                    "PromSeriesNormalizeExec: offset=[{}], time index=[{}], filter NaN: [{}]",
+                    self.offset, self.time_index_column_name, self.need_filter_out_nan
                 )
             }
         }
@@ -248,17 +248,12 @@ impl SeriesNormalizeStream {
         }
 
         // TODO(ruihang): consider the "special NaN"
-        const STALE_NAN: u64 = 0x7ff0000000000002;
         // filter out NaN
         let mut filter = vec![true; input.num_rows()];
         for column in ordered_batch.columns() {
             if let Some(float_column) = column.as_any().downcast_ref::<Float64Array>() {
-                let mut staled = false;
                 for (i, flag) in filter.iter_mut().enumerate() {
-                    if !staled && float_column.value(i).to_bits() == STALE_NAN {
-                        // staled = true;
-                    }
-                    if staled || float_column.value(i).is_nan() {
+                    if float_column.value(i).is_nan() {
                         *flag = false;
                     }
                 }
