@@ -36,10 +36,10 @@ use rustpython_vm as vm;
 use serde::Deserialize;
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
-use vm::builtins::{PyList, PyListRef};
 use vm::convert::ToPyObject;
-use vm::{pyclass as rspyclass, PyPayload, PyResult, VirtualMachine};
+use vm::{pyclass as rspyclass, PyObjectRef, PyPayload, PyResult, VirtualMachine};
 
+use super::py_recordbatch::PyRecordBatch;
 use crate::python::error::{ensure, ArrowSnafu, OtherSnafu, Result, TypeCastSnafu};
 use crate::python::ffi_types::PyVector;
 #[cfg(feature = "pyo3_backend")]
@@ -412,7 +412,7 @@ impl PyQueryEngine {
     // TODO(discord9): find a better way to call sql query api, now we don't if we are in async context or not
     /// return sql query results in List[PyVector], or List[usize] for AffectedRows number if no recordbatches is returned
     #[pymethod]
-    fn sql(&self, s: String, vm: &VirtualMachine) -> PyResult<PyListRef> {
+    fn sql(&self, s: String, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         self.query_with_new_thread(s)
             .map_err(|e| vm.new_system_error(e))
             .map(|rbs| match rbs {
@@ -428,17 +428,11 @@ impl PyQueryEngine {
                         RecordBatch::try_from_df_record_batch(rbs.schema(), rb).map_err(|e| {
                             vm.new_runtime_error(format!("Failed to cast recordbatch: {e:#?}"))
                         })?;
-                    let columns_vectors = rb
-                        .columns()
-                        .iter()
-                        .map(|v| PyVector::from(v.clone()).to_pyobject(vm))
-                        .collect::<Vec<_>>();
-                    Ok(PyList::new_ref(columns_vectors, vm.as_ref()))
+                    let rb = PyRecordBatch::new(rb);
+
+                    Ok(rb.to_pyobject(vm))
                 }
-                Either::AffectedRows(cnt) => Ok(PyList::new_ref(
-                    vec![vm.ctx.new_int(cnt).into()],
-                    vm.as_ref(),
-                )),
+                Either::AffectedRows(cnt) => Ok(vm.ctx.new_int(cnt).to_pyobject(vm)),
             })?
     }
 }

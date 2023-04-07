@@ -34,6 +34,7 @@ use rustpython_vm::{
 
 use crate::python::ffi_types::PyVector;
 
+/// This is a Wrapper around a RecordBatch, impl PyMapping Protocol so you can do both `a[0]` and `a["number"]` to retrieve column.
 #[cfg_attr(feature = "pyo3_backend", pyo3class(name = "PyRecordBatch"))]
 #[rspyclass(module = false, name = "PyRecordBatch")]
 #[derive(Debug, PyPayload)]
@@ -47,9 +48,19 @@ impl PyRecordBatch {
     }
 }
 
+impl From<RecordBatch> for PyRecordBatch {
+    fn from(record_batch: RecordBatch) -> Self {
+        Self::new(record_batch)
+    }
+}
+
 #[cfg(feature = "pyo3_backend")]
 #[pymethods]
 impl PyRecordBatch {
+    fn __repr__(&self) -> String {
+        // TODO(discord9): a better pretty print
+        format!("{:#?}", &self.record_batch.df_record_batch())
+    }
     fn __getitem__(&self, py: Python, key: PyObject) -> PyResult<PyVector> {
         let column = if let Ok(key) = key.extract::<String>(py) {
             self.record_batch.column_by_name(&key)
@@ -105,7 +116,12 @@ impl PyRecordBatch {
 }
 
 #[rspyclass(with(AsMapping))]
-impl PyRecordBatch {}
+impl PyRecordBatch {
+    #[pymethod(name = "__repr__")]
+    fn rspy_repr(&self) -> String {
+        format!("{:#?}", &self.record_batch.df_record_batch())
+    }
+}
 
 impl AsMapping for PyRecordBatch {
     fn as_mapping() -> &'static PyMappingMethods {

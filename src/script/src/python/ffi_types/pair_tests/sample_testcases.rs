@@ -418,6 +418,12 @@ def boolean_array() -> vector[f64]:
     
     print("query()=", query())
     assert "query_engine object at" in str(query())
+    rb = query().sql(
+        "select number from numbers limit 5"
+    )
+    print(rb)
+    assert len(rb) == 5
+
     try: 
         print("dataframe()=", dataframe())
     except KeyError as e:
@@ -451,6 +457,11 @@ def boolean_array() -> vector[f64]:
     print("query()=", query())
 
     assert "query_engine object at" in repr(query())
+    rb = query().sql(
+        "select number from numbers limit 5"
+    )
+    print(rb)
+    assert len(rb) == 5
     try: 
         print("dataframe()=", dataframe())
     except KeyError as e:
