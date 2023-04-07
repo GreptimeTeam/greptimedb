@@ -134,6 +134,7 @@ def entry() -> vector[i64]:
 
 fn criterion_benchmark(c: &mut Criterion) {
     // TODO: Prime Number, api heavy computation
+    // and database-local computation/remote download python script comparison
 
     c.bench_function("fib 20 rspy", |b| {
         b.to_async(tokio::runtime::Runtime::new().unwrap())
