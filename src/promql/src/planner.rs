@@ -553,16 +553,6 @@ impl PromPlanner {
         });
 
         Ok(logical_plan)
-
-        // let accurate_filters = self.matchers_to_expr(label_matchers)?;
-        // if accurate_filters.is_empty() {
-        //     return Ok(logical_plan);
-        // }
-        // LogicalPlanBuilder::from(logical_plan)
-        //     .filter(utils::conjunction(accurate_filters).unwrap())
-        //     .context(DataFusionPlanningSnafu)?
-        //     .build()
-        //     .context(DataFusionPlanningSnafu)
     }
 
     /// Convert [AggModifier] to [Column] exprs for aggregation.
