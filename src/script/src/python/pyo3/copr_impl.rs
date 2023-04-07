@@ -23,7 +23,7 @@ use datatypes::vectors::{Helper, VectorRef};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyModule, PyString, PyTuple};
 use pyo3::{pymethods, IntoPy, PyAny, PyCell, PyObject, PyResult, Python, ToPyObject};
-use snafu::{ensure, ResultExt, Location};
+use snafu::{ensure, Location, ResultExt};
 
 use crate::python::error::{self, NewRecordBatchSnafu, OtherSnafu, Result};
 use crate::python::ffi_types::copr::PyQueryEngine;
