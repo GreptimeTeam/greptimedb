@@ -15,7 +15,7 @@
 use std::env;
 use std::sync::Arc;
 
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_query::Output;
 use common_recordbatch::util;
 use common_telemetry::logging;
@@ -23,9 +23,9 @@ use datatypes::vectors::{Int64Vector, StringVector, UInt64Vector, VectorRef};
 use rstest::rstest;
 use rstest_reuse::apply;
 use servers::query_handler::sql::SqlQueryHandler;
-use session::context::QueryContext;
+use session::context::{QueryContext, QueryContextRef};
 
-use crate::error::Error;
+use crate::error::{Error, Result};
 use crate::instance::Instance;
 use crate::tests::test_util::{
     both_instances_cases, check_output_stream, check_unordered_output_stream, distributed,
@@ -246,8 +246,7 @@ async fn test_execute_insert_by_select(instance: Arc<dyn MockInstance>) {
 +-------+------+--------+---------------------+
 | host1 | 66.6 | 1024.0 | 2022-06-15T07:02:37 |
 | host2 | 88.8 | 333.3  | 2022-06-15T07:02:38 |
-+-------+------+--------+---------------------+"
-        .to_string();
++-------+------+--------+---------------------+";
     check_output_stream(output, expected).await;
 }
 
@@ -451,51 +450,58 @@ async fn test_rename_table(instance: Arc<dyn MockInstance>) {
     let output = execute_sql(&instance, "create database db").await;
     assert!(matches!(output, Output::AffectedRows(1)));
 
-    let output = execute_sql_in_db(
+    let query_ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, "db"));
+    let output = execute_sql_with(
         &instance,
         "create table demo(host string, cpu double, memory double, ts timestamp, time index(ts))",
-        "db",
+        query_ctx.clone(),
     )
     .await;
     assert!(matches!(output, Output::AffectedRows(0)));
 
     // make sure table insertion is ok before altering table name
-    let output = execute_sql_in_db(
+    let output = execute_sql_with(
         &instance,
         "insert into demo(host, cpu, memory, ts) values ('host1', 1.1, 100, 1000), ('host2', 2.2, 200, 2000)",
-        "db",
+        query_ctx.clone(),
     )
     .await;
     assert!(matches!(output, Output::AffectedRows(2)));
 
     // rename table
-    let output = execute_sql_in_db(&instance, "alter table demo rename test_table", "db").await;
+    let output = execute_sql_with(
+        &instance,
+        "alter table demo rename test_table",
+        query_ctx.clone(),
+    )
+    .await;
     assert!(matches!(output, Output::AffectedRows(0)));
 
-    let output = execute_sql_in_db(&instance, "show tables", "db").await;
+    let output = execute_sql_with(&instance, "show tables", query_ctx.clone()).await;
     let expect = "\
 +------------+
 | Tables     |
 +------------+
 | test_table |
-+------------+\
-"
-    .to_string();
++------------+";
     check_output_stream(output, expect).await;
 
-    let output = execute_sql_in_db(&instance, "select * from test_table order by ts", "db").await;
+    let output = execute_sql_with(
+        &instance,
+        "select * from test_table order by ts",
+        query_ctx.clone(),
+    )
+    .await;
     let expected = "\
 +-------+-----+--------+---------------------+
 | host  | cpu | memory | ts                  |
 +-------+-----+--------+---------------------+
 | host1 | 1.1 | 100.0  | 1970-01-01T00:00:01 |
 | host2 | 2.2 | 200.0  | 1970-01-01T00:00:02 |
-+-------+-----+--------+---------------------+\
-"
-    .to_string();
++-------+-----+--------+---------------------+";
     check_output_stream(output, expected).await;
 
-    try_execute_sql_in_db(&instance, "select * from demo", "db")
+    try_execute_sql_with(&instance, "select * from demo", query_ctx)
         .await
         .expect_err("no table found in expect");
 }
@@ -510,30 +516,31 @@ async fn test_create_table_after_rename_table(instance: Arc<dyn MockInstance>) {
 
     // create test table
     let table_name = "demo";
-    let output = execute_sql_in_db(
+    let query_ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, "db"));
+    let output = execute_sql_with(
         &instance,
         &format!("create table {table_name}(host string, cpu double, memory double, ts timestamp, time index(ts))"),
-        "db",
+        query_ctx.clone(),
     )
         .await;
     assert!(matches!(output, Output::AffectedRows(0)));
 
     // rename table
     let new_table_name = "test_table";
-    let output = execute_sql_in_db(
+    let output = execute_sql_with(
         &instance,
         &format!("alter table {table_name} rename {new_table_name}"),
-        "db",
+        query_ctx.clone(),
     )
     .await;
     assert!(matches!(output, Output::AffectedRows(0)));
 
     // create table with same name
     // create test table
-    let output = execute_sql_in_db(
+    let output = execute_sql_with(
         &instance,
         &format!("create table {table_name}(host string, cpu double, memory double, ts timestamp, time index(ts))"),
-        "db",
+        query_ctx.clone(),
     )
         .await;
     assert!(matches!(output, Output::AffectedRows(0)));
@@ -544,10 +551,8 @@ async fn test_create_table_after_rename_table(instance: Arc<dyn MockInstance>) {
 +------------+
 | demo       |
 | test_table |
-+------------+\
-"
-    .to_string();
-    let output = execute_sql_in_db(&instance, "show tables", "db").await;
++------------+";
+    let output = execute_sql_with(&instance, "show tables", query_ctx).await;
     check_output_stream(output, expect).await;
 }
 
@@ -594,9 +599,7 @@ async fn test_alter_table(instance: Arc<dyn MockInstance>) {
 | host1 | 1.1 | 100.0  | 1970-01-01T00:00:01 |        |
 | host2 | 2.2 | 200.0  | 1970-01-01T00:00:02 | hello  |
 | host3 | 3.3 | 300.0  | 1970-01-01T00:00:03 |        |
-+-------+-----+--------+---------------------+--------+\
-    "
-    .to_string();
++-------+-----+--------+---------------------+--------+";
     check_output_stream(output, expected).await;
 
     // Drop a column
@@ -611,9 +614,7 @@ async fn test_alter_table(instance: Arc<dyn MockInstance>) {
 | host1 | 1.1 | 1970-01-01T00:00:01 |        |
 | host2 | 2.2 | 1970-01-01T00:00:02 | hello  |
 | host3 | 3.3 | 1970-01-01T00:00:03 |        |
-+-------+-----+---------------------+--------+\
-    "
-    .to_string();
++-------+-----+---------------------+--------+";
     check_output_stream(output, expected).await;
 
     // insert a new row
@@ -633,9 +634,7 @@ async fn test_alter_table(instance: Arc<dyn MockInstance>) {
 | host2 | 2.2   | 1970-01-01T00:00:02 | hello  |
 | host3 | 3.3   | 1970-01-01T00:00:03 |        |
 | host4 | 400.0 | 1970-01-01T00:00:04 | world  |
-+-------+-------+---------------------+--------+\
-    "
-    .to_string();
++-------+-------+---------------------+--------+";
     check_output_stream(output, expected).await;
 }
 
@@ -676,9 +675,7 @@ async fn test_insert_with_default_value_for_type(instance: Arc<Instance>, type_n
 +-------+-----+
 | host1 | 1.1 |
 | host2 | 2.2 |
-+-------+-----+\
-    "
-    .to_string();
++-------+-----+";
     check_output_stream(output, expected).await;
 }
 
@@ -697,42 +694,39 @@ async fn test_use_database(instance: Arc<dyn MockInstance>) {
     let output = execute_sql(&instance, "create database db1").await;
     assert!(matches!(output, Output::AffectedRows(1)));
 
-    let output = execute_sql_in_db(
+    let query_ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, "db1"));
+    let output = execute_sql_with(
         &instance,
         "create table tb1(col_i32 int, ts bigint, TIME INDEX(ts))",
-        "db1",
+        query_ctx.clone(),
     )
     .await;
     assert!(matches!(output, Output::AffectedRows(0)));
 
-    let output = execute_sql_in_db(&instance, "show tables", "db1").await;
+    let output = execute_sql_with(&instance, "show tables", query_ctx.clone()).await;
     let expected = "\
 +--------+
 | Tables |
 +--------+
 | tb1    |
-+--------+\
-    "
-    .to_string();
++--------+";
     check_output_stream(output, expected).await;
 
-    let output = execute_sql_in_db(
+    let output = execute_sql_with(
         &instance,
         r#"insert into tb1(col_i32, ts) values (1, 1655276557000)"#,
-        "db1",
+        query_ctx.clone(),
     )
     .await;
     assert!(matches!(output, Output::AffectedRows(1)));
 
-    let output = execute_sql_in_db(&instance, "select col_i32 from tb1", "db1").await;
+    let output = execute_sql_with(&instance, "select col_i32 from tb1", query_ctx.clone()).await;
     let expected = "\
 +---------+
 | col_i32 |
 +---------+
 | 1       |
-+---------+\
-    "
-    .to_string();
++---------+";
     check_output_stream(output, expected).await;
 
     // Making a particular database the default by means of the USE statement does not preclude
@@ -743,9 +737,7 @@ async fn test_use_database(instance: Arc<dyn MockInstance>) {
 | number |
 +--------+
 | 0      |
-+--------+\
-    "
-    .to_string();
++--------+";
     check_output_stream(output, expected).await;
 }
 
@@ -793,9 +785,7 @@ async fn test_delete(instance: Arc<dyn MockInstance>) {
 +-------+---------------------+------+--------+
 | host2 | 2022-06-15T07:02:38 | 77.7 | 2048.0 |
 | host3 | 2022-06-15T07:02:39 | 88.8 | 3072.0 |
-+-------+---------------------+------+--------+\
-"
-    .to_string();
++-------+---------------------+------+--------+";
     check_output_stream(output, expect).await;
 }
 
@@ -929,34 +919,82 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
 +-------+------+--------+---------------------+
 | host1 | 66.6 | 1024.0 | 2022-06-15T07:02:37 |
 | host2 | 88.8 | 333.3  | 2022-06-15T07:02:38 |
-+-------+------+--------+---------------------+"
-                    .to_string();
++-------+------+--------+---------------------+";
                 check_output_stream(output, expected).await;
             }
         }
     }
 }
 
+#[apply(both_instances_cases)]
+async fn test_information_schema(instance: Arc<dyn MockInstance>) {
+    let is_distributed_mode = instance.is_distributed_mode();
+
+    let instance = instance.frontend();
+
+    let sql = "create table another_table(i bigint time index)";
+    let query_ctx = Arc::new(QueryContext::with("another_catalog", "another_schema"));
+    let output = execute_sql_with(&instance, sql, query_ctx.clone()).await;
+    assert!(matches!(output, Output::AffectedRows(0)));
+
+    // User can only see information schema under current catalog.
+    // A necessary requirement to GreptimeCloud.
+    let sql = "select table_catalog, table_schema, table_name, table_type from information_schema.tables where table_type != 'SYSTEM VIEW' order by table_name";
+
+    let output = execute_sql(&instance, sql).await;
+    let expected = if is_distributed_mode {
+        "\
++---------------+--------------------+------------+------------+
+| table_catalog | table_schema       | table_name | table_type |
++---------------+--------------------+------------+------------+
+| greptime      | public             | scripts    | BASE TABLE |
+| greptime      | information_schema | tables     | VIEW       |
++---------------+--------------------+------------+------------+"
+    } else {
+        "\
++---------------+--------------------+------------+------------+
+| table_catalog | table_schema       | table_name | table_type |
++---------------+--------------------+------------+------------+
+| greptime      | public             | numbers    | BASE TABLE |
+| greptime      | public             | scripts    | BASE TABLE |
+| greptime      | information_schema | tables     | VIEW       |
++---------------+--------------------+------------+------------+"
+    };
+    check_output_stream(output, expected).await;
+
+    let output = execute_sql_with(&instance, sql, query_ctx).await;
+    let expected = "\
++-----------------+--------------------+---------------+------------+
+| table_catalog   | table_schema       | table_name    | table_type |
++-----------------+--------------------+---------------+------------+
+| another_catalog | another_schema     | another_table | BASE TABLE |
+| another_catalog | information_schema | tables        | VIEW       |
++-----------------+--------------------+---------------+------------+";
+    check_output_stream(output, expected).await;
+}
+
 async fn execute_sql(instance: &Arc<Instance>, sql: &str) -> Output {
-    execute_sql_in_db(instance, sql, DEFAULT_SCHEMA_NAME).await
+    execute_sql_with(instance, sql, QueryContext::arc()).await
 }
 
-async fn try_execute_sql(
-    instance: &Arc<Instance>,
-    sql: &str,
-) -> Result<Output, crate::error::Error> {
-    try_execute_sql_in_db(instance, sql, DEFAULT_SCHEMA_NAME).await
+async fn try_execute_sql(instance: &Arc<Instance>, sql: &str) -> Result<Output> {
+    try_execute_sql_with(instance, sql, QueryContext::arc()).await
 }
 
-async fn try_execute_sql_in_db(
+async fn try_execute_sql_with(
     instance: &Arc<Instance>,
     sql: &str,
-    db: &str,
-) -> Result<Output, crate::error::Error> {
-    let query_ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, db));
+    query_ctx: QueryContextRef,
+) -> Result<Output> {
     instance.do_query(sql, query_ctx).await.remove(0)
 }
 
-async fn execute_sql_in_db(instance: &Arc<Instance>, sql: &str, db: &str) -> Output {
-    try_execute_sql_in_db(instance, sql, db).await.unwrap()
+async fn execute_sql_with(
+    instance: &Arc<Instance>,
+    sql: &str,
+    query_ctx: QueryContextRef,
+) -> Output {
+    try_execute_sql_with(instance, sql, query_ctx)
+        .await
+        .unwrap()
 }

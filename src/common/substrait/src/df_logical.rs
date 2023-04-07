@@ -398,7 +398,6 @@ impl DFLogicalSubstraitConvertor {
             | LogicalPlan::CreateCatalog(_)
             | LogicalPlan::DropView(_)
             | LogicalPlan::Distinct(_)
-            | LogicalPlan::SetVariable(_)
             | LogicalPlan::CreateExternalTable(_)
             | LogicalPlan::CreateMemoryTable(_)
             | LogicalPlan::DropTable(_)
@@ -409,7 +408,8 @@ impl DFLogicalSubstraitConvertor {
             | LogicalPlan::Prepare(_)
             | LogicalPlan::Dml(_)
             | LogicalPlan::DescribeTable(_)
-            | LogicalPlan::Unnest(_) => InvalidParametersSnafu {
+            | LogicalPlan::Unnest(_)
+            | LogicalPlan::Statement(_) => InvalidParametersSnafu {
                 reason: format!(
                     "Trying to convert DDL/DML plan to substrait proto, plan: {plan:?}",
                 ),

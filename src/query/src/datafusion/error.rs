@@ -38,12 +38,6 @@ pub enum InnerError {
         source: datatypes::error::Error,
     },
 
-    #[snafu(display("Failed to convert table schema, source: {}", source))]
-    TableSchemaMismatch {
-        #[snafu(backtrace)]
-        source: table::error::Error,
-    },
-
     #[snafu(display(
         "Failed to convert DataFusion's recordbatch stream, source: {}",
         source
@@ -67,10 +61,7 @@ impl ErrorExt for InnerError {
         match self {
             // TODO(yingwen): Further categorize datafusion error.
             Datafusion { .. } => StatusCode::EngineExecuteQuery,
-            // This downcast should not fail in usual case.
-            PhysicalPlanDowncast { .. } | ConvertSchema { .. } | TableSchemaMismatch { .. } => {
-                StatusCode::Unexpected
-            }
+            PhysicalPlanDowncast { .. } | ConvertSchema { .. } => StatusCode::Unexpected,
             ConvertDfRecordBatchStream { source } => source.status_code(),
             ExecutePhysicalPlan { source } => source.status_code(),
         }

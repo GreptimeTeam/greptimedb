@@ -74,7 +74,7 @@ impl LocalCatalogManager {
             })?;
         let table = SystemCatalogTable::new(engine.clone()).await?;
         let memory_catalog_list = crate::local::memory::new_memory_catalog_list()?;
-        let system_catalog = Arc::new(SystemCatalog::new(table, memory_catalog_list.clone()));
+        let system_catalog = Arc::new(SystemCatalog::new(table));
         Ok(Self {
             system: system_catalog,
             catalogs: memory_catalog_list,
@@ -305,9 +305,7 @@ impl CatalogList for LocalCatalogManager {
     }
 
     fn catalog_names(&self) -> Result<Vec<String>> {
-        let mut res = self.catalogs.catalog_names()?;
-        res.push(SYSTEM_CATALOG_NAME.to_string());
-        Ok(res)
+        self.catalogs.catalog_names()
     }
 
     fn catalog(&self, name: &str) -> Result<Option<CatalogProviderRef>> {

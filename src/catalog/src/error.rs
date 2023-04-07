@@ -117,6 +117,9 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Operation {} not supported", op))]
+    NotSupported { op: String, location: Location },
+
     #[snafu(display("Failed to open table, table info: {}, source: {}", table_info, source))]
     OpenTable {
         table_info: String,
@@ -132,6 +135,12 @@ pub enum Error {
 
     #[snafu(display("Failed to read system catalog table records"))]
     ReadSystemCatalog {
+        #[snafu(backtrace)]
+        source: common_recordbatch::error::Error,
+    },
+
+    #[snafu(display("Failed to create recordbatch, source: {}", source))]
+    CreateRecordBatch {
         #[snafu(backtrace)]
         source: common_recordbatch::error::Error,
     },
@@ -226,6 +235,19 @@ pub enum Error {
 
     #[snafu(display("Invalid system table definition: {err_msg}"))]
     InvalidSystemTableDef { err_msg: String, location: Location },
+
+    #[snafu(display("{}: {}", msg, source))]
+    Datafusion {
+        msg: String,
+        source: DataFusionError,
+        location: Location,
+    },
+
+    #[snafu(display("Table schema mismatch, source: {}", source))]
+    TableSchemaMismatch {
+        #[snafu(backtrace)]
+        source: table::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -247,7 +269,9 @@ impl ErrorExt for Error {
 
             Error::SystemCatalogTypeMismatch { .. } => StatusCode::Internal,
 
-            Error::ReadSystemCatalog { source, .. } => source.status_code(),
+            Error::ReadSystemCatalog { source, .. } | Error::CreateRecordBatch { source } => {
+                source.status_code()
+            }
             Error::InvalidCatalogValue { source, .. } | Error::CatalogEntrySerde { source } => {
                 source.status_code()
             }
@@ -264,7 +288,8 @@ impl ErrorExt for Error {
             | Error::OpenTable { source, .. }
             | Error::CreateTable { source, .. }
             | Error::DeregisterTable { source, .. }
-            | Error::RegionStats { source, .. } => source.status_code(),
+            | Error::RegionStats { source, .. }
+            | Error::TableSchemaMismatch { source } => source.status_code(),
 
             Error::MetaSrv { source, .. } => source.status_code(),
             Error::SystemCatalogTableScan { source } => source.status_code(),
@@ -274,8 +299,9 @@ impl ErrorExt for Error {
                 source.status_code()
             }
 
-            Error::Unimplemented { .. } => StatusCode::Unsupported,
+            Error::Unimplemented { .. } | Error::NotSupported { .. } => StatusCode::Unsupported,
             Error::QueryAccessDenied { .. } => StatusCode::AccessDenied,
+            Error::Datafusion { .. } => StatusCode::EngineExecuteQuery,
         }
     }
 
