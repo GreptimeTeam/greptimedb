@@ -120,6 +120,8 @@ pub struct HttpOptions {
     pub addr: String,
     #[serde(with = "humantime_serde")]
     pub timeout: Duration,
+
+    pub disable_dashboard: bool,
 }
 
 impl Default for HttpOptions {
@@ -127,6 +129,7 @@ impl Default for HttpOptions {
         Self {
             addr: "127.0.0.1:4000".to_string(),
             timeout: Duration::from_secs(30),
+            disable_dashboard: false,
         }
     }
 }
@@ -502,7 +505,10 @@ impl HttpServer {
 
         #[cfg(feature = "dashboard")]
         {
-            router = router.nest("/dashboard", dashboard::dashboard());
+            if !self.options.disable_dashboard {
+                info!("Enable dashboard service at '/dashboard'");
+                router = router.nest("/dashboard", dashboard::dashboard());
+            }
         }
 
         router

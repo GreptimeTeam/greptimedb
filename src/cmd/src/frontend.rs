@@ -107,6 +107,8 @@ pub struct StartCommand {
     tls_key_path: Option<String>,
     #[clap(long)]
     user_provider: Option<String>,
+    #[clap(long)]
+    disable_dashboard: bool,
 }
 
 impl StartCommand {
@@ -149,18 +151,24 @@ impl TryFrom<StartCommand> for FrontendOptions {
 
         let tls_option = TlsOption::new(cmd.tls_mode, cmd.tls_cert_path, cmd.tls_key_path);
 
+        opts.http_options = Some(HttpOptions::default());
         if let Some(addr) = cmd.http_addr {
-            opts.http_options = Some(HttpOptions {
-                addr,
-                ..Default::default()
-            });
+            if let Some(ref mut http_options) = opts.http_options {
+                http_options.addr = addr;
+            }
         }
+
+        if let Some(ref mut http_options) = opts.http_options {
+            http_options.disable_dashboard = cmd.disable_dashboard
+        }
+
         if let Some(addr) = cmd.grpc_addr {
             opts.grpc_options = Some(GrpcOptions {
                 addr,
                 ..Default::default()
             });
         }
+
         if let Some(addr) = cmd.mysql_addr {
             opts.mysql_options = Some(MysqlOptions {
                 addr,
@@ -227,6 +235,7 @@ mod tests {
             tls_cert_path: None,
             tls_key_path: None,
             user_provider: None,
+            disable_dashboard: false,
         };
 
         let opts: FrontendOptions = command.try_into().unwrap();
@@ -289,6 +298,7 @@ mod tests {
             tls_cert_path: None,
             tls_key_path: None,
             user_provider: None,
+            disable_dashboard: false,
         };
 
         let fe_opts = FrontendOptions::try_from(command).unwrap();
@@ -319,6 +329,7 @@ mod tests {
             tls_cert_path: None,
             tls_key_path: None,
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
+            disable_dashboard: false,
         };
 
         let plugins = load_frontend_plugins(&command.user_provider);

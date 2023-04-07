@@ -141,6 +141,9 @@ impl TryFrom<StartCommand> for MetaSrvOptions {
             opts.http_opts.timeout = Duration::from_secs(http_timeout);
         }
 
+        // Disable dashboard in metasrv.
+        opts.http_opts.disable_dashboard = true;
+
         Ok(opts)
     }
 }
