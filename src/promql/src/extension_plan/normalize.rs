@@ -42,7 +42,7 @@ use crate::extension_plan::Millisecond;
 /// Roughly speaking, this method does these things:
 /// - bias sample's timestamp by offset
 /// - sort the record batch based on timestamp column
-/// - remove NaN values
+/// - remove NaN values (optional)
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct SeriesNormalize {
     offset: Millisecond,
@@ -379,11 +379,11 @@ mod test {
             "+---------------------+--------+------+\
             \n| timestamp           | value  | path |\
             \n+---------------------+--------+------+\
-            \n| 1969-12-31T23:59:59 | 10.0   | foo  |\
-            \n| 1970-01-01T00:00:29 | 100.0  | foo  |\
-            \n| 1970-01-01T00:00:59 | 0.0    | foo  |\
-            \n| 1970-01-01T00:01:29 | 1000.0 | foo  |\
-            \n| 1970-01-01T00:01:59 | 1.0    | foo  |\
+            \n| 1970-01-01T00:00:01 | 10.0   | foo  |\
+            \n| 1970-01-01T00:00:31 | 100.0  | foo  |\
+            \n| 1970-01-01T00:01:01 | 0.0    | foo  |\
+            \n| 1970-01-01T00:01:31 | 1000.0 | foo  |\
+            \n| 1970-01-01T00:02:01 | 1.0    | foo  |\
             \n+---------------------+--------+------+",
         );
 

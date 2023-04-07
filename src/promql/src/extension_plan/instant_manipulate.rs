@@ -200,8 +200,7 @@ impl ExecutionPlan for InstantManipulateExec {
         let value_index = self
             .value_column
             .as_ref()
-            .map(|name| schema.column_with_name(name))
-            .flatten()
+            .and_then(|name| schema.column_with_name(name))
             .map(|x| x.0);
         Ok(Box::pin(InstantManipulateStream {
             start: self.start,
@@ -301,8 +300,7 @@ impl InstantManipulateStream {
         // value column for staleness check
         let value_column = self
             .value_index
-            .map(|index| input.column(index).as_any().downcast_ref::<Float64Array>())
-            .flatten();
+            .and_then(|index| input.column(index).as_any().downcast_ref::<Float64Array>());
 
         let mut cursor = 0;
         let aligned_ts = (self.start..=self.end)
@@ -319,7 +317,7 @@ impl InstantManipulateStream {
                         if let Some(value_column) = &value_column && value_column.value(cursor).is_nan() {
                             // ignore the NaN value
                             take_indices.push(None);
-                        } else{
+                        } else {
                             take_indices.push(Some(cursor as u64));
                         }
                         continue 'next;
@@ -337,8 +335,8 @@ impl InstantManipulateStream {
                 let curr = ts_column.value(cursor);
                 if let Some(value_column) = &value_column && value_column.value(cursor).is_nan() {
                     // if the newest value is NaN, it means the value is stale, so we should not use it
-                        take_indices.push(None);
-                        break;
+                    take_indices.push(None);
+                    break;
                 }
                 if curr + self.lookback_delta < expected_ts {
                     // not found in lookback, leave this field blank.

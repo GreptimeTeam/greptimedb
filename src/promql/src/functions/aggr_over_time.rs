@@ -324,13 +324,13 @@ mod test {
                 Some(2.0),
                 Some(5.0),
                 Some(1.0),
-                Some(0.0),
-                Some(0.0),
+                None,
+                None,
                 Some(3.0),
                 Some(3.0),
                 Some(3.0),
                 Some(1.0),
-                Some(0.0),
+                None,
             ],
         );
     }
