@@ -34,7 +34,8 @@ use crate::error::{
     BuildTableInfoSnafu, BuildTableMetaSnafu, DropTableSnafu, InvalidRawSchemaSnafu, Result,
     TableExistsSnafu,
 };
-use crate::manifest::immutable::{build_manifest, delete_manifest, ImmutableManifest};
+use crate::manifest::immutable::{delete_table_manifest, ImmutableMetadata};
+use crate::manifest::table_manifest_dir;
 use crate::table::immutable::{ImmutableFileTable, ImmutableFileTableRef};
 
 ///  [TableEngine] implementation.
@@ -159,6 +160,8 @@ impl EngineInner {
         let table_id = request.id;
         let table_dir = table_dir(&catalog_name, &schema_name, table_id);
 
+        let table_full_name = table_ref.to_string();
+
         let _lock = self.table_mutex.lock().await;
         // Checks again, read lock should be enough since we are guarded by the mutex.
         if let Some(table) = self.get_table(&table_ref) {
@@ -174,8 +177,8 @@ impl EngineInner {
             .engine(IMMUTABLE_FILE_ENGINE)
             .options(table_options)
             .build()
-            .with_context(|_| BuildTableMetaSnafu {
-                table_name: table_ref.to_string(),
+            .context(BuildTableMetaSnafu {
+                table_name: &table_full_name,
             })?;
 
         let table_info = TableInfoBuilder::new(&table_name, table_meta)
@@ -186,13 +189,13 @@ impl EngineInner {
             .schema_name(schema_name.to_string())
             .desc(request.desc)
             .build()
-            .with_context(|_| BuildTableInfoSnafu {
-                table_name: table_ref.to_string(),
+            .context(BuildTableInfoSnafu {
+                table_name: &table_full_name,
             })?;
 
         let table = Arc::new(
             ImmutableFileTable::create(
-                &table_name,
+                &table_full_name,
                 &table_dir,
                 table_info,
                 self.object_store.clone(),
@@ -241,6 +244,8 @@ impl EngineInner {
             table: &table_name,
         };
 
+        let table_full_name = table_ref.to_string();
+
         if let Some(table) = self.get_table(&table_ref) {
             return Ok(Some(table));
         }
@@ -255,17 +260,18 @@ impl EngineInner {
             let table_id = request.table_id;
             let table_dir = table_dir(&catalog_name, &schema_name, table_id);
 
-            let Some((manifest, table_info)) = self
-                .recover_table_manifest_and_info(&table_name, &table_dir)
-                .await.map_err(BoxedError::new)
-                .context(TableOperationSnafu)? else { return Ok(None) };
+            let (metadata, table_info) = self
+                .recover_table_manifest_and_info(&table_full_name, &table_dir)
+                .await
+                .map_err(BoxedError::new)
+                .context(TableOperationSnafu)?;
 
             debug!(
                 "Opening table {}, table info recovered: {:?}",
                 table_id, table_info
             );
 
-            let table = Arc::new(ImmutableFileTable::new(table_info, manifest));
+            let table = Arc::new(ImmutableFileTable::new(table_info, metadata));
 
             self.tables
                 .write()
@@ -284,25 +290,29 @@ impl EngineInner {
     }
 
     async fn drop_table(&self, req: DropTableRequest) -> Result<bool> {
-        let table_reference = TableReference {
+        let table_ref = TableReference {
             catalog: &req.catalog_name,
             schema: &req.schema_name,
             table: &req.table_name,
         };
+
+        let table_full_name = table_ref.to_string();
         let _lock = self.table_mutex.lock().await;
-        if let Some(table) = self.get_table(&table_reference) {
+        if let Some(table) = self.get_table(&table_ref) {
             let table_id = table.table_info().ident.table_id;
             let table_dir = table_dir(&req.catalog_name, &req.schema_name, table_id);
-            delete_manifest(&table_dir, self.object_store.clone())
-                .await
-                .map_err(BoxedError::new)
-                .with_context(|_| DropTableSnafu {
-                    table_name: table_reference.to_string(),
-                })?;
-            self.tables
-                .write()
-                .unwrap()
-                .remove(&table_reference.to_string());
+
+            delete_table_manifest(
+                &table_full_name,
+                &table_manifest_dir(&table_dir),
+                self.object_store.clone(),
+            )
+            .await
+            .map_err(BoxedError::new)
+            .context(DropTableSnafu {
+                table_name: &table_full_name,
+            })?;
+            self.tables.write().unwrap().remove(&table_ref.to_string());
 
             Ok(true)
         } else {
@@ -330,13 +340,12 @@ impl EngineInner {
         &self,
         table_name: &str,
         table_dir: &str,
-    ) -> Result<Option<(ImmutableManifest, TableInfo)>> {
-        let manifest = build_manifest(table_dir, self.object_store.clone());
-
-        let Some(table_info) =
-        ImmutableFileTable::recover_table_info(table_name, &manifest)
-                .await? else { return Ok(None) };
-
-        Ok(Some((manifest, table_info)))
+    ) -> Result<(ImmutableMetadata, TableInfo)> {
+        ImmutableFileTable::recover_table_info(
+            table_name,
+            &table_manifest_dir(table_dir),
+            &self.object_store,
+        )
+        .await
     }
 }

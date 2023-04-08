@@ -14,7 +14,6 @@
 
 use std::collections::HashMap;
 use std::iter::Iterator;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_telemetry::logging;
@@ -27,9 +26,8 @@ use snafu::{ensure, ResultExt};
 use store_api::manifest::{LogIterator, ManifestLogStorage, ManifestVersion};
 
 use crate::error::{
-    CheckObjectSnafu, DecodeJsonSnafu, DeleteObjectSnafu, EncodeJsonSnafu, Error,
-    InvalidScanIndexSnafu, ListObjectsSnafu, ReadObjectSnafu, Result, Utf8Snafu,
-    WriteImmutableSnafu, WriteObjectSnafu,
+    DecodeJsonSnafu, DeleteObjectSnafu, EncodeJsonSnafu, Error, InvalidScanIndexSnafu,
+    ListObjectsSnafu, ReadObjectSnafu, Result, Utf8Snafu, WriteObjectSnafu,
 };
 
 lazy_static! {
@@ -343,85 +341,13 @@ impl ManifestLogStorage for ManifestObjectStore {
     }
 }
 
-#[derive(Clone, Debug)]
-/// a single file immutable manifest
-pub struct ImmutableManifestObjectStore {
-    object_store: Arc<ObjectStore>,
-    path: String,
-}
-
-impl ImmutableManifestObjectStore {
-    pub fn new(manifest_dir: &str, filename: &str, object_store: ObjectStore) -> Self {
-        ImmutableManifestObjectStore {
-            object_store: Arc::new(object_store),
-            path: format!("{}{}", manifest_dir, filename),
-        }
-    }
-
-    async fn is_exist(&self) -> Result<bool> {
-        self.object_store
-            .is_exist(&self.path)
-            .await
-            .context(CheckObjectSnafu { path: &self.path })
-    }
-
-    pub async fn write(&self, bs: &[u8]) -> Result<()> {
-        let exist = self.is_exist().await?;
-
-        ensure!(!exist, WriteImmutableSnafu { path: &self.path });
-
-        self.object_store
-            .write(&self.path, bs.to_vec())
-            .await
-            .context(WriteObjectSnafu { path: &self.path })
-    }
-
-    pub async fn read(&self) -> Result<Vec<u8>> {
-        self.object_store
-            .read(&self.path)
-            .await
-            .context(ReadObjectSnafu { path: &self.path })
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
-
     use common_test_util::temp_dir::create_temp_dir;
     use object_store::services::Fs;
     use object_store::ObjectStore;
 
     use super::*;
-    use crate::error::Error;
-
-    #[tokio::test]
-    async fn test_immutable_manifest() {
-        common_telemetry::init_default_ut_logging();
-        let tmp_dir = create_temp_dir("test_immutable_manifest");
-        let mut builder = Fs::default();
-        builder.root(&tmp_dir.path().to_string_lossy());
-        let object_store = ObjectStore::new(builder).unwrap().finish();
-
-        let manifest = ImmutableManifestObjectStore::new("/", "_immutable_manifest", object_store);
-
-        let not_found = manifest.read().await;
-
-        assert_matches!(not_found.unwrap_err(), Error::ReadObject { .. });
-
-        manifest.write(b"hello, world").await.unwrap();
-
-        let failed_to_overwrite = manifest.write(b"overwrite").await;
-
-        assert_matches!(
-            failed_to_overwrite.unwrap_err(),
-            Error::WriteImmutable { .. }
-        );
-
-        let output = manifest.read().await.unwrap();
-
-        assert_eq!(output, "hello, world".as_bytes());
-    }
 
     #[tokio::test]
     async fn test_manifest_log_store() {

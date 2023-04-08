@@ -16,7 +16,6 @@ use std::any::Any;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_error::prelude::BoxedError;
 use common_query::physical_plan::PhysicalPlanRef;
 use common_query::prelude::Expr;
 use datatypes::schema::SchemaRef;
@@ -27,12 +26,12 @@ use table::error::Result as TableResult;
 use table::metadata::{RawTableInfo, TableInfo, TableInfoRef, TableType};
 use table::Table;
 
-use crate::error::{ConvertRawSnafu, CreateTableManifestSnafu, RecoverTableManifestSnafu, Result};
-use crate::manifest::immutable::{build_manifest, ImmutableManifest, ImmutableMetadata};
+use crate::error::{ConvertRawSnafu, Result};
+use crate::manifest::immutable::{read_table_manifest, write_table_manifest, ImmutableMetadata};
 use crate::manifest::table_manifest_dir;
 
 pub struct ImmutableFileTable {
-    manifest: ImmutableManifest,
+    metadata: ImmutableMetadata,
     // currently, it's immutable
     table_info: Arc<TableInfo>,
 }
@@ -76,19 +75,19 @@ impl Table for ImmutableFileTable {
     }
 
     async fn close(&self) -> TableResult<()> {
-        todo!()
+        Ok(())
     }
 }
 
 impl ImmutableFileTable {
     #[inline]
-    pub fn manifest(&self) -> &ImmutableManifest {
-        &self.manifest
+    pub fn metadata(&self) -> &ImmutableMetadata {
+        &self.metadata
     }
 
-    pub(crate) fn new(table_info: TableInfo, manifest: ImmutableManifest) -> Self {
+    pub(crate) fn new(table_info: TableInfo, metadata: ImmutableMetadata) -> Self {
         Self {
-            manifest,
+            metadata,
             table_info: Arc::new(table_info),
         }
     }
@@ -99,31 +98,30 @@ impl ImmutableFileTable {
         table_info: TableInfo,
         object_store: ObjectStore,
     ) -> Result<ImmutableFileTable> {
-        let manifest = build_manifest(&table_manifest_dir(table_dir), object_store);
+        let metadata = ImmutableMetadata {
+            table_info: RawTableInfo::from(table_info.clone()),
+        };
 
-        manifest
-            .write(&ImmutableMetadata {
-                table_info: RawTableInfo::from(table_info.clone()),
-            })
-            .await
-            .map_err(BoxedError::new)
-            .context(CreateTableManifestSnafu { table_name })?;
+        write_table_manifest(
+            table_name,
+            &table_manifest_dir(table_dir),
+            &object_store,
+            &metadata,
+        )
+        .await?;
 
-        Ok(ImmutableFileTable::new(table_info, manifest))
+        Ok(ImmutableFileTable::new(table_info, metadata))
     }
 
     pub(crate) async fn recover_table_info(
         table_name: &str,
-        manifest: &ImmutableManifest,
-    ) -> Result<Option<TableInfo>> {
-        let metadata = manifest
-            .read()
-            .await
-            .map_err(BoxedError::new)
-            .context(RecoverTableManifestSnafu { table_name })?;
+        table_dir: &str,
+        object_store: &ObjectStore,
+    ) -> Result<(ImmutableMetadata, TableInfo)> {
+        let metadata = read_table_manifest(table_name, table_dir, object_store).await?;
+        let table_info =
+            TableInfo::try_from(metadata.table_info.clone()).context(ConvertRawSnafu)?;
 
-        Ok(Some(
-            TableInfo::try_from(metadata.table_info).context(ConvertRawSnafu)?,
-        ))
+        Ok((metadata, table_info))
     }
 }

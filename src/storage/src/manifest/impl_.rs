@@ -26,16 +26,13 @@ use snafu::{ensure, ResultExt};
 use store_api::manifest::action::{self, ProtocolAction, ProtocolVersion};
 use store_api::manifest::*;
 
-use crate::codec::Codec;
 use crate::error::{
-    DeleteObjectSnafu, Error, ManifestProtocolForbidWriteSnafu, Result, StartManifestGcTaskSnafu,
+    Error, ManifestProtocolForbidWriteSnafu, Result, StartManifestGcTaskSnafu,
     StopManifestGcTaskSnafu,
 };
 use crate::manifest::action::RegionCheckpoint;
 use crate::manifest::checkpoint::Checkpointer;
-use crate::manifest::storage::{
-    ImmutableManifestObjectStore, ManifestObjectStore, ObjectStoreLogIterator,
-};
+use crate::manifest::storage::{ManifestObjectStore, ObjectStoreLogIterator};
 
 const CHECKPOINT_ACTIONS_MARGIN: u16 = 10;
 const GC_DURATION_SECS: u64 = 30;
@@ -380,48 +377,5 @@ impl<S: Checkpoint<Error = Error>, M: MetaAction<Error = Error>> ManifestImplInn
         } else {
             Ok(None)
         }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct ImmutableManifestImpl<T> {
-    store: Arc<ImmutableManifestObjectStore>,
-    codec: Arc<dyn Codec<T, Error>>,
-}
-
-impl<T> ImmutableManifestImpl<T> {
-    pub fn new(
-        dir: &str,
-        filename: &str,
-        object_store: ObjectStore,
-        codec: Arc<dyn Codec<T, Error>>,
-    ) -> Self {
-        ImmutableManifestImpl {
-            store: Arc::new(ImmutableManifestObjectStore::new(
-                dir,
-                filename,
-                object_store,
-            )),
-            codec,
-        }
-    }
-
-    pub async fn write(&self, metadata: &T) -> Result<()> {
-        let mut bs = Vec::new();
-        self.codec.encode(metadata, &mut bs)?;
-        self.store.write(&bs).await
-    }
-
-    pub async fn read(&self) -> Result<T> {
-        let bs = self.store.read().await?;
-        self.codec.decode(&bs)
-    }
-
-    pub async fn delete(dir: &str, filename: &str, object_store: ObjectStore) -> Result<()> {
-        let path = format!("{}{}", dir, filename);
-        object_store
-            .delete(&path)
-            .await
-            .context(DeleteObjectSnafu { path: &path })
     }
 }

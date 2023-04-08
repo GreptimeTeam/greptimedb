@@ -13,7 +13,6 @@
 // limitations under the License.
 
 //! Storage engine implementation.
-#![feature(assert_matches)]
 
 mod background;
 mod chunk;

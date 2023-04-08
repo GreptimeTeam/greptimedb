@@ -12,19 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use object_store::ObjectStore;
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
-use storage::codec::{Codec, Decoder, Encoder};
-use storage::error::{
-    DecodeJsonSnafu, EncodeJsonSnafu, Error as StorageError, Result as StorageResult,
-};
-use storage::manifest::ImmutableManifestImpl;
+use snafu::{ensure, ResultExt};
 use table::metadata::RawTableInfo;
 
-use crate::error::{DeleteTableManifestSnafu, Result};
+use crate::error::{
+    CheckObjectSnafu, DecodeJsonSnafu, DeleteTableManifestSnafu, EncodeJsonSnafu,
+    ReadTableManifestSnafu, Result, WriteImmutableManifestSnafu, WriteTableManifestSnafu,
+};
 const IMMUTABLE_MANIFEST_FILE: &str = "_immutable_manifest";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -32,48 +28,61 @@ pub struct ImmutableMetadata {
     pub table_info: RawTableInfo,
 }
 
-#[derive(Default, Debug)]
-pub struct ImmutableMetadataCodec {}
-
-impl ImmutableMetadataCodec {
-    pub fn new() -> Self {
-        ImmutableMetadataCodec::default()
-    }
+fn encode_metadata(item: &ImmutableMetadata) -> Result<Vec<u8>> {
+    serde_json::to_vec(&item).context(EncodeJsonSnafu)
 }
 
-impl Encoder for ImmutableMetadataCodec {
-    type Item = ImmutableMetadata;
-    type Error = StorageError;
-
-    fn encode(&self, item: &Self::Item, dst: &mut Vec<u8>) -> StorageResult<()> {
-        serde_json::to_writer(dst, &item).context(EncodeJsonSnafu)
-    }
+fn decode_metadata(src: &[u8]) -> Result<ImmutableMetadata> {
+    serde_json::from_slice(src).context(DecodeJsonSnafu)
 }
 
-impl Decoder for ImmutableMetadataCodec {
-    type Item = ImmutableMetadata;
-    type Error = StorageError;
-
-    fn decode(&self, src: &[u8]) -> StorageResult<Self::Item> {
-        serde_json::from_slice(src).context(DecodeJsonSnafu)
-    }
+fn manifest_path(dir: &str) -> String {
+    format!("{}{}", dir, IMMUTABLE_MANIFEST_FILE)
 }
 
-impl Codec<ImmutableMetadata, StorageError> for ImmutableMetadataCodec {}
-
-pub type ImmutableManifest = ImmutableManifestImpl<ImmutableMetadata>;
-
-pub(crate) fn build_manifest(dir: &str, object_store: ObjectStore) -> ImmutableManifest {
-    ImmutableManifestImpl::new(
-        dir,
-        IMMUTABLE_MANIFEST_FILE,
-        object_store,
-        Arc::new(ImmutableMetadataCodec::new()),
-    )
-}
-
-pub(crate) async fn delete_manifest(dir: &str, object_store: ObjectStore) -> Result<()> {
-    ImmutableManifest::delete(dir, IMMUTABLE_MANIFEST_FILE, object_store)
+pub(crate) async fn delete_table_manifest(
+    table_name: &str,
+    dir: &str,
+    object_store: ObjectStore,
+) -> Result<()> {
+    object_store
+        .delete(&manifest_path(dir))
         .await
-        .context(DeleteTableManifestSnafu)
+        .context(DeleteTableManifestSnafu { table_name })
+}
+
+pub(crate) async fn write_table_manifest(
+    table_name: &str,
+    dir: &str,
+    object_store: &ObjectStore,
+    metadata: &ImmutableMetadata,
+) -> Result<()> {
+    let path = &manifest_path(dir);
+    let exist = object_store
+        .is_exist(path)
+        .await
+        .context(CheckObjectSnafu { path })?;
+
+    ensure!(!exist, WriteImmutableManifestSnafu { path });
+
+    let bs = encode_metadata(metadata)?;
+
+    object_store
+        .write(path, bs)
+        .await
+        .context(WriteTableManifestSnafu { table_name })
+}
+
+pub(crate) async fn read_table_manifest(
+    table_name: &str,
+    dir: &str,
+    object_store: &ObjectStore,
+) -> Result<ImmutableMetadata> {
+    let path = manifest_path(dir);
+    let bs = object_store
+        .read(&path)
+        .await
+        .context(ReadTableManifestSnafu { table_name })?;
+
+    decode_metadata(&bs)
 }
