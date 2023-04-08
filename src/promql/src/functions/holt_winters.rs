@@ -118,7 +118,7 @@ impl HoltWinters {
         )?;
 
         // calculation
-        let mut result_array: Vec<f64> = Vec::with_capacity(ts_range.len());
+        let mut result_array = Vec::with_capacity(ts_range.len());
         for index in 0..ts_range.len() {
             let timestamps = ts_range.get(index).unwrap();
             let values = value_range.get(index).unwrap();
@@ -136,7 +136,7 @@ impl HoltWinters {
                     values.len()
                 )),
             )?;
-            result_array = holt_winter_impl(values, self.sf, self.tf);
+            result_array.push(holt_winter_impl(values, self.sf, self.tf));
         }
 
         let result = ColumnarValue::Array(Arc::new(Float64Array::from_iter(result_array)));
@@ -154,21 +154,21 @@ fn calc_trend_value(i: usize, tf: f64, s0: f64, s1: f64, b: f64) -> f64 {
 }
 
 /// Refer to https://github.com/prometheus/prometheus/blob/main/promql/functions.go#L299
-fn holt_winter_impl(values: &[f64], sf: f64, tf: f64) -> Vec<f64> {
+fn holt_winter_impl(values: &[f64], sf: f64, tf: f64) -> Option<f64> {
     if sf.is_nan() || tf.is_nan() || values.is_empty() {
-        return vec![];
+        return Some(f64::NAN);
     }
     if sf < 0.0 || tf < 0.0 {
-        return vec![];
+        return Some(f64::NEG_INFINITY);
     }
     if sf > 1.0 || tf > 1.0 {
-        return vec![];
+        return Some(f64::INFINITY);
     }
 
     let l = values.len();
     if l <= 2 {
         // Can't do the smoothing operation with less than two points.
-        return vec![];
+        return Some(f64::NAN);
     }
 
     let values = values.to_vec();
@@ -177,8 +177,6 @@ fn holt_winter_impl(values: &[f64], sf: f64, tf: f64) -> Vec<f64> {
     let mut s1 = values[0];
     let mut b = values[1] - values[0];
 
-    let mut result = vec![];
-    result.push(s1);
     for (i, value) in values.iter().enumerate().skip(1) {
         // Scale the raw value against the smoothing factor.
         let x = sf * value;
@@ -187,9 +185,8 @@ fn holt_winter_impl(values: &[f64], sf: f64, tf: f64) -> Vec<f64> {
         let y = (1.0 - sf) * (s1 + b);
         s0 = s1;
         s1 = x + y;
-        result.push(s1);
     }
-    result
+    Some(s1)
 }
 
 #[cfg(test)]
@@ -200,89 +197,60 @@ mod tests {
     use crate::functions::test_util::simple_range_udf_runner;
 
     #[test]
-    fn test_holt_winter_impl_validation_rules() {
+    fn test_holt_winter_impl_empty() {
+        let sf = 0.5;
+        let tf = 0.5;
         let values = &[];
-        let sf = 0.5;
-        let tf = 0.5;
-        assert!(holt_winter_impl(values, sf, tf).is_empty());
-        let values = &[1.0, 2.0, 3.0];
-        let sf = f64::NAN;
-        let tf = 0.5;
-        assert!(holt_winter_impl(values, sf, tf).is_empty());
-        let values = &[1.0, 2.0, 3.0];
-        let sf = 0.5;
-        let tf = f64::NAN;
-        assert!(holt_winter_impl(values, sf, tf).is_empty());
-        let values = &[1.0, 2.0, 3.0];
-        let sf = -0.5;
-        let tf = 0.5;
-        assert!(holt_winter_impl(values, sf, tf).is_empty());
-        let values = &[1.0, 2.0, 3.0];
-        let sf = 0.5;
-        let tf = -0.5;
-        assert!(holt_winter_impl(values, sf, tf).is_empty());
-        let values = &[1.0, 2.0, 3.0];
-        let sf = 1.5;
-        let tf = 0.5;
-        assert!(holt_winter_impl(values, sf, tf).is_empty());
-        let values = &[1.0, 2.0, 3.0];
-        let sf = 0.5;
-        let tf = 1.5;
-        assert!(holt_winter_impl(values, sf, tf).is_empty());
+        assert!(holt_winter_impl(values, sf, tf).unwrap().is_nan());
+
         let values = &[1.0, 2.0];
-        let sf = 0.5;
-        let tf = 0.5;
-        assert!(holt_winter_impl(values, sf, tf).is_empty());
+        assert!(holt_winter_impl(values, sf, tf).unwrap().is_nan());
     }
 
     #[test]
-    fn test_holt_winter_impl_even_length() {
-        let sf = 0.5;
+    fn test_holt_winter_impl_nan() {
+        let values = &[1.0, 2.0, 3.0];
+        let sf = f64::NAN;
         let tf = 0.5;
-        let values = &[1.0, 2.0, 3.0, 4.0, 5.0];
-        assert_eq!(
-            holt_winter_impl(values, sf, tf),
-            vec![1.0, 2.0, 3.0, 4.0, 5.0]
-        );
-        let values = &[50.0, 52.0, 95.0, 59.0, 52.0, 45.0, 38.0, 10.0, 47.0, 40.0];
-        assert_eq!(
-            holt_winter_impl(values, sf, tf),
-            vec![
-                50.0,
-                52.0,
-                74.5,
-                72.875,
-                65.09375,
-                54.4296875,
-                43.240234375,
-                22.33544921875,
-                27.2991943359375,
-                31.206268310546875
-            ]
-        );
+        assert!(holt_winter_impl(values, sf, tf).unwrap().is_nan());
 
-        let values = &[
-            2.0, 3.0, 5.0, 7.0, 11.0, 13.0, 17.0, 19.0, 23.0, 29.0, 31.0, 37.0,
-        ];
+        let values = &[1.0, 2.0, 3.0];
+        let sf = 0.5;
+        let tf = f64::NAN;
+        assert!(holt_winter_impl(values, sf, tf).unwrap().is_nan());
+    }
+
+    #[test]
+    fn test_holt_winter_impl_validation_rules() {
+        let values = &[1.0, 2.0, 3.0];
+        let sf = -0.5;
+        let tf = 0.5;
+        assert_eq!(holt_winter_impl(values, sf, tf).unwrap(), f64::NEG_INFINITY);
+
+        let values = &[1.0, 2.0, 3.0];
+        let sf = 0.5;
+        let tf = -0.5;
+        assert_eq!(holt_winter_impl(values, sf, tf).unwrap(), f64::NEG_INFINITY);
+
+        let values = &[1.0, 2.0, 3.0];
+        let sf = 1.5;
+        let tf = 0.5;
+        assert_eq!(holt_winter_impl(values, sf, tf).unwrap(), f64::INFINITY);
+
+        let values = &[1.0, 2.0, 3.0];
+        let sf = 0.5;
+        let tf = 1.5;
+        assert_eq!(holt_winter_impl(values, sf, tf).unwrap(), f64::INFINITY);
+    }
+
+    #[test]
+    fn test_holt_winter_impl() {
         let sf = 0.5;
         let tf = 0.1;
-        assert_eq!(
-            holt_winter_impl(values, sf, tf),
-            vec![
-                2.0,
-                3.0,
-                4.5,
-                6.275,
-                9.19875,
-                11.750687500000002,
-                15.089121875,
-                17.85388296875,
-                21.2935693671875,
-                26.098734098046876,
-                29.64637975857422,
-                34.48788360090918,
-            ]
-        );
+        let values = &[1.0, 2.0, 3.0, 4.0, 5.0];
+        assert_eq!(holt_winter_impl(values, sf, tf), Some(5.0));
+        let values = &[50.0, 52.0, 95.0, 59.0, 52.0, 45.0, 38.0, 10.0, 47.0, 40.0];
+        assert_eq!(holt_winter_impl(values, sf, tf), Some(38.18119566835938));
     }
 
     #[test]
@@ -297,10 +265,10 @@ mod tests {
         let ts_range_array = RangeArray::from_ranges(ts_array, ranges).unwrap();
         let value_range_array = RangeArray::from_ranges(values_array, ranges).unwrap();
         simple_range_udf_runner(
-            HoltWinters::scalar_udf(0.5, 0.5),
+            HoltWinters::scalar_udf(0.5, 0.1),
             ts_range_array,
             value_range_array,
-            vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0), Some(5.0)],
+            vec![Some(5.0)],
         );
     }
 
@@ -320,21 +288,10 @@ mod tests {
         let ts_range_array = RangeArray::from_ranges(ts_array, ranges).unwrap();
         let value_range_array = RangeArray::from_ranges(values_array, ranges).unwrap();
         simple_range_udf_runner(
-            HoltWinters::scalar_udf(0.5, 0.5),
+            HoltWinters::scalar_udf(0.5, 0.1),
             ts_range_array,
             value_range_array,
-            vec![
-                Some(50.0),
-                Some(52.0),
-                Some(74.5),
-                Some(72.875),
-                Some(65.09375),
-                Some(54.4296875),
-                Some(43.240234375),
-                Some(22.33544921875),
-                Some(27.2991943359375),
-                Some(31.206268310546875),
-            ],
+            vec![Some(38.18119566835938)],
         );
     }
 }
