@@ -294,4 +294,28 @@ mod tests {
             vec![Some(38.18119566835938)],
         );
     }
+
+    #[test]
+    fn test_prom_holt_winter_instance_0_group_prod() {
+        let ranges = [(0, 801)];
+
+        // http_requests{job="api-server", instance="0", group="production"}	0+10x1000 100+30x1000
+        // https://github.com/prometheus/prometheus/blob/8dba9163f1e923ec213f0f4d5c185d9648e387f0/promql/testdata/functions.test#L477
+        let ts_array = Arc::new(TimestampMillisecondArray::from_iter((0..2000).map(Some)));
+
+        let range1 = (0..=(10 * 1000)).step_by(10);
+        let range2 = (100..=(30 * 1000)).step_by(30);
+        let concatenated = range1.chain(range2).map(f64::from).collect::<Vec<_>>();
+
+        let values_array = Arc::new(Float64Array::from_iter(concatenated));
+        let ts_range_array = RangeArray::from_ranges(ts_array, ranges).unwrap();
+        let value_range_array = RangeArray::from_ranges(values_array, ranges).unwrap();
+
+        simple_range_udf_runner(
+            HoltWinters::scalar_udf(0.01, 0.1),
+            ts_range_array,
+            value_range_array,
+            vec![Some(8000.0)],
+        );
+    }
 }
