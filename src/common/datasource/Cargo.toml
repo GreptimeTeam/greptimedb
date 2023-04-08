@@ -5,9 +5,14 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+arrow.workspace = true
+arrow-schema.workspace = true
+async-trait = "0.1"
 common-error = { path = "../error" }
+datafusion.workspace = true
 futures.workspace = true
 object-store = { path = "../../object-store" }
 regex = "1.7"
 snafu.workspace = true
+tokio.workspace = true
 url = "2.3"

@@ -39,6 +39,32 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to read object from path: {}, source: {}", path, source))]
+    ReadObject {
+        path: String,
+        location: Location,
+        source: object_store::Error,
+    },
+
+    #[snafu(display("Failed to read parquet source: {}", source))]
+    ReadParquetSnafu {
+        location: Location,
+        source: datafusion::parquet::errors::ParquetError,
+    },
+
+    #[snafu(display("Failed to convert parquet to schema: {}", source))]
+    ParquetToSchema {
+        location: Location,
+        source: datafusion::parquet::errors::ParquetError,
+    },
+
+    #[snafu(display("Failed to infer schema from file: {}, source: {}", path, source))]
+    InferSchema {
+        path: String,
+        location: Location,
+        source: arrow_schema::ArrowError,
+    },
+
     #[snafu(display("Failed to list object in path: {}, source: {}", path, source))]
     ListObjects {
         path: String,
@@ -56,13 +82,18 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
-            BuildBackend { .. } | ListObjects { .. } => StatusCode::StorageUnavailable,
+            BuildBackend { .. } | ListObjects { .. } | ReadObject { .. } => {
+                StatusCode::StorageUnavailable
+            }
 
             UnsupportedBackendProtocol { .. }
             | InvalidConnection { .. }
             | InvalidUrl { .. }
             | EmptyHostPath { .. }
-            | InvalidPath { .. } => StatusCode::InvalidArguments,
+            | InvalidPath { .. }
+            | InferSchema { .. }
+            | ReadParquetSnafu { .. }
+            | ParquetToSchema { .. } => StatusCode::InvalidArguments,
         }
     }
 
@@ -71,14 +102,20 @@ impl ErrorExt for Error {
     }
 
     fn location_opt(&self) -> Option<common_error::snafu::Location> {
+        use Error::*;
         match self {
-            Error::BuildBackend { location, .. } => Some(*location),
-            Error::ListObjects { location, .. } => Some(*location),
-            Error::UnsupportedBackendProtocol { .. }
-            | Error::EmptyHostPath { .. }
-            | Error::InvalidPath { .. }
-            | Error::InvalidUrl { .. }
-            | Error::InvalidConnection { .. } => None,
+            BuildBackend { location, .. } => Some(*location),
+            ReadObject { location, .. } => Some(*location),
+            ListObjects { location, .. } => Some(*location),
+            InferSchema { location, .. } => Some(*location),
+            ReadParquetSnafu { location, .. } => Some(*location),
+            ParquetToSchema { location, .. } => Some(*location),
+
+            UnsupportedBackendProtocol { .. }
+            | EmptyHostPath { .. }
+            | InvalidPath { .. }
+            | InvalidUrl { .. }
+            | InvalidConnection { .. } => None,
         }
     }
 }

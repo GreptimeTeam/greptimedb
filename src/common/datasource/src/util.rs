@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod io;
+
 pub fn find_dir_and_filename(path: &str) -> (String, Option<String>) {
     if path.is_empty() {
         ("/".to_string(), None)
