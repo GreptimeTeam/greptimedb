@@ -1562,6 +1562,7 @@ version = "0.1.1"
 dependencies = [
  "arrow",
  "arrow-schema",
+ "async-compression",
  "async-trait",
  "common-error",
  "datafusion",
@@ -1570,6 +1571,7 @@ dependencies = [
  "regex",
  "snafu",
  "tokio",
+ "tokio-util",
  "url",
 ]
 

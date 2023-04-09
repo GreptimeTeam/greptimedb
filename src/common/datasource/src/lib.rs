@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod compression;
 pub mod error;
 pub mod file_format;
 pub mod lister;

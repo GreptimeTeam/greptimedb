@@ -21,6 +21,9 @@ use url::ParseError;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Unsupported compression type: {}", compression_type))]
+    UnsupportedCompressionType { compression_type: String },
+
     #[snafu(display("Unsupported backend protocol: {}", protocol))]
     UnsupportedBackendProtocol { protocol: String },
 
@@ -32,6 +35,12 @@ pub enum Error {
 
     #[snafu(display("Invalid url: {}, error :{}", url, source))]
     InvalidUrl { url: String, source: ParseError },
+
+    #[snafu(display("Failed to decompression, source: {}", source))]
+    Decompression {
+        source: object_store::Error,
+        location: Location,
+    },
 
     #[snafu(display("Failed to build backend, source: {}", source))]
     BuildBackend {
@@ -87,6 +96,7 @@ impl ErrorExt for Error {
             }
 
             UnsupportedBackendProtocol { .. }
+            | UnsupportedCompressionType { .. }
             | InvalidConnection { .. }
             | InvalidUrl { .. }
             | EmptyHostPath { .. }
@@ -94,6 +104,8 @@ impl ErrorExt for Error {
             | InferSchema { .. }
             | ReadParquetSnafu { .. }
             | ParquetToSchema { .. } => StatusCode::InvalidArguments,
+
+            Decompression { .. } => StatusCode::Unexpected,
         }
     }
 
@@ -110,12 +122,14 @@ impl ErrorExt for Error {
             InferSchema { location, .. } => Some(*location),
             ReadParquetSnafu { location, .. } => Some(*location),
             ParquetToSchema { location, .. } => Some(*location),
+            Decompression { location, .. } => Some(*location),
 
             UnsupportedBackendProtocol { .. }
             | EmptyHostPath { .. }
             | InvalidPath { .. }
             | InvalidUrl { .. }
-            | InvalidConnection { .. } => None,
+            | InvalidConnection { .. }
+            | UnsupportedCompressionType { .. } => None,
         }
     }
 }

@@ -21,6 +21,7 @@ use async_trait::async_trait;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 
+use crate::compression::CompressionType;
 use crate::error::{self, Result};
 use crate::file_format::{self, FileFormat};
 use crate::util::io::SyncIoBridge;
@@ -28,13 +29,14 @@ use crate::util::io::SyncIoBridge;
 #[derive(Debug)]
 pub struct JsonFormat {
     pub schema_infer_max_record: Option<usize>,
-    // TODO(weny): add compression_type
+    pub compression_type: CompressionType,
 }
 
 impl Default for JsonFormat {
     fn default() -> Self {
         Self {
             schema_infer_max_record: Some(file_format::DEFAULT_SCHEMA_INFER_MAX_RECORD),
+            compression_type: CompressionType::UNCOMPRESSED,
         }
     }
 }
@@ -47,7 +49,9 @@ impl FileFormat for JsonFormat {
             .await
             .context(error::ReadObjectSnafu { path: &path })?;
 
-        let mut reader = BufReader::new(SyncIoBridge::new(reader));
+        let decoded = self.compression_type.convert_async_read(reader);
+
+        let mut reader = BufReader::new(SyncIoBridge::new(decoded));
 
         let iter = ValueIter::new(&mut reader, self.schema_infer_max_record);
 
@@ -88,6 +92,7 @@ mod tests {
     async fn infer_schema_with_limit() {
         let json = JsonFormat {
             schema_infer_max_record: Some(3),
+            ..JsonFormat::default()
         };
         let store = test_store(&test_data_root());
         let schema = json

@@ -21,6 +21,7 @@ use async_trait::async_trait;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 
+use crate::compression::CompressionType;
 use crate::error::{self, Result};
 use crate::file_format::{self, FileFormat};
 use crate::util::io::SyncIoBridge;
@@ -30,7 +31,7 @@ pub struct CsvFormat {
     pub has_header: bool,
     pub delimiter: u8,
     pub schema_infer_max_record: Option<usize>,
-    // TODO(weny): add compression_type
+    pub compression_type: CompressionType,
 }
 
 impl Default for CsvFormat {
@@ -39,6 +40,7 @@ impl Default for CsvFormat {
             has_header: true,
             delimiter: b',',
             schema_infer_max_record: Some(file_format::DEFAULT_SCHEMA_INFER_MAX_RECORD),
+            compression_type: CompressionType::UNCOMPRESSED,
         }
     }
 }
@@ -51,7 +53,9 @@ impl FileFormat for CsvFormat {
             .await
             .context(error::ReadObjectSnafu { path: &path })?;
 
-        let reader = BufReader::new(SyncIoBridge::new(reader));
+        let decoded = self.compression_type.convert_async_read(reader);
+
+        let reader = BufReader::new(SyncIoBridge::new(decoded));
 
         let (schema, _records_read) = infer_csv_schema(
             reader,
