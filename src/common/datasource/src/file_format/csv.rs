@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::io::BufReader;
 use std::sync::Arc;
 
 use arrow::csv::reader::infer_reader_schema as infer_csv_schema;
@@ -55,7 +54,7 @@ impl FileFormat for CsvFormat {
 
         let decoded = self.compression_type.convert_async_read(reader);
 
-        let reader = BufReader::new(SyncIoBridge::new(decoded));
+        let reader = SyncIoBridge::new(decoded);
 
         let (schema, _records_read) = infer_csv_schema(
             reader,
