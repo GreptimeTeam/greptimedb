@@ -176,7 +176,7 @@ impl CreateTableProcedure {
             // do this check as we might not submitted the subprocedure yet when the manager
             // recover this procedure from procedure store.
             logging::info!(
-                "On engine create table {}, not found, sub_id: {}",
+                "On engine create table {}, subprocedure not found, sub_id: {}",
                 self.data.request.table_name,
                 sub_id
             );
@@ -186,7 +186,7 @@ impl CreateTableProcedure {
             let procedure = self
                 .engine_procedure
                 .create_table_procedure(&engine_ctx, self.data.request.clone())
-                .map_err(Error::external)?;
+                .map_err(Error::from_error_ext)?;
             return Ok(Status::Suspended {
                 subprocedures: vec![ProcedureWithId {
                     id: sub_id,
@@ -238,7 +238,7 @@ impl CreateTableProcedure {
         let table_exists = schema
             .table(&self.data.request.table_name)
             .await
-            .map_err(Error::external)?
+            .map_err(Error::from_error_ext)?
             .is_some();
         if table_exists {
             // Table already exists.
@@ -251,7 +251,7 @@ impl CreateTableProcedure {
         let table = self
             .table_engine
             .get_table(&engine_ctx, &table_ref)
-            .map_err(Error::external)?
+            .map_err(Error::from_error_ext)?
             .unwrap();
 
         let register_req = RegisterTableRequest {
@@ -264,7 +264,7 @@ impl CreateTableProcedure {
         self.catalog_manager
             .register_table(register_req)
             .await
-            .map_err(Error::external)?;
+            .map_err(Error::from_error_ext)?;
 
         Ok(Status::Done)
     }

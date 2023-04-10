@@ -14,11 +14,13 @@
 
 //! Procedures for table operations.
 
+mod alter;
 mod create;
 pub mod error;
 #[cfg(test)]
 mod test_util;
 
+pub use alter::AlterTableProcedure;
 use catalog::CatalogManagerRef;
 use common_procedure::ProcedureManager;
 pub use create::CreateTableProcedure;
@@ -35,9 +37,10 @@ pub fn register_procedure_loaders(
     procedure_manager: &dyn ProcedureManager,
 ) {
     CreateTableProcedure::register_loader(
-        catalog_manager,
-        engine_procedure,
+        catalog_manager.clone(),
+        engine_procedure.clone(),
         table_engine,
         procedure_manager,
     );
+    AlterTableProcedure::register_loader(catalog_manager, engine_procedure, procedure_manager);
 }
