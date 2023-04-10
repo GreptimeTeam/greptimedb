@@ -191,7 +191,7 @@ fn holt_winter_impl(values: &[f64], sf: f64, tf: f64) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
-    use datafusion::arrow::array::TimestampMillisecondArray;
+    use datafusion::arrow::array::{Float64Array, TimestampMillisecondArray};
 
     use super::*;
     use crate::functions::test_util::simple_range_udf_runner;
@@ -296,26 +296,87 @@ mod tests {
     }
 
     #[test]
-    fn test_prom_holt_winter_instance_0_group_prod() {
-        let ranges = [(0, 801)];
+    fn test_promql_trends() {
+        let ranges = vec![(0, 801)];
 
-        // http_requests{job="api-server", instance="0", group="production"}	0+10x1000 100+30x1000
-        // https://github.com/prometheus/prometheus/blob/8dba9163f1e923ec213f0f4d5c185d9648e387f0/promql/testdata/functions.test#L477
-        let ts_array = Arc::new(TimestampMillisecondArray::from_iter((0..2000).map(Some)));
+        let trends = vec![
+            // positive trends https://github.com/prometheus/prometheus/blob/8dba9163f1e923ec213f0f4d5c185d9648e387f0/promql/testdata/functions.test#L475
+            ("0+10x1000 100+30x1000", 8000.0),
+            ("0+20x1000 200+30x1000", 16000.0),
+            ("0+30x1000 300+80x1000", 24000.0),
+            ("0+40x2000", 32000.0),
+            // negative trends https://github.com/prometheus/prometheus/blob/8dba9163f1e923ec213f0f4d5c185d9648e387f0/promql/testdata/functions.test#L488
+            ("8000-10x1000", 0.0),
+            ("0-20x1000", -16000.0),
+            ("0+30x1000 300-80x1000", 24000.0),
+            ("0-40x1000 0+40x1000", -32000.0),
+        ];
 
-        let range1 = (0..=(10 * 1000)).step_by(10);
-        let range2 = (100..=(30 * 1000)).step_by(30);
-        let concatenated = range1.chain(range2).map(f64::from).collect::<Vec<_>>();
+        for (query, expected) in trends {
+            let (ts_range_array, value_range_array) =
+                create_ts_and_value_range_arrays(query, ranges.clone());
+            simple_range_udf_runner(
+                HoltWinters::scalar_udf(0.01, 0.1),
+                ts_range_array,
+                value_range_array,
+                vec![Some(expected)],
+            );
+        }
+    }
 
-        let values_array = Arc::new(Float64Array::from_iter(concatenated));
-        let ts_range_array = RangeArray::from_ranges(ts_array, ranges).unwrap();
+    fn create_ts_and_value_range_arrays(
+        input: &str,
+        ranges: Vec<(u32, u32)>,
+    ) -> (RangeArray, RangeArray) {
+        let promql_range = create_test_range_from_promql_series(input);
+        let ts_array = Arc::new(TimestampMillisecondArray::from_iter(
+            (0..(promql_range.len() as i64)).map(Some),
+        ));
+        let values_array = Arc::new(Float64Array::from_iter(promql_range));
+        let ts_range_array = RangeArray::from_ranges(ts_array, ranges.clone()).unwrap();
         let value_range_array = RangeArray::from_ranges(values_array, ranges).unwrap();
+        (ts_range_array, value_range_array)
+    }
 
-        simple_range_udf_runner(
-            HoltWinters::scalar_udf(0.01, 0.1),
-            ts_range_array,
-            value_range_array,
-            vec![Some(8000.0)],
-        );
+    /// Converts a prometheus functions test series into a vector of f64 element with respect to resets and trend direction   
+    /// The input example: "0+10x1000 100+30x1000"
+    fn create_test_range_from_promql_series(input: &str) -> Vec<f64> {
+        input.split(' ').map(parse_promql_series_entry).fold(
+            Vec::new(),
+            |mut acc, (start, end, step, operation)| {
+                if operation.eq("+") {
+                    let iter = (start..=((step * end) + start))
+                        .step_by(step as usize)
+                        .map(|x| x as f64);
+                    acc.extend(iter);
+                } else {
+                    let iter = (((-step * end) + start)..=start)
+                        .rev()
+                        .step_by(step as usize)
+                        .map(|x| x as f64);
+                    acc.extend(iter);
+                };
+                acc
+            },
+        )
+    }
+
+    /// Converts a prometheus functions test series entry into separate parts to create a range with a step
+    /// The input example: "100+30x1000"
+    fn parse_promql_series_entry(input: &str) -> (i32, i32, i32, &str) {
+        let mut parts = input.split('x');
+        let start_operation_step = parts.next().unwrap();
+        let operation = start_operation_step
+            .split(char::is_numeric)
+            .find(|&x| !x.is_empty())
+            .unwrap();
+        let start_step = start_operation_step
+            .split(operation)
+            .map(|s| s.parse::<i32>().unwrap())
+            .collect::<Vec<_>>();
+        let start = *start_step.first().unwrap();
+        let step = *start_step.last().unwrap();
+        let end = parts.next().unwrap().parse::<i32>().unwrap();
+        (start, end, step, operation)
     }
 }
