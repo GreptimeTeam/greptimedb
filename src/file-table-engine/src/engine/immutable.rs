@@ -164,7 +164,7 @@ impl EngineInner {
 
         let _lock = self.table_mutex.lock().await;
         // Checks again, read lock should be enough since we are guarded by the mutex.
-        if let Some(table) = self.get_table(&table_ref) {
+        if let Some(table) = self.get_table_by_full_name(&table_full_name) {
             return if request.create_if_not_exists {
                 Ok(table)
             } else {
@@ -213,19 +213,24 @@ impl EngineInner {
         self.tables
             .write()
             .unwrap()
-            .insert(table_ref.to_string(), table.clone());
+            .insert(table_full_name, table.clone());
 
         Ok(table)
     }
 
-    fn get_table(&self, table_ref: &TableReference) -> Option<TableRef> {
+    fn get_table_by_full_name(&self, full_name: &str) -> Option<TableRef> {
         self.tables
             .read()
             .unwrap()
-            .get(&table_ref.to_string())
+            .get(full_name)
             .cloned()
             .map(|table| table as _)
     }
+
+    fn get_table(&self, table_ref: &TableReference) -> Option<TableRef> {
+        self.get_table_by_full_name(&table_ref.to_string())
+    }
+
 
     async fn open_table(
         &self,
@@ -246,14 +251,14 @@ impl EngineInner {
 
         let table_full_name = table_ref.to_string();
 
-        if let Some(table) = self.get_table(&table_ref) {
+        if let Some(table) = self.get_table_by_full_name(&table_full_name) {
             return Ok(Some(table));
         }
 
         let table = {
             let _lock = self.table_mutex.lock().await;
             // Checks again, read lock should be enough since we are guarded by the mutex.
-            if let Some(table) = self.get_table(&table_ref) {
+            if let Some(table) = self.get_table_by_full_name(&table_full_name) {
                 return Ok(Some(table));
             }
 
@@ -276,7 +281,7 @@ impl EngineInner {
             self.tables
                 .write()
                 .unwrap()
-                .insert(table_ref.to_string(), table.clone());
+                .insert(table_full_name, table.clone());
             Some(table as _)
         };
 
@@ -298,7 +303,7 @@ impl EngineInner {
 
         let table_full_name = table_ref.to_string();
         let _lock = self.table_mutex.lock().await;
-        if let Some(table) = self.get_table(&table_ref) {
+        if let Some(table) = self.get_table_by_full_name(&table_full_name) {
             let table_id = table.table_info().ident.table_id;
             let table_dir = table_dir(&req.catalog_name, &req.schema_name, table_id);
 
@@ -312,7 +317,7 @@ impl EngineInner {
             .context(DropTableSnafu {
                 table_name: &table_full_name,
             })?;
-            self.tables.write().unwrap().remove(&table_ref.to_string());
+            self.tables.write().unwrap().remove(&table_full_name);
 
             Ok(true)
         } else {
