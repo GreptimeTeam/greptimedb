@@ -238,16 +238,18 @@ impl Helper {
             ArrowDataType::Date64 => Arc::new(DateTimeVector::try_from_arrow_array(array)?),
             ArrowDataType::List(_) => Arc::new(ListVector::try_from_arrow_array(array)?),
             ArrowDataType::Timestamp(unit, _) => match unit {
-                TimeUnit::Second => Arc::new(TimestampSecondVector::try_from_arrow_array(array)?),
-                TimeUnit::Millisecond => {
-                    Arc::new(TimestampMillisecondVector::try_from_arrow_array(array)?)
-                }
-                TimeUnit::Microsecond => {
-                    Arc::new(TimestampMicrosecondVector::try_from_arrow_array(array)?)
-                }
-                TimeUnit::Nanosecond => {
-                    Arc::new(TimestampNanosecondVector::try_from_arrow_array(array)?)
-                }
+                TimeUnit::Second => Arc::new(
+                    TimestampSecondVector::try_from_arrow_timestamp_array(array)?,
+                ),
+                TimeUnit::Millisecond => Arc::new(
+                    TimestampMillisecondVector::try_from_arrow_timestamp_array(array)?,
+                ),
+                TimeUnit::Microsecond => Arc::new(
+                    TimestampMicrosecondVector::try_from_arrow_timestamp_array(array)?,
+                ),
+                TimeUnit::Nanosecond => Arc::new(
+                    TimestampNanosecondVector::try_from_arrow_timestamp_array(array)?,
+                ),
             },
             ArrowDataType::Float16
             | ArrowDataType::Time32(_)
