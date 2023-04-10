@@ -42,11 +42,12 @@ use crate::extension_plan::Millisecond;
 /// Roughly speaking, this method does these things:
 /// - bias sample's timestamp by offset
 /// - sort the record batch based on timestamp column
-/// - remove NaN values
+/// - remove NaN values (optional)
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct SeriesNormalize {
     offset: Millisecond,
     time_index_column_name: String,
+    need_filter_out_nan: bool,
 
     input: LogicalPlan,
 }
@@ -71,8 +72,8 @@ impl UserDefinedLogicalNodeCore for SeriesNormalize {
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
             f,
-            "PromSeriesNormalize: offset=[{}], time index=[{}]",
-            self.offset, self.time_index_column_name
+            "PromSeriesNormalize: offset=[{}], time index=[{}], filter NaN: [{}]",
+            self.offset, self.time_index_column_name, self.need_filter_out_nan
         )
     }
 
@@ -82,6 +83,7 @@ impl UserDefinedLogicalNodeCore for SeriesNormalize {
         Self {
             offset: self.offset,
             time_index_column_name: self.time_index_column_name.clone(),
+            need_filter_out_nan: self.need_filter_out_nan,
             input: inputs[0].clone(),
         }
     }
@@ -91,11 +93,13 @@ impl SeriesNormalize {
     pub fn new<N: AsRef<str>>(
         offset: Millisecond,
         time_index_column_name: N,
+        need_filter_out_nan: bool,
         input: LogicalPlan,
     ) -> Self {
         Self {
             offset,
             time_index_column_name: time_index_column_name.as_ref().to_string(),
+            need_filter_out_nan,
             input,
         }
     }
@@ -104,6 +108,7 @@ impl SeriesNormalize {
         Arc::new(SeriesNormalizeExec {
             offset: self.offset,
             time_index_column_name: self.time_index_column_name.clone(),
+            need_filter_out_nan: self.need_filter_out_nan,
             input: exec_input,
             metric: ExecutionPlanMetricsSet::new(),
         })
@@ -114,6 +119,7 @@ impl SeriesNormalize {
 pub struct SeriesNormalizeExec {
     offset: Millisecond,
     time_index_column_name: String,
+    need_filter_out_nan: bool,
 
     input: Arc<dyn ExecutionPlan>,
     metric: ExecutionPlanMetricsSet,
@@ -148,6 +154,7 @@ impl ExecutionPlan for SeriesNormalizeExec {
         Ok(Arc::new(Self {
             offset: self.offset,
             time_index_column_name: self.time_index_column_name.clone(),
+            need_filter_out_nan: self.need_filter_out_nan,
             input: children[0].clone(),
             metric: self.metric.clone(),
         }))
@@ -169,6 +176,7 @@ impl ExecutionPlan for SeriesNormalizeExec {
         Ok(Box::pin(SeriesNormalizeStream {
             offset: self.offset,
             time_index,
+            need_filter_out_nan: self.need_filter_out_nan,
             schema,
             input,
             metric: baseline_metric,
@@ -180,8 +188,8 @@ impl ExecutionPlan for SeriesNormalizeExec {
             DisplayFormatType::Default => {
                 write!(
                     f,
-                    "PromSeriesNormalizeExec: offset=[{}], time index=[{}]",
-                    self.offset, self.time_index_column_name
+                    "PromSeriesNormalizeExec: offset=[{}], time index=[{}], filter NaN: [{}]",
+                    self.offset, self.time_index_column_name, self.need_filter_out_nan
                 )
             }
         }
@@ -200,6 +208,7 @@ pub struct SeriesNormalizeStream {
     offset: Millisecond,
     // Column index of TIME INDEX column's position in schema
     time_index: usize,
+    need_filter_out_nan: bool,
 
     schema: SchemaRef,
     input: SendableRecordBatchStream,
@@ -220,7 +229,7 @@ impl SeriesNormalizeStream {
             ts_column.clone()
         } else {
             TimestampMillisecondArray::from_iter(
-                ts_column.iter().map(|ts| ts.map(|ts| ts - self.offset)),
+                ts_column.iter().map(|ts| ts.map(|ts| ts + self.offset)),
             )
         };
         let mut columns = input.columns().to_vec();
@@ -233,6 +242,10 @@ impl SeriesNormalizeStream {
             .map(|array| compute::take(array, &ordered_indices, None))
             .collect::<ArrowResult<Vec<_>>>()?;
         let ordered_batch = RecordBatch::try_new(input.schema(), ordered_columns)?;
+
+        if !self.need_filter_out_nan {
+            return Ok(ordered_batch);
+        }
 
         // TODO(ruihang): consider the "special NaN"
         // filter out NaN
@@ -317,6 +330,7 @@ mod test {
         let normalize_exec = Arc::new(SeriesNormalizeExec {
             offset: 0,
             time_index_column_name: TIME_INDEX_COLUMN.to_string(),
+            need_filter_out_nan: true,
             input: memory_exec,
             metric: ExecutionPlanMetricsSet::new(),
         });
@@ -349,6 +363,7 @@ mod test {
         let normalize_exec = Arc::new(SeriesNormalizeExec {
             offset: 1_000, // offset 1s
             time_index_column_name: TIME_INDEX_COLUMN.to_string(),
+            need_filter_out_nan: true,
             input: memory_exec,
             metric: ExecutionPlanMetricsSet::new(),
         });
@@ -364,11 +379,11 @@ mod test {
             "+---------------------+--------+------+\
             \n| timestamp           | value  | path |\
             \n+---------------------+--------+------+\
-            \n| 1969-12-31T23:59:59 | 10.0   | foo  |\
-            \n| 1970-01-01T00:00:29 | 100.0  | foo  |\
-            \n| 1970-01-01T00:00:59 | 0.0    | foo  |\
-            \n| 1970-01-01T00:01:29 | 1000.0 | foo  |\
-            \n| 1970-01-01T00:01:59 | 1.0    | foo  |\
+            \n| 1970-01-01T00:00:01 | 10.0   | foo  |\
+            \n| 1970-01-01T00:00:31 | 100.0  | foo  |\
+            \n| 1970-01-01T00:01:01 | 0.0    | foo  |\
+            \n| 1970-01-01T00:01:31 | 1000.0 | foo  |\
+            \n| 1970-01-01T00:02:01 | 1.0    | foo  |\
             \n+---------------------+--------+------+",
         );
 

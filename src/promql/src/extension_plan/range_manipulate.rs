@@ -342,12 +342,20 @@ impl Stream for RangeManipulateStream {
     type Item = DataFusionResult<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let poll = match self.input.poll_next_unpin(cx) {
-            Poll::Ready(batch) => {
-                let _timer = self.metric.elapsed_compute().timer();
-                Poll::Ready(batch.map(|batch| batch.and_then(|batch| self.manipulate(batch))))
+        let poll = loop {
+            match self.input.poll_next_unpin(cx) {
+                Poll::Ready(Some(Ok(batch))) => {
+                    let _timer = self.metric.elapsed_compute().timer();
+                    let result = self.manipulate(batch);
+                    if let Ok(None) = result {
+                        continue;
+                    } else {
+                        break Poll::Ready(result.transpose());
+                    }
+                }
+                Poll::Ready(other) => break Poll::Ready(other),
+                Poll::Pending => break Poll::Pending,
             }
-            Poll::Pending => Poll::Pending,
         };
         self.metric.record_poll(poll)
     }
@@ -357,10 +365,14 @@ impl RangeManipulateStream {
     // Prometheus: https://github.com/prometheus/prometheus/blob/e934d0f01158a1d55fa0ebb035346b195fcc1260/promql/engine.go#L1113-L1198
     // But they are not exactly the same, because we don't eager-evaluate on the data in this plan.
     // And the generated timestamp is not aligned to the step. It's expected to do later.
-    pub fn manipulate(&self, input: RecordBatch) -> DataFusionResult<RecordBatch> {
+    pub fn manipulate(&self, input: RecordBatch) -> DataFusionResult<Option<RecordBatch>> {
         let mut other_columns = (0..input.columns().len()).collect::<HashSet<_>>();
         // calculate the range
         let (aligned_ts, ranges) = self.calculate_range(&input);
+        // ignore this if all ranges are empty
+        if ranges.iter().all(|(_, len)| *len == 0) {
+            return Ok(None);
+        }
 
         // transform columns
         let mut new_columns = input.columns().to_vec();
@@ -391,6 +403,7 @@ impl RangeManipulateStream {
         new_columns[self.time_index] = aligned_ts;
 
         RecordBatch::try_new(self.output_schema.clone(), new_columns)
+            .map(Some)
             .map_err(DataFusionError::ArrowError)
     }
 
