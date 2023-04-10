@@ -24,7 +24,6 @@ use common_query::Output;
 use common_recordbatch::error::DataTypesSnafu;
 use datafusion::parquet::arrow::ParquetRecordBatchStreamBuilder;
 use datatypes::arrow::datatypes::{DataType, SchemaRef};
-use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::vectors::Helper;
 use futures_util::StreamExt;
 use regex::Regex;
