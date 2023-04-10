@@ -29,6 +29,7 @@ use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, O
 use table::{error as table_error, Result as TableResult, Table, TableRef};
 use tokio::sync::Mutex;
 
+use crate::config::EngineConfig;
 use crate::engine::INIT_TABLE_VERSION;
 use crate::error::{
     BuildTableInfoSnafu, BuildTableMetaSnafu, DropTableSnafu, InvalidRawSchemaSnafu, Result,
@@ -114,6 +115,14 @@ impl TableEngine for ImmutableFileTableEngine {
     }
 }
 
+impl ImmutableFileTableEngine {
+    pub fn new(config: EngineConfig, object_store: ObjectStore) -> Self {
+        ImmutableFileTableEngine {
+            inner: Arc::new(EngineInner::new(config, object_store)),
+        }
+    }
+}
+
 struct EngineInner {
     /// All tables opened by the engine. Map key is formatted [TableReference].
     ///
@@ -127,6 +136,14 @@ struct EngineInner {
 }
 
 impl EngineInner {
+    pub fn new(_config: EngineConfig, object_store: ObjectStore) -> Self {
+        EngineInner {
+            tables: RwLock::new(HashMap::default()),
+            object_store,
+            table_mutex: Mutex::new(()),
+        }
+    }
+
     async fn create_table(
         &self,
         _ctx: &EngineContext,
@@ -309,7 +326,7 @@ impl EngineInner {
             delete_table_manifest(
                 &table_full_name,
                 &table_manifest_dir(&table_dir),
-                self.object_store.clone(),
+                &self.object_store,
             )
             .await
             .map_err(BoxedError::new)
