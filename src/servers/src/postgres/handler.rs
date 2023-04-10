@@ -16,7 +16,6 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::LocalResult;
 use common_query::Output;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::RecordBatch;
