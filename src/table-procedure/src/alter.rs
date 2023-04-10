@@ -76,7 +76,7 @@ impl Procedure for AlterTableProcedure {
 }
 
 impl AlterTableProcedure {
-    const TYPE_NAME: &str = "table-procedures:AlterTableProcedure";
+    const TYPE_NAME: &str = "table-procedure:AlterTableProcedure";
 
     /// Returns a new [AlterTableProcedure].
     pub fn new(
@@ -290,5 +290,54 @@ impl AlterTableData {
             schema: &self.request.schema_name,
             table: &self.request.table_name,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+
+    use super::*;
+    use crate::test_util::TestEnv;
+
+    #[tokio::test]
+    async fn test_alter_table_procedure_rename() {
+        let env = TestEnv::new("rename");
+        let table_name = "test_old";
+        env.create_table(table_name).await;
+
+        let new_table_name = "test_new";
+        let request = AlterTableRequest {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: table_name.to_string(),
+            alter_kind: AlterKind::RenameTable {
+                new_table_name: new_table_name.to_string(),
+            },
+        };
+
+        let TestEnv {
+            dir: _dir,
+            table_engine,
+            procedure_manager,
+            catalog_manager,
+        } = env;
+        let procedure =
+            AlterTableProcedure::new(request, catalog_manager.clone(), table_engine.clone());
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+
+        let mut watcher = procedure_manager.submit(procedure_with_id).await.unwrap();
+        watcher.changed().await.unwrap();
+
+        let catalog = catalog_manager
+            .catalog(DEFAULT_CATALOG_NAME)
+            .unwrap()
+            .unwrap();
+        let schema = catalog.schema(DEFAULT_SCHEMA_NAME).unwrap().unwrap();
+        let table = schema.table(new_table_name).await.unwrap().unwrap();
+        let table_info = table.table_info();
+        assert_eq!(new_table_name, table_info.name);
+
+        assert!(schema.table(table_name).await.unwrap().is_none());
     }
 }
