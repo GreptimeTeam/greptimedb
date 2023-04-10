@@ -640,7 +640,7 @@ mod tests {
 
     #[test]
     fn test_to_iso8601_string() {
-        std::env::set_var("TZ", "CST");
+        std::env::set_var("TZ", "Asia/Shanghai");
         let datetime_str = "2020-09-08 13:42:29.042+0000";
         let ts = Timestamp::from_str(datetime_str).unwrap();
         assert_eq!("2020-09-08 21:42:29.042+0800", ts.to_iso8601_string());
@@ -664,7 +664,7 @@ mod tests {
 
     #[test]
     fn test_serialize_to_json_value() {
-        std::env::set_var("TZ", "CST");
+        std::env::set_var("TZ", "Asia/Shanghai");
         assert_eq!(
             "1970-01-01 08:00:01+0800",
             match serde_json::Value::from(Timestamp::new(1, TimeUnit::Second)) {
@@ -878,7 +878,7 @@ mod tests {
 
     #[test]
     fn test_get_time_zone() {
-        std::env::set_var("TZ", "CST");
+        std::env::set_var("TZ", "Asia/Shanghai");
         assert_eq!(
             Timestamp::new(0, TimeUnit::Nanosecond),
             Timestamp::from_str("1970-01-01 08:00:00.000").unwrap()

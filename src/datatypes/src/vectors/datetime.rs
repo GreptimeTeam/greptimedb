@@ -37,7 +37,7 @@ mod tests {
 
     #[test]
     fn test_datetime_vector() {
-        std::env::set_var("TZ", "CST");
+        std::env::set_var("TZ", "Asia/Shanghai");
         let v = DateTimeVector::new(PrimitiveArray::from_slice([1, 2, 3]));
         assert_eq!(ConcreteDataType::datetime_datatype(), v.data_type());
         assert_eq!(3, v.len());

@@ -1345,7 +1345,7 @@ mod tests {
 
     #[test]
     fn test_display() {
-        std::env::set_var("TZ", "CST");
+        std::env::set_var("TZ", "Asia/Shanghai");
         assert_eq!(Value::Null.to_string(), "Null");
         assert_eq!(Value::UInt8(8).to_string(), "8");
         assert_eq!(Value::UInt16(16).to_string(), "16");

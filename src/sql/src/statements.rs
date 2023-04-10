@@ -487,7 +487,7 @@ mod tests {
 
     #[test]
     pub fn test_parse_datetime_literal() {
-        std::env::set_var("TZ", "CST");
+        std::env::set_var("TZ", "Asia/Shanghai");
         let value = sql_value_to_value(
             "datetime_col",
             &ConcreteDataType::datetime_datatype(),

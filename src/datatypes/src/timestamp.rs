@@ -125,7 +125,7 @@ mod tests {
 
     #[test]
     fn test_to_serde_json_value() {
-        std::env::set_var("TZ", "CST");
+        std::env::set_var("TZ", "Asia/Shanghai");
         let ts = TimestampSecond::new(123);
         let val = serde_json::Value::from(ts);
         match val {
