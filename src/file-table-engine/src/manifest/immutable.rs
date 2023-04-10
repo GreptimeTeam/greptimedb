@@ -21,11 +21,15 @@ use crate::error::{
     CheckObjectSnafu, DecodeJsonSnafu, DeleteTableManifestSnafu, EncodeJsonSnafu,
     ReadTableManifestSnafu, Result, WriteImmutableManifestSnafu, WriteTableManifestSnafu,
 };
+
+pub type MetadataVersion = u32;
+pub const INIT_META_VERSION: MetadataVersion = 0;
 const IMMUTABLE_MANIFEST_FILE: &str = "_immutable_manifest";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ImmutableMetadata {
     pub table_info: RawTableInfo,
+    pub version: MetadataVersion,
 }
 
 fn encode_metadata(item: &ImmutableMetadata) -> Result<Vec<u8>> {

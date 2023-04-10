@@ -133,18 +133,18 @@ impl ErrorExt for Error {
             TableExists { .. }
             | BuildTableMeta { .. }
             | BuildTableInfo { .. }
-            | InvalidRawSchema { .. }
-            | EncodeJson { .. }
-            | DecodeJson { .. } => StatusCode::InvalidArguments,
+            | InvalidRawSchema { .. } => StatusCode::InvalidArguments,
 
             WriteTableManifest { .. }
             | DeleteTableManifest { .. }
             | ReadTableManifest { .. }
             | CheckObject { .. } => StatusCode::StorageUnavailable,
 
-            ConvertRaw { .. } | DropTable { .. } | WriteImmutableManifest { .. } => {
-                StatusCode::Unexpected
-            }
+            EncodeJson { .. }
+            | DecodeJson { .. }
+            | ConvertRaw { .. }
+            | DropTable { .. }
+            | WriteImmutableManifest { .. } => StatusCode::Unexpected,
         }
     }
 

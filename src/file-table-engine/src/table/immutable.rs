@@ -27,7 +27,9 @@ use table::metadata::{RawTableInfo, TableInfo, TableInfoRef, TableType};
 use table::Table;
 
 use crate::error::{ConvertRawSnafu, Result};
-use crate::manifest::immutable::{read_table_manifest, write_table_manifest, ImmutableMetadata};
+use crate::manifest::immutable::{
+    read_table_manifest, write_table_manifest, ImmutableMetadata, INIT_META_VERSION,
+};
 use crate::manifest::table_manifest_dir;
 
 pub struct ImmutableFileTable {
@@ -100,6 +102,7 @@ impl ImmutableFileTable {
     ) -> Result<ImmutableFileTable> {
         let metadata = ImmutableMetadata {
             table_info: RawTableInfo::from(table_info.clone()),
+            version: INIT_META_VERSION,
         };
 
         write_table_manifest(

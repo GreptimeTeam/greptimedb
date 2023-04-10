@@ -231,7 +231,6 @@ impl EngineInner {
         self.get_table_by_full_name(&table_ref.to_string())
     }
 
-
     async fn open_table(
         &self,
         _ctx: &EngineContext,
