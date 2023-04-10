@@ -173,7 +173,6 @@ mod tests {
             .schema(DEFAULT_SCHEMA_NAME)
             .unwrap()
             .unwrap();
-        assert_eq!(vec!["numbers"], default_schema.table_names().unwrap());
 
         // register a new table with an nonexistent catalog
         let catalog_name = DEFAULT_CATALOG_NAME.to_string();
@@ -209,14 +208,7 @@ mod tests {
             table,
         };
         assert!(catalog_manager.register_table(reg_req).await.unwrap());
-        assert_eq!(
-            HashSet::from([table_name, "numbers".to_string()]),
-            default_schema
-                .table_names()
-                .unwrap()
-                .into_iter()
-                .collect::<HashSet<_>>()
-        );
+        assert_eq!(vec![table_name], default_schema.table_names().unwrap());
     }
 
     #[tokio::test]
