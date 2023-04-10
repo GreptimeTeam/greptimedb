@@ -125,11 +125,12 @@ mod tests {
 
     #[test]
     fn test_to_serde_json_value() {
+        std::env::set_var("TZ", "CST");
         let ts = TimestampSecond::new(123);
         let val = serde_json::Value::from(ts);
         match val {
             serde_json::Value::String(s) => {
-                assert_eq!("1970-01-01 00:02:03+0000", s);
+                assert_eq!("1970-01-01 08:02:03+0800", s);
             }
             _ => unreachable!(),
         }

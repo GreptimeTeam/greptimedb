@@ -37,6 +37,7 @@ mod tests {
 
     #[test]
     fn test_datetime_vector() {
+        std::env::set_var("TZ", "CST");
         let v = DateTimeVector::new(PrimitiveArray::from_slice([1, 2, 3]));
         assert_eq!(ConcreteDataType::datetime_datatype(), v.data_type());
         assert_eq!(3, v.len());
@@ -63,7 +64,7 @@ mod tests {
             unreachable!()
         }
         assert_eq!(
-            "[\"1970-01-01 00:00:01\",\"1970-01-01 00:00:02\",\"1970-01-01 00:00:03\"]",
+            "[\"1970-01-01 08:00:01\",\"1970-01-01 08:00:02\",\"1970-01-01 08:00:03\"]",
             serde_json::to_string(&v.serialize_to_json().unwrap()).unwrap()
         );
     }

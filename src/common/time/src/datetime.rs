@@ -15,11 +15,11 @@
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
-use chrono::NaiveDateTime;
+use chrono::{Local, LocalResult, NaiveDateTime, TimeZone};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
-use crate::error::{Error, ParseDateStrSnafu, Result};
+use crate::error::{Error, InvalidDateStrSnafu, ParseDateStrSnafu, Result};
 
 const DATETIME_FORMAT: &str = "%F %T";
 
@@ -32,7 +32,13 @@ pub struct DateTime(i64);
 impl Display for DateTime {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         if let Some(abs_time) = NaiveDateTime::from_timestamp_opt(self.0, 0) {
-            write!(f, "{}", abs_time.format(DATETIME_FORMAT))
+            write!(
+                f,
+                "{}",
+                Local {}
+                    .from_utc_datetime(&abs_time)
+                    .format(DATETIME_FORMAT)
+            )
         } else {
             write!(f, "DateTime({})", self.0)
         }
@@ -51,7 +57,14 @@ impl FromStr for DateTime {
     fn from_str(s: &str) -> Result<Self> {
         let datetime = NaiveDateTime::parse_from_str(s, DATETIME_FORMAT)
             .context(ParseDateStrSnafu { raw: s })?;
-        Ok(Self(datetime.timestamp()))
+        let local = Local {};
+        let unix_ts = match local.from_local_datetime(&datetime) {
+            LocalResult::None => {
+                return InvalidDateStrSnafu { raw: s }.fail();
+            }
+            LocalResult::Single(d) | LocalResult::Ambiguous(d, _) => d.timestamp(),
+        };
+        Ok(Self(unix_ts))
     }
 }
 
@@ -81,13 +94,14 @@ mod tests {
 
     #[test]
     pub fn test_new_date_time() {
-        assert_eq!("1970-01-01 00:00:00", DateTime::new(0).to_string());
-        assert_eq!("1970-01-01 00:00:01", DateTime::new(1).to_string());
-        assert_eq!("1969-12-31 23:59:59", DateTime::new(-1).to_string());
+        assert_eq!("1970-01-01 08:00:00", DateTime::new(0).to_string());
+        assert_eq!("1970-01-01 08:00:01", DateTime::new(1).to_string());
+        assert_eq!("1970-01-01 07:59:59", DateTime::new(-1).to_string());
     }
 
     #[test]
     pub fn test_parse_from_string() {
+        std::env::set_var("TZ", "CST");
         let time = "1970-01-01 00:00:00";
         let dt = DateTime::from_str(time).unwrap();
         assert_eq!(time, &dt.to_string());
@@ -97,5 +111,15 @@ mod tests {
     pub fn test_from() {
         let d: DateTime = 42.into();
         assert_eq!(42, d.val());
+    }
+
+    #[test]
+    fn test_parse_local_date_time() {
+        std::env::set_var("TZ", "CST");
+        assert_eq!(
+            -28800,
+            DateTime::from_str("1970-01-01 00:00:00").unwrap().val()
+        );
+        assert_eq!(0, DateTime::from_str("1970-01-01 08:00:00").unwrap().val());
     }
 }

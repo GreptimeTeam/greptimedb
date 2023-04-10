@@ -1345,6 +1345,7 @@ mod tests {
 
     #[test]
     fn test_display() {
+        std::env::set_var("TZ", "CST");
         assert_eq!(Value::Null.to_string(), "Null");
         assert_eq!(Value::UInt8(8).to_string(), "8");
         assert_eq!(Value::UInt16(16).to_string(), "16");
@@ -1366,11 +1367,11 @@ mod tests {
         assert_eq!(Value::Date(Date::new(0)).to_string(), "1970-01-01");
         assert_eq!(
             Value::DateTime(DateTime::new(0)).to_string(),
-            "1970-01-01 00:00:00"
+            "1970-01-01 08:00:00"
         );
         assert_eq!(
             Value::Timestamp(Timestamp::new(1000, TimeUnit::Millisecond)).to_string(),
-            "1970-01-01 00:00:01+0000"
+            "1970-01-01 08:00:01+0800"
         );
         assert_eq!(
             Value::List(ListValue::new(

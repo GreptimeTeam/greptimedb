@@ -178,7 +178,7 @@ fn encode_value(value: &Value, builder: &mut DataRowEncoder) -> PgWireResult<()>
             }
         }
         Value::Timestamp(v) => {
-            if let LocalResult::Single(datetime) = v.to_chrono_datetime() {
+            if let Some(datetime) = v.to_chrono_datetime() {
                 builder.encode_field(&datetime)
             } else {
                 Err(PgWireError::ApiError(Box::new(Error::Internal {
