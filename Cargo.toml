@@ -24,6 +24,7 @@ members = [
     "src/common/time",
     "src/datanode",
     "src/datatypes",
+    "src/file-table-engine",
     "src/frontend",
     "src/log-store",
     "src/meta-client",

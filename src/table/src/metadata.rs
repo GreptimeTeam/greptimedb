@@ -128,6 +128,16 @@ impl TableMetaBuilder {
             _ => Err("Missing primary_key_indices or schema to create value_indices".to_string()),
         }
     }
+
+    pub fn new_external_table() -> Self {
+        Self {
+            primary_key_indices: Some(Vec::new()),
+            value_indices: Some(Vec::new()),
+            region_numbers: Some(Vec::new()),
+            next_column_id: Some(0),
+            ..Default::default()
+        }
+    }
 }
 
 impl TableMeta {

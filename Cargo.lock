@@ -2817,6 +2817,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "file-table-engine"
+version = "0.1.1"
+dependencies = [
+ "async-trait",
+ "common-catalog",
+ "common-error",
+ "common-procedure",
+ "common-query",
+ "common-telemetry",
+ "common-test-util",
+ "datatypes",
+ "futures",
+ "object-store",
+ "serde",
+ "serde_json",
+ "snafu",
+ "storage",
+ "store-api",
+ "table",
+ "tokio",
+]
+
+[[package]]
 name = "filetime"
 version = "0.2.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
