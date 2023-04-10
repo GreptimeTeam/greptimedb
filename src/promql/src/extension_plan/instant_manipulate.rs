@@ -333,7 +333,7 @@ impl InstantManipulateStream {
             // then, search backward to lookback
             loop {
                 let curr = ts_column.value(cursor);
-                if let Some(value_column) = &field_column && value_column.value(cursor).is_nan() {
+                if let Some(field_column) = &field_column && field_column.value(cursor).is_nan() {
                     // if the newest value is NaN, it means the value is stale, so we should not use it
                     take_indices.push(None);
                     break;
