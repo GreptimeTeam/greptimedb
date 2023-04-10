@@ -94,11 +94,11 @@ impl PyRecordBatch {
         self.record_batch.num_rows()
     }
     fn get_item(&self, needle: &RsPyObject, vm: &VirtualMachine) -> RsPyResult {
-        if let Ok(index) = needle.to_owned().try_into_value::<usize>(vm) {
+        if let Ok(index) = needle.try_to_value::<usize>(vm) {
             let column = self.record_batch.column(index);
             let v = PyVector::from(column.clone());
             Ok(v.into_pyobject(vm))
-        } else if let Some(index) = needle.to_owned().payload::<PyStr>() {
+        } else if let Ok(index) = needle.try_to_value::<String>(vm) {
             let key = index.as_str();
 
             let v = self.record_batch.column_by_name(key).ok_or_else(|| {

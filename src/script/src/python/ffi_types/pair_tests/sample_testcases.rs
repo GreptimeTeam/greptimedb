@@ -414,7 +414,7 @@ def boolean_array() -> vector[f64]:
 @copr(returns=["value"], backend="pyo3")
 def boolean_array() -> vector[f64]:
     from greptime import vector
-    from greptime import query, dataframe
+    from greptime import query
     
     print("query()=", query())
     assert "query_engine object at" in str(query())
@@ -424,12 +424,6 @@ def boolean_array() -> vector[f64]:
     print(rb)
     assert len(rb) == 5
 
-    try: 
-        print("dataframe()=", dataframe())
-    except KeyError as e:
-        print("dataframe()=", e)
-        print(str(e), type(str(e)), 'No __dataframe__' in str(e))
-        assert 'No __dataframe__' in str(e)
 
     v = vector([1.0, 2.0, 3.0])
     # This returns a vector([2.0])
@@ -443,7 +437,7 @@ def boolean_array() -> vector[f64]:
 @copr(returns=["value"], backend="rspy")
 def boolean_array() -> vector[f64]:
     from greptime import vector, col
-    from greptime import query, dataframe, PyDataFrame
+    from greptime import query, PyDataFrame
     
     df = PyDataFrame.from_sql("select number from numbers limit 5")
     print("df from sql=", df)
@@ -462,11 +456,6 @@ def boolean_array() -> vector[f64]:
     )
     print(rb)
     assert len(rb) == 5
-    try: 
-        print("dataframe()=", dataframe())
-    except KeyError as e:
-        print("dataframe()=", e)
-        assert "__dataframe__" in str(e)
 
     v = vector([1.0, 2.0, 3.0])
     # This returns a vector([2.0])
@@ -481,7 +470,7 @@ def boolean_array() -> vector[f64]:
 @copr(returns=["value"], backend="pyo3")
 def boolean_array() -> vector[f64]:
     from greptime import vector
-    from greptime import query, dataframe, PyDataFrame, col
+    from greptime import query, PyDataFrame, col
     df = PyDataFrame.from_sql("select number from numbers limit 5")
     print("df from sql=", df)
     ret = df.collect()
@@ -563,6 +552,7 @@ def answer() -> vector[i64]:
         import pyarrow as pa
     except ImportError:
         # Python didn't have pyarrow
+        print("Warning: no pyarrow in current python")
         return vector([42, 43, 44])
     return vector.from_pyarrow(vector([42, 43, 44]).to_pyarrow())
 "#
@@ -579,6 +569,7 @@ def answer() -> vector[i64]:
         import pyarrow as pa
     except ImportError:
         # Python didn't have pyarrow
+        print("Warning: no pyarrow in current python")
         return vector([42, 43, 44])
     return vector.from_pyarrow(pa.array([42, 43, 44]))
 "#
@@ -589,9 +580,9 @@ def answer() -> vector[i64]:
             script: r#"
 @copr(args=[], returns = ["number"], sql = "select * from numbers", backend="rspy")
 def answer() -> vector[i64]:
-    from greptime import vector, col, lit, dataframe
+    from greptime import vector, col, lit, PyDataFrame
     expr_0 = (col("number")<lit(3)) & (col("number")>0)
-    ret = dataframe().select([col("number")]).filter(expr_0).collect()[0]
+    ret = PyDataFrame.from_sql("select * from numbers").select([col("number")]).filter(expr_0).collect()[0]
     return ret
 "#
             .to_string(),
@@ -602,10 +593,10 @@ def answer() -> vector[i64]:
             script: r#"
 @copr(args=[], returns = ["number"], sql = "select * from numbers", backend="pyo3")
 def answer() -> vector[i64]:
-    from greptime import vector, col, lit, dataframe
+    from greptime import vector, col, lit, PyDataFrame
     # Bitwise Operator  pred comparison operator
     expr_0 = (col("number")<lit(3)) & (col("number")>0)
-    ret = dataframe().select([col("number")]).filter(expr_0).collect()[0]
+    ret = PyDataFrame.from_sql("select * from numbers").select([col("number")]).filter(expr_0).collect()[0]
     return ret
 "#
             .to_string(),
@@ -621,6 +612,7 @@ def answer() -> vector[i64]:
         import pyarrow as pa
     except ImportError:
         # Python didn't have pyarrow
+        print("Warning: no pyarrow in current python")
         return vector([42, 43, 44])
     a = vector.from_pyarrow(pa.array([42]))
     return a[0:1]
@@ -733,8 +725,9 @@ def test_numpy() -> vector[i64]:
     try:
         import numpy as np
         import pyarrow as pa
-    except ImportError:
+    except ImportError as e:
         # Python didn't have numpy or pyarrow
+        print("Warning: no pyarrow or numpy found in current python", e)
         return vector([0, 1, 2, 3, 4, 5, 6, 7, 8, 9,])
     from greptime import vector
     v = np.array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9,])

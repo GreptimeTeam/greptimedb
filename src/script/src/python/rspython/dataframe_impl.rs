@@ -234,13 +234,16 @@ pub(crate) mod data_frame {
         }
 
         #[pymethod]
-        /// collect `DataFrame` results into `List[Vector]`
-        fn collect(&self, vm: &VirtualMachine) -> PyResult<PyRecordBatch> {
+        /// collect `DataFrame` results into `PyRecordBatch` that impl Mapping Protocol
+        fn collect(&self, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
             let inner = self.inner.clone();
             let res = block_on_async(async { inner.collect().await });
             let res = res
                 .map_err(|e| vm.new_runtime_error(format!("{e:?}")))?
                 .map_err(|e| vm.new_runtime_error(e.to_string()))?;
+            if res.is_empty() {
+                return Ok(vm.ctx.new_dict().into());
+            }
             let concat_rb =
                 arrow::compute::concat_batches(&res[0].schema(), res.iter()).map_err(|e| {
                     vm.new_runtime_error(format!(
@@ -262,7 +265,7 @@ pub(crate) mod data_frame {
                 })?;
 
             let rb = PyRecordBatch::new(rb);
-            Ok(rb)
+            Ok(rb.into_pyobject(vm))
         }
     }
 

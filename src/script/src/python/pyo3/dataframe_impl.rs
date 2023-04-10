@@ -20,7 +20,7 @@ use datatypes::schema::Schema;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::pyclass::CompareOp;
-use pyo3::types::PyType;
+use pyo3::types::{PyDict, PyType};
 use snafu::ResultExt;
 
 use crate::python::error::DataFusionSnafu;
@@ -212,13 +212,16 @@ impl PyDataFrame {
             .map_err(|e| PyValueError::new_err(e.to_string()))?
             .into())
     }
-    /// collect `DataFrame` results into `List[Vector]`
-    fn collect(&self) -> PyResult<PyRecordBatch> {
+    /// collect `DataFrame` results into `PyRecordBatch` that impl Mapping Protocol
+    fn collect(&self, py: Python) -> PyResult<PyObject> {
         let inner = self.inner.clone();
         let res = block_on_async(async { inner.collect().await });
         let res = res
             .map_err(|e| PyValueError::new_err(format!("{e:?}")))?
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        if res.is_empty() {
+            return Ok(PyDict::new(py).into());
+        }
         let concat_rb = compute::concat_batches(&res[0].schema(), res.iter()).map_err(|e| {
             PyRuntimeError::new_err(format!("Concat batches failed for dataframe {self:?}: {e}"))
         })?;
@@ -234,7 +237,7 @@ impl PyDataFrame {
             ))
         })?;
         let rb = PyRecordBatch::new(rb);
-        Ok(rb)
+        Ok(rb.into_py(py))
     }
 }
 
