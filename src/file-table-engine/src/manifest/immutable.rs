@@ -24,6 +24,7 @@ use crate::error::{
 
 pub type MetadataVersion = u32;
 pub const INIT_META_VERSION: MetadataVersion = 0;
+
 const IMMUTABLE_MANIFEST_FILE: &str = "_immutable_manifest";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]

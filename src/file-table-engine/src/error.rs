@@ -18,6 +18,7 @@ use common_error::prelude::*;
 use serde_json::error::Error as JsonError;
 use snafu::Location;
 use table::metadata::{TableInfoBuilderError, TableMetaBuilderError};
+
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
@@ -28,19 +29,19 @@ pub enum Error {
         source: object_store::Error,
     },
 
-    #[snafu(display("Fail to encode object into json , source: {}", source))]
+    #[snafu(display("Fail to encode object into json, source: {}", source))]
     EncodeJson {
         location: Location,
         source: JsonError,
     },
 
-    #[snafu(display("Fail to decode object from json , source: {}", source))]
+    #[snafu(display("Fail to decode object from json, source: {}", source))]
     DecodeJson {
         location: Location,
         source: JsonError,
     },
 
-    #[snafu(display("Failed to drop table, table :{}, source: {}", table_name, source,))]
+    #[snafu(display("Failed to drop table, table: {}, source: {}", table_name, source))]
     DropTable {
         source: BoxedError,
         table_name: String,
@@ -48,7 +49,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to write table manifest,  table: {}, source: {}",
+        "Failed to write table manifest, table: {}, source: {}",
         table_name,
         source,
     ))]
@@ -69,7 +70,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to read table manifest,  table: {}, source: {}",
+        "Failed to read table manifest, table: {}, source: {}",
         table_name,
         source,
     ))]
