@@ -20,11 +20,11 @@ use arrow::json::reader::{infer_json_schema_from_iterator, ValueIter};
 use async_trait::async_trait;
 use object_store::ObjectStore;
 use snafu::ResultExt;
+use tokio_util::io::SyncIoBridge;
 
 use crate::compression::CompressionType;
 use crate::error::{self, Result};
 use crate::file_format::{self, FileFormat};
-use crate::util::io::SyncIoBridge;
 
 #[derive(Debug)]
 pub struct JsonFormat {
@@ -51,14 +51,20 @@ impl FileFormat for JsonFormat {
 
         let decoded = self.compression_type.convert_async_read(reader);
 
-        let mut reader = BufReader::new(SyncIoBridge::new(decoded));
+        let schema_infer_max_record = self.schema_infer_max_record;
 
-        let iter = ValueIter::new(&mut reader, self.schema_infer_max_record);
+        tokio::task::spawn_blocking(move || {
+            let mut reader = BufReader::new(SyncIoBridge::new(decoded));
 
-        let schema = infer_json_schema_from_iterator(iter)
-            .context(error::InferSchemaSnafu { path: &path })?;
+            let iter = ValueIter::new(&mut reader, schema_infer_max_record);
 
-        Ok(Arc::new(schema))
+            let schema = infer_json_schema_from_iterator(iter)
+                .context(error::InferSchemaSnafu { path: &path })?;
+
+            Ok(Arc::new(schema))
+        })
+        .await
+        .context(error::JoinHandleSnafu)?
     }
 }
 
@@ -83,7 +89,12 @@ mod tests {
         let formatted: Vec<_> = format_schema(schema);
 
         assert_eq!(
-            vec!["a: Int64", "b: Float64", "c: Boolean", "d: Utf8",],
+            vec![
+                "a: Int64: NULL",
+                "b: Float64: NULL",
+                "c: Boolean: NULL",
+                "d: Utf8: NULL",
+            ],
             formatted
         );
     }
@@ -101,6 +112,9 @@ mod tests {
             .unwrap();
         let formatted: Vec<_> = format_schema(schema);
 
-        assert_eq!(vec!["a: Int64", "b: Float64", "c: Boolean"], formatted);
+        assert_eq!(
+            vec!["a: Int64: NULL", "b: Float64: NULL", "c: Boolean: NULL"],
+            formatted
+        );
     }
 }

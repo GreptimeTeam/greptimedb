@@ -83,6 +83,12 @@ pub enum Error {
 
     #[snafu(display("Invalid connection: {}", msg))]
     InvalidConnection { msg: String },
+
+    #[snafu(display("Failed to join handle: {}", source))]
+    JoinHandle {
+        location: Location,
+        source: tokio::task::JoinError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -105,7 +111,7 @@ impl ErrorExt for Error {
             | ReadParquetSnafu { .. }
             | ParquetToSchema { .. } => StatusCode::InvalidArguments,
 
-            Decompression { .. } => StatusCode::Unexpected,
+            Decompression { .. } | JoinHandle { .. } => StatusCode::Unexpected,
         }
     }
 
@@ -123,6 +129,7 @@ impl ErrorExt for Error {
             ReadParquetSnafu { location, .. } => Some(*location),
             ParquetToSchema { location, .. } => Some(*location),
             Decompression { location, .. } => Some(*location),
+            JoinHandle { location, .. } => Some(*location),
 
             UnsupportedBackendProtocol { .. }
             | EmptyHostPath { .. }

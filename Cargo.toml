@@ -76,7 +76,7 @@ snafu = { version = "0.7", features = ["backtraces"] }
 sqlparser = "0.32"
 tempfile = "3"
 tokio = { version = "1.24.2", features = ["full"] }
-tokio-util = "0.7"
+tokio-util = { version = "0.7", features = ["io-util"] }
 tonic = { version = "0.8", features = ["tls"] }
 uuid = { version = "1", features = ["serde", "v4", "fast-rng"] }
 

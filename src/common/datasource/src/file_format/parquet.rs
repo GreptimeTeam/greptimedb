@@ -73,6 +73,6 @@ mod tests {
             .unwrap();
         let formatted: Vec<_> = format_schema(schema);
 
-        assert_eq!(vec!["num: Int64", "str: Utf8"], formatted);
+        assert_eq!(vec!["num: Int64: NULL", "str: Utf8: NULL"], formatted);
     }
 }

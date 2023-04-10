@@ -19,11 +19,11 @@ use arrow_schema::SchemaRef;
 use async_trait::async_trait;
 use object_store::ObjectStore;
 use snafu::ResultExt;
+use tokio_util::io::SyncIoBridge;
 
 use crate::compression::CompressionType;
 use crate::error::{self, Result};
 use crate::file_format::{self, FileFormat};
-use crate::util::io::SyncIoBridge;
 
 #[derive(Debug)]
 pub struct CsvFormat {
@@ -54,17 +54,21 @@ impl FileFormat for CsvFormat {
 
         let decoded = self.compression_type.convert_async_read(reader);
 
-        let reader = SyncIoBridge::new(decoded);
+        let delimiter = self.delimiter;
+        let schema_infer_max_record = self.schema_infer_max_record;
+        let has_header = self.has_header;
 
-        let (schema, _records_read) = infer_csv_schema(
-            reader,
-            self.delimiter,
-            self.schema_infer_max_record,
-            self.has_header,
-        )
-        .context(error::InferSchemaSnafu { path: &path })?;
+        tokio::task::spawn_blocking(move || {
+            let reader = SyncIoBridge::new(decoded);
 
-        Ok(Arc::new(schema))
+            let (schema, _records_read) =
+                infer_csv_schema(reader, delimiter, schema_infer_max_record, has_header)
+                    .context(error::InferSchemaSnafu { path: &path })?;
+
+            Ok::<SchemaRef, error::Error>(Arc::new(schema))
+        })
+        .await
+        .context(error::JoinHandleSnafu)?
     }
 }
 
@@ -91,19 +95,19 @@ mod tests {
 
         assert_eq!(
             vec![
-                "c1: Utf8",
-                "c2: Int64",
-                "c3: Int64",
-                "c4: Int64",
-                "c5: Int64",
-                "c6: Int64",
-                "c7: Int64",
-                "c8: Int64",
-                "c9: Int64",
-                "c10: Int64",
-                "c11: Float64",
-                "c12: Float64",
-                "c13: Utf8"
+                "c1: Utf8: NULL",
+                "c2: Int64: NULL",
+                "c3: Int64: NULL",
+                "c4: Int64: NULL",
+                "c5: Int64: NULL",
+                "c6: Int64: NULL",
+                "c7: Int64: NULL",
+                "c8: Int64: NULL",
+                "c9: Int64: NULL",
+                "c10: Int64: NULL",
+                "c11: Float64: NULL",
+                "c12: Float64: NULL",
+                "c13: Utf8: NULL"
             ],
             formatted,
         );
@@ -123,7 +127,12 @@ mod tests {
         let formatted: Vec<_> = format_schema(schema);
 
         assert_eq!(
-            vec!["a: Int64", "b: Float64", "c: Int64", "d: Int64"],
+            vec![
+                "a: Int64: NULL",
+                "b: Float64: NULL",
+                "c: Int64: NULL",
+                "d: Int64: NULL"
+            ],
             formatted
         );
 
@@ -136,7 +145,12 @@ mod tests {
         let formatted: Vec<_> = format_schema(schema);
 
         assert_eq!(
-            vec!["a: Int64", "b: Float64", "c: Int64", "d: Utf8"],
+            vec![
+                "a: Int64: NULL",
+                "b: Float64: NULL",
+                "c: Int64: NULL",
+                "d: Utf8: NULL"
+            ],
             formatted
         );
     }
