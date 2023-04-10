@@ -100,6 +100,7 @@ mod tests {
 
     #[test]
     pub fn test_new_date_time() {
+        std::env::set_var("TZ", "CST");
         assert_eq!("1970-01-01 08:00:00+0800", DateTime::new(0).to_string());
         assert_eq!("1970-01-01 08:00:01+0800", DateTime::new(1).to_string());
         assert_eq!("1970-01-01 07:59:59+0800", DateTime::new(-1).to_string());
