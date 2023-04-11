@@ -764,15 +764,14 @@ mod test {
         let merge =
             CoalescePartitionsExec::new(Arc::new(DfPhysicalPlanAdapter(table_scan.clone())));
 
-        let sort = SortExec::try_new(
+        let sort = SortExec::new(
             vec![PhysicalSortExpr {
                 expr: physical_col("a", table_scan.schema().arrow_schema()).unwrap(),
                 options: SortOptions::default(),
             }],
             Arc::new(merge),
-            None,
         )
-        .unwrap();
+        .with_fetch(None);
         assert_eq!(sort.output_partitioning().partition_count(), 1);
 
         let session_ctx = SessionContext::new();

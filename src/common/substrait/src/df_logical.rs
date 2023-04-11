@@ -197,6 +197,14 @@ impl DFLogicalSubstraitConvertorDeprecated {
                 name: "Cross Relation",
             }
             .fail()?,
+            RelType::HashJoin(_) => UnsupportedPlanSnafu {
+                name: "Cross Relation",
+            }
+            .fail()?,
+            RelType::MergeJoin(_) => UnsupportedPlanSnafu {
+                name: "Cross Relation",
+            }
+            .fail()?,
         };
 
         Ok(logical_plan)

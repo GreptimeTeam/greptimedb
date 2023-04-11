@@ -113,13 +113,13 @@ pub enum Error {
     #[snafu(display("Failed to encode DataFusion plan, source: {}", source))]
     EncodeDfPlan {
         source: datafusion::error::DataFusionError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to decode DataFusion plan, source: {}", source))]
     DecodeDfPlan {
         source: datafusion::error::DataFusionError,
-        backtrace: Backtrace,
+        location: Location,
     },
 }
 

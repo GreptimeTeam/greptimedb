@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::{Buf, Bytes, BytesMut};
+use catalog::datafusion::catalog_adapter::DfCatalogProviderAdapter;
 use catalog::CatalogManagerRef;
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use datafusion::prelude::SessionContext;
@@ -23,7 +24,6 @@ use datafusion_expr::LogicalPlan;
 use datafusion_substrait::logical_plan::consumer::from_substrait_plan;
 use datafusion_substrait::logical_plan::producer::to_substrait_plan;
 use prost::Message;
-use query::datafusion::DfCatalogProviderAdapter;
 use snafu::ResultExt;
 use substrait_proto::proto::Plan;
 

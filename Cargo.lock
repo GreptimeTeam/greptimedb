@@ -2245,11 +2245,13 @@ dependencies = [
 
 [[package]]
 name = "datafusion"
-version = "21.1.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=21bf4ffccadfeea824ab6e29c0b872930d0e190a#21bf4ffccadfeea824ab6e29c0b872930d0e190a"
+version = "22.0.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=93771052c5ac31f2cf22b8c25bf938656afe1047#93771052c5ac31f2cf22b8c25bf938656afe1047"
 dependencies = [
  "ahash 0.8.3",
  "arrow",
+ "arrow-array",
+ "arrow-schema",
  "async-compression",
  "async-trait",
  "bytes",
@@ -2292,8 +2294,8 @@ dependencies = [
 
 [[package]]
 name = "datafusion-common"
-version = "21.1.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=21bf4ffccadfeea824ab6e29c0b872930d0e190a#21bf4ffccadfeea824ab6e29c0b872930d0e190a"
+version = "22.0.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=93771052c5ac31f2cf22b8c25bf938656afe1047#93771052c5ac31f2cf22b8c25bf938656afe1047"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -2306,8 +2308,8 @@ dependencies = [
 
 [[package]]
 name = "datafusion-execution"
-version = "21.1.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=21bf4ffccadfeea824ab6e29c0b872930d0e190a#21bf4ffccadfeea824ab6e29c0b872930d0e190a"
+version = "22.0.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=93771052c5ac31f2cf22b8c25bf938656afe1047#93771052c5ac31f2cf22b8c25bf938656afe1047"
 dependencies = [
  "dashmap",
  "datafusion-common",
@@ -2323,8 +2325,8 @@ dependencies = [
 
 [[package]]
 name = "datafusion-expr"
-version = "21.1.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=21bf4ffccadfeea824ab6e29c0b872930d0e190a#21bf4ffccadfeea824ab6e29c0b872930d0e190a"
+version = "22.0.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=93771052c5ac31f2cf22b8c25bf938656afe1047#93771052c5ac31f2cf22b8c25bf938656afe1047"
 dependencies = [
  "ahash 0.8.3",
  "arrow",
@@ -2334,8 +2336,8 @@ dependencies = [
 
 [[package]]
 name = "datafusion-optimizer"
-version = "21.1.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=21bf4ffccadfeea824ab6e29c0b872930d0e190a#21bf4ffccadfeea824ab6e29c0b872930d0e190a"
+version = "22.0.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=93771052c5ac31f2cf22b8c25bf938656afe1047#93771052c5ac31f2cf22b8c25bf938656afe1047"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2351,8 +2353,8 @@ dependencies = [
 
 [[package]]
 name = "datafusion-physical-expr"
-version = "21.1.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=21bf4ffccadfeea824ab6e29c0b872930d0e190a#21bf4ffccadfeea824ab6e29c0b872930d0e190a"
+version = "22.0.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=93771052c5ac31f2cf22b8c25bf938656afe1047#93771052c5ac31f2cf22b8c25bf938656afe1047"
 dependencies = [
  "ahash 0.8.3",
  "arrow",
@@ -2382,8 +2384,8 @@ dependencies = [
 
 [[package]]
 name = "datafusion-row"
-version = "21.1.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=21bf4ffccadfeea824ab6e29c0b872930d0e190a#21bf4ffccadfeea824ab6e29c0b872930d0e190a"
+version = "22.0.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=93771052c5ac31f2cf22b8c25bf938656afe1047#93771052c5ac31f2cf22b8c25bf938656afe1047"
 dependencies = [
  "arrow",
  "datafusion-common",
@@ -2393,8 +2395,8 @@ dependencies = [
 
 [[package]]
 name = "datafusion-sql"
-version = "21.1.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=21bf4ffccadfeea824ab6e29c0b872930d0e190a#21bf4ffccadfeea824ab6e29c0b872930d0e190a"
+version = "22.0.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=93771052c5ac31f2cf22b8c25bf938656afe1047#93771052c5ac31f2cf22b8c25bf938656afe1047"
 dependencies = [
  "arrow",
  "arrow-schema",
@@ -2406,8 +2408,8 @@ dependencies = [
 
 [[package]]
 name = "datafusion-substrait"
-version = "21.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=8e125d2ecf242b4f4b81f06839900dbb2037cc2a#8e125d2ecf242b4f4b81f06839900dbb2037cc2a"
+version = "22.0.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=93771052c5ac31f2cf22b8c25bf938656afe1047#93771052c5ac31f2cf22b8c25bf938656afe1047"
 dependencies = [
  "async-recursion",
  "chrono",
@@ -2415,7 +2417,7 @@ dependencies = [
  "itertools",
  "object_store",
  "prost",
- "substrait 0.5.4",
+ "substrait 0.7.3",
  "tokio",
 ]
 
@@ -3275,9 +3277,9 @@ checksum = "ad0a93d233ebf96623465aad4046a8d3aa4da22d4f4beba5388838c8a434bbb4"
 
 [[package]]
 name = "gix"
-version = "0.42.0"
+version = "0.43.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd5e0d9c5df90c9b4d325ec716762beb7d6c1465a4049fec5c4f6b72e7824656"
+checksum = "c256ea71cc1967faaefdaad15f334146b7c806f12460dcafd3afed845c8c78dd"
 dependencies = [
  "gix-actor",
  "gix-attributes",
@@ -3373,9 +3375,9 @@ dependencies = [
 
 [[package]]
 name = "gix-config"
-version = "0.19.0"
+version = "0.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6aa7d7dd60256b7a0c0506a1d708ec92767c2662ee57b3301b538eaa3e064f8a"
+checksum = "7fbad5ce54a8fc997acc50febd89ec80fa6e97cb7f8d0654cb229936407489d8"
 dependencies = [
  "bstr 1.4.0",
  "gix-config-value",
@@ -3384,6 +3386,7 @@ dependencies = [
  "gix-path",
  "gix-ref",
  "gix-sec",
+ "log",
  "memchr",
  "nom",
  "once_cell",
@@ -6020,6 +6023,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "prettyplease"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ceca8aaf45b5c46ec7ed39fff75f57290368c1846d33d24a122ca81416ab058"
+dependencies = [
+ "proc-macro2",
+ "syn 2.0.11",
+]
+
+[[package]]
 name = "prettytable-rs"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6192,7 +6205,7 @@ dependencies = [
  "log",
  "multimap",
  "petgraph",
- "prettyplease",
+ "prettyplease 0.1.25",
  "prost",
  "prost-types",
  "regex",
@@ -6632,6 +6645,16 @@ version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0a92ff21fe8026ce3f2627faaf43606f0b67b014dbc9ccf027181a804f75d92e"
 dependencies = [
+ "memchr",
+]
+
+[[package]]
+name = "regress"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d995d590bd8ec096d1893f414bf3f5e8b0ee4c9eed9a5642b9766ef2c8e2e8e9"
+dependencies = [
+ "hashbrown 0.13.2",
  "memchr",
 ]
 
@@ -8356,7 +8379,7 @@ dependencies = [
  "query",
  "session",
  "snafu",
- "substrait 0.5.4",
+ "substrait 0.7.3",
  "table",
  "tokio",
 ]
@@ -8375,19 +8398,19 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "typify",
+ "typify 0.0.10",
  "walkdir",
 ]
 
 [[package]]
 name = "substrait"
-version = "0.5.4"
+version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "58dbeec746a1da14b7af982eabbd18031563f418fe4217612bc1a4cab5961259"
+checksum = "fcd7c95895a69f92b0491cb0764d49140f57ad918a8abb3b7ec7f8e507d2a240"
 dependencies = [
  "gix",
  "heck 0.4.1",
- "prettyplease",
+ "prettyplease 0.2.4",
  "prost",
  "prost-build",
  "prost-types",
@@ -8396,8 +8419,8 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "syn 1.0.109",
- "typify",
+ "syn 2.0.11",
+ "typify 0.0.11",
  "walkdir",
 ]
 
@@ -9019,7 +9042,7 @@ version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5bf5e9b9c0f7e0a7c027dcfaba7b2c60816c7049171f679d99ee2ff65d0de8c4"
 dependencies = [
- "prettyplease",
+ "prettyplease 0.1.25",
  "proc-macro2",
  "prost-build",
  "quote",
@@ -9278,8 +9301,18 @@ version = "0.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e8486352f3c946e69f983558cfc09b295250b01e01b381ec67a05a812d01d63"
 dependencies = [
- "typify-impl",
- "typify-macro",
+ "typify-impl 0.0.10",
+ "typify-macro 0.0.10",
+]
+
+[[package]]
+name = "typify"
+version = "0.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "30bfde96849e25d7feef1bbf652e9cfc51deb63203fdc07b115b8bc3bcfe20b9"
+dependencies = [
+ "typify-impl 0.0.11",
+ "typify-macro 0.0.11",
 ]
 
 [[package]]
@@ -9292,8 +9325,26 @@ dependencies = [
  "log",
  "proc-macro2",
  "quote",
- "regress",
+ "regress 0.4.1",
  "rustfmt-wrapper",
+ "schemars",
+ "serde_json",
+ "syn 1.0.109",
+ "thiserror",
+ "unicode-ident",
+]
+
+[[package]]
+name = "typify-impl"
+version = "0.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95d27d749378ceab6ec22188ed7ad102205c89ddb92ab662371c850ffc71aa1a"
+dependencies = [
+ "heck 0.4.1",
+ "log",
+ "proc-macro2",
+ "quote",
+ "regress 0.5.0",
  "schemars",
  "serde_json",
  "syn 1.0.109",
@@ -9314,7 +9365,23 @@ dependencies = [
  "serde_json",
  "serde_tokenstream",
  "syn 1.0.109",
- "typify-impl",
+ "typify-impl 0.0.10",
+]
+
+[[package]]
+name = "typify-macro"
+version = "0.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "35db6fc2bd9220ecdac6eeb88158824b83610de3dda0c6d0f2142b49efd858b0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "schemars",
+ "serde",
+ "serde_json",
+ "serde_tokenstream",
+ "syn 1.0.109",
+ "typify-impl 0.0.11",
 ]
 
 [[package]]
