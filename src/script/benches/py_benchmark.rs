@@ -132,6 +132,22 @@ def entry() -> vector[i64]:
     run_script(&source).await;
 }
 
+async fn api_heavy(backend: &str) {
+    let source = format!(
+        r#"
+from greptime import vector
+@copr(args=["number"], sql="select number from numbers", returns=["value"], backend="{backend}")
+def entry(number) -> vector[i64]:
+    for i in range(1000):
+        n2 = number + number
+        n_mul = n2 * n2
+        n_mask = n_mul[n_mul>2]
+    return 1
+"#
+    );
+    run_script(&source).await;
+}
+
 fn criterion_benchmark(c: &mut Criterion) {
     // TODO: Prime Number, api heavy computation
     // and database-local computation/remote download python script comparison
@@ -161,6 +177,14 @@ fn criterion_benchmark(c: &mut Criterion) {
     c.bench_function("loop 1M pyo3", |b| {
         b.to_async(tokio::runtime::Runtime::new().unwrap())
             .iter(|| loop_1_million(black_box("pyo3")))
+    });
+    c.bench_function("api heavy rspy", |b| {
+        b.to_async(tokio::runtime::Runtime::new().unwrap())
+            .iter(|| api_heavy(black_box("rspy")))
+    });
+    c.bench_function("api heavy pyo3", |b| {
+        b.to_async(tokio::runtime::Runtime::new().unwrap())
+            .iter(|| api_heavy(black_box("pyo3")))
     });
 }
 
