@@ -12,10 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod compression;
-pub mod error;
-pub mod file_format;
-pub mod lister;
-pub mod object_store;
-pub mod test_util;
-pub mod util;
+pub mod csv;
+pub mod json;
+pub mod parquet;
+
+pub const DEFAULT_SCHEMA_INFER_MAX_RECORD: usize = 1000;
+
+use arrow::datatypes::SchemaRef;
+use async_trait::async_trait;
+use object_store::ObjectStore;
+
+use crate::error::Result;
+
+#[async_trait]
+pub trait FileFormat: Send + Sync + std::fmt::Debug {
+    async fn infer_schema(&self, store: &ObjectStore, path: String) -> Result<SchemaRef>;
+}

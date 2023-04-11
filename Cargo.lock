@@ -1561,11 +1561,19 @@ dependencies = [
 name = "common-datasource"
 version = "0.1.1"
 dependencies = [
+ "arrow",
+ "arrow-schema",
+ "async-compression",
+ "async-trait",
  "common-error",
+ "common-runtime",
+ "datafusion",
  "futures",
  "object-store",
  "regex",
  "snafu",
+ "tokio",
+ "tokio-util",
  "url",
 ]
 
