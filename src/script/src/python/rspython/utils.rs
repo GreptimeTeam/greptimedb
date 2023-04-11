@@ -86,21 +86,21 @@ pub fn py_obj_to_vec(
         Ok(pyv.as_vector_ref())
     } else if is_instance::<PyInt>(obj, vm) {
         let val = obj
-            .to_owned()
+            .clone()
             .try_into_value::<i64>(vm)
             .map_err(|e| format_py_error(e, vm))?;
         let ret = Int64Vector::from_iterator(std::iter::repeat(val).take(col_len));
         Ok(Arc::new(ret) as _)
     } else if is_instance::<PyFloat>(obj, vm) {
         let val = obj
-            .to_owned()
+            .clone()
             .try_into_value::<f64>(vm)
             .map_err(|e| format_py_error(e, vm))?;
         let ret = Float64Vector::from_iterator(std::iter::repeat(val).take(col_len));
         Ok(Arc::new(ret) as _)
     } else if is_instance::<PyBool>(obj, vm) {
         let val = obj
-            .to_owned()
+            .clone()
             .try_into_value::<bool>(vm)
             .map_err(|e| format_py_error(e, vm))?;
 
@@ -108,7 +108,7 @@ pub fn py_obj_to_vec(
         Ok(Arc::new(ret) as _)
     } else if is_instance::<PyStr>(obj, vm) {
         let val = obj
-            .to_owned()
+            .clone()
             .try_into_value::<String>(vm)
             .map_err(|e| format_py_error(e, vm))?;
 

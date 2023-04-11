@@ -78,7 +78,7 @@ impl FromRow for MysqlTextRow {
             let value = if let Some(mysql_value) = row.as_ref(i) {
                 match mysql_value {
                     MysqlValue::NULL => Value::Null,
-                    MysqlValue::Bytes(v) => Value::from(v.to_vec()),
+                    MysqlValue::Bytes(v) => Value::from(v.clone()),
                     _ => unreachable!(),
                 }
             } else {

@@ -573,7 +573,7 @@ pub(crate) fn create_alter_operation(
             create_add_columns_operation(table_name, columns, table_meta)
         }
         AlterKind::DropColumns { names } => Ok(Some(AlterOperation::DropColumns {
-            names: names.to_vec(),
+            names: names.clone(),
         })),
         // No need to build alter operation when reaming tables.
         AlterKind::RenameTable { .. } => Ok(None),
