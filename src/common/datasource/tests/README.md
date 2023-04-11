@@ -1,5 +1,5 @@
 ### Parquet
-The `parquet/basic.parquet` was converted from `csv/basic.csv` via [dbt](https://github.com/andygrove/bdt).
+The `parquet/basic.parquet` was converted from `csv/basic.csv` via [bdt](https://github.com/andygrove/bdt).
 
 Internal of  `parquet/basic.parquet`: 
 

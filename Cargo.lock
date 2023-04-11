@@ -1565,6 +1565,7 @@ dependencies = [
  "async-compression",
  "async-trait",
  "common-error",
+ "common-runtime",
  "datafusion",
  "futures",
  "object-store",

@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 arrow.workspace = true
 arrow-schema.workspace = true
-async-compression = { version = "0.3.15", features = [
+async-compression = { version = "0.3", features = [
     "bzip2",
     "gzip",
     "xz",
@@ -15,8 +15,9 @@ async-compression = { version = "0.3.15", features = [
     "futures-io",
     "tokio",
 ] }
-async-trait = "0.1"
+async-trait.workspace = true
 common-error = { path = "../error" }
+common-runtime = { path = "../runtime" }
 datafusion.workspace = true
 futures.workspace = true
 object-store = { path = "../../object-store" }

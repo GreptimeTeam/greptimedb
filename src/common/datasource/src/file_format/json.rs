@@ -18,6 +18,7 @@ use std::sync::Arc;
 use arrow::datatypes::SchemaRef;
 use arrow::json::reader::{infer_json_schema_from_iterator, ValueIter};
 use async_trait::async_trait;
+use common_runtime;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 use tokio_util::io::SyncIoBridge;
@@ -53,7 +54,7 @@ impl FileFormat for JsonFormat {
 
         let schema_infer_max_record = self.schema_infer_max_record;
 
-        tokio::task::spawn_blocking(move || {
+        common_runtime::spawn_blocking_read(move || {
             let mut reader = BufReader::new(SyncIoBridge::new(decoded));
 
             let iter = ValueIter::new(&mut reader, schema_infer_max_record);

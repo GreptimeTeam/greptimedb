@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Display;
 use std::str::FromStr;
 
 use async_compression::tokio::bufread::{BzDecoder, GzipDecoder, XzDecoder, ZstdDecoder};
@@ -51,16 +52,15 @@ impl FromStr for CompressionType {
     }
 }
 
-impl ToString for CompressionType {
-    fn to_string(&self) -> String {
-        match self {
+impl Display for CompressionType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
             Self::GZIP => "GZIP",
             Self::BZIP2 => "BZIP2",
             Self::XZ => "XZ",
             Self::ZSTD => "ZSTD",
             Self::UNCOMPRESSED => "",
-        }
-        .to_string()
+        })
     }
 }
 

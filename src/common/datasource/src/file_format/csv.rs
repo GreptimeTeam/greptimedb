@@ -17,6 +17,7 @@ use std::sync::Arc;
 use arrow::csv::reader::infer_reader_schema as infer_csv_schema;
 use arrow_schema::SchemaRef;
 use async_trait::async_trait;
+use common_runtime;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 use tokio_util::io::SyncIoBridge;
@@ -58,14 +59,14 @@ impl FileFormat for CsvFormat {
         let schema_infer_max_record = self.schema_infer_max_record;
         let has_header = self.has_header;
 
-        tokio::task::spawn_blocking(move || {
+        common_runtime::spawn_blocking_read(move || {
             let reader = SyncIoBridge::new(decoded);
 
             let (schema, _records_read) =
                 infer_csv_schema(reader, delimiter, schema_infer_max_record, has_header)
                     .context(error::InferSchemaSnafu { path: &path })?;
 
-            Ok::<SchemaRef, error::Error>(Arc::new(schema))
+            Ok(Arc::new(schema))
         })
         .await
         .context(error::JoinHandleSnafu)?
