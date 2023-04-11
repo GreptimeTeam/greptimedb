@@ -2827,6 +2827,7 @@ dependencies = [
  "common-query",
  "common-telemetry",
  "common-test-util",
+ "common-time",
  "datatypes",
  "futures",
  "object-store",

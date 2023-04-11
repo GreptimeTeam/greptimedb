@@ -6,6 +6,7 @@ license.workspace = true
 
 [features]
 default = []
+test = ["common-test-util"]
 
 [dependencies]
 async-trait = "0.1"
@@ -14,6 +15,7 @@ common-error = { path = "../common/error" }
 common-procedure = { path = "../common/procedure" }
 common-query = { path = "../common/query" }
 common-telemetry = { path = "../common/telemetry" }
+common-time = { path = "../common/time" }
 datatypes = { path = "../datatypes" }
 futures.workspace = true
 object-store = { path = "../object-store" }
@@ -25,3 +27,6 @@ store-api = { path = "../store-api" }
 table = { path = "../table" }
 common-test-util = { path = "../common/test-util", optional = true }
 tokio.workspace = true
+
+[dev-dependencies]
+common-test-util = { path = "../common/test-util" }
