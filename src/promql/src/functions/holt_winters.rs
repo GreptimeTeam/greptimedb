@@ -41,7 +41,6 @@ use crate::range_array::RangeArray;
 /// the "Holt's linear"("double exponential smoothing") suits better and reflects implementation.
 /// There's the [discussion](https://github.com/prometheus/prometheus/issues/2458) in the Prometheus Github that dates back
 /// to 2017 highlighting the naming/implementation mismatch.
-
 pub struct HoltWinters {
     sf: f64,
     tf: f64,
