@@ -877,7 +877,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_time_zone() {
+    fn test_parse_in_time_zone() {
         std::env::set_var("TZ", "Asia/Shanghai");
         assert_eq!(
             Timestamp::new(0, TimeUnit::Nanosecond),

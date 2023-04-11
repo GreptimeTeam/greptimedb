@@ -56,12 +56,12 @@ impl FromStr for DateTime {
 
     fn from_str(s: &str) -> Result<Self> {
         let local = Local {};
-        let datetime = if let Ok(v) = NaiveDateTime::parse_from_str(s, DATETIME_FORMAT) {
-            match local.from_local_datetime(&v) {
+        let timestamp = if let Ok(d) = NaiveDateTime::parse_from_str(s, DATETIME_FORMAT) {
+            match local.from_local_datetime(&d) {
                 LocalResult::None => {
                     return InvalidDateStrSnafu { raw: s }.fail();
                 }
-                LocalResult::Single(v) | LocalResult::Ambiguous(v, _) => v.naive_utc().timestamp(),
+                LocalResult::Single(d) | LocalResult::Ambiguous(d, _) => d.naive_utc().timestamp(),
             }
         } else if let Ok(v) = chrono::DateTime::parse_from_str(s, DATETIME_FORMAT_WITH_TZ) {
             v.timestamp()
@@ -69,8 +69,7 @@ impl FromStr for DateTime {
             return InvalidDateStrSnafu { raw: s }.fail();
         };
 
-        // let unix_ts = local.from_utc_datetime(&datetime).timestamp();
-        Ok(Self(datetime))
+        Ok(Self(timestamp))
     }
 }
 
