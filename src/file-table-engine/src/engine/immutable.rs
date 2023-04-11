@@ -115,6 +115,13 @@ impl TableEngine for ImmutableFileTableEngine {
     }
 }
 
+#[cfg(test)]
+impl ImmutableFileTableEngine {
+    pub async fn close_table(&self, table_ref: &TableReference<'_>) -> TableResult<()> {
+        self.inner.close_table(table_ref).await
+    }
+}
+
 impl ImmutableFileTableEngine {
     pub fn new(config: EngineConfig, object_store: ObjectStore) -> Self {
         ImmutableFileTableEngine {
@@ -344,7 +351,7 @@ impl EngineInner {
     async fn close(&self) -> TableResult<()> {
         let _lock = self.table_mutex.lock().await;
 
-        let mut tables = self.tables.write().unwrap().clone();
+        let tables = self.tables.read().unwrap().clone();
 
         futures::future::try_join_all(tables.values().map(|t| t.close()))
             .await
@@ -352,7 +359,7 @@ impl EngineInner {
             .context(table_error::TableOperationSnafu)?;
 
         // Releases all closed table
-        tables.clear();
+        self.tables.write().unwrap().clear();
 
         Ok(())
     }
@@ -368,5 +375,26 @@ impl EngineInner {
             &self.object_store,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+impl EngineInner {
+    pub async fn close_table(&self, table_ref: &TableReference<'_>) -> TableResult<()> {
+        let full_name = table_ref.to_string();
+
+        let _lock = self.table_mutex.lock().await;
+
+        if let Some(table) = self.get_table_by_full_name(&full_name) {
+            table
+                .close()
+                .await
+                .map_err(BoxedError::new)
+                .context(table_error::TableOperationSnafu)?;
+        }
+
+        self.tables.write().unwrap().remove(&full_name);
+
+        Ok(())
     }
 }

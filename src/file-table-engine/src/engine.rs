@@ -11,9 +11,11 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 pub mod immutable;
 #[cfg(test)]
 mod tests;
+
 use table::metadata::TableVersion;
 
 const INIT_TABLE_VERSION: TableVersion = 0;

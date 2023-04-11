@@ -19,8 +19,6 @@ use table::engine::{EngineContext, TableEngine, TableReference};
 use table::requests::{AlterKind, AlterTableRequest, DropTableRequest, OpenTableRequest};
 use table::{error as table_error, Table};
 
-use crate::config::EngineConfig;
-use crate::engine::immutable::ImmutableFileTableEngine;
 use crate::manifest::immutable::manifest_path;
 use crate::table::immutable::ImmutableFileTable;
 use crate::test_util::{self, TestEngineComponents, TEST_TABLE_NAME};
@@ -60,36 +58,28 @@ async fn test_open_table() {
         table_id: 1,
     };
 
-    let (table, object_store, _dir) = {
-        let TestEngineComponents {
-            table_engine,
-            table_ref: table,
-            object_store,
-            dir,
-            ..
-        } = test_util::setup_test_engine_and_table("test_open_table").await;
-
-        assert_eq!(IMMUTABLE_FILE_ENGINE, table_engine.name());
-
-        let reopened = table_engine
-            .open_table(&ctx, open_req.clone())
-            .await
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(table.schema(), reopened.schema());
-
-        (table, object_store, dir)
+    let table_ref = TableReference {
+        catalog: DEFAULT_CATALOG_NAME,
+        schema: DEFAULT_SCHEMA_NAME,
+        table: test_util::TEST_TABLE_NAME,
     };
 
-    let table_engine = ImmutableFileTableEngine::new(EngineConfig::default(), object_store);
+    let TestEngineComponents {
+        table_engine,
+        table_ref: table,
+        dir: _dir,
+        ..
+    } = test_util::setup_test_engine_and_table("test_open_table").await;
+
+    assert_eq!(IMMUTABLE_FILE_ENGINE, table_engine.name());
+
+    table_engine.close_table(&table_ref).await.unwrap();
+
     let reopened = table_engine
         .open_table(&ctx, open_req.clone())
         .await
         .unwrap()
         .unwrap();
-
-    assert_eq!(table.schema(), reopened.schema());
 
     let reopened = reopened
         .as_any()
@@ -101,6 +91,29 @@ async fn test_open_table() {
 
     // assert recovered table_info is correct
     assert_eq!(left, right);
+}
+
+#[tokio::test]
+async fn test_close_all_table() {
+    common_telemetry::init_default_ut_logging();
+
+    let table_ref = TableReference {
+        catalog: DEFAULT_CATALOG_NAME,
+        schema: DEFAULT_SCHEMA_NAME,
+        table: test_util::TEST_TABLE_NAME,
+    };
+
+    let TestEngineComponents {
+        table_engine,
+        dir: _dir,
+        ..
+    } = test_util::setup_test_engine_and_table("test_close_all_table").await;
+
+    table_engine.close().await.unwrap();
+
+    let exist = table_engine.table_exists(&EngineContext::default(), &table_ref);
+
+    assert!(!exist);
 }
 
 #[tokio::test]
