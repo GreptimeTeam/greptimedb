@@ -20,6 +20,8 @@ use datafusion::error::DataFusionError;
 use datatypes::arrow::error::ArrowError;
 use snafu::Location;
 
+use crate::metadata::TableId;
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Default error implementation of table.
@@ -106,6 +108,7 @@ pub enum Error {
         column_name: String,
         location: Location,
     },
+
     #[snafu(display("Regions schemas mismatch in table: {}", table))]
     RegionSchemaMismatch { table: String, location: Location },
 
@@ -119,6 +122,12 @@ pub enum Error {
     ParseTableOption {
         key: String,
         value: String,
+        location: Location,
+    },
+
+    #[snafu(display("Invalid table state: {}", table_id))]
+    InvalidTable {
+        table_id: TableId,
         location: Location,
     },
 }
@@ -143,6 +152,7 @@ impl ErrorExt for Error {
             Error::ParseTableOption { .. }
             | Error::EngineNotFound { .. }
             | Error::EngineExist { .. } => StatusCode::InvalidArguments,
+            Error::InvalidTable { .. } => StatusCode::Internal,
         }
     }
 

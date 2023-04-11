@@ -39,7 +39,9 @@ use store_api::storage::{
     RegionMeta, RegionNumber, ScanRequest, SchemaRef, Snapshot, WriteContext, WriteRequest,
 };
 use table::error as table_error;
-use table::error::{RegionSchemaMismatchSnafu, Result as TableResult, TableOperationSnafu};
+use table::error::{
+    InvalidTableSnafu, RegionSchemaMismatchSnafu, Result as TableResult, TableOperationSnafu,
+};
 use table::metadata::{
     FilterPushDownType, RawTableInfo, TableInfo, TableInfoRef, TableMeta, TableType,
 };
@@ -193,7 +195,10 @@ impl<R: Region> Table for MitoTable<R> {
 
         // TODO(hl): we assume table contains at least one region, but with region migration this
         // assumption may become invalid.
-        let stream_schema = first_schema.unwrap();
+        let stream_schema = first_schema.context(InvalidTableSnafu {
+            table_id: table_info.ident.table_id,
+        })?;
+
         let schema = stream_schema.clone();
         let stream = Box::pin(async_stream::try_stream! {
             for mut reader in readers {
