@@ -14,7 +14,8 @@
 
 pub mod error;
 mod global;
-pub mod metric;
+mod metrics;
+mod repeated_task;
 pub mod runtime;
 
 pub use global::{
@@ -23,4 +24,5 @@ pub use global::{
     spawn_read, spawn_write, write_runtime,
 };
 
+pub use crate::repeated_task::{RepeatedTask, TaskFunction, TaskFunctionRef};
 pub use crate::runtime::{Builder, JoinError, JoinHandle, Runtime};

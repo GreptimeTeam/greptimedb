@@ -156,6 +156,7 @@ pub struct StoreConfig<S: LogStore> {
     pub engine_config: Arc<EngineConfig>,
     pub file_purger: FilePurgerRef,
     pub ttl: Option<Duration>,
+    pub compaction_time_window: Option<i64>,
 }
 
 pub type RecoverdMetadata = (SequenceNumber, (ManifestVersion, RawRegionMetadata));
@@ -232,6 +233,7 @@ impl<S: LogStore> RegionImpl<S> {
                 store_config.memtable_builder,
                 store_config.engine_config.clone(),
                 store_config.ttl,
+                store_config.compaction_time_window,
             )),
             wal,
             flush_strategy: store_config.flush_strategy,
@@ -250,7 +252,7 @@ impl<S: LogStore> RegionImpl<S> {
     pub async fn open(
         name: String,
         store_config: StoreConfig<S>,
-        _opts: &OpenOptions,
+        opts: &OpenOptions,
     ) -> Result<Option<RegionImpl<S>>> {
         // Load version meta data from manifest.
         let (version, mut recovered_metadata) = match Self::recover_from_manifest(
@@ -307,11 +309,14 @@ impl<S: LogStore> RegionImpl<S> {
             name,
             version_control,
         });
-
+        let compaction_time_window = store_config
+            .compaction_time_window
+            .or(opts.compaction_time_window);
         let writer = Arc::new(RegionWriter::new(
             store_config.memtable_builder,
             store_config.engine_config.clone(),
             store_config.ttl,
+            compaction_time_window,
         ));
         let writer_ctx = WriterContext {
             shared: &shared,
@@ -327,6 +332,12 @@ impl<S: LogStore> RegionImpl<S> {
         writer
             .replay(recovered_metadata_after_flushed, writer_ctx)
             .await?;
+
+        // Try to do a manifest checkpoint on opening
+        if store_config.engine_config.manifest_checkpoint_on_startup {
+            let manifest = &store_config.manifest;
+            manifest.may_do_checkpoint(manifest.last_version()).await?;
+        }
 
         let inner = Arc::new(RegionInner {
             shared,
@@ -629,7 +640,8 @@ impl<S: LogStore> RegionInner<S> {
     }
 
     async fn close(&self) -> Result<()> {
-        self.writer.close().await
+        self.writer.close().await?;
+        self.manifest.stop().await
     }
 
     async fn flush(&self, ctx: &FlushContext) -> Result<()> {

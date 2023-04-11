@@ -413,7 +413,6 @@ mod tests {
 
     fn check_err(err: Error, msg: &str) {
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
-        assert!(err.backtrace_opt().is_some());
         assert!(
             err.to_string().contains(msg),
             "<{err}> does not contain {msg}",

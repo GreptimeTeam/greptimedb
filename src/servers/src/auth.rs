@@ -18,7 +18,7 @@ use common_error::ext::BoxedError;
 use common_error::prelude::ErrorExt;
 use common_error::status_code::StatusCode;
 use session::context::UserInfo;
-use snafu::{Backtrace, ErrorCompat, OptionExt, Snafu};
+use snafu::{Location, OptionExt, Snafu};
 
 use crate::auth::user_provider::StaticUserProvider;
 
@@ -35,6 +35,20 @@ pub trait UserProvider: Send + Sync {
     /// from a certain user to a certain catalog/schema is legal.
     /// This method should be called after [`authenticate`].
     async fn authorize(&self, catalog: &str, schema: &str, user_info: &UserInfo) -> Result<()>;
+
+    /// [`auth`] is a combination of [`authenticate`] and [`authorize`].
+    /// In most cases it's preferred for both convenience and performance.
+    async fn auth(
+        &self,
+        id: Identity<'_>,
+        password: Password<'_>,
+        catalog: &str,
+        schema: &str,
+    ) -> Result<UserInfo> {
+        let user_info = self.authenticate(id, password).await?;
+        self.authorize(catalog, schema, &user_info).await?;
+        Ok(user_info)
+    }
 }
 
 pub type UserProviderRef = Arc<dyn UserProvider>;
@@ -91,7 +105,7 @@ pub enum Error {
     #[snafu(display("IO error, source: {}", source))]
     Io {
         source: std::io::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Auth failed, source: {}", source))]
@@ -136,10 +150,6 @@ impl ErrorExt for Error {
             Error::UserPasswordMismatch { .. } => StatusCode::UserPasswordMismatch,
             Error::AccessDenied { .. } => StatusCode::AccessDenied,
         }
-    }
-
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        ErrorCompat::backtrace(self)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

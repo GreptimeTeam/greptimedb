@@ -36,6 +36,10 @@ pub trait ManifestLogStorage {
         end: ManifestVersion,
     ) -> Result<Self::Iter, Self::Error>;
 
+    /// Delete logs which version is less than specified version.
+    /// Returns the delete logs number.
+    async fn delete_until(&self, version: ManifestVersion) -> Result<usize, Self::Error>;
+
     /// Save  a log
     async fn save(&self, version: ManifestVersion, bytes: &[u8]) -> Result<(), Self::Error>;
 

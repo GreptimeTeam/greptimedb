@@ -17,9 +17,7 @@ use std::sync::Arc;
 use clap::Parser;
 use common_base::Plugins;
 use common_telemetry::info;
-use datanode::datanode::{
-    CompactionConfig, Datanode, DatanodeOptions, ObjectStoreConfig, ProcedureConfig, WalConfig,
-};
+use datanode::datanode::{Datanode, DatanodeOptions, ProcedureConfig, StorageConfig, WalConfig};
 use datanode::instance::InstanceRef;
 use frontend::frontend::FrontendOptions;
 use frontend::grpc::GrpcOptions;
@@ -82,8 +80,7 @@ pub struct StandaloneOptions {
     pub prometheus_options: Option<PrometheusOptions>,
     pub prom_options: Option<PromOptions>,
     pub wal: WalConfig,
-    pub storage: ObjectStoreConfig,
-    pub compaction: CompactionConfig,
+    pub storage: StorageConfig,
     pub procedure: Option<ProcedureConfig>,
 }
 
@@ -101,8 +98,7 @@ impl Default for StandaloneOptions {
             prometheus_options: Some(PrometheusOptions::default()),
             prom_options: Some(PromOptions::default()),
             wal: WalConfig::default(),
-            storage: ObjectStoreConfig::default(),
-            compaction: CompactionConfig::default(),
+            storage: StorageConfig::default(),
             procedure: None,
         }
     }
@@ -129,7 +125,6 @@ impl StandaloneOptions {
             enable_memory_catalog: self.enable_memory_catalog,
             wal: self.wal,
             storage: self.storage,
-            compaction: self.compaction,
             procedure: self.procedure,
             ..Default::default()
         }
@@ -241,8 +236,9 @@ async fn build_frontend(
     plugins: Arc<Plugins>,
     datanode_instance: InstanceRef,
 ) -> Result<FeInstance> {
-    let mut frontend_instance = FeInstance::new_standalone(datanode_instance.clone());
-    frontend_instance.set_script_handler(datanode_instance);
+    let mut frontend_instance = FeInstance::try_new_standalone(datanode_instance.clone())
+        .await
+        .context(StartFrontendSnafu)?;
     frontend_instance.set_plugins(plugins.clone());
     Ok(frontend_instance)
 }

@@ -18,6 +18,7 @@ use std::time::Duration;
 use catalog::local::MemoryCatalogManager;
 use catalog::CatalogManagerRef;
 use common_procedure::local::{LocalManager, ManagerConfig};
+use common_procedure::store::state_store::ObjectStateStore;
 use common_procedure::ProcedureManagerRef;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use log_store::NoopLogStore;
@@ -62,11 +63,12 @@ impl TestEnv {
         builder.root(&procedure_dir);
         let object_store = ObjectStore::new(builder).unwrap().finish();
 
-        let procedure_manager = Arc::new(LocalManager::new(ManagerConfig {
-            object_store,
+        let config = ManagerConfig {
             max_retry_times: 3,
             retry_delay: Duration::from_secs(500),
-        }));
+        };
+        let state_store = Arc::new(ObjectStateStore::new(object_store));
+        let procedure_manager = Arc::new(LocalManager::new(config, state_store));
 
         let catalog_manager = Arc::new(MemoryCatalogManager::default());
 

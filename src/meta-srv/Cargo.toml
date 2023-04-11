@@ -10,12 +10,14 @@ mock = []
 [dependencies]
 anymap = "1.0.0-beta.2"
 api = { path = "../api" }
+async-stream.workspace = true
 async-trait = "0.1"
 catalog = { path = "../catalog" }
 common-base = { path = "../common/base" }
 common-catalog = { path = "../common/catalog" }
 common-error = { path = "../common/error" }
 common-grpc = { path = "../common/grpc" }
+common-procedure = { path = "../common/procedure" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
@@ -39,6 +41,7 @@ tokio-stream = { version = "0.1", features = ["net"] }
 tonic.workspace = true
 tower = "0.4"
 url = "2.3"
+servers = { path = "../servers" }
 
 [dev-dependencies]
 tracing = "0.1"

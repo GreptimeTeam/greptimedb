@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub use opendal::raw::normalize_path as raw_normalize_path;
 pub use opendal::raw::oio::Pager;
 pub use opendal::{
     layers, services, Builder as ObjectStoreBuilder, Entry, EntryMode, Error, ErrorKind, Metakey,
-    Operator as ObjectStore, Result,
+    Operator as ObjectStore, Result, Writer,
 };
 
 pub mod cache_policy;

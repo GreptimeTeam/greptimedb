@@ -21,6 +21,10 @@ fmt: ## Format all the Rust code.
 
 .PHONY: fmt-toml
 fmt-toml: ## Format all TOML files.
+	taplo format --option "indent_string=    "
+
+.PHONY: check-toml
+check-toml: ## Check all TOML files.
 	taplo format --check --option "indent_string=    "
 
 .PHONY: docker-image

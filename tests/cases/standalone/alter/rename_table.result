@@ -7,7 +7,7 @@ DESC TABLE t;
 +-------+-------+------+---------+---------------+
 | Field | Type  | Null | Default | Semantic Type |
 +-------+-------+------+---------+---------------+
-| i     | Int32 | YES  |         | VALUE         |
+| i     | Int32 | YES  |         | FIELD         |
 | j     | Int64 | NO   |         | TIME INDEX    |
 +-------+-------+------+---------+---------------+
 
@@ -31,7 +31,7 @@ Affected Rows: 0
 
 DESC TABLE t;
 
-Error: 4001(TableNotFound), Table not found: t
+Error: 4001(TableNotFound), Table `t` not exist
 
 SELECT * FROM t;
 
@@ -46,10 +46,11 @@ DESC TABLE new_table;
 +-------+-------+------+---------+---------------+
 | Field | Type  | Null | Default | Semantic Type |
 +-------+-------+------+---------+---------------+
-| i     | Int32 | YES  |         | VALUE         |
+| i     | Int32 | YES  |         | FIELD         |
 | j     | Int64 | NO   |         | TIME INDEX    |
 +-------+-------+------+---------+---------------+
 
+-- SQLNESS ARG restart=true
 SELECT * FROM new_table;
 
 +---+---+

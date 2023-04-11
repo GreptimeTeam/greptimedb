@@ -34,7 +34,7 @@ use crate::error::{
     self, CatalogNotFoundSnafu, CatalogSnafu, ConstraintNotSupportedSnafu, CreateTableSnafu,
     IllegalPrimaryKeysDefSnafu, InsertSystemCatalogSnafu, KeyColumnNotFoundSnafu,
     RegisterSchemaSnafu, Result, SchemaExistsSnafu, SchemaNotFoundSnafu, SubmitProcedureSnafu,
-    UnrecognizedTableOptionSnafu, WaitProcedureSnafu,
+    TableEngineNotFoundSnafu, UnrecognizedTableOptionSnafu, WaitProcedureSnafu,
 };
 use crate::sql::SqlHandler;
 
@@ -107,8 +107,14 @@ impl SqlHandler {
 
         // determine catalog and schema from the very beginning
         let table_name = req.table_name.clone();
-        let table = self
-            .table_engine
+        let table_engine =
+            self.table_engine_manager
+                .engine(&req.engine)
+                .context(TableEngineNotFoundSnafu {
+                    engine_name: &req.engine,
+                })?;
+
+        let table = table_engine
             .create_table(&ctx, req)
             .await
             .with_context(|_| CreateTableSnafu {
@@ -138,10 +144,16 @@ impl SqlHandler {
         req: CreateTableRequest,
     ) -> Result<Output> {
         let table_name = req.table_name.clone();
+        let table_engine =
+            self.table_engine_manager
+                .engine(&req.engine)
+                .context(TableEngineNotFoundSnafu {
+                    engine_name: &req.engine,
+                })?;
         let procedure = CreateTableProcedure::new(
             req,
             self.catalog_manager.clone(),
-            self.table_engine.clone(),
+            table_engine.clone(),
             self.engine_procedure.clone(),
         );
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
@@ -286,6 +298,7 @@ impl SqlHandler {
             primary_key_indices: primary_keys,
             create_if_not_exists: stmt.if_not_exists,
             table_options,
+            engine: stmt.engine,
         };
         Ok(request)
     }
@@ -313,13 +326,15 @@ mod tests {
     use common_base::readable_size::ReadableSize;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::Schema;
+    use query::parser::QueryLanguageParser;
+    use session::context::QueryContext;
     use sql::dialect::GenericDialect;
     use sql::parser::ParserContext;
     use sql::statements::statement::Statement;
 
     use super::*;
     use crate::error::Error;
-    use crate::tests::test_util::create_mock_sql_handler;
+    use crate::tests::test_util::{create_mock_sql_handler, MockInstance};
 
     fn sql_to_statement(sql: &str) -> CreateTable {
         let mut res = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
@@ -334,7 +349,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_table_with_options() {
-        let sql = r#"CREATE TABLE demo_table (timestamp BIGINT TIME INDEX, value DOUBLE, host STRING PRIMARY KEY) engine=mito with(regions=1, ttl='7days',write_buffer_size='32MB',some='other');"#;
+        let sql = r#"
+            CREATE TABLE demo_table (
+                "timestamp" BIGINT TIME INDEX, 
+                "value" DOUBLE,
+                host STRING PRIMARY KEY
+            ) engine=mito with(regions=1, ttl='7days',write_buffer_size='32MB',some='other');"#;
         let parsed_stmt = sql_to_statement(sql);
         let handler = create_mock_sql_handler().await;
         let c = handler
@@ -353,7 +373,12 @@ mod tests {
     pub async fn test_create_with_inline_primary_key() {
         let handler = create_mock_sql_handler().await;
         let parsed_stmt = sql_to_statement(
-            r#"CREATE TABLE demo_table (timestamp BIGINT TIME INDEX, value DOUBLE, host STRING PRIMARY KEY) engine=mito with(regions=1);"#,
+            r#"
+            CREATE TABLE demo_table(
+                "timestamp" BIGINT TIME INDEX, 
+                "value" DOUBLE,
+                host STRING PRIMARY KEY
+            ) engine=mito with(regions=1);"#,
         );
         let c = handler
             .create_to_request(42, parsed_stmt, &TableReference::bare("demo_table"))
@@ -392,8 +417,8 @@ mod tests {
         let handler = create_mock_sql_handler().await;
         let parsed_stmt = sql_to_statement(
             r#"create table demo_table (
-                      timestamp BIGINT TIME INDEX,
-                      value DOUBLE,
+                      "timestamp" BIGINT TIME INDEX,
+                      "value" DOUBLE,
                       host STRING PRIMARY KEY,
                       PRIMARY KEY(host)) engine=mito with(regions=1);"#,
         );
@@ -408,8 +433,8 @@ mod tests {
         let handler = create_mock_sql_handler().await;
         let parsed_stmt = sql_to_statement(
             r#"create table demo_table (
-                      timestamp BIGINT TIME INDEX,
-                      value DOUBLE PRIMARY KEY,
+                      "timestamp" BIGINT TIME INDEX,
+                      "value" DOUBLE PRIMARY KEY,
                       host STRING PRIMARY KEY) engine=mito with(regions=1);"#,
         );
         let error = handler
@@ -521,5 +546,43 @@ mod tests {
             ConcreteDataType::float64_datatype(),
             schema.column_schema_by_name("memory").unwrap().data_type
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_table_by_procedure() {
+        let instance = MockInstance::with_procedure_enabled("create_table_by_procedure").await;
+
+        let sql = r#"create table test_table(
+                            host string,
+                            ts timestamp,
+                            cpu double default 0,
+                            memory double,
+                            TIME INDEX (ts),
+                            PRIMARY KEY(host)
+                        ) engine=mito with(regions=1);"#;
+        let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
+        let output = instance
+            .inner()
+            .execute_stmt(stmt, QueryContext::arc())
+            .await
+            .unwrap();
+        assert!(matches!(output, Output::AffectedRows(0)));
+
+        // create if not exists
+        let sql = r#"create table if not exists test_table(
+                            host string,
+                            ts timestamp,
+                            cpu double default 0,
+                            memory double,
+                            TIME INDEX (ts),
+                            PRIMARY KEY(host)
+                        ) engine=mito with(regions=1);"#;
+        let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
+        let output = instance
+            .inner()
+            .execute_stmt(stmt, QueryContext::arc())
+            .await
+            .unwrap();
+        assert!(matches!(output, Output::AffectedRows(0)));
     }
 }

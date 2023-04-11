@@ -25,6 +25,7 @@ pub mod http;
 pub mod influxdb;
 pub mod interceptor;
 pub mod line_writer;
+pub mod metrics_handler;
 pub mod mysql;
 pub mod opentsdb;
 pub mod postgres;

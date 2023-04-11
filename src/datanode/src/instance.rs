@@ -23,6 +23,7 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER
 use common_error::prelude::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_procedure::local::{LocalManager, ManagerConfig};
+use common_procedure::store::state_store::ObjectStateStore;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::info;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
@@ -44,6 +45,7 @@ use storage::config::EngineConfig as StorageEngineConfig;
 use storage::scheduler::{LocalScheduler, SchedulerConfig};
 use storage::EngineImpl;
 use store_api::logstore::LogStore;
+use table::engine::manager::MemoryTableEngineManager;
 use table::requests::FlushTableRequest;
 use table::table::numbers::NumbersTable;
 use table::table::TableIdProviderRef;
@@ -57,11 +59,9 @@ use crate::error::{
     NewCatalogSnafu, OpenLogStoreSnafu, RecoverProcedureSnafu, Result, ShutdownInstanceSnafu,
 };
 use crate::heartbeat::HeartbeatTask;
-use crate::script::ScriptExecutor;
 use crate::sql::{SqlHandler, SqlRequest};
 
 mod grpc;
-mod script;
 pub mod sql;
 
 pub(crate) type DefaultEngine = MitoEngine<EngineImpl<RaftEngineLogStore>>;
@@ -71,9 +71,9 @@ pub struct Instance {
     pub(crate) query_engine: QueryEngineRef,
     pub(crate) sql_handler: SqlHandler,
     pub(crate) catalog_manager: CatalogManagerRef,
-    pub(crate) script_executor: ScriptExecutor,
     pub(crate) table_id_provider: Option<TableIdProviderRef>,
     pub(crate) heartbeat_task: Option<HeartbeatTask>,
+    procedure_manager: Option<ProcedureManagerRef>,
 }
 
 pub type InstanceRef = Arc<Instance>;
@@ -104,7 +104,7 @@ impl Instance {
         meta_client: Option<Arc<MetaClient>>,
         compaction_scheduler: CompactionSchedulerRef<RaftEngineLogStore>,
     ) -> Result<Self> {
-        let object_store = new_object_store(&opts.storage).await?;
+        let object_store = new_object_store(&opts.storage.store).await?;
         let log_store = Arc::new(create_log_store(&opts.wal).await?);
 
         let table_engine = Arc::new(DefaultEngine::new(
@@ -117,6 +117,8 @@ impl Instance {
             ),
             object_store,
         ));
+
+        let engine_manager = Arc::new(MemoryTableEngineManager::new(table_engine.clone()));
 
         // create remote catalog manager
         let (catalog_manager, table_id_provider) = match opts.mode {
@@ -142,7 +144,7 @@ impl Instance {
                     )
                 } else {
                     let catalog = Arc::new(
-                        catalog::local::LocalCatalogManager::try_new(table_engine.clone())
+                        catalog::local::LocalCatalogManager::try_new(engine_manager)
                             .await
                             .context(CatalogSnafu)?,
                     );
@@ -156,7 +158,7 @@ impl Instance {
 
             Mode::Distributed => {
                 let catalog = Arc::new(catalog::remote::RemoteCatalogManager::new(
-                    table_engine.clone(),
+                    engine_manager,
                     opts.node_id.context(MissingNodeIdSnafu)?,
                     Arc::new(MetaKvBackend {
                         client: meta_client.as_ref().unwrap().clone(),
@@ -168,8 +170,6 @@ impl Instance {
 
         let factory = QueryEngineFactory::new(catalog_manager.clone());
         let query_engine = factory.query_engine();
-        let script_executor =
-            ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?;
 
         let heartbeat_task = match opts.mode {
             Mode::Standalone => None,
@@ -183,6 +183,7 @@ impl Instance {
         };
 
         let procedure_manager = create_procedure_manager(&opts.procedure).await?;
+        // Register all procedures.
         if let Some(procedure_manager) = &procedure_manager {
             table_engine.register_procedure_loaders(&**procedure_manager);
             table_procedure::register_procedure_loaders(
@@ -191,26 +192,20 @@ impl Instance {
                 table_engine.clone(),
                 &**procedure_manager,
             );
-
-            // Recover procedures.
-            procedure_manager
-                .recover()
-                .await
-                .context(RecoverProcedureSnafu)?;
         }
 
         Ok(Self {
             query_engine: query_engine.clone(),
             sql_handler: SqlHandler::new(
-                table_engine.clone(),
+                Arc::new(MemoryTableEngineManager::new(table_engine.clone())),
                 catalog_manager.clone(),
                 table_engine,
-                procedure_manager,
+                procedure_manager.clone(),
             ),
             catalog_manager,
-            script_executor,
             heartbeat_task,
             table_id_provider,
+            procedure_manager,
         })
     }
 
@@ -221,6 +216,15 @@ impl Instance {
             .context(NewCatalogSnafu)?;
         if let Some(task) = &self.heartbeat_task {
             task.start().await?;
+        }
+
+        // Recover procedures after the catalog manager is started, so we can
+        // ensure we can access all tables from the catalog manager.
+        if let Some(procedure_manager) = &self.procedure_manager {
+            procedure_manager
+                .recover()
+                .await
+                .context(RecoverProcedureSnafu)?;
         }
         Ok(())
     }
@@ -308,11 +312,22 @@ pub(crate) async fn new_object_store(store_config: &ObjectStoreConfig) -> Result
         ObjectStoreConfig::Oss { .. } => new_oss_object_store(store_config).await,
     };
 
+    // Don't enable retry layer when using local file backend.
+    let object_store = if !matches!(store_config, ObjectStoreConfig::File(..)) {
+        object_store.map(|object_store| object_store.layer(RetryLayer::new().with_jitter()))
+    } else {
+        object_store
+    };
+
     object_store.map(|object_store| {
         object_store
-            .layer(RetryLayer::new().with_jitter())
             .layer(MetricsLayer)
-            .layer(LoggingLayer::default())
+            .layer(
+                LoggingLayer::default()
+                    // Print the expected error only in DEBUG level.
+                    // See https://docs.rs/opendal/latest/opendal/layers/struct.LoggingLayer.html#method.with_error_level
+                    .with_error_level(Some(log::Level::Debug)),
+            )
             .layer(TracingLayer)
     })
 }
@@ -430,15 +445,27 @@ pub(crate) async fn new_fs_object_store(store_config: &ObjectStoreConfig) -> Res
     info!("The file storage directory is: {}", &data_dir);
 
     let atomic_write_dir = format!("{data_dir}/.tmp/");
+    if path::Path::new(&atomic_write_dir).exists() {
+        info!(
+            "Begin to clean temp storage directory: {}",
+            &atomic_write_dir
+        );
+        fs::remove_dir_all(&atomic_write_dir).context(error::RemoveDirSnafu {
+            dir: &atomic_write_dir,
+        })?;
+        info!("Cleaned temp storage directory: {}", &atomic_write_dir);
+    }
 
     let mut builder = FsBuilder::default();
     builder.root(&data_dir).atomic_write_dir(&atomic_write_dir);
 
-    Ok(ObjectStore::new(builder)
+    let object_store = ObjectStore::new(builder)
         .context(error::InitBackendSnafu {
             config: store_config.clone(),
         })?
-        .finish())
+        .finish();
+
+    Ok(object_store)
 }
 
 /// Create metasrv client instance and spawn heartbeat loop.
@@ -504,11 +531,15 @@ pub(crate) async fn create_procedure_manager(
     );
 
     let object_store = new_object_store(&procedure_config.store).await?;
+    let state_store = Arc::new(ObjectStateStore::new(object_store));
+
     let manager_config = ManagerConfig {
-        object_store,
         max_retry_times: procedure_config.max_retry_times,
         retry_delay: procedure_config.retry_delay,
     };
 
-    Ok(Some(Arc::new(LocalManager::new(manager_config))))
+    Ok(Some(Arc::new(LocalManager::new(
+        manager_config,
+        state_store,
+    ))))
 }

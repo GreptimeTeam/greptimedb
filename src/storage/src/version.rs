@@ -24,7 +24,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use common_telemetry::info;
+use common_telemetry::{debug, info};
 use store_api::manifest::ManifestVersion;
 use store_api::storage::{SchemaRef, SequenceNumber};
 
@@ -237,7 +237,8 @@ impl Version {
         self.manifest_version = manifest_version;
         let ssts = self.ssts.merge(files, std::iter::empty());
         info!(
-            "After applying checkpoint, region: {}, flushed_sequence: {}, manifest_version: {}",
+            "After applying checkpoint, region: {}, id: {}, flushed_sequence: {}, manifest_version: {}",
+            self.metadata.name(),
             self.metadata.id(),
             self.flushed_sequence,
             self.manifest_version,
@@ -267,8 +268,9 @@ impl Version {
             .ssts
             .merge(handles_to_add, edit.files_to_remove.into_iter());
 
-        info!(
-            "After applying edit, region: {}, SST files: {:?}",
+        debug!(
+            "After applying edit, region: {}, id: {}, SST files: {:?}",
+            self.metadata.name(),
             self.metadata.id(),
             merged_ssts
         );

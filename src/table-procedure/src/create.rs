@@ -309,6 +309,7 @@ impl CreateTableData {
 mod tests {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, RawSchema};
+    use mito::engine::MITO_ENGINE;
     use table::engine::{EngineContext, TableEngine};
 
     use super::*;
@@ -345,6 +346,7 @@ mod tests {
             create_if_not_exists: true,
             primary_key_indices: vec![0],
             table_options: Default::default(),
+            engine: MITO_ENGINE.to_string(),
         }
     }
 

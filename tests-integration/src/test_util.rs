@@ -20,14 +20,16 @@ use std::time::Duration;
 
 use axum::Router;
 use catalog::CatalogManagerRef;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
+use common_catalog::consts::{
+    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID, MITO_ENGINE,
+};
 use common_runtime::Builder as RuntimeBuilder;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datanode::datanode::{
-    DatanodeOptions, FileConfig, ObjectStoreConfig, OssConfig, S3Config, WalConfig,
+    DatanodeOptions, FileConfig, ObjectStoreConfig, OssConfig, S3Config, StorageConfig, WalConfig,
 };
 use datanode::error::{CreateTableSnafu, Result};
-use datanode::instance::{Instance, InstanceRef};
+use datanode::instance::Instance;
 use datanode::sql::SqlHandler;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema};
@@ -38,7 +40,8 @@ use object_store::ObjectStore;
 use once_cell::sync::OnceCell;
 use rand::Rng;
 use servers::grpc::GrpcServer;
-use servers::http::{HttpOptions, HttpServer};
+use servers::http::{HttpOptions, HttpServerBuilder};
+use servers::metrics_handler::MetricsHandler;
 use servers::prom::PromServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
 use servers::query_handler::sql::ServerSqlQueryHandlerAdaptor;
@@ -100,8 +103,7 @@ fn get_test_store_config(
                 access_key_secret: env::var("GT_OSS_ACCESS_KEY").unwrap(),
                 bucket: env::var("GT_OSS_BUCKET").unwrap(),
                 endpoint: env::var("GT_OSS_ENDPOINT").unwrap(),
-                cache_path: None,
-                cache_capacity: None,
+                ..Default::default()
             };
 
             let mut builder = Oss::default();
@@ -127,10 +129,7 @@ fn get_test_store_config(
                 access_key_id: env::var("GT_S3_ACCESS_KEY_ID").unwrap(),
                 secret_access_key: env::var("GT_S3_ACCESS_KEY").unwrap(),
                 bucket: env::var("GT_S3_BUCKET").unwrap(),
-                endpoint: None,
-                region: None,
-                cache_path: None,
-                cache_capacity: None,
+                ..Default::default()
             };
 
             let mut builder = S3::default();
@@ -189,14 +188,17 @@ pub fn create_tmp_dir_and_datanode_opts(
 ) -> (DatanodeOptions, TestGuard) {
     let wal_tmp_dir = create_temp_dir(&format!("gt_wal_{name}"));
 
-    let (storage, data_tmp_dir) = get_test_store_config(&store_type, name);
+    let (store, data_tmp_dir) = get_test_store_config(&store_type, name);
 
     let opts = DatanodeOptions {
         wal: WalConfig {
             dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
             ..Default::default()
         },
-        storage,
+        storage: StorageConfig {
+            store,
+            ..Default::default()
+        },
         mode: Mode::Standalone,
         ..Default::default()
     };
@@ -222,7 +224,10 @@ pub async fn create_test_table(
     ];
 
     let table_name = "demo";
-    let table_engine: TableEngineRef = sql_handler.table_engine();
+    let table_engine: TableEngineRef = sql_handler
+        .table_engine_manager()
+        .engine(MITO_ENGINE)
+        .unwrap();
     let table = table_engine
         .create_table(
             &EngineContext::default(),
@@ -237,6 +242,7 @@ pub async fn create_test_table(
                 primary_key_indices: vec![0], // "host" is in primary keys
                 table_options: TableOptions::default(),
                 region_numbers: vec![0],
+                engine: MITO_ENGINE.to_string(),
             },
         )
         .await
@@ -255,16 +261,9 @@ pub async fn create_test_table(
     Ok(())
 }
 
-fn build_frontend_instance(datanode_instance: InstanceRef) -> FeInstance {
-    let mut frontend_instance = FeInstance::new_standalone(datanode_instance.clone());
-    frontend_instance.set_script_handler(datanode_instance);
-    frontend_instance
-}
-
 pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router, TestGuard) {
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
     let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
-    instance.start().await.unwrap();
     create_test_table(
         instance.catalog_manager(),
         instance.sql_handler(),
@@ -272,11 +271,17 @@ pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router
     )
     .await
     .unwrap();
-    let http_server = HttpServer::new(
-        ServerSqlQueryHandlerAdaptor::arc(Arc::new(build_frontend_instance(instance.clone()))),
-        ServerGrpcQueryHandlerAdaptor::arc(instance.clone()),
-        HttpOptions::default(),
-    );
+    let frontend_instance = FeInstance::try_new_standalone(instance.clone())
+        .await
+        .unwrap();
+    instance.start().await.unwrap();
+    let http_server = HttpServerBuilder::new(HttpOptions::default())
+        .with_sql_handler(ServerSqlQueryHandlerAdaptor::arc(Arc::new(
+            frontend_instance,
+        )))
+        .with_grpc_handler(ServerGrpcQueryHandlerAdaptor::arc(instance.clone()))
+        .with_metrics_handler(MetricsHandler)
+        .build();
     (http_server.make_app(), guard)
 }
 
@@ -286,7 +291,9 @@ pub async fn setup_test_http_app_with_frontend(
 ) -> (Router, TestGuard) {
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
     let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
-    let frontend = build_frontend_instance(instance.clone());
+    let frontend = FeInstance::try_new_standalone(instance.clone())
+        .await
+        .unwrap();
     instance.start().await.unwrap();
     create_test_table(
         frontend.catalog_manager(),
@@ -296,12 +303,11 @@ pub async fn setup_test_http_app_with_frontend(
     .await
     .unwrap();
     let frontend_ref = Arc::new(frontend);
-    let mut http_server = HttpServer::new(
-        ServerSqlQueryHandlerAdaptor::arc(frontend_ref.clone()),
-        ServerGrpcQueryHandlerAdaptor::arc(frontend_ref),
-        HttpOptions::default(),
-    );
-    http_server.set_script_handler(instance.clone());
+    let http_server = HttpServerBuilder::new(HttpOptions::default())
+        .with_sql_handler(ServerSqlQueryHandlerAdaptor::arc(frontend_ref.clone()))
+        .with_grpc_handler(ServerGrpcQueryHandlerAdaptor::arc(frontend_ref.clone()))
+        .with_script_handler(frontend_ref)
+        .build();
     let app = http_server.make_app();
     (app, guard)
 }
@@ -312,7 +318,9 @@ pub async fn setup_test_prom_app_with_frontend(
 ) -> (Router, TestGuard) {
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
     let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
-    let frontend = build_frontend_instance(instance.clone());
+    let frontend = FeInstance::try_new_standalone(instance.clone())
+        .await
+        .unwrap();
     instance.start().await.unwrap();
     create_test_table(
         frontend.catalog_manager(),
@@ -334,7 +342,6 @@ pub async fn setup_grpc_server(
 
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
     let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
-    instance.start().await.unwrap();
 
     let runtime = Arc::new(
         RuntimeBuilder::default()
@@ -346,7 +353,10 @@ pub async fn setup_grpc_server(
 
     let fe_grpc_addr = format!("127.0.0.1:{}", get_port());
 
-    let fe_instance = frontend::instance::Instance::new_standalone(instance.clone());
+    let fe_instance = FeInstance::try_new_standalone(instance.clone())
+        .await
+        .unwrap();
+    instance.start().await.unwrap();
     let fe_instance_ref = Arc::new(fe_instance);
     let fe_grpc_server = Arc::new(GrpcServer::new(
         ServerGrpcQueryHandlerAdaptor::arc(fe_instance_ref),

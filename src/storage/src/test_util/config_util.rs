@@ -18,6 +18,7 @@ use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::LogConfig;
 use object_store::services::Fs;
 use object_store::ObjectStore;
+use store_api::manifest::Manifest;
 
 use crate::background::JobPoolImpl;
 use crate::compaction::noop::NoopCompactionScheduler;
@@ -57,7 +58,8 @@ pub async fn new_store_config_with_object_store(
     let manifest_dir = engine::region_manifest_dir(parent_dir, region_name);
 
     let sst_layer = Arc::new(FsAccessLayer::new(&sst_dir, object_store.clone()));
-    let manifest = RegionManifest::with_checkpointer(&manifest_dir, object_store);
+    let manifest = RegionManifest::with_checkpointer(&manifest_dir, object_store, None, None);
+    manifest.start().await.unwrap();
     let job_pool = Arc::new(JobPoolImpl {});
     let flush_scheduler = Arc::new(FlushSchedulerImpl::new(job_pool));
     let log_config = LogConfig {
@@ -81,5 +83,6 @@ pub async fn new_store_config_with_object_store(
         engine_config: Default::default(),
         file_purger,
         ttl: None,
+        compaction_time_window: None,
     }
 }

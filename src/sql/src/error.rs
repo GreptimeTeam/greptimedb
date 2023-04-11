@@ -18,6 +18,7 @@ use common_error::prelude::*;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
+use snafu::Location;
 use sqlparser::parser::ParserError;
 use sqlparser::tokenizer::TokenizerError;
 
@@ -142,7 +143,7 @@ pub enum Error {
     #[snafu(display("Unable to convert statement {} to DataFusion statement", statement))]
     ConvertToDfStatement {
         statement: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 }
 
@@ -175,10 +176,6 @@ impl ErrorExt for Error {
             ConvertToGrpcDataType { source, .. } => source.status_code(),
             ConvertToDfStatement { .. } => StatusCode::Internal,
         }
-    }
-
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        ErrorCompat::backtrace(self)
     }
 
     fn as_any(&self) -> &dyn Any {

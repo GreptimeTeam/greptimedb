@@ -22,6 +22,7 @@ use crate::error::Result;
 use crate::metadata::TableId;
 use crate::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
 use crate::TableRef;
+pub mod manager;
 
 /// Represents a resolved path to a table of the form “catalog.schema.table”
 #[derive(Debug, PartialEq)]
@@ -120,6 +121,13 @@ pub trait TableEngineProcedure: Send + Sync {
         &self,
         ctx: &EngineContext,
         request: CreateTableRequest,
+    ) -> Result<BoxedProcedure>;
+
+    /// Returns a procedure that alters table by specific `request`.
+    fn alter_table_procedure(
+        &self,
+        ctx: &EngineContext,
+        request: AlterTableRequest,
     ) -> Result<BoxedProcedure>;
 }
 

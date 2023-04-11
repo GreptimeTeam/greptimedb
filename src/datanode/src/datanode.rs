@@ -19,6 +19,7 @@ use common_base::readable_size::ReadableSize;
 use common_telemetry::info;
 use meta_client::MetaClientOptions;
 use serde::{Deserialize, Serialize};
+use servers::http::HttpOptions;
 use servers::Mode;
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::scheduler::SchedulerConfig;
@@ -29,12 +30,23 @@ use crate::server::Services;
 
 pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize(1024);
 
+/// Object storage config
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ObjectStoreConfig {
     File(FileConfig),
     S3(S3Config),
     Oss(OssConfig),
+}
+
+/// Storage engine config
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct StorageConfig {
+    #[serde(flatten)]
+    pub store: ObjectStoreConfig,
+    pub compaction: CompactionConfig,
+    pub manifest: RegionManifestConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Default, Deserialize)]
@@ -107,6 +119,30 @@ impl Default for WalConfig {
     }
 }
 
+/// Options for region manifest
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(default)]
+pub struct RegionManifestConfig {
+    /// Region manifest checkpoint actions margin.
+    /// Manifest service create a checkpoint every [checkpoint_margin] actions.
+    pub checkpoint_margin: Option<u16>,
+    /// Region manifest logs and checkpoints gc task execution duration.
+    #[serde(with = "humantime_serde")]
+    pub gc_duration: Option<Duration>,
+    /// Whether to try creating a manifest checkpoint on region opening
+    pub checkpoint_on_startup: bool,
+}
+
+impl Default for RegionManifestConfig {
+    fn default() -> Self {
+        Self {
+            checkpoint_margin: Some(10u16),
+            gc_duration: Some(Duration::from_secs(30)),
+            checkpoint_on_startup: false,
+        }
+    }
+}
+
 /// Options for table compaction
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(default)]
@@ -117,6 +153,8 @@ pub struct CompactionConfig {
     pub max_files_in_level0: usize,
     /// Max task number for SST purge task after compaction.
     pub max_purge_tasks: usize,
+    /// Buffer threshold while writing SST files
+    pub sst_write_buffer_size: ReadableSize,
 }
 
 impl Default for CompactionConfig {
@@ -125,6 +163,7 @@ impl Default for CompactionConfig {
             max_inflight_tasks: 4,
             max_files_in_level0: 8,
             max_purge_tasks: 32,
+            sst_write_buffer_size: ReadableSize::mb(8),
         }
     }
 }
@@ -132,7 +171,7 @@ impl Default for CompactionConfig {
 impl From<&DatanodeOptions> for SchedulerConfig {
     fn from(value: &DatanodeOptions) -> Self {
         Self {
-            max_inflight_tasks: value.compaction.max_inflight_tasks,
+            max_inflight_tasks: value.storage.compaction.max_inflight_tasks,
         }
     }
 }
@@ -140,8 +179,12 @@ impl From<&DatanodeOptions> for SchedulerConfig {
 impl From<&DatanodeOptions> for StorageEngineConfig {
     fn from(value: &DatanodeOptions) -> Self {
         Self {
-            max_files_in_l0: value.compaction.max_files_in_level0,
-            max_purge_tasks: value.compaction.max_purge_tasks,
+            manifest_checkpoint_on_startup: value.storage.manifest.checkpoint_on_startup,
+            manifest_checkpoint_margin: value.storage.manifest.checkpoint_margin,
+            manifest_gc_duration: value.storage.manifest.gc_duration,
+            max_files_in_l0: value.storage.compaction.max_files_in_level0,
+            max_purge_tasks: value.storage.compaction.max_purge_tasks,
+            sst_write_buffer_size: value.storage.compaction.sst_write_buffer_size,
         }
     }
 }
@@ -190,10 +233,10 @@ pub struct DatanodeOptions {
     pub rpc_runtime_size: usize,
     pub mysql_addr: String,
     pub mysql_runtime_size: usize,
+    pub http_opts: HttpOptions,
     pub meta_client_options: Option<MetaClientOptions>,
     pub wal: WalConfig,
-    pub storage: ObjectStoreConfig,
-    pub compaction: CompactionConfig,
+    pub storage: StorageConfig,
     pub procedure: Option<ProcedureConfig>,
 }
 
@@ -208,10 +251,10 @@ impl Default for DatanodeOptions {
             rpc_runtime_size: 8,
             mysql_addr: "127.0.0.1:4406".to_string(),
             mysql_runtime_size: 2,
+            http_opts: HttpOptions::default(),
             meta_client_options: None,
             wal: WalConfig::default(),
-            storage: ObjectStoreConfig::default(),
-            compaction: CompactionConfig::default(),
+            storage: StorageConfig::default(),
             procedure: None,
         }
     }
@@ -220,14 +263,17 @@ impl Default for DatanodeOptions {
 /// Datanode service.
 pub struct Datanode {
     opts: DatanodeOptions,
-    services: Services,
+    services: Option<Services>,
     instance: InstanceRef,
 }
 
 impl Datanode {
     pub async fn new(opts: DatanodeOptions) -> Result<Datanode> {
         let instance = Arc::new(Instance::new(&opts).await?);
-        let services = Services::try_new(instance.clone(), &opts).await?;
+        let services = match opts.mode {
+            Mode::Distributed => Some(Services::try_new(instance.clone(), &opts).await?),
+            Mode::Standalone => None,
+        };
         Ok(Self {
             opts,
             services,
@@ -248,7 +294,11 @@ impl Datanode {
 
     /// Start services of datanode. This method call will block until services are shutdown.
     pub async fn start_services(&mut self) -> Result<()> {
-        self.services.start(&self.opts).await
+        if let Some(service) = self.services.as_mut() {
+            service.start(&self.opts).await
+        } else {
+            Ok(())
+        }
     }
 
     pub fn get_instance(&self) -> InstanceRef {
@@ -260,7 +310,11 @@ impl Datanode {
     }
 
     async fn shutdown_services(&self) -> Result<()> {
-        self.services.shutdown().await
+        if let Some(service) = self.services.as_ref() {
+            service.shutdown().await
+        } else {
+            Ok(())
+        }
     }
 
     pub async fn shutdown(&self) -> Result<()> {

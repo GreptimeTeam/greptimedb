@@ -457,7 +457,7 @@ async fn test_replay_metadata_after_open() {
 
     let desc = RegionDescBuilder::new(REGION_NAME)
         .push_key_column(("k1", LogicalTypeId::Int32, false))
-        .push_value_column(("v0", LogicalTypeId::Float32, true))
+        .push_field_column(("v0", LogicalTypeId::Float32, true))
         .build();
     let metadata: &RegionMetadata = &desc.try_into().unwrap();
     let mut raw_metadata: RawRegionMetadata = metadata.into();

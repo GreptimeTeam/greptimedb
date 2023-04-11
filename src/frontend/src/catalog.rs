@@ -16,8 +16,12 @@ use std::any::Any;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use api::v1::CreateTableExpr;
 use async_trait::async_trait;
-use catalog::error::{self as catalog_err, InvalidCatalogValueSnafu, Result as CatalogResult};
+use catalog::error::{
+    self as catalog_err, InternalSnafu, InvalidCatalogValueSnafu, InvalidSystemTableDefSnafu,
+    Result as CatalogResult, UnimplementedSnafu,
+};
 use catalog::helper::{
     build_catalog_prefix, build_schema_prefix, build_table_global_prefix, CatalogKey, SchemaKey,
     TableGlobalKey, TableGlobalValue,
@@ -28,6 +32,7 @@ use catalog::{
     RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest,
     SchemaProvider, SchemaProviderRef,
 };
+use common_error::prelude::BoxedError;
 use common_telemetry::error;
 use futures::StreamExt;
 use meta_client::rpc::TableName;
@@ -36,6 +41,8 @@ use snafu::prelude::*;
 use table::TableRef;
 
 use crate::datanode::DatanodeClients;
+use crate::expr_factory;
+use crate::instance::distributed::DistInstance;
 use crate::table::DistTable;
 
 #[derive(Clone)]
@@ -43,6 +50,12 @@ pub struct FrontendCatalogManager {
     backend: KvBackendRef,
     partition_manager: PartitionRuleManagerRef,
     datanode_clients: Arc<DatanodeClients>,
+
+    // TODO(LFC): Remove this field.
+    // DistInstance in FrontendCatalogManager is only used for creating distributed script table now.
+    // Once we have some standalone distributed table creator (like create distributed table procedure),
+    // we should use that.
+    dist_instance: Option<Arc<DistInstance>>,
 }
 
 impl FrontendCatalogManager {
@@ -55,7 +68,12 @@ impl FrontendCatalogManager {
             backend,
             partition_manager,
             datanode_clients,
+            dist_instance: None,
         }
+    }
+
+    pub(crate) fn set_dist_instance(&mut self, dist_instance: Arc<DistInstance>) {
+        self.dist_instance = Some(dist_instance)
     }
 
     pub(crate) fn backend(&self) -> KvBackendRef {
@@ -106,9 +124,94 @@ impl CatalogManager for FrontendCatalogManager {
 
     async fn register_system_table(
         &self,
-        _request: RegisterSystemTableRequest,
+        request: RegisterSystemTableRequest,
     ) -> catalog::error::Result<()> {
-        unimplemented!()
+        if let Some(dist_instance) = &self.dist_instance {
+            let open_hook = request.open_hook;
+            let request = request.create_table_request;
+
+            if let Some(table) = self
+                .table(
+                    &request.catalog_name,
+                    &request.schema_name,
+                    &request.table_name,
+                )
+                .await?
+            {
+                if let Some(hook) = open_hook {
+                    (hook)(table)?;
+                }
+                return Ok(());
+            }
+
+            let time_index = request
+                .schema
+                .column_schemas
+                .iter()
+                .find_map(|x| {
+                    if x.is_time_index() {
+                        Some(x.name.clone())
+                    } else {
+                        None
+                    }
+                })
+                .context(InvalidSystemTableDefSnafu {
+                    err_msg: "Time index is not defined.",
+                })?;
+
+            let primary_keys = request
+                .schema
+                .column_schemas
+                .iter()
+                .enumerate()
+                .filter_map(|(i, x)| {
+                    if request.primary_key_indices.contains(&i) {
+                        Some(x.name.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            let column_defs = expr_factory::column_schemas_to_defs(request.schema.column_schemas)
+                .map_err(|e| {
+                InvalidSystemTableDefSnafu {
+                    err_msg: e.to_string(),
+                }
+                .build()
+            })?;
+
+            let mut create_table = CreateTableExpr {
+                catalog_name: request.catalog_name,
+                schema_name: request.schema_name,
+                table_name: request.table_name,
+                desc: request.desc.unwrap_or("".to_string()),
+                column_defs,
+                time_index,
+                primary_keys,
+                create_if_not_exists: request.create_if_not_exists,
+                table_options: (&request.table_options).into(),
+                table_id: None, // Should and will be assigned by Meta.
+                region_ids: vec![0],
+                engine: request.engine,
+            };
+
+            let table = dist_instance
+                .create_table(&mut create_table, None)
+                .await
+                .map_err(BoxedError::new)
+                .context(InternalSnafu)?;
+
+            if let Some(hook) = open_hook {
+                (hook)(table)?;
+            }
+            Ok(())
+        } else {
+            UnimplementedSnafu {
+                operation: "register system table",
+            }
+            .fail()
+        }
     }
 
     fn schema(
@@ -310,23 +413,75 @@ impl SchemaProvider for FrontendSchemaProvider {
         Ok(Some(table))
     }
 
-    fn register_table(
-        &self,
-        _name: String,
-        _table: TableRef,
-    ) -> catalog::error::Result<Option<TableRef>> {
-        unimplemented!("Frontend schema provider does not support register table")
-    }
-
-    fn rename_table(&self, _name: &str, _new_name: String) -> catalog_err::Result<TableRef> {
-        unimplemented!("Frontend schema provider does not support rename table")
-    }
-
-    fn deregister_table(&self, _name: &str) -> catalog::error::Result<Option<TableRef>> {
-        unimplemented!("Frontend schema provider does not support deregister table")
-    }
-
     fn table_exist(&self, name: &str) -> catalog::error::Result<bool> {
         Ok(self.table_names()?.contains(&name.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
+    use script::table::{build_scripts_schema, SCRIPTS_TABLE_NAME};
+    use table::requests::{CreateTableRequest, TableOptions};
+
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_register_system_table() {
+        let instance =
+            crate::tests::create_distributed_instance("test_register_system_table").await;
+
+        let catalog_name = DEFAULT_CATALOG_NAME;
+        let schema_name = DEFAULT_SCHEMA_NAME;
+        let table_name = SCRIPTS_TABLE_NAME;
+        let request = CreateTableRequest {
+            id: 1,
+            catalog_name: catalog_name.to_string(),
+            schema_name: schema_name.to_string(),
+            table_name: table_name.to_string(),
+            desc: Some("Scripts table".to_string()),
+            schema: build_scripts_schema(),
+            region_numbers: vec![0],
+            primary_key_indices: vec![0, 1],
+            create_if_not_exists: true,
+            table_options: TableOptions::default(),
+            engine: MITO_ENGINE.to_string(),
+        };
+
+        let result = instance
+            .catalog_manager
+            .register_system_table(RegisterSystemTableRequest {
+                create_table_request: request,
+                open_hook: None,
+            })
+            .await;
+        assert!(result.is_ok());
+
+        assert!(
+            instance
+                .catalog_manager
+                .table(catalog_name, schema_name, table_name)
+                .await
+                .unwrap()
+                .is_some(),
+            "the registered system table cannot be found in catalog"
+        );
+
+        let mut actually_created_table_in_datanode = 0;
+        for datanode in instance.datanodes.values() {
+            if datanode
+                .catalog_manager()
+                .table(catalog_name, schema_name, table_name)
+                .await
+                .unwrap()
+                .is_some()
+            {
+                actually_created_table_in_datanode += 1;
+            }
+        }
+        assert_eq!(
+            actually_created_table_in_datanode, 1,
+            "system table should be actually created at one and only one datanode"
+        )
     }
 }

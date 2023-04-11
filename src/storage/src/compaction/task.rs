@@ -15,7 +15,8 @@
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 
-use common_telemetry::{error, info};
+use common_base::readable_size::ReadableSize;
+use common_telemetry::{debug, error};
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
@@ -46,6 +47,8 @@ pub struct CompactionTaskImpl<S: LogStore> {
     pub wal: Wal<S>,
     pub manifest: RegionManifest,
     pub expired_ssts: Vec<FileHandle>,
+    pub sst_write_buffer_size: ReadableSize,
+    pub compaction_time_window: Option<i64>,
 }
 
 impl<S: LogStore> Debug for CompactionTaskImpl<S> {
@@ -71,14 +74,14 @@ impl<S: LogStore> CompactionTaskImpl<S> {
         for output in self.outputs.drain(..) {
             let schema = self.schema.clone();
             let sst_layer = self.sst_layer.clone();
+            let sst_write_buffer_size = self.sst_write_buffer_size;
             compacted_inputs.extend(output.inputs.iter().map(FileHandle::meta));
 
             // TODO(hl): Maybe spawn to runtime to exploit in-job parallelism.
             futs.push(async move {
-                match output.build(region_id, schema, sst_layer).await {
-                    Ok(meta) => Ok(meta),
-                    Err(e) => Err(e),
-                }
+                output
+                    .build(region_id, schema, sst_layer, sst_write_buffer_size)
+                    .await
             });
         }
 
@@ -99,6 +102,7 @@ impl<S: LogStore> CompactionTaskImpl<S> {
     }
 
     /// Writes updated SST info into manifest.
+    // TODO(etolbakov): we are not persisting inferred compaction_time_window (#1083)[https://github.com/GreptimeTeam/greptimedb/pull/1083]
     async fn write_manifest_and_apply(
         &self,
         output: HashSet<FileMeta>,
@@ -113,7 +117,7 @@ impl<S: LogStore> CompactionTaskImpl<S> {
             files_to_add: Vec::from_iter(output.into_iter()),
             files_to_remove: Vec::from_iter(input.into_iter()),
         };
-        info!(
+        debug!(
             "Compacted region: {}, region edit: {:?}",
             version.metadata().name(),
             edit
@@ -172,6 +176,7 @@ impl CompactionOutput {
         region_id: RegionId,
         schema: RegionSchemaRef,
         sst_layer: AccessLayerRef,
+        sst_write_buffer_size: ReadableSize,
     ) -> Result<Option<FileMeta>> {
         let reader = build_sst_reader(
             schema,
@@ -183,7 +188,9 @@ impl CompactionOutput {
         .await?;
 
         let output_file_id = FileId::random();
-        let opts = WriteOptions {};
+        let opts = WriteOptions {
+            sst_write_buffer_size,
+        };
 
         Ok(sst_layer
             .write_sst(output_file_id, Source::Reader(reader), &opts)
@@ -192,6 +199,7 @@ impl CompactionOutput {
                 |SstInfo {
                      time_range,
                      file_size,
+                     ..
                  }| FileMeta {
                     region_id,
                     file_id: output_file_id,

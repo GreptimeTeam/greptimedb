@@ -19,9 +19,8 @@ pub mod datanode;
 pub mod error;
 mod heartbeat;
 pub mod instance;
-pub mod metric;
+pub mod metrics;
 mod mock;
-mod script;
 pub mod server;
 pub mod sql;
 #[cfg(test)]

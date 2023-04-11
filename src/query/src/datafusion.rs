@@ -14,7 +14,6 @@
 
 //! Planner, QueryEngine implementations based on DataFusion.
 
-mod catalog_adapter;
 mod error;
 mod planner;
 
@@ -22,6 +21,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+pub use catalog::datafusion::catalog_adapter::DfCatalogListAdapter;
 use common_error::prelude::BoxedError;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::udf::create_udf;
@@ -44,7 +44,6 @@ use snafu::{ensure, OptionExt, ResultExt};
 use table::requests::{DeleteRequest, InsertRequest};
 use table::TableRef;
 
-pub use crate::datafusion::catalog_adapter::{DfCatalogListAdapter, DfCatalogProviderAdapter};
 pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::error::{
     CatalogNotFoundSnafu, CatalogSnafu, CreateRecordBatchSnafu, DataFusionSnafu,
@@ -58,7 +57,7 @@ use crate::physical_planner::PhysicalPlanner;
 use crate::plan::LogicalPlan;
 use crate::planner::{DfLogicalPlanner, LogicalPlanner};
 use crate::query_engine::{QueryEngineContext, QueryEngineState};
-use crate::{metric, QueryEngine};
+use crate::{metrics, QueryEngine};
 
 pub struct DatafusionQueryEngine {
     state: Arc<QueryEngineState>,
@@ -254,7 +253,7 @@ impl QueryEngine for DatafusionQueryEngine {
 
 impl LogicalOptimizer for DatafusionQueryEngine {
     fn optimize(&self, plan: &LogicalPlan) -> Result<LogicalPlan> {
-        let _timer = timer!(metric::METRIC_OPTIMIZE_LOGICAL_ELAPSED);
+        let _timer = timer!(metrics::METRIC_OPTIMIZE_LOGICAL_ELAPSED);
         match plan {
             LogicalPlan::DfPlan(df_plan) => {
                 let optimized_plan = self
@@ -280,7 +279,7 @@ impl PhysicalPlanner for DatafusionQueryEngine {
         ctx: &mut QueryEngineContext,
         logical_plan: &LogicalPlan,
     ) -> Result<Arc<dyn PhysicalPlan>> {
-        let _timer = timer!(metric::METRIC_CREATE_PHYSICAL_ELAPSED);
+        let _timer = timer!(metrics::METRIC_CREATE_PHYSICAL_ELAPSED);
         match logical_plan {
             LogicalPlan::DfPlan(df_plan) => {
                 let state = ctx.state();
@@ -315,7 +314,7 @@ impl PhysicalOptimizer for DatafusionQueryEngine {
         ctx: &mut QueryEngineContext,
         plan: Arc<dyn PhysicalPlan>,
     ) -> Result<Arc<dyn PhysicalPlan>> {
-        let _timer = timer!(metric::METRIC_OPTIMIZE_PHYSICAL_ELAPSED);
+        let _timer = timer!(metrics::METRIC_OPTIMIZE_PHYSICAL_ELAPSED);
 
         let mut new_plan = plan
             .as_any()
@@ -342,7 +341,7 @@ impl QueryExecutor for DatafusionQueryEngine {
         ctx: &QueryEngineContext,
         plan: &Arc<dyn PhysicalPlan>,
     ) -> Result<SendableRecordBatchStream> {
-        let _timer = timer!(metric::METRIC_EXEC_PLAN_ELAPSED);
+        let _timer = timer!(metrics::METRIC_EXEC_PLAN_ELAPSED);
         match plan.output_partitioning().partition_count() {
             0 => Ok(Box::pin(EmptyRecordBatchStream::new(plan.schema()))),
             1 => Ok(plan

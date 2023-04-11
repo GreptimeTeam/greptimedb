@@ -12,16 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod instance_test;
+mod promql_test;
+mod test_util;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use catalog::remote::MetaKvBackend;
+use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
+use catalog::remote::{MetaKvBackend, RemoteCatalogManager};
+use catalog::CatalogProvider;
 use client::Client;
 use common_grpc::channel_manager::ChannelManager;
 use common_runtime::Builder as RuntimeBuilder;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
-use datanode::datanode::{DatanodeOptions, FileConfig, ObjectStoreConfig, WalConfig};
+use datanode::datanode::{
+    DatanodeOptions, FileConfig, ObjectStoreConfig, StorageConfig, WalConfig,
+};
 use datanode::instance::Instance as DatanodeInstance;
 use meta_client::client::MetaClientBuilder;
 use meta_client::rpc::Peer;
@@ -54,6 +62,7 @@ pub(crate) struct MockDistributedInstance {
     pub(crate) frontend: Arc<Instance>,
     pub(crate) dist_instance: Arc<DistInstance>,
     pub(crate) datanodes: HashMap<u64, Arc<DatanodeInstance>>,
+    pub(crate) catalog_manager: Arc<FrontendCatalogManager>,
     _guards: Vec<TestGuard>,
 }
 
@@ -76,11 +85,25 @@ impl MockStandaloneInstance {
 
 pub(crate) async fn create_standalone_instance(test_name: &str) -> MockStandaloneInstance {
     let (opts, guard) = create_tmp_dir_and_datanode_opts(test_name);
-    let datanode_instance = DatanodeInstance::new(&opts).await.unwrap();
-    datanode_instance.start().await.unwrap();
+    let dn_instance = Arc::new(DatanodeInstance::new(&opts).await.unwrap());
+    let frontend_instance = Instance::try_new_standalone(dn_instance.clone())
+        .await
+        .unwrap();
 
-    let frontend_instance = Instance::new_standalone(Arc::new(datanode_instance));
+    // create another catalog and schema for testing
+    let another_catalog = Arc::new(MemoryCatalogProvider::new());
+    let _ = another_catalog
+        .register_schema(
+            "another_schema".to_string(),
+            Arc::new(MemorySchemaProvider::new()),
+        )
+        .unwrap();
+    let _ = dn_instance
+        .catalog_manager()
+        .register_catalog("another_catalog".to_string(), another_catalog)
+        .unwrap();
 
+    dn_instance.start().await.unwrap();
     MockStandaloneInstance {
         instance: Arc::new(frontend_instance),
         _guard: guard,
@@ -95,9 +118,12 @@ fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) 
             dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
             ..Default::default()
         },
-        storage: ObjectStoreConfig::File(FileConfig {
-            data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
-        }),
+        storage: StorageConfig {
+            store: ObjectStoreConfig::File(FileConfig {
+                data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
+            }),
+            ..Default::default()
+        },
         mode: Mode::Standalone,
         ..Default::default()
     };
@@ -182,9 +208,12 @@ async fn create_distributed_datanode(
             dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
             ..Default::default()
         },
-        storage: ObjectStoreConfig::File(FileConfig {
-            data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
-        }),
+        storage: StorageConfig {
+            store: ObjectStoreConfig::File(FileConfig {
+                data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
+            }),
+            ..Default::default()
+        },
         mode: Mode::Distributed,
         ..Default::default()
     };
@@ -195,6 +224,16 @@ async fn create_distributed_datanode(
             .unwrap(),
     );
     instance.start().await.unwrap();
+
+    // create another catalog and schema for testing
+    let _ = instance
+        .catalog_manager()
+        .as_any()
+        .downcast_ref::<RemoteCatalogManager>()
+        .unwrap()
+        .create_catalog_and_schema("another_catalog", "another_schema")
+        .await
+        .unwrap();
 
     (
         instance,
@@ -259,26 +298,28 @@ pub(crate) async fn create_distributed_instance(test_name: &str) -> MockDistribu
     let partition_manager = Arc::new(PartitionRuleManager::new(Arc::new(TableRoutes::new(
         meta_client.clone(),
     ))));
-    let catalog_manager = Arc::new(FrontendCatalogManager::new(
-        meta_backend,
-        partition_manager,
-        datanode_clients.clone(),
-    ));
+    let mut catalog_manager =
+        FrontendCatalogManager::new(meta_backend, partition_manager, datanode_clients.clone());
 
     wait_datanodes_alive(kv_store).await;
 
     let dist_instance = DistInstance::new(
         meta_client.clone(),
-        catalog_manager,
+        Arc::new(catalog_manager.clone()),
         datanode_clients.clone(),
     );
     let dist_instance = Arc::new(dist_instance);
-    let frontend = Instance::new_distributed(dist_instance.clone());
+
+    catalog_manager.set_dist_instance(dist_instance.clone());
+    let catalog_manager = Arc::new(catalog_manager);
+
+    let frontend = Instance::new_distributed(catalog_manager.clone(), dist_instance.clone()).await;
 
     MockDistributedInstance {
         frontend: Arc::new(frontend),
         dist_instance,
         datanodes: datanode_instances,
+        catalog_manager,
         _guards: test_guards,
     }
 }

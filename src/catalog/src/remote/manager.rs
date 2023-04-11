@@ -20,14 +20,17 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use async_stream::stream;
 use async_trait::async_trait;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
+use common_catalog::consts::{
+    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID, MITO_ENGINE,
+};
 use common_telemetry::{debug, error, info};
 use dashmap::DashMap;
 use futures::Stream;
 use futures_util::StreamExt;
 use parking_lot::RwLock;
 use snafu::{OptionExt, ResultExt};
-use table::engine::{EngineContext, TableEngineRef};
+use table::engine::manager::TableEngineManagerRef;
+use table::engine::EngineContext;
 use table::metadata::TableId;
 use table::requests::{CreateTableRequest, OpenTableRequest};
 use table::table::numbers::NumbersTable;
@@ -36,7 +39,7 @@ use tokio::sync::Mutex;
 
 use crate::error::{
     CatalogNotFoundSnafu, CreateTableSnafu, InvalidCatalogValueSnafu, OpenTableSnafu, Result,
-    SchemaNotFoundSnafu, TableExistsSnafu, UnimplementedSnafu,
+    SchemaNotFoundSnafu, TableEngineNotFoundSnafu, TableExistsSnafu, UnimplementedSnafu,
 };
 use crate::helper::{
     build_catalog_prefix, build_schema_prefix, build_table_global_prefix, CatalogKey, CatalogValue,
@@ -55,14 +58,14 @@ pub struct RemoteCatalogManager {
     node_id: u64,
     backend: KvBackendRef,
     catalogs: Arc<RwLock<DashMap<String, CatalogProviderRef>>>,
-    engine: TableEngineRef,
+    engine_manager: TableEngineManagerRef,
     system_table_requests: Mutex<Vec<RegisterSystemTableRequest>>,
 }
 
 impl RemoteCatalogManager {
-    pub fn new(engine: TableEngineRef, node_id: u64, backend: KvBackendRef) -> Self {
+    pub fn new(engine_manager: TableEngineManagerRef, node_id: u64, backend: KvBackendRef) -> Self {
         Self {
-            engine,
+            engine_manager,
             node_id,
             backend,
             catalogs: Default::default(),
@@ -186,7 +189,9 @@ impl RemoteCatalogManager {
         let max_table_id = MIN_USER_TABLE_ID - 1;
 
         // initiate default catalog and schema
-        let default_catalog = self.initiate_default_catalog().await?;
+        let default_catalog = self
+            .create_catalog_and_schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
+            .await?;
         res.insert(DEFAULT_CATALOG_NAME.to_string(), default_catalog);
         info!("Default catalog and schema registered");
 
@@ -266,13 +271,19 @@ impl RemoteCatalogManager {
         Ok(())
     }
 
-    async fn initiate_default_catalog(&self) -> Result<CatalogProviderRef> {
-        let default_catalog = self.new_catalog_provider(DEFAULT_CATALOG_NAME);
-        let default_schema = self.new_schema_provider(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
-        default_catalog.register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema.clone())?;
+    pub async fn create_catalog_and_schema(
+        &self,
+        catalog_name: &str,
+        schema_name: &str,
+    ) -> Result<CatalogProviderRef> {
+        let schema_provider = self.new_schema_provider(catalog_name, schema_name);
+
+        let catalog_provider = self.new_catalog_provider(catalog_name);
+        catalog_provider.register_schema(schema_name.to_string(), schema_provider.clone())?;
+
         let schema_key = SchemaKey {
-            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            catalog_name: catalog_name.to_string(),
+            schema_name: schema_name.to_string(),
         }
         .to_string();
         self.backend
@@ -283,10 +294,10 @@ impl RemoteCatalogManager {
                     .context(InvalidCatalogValueSnafu)?,
             )
             .await?;
-        info!("Registered default schema");
+        info!("Created schema '{schema_key}'");
 
         let catalog_key = CatalogKey {
-            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            catalog_name: catalog_name.to_string(),
         }
         .to_string();
         self.backend
@@ -297,8 +308,8 @@ impl RemoteCatalogManager {
                     .context(InvalidCatalogValueSnafu)?,
             )
             .await?;
-        info!("Registered default catalog");
-        Ok(default_catalog)
+        info!("Created catalog '{catalog_key}");
+        Ok(catalog_provider)
     }
 
     async fn open_or_create_table(
@@ -331,8 +342,13 @@ impl RemoteCatalogManager {
             table_name: table_name.clone(),
             table_id,
         };
-        match self
-            .engine
+        let engine = self
+            .engine_manager
+            .engine(&table_info.meta.engine)
+            .context(TableEngineNotFoundSnafu {
+                engine_name: &table_info.meta.engine,
+            })?;
+        match engine
             .open_table(&context, request)
             .await
             .with_context(|_| OpenTableSnafu {
@@ -363,9 +379,10 @@ impl RemoteCatalogManager {
                     primary_key_indices: meta.primary_key_indices.clone(),
                     create_if_not_exists: true,
                     table_options: meta.options.clone(),
+                    engine: engine.name().to_string(),
                 };
 
-                self.engine
+                engine
                     .create_table(&context, req)
                     .await
                     .context(CreateTableSnafu {
@@ -398,7 +415,13 @@ impl CatalogManager for RemoteCatalogManager {
         info!("Max table id allocated: {}", max_table_id);
 
         let mut system_table_requests = self.system_table_requests.lock().await;
-        handle_system_table_request(self, self.engine.clone(), &mut system_table_requests).await?;
+        let engine = self
+            .engine_manager
+            .engine(MITO_ENGINE)
+            .context(TableEngineNotFoundSnafu {
+                engine_name: MITO_ENGINE,
+            })?;
+        handle_system_table_request(self, engine, &mut system_table_requests).await?;
         info!("All system table opened");
 
         self.catalog(DEFAULT_CATALOG_NAME)

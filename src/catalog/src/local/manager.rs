@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, MIN_USER_TABLE_ID,
-    SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_NAME,
+    MITO_ENGINE, SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_NAME,
 };
 use common_catalog::format_full_table_name;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
@@ -27,7 +27,8 @@ use datatypes::prelude::ScalarVector;
 use datatypes::vectors::{BinaryVector, UInt8Vector};
 use futures_util::lock::Mutex;
 use snafu::{ensure, OptionExt, ResultExt};
-use table::engine::{EngineContext, TableEngineRef};
+use table::engine::manager::TableEngineManagerRef;
+use table::engine::EngineContext;
 use table::metadata::TableId;
 use table::requests::OpenTableRequest;
 use table::table::numbers::NumbersTable;
@@ -37,7 +38,8 @@ use table::TableRef;
 use crate::error::{
     self, CatalogNotFoundSnafu, IllegalManagerStateSnafu, OpenTableSnafu, ReadSystemCatalogSnafu,
     Result, SchemaExistsSnafu, SchemaNotFoundSnafu, SystemCatalogSnafu,
-    SystemCatalogTypeMismatchSnafu, TableExistsSnafu, TableNotFoundSnafu,
+    SystemCatalogTypeMismatchSnafu, TableEngineNotFoundSnafu, TableExistsSnafu, TableNotExistSnafu,
+    TableNotFoundSnafu,
 };
 use crate::local::memory::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
 use crate::system::{
@@ -55,7 +57,7 @@ use crate::{
 pub struct LocalCatalogManager {
     system: Arc<SystemCatalog>,
     catalogs: Arc<MemoryCatalogManager>,
-    engine: TableEngineRef,
+    engine_manager: TableEngineManagerRef,
     next_table_id: AtomicU32,
     init_lock: Mutex<bool>,
     register_lock: Mutex<()>,
@@ -63,19 +65,20 @@ pub struct LocalCatalogManager {
 }
 
 impl LocalCatalogManager {
-    /// Create a new [CatalogManager] with given user catalogs and table engine
-    pub async fn try_new(engine: TableEngineRef) -> Result<Self> {
+    /// Create a new [CatalogManager] with given user catalogs and mito engine
+    pub async fn try_new(engine_manager: TableEngineManagerRef) -> Result<Self> {
+        let engine = engine_manager
+            .engine(MITO_ENGINE)
+            .context(TableEngineNotFoundSnafu {
+                engine_name: MITO_ENGINE,
+            })?;
         let table = SystemCatalogTable::new(engine.clone()).await?;
         let memory_catalog_list = crate::local::memory::new_memory_catalog_list()?;
-        let system_catalog = Arc::new(SystemCatalog::new(
-            table,
-            memory_catalog_list.clone(),
-            engine.clone(),
-        ));
+        let system_catalog = Arc::new(SystemCatalog::new(table));
         Ok(Self {
             system: system_catalog,
             catalogs: memory_catalog_list,
-            engine,
+            engine_manager,
             next_table_id: AtomicU32::new(MIN_USER_TABLE_ID),
             init_lock: Mutex::new(false),
             register_lock: Mutex::new(()),
@@ -100,7 +103,14 @@ impl LocalCatalogManager {
 
         // Processing system table hooks
         let mut sys_table_requests = self.system_table_requests.lock().await;
-        handle_system_table_request(self, self.engine.clone(), &mut sys_table_requests).await?;
+        let engine = self
+            .engine_manager
+            .engine(MITO_ENGINE)
+            .context(TableEngineNotFoundSnafu {
+                engine_name: MITO_ENGINE,
+            })?;
+
+        handle_system_table_request(self, engine, &mut sys_table_requests).await?;
         Ok(())
     }
 
@@ -253,9 +263,14 @@ impl LocalCatalogManager {
             table_name: t.table_name.clone(),
             table_id: t.table_id,
         };
+        let engine = self
+            .engine_manager
+            .engine(&t.engine)
+            .context(TableEngineNotFoundSnafu {
+                engine_name: &t.engine,
+            })?;
 
-        let option = self
-            .engine
+        let option = engine
             .open_table(&context, request)
             .await
             .with_context(|_| OpenTableSnafu {
@@ -290,9 +305,7 @@ impl CatalogList for LocalCatalogManager {
     }
 
     fn catalog_names(&self) -> Result<Vec<String>> {
-        let mut res = self.catalogs.catalog_names()?;
-        res.push(SYSTEM_CATALOG_NAME.to_string());
-        Ok(res)
+        self.catalogs.catalog_names()
     }
 
     fn catalog(&self, name: &str) -> Result<Option<CatalogProviderRef>> {
@@ -364,6 +377,7 @@ impl CatalogManager for LocalCatalogManager {
                 // Try to register table with same table id, just ignore.
                 Ok(false)
             } else {
+                let engine = request.table.table_info().meta.engine.to_string();
                 // table does not exist
                 self.system
                     .register_table(
@@ -371,6 +385,7 @@ impl CatalogManager for LocalCatalogManager {
                         schema_name.clone(),
                         request.table_name.clone(),
                         request.table_id,
+                        engine,
                     )
                     .await?;
                 schema.register_table(request.table_name, request.table)?;
@@ -404,6 +419,14 @@ impl CatalogManager for LocalCatalogManager {
                 schema: schema_name,
             })?;
 
+        let old_table = schema
+            .table(&request.table_name)
+            .await?
+            .context(TableNotExistSnafu {
+                table: &request.table_name,
+            })?;
+
+        let engine = old_table.table_info().meta.engine.to_string();
         // rename table in system catalog
         self.system
             .register_table(
@@ -411,6 +434,7 @@ impl CatalogManager for LocalCatalogManager {
                 schema_name.clone(),
                 request.new_table_name.clone(),
                 request.table_id,
+                engine,
             )
             .await?;
         Ok(schema
@@ -530,6 +554,8 @@ impl CatalogManager for LocalCatalogManager {
 mod tests {
     use std::assert_matches::assert_matches;
 
+    use mito::engine::MITO_ENGINE;
+
     use super::*;
     use crate::system::{CatalogEntry, SchemaEntry};
 
@@ -541,6 +567,7 @@ mod tests {
                 schema_name: "S1".to_string(),
                 table_name: "T1".to_string(),
                 table_id: 1,
+                engine: MITO_ENGINE.to_string(),
             }),
             Entry::Catalog(CatalogEntry {
                 catalog_name: "C2".to_string(),
@@ -561,6 +588,7 @@ mod tests {
                 schema_name: "S1".to_string(),
                 table_name: "T2".to_string(),
                 table_id: 2,
+                engine: MITO_ENGINE.to_string(),
             }),
         ];
         let res = LocalCatalogManager::sort_entries(vec);

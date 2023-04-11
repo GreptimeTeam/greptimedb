@@ -39,7 +39,9 @@ use store_api::storage::{
     RegionMeta, RegionNumber, ScanRequest, SchemaRef, Snapshot, WriteContext, WriteRequest,
 };
 use table::error as table_error;
-use table::error::{RegionSchemaMismatchSnafu, Result as TableResult, TableOperationSnafu};
+use table::error::{
+    InvalidTableSnafu, RegionSchemaMismatchSnafu, Result as TableResult, TableOperationSnafu,
+};
 use table::metadata::{
     FilterPushDownType, RawTableInfo, TableInfo, TableInfoRef, TableMeta, TableType,
 };
@@ -193,7 +195,10 @@ impl<R: Region> Table for MitoTable<R> {
 
         // TODO(hl): we assume table contains at least one region, but with region migration this
         // assumption may become invalid.
-        let stream_schema = first_schema.unwrap();
+        let stream_schema = first_schema.context(InvalidTableSnafu {
+            table_id: table_info.ident.table_id,
+        })?;
+
         let schema = stream_schema.clone();
         let stream = Box::pin(async_stream::try_stream! {
             for mut reader in readers {
@@ -471,7 +476,7 @@ impl<R: Region> MitoTable<R> {
         regions: HashMap<RegionNumber, R>,
         object_store: ObjectStore,
     ) -> Result<MitoTable<R>> {
-        let manifest = TableManifest::new(&table_manifest_dir(table_dir), object_store, None);
+        let manifest = TableManifest::create(&table_manifest_dir(table_dir), object_store);
 
         // TODO(dennis): save manifest version into catalog?
         let _manifest_version = manifest
@@ -487,7 +492,7 @@ impl<R: Region> MitoTable<R> {
     }
 
     pub(crate) fn build_manifest(table_dir: &str, object_store: ObjectStore) -> TableManifest {
-        TableManifest::new(&table_manifest_dir(table_dir), object_store, None)
+        TableManifest::create(&table_manifest_dir(table_dir), object_store)
     }
 
     pub(crate) async fn recover_table_info(
@@ -558,7 +563,7 @@ impl<R: Region> MitoTable<R> {
 }
 
 /// Create [`AlterOperation`] according to given `alter_kind`.
-fn create_alter_operation(
+pub(crate) fn create_alter_operation(
     table_name: &str,
     alter_kind: &AlterKind,
     table_meta: &mut TableMeta,

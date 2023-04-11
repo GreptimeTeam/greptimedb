@@ -18,7 +18,7 @@ use common_error::ext::ErrorExt;
 use common_error::prelude::StatusCode;
 use datatypes::prelude::ConcreteDataType;
 use snafu::prelude::*;
-use snafu::{Backtrace, ErrorCompat};
+use snafu::Location;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -26,12 +26,12 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[snafu(visibility(pub))]
 pub enum Error {
     #[snafu(display("Unknown proto column datatype: {}", datatype))]
-    UnknownColumnDataType { datatype: i32, backtrace: Backtrace },
+    UnknownColumnDataType { datatype: i32, location: Location },
 
     #[snafu(display("Failed to create column datatype from {:?}", from))]
     IntoColumnDataType {
         from: ConcreteDataType,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display(
@@ -65,9 +65,6 @@ impl ErrorExt for Error {
             Error::ConvertColumnDefaultConstraint { source, .. }
             | Error::InvalidColumnDefaultConstraint { source, .. } => source.status_code(),
         }
-    }
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        ErrorCompat::backtrace(self)
     }
 
     fn as_any(&self) -> &dyn Any {

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::v1::meta::heartbeat_server::HeartbeatServer;
 use api::v1::meta::router_server::RouterServer;
@@ -73,7 +74,10 @@ pub async fn mock(
             .await
     });
 
-    let config = ChannelConfig::new();
+    let config = ChannelConfig::new()
+        .timeout(Duration::from_secs(1))
+        .connect_timeout(Duration::from_secs(1))
+        .tcp_nodelay(true);
     let channel_manager = ChannelManager::with_config(config);
 
     // Move client to an option so we can _move_ the inner value

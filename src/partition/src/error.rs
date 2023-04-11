@@ -17,17 +17,14 @@ use std::any::Any;
 use common_error::prelude::*;
 use common_query::prelude::Expr;
 use datafusion_common::ScalarValue;
-use snafu::Snafu;
+use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
     #[snafu(display("Failed to get meta info from cache, error: {}", err_msg))]
-    GetCache {
-        err_msg: String,
-        backtrace: Backtrace,
-    },
+    GetCache { err_msg: String, location: Location },
 
     #[snafu(display("Failed to request Meta, source: {}", source))]
     RequestMeta {
@@ -39,13 +36,13 @@ pub enum Error {
     FindDatanode {
         table: String,
         region: RegionId,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to find table routes for table {}", table_name))]
     FindTableRoutes {
         table_name: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display(
@@ -56,51 +53,45 @@ pub enum Error {
     FindRegionRoutes {
         table_name: String,
         region_id: u64,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to serialize value to json, source: {}", source))]
     SerializeJson {
         source: serde_json::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to deserialize value from json, source: {}", source))]
     DeserializeJson {
         source: serde_json::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Expect {} region keys, actual {}", expect, actual))]
     RegionKeysSize {
         expect: usize,
         actual: usize,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to find region, reason: {}", reason))]
-    FindRegion {
-        reason: String,
-        backtrace: Backtrace,
-    },
+    FindRegion { reason: String, location: Location },
 
     #[snafu(display("Failed to find regions by filters: {:?}", filters))]
     FindRegions {
         filters: Vec<Expr>,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to find partition column: {}", column_name))]
     FindPartitionColumn {
         column_name: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Invalid InsertRequest, reason: {}", reason))]
-    InvalidInsertRequest {
-        reason: String,
-        backtrace: Backtrace,
-    },
+    InvalidInsertRequest { reason: String, location: Location },
 
     #[snafu(display(
         "Invalid table route data in meta, table name: {}, msg: {}",
@@ -110,7 +101,7 @@ pub enum Error {
     InvalidTableRouteData {
         table_name: String,
         err_msg: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display(
@@ -142,9 +133,6 @@ impl ErrorExt for Error {
             Error::ConvertScalarValue { .. } => StatusCode::Internal,
             Error::FindDatanode { .. } => StatusCode::InvalidArguments,
         }
-    }
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        ErrorCompat::backtrace(self)
     }
 
     fn as_any(&self) -> &dyn Any {

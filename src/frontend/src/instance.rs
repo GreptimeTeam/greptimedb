@@ -17,6 +17,7 @@ mod grpc;
 mod influxdb;
 mod opentsdb;
 mod prometheus;
+mod script;
 mod standalone;
 
 use std::collections::HashMap;
@@ -31,6 +32,7 @@ use async_trait::async_trait;
 use catalog::remote::MetaKvBackend;
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
+use common_catalog::consts::MITO_ENGINE;
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_query::Output;
@@ -40,7 +42,6 @@ use common_telemetry::timer;
 use datafusion::sql::sqlparser::ast::ObjectName;
 use datanode::instance::sql::table_idents_to_full_name;
 use datanode::instance::InstanceRef as DnInstanceRef;
-use datanode::metric;
 use datatypes::schema::Schema;
 use distributed::DistInstance;
 use meta_client::client::{MetaClient, MetaClientBuilder};
@@ -52,32 +53,36 @@ use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
 use query::query_engine::StatementHandlerRef;
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error as server_error;
+use servers::error::{ExecuteQuerySnafu, ParsePromQLSnafu};
 use servers::interceptor::{SqlQueryInterceptor, SqlQueryInterceptorRef};
-use servers::prom::{PromHandler, PromHandlerRef};
+use servers::prom::PromHandler;
 use servers::query_handler::grpc::{GrpcQueryHandler, GrpcQueryHandlerRef};
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::{
     InfluxdbLineProtocolHandler, OpentsdbProtocolHandler, PrometheusProtocolHandler, ScriptHandler,
-    ScriptHandlerRef,
 };
-use session::context::QueryContextRef;
+use session::context::{QueryContext, QueryContextRef};
 use snafu::prelude::*;
 use sql::dialect::GenericDialect;
 use sql::parser::ParserContext;
 use sql::statements::copy::CopyTable;
+use sql::statements::describe::DescribeTable;
 use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
-    self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExecuteStatementSnafu, ExternalSnafu,
-    InvalidInsertRequestSnafu, MissingMetasrvOptsSnafu, NotSupportedSnafu, ParseQuerySnafu,
-    ParseSqlSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
+    self, CatalogSnafu, DescribeStatementSnafu, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu,
+    ExecuteStatementSnafu, ExternalSnafu, InvalidInsertRequestSnafu, MissingMetasrvOptsSnafu,
+    NotSupportedSnafu, ParseQuerySnafu, ParseSqlSnafu, PlanStatementSnafu, Result,
+    SqlExecInterceptedSnafu, TableNotFoundSnafu,
 };
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::FrontendOptions;
 use crate::instance::standalone::StandaloneGrpcQueryHandler;
+use crate::metric;
+use crate::script::ScriptExecutor;
 use crate::server::{start_server, ServerHandlers, Services};
 
 #[async_trait]
@@ -101,13 +106,10 @@ pub type FrontendInstanceRef = Arc<dyn FrontendInstance>;
 #[derive(Clone)]
 pub struct Instance {
     catalog_manager: CatalogManagerRef,
-
-    /// Script handler is None in distributed mode, only works on standalone mode.
-    script_handler: Option<ScriptHandlerRef>,
+    script_executor: Arc<ScriptExecutor>,
     statement_handler: StatementHandlerRef,
     query_engine: QueryEngineRef,
     grpc_query_handler: GrpcQueryHandlerRef<Error>,
-    promql_handler: Option<PromHandlerRef>,
 
     create_expr_factory: CreateExprFactoryRef,
 
@@ -132,28 +134,33 @@ impl Instance {
         let partition_manager = Arc::new(PartitionRuleManager::new(table_routes));
         let datanode_clients = Arc::new(DatanodeClients::default());
 
-        let catalog_manager = Arc::new(FrontendCatalogManager::new(
-            meta_backend,
-            partition_manager,
-            datanode_clients.clone(),
-        ));
+        let mut catalog_manager =
+            FrontendCatalogManager::new(meta_backend, partition_manager, datanode_clients.clone());
 
-        let dist_instance =
-            DistInstance::new(meta_client, catalog_manager.clone(), datanode_clients);
+        let dist_instance = DistInstance::new(
+            meta_client,
+            Arc::new(catalog_manager.clone()),
+            datanode_clients,
+        );
         let dist_instance = Arc::new(dist_instance);
+
+        catalog_manager.set_dist_instance(dist_instance.clone());
+        let catalog_manager = Arc::new(catalog_manager);
 
         let query_engine =
             QueryEngineFactory::new_with_plugins(catalog_manager.clone(), plugins.clone())
                 .query_engine();
 
+        let script_executor =
+            Arc::new(ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?);
+
         Ok(Instance {
             catalog_manager,
-            script_handler: None,
+            script_executor,
             create_expr_factory: Arc::new(DefaultCreateExprFactory),
             statement_handler: dist_instance.clone(),
             query_engine,
             grpc_query_handler: dist_instance,
-            promql_handler: None,
             plugins: plugins.clone(),
             servers: Arc::new(HashMap::new()),
         })
@@ -189,18 +196,21 @@ impl Instance {
         Ok(Arc::new(meta_client))
     }
 
-    pub fn new_standalone(dn_instance: DnInstanceRef) -> Self {
-        Instance {
-            catalog_manager: dn_instance.catalog_manager().clone(),
-            script_handler: None,
+    pub async fn try_new_standalone(dn_instance: DnInstanceRef) -> Result<Self> {
+        let catalog_manager = dn_instance.catalog_manager();
+        let query_engine = dn_instance.query_engine();
+        let script_executor =
+            Arc::new(ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?);
+        Ok(Instance {
+            catalog_manager: catalog_manager.clone(),
+            script_executor,
             create_expr_factory: Arc::new(DefaultCreateExprFactory),
             statement_handler: dn_instance.clone(),
-            query_engine: dn_instance.query_engine(),
+            query_engine,
             grpc_query_handler: StandaloneGrpcQueryHandler::arc(dn_instance.clone()),
-            promql_handler: Some(dn_instance.clone()),
             plugins: Default::default(),
             servers: Arc::new(HashMap::new()),
-        }
+        })
     }
 
     pub async fn build_servers(
@@ -215,17 +225,23 @@ impl Instance {
     }
 
     #[cfg(test)]
-    pub(crate) fn new_distributed(dist_instance: Arc<DistInstance>) -> Self {
-        let catalog_manager = dist_instance.catalog_manager();
+    pub(crate) async fn new_distributed(
+        catalog_manager: CatalogManagerRef,
+        dist_instance: Arc<DistInstance>,
+    ) -> Self {
         let query_engine = QueryEngineFactory::new(catalog_manager.clone()).query_engine();
+        let script_executor = Arc::new(
+            ScriptExecutor::new(catalog_manager.clone(), query_engine.clone())
+                .await
+                .unwrap(),
+        );
         Instance {
             catalog_manager,
-            script_handler: None,
+            script_executor,
             statement_handler: dist_instance.clone(),
             query_engine,
             create_expr_factory: Arc::new(DefaultCreateExprFactory),
             grpc_query_handler: dist_instance,
-            promql_handler: None,
             plugins: Default::default(),
             servers: Arc::new(HashMap::new()),
         }
@@ -233,14 +249,6 @@ impl Instance {
 
     pub fn catalog_manager(&self) -> &CatalogManagerRef {
         &self.catalog_manager
-    }
-
-    pub fn set_script_handler(&mut self, handler: ScriptHandlerRef) {
-        debug_assert!(
-            self.script_handler.is_none(),
-            "Script handler can be set only once!"
-        );
-        self.script_handler = Some(handler);
     }
 
     /// Handle batch inserts
@@ -291,7 +299,7 @@ impl Instance {
                     "Table {}.{}.{} does not exist, try create table",
                     catalog_name, schema_name, table_name,
                 );
-                self.create_table_by_columns(ctx, table_name, columns)
+                self.create_table_by_columns(ctx, table_name, columns, MITO_ENGINE)
                     .await?;
                 info!(
                     "Successfully created table on insertion: {}.{}.{}",
@@ -328,6 +336,7 @@ impl Instance {
         ctx: QueryContextRef,
         table_name: &str,
         columns: &[Column],
+        engine: &str,
     ) -> Result<Output> {
         let catalog_name = &ctx.current_catalog();
         let schema_name = &ctx.current_schema();
@@ -335,7 +344,7 @@ impl Instance {
         // Create table automatically, build schema from data.
         let create_expr = self
             .create_expr_factory
-            .create_expr_by_columns(catalog_name, schema_name, table_name, columns)
+            .create_expr_by_columns(catalog_name, schema_name, table_name, columns, engine)
             .await?;
 
         info!(
@@ -428,10 +437,14 @@ fn parse_stmt(sql: &str) -> Result<Vec<Statement>> {
 }
 
 impl Instance {
-    async fn plan_exec(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
+    pub(crate) async fn plan_exec(
+        &self,
+        stmt: QueryStatement,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
         let planner = self.query_engine.planner();
         let plan = planner
-            .plan(QueryStatement::Sql(stmt), query_ctx.clone())
+            .plan(stmt, query_ctx.clone())
             .await
             .context(PlanStatementSnafu)?;
         self.query_engine
@@ -464,27 +477,50 @@ impl Instance {
             .context(ExecLogicalPlanSnafu)
     }
 
+    async fn describe_table(
+        &self,
+        stmt: DescribeTable,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let (catalog, schema, table) = table_idents_to_full_name(stmt.name(), query_ctx)
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+
+        let table = self
+            .catalog_manager
+            .table(&catalog, &schema, &table)
+            .await
+            .context(CatalogSnafu)?
+            .with_context(|| TableNotFoundSnafu {
+                table_name: stmt.name().to_string(),
+            })?;
+
+        query::sql::describe_table(table).context(DescribeStatementSnafu)
+    }
+
     async fn query_statement(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
         check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
 
         match stmt {
             Statement::Query(_) | Statement::Explain(_) | Statement::Delete(_) => {
-                self.plan_exec(stmt, query_ctx).await
+                self.plan_exec(QueryStatement::Sql(stmt), query_ctx).await
             }
 
             // For performance consideration, only "insert with select" is executed by query engine.
             // Plain insert ("insert with values") is still executed directly in statement.
             Statement::Insert(ref insert) if insert.is_insert_select() => {
-                self.plan_exec(stmt, query_ctx).await
+                self.plan_exec(QueryStatement::Sql(stmt), query_ctx).await
             }
 
             Statement::Tql(tql) => self.execute_tql(tql, query_ctx).await,
+
+            Statement::DescribeTable(stmt) => self.describe_table(stmt, query_ctx).await,
+
             Statement::CreateDatabase(_)
             | Statement::CreateExternalTable(_)
             | Statement::ShowDatabases(_)
             | Statement::CreateTable(_)
             | Statement::ShowTables(_)
-            | Statement::DescribeTable(_)
             | Statement::Insert(_)
             | Statement::Alter(_)
             | Statement::DropTable(_)
@@ -549,20 +585,13 @@ impl SqlQueryHandler for Instance {
     }
 
     async fn do_promql_query(&self, query: &PromQuery, _: QueryContextRef) -> Vec<Result<Output>> {
-        if let Some(handler) = &self.promql_handler {
-            let result = handler.do_query(query).await.with_context(|_| {
-                let query_literal = format!("{query:?}");
-                ExecutePromqlSnafu {
-                    query: query_literal,
-                }
-            });
-            vec![result]
-        } else {
-            vec![Err(NotSupportedSnafu {
-                feat: "PromQL Query",
-            }
-            .build())]
-        }
+        let result =
+            PromHandler::do_query(self, query)
+                .await
+                .with_context(|_| ExecutePromqlSnafu {
+                    query: format!("{query:?}"),
+                });
+        vec![result]
     }
 
     async fn do_describe(
@@ -596,51 +625,17 @@ impl SqlQueryHandler for Instance {
 }
 
 #[async_trait]
-impl ScriptHandler for Instance {
-    async fn insert_script(
-        &self,
-        schema: &str,
-        name: &str,
-        script: &str,
-    ) -> server_error::Result<()> {
-        if let Some(handler) = &self.script_handler {
-            handler.insert_script(schema, name, script).await
-        } else {
-            server_error::NotSupportedSnafu {
-                feat: "Script execution in Frontend",
-            }
-            .fail()
-        }
-    }
-
-    async fn execute_script(
-        &self,
-        schema: &str,
-        script: &str,
-        params: HashMap<String, String>,
-    ) -> server_error::Result<Output> {
-        if let Some(handler) = &self.script_handler {
-            handler.execute_script(schema, script, params).await
-        } else {
-            server_error::NotSupportedSnafu {
-                feat: "Script execution in Frontend",
-            }
-            .fail()
-        }
-    }
-}
-
-#[async_trait]
 impl PromHandler for Instance {
     async fn do_query(&self, query: &PromQuery) -> server_error::Result<Output> {
-        if let Some(promql_handler) = &self.promql_handler {
-            promql_handler.do_query(query).await
-        } else {
-            server_error::NotSupportedSnafu {
-                feat: "PromQL query in Frontend",
-            }
-            .fail()
-        }
+        let stmt = QueryLanguageParser::parse_promql(query).with_context(|_| ParsePromQLSnafu {
+            query: query.clone(),
+        })?;
+        self.plan_exec(stmt, QueryContext::arc())
+            .await
+            .map_err(BoxedError::new)
+            .with_context(|_| ExecuteQuerySnafu {
+                query: format!("{query:?}"),
+            })
     }
 }
 

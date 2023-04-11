@@ -30,7 +30,6 @@ use datafusion::physical_plan::{
     DisplayFormatType, ExecutionPlan, Partitioning, RecordBatchStream, SendableRecordBatchStream,
 };
 use datafusion::prelude::Expr;
-use datafusion::sql::TableReference;
 use datatypes::arrow::array::TimestampMillisecondArray;
 use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::RecordBatch;
@@ -52,22 +51,17 @@ impl EmptyMetric {
         end: Millisecond,
         interval: Millisecond,
         time_index_column_name: String,
-        value_column_name: String,
+        field_column_name: String,
     ) -> DataFusionResult<Self> {
         let schema = Arc::new(DFSchema::new_with_metadata(
             vec![
                 DFField::new(
-                    None::<TableReference>,
+                    Some(""),
                     &time_index_column_name,
                     DataType::Timestamp(TimeUnit::Millisecond, None),
                     false,
                 ),
-                DFField::new(
-                    None::<TableReference>,
-                    &value_column_name,
-                    DataType::Float64,
-                    true,
-                ),
+                DFField::new(Some(""), &field_column_name, DataType::Float64, true),
             ],
             HashMap::new(),
         )?);
@@ -81,7 +75,6 @@ impl EmptyMetric {
     }
 
     pub fn to_execution_plan(&self) -> Arc<dyn ExecutionPlan> {
-        // let schema =  self.schema.to
         Arc::new(EmptyMetricExec {
             start: self.start,
             end: self.end,
@@ -260,11 +253,11 @@ mod test {
         end: Millisecond,
         interval: Millisecond,
         time_column_name: String,
-        value_column_name: String,
+        field_column_name: String,
         expected: String,
     ) {
         let empty_metric =
-            EmptyMetric::new(start, end, interval, time_column_name, value_column_name).unwrap();
+            EmptyMetric::new(start, end, interval, time_column_name, field_column_name).unwrap();
         let empty_metric_exec = empty_metric.to_execution_plan();
 
         let session_context = SessionContext::default();

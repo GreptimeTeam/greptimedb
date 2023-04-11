@@ -18,10 +18,6 @@ use std::any::Any;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use catalog::error::{self as catalog_error, Error};
-use catalog::{
-    CatalogListRef, CatalogProvider, CatalogProviderRef, SchemaProvider, SchemaProviderRef,
-};
 use common_error::prelude::BoxedError;
 use datafusion::catalog::catalog::{
     CatalogList as DfCatalogList, CatalogProvider as DfCatalogProvider,
@@ -33,7 +29,10 @@ use snafu::ResultExt;
 use table::table::adapter::{DfTableProviderAdapter, TableAdapter};
 use table::TableRef;
 
-use crate::datafusion::error;
+use crate::error::{self, Result, SchemaProviderOperationSnafu};
+use crate::{
+    CatalogListRef, CatalogProvider, CatalogProviderRef, SchemaProvider, SchemaProviderRef,
+};
 
 pub struct DfCatalogListAdapter {
     catalog_list: CatalogListRef,
@@ -89,7 +88,7 @@ impl CatalogProvider for CatalogProviderAdapter {
         self
     }
 
-    fn schema_names(&self) -> catalog::error::Result<Vec<String>> {
+    fn schema_names(&self) -> Result<Vec<String>> {
         Ok(self.df_catalog_provider.schema_names())
     }
 
@@ -97,11 +96,11 @@ impl CatalogProvider for CatalogProviderAdapter {
         &self,
         _name: String,
         _schema: SchemaProviderRef,
-    ) -> catalog::error::Result<Option<SchemaProviderRef>> {
+    ) -> Result<Option<SchemaProviderRef>> {
         todo!("register_schema is not supported in Datafusion catalog provider")
     }
 
-    fn schema(&self, name: &str) -> catalog::error::Result<Option<Arc<dyn SchemaProvider>>> {
+    fn schema(&self, name: &str) -> Result<Option<Arc<dyn SchemaProvider>>> {
         Ok(self
             .df_catalog_provider
             .schema(name)
@@ -202,11 +201,11 @@ impl SchemaProvider for SchemaProviderAdapter {
     }
 
     /// Retrieves the list of available table names in this schema.
-    fn table_names(&self) -> Result<Vec<String>, Error> {
+    fn table_names(&self) -> Result<Vec<String>> {
         Ok(self.df_schema_provider.table_names())
     }
 
-    async fn table(&self, name: &str) -> Result<Option<TableRef>, Error> {
+    async fn table(&self, name: &str) -> Result<Option<TableRef>> {
         let table = self.df_schema_provider.table(name).await;
         let table = table.map(|table_provider| {
             match table_provider
@@ -225,11 +224,7 @@ impl SchemaProvider for SchemaProviderAdapter {
         Ok(table)
     }
 
-    fn register_table(
-        &self,
-        name: String,
-        table: TableRef,
-    ) -> catalog::error::Result<Option<TableRef>> {
+    fn register_table(&self, name: String, table: TableRef) -> Result<Option<TableRef>> {
         let table_provider = Arc::new(DfTableProviderAdapter::new(table.clone()));
         Ok(self
             .df_schema_provider
@@ -238,43 +233,43 @@ impl SchemaProvider for SchemaProviderAdapter {
                 msg: "Fail to register table to datafusion",
             })
             .map_err(BoxedError::new)
-            .context(catalog_error::SchemaProviderOperationSnafu)?
+            .context(SchemaProviderOperationSnafu)?
             .map(|_| table))
     }
 
-    fn rename_table(&self, _name: &str, _new_name: String) -> catalog_error::Result<TableRef> {
+    fn rename_table(&self, _name: &str, _new_name: String) -> Result<TableRef> {
         todo!()
     }
 
-    fn deregister_table(&self, name: &str) -> catalog::error::Result<Option<TableRef>> {
+    fn deregister_table(&self, name: &str) -> Result<Option<TableRef>> {
         self.df_schema_provider
             .deregister_table(name)
             .context(error::DatafusionSnafu {
                 msg: "Fail to deregister table from datafusion",
             })
             .map_err(BoxedError::new)
-            .context(catalog_error::SchemaProviderOperationSnafu)?
+            .context(SchemaProviderOperationSnafu)?
             .map(|table| {
                 let adapter = TableAdapter::new(table)
                     .context(error::TableSchemaMismatchSnafu)
                     .map_err(BoxedError::new)
-                    .context(catalog_error::SchemaProviderOperationSnafu)?;
+                    .context(SchemaProviderOperationSnafu)?;
                 Ok(Arc::new(adapter) as _)
             })
             .transpose()
     }
 
-    fn table_exist(&self, name: &str) -> Result<bool, Error> {
+    fn table_exist(&self, name: &str) -> Result<bool> {
         Ok(self.df_schema_provider.table_exist(name))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use catalog::local::{new_memory_catalog_list, MemoryCatalogProvider, MemorySchemaProvider};
     use table::table::numbers::NumbersTable;
 
     use super::*;
+    use crate::local::{new_memory_catalog_list, MemoryCatalogProvider, MemorySchemaProvider};
 
     #[test]
     #[should_panic]

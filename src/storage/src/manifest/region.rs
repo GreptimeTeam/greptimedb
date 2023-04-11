@@ -16,9 +16,10 @@
 use std::any::Any;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
-use common_telemetry::info;
+use common_telemetry::{error, info};
 use object_store::ObjectStore;
 use store_api::manifest::action::ProtocolAction;
 use store_api::manifest::{
@@ -115,16 +116,16 @@ impl Checkpointer for RegionManifestCheckpointer {
         };
 
         manifest.save_checkpoint(&checkpoint).await?;
-        // TODO(dennis): background task to clean old manifest actions and checkpoints.
-        manifest
+        if let Err(e) = manifest
             .manifest_store()
             .delete(start_version, last_version + 1)
-            .await?;
-        if start_version > MIN_VERSION {
-            manifest
-                .manifest_store()
-                .delete_checkpoint(start_version - 1)
-                .await?
+            .await
+        {
+            // It doesn't matter when deletion fails, they will be purged by gc task.
+            error!(e; "Failed to delete manifest logs [{},{}] in path: {}.",
+                   start_version,
+                   last_version,
+                   manifest.manifest_store().path());
         }
 
         info!("Region manifest checkpoint, start_version: {}, last_version: {}, compacted actions: {}", start_version, last_version, compacted_actions);
@@ -138,10 +139,17 @@ impl Checkpointer for RegionManifestCheckpointer {
 }
 
 impl RegionManifest {
-    pub fn with_checkpointer(manifest_dir: &str, object_store: ObjectStore) -> Self {
+    pub fn with_checkpointer(
+        manifest_dir: &str,
+        object_store: ObjectStore,
+        checkpoint_actions_margin: Option<u16>,
+        gc_duration: Option<Duration>,
+    ) -> Self {
         Self::new(
             manifest_dir,
             object_store,
+            checkpoint_actions_margin,
+            gc_duration,
             Some(Arc::new(RegionManifestCheckpointer {
                 flushed_manifest_version: AtomicU64::new(0),
             })),
@@ -184,7 +192,8 @@ mod tests {
         builder.root(&tmp_dir.path().to_string_lossy());
         let object_store = ObjectStore::new(builder).unwrap().finish();
 
-        let manifest = RegionManifest::with_checkpointer("/manifest/", object_store);
+        let manifest = RegionManifest::with_checkpointer("/manifest/", object_store, None, None);
+        manifest.start().await.unwrap();
 
         let region_meta = Arc::new(build_region_meta());
 
@@ -274,6 +283,8 @@ mod tests {
 
         // Reach end
         assert!(iter.next_action().await.unwrap().is_none());
+
+        manifest.stop().await.unwrap();
     }
 
     async fn assert_scan(manifest: &RegionManifest, start_version: ManifestVersion, expected: u64) {
@@ -294,7 +305,13 @@ mod tests {
         builder.root(&tmp_dir.path().to_string_lossy());
         let object_store = ObjectStore::new(builder).unwrap().finish();
 
-        let manifest = RegionManifest::with_checkpointer("/manifest/", object_store);
+        let manifest = RegionManifest::with_checkpointer(
+            "/manifest/",
+            object_store,
+            None,
+            Some(Duration::from_millis(50)),
+        );
+        manifest.start().await.unwrap();
 
         let region_meta = Arc::new(build_region_meta());
         let new_region_meta = Arc::new(build_altered_region_meta());
@@ -325,12 +342,15 @@ mod tests {
         // update flushed manifest version for doing checkpoint
         manifest.set_flushed_manifest_version(2);
 
+        let mut checkpoint_versions = vec![];
+
         // do a checkpoint
         let checkpoint = manifest.do_checkpoint().await.unwrap().unwrap();
         let last_checkpoint = manifest.last_checkpoint().await.unwrap().unwrap();
         assert_eq!(checkpoint, last_checkpoint);
         assert_eq!(checkpoint.compacted_actions, 3);
         assert_eq!(checkpoint.last_version, 2);
+        checkpoint_versions.push(2);
         let alterd_raw_meta = RawRegionMetadata::from(new_region_meta.as_ref());
         assert!(matches!(&checkpoint.checkpoint, Some(RegionManifestData {
             committed_sequence: 99,
@@ -376,8 +396,8 @@ mod tests {
         }
 
         assert_scan(&manifest, 3, 2).await;
-        // do another checkpoints
 
+        // do another checkpoints
         // compacted RegionChange
         manifest.set_flushed_manifest_version(3);
         let checkpoint = manifest.do_checkpoint().await.unwrap().unwrap();
@@ -385,6 +405,7 @@ mod tests {
         assert_eq!(checkpoint, last_checkpoint);
         assert_eq!(checkpoint.compacted_actions, 1);
         assert_eq!(checkpoint.last_version, 3);
+        checkpoint_versions.push(3);
         assert!(matches!(&checkpoint.checkpoint, Some(RegionManifestData {
             committed_sequence: 200,
             metadata,
@@ -406,6 +427,7 @@ mod tests {
         assert_eq!(checkpoint, last_checkpoint);
         assert_eq!(checkpoint.compacted_actions, 1);
         assert_eq!(checkpoint.last_version, 4);
+        checkpoint_versions.push(4);
         assert!(matches!(&checkpoint.checkpoint, Some(RegionManifestData {
             committed_sequence: 200,
             metadata,
@@ -427,5 +449,26 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+
+        // wait for gc
+        tokio::time::sleep(Duration::from_millis(60)).await;
+
+        for v in checkpoint_versions {
+            if v < 4 {
+                // ensure old checkpoints were purged.
+                assert!(manifest
+                    .manifest_store()
+                    .load_checkpoint(v)
+                    .await
+                    .unwrap()
+                    .is_none());
+            } else {
+                // the last checkpoints is still exists.
+                let last_checkpoint = manifest.last_checkpoint().await.unwrap().unwrap();
+                assert_eq!(checkpoint, last_checkpoint);
+            }
+        }
+
+        manifest.stop().await.unwrap();
     }
 }

@@ -17,10 +17,11 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use common_telemetry::logging::info;
+use common_telemetry::logging::debug;
 use object_store::{util, ObjectStore};
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
+use store_api::manifest::Manifest;
 use store_api::storage::{
     CreateOptions, EngineContext, OpenOptions, Region, RegionDescriptor, StorageEngine,
 };
@@ -290,15 +291,27 @@ impl<S: LogStore> EngineInner<S> {
 
         let mut guard = SlotGuard::new(name, &self.regions);
 
-        let store_config =
-            self.region_store_config(&opts.parent_dir, opts.write_buffer_size, name, opts.ttl);
+        let store_config = self
+            .region_store_config(
+                &opts.parent_dir,
+                opts.write_buffer_size,
+                name,
+                &self.config,
+                opts.ttl,
+                opts.compaction_time_window,
+            )
+            .await?;
 
         let region = match RegionImpl::open(name.to_string(), store_config, opts).await? {
             None => return Ok(None),
             Some(v) => v,
         };
         guard.update(RegionSlot::Ready(region.clone()));
-        info!("Storage engine open region {}", region.id());
+        debug!(
+            "Storage engine open region {}, id: {}",
+            region.name(),
+            region.id()
+        );
         Ok(Some(region))
     }
 
@@ -321,18 +334,26 @@ impl<S: LogStore> EngineInner<S> {
                 .context(error::InvalidRegionDescSnafu {
                     region: &region_name,
                 })?;
-        let store_config = self.region_store_config(
-            &opts.parent_dir,
-            opts.write_buffer_size,
-            &region_name,
-            opts.ttl,
-        );
+        let store_config = self
+            .region_store_config(
+                &opts.parent_dir,
+                opts.write_buffer_size,
+                &region_name,
+                &self.config,
+                opts.ttl,
+                opts.compaction_time_window,
+            )
+            .await?;
 
         let region = RegionImpl::create(metadata, store_config).await?;
 
         guard.update(RegionSlot::Ready(region.clone()));
 
-        info!("Storage engine create region {}", region.id());
+        debug!(
+            "Storage engine create region {}, id: {}",
+            region.name(),
+            region.id()
+        );
 
         Ok(region)
     }
@@ -342,25 +363,33 @@ impl<S: LogStore> EngineInner<S> {
         slot.get_ready_region()
     }
 
-    fn region_store_config(
+    async fn region_store_config(
         &self,
         parent_dir: &str,
         write_buffer_size: Option<usize>,
         region_name: &str,
+        config: &EngineConfig,
         ttl: Option<Duration>,
-    ) -> StoreConfig<S> {
+        compaction_time_window: Option<i64>,
+    ) -> Result<StoreConfig<S>> {
         let parent_dir = util::normalize_dir(parent_dir);
 
         let sst_dir = &region_sst_dir(&parent_dir, region_name);
         let sst_layer = Arc::new(FsAccessLayer::new(sst_dir, self.object_store.clone()));
         let manifest_dir = region_manifest_dir(&parent_dir, region_name);
-        let manifest = RegionManifest::with_checkpointer(&manifest_dir, self.object_store.clone());
+        let manifest = RegionManifest::with_checkpointer(
+            &manifest_dir,
+            self.object_store.clone(),
+            config.manifest_checkpoint_margin,
+            config.manifest_gc_duration,
+        );
+        manifest.start().await?;
 
         let flush_strategy = write_buffer_size
             .map(|size| Arc::new(SizeBasedStrategy::new(size)) as Arc<_>)
             .unwrap_or_else(|| self.flush_strategy.clone());
 
-        StoreConfig {
+        Ok(StoreConfig {
             log_store: self.log_store.clone(),
             sst_layer,
             manifest,
@@ -371,7 +400,8 @@ impl<S: LogStore> EngineInner<S> {
             engine_config: self.config.clone(),
             file_purger: self.file_purger.clone(),
             ttl,
-        }
+            compaction_time_window,
+        })
     }
 }
 
@@ -413,7 +443,7 @@ mod tests {
         let region_name = "region-0";
         let desc = RegionDescBuilder::new(region_name)
             .push_key_column(("k1", LogicalTypeId::Int32, false))
-            .push_value_column(("v1", LogicalTypeId::Float32, true))
+            .push_field_column(("v1", LogicalTypeId::Float32, true))
             .build();
         let ctx = EngineContext::default();
         let region = engine

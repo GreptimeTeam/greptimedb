@@ -16,6 +16,7 @@ CREATE TABLE t(i INTEGER, j BIGINT TIME INDEX);
 
 DESC TABLE new_table;
 
+-- SQLNESS ARG restart=true
 SELECT * FROM new_table;
 
 ALTER TABLE new_table RENAME new_table;

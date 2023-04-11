@@ -15,8 +15,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use common_base::readable_size::ReadableSize;
 use common_error::prelude::BoxedError;
-use common_telemetry::tracing::log::info;
+use common_telemetry::tracing::log::{debug, info};
 use common_telemetry::{error, logging};
 use futures::TryStreamExt;
 use snafu::{ensure, ResultExt};
@@ -67,9 +68,15 @@ impl RegionWriter {
         memtable_builder: MemtableBuilderRef,
         config: Arc<EngineConfig>,
         ttl: Option<Duration>,
+        compaction_time_window: Option<i64>,
     ) -> RegionWriter {
         RegionWriter {
-            inner: Mutex::new(WriterInner::new(memtable_builder, config, ttl)),
+            inner: Mutex::new(WriterInner::new(
+                memtable_builder,
+                config,
+                ttl,
+                compaction_time_window,
+            )),
             version_mutex: Mutex::new(()),
         }
     }
@@ -297,8 +304,10 @@ impl RegionWriter {
         let mut inner = self.inner.lock().await;
 
         ensure!(!inner.is_closed(), error::ClosedRegionSnafu);
-
-        inner.manual_compact(writer_ctx, ctx).await
+        let sst_write_buffer_size = inner.engine_config.sst_write_buffer_size;
+        inner
+            .manual_compact(writer_ctx, ctx, sst_write_buffer_size)
+            .await
     }
 
     /// Cancel flush task if any
@@ -358,6 +367,7 @@ struct WriterInner {
     closed: bool,
     engine_config: Arc<EngineConfig>,
     ttl: Option<Duration>,
+    compaction_time_window: Option<i64>,
 }
 
 impl WriterInner {
@@ -365,6 +375,7 @@ impl WriterInner {
         memtable_builder: MemtableBuilderRef,
         engine_config: Arc<EngineConfig>,
         ttl: Option<Duration>,
+        compaction_time_window: Option<i64>,
     ) -> WriterInner {
         WriterInner {
             memtable_builder,
@@ -372,6 +383,7 @@ impl WriterInner {
             engine_config,
             closed: false,
             ttl,
+            compaction_time_window,
         }
     }
 
@@ -635,7 +647,13 @@ impl WriterInner {
             return Ok(());
         }
 
-        let cb = Self::build_flush_callback(&current_version, ctx, &self.engine_config, self.ttl);
+        let cb = Self::build_flush_callback(
+            &current_version,
+            ctx,
+            &self.engine_config,
+            self.ttl,
+            self.compaction_time_window,
+        );
 
         let flush_req = FlushJob {
             max_memtable_id: max_memtable_id.unwrap(),
@@ -648,6 +666,7 @@ impl WriterInner {
             wal: ctx.wal.clone(),
             manifest: ctx.manifest.clone(),
             on_success: cb,
+            engine_config: self.engine_config.clone(),
         };
 
         let flush_handle = ctx
@@ -663,6 +682,7 @@ impl WriterInner {
         &mut self,
         writer_ctx: WriterContext<'_, S>,
         compact_ctx: CompactContext,
+        sst_write_buffer_size: ReadableSize,
     ) -> Result<()> {
         let region_id = writer_ctx.shared.id();
         let mut compaction_request = CompactionRequestImpl {
@@ -673,7 +693,9 @@ impl WriterInner {
             manifest: writer_ctx.manifest.clone(),
             wal: writer_ctx.wal.clone(),
             ttl: self.ttl,
+            compaction_time_window: self.compaction_time_window,
             sender: None,
+            sst_write_buffer_size,
         };
 
         let compaction_scheduler = writer_ctx.compaction_scheduler.clone();
@@ -719,6 +741,7 @@ impl WriterInner {
         ctx: &WriterContext<S>,
         config: &Arc<EngineConfig>,
         ttl: Option<Duration>,
+        compaction_time_window: Option<i64>,
     ) -> Option<FlushCallback> {
         let region_id = version.metadata().id();
         let compaction_request = CompactionRequestImpl {
@@ -729,7 +752,9 @@ impl WriterInner {
             manifest: ctx.manifest.clone(),
             wal: ctx.wal.clone(),
             ttl,
+            compaction_time_window,
             sender: None,
+            sst_write_buffer_size: config.sst_write_buffer_size,
         };
         let compaction_scheduler = ctx.compaction_scheduler.clone();
         let shared_data = ctx.shared.clone();
@@ -763,7 +788,7 @@ impl WriterInner {
             .file_num();
 
         if level0_file_num <= max_files_in_l0 {
-            info!(
+            debug!(
                 "No enough SST files in level 0 (threshold: {}), skip compaction",
                 max_files_in_l0
             );

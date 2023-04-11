@@ -4,10 +4,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[features]
-default = ["python"]
-python = ["dep:script"]
-
 [dependencies]
 async-compat = "0.2"
 async-stream.workspace = true
@@ -38,6 +34,7 @@ futures = "0.3"
 futures-util.workspace = true
 hyper = { version = "0.14", features = ["full"] }
 humantime-serde = "1.1"
+log = "0.4"
 log-store = { path = "../log-store" }
 meta-client = { path = "../meta-client" }
 meta-srv = { path = "../meta-srv", features = ["mock"] }
@@ -48,7 +45,6 @@ pin-project = "1.0"
 prost.workspace = true
 query = { path = "../query" }
 regex = "1.6"
-script = { path = "../script", features = ["python"], optional = true }
 serde = "1.0"
 serde_json = "1.0"
 servers = { path = "../servers" }
@@ -66,7 +62,6 @@ tonic.workspace = true
 tower = { version = "0.4", features = ["full"] }
 tower-http = { version = "0.3", features = ["full"] }
 url = "2.3.1"
-uuid.workspace = true
 
 [dev-dependencies]
 axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", branch = "patch-1" }

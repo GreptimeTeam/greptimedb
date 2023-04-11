@@ -12,15 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
+use rstest::rstest;
+use rstest_reuse::apply;
+use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContext;
 
-use super::test_util::check_unordered_output_stream;
-use crate::tests::test_util::setup_test_instance;
+use super::test_util::{check_unordered_output_stream, standalone, standalone_instance_case};
+use crate::instance::Instance;
+use crate::tests::test_util::MockInstance;
 
 #[allow(clippy::too_many_arguments)]
 async fn create_insert_query_assert(
+    instance: Arc<Instance>,
     create: &str,
     insert: &str,
     promql: &str,
@@ -30,37 +37,54 @@ async fn create_insert_query_assert(
     lookback: Duration,
     expected: &str,
 ) {
-    let instance = setup_test_instance("test_execute_insert").await;
+    instance.do_query(create, QueryContext::arc()).await;
+    instance.do_query(insert, QueryContext::arc()).await;
 
-    instance.execute_sql(create).await;
-
-    instance.execute_sql(insert).await;
+    let query = PromQuery {
+        query: promql.to_string(),
+        start: "0".to_string(),
+        end: "0".to_string(),
+        step: "5m".to_string(),
+    };
+    let QueryStatement::Promql(mut eval_stmt) = QueryLanguageParser::parse_promql(&query).unwrap() else { unreachable!() };
+    eval_stmt.start = start;
+    eval_stmt.end = end;
+    eval_stmt.interval = interval;
+    eval_stmt.lookback_delta = lookback;
 
     let query_output = instance
-        .inner()
-        .execute_promql_statement(promql, start, end, interval, lookback, QueryContext::arc())
+        .plan_exec(QueryStatement::Promql(eval_stmt), QueryContext::arc())
         .await
         .unwrap();
-    let expected = String::from(expected);
     check_unordered_output_stream(query_output, expected).await;
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn create_insert_tql_assert(create: &str, insert: &str, tql: &str, expected: &str) {
-    let instance = setup_test_instance("test_execute_insert").await;
+async fn create_insert_tql_assert(
+    instance: Arc<Instance>,
+    create: &str,
+    insert: &str,
+    tql: &str,
+    expected: &str,
+) {
+    instance.do_query(create, QueryContext::arc()).await;
+    instance.do_query(insert, QueryContext::arc()).await;
 
-    instance.execute_sql(create).await;
-
-    instance.execute_sql(insert).await;
-
-    let query_output = instance.execute_sql(tql).await;
-    let expected = String::from(expected);
+    let query_output = instance
+        .do_query(tql, QueryContext::arc())
+        .await
+        .remove(0)
+        .unwrap();
     check_unordered_output_stream(query_output, expected).await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn sql_insert_tql_query_ceil() {
+// should apply to both instances. tracked in #1296
+#[apply(standalone_instance_case)]
+async fn sql_insert_tql_query_ceil(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+
     create_insert_tql_assert(
+        instance,
         r#"create table http_requests_total (
             host string,
             cpu double,
@@ -102,9 +126,13 @@ async fn sql_insert_tql_query_ceil() {
     .await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn sql_insert_promql_query_ceil() {
+// should apply to both instances. tracked in #1296
+#[apply(standalone_instance_case)]
+async fn sql_insert_promql_query_ceil(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+
     create_insert_query_assert(
+        instance,
         r#"create table http_requests_total (
             host string,
             cpu double,
@@ -148,8 +176,8 @@ async fn sql_insert_promql_query_ceil() {
 const AGGREGATORS_CREATE_TABLE: &str = r#"create table http_requests (
     job string,
     instance string,
-    group string,
-    value double,
+    "group" string,
+    "value" double,
     ts timestamp TIME INDEX,
     PRIMARY KEY (job, instance, group),
 );"#;
@@ -181,9 +209,13 @@ fn unix_epoch_plus_100s() -> SystemTime {
 // eval instant at 50m SUM BY (group) (http_requests{job="api-server"})
 //   {group="canary"} 700
 //   {group="production"} 300
-#[tokio::test(flavor = "multi_thread")]
-async fn aggregators_simple_sum() {
+// should apply to both instances. tracked in #1296
+#[apply(standalone_instance_case)]
+async fn aggregators_simple_sum(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+
     create_insert_query_assert(
+        instance,
         AGGREGATORS_CREATE_TABLE,
         AGGREGATORS_INSERT_DATA,
         "SUM BY (group) (http_requests{job=\"api-server\"})",
@@ -205,9 +237,13 @@ async fn aggregators_simple_sum() {
 // eval instant at 50m avg by (group) (http_requests{job="api-server"})
 //   {group="canary"} 350
 //   {group="production"} 150
-#[tokio::test(flavor = "multi_thread")]
-async fn aggregators_simple_avg() {
+// should apply to both instances. tracked in #1296
+#[apply(standalone_instance_case)]
+async fn aggregators_simple_avg(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+
     create_insert_query_assert(
+        instance,
         AGGREGATORS_CREATE_TABLE,
         AGGREGATORS_INSERT_DATA,
         "AVG BY (group) (http_requests{job=\"api-server\"})",
@@ -229,9 +265,13 @@ async fn aggregators_simple_avg() {
 // eval instant at 50m count by (group) (http_requests{job="api-server"})
 //   {group="canary"} 2
 //   {group="production"} 2
-#[tokio::test(flavor = "multi_thread")]
-async fn aggregators_simple_count() {
+// should apply to both instances. tracked in #1296
+#[apply(standalone_instance_case)]
+async fn aggregators_simple_count(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+
     create_insert_query_assert(
+        instance,
         AGGREGATORS_CREATE_TABLE,
         AGGREGATORS_INSERT_DATA,
         "COUNT BY (group) (http_requests{job=\"api-server\"})",
@@ -253,9 +293,13 @@ async fn aggregators_simple_count() {
 // eval instant at 50m sum without (instance) (http_requests{job="api-server"})
 //   {group="canary",job="api-server"} 700
 //   {group="production",job="api-server"} 300
-#[tokio::test(flavor = "multi_thread")]
-async fn aggregators_simple_without() {
+// should apply to both instances. tracked in #1296
+#[apply(standalone_instance_case)]
+async fn aggregators_simple_without(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+
     create_insert_query_assert(
+        instance,
         AGGREGATORS_CREATE_TABLE,
         AGGREGATORS_INSERT_DATA,
         "sum without (instance) (http_requests{job=\"api-server\"})",
@@ -276,9 +320,13 @@ async fn aggregators_simple_without() {
 // # Empty by.
 // eval instant at 50m sum by () (http_requests{job="api-server"})
 //   {} 1000
-#[tokio::test(flavor = "multi_thread")]
-async fn aggregators_empty_by() {
+// should apply to both instances. tracked in #1296
+#[apply(standalone_instance_case)]
+async fn aggregators_empty_by(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+
     create_insert_query_assert(
+        instance,
         AGGREGATORS_CREATE_TABLE,
         AGGREGATORS_INSERT_DATA,
         "sum by () (http_requests{job=\"api-server\"})",
@@ -298,9 +346,13 @@ async fn aggregators_empty_by() {
 // # No by/without.
 // eval instant at 50m sum(http_requests{job="api-server"})
 //   {} 1000
-#[tokio::test(flavor = "multi_thread")]
-async fn aggregators_no_by_without() {
+// should apply to both instances. tracked in #1296
+#[apply(standalone_instance_case)]
+async fn aggregators_no_by_without(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+
     create_insert_query_assert(
+        instance,
         AGGREGATORS_CREATE_TABLE,
         AGGREGATORS_INSERT_DATA,
         r#"sum (http_requests{job="api-server"})"#,
@@ -321,9 +373,13 @@ async fn aggregators_no_by_without() {
 // eval instant at 50m sum without () (http_requests{job="api-server",group="production"})
 //   {group="production",job="api-server",instance="0"} 100
 //   {group="production",job="api-server",instance="1"} 200
-#[tokio::test(flavor = "multi_thread")]
-async fn aggregators_empty_without() {
+// should apply to both instances. tracked in #1296
+#[apply(standalone_instance_case)]
+async fn aggregators_empty_without(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+
     create_insert_query_assert(
+        instance,
         AGGREGATORS_CREATE_TABLE,
         AGGREGATORS_INSERT_DATA,
         r#"sum without () (http_requests{job="api-server",group="production"})"#,
@@ -345,9 +401,13 @@ async fn aggregators_empty_without() {
 // eval instant at 50m sum(http_requests) by (job) + min(http_requests) by (job) + max(http_requests) by (job) + avg(http_requests) by (job)
 //   {job="app-server"} 4550
 //   {job="api-server"} 1750
-#[tokio::test(flavor = "multi_thread")]
-async fn aggregators_complex_combined_aggrs() {
+// should apply to both instances. tracked in #1296
+#[apply(standalone_instance_case)]
+async fn aggregators_complex_combined_aggrs(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+
     create_insert_query_assert(
+        instance,
         AGGREGATORS_CREATE_TABLE,
         AGGREGATORS_INSERT_DATA,
         "sum(http_requests) by (job) + min(http_requests) by (job) + max(http_requests) by (job) + avg(http_requests) by (job)",
@@ -366,9 +426,13 @@ async fn aggregators_complex_combined_aggrs() {
 }
 
 // This is not from prometheus test set. It's derived from `aggregators_complex_combined_aggrs()`
-#[tokio::test(flavor = "multi_thread")]
-async fn two_aggregators_combined_aggrs() {
+// should apply to both instances. tracked in #1296
+#[apply(standalone_instance_case)]
+async fn two_aggregators_combined_aggrs(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+
     create_insert_query_assert(
+        instance,
         AGGREGATORS_CREATE_TABLE,
         AGGREGATORS_INSERT_DATA,
         "sum(http_requests) by (job) + min(http_requests) by (job) ",
@@ -389,10 +453,14 @@ async fn two_aggregators_combined_aggrs() {
 // eval instant at 50m stddev by (instance)(http_requests)
 //   {instance="0"} 223.60679774998
 //   {instance="1"} 223.60679774998
-#[tokio::test(flavor = "multi_thread")]
+// should apply to both instances. tracked in #1296
+#[apply(standalone_instance_case)]
 #[ignore = "TODO(ruihang): fix this case"]
-async fn stddev_by_label() {
+async fn stddev_by_label(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+
     create_insert_query_assert(
+        instance,
         AGGREGATORS_CREATE_TABLE,
         AGGREGATORS_INSERT_DATA,
         r#"stddev by (instance)(http_requests)"#,
@@ -400,20 +468,24 @@ async fn stddev_by_label() {
         unix_epoch_plus_100s(),
         Duration::from_secs(60),
         Duration::from_secs(0),
-        "+----------+---------------------+-----------------------------+\
-        \n| instance | ts                  | STDDEV(http_requests.value) |\
-        \n+----------+---------------------+-----------------------------+\
-        \n| 0        | 1970-01-01T00:00:00 | 258.19888974716116          |\
-        \n| 1        | 1970-01-01T00:00:00 | 258.19888974716116          |\
-        \n+----------+---------------------+-----------------------------+",
+        "+----------+---------------------+--------------------------------+\
+        \n| instance | ts                  | STDDEVPOP(http_requests.value) |\
+        \n+----------+---------------------+--------------------------------+\
+        \n| 0        | 1970-01-01T00:00:00 | 223.606797749979               |\
+        \n| 1        | 1970-01-01T00:00:00 | 223.606797749979               |\
+        \n+----------+---------------------+--------------------------------+",
     )
     .await;
 }
 
 // This is not derived from prometheus
-#[tokio::test(flavor = "multi_thread")]
-async fn binary_op_plain_columns() {
+// should apply to both instances. tracked in #1296
+#[apply(standalone_instance_case)]
+async fn binary_op_plain_columns(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+
     create_insert_query_assert(
+        instance,
         AGGREGATORS_CREATE_TABLE,
         AGGREGATORS_INSERT_DATA,
         r#"http_requests - http_requests"#,

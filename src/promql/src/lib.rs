@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![feature(option_get_or_insert_default)]
+#![feature(let_chains)]
+
 pub mod error;
 pub mod extension_plan;
 pub mod functions;

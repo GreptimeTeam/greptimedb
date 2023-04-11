@@ -31,7 +31,7 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::format_full_table_name;
 use common_error::prelude::BoxedError;
 use common_query::Output;
-use common_telemetry::{debug, info};
+use common_telemetry::debug;
 use datanode::instance::sql::table_idents_to_full_name;
 use datanode::sql::SqlHandler;
 use datatypes::prelude::ConcreteDataType;
@@ -46,7 +46,7 @@ use partition::partition::{PartitionBound, PartitionDef};
 use query::error::QueryExecutionSnafu;
 use query::parser::QueryStatement;
 use query::query_engine::StatementHandler;
-use query::sql::{describe_table, show_databases, show_tables};
+use query::sql::{show_databases, show_tables};
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::Value as SqlValue;
@@ -56,6 +56,7 @@ use sql::statements::statement::Statement;
 use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
 use table::requests::TableOptions;
 use table::table::AlterContext;
+use table::TableRef;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
@@ -93,14 +94,14 @@ impl DistInstance {
         &self,
         create_table: &mut CreateTableExpr,
         partitions: Option<Partitions>,
-    ) -> Result<Output> {
+    ) -> Result<TableRef> {
         let table_name = TableName::new(
             &create_table.catalog_name,
             &create_table.schema_name,
             &create_table.table_name,
         );
 
-        if self
+        if let Some(table) = self
             .catalog_manager
             .table(
                 &table_name.catalog_name,
@@ -109,10 +110,9 @@ impl DistInstance {
             )
             .await
             .context(CatalogSnafu)?
-            .is_some()
         {
             return if create_table.create_if_not_exists {
-                Ok(Output::AffectedRows(0))
+                Ok(table)
             } else {
                 TableAlreadyExistSnafu {
                     table: table_name.to_string(),
@@ -134,7 +134,7 @@ impl DistInstance {
             }
         );
         let table_route = table_routes.first().unwrap();
-        info!(
+        debug!(
             "Creating distributed table {table_name} with table routes: {}",
             serde_json::to_string_pretty(table_route)
                 .unwrap_or_else(|_| format!("{table_route:#?}"))
@@ -153,20 +153,20 @@ impl DistInstance {
 
         create_table.table_id = Some(TableId { id: table_id });
 
-        let table = DistTable::new(
+        let table = Arc::new(DistTable::new(
             table_name.clone(),
             table_info,
             self.catalog_manager.partition_manager(),
             self.catalog_manager.datanode_clients(),
             self.catalog_manager.backend(),
-        );
+        ));
 
         let request = RegisterTableRequest {
             catalog: table_name.catalog_name.clone(),
             schema: table_name.schema_name.clone(),
             table_name: table_name.table_name.clone(),
             table_id,
-            table: Arc::new(table),
+            table: table.clone(),
         };
         ensure!(
             self.catalog_manager
@@ -196,9 +196,7 @@ impl DistInstance {
                 .await
                 .context(RequestDatanodeSnafu)?;
         }
-
-        // Checked in real MySQL, it truly returns "0 rows affected".
-        Ok(Output::AffectedRows(0))
+        Ok(table)
     }
 
     async fn drop_table(&self, table_name: TableName) -> Result<Output> {
@@ -329,7 +327,8 @@ impl DistInstance {
             }
             Statement::CreateTable(stmt) => {
                 let create_expr = &mut expr_factory::create_to_expr(&stmt, query_ctx)?;
-                Ok(self.create_table(create_expr, stmt.partitions).await?)
+                let _ = self.create_table(create_expr, stmt.partitions).await?;
+                Ok(Output::AffectedRows(0))
             }
             Statement::Alter(alter_table) => {
                 let expr = grpc::to_alter_expr(alter_table, query_ctx)?;
@@ -346,20 +345,6 @@ impl DistInstance {
             Statement::ShowDatabases(stmt) => show_databases(stmt, self.catalog_manager.clone()),
             Statement::ShowTables(stmt) => {
                 show_tables(stmt, self.catalog_manager.clone(), query_ctx)
-            }
-            Statement::DescribeTable(stmt) => {
-                let (catalog, schema, table) = table_idents_to_full_name(stmt.name(), query_ctx)
-                    .map_err(BoxedError::new)
-                    .context(error::ExternalSnafu)?;
-                let table = self
-                    .catalog_manager
-                    .table(&catalog, &schema, &table)
-                    .await
-                    .context(CatalogSnafu)?
-                    .with_context(|| TableNotFoundSnafu {
-                        table_name: stmt.name().to_string(),
-                    })?;
-                describe_table(table)
             }
             Statement::Insert(insert) => {
                 let (catalog, schema, table) =

@@ -16,7 +16,6 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::LocalResult;
 use common_query::Output;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::RecordBatch;
@@ -178,7 +177,7 @@ fn encode_value(value: &Value, builder: &mut DataRowEncoder) -> PgWireResult<()>
             }
         }
         Value::Timestamp(v) => {
-            if let LocalResult::Single(datetime) = v.to_chrono_datetime() {
+            if let Some(datetime) = v.to_chrono_datetime() {
                 builder.encode_field(&datetime)
             } else {
                 Err(PgWireError::ApiError(Box::new(Error::Internal {

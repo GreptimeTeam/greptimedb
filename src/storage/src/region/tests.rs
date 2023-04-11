@@ -53,7 +53,7 @@ use crate::test_util::{self, config_util, schema_util, write_batch_util};
 pub fn new_metadata(region_name: &str, enable_version_column: bool) -> RegionMetadata {
     let desc = RegionDescBuilder::new(region_name)
         .enable_version_column(enable_version_column)
-        .push_value_column(("v0", LogicalTypeId::Int64, true))
+        .push_field_column(("v0", LogicalTypeId::Int64, true))
         .build();
     desc.try_into().unwrap()
 }
@@ -269,7 +269,7 @@ async fn test_new_region() {
     let desc = RegionDescBuilder::new(region_name)
         .enable_version_column(true)
         .push_key_column(("k1", LogicalTypeId::Int32, false))
-        .push_value_column(("v0", LogicalTypeId::Float32, true))
+        .push_field_column(("v0", LogicalTypeId::Float32, true))
         .build();
     let metadata: RegionMetadata = desc.try_into().unwrap();
 
@@ -314,7 +314,8 @@ async fn test_recover_region_manifets() {
     builder.root(&tmp_dir.path().to_string_lossy());
     let object_store = ObjectStore::new(builder).unwrap().finish();
 
-    let manifest = RegionManifest::with_checkpointer("/manifest/", object_store.clone());
+    let manifest =
+        RegionManifest::with_checkpointer("/manifest/", object_store.clone(), None, None);
     let region_meta = Arc::new(build_region_meta());
 
     let sst_layer = Arc::new(FsAccessLayer::new("sst", object_store)) as _;

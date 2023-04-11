@@ -38,10 +38,16 @@ use crate::table::{Expr, Table};
 pub struct NumbersTable {
     table_id: TableId,
     schema: SchemaRef,
+    name: String,
+    engine: String,
 }
 
 impl NumbersTable {
     pub fn new(table_id: TableId) -> Self {
+        NumbersTable::with_name(table_id, "numbers".to_string())
+    }
+
+    pub fn with_name(table_id: TableId, name: String) -> Self {
         let column_schemas = vec![ColumnSchema::new(
             "number",
             ConcreteDataType::uint32_datatype(),
@@ -49,6 +55,8 @@ impl NumbersTable {
         )];
         Self {
             table_id,
+            name,
+            engine: "test_engine".to_string(),
             schema: Arc::new(
                 SchemaBuilder::try_from_columns(column_schemas)
                     .unwrap()
@@ -79,7 +87,7 @@ impl Table for NumbersTable {
         Arc::new(
             TableInfoBuilder::default()
                 .table_id(self.table_id)
-                .name("numbers")
+                .name(&self.name)
                 .catalog_name("greptime")
                 .schema_name("public")
                 .table_version(0)
@@ -90,6 +98,7 @@ impl Table for NumbersTable {
                         .region_numbers(vec![0])
                         .primary_key_indices(vec![0])
                         .next_column_id(1)
+                        .engine(&self.engine)
                         .build()
                         .unwrap(),
                 )

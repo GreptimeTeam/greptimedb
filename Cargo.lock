@@ -1157,6 +1157,7 @@ version = "0.1.1"
 dependencies = [
  "api",
  "arc-swap",
+ "arrow-schema",
  "async-stream",
  "async-trait",
  "backoff",
@@ -1587,11 +1588,19 @@ dependencies = [
 name = "common-datasource"
 version = "0.1.1"
 dependencies = [
+ "arrow",
+ "arrow-schema",
+ "async-compression",
+ "async-trait",
  "common-error",
+ "common-runtime",
+ "datafusion",
  "futures",
  "object-store",
  "regex",
  "snafu",
+ "tokio",
+ "tokio-util",
  "url",
 ]
 
@@ -1757,6 +1766,7 @@ dependencies = [
 name = "common-runtime"
 version = "0.1.1"
 dependencies = [
+ "async-trait",
  "common-error",
  "common-telemetry",
  "metrics",
@@ -1765,6 +1775,7 @@ dependencies = [
  "snafu",
  "tokio",
  "tokio-test",
+ "tokio-util",
 ]
 
 [[package]]
@@ -2234,8 +2245,8 @@ dependencies = [
 
 [[package]]
 name = "datafusion"
-version = "21.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=8e125d2ecf242b4f4b81f06839900dbb2037cc2a#8e125d2ecf242b4f4b81f06839900dbb2037cc2a"
+version = "21.1.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=21bf4ffccadfeea824ab6e29c0b872930d0e190a#21bf4ffccadfeea824ab6e29c0b872930d0e190a"
 dependencies = [
  "ahash 0.8.3",
  "arrow",
@@ -2281,8 +2292,8 @@ dependencies = [
 
 [[package]]
 name = "datafusion-common"
-version = "21.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=8e125d2ecf242b4f4b81f06839900dbb2037cc2a#8e125d2ecf242b4f4b81f06839900dbb2037cc2a"
+version = "21.1.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=21bf4ffccadfeea824ab6e29c0b872930d0e190a#21bf4ffccadfeea824ab6e29c0b872930d0e190a"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -2295,8 +2306,8 @@ dependencies = [
 
 [[package]]
 name = "datafusion-execution"
-version = "21.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=8e125d2ecf242b4f4b81f06839900dbb2037cc2a#8e125d2ecf242b4f4b81f06839900dbb2037cc2a"
+version = "21.1.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=21bf4ffccadfeea824ab6e29c0b872930d0e190a#21bf4ffccadfeea824ab6e29c0b872930d0e190a"
 dependencies = [
  "dashmap",
  "datafusion-common",
@@ -2312,8 +2323,8 @@ dependencies = [
 
 [[package]]
 name = "datafusion-expr"
-version = "21.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=8e125d2ecf242b4f4b81f06839900dbb2037cc2a#8e125d2ecf242b4f4b81f06839900dbb2037cc2a"
+version = "21.1.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=21bf4ffccadfeea824ab6e29c0b872930d0e190a#21bf4ffccadfeea824ab6e29c0b872930d0e190a"
 dependencies = [
  "ahash 0.8.3",
  "arrow",
@@ -2323,8 +2334,8 @@ dependencies = [
 
 [[package]]
 name = "datafusion-optimizer"
-version = "21.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=8e125d2ecf242b4f4b81f06839900dbb2037cc2a#8e125d2ecf242b4f4b81f06839900dbb2037cc2a"
+version = "21.1.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=21bf4ffccadfeea824ab6e29c0b872930d0e190a#21bf4ffccadfeea824ab6e29c0b872930d0e190a"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2340,11 +2351,12 @@ dependencies = [
 
 [[package]]
 name = "datafusion-physical-expr"
-version = "21.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=8e125d2ecf242b4f4b81f06839900dbb2037cc2a#8e125d2ecf242b4f4b81f06839900dbb2037cc2a"
+version = "21.1.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=21bf4ffccadfeea824ab6e29c0b872930d0e190a#21bf4ffccadfeea824ab6e29c0b872930d0e190a"
 dependencies = [
  "ahash 0.8.3",
  "arrow",
+ "arrow-array",
  "arrow-buffer",
  "arrow-schema",
  "blake2",
@@ -2370,8 +2382,8 @@ dependencies = [
 
 [[package]]
 name = "datafusion-row"
-version = "21.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=8e125d2ecf242b4f4b81f06839900dbb2037cc2a#8e125d2ecf242b4f4b81f06839900dbb2037cc2a"
+version = "21.1.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=21bf4ffccadfeea824ab6e29c0b872930d0e190a#21bf4ffccadfeea824ab6e29c0b872930d0e190a"
 dependencies = [
  "arrow",
  "datafusion-common",
@@ -2381,9 +2393,10 @@ dependencies = [
 
 [[package]]
 name = "datafusion-sql"
-version = "21.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=8e125d2ecf242b4f4b81f06839900dbb2037cc2a#8e125d2ecf242b4f4b81f06839900dbb2037cc2a"
+version = "21.1.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=21bf4ffccadfeea824ab6e29c0b872930d0e190a#21bf4ffccadfeea824ab6e29c0b872930d0e190a"
 dependencies = [
+ "arrow",
  "arrow-schema",
  "datafusion-common",
  "datafusion-expr",
@@ -2442,6 +2455,7 @@ dependencies = [
  "futures-util",
  "humantime-serde",
  "hyper",
+ "log",
  "log-store",
  "meta-client",
  "meta-srv",
@@ -2452,7 +2466,6 @@ dependencies = [
  "prost",
  "query",
  "regex",
- "script",
  "serde",
  "serde_json",
  "servers",
@@ -2471,7 +2484,6 @@ dependencies = [
  "tower",
  "tower-http",
  "url",
- "uuid",
 ]
 
 [[package]]
@@ -2479,6 +2491,7 @@ name = "datatypes"
 version = "0.1.1"
 dependencies = [
  "arrow",
+ "arrow-array",
  "arrow-schema",
  "common-base",
  "common-error",
@@ -2860,6 +2873,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "file-table-engine"
+version = "0.1.1"
+dependencies = [
+ "async-trait",
+ "common-catalog",
+ "common-error",
+ "common-procedure",
+ "common-query",
+ "common-telemetry",
+ "common-test-util",
+ "common-time",
+ "datatypes",
+ "futures",
+ "object-store",
+ "serde",
+ "serde_json",
+ "snafu",
+ "storage",
+ "store-api",
+ "table",
+ "tokio",
+]
+
+[[package]]
 name = "filetime"
 version = "0.2.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2959,12 +2996,16 @@ dependencies = [
  "itertools",
  "meta-client",
  "meta-srv",
+ "mito",
  "moka",
  "openmetrics-parser",
  "partition",
  "prost",
  "query",
+ "rstest",
+ "rstest_reuse",
  "rustls",
+ "script",
  "serde",
  "serde_json",
  "servers",
@@ -2979,6 +3020,7 @@ dependencies = [
  "toml",
  "tonic",
  "tower",
+ "uuid",
 ]
 
 [[package]]
@@ -3146,6 +3188,12 @@ name = "futures-task"
 version = "0.3.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd65540d33b37b16542a0438c12e6aeead10d4ac5d05bd3f805b8f35ab592879"
+
+[[package]]
+name = "futures-timer"
+version = "3.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e64b03909df88034c26dc1547e8970b91f98bdb65165d6a4e9110d94263dbb2c"
 
 [[package]]
 name = "futures-util"
@@ -3734,7 +3782,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=d3861c34f7920238869d0d4e50dc1e6b189d2a6b#d3861c34f7920238869d0d4e50dc1e6b189d2a6b"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=59afacdae59eae4241cfaf851021361caaeaed21#59afacdae59eae4241cfaf851021361caaeaed21"
 dependencies = [
  "prost",
  "tonic",
@@ -4676,12 +4724,14 @@ version = "0.1.1"
 dependencies = [
  "anymap",
  "api",
+ "async-stream",
  "async-trait",
  "catalog",
  "common-base",
  "common-catalog",
  "common-error",
  "common-grpc",
+ "common-procedure",
  "common-runtime",
  "common-telemetry",
  "common-time",
@@ -4698,6 +4748,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "servers",
  "snafu",
  "table",
  "tokio",
@@ -6771,6 +6822,44 @@ dependencies = [
  "signature",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "rstest"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de1bb486a691878cd320c2f0d319ba91eeaa2e894066d8b5f8f117c000e9d962"
+dependencies = [
+ "futures",
+ "futures-timer",
+ "rstest_macros",
+ "rustc_version 0.4.0",
+]
+
+[[package]]
+name = "rstest_macros"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "290ca1a1c8ca7edb7c3283bd44dc35dd54fdec6253a3912e201ba1072018fca8"
+dependencies = [
+ "cfg-if 1.0.0",
+ "proc-macro2",
+ "quote",
+ "rustc_version 0.4.0",
+ "syn 1.0.109",
+ "unicode-ident",
+]
+
+[[package]]
+name = "rstest_reuse"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "45f80dcc84beab3a327bbe161f77db25f336a1452428176787c8c79ac79d7073"
+dependencies = [
+ "quote",
+ "rand",
+ "rustc_version 0.4.0",
+ "syn 1.0.109",
 ]
 
 [[package]]

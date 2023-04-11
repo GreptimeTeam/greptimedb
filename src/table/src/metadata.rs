@@ -128,6 +128,16 @@ impl TableMetaBuilder {
             _ => Err("Missing primary_key_indices or schema to create value_indices".to_string()),
         }
     }
+
+    pub fn new_external_table() -> Self {
+        Self {
+            primary_key_indices: Some(Vec::new()),
+            value_indices: Some(Vec::new()),
+            region_numbers: Some(Vec::new()),
+            next_column_id: Some(0),
+            ..Default::default()
+        }
+    }
 }
 
 impl TableMeta {
@@ -138,7 +148,7 @@ impl TableMeta {
             .map(|idx| &columns_schemas[*idx].name)
     }
 
-    pub fn value_column_names(&self) -> impl Iterator<Item = &String> {
+    pub fn field_column_names(&self) -> impl Iterator<Item = &String> {
         let columns_schemas = &self.schema.column_schemas();
         self.value_indices.iter().filter_map(|idx| {
             let column = &columns_schemas[*idx];

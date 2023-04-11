@@ -13,9 +13,11 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::string::FromUtf8Error;
 use std::sync::Arc;
 
 use common_error::prelude::*;
+use snafu::Location;
 
 use crate::procedure::ProcedureId;
 
@@ -33,24 +35,25 @@ pub enum Error {
     },
 
     #[snafu(display("Loader {} is already registered", name))]
-    LoaderConflict { name: String, backtrace: Backtrace },
+    LoaderConflict { name: String, location: Location },
 
     #[snafu(display("Failed to serialize to json, source: {}", source))]
     ToJson {
         source: serde_json::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Procedure {} already exists", procedure_id))]
     DuplicateProcedure {
         procedure_id: ProcedureId,
-        backtrace: Backtrace,
+        location: Location,
     },
 
-    #[snafu(display("Failed to put {}, source: {}", key, source))]
+    #[snafu(display("Failed to put state, key: '{key}', source: {source}"))]
     PutState {
         key: String,
-        source: object_store::Error,
+        #[snafu(backtrace)]
+        source: BoxedError,
     },
 
     #[snafu(display("Failed to delete {}, source: {}", key, source))]
@@ -59,10 +62,18 @@ pub enum Error {
         source: object_store::Error,
     },
 
-    #[snafu(display("Failed to list {}, source: {}", path, source))]
+    #[snafu(display("Failed to delete keys: '{keys}', source: {source}"))]
+    DeleteStates {
+        keys: String,
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to list state, path: '{path}', source: {source}"))]
     ListState {
         path: String,
-        source: object_store::Error,
+        #[snafu(backtrace)]
+        source: BoxedError,
     },
 
     #[snafu(display("Failed to read {}, source: {}", key, source))]
@@ -74,7 +85,7 @@ pub enum Error {
     #[snafu(display("Failed to deserialize from json, source: {}", source))]
     FromJson {
         source: serde_json::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Procedure exec failed, source: {}", source))]
@@ -89,13 +100,13 @@ pub enum Error {
     #[snafu(display("Failed to wait watcher, source: {}", source))]
     WaitWatcher {
         source: tokio::sync::watch::error::RecvError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to execute procedure, source: {}", source))]
     ProcedureExec {
         source: Arc<Error>,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display(
@@ -107,6 +118,9 @@ pub enum Error {
         source: Arc<Error>,
         procedure_id: ProcedureId,
     },
+
+    #[snafu(display("Corrupted data, error: {source}"))]
+    CorruptedData { source: FromUtf8Error },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -114,11 +128,13 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::External { source } => source.status_code(),
+            Error::External { source }
+            | Error::PutState { source, .. }
+            | Error::DeleteStates { source, .. }
+            | Error::ListState { source, .. } => source.status_code(),
+
             Error::ToJson { .. }
-            | Error::PutState { .. }
             | Error::DeleteState { .. }
-            | Error::ListState { .. }
             | Error::ReadState { .. }
             | Error::FromJson { .. }
             | Error::RetryTimesExceeded { .. }
@@ -127,13 +143,9 @@ impl ErrorExt for Error {
             Error::LoaderConflict { .. } | Error::DuplicateProcedure { .. } => {
                 StatusCode::InvalidArguments
             }
-            Error::ProcedurePanic { .. } => StatusCode::Unexpected,
+            Error::ProcedurePanic { .. } | Error::CorruptedData { .. } => StatusCode::Unexpected,
             Error::ProcedureExec { source, .. } => source.status_code(),
         }
-    }
-
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        ErrorCompat::backtrace(self)
     }
 
     fn as_any(&self) -> &dyn Any {

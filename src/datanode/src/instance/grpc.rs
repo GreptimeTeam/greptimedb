@@ -161,6 +161,7 @@ mod test {
         alter_expr, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef,
         CreateDatabaseExpr, CreateTableExpr, QueryRequest,
     };
+    use common_catalog::consts::MITO_ENGINE;
     use common_recordbatch::RecordBatches;
     use datatypes::prelude::*;
     use query::parser::QueryLanguageParser;
@@ -215,6 +216,7 @@ mod test {
                     },
                 ],
                 time_index: "ts".to_string(),
+                engine: MITO_ENGINE.to_string(),
                 ..Default::default()
             })),
         });

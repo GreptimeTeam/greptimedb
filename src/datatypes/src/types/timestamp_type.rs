@@ -28,6 +28,7 @@ use snafu::OptionExt;
 
 use crate::data_type::ConcreteDataType;
 use crate::error;
+use crate::error::InvalidTimestampPrecisionSnafu;
 use crate::prelude::{
     DataType, LogicalTypeId, MutableVector, ScalarVectorBuilder, Value, ValueRef, Vector,
 };
@@ -41,6 +42,11 @@ use crate::vectors::{
     TimestampNanosecondVectorBuilder, TimestampSecondVector, TimestampSecondVectorBuilder,
 };
 
+const SECOND_VARIATION: u64 = 0;
+const MILLISECOND_VARIATION: u64 = 3;
+const MICROSECOND_VARIATION: u64 = 6;
+const NANOSECOND_VARIATION: u64 = 9;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[enum_dispatch(DataType)]
 pub enum TimestampType {
@@ -48,6 +54,31 @@ pub enum TimestampType {
     Millisecond(TimestampMillisecondType),
     Microsecond(TimestampMicrosecondType),
     Nanosecond(TimestampNanosecondType),
+}
+
+impl TryFrom<u64> for TimestampType {
+    type Error = error::Error;
+
+    /// Convert fractional timestamp precision to timestamp types. Supported precisions are:
+    /// - 0: second
+    /// - 3: millisecond
+    /// - 6: microsecond
+    /// - 9: nanosecond
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        match value {
+            SECOND_VARIATION => Ok(TimestampType::Second(TimestampSecondType::default())),
+            MILLISECOND_VARIATION => Ok(TimestampType::Millisecond(
+                TimestampMillisecondType::default(),
+            )),
+            MICROSECOND_VARIATION => Ok(TimestampType::Microsecond(
+                TimestampMicrosecondType::default(),
+            )),
+            NANOSECOND_VARIATION => {
+                Ok(TimestampType::Nanosecond(TimestampNanosecondType::default()))
+            }
+            _ => InvalidTimestampPrecisionSnafu { precision: value }.fail(),
+        }
+    }
 }
 
 impl TimestampType {
@@ -58,6 +89,15 @@ impl TimestampType {
             TimestampType::Millisecond(_) => TimeUnit::Millisecond,
             TimestampType::Microsecond(_) => TimeUnit::Microsecond,
             TimestampType::Nanosecond(_) => TimeUnit::Nanosecond,
+        }
+    }
+
+    pub fn precision(&self) -> u64 {
+        match self {
+            TimestampType::Second(_) => SECOND_VARIATION,
+            TimestampType::Millisecond(_) => MILLISECOND_VARIATION,
+            TimestampType::Microsecond(_) => MICROSECOND_VARIATION,
+            TimestampType::Nanosecond(_) => NANOSECOND_VARIATION,
         }
     }
 }

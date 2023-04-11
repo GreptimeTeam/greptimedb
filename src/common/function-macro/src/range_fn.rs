@@ -36,6 +36,8 @@ macro_rules! ok {
 }
 
 pub(crate) fn process_range_fn(args: TokenStream, input: TokenStream) -> TokenStream {
+    let mut result = TokenStream::new();
+
     // extract arg map
     let arg_pairs = parse_macro_input!(args as AttributeArgs);
     let arg_span = arg_pairs[0].span();
@@ -59,12 +61,17 @@ pub(crate) fn process_range_fn(args: TokenStream, input: TokenStream) -> TokenSt
     let arg_types = ok!(extract_input_types(inputs));
 
     // build the struct and its impl block
-    let struct_code = build_struct(
-        attrs,
-        vis,
-        ok!(get_ident(&arg_map, "name", arg_span)),
-        ok!(get_ident(&arg_map, "display_name", arg_span)),
-    );
+    // only do this when `display_name` is specified
+    if let Ok(display_name) = get_ident(&arg_map, "display_name", arg_span) {
+        let struct_code = build_struct(
+            attrs,
+            vis,
+            ok!(get_ident(&arg_map, "name", arg_span)),
+            display_name,
+        );
+        result.extend(struct_code);
+    }
+
     let calc_fn_code = build_calc_fn(
         ok!(get_ident(&arg_map, "name", arg_span)),
         arg_types,
@@ -77,8 +84,6 @@ pub(crate) fn process_range_fn(args: TokenStream, input: TokenStream) -> TokenSt
     }
     .into();
 
-    let mut result = TokenStream::new();
-    result.extend(struct_code);
     result.extend(calc_fn_code);
     result.extend(input_fn_code);
     result
