@@ -168,6 +168,9 @@ impl TryFrom<StartCommand> for DatanodeOptions {
             opts.http_opts.timeout = Duration::from_secs(http_timeout)
         }
 
+        // Disable dashboard in datanode.
+        opts.http_opts.disable_dashboard = true;
+
         Ok(opts)
     }
 }

@@ -25,7 +25,7 @@ use tower_http::auth::AsyncAuthorizeRequest;
 
 use super::PUBLIC_APIS;
 use crate::auth::Error::IllegalParam;
-use crate::auth::{Identity, IllegalParamSnafu, InternalStateSnafu, UserProviderRef};
+use crate::auth::{Identity, IllegalParamSnafu, UserProviderRef};
 use crate::error::Error::Auth;
 use crate::error::{
     self, InvalidAuthorizationHeaderSnafu, InvisibleASCIISnafu, NotFoundInfluxAuthSnafu, Result,
@@ -77,21 +77,37 @@ where
                 return Ok(request);
             };
 
-            // do authenticate
-            match authenticate(&user_provider, &request).await {
-                Ok(user_info) => {
-                    request.extensions_mut().insert(user_info);
+            let (username, password) = match extract_username_and_password(&request) {
+                Ok((username, password)) => (username, password),
+                Err(e) => {
+                    error!("extract username and password failed: {}", e);
+                    return Err(unauthorized_resp());
+                }
+            };
+
+            let (catalog, schema) = match extract_catalog_and_schema(&request) {
+                Ok((catalog, schema)) => (catalog, schema),
+                Err(e) => {
+                    error!("extract catalog and schema failed: {}", e);
+                    return Err(unauthorized_resp());
+                }
+            };
+
+            match user_provider
+                .auth(
+                    Identity::UserId(username.as_str(), None),
+                    crate::auth::Password::PlainText(password.as_str()),
+                    catalog,
+                    schema,
+                )
+                .await
+            {
+                Ok(userinfo) => {
+                    request.extensions_mut().insert(userinfo);
+                    Ok(request)
                 }
                 Err(e) => {
                     error!("authenticate failed: {}", e);
-                    return Err(unauthorized_resp());
-                }
-            }
-
-            match authorize(&user_provider, &request).await {
-                Ok(_) => Ok(request),
-                Err(e) => {
-                    error!("authorize failed: {}", e);
                     Err(unauthorized_resp())
                 }
             }
@@ -99,27 +115,18 @@ where
     }
 }
 
-async fn authorize<B: Send + Sync + 'static>(
-    user_provider: &UserProviderRef,
+fn extract_catalog_and_schema<B: Send + Sync + 'static>(
     request: &Request<B>,
-) -> crate::auth::Result<()> {
+) -> crate::auth::Result<(&str, &str)> {
     // try get database name
     let query = request.uri().query().unwrap_or_default();
     let input_database = extract_db_from_query(query).context(IllegalParamSnafu {
         msg: "db not provided or corrupted",
     })?;
 
-    let (catalog, database) =
-        crate::parse_catalog_and_schema_from_client_database_name(input_database);
-
-    let user_info = request
-        .extensions()
-        .get::<UserInfo>()
-        .context(InternalStateSnafu {
-            msg: "no user info provided while authorizing",
-        })?;
-
-    user_provider.authorize(catalog, database, user_info).await
+    Ok(crate::parse_catalog_and_schema_from_client_database_name(
+        input_database,
+    ))
 }
 
 fn get_influxdb_credentials<B: Send + Sync + 'static>(
@@ -162,11 +169,10 @@ fn get_influxdb_credentials<B: Send + Sync + 'static>(
     }
 }
 
-async fn authenticate<B: Send + Sync + 'static>(
-    user_provider: &UserProviderRef,
+fn extract_username_and_password<B: Send + Sync + 'static>(
     request: &Request<B>,
-) -> Result<UserInfo> {
-    let (username, password) = if request.uri().path().contains("influxdb") {
+) -> Result<(Username, Password)> {
+    Ok(if request.uri().path().contains("influxdb") {
         // compatible with influxdb auth
         get_influxdb_credentials(request)?.context(NotFoundInfluxAuthSnafu)?
     } else {
@@ -175,14 +181,7 @@ async fn authenticate<B: Send + Sync + 'static>(
         match scheme {
             AuthScheme::Basic(username, password) => (username, password),
         }
-    };
-
-    Ok(user_provider
-        .authenticate(
-            Identity::UserId(&username, None),
-            crate::auth::Password::PlainText(&password),
-        )
-        .await?)
+    })
 }
 
 fn unauthorized_resp<RespBody>() -> Response<RespBody>

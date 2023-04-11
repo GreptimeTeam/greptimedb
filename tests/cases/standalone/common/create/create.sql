@@ -36,15 +36,15 @@ DROP TABLE test1;
 
 DROP TABLE test2;
 
-CREATE TABLE test_pk (timestamp BIGINT TIME INDEX, host STRING PRIMARY KEY, value DOUBLE);
+CREATE TABLE test_pk ("timestamp" BIGINT TIME INDEX, host STRING PRIMARY KEY, "value" DOUBLE);
 
 DESC TABLE test_pk;
 
 DROP TABLE test_pk;
 
-CREATE TABLE test_multiple_pk_definitions (timestamp BIGINT TIME INDEX, host STRING PRIMARY KEY, value DOUBLE, PRIMARY KEY(host));
+CREATE TABLE test_multiple_pk_definitions ("timestamp" BIGINT TIME INDEX, host STRING PRIMARY KEY, "value" DOUBLE, PRIMARY KEY(host));
 
-CREATE TABLE test_multiple_pk_definitions (timestamp BIGINT TIME INDEX, host STRING PRIMARY KEY, value DOUBLE, PRIMARY KEY(host), PRIMARY KEY(host));
+CREATE TABLE test_multiple_pk_definitions ("timestamp" BIGINT TIME INDEX, host STRING PRIMARY KEY, "value" DOUBLE, PRIMARY KEY(host), PRIMARY KEY(host));
 
-CREATE TABLE test_multiple_inline_pk_definitions (timestamp BIGINT TIME INDEX, host STRING PRIMARY KEY, value DOUBLE PRIMARY KEY);
+CREATE TABLE test_multiple_inline_pk_definitions ("timestamp" BIGINT TIME INDEX, host STRING PRIMARY KEY, "value" DOUBLE PRIMARY KEY);
 

@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use api::v1::meta::{HeartbeatRequest, HeartbeatResponse, NodeStat, Peer};
 use catalog::{datanode_stat, CatalogManagerRef};
-use common_telemetry::{error, info, warn};
+use common_telemetry::{error, info, trace, warn};
 use meta_client::client::{HeartbeatSender, MetaClient};
 use snafu::ResultExt;
 
@@ -84,7 +84,7 @@ impl HeartbeatTask {
     }
 
     async fn handle_response(resp: HeartbeatResponse) {
-        info!("heartbeat response: {:?}", resp);
+        trace!("heartbeat response: {:?}", resp);
     }
 
     /// Start heartbeat task, spawn background task.

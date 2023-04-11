@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use common_error::prelude::*;
+use snafu::Location;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -21,26 +22,23 @@ pub enum Error {
     ConnectFailed {
         url: String,
         source: tonic::transport::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Illegal GRPC client state: {}", err_msg))]
-    IllegalGrpcClientState {
-        err_msg: String,
-        backtrace: Backtrace,
-    },
+    IllegalGrpcClientState { err_msg: String, location: Location },
 
     #[snafu(display("Tonic internal error, source: {}", source))]
     TonicStatus {
         source: tonic::Status,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to ask leader from all endpoints"))]
-    AskLeader { backtrace: Backtrace },
+    AskLeader { location: Location },
 
     #[snafu(display("No leader, should ask leader first"))]
-    NoLeader { backtrace: Backtrace },
+    NoLeader { location: Location },
 
     #[snafu(display("Failed to create gRPC channel, source: {}", source))]
     CreateChannel {
@@ -49,34 +47,28 @@ pub enum Error {
     },
 
     #[snafu(display("{} not started", name))]
-    NotStarted { name: String, backtrace: Backtrace },
+    NotStarted { name: String, location: Location },
 
     #[snafu(display("Failed to send heartbeat: {}", err_msg))]
-    SendHeartbeat {
-        err_msg: String,
-        backtrace: Backtrace,
-    },
+    SendHeartbeat { err_msg: String, location: Location },
 
     #[snafu(display("Failed create heartbeat stream to server"))]
-    CreateHeartbeatStream { backtrace: Backtrace },
+    CreateHeartbeatStream { location: Location },
 
     #[snafu(display("Route info corrupted: {}", err_msg))]
-    RouteInfoCorrupted {
-        err_msg: String,
-        backtrace: Backtrace,
-    },
+    RouteInfoCorrupted { err_msg: String, location: Location },
 
     #[snafu(display("Illegal state from server, code: {}, error: {}", code, err_msg))]
     IllegalServerState {
         code: i32,
         err_msg: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to serde json, source: {}", source))]
     SerdeJson {
         source: serde_json::error::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 }
 
@@ -84,10 +76,6 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl ErrorExt for Error {
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        ErrorCompat::backtrace(self)
-    }
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }

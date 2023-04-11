@@ -17,6 +17,7 @@ use std::string::FromUtf8Error;
 use std::sync::Arc;
 
 use common_error::prelude::*;
+use snafu::Location;
 
 use crate::procedure::ProcedureId;
 
@@ -34,18 +35,18 @@ pub enum Error {
     },
 
     #[snafu(display("Loader {} is already registered", name))]
-    LoaderConflict { name: String, backtrace: Backtrace },
+    LoaderConflict { name: String, location: Location },
 
     #[snafu(display("Failed to serialize to json, source: {}", source))]
     ToJson {
         source: serde_json::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Procedure {} already exists", procedure_id))]
     DuplicateProcedure {
         procedure_id: ProcedureId,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to put state, key: '{key}', source: {source}"))]
@@ -84,7 +85,7 @@ pub enum Error {
     #[snafu(display("Failed to deserialize from json, source: {}", source))]
     FromJson {
         source: serde_json::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Procedure exec failed, source: {}", source))]
@@ -99,13 +100,13 @@ pub enum Error {
     #[snafu(display("Failed to wait watcher, source: {}", source))]
     WaitWatcher {
         source: tokio::sync::watch::error::RecvError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to execute procedure, source: {}", source))]
     ProcedureExec {
         source: Arc<Error>,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display(
@@ -145,10 +146,6 @@ impl ErrorExt for Error {
             Error::ProcedurePanic { .. } | Error::CorruptedData { .. } => StatusCode::Unexpected,
             Error::ProcedureExec { source, .. } => source.status_code(),
         }
-    }
-
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        ErrorCompat::backtrace(self)
     }
 
     fn as_any(&self) -> &dyn Any {

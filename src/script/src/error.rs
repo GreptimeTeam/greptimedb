@@ -16,7 +16,7 @@ use std::any::Any;
 
 use common_error::ext::ErrorExt;
 use common_error::prelude::{Snafu, StatusCode};
-use snafu::{Backtrace, ErrorCompat};
+use snafu::Location;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -34,7 +34,7 @@ pub enum Error {
     },
 
     #[snafu(display("Scripts table not found"))]
-    ScriptsTableNotFound { backtrace: Backtrace },
+    ScriptsTableNotFound { location: Location },
 
     #[snafu(display(
         "Failed to insert script to scripts table, name: {}, source: {}",
@@ -62,7 +62,7 @@ pub enum Error {
     },
 
     #[snafu(display("Script not found, name: {}", name))]
-    ScriptNotFound { backtrace: Backtrace, name: String },
+    ScriptNotFound { location: Location, name: String },
 
     #[snafu(display("Failed to find script by name: {}", name))]
     FindScript {
@@ -78,7 +78,7 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to cast type, msg: {}", msg))]
-    CastType { msg: String, backtrace: Backtrace },
+    CastType { msg: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -98,45 +98,7 @@ impl ErrorExt for Error {
         }
     }
 
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        ErrorCompat::backtrace(self)
-    }
-
     fn as_any(&self) -> &dyn Any {
         self
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use snafu::ResultExt;
-
-    use super::*;
-
-    fn throw_catalog_error() -> catalog::error::Result<()> {
-        catalog::error::IllegalManagerStateSnafu { msg: "test" }.fail()
-    }
-
-    fn throw_python_error() -> crate::python::error::Result<()> {
-        crate::python::error::CoprParseSnafu {
-            reason: "test",
-            loc: None,
-        }
-        .fail()
-    }
-
-    #[test]
-    fn test_error() {
-        let err = throw_catalog_error()
-            .context(FindScriptsTableSnafu)
-            .unwrap_err();
-        assert_eq!(StatusCode::Unexpected, err.status_code());
-        assert!(err.backtrace_opt().is_some());
-
-        let err = throw_python_error()
-            .context(ExecutePythonSnafu { name: "test" })
-            .unwrap_err();
-        assert_eq!(StatusCode::InvalidArguments, err.status_code());
-        assert!(err.backtrace_opt().is_some());
     }
 }

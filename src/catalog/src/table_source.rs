@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use common_catalog::consts::INFORMATION_SCHEMA_NAME;
 use common_catalog::format_full_table_name;
 use datafusion::common::{ResolvedTableReference, TableReference};
 use datafusion::datasource::provider_as_source;
@@ -26,6 +27,7 @@ use table::table::adapter::DfTableProviderAdapter;
 use crate::error::{
     CatalogNotFoundSnafu, QueryAccessDeniedSnafu, Result, SchemaNotFoundSnafu, TableNotExistSnafu,
 };
+use crate::information_schema::InformationSchemaProvider;
 use crate::CatalogListRef;
 
 pub struct DfTableSourceProvider {
@@ -100,14 +102,25 @@ impl DfTableSourceProvider {
         let schema_name = table_ref.schema.as_ref();
         let table_name = table_ref.table.as_ref();
 
-        let catalog = self
-            .catalog_list
-            .catalog(catalog_name)?
-            .context(CatalogNotFoundSnafu { catalog_name })?;
-        let schema = catalog.schema(schema_name)?.context(SchemaNotFoundSnafu {
-            catalog: catalog_name,
-            schema: schema_name,
-        })?;
+        let schema = if schema_name != INFORMATION_SCHEMA_NAME {
+            let catalog = self
+                .catalog_list
+                .catalog(catalog_name)?
+                .context(CatalogNotFoundSnafu { catalog_name })?;
+            catalog.schema(schema_name)?.context(SchemaNotFoundSnafu {
+                catalog: catalog_name,
+                schema: schema_name,
+            })?
+        } else {
+            let catalog_provider = self
+                .catalog_list
+                .catalog(catalog_name)?
+                .context(CatalogNotFoundSnafu { catalog_name })?;
+            Arc::new(InformationSchemaProvider::new(
+                catalog_name.to_string(),
+                catalog_provider,
+            ))
+        };
         let table = schema
             .table(table_name)
             .await?

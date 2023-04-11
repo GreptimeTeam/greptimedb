@@ -176,8 +176,8 @@ async fn sql_insert_promql_query_ceil(instance: Arc<dyn MockInstance>) {
 const AGGREGATORS_CREATE_TABLE: &str = r#"create table http_requests (
     job string,
     instance string,
-    group string,
-    value double,
+    "group" string,
+    "value" double,
     ts timestamp TIME INDEX,
     PRIMARY KEY (job, instance, group),
 );"#;
@@ -468,12 +468,12 @@ async fn stddev_by_label(instance: Arc<dyn MockInstance>) {
         unix_epoch_plus_100s(),
         Duration::from_secs(60),
         Duration::from_secs(0),
-        "+----------+---------------------+-----------------------------+\
-        \n| instance | ts                  | STDDEV(http_requests.value) |\
-        \n+----------+---------------------+-----------------------------+\
-        \n| 0        | 1970-01-01T00:00:00 | 258.19888974716116          |\
-        \n| 1        | 1970-01-01T00:00:00 | 258.19888974716116          |\
-        \n+----------+---------------------+-----------------------------+",
+        "+----------+---------------------+--------------------------------+\
+        \n| instance | ts                  | STDDEVPOP(http_requests.value) |\
+        \n+----------+---------------------+--------------------------------+\
+        \n| 0        | 1970-01-01T00:00:00 | 223.606797749979               |\
+        \n| 1        | 1970-01-01T00:00:00 | 223.606797749979               |\
+        \n+----------+---------------------+--------------------------------+",
     )
     .await;
 }

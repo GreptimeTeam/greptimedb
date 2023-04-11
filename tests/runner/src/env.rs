@@ -169,7 +169,7 @@ impl Env {
             }
             "frontend" => {
                 args.push("--metasrv-addr=0.0.0.0:3002".to_string());
-                args.push("--http-addr=0.0.0.0:5000".to_string());
+                args.push("--http-addr=0.0.0.0:5003".to_string());
             }
             "metasrv" => {
                 args.push("--use-memory-store".to_string());
@@ -264,7 +264,7 @@ impl Database for GreptimeDB {
         }
 
         let mut client = self.client.lock().await;
-        if query.trim().starts_with("USE ") {
+        if query.trim().to_lowercase().starts_with("use ") {
             let database = query
                 .split_ascii_whitespace()
                 .nth(1)

@@ -545,7 +545,10 @@ pub(crate) mod greptime_builtin {
     /// simple math function, the backing implement is datafusion's `round` math function
     #[pyfunction]
     fn round(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
-        bind_call_unary_math_function!(round, vm, val);
+        let value = try_into_columnar_value(val, vm)?;
+        let array = value.into_array(1);
+        let result = math_expressions::round(&[array]).map_err(|e| from_df_err(e, vm))?;
+        try_into_py_obj(DFColValue::Array(result), vm)
     }
 
     /// simple math function, the backing implement is datafusion's `trunc` math function

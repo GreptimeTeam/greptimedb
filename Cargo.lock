@@ -1136,6 +1136,7 @@ version = "0.1.1"
 dependencies = [
  "api",
  "arc-swap",
+ "arrow-schema",
  "async-stream",
  "async-trait",
  "backoff",
@@ -1561,11 +1562,19 @@ dependencies = [
 name = "common-datasource"
 version = "0.1.1"
 dependencies = [
+ "arrow",
+ "arrow-schema",
+ "async-compression",
+ "async-trait",
  "common-error",
+ "common-runtime",
+ "datafusion",
  "futures",
  "object-store",
  "regex",
  "snafu",
+ "tokio",
+ "tokio-util",
  "url",
 ]
 
@@ -2210,8 +2219,8 @@ dependencies = [
 
 [[package]]
 name = "datafusion"
-version = "21.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=8e125d2ecf242b4f4b81f06839900dbb2037cc2a#8e125d2ecf242b4f4b81f06839900dbb2037cc2a"
+version = "21.1.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=21bf4ffccadfeea824ab6e29c0b872930d0e190a#21bf4ffccadfeea824ab6e29c0b872930d0e190a"
 dependencies = [
  "ahash 0.8.3",
  "arrow",
@@ -2257,8 +2266,8 @@ dependencies = [
 
 [[package]]
 name = "datafusion-common"
-version = "21.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=8e125d2ecf242b4f4b81f06839900dbb2037cc2a#8e125d2ecf242b4f4b81f06839900dbb2037cc2a"
+version = "21.1.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=21bf4ffccadfeea824ab6e29c0b872930d0e190a#21bf4ffccadfeea824ab6e29c0b872930d0e190a"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -2271,8 +2280,8 @@ dependencies = [
 
 [[package]]
 name = "datafusion-execution"
-version = "21.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=8e125d2ecf242b4f4b81f06839900dbb2037cc2a#8e125d2ecf242b4f4b81f06839900dbb2037cc2a"
+version = "21.1.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=21bf4ffccadfeea824ab6e29c0b872930d0e190a#21bf4ffccadfeea824ab6e29c0b872930d0e190a"
 dependencies = [
  "dashmap",
  "datafusion-common",
@@ -2288,8 +2297,8 @@ dependencies = [
 
 [[package]]
 name = "datafusion-expr"
-version = "21.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=8e125d2ecf242b4f4b81f06839900dbb2037cc2a#8e125d2ecf242b4f4b81f06839900dbb2037cc2a"
+version = "21.1.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=21bf4ffccadfeea824ab6e29c0b872930d0e190a#21bf4ffccadfeea824ab6e29c0b872930d0e190a"
 dependencies = [
  "ahash 0.8.3",
  "arrow",
@@ -2299,8 +2308,8 @@ dependencies = [
 
 [[package]]
 name = "datafusion-optimizer"
-version = "21.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=8e125d2ecf242b4f4b81f06839900dbb2037cc2a#8e125d2ecf242b4f4b81f06839900dbb2037cc2a"
+version = "21.1.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=21bf4ffccadfeea824ab6e29c0b872930d0e190a#21bf4ffccadfeea824ab6e29c0b872930d0e190a"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2316,11 +2325,12 @@ dependencies = [
 
 [[package]]
 name = "datafusion-physical-expr"
-version = "21.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=8e125d2ecf242b4f4b81f06839900dbb2037cc2a#8e125d2ecf242b4f4b81f06839900dbb2037cc2a"
+version = "21.1.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=21bf4ffccadfeea824ab6e29c0b872930d0e190a#21bf4ffccadfeea824ab6e29c0b872930d0e190a"
 dependencies = [
  "ahash 0.8.3",
  "arrow",
+ "arrow-array",
  "arrow-buffer",
  "arrow-schema",
  "blake2",
@@ -2346,8 +2356,8 @@ dependencies = [
 
 [[package]]
 name = "datafusion-row"
-version = "21.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=8e125d2ecf242b4f4b81f06839900dbb2037cc2a#8e125d2ecf242b4f4b81f06839900dbb2037cc2a"
+version = "21.1.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=21bf4ffccadfeea824ab6e29c0b872930d0e190a#21bf4ffccadfeea824ab6e29c0b872930d0e190a"
 dependencies = [
  "arrow",
  "datafusion-common",
@@ -2357,9 +2367,10 @@ dependencies = [
 
 [[package]]
 name = "datafusion-sql"
-version = "21.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=8e125d2ecf242b4f4b81f06839900dbb2037cc2a#8e125d2ecf242b4f4b81f06839900dbb2037cc2a"
+version = "21.1.0"
+source = "git+https://github.com/apache/arrow-datafusion.git?rev=21bf4ffccadfeea824ab6e29c0b872930d0e190a#21bf4ffccadfeea824ab6e29c0b872930d0e190a"
 dependencies = [
+ "arrow",
  "arrow-schema",
  "datafusion-common",
  "datafusion-expr",
@@ -2439,6 +2450,7 @@ name = "datatypes"
 version = "0.1.1"
 dependencies = [
  "arrow",
+ "arrow-array",
  "arrow-schema",
  "common-base",
  "common-error",
@@ -2811,6 +2823,30 @@ dependencies = [
  "cfg-if 1.0.0",
  "rustix",
  "windows-sys 0.45.0",
+]
+
+[[package]]
+name = "file-table-engine"
+version = "0.1.1"
+dependencies = [
+ "async-trait",
+ "common-catalog",
+ "common-error",
+ "common-procedure",
+ "common-query",
+ "common-telemetry",
+ "common-test-util",
+ "common-time",
+ "datatypes",
+ "futures",
+ "object-store",
+ "serde",
+ "serde_json",
+ "snafu",
+ "storage",
+ "store-api",
+ "table",
+ "tokio",
 ]
 
 [[package]]

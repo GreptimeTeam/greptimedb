@@ -21,6 +21,7 @@ use common_runtime::error::Error as RuntimeError;
 use datatypes::arrow::error::ArrowError;
 use datatypes::prelude::ConcreteDataType;
 use serde_json::error::Error as JsonError;
+use snafu::Location;
 use store_api::manifest::action::ProtocolVersion;
 use store_api::manifest::ManifestVersion;
 use store_api::storage::{RegionId, SequenceNumber};
@@ -40,66 +41,63 @@ pub enum Error {
     },
 
     #[snafu(display("Missing column {} in write batch", column))]
-    BatchMissingColumn {
-        column: String,
-        backtrace: Backtrace,
-    },
+    BatchMissingColumn { column: String, location: Location },
 
     #[snafu(display("Failed to write parquet file, source: {}", source))]
     WriteParquet {
         source: parquet::errors::ParquetError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to create RecordBatch from vectors, source: {}", source))]
     NewRecordBatch {
-        backtrace: Backtrace,
+        location: Location,
         source: ArrowError,
     },
 
     #[snafu(display("Fail to read object from path: {}, source: {}", path, source))]
     ReadObject {
         path: String,
-        backtrace: Backtrace,
+        location: Location,
         source: object_store::Error,
     },
 
     #[snafu(display("Fail to write object into path: {}, source: {}", path, source))]
     WriteObject {
         path: String,
-        backtrace: Backtrace,
+        location: Location,
         source: object_store::Error,
     },
 
     #[snafu(display("Fail to delete object from path: {}, source: {}", path, source))]
     DeleteObject {
         path: String,
-        backtrace: Backtrace,
+        location: Location,
         source: object_store::Error,
     },
 
     #[snafu(display("Fail to list objects in path: {}, source: {}", path, source))]
     ListObjects {
         path: String,
-        backtrace: Backtrace,
+        location: Location,
         source: object_store::Error,
     },
 
     #[snafu(display("Fail to create str from bytes, source: {}", source))]
     Utf8 {
-        backtrace: Backtrace,
+        location: Location,
         source: Utf8Error,
     },
 
     #[snafu(display("Fail to encode object into json , source: {}", source))]
     EncodeJson {
-        backtrace: Backtrace,
+        location: Location,
         source: JsonError,
     },
 
     #[snafu(display("Fail to decode object from json , source: {}", source))]
     DecodeJson {
-        backtrace: Backtrace,
+        location: Location,
         source: JsonError,
     },
 
@@ -107,7 +105,7 @@ pub enum Error {
     InvalidScanIndex {
         start: ManifestVersion,
         end: ManifestVersion,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display(
@@ -123,24 +121,24 @@ pub enum Error {
 
     #[snafu(display("Failed to encode WAL header, source {}", source))]
     EncodeWalHeader {
-        backtrace: Backtrace,
+        location: Location,
         source: std::io::Error,
     },
 
     #[snafu(display("Failed to decode WAL header, source {}", source))]
     DecodeWalHeader {
-        backtrace: Backtrace,
+        location: Location,
         source: std::io::Error,
     },
 
     #[snafu(display("Failed to join task, source: {}", source))]
     JoinTask {
         source: common_runtime::JoinError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Task already cancelled"))]
-    Cancelled { backtrace: Backtrace },
+    Cancelled { location: Location },
 
     #[snafu(display("Failed to cancel flush, source: {}", source))]
     CancelFlush {
@@ -156,7 +154,7 @@ pub enum Error {
     ManifestProtocolForbidRead {
         min_version: ProtocolVersion,
         supported_version: ProtocolVersion,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display(
@@ -167,11 +165,11 @@ pub enum Error {
     ManifestProtocolForbidWrite {
         min_version: ProtocolVersion,
         supported_version: ProtocolVersion,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to decode action list, {}", msg))]
-    DecodeMetaActionList { msg: String, backtrace: Backtrace },
+    DecodeMetaActionList { msg: String, location: Location },
 
     #[snafu(display("Failed to read line, err: {}", source))]
     Readline { source: IoError },
@@ -180,13 +178,13 @@ pub enum Error {
     ReadParquet {
         file: String,
         source: parquet::errors::ParquetError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Region is under {} state, cannot proceed operation", state))]
     InvalidRegionState {
         state: &'static str,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to read WAL, region_id: {}, source: {}", region_id, source))]
@@ -211,7 +209,7 @@ pub enum Error {
     WalDataCorrupted {
         region_id: RegionId,
         message: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display(
@@ -222,7 +220,7 @@ pub enum Error {
     SequenceNotMonotonic {
         prev: SequenceNumber,
         given: SequenceNumber,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to convert store schema, file: {}, source: {}", file, source))]
@@ -240,7 +238,7 @@ pub enum Error {
     },
 
     #[snafu(display("Try to write the closed region"))]
-    ClosedRegion { backtrace: Backtrace },
+    ClosedRegion { location: Location },
 
     #[snafu(display("Invalid projection, source: {}", source))]
     InvalidProjection {
@@ -255,7 +253,7 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to build batch, {}", msg))]
-    BuildBatch { msg: String, backtrace: Backtrace },
+    BuildBatch { msg: String, location: Location },
 
     #[snafu(display("Failed to filter column {}, source: {}", name, source))]
     FilterColumn {
@@ -296,21 +294,18 @@ pub enum Error {
         /// Schema version of data to write.
         data_version: u32,
         schema_version: u32,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Column {} not in schema with version {}", column, version))]
     NotInSchemaToCompat {
         column: String,
         version: u32,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Incompatible schema to read, reason: {}", reason))]
-    CompatRead {
-        reason: String,
-        backtrace: Backtrace,
-    },
+    CompatRead { reason: String, location: Location },
 
     #[snafu(display(
         "Failed to read column {}, could not create default value, source: {}",
@@ -324,10 +319,7 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to read column {}, no proper default value for it", column))]
-    NoDefaultToRead {
-        column: String,
-        backtrace: Backtrace,
-    },
+    NoDefaultToRead { column: String, location: Location },
 
     #[snafu(display(
         "Failed to convert arrow chunk to batch, name: {}, source: {}",
@@ -341,7 +333,7 @@ pub enum Error {
     },
 
     #[snafu(display("Unknown column {}", name))]
-    UnknownColumn { name: String, backtrace: Backtrace },
+    UnknownColumn { name: String, location: Location },
 
     #[snafu(display("Failed to create record batch for write batch, source:{}", source))]
     CreateRecordBatch {
@@ -354,10 +346,7 @@ pub enum Error {
         write_batch::MAX_BATCH_SIZE,
         num_rows
     ))]
-    RequestTooLarge {
-        num_rows: usize,
-        backtrace: Backtrace,
-    },
+    RequestTooLarge { num_rows: usize, location: Location },
 
     #[snafu(display(
         "Type of column {} does not match type in schema, expect {:?}, given {:?}",
@@ -369,11 +358,11 @@ pub enum Error {
         name: String,
         expect: ConcreteDataType,
         given: ConcreteDataType,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Column {} is not null but input has null", name))]
-    HasNull { name: String, backtrace: Backtrace },
+    HasNull { name: String, location: Location },
 
     #[snafu(display(
         "Length of column {} not equals to other columns, expect {}, given {}",
@@ -385,44 +374,41 @@ pub enum Error {
         name: String,
         expect: usize,
         given: usize,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to decode write batch, corrupted data {}", message))]
-    BatchCorrupted {
-        message: String,
-        backtrace: Backtrace,
-    },
+    BatchCorrupted { message: String, location: Location },
 
     #[snafu(display("Failed to decode arrow data, source: {}", source))]
     DecodeArrow {
-        backtrace: Backtrace,
+        location: Location,
         source: ArrowError,
     },
 
     #[snafu(display("Failed to encode arrow data, source: {}", source))]
     EncodeArrow {
-        backtrace: Backtrace,
+        location: Location,
         source: ArrowError,
     },
 
     #[snafu(display("Failed to parse schema, source: {}", source))]
     ParseSchema {
-        backtrace: Backtrace,
+        location: Location,
         source: datatypes::error::Error,
     },
 
     #[snafu(display("More columns than expected in the request"))]
-    MoreColumnThanExpected { backtrace: Backtrace },
+    MoreColumnThanExpected { location: Location },
 
     #[snafu(display("Failed to decode parquet file time range, msg: {}", msg))]
-    DecodeParquetTimeRange { msg: String, backtrace: Backtrace },
+    DecodeParquetTimeRange { msg: String, location: Location },
 
     #[snafu(display("Scheduler rate limited, msg: {}", msg))]
     RateLimited { msg: String },
 
     #[snafu(display("Cannot schedule request, scheduler's already stopped"))]
-    IllegalSchedulerState { backtrace: Backtrace },
+    IllegalSchedulerState { location: Location },
 
     #[snafu(display("Failed to start manifest gc task: {}", source))]
     StartManifestGcTask {
@@ -439,13 +425,13 @@ pub enum Error {
     #[snafu(display("Failed to stop scheduler, source: {}", source))]
     StopScheduler {
         source: JoinError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to delete SST file, source: {}", source))]
     DeleteSst {
         source: object_store::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to calculate SST expire time, source: {}", source))]
@@ -455,7 +441,7 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to create a checkpoint: {}", msg))]
-    ManifestCheckpoint { msg: String, backtrace: Backtrace },
+    ManifestCheckpoint { msg: String, location: Location },
 
     #[snafu(display("The compaction task is cancelled, region_id: {}", region_id))]
     CompactTaskCancel {
@@ -546,51 +532,7 @@ impl ErrorExt for Error {
         }
     }
 
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        ErrorCompat::backtrace(self)
-    }
-
     fn as_any(&self) -> &dyn Any {
         self
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use common_error::prelude::StatusCode::*;
-    use snafu::GenerateImplicitData;
-
-    use super::*;
-
-    fn throw_metadata_error() -> std::result::Result<(), MetadataError> {
-        Err(MetadataError::CfIdExists {
-            id: 1,
-            backtrace: Backtrace::generate(),
-        })
-    }
-
-    #[test]
-    fn test_invalid_region_desc_error() {
-        let err = throw_metadata_error()
-            .context(InvalidRegionDescSnafu { region: "hello" })
-            .err()
-            .unwrap();
-
-        assert_eq!(StatusCode::InvalidArguments, err.status_code());
-        assert!(err.backtrace_opt().is_some());
-    }
-
-    #[test]
-    pub fn test_arrow_error() {
-        fn throw_arrow_error() -> std::result::Result<(), ArrowError> {
-            Err(ArrowError::IoError("Lorem ipsum".to_string()))
-        }
-
-        let error = throw_arrow_error()
-            .context(NewRecordBatchSnafu)
-            .err()
-            .unwrap();
-        assert_eq!(Unexpected, error.status_code());
-        assert!(error.backtrace_opt().is_some());
     }
 }

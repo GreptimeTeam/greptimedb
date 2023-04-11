@@ -279,8 +279,7 @@ fn sqrt(py: Python<'_>, val: PyObject) -> PyResult<PyObject> {
 ```
 */
 bind_call_unary_math_function!(
-    sqrt, sin, cos, tan, asin, acos, atan, floor, ceil, round, trunc, abs, signum, exp, ln, log2,
-    log10
+    sqrt, sin, cos, tan, asin, acos, atan, floor, ceil, trunc, abs, signum, exp, ln, log2, log10
 );
 
 /// return a random vector range from 0 to 1 and length of len
@@ -294,6 +293,15 @@ fn random(py: Python<'_>, len: usize) -> PyResult<PyObject> {
         math_expressions::random(args).map_err(|e| PyValueError::new_err(format!("{e:?}")))?;
 
     columnar_value_to_py_any(py, res)
+}
+
+#[pyfunction]
+fn round(py: Python<'_>, val: PyObject) -> PyResult<PyObject> {
+    let value = try_into_columnar_value(py, val)?;
+    let array = value.into_array(1);
+    let result =
+        math_expressions::round(&[array]).map_err(|e| PyValueError::new_err(format!("{e:?}")))?;
+    columnar_value_to_py_any(py, ColumnarValue::Array(result))
 }
 
 /// The macro for binding function in `datafusion_physical_expr::expressions`(most of them are aggregate function)

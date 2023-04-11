@@ -379,12 +379,15 @@ impl<'a> ParserContext<'a> {
 mod tests {
     use std::assert_matches::assert_matches;
 
+    use datatypes::prelude::ConcreteDataType;
     use sqlparser::ast::{
         Ident, ObjectName, Query as SpQuery, Statement as SpStatement, WildcardAdditionalOptions,
     };
     use sqlparser::dialect::GenericDialect;
 
     use super::*;
+    use crate::statements::create::CreateTable;
+    use crate::statements::sql_data_type_to_concrete_data_type;
 
     #[test]
     pub fn test_show_database_all() {
@@ -605,5 +608,55 @@ mod tests {
                 Ident::new("foo")
             ])))
         )
+    }
+
+    fn test_timestamp_precision(sql: &str, expected_type: ConcreteDataType) {
+        match ParserContext::create_with_dialect(sql, &GenericDialect {})
+            .unwrap()
+            .pop()
+            .unwrap()
+        {
+            Statement::CreateTable(CreateTable { columns, .. }) => {
+                let ts_col = columns.get(0).unwrap();
+                assert_eq!(
+                    expected_type,
+                    sql_data_type_to_concrete_data_type(&ts_col.data_type).unwrap()
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    pub fn test_create_table_with_precision() {
+        test_timestamp_precision(
+            "create table demo (ts timestamp time index, cnt int);",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+        );
+        test_timestamp_precision(
+            "create table demo (ts timestamp(0) time index, cnt int);",
+            ConcreteDataType::timestamp_second_datatype(),
+        );
+        test_timestamp_precision(
+            "create table demo (ts timestamp(3) time index, cnt int);",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+        );
+        test_timestamp_precision(
+            "create table demo (ts timestamp(6) time index, cnt int);",
+            ConcreteDataType::timestamp_microsecond_datatype(),
+        );
+        test_timestamp_precision(
+            "create table demo (ts timestamp(9) time index, cnt int);",
+            ConcreteDataType::timestamp_nanosecond_datatype(),
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    pub fn test_create_table_with_invalid_precision() {
+        test_timestamp_precision(
+            "create table demo (ts timestamp(1) time index, cnt int);",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+        );
     }
 }

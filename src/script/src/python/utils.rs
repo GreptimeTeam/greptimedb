@@ -16,7 +16,6 @@ use futures::Future;
 use once_cell::sync::OnceCell;
 use rustpython_vm::builtins::PyBaseExceptionRef;
 use rustpython_vm::{PyObjectRef, PyPayload, VirtualMachine};
-use snafu::{Backtrace, GenerateImplicitData};
 use tokio::runtime::Runtime;
 
 use crate::python::error;
@@ -30,16 +29,12 @@ pub fn is_instance<T: PyPayload>(obj: &PyObjectRef, vm: &VirtualMachine) -> bool
 pub fn format_py_error(excep: PyBaseExceptionRef, vm: &VirtualMachine) -> error::Error {
     let mut msg = String::new();
     if let Err(e) = vm.write_exception(&mut msg, &excep) {
-        return error::Error::PyRuntime {
+        return error::PyRuntimeSnafu {
             msg: format!("Failed to write exception msg, err: {e}"),
-            backtrace: Backtrace::generate(),
-        };
+        }
+        .build();
     }
-
-    error::Error::PyRuntime {
-        msg,
-        backtrace: Backtrace::generate(),
-    }
+    error::PyRuntimeSnafu { msg }.build()
 }
 static LOCAL_RUNTIME: OnceCell<tokio::runtime::Runtime> = OnceCell::new();
 fn get_local_runtime() -> std::thread::Result<&'static Runtime> {

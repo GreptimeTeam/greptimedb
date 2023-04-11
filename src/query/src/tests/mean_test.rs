@@ -18,7 +18,6 @@ use datatypes::for_all_primitive_types;
 use datatypes::prelude::*;
 use datatypes::types::WrapperType;
 use datatypes::value::OrderedFloat;
-use format_num::NumberFormat;
 use num_traits::AsPrimitive;
 
 use crate::error::Result;
@@ -56,14 +55,12 @@ where
 
     let numbers =
         function::get_numbers_from_table::<T>(column_name, table_name, engine.clone()).await;
-    let expected_value = numbers.iter().map(|&n| n.as_()).collect::<Vec<f64>>();
-
-    let expected_value = inc_stats::mean(expected_value.iter().cloned()).unwrap();
-    if let Value::Float64(OrderedFloat(value)) = value {
-        let num = NumberFormat::new();
-        let value = num.format(".6e", value);
-        let expected_value = num.format(".6e", expected_value);
-        assert_eq!(value, expected_value);
-    }
+    let numbers = numbers.iter().map(|&n| n.as_()).collect::<Vec<f64>>();
+    let expected = numbers.iter().sum::<f64>() / (numbers.len() as f64);
+    let Value::Float64(OrderedFloat(value)) = value else { unreachable!() };
+    assert!(
+        (value - expected).abs() < 1e-3,
+        "expected {expected}, actual {value}"
+    );
     Ok(())
 }

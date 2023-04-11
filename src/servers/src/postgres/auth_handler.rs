@@ -22,12 +22,10 @@ use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::response::ErrorResponse;
 use pgwire::messages::startup::Authentication;
 use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
-use session::context::{QueryContextRef, UserInfo};
-use snafu::ResultExt;
+use session::context::QueryContextRef;
 
 use super::PostgresServerHandler;
 use crate::auth::{Identity, Password, UserProviderRef};
-use crate::error;
 use crate::error::Result;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
@@ -70,45 +68,34 @@ impl LoginInfo {
 }
 
 impl PgLoginVerifier {
-    async fn verify_pwd(&self, password: &str, login: &LoginInfo) -> Result<bool> {
-        if let Some(user_provider) = &self.user_provider {
-            let user_name = match &login.user {
-                Some(name) => name,
-                None => return Ok(false),
-            };
+    async fn auth(&self, login: &LoginInfo, password: &str) -> Result<bool> {
+        let user_provider = match &self.user_provider {
+            Some(provider) => provider,
+            None => return Ok(false),
+        };
 
-            // TODO(fys): pass user_info to context
-            let _user_info = user_provider
-                .authenticate(
-                    Identity::UserId(user_name, None),
-                    Password::PlainText(password),
-                )
-                .await
-                .context(error::AuthSnafu)?;
-        }
-        Ok(true)
-    }
+        let user_name = match &login.user {
+            Some(name) => name,
+            None => return Ok(false),
+        };
+        let catalog = match &login.catalog {
+            Some(name) => name,
+            None => return Ok(false),
+        };
+        let schema = match &login.schema {
+            Some(name) => name,
+            None => return Ok(false),
+        };
 
-    async fn authorize(&self, login: &LoginInfo) -> Result<bool> {
-        // at this time, username in login info should be valid
-        // TODO(shuiyisong): change to use actually user_info from session
-        if let Some(user_provider) = &self.user_provider {
-            let user_name = match &login.user {
-                Some(name) => name,
-                None => return Ok(false),
-            };
-            let catalog = match &login.catalog {
-                Some(name) => name,
-                None => return Ok(false),
-            };
-            let schema = match &login.schema {
-                Some(name) => name,
-                None => return Ok(false),
-            };
-            user_provider
-                .authorize(catalog, schema, &UserInfo::new(user_name))
-                .await?;
-        }
+        let _user_info = user_provider
+            .auth(
+                Identity::UserId(user_name, None),
+                Password::PlainText(password),
+                catalog,
+                schema,
+            )
+            .await?;
+
         Ok(true)
     }
 }
@@ -182,28 +169,15 @@ impl StartupHandler for PostgresServerHandler {
                 let pwd = pwd.into_password()?;
 
                 let login_info = LoginInfo::from_client_info(client);
+
                 // do authenticate
-                let authenticate_result = self
-                    .login_verifier
-                    .verify_pwd(pwd.password(), &login_info)
-                    .await;
-                if !matches!(authenticate_result, Ok(true)) {
+                let auth_result = self.login_verifier.auth(&login_info, pwd.password()).await;
+                if !matches!(auth_result, Ok(true)) {
                     return send_error(
                         client,
                         "FATAL",
                         "28P01",
                         "password authentication failed".to_owned(),
-                    )
-                    .await;
-                }
-                // do authorize
-                let authorize_result = self.login_verifier.authorize(&login_info).await;
-                if !matches!(authorize_result, Ok(true)) {
-                    return send_error(
-                        client,
-                        "FATAL",
-                        "28P01",
-                        "password authorization failed".to_owned(),
                     )
                     .await;
                 }

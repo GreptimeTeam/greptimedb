@@ -18,6 +18,7 @@ use std::any::Any;
 use common_error::ext::BoxedError;
 use common_error::prelude::*;
 use datatypes::prelude::ConcreteDataType;
+use snafu::Location;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -27,7 +28,7 @@ pub enum Error {
     #[snafu(display("Fail to create datafusion record batch, source: {}", source))]
     NewDfRecordBatch {
         source: datatypes::arrow::error::ArrowError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Data types error, source: {}", source))]
@@ -43,40 +44,37 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to create RecordBatches, reason: {}", reason))]
-    CreateRecordBatches {
-        reason: String,
-        backtrace: Backtrace,
-    },
+    CreateRecordBatches { reason: String, location: Location },
 
     #[snafu(display("Failed to convert Arrow schema, source: {}", source))]
     SchemaConversion {
         source: datatypes::error::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to poll stream, source: {}", source))]
     PollStream {
         source: datafusion::error::DataFusionError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Fail to format record batch, source: {}", source))]
     Format {
         source: datatypes::arrow::error::ArrowError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to init Recordbatch stream, source: {}", source))]
     InitRecordbatchStream {
         source: datafusion_common::DataFusionError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Column {} not exists in table {}", column_name, table_name))]
     ColumnNotExists {
         column_name: String,
         table_name: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display(
@@ -111,10 +109,6 @@ impl ErrorExt for Error {
                 source.status_code()
             }
         }
-    }
-
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        ErrorCompat::backtrace(self)
     }
 
     fn as_any(&self) -> &dyn Any {

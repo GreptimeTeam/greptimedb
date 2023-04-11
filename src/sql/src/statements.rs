@@ -32,6 +32,7 @@ use common_base::bytes::Bytes;
 use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
+use datatypes::types::TimestampType;
 use datatypes::value::Value;
 use snafu::{ensure, OptionExt, ResultExt};
 
@@ -304,7 +305,18 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
         SqlDataType::Date => Ok(ConcreteDataType::date_datatype()),
         SqlDataType::Varbinary(_) => Ok(ConcreteDataType::binary_datatype()),
         SqlDataType::Datetime(_) => Ok(ConcreteDataType::datetime_datatype()),
-        SqlDataType::Timestamp(_, _) => Ok(ConcreteDataType::timestamp_millisecond_datatype()),
+        SqlDataType::Timestamp(precision, _) => Ok(precision
+            .as_ref()
+            .map(|v| TimestampType::try_from(*v))
+            .transpose()
+            .map_err(|_| {
+                error::SqlTypeNotSupportedSnafu {
+                    t: data_type.clone(),
+                }
+                .build()
+            })?
+            .map(|t| ConcreteDataType::timestamp_datatype(t.unit()))
+            .unwrap_or(ConcreteDataType::timestamp_millisecond_datatype())),
         _ => error::SqlTypeNotSupportedSnafu {
             t: data_type.clone(),
         }
@@ -475,15 +487,16 @@ mod tests {
 
     #[test]
     pub fn test_parse_datetime_literal() {
+        std::env::set_var("TZ", "Asia/Shanghai");
         let value = sql_value_to_value(
             "datetime_col",
             &ConcreteDataType::datetime_datatype(),
-            &SqlValue::DoubleQuotedString("2022-02-22 00:01:03".to_string()),
+            &SqlValue::DoubleQuotedString("2022-02-22 00:01:03+0800".to_string()),
         )
         .unwrap();
         assert_eq!(ConcreteDataType::datetime_datatype(), value.data_type());
         if let Value::DateTime(d) = value {
-            assert_eq!("2022-02-22 00:01:03", d.to_string());
+            assert_eq!("2022-02-22 00:01:03+0800", d.to_string());
         } else {
             unreachable!()
         }

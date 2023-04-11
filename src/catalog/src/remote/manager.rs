@@ -192,7 +192,9 @@ impl RemoteCatalogManager {
         let max_table_id = MIN_USER_TABLE_ID - 1;
 
         // initiate default catalog and schema
-        let default_catalog = self.initiate_default_catalog().await?;
+        let default_catalog = self
+            .create_catalog_and_schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
+            .await?;
         res.insert(DEFAULT_CATALOG_NAME.to_string(), default_catalog);
         info!("Default catalog and schema registered");
 
@@ -299,13 +301,19 @@ impl RemoteCatalogManager {
         Ok(())
     }
 
-    async fn initiate_default_catalog(&self) -> Result<CatalogProviderRef> {
-        let default_catalog = self.new_catalog_provider(DEFAULT_CATALOG_NAME);
-        let default_schema = self.new_schema_provider(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
-        default_catalog.register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema.clone())?;
+    pub async fn create_catalog_and_schema(
+        &self,
+        catalog_name: &str,
+        schema_name: &str,
+    ) -> Result<CatalogProviderRef> {
+        let schema_provider = self.new_schema_provider(catalog_name, schema_name);
+
+        let catalog_provider = self.new_catalog_provider(catalog_name);
+        catalog_provider.register_schema(schema_name.to_string(), schema_provider.clone())?;
+
         let schema_key = SchemaKey {
-            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            catalog_name: catalog_name.to_string(),
+            schema_name: schema_name.to_string(),
         }
         .to_string();
         self.backend
@@ -316,10 +324,10 @@ impl RemoteCatalogManager {
                     .context(InvalidCatalogValueSnafu)?,
             )
             .await?;
-        info!("Registered default schema");
+        info!("Created schema '{schema_key}'");
 
         let catalog_key = CatalogKey {
-            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            catalog_name: catalog_name.to_string(),
         }
         .to_string();
         self.backend
@@ -330,8 +338,8 @@ impl RemoteCatalogManager {
                     .context(InvalidCatalogValueSnafu)?,
             )
             .await?;
-        info!("Registered default catalog");
-        Ok(default_catalog)
+        info!("Created catalog '{catalog_key}");
+        Ok(catalog_provider)
     }
 }
 
