@@ -26,7 +26,7 @@ use datafusion::physical_plan::ColumnarValue;
 use datatypes::arrow::array::Array;
 use datatypes::arrow::datatypes::DataType;
 
-use crate::functions::{compensated_sum_inc, extract_array};
+use crate::functions::{extract_array, linear_regression};
 use crate::range_array::RangeArray;
 
 #[range_fn(name = "Deriv", ret = "Float64Array", display_name = "prom_drive")]
@@ -38,62 +38,6 @@ pub fn drive(times: &TimestampMillisecondArray, values: &Float64Array) -> Option
         let (slope, _) = linear_regression(times, values, intercept_time);
         slope
     }
-}
-
-/// linear_regression performs a least-square linear regression analysis on the
-/// times and values. It return the slope and intercept based on times and values.
-/// Prometheus's implementation: https://github.com/prometheus/prometheus/blob/90b2f7a540b8a70d8d81372e6692dcbb67ccbaaa/promql/functions.go#L793-L837
-fn linear_regression(
-    times: &TimestampMillisecondArray,
-    values: &Float64Array,
-    intercept_time: i64,
-) -> (Option<f64>, Option<f64>) {
-    let mut count: f64 = 0.0;
-    let mut sum_x: f64 = 0.0;
-    let mut sum_y: f64 = 0.0;
-    let mut sum_xy: f64 = 0.0;
-    let mut sum_x2: f64 = 0.0;
-    let mut comp_x: f64 = 0.0;
-    let mut comp_y: f64 = 0.0;
-    let mut comp_xy: f64 = 0.0;
-    let mut comp_x2: f64 = 0.0;
-
-    let mut const_y = true;
-    let init_y: f64 = values.value(0);
-
-    for (i, value) in values.iter().enumerate() {
-        let time = times.value(i) as f64;
-        let value = value.unwrap();
-        if const_y && i > 0 && value != init_y {
-            const_y = false;
-        }
-        count += 1.0;
-        let x = time - intercept_time as f64 / 1e3;
-        (sum_x, comp_x) = compensated_sum_inc(x, sum_x, comp_x);
-        (sum_y, comp_y) = compensated_sum_inc(value, sum_y, comp_y);
-        (sum_xy, comp_xy) = compensated_sum_inc(x * value, sum_xy, comp_xy);
-        (sum_x2, comp_x2) = compensated_sum_inc(x * x, sum_x2, comp_x2);
-    }
-
-    if const_y {
-        if init_y.is_finite() {
-            return (None, None);
-        }
-        return (Some(0.0), Some(init_y));
-    }
-
-    sum_x += comp_x;
-    sum_y += comp_y;
-    sum_xy += comp_xy;
-    sum_x2 += comp_x2;
-
-    let cov_xy = sum_xy - sum_x * sum_y / count;
-    let var_x = sum_x2 - sum_x * sum_x / count;
-
-    let slope = cov_xy / var_x;
-    let intercept = sum_y / count - slope * sum_x / count;
-
-    (Some(slope), Some(intercept))
 }
 
 #[cfg(test)]

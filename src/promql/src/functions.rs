@@ -17,6 +17,7 @@ mod changes;
 mod deriv;
 mod extrapolate_rate;
 mod idelta;
+mod predict_linear;
 mod quantile;
 mod resets;
 #[cfg(test)]
@@ -27,12 +28,13 @@ pub use aggr_over_time::{
     PresentOverTime, StddevOverTime, StdvarOverTime, SumOverTime,
 };
 pub use changes::Changes;
-use datafusion::arrow::array::ArrayRef;
+use datafusion::arrow::array::{ArrayRef, Float64Array, TimestampMillisecondArray};
 use datafusion::error::DataFusionError;
 use datafusion::physical_plan::ColumnarValue;
 pub use deriv::Deriv;
 pub use extrapolate_rate::{Delta, Increase, Rate};
 pub use idelta::IDelta;
+pub use predict_linear::PredictLinear;
 pub use quantile::QuantileOverTime;
 pub use resets::Resets;
 
@@ -60,4 +62,60 @@ pub(crate) fn compensated_sum_inc(inc: f64, sum: f64, mut compensation: f64) -> 
         compensation += (inc - new_sum) + sum;
     }
     (new_sum, compensation)
+}
+
+/// linear_regression performs a least-square linear regression analysis on the
+/// times and values. It return the slope and intercept based on times and values.
+/// Prometheus's implementation: https://github.com/prometheus/prometheus/blob/90b2f7a540b8a70d8d81372e6692dcbb67ccbaaa/promql/functions.go#L793-L837
+pub(crate) fn linear_regression(
+    times: &TimestampMillisecondArray,
+    values: &Float64Array,
+    intercept_time: i64,
+) -> (Option<f64>, Option<f64>) {
+    let mut count: f64 = 0.0;
+    let mut sum_x: f64 = 0.0;
+    let mut sum_y: f64 = 0.0;
+    let mut sum_xy: f64 = 0.0;
+    let mut sum_x2: f64 = 0.0;
+    let mut comp_x: f64 = 0.0;
+    let mut comp_y: f64 = 0.0;
+    let mut comp_xy: f64 = 0.0;
+    let mut comp_x2: f64 = 0.0;
+
+    let mut const_y = true;
+    let init_y: f64 = values.value(0);
+
+    for (i, value) in values.iter().enumerate() {
+        let time = times.value(i) as f64;
+        let value = value.unwrap();
+        if const_y && i > 0 && value != init_y {
+            const_y = false;
+        }
+        count += 1.0;
+        let x = time - intercept_time as f64 / 1e3;
+        (sum_x, comp_x) = compensated_sum_inc(x, sum_x, comp_x);
+        (sum_y, comp_y) = compensated_sum_inc(value, sum_y, comp_y);
+        (sum_xy, comp_xy) = compensated_sum_inc(x * value, sum_xy, comp_xy);
+        (sum_x2, comp_x2) = compensated_sum_inc(x * x, sum_x2, comp_x2);
+    }
+
+    if const_y {
+        if init_y.is_finite() {
+            return (None, None);
+        }
+        return (Some(0.0), Some(init_y));
+    }
+
+    sum_x += comp_x;
+    sum_y += comp_y;
+    sum_xy += comp_xy;
+    sum_x2 += comp_x2;
+
+    let cov_xy = sum_xy - sum_x * sum_y / count;
+    let var_x = sum_x2 - sum_x * sum_x / count;
+
+    let slope = cov_xy / var_x;
+    let intercept = sum_y / count - slope * sum_x / count;
+
+    (Some(slope), Some(intercept))
 }
