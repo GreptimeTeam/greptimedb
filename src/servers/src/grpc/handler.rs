@@ -98,11 +98,13 @@ impl GreptimeRequestHandler {
             })
             .context(NotFoundAuthHeaderSnafu)?;
 
-        let user_info = match auth_scheme {
+        match auth_scheme {
             AuthScheme::Basic(Basic { username, password }) => user_provider
-                .authenticate(
+                .auth(
                     Identity::UserId(&username, None),
                     Password::PlainText(&password),
+                    &query_ctx.current_catalog(),
+                    &query_ctx.current_schema(),
                 )
                 .await
                 .map_err(|e| Auth { source: e }),
@@ -111,15 +113,7 @@ impl GreptimeRequestHandler {
             }),
         }
         .map_err(|e| Status::unauthenticated(e.to_string()))?;
-
-        user_provider
-            .authorize(
-                &query_ctx.current_catalog(),
-                &query_ctx.current_schema(),
-                &user_info,
-            )
-            .await
-            .map_err(|e| Status::permission_denied(e.to_string()))
+        Ok(())
     }
 }
 
