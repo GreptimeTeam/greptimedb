@@ -21,7 +21,7 @@ use common_telemetry::logging::info;
 use common_telemetry::timer;
 use query::error::QueryExecutionSnafu;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
-use query::query_engine::StatementHandler;
+use query::query_engine::SqlStatementExecutor;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
 use sql::ast::ObjectName;
@@ -31,27 +31,23 @@ use table::engine::TableReference;
 use table::requests::{CopyDirection, CopyTableRequest, CreateDatabaseRequest, DropTableRequest};
 
 use crate::error::{
-    self, BumpTableIdSnafu, ExecuteSqlSnafu, ExecuteStatementSnafu, PlanStatementSnafu, Result,
-    TableIdProviderNotFoundSnafu,
+    self, BumpTableIdSnafu, ExecuteSqlSnafu, ExecuteStatementSnafu, NotSupportSqlSnafu,
+    PlanStatementSnafu, Result, TableIdProviderNotFoundSnafu,
 };
 use crate::instance::Instance;
 use crate::metrics;
 use crate::sql::{SqlHandler, SqlRequest};
 
 impl Instance {
-    pub async fn execute_stmt(
-        &self,
-        stmt: QueryStatement,
-        query_ctx: QueryContextRef,
-    ) -> Result<Output> {
+    async fn do_execute_sql(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
         match stmt {
-            QueryStatement::Sql(Statement::Insert(insert)) => {
+            Statement::Insert(insert) => {
                 let request =
                     SqlHandler::insert_to_request(self.catalog_manager.clone(), *insert, query_ctx)
                         .await?;
                 self.sql_handler.insert(request).await
             }
-            QueryStatement::Sql(Statement::CreateDatabase(create_database)) => {
+            Statement::CreateDatabase(create_database) => {
                 let request = CreateDatabaseRequest {
                     db_name: create_database.name.to_string(),
                     create_if_not_exists: create_database.if_not_exists,
@@ -64,7 +60,7 @@ impl Instance {
                     .await
             }
 
-            QueryStatement::Sql(Statement::CreateTable(create_table)) => {
+            Statement::CreateTable(create_table) => {
                 let table_id = self
                     .table_id_provider
                     .as_ref()
@@ -88,10 +84,7 @@ impl Instance {
                     .execute(SqlRequest::CreateTable(request), query_ctx)
                     .await
             }
-            QueryStatement::Sql(Statement::CreateExternalTable(_create_external_table)) => {
-                unimplemented!()
-            }
-            QueryStatement::Sql(Statement::Alter(alter_table)) => {
+            Statement::Alter(alter_table) => {
                 let name = alter_table.table_name().clone();
                 let (catalog, schema, table) = table_idents_to_full_name(&name, query_ctx.clone())?;
                 let table_ref = TableReference::full(&catalog, &schema, &table);
@@ -100,7 +93,7 @@ impl Instance {
                     .execute(SqlRequest::Alter(req), query_ctx)
                     .await
             }
-            QueryStatement::Sql(Statement::DropTable(drop_table)) => {
+            Statement::DropTable(drop_table) => {
                 let (catalog_name, schema_name, table_name) =
                     table_idents_to_full_name(drop_table.table_name(), query_ctx.clone())?;
                 let req = DropTableRequest {
@@ -112,20 +105,7 @@ impl Instance {
                     .execute(SqlRequest::DropTable(req), query_ctx)
                     .await
             }
-            QueryStatement::Sql(Statement::ShowDatabases(show_databases)) => {
-                self.sql_handler
-                    .execute(SqlRequest::ShowDatabases(show_databases), query_ctx)
-                    .await
-            }
-            QueryStatement::Sql(Statement::ShowTables(show_tables)) => {
-                self.sql_handler
-                    .execute(SqlRequest::ShowTables(show_tables), query_ctx)
-                    .await
-            }
-            QueryStatement::Sql(Statement::ShowCreateTable(_show_create_table)) => {
-                unimplemented!("SHOW CREATE TABLE is unimplemented yet");
-            }
-            QueryStatement::Sql(Statement::Copy(copy_table)) => {
+            Statement::Copy(copy_table) => {
                 let req = match copy_table {
                     CopyTable::To(copy_table) => {
                         let CopyTableArgument {
@@ -173,13 +153,10 @@ impl Instance {
                     .execute(SqlRequest::CopyTable(req), query_ctx)
                     .await
             }
-            QueryStatement::Sql(Statement::Query(_))
-            | QueryStatement::Sql(Statement::Explain(_))
-            | QueryStatement::Sql(Statement::Use(_))
-            | QueryStatement::Sql(Statement::Tql(_))
-            | QueryStatement::Sql(Statement::Delete(_))
-            | QueryStatement::Sql(Statement::DescribeTable(_))
-            | QueryStatement::Promql(_) => unreachable!(),
+            _ => NotSupportSqlSnafu {
+                msg: format!("not supported to execute {stmt:?}"),
+            }
+            .fail(),
         }
     }
 
@@ -276,13 +253,13 @@ pub fn table_idents_to_full_name(
 }
 
 #[async_trait]
-impl StatementHandler for Instance {
-    async fn handle_statement(
+impl SqlStatementExecutor for Instance {
+    async fn execute_sql(
         &self,
-        stmt: QueryStatement,
+        stmt: Statement,
         query_ctx: QueryContextRef,
     ) -> query::error::Result<Output> {
-        self.execute_stmt(stmt, query_ctx)
+        self.do_execute_sql(stmt, query_ctx)
             .await
             .map_err(BoxedError::new)
             .context(QueryExecutionSnafu)

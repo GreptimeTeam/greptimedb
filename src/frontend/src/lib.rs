@@ -31,6 +31,7 @@ pub mod prom;
 pub mod prometheus;
 mod script;
 mod server;
+pub(crate) mod statement;
 mod table;
 #[cfg(test)]
 mod tests;

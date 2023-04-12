@@ -20,6 +20,7 @@ use async_trait::async_trait;
 use common_query::Output;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::plan::LogicalPlan;
+use query::query_engine::SqlStatementExecutor;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::prelude::*;
@@ -65,7 +66,7 @@ impl Instance {
                 match stmt {
                     // TODO(LFC): Remove SQL execution branch here.
                     // Keep this because substrait can't handle much of SQLs now.
-                    QueryStatement::Sql(Statement::Query(_)) => {
+                    QueryStatement::Sql(Statement::Query(_)) | QueryStatement::Promql(_) => {
                         let plan = self
                             .query_engine
                             .planner()
@@ -77,7 +78,9 @@ impl Instance {
                             .await
                             .context(ExecuteLogicalPlanSnafu)
                     }
-                    _ => self.execute_stmt(stmt, ctx).await,
+                    QueryStatement::Sql(stmt) => {
+                        self.execute_sql(stmt, ctx).await.context(ExecuteSqlSnafu)
+                    }
                 }
             }
             Query::LogicalPlan(plan) => self.execute_logical(plan).await,
@@ -242,12 +245,11 @@ mod test {
         let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
         assert!(matches!(output, Output::AffectedRows(0)));
 
-        let stmt = QueryLanguageParser::parse_sql(
+        let Ok(QueryStatement::Sql(stmt)) = QueryLanguageParser::parse_sql(
             "INSERT INTO my_database.my_table (a, b, ts) VALUES ('s', 1, 1672384140000)",
-        )
-        .unwrap();
+        ) else { unreachable!() };
         let output = instance
-            .execute_stmt(stmt, QueryContext::arc())
+            .execute_sql(stmt, QueryContext::arc())
             .await
             .unwrap();
         assert!(matches!(output, Output::AffectedRows(1)));

@@ -36,7 +36,6 @@ use common_catalog::consts::MITO_ENGINE;
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_query::Output;
-use common_recordbatch::RecordBatches;
 use common_telemetry::logging::{debug, info};
 use common_telemetry::timer;
 use datafusion::sql::sqlparser::ast::ObjectName;
@@ -50,7 +49,6 @@ use partition::manager::PartitionRuleManager;
 use partition::route::TableRoutes;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
-use query::query_engine::StatementHandlerRef;
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error as server_error;
 use servers::error::{ExecuteQuerySnafu, ParsePromQLSnafu};
@@ -66,17 +64,13 @@ use snafu::prelude::*;
 use sql::dialect::GenericDialect;
 use sql::parser::ParserContext;
 use sql::statements::copy::CopyTable;
-use sql::statements::describe::DescribeTable;
 use sql::statements::statement::Statement;
-use sql::statements::tql::Tql;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
-    self, CatalogSnafu, DescribeStatementSnafu, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu,
-    ExecuteStatementSnafu, ExternalSnafu, InvalidInsertRequestSnafu, MissingMetasrvOptsSnafu,
-    NotSupportedSnafu, ParseQuerySnafu, ParseSqlSnafu, PlanStatementSnafu, Result,
-    SqlExecInterceptedSnafu, TableNotFoundSnafu,
+    self, Error, ExecutePromqlSnafu, ExternalSnafu, InvalidInsertRequestSnafu,
+    MissingMetasrvOptsSnafu, ParseSqlSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
 };
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::FrontendOptions;
@@ -84,6 +78,7 @@ use crate::instance::standalone::StandaloneGrpcQueryHandler;
 use crate::metric;
 use crate::script::ScriptExecutor;
 use crate::server::{start_server, ServerHandlers, Services};
+use crate::statement::StatementExecutor;
 
 #[async_trait]
 pub trait FrontendInstance:
@@ -107,7 +102,7 @@ pub type FrontendInstanceRef = Arc<dyn FrontendInstance>;
 pub struct Instance {
     catalog_manager: CatalogManagerRef,
     script_executor: Arc<ScriptExecutor>,
-    statement_handler: StatementHandlerRef,
+    statement_executor: Arc<StatementExecutor>,
     query_engine: QueryEngineRef,
     grpc_query_handler: GrpcQueryHandlerRef<Error>,
 
@@ -154,11 +149,17 @@ impl Instance {
         let script_executor =
             Arc::new(ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?);
 
+        let statement_executor = Arc::new(StatementExecutor::new(
+            catalog_manager.clone(),
+            query_engine.clone(),
+            dist_instance.clone(),
+        ));
+
         Ok(Instance {
             catalog_manager,
             script_executor,
             create_expr_factory: Arc::new(DefaultCreateExprFactory),
-            statement_handler: dist_instance.clone(),
+            statement_executor,
             query_engine,
             grpc_query_handler: dist_instance,
             plugins: plugins.clone(),
@@ -201,11 +202,18 @@ impl Instance {
         let query_engine = dn_instance.query_engine();
         let script_executor =
             Arc::new(ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?);
+
+        let statement_executor = Arc::new(StatementExecutor::new(
+            catalog_manager.clone(),
+            query_engine.clone(),
+            dn_instance.clone(),
+        ));
+
         Ok(Instance {
             catalog_manager: catalog_manager.clone(),
             script_executor,
             create_expr_factory: Arc::new(DefaultCreateExprFactory),
-            statement_handler: dn_instance.clone(),
+            statement_executor,
             query_engine,
             grpc_query_handler: StandaloneGrpcQueryHandler::arc(dn_instance.clone()),
             plugins: Default::default(),
@@ -235,10 +243,17 @@ impl Instance {
                 .await
                 .unwrap(),
         );
+
+        let statement_executor = Arc::new(StatementExecutor::new(
+            catalog_manager.clone(),
+            query_engine.clone(),
+            dist_instance.clone(),
+        ));
+
         Instance {
             catalog_manager,
             script_executor,
-            statement_handler: dist_instance.clone(),
+            statement_executor,
             query_engine,
             create_expr_factory: Arc::new(DefaultCreateExprFactory),
             grpc_query_handler: dist_instance,
@@ -389,21 +404,6 @@ impl Instance {
             .await
     }
 
-    fn handle_use(&self, db: String, query_ctx: QueryContextRef) -> Result<Output> {
-        let catalog = &query_ctx.current_catalog();
-        ensure!(
-            self.catalog_manager
-                .schema(catalog, &db)
-                .context(error::CatalogSnafu)?
-                .is_some(),
-            error::SchemaNotFoundSnafu { schema_info: &db }
-        );
-
-        query_ctx.set_current_schema(&db);
-
-        Ok(Output::RecordBatches(RecordBatches::empty()))
-    }
-
     pub fn set_plugins(&mut self, map: Arc<Plugins>) {
         self.plugins = map;
     }
@@ -417,6 +417,11 @@ impl Instance {
             .await
             .context(error::ShutdownServerSnafu)
             .map(|_| ())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn statement_executor(&self) -> Arc<StatementExecutor> {
+        self.statement_executor.clone()
     }
 }
 
@@ -437,104 +442,11 @@ fn parse_stmt(sql: &str) -> Result<Vec<Statement>> {
 }
 
 impl Instance {
-    pub(crate) async fn plan_exec(
-        &self,
-        stmt: QueryStatement,
-        query_ctx: QueryContextRef,
-    ) -> Result<Output> {
-        let planner = self.query_engine.planner();
-        let plan = planner
-            .plan(stmt, query_ctx.clone())
-            .await
-            .context(PlanStatementSnafu)?;
-        self.query_engine
-            .execute(plan, query_ctx)
-            .await
-            .context(ExecLogicalPlanSnafu)
-    }
-
-    async fn execute_tql(&self, tql: Tql, query_ctx: QueryContextRef) -> Result<Output> {
-        let plan = match tql {
-            Tql::Eval(eval) => {
-                let promql = PromQuery {
-                    start: eval.start,
-                    end: eval.end,
-                    step: eval.step,
-                    query: eval.query,
-                };
-                let stmt = QueryLanguageParser::parse_promql(&promql).context(ParseQuerySnafu)?;
-                self.query_engine
-                    .planner()
-                    .plan(stmt, query_ctx.clone())
-                    .await
-                    .context(PlanStatementSnafu)?
-            }
-            Tql::Explain(_) => unimplemented!(),
-        };
-        self.query_engine
-            .execute(plan, query_ctx)
-            .await
-            .context(ExecLogicalPlanSnafu)
-    }
-
-    async fn describe_table(
-        &self,
-        stmt: DescribeTable,
-        query_ctx: QueryContextRef,
-    ) -> Result<Output> {
-        let (catalog, schema, table) = table_idents_to_full_name(stmt.name(), query_ctx)
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)?;
-
-        let table = self
-            .catalog_manager
-            .table(&catalog, &schema, &table)
-            .await
-            .context(CatalogSnafu)?
-            .with_context(|| TableNotFoundSnafu {
-                table_name: stmt.name().to_string(),
-            })?;
-
-        query::sql::describe_table(table).context(DescribeStatementSnafu)
-    }
-
     async fn query_statement(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
         check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
 
-        match stmt {
-            Statement::Query(_) | Statement::Explain(_) | Statement::Delete(_) => {
-                self.plan_exec(QueryStatement::Sql(stmt), query_ctx).await
-            }
-
-            // For performance consideration, only "insert with select" is executed by query engine.
-            // Plain insert ("insert with values") is still executed directly in statement.
-            Statement::Insert(ref insert) if insert.is_insert_select() => {
-                self.plan_exec(QueryStatement::Sql(stmt), query_ctx).await
-            }
-
-            Statement::Tql(tql) => self.execute_tql(tql, query_ctx).await,
-
-            Statement::DescribeTable(stmt) => self.describe_table(stmt, query_ctx).await,
-
-            Statement::CreateDatabase(_)
-            | Statement::CreateExternalTable(_)
-            | Statement::ShowDatabases(_)
-            | Statement::CreateTable(_)
-            | Statement::ShowTables(_)
-            | Statement::Insert(_)
-            | Statement::Alter(_)
-            | Statement::DropTable(_)
-            | Statement::Copy(_) => self
-                .statement_handler
-                .handle_statement(QueryStatement::Sql(stmt), query_ctx)
-                .await
-                .context(ExecuteStatementSnafu),
-            Statement::Use(db) => self.handle_use(db, query_ctx),
-            Statement::ShowCreateTable(_) => NotSupportedSnafu {
-                feat: format!("{stmt:?}"),
-            }
-            .fail(),
-        }
+        let stmt = QueryStatement::Sql(stmt);
+        self.statement_executor.execute_stmt(stmt, query_ctx).await
     }
 }
 
@@ -630,7 +542,8 @@ impl PromHandler for Instance {
         let stmt = QueryLanguageParser::parse_promql(query).with_context(|_| ParsePromQLSnafu {
             query: query.clone(),
         })?;
-        self.plan_exec(stmt, QueryContext::arc())
+        self.statement_executor
+            .execute_stmt(stmt, QueryContext::arc())
             .await
             .map_err(BoxedError::new)
             .with_context(|_| ExecuteQuerySnafu {
@@ -732,6 +645,7 @@ mod tests {
 
     use api::v1::column::Values;
     use catalog::helper::{TableGlobalKey, TableGlobalValue};
+    use common_recordbatch::RecordBatches;
     use datatypes::prelude::{ConcreteDataType, Value};
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
     use query::query_engine::options::QueryOptions;
