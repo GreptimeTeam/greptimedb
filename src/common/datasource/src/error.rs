@@ -21,6 +21,9 @@ use url::ParseError;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Unsupported compression type: {}", compression_type))]
+    UnsupportedCompressionType { compression_type: String },
+
     #[snafu(display("Unsupported backend protocol: {}", protocol))]
     UnsupportedBackendProtocol { protocol: String },
 
@@ -33,10 +36,42 @@ pub enum Error {
     #[snafu(display("Invalid url: {}, error :{}", url, source))]
     InvalidUrl { url: String, source: ParseError },
 
+    #[snafu(display("Failed to decompression, source: {}", source))]
+    Decompression {
+        source: object_store::Error,
+        location: Location,
+    },
+
     #[snafu(display("Failed to build backend, source: {}", source))]
     BuildBackend {
         source: object_store::Error,
         location: Location,
+    },
+
+    #[snafu(display("Failed to read object from path: {}, source: {}", path, source))]
+    ReadObject {
+        path: String,
+        location: Location,
+        source: object_store::Error,
+    },
+
+    #[snafu(display("Failed to read parquet source: {}", source))]
+    ReadParquetSnafu {
+        location: Location,
+        source: datafusion::parquet::errors::ParquetError,
+    },
+
+    #[snafu(display("Failed to convert parquet to schema: {}", source))]
+    ParquetToSchema {
+        location: Location,
+        source: datafusion::parquet::errors::ParquetError,
+    },
+
+    #[snafu(display("Failed to infer schema from file: {}, source: {}", path, source))]
+    InferSchema {
+        path: String,
+        location: Location,
+        source: arrow_schema::ArrowError,
     },
 
     #[snafu(display("Failed to list object in path: {}, source: {}", path, source))]
@@ -48,6 +83,12 @@ pub enum Error {
 
     #[snafu(display("Invalid connection: {}", msg))]
     InvalidConnection { msg: String },
+
+    #[snafu(display("Failed to join handle: {}", source))]
+    JoinHandle {
+        location: Location,
+        source: tokio::task::JoinError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -56,13 +97,21 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
-            BuildBackend { .. } | ListObjects { .. } => StatusCode::StorageUnavailable,
+            BuildBackend { .. } | ListObjects { .. } | ReadObject { .. } => {
+                StatusCode::StorageUnavailable
+            }
 
             UnsupportedBackendProtocol { .. }
+            | UnsupportedCompressionType { .. }
             | InvalidConnection { .. }
             | InvalidUrl { .. }
             | EmptyHostPath { .. }
-            | InvalidPath { .. } => StatusCode::InvalidArguments,
+            | InvalidPath { .. }
+            | InferSchema { .. }
+            | ReadParquetSnafu { .. }
+            | ParquetToSchema { .. } => StatusCode::InvalidArguments,
+
+            Decompression { .. } | JoinHandle { .. } => StatusCode::Unexpected,
         }
     }
 
@@ -71,14 +120,23 @@ impl ErrorExt for Error {
     }
 
     fn location_opt(&self) -> Option<common_error::snafu::Location> {
+        use Error::*;
         match self {
-            Error::BuildBackend { location, .. } => Some(*location),
-            Error::ListObjects { location, .. } => Some(*location),
-            Error::UnsupportedBackendProtocol { .. }
-            | Error::EmptyHostPath { .. }
-            | Error::InvalidPath { .. }
-            | Error::InvalidUrl { .. }
-            | Error::InvalidConnection { .. } => None,
+            BuildBackend { location, .. } => Some(*location),
+            ReadObject { location, .. } => Some(*location),
+            ListObjects { location, .. } => Some(*location),
+            InferSchema { location, .. } => Some(*location),
+            ReadParquetSnafu { location, .. } => Some(*location),
+            ParquetToSchema { location, .. } => Some(*location),
+            Decompression { location, .. } => Some(*location),
+            JoinHandle { location, .. } => Some(*location),
+
+            UnsupportedBackendProtocol { .. }
+            | EmptyHostPath { .. }
+            | InvalidPath { .. }
+            | InvalidUrl { .. }
+            | InvalidConnection { .. }
+            | UnsupportedCompressionType { .. } => None,
         }
     }
 }

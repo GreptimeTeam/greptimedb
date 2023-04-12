@@ -128,7 +128,7 @@ fn convert_record_batch(record_batch: RecordBatch) -> (Vec<Column>, u32) {
         let (values, datatype) = build_values(array);
 
         let column = Column {
-            column_name: field.name().to_owned(),
+            column_name: field.name().clone(),
             values: Some(values),
             null_mask: array
                 .data()

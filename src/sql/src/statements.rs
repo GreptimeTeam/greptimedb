@@ -193,7 +193,7 @@ pub fn sql_value_to_value(
             (*b).into()
         }
         SqlValue::DoubleQuotedString(s) | SqlValue::SingleQuotedString(s) => {
-            parse_string_to_value(column_name, s.to_owned(), data_type)?
+            parse_string_to_value(column_name, s.clone(), data_type)?
         }
         SqlValue::HexStringLiteral(s) => parse_hex_string(s)?,
         SqlValue::Placeholder(s) => return InvalidSqlValueSnafu { value: s }.fail(),
@@ -487,15 +487,16 @@ mod tests {
 
     #[test]
     pub fn test_parse_datetime_literal() {
+        std::env::set_var("TZ", "Asia/Shanghai");
         let value = sql_value_to_value(
             "datetime_col",
             &ConcreteDataType::datetime_datatype(),
-            &SqlValue::DoubleQuotedString("2022-02-22 00:01:03".to_string()),
+            &SqlValue::DoubleQuotedString("2022-02-22 00:01:03+0800".to_string()),
         )
         .unwrap();
         assert_eq!(ConcreteDataType::datetime_datatype(), value.data_type());
         if let Value::DateTime(d) = value {
-            assert_eq!("2022-02-22 00:01:03", d.to_string());
+            assert_eq!("2022-02-22 00:01:03+0800", d.to_string());
         } else {
             unreachable!()
         }

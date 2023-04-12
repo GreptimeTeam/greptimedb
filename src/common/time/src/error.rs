@@ -26,6 +26,9 @@ pub enum Error {
     #[snafu(display("Failed to parse string to date, raw: {}, source: {}", raw, source))]
     ParseDateStr { raw: String, source: ParseError },
 
+    #[snafu(display("Invalid date string, raw: {}", raw))]
+    InvalidDateStr { raw: String, location: Location },
+
     #[snafu(display("Failed to parse a string into Timestamp, raw string: {}", raw))]
     ParseTimestamp { raw: String, location: Location },
 
@@ -46,7 +49,9 @@ impl ErrorExt for Error {
                 StatusCode::InvalidArguments
             }
             Error::TimestampOverflow { .. } => StatusCode::Internal,
-            Error::ArithmeticOverflow { .. } => StatusCode::InvalidArguments,
+            Error::InvalidDateStr { .. } | Error::ArithmeticOverflow { .. } => {
+                StatusCode::InvalidArguments
+            }
         }
     }
 
@@ -60,6 +65,7 @@ impl ErrorExt for Error {
             | Error::TimestampOverflow { location, .. }
             | Error::ArithmeticOverflow { location, .. } => Some(*location),
             Error::ParseDateStr { .. } => None,
+            Error::InvalidDateStr { location, .. } => Some(*location),
         }
     }
 }

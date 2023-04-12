@@ -41,14 +41,14 @@ fn decode_metadata(src: &[u8]) -> Result<ImmutableMetadata> {
     serde_json::from_slice(src).context(DecodeJsonSnafu)
 }
 
-fn manifest_path(dir: &str) -> String {
+pub fn manifest_path(dir: &str) -> String {
     format!("{}{}", dir, IMMUTABLE_MANIFEST_FILE)
 }
 
 pub(crate) async fn delete_table_manifest(
     table_name: &str,
     dir: &str,
-    object_store: ObjectStore,
+    object_store: &ObjectStore,
 ) -> Result<()> {
     object_store
         .delete(&manifest_path(dir))
@@ -90,4 +90,103 @@ pub(crate) async fn read_table_manifest(
         .context(ReadTableManifestSnafu { table_name })?;
 
     decode_metadata(&bs)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::assert_matches::assert_matches;
+
+    use super::*;
+    use crate::error::Error;
+    use crate::manifest::table_manifest_dir;
+    use crate::test_util::{build_test_table_metadata, new_test_object_store, TEST_TABLE_NAME};
+
+    #[tokio::test]
+    async fn test_write_table_manifest() {
+        let (_dir, store) = new_test_object_store("test_write_table_manifest");
+        let metadata = build_test_table_metadata();
+
+        write_table_manifest(
+            TEST_TABLE_NAME,
+            &table_manifest_dir(TEST_TABLE_NAME),
+            &store,
+            &metadata,
+        )
+        .await
+        .unwrap();
+
+        // try to overwrite immutable manifest
+        let write_immutable = write_table_manifest(
+            TEST_TABLE_NAME,
+            &table_manifest_dir(TEST_TABLE_NAME),
+            &store,
+            &metadata,
+        )
+        .await
+        .unwrap_err();
+
+        assert_matches!(write_immutable, Error::WriteImmutableManifest { .. })
+    }
+
+    #[tokio::test]
+    async fn test_read_table_manifest() {
+        let (_dir, store) = new_test_object_store("test_read_table_manifest");
+        let metadata = build_test_table_metadata();
+
+        write_table_manifest(
+            TEST_TABLE_NAME,
+            &table_manifest_dir(TEST_TABLE_NAME),
+            &store,
+            &metadata,
+        )
+        .await
+        .unwrap();
+
+        let read = read_table_manifest(
+            TEST_TABLE_NAME,
+            &table_manifest_dir(TEST_TABLE_NAME),
+            &store,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(read, metadata);
+    }
+
+    #[tokio::test]
+    async fn test_read_non_exist_table_manifest() {
+        let (_dir, store) = new_test_object_store("test_read_non_exist_table_manifest");
+        let not_fount = read_table_manifest(
+            TEST_TABLE_NAME,
+            &table_manifest_dir(TEST_TABLE_NAME),
+            &store,
+        )
+        .await
+        .unwrap_err();
+
+        assert_matches!(not_fount, Error::ReadTableManifest { .. })
+    }
+
+    #[tokio::test]
+    async fn test_delete_table_manifest() {
+        let (_dir, store) = new_test_object_store("test_delete_table_manifest");
+
+        let metadata = build_test_table_metadata();
+        let table_dir = &table_manifest_dir(TEST_TABLE_NAME);
+        write_table_manifest(TEST_TABLE_NAME, table_dir, &store, &metadata)
+            .await
+            .unwrap();
+
+        let exist = store.is_exist(&manifest_path(table_dir)).await.unwrap();
+
+        assert!(exist);
+
+        delete_table_manifest(TEST_TABLE_NAME, table_dir, &store)
+            .await
+            .unwrap();
+
+        let exist = store.is_exist(&manifest_path(table_dir)).await.unwrap();
+
+        assert!(!exist);
+    }
 }

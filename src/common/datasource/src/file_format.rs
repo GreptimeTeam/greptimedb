@@ -12,10 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod immutable;
-#[cfg(test)]
-mod tests;
+pub mod csv;
+pub mod json;
+pub mod parquet;
 
-use table::metadata::TableVersion;
+pub const DEFAULT_SCHEMA_INFER_MAX_RECORD: usize = 1000;
 
-const INIT_TABLE_VERSION: TableVersion = 0;
+use arrow::datatypes::SchemaRef;
+use async_trait::async_trait;
+use object_store::ObjectStore;
+
+use crate::error::Result;
+
+#[async_trait]
+pub trait FileFormat: Send + Sync + std::fmt::Debug {
+    async fn infer_schema(&self, store: &ObjectStore, path: String) -> Result<SchemaRef>;
+}

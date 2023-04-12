@@ -16,7 +16,6 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::LocalResult;
 use common_query::Output;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::RecordBatch;
@@ -178,7 +177,7 @@ fn encode_value(value: &Value, builder: &mut DataRowEncoder) -> PgWireResult<()>
             }
         }
         Value::Timestamp(v) => {
-            if let LocalResult::Single(datetime) = v.to_chrono_datetime() {
+            if let Some(datetime) = v.to_chrono_datetime() {
                 builder.encode_field(&datetime)
             } else {
                 Err(PgWireError::ApiError(Box::new(Error::Internal {
@@ -340,7 +339,7 @@ impl ExtendedQueryHandler for PostgresServerHandler {
         let (_, sql) = portal.statement().statement();
 
         // manually replace variables in prepared statement
-        let mut sql = sql.to_owned();
+        let mut sql = sql.clone();
         for i in 0..portal.parameter_len() {
             sql = sql.replace(&format!("${}", i + 1), &parameter_to_string(portal, i)?);
         }

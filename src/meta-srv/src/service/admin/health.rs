@@ -45,6 +45,6 @@ mod tests {
         let res = health_handler.handle(path, &params).await.unwrap();
 
         assert!(res.status().is_success());
-        assert_eq!(HTTP_OK.to_owned(), res.body().to_owned());
+        assert_eq!(HTTP_OK.to_owned(), res.body().clone());
     }
 }

@@ -29,6 +29,7 @@ use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, O
 use table::{error as table_error, Result as TableResult, Table, TableRef};
 use tokio::sync::Mutex;
 
+use crate::config::EngineConfig;
 use crate::engine::INIT_TABLE_VERSION;
 use crate::error::{
     BuildTableInfoSnafu, BuildTableMetaSnafu, DropTableSnafu, InvalidRawSchemaSnafu, Result,
@@ -114,6 +115,21 @@ impl TableEngine for ImmutableFileTableEngine {
     }
 }
 
+#[cfg(test)]
+impl ImmutableFileTableEngine {
+    pub async fn close_table(&self, table_ref: &TableReference<'_>) -> TableResult<()> {
+        self.inner.close_table(table_ref).await
+    }
+}
+
+impl ImmutableFileTableEngine {
+    pub fn new(config: EngineConfig, object_store: ObjectStore) -> Self {
+        ImmutableFileTableEngine {
+            inner: Arc::new(EngineInner::new(config, object_store)),
+        }
+    }
+}
+
 struct EngineInner {
     /// All tables opened by the engine. Map key is formatted [TableReference].
     ///
@@ -127,6 +143,14 @@ struct EngineInner {
 }
 
 impl EngineInner {
+    pub fn new(_config: EngineConfig, object_store: ObjectStore) -> Self {
+        EngineInner {
+            tables: RwLock::new(HashMap::default()),
+            object_store,
+            table_mutex: Mutex::new(()),
+        }
+    }
+
     async fn create_table(
         &self,
         _ctx: &EngineContext,
@@ -309,7 +333,7 @@ impl EngineInner {
             delete_table_manifest(
                 &table_full_name,
                 &table_manifest_dir(&table_dir),
-                self.object_store.clone(),
+                &self.object_store,
             )
             .await
             .map_err(BoxedError::new)
@@ -327,7 +351,7 @@ impl EngineInner {
     async fn close(&self) -> TableResult<()> {
         let _lock = self.table_mutex.lock().await;
 
-        let mut tables = self.tables.write().unwrap().clone();
+        let tables = self.tables.read().unwrap().clone();
 
         futures::future::try_join_all(tables.values().map(|t| t.close()))
             .await
@@ -335,7 +359,7 @@ impl EngineInner {
             .context(table_error::TableOperationSnafu)?;
 
         // Releases all closed table
-        tables.clear();
+        self.tables.write().unwrap().clear();
 
         Ok(())
     }
@@ -351,5 +375,26 @@ impl EngineInner {
             &self.object_store,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+impl EngineInner {
+    pub async fn close_table(&self, table_ref: &TableReference<'_>) -> TableResult<()> {
+        let full_name = table_ref.to_string();
+
+        let _lock = self.table_mutex.lock().await;
+
+        if let Some(table) = self.get_table_by_full_name(&full_name) {
+            table
+                .close()
+                .await
+                .map_err(BoxedError::new)
+                .context(table_error::TableOperationSnafu)?;
+        }
+
+        self.tables.write().unwrap().remove(&full_name);
+
+        Ok(())
     }
 }

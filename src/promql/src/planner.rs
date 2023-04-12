@@ -51,8 +51,8 @@ use crate::extension_plan::{
     EmptyMetric, InstantManipulate, Millisecond, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
 use crate::functions::{
-    AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, IDelta, Increase, LastOverTime,
-    MaxOverTime, MinOverTime, PredictLinear, PresentOverTime, QuantileOverTime, Rate, Resets,
+    AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, HoltWinters, IDelta, Increase,
+    LastOverTime, MaxOverTime, MinOverTime, PredictLinear, PresentOverTime, QuantileOverTime, Rate, Resets,
     StddevOverTime, StdvarOverTime, SumOverTime,
 };
 
@@ -805,6 +805,26 @@ impl PromPlanner {
                     .fail()?,
                 };
                 ScalarFunc::Udf(PredictLinear::scalar_udf(t_expr))
+            }
+            "holt_winters" => {
+                let sf_exp = match other_input_exprs.get(0) {
+                    Some(DfExpr::Literal(ScalarValue::Float64(Some(sf)))) => *sf,
+                    other => UnexpectedPlanExprSnafu {
+                        desc: format!(
+                            "expect f64 literal as smoothing factor, but found {:?}",
+                            other
+                        ),
+                    }
+                    .fail()?,
+                };
+                let tf_exp = match other_input_exprs.get(1) {
+                    Some(DfExpr::Literal(ScalarValue::Float64(Some(tf)))) => *tf,
+                    other => UnexpectedPlanExprSnafu {
+                        desc: format!("expect f64 literal as trend factor, but found {:?}", other),
+                    }
+                    .fail()?,
+                };
+                ScalarFunc::Udf(HoltWinters::scalar_udf(sf_exp, tf_exp))
             }
             _ => ScalarFunc::DataFusionBuiltin(
                 BuiltinScalarFunction::from_str(func.name).map_err(|_| {

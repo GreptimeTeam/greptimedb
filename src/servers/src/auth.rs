@@ -35,6 +35,20 @@ pub trait UserProvider: Send + Sync {
     /// from a certain user to a certain catalog/schema is legal.
     /// This method should be called after [`authenticate`].
     async fn authorize(&self, catalog: &str, schema: &str, user_info: &UserInfo) -> Result<()>;
+
+    /// [`auth`] is a combination of [`authenticate`] and [`authorize`].
+    /// In most cases it's preferred for both convenience and performance.
+    async fn auth(
+        &self,
+        id: Identity<'_>,
+        password: Password<'_>,
+        catalog: &str,
+        schema: &str,
+    ) -> Result<UserInfo> {
+        let user_info = self.authenticate(id, password).await?;
+        self.authorize(catalog, schema, &user_info).await?;
+        Ok(user_info)
+    }
 }
 
 pub type UserProviderRef = Arc<dyn UserProvider>;

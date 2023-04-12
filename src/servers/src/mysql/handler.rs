@@ -115,7 +115,7 @@ impl MysqlInstanceShim {
 
     fn query(&self, stmt_id: u32) -> Option<String> {
         let guard = self.prepared_stmts.read();
-        guard.get(&stmt_id).map(|s| s.to_owned())
+        guard.get(&stmt_id).cloned()
     }
 }
 

@@ -448,7 +448,7 @@ mod tests {
         }
 
         fn find_region(&self, values: &[Value]) -> Result<RegionNumber, Error> {
-            let val = values.get(0).unwrap().to_owned();
+            let val = values.get(0).unwrap().clone();
             let id_1: Value = 1_i16.into();
             let id_2: Value = 2_i16.into();
             let id_3: Value = 3_i16.into();

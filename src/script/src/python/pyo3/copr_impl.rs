@@ -44,7 +44,7 @@ impl PyQueryEngine {
                 for rb in rbs.iter() {
                     let mut vec_of_vec = Vec::with_capacity(rb.columns().len());
                     for v in rb.columns() {
-                        let v = PyVector::from(v.to_owned());
+                        let v = PyVector::from(v.clone());
                         let v = PyCell::new(py, v)?;
                         vec_of_vec.push(v.to_object(py));
                     }

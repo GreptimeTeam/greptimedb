@@ -5,9 +5,24 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+arrow.workspace = true
+arrow-schema.workspace = true
+async-compression = { version = "0.3", features = [
+    "bzip2",
+    "gzip",
+    "xz",
+    "zstd",
+    "futures-io",
+    "tokio",
+] }
+async-trait.workspace = true
 common-error = { path = "../error" }
+common-runtime = { path = "../runtime" }
+datafusion.workspace = true
 futures.workspace = true
 object-store = { path = "../../object-store" }
 regex = "1.7"
 snafu.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
 url = "2.3"

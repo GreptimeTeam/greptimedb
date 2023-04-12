@@ -72,7 +72,7 @@ async fn run() {
 
     tokio::spawn(async move {
         while let Some(res) = receiver.message().await.unwrap() {
-            event!(Level::INFO, "heartbeat response: {:#?}", res);
+            event!(Level::TRACE, "heartbeat response: {:#?}", res);
         }
     });
 

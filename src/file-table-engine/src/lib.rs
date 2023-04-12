@@ -12,7 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![feature(assert_matches)]
+
+pub mod config;
 pub mod engine;
 pub mod error;
 pub mod manifest;
 pub mod table;
+#[cfg(any(test, feature = "test"))]
+pub(crate) mod test_util;
