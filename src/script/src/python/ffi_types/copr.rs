@@ -410,7 +410,9 @@ impl PyQueryEngine {
             .map_err(|e| format!("Dedicated thread for sql query panic: {e:?}"))?
     }
     // TODO(discord9): find a better way to call sql query api, now we don't if we are in async context or not
-    /// return sql query results in List[PyVector], or List[usize] for AffectedRows number if no recordbatches is returned
+    /// - return sql query results in `PyRecordBatch`,  or
+    /// - a empty `PyDict` if query results is empty
+    /// - or number of AffectedRows
     #[pymethod]
     fn sql(&self, s: String, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         self.query_with_new_thread(s)
