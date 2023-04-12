@@ -14,23 +14,22 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::thread;
-
-use common_query::Output;
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use futures::Future;
-use once_cell::sync::{Lazy, OnceCell};
-use script::engine::{CompileContext, EvalContext, Script, ScriptEngine};
-static SCRIPT_ENGINE: Lazy<PyEngine> = Lazy::new(sample_script_engine);
 
 use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
 use catalog::{CatalogList, CatalogProvider, SchemaProvider};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_query::Output;
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use futures::Future;
+use once_cell::sync::{Lazy, OnceCell};
 use query::QueryEngineFactory;
+use rayon::ThreadPool;
+use script::engine::{CompileContext, EvalContext, Script, ScriptEngine};
 use script::python::PyEngine;
 use table::table::numbers::NumbersTable;
 use tokio::runtime::Runtime;
 
+static SCRIPT_ENGINE: Lazy<PyEngine> = Lazy::new(sample_script_engine);
 static LOCAL_RUNTIME: OnceCell<tokio::runtime::Runtime> = OnceCell::new();
 fn get_local_runtime() -> std::thread::Result<&'static Runtime> {
     let rt = LOCAL_RUNTIME
@@ -104,7 +103,8 @@ def entry() -> vector[i64]:
     run_script(&source).await;
 }
 
-async fn parallel_fibonacci(n: u64, backend: &str, par: usize) {
+/// TODO(discord9): use a better way to benchmark in parallel
+async fn parallel_fibonacci(n: u64, backend: &str, pool: &ThreadPool) {
     let source = format!(
         r#"
 @copr(returns=["value"], backend="{backend}")
@@ -118,19 +118,14 @@ def entry() -> vector[i64]:
 "#
     );
     let source = Arc::new(source);
-    let mut results = Vec::with_capacity(par);
-    for _ in 0..par {
+    // execute the script in parallel for every thread in the pool
+    pool.broadcast(|_| {
         let source = source.clone();
-        // spawn new thread for parallel(To test GIL for CPython)
-        results.push(thread::spawn(move || {
-            block_on_async(async move {
-                run_script(&source).await;
-            })
-        }));
-    }
-    for i in results {
-        i.join().unwrap().unwrap();
-    }
+        let rt = get_local_runtime().unwrap();
+        rt.block_on(async move {
+            run_script(&source).await;
+        });
+    });
 }
 
 async fn loop_1_million(backend: &str) {
@@ -163,8 +158,10 @@ def entry(number) -> vector[i64]:
 }
 
 fn criterion_benchmark(c: &mut Criterion) {
-    // TODO: Prime Number, api heavy computation
+    // TODO(discord9): Prime Number,
     // and database-local computation/remote download python script comparison
+    // which require a local mock library
+    // TODO(discord9): revisit once mock library is ready
 
     c.bench_function("fib 20 rspy", |b| {
         b.to_async(tokio::runtime::Runtime::new().unwrap())
@@ -175,13 +172,17 @@ fn criterion_benchmark(c: &mut Criterion) {
             .iter(|| fibonacci(black_box(20), "pyo3"))
     });
 
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(16)
+        .build()
+        .unwrap();
     c.bench_function("par fib 20 rspy", |b| {
         b.to_async(tokio::runtime::Runtime::new().unwrap())
-            .iter(|| parallel_fibonacci(black_box(20), "rspy", 8))
+            .iter(|| parallel_fibonacci(black_box(20), "rspy", &pool))
     });
     c.bench_function("par fib 20 pyo3", |b| {
         b.to_async(tokio::runtime::Runtime::new().unwrap())
-            .iter(|| parallel_fibonacci(black_box(20), "pyo3", 8))
+            .iter(|| parallel_fibonacci(black_box(20), "pyo3", &pool))
     });
 
     c.bench_function("loop 1M rspy", |b| {
