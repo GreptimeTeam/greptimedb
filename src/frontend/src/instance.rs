@@ -445,7 +445,8 @@ impl Instance {
     async fn query_statement(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
         check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
 
-        self.statement_executor.execute_sql(stmt, query_ctx).await
+        let stmt = QueryStatement::Sql(stmt);
+        self.statement_executor.execute_stmt(stmt, query_ctx).await
     }
 }
 
@@ -542,7 +543,7 @@ impl PromHandler for Instance {
             query: query.clone(),
         })?;
         self.statement_executor
-            .plan_exec(stmt, QueryContext::arc())
+            .execute_stmt(stmt, QueryContext::arc())
             .await
             .map_err(BoxedError::new)
             .with_context(|_| ExecuteQuerySnafu {

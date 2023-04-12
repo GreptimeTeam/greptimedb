@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use common_query::Output;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::plan::LogicalPlan;
-use query::query_engine::StatementExecutorExt;
+use query::query_engine::SqlStatementExecutor;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::prelude::*;

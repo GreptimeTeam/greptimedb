@@ -26,9 +26,9 @@ statement is implemented for both GreptimeDB Standalone and Cluster. You can see
 an example.
 
 Now, what if the statements should be handled differently for GreptimeDB Standalone and Cluster? You can see there's
-a `StatementExecutorExt` field in `StatementExecutor`. Each GreptimeDB Standalone and Cluster has its own implementation
-of `StatementExecutorExt`. If you are going to implement the statements differently in the two mode (
-like `CREATE TABLE`), you have to implement them in their own `StatementExecutorExt`s.
+a `SqlStatementExecutor` field in `StatementExecutor`. Each GreptimeDB Standalone and Cluster has its own implementation
+of `SqlStatementExecutor`. If you are going to implement the statements differently in the two mode (
+like `CREATE TABLE`), you have to implement them in their own `SqlStatementExecutor`s.
 
 Summarize as the diagram below:
 
@@ -46,16 +46,17 @@ Summarize as the diagram below:
                | StatementExecutor::execute_sql |                
                +--------------------------------+                
                                 |                                
-                                | SQL execution                               
+                                | SQL execution                    
                                 v                                
-               +--------------------------------+                
-               | commonly handled statements or |                
-               +--------------------------------+                
+               +----------------------------------+                
+               | commonly handled statements like |
+               | "plan_exec" for selection or     |
+               +----------------------------------+                
                        |                |                        
         For Standalone |                | For Cluster          
                        v                v                        
 +---------------------------+      +---------------------------+ 
-| StatementExecutorExt impl |      | StatementExecutorExt impl | 
+| SqlStatementExecutor impl |      | SqlStatementExecutor impl | 
 | in Datanode Instance      |      | in Frontend DistInstance  | 
 +---------------------------+      +---------------------------+ 
 ```

@@ -42,7 +42,7 @@ impl StatementExecutor {
             }
             Tql::Explain(_) => {
                 return NotSupportedSnafu {
-                    feat: "TQL EXPLAIN".to_string(),
+                    feat: "TQL EXPLAIN",
                 }
                 .fail()
             }

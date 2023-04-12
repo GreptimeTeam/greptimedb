@@ -21,7 +21,7 @@ use common_telemetry::logging::info;
 use common_telemetry::timer;
 use query::error::QueryExecutionSnafu;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
-use query::query_engine::StatementExecutorExt;
+use query::query_engine::SqlStatementExecutor;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
 use sql::ast::ObjectName;
@@ -253,7 +253,7 @@ pub fn table_idents_to_full_name(
 }
 
 #[async_trait]
-impl StatementExecutorExt for Instance {
+impl SqlStatementExecutor for Instance {
     async fn execute_sql(
         &self,
         stmt: Statement,

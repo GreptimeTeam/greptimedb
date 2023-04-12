@@ -20,7 +20,7 @@ use catalog::CatalogManagerRef;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use query::parser::QueryStatement;
-use query::query_engine::StatementExecutorExtRef;
+use query::query_engine::SqlStatementExecutorRef;
 use query::QueryEngineRef;
 use session::context::QueryContextRef;
 use snafu::{ensure, ResultExt};
@@ -35,27 +35,34 @@ use crate::error::{
 pub(crate) struct StatementExecutor {
     catalog_manager: CatalogManagerRef,
     query_engine: QueryEngineRef,
-    executor_ext: StatementExecutorExtRef,
+    sql_stmt_executor: SqlStatementExecutorRef,
 }
 
 impl StatementExecutor {
     pub(crate) fn new(
         catalog_manager: CatalogManagerRef,
         query_engine: QueryEngineRef,
-        executor_ext: StatementExecutorExtRef,
+        sql_stmt_executor: SqlStatementExecutorRef,
     ) -> Self {
         Self {
             catalog_manager,
             query_engine,
-            executor_ext,
+            sql_stmt_executor,
         }
     }
 
-    pub(crate) async fn execute_sql(
+    pub(crate) async fn execute_stmt(
         &self,
-        stmt: Statement,
+        stmt: QueryStatement,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
+        match stmt {
+            QueryStatement::Sql(stmt) => self.execute_sql(stmt, query_ctx).await,
+            QueryStatement::Promql(_) => self.plan_exec(stmt, query_ctx).await,
+        }
+    }
+
+    async fn execute_sql(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
         match stmt {
             Statement::Query(_) | Statement::Explain(_) | Statement::Delete(_) => {
                 self.plan_exec(QueryStatement::Sql(stmt), query_ctx).await
@@ -85,7 +92,7 @@ impl StatementExecutor {
             | Statement::DropTable(_)
             | Statement::Copy(_)
             | Statement::ShowCreateTable(_) => self
-                .executor_ext
+                .sql_stmt_executor
                 .execute_sql(stmt, query_ctx)
                 .await
                 .context(ExecuteStatementSnafu),

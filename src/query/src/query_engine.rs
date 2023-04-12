@@ -36,10 +36,10 @@ use crate::planner::LogicalPlanner;
 pub use crate::query_engine::context::QueryEngineContext;
 pub use crate::query_engine::state::QueryEngineState;
 
-pub type StatementExecutorExtRef = Arc<dyn StatementExecutorExt>;
+pub type SqlStatementExecutorRef = Arc<dyn SqlStatementExecutor>;
 
 #[async_trait]
-pub trait StatementExecutorExt: Send + Sync {
+pub trait SqlStatementExecutor: Send + Sync {
     async fn execute_sql(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output>;
 }
 

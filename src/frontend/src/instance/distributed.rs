@@ -44,7 +44,7 @@ use meta_client::rpc::{
 };
 use partition::partition::{PartitionBound, PartitionDef};
 use query::error::QueryExecutionSnafu;
-use query::query_engine::StatementExecutorExt;
+use query::query_engine::SqlStatementExecutor;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::Value as SqlValue;
@@ -515,7 +515,7 @@ impl DistInstance {
 }
 
 #[async_trait]
-impl StatementExecutorExt for DistInstance {
+impl SqlStatementExecutor for DistInstance {
     async fn execute_sql(
         &self,
         stmt: Statement,

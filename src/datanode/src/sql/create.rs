@@ -327,7 +327,7 @@ mod tests {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::Schema;
     use query::parser::{QueryLanguageParser, QueryStatement};
-    use query::query_engine::StatementExecutorExt;
+    use query::query_engine::SqlStatementExecutor;
     use session::context::QueryContext;
     use sql::dialect::GenericDialect;
     use sql::parser::ParserContext;
