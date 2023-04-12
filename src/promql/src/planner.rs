@@ -52,8 +52,8 @@ use crate::extension_plan::{
 };
 use crate::functions::{
     AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, IDelta, Increase, LastOverTime,
-    MaxOverTime, MinOverTime, PresentOverTime, QuantileOverTime, Rate, Resets, StddevOverTime,
-    StdvarOverTime, SumOverTime,
+    MaxOverTime, MinOverTime, PredictLinear, PresentOverTime, QuantileOverTime, Rate, Resets,
+    StddevOverTime, StdvarOverTime, SumOverTime,
 };
 
 const LEFT_PLAN_JOIN_ALIAS: &str = "lhs";
@@ -795,6 +795,16 @@ impl PromPlanner {
                     .fail()?,
                 };
                 ScalarFunc::Udf(QuantileOverTime::scalar_udf(quantile_expr))
+            }
+            "predict_linear" => {
+                let t_expr = match other_input_exprs.get(0) {
+                    Some(DfExpr::Literal(ScalarValue::Time64Microsecond(Some(t)))) => *t,
+                    other => UnexpectedPlanExprSnafu {
+                        desc: format!("expect i64 literal as t, but found {:?}", other),
+                    }
+                    .fail()?,
+                };
+                ScalarFunc::Udf(PredictLinear::scalar_udf(t_expr))
             }
             _ => ScalarFunc::DataFusionBuiltin(
                 BuiltinScalarFunction::from_str(func.name).map_err(|_| {
