@@ -100,7 +100,7 @@ pub(crate) fn linear_regression(
     }
 
     if const_y {
-        if init_y.is_finite() {
+        if !init_y.is_finite() {
             return (None, None);
         }
         return (Some(0.0), Some(init_y));
@@ -118,4 +118,68 @@ pub(crate) fn linear_regression(
     let intercept = sum_y / count - slope * sum_x / count;
 
     (Some(slope), Some(intercept))
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn calculate_linear_regression_none() {
+        let ts_array = TimestampMillisecondArray::from_iter(
+            [
+                0i64, 300, 600, 900, 1200, 1500, 1800, 2100, 2400, 2700, 3000,
+            ]
+            .into_iter()
+            .map(Some),
+        );
+        let values_array = Float64Array::from_iter([
+            1.0 / 0.0,
+            1.0 / 0.0,
+            1.0 / 0.0,
+            1.0 / 0.0,
+            1.0 / 0.0,
+            1.0 / 0.0,
+            1.0 / 0.0,
+            1.0 / 0.0,
+            1.0 / 0.0,
+            1.0 / 0.0,
+        ]);
+        let (slope, intercept) = linear_regression(&ts_array, &values_array, ts_array.value(0));
+        assert_eq!(slope, None);
+        assert_eq!(intercept, None);
+    }
+
+    #[test]
+    fn calculate_linear_regression_value_is_const() {
+        let ts_array = TimestampMillisecondArray::from_iter(
+            [
+                0i64, 300, 600, 900, 1200, 1500, 1800, 2100, 2400, 2700, 3000,
+            ]
+            .into_iter()
+            .map(Some),
+        );
+        let values_array =
+            Float64Array::from_iter([10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0]);
+        let (slope, intercept) = linear_regression(&ts_array, &values_array, ts_array.value(0));
+        assert_eq!(slope, Some(0.0));
+        assert_eq!(intercept, Some(10.0));
+    }
+
+    #[test]
+    fn calculate_linear_regression() {
+        let ts_array = TimestampMillisecondArray::from_iter(
+            [
+                0i64, 300, 600, 900, 1200, 1500, 1800, 2100, 2400, 2700, 3000,
+            ]
+            .into_iter()
+            .map(Some),
+        );
+        let values_array = Float64Array::from_iter([
+            0.0, 10.0, 20.0, 30.0, 40.0, 0.0, 10.0, 20.0, 30.0, 40.0, 50.0,
+        ]);
+        let (slope, intercept) = linear_regression(&ts_array, &values_array, ts_array.value(0));
+        assert_eq!(slope, Some(0.010606060606060607));
+        assert_eq!(intercept, Some(6.818181818181818));
+    }
 }
