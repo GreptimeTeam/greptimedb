@@ -52,8 +52,8 @@ use crate::extension_plan::{
 };
 use crate::functions::{
     AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, HoltWinters, IDelta, Increase,
-    LastOverTime, MaxOverTime, MinOverTime, PredictLinear, PresentOverTime, QuantileOverTime, Rate, Resets,
-    StddevOverTime, StdvarOverTime, SumOverTime,
+    LastOverTime, MaxOverTime, MinOverTime, PredictLinear, PresentOverTime, QuantileOverTime, Rate,
+    Resets, StddevOverTime, StdvarOverTime, SumOverTime,
 };
 
 const LEFT_PLAN_JOIN_ALIAS: &str = "lhs";
