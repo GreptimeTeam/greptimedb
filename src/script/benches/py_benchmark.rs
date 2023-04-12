@@ -25,7 +25,7 @@ use once_cell::sync::{Lazy, OnceCell};
 use query::QueryEngineFactory;
 use rayon::ThreadPool;
 use script::engine::{CompileContext, EvalContext, Script, ScriptEngine};
-use script::python::PyEngine;
+use script::python::{PyEngine, PyScript};
 use table::table::numbers::NumbersTable;
 use tokio::runtime::Runtime;
 
@@ -70,12 +70,14 @@ pub(crate) fn sample_script_engine() -> PyEngine {
 
     PyEngine::new(query_engine.clone())
 }
-async fn run_script(script: &str) {
-    let script = script;
-    let script = SCRIPT_ENGINE
+
+async fn compile_script(script: &str) -> PyScript {
+    SCRIPT_ENGINE
         .compile(script, CompileContext::default())
         .await
-        .unwrap();
+        .unwrap()
+}
+async fn run_compiled(script: &PyScript) {
     let output = script
         .execute(HashMap::default(), EvalContext::default())
         .await
@@ -100,7 +102,10 @@ def entry() -> vector[i64]:
     return fibonacci({n})
 "#
     );
-    run_script(&source).await;
+    let compiled = compile_script(&source).await;
+    for _ in 0..10 {
+        run_compiled(&compiled).await;
+    }
 }
 
 /// TODO(discord9): use a better way to benchmark in parallel
@@ -123,7 +128,10 @@ def entry() -> vector[i64]:
         let source = source.clone();
         let rt = get_local_runtime().unwrap();
         rt.block_on(async move {
-            run_script(&source).await;
+            let compiled = compile_script(&source).await;
+            for _ in 0..10 {
+                run_compiled(&compiled).await;
+            }
         });
     });
 }
@@ -138,7 +146,10 @@ def entry() -> vector[i64]:
     return 1
 "#
     );
-    run_script(&source).await;
+    let compiled = compile_script(&source).await;
+    for _ in 0..10 {
+        run_compiled(&compiled).await;
+    }
 }
 
 async fn api_heavy(backend: &str) {
@@ -154,7 +165,10 @@ def entry(number) -> vector[i64]:
     return 1
 "#
     );
-    run_script(&source).await;
+    let compiled = compile_script(&source).await;
+    for _ in 0..10 {
+        run_compiled(&compiled).await;
+    }
 }
 
 fn criterion_benchmark(c: &mut Criterion) {
