@@ -4,7 +4,7 @@
 The `datatypes` crate defines the elementary schema struct to describe the metadata.
 
 ## ColumnSchema
-`ColumnSchema` represents the metadata of a column. It is equivalent to arrow's [Field](https://docs.rs/arrow/latest/arrow/datatypes/struct.Field.html) with additional metadata such as default constraint and whether the column is a time index. The time index is the column with a `TIME INDEX` constraint of a table. We can convert the `ColumnSchema` into an arrow `Field` and convert the `Field` back to the `ColumnSchema` without losing metadata.
+[ColumnSchema](https://github.com/GreptimeTeam/greptimedb/blob/9fa871a3fad07f583dc1863a509414da393747f8/src/datatypes/src/schema/column_schema.rs#L36) represents the metadata of a column. It is equivalent to arrow's [Field](https://docs.rs/arrow/latest/arrow/datatypes/struct.Field.html) with additional metadata such as default constraint and whether the column is a time index. The time index is the column with a `TIME INDEX` constraint of a table. We can convert the `ColumnSchema` into an arrow `Field` and convert the `Field` back to the `ColumnSchema` without losing metadata.
 
 ```rust
 pub struct ColumnSchema {
@@ -18,7 +18,7 @@ pub struct ColumnSchema {
 ```
 
 ## Schema
-`Schema` is an ordered sequence of `ColumnSchema`. It is equivalent to arrow's [Schema](https://docs.rs/arrow/latest/arrow/datatypes/struct.Schema.html) with additional metadata including the index of the time index column and the version of this schema. Same as `ColumnSchema`, we can convert our `Schema` between arrow's `Schema`.
+[Schema](https://github.com/GreptimeTeam/greptimedb/blob/9fa871a3fad07f583dc1863a509414da393747f8/src/datatypes/src/schema.rs#L38) is an ordered sequence of `ColumnSchema`. It is equivalent to arrow's [Schema](https://docs.rs/arrow/latest/arrow/datatypes/struct.Schema.html) with additional metadata including the index of the time index column and the version of this schema. Same as `ColumnSchema`, we can convert our `Schema` between arrow's `Schema`.
 
 ```rust
 use arrow::datatypes::Schema as ArrowSchema;
@@ -37,7 +37,7 @@ pub type SchemaRef = Arc<Schema>;
 We alias `Arc<Schema>` as `SchemaRef` since it is used frequently. Mostly, we use our `ColumnSchema` and `Schema` structs instead of arrow's `Field` and `Schema` unless we need to invoke third-party libraries that rely on arrow.
 
 ## RawSchema
-`Schema` contains fields like a map from column names to their indices in the `ColumnSchema` sequences and a cached arrow `Schema`. We can construct these fields from the `ColumnSchema` sequences thus we don't want to serialize them. This is why we don't derive `Serialize` and `Deserialize` for `Schema`. We introduce a new struct `RawSchema` which keeps all required fields of a `Schema` and derives the serialization traits. To serialize a `Schema`, we need to convert it into a `RawSchema` first and serialize the `RawSchema`.
+`Schema` contains fields like a map from column names to their indices in the `ColumnSchema` sequences and a cached arrow `Schema`. We can construct these fields from the `ColumnSchema` sequences thus we don't want to serialize them. This is why we don't derive `Serialize` and `Deserialize` for `Schema`. We introduce a new struct [RawSchema](https://github.com/GreptimeTeam/greptimedb/blob/9fa871a3fad07f583dc1863a509414da393747f8/src/datatypes/src/schema/raw.rs#L24) which keeps all required fields of a `Schema` and derives the serialization traits. To serialize a `Schema`, we need to convert it into a `RawSchema` first and serialize the `RawSchema`.
 
 ```rust
 pub struct RawSchema {
@@ -50,7 +50,7 @@ pub struct RawSchema {
 We want to keep the `Schema` simple and avoid putting too much business-related metadata in it as many different structs or traits rely on it.
 
 # Schema of the Table
-A table maintains its schema in `TableMeta`.
+A table maintains its schema in [TableMeta](https://github.com/GreptimeTeam/greptimedb/blob/9fa871a3fad07f583dc1863a509414da393747f8/src/table/src/metadata.rs#L97).
 ```rust
 pub struct TableMeta {
     pub schema: SchemaRef,
@@ -116,7 +116,7 @@ So the storage engine defines several schema structs:
 - ProjectedSchema
 
 ## RegionSchema
-A `RegionSchema` describes the schema of a region.
+A [RegionSchema](https://github.com/GreptimeTeam/greptimedb/blob/9fa871a3fad07f583dc1863a509414da393747f8/src/storage/src/schema/region.rs#L37) describes the schema of a region.
 
 ```rust
 pub struct RegionSchema {
@@ -173,7 +173,7 @@ So the `RegionSchema` of our `cpu` table above looks like this:
 ```
 
 ## StoreSchema
-As described above, a `StoreSchema` is a schema that knows all internal columns.
+As described above, a [StoreSchema](https://github.com/GreptimeTeam/greptimedb/blob/9fa871a3fad07f583dc1863a509414da393747f8/src/storage/src/schema/store.rs#L36) is a schema that knows all internal columns.
 ```rust
 struct StoreSchema {
     columns: Vec<ColumnMetadata>,
@@ -224,7 +224,7 @@ impl StoreSchema {
 Another useful feature of `StoreSchema` is that we ensure it always contains key columns, a timestamp column, and internal columns because we need them to perform merge, deduplication, and delete. Projection on `StoreSchema` only projects value columns.
 
 ## ProjectedSchema
-To support arbitrary projection, we introduce the `ProjectedSchema`.
+To support arbitrary projection, we introduce the [ProjectedSchema](https://github.com/GreptimeTeam/greptimedb/blob/9fa871a3fad07f583dc1863a509414da393747f8/src/storage/src/schema/projected.rs#L106).
 ```rust
 pub struct ProjectedSchema {
     projection: Option<Projection>,
@@ -307,7 +307,7 @@ As you can see, `schema_to_read` doesn't contain column `usage_user`.
 ### ReadAdapter
 As mentioned above, we can alter a table so the underlying files (SSTs) and memtables in the storage engine may have different schemas.
 
-To simplify the logic of `ProjectedSchema`, we handle the difference between schemas before projection (constructing the `ProjectedSchema`). We introduce `ReadAdapter` that adapts rows with different source schemas to the same expected schema.
+To simplify the logic of `ProjectedSchema`, we handle the difference between schemas before projection (constructing the `ProjectedSchema`). We introduce [ReadAdapter](https://github.com/GreptimeTeam/greptimedb/blob/9fa871a3fad07f583dc1863a509414da393747f8/src/storage/src/schema/compat.rs#L90) that adapts rows with different source schemas to the same expected schema.
 
 So we can always use the current `RegionSchema` of the region to construct the `ProjectedSchema`, and then create a `ReadAdapter` for each memtable or SST.
 ```rust
