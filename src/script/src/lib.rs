@@ -14,6 +14,7 @@
 
 // TODO(discord9): spawn new process for executing python script(if hit gil limit) and use shared memory to communicate
 #![deny(clippy::implicit_clone)]
+
 pub mod engine;
 pub mod error;
 #[cfg(feature = "python")]
