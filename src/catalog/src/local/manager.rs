@@ -419,6 +419,13 @@ impl CatalogManager for LocalCatalogManager {
                 schema: schema_name,
             })?;
 
+        let _lock = self.register_lock.lock().await;
+        ensure!(
+            !schema.table_exist(&request.new_table_name)?,
+            TableExistsSnafu {
+                table: &request.new_table_name
+            }
+        );
         let old_table = schema
             .table(&request.table_name)
             .await?
@@ -427,22 +434,20 @@ impl CatalogManager for LocalCatalogManager {
             })?;
 
         let engine = old_table.table_info().meta.engine.to_string();
+        // rename table in system catalog
+        self.system
+            .register_table(
+                catalog_name.clone(),
+                schema_name.clone(),
+                request.new_table_name.clone(),
+                request.table_id,
+                engine,
+            )
+            .await?;
 
         let renamed = schema
             .rename_table(&request.table_name, request.new_table_name.clone())
             .is_ok();
-        if renamed {
-            // rename table in system catalog
-            self.system
-                .register_table(
-                    catalog_name.clone(),
-                    schema_name.clone(),
-                    request.new_table_name.clone(),
-                    request.table_id,
-                    engine,
-                )
-                .await?;
-        }
         Ok(renamed)
     }
 
