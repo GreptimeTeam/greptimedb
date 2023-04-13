@@ -85,7 +85,7 @@ mysql_async = { version = "0.32", default-features = false, features = [
     "default-rustls",
 ] }
 rand.workspace = true
-rustls = { version = "0.21", features = ["dangerous_configuration"]}
+rustls = { version = "0.21", features = ["dangerous_configuration"] }
 script = { path = "../script", features = ["python"] }
 serde_json = "1.0"
 table = { path = "../table" }
