@@ -29,6 +29,7 @@ use snafu::{OptionExt, ResultExt};
 
 use crate::python::error::{ensure, ret_other_error_with, NewRecordBatchSnafu, OtherSnafu, Result};
 use crate::python::ffi_types::copr::PyQueryEngine;
+use crate::python::ffi_types::py_recordbatch::PyRecordBatch;
 use crate::python::ffi_types::{check_args_anno_real_type, select_from_rb, Coprocessor, PyVector};
 use crate::python::metric;
 use crate::python::rspython::builtins::init_greptime_builtins;
@@ -216,6 +217,7 @@ pub(crate) fn init_interpreter() -> Arc<Interpreter> {
                     // add our own custom datatype and module
                     PyVector::make_class(&vm.ctx);
                     PyQueryEngine::make_class(&vm.ctx);
+                    PyRecordBatch::make_class(&vm.ctx);
                     init_greptime_builtins("greptime", vm);
                     init_data_frame("data_frame", vm);
                 }));

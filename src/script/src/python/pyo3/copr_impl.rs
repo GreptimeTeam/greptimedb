@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 
+use arrow::compute;
 use common_recordbatch::RecordBatch;
 use common_telemetry::timer;
 use datafusion_common::ScalarValue;
@@ -21,11 +22,12 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::vectors::{Helper, VectorRef};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyModule, PyString, PyTuple};
-use pyo3::{pymethods, PyAny, PyCell, PyObject, PyResult, Python, ToPyObject};
+use pyo3::{pymethods, IntoPy, PyAny, PyCell, PyObject, PyResult, Python, ToPyObject};
 use snafu::{ensure, Location, ResultExt};
 
 use crate::python::error::{self, NewRecordBatchSnafu, OtherSnafu, Result};
 use crate::python::ffi_types::copr::PyQueryEngine;
+use crate::python::ffi_types::py_recordbatch::PyRecordBatch;
 use crate::python::ffi_types::{check_args_anno_real_type, select_from_rb, Coprocessor, PyVector};
 use crate::python::metric;
 use crate::python::pyo3::dataframe_impl::PyDataFrame;
@@ -36,23 +38,22 @@ impl PyQueryEngine {
     #[pyo3(name = "sql")]
     pub(crate) fn sql_pyo3(&self, py: Python<'_>, s: String) -> PyResult<PyObject> {
         let res = self
-            .query_with_new_thread(s)
+            .query_with_new_thread(s.clone())
             .map_err(PyValueError::new_err)?;
         match res {
             crate::python::ffi_types::copr::Either::Rb(rbs) => {
-                let mut top_vec = Vec::with_capacity(rbs.iter().count());
-                for rb in rbs.iter() {
-                    let mut vec_of_vec = Vec::with_capacity(rb.columns().len());
-                    for v in rb.columns() {
-                        let v = PyVector::from(v.clone());
-                        let v = PyCell::new(py, v)?;
-                        vec_of_vec.push(v.to_object(py));
-                    }
-                    let vec_of_vec = PyList::new(py, vec_of_vec);
-                    top_vec.push(vec_of_vec);
-                }
-                let top_vec = PyList::new(py, top_vec);
-                Ok(top_vec.to_object(py))
+                let rb = compute::concat_batches(
+                    rbs.schema().arrow_schema(),
+                    rbs.iter().map(|rb| rb.df_record_batch()),
+                )
+                .map_err(|e| PyRuntimeError::new_err(format!("{e:?}")))?;
+                let rb = RecordBatch::try_from_df_record_batch(rbs.schema(), rb).map_err(|e| {
+                    PyRuntimeError::new_err(format!(
+                        "Convert datafusion record batch to record batch failed for query {s}: {e}"
+                    ))
+                })?;
+                let rb = PyRecordBatch::new(rb);
+                Ok(rb.into_py(py))
             }
             crate::python::ffi_types::copr::Either::AffectedRows(count) => Ok(count.to_object(py)),
         }

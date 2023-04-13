@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub(crate) mod copr;
+pub(crate) mod py_recordbatch;
 pub(crate) mod utils;
 pub(crate) mod vector;
 pub(crate) use copr::{check_args_anno_real_type, select_from_rb, Coprocessor};

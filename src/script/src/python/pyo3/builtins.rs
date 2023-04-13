@@ -126,6 +126,8 @@ fn get_globals(py: Python) -> PyResult<&PyDict> {
     Ok(globals)
 }
 
+/// In case of not wanting to repeat the same sql statement in sql,
+/// this function is still useful even we already have PyDataFrame.from_sql()
 #[pyfunction]
 fn dataframe(py: Python) -> PyResult<PyDataFrame> {
     let globals = get_globals(py)?;
