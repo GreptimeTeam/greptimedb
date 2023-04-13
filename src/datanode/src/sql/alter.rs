@@ -146,7 +146,8 @@ mod tests {
     use std::assert_matches::assert_matches;
 
     use datatypes::prelude::ConcreteDataType;
-    use query::parser::QueryLanguageParser;
+    use query::parser::{QueryLanguageParser, QueryStatement};
+    use query::query_engine::SqlStatementExecutor;
     use session::context::QueryContext;
     use sql::dialect::GenericDialect;
     use sql::parser::ParserContext;
@@ -231,20 +232,26 @@ mod tests {
                             TIME INDEX (ts),
                             PRIMARY KEY(host)
                         ) engine=mito with(regions=1);"#;
-        let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
+        let stmt = match QueryLanguageParser::parse_sql(sql).unwrap() {
+            QueryStatement::Sql(sql) => sql,
+            _ => unreachable!(),
+        };
         let output = instance
             .inner()
-            .execute_stmt(stmt, QueryContext::arc())
+            .execute_sql(stmt, QueryContext::arc())
             .await
             .unwrap();
         assert!(matches!(output, Output::AffectedRows(0)));
 
         // Alter table.
         let sql = r#"alter table test_alter add column memory double"#;
-        let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
+        let stmt = match QueryLanguageParser::parse_sql(sql).unwrap() {
+            QueryStatement::Sql(sql) => sql,
+            _ => unreachable!(),
+        };
         let output = instance
             .inner()
-            .execute_stmt(stmt, QueryContext::arc())
+            .execute_sql(stmt, QueryContext::arc())
             .await
             .unwrap();
         assert!(matches!(output, Output::AffectedRows(0)));
