@@ -2933,7 +2933,6 @@ dependencies = [
  "query",
  "rstest",
  "rstest_reuse",
- "rustls 0.20.8",
  "script",
  "serde",
  "serde_json",

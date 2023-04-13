@@ -40,7 +40,6 @@ openmetrics-parser = "0.4"
 partition = { path = "../partition" }
 prost.workspace = true
 query = { path = "../query" }
-rustls = "0.20"
 script = { path = "../script", features = ["python"], optional = true }
 serde = "1.0"
 serde_json = "1.0"
