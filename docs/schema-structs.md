@@ -4,13 +4,48 @@
 The `datatypes` crate defines the elementary schema struct to describe the metadata.
 
 ## ColumnSchema
-`ColumnSchema` represents the metadata of a column. It is equivalent to arrow's `Field` with additional metadata such as default constraint and whether the column is a time index. The time index is the column with a `TIME INDEX` constraint of a table. We can convert the `ColumnSchema` into an arrow `Field` and convert the `Field` back to the `ColumnSchema` without losing metadata.
+`ColumnSchema` represents the metadata of a column. It is equivalent to arrow's [Field](https://docs.rs/arrow/latest/arrow/datatypes/struct.Field.html) with additional metadata such as default constraint and whether the column is a time index. The time index is the column with a `TIME INDEX` constraint of a table. We can convert the `ColumnSchema` into an arrow `Field` and convert the `Field` back to the `ColumnSchema` without losing metadata.
+
+```rust
+pub struct ColumnSchema {
+    pub name: String,
+    pub data_type: ConcreteDataType,
+    is_nullable: bool,
+    is_time_index: bool,
+    default_constraint: Option<ColumnDefaultConstraint>,
+    metadata: Metadata,
+}
+```
 
 ## Schema
-`Schema` is an ordered sequence of `ColumnSchema`. It is equivalent to arrow's `Schema` with additional metadata including the index of the time index column and the version of this schema. Same as `ColumnSchema`, we can convert our `Schema` between arrow's `Schema`.
+`Schema` is an ordered sequence of `ColumnSchema`. It is equivalent to arrow's [Schema](https://docs.rs/arrow/latest/arrow/datatypes/struct.Schema.html) with additional metadata including the index of the time index column and the version of this schema. Same as `ColumnSchema`, we can convert our `Schema` between arrow's `Schema`.
+
+```rust
+use arrow::datatypes::Schema as ArrowSchema;
+
+pub struct Schema {
+    column_schemas: Vec<ColumnSchema>,
+    name_to_index: HashMap<String, usize>,
+    arrow_schema: Arc<ArrowSchema>,
+    timestamp_index: Option<usize>,
+    version: u32,
+}
+
+pub type SchemaRef = Arc<Schema>;
+```
+
+We alias `Arc<Schema>` as `SchemaRef` since it is used frequently. Mostly, we use our `ColumnSchema` and `Schema` structs instead of arrow's `Field` and `Schema` unless we need to invoke third-party libraries that rely on arrow.
 
 ## RawSchema
 `Schema` contains fields like a map from column names to their indices in the `ColumnSchema` sequences and a cached arrow `Schema`. We can construct these fields from the `ColumnSchema` sequences thus we don't want to serialize them. This is why we don't derive `Serialize` and `Deserialize` for `Schema`. We introduce a new struct `RawSchema` which keeps all required fields of a `Schema` and derives the serialization traits. To serialize a `Schema`, we need to convert it into a `RawSchema` first and serialize the `RawSchema`.
+
+```rust
+pub struct RawSchema {
+    pub column_schemas: Vec<ColumnSchema>,
+    pub timestamp_index: Option<usize>,
+    pub version: u32,
+}
+```
 
 We want to keep the `Schema` simple and avoid putting too much business-related metadata in it as many different structs or traits rely on it.
 
@@ -27,7 +62,7 @@ pub struct TableMeta {
 
 The order of columns in `TableMeta::schema` is the same as the order specified in the `CREATE TABLE` statement which users use to create this table.
 
-`TableMeta::schema` doesn't have metadata about which columns are primary key columns or value columns (non-primary key and time index). We store them in `primary_key_indices` and `value_indices`.
+The field `primary_key_indices` stores indices of primary key columns. The field `value_indices` records the indices of value columns (non-primary key and time index, we sometimes call them field columns).
 
 Suppose we create a table with the following SQL
 ```sql
@@ -92,9 +127,9 @@ pub struct RegionSchema {
 ```
 
 Each region reserves some columns called `internal columns` for internal usage:
-- `__sequence`
-- `__op_type`
-- `__version` (reserved but not used)
+- `__sequence`, sequence number of a row
+- `__op_type`, operation type of a row, such as `PUT`, `DELETE`
+- `__version`, user-specified version of a row, reserved but not used. We might remove this in the future
 
 The table engine can't see the `__sequence` and `__op_type` columns, so the `RegionSchema` itself maintains two internal schemas:
 - User schema, a `Schema` struct that doesn't have internal columns
@@ -171,7 +206,20 @@ The `StoreSchema` of the region above is similar to this:
 }
 ```
 
-The key and timestamp columns form row keys of rows. We put them together so we can use `row_key_end` to get a slice of all row key columns. Similarly, we can use the `user_column_end` to get a slice of all user columns (non-internal columns).
+The key and timestamp columns form row keys of rows. We put them together so we can use `row_key_end` to get indices of all row key columns. Similarly, we can use the `user_column_end` to get indices of all user columns (non-internal columns).
+```rust
+impl StoreSchema {
+    #[inline]
+    pub(crate) fn row_key_indices(&self) -> impl Iterator<Item = usize> {
+        0..self.row_key_end
+    }
+
+    #[inline]
+    pub(crate) fn value_indices(&self) -> impl Iterator<Item = usize> {
+        self.row_key_end..self.user_column_end
+    }
+}
+```
 
 Another useful feature of `StoreSchema` is that we ensure it always contains key columns, a timestamp column, and internal columns because we need them to perform merge, deduplication, and delete. Projection on `StoreSchema` only projects value columns.
 
@@ -376,6 +424,7 @@ If we want to select `ts`, `usage_system`, and `usage_idle`. While reading from 
 We don't need to read `usage_user` so `is_source_needed[3]` is false. The old schema doesn't have column `usage_idle` so `indices_in_result[4]` is `null` and the `ReadAdapter` needs to insert a null column to the output row so the output schema still contains `usage_idle`.
 
 The figure below shows the relationship between `RegionSchema`, `StoreSchema`, `ProjectedSchema`, and `ReadAdapter`.
+
 ```text
                    ┌──────────────────────────────┐
                    │                              │
