@@ -137,15 +137,16 @@ impl<S: StorageEngine> DropMitoTable<S> {
 
     /// Close all regions.
     async fn on_close_regions(&mut self) -> Result<Status> {
-        // Close the table to close all regions. Closing a region idempotent.
-        self.table.close().await.map_err(Error::from_error_ext)?;
+        // Remove the table from the engine to avoid further access from users.
         let table_ref = self.data.table_ref();
-
         self.engine_inner
             .tables
             .write()
             .unwrap()
             .remove(&table_ref.to_string());
+
+        // Close the table to close all regions. Closing a region is idempotent.
+        self.table.close().await.map_err(Error::from_error_ext)?;
 
         // TODO(yingwen): Currently, DROP TABLE doesn't remove data. We can
         // write a drop meta update to the table and remove all files in the
