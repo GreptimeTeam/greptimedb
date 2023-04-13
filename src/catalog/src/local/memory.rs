@@ -324,16 +324,20 @@ impl SchemaProvider for MemorySchemaProvider {
 
     fn rename_table(&self, name: &str, new_name: String) -> Result<TableRef> {
         let mut tables = self.tables.write().unwrap();
-        if tables.get(name).is_some() {
-            let table = tables.remove(name).unwrap();
-            tables.insert(new_name, table.clone());
-            Ok(table)
-        } else {
-            TableNotFoundSnafu {
+        let Some(table) = tables.remove(name) else {
+            return TableNotFoundSnafu {
                 table_info: name.to_string(),
             }
-            .fail()?
-        }
+                .fail()?;
+        };
+        let e = match tables.entry(new_name) {
+            Entry::Vacant(e) => e,
+            Entry::Occupied(e) => {
+                return TableExistsSnafu { table: e.key() }.fail();
+            }
+        };
+        e.insert(table.clone());
+        Ok(table)
     }
 
     fn deregister_table(&self, name: &str) -> Result<Option<TableRef>> {
@@ -459,7 +463,7 @@ mod tests {
         assert!(schema.table_exist(table_name).unwrap());
 
         // rename table
-        let new_table_name = "numbers";
+        let new_table_name = "numbers_new";
         let rename_table_req = RenameTableRequest {
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: DEFAULT_SCHEMA_NAME.to_string(),
