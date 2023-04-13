@@ -44,7 +44,7 @@ mime_guess = "2.0"
 num_cpus = "1.13"
 once_cell = "1.16"
 openmetrics-parser = "0.4"
-opensrv-mysql = { git = "https://github.com/sunng87/opensrv", branch = "feature/update-tokio-rustls" }
+opensrv-mysql = "0.4"
 parking_lot = "0.12"
 pgwire = "0.13"
 pin-project = "1.0"
@@ -81,13 +81,14 @@ axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", br
 client = { path = "../client" }
 common-base = { path = "../common/base" }
 common-test-util = { path = "../common/test-util" }
-mysql_async = { version = "0.31", default-features = false, features = [
+mysql_async = { version = "0.32", default-features = false, features = [
     "default-rustls",
 ] }
 rand.workspace = true
+rustls = { version = "0.21", features = ["dangerous_configuration"]}
 script = { path = "../script", features = ["python"] }
 serde_json = "1.0"
 table = { path = "../table" }
 tokio-postgres = "0.7"
-tokio-postgres-rustls = "0.9"
+tokio-postgres-rustls = { git = "https://github.com/sunng87/tokio-postgres-rustls.git", branch = "patch-1" }
 tokio-test = "0.4"
