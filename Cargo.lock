@@ -7876,6 +7876,7 @@ version = "0.1.1"
 dependencies = [
  "async-trait",
  "catalog",
+ "common-catalog",
  "common-error",
  "common-procedure",
  "common-telemetry",

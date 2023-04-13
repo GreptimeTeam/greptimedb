@@ -54,6 +54,8 @@ pub enum SqlRequest {
 pub struct SqlHandler {
     table_engine_manager: TableEngineManagerRef,
     catalog_manager: CatalogManagerRef,
+    // TODO(yingwen): Support multiple table engine. We need to add a method
+    // to TableEngineManagerRef to return engine procedure by engine name.
     engine_procedure: TableEngineProcedureRef,
     procedure_manager: Option<ProcedureManagerRef>,
 }
