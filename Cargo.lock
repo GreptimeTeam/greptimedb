@@ -1986,6 +1986,7 @@ dependencies = [
  "ciborium",
  "clap 3.2.23",
  "criterion-plot 0.5.0",
+ "futures",
  "itertools",
  "lazy_static",
  "num-traits",
@@ -1997,6 +1998,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "tinytemplate",
+ "tokio",
  "walkdir",
 ]
 
@@ -6891,6 +6893,7 @@ dependencies = [
  "common-test-util",
  "common-time",
  "console",
+ "criterion 0.4.0",
  "crossbeam-utils",
  "datafusion",
  "datafusion-common",
@@ -6905,6 +6908,7 @@ dependencies = [
  "paste",
  "pyo3",
  "query",
+ "rayon",
  "ron",
  "rustpython-ast",
  "rustpython-codegen",
