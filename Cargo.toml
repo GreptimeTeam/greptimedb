@@ -59,13 +59,13 @@ arrow-schema = { version = "36.0", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
-datafusion = { git = "https://github.com/apache/arrow-datafusion.git", rev = "93771052c5ac31f2cf22b8c25bf938656afe1047" }
-datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", rev = "93771052c5ac31f2cf22b8c25bf938656afe1047" }
-datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "93771052c5ac31f2cf22b8c25bf938656afe1047" }
-datafusion-optimizer = { git = "https://github.com/apache/arrow-datafusion.git", rev = "93771052c5ac31f2cf22b8c25bf938656afe1047" }
-datafusion-physical-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "93771052c5ac31f2cf22b8c25bf938656afe1047" }
-datafusion-sql = { git = "https://github.com/apache/arrow-datafusion.git", rev = "93771052c5ac31f2cf22b8c25bf938656afe1047" }
-datafusion-substrait = { git = "https://github.com/apache/arrow-datafusion.git", rev = "93771052c5ac31f2cf22b8c25bf938656afe1047" }
+datafusion = { git = "https://github.com/apache/arrow-datafusion.git", rev = "74a778ca6016a853a3c3add3fa8c6f12f4fe4561" }
+datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", rev = "74a778ca6016a853a3c3add3fa8c6f12f4fe4561" }
+datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "74a778ca6016a853a3c3add3fa8c6f12f4fe4561" }
+datafusion-optimizer = { git = "https://github.com/apache/arrow-datafusion.git", rev = "74a778ca6016a853a3c3add3fa8c6f12f4fe4561" }
+datafusion-physical-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "74a778ca6016a853a3c3add3fa8c6f12f4fe4561" }
+datafusion-sql = { git = "https://github.com/apache/arrow-datafusion.git", rev = "74a778ca6016a853a3c3add3fa8c6f12f4fe4561" }
+datafusion-substrait = { git = "https://github.com/apache/arrow-datafusion.git", rev = "74a778ca6016a853a3c3add3fa8c6f12f4fe4561" }
 futures = "0.3"
 futures-util = "0.3"
 parquet = "36.0"
