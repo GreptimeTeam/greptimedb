@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use arrow::pyarrow::PyArrowException;
 use common_telemetry::{info, timer};
@@ -278,7 +278,7 @@ pub fn try_into_columnar_value(py: Python<'_>, obj: PyObject) -> PyResult<Column
         if ret.is_empty() {
             return Ok(ColumnarValue::Scalar(ScalarValue::List(
                 None,
-                Box::new(new_item_field(ArrowDataType::Null)),
+                Arc::new(new_item_field(ArrowDataType::Null)),
             )));
         }
         let ty = ret[0].get_datatype();
@@ -291,7 +291,7 @@ pub fn try_into_columnar_value(py: Python<'_>, obj: PyObject) -> PyResult<Column
         }
         Ok(ColumnarValue::Scalar(ScalarValue::List(
             Some(ret),
-            Box::new(new_item_field(ty)),
+            Arc::new(new_item_field(ty)),
         )))
     } else {
         to_rust_types!(obj,

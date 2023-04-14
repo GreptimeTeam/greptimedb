@@ -103,7 +103,7 @@ impl PyVector {
     }
 
     fn numpy(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let pa_arrow = self.to_arrow_array().data().to_pyarrow(py)?;
+        let pa_arrow = self.to_arrow_array().to_data().to_pyarrow(py)?;
         let ndarray = pa_arrow.call_method0(py, "to_numpy")?;
         Ok(ndarray)
     }
@@ -304,7 +304,7 @@ impl PyVector {
     }
     /// Convert to `pyarrow` 's array
     pub(crate) fn to_pyarrow(&self, py: Python) -> PyResult<PyObject> {
-        self.to_arrow_array().data().to_pyarrow(py)
+        self.to_arrow_array().to_data().to_pyarrow(py)
     }
     /// Convert from `pyarrow`'s array
     #[classmethod]

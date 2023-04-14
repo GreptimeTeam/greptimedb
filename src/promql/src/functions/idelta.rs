@@ -71,8 +71,8 @@ impl<const IS_RATE: bool> IDelta<IS_RATE> {
         let ts_array = extract_array(&input[0])?;
         let value_array = extract_array(&input[1])?;
 
-        let ts_range: RangeArray = RangeArray::try_new(ts_array.data().clone().into())?;
-        let value_range: RangeArray = RangeArray::try_new(value_array.data().clone().into())?;
+        let ts_range: RangeArray = RangeArray::try_new(ts_array.to_data().into())?;
+        let value_range: RangeArray = RangeArray::try_new(value_array.to_data().into())?;
         error::ensure(
             ts_range.len() == value_range.len(),
             DataFusionError::Execution(format!(

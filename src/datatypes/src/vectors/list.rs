@@ -47,7 +47,7 @@ impl ListVector {
     }
 
     fn to_array_data(&self) -> ArrayData {
-        self.array.data().clone()
+        self.array.to_data()
     }
 
     fn from_array_data_and_type(data: ArrayData, item_type: ConcreteDataType) -> Self {
@@ -106,7 +106,7 @@ impl Vector for ListVector {
     }
 
     fn slice(&self, offset: usize, length: usize) -> VectorRef {
-        let data = self.array.data().slice(offset, length);
+        let data = self.array.to_data().slice(offset, length);
         Arc::new(Self::from_array_data_and_type(data, self.item_type.clone()))
     }
 
@@ -345,7 +345,7 @@ impl ScalarVectorBuilder for ListVectorBuilder {
         let len = self.len();
         let values_vector = self.values_builder.to_vector();
         let values_arr = values_vector.to_arrow_array();
-        let values_data = values_arr.data();
+        let values_data = values_arr.to_data();
 
         let offset_buffer = self.offsets_builder.finish();
         let null_bit_buffer = self.null_buffer_builder.finish();

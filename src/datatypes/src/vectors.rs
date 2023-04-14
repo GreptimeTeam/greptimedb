@@ -217,8 +217,7 @@ macro_rules! impl_try_from_arrow_array_for_vector {
                     .with_context(|| crate::error::ConversionSnafu {
                         from: std::format!("{:?}", array.as_ref().data_type()),
                     })?
-                    .data()
-                    .clone();
+                    .to_data();
 
                 let concrete_array = $Array::from(data);
                 Ok($Vector::from(concrete_array))
@@ -229,7 +228,7 @@ macro_rules! impl_try_from_arrow_array_for_vector {
 
 macro_rules! impl_validity_for_vector {
     ($array: expr) => {
-        Validity::from_array_data($array.data())
+        Validity::from_array_data($array.to_data())
     };
 }
 

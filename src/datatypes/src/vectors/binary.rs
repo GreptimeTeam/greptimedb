@@ -38,13 +38,7 @@ impl BinaryVector {
     }
 
     fn to_array_data(&self) -> ArrayData {
-        self.array.data().clone()
-    }
-
-    fn from_array_data(data: ArrayData) -> BinaryVector {
-        BinaryVector {
-            array: BinaryArray::from(data),
-        }
+        self.array.to_data()
     }
 }
 
@@ -106,8 +100,8 @@ impl Vector for BinaryVector {
     }
 
     fn slice(&self, offset: usize, length: usize) -> VectorRef {
-        let data = self.array.data().slice(offset, length);
-        Arc::new(Self::from_array_data(data))
+        let array = self.array.slice(offset, length);
+        Arc::new(Self { array })
     }
 
     fn get(&self, index: usize) -> Value {
@@ -286,7 +280,7 @@ mod tests {
     #[test]
     fn test_from_arrow_array() {
         let arrow_array = BinaryArray::from_iter_values([vec![1, 2, 3], vec![1, 2, 3]]);
-        let original = BinaryArray::from(arrow_array.data().clone());
+        let original = BinaryArray::from(arrow_array.to_data());
         let vector = BinaryVector::from(arrow_array);
         assert_eq!(original, vector.array);
     }
