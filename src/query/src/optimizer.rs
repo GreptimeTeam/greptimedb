@@ -13,16 +13,15 @@
 // limitations under the License.
 
 use std::str::FromStr;
-use std::sync::Arc;
 
 use common_time::timestamp::{TimeUnit, Timestamp};
-use datafusion::optimizer::optimizer::OptimizerRule;
-use datafusion::optimizer::OptimizerConfig;
-use datafusion_common::tree_node::{TreeNode, TreeNodeRewriter};
+use datafusion::config::ConfigOptions;
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_common::{DFSchemaRef, DataFusionError, Result, ScalarValue};
 use datafusion_expr::{
     Between, BinaryExpr, Expr, ExprSchemable, Filter, LogicalPlan, Operator, TableScan,
 };
+use datafusion_optimizer::analyzer::AnalyzerRule;
 use datatypes::arrow::compute;
 use datatypes::arrow::datatypes::DataType;
 
@@ -33,25 +32,20 @@ use datatypes::arrow::datatypes::DataType;
 /// - string literal of boolean is converted to `Expr::Literal(ScalarValue::Boolean)`
 pub struct TypeConversionRule;
 
-impl OptimizerRule for TypeConversionRule {
+impl AnalyzerRule for TypeConversionRule {
     // TODO(ruihang): fix this warning
     #[allow(deprecated)]
-    fn try_optimize(
-        &self,
-        plan: &LogicalPlan,
-        _config: &dyn OptimizerConfig,
-    ) -> Result<Option<LogicalPlan>> {
-        let mut converter = TypeConverter {
-            schemas: plan.all_schemas(),
-        };
-
-        match plan {
+    fn analyze(&self, plan: LogicalPlan, _config: &ConfigOptions) -> Result<LogicalPlan> {
+        let schemas = plan.all_schemas().into_iter().cloned().collect::<Vec<_>>();
+        plan.transform(&|plan| match plan {
             LogicalPlan::Filter(filter) => {
+                let mut converter = TypeConverter {
+                    schemas: schemas.clone(),
+                };
                 let rewritten = filter.predicate.clone().rewrite(&mut converter)?;
-                let Some(plan) = self.try_optimize(&filter.input, _config)? else { return Ok(None) };
-                Ok(Some(LogicalPlan::Filter(Filter::try_new(
+                Ok(Transformed::Yes(LogicalPlan::Filter(Filter::try_new(
                     rewritten,
-                    Arc::new(plan),
+                    filter.input,
                 )?)))
             }
             LogicalPlan::TableScan(TableScan {
@@ -62,18 +56,21 @@ impl OptimizerRule for TypeConversionRule {
                 filters,
                 fetch,
             }) => {
+                let mut converter = TypeConverter {
+                    schemas: schemas.clone(),
+                };
                 let rewrite_filters = filters
                     .clone()
                     .into_iter()
                     .map(|e| e.rewrite(&mut converter))
                     .collect::<Result<Vec<_>>>()?;
-                Ok(Some(LogicalPlan::TableScan(TableScan {
+                Ok(Transformed::Yes(LogicalPlan::TableScan(TableScan {
                     table_name: table_name.clone(),
                     source: source.clone(),
                     projection: projection.clone(),
                     projected_schema: projected_schema.clone(),
                     filters: rewrite_filters,
-                    fetch: *fetch,
+                    fetch: fetch,
                 })))
             }
             LogicalPlan::Projection { .. }
@@ -94,20 +91,21 @@ impl OptimizerRule for TypeConversionRule {
             | LogicalPlan::Distinct { .. }
             | LogicalPlan::Values { .. }
             | LogicalPlan::Analyze { .. } => {
-                let inputs = plan.inputs();
-                let mut new_inputs = Vec::with_capacity(inputs.len());
-                for input in inputs {
-                    let Some(plan) = self.try_optimize(input, _config)? else { return Ok(None) };
-                    new_inputs.push(plan);
-                }
-
+                let mut converter = TypeConverter {
+                    schemas: plan.all_schemas().into_iter().cloned().collect(),
+                };
+                let inputs = plan
+                    .inputs()
+                    .into_iter()
+                    .map(|p| p.clone())
+                    .collect::<Vec<_>>();
                 let expr = plan
                     .expressions()
                     .into_iter()
                     .map(|e| e.rewrite(&mut converter))
                     .collect::<Result<Vec<_>>>()?;
 
-                datafusion_expr::utils::from_plan(plan, &expr, &new_inputs).map(Some)
+                datafusion_expr::utils::from_plan(&plan, &expr, &inputs).map(Transformed::Yes)
             }
 
             LogicalPlan::Subquery { .. }
@@ -120,8 +118,8 @@ impl OptimizerRule for TypeConversionRule {
             | LogicalPlan::Dml(_)
             | LogicalPlan::DescribeTable(_)
             | LogicalPlan::Unnest(_)
-            | LogicalPlan::Statement(_) => Ok(Some(plan.clone())),
-        }
+            | LogicalPlan::Statement(_) => Ok(Transformed::No(plan)),
+        })
     }
 
     fn name(&self) -> &str {
@@ -129,11 +127,11 @@ impl OptimizerRule for TypeConversionRule {
     }
 }
 
-struct TypeConverter<'a> {
-    schemas: Vec<&'a DFSchemaRef>,
+struct TypeConverter {
+    schemas: Vec<DFSchemaRef>,
 }
 
-impl<'a> TypeConverter<'a> {
+impl TypeConverter {
     fn column_type(&self, expr: &Expr) -> Option<DataType> {
         if let Expr::Column(_) = expr {
             for schema in &self.schemas {
@@ -154,6 +152,7 @@ impl<'a> TypeConverter<'a> {
                 _ => Ok(ScalarValue::Boolean(None)),
             },
             (target_type, value) => {
+                println!("cast_scalar_value: {:?} {:?}", target_type, value);
                 let value_arr = value.to_array();
                 let arr =
                     compute::cast(&value_arr, target_type).map_err(DataFusionError::ArrowError)?;
@@ -200,7 +199,7 @@ impl<'a> TypeConverter<'a> {
     }
 }
 
-impl<'a> TreeNodeRewriter for TypeConverter<'a> {
+impl TreeNodeRewriter for TypeConverter {
     type N = Expr;
 
     fn mutate(&mut self, expr: Expr) -> Result<Expr> {
@@ -299,6 +298,7 @@ fn string_to_timestamp_ms(string: &str) -> Result<ScalarValue> {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     use datafusion_common::{Column, DFField, DFSchema};
     use datafusion_sql::TableReference;
@@ -371,7 +371,7 @@ mod tests {
             .unwrap(),
         );
         let mut converter = TypeConverter {
-            schemas: vec![&schema_ref],
+            schemas: vec![schema_ref],
         };
 
         assert_eq!(
@@ -404,7 +404,7 @@ mod tests {
             .unwrap(),
         );
         let mut converter = TypeConverter {
-            schemas: vec![&schema_ref],
+            schemas: vec![schema_ref],
         };
 
         assert_eq!(
