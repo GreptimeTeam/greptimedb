@@ -93,6 +93,7 @@ impl DistInstance {
         create_table: &mut CreateTableExpr,
         partitions: Option<Partitions>,
     ) -> Result<TableRef> {
+        let _timer = common_telemetry::timer!(crate::metrics::DIST_CREATE_TABLE);
         let table_name = TableName::new(
             &create_table.catalog_name,
             &create_table.schema_name,
@@ -189,6 +190,7 @@ impl DistInstance {
                 create_table, datanode, create_expr_for_region.region_ids,
             );
 
+            let _timer = common_telemetry::timer!(crate::metrics::DIST_CREATE_TABLE_IN_DATANODE);
             client
                 .create(create_expr_for_region)
                 .await
@@ -460,6 +462,7 @@ impl DistInstance {
         partitions: Option<Partitions>,
         table_info: &RawTableInfo,
     ) -> Result<RouteResponse> {
+        let _timer = common_telemetry::timer!(crate::metrics::DIST_CREATE_TABLE_IN_META);
         let mut catalog_name = create_table.catalog_name.clone();
         if catalog_name.is_empty() {
             catalog_name = DEFAULT_CATALOG_NAME.to_string();

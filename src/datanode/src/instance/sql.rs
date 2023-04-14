@@ -165,7 +165,7 @@ impl Instance {
         promql: &PromQuery,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        let _timer = timer!(metrics::METRIC_HANDLE_PROMQL_ELAPSED);
+        let _timer = timer!(metrics::HANDLE_PROMQL_ELAPSED);
 
         let stmt = QueryLanguageParser::parse_promql(promql).context(ExecuteSqlSnafu)?;
 
