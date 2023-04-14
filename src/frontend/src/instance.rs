@@ -59,7 +59,7 @@ use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::{
     InfluxdbLineProtocolHandler, OpentsdbProtocolHandler, PrometheusProtocolHandler, ScriptHandler,
 };
-use session::context::{QueryContext, QueryContextRef};
+use session::context::QueryContextRef;
 use snafu::prelude::*;
 use sql::dialect::GenericDialect;
 use sql::parser::ParserContext;
@@ -496,13 +496,16 @@ impl SqlQueryHandler for Instance {
         }
     }
 
-    async fn do_promql_query(&self, query: &PromQuery, _: QueryContextRef) -> Vec<Result<Output>> {
-        let result =
-            PromHandler::do_query(self, query)
-                .await
-                .with_context(|_| ExecutePromqlSnafu {
-                    query: format!("{query:?}"),
-                });
+    async fn do_promql_query(
+        &self,
+        query: &PromQuery,
+        query_ctx: QueryContextRef,
+    ) -> Vec<Result<Output>> {
+        let result = PromHandler::do_query(self, query, query_ctx)
+            .await
+            .with_context(|_| ExecutePromqlSnafu {
+                query: format!("{query:?}"),
+            });
         vec![result]
     }
 
@@ -538,12 +541,16 @@ impl SqlQueryHandler for Instance {
 
 #[async_trait]
 impl PromHandler for Instance {
-    async fn do_query(&self, query: &PromQuery) -> server_error::Result<Output> {
+    async fn do_query(
+        &self,
+        query: &PromQuery,
+        query_ctx: QueryContextRef,
+    ) -> server_error::Result<Output> {
         let stmt = QueryLanguageParser::parse_promql(query).with_context(|_| ParsePromQLSnafu {
             query: query.clone(),
         })?;
         self.statement_executor
-            .execute_stmt(stmt, QueryContext::arc())
+            .execute_stmt(stmt, query_ctx)
             .await
             .map_err(BoxedError::new)
             .with_context(|_| ExecuteQuerySnafu {
