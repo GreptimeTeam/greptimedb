@@ -116,18 +116,25 @@ pub struct EngineContext {}
 
 /// Procedures for table engine.
 pub trait TableEngineProcedure: Send + Sync {
-    /// Returns a procedure that creates table by specific `request`.
+    /// Returns a procedure that creates a table by specific `request`.
     fn create_table_procedure(
         &self,
         ctx: &EngineContext,
         request: CreateTableRequest,
     ) -> Result<BoxedProcedure>;
 
-    /// Returns a procedure that alters table by specific `request`.
+    /// Returns a procedure that alters a table by specific `request`.
     fn alter_table_procedure(
         &self,
         ctx: &EngineContext,
         request: AlterTableRequest,
+    ) -> Result<BoxedProcedure>;
+
+    /// Returns a procedure that drops a table by specific `request`.
+    fn drop_table_procedure(
+        &self,
+        ctx: &EngineContext,
+        request: DropTableRequest,
     ) -> Result<BoxedProcedure>;
 }
 
