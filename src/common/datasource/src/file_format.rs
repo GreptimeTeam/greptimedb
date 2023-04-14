@@ -15,6 +15,8 @@
 pub mod csv;
 pub mod json;
 pub mod parquet;
+#[cfg(test)]
+pub mod tests;
 
 pub const DEFAULT_SCHEMA_INFER_MAX_RECORD: usize = 1000;
 

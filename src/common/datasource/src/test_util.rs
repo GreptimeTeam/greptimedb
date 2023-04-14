@@ -13,10 +13,13 @@
 // limitations under the License.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use arrow_schema::SchemaRef;
+use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use object_store::services::Fs;
 use object_store::ObjectStore;
+
+pub const TEST_BATCH_SIZE: usize = 100;
 
 pub fn get_data_dir(path: &str) -> PathBuf {
     // https://doc.rust-lang.org/cargo/reference/environment-variables.html
@@ -45,4 +48,12 @@ pub fn test_store(root: &str) -> ObjectStore {
     builder.root(root);
 
     ObjectStore::new(builder).unwrap().finish()
+}
+
+pub fn test_basic_schema() -> SchemaRef {
+    let schema = Schema::new(vec![
+        Field::new("num", DataType::Int64, false),
+        Field::new("str", DataType::Utf8, false),
+    ]);
+    Arc::new(schema)
 }
