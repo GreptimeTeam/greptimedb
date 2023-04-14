@@ -89,6 +89,9 @@ pub(crate) fn linear_regression(
 
     for (i, value) in values.iter().enumerate() {
         let time = times.value(i) as f64;
+        if value.is_none() {
+            continue;
+        }
         let value = value.unwrap();
         if const_y && i > 0 && value != init_y {
             const_y = false;
@@ -106,6 +109,10 @@ pub(crate) fn linear_regression(
             return (None, None);
         }
         return (Some(0.0), Some(init_y));
+    }
+
+    if count < 2.0 {
+        return (None, None);
     }
 
     sum_x += comp_x;
@@ -183,5 +190,45 @@ mod test {
         let (slope, intercept) = linear_regression(&ts_array, &values_array, ts_array.value(0));
         assert_eq!(slope, Some(0.010606060606060607));
         assert_eq!(intercept, Some(6.818181818181818));
+    }
+
+    #[test]
+    fn calculate_linear_regression_value_is_none() {
+        let ts_array = TimestampMillisecondArray::from_iter(
+            [
+                0i64, 300, 600, 900, 1200, 1350, 1500, 1800, 2100, 2400, 2550, 2700, 3000,
+            ]
+            .into_iter()
+            .map(Some),
+        );
+        let values_array: Float64Array = [
+            Some(0.0),
+            Some(10.0),
+            Some(20.0),
+            Some(30.0),
+            Some(40.0),
+            None,
+            Some(0.0),
+            Some(10.0),
+            Some(20.0),
+            Some(30.0),
+            None,
+            Some(40.0),
+            Some(50.0),
+        ]
+        .into_iter()
+        .collect();
+        let (slope, intercept) = linear_regression(&ts_array, &values_array, ts_array.value(0));
+        assert_eq!(slope, Some(0.010606060606060607));
+        assert_eq!(intercept, Some(6.818181818181818));
+    }
+
+    #[test]
+    fn calculate_linear_regression_length_less_two() {
+        let ts_array = TimestampMillisecondArray::from_iter([0i64, 300, 600].into_iter().map(Some));
+        let values_array: Float64Array = [None, Some(10.0), None].into_iter().collect();
+        let (slope, intercept) = linear_regression(&ts_array, &values_array, ts_array.value(0));
+        assert_eq!(slope, None);
+        assert_eq!(intercept, None);
     }
 }
