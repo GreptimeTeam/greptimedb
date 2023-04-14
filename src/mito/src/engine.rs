@@ -427,15 +427,14 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 compaction_time_window: request.table_options.compaction_time_window,
             };
 
-            {
+            let region = {
                 let _timer = common_telemetry::timer!(crate::metrics::MITO_CREATE_REGION_ELAPSED);
-                let region = self
-                    .storage_engine
+                self.storage_engine
                     .create_region(&StorageEngineContext::default(), region_descriptor, &opts)
                     .await
                     .map_err(BoxedError::new)
-                    .context(error::CreateRegionSnafu)?;
-            }
+                    .context(error::CreateRegionSnafu)?
+            };
             info!(
                 "Mito engine created region: {}, id: {}",
                 region.name(),
