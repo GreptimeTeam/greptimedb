@@ -29,7 +29,7 @@ use tokio::sync::broadcast::error::RecvError;
 
 use crate::cluster::MetaPeerClient;
 use crate::election::{Election, LeaderChangeMessage};
-use crate::error::{RecoverProcedureSnafu, Result};
+use crate::error::{InvalidCatalogValueSnafu, RecoverProcedureSnafu, Result};
 use crate::handler::HeartbeatHandlerGroup;
 use crate::lock::DistLockRef;
 use crate::selector::{Selector, SelectorType};
@@ -198,7 +198,9 @@ impl MetaSrv {
         let req = CompareAndPutRequest {
             key: default_catalog_key.into(),
             expect: vec![],
-            value: catalog::helper::CatalogValue {}.as_bytes().unwrap(),
+            value: catalog::helper::CatalogValue {}
+                .as_bytes()
+                .context(InvalidCatalogValueSnafu)?,
             ..Default::default()
         };
 
@@ -214,7 +216,9 @@ impl MetaSrv {
         let req = CompareAndPutRequest {
             key: default_schema_key.into(),
             expect: vec![],
-            value: catalog::helper::SchemaValue {}.as_bytes().unwrap(),
+            value: catalog::helper::SchemaValue {}
+                .as_bytes()
+                .context(InvalidCatalogValueSnafu)?,
             ..Default::default()
         };
         let resp = kv_store.compare_and_put(req).await?;
