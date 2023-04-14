@@ -68,7 +68,6 @@ impl SqlQueryHandler for DummyInstance {
     type Error = Error;
 
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
-        println!("query: {}", query);
         let stmt = QueryLanguageParser::parse_sql(query).unwrap();
         let plan = self
             .query_engine

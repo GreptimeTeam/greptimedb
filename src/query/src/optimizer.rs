@@ -60,17 +60,16 @@ impl AnalyzerRule for TypeConversionRule {
                     schemas: schemas.clone(),
                 };
                 let rewrite_filters = filters
-                    .clone()
                     .into_iter()
                     .map(|e| e.rewrite(&mut converter))
                     .collect::<Result<Vec<_>>>()?;
                 Ok(Transformed::Yes(LogicalPlan::TableScan(TableScan {
                     table_name: table_name.clone(),
                     source: source.clone(),
-                    projection: projection.clone(),
-                    projected_schema: projected_schema.clone(),
+                    projection,
+                    projected_schema,
                     filters: rewrite_filters,
-                    fetch: fetch,
+                    fetch,
                 })))
             }
             LogicalPlan::Projection { .. }
@@ -94,11 +93,7 @@ impl AnalyzerRule for TypeConversionRule {
                 let mut converter = TypeConverter {
                     schemas: plan.all_schemas().into_iter().cloned().collect(),
                 };
-                let inputs = plan
-                    .inputs()
-                    .into_iter()
-                    .map(|p| p.clone())
-                    .collect::<Vec<_>>();
+                let inputs = plan.inputs().into_iter().cloned().collect::<Vec<_>>();
                 let expr = plan
                     .expressions()
                     .into_iter()
@@ -152,7 +147,6 @@ impl TypeConverter {
                 _ => Ok(ScalarValue::Boolean(None)),
             },
             (target_type, value) => {
-                println!("cast_scalar_value: {:?} {:?}", target_type, value);
                 let value_arr = value.to_array();
                 let arr =
                     compute::cast(&value_arr, target_type).map_err(DataFusionError::ArrowError)?;

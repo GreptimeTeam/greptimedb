@@ -355,7 +355,7 @@ impl ScalarVectorBuilder for ListVectorBuilder {
         let array_data_builder = ArrayData::builder(data_type)
             .len(len)
             .add_buffer(offset_buffer)
-            .add_child_data(values_data.clone())
+            .add_child_data(values_data)
             .null_bit_buffer(null_bit_buffer);
 
         let array_data = unsafe { array_data_builder.build_unchecked() };
