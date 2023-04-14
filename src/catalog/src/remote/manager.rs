@@ -187,13 +187,6 @@ impl RemoteCatalogManager {
         let mut res = HashMap::new();
         let max_table_id = MIN_USER_TABLE_ID - 1;
 
-        // initiate default catalog and schema
-        let default_catalog = self
-            .create_catalog_and_schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
-            .await?;
-        res.insert(DEFAULT_CATALOG_NAME.to_string(), default_catalog);
-        info!("Default catalog and schema registered");
-
         let mut catalogs = self.iter_remote_catalogs().await;
         while let Some(r) = catalogs.next().await {
             let CatalogKey { catalog_name, .. } = r?;

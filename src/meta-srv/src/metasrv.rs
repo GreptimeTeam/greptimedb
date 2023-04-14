@@ -17,7 +17,9 @@ pub mod builder;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use api::v1::meta::Peer;
+use api::v1::meta::{CompareAndPutRequest, Peer};
+use catalog::helper::{CatalogKey, SchemaKey};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::{error, info, warn};
 use serde::{Deserialize, Serialize};
@@ -123,6 +125,8 @@ impl MetaSrv {
             return Ok(());
         }
 
+        self.create_default_catalog_schema().await?;
+
         if let Some(election) = self.election() {
             let procedure_manager = self.procedure_manager.clone();
             let mut rx = election.subscribe_leader_change();
@@ -174,6 +178,54 @@ impl MetaSrv {
         }
 
         info!("MetaSrv started");
+        Ok(())
+    }
+
+    async fn create_default_catalog_schema(&self) -> Result<()> {
+        let kv_store = self.kv_store();
+
+        let default_catalog_key = CatalogKey {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+        }
+        .to_string();
+
+        let default_schema_key = SchemaKey {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+        }
+        .to_string();
+
+        let req = CompareAndPutRequest {
+            key: default_catalog_key.into(),
+            expect: vec![],
+            value: catalog::helper::CatalogValue {}.as_bytes().unwrap(),
+            ..Default::default()
+        };
+
+        let resp = kv_store.compare_and_put(req).await?;
+
+        if resp.success {
+            info!(
+                "Successfully created the default catalog: {}",
+                DEFAULT_CATALOG_NAME
+            );
+        }
+
+        let req = CompareAndPutRequest {
+            key: default_schema_key.into(),
+            expect: vec![],
+            value: catalog::helper::SchemaValue {}.as_bytes().unwrap(),
+            ..Default::default()
+        };
+        let resp = kv_store.compare_and_put(req).await?;
+
+        if resp.success {
+            info!(
+                "Successfully created the default schema: {}",
+                DEFAULT_SCHEMA_NAME
+            );
+        }
+
         Ok(())
     }
 
