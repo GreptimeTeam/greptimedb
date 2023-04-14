@@ -20,7 +20,9 @@ use std::sync::Arc;
 
 use async_stream::stream;
 use catalog::error::Error;
+use catalog::helper::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
 use catalog::remote::{Kv, KvBackend, ValueIter};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_recordbatch::RecordBatch;
 use common_telemetry::logging::info;
 use datatypes::data_type::ConcreteDataType;
@@ -34,9 +36,33 @@ use table::test_util::MemTable;
 use table::TableRef;
 use tokio::sync::RwLock;
 
-#[derive(Default)]
 pub struct MockKvBackend {
     map: RwLock<BTreeMap<Vec<u8>, Vec<u8>>>,
+}
+
+impl Default for MockKvBackend {
+    fn default() -> Self {
+        let mut map = BTreeMap::default();
+        let catalog_value = CatalogValue {}.as_bytes().unwrap();
+        let schema_value = SchemaValue {}.as_bytes().unwrap();
+
+        let default_catalog_key = CatalogKey {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+        }
+        .to_string();
+
+        let default_schema_key = SchemaKey {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+        }
+        .to_string();
+
+        map.insert(default_catalog_key.into(), catalog_value);
+        map.insert(default_schema_key.into(), schema_value);
+
+        let map = RwLock::new(map);
+        Self { map }
+    }
 }
 
 impl Display for MockKvBackend {

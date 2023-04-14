@@ -18,6 +18,9 @@ use std::time::Duration;
 use api::v1::meta::heartbeat_server::HeartbeatServer;
 use api::v1::meta::router_server::RouterServer;
 use api::v1::meta::store_server::StoreServer;
+use api::v1::meta::PutRequest;
+use catalog::helper::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use tower::service_fn;
 
@@ -54,6 +57,38 @@ pub async fn mock(
     selector: Option<SelectorRef>,
 ) -> MockInfo {
     let server_addr = opts.server_addr.clone();
+
+    let catalog_value = CatalogValue {}.as_bytes().unwrap();
+    let schema_value = SchemaValue {}.as_bytes().unwrap();
+
+    let default_catalog_key = CatalogKey {
+        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+    }
+    .to_string();
+
+    let default_schema_key = SchemaKey {
+        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+        schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+    }
+    .to_string();
+
+    kv_store
+        .put(PutRequest {
+            key: default_catalog_key.into(),
+            value: catalog_value,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    kv_store
+        .put(PutRequest {
+            key: default_schema_key.into(),
+            value: schema_value,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
 
     let builder = MetaSrvBuilder::new().options(opts).kv_store(kv_store);
 
