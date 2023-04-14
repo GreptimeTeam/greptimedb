@@ -4393,9 +4393,8 @@ dependencies = [
 
 [[package]]
 name = "mysql_async"
-version = "0.32.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7089295150273e5d211a11222dcae3974c9aa4f7691c288e10e2e8aa43b3b1e9"
+version = "0.32.1"
+source = "git+https://github.com/blackbeam/mysql_async.git?rev=32c6f2a986789f97108502c2d0c755a089411b66#32c6f2a986789f97108502c2d0c755a089411b66"
 dependencies = [
  "bytes",
  "crossbeam",
@@ -8330,8 +8329,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-postgres-rustls"
-version = "0.9.0"
-source = "git+https://github.com/sunng87/tokio-postgres-rustls.git?branch=patch-1#9f6e8a1c11e33c43a80618acd6b5135a7fb9a4be"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd5831152cb0d3f79ef5523b357319ba154795d64c7078b2daa95a803b54057f"
 dependencies = [
  "futures",
  "ring",
