@@ -12,32 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
-#![feature(trait_upcasting)]
+//! storage metrics
 
-pub mod catalog;
-pub mod datanode;
-pub mod error;
-mod expr_factory;
-pub mod frontend;
-pub mod grpc;
-pub mod influxdb;
-pub mod instance;
-pub(crate) mod metric;
-mod metrics;
-pub mod mysql;
-pub mod opentsdb;
-pub mod postgres;
-pub mod prom;
-pub mod prometheus;
-mod script;
-mod server;
-pub(crate) mod statement;
-mod table;
-#[cfg(test)]
-mod tests;
-
-#[cfg(test)]
-// allowed because https://docs.rs/rstest_reuse/0.5.0/rstest_reuse/#use-rstest_reuse-at-the-top-of-your-crate
-#[allow(clippy::single_component_path_imports)]
-use rstest_reuse;
+/// Elapsed time of updating manifest when creating regions.
+pub const CREATE_REGION_UPDATE_MANIFEST: &str = "storage.create_region.update_manifest";

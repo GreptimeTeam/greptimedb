@@ -55,6 +55,7 @@ use crate::error::{
     MissingTimestampIndexSnafu, RegionNotFoundSnafu, Result, TableExistsSnafu,
 };
 use crate::manifest::TableManifest;
+use crate::metrics;
 use crate::table::MitoTable;
 pub const INIT_COLUMN_ID: ColumnId = 0;
 const INIT_TABLE_VERSION: TableVersion = 0;
@@ -95,6 +96,7 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
         ctx: &EngineContext,
         request: CreateTableRequest,
     ) -> TableResult<TableRef> {
+        let _timer = common_telemetry::timer!(metrics::MITO_CREATE_TABLE_ELAPSED);
         self.inner
             .create_table(ctx, request)
             .await
@@ -107,6 +109,7 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
         ctx: &EngineContext,
         request: OpenTableRequest,
     ) -> TableResult<Option<TableRef>> {
+        let _timer = common_telemetry::timer!(metrics::MITO_OPEN_TABLE_ELAPSED);
         self.inner
             .open_table(ctx, request)
             .await
@@ -119,6 +122,7 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
         ctx: &EngineContext,
         req: AlterTableRequest,
     ) -> TableResult<TableRef> {
+        let _timer = common_telemetry::timer!(metrics::MITO_ALTER_TABLE_ELAPSED);
         self.inner
             .alter_table(ctx, req)
             .await
@@ -423,12 +427,15 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 compaction_time_window: request.table_options.compaction_time_window,
             };
 
-            let region = self
-                .storage_engine
-                .create_region(&StorageEngineContext::default(), region_descriptor, &opts)
-                .await
-                .map_err(BoxedError::new)
-                .context(error::CreateRegionSnafu)?;
+            {
+                let _timer = common_telemetry::timer!(crate::metrics::MITO_CREATE_REGION_ELAPSED);
+                let region = self
+                    .storage_engine
+                    .create_region(&StorageEngineContext::default(), region_descriptor, &opts)
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(error::CreateRegionSnafu)?;
+            }
             info!(
                 "Mito engine created region: {}, id: {}",
                 region.name(),
