@@ -43,7 +43,20 @@ pub trait FileFormat: Send + Sync + std::fmt::Debug {
 }
 
 pub trait ArrowDecoder: Send + 'static {
+    /// Decode records from `buf` returning the number of bytes read.
+    ///
+    /// This method returns `Ok(0)` once `batch_size` objects have been parsed since the
+    /// last call to [`Self::flush`], or `buf` is exhausted.
+    ///
+    /// Any remaining bytes should be included in the next call to [`Self::decode`].
     fn decode(&mut self, buf: &[u8]) -> result::Result<usize, ArrowError>;
+
+    /// Flushes the currently buffered data to a [`RecordBatch`].
+    ///
+    /// This should only be called after [`Self::decode`] has returned `Ok(0)`,
+    /// otherwise may return an error if part way through decoding a record
+    ///
+    /// Returns `Ok(None)` if no buffered data.
     fn flush(&mut self) -> result::Result<Option<RecordBatch>, ArrowError>;
 }
 
