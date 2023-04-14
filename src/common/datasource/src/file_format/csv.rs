@@ -13,25 +13,22 @@
 // limitations under the License.
 
 use std::sync::Arc;
-use std::task::Poll;
 
 use arrow::csv;
 use arrow::csv::reader::infer_reader_schema as infer_csv_schema;
 use arrow_schema::SchemaRef;
 use async_trait::async_trait;
-use bytes::{Buf, Bytes};
 use common_runtime;
-use datafusion::error::{DataFusionError, Result as DataFusionResult};
+use datafusion::error::Result as DataFusionResult;
 use datafusion::physical_plan::file_format::{FileMeta, FileOpenFuture, FileOpener};
 use derive_builder::Builder;
-use futures::{ready, StreamExt};
 use object_store::ObjectStore;
 use snafu::ResultExt;
 use tokio_util::io::SyncIoBridge;
 
 use crate::compression::CompressionType;
 use crate::error::{self, Result};
-use crate::file_format::{self, FileFormat};
+use crate::file_format::{self, open_with_decoder, FileFormat};
 
 #[derive(Debug)]
 pub struct CsvFormat {
@@ -88,7 +85,7 @@ pub struct CsvOpener {
 }
 
 impl CsvOpener {
-    /// Return a new [`CsvOpener`]. The call must ensure [`CsvConfig`].file_schema must correspond to the opening file.
+    /// Return a new [`CsvOpener`]. The caller must ensure [`CsvConfig`].file_schema must correspond to the opening file.
     pub fn new(
         config: CsvConfig,
         object_store: ObjectStore,
@@ -104,45 +101,12 @@ impl CsvOpener {
 
 impl FileOpener for CsvOpener {
     fn open(&self, meta: FileMeta) -> DataFusionResult<FileOpenFuture> {
-        let path = meta.location().to_string();
-        let compression_type = self.compression_type;
-        let object_store = self.object_store.clone();
-        let config = self.config.clone();
-
-        Ok(Box::pin(async move {
-            let reader = object_store
-                .reader(&path)
-                .await
-                .map_err(|e| DataFusionError::External(Box::new(e)))?;
-
-            let mut upstream = compression_type.convert_stream(reader).fuse();
-
-            let mut buffered = Bytes::new();
-
-            let mut decoder = config.builder().build_decoder();
-
-            let stream = futures::stream::poll_fn(move |cx| {
-                loop {
-                    if buffered.is_empty() {
-                        if let Some(result) = ready!(upstream.poll_next_unpin(cx)) {
-                            buffered = result?;
-                        };
-                    }
-
-                    let decoded = decoder.decode(buffered.as_ref())?;
-
-                    if decoded == 0 {
-                        break;
-                    } else {
-                        buffered.advance(decoded);
-                    }
-                }
-
-                Poll::Ready(decoder.flush().transpose())
-            });
-
-            Ok(stream.boxed())
-        }))
+        open_with_decoder(
+            self.object_store.clone(),
+            meta.location().to_string(),
+            self.compression_type,
+            || Ok(self.config.builder().build_decoder()),
+        )
     }
 }
 

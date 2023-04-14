@@ -20,13 +20,90 @@ pub mod tests;
 
 pub const DEFAULT_SCHEMA_INFER_MAX_RECORD: usize = 1000;
 
+use std::result;
+use std::sync::Arc;
+use std::task::Poll;
+
 use arrow::datatypes::SchemaRef;
+use arrow::record_batch::RecordBatch;
+use arrow_schema::ArrowError;
 use async_trait::async_trait;
+use bytes::{Buf, Bytes};
+use datafusion::error::{DataFusionError, Result as DataFusionResult};
+use datafusion::physical_plan::file_format::FileOpenFuture;
+use futures::StreamExt;
 use object_store::ObjectStore;
 
+use crate::compression::CompressionType;
 use crate::error::Result;
 
 #[async_trait]
 pub trait FileFormat: Send + Sync + std::fmt::Debug {
     async fn infer_schema(&self, store: &ObjectStore, path: String) -> Result<SchemaRef>;
+}
+
+pub trait ArrowDecoder: Send + 'static {
+    fn decode(&mut self, buf: &[u8]) -> result::Result<usize, ArrowError>;
+    fn flush(&mut self) -> result::Result<Option<RecordBatch>, ArrowError>;
+}
+
+impl ArrowDecoder for arrow::csv::reader::Decoder {
+    fn decode(&mut self, buf: &[u8]) -> result::Result<usize, ArrowError> {
+        self.decode(buf)
+    }
+
+    fn flush(&mut self) -> result::Result<Option<RecordBatch>, ArrowError> {
+        self.flush()
+    }
+}
+
+impl ArrowDecoder for arrow::json::RawDecoder {
+    fn decode(&mut self, buf: &[u8]) -> result::Result<usize, ArrowError> {
+        self.decode(buf)
+    }
+
+    fn flush(&mut self) -> result::Result<Option<RecordBatch>, ArrowError> {
+        self.flush()
+    }
+}
+
+pub fn open_with_decoder<T: ArrowDecoder, F: Fn() -> DataFusionResult<T>>(
+    object_store: Arc<ObjectStore>,
+    path: String,
+    compression_type: CompressionType,
+    decoder_factory: F,
+) -> DataFusionResult<FileOpenFuture> {
+    let mut decoder = decoder_factory()?;
+    Ok(Box::pin(async move {
+        let reader = object_store
+            .reader(&path)
+            .await
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+
+        let mut upstream = compression_type.convert_stream(reader).fuse();
+
+        let mut buffered = Bytes::new();
+
+        let stream = futures::stream::poll_fn(move |cx| {
+            loop {
+                if buffered.is_empty() {
+                    if let Some(result) = futures::ready!(upstream.poll_next_unpin(cx)) {
+                        buffered = result?;
+                    };
+                }
+
+                let decoded = decoder.decode(buffered.as_ref())?;
+
+                if decoded == 0 {
+                    break;
+                } else {
+                    buffered.advance(decoded);
+                }
+            }
+
+            Poll::Ready(decoder.flush().transpose())
+        });
+
+        Ok(stream.boxed())
+    }))
 }

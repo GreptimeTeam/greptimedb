@@ -14,24 +14,21 @@
 
 use std::io::BufReader;
 use std::sync::Arc;
-use std::task::Poll;
 
 use arrow::datatypes::SchemaRef;
 use arrow::json::reader::{infer_json_schema_from_iterator, ValueIter};
 use arrow::json::RawReaderBuilder;
 use async_trait::async_trait;
-use bytes::{Buf, Bytes};
 use common_runtime;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::physical_plan::file_format::{FileMeta, FileOpenFuture, FileOpener};
-use futures::{ready, StreamExt};
 use object_store::ObjectStore;
 use snafu::ResultExt;
 use tokio_util::io::SyncIoBridge;
 
 use crate::compression::CompressionType;
 use crate::error::{self, Result};
-use crate::file_format::{self, FileFormat};
+use crate::file_format::{self, open_with_decoder, FileFormat};
 
 #[derive(Debug)]
 pub struct JsonFormat {
@@ -102,49 +99,17 @@ impl JsonOpener {
 
 impl FileOpener for JsonOpener {
     fn open(&self, meta: FileMeta) -> DataFusionResult<FileOpenFuture> {
-        let projected_schema = self.projected_schema.clone();
-        let path = meta.location().to_string();
-        let compression_type = self.compression_type;
-        let object_store = self.object_store.clone();
-        let batch_size = self.batch_size;
-
-        Ok(Box::pin(async move {
-            let reader = object_store
-                .reader(&path)
-                .await
-                .map_err(|e| DataFusionError::External(Box::new(e)))?;
-
-            let mut upstream = compression_type.convert_stream(reader).fuse();
-
-            let mut buffered = Bytes::new();
-
-            let mut decoder = RawReaderBuilder::new(projected_schema)
-                .with_batch_size(batch_size)
-                .build_decoder()
-                .map_err(DataFusionError::from)?;
-
-            let stream = futures::stream::poll_fn(move |cx| {
-                loop {
-                    if buffered.is_empty() {
-                        if let Some(result) = ready!(upstream.poll_next_unpin(cx)) {
-                            buffered = result?;
-                        };
-                    }
-
-                    let decoded = decoder.decode(buffered.as_ref())?;
-
-                    if decoded == 0 {
-                        break;
-                    } else {
-                        buffered.advance(decoded);
-                    }
-                }
-
-                Poll::Ready(decoder.flush().transpose())
-            });
-
-            Ok(stream.boxed())
-        }))
+        open_with_decoder(
+            self.object_store.clone(),
+            meta.location().to_string(),
+            self.compression_type,
+            || {
+                RawReaderBuilder::new(self.projected_schema.clone())
+                    .with_batch_size(self.batch_size)
+                    .build_decoder()
+                    .map_err(DataFusionError::from)
+            },
+        )
     }
 }
 
