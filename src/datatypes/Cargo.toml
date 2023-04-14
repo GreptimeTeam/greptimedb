@@ -10,7 +10,7 @@ test = []
 
 [dependencies]
 arrow.workspace = true
-arrow-array = "36"
+arrow-array.workspace = true
 arrow-schema.workspace = true
 common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }

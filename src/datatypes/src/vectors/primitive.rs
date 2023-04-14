@@ -67,8 +67,7 @@ impl<T: LogicalPrimitiveType> PrimitiveVector<T> {
             .with_context(|| error::ConversionSnafu {
                 from: format!("{:?}", array.as_ref().data_type()),
             })?
-            .data()
-            .clone();
+            .to_data();
         let concrete_array = PrimitiveArray::<T::ArrowPrimitive>::from(data);
         Ok(Self::new(concrete_array))
     }
@@ -82,30 +81,26 @@ impl<T: LogicalPrimitiveType> PrimitiveVector<T> {
                     .as_any()
                     .downcast_ref::<TimestampSecondArray>()
                     .unwrap()
-                    .with_timezone_opt(None)
-                    .data()
-                    .clone(),
+                    .with_timezone_opt(None::<String>)
+                    .to_data(),
                 arrow_schema::TimeUnit::Millisecond => array
                     .as_any()
                     .downcast_ref::<TimestampMillisecondArray>()
                     .unwrap()
-                    .with_timezone_opt(None)
-                    .data()
-                    .clone(),
+                    .with_timezone_opt(None::<String>)
+                    .to_data(),
                 arrow_schema::TimeUnit::Microsecond => array
                     .as_any()
                     .downcast_ref::<TimestampMicrosecondArray>()
                     .unwrap()
-                    .with_timezone_opt(None)
-                    .data()
-                    .clone(),
+                    .with_timezone_opt(None::<String>)
+                    .to_data(),
                 arrow_schema::TimeUnit::Nanosecond => array
                     .as_any()
                     .downcast_ref::<TimestampNanosecondArray>()
                     .unwrap()
-                    .with_timezone_opt(None)
-                    .data()
-                    .clone(),
+                    .with_timezone_opt(None::<String>)
+                    .to_data(),
             },
             _ => {
                 unreachable!()
@@ -146,7 +141,7 @@ impl<T: LogicalPrimitiveType> PrimitiveVector<T> {
     }
 
     fn to_array_data(&self) -> ArrayData {
-        self.array.data().clone()
+        self.array.to_data()
     }
 
     fn from_array_data(data: ArrayData) -> Self {
@@ -157,7 +152,7 @@ impl<T: LogicalPrimitiveType> PrimitiveVector<T> {
 
     // To distinguish with `Vector::slice()`.
     fn get_slice(&self, offset: usize, length: usize) -> Self {
-        let data = self.array.data().slice(offset, length);
+        let data = self.array.to_data().slice(offset, length);
         Self::from_array_data(data)
     }
 }
@@ -206,7 +201,7 @@ impl<T: LogicalPrimitiveType> Vector for PrimitiveVector<T> {
     }
 
     fn slice(&self, offset: usize, length: usize) -> VectorRef {
-        let data = self.array.data().slice(offset, length);
+        let data = self.array.to_data().slice(offset, length);
         Arc::new(Self::from_array_data(data))
     }
 

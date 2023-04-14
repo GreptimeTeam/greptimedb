@@ -38,7 +38,7 @@ impl StringVector {
     }
 
     fn to_array_data(&self) -> ArrayData {
-        self.array.data().clone()
+        self.array.to_data()
     }
 
     fn from_array_data(data: ArrayData) -> Self {
@@ -146,7 +146,7 @@ impl Vector for StringVector {
     }
 
     fn slice(&self, offset: usize, length: usize) -> VectorRef {
-        let data = self.array.data().slice(offset, length);
+        let data = self.array.to_data().slice(offset, length);
         Arc::new(Self::from_array_data(data))
     }
 

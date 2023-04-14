@@ -262,7 +262,7 @@ impl Helper {
             | ArrowDataType::LargeList(_)
             | ArrowDataType::FixedSizeList(_, _)
             | ArrowDataType::Struct(_)
-            | ArrowDataType::Union(_, _, _)
+            | ArrowDataType::Union(_, _)
             | ArrowDataType::Dictionary(_, _)
             | ArrowDataType::Decimal128(_, _)
             | ArrowDataType::Decimal256(_, _)
@@ -359,7 +359,7 @@ mod tests {
                 ScalarValue::Int32(Some(1)),
                 ScalarValue::Int32(Some(2)),
             ]),
-            Box::new(Field::new("item", ArrowDataType::Int32, true)),
+            Arc::new(Field::new("item", ArrowDataType::Int32, true)),
         );
         let vector = Helper::try_from_scalar_value(value, 3).unwrap();
         assert_eq!(

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use arrow::datatypes::{DataType as ArrowDataType, Field};
 use serde::{Deserialize, Serialize};
 
@@ -63,7 +65,7 @@ impl DataType for ListType {
     }
 
     fn as_arrow_type(&self) -> ArrowDataType {
-        let field = Box::new(Field::new("item", self.item_type.as_arrow_type(), true));
+        let field = Arc::new(Field::new("item", self.item_type.as_arrow_type(), true));
         ArrowDataType::List(field)
     }
 
@@ -94,7 +96,7 @@ mod tests {
             t.default_value()
         );
         assert_eq!(
-            ArrowDataType::List(Box::new(Field::new("item", ArrowDataType::Boolean, true))),
+            ArrowDataType::List(Arc::new(Field::new("item", ArrowDataType::Boolean, true))),
             t.as_arrow_type()
         );
         assert_eq!(ConcreteDataType::boolean_datatype(), *t.item_type());

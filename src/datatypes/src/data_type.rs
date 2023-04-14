@@ -362,7 +362,7 @@ mod tests {
             ConcreteDataType::String(_)
         ));
         assert_eq!(
-            ConcreteDataType::from_arrow_type(&ArrowDataType::List(Box::new(Field::new(
+            ConcreteDataType::from_arrow_type(&ArrowDataType::List(Arc::new(Field::new(
                 "item",
                 ArrowDataType::Int32,
                 true,

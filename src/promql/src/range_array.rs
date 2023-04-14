@@ -14,6 +14,8 @@
 
 //！An extended "array" based on [DictionaryArray].
 
+use std::sync::Arc;
+
 use datafusion::arrow::buffer::NullBuffer;
 use datafusion::arrow::datatypes::Field;
 use datatypes::arrow::array::{Array, ArrayData, ArrayRef, DictionaryArray, Int64Array};
@@ -123,13 +125,13 @@ impl RangeArray {
             Box::new(values.data_type().clone()),
         ))
         .len(key_array.len())
-        .add_buffer(key_array.data().buffers()[0].clone())
-        .add_child_data(values.data().clone());
-        match key_array.data().nulls() {
-            Some(buffer) if key_array.data().null_count() > 0 => {
+        .add_buffer(key_array.to_data().buffers()[0].clone())
+        .add_child_data(values.to_data());
+        match key_array.to_data().nulls() {
+            Some(buffer) if key_array.to_data().null_count() > 0 => {
                 data = data
                     .nulls(Some(buffer.clone()))
-                    .null_count(key_array.data().null_count());
+                    .null_count(key_array.to_data().null_count());
             }
             _ => data = data.null_count(0),
         }
@@ -217,6 +219,7 @@ impl Array for RangeArray {
         self
     }
 
+    #[allow(deprecated)]
     fn data(&self) -> &ArrayData {
         self.array.data()
     }
@@ -230,7 +233,7 @@ impl Array for RangeArray {
     }
 
     fn slice(&self, offset: usize, length: usize) -> ArrayRef {
-        self.array.slice(offset, length)
+        Arc::new(self.array.slice(offset, length))
     }
 
     fn nulls(&self) -> Option<&NullBuffer> {

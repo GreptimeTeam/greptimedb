@@ -24,7 +24,7 @@ pub type DateVectorBuilder = PrimitiveVectorBuilder<DateType>;
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::Array;
+    use arrow_array::ArrayRef;
     use common_time::date::Date;
 
     use super::*;
@@ -84,7 +84,7 @@ mod tests {
     #[test]
     fn test_date_from_arrow() {
         let vector = DateVector::from_slice([1, 2]);
-        let arrow = vector.as_arrow().slice(0, vector.len());
+        let arrow: ArrayRef = Arc::new(vector.as_arrow().slice(0, vector.len()));
         let vector2 = DateVector::try_from_arrow_array(&arrow).unwrap();
         assert_eq!(vector, vector2);
     }
