@@ -104,15 +104,15 @@ pub(crate) fn linear_regression(
         (sum_x2, comp_x2) = compensated_sum_inc(x * x, sum_x2, comp_x2);
     }
 
+    if count < 2.0 {
+        return (None, None);
+    }
+
     if const_y {
         if !init_y.is_finite() {
             return (None, None);
         }
         return (Some(0.0), Some(init_y));
-    }
-
-    if count < 2.0 {
-        return (None, None);
     }
 
     sum_x += comp_x;
@@ -193,7 +193,7 @@ mod test {
     }
 
     #[test]
-    fn calculate_linear_regression_value_is_none() {
+    fn calculate_linear_regression_value_have_none() {
         let ts_array = TimestampMillisecondArray::from_iter(
             [
                 0i64, 300, 600, 900, 1200, 1350, 1500, 1800, 2100, 2400, 2550, 2700, 3000,
@@ -224,9 +224,9 @@ mod test {
     }
 
     #[test]
-    fn calculate_linear_regression_length_less_two() {
+    fn calculate_linear_regression_value_all_none() {
         let ts_array = TimestampMillisecondArray::from_iter([0i64, 300, 600].into_iter().map(Some));
-        let values_array: Float64Array = [None, Some(10.0), None].into_iter().collect();
+        let values_array: Float64Array = [None, None, None].into_iter().collect();
         let (slope, intercept) = linear_regression(&ts_array, &values_array, ts_array.value(0));
         assert_eq!(slope, None);
         assert_eq!(intercept, None);
