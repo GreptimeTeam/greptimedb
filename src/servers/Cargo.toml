@@ -81,7 +81,7 @@ axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", br
 client = { path = "../client" }
 common-base = { path = "../common/base" }
 common-test-util = { path = "../common/test-util" }
-mysql_async = { version = "0.32", default-features = false, features = [
+mysql_async = { git = "https://github.com/blackbeam/mysql_async.git", rev = "32c6f2a986789f97108502c2d0c755a089411b66", default-features = false, features = [
     "default-rustls",
 ] }
 rand.workspace = true
@@ -90,5 +90,5 @@ script = { path = "../script", features = ["python"] }
 serde_json = "1.0"
 table = { path = "../table" }
 tokio-postgres = "0.7"
-tokio-postgres-rustls = { git = "https://github.com/sunng87/tokio-postgres-rustls.git", branch = "patch-1" }
+tokio-postgres-rustls = "0.10"
 tokio-test = "0.4"
