@@ -25,10 +25,9 @@ use query::query_engine::SqlStatementExecutor;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
 use sql::ast::ObjectName;
-use sql::statements::copy::{CopyTable, CopyTableArgument};
 use sql::statements::statement::Statement;
 use table::engine::TableReference;
-use table::requests::{CopyDirection, CopyTableRequest, CreateDatabaseRequest, DropTableRequest};
+use table::requests::{CreateDatabaseRequest, DropTableRequest};
 
 use crate::error::{
     self, BumpTableIdSnafu, ExecuteSqlSnafu, ExecuteStatementSnafu, NotSupportSqlSnafu,
@@ -103,54 +102,6 @@ impl Instance {
                 };
                 self.sql_handler
                     .execute(SqlRequest::DropTable(req), query_ctx)
-                    .await
-            }
-            Statement::Copy(copy_table) => {
-                let req = match copy_table {
-                    CopyTable::To(copy_table) => {
-                        let CopyTableArgument {
-                            location,
-                            connection,
-                            pattern,
-                            table_name,
-                            ..
-                        } = copy_table;
-                        let (catalog_name, schema_name, table_name) =
-                            table_idents_to_full_name(&table_name, query_ctx.clone())?;
-                        CopyTableRequest {
-                            catalog_name,
-                            schema_name,
-                            table_name,
-                            location,
-                            connection,
-                            pattern,
-                            direction: CopyDirection::Export,
-                        }
-                    }
-                    CopyTable::From(copy_table) => {
-                        let CopyTableArgument {
-                            location,
-                            connection,
-                            pattern,
-                            table_name,
-                            ..
-                        } = copy_table;
-                        let (catalog_name, schema_name, table_name) =
-                            table_idents_to_full_name(&table_name, query_ctx.clone())?;
-                        CopyTableRequest {
-                            catalog_name,
-                            schema_name,
-                            table_name,
-                            location,
-                            connection,
-                            pattern,
-                            direction: CopyDirection::Import,
-                        }
-                    }
-                };
-
-                self.sql_handler
-                    .execute(SqlRequest::CopyTable(req), query_ctx)
                     .await
             }
             _ => NotSupportSqlSnafu {

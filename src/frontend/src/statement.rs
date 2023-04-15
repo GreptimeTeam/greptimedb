@@ -12,23 +12,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod copy_table_from;
+mod copy_table_to;
 mod describe;
 mod show;
 mod tql;
 
 use catalog::CatalogManagerRef;
+use common_error::prelude::BoxedError;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
+use datanode::instance::sql::table_idents_to_full_name;
 use query::parser::QueryStatement;
 use query::query_engine::SqlStatementExecutorRef;
 use query::QueryEngineRef;
 use session::context::QueryContextRef;
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
+use sql::statements::copy::{CopyTable, CopyTableArgument};
 use sql::statements::statement::Statement;
+use table::engine::TableReference;
+use table::requests::{CopyDirection, CopyTableRequest};
+use table::TableRef;
 
 use crate::error::{
-    CatalogSnafu, ExecLogicalPlanSnafu, ExecuteStatementSnafu, PlanStatementSnafu, Result,
-    SchemaNotFoundSnafu,
+    CatalogSnafu, ExecLogicalPlanSnafu, ExecuteStatementSnafu, ExternalSnafu, PlanStatementSnafu,
+    Result, SchemaNotFoundSnafu, TableNotFoundSnafu,
 };
 
 #[derive(Clone)]
@@ -84,13 +92,20 @@ impl StatementExecutor {
 
             Statement::ShowTables(stmt) => self.show_tables(stmt, query_ctx),
 
+            Statement::Copy(stmt) => {
+                let req = to_copy_table_request(stmt, query_ctx)?;
+                match req.direction {
+                    CopyDirection::Export => self.copy_table_to(req).await,
+                    CopyDirection::Import => self.copy_table_from(req).await,
+                }
+            }
+
             Statement::CreateDatabase(_)
             | Statement::CreateTable(_)
             | Statement::CreateExternalTable(_)
             | Statement::Insert(_)
             | Statement::Alter(_)
             | Statement::DropTable(_)
-            | Statement::Copy(_)
             | Statement::ShowCreateTable(_) => self
                 .sql_stmt_executor
                 .execute_sql(stmt, query_ctx)
@@ -99,11 +114,7 @@ impl StatementExecutor {
         }
     }
 
-    pub(crate) async fn plan_exec(
-        &self,
-        stmt: QueryStatement,
-        query_ctx: QueryContextRef,
-    ) -> Result<Output> {
+    async fn plan_exec(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<Output> {
         let planner = self.query_engine.planner();
         let plan = planner
             .plan(stmt, query_ctx.clone())
@@ -129,4 +140,50 @@ impl StatementExecutor {
 
         Ok(Output::RecordBatches(RecordBatches::empty()))
     }
+
+    async fn get_table(&self, table_ref: &TableReference<'_>) -> Result<TableRef> {
+        let TableReference {
+            catalog,
+            schema,
+            table,
+        } = table_ref;
+        self.catalog_manager
+            .table(catalog, schema, table)
+            .await
+            .context(CatalogSnafu)?
+            .with_context(|| TableNotFoundSnafu {
+                table_name: table_ref.to_string(),
+            })
+    }
+}
+
+fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<CopyTableRequest> {
+    let direction = match stmt {
+        CopyTable::To(_) => CopyDirection::Export,
+        CopyTable::From(_) => CopyDirection::Import,
+    };
+
+    let CopyTableArgument {
+        location,
+        connection,
+        pattern,
+        table_name,
+        ..
+    } = match stmt {
+        CopyTable::To(arg) => arg,
+        CopyTable::From(arg) => arg,
+    };
+    let (catalog_name, schema_name, table_name) = table_idents_to_full_name(&table_name, query_ctx)
+        .map_err(BoxedError::new)
+        .context(ExternalSnafu)?;
+
+    Ok(CopyTableRequest {
+        catalog_name,
+        schema_name,
+        table_name,
+        location,
+        connection,
+        pattern,
+        direction,
+    })
 }

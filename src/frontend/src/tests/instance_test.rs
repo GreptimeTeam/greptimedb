@@ -765,7 +765,7 @@ async fn test_delete(instance: Arc<dyn MockInstance>) {
     check_output_stream(output, expect).await;
 }
 
-#[apply(standalone_instance_case)]
+#[apply(both_instances_cases)]
 async fn test_execute_copy_to_s3(instance: Arc<dyn MockInstance>) {
     if let Ok(bucket) = env::var("GT_S3_BUCKET") {
         if !bucket.is_empty() {
@@ -803,7 +803,7 @@ async fn test_execute_copy_to_s3(instance: Arc<dyn MockInstance>) {
     }
 }
 
-#[apply(standalone_instance_case)]
+#[apply(both_instances_cases)]
 async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
     logging::init_default_ut_logging();
     if let Ok(bucket) = env::var("GT_S3_BUCKET") {
