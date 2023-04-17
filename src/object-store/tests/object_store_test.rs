@@ -16,7 +16,7 @@ use std::env;
 use std::sync::Arc;
 
 use anyhow::Result;
-use common_telemetry::logging;
+use common_telemetry::{logging, metric};
 use common_test_util::temp_dir::create_temp_dir;
 use object_store::cache_policy::LruCacheLayer;
 use object_store::services::{Fs, S3};
@@ -185,6 +185,7 @@ async fn assert_cache_files(
 #[tokio::test]
 async fn test_object_store_cache_policy() -> Result<()> {
     common_telemetry::init_default_ut_logging();
+    common_telemetry::init_default_metrics_recorder();
     // create file storage
     let root_dir = create_temp_dir("test_fs_backend");
     let store = OperatorBuilder::new(
@@ -257,6 +258,15 @@ async fn test_object_store_cache_policy() -> Result<()> {
         &["Hello, object1!", "Hello, object3!", "Hello"],
     )
     .await?;
+
+    let handle = metric::try_handle().unwrap();
+    let metric_text = handle.render();
+
+    assert!(metric_text.contains("lru_cache_hit{lru_cache_name=\"test_file1\""));
+    assert!(metric_text.contains("lru_cache_hit{lru_cache_name=\"test_file2\""));
+    assert!(metric_text.contains("lru_cache_miss{lru_cache_name=\"test_file1\""));
+    assert!(metric_text.contains("lru_cache_miss{lru_cache_name=\"test_file2\""));
+    assert!(metric_text.contains("lru_cache_miss{lru_cache_name=\"test_file3\""));
 
     Ok(())
 }
