@@ -4226,9 +4226,8 @@ dependencies = [
 
 [[package]]
 name = "metrics-exporter-prometheus"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8603921e1f54ef386189335f288441af761e0fc61bcb552168d9cedfe63ebc70"
+version = "0.11.1"
+source = "git+https://github.com/GreptimeTeam/metrics.git?rev=174de287e9f7f9f57c0272be56c95df156489476#174de287e9f7f9f57c0272be56c95df156489476"
 dependencies = [
  "indexmap",
  "metrics",

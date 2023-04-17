@@ -13,12 +13,12 @@
 // limitations under the License.
 
 //! client metrics
-pub const METRIC_CREATE_TABLE: &str = "create.table";
-pub const METRIC_PROMQL_RANGE_QUERY: &str = "promql.range.query";
-pub const METRIC_INSERT: &str = "insert";
-pub const METRIC_SQL: &str = "sql";
-pub const METRIC_LOGICAL_PLAN: &str = "logical.plan";
-pub const METRIC_ALTER: &str = "alter";
-pub const METRIC_DROP_TABLE: &str = "drop.table";
-pub const METRIC_FLUSH_TABLE: &str = "flush.table";
-pub const METRIC_GRPC_DO_GET: &str = "grpc.do.get";
+pub const METRIC_GRPC_CREATE_TABLE: &str = "grpc.create_table";
+pub const METRIC_GRPC_PROMQL_RANGE_QUERY: &str = "grpc.promql.range_query";
+pub const METRIC_GRPC_INSERT: &str = "grpc.insert";
+pub const METRIC_GRPC_SQL: &str = "grpc.sql";
+pub const METRIC_GRPC_LOGICAL_PLAN: &str = "grpc.logical_plan";
+pub const METRIC_GRPC_ALTER: &str = "grpc.alter";
+pub const METRIC_GRPC_DROP_TABLE: &str = "grpc.drop_table";
+pub const METRIC_GRPC_FLUSH_TABLE: &str = "grpc.flush_table";
+pub const METRIC_GRPC_DO_GET: &str = "grpc.do_get";

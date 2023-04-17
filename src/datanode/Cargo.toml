@@ -38,7 +38,7 @@ log = "0.4"
 log-store = { path = "../log-store" }
 meta-client = { path = "../meta-client" }
 meta-srv = { path = "../meta-srv", features = ["mock"] }
-metrics = "0.20"
+metrics.workspace = true
 mito = { path = "../mito", features = ["test"] }
 object-store = { path = "../object-store" }
 pin-project = "1.0"

@@ -32,7 +32,9 @@ pub fn init_default_metrics_recorder() {
 
 /// Init prometheus recorder.
 fn init_prometheus_recorder() {
-    let recorder = PrometheusBuilder::new().build_recorder();
+    let recorder = PrometheusBuilder::new()
+        .add_global_prefix("greptime".to_string())
+        .build_recorder();
     let mut h = PROMETHEUS_HANDLE.as_ref().write().unwrap();
     *h = Some(recorder.handle());
     // TODO(LFC): separate metrics for testing and metrics for production
@@ -78,7 +80,7 @@ impl Timer {
             name,
             labels: labels
                 .iter()
-                .map(|(k, v)| (k.to_owned().into(), v.to_owned().into()))
+                .map(|(k, v)| (k.clone().into(), v.clone().into()))
                 .collect::<Vec<_>>(),
         }
     }
