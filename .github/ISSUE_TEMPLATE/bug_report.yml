@@ -81,6 +81,5 @@ body:
         Please walk us through and provide steps and details on how
         to reproduce the issue. If possible, provide scripts that we
         can run to trigger the bug.
-      render: bash
     validations:
       required: true
