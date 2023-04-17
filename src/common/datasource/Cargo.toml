@@ -16,9 +16,11 @@ async-compression = { version = "0.3", features = [
     "tokio",
 ] }
 async-trait.workspace = true
+bytes = "1.1"
 common-error = { path = "../error" }
 common-runtime = { path = "../runtime" }
 datafusion.workspace = true
+derive_builder = "0.12"
 futures.workspace = true
 object-store = { path = "../../object-store" }
 regex = "1.7"

@@ -14,17 +14,21 @@
 
 use std::sync::Arc;
 
+use arrow::csv;
 use arrow::csv::reader::infer_reader_schema as infer_csv_schema;
 use arrow_schema::SchemaRef;
 use async_trait::async_trait;
 use common_runtime;
+use datafusion::error::Result as DataFusionResult;
+use datafusion::physical_plan::file_format::{FileMeta, FileOpenFuture, FileOpener};
+use derive_builder::Builder;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 use tokio_util::io::SyncIoBridge;
 
 use crate::compression::CompressionType;
 use crate::error::{self, Result};
-use crate::file_format::{self, FileFormat};
+use crate::file_format::{self, open_with_decoder, FileFormat};
 
 #[derive(Debug)]
 pub struct CsvFormat {
@@ -42,6 +46,67 @@ impl Default for CsvFormat {
             schema_infer_max_record: Some(file_format::DEFAULT_SCHEMA_INFER_MAX_RECORD),
             compression_type: CompressionType::UNCOMPRESSED,
         }
+    }
+}
+
+#[derive(Debug, Clone, Builder)]
+pub struct CsvConfig {
+    batch_size: usize,
+    file_schema: SchemaRef,
+    #[builder(default = "None")]
+    file_projection: Option<Vec<usize>>,
+    #[builder(default = "true")]
+    has_header: bool,
+    #[builder(default = "b','")]
+    delimiter: u8,
+}
+
+impl CsvConfig {
+    fn builder(&self) -> csv::ReaderBuilder {
+        let mut builder = csv::ReaderBuilder::new()
+            .with_schema(self.file_schema.clone())
+            .with_delimiter(self.delimiter)
+            .with_batch_size(self.batch_size)
+            .has_header(self.has_header);
+
+        if let Some(proj) = &self.file_projection {
+            builder = builder.with_projection(proj.clone());
+        }
+
+        builder
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CsvOpener {
+    config: Arc<CsvConfig>,
+    object_store: Arc<ObjectStore>,
+    compression_type: CompressionType,
+}
+
+impl CsvOpener {
+    /// Return a new [`CsvOpener`]. The caller must ensure [`CsvConfig`].file_schema must correspond to the opening file.
+    pub fn new(
+        config: CsvConfig,
+        object_store: ObjectStore,
+        compression_type: CompressionType,
+    ) -> Self {
+        CsvOpener {
+            config: Arc::new(config),
+            object_store: Arc::new(object_store),
+            compression_type,
+        }
+    }
+}
+
+impl FileOpener for CsvOpener {
+    fn open(&self, meta: FileMeta) -> DataFusionResult<FileOpenFuture> {
+        open_with_decoder(
+            self.object_store.clone(),
+            meta.location().to_string(),
+            self.compression_type,
+            || Ok(self.config.builder().build_decoder()),
+        )
     }
 }
 

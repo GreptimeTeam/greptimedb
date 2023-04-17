@@ -17,15 +17,18 @@ use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
 use arrow::json::reader::{infer_json_schema_from_iterator, ValueIter};
+use arrow::json::RawReaderBuilder;
 use async_trait::async_trait;
 use common_runtime;
+use datafusion::error::{DataFusionError, Result as DataFusionResult};
+use datafusion::physical_plan::file_format::{FileMeta, FileOpenFuture, FileOpener};
 use object_store::ObjectStore;
 use snafu::ResultExt;
 use tokio_util::io::SyncIoBridge;
 
 use crate::compression::CompressionType;
 use crate::error::{self, Result};
-use crate::file_format::{self, FileFormat};
+use crate::file_format::{self, open_with_decoder, FileFormat};
 
 #[derive(Debug)]
 pub struct JsonFormat {
@@ -66,6 +69,47 @@ impl FileFormat for JsonFormat {
         })
         .await
         .context(error::JoinHandleSnafu)?
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct JsonOpener {
+    batch_size: usize,
+    projected_schema: SchemaRef,
+    object_store: Arc<ObjectStore>,
+    compression_type: CompressionType,
+}
+
+impl JsonOpener {
+    /// Return a new [`JsonOpener`]. Any fields not present in `projected_schema` will be ignored.
+    pub fn new(
+        batch_size: usize,
+        projected_schema: SchemaRef,
+        object_store: ObjectStore,
+        compression_type: CompressionType,
+    ) -> Self {
+        Self {
+            batch_size,
+            projected_schema,
+            object_store: Arc::new(object_store),
+            compression_type,
+        }
+    }
+}
+
+impl FileOpener for JsonOpener {
+    fn open(&self, meta: FileMeta) -> DataFusionResult<FileOpenFuture> {
+        open_with_decoder(
+            self.object_store.clone(),
+            meta.location().to_string(),
+            self.compression_type,
+            || {
+                RawReaderBuilder::new(self.projected_schema.clone())
+                    .with_batch_size(self.batch_size)
+                    .build_decoder()
+                    .map_err(DataFusionError::from)
+            },
+        )
     }
 }
 

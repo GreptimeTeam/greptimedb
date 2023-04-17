@@ -13,10 +13,14 @@
 // limitations under the License.
 
 use std::fmt::Display;
+use std::io;
 use std::str::FromStr;
 
 use async_compression::tokio::bufread::{BzDecoder, GzipDecoder, XzDecoder, ZstdDecoder};
+use bytes::Bytes;
+use futures::Stream;
 use tokio::io::{AsyncRead, BufReader};
+use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::error::{self, Error, Result};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -78,6 +82,27 @@ impl CompressionType {
             CompressionType::BZIP2 => Box::new(BzDecoder::new(BufReader::new(s))),
             CompressionType::XZ => Box::new(XzDecoder::new(BufReader::new(s))),
             CompressionType::ZSTD => Box::new(ZstdDecoder::new(BufReader::new(s))),
+            CompressionType::UNCOMPRESSED => Box::new(s),
+        }
+    }
+
+    pub fn convert_stream<T: Stream<Item = io::Result<Bytes>> + Unpin + Send + 'static>(
+        &self,
+        s: T,
+    ) -> Box<dyn Stream<Item = io::Result<Bytes>> + Send + Unpin> {
+        match self {
+            CompressionType::GZIP => {
+                Box::new(ReaderStream::new(GzipDecoder::new(StreamReader::new(s))))
+            }
+            CompressionType::BZIP2 => {
+                Box::new(ReaderStream::new(BzDecoder::new(StreamReader::new(s))))
+            }
+            CompressionType::XZ => {
+                Box::new(ReaderStream::new(XzDecoder::new(StreamReader::new(s))))
+            }
+            CompressionType::ZSTD => {
+                Box::new(ReaderStream::new(ZstdDecoder::new(StreamReader::new(s))))
+            }
             CompressionType::UNCOMPRESSED => Box::new(s),
         }
     }
