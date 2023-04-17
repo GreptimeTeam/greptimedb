@@ -112,3 +112,50 @@ impl SqlHandler {
         Ok(Output::AffectedRows(1))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use query::parser::{QueryLanguageParser, QueryStatement};
+    use query::query_engine::SqlStatementExecutor;
+    use session::context::QueryContext;
+
+    use super::*;
+    use crate::tests::test_util::MockInstance;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_drop_table_by_procedure() {
+        let instance = MockInstance::with_procedure_enabled("alter_table_by_procedure").await;
+
+        // Create table first.
+        let sql = r#"create table test_drop(
+                            host string,
+                            ts timestamp,
+                            cpu double default 0,
+                            TIME INDEX (ts),
+                            PRIMARY KEY(host)
+                        ) engine=mito with(regions=1);"#;
+        let stmt = match QueryLanguageParser::parse_sql(sql).unwrap() {
+            QueryStatement::Sql(sql) => sql,
+            _ => unreachable!(),
+        };
+        let output = instance
+            .inner()
+            .execute_sql(stmt, QueryContext::arc())
+            .await
+            .unwrap();
+        assert!(matches!(output, Output::AffectedRows(0)));
+
+        // Drop table.
+        let sql = r#"drop table test_drop"#;
+        let stmt = match QueryLanguageParser::parse_sql(sql).unwrap() {
+            QueryStatement::Sql(sql) => sql,
+            _ => unreachable!(),
+        };
+        let output = instance
+            .inner()
+            .execute_sql(stmt, QueryContext::arc())
+            .await
+            .unwrap();
+        assert!(matches!(output, Output::AffectedRows(1)));
+    }
+}
