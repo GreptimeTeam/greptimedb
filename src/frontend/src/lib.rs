@@ -24,6 +24,7 @@ pub mod grpc;
 pub mod influxdb;
 pub mod instance;
 pub(crate) mod metric;
+mod metrics;
 pub mod mysql;
 pub mod opentsdb;
 pub mod postgres;
@@ -31,6 +32,7 @@ pub mod prom;
 pub mod prometheus;
 mod script;
 mod server;
+pub(crate) mod statement;
 mod table;
 #[cfg(test)]
 mod tests;

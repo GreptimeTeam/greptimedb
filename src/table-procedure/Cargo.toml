@@ -17,6 +17,7 @@ snafu.workspace = true
 table = { path = "../table" }
 
 [dev-dependencies]
+common-catalog = { path = "../common/catalog" }
 common-test-util = { path = "../common/test-util" }
 log-store = { path = "../log-store" }
 mito = { path = "../mito" }

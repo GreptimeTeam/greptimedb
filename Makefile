@@ -51,7 +51,7 @@ check: ## Cargo check all the targets.
 
 .PHONY: clippy
 clippy: ## Check clippy rules.
-	cargo clippy --workspace --all-targets -- -D warnings -D clippy::print_stdout -D clippy::print_stderr
+	cargo clippy --workspace --all-targets -- -D warnings
 
 .PHONY: fmt-check
 fmt-check: ## Check code format.

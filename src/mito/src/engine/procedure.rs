@@ -14,12 +14,14 @@
 
 mod alter;
 mod create;
+mod drop;
 
 use std::sync::Arc;
 
 pub(crate) use alter::AlterMitoTable;
 use common_procedure::ProcedureManager;
 pub(crate) use create::CreateMitoTable;
+pub(crate) use drop::DropMitoTable;
 use store_api::storage::StorageEngine;
 
 use crate::engine::MitoEngineInner;
@@ -34,7 +36,8 @@ pub(crate) fn register_procedure_loaders<S: StorageEngine>(
 ) {
     // The procedure names are expected to be unique, so we just panic on error.
     CreateMitoTable::register_loader(engine_inner.clone(), procedure_manager);
-    AlterMitoTable::register_loader(engine_inner, procedure_manager);
+    AlterMitoTable::register_loader(engine_inner.clone(), procedure_manager);
+    DropMitoTable::register_loader(engine_inner, procedure_manager);
 }
 
 #[cfg(test)]

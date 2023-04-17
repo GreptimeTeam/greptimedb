@@ -15,6 +15,7 @@
 use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
+use std::sync::Arc;
 
 use arrow::datatypes::{DataType as ArrowDataType, Field};
 use common_base::bytes::{Bytes, StringBytes};
@@ -271,7 +272,7 @@ fn to_null_value(output_type: &ConcreteDataType) -> ScalarValue {
         ConcreteDataType::DateTime(_) => ScalarValue::Date64(None),
         ConcreteDataType::Timestamp(t) => timestamp_to_scalar_value(t.unit(), None),
         ConcreteDataType::List(_) => {
-            ScalarValue::List(None, Box::new(new_item_field(output_type.as_arrow_type())))
+            ScalarValue::List(None, Arc::new(new_item_field(output_type.as_arrow_type())))
         }
         ConcreteDataType::Dictionary(dict) => ScalarValue::Dictionary(
             Box::new(dict.key_type().as_arrow_type()),
@@ -490,7 +491,7 @@ impl ListValue {
 
         Ok(ScalarValue::List(
             vs,
-            Box::new(new_item_field(output_type.item_type().as_arrow_type())),
+            Arc::new(new_item_field(output_type.item_type().as_arrow_type())),
         ))
     }
 }

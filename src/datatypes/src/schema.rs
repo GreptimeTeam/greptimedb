@@ -272,7 +272,7 @@ impl TryFrom<Arc<ArrowSchema>> for Schema {
         let mut column_schemas = Vec::with_capacity(arrow_schema.fields.len());
         let mut name_to_index = HashMap::with_capacity(arrow_schema.fields.len());
         for field in &arrow_schema.fields {
-            let column_schema = ColumnSchema::try_from(field)?;
+            let column_schema = ColumnSchema::try_from(field.as_ref())?;
             name_to_index.insert(field.name().to_string(), column_schemas.len());
             column_schemas.push(column_schema);
         }

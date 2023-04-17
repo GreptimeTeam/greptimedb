@@ -673,9 +673,9 @@ mod tests {
         let batch_get: BatchGet = req.try_into().unwrap();
         let keys = batch_get.keys;
 
-        assert_eq!(b"k1".to_vec(), keys.get(0).unwrap().to_vec());
-        assert_eq!(b"k2".to_vec(), keys.get(1).unwrap().to_vec());
-        assert_eq!(b"k3".to_vec(), keys.get(2).unwrap().to_vec());
+        assert_eq!(b"k1".to_vec(), keys.get(0).unwrap().clone());
+        assert_eq!(b"k2".to_vec(), keys.get(1).unwrap().clone());
+        assert_eq!(b"k3".to_vec(), keys.get(2).unwrap().clone());
     }
 
     #[test]
@@ -707,9 +707,9 @@ mod tests {
         let batch_delete: BatchDelete = req.try_into().unwrap();
 
         assert_eq!(batch_delete.keys.len(), 3);
-        assert_eq!(b"k1".to_vec(), batch_delete.keys.get(0).unwrap().to_vec());
-        assert_eq!(b"k2".to_vec(), batch_delete.keys.get(1).unwrap().to_vec());
-        assert_eq!(b"k3".to_vec(), batch_delete.keys.get(2).unwrap().to_vec());
+        assert_eq!(b"k1".to_vec(), batch_delete.keys.get(0).unwrap().clone());
+        assert_eq!(b"k2".to_vec(), batch_delete.keys.get(1).unwrap().clone());
+        assert_eq!(b"k3".to_vec(), batch_delete.keys.get(2).unwrap().clone());
         assert!(batch_delete.options.is_some());
     }
 

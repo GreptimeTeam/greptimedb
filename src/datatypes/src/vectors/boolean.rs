@@ -44,7 +44,7 @@ impl BooleanVector {
     }
 
     fn to_array_data(&self) -> ArrayData {
-        self.array.data().clone()
+        self.array.to_data()
     }
 
     fn from_array_data(data: ArrayData) -> BooleanVector {
@@ -132,7 +132,7 @@ impl Vector for BooleanVector {
     }
 
     fn slice(&self, offset: usize, length: usize) -> VectorRef {
-        let data = self.array.data().slice(offset, length);
+        let data = self.array.to_data().slice(offset, length);
         Arc::new(Self::from_array_data(data))
     }
 
@@ -259,7 +259,7 @@ mod tests {
         assert!(!v.is_const());
         assert!(v.validity().is_all_valid());
         assert!(!v.only_null());
-        assert_eq!(64, v.memory_size());
+        assert_eq!(2, v.memory_size());
 
         for (i, b) in bools.iter().enumerate() {
             assert!(!v.is_null(i));

@@ -28,7 +28,7 @@ use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::physical_plan::planner::DefaultPhysicalPlanner;
 use datafusion::physical_plan::{ExecutionPlan, PhysicalPlanner};
 use datafusion_expr::LogicalPlan as DfLogicalPlan;
-use datafusion_optimizer::optimizer::Optimizer;
+use datafusion_optimizer::analyzer::Analyzer;
 use promql::extension_plan::PromExtensionPlanner;
 
 use crate::datafusion::DfCatalogListAdapter;
@@ -58,16 +58,16 @@ impl QueryEngineState {
     pub fn new(catalog_list: CatalogListRef, plugins: Arc<Plugins>) -> Self {
         let runtime_env = Arc::new(RuntimeEnv::default());
         let session_config = SessionConfig::new().with_create_default_catalog_and_schema(false);
-        let mut optimizer = Optimizer::new();
         // Apply the type conversion rule first.
-        optimizer.rules.insert(0, Arc::new(TypeConversionRule {}));
+        let mut analyzer = Analyzer::new();
+        analyzer.rules.insert(0, Arc::new(TypeConversionRule));
 
         let session_state = SessionState::with_config_rt_and_catalog_list(
             session_config,
             runtime_env,
             Arc::new(DfCatalogListAdapter::new(catalog_list.clone())),
         )
-        .with_optimizer_rules(optimizer.rules)
+        .with_analyzer_rules(analyzer.rules)
         .with_query_planner(Arc::new(DfQueryPlanner::new()));
 
         let df_context = SessionContext::with_state(session_state);

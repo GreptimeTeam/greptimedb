@@ -236,7 +236,7 @@ mod tests {
             (
                 DataType::Timestamp(
                     datatypes::arrow::datatypes::TimeUnit::Second,
-                    Some("UTC".to_string()),
+                    Some("UTC".into()),
                 ),
                 true,
             ),
@@ -251,14 +251,14 @@ mod tests {
             (
                 DataType::Timestamp(
                     datatypes::arrow::datatypes::TimeUnit::Second,
-                    Some("UTC".to_string()),
+                    Some("UTC".into()),
                 ),
                 true,
             ),
             (
                 DataType::Timestamp(
                     datatypes::arrow::datatypes::TimeUnit::Second,
-                    Some("PDT".to_string()),
+                    Some("PDT".into()),
                 ),
                 true,
             ),
@@ -269,14 +269,14 @@ mod tests {
             (
                 DataType::Timestamp(
                     datatypes::arrow::datatypes::TimeUnit::Second,
-                    Some("UTC".to_string()),
+                    Some("UTC".into()),
                 ),
                 true,
             ),
             (
                 DataType::Timestamp(
                     datatypes::arrow::datatypes::TimeUnit::Millisecond,
-                    Some("UTC".to_string()),
+                    Some("UTC".into()),
                 ),
                 true,
             ),

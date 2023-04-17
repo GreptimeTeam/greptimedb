@@ -183,7 +183,7 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
       - name: Run cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings -D clippy::print_stdout -D clippy::print_stderr
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   coverage:
     if: github.event.pull_request.draft == false

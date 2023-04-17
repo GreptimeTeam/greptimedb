@@ -212,7 +212,7 @@ fn build_calc_fn(
             fn calc(input: &[ColumnarValue]) -> Result<ColumnarValue, DataFusionError> {
                 assert_eq!(input.len(), #num_params);
 
-                #( let #range_array_names = RangeArray::try_new(extract_array(&input[#param_numbers])?.data().clone().into())?; )*
+                #( let #range_array_names = RangeArray::try_new(extract_array(&input[#param_numbers])?.to_data().into())?; )*
 
                 // TODO(ruihang): add ensure!() 
 

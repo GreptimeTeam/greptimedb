@@ -46,7 +46,7 @@ impl NullVector {
     }
 
     fn to_array_data(&self) -> ArrayData {
-        self.array.data().clone()
+        self.array.to_data()
     }
 }
 

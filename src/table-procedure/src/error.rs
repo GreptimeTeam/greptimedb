@@ -51,11 +51,17 @@ pub enum Error {
     #[snafu(display("Schema {} not found", name))]
     SchemaNotFound { name: String },
 
+    #[snafu(display("Table {} not found", name))]
+    TableNotFound { name: String },
+
     #[snafu(display("Subprocedure {} failed", subprocedure_id))]
     SubprocedureFailed {
         subprocedure_id: ProcedureId,
         location: Location,
     },
+
+    #[snafu(display("Table {} already exists", name))]
+    TableExists { name: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -70,7 +76,10 @@ impl ErrorExt for Error {
             }
             InvalidRawSchema { source, .. } => source.status_code(),
             AccessCatalog { source } => source.status_code(),
-            CatalogNotFound { .. } | SchemaNotFound { .. } => StatusCode::InvalidArguments,
+            CatalogNotFound { .. } | SchemaNotFound { .. } | TableExists { .. } => {
+                StatusCode::InvalidArguments
+            }
+            TableNotFound { .. } => StatusCode::TableNotFound,
         }
     }
 

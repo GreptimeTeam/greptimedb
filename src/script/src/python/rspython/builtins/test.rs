@@ -73,7 +73,7 @@ fn convert_scalar_to_py_obj_and_back() {
                 ScalarValue::Int64(Some(1)),
                 ScalarValue::Int64(Some(2)),
             ]),
-            Box::new(Field::new("item", ArrowDataType::Int64, false)),
+            Arc::new(Field::new("item", ArrowDataType::Int64, false)),
         ));
         let to = try_into_py_obj(col, vm).unwrap();
         let back = try_into_columnar_value(to, vm).unwrap();

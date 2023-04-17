@@ -188,17 +188,21 @@ impl<S: LogStore> RegionImpl<S> {
         store_config: StoreConfig<S>,
     ) -> Result<RegionImpl<S>> {
         let metadata = Arc::new(metadata);
+
         // Try to persist region data to manifest, ensure the new region could be recovered from
         // the manifest.
-        let manifest_version = store_config
-            .manifest
-            .update(RegionMetaActionList::with_action(RegionMetaAction::Change(
-                RegionChange {
-                    metadata: metadata.as_ref().into(),
-                    committed_sequence: INIT_COMMITTED_SEQUENCE,
-                },
-            )))
-            .await?;
+        let manifest_version = {
+            let _timer = common_telemetry::timer!(crate::metrics::CREATE_REGION_UPDATE_MANIFEST);
+            store_config
+                .manifest
+                .update(RegionMetaActionList::with_action(RegionMetaAction::Change(
+                    RegionChange {
+                        metadata: metadata.as_ref().into(),
+                        committed_sequence: INIT_COMMITTED_SEQUENCE,
+                    },
+                )))
+                .await?
+        };
 
         let mutable_memtable = store_config
             .memtable_builder

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use api::v1::meta::{BatchPutRequest, HeartbeatRequest, KeyValue};
-use common_telemetry::{info, warn};
+use common_telemetry::{trace, warn};
 use common_time::util as time_util;
 use tokio::sync::mpsc::{self, Sender};
 
@@ -76,7 +76,7 @@ impl HeartbeatHandler for KeepLeaseHandler {
                 node_addr: peer.addr.clone(),
             };
 
-            info!("Receive a heartbeat: {key:?}, {value:?}");
+            trace!("Receive a heartbeat: {key:?}, {value:?}");
 
             let key = key.try_into()?;
             let value = value.try_into()?;

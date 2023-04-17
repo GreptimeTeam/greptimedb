@@ -25,6 +25,7 @@ mod tests {
     use std::sync::Arc;
 
     use arrow::array::{Array, PrimitiveArray};
+    use arrow_array::ArrayRef;
     use common_time::DateTime;
     use datafusion_common::from_slice::FromSlice;
 
@@ -108,8 +109,8 @@ mod tests {
     #[test]
     fn test_datetime_from_arrow() {
         let vector = DateTimeVector::from_wrapper_slice([DateTime::new(1), DateTime::new(2)]);
-        let arrow = vector.as_arrow().slice(0, vector.len());
-        let vector2 = DateTimeVector::try_from_arrow_array(&arrow).unwrap();
+        let arrow: ArrayRef = Arc::new(vector.as_arrow().slice(0, vector.len())) as _;
+        let vector2 = DateTimeVector::try_from_arrow_array(arrow).unwrap();
         assert_eq!(vector, vector2);
     }
 }

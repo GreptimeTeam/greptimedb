@@ -128,10 +128,10 @@ fn convert_record_batch(record_batch: RecordBatch) -> (Vec<Column>, u32) {
         let (values, datatype) = build_values(array);
 
         let column = Column {
-            column_name: field.name().to_owned(),
+            column_name: field.name().clone(),
             values: Some(values),
             null_mask: array
-                .data()
+                .to_data()
                 .nulls()
                 .map(|bitmap| bitmap.buffer().as_slice().to_vec())
                 .unwrap_or_default(),
@@ -225,7 +225,7 @@ fn build_values(column: &ArrayRef) -> (Values, ColumnDataType) {
         | DataType::FixedSizeList(_, _)
         | DataType::LargeList(_)
         | DataType::Struct(_)
-        | DataType::Union(_, _, _)
+        | DataType::Union(_, _)
         | DataType::Dictionary(_, _)
         | DataType::Decimal128(_, _)
         | DataType::Decimal256(_, _)

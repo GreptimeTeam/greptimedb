@@ -439,8 +439,8 @@ from greptime import col
 
 @copr(args=["number"], returns = ["number"], sql = "select * from numbers")
 def test(number) -> vector[u32]:
-    from greptime import dataframe
-    return dataframe().filter(col("number")==col("number")).collect()[0][0]
+    from greptime import PyDataFrame
+    return PyDataFrame.from_sql("select * from numbers").filter(col("number")==col("number")).collect()[0][0]
 "#;
         let script = script_engine
             .compile(script, CompileContext::default())

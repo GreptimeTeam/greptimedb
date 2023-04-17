@@ -14,5 +14,5 @@
 
 //! datanode metrics
 
-pub const METRIC_HANDLE_SQL_ELAPSED: &str = "datanode.handle_sql_elapsed";
-pub const METRIC_HANDLE_PROMQL_ELAPSED: &str = "datanode.handle_promql_elapsed";
+pub const HANDLE_SQL_ELAPSED: &str = "datanode.handle_sql_elapsed";
+pub const HANDLE_PROMQL_ELAPSED: &str = "datanode.handle_promql_elapsed";

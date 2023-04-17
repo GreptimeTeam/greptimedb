@@ -26,27 +26,17 @@ use crate::tests::{
 
 pub(crate) trait MockInstance {
     fn frontend(&self) -> Arc<Instance>;
-
-    fn is_distributed_mode(&self) -> bool;
 }
 
 impl MockInstance for MockStandaloneInstance {
     fn frontend(&self) -> Arc<Instance> {
         self.instance.clone()
     }
-
-    fn is_distributed_mode(&self) -> bool {
-        false
-    }
 }
 
 impl MockInstance for MockDistributedInstance {
     fn frontend(&self) -> Arc<Instance> {
         self.frontend.clone()
-    }
-
-    fn is_distributed_mode(&self) -> bool {
-        true
     }
 }
 
