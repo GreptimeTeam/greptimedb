@@ -58,8 +58,6 @@ impl DatanodeInstance {
             .encode(logical_plan)
             .context(error::EncodeSubstraitLogicalPlanSnafu)?;
 
-        println!("substrait_plan: {:?}", substrait_plan);
-
         let result = self
             .db
             .logical_plan(substrait_plan.to_vec())

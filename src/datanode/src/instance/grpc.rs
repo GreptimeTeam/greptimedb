@@ -53,8 +53,6 @@ impl Instance {
             .await
             .context(DecodeLogicalPlanSnafu)?;
 
-        println!("decoded logical plan: {:?}", logical_plan);
-
         self.query_engine
             .execute(LogicalPlan::DfPlan(logical_plan), QueryContext::arc())
             .await

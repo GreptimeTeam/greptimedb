@@ -44,7 +44,6 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
         catalog_manager: CatalogManagerRef,
     ) -> Result<Self::Plan, Self::Error> {
         let mut context = SessionContext::new();
-        // context.register_catalog_list(catalog_manager as _);
         context.register_catalog(
             DEFAULT_CATALOG_NAME,
             Arc::new(DfCatalogProviderAdapter::new(
@@ -59,19 +58,13 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
         let df_plan = from_substrait_plan(&mut context, &plan)
             .await
             .context(DecodeDfPlanSnafu)?;
-        println!("df_plan: {:?}", df_plan);
         Ok(df_plan)
     }
 
     fn encode(&self, plan: Self::Plan) -> Result<Bytes, Self::Error> {
         let mut buf = BytesMut::new();
-        // to_substrait_plan(&plan)
-        //     .context(EncodeDfPlanSnafu)?
-        //     .encode(&mut buf)
-        //     .context(EncodeRelSnafu)?;
 
         let substrait_plan = to_substrait_plan(&plan).context(EncodeDfPlanSnafu)?;
-        println!("substrait_plan: {:?}", substrait_plan);
         substrait_plan.encode(&mut buf).context(EncodeRelSnafu)?;
 
         Ok(buf.freeze())
