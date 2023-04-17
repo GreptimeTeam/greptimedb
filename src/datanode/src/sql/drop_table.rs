@@ -15,17 +15,23 @@
 use catalog::error::TableNotExistSnafu;
 use catalog::DeregisterTableRequest;
 use common_error::prelude::BoxedError;
+use common_procedure::{watcher, ProcedureManagerRef, ProcedureWithId};
 use common_query::Output;
 use common_telemetry::info;
 use snafu::{OptionExt, ResultExt};
 use table::engine::{EngineContext, TableReference};
 use table::requests::DropTableRequest;
+use table_procedure::DropTableProcedure;
 
 use crate::error::{self, Result};
 use crate::sql::SqlHandler;
 
 impl SqlHandler {
     pub async fn drop_table(&self, req: DropTableRequest) -> Result<Output> {
+        if let Some(procedure_manager) = &self.procedure_manager {
+            return self.drop_table_by_procedure(procedure_manager, req).await;
+        }
+
         let deregister_table_req = DeregisterTableRequest {
             catalog: req.catalog_name.clone(),
             schema: req.schema_name.clone(),
@@ -73,6 +79,35 @@ impl SqlHandler {
             })?;
 
         info!("Successfully dropped table: {}", table_full_name);
+
+        Ok(Output::AffectedRows(1))
+    }
+
+    pub(crate) async fn drop_table_by_procedure(
+        &self,
+        procedure_manager: &ProcedureManagerRef,
+        req: DropTableRequest,
+    ) -> Result<Output> {
+        let table_name = req.table_name.clone();
+        let procedure = DropTableProcedure::new(
+            req,
+            self.catalog_manager.clone(),
+            self.engine_procedure.clone(),
+        );
+
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        let procedure_id = procedure_with_id.id;
+
+        info!("Drop table {} by procedure {}", table_name, procedure_id);
+
+        let mut watcher = procedure_manager
+            .submit(procedure_with_id)
+            .await
+            .context(error::SubmitProcedureSnafu { procedure_id })?;
+
+        watcher::wait(&mut watcher)
+            .await
+            .context(error::WaitProcedureSnafu { procedure_id })?;
 
         Ok(Output::AffectedRows(1))
     }
