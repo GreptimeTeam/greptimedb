@@ -1,3 +1,17 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::sync::Arc;
 
 use api::v1::meta::CompareAndPutRequest;
@@ -36,19 +50,19 @@ impl MetadataService for DefaultMetadataService {
     async fn create_schema(&self, catalog_name: &str, schema_name: &str) -> Result<()> {
         let kv_store = self.kv_store.clone();
 
-        let default_catalog_key = CatalogKey {
+        let catalog_key = CatalogKey {
             catalog_name: catalog_name.to_string(),
         }
         .to_string();
 
-        let default_schema_key = SchemaKey {
+        let schema_key = SchemaKey {
             catalog_name: catalog_name.to_string(),
             schema_name: schema_name.to_string(),
         }
         .to_string();
 
         let req = CompareAndPutRequest {
-            key: default_catalog_key.into(),
+            key: catalog_key.into(),
             expect: vec![],
             value: CatalogValue {}
                 .as_bytes()
@@ -59,11 +73,11 @@ impl MetadataService for DefaultMetadataService {
         let resp = kv_store.compare_and_put(req).await?;
 
         if resp.success {
-            info!("Successfully created the default catalog: {}", catalog_name);
+            info!("Successfully created a catalog: {}", catalog_name);
         }
 
         let req = CompareAndPutRequest {
-            key: default_schema_key.into(),
+            key: schema_key.into(),
             expect: vec![],
             value: SchemaValue {}
                 .as_bytes()
@@ -73,7 +87,7 @@ impl MetadataService for DefaultMetadataService {
         let resp = kv_store.compare_and_put(req).await?;
 
         if resp.success {
-            info!("Successfully created the default schema: {}", schema_name);
+            info!("Successfully created a schema: {}", schema_name);
         }
 
         Ok(())
@@ -89,7 +103,7 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::meta::PutRequest;
-    use catalog::helper::{CatalogKey, SchemaKey};
+    use catalog::helper::{CatalogKey, CatalogValue, SchemaKey};
 
     use super::{DefaultMetadataService, MetadataService};
     use crate::service::store::ext::KvStoreExt;
@@ -107,10 +121,11 @@ mod tests {
         }
         .to_string()
         .into();
+
         kv_store
             .put(PutRequest {
                 key,
-                value: vec![],
+                value: CatalogValue {}.as_bytes().unwrap(),
                 ..Default::default()
             })
             .await
