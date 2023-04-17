@@ -18,12 +18,11 @@ use std::time::Duration;
 use api::v1::meta::heartbeat_server::HeartbeatServer;
 use api::v1::meta::router_server::RouterServer;
 use api::v1::meta::store_server::StoreServer;
-use api::v1::meta::PutRequest;
-use catalog::helper::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use tower::service_fn;
 
+use crate::metadata_service::{DefaultMetadataService, MetadataService};
 use crate::metasrv::builder::MetaSrvBuilder;
 use crate::metasrv::{MetaSrvOptions, SelectorRef};
 use crate::service::store::etcd::EtcdStore;
@@ -58,37 +57,10 @@ pub async fn mock(
 ) -> MockInfo {
     let server_addr = opts.server_addr.clone();
 
-    let catalog_value = CatalogValue {}.as_bytes().unwrap();
-    let schema_value = SchemaValue {}.as_bytes().unwrap();
+    let metadata_service = DefaultMetadataService::new(kv_store.clone());
 
-    let default_catalog_key = CatalogKey {
-        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-    }
-    .to_string();
-
-    let default_schema_key = SchemaKey {
-        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-        schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-    }
-    .to_string();
-
-    // create default catalog
-    kv_store
-        .put(PutRequest {
-            key: default_catalog_key.into(),
-            value: catalog_value,
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-
-    // create default schema
-    kv_store
-        .put(PutRequest {
-            key: default_schema_key.into(),
-            value: schema_value,
-            ..Default::default()
-        })
+    metadata_service
+        .create_schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
         .await
         .unwrap();
 
