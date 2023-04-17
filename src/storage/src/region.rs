@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use common_telemetry::{info, logging};
+use common_telemetry::logging;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::manifest::{self, Manifest, ManifestVersion, MetaActionIterator};
@@ -336,6 +336,7 @@ impl<S: LogStore> RegionImpl<S> {
         writer
             .replay(recovered_metadata_after_flushed, writer_ctx)
             .await?;
+
         // Try to do a manifest checkpoint on opening
         if store_config.engine_config.manifest_checkpoint_on_startup {
             let manifest = &store_config.manifest;
@@ -626,9 +627,11 @@ impl<S: LogStore> RegionInner<S> {
     }
 
     async fn alter(&self, request: AlterRequest) -> Result<()> {
-        info!(
+        logging::info!(
             "Alter region {}, name: {}, request: {:?}",
-            self.shared.id, self.shared.name, request
+            self.shared.id,
+            self.shared.name,
+            request
         );
 
         let alter_ctx = AlterContext {
