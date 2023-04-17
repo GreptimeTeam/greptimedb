@@ -19,11 +19,17 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 use lru::LruCache;
+use metrics::increment_counter;
 use opendal::ops::{OpDelete, OpList, OpRead, OpScan, OpWrite};
 use opendal::raw::oio::{Read, Reader, Write};
 use opendal::raw::{Accessor, Layer, LayeredAccessor, RpDelete, RpList, RpRead, RpScan, RpWrite};
 use opendal::{ErrorKind, Result};
 use tokio::sync::Mutex;
+
+const METRIC_LRU_CACHE_NAME_LABEL: &str = "lru_cache.name";
+const METRIC_LRU_CACHE_RANGE_LABEL: &str = "lru_cache.range";
+const METRIC_LRU_CACHE_HIT_COUNTER: &str = "lru_cache.hit";
+const METRIC_LRU_CACHE_MISS_COUNTER: &str = "lru_cache.miss";
 
 pub struct LruCacheLayer<C> {
     cache: Arc<C>,
@@ -89,12 +95,16 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
 
         match self.cache.read(&cache_path, OpRead::default()).await {
             Ok((rp, r)) => {
+                increment_counter!(METRIC_LRU_CACHE_HIT_COUNTER, METRIC_LRU_CACHE_NAME_LABEL => path.clone(), METRIC_LRU_CACHE_RANGE_LABEL => args.range().to_header());
+
                 // update lru when cache hit
                 let mut lru_cache = lru_cache.lock().await;
                 lru_cache.get_or_insert(cache_path.clone(), || ());
                 Ok(to_output_reader((rp, r)))
             }
             Err(err) if err.kind() == ErrorKind::NotFound => {
+                increment_counter!(METRIC_LRU_CACHE_MISS_COUNTER, METRIC_LRU_CACHE_NAME_LABEL => path.clone(), METRIC_LRU_CACHE_RANGE_LABEL => args.range().to_header());
+
                 let (rp, mut reader) = self.inner.read(&path, args.clone()).await?;
                 let size = rp.clone().into_metadata().content_length();
                 let (_, mut writer) = self.cache.write(&cache_path, OpWrite::new()).await?;
@@ -122,6 +132,7 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
                     Err(_) => return self.inner.read(&path, args).await.map(to_output_reader),
                 }
             }
+            // TODO(nearsyh): should we increase the cache miss counter here?
             Err(_) => return self.inner.read(&path, args).await.map(to_output_reader),
         }
     }
