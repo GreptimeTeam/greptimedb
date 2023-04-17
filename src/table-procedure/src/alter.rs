@@ -32,6 +32,7 @@ use crate::error::{
     SerializeProcedureSnafu, SubprocedureFailedSnafu, TableExistsSnafu, TableNotFoundSnafu,
 };
 
+/// Procedure to alter a table.
 pub struct AlterTableProcedure {
     data: AlterTableData,
     catalog_manager: CatalogManagerRef,
