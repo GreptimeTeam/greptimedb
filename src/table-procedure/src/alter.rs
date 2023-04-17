@@ -88,8 +88,8 @@ impl AlterTableProcedure {
             data: AlterTableData {
                 state: AlterTableState::Prepare,
                 request,
-                subprocedure_id: None,
                 table_id: None,
+                subprocedure_id: None,
             },
             catalog_manager,
             engine_procedure,
@@ -137,13 +137,13 @@ impl AlterTableProcedure {
             .catalog_manager
             .catalog(&self.data.request.catalog_name)
             .context(AccessCatalogSnafu)?
-            .with_context(|| CatalogNotFoundSnafu {
+            .context(CatalogNotFoundSnafu {
                 name: &self.data.request.catalog_name,
             })?;
         let schema = catalog
             .schema(&self.data.request.schema_name)
             .context(AccessCatalogSnafu)?
-            .with_context(|| SchemaNotFoundSnafu {
+            .context(SchemaNotFoundSnafu {
                 name: &self.data.request.schema_name,
             })?;
 
@@ -276,7 +276,7 @@ struct AlterTableData {
     ///
     /// Available after [AlterTableState::Prepare] state.
     table_id: Option<TableId>,
-    /// Id of the subprocedure to create this table in the engine.
+    /// Id of the subprocedure to alter this table in the engine.
     ///
     /// This id is `Some` while the procedure is in [AlterTableState::EngineAlterTable]
     /// state.
