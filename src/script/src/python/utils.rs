@@ -23,7 +23,8 @@ use crate::python::error;
 /// use `rustpython`'s `is_instance` method to check if a PyObject is a instance of class.
 /// if `PyResult` is Err, then this function return `false`
 pub fn is_instance<T: PyPayload>(obj: &PyObjectRef, vm: &VirtualMachine) -> bool {
-    obj.is_instance(T::class(vm).into(), vm).unwrap_or(false)
+    obj.is_instance(T::class(&vm.ctx).into(), vm)
+        .unwrap_or(false)
 }
 
 pub fn format_py_error(excep: PyBaseExceptionRef, vm: &VirtualMachine) -> error::Error {

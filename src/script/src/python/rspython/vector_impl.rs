@@ -24,12 +24,17 @@ use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::value::{self, OrderedFloat};
 use datatypes::vectors::Helper;
 use once_cell::sync::Lazy;
-use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyBytes, PyFloat, PyInt, PyNone, PyStr};
+use rustpython_vm::builtins::{
+    PyBaseExceptionRef, PyBool, PyBytes, PyFloat, PyInt, PyNone, PyStr,
+};
+use rustpython_vm::convert::ToPyResult;
 use rustpython_vm::function::{Either, OptionalArg, PyComparisonValue};
-use rustpython_vm::protocol::{PyMappingMethods, PySequenceMethods};
-use rustpython_vm::types::{AsMapping, AsSequence, Comparable, PyComparisonOp};
+use rustpython_vm::protocol::{PyMappingMethods, PyNumberMethods, PySequenceMethods};
+use rustpython_vm::types::{
+    AsMapping, AsNumber, AsSequence, Comparable, PyComparisonOp, Representable,
+};
 use rustpython_vm::{
-    atomic_func, pyclass as rspyclass, PyObject, PyObjectRef, PyPayload, PyRef, PyResult,
+    atomic_func, pyclass as rspyclass, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult,
     VirtualMachine,
 };
 
@@ -45,7 +50,7 @@ fn to_type_error(vm: &'_ VirtualMachine) -> impl FnOnce(String) -> PyBaseExcepti
 
 pub(crate) type PyVectorRef = PyRef<PyVector>;
 /// PyVector type wraps a greptime vector, impl multiply/div/add/sub opeerators etc.
-#[rspyclass(with(AsMapping, AsSequence, Comparable))]
+#[rspyclass(with(AsMapping, AsSequence, Comparable, AsNumber, Representable))]
 impl PyVector {
     #[pymethod]
     pub(crate) fn new(
@@ -86,29 +91,32 @@ impl PyVector {
 
     #[pymethod(name = "__radd__")]
     #[pymethod(magic)]
-    fn add(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+    fn add(zelf: PyObjectRef, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+        let zelf = Self::obj_to_vector(zelf, vm)?;
         if rspy_is_pyobj_scalar(&other, vm) {
-            self.rspy_scalar_arith_op(other, None, wrap_result(arithmetic::add_dyn), vm)
+            zelf.rspy_scalar_arith_op(other, None, wrap_result(arithmetic::add_dyn), vm)
         } else {
-            self.rspy_vector_arith_op(other, None, wrap_result(arithmetic::add_dyn), vm)
+            zelf.rspy_vector_arith_op(other, None, wrap_result(arithmetic::add_dyn), vm)
         }
     }
 
     #[pymethod(magic)]
-    fn sub(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+    fn sub(zelf: PyObjectRef, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+        let zelf = Self::obj_to_vector(zelf, vm)?;
         if rspy_is_pyobj_scalar(&other, vm) {
-            self.rspy_scalar_arith_op(other, None, wrap_result(arithmetic::subtract_dyn), vm)
+            zelf.rspy_scalar_arith_op(other, None, wrap_result(arithmetic::subtract_dyn), vm)
         } else {
-            self.rspy_vector_arith_op(other, None, wrap_result(arithmetic::subtract_dyn), vm)
+            zelf.rspy_vector_arith_op(other, None, wrap_result(arithmetic::subtract_dyn), vm)
         }
     }
 
     #[pymethod(magic)]
-    fn rsub(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+    fn rsub(zelf: PyObjectRef, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+        let zelf = Self::obj_to_vector(zelf, vm)?;
         if rspy_is_pyobj_scalar(&other, vm) {
-            self.rspy_scalar_arith_op(other, None, arrow_rsub, vm)
+            zelf.rspy_scalar_arith_op(other, None, arrow_rsub, vm)
         } else {
-            self.rspy_vector_arith_op(
+            zelf.rspy_vector_arith_op(
                 other,
                 None,
                 wrap_result(|a, b| arithmetic::subtract_dyn(b, a)),
@@ -119,25 +127,27 @@ impl PyVector {
 
     #[pymethod(name = "__rmul__")]
     #[pymethod(magic)]
-    fn mul(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+    fn mul(zelf: PyObjectRef, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+        let zelf = Self::obj_to_vector(zelf, vm)?;
         if rspy_is_pyobj_scalar(&other, vm) {
-            self.rspy_scalar_arith_op(other, None, wrap_result(arithmetic::multiply_dyn), vm)
+            zelf.rspy_scalar_arith_op(other, None, wrap_result(arithmetic::multiply_dyn), vm)
         } else {
-            self.rspy_vector_arith_op(other, None, wrap_result(arithmetic::multiply_dyn), vm)
+            zelf.rspy_vector_arith_op(other, None, wrap_result(arithmetic::multiply_dyn), vm)
         }
     }
 
     #[pymethod(magic)]
-    fn truediv(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+    fn truediv(zelf: PyObjectRef, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+        let zelf = Self::obj_to_vector(zelf, vm)?;
         if rspy_is_pyobj_scalar(&other, vm) {
-            self.rspy_scalar_arith_op(
+            zelf.rspy_scalar_arith_op(
                 other,
                 Some(ArrowDataType::Float64),
                 wrap_result(arithmetic::divide_dyn),
                 vm,
             )
         } else {
-            self.rspy_vector_arith_op(
+            zelf.rspy_vector_arith_op(
                 other,
                 Some(ArrowDataType::Float64),
                 wrap_result(arithmetic::divide_dyn),
@@ -161,16 +171,17 @@ impl PyVector {
     }
 
     #[pymethod(magic)]
-    fn floordiv(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+    fn floordiv(zelf: PyObjectRef, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+        let zelf = Self::obj_to_vector(zelf, vm)?;
         if rspy_is_pyobj_scalar(&other, vm) {
-            self.rspy_scalar_arith_op(
+            zelf.rspy_scalar_arith_op(
                 other,
                 Some(ArrowDataType::Int64),
                 wrap_result(arithmetic::divide_dyn),
                 vm,
             )
         } else {
-            self.rspy_vector_arith_op(
+            zelf.rspy_vector_arith_op(
                 other,
                 Some(ArrowDataType::Int64),
                 wrap_result(arithmetic::divide_dyn),
@@ -194,19 +205,33 @@ impl PyVector {
         }
     }
 
-    #[pymethod(magic)]
-    fn and(&self, other: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        Self::vector_and(self, &other).map_err(to_type_error(vm))
+    fn obj_to_vector(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyRef<PyVector>> {
+        obj.downcast::<PyVector>().map_err(|e| {
+            vm.new_type_error(format!(
+                "Can't cast right operand into PyVector, actual type: {}",
+                e.class().name()
+            ))
+        })
     }
 
     #[pymethod(magic)]
-    fn or(&self, other: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        Self::vector_or(self, &other).map_err(to_type_error(vm))
+    fn and(zelf: PyObjectRef, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+        let zelf = Self::obj_to_vector(zelf, vm)?;
+        let other = Self::obj_to_vector(other, vm)?;
+        Self::vector_and(&zelf, &other).map_err(to_type_error(vm))
     }
 
     #[pymethod(magic)]
-    fn invert(&self, vm: &VirtualMachine) -> PyResult<PyVector> {
-        Self::vector_invert(self).map_err(to_type_error(vm))
+    fn or(zelf: PyObjectRef, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+        let zelf = Self::obj_to_vector(zelf, vm)?;
+        let other = Self::obj_to_vector(other, vm)?;
+        Self::vector_or(&zelf, &other).map_err(to_type_error(vm))
+    }
+
+    #[pymethod(magic)]
+    fn invert(zelf: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+        let zelf = Self::obj_to_vector(zelf, vm)?;
+        Self::vector_invert(&zelf).map_err(to_type_error(vm))
     }
 
     #[pymethod(name = "__len__")]
@@ -259,6 +284,38 @@ impl PyVector {
         Ok(PyStr::from(
             "PyVector is like a Python array, a compact array of elem of same datatype, but Readonly for now",
         ))
+    }
+}
+
+impl Representable for PyVector {
+    #[inline]
+    fn repr_str(zelf: &Py<Self>, _vm: &VirtualMachine) -> PyResult<String> {
+        Ok(format!("{:#?}", *zelf))
+    }
+}
+
+impl AsNumber for PyVector {
+    fn as_number() -> &'static PyNumberMethods {
+        static AS_NUMBER: PyNumberMethods = PyNumberMethods {
+            and: Some(|a, b, vm| PyVector::and(a.to_owned(), b.to_owned(), vm).to_pyresult(vm)),
+            or: Some(|a, b, vm| PyVector::or(a.to_owned(), b.to_owned(), vm).to_pyresult(vm)),
+            invert: Some(|a, vm| PyVector::invert((*a).to_owned(), vm).to_pyresult(vm)),
+            add: Some(|a, b, vm| PyVector::add(a.to_owned(), b.to_owned(), vm).to_pyresult(vm)),
+            subtract: Some(|a, b, vm| {
+                PyVector::sub(a.to_owned(), b.to_owned(), vm).to_pyresult(vm)
+            }),
+            multiply: Some(|a, b, vm| {
+                PyVector::mul(a.to_owned(), b.to_owned(), vm).to_pyresult(vm)
+            }),
+            true_divide: Some(|a, b, vm| {
+                PyVector::truediv(a.to_owned(), b.to_owned(), vm).to_pyresult(vm)
+            }),
+            floor_divide: Some(|a, b, vm| {
+                PyVector::floordiv(a.to_owned(), b.to_owned(), vm).to_pyresult(vm)
+            }),
+            ..PyNumberMethods::NOT_IMPLEMENTED
+        };
+        &AS_NUMBER
     }
 }
 

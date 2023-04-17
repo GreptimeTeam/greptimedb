@@ -356,7 +356,7 @@ pub(crate) mod greptime_builtin {
     #[pyfunction]
     fn col(name: String, vm: &VirtualMachine) -> PyExprRef {
         let expr: PyExpr = DfExpr::Column(datafusion_common::Column::from_name(name)).into();
-        expr.into_ref(vm)
+        expr.into_ref(&vm.ctx)
     }
 
     #[pyfunction]
@@ -366,7 +366,7 @@ pub(crate) mod greptime_builtin {
             .try_to_scalar_value(&val.data_type())
             .map_err(|e| vm.new_runtime_error(format!("{e}")))?;
         let expr: PyExpr = DfExpr::Literal(scalar_val).into();
-        Ok(expr.into_ref(vm))
+        Ok(expr.into_ref(&vm.ctx))
     }
 
     // the main binding code, due to proc macro things, can't directly use a simpler macro

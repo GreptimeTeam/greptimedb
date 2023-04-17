@@ -155,8 +155,10 @@ fn eval_pyo3(testcase: TestCase, locals: HashMap<String, PyVector>) {
 }
 
 fn eval_rspy(testcase: TestCase, locals: HashMap<String, PyVector>) {
-    vm::Interpreter::without_stdlib(Default::default()).enter(|vm| {
+    vm::Interpreter::with_init(Default::default(), |vm| {
         PyVector::make_class(&vm.ctx);
+    })
+    .enter(|vm| {
         let scope = vm.new_scope_with_builtins();
         locals.into_iter().for_each(|(k, v)| {
             scope
@@ -169,7 +171,13 @@ fn eval_rspy(testcase: TestCase, locals: HashMap<String, PyVector>) {
             .compile(&testcase.eval, Mode::Eval, "<embedded>".to_owned())
             .map_err(|err| vm.new_syntax_error(&err))
             .unwrap();
-        let obj = vm.run_code_obj(code_obj, scope).unwrap();
+        let obj = vm.run_code_obj(code_obj, scope)
+            .map_err(|e| {
+                let mut output = String::new();
+                vm.write_exception(&mut output, &e).unwrap();
+                (e, output)
+            })
+            .unwrap();
         let v = obj.downcast::<PyVector>().unwrap();
         let result_arr = v.to_arrow_array();
         let expect_arr = testcase.result.to_arrow_array();

@@ -213,7 +213,7 @@ pub(crate) fn init_interpreter() -> Arc<Interpreter> {
                     // so according to this issue:
                     // https://github.com/RustPython/RustPython/issues/4292
                     // add this line for stdlib, so rustpython can found stdlib's python part in bytecode format
-                    vm.add_frozen(rustpython_pylib::frozen_stdlib());
+                    vm.add_frozen(rustpython_pylib::FROZEN_STDLIB);
                     // add our own custom datatype and module
                     PyVector::make_class(&vm.ctx);
                     PyQueryEngine::make_class(&vm.ctx);
