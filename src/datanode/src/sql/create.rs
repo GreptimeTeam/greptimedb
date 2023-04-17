@@ -23,8 +23,7 @@ use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::{ColumnOption, SqlOption, TableConstraint, Value};
 use sql::statements::column_def_to_schema;
-use sql::statements::create::CreateTable;
-use store_api::storage::consts::TIME_INDEX_NAME;
+use sql::statements::create::{CreateTable, TIME_INDEX};
 use table::engine::{EngineContext, TableReference};
 use table::metadata::TableId;
 use table::requests::*;
@@ -223,7 +222,7 @@ impl SqlHandler {
                     is_primary,
                 } => {
                     if let Some(name) = name {
-                        if name.value == TIME_INDEX_NAME {
+                        if name.value == TIME_INDEX {
                             ts_index = *col_map.get(&columns[0].value).context(
                                 KeyColumnNotFoundSnafu {
                                     name: columns[0].value.to_string(),
@@ -352,7 +351,7 @@ mod tests {
     async fn test_create_table_with_options() {
         let sql = r#"
             CREATE TABLE demo_table (
-                "timestamp" BIGINT TIME INDEX, 
+                "timestamp" BIGINT TIME INDEX,
                 "value" DOUBLE,
                 host STRING PRIMARY KEY
             ) engine=mito with(regions=1, ttl='7days',write_buffer_size='32MB',some='other');"#;
@@ -376,7 +375,7 @@ mod tests {
         let parsed_stmt = sql_to_statement(
             r#"
             CREATE TABLE demo_table(
-                "timestamp" BIGINT TIME INDEX, 
+                "timestamp" BIGINT TIME INDEX,
                 "value" DOUBLE,
                 host STRING PRIMARY KEY
             ) engine=mito with(regions=1);"#,

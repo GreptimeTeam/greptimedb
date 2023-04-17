@@ -81,9 +81,6 @@ pub const DEFAULT_CF_NAME: &str = "default";
 /// Name for reserved column: sequence
 pub const SEQUENCE_COLUMN_NAME: &str = "__sequence";
 
-/// Name for time index constraint name.
-pub const TIME_INDEX_NAME: &str = "__time_index";
-
 /// Name for reserved column: op_type
 pub const OP_TYPE_COLUMN_NAME: &str = "__op_type";
 
