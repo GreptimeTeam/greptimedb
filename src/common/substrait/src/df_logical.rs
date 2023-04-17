@@ -49,10 +49,10 @@ use crate::error::{
 use crate::schema::{from_schema, to_schema};
 use crate::SubstraitPlan;
 
-pub struct DFLogicalSubstraitConvertor;
+pub struct DFLogicalSubstraitConvertorDeprecated;
 
 #[async_trait]
-impl SubstraitPlan for DFLogicalSubstraitConvertor {
+impl SubstraitPlan for DFLogicalSubstraitConvertorDeprecated {
     type Error = Error;
 
     type Plan = LogicalPlan;
@@ -76,7 +76,7 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
     }
 }
 
-impl DFLogicalSubstraitConvertor {
+impl DFLogicalSubstraitConvertorDeprecated {
     async fn convert_plan(
         &self,
         mut plan: Plan,
@@ -197,6 +197,14 @@ impl DFLogicalSubstraitConvertor {
                 name: "Cross Relation",
             }
             .fail()?,
+            RelType::HashJoin(_) => UnsupportedPlanSnafu {
+                name: "Cross Relation",
+            }
+            .fail()?,
+            RelType::MergeJoin(_) => UnsupportedPlanSnafu {
+                name: "Cross Relation",
+            }
+            .fail()?,
         };
 
         Ok(logical_plan)
@@ -311,7 +319,7 @@ impl DFLogicalSubstraitConvertor {
     }
 }
 
-impl DFLogicalSubstraitConvertor {
+impl DFLogicalSubstraitConvertorDeprecated {
     fn logical_plan_to_rel(
         &self,
         ctx: &mut ConvertorContext,
@@ -585,7 +593,7 @@ mod test {
     }
 
     async fn logical_plan_round_trip(plan: LogicalPlan, catalog: CatalogManagerRef) {
-        let convertor = DFLogicalSubstraitConvertor;
+        let convertor = DFLogicalSubstraitConvertorDeprecated;
 
         let proto = convertor.encode(plan.clone()).unwrap();
         let tripped_plan = convertor.decode(proto, catalog).await.unwrap();

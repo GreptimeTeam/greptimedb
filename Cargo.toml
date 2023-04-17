@@ -65,6 +65,7 @@ datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev 
 datafusion-optimizer = { git = "https://github.com/apache/arrow-datafusion.git", rev = "74a778ca6016a853a3c3add3fa8c6f12f4fe4561" }
 datafusion-physical-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "74a778ca6016a853a3c3add3fa8c6f12f4fe4561" }
 datafusion-sql = { git = "https://github.com/apache/arrow-datafusion.git", rev = "74a778ca6016a853a3c3add3fa8c6f12f4fe4561" }
+datafusion-substrait = { git = "https://github.com/apache/arrow-datafusion.git", rev = "74a778ca6016a853a3c3add3fa8c6f12f4fe4561" }
 futures = "0.3"
 futures-util = "0.3"
 parquet = "37.0"

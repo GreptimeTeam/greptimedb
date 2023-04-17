@@ -770,7 +770,8 @@ mod test {
                 options: SortOptions::default(),
             }],
             Arc::new(merge),
-        );
+        )
+        .with_fetch(None);
         assert_eq!(sort.output_partitioning().partition_count(), 1);
 
         let session_ctx = SessionContext::new();

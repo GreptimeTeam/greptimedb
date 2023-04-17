@@ -109,8 +109,14 @@ impl CatalogProvider for CatalogProviderAdapter {
 }
 
 ///Greptime CatalogProvider -> datafusion's CatalogProvider
-struct DfCatalogProviderAdapter {
+pub struct DfCatalogProviderAdapter {
     catalog_provider: CatalogProviderRef,
+}
+
+impl DfCatalogProviderAdapter {
+    pub fn new(catalog_provider: CatalogProviderRef) -> Self {
+        Self { catalog_provider }
+    }
 }
 
 impl DfCatalogProvider for DfCatalogProviderAdapter {
