@@ -241,3 +241,53 @@ impl DropTableData {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use table::engine::TableEngine;
+
+    use super::*;
+    use crate::test_util::TestEnv;
+
+    #[tokio::test]
+    async fn test_drop_table_procedure() {
+        let env = TestEnv::new("drop");
+        let table_name = "test_drop";
+        env.create_table(table_name).await;
+
+        let request = DropTableRequest {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: table_name.to_string(),
+        };
+        let TestEnv {
+            dir: _dir,
+            table_engine,
+            procedure_manager,
+            catalog_manager,
+        } = env;
+        let procedure =
+            DropTableProcedure::new(request, catalog_manager.clone(), table_engine.clone());
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+
+        let mut watcher = procedure_manager.submit(procedure_with_id).await.unwrap();
+        watcher.changed().await.unwrap();
+
+        let catalog = catalog_manager
+            .catalog(DEFAULT_CATALOG_NAME)
+            .unwrap()
+            .unwrap();
+        let schema = catalog.schema(DEFAULT_SCHEMA_NAME).unwrap().unwrap();
+        assert!(schema.table(table_name).await.unwrap().is_none());
+        let ctx = EngineContext::default();
+        assert!(!table_engine.table_exists(
+            &ctx,
+            &TableReference {
+                catalog: DEFAULT_CATALOG_NAME,
+                schema: DEFAULT_SCHEMA_NAME,
+                table: table_name,
+            }
+        ));
+    }
+}
