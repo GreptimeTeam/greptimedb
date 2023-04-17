@@ -27,25 +27,20 @@ use common_query::prelude::ScalarUdf;
 use common_query::Output;
 use datatypes::schema::Schema;
 use session::context::QueryContextRef;
+use sql::statements::statement::Statement;
 
 use crate::datafusion::DatafusionQueryEngine;
 use crate::error::Result;
-use crate::parser::QueryStatement;
 use crate::plan::LogicalPlan;
 use crate::planner::LogicalPlanner;
 pub use crate::query_engine::context::QueryEngineContext;
 pub use crate::query_engine::state::QueryEngineState;
 
-pub type StatementHandlerRef = Arc<dyn StatementHandler>;
+pub type SqlStatementExecutorRef = Arc<dyn SqlStatementExecutor>;
 
-// TODO(LFC): Gradually make more statements executed in the form of logical plan, and remove this trait. Tracked in #1010.
 #[async_trait]
-pub trait StatementHandler: Send + Sync {
-    async fn handle_statement(
-        &self,
-        stmt: QueryStatement,
-        query_ctx: QueryContextRef,
-    ) -> Result<Output>;
+pub trait SqlStatementExecutor: Send + Sync {
+    async fn execute_sql(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output>;
 }
 
 #[async_trait]

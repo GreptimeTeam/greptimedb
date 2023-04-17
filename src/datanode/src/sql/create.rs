@@ -326,7 +326,8 @@ mod tests {
     use common_base::readable_size::ReadableSize;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::Schema;
-    use query::parser::QueryLanguageParser;
+    use query::parser::{QueryLanguageParser, QueryStatement};
+    use query::query_engine::SqlStatementExecutor;
     use session::context::QueryContext;
     use sql::dialect::GenericDialect;
     use sql::parser::ParserContext;
@@ -560,10 +561,10 @@ mod tests {
                             TIME INDEX (ts),
                             PRIMARY KEY(host)
                         ) engine=mito with(regions=1);"#;
-        let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
+        let Ok(QueryStatement::Sql(stmt)) = QueryLanguageParser::parse_sql(sql) else { unreachable!() };
         let output = instance
             .inner()
-            .execute_stmt(stmt, QueryContext::arc())
+            .execute_sql(stmt, QueryContext::arc())
             .await
             .unwrap();
         assert!(matches!(output, Output::AffectedRows(0)));
@@ -577,10 +578,10 @@ mod tests {
                             TIME INDEX (ts),
                             PRIMARY KEY(host)
                         ) engine=mito with(regions=1);"#;
-        let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
+        let Ok(QueryStatement::Sql(stmt)) = QueryLanguageParser::parse_sql(sql) else { unreachable!() };
         let output = instance
             .inner()
-            .execute_stmt(stmt, QueryContext::arc())
+            .execute_sql(stmt, QueryContext::arc())
             .await
             .unwrap();
         assert!(matches!(output, Output::AffectedRows(0)));

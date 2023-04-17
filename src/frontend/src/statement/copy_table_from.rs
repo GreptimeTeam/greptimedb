@@ -21,7 +21,6 @@ use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::{build_backend, parse_url};
 use common_datasource::util::find_dir_and_filename;
 use common_query::Output;
-use common_recordbatch::error::DataTypesSnafu;
 use datafusion::parquet::arrow::ParquetRecordBatchStreamBuilder;
 use datatypes::arrow::datatypes::{DataType, SchemaRef};
 use datatypes::vectors::Helper;
@@ -32,10 +31,10 @@ use table::engine::TableReference;
 use table::requests::{CopyTableRequest, InsertRequest};
 use tokio::io::BufReader;
 
-use crate::error::{self, ParseDataTypesSnafu, Result};
-use crate::sql::SqlHandler;
+use crate::error::{self, IntoVectorsSnafu, Result};
+use crate::statement::StatementExecutor;
 
-impl SqlHandler {
+impl StatementExecutor {
     pub(crate) async fn copy_table_from(&self, req: CopyTableRequest) -> Result<Output> {
         let table_ref = TableReference {
             catalog: &req.catalog_name,
@@ -102,9 +101,8 @@ impl SqlHandler {
 
             while let Some(r) = stream.next().await {
                 let record_batch = r.context(error::ReadParquetSnafu)?;
-                let vectors = Helper::try_into_vectors(record_batch.columns())
-                    .context(DataTypesSnafu)
-                    .context(ParseDataTypesSnafu)?;
+                let vectors =
+                    Helper::try_into_vectors(record_batch.columns()).context(IntoVectorsSnafu)?;
 
                 pending_mem_size += vectors.iter().map(|v| v.memory_size()).sum::<usize>();
 
@@ -236,7 +234,7 @@ mod tests {
             (
                 DataType::Timestamp(
                     datatypes::arrow::datatypes::TimeUnit::Second,
-                    Some("UTC".to_string()),
+                    Some("UTC".into()),
                 ),
                 true,
             ),
@@ -251,14 +249,14 @@ mod tests {
             (
                 DataType::Timestamp(
                     datatypes::arrow::datatypes::TimeUnit::Second,
-                    Some("UTC".to_string()),
+                    Some("UTC".into()),
                 ),
                 true,
             ),
             (
                 DataType::Timestamp(
                     datatypes::arrow::datatypes::TimeUnit::Second,
-                    Some("PDT".to_string()),
+                    Some("PDT".into()),
                 ),
                 true,
             ),
@@ -269,14 +267,14 @@ mod tests {
             (
                 DataType::Timestamp(
                     datatypes::arrow::datatypes::TimeUnit::Second,
-                    Some("UTC".to_string()),
+                    Some("UTC".into()),
                 ),
                 true,
             ),
             (
                 DataType::Timestamp(
                     datatypes::arrow::datatypes::TimeUnit::Millisecond,
-                    Some("UTC".to_string()),
+                    Some("UTC".into()),
                 ),
                 true,
             ),

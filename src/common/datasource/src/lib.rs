@@ -17,5 +17,6 @@ pub mod error;
 pub mod file_format;
 pub mod lister;
 pub mod object_store;
+#[cfg(test)]
 pub mod test_util;
 pub mod util;

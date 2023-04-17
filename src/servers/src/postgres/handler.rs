@@ -339,7 +339,7 @@ impl ExtendedQueryHandler for PostgresServerHandler {
         let (_, sql) = portal.statement().statement();
 
         // manually replace variables in prepared statement
-        let mut sql = sql.to_owned();
+        let mut sql = sql.clone();
         for i in 0..portal.parameter_len() {
             sql = sql.replace(&format!("${}", i + 1), &parameter_to_string(portal, i)?);
         }

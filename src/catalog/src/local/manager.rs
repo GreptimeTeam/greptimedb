@@ -419,6 +419,13 @@ impl CatalogManager for LocalCatalogManager {
                 schema: schema_name,
             })?;
 
+        let _lock = self.register_lock.lock().await;
+        ensure!(
+            !schema.table_exist(&request.new_table_name)?,
+            TableExistsSnafu {
+                table: &request.new_table_name
+            }
+        );
         let old_table = schema
             .table(&request.table_name)
             .await?
@@ -437,9 +444,11 @@ impl CatalogManager for LocalCatalogManager {
                 engine,
             )
             .await?;
-        Ok(schema
-            .rename_table(&request.table_name, request.new_table_name)
-            .is_ok())
+
+        let renamed = schema
+            .rename_table(&request.table_name, request.new_table_name.clone())
+            .is_ok();
+        Ok(renamed)
     }
 
     async fn deregister_table(&self, request: DeregisterTableRequest) -> Result<bool> {

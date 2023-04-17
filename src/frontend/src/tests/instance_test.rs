@@ -324,8 +324,6 @@ async fn test_execute_query(instance: Arc<dyn MockInstance>) {
 
 #[apply(both_instances_cases)]
 async fn test_execute_show_databases_tables(instance: Arc<dyn MockInstance>) {
-    let is_distributed_mode = instance.is_distributed_mode();
-
     let instance = instance.frontend();
 
     let output = execute_sql(&instance, "show databases").await;
@@ -358,24 +356,14 @@ async fn test_execute_show_databases_tables(instance: Arc<dyn MockInstance>) {
         _ => unreachable!(),
     }
 
-    let expected = if is_distributed_mode {
-        "\
-+---------+
-| Tables  |
-+---------+
-| scripts |
-+---------+\
-"
-    } else {
-        "\
+    let expected = "\
 +---------+
 | Tables  |
 +---------+
 | numbers |
 | scripts |
 +---------+\
-"
-    };
+";
     let output = execute_sql(&instance, "show tables").await;
     check_unordered_output_stream(output, expected).await;
 
@@ -385,17 +373,7 @@ async fn test_execute_show_databases_tables(instance: Arc<dyn MockInstance>) {
     ).await;
 
     let output = execute_sql(&instance, "show tables").await;
-    let expected = if is_distributed_mode {
-        "\
-+---------+
-| Tables  |
-+---------+
-| demo    |
-| scripts |
-+---------+\
-"
-    } else {
-        "\
+    let expected = "\
 +---------+
 | Tables  |
 +---------+
@@ -403,8 +381,7 @@ async fn test_execute_show_databases_tables(instance: Arc<dyn MockInstance>) {
 | numbers |
 | scripts |
 +---------+\
-"
-    };
+";
     check_unordered_output_stream(output, expected).await;
 
     // show tables like [string]
@@ -686,8 +663,7 @@ async fn test_insert_with_default_value(instance: Arc<dyn MockInstance>) {
     test_insert_with_default_value_for_type(instance.frontend(), "bigint").await;
 }
 
-// should apply to both instance. tracked in #1294
-#[apply(standalone_instance_case)]
+#[apply(both_instances_cases)]
 async fn test_use_database(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
@@ -789,7 +765,7 @@ async fn test_delete(instance: Arc<dyn MockInstance>) {
     check_output_stream(output, expect).await;
 }
 
-#[apply(standalone_instance_case)]
+#[apply(both_instances_cases)]
 async fn test_execute_copy_to_s3(instance: Arc<dyn MockInstance>) {
     if let Ok(bucket) = env::var("GT_S3_BUCKET") {
         if !bucket.is_empty() {
@@ -827,7 +803,7 @@ async fn test_execute_copy_to_s3(instance: Arc<dyn MockInstance>) {
     }
 }
 
-#[apply(standalone_instance_case)]
+#[apply(both_instances_cases)]
 async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
     logging::init_default_ut_logging();
     if let Ok(bucket) = env::var("GT_S3_BUCKET") {
@@ -928,8 +904,6 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
 
 #[apply(both_instances_cases)]
 async fn test_information_schema(instance: Arc<dyn MockInstance>) {
-    let is_distributed_mode = instance.is_distributed_mode();
-
     let instance = instance.frontend();
 
     let sql = "create table another_table(i bigint time index)";
@@ -942,24 +916,14 @@ async fn test_information_schema(instance: Arc<dyn MockInstance>) {
     let sql = "select table_catalog, table_schema, table_name, table_type from information_schema.tables where table_type != 'SYSTEM VIEW' order by table_name";
 
     let output = execute_sql(&instance, sql).await;
-    let expected = if is_distributed_mode {
-        "\
-+---------------+--------------------+------------+------------+
-| table_catalog | table_schema       | table_name | table_type |
-+---------------+--------------------+------------+------------+
-| greptime      | public             | scripts    | BASE TABLE |
-| greptime      | information_schema | tables     | VIEW       |
-+---------------+--------------------+------------+------------+"
-    } else {
-        "\
+    let expected = "\
 +---------------+--------------------+------------+------------+
 | table_catalog | table_schema       | table_name | table_type |
 +---------------+--------------------+------------+------------+
 | greptime      | public             | numbers    | BASE TABLE |
 | greptime      | public             | scripts    | BASE TABLE |
 | greptime      | information_schema | tables     | VIEW       |
-+---------------+--------------------+------------+------------+"
-    };
++---------------+--------------------+------------+------------+";
     check_output_stream(output, expected).await;
 
     let output = execute_sql_with(&instance, sql, query_ctx).await;

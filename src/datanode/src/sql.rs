@@ -19,24 +19,19 @@ use common_error::prelude::BoxedError;
 use common_procedure::ProcedureManagerRef;
 use common_query::Output;
 use common_telemetry::error;
-use query::sql::{show_databases, show_tables};
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
-use sql::statements::show::{ShowDatabases, ShowTables};
 use table::engine::manager::TableEngineManagerRef;
 use table::engine::{TableEngineProcedureRef, TableEngineRef, TableReference};
 use table::requests::*;
 use table::{Table, TableRef};
 
 use crate::error::{
-    self, CloseTableEngineSnafu, ExecuteSqlSnafu, Result, TableEngineNotFoundSnafu,
-    TableNotFoundSnafu,
+    self, CloseTableEngineSnafu, Result, TableEngineNotFoundSnafu, TableNotFoundSnafu,
 };
 use crate::instance::sql::table_idents_to_full_name;
 
 mod alter;
-mod copy_table_from;
-mod copy_table_to;
 mod create;
 mod drop_table;
 mod flush_table;
@@ -49,9 +44,6 @@ pub enum SqlRequest {
     Alter(AlterTableRequest),
     DropTable(DropTableRequest),
     FlushTable(FlushTableRequest),
-    ShowDatabases(ShowDatabases),
-    ShowTables(ShowTables),
-    CopyTable(CopyTableRequest),
 }
 
 // Handler to execute SQL except query
@@ -59,6 +51,8 @@ pub enum SqlRequest {
 pub struct SqlHandler {
     table_engine_manager: TableEngineManagerRef,
     catalog_manager: CatalogManagerRef,
+    // TODO(yingwen): Support multiple table engine. We need to add a method
+    // to TableEngineManagerRef to return engine procedure by engine name.
     engine_procedure: TableEngineProcedureRef,
     procedure_manager: Option<ProcedureManagerRef>,
 }
@@ -88,17 +82,6 @@ impl SqlHandler {
             SqlRequest::CreateDatabase(req) => self.create_database(req, query_ctx.clone()).await,
             SqlRequest::Alter(req) => self.alter(req).await,
             SqlRequest::DropTable(req) => self.drop_table(req).await,
-            SqlRequest::CopyTable(req) => match req.direction {
-                CopyDirection::Export => self.copy_table_to(req).await,
-                CopyDirection::Import => self.copy_table_from(req).await,
-            },
-            SqlRequest::ShowDatabases(req) => {
-                show_databases(req, self.catalog_manager.clone()).context(ExecuteSqlSnafu)
-            }
-            SqlRequest::ShowTables(req) => {
-                show_tables(req, self.catalog_manager.clone(), query_ctx.clone())
-                    .context(ExecuteSqlSnafu)
-            }
             SqlRequest::FlushTable(req) => self.flush_table(req).await,
         };
         if let Err(e) = &result {

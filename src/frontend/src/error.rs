@@ -15,6 +15,7 @@
 use std::any::Any;
 
 use common_error::prelude::*;
+use datafusion::parquet;
 use snafu::Location;
 use store_api::storage::RegionId;
 
@@ -310,13 +311,8 @@ pub enum Error {
         source: common_grpc_expr::error::Error,
     },
 
-    #[snafu(display(
-        "Failed to build default value, column: {}, source: {}",
-        column,
-        source
-    ))]
-    ColumnDefaultValue {
-        column: String,
+    #[snafu(display("Failed to convert into vectors, source: {}", source))]
+    IntoVectors {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
@@ -370,6 +366,92 @@ pub enum Error {
         #[snafu(backtrace)]
         source: script::error::Error,
     },
+
+    #[snafu(display("Failed to build regex, source: {}", source))]
+    BuildRegex {
+        location: Location,
+        source: regex::Error,
+    },
+
+    #[snafu(display("Failed to copy table: {}, source: {}", table_name, source))]
+    CopyTable {
+        table_name: String,
+        #[snafu(backtrace)]
+        source: table::error::Error,
+    },
+
+    #[snafu(display(
+        "Failed to insert value into table: {}, source: {}",
+        table_name,
+        source
+    ))]
+    Insert {
+        table_name: String,
+        #[snafu(backtrace)]
+        source: table::error::Error,
+    },
+
+    #[snafu(display("Failed to execute table scan, source: {}", source))]
+    TableScanExec {
+        #[snafu(backtrace)]
+        source: common_query::error::Error,
+    },
+
+    #[snafu(display("Failed to parse data source url, source: {}", source))]
+    ParseUrl {
+        #[snafu(backtrace)]
+        source: common_datasource::error::Error,
+    },
+
+    #[snafu(display("Failed to build data source backend, source: {}", source))]
+    BuildBackend {
+        #[snafu(backtrace)]
+        source: common_datasource::error::Error,
+    },
+
+    #[snafu(display("Failed to list objects, source: {}", source))]
+    ListObjects {
+        #[snafu(backtrace)]
+        source: common_datasource::error::Error,
+    },
+
+    #[snafu(display("Failed to read object in path: {}, source: {}", path, source))]
+    ReadObject {
+        path: String,
+        location: Location,
+        source: object_store::Error,
+    },
+
+    #[snafu(display("Failed to read parquet file, source: {}", source))]
+    ReadParquet {
+        source: parquet::errors::ParquetError,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to build parquet record batch stream, source: {}", source))]
+    BuildParquetRecordBatchStream {
+        location: Location,
+        source: parquet::errors::ParquetError,
+    },
+
+    #[snafu(display("Failed to write parquet file, source: {}", source))]
+    WriteParquet {
+        #[snafu(backtrace)]
+        source: storage::error::Error,
+    },
+
+    #[snafu(display(
+        "Schema datatypes not match at index {}, expected table schema: {}, actual file schema: {}",
+        index,
+        table_schema,
+        file_schema
+    ))]
+    InvalidSchema {
+        index: usize,
+        table_schema: String,
+        file_schema: String,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -388,7 +470,9 @@ impl ErrorExt for Error {
             | Error::MissingInsertValues { .. }
             | Error::PrimaryKeyNotFound { .. }
             | Error::MissingMetasrvOpts { .. }
-            | Error::ColumnNoneDefaultValue { .. } => StatusCode::InvalidArguments,
+            | Error::ColumnNoneDefaultValue { .. }
+            | Error::BuildRegex { .. }
+            | Error::InvalidSchema { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
 
@@ -401,10 +485,13 @@ impl ErrorExt for Error {
 
             Error::ParseSql { source } => source.status_code(),
 
-            Error::Table { source } => source.status_code(),
+            Error::Table { source }
+            | Error::CopyTable { source, .. }
+            | Error::Insert { source, .. } => source.status_code(),
 
             Error::ConvertColumnDefaultConstraint { source, .. }
-            | Error::CreateTableInfo { source } => source.status_code(),
+            | Error::CreateTableInfo { source }
+            | Error::IntoVectors { source } => source.status_code(),
 
             Error::RequestDatanode { source } => source.status_code(),
 
@@ -447,7 +534,6 @@ impl ErrorExt for Error {
             Error::TableAlreadyExist { .. } => StatusCode::TableAlreadyExists,
             Error::EncodeSubstraitLogicalPlan { source } => source.status_code(),
             Error::InvokeDatanode { source } => source.status_code(),
-            Error::ColumnDefaultValue { source, .. } => source.status_code(),
 
             Error::External { source } => source.status_code(),
             Error::DeserializePartition { source, .. } | Error::FindTableRoute { source, .. } => {
@@ -456,6 +542,18 @@ impl ErrorExt for Error {
             Error::UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
 
             Error::StartScriptManager { source } => source.status_code(),
+
+            Error::TableScanExec { source, .. } => source.status_code(),
+
+            Error::ReadObject { .. }
+            | Error::ReadParquet { .. }
+            | Error::BuildParquetRecordBatchStream { .. } => StatusCode::StorageUnavailable,
+
+            Error::ListObjects { source }
+            | Error::ParseUrl { source }
+            | Error::BuildBackend { source } => source.status_code(),
+
+            Error::WriteParquet { source, .. } => source.status_code(),
         }
     }
 

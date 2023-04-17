@@ -371,7 +371,7 @@ mod tests {
         let TestEnv {
             table_engine,
             dir: _dir,
-        } = procedure_test_util::setup_test_engine("create_procedure").await;
+        } = procedure_test_util::setup_test_engine("add_column").await;
         let schema = Arc::new(test_util::schema_for_test());
         let request = test_util::new_create_request(schema.clone());
 
@@ -426,7 +426,7 @@ mod tests {
         let TestEnv {
             table_engine,
             dir: _dir,
-        } = procedure_test_util::setup_test_engine("create_procedure").await;
+        } = procedure_test_util::setup_test_engine("drop_column").await;
         let schema = Arc::new(test_util::schema_for_test());
         let request = test_util::new_create_request(schema.clone());
 
@@ -491,7 +491,7 @@ mod tests {
         let TestEnv {
             table_engine,
             dir: _dir,
-        } = procedure_test_util::setup_test_engine("create_procedure").await;
+        } = procedure_test_util::setup_test_engine("rename").await;
         let schema = Arc::new(test_util::schema_for_test());
         let create_request = test_util::new_create_request(schema.clone());
 

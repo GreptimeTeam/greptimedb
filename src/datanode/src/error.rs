@@ -14,14 +14,11 @@
 
 use std::any::Any;
 
-use common_datasource::error::Error as DataSourceError;
 use common_error::prelude::*;
 use common_procedure::ProcedureId;
-use datafusion::parquet;
 use snafu::Location;
 use storage::error::Error as StorageError;
 use table::error::Error as TableError;
-use url::ParseError;
 
 use crate::datanode::ObjectStoreConfig;
 
@@ -208,18 +205,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to build backend, source: {}", source))]
-    BuildBackend {
-        #[snafu(backtrace)]
-        source: DataSourceError,
-    },
-
-    #[snafu(display("Failed to parse url, source: {}", source))]
-    ParseUrl {
-        source: DataSourceError,
-        location: Location,
-    },
-
     #[snafu(display("Runtime resource error, source: {}", source))]
     RuntimeResource {
         #[snafu(backtrace)]
@@ -228,36 +213,6 @@ pub enum Error {
 
     #[snafu(display("Invalid SQL, error: {}", msg))]
     InvalidSql { msg: String },
-
-    #[snafu(display("Invalid url: {}, error :{}", url, source))]
-    InvalidUrl { url: String, source: ParseError },
-
-    #[snafu(display("Invalid filepath: {}", path))]
-    InvalidPath { path: String },
-
-    #[snafu(display("Invalid connection: {}", msg))]
-    InvalidConnection { msg: String },
-
-    #[snafu(display("Unsupported backend protocol: {}", protocol))]
-    UnsupportedBackendProtocol { protocol: String },
-
-    #[snafu(display("Failed to regex, source: {}", source))]
-    BuildRegex {
-        location: Location,
-        source: regex::Error,
-    },
-
-    #[snafu(display("Failed to list objects, source: {}", source))]
-    ListObjects {
-        #[snafu(backtrace)]
-        source: DataSourceError,
-    },
-
-    #[snafu(display("Failed to parse the data, source: {}", source))]
-    ParseDataTypes {
-        #[snafu(backtrace)]
-        source: common_recordbatch::error::Error,
-    },
 
     #[snafu(display("Not support SQL, error: {}", msg))]
     NotSupportSql { msg: String },
@@ -409,63 +364,6 @@ pub enum Error {
         source: query::error::Error,
     },
 
-    #[snafu(display("Failed to copy data from table: {}, source: {}", table_name, source))]
-    CopyTable {
-        table_name: String,
-        #[snafu(backtrace)]
-        source: TableError,
-    },
-
-    #[snafu(display("Failed to execute table scan, source: {}", source))]
-    TableScanExec {
-        #[snafu(backtrace)]
-        source: common_query::error::Error,
-    },
-
-    #[snafu(display(
-        "File schema mismatch at index {}, expected table schema: {} but found: {}",
-        index,
-        table_schema,
-        file_schema
-    ))]
-    InvalidSchema {
-        index: usize,
-        table_schema: String,
-        file_schema: String,
-    },
-
-    #[snafu(display("Failed to read parquet file, source: {}", source))]
-    ReadParquet {
-        source: parquet::errors::ParquetError,
-        location: Location,
-    },
-
-    #[snafu(display("Failed to poll stream, source: {}", source))]
-    PollStream {
-        source: datafusion_common::DataFusionError,
-        location: Location,
-    },
-
-    #[snafu(display("Failed to build parquet record batch stream, source: {}", source))]
-    BuildParquetRecordBatchStream {
-        location: Location,
-        source: parquet::errors::ParquetError,
-    },
-
-    #[snafu(display("Failed to read object in path: {}, source: {}", path, source))]
-    ReadObject {
-        path: String,
-        location: Location,
-        source: object_store::Error,
-    },
-
-    #[snafu(display("Failed to write object into path: {}, source: {}", path, source))]
-    WriteObject {
-        path: String,
-        location: Location,
-        source: object_store::Error,
-    },
-
     #[snafu(display("Unrecognized table option: {}", source))]
     UnrecognizedTableOption {
         #[snafu(backtrace)]
@@ -509,12 +407,6 @@ pub enum Error {
         #[snafu(backtrace)]
         source: BoxedError,
     },
-
-    #[snafu(display("Failed to copy table to parquet file, source: {}", source))]
-    WriteParquet {
-        #[snafu(backtrace)]
-        source: storage::error::Error,
-    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -554,11 +446,6 @@ impl ErrorExt for Error {
 
             ColumnValuesNumberMismatch { .. }
             | InvalidSql { .. }
-            | InvalidUrl { .. }
-            | InvalidPath { .. }
-            | InvalidConnection { .. }
-            | UnsupportedBackendProtocol { .. }
-            | BuildRegex { .. }
             | NotSupportSql { .. }
             | KeyColumnNotFound { .. }
             | IllegalPrimaryKeysDef { .. }
@@ -572,8 +459,7 @@ impl ErrorExt for Error {
             | DatabaseNotFound { .. }
             | MissingNodeId { .. }
             | MissingMetasrvOpts { .. }
-            | ColumnNoneDefaultValue { .. }
-            | ParseUrl { .. } => StatusCode::InvalidArguments,
+            | ColumnNoneDefaultValue { .. } => StatusCode::InvalidArguments,
 
             // TODO(yingwen): Further categorize http error.
             StartServer { .. }
@@ -586,22 +472,13 @@ impl ErrorExt for Error {
             | RenameTable { .. }
             | Catalog { .. }
             | MissingRequiredField { .. }
-            | BuildParquetRecordBatchStream { .. }
-            | InvalidSchema { .. }
-            | ParseDataTypes { .. }
             | IncorrectInternalState { .. }
             | ShutdownServer { .. }
             | ShutdownInstance { .. }
             | CloseTableEngine { .. } => StatusCode::Internal,
 
-            BuildBackend { .. }
-            | InitBackend { .. }
-            | ReadParquet { .. }
-            | WriteParquet { .. }
-            | PollStream { .. }
-            | ReadObject { .. }
-            | WriteObject { .. }
-            | ListObjects { .. } => StatusCode::StorageUnavailable,
+            InitBackend { .. } => StatusCode::StorageUnavailable,
+
             OpenLogStore { source } => source.status_code(),
             OpenStorageEngine { source } => source.status_code(),
             RuntimeResource { .. } => StatusCode::RuntimeResourcesExhausted,
@@ -609,8 +486,6 @@ impl ErrorExt for Error {
             TableIdProviderNotFound { .. } => StatusCode::Unsupported,
             BumpTableId { source, .. } => source.status_code(),
             ColumnDefaultValue { source, .. } => source.status_code(),
-            CopyTable { source, .. } => source.status_code(),
-            TableScanExec { source, .. } => source.status_code(),
             UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
             RecoverProcedure { source, .. } | SubmitProcedure { source, .. } => {
                 source.status_code()

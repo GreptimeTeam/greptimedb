@@ -382,11 +382,11 @@ mod test {
     use catalog::error::Result;
     use catalog::remote::{KvBackend, ValueIter};
     use common_query::physical_plan::DfPhysicalPlanAdapter;
+    use common_query::DfPhysicalPlan;
     use common_recordbatch::adapter::RecordBatchStreamAdapter;
     use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
     use datafusion::physical_plan::expressions::{col as physical_col, PhysicalSortExpr};
     use datafusion::physical_plan::sorts::sort::SortExec;
-    use datafusion::physical_plan::ExecutionPlan;
     use datafusion::prelude::SessionContext;
     use datafusion::sql::sqlparser;
     use datafusion_expr::expr_fn::{and, binary_expr, col, or};

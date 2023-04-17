@@ -52,10 +52,10 @@ edition = "2021"
 license = "Apache-2.0"
 
 [workspace.dependencies]
-arrow = { version = "36.0" }
-arrow-array = "36.0"
-arrow-flight = "36.0"
-arrow-schema = { version = "36.0", features = ["serde"] }
+arrow = { version = "37.0" }
+arrow-array = "37.0"
+arrow-flight = "37.0"
+arrow-schema = { version = "37.0", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
@@ -68,18 +68,18 @@ datafusion-sql = { git = "https://github.com/apache/arrow-datafusion.git", rev =
 datafusion-substrait = { git = "https://github.com/apache/arrow-datafusion.git", rev = "74a778ca6016a853a3c3add3fa8c6f12f4fe4561" }
 futures = "0.3"
 futures-util = "0.3"
-parquet = "36.0"
+parquet = "37.0"
 paste = "1.0"
 prost = "0.11"
 rand = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 snafu = { version = "0.7", features = ["backtraces"] }
-sqlparser = "0.32"
+sqlparser = "0.33"
 tempfile = "3"
 tokio = { version = "1.24.2", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io-util"] }
-tonic = { version = "0.8", features = ["tls"] }
+tonic = { version = "0.9", features = ["tls"] }
 uuid = { version = "1", features = ["serde", "v4", "fast-rng"] }
 
 [profile.release]

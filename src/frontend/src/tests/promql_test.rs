@@ -53,7 +53,8 @@ async fn create_insert_query_assert(
     eval_stmt.lookback_delta = lookback;
 
     let query_output = instance
-        .plan_exec(QueryStatement::Promql(eval_stmt), QueryContext::arc())
+        .statement_executor()
+        .execute_stmt(QueryStatement::Promql(eval_stmt), QueryContext::arc())
         .await
         .unwrap();
     check_unordered_output_stream(query_output, expected).await;

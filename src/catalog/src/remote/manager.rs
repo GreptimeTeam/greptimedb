@@ -33,7 +33,6 @@ use table::engine::manager::TableEngineManagerRef;
 use table::engine::EngineContext;
 use table::metadata::TableId;
 use table::requests::{CreateTableRequest, OpenTableRequest};
-use table::table::numbers::NumbersTable;
 use table::TableRef;
 use tokio::sync::Mutex;
 
@@ -423,15 +422,6 @@ impl CatalogManager for RemoteCatalogManager {
             })?;
         handle_system_table_request(self, engine, &mut system_table_requests).await?;
         info!("All system table opened");
-
-        self.catalog(DEFAULT_CATALOG_NAME)
-            .unwrap()
-            .unwrap()
-            .schema(DEFAULT_SCHEMA_NAME)
-            .unwrap()
-            .unwrap()
-            .register_table("numbers".to_string(), Arc::new(NumbersTable::default()))
-            .unwrap();
         Ok(())
     }
 

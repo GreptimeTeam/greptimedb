@@ -76,3 +76,9 @@ serde = { version = "1.0", features = ["derive"] }
 storage = { path = "../storage" }
 store-api = { path = "../store-api" }
 tokio-test = "0.4"
+criterion = { version = "0.4", features = ["html_reports", "async_tokio"] }
+rayon = "1.0"
+
+[[bench]]
+name = "py_benchmark"
+harness = false

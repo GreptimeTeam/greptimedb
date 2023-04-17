@@ -21,6 +21,7 @@ use async_trait::async_trait;
 use axum::body::BoxBody;
 use axum::extract::{Query, State};
 use axum::{routing, Form, Json, Router};
+use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_error::prelude::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
@@ -38,6 +39,7 @@ use promql_parser::parser::{
 use query::parser::PromQuery;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use session::context::{QueryContext, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::oneshot::Sender;
 use tokio::sync::{oneshot, Mutex};
@@ -59,7 +61,7 @@ pub type PromHandlerRef = Arc<dyn PromHandler + Send + Sync>;
 
 #[async_trait]
 pub trait PromHandler {
-    async fn do_query(&self, query: &PromQuery) -> Result<Output>;
+    async fn do_query(&self, query: &PromQuery, query_ctx: QueryContextRef) -> Result<Output>;
 }
 
 /// PromServer represents PrometheusServer which handles the compliance with prometheus HTTP API
@@ -372,6 +374,7 @@ pub struct RangeQuery {
     end: Option<String>,
     step: Option<String>,
     timeout: Option<String>,
+    db: Option<String>,
 }
 
 #[axum_macros::debug_handler]
@@ -386,7 +389,13 @@ pub async fn range_query(
         end: params.end.or(form_params.end).unwrap_or_default(),
         step: params.step.or(form_params.step).unwrap_or_default(),
     };
-    let result = handler.do_query(&prom_query).await;
+
+    let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
+    let (catalog, schema) = super::parse_catalog_and_schema_from_client_database_name(db);
+
+    let query_ctx = QueryContext::with(catalog, schema);
+
+    let result = handler.do_query(&prom_query, Arc::new(query_ctx)).await;
     let metric_name = retrieve_metric_name(&prom_query.query).unwrap_or_default();
     PromJsonResponse::from_query_result(result, metric_name).await
 }

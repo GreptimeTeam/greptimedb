@@ -81,9 +81,9 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
 
         // construct matrix from input
         let ts_array = extract_array(&input[0])?;
-        let ts_range = RangeArray::try_new(ts_array.data().clone().into())?;
+        let ts_range = RangeArray::try_new(ts_array.to_data().into())?;
         let value_array = extract_array(&input[1])?;
-        let value_range = RangeArray::try_new(value_array.data().clone().into())?;
+        let value_range = RangeArray::try_new(value_array.to_data().into())?;
         let ts = extract_array(&input[2])?;
         let ts = ts
             .as_any()

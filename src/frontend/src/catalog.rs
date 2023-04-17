@@ -32,12 +32,14 @@ use catalog::{
     RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest,
     SchemaProvider, SchemaProviderRef,
 };
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::BoxedError;
 use common_telemetry::error;
 use futures::StreamExt;
 use meta_client::rpc::TableName;
 use partition::manager::PartitionRuleManagerRef;
 use snafu::prelude::*;
+use table::table::numbers::NumbersTable;
 use table::TableRef;
 
 use crate::datanode::DatanodeClients;
@@ -373,17 +375,21 @@ impl SchemaProvider for FrontendSchemaProvider {
 
         std::thread::spawn(|| {
             common_runtime::block_on_read(async move {
+                let mut tables = vec![];
+                if catalog_name == DEFAULT_CATALOG_NAME && schema_name == DEFAULT_SCHEMA_NAME {
+                    tables.push("numbers".to_string());
+                }
+
                 let key = build_table_global_prefix(catalog_name, schema_name);
                 let mut iter = backend.range(key.as_bytes());
-                let mut res = HashSet::new();
 
                 while let Some(r) = iter.next().await {
                     let Kv(k, _) = r?;
                     let key = TableGlobalKey::parse(String::from_utf8_lossy(&k))
                         .context(InvalidCatalogValueSnafu)?;
-                    res.insert(key.table_name);
+                    tables.push(key.table_name);
                 }
-                Ok(res.into_iter().collect())
+                Ok(tables)
             })
         })
         .join()
@@ -391,6 +397,13 @@ impl SchemaProvider for FrontendSchemaProvider {
     }
 
     async fn table(&self, name: &str) -> catalog::error::Result<Option<TableRef>> {
+        if self.catalog_name == DEFAULT_CATALOG_NAME
+            && self.schema_name == DEFAULT_SCHEMA_NAME
+            && name == "numbers"
+        {
+            return Ok(Some(Arc::new(NumbersTable::default())));
+        }
+
         let table_global_key = TableGlobalKey {
             catalog_name: self.catalog_name.clone(),
             schema_name: self.schema_name.clone(),

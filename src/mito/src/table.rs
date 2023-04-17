@@ -478,6 +478,8 @@ impl<R: Region> MitoTable<R> {
     ) -> Result<MitoTable<R>> {
         let manifest = TableManifest::create(&table_manifest_dir(table_dir), object_store);
 
+        let _timer =
+            common_telemetry::timer!(crate::metrics::MITO_CREATE_TABLE_UPDATE_MANIFEST_ELAPSED);
         // TODO(dennis): save manifest version into catalog?
         let _manifest_version = manifest
             .update(TableMetaActionList::with_action(TableMetaAction::Change(
@@ -573,7 +575,7 @@ pub(crate) fn create_alter_operation(
             create_add_columns_operation(table_name, columns, table_meta)
         }
         AlterKind::DropColumns { names } => Ok(Some(AlterOperation::DropColumns {
-            names: names.to_vec(),
+            names: names.clone(),
         })),
         // No need to build alter operation when reaming tables.
         AlterKind::RenameTable { .. } => Ok(None),

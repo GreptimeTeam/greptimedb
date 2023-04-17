@@ -52,7 +52,7 @@ impl From<UnlockRequest> for PbUnlockRequest {
     fn from(req: UnlockRequest) -> Self {
         Self {
             header: None,
-            key: req.key.to_vec(),
+            key: req.key,
         }
     }
 }

@@ -10,6 +10,7 @@ python = ["dep:script"]
 
 [dependencies]
 api = { path = "../api" }
+async-compat = "0.2"
 async-stream.workspace = true
 async-trait = "0.1"
 catalog = { path = "../catalog" }
@@ -17,6 +18,7 @@ chrono.workspace = true
 client = { path = "../client" }
 common-base = { path = "../common/base" }
 common-catalog = { path = "../common/catalog" }
+common-datasource = { path = "../common/datasource" }
 common-error = { path = "../common/error" }
 common-function = { path = "../common/function" }
 common-grpc = { path = "../common/grpc" }
@@ -36,11 +38,12 @@ itertools = "0.10"
 meta-client = { path = "../meta-client" }
 mito = { path = "../mito", features = ["test"] }
 moka = { version = "0.9", features = ["future"] }
+object-store = { path = "../object-store" }
 openmetrics-parser = "0.4"
 partition = { path = "../partition" }
 prost.workspace = true
 query = { path = "../query" }
-rustls = "0.20"
+regex = "1.6"
 script = { path = "../script", features = ["python"], optional = true }
 serde = "1.0"
 serde_json = "1.0"
@@ -48,6 +51,7 @@ servers = { path = "../servers" }
 session = { path = "../session" }
 snafu.workspace = true
 sql = { path = "../sql" }
+storage = { path = "../storage" }
 store-api = { path = "../store-api" }
 substrait = { path = "../common/substrait" }
 table = { path = "../table" }

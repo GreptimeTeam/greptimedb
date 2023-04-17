@@ -66,7 +66,7 @@ impl Procedure for CreateTableProcedure {
 }
 
 impl CreateTableProcedure {
-    const TYPE_NAME: &str = "table-procedures::CreateTableProcedure";
+    const TYPE_NAME: &str = "table-procedure::CreateTableProcedure";
 
     /// Returns a new [CreateTableProcedure].
     pub fn new(
@@ -176,7 +176,7 @@ impl CreateTableProcedure {
             // do this check as we might not submitted the subprocedure yet when the manager
             // recover this procedure from procedure store.
             logging::info!(
-                "On engine create table {}, not found, sub_id: {}",
+                "On engine create table {}, subprocedure not found, sub_id: {}",
                 self.data.request.table_name,
                 sub_id
             );
@@ -186,7 +186,7 @@ impl CreateTableProcedure {
             let procedure = self
                 .engine_procedure
                 .create_table_procedure(&engine_ctx, self.data.request.clone())
-                .map_err(Error::external)?;
+                .map_err(Error::from_error_ext)?;
             return Ok(Status::Suspended {
                 subprocedures: vec![ProcedureWithId {
                     id: sub_id,
@@ -238,7 +238,7 @@ impl CreateTableProcedure {
         let table_exists = schema
             .table(&self.data.request.table_name)
             .await
-            .map_err(Error::external)?
+            .map_err(Error::from_error_ext)?
             .is_some();
         if table_exists {
             // Table already exists.
@@ -251,7 +251,7 @@ impl CreateTableProcedure {
         let table = self
             .table_engine
             .get_table(&engine_ctx, &table_ref)
-            .map_err(Error::external)?
+            .map_err(Error::from_error_ext)?
             .unwrap();
 
         let register_req = RegisterTableRequest {
@@ -264,7 +264,7 @@ impl CreateTableProcedure {
         self.catalog_manager
             .register_table(register_req)
             .await
-            .map_err(Error::external)?;
+            .map_err(Error::from_error_ext)?;
 
         Ok(Status::Done)
     }
@@ -307,48 +307,10 @@ impl CreateTableData {
 
 #[cfg(test)]
 mod tests {
-    use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, RawSchema};
-    use mito::engine::MITO_ENGINE;
     use table::engine::{EngineContext, TableEngine};
 
     use super::*;
-    use crate::test_util::TestEnv;
-
-    fn schema_for_test() -> RawSchema {
-        let column_schemas = vec![
-            // Key
-            ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
-            // Nullable value column: cpu
-            ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
-            // Non-null value column: memory
-            ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), false),
-            ColumnSchema::new(
-                "ts",
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                true,
-            )
-            .with_time_index(true),
-        ];
-
-        RawSchema::new(column_schemas)
-    }
-
-    fn new_create_request(table_name: &str) -> CreateTableRequest {
-        CreateTableRequest {
-            id: 1,
-            catalog_name: "greptime".to_string(),
-            schema_name: "public".to_string(),
-            table_name: table_name.to_string(),
-            desc: Some("a test table".to_string()),
-            schema: schema_for_test(),
-            region_numbers: vec![0, 1],
-            create_if_not_exists: true,
-            primary_key_indices: vec![0],
-            table_options: Default::default(),
-            engine: MITO_ENGINE.to_string(),
-        }
-    }
+    use crate::test_util::{self, TestEnv};
 
     #[tokio::test]
     async fn test_create_table_procedure() {
@@ -360,7 +322,7 @@ mod tests {
         } = TestEnv::new("create");
 
         let table_name = "test_create";
-        let request = new_create_request(table_name);
+        let request = test_util::new_create_request(table_name);
         let procedure = CreateTableProcedure::new(
             request.clone(),
             catalog_manager,

@@ -757,6 +757,7 @@ mod utils {
             BuiltinScalarFunction::Atanh => "atanh",
             BuiltinScalarFunction::Cbrt => "cbrt",
             BuiltinScalarFunction::Cosh => "cosh",
+            BuiltinScalarFunction::Pi => "pi",
             BuiltinScalarFunction::Sinh => "sinh",
             BuiltinScalarFunction::Tanh => "tanh",
         }

@@ -20,7 +20,7 @@ use std::task::{Context, Poll};
 
 use datafusion::arrow::array::{Array, ArrayRef, Int64Array, TimestampMillisecondArray};
 use datafusion::arrow::compute;
-use datafusion::arrow::datatypes::SchemaRef;
+use datafusion::arrow::datatypes::{Field, SchemaRef};
 use datafusion::arrow::error::ArrowError;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DFField, DFSchema, DFSchemaRef};
@@ -109,13 +109,13 @@ impl RangeManipulate {
         let Some(ts_col_index) = input_schema.index_of_column_by_name(None, time_index)? else {
             return Err(datafusion::common::field_not_found(None::<TableReference>, time_index, input_schema.as_ref()))
         };
-        let timestamp_range_field = columns[ts_col_index]
-            .field()
-            .clone()
-            .with_name(Self::build_timestamp_range_name(time_index));
-        columns.push(DFField::from(RangeArray::convert_field(
-            &timestamp_range_field,
-        )));
+        let ts_col_field = columns[ts_col_index].field();
+        let timestamp_range_field = Field::new(
+            Self::build_timestamp_range_name(time_index),
+            RangeArray::convert_field(ts_col_field).data_type().clone(),
+            ts_col_field.is_nullable(),
+        );
+        columns.push(DFField::from(timestamp_range_field));
 
         // process value columns
         for name in field_columns {

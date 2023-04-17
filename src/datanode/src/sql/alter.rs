@@ -13,18 +13,25 @@
 // limitations under the License.
 
 use catalog::RenameTableRequest;
+use common_procedure::{watcher, ProcedureManagerRef, ProcedureWithId};
 use common_query::Output;
+use common_telemetry::logging::info;
 use snafu::prelude::*;
 use sql::statements::alter::{AlterTable, AlterTableOperation};
 use sql::statements::column_def_to_schema;
 use table::engine::{EngineContext, TableReference};
 use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest};
+use table_procedure::AlterTableProcedure;
 
 use crate::error::{self, Result};
 use crate::sql::SqlHandler;
 
 impl SqlHandler {
     pub(crate) async fn alter(&self, req: AlterTableRequest) -> Result<Output> {
+        if let Some(procedure_manager) = &self.procedure_manager {
+            return self.alter_table_by_procedure(procedure_manager, req).await;
+        }
+
         let ctx = EngineContext {};
         let table_name = req.table_name.clone();
         let table_ref = TableReference {
@@ -71,6 +78,33 @@ impl SqlHandler {
         Ok(Output::AffectedRows(0))
     }
 
+    pub(crate) async fn alter_table_by_procedure(
+        &self,
+        procedure_manager: &ProcedureManagerRef,
+        req: AlterTableRequest,
+    ) -> Result<Output> {
+        let table_name = req.table_name.clone();
+        let procedure = AlterTableProcedure::new(
+            req,
+            self.catalog_manager.clone(),
+            self.engine_procedure.clone(),
+        );
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        let procedure_id = procedure_with_id.id;
+
+        info!("Alter table {} by procedure {}", table_name, procedure_id);
+
+        let mut watcher = procedure_manager
+            .submit(procedure_with_id)
+            .await
+            .context(error::SubmitProcedureSnafu { procedure_id })?;
+
+        watcher::wait(&mut watcher)
+            .await
+            .context(error::WaitProcedureSnafu { procedure_id })?;
+        Ok(Output::AffectedRows(0))
+    }
+
     pub(crate) fn alter_to_request(
         &self,
         alter_table: AlterTable,
@@ -112,12 +146,15 @@ mod tests {
     use std::assert_matches::assert_matches;
 
     use datatypes::prelude::ConcreteDataType;
+    use query::parser::{QueryLanguageParser, QueryStatement};
+    use query::query_engine::SqlStatementExecutor;
+    use session::context::QueryContext;
     use sql::dialect::GenericDialect;
     use sql::parser::ParserContext;
     use sql::statements::statement::Statement;
 
     use super::*;
-    use crate::tests::test_util::create_mock_sql_handler;
+    use crate::tests::test_util::{create_mock_sql_handler, MockInstance};
 
     fn parse_sql(sql: &str) -> AlterTable {
         let mut stmt = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
@@ -181,5 +218,42 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn alter_table_by_procedure() {
+        let instance = MockInstance::with_procedure_enabled("alter_table_by_procedure").await;
+
+        // Create table first.
+        let sql = r#"create table test_alter(
+                            host string,
+                            ts timestamp,
+                            cpu double default 0,
+                            TIME INDEX (ts),
+                            PRIMARY KEY(host)
+                        ) engine=mito with(regions=1);"#;
+        let stmt = match QueryLanguageParser::parse_sql(sql).unwrap() {
+            QueryStatement::Sql(sql) => sql,
+            _ => unreachable!(),
+        };
+        let output = instance
+            .inner()
+            .execute_sql(stmt, QueryContext::arc())
+            .await
+            .unwrap();
+        assert!(matches!(output, Output::AffectedRows(0)));
+
+        // Alter table.
+        let sql = r#"alter table test_alter add column memory double"#;
+        let stmt = match QueryLanguageParser::parse_sql(sql).unwrap() {
+            QueryStatement::Sql(sql) => sql,
+            _ => unreachable!(),
+        };
+        let output = instance
+            .inner()
+            .execute_sql(stmt, QueryContext::arc())
+            .await
+            .unwrap();
+        assert!(matches!(output, Output::AffectedRows(0)));
     }
 }
