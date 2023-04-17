@@ -57,6 +57,7 @@ impl Default for MockKvBackend {
         }
         .to_string();
 
+        // create default catalog and schema
         map.insert(default_catalog_key.into(), catalog_value);
         map.insert(default_schema_key.into(), schema_value);
 

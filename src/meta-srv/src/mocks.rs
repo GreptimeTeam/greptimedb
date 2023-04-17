@@ -72,6 +72,7 @@ pub async fn mock(
     }
     .to_string();
 
+    // create default catalog
     kv_store
         .put(PutRequest {
             key: default_catalog_key.into(),
@@ -81,6 +82,7 @@ pub async fn mock(
         .await
         .unwrap();
 
+    // create default schema
     kv_store
         .put(PutRequest {
             key: default_schema_key.into(),
