@@ -20,9 +20,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use async_stream::stream;
 use async_trait::async_trait;
-use common_catalog::consts::{
-    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID, MITO_ENGINE,
-};
+use common_catalog::consts::{MIN_USER_TABLE_ID, MITO_ENGINE};
 use common_telemetry::{debug, error, info};
 use dashmap::DashMap;
 use futures::Stream;
