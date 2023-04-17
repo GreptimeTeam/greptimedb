@@ -17,8 +17,7 @@ pub mod builder;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use api::v1::meta::{CompareAndPutRequest, Peer};
-use catalog::helper::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
+use api::v1::meta::Peer;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::{error, info, warn};
@@ -29,9 +28,10 @@ use tokio::sync::broadcast::error::RecvError;
 
 use crate::cluster::MetaPeerClient;
 use crate::election::{Election, LeaderChangeMessage};
-use crate::error::{InvalidCatalogValueSnafu, RecoverProcedureSnafu, Result};
+use crate::error::{RecoverProcedureSnafu, Result};
 use crate::handler::HeartbeatHandlerGroup;
 use crate::lock::DistLockRef;
+use crate::metadata_service::MetadataServiceRef;
 use crate::selector::{Selector, SelectorType};
 use crate::sequence::SequenceRef;
 use crate::service::store::kv::{KvStoreRef, ResettableKvStoreRef};
@@ -112,6 +112,7 @@ pub struct MetaSrv {
     meta_peer_client: Option<MetaPeerClient>,
     lock: Option<DistLockRef>,
     procedure_manager: ProcedureManagerRef,
+    metadata_service: MetadataServiceRef,
 }
 
 impl MetaSrv {
@@ -125,7 +126,7 @@ impl MetaSrv {
             return Ok(());
         }
 
-        self.create_default_catalog_schema().await?;
+        self.create_default_catalog_and_schema().await?;
 
         if let Some(election) = self.election() {
             let procedure_manager = self.procedure_manager.clone();
@@ -181,56 +182,10 @@ impl MetaSrv {
         Ok(())
     }
 
-    async fn create_default_catalog_schema(&self) -> Result<()> {
-        let kv_store = self.kv_store();
-
-        let default_catalog_key = CatalogKey {
-            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-        }
-        .to_string();
-
-        let default_schema_key = SchemaKey {
-            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-        }
-        .to_string();
-
-        let req = CompareAndPutRequest {
-            key: default_catalog_key.into(),
-            expect: vec![],
-            value: CatalogValue {}
-                .as_bytes()
-                .context(InvalidCatalogValueSnafu)?,
-            ..Default::default()
-        };
-
-        let resp = kv_store.compare_and_put(req).await?;
-
-        if resp.success {
-            info!(
-                "Successfully created the default catalog: {}",
-                DEFAULT_CATALOG_NAME
-            );
-        }
-
-        let req = CompareAndPutRequest {
-            key: default_schema_key.into(),
-            expect: vec![],
-            value: SchemaValue {}
-                .as_bytes()
-                .context(InvalidCatalogValueSnafu)?,
-            ..Default::default()
-        };
-        let resp = kv_store.compare_and_put(req).await?;
-
-        if resp.success {
-            info!(
-                "Successfully created the default schema: {}",
-                DEFAULT_SCHEMA_NAME
-            );
-        }
-
-        Ok(())
+    async fn create_default_catalog_and_schema(&self) -> Result<()> {
+        self.metadata_service
+            .create_schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
+            .await
     }
 
     pub fn shutdown(&self) {

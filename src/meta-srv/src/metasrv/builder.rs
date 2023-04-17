@@ -23,6 +23,7 @@ use crate::handler::{
     OnLeaderStartHandler, PersistStatsHandler, RegionFailureHandler, ResponseHeaderHandler,
 };
 use crate::lock::DistLockRef;
+use crate::metadata_service::{DefaultMetadataService, MetadataServiceRef};
 use crate::metasrv::{ElectionRef, MetaSrv, MetaSrvOptions, SelectorRef, TABLE_ID_SEQ};
 use crate::procedure::state_store::MetaStateStore;
 use crate::selector::lease_based::LeaseBasedSelector;
@@ -40,6 +41,7 @@ pub struct MetaSrvBuilder {
     election: Option<ElectionRef>,
     meta_peer_client: Option<MetaPeerClient>,
     lock: Option<DistLockRef>,
+    metadata_service: Option<MetadataServiceRef>,
 }
 
 impl MetaSrvBuilder {
@@ -53,6 +55,7 @@ impl MetaSrvBuilder {
             election: None,
             options: None,
             lock: None,
+            metadata_service: None,
         }
     }
 
@@ -96,6 +99,11 @@ impl MetaSrvBuilder {
         self
     }
 
+    pub fn metadata_service(mut self, metadata_service: MetadataServiceRef) -> Self {
+        self.metadata_service = Some(metadata_service);
+        self
+    }
+
     pub async fn build(self) -> MetaSrv {
         let started = Arc::new(AtomicBool::new(false));
 
@@ -108,6 +116,7 @@ impl MetaSrvBuilder {
             selector,
             handler_group,
             lock,
+            metadata_service,
         } = self;
 
         let options = options.unwrap_or_default();
@@ -146,6 +155,9 @@ impl MetaSrvBuilder {
         let state_store = Arc::new(MetaStateStore::new(kv_store.clone()));
         let procedure_manager = Arc::new(LocalManager::new(config, state_store));
 
+        let metadata_service = metadata_service
+            .unwrap_or_else(|| Arc::new(DefaultMetadataService::new(kv_store.clone())));
+
         MetaSrv {
             started,
             options,
@@ -158,6 +170,7 @@ impl MetaSrvBuilder {
             meta_peer_client,
             lock,
             procedure_manager,
+            metadata_service,
         }
     }
 }
