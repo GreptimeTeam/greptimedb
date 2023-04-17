@@ -25,7 +25,7 @@ use arrow_flight::{FlightData, Ticket};
 use common_error::prelude::*;
 use common_grpc::flight::{flight_messages_to_recordbatches, FlightDecoder, FlightMessage};
 use common_query::Output;
-use common_telemetry::logging;
+use common_telemetry::{logging, timer};
 use futures_util::{TryFutureExt, TryStreamExt};
 use prost::Message;
 use snafu::{ensure, ResultExt};
@@ -33,7 +33,7 @@ use snafu::{ensure, ResultExt};
 use crate::error::{
     ConvertFlightDataSnafu, IllegalDatabaseResponseSnafu, IllegalFlightMessagesSnafu,
 };
-use crate::{error, Client, Result};
+use crate::{error, metrics, Client, Result};
 
 #[derive(Clone, Debug, Default)]
 pub struct Database {
@@ -107,6 +107,7 @@ impl Database {
     }
 
     pub async fn insert(&self, request: InsertRequest) -> Result<u32> {
+        let _timer = timer!(metrics::METRIC_INSERT);
         let mut client = self.client.make_database_client()?.inner;
         let request = GreptimeRequest {
             header: Some(RequestHeader {
@@ -130,6 +131,7 @@ impl Database {
     }
 
     pub async fn sql(&self, sql: &str) -> Result<Output> {
+        let _timer = timer!(metrics::METRIC_SQL);
         self.do_get(Request::Query(QueryRequest {
             query: Some(Query::Sql(sql.to_string())),
         }))
@@ -137,6 +139,7 @@ impl Database {
     }
 
     pub async fn logical_plan(&self, logical_plan: Vec<u8>) -> Result<Output> {
+        let _timer = timer!(metrics::METRIC_LOGICAL_PLAN);
         self.do_get(Request::Query(QueryRequest {
             query: Some(Query::LogicalPlan(logical_plan)),
         }))
@@ -150,6 +153,7 @@ impl Database {
         end: &str,
         step: &str,
     ) -> Result<Output> {
+        let _timer = timer!(metrics::METRIC_PROMQL_RANGE_QUERY);
         self.do_get(Request::Query(QueryRequest {
             query: Some(Query::PromRangeQuery(PromRangeQuery {
                 query: promql.to_string(),
@@ -162,6 +166,7 @@ impl Database {
     }
 
     pub async fn create(&self, expr: CreateTableExpr) -> Result<Output> {
+        let _timer = timer!(metrics::METRIC_CREATE_TABLE);
         self.do_get(Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::CreateTable(expr)),
         }))
@@ -169,6 +174,7 @@ impl Database {
     }
 
     pub async fn alter(&self, expr: AlterExpr) -> Result<Output> {
+        let _timer = timer!(metrics::METRIC_ALTER);
         self.do_get(Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::Alter(expr)),
         }))
@@ -176,6 +182,7 @@ impl Database {
     }
 
     pub async fn drop_table(&self, expr: DropTableExpr) -> Result<Output> {
+        let _timer = timer!(metrics::METRIC_DROP_TABLE);
         self.do_get(Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::DropTable(expr)),
         }))
@@ -183,6 +190,7 @@ impl Database {
     }
 
     pub async fn flush_table(&self, expr: FlushTableExpr) -> Result<Output> {
+        let _timer = timer!(metrics::METRIC_FLUSH_TABLE);
         self.do_get(Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::FlushTable(expr)),
         }))
@@ -190,6 +198,8 @@ impl Database {
     }
 
     async fn do_get(&self, request: Request) -> Result<Output> {
+        // FIXME: should be added some labels for metrics
+        let _timer = timer!(metrics::METRIC_GRPC_DO_GET);
         let request = GreptimeRequest {
             header: Some(RequestHeader {
                 catalog: self.catalog.clone(),

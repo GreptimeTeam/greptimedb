@@ -12,15 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod client;
-mod database;
-mod error;
-pub mod load_balance;
-mod metrics;
-
-pub use api;
-pub use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-
-pub use self::client::Client;
-pub use self::database::Database;
-pub use self::error::{Error, Result};
+//! client metrics
+pub const METRIC_CREATE_TABLE: &str = "create.table";
+pub const METRIC_PROMQL_RANGE_QUERY: &str = "promql.range.query";
+pub const METRIC_INSERT: &str = "insert";
+pub const METRIC_SQL: &str = "sql";
+pub const METRIC_LOGICAL_PLAN: &str = "logical.plan";
+pub const METRIC_ALTER: &str = "alter";
+pub const METRIC_DROP_TABLE: &str = "drop.table";
+pub const METRIC_FLUSH_TABLE: &str = "flush.table";
+pub const METRIC_GRPC_DO_GET: &str = "grpc.do.get";
