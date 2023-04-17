@@ -18,7 +18,7 @@ pub struct ColumnSchema {
 ```
 
 ## Schema
-[Schema](https://github.com/GreptimeTeam/greptimedb/blob/9fa871a3fad07f583dc1863a509414da393747f8/src/datatypes/src/schema.rs#L38) is an ordered sequence of `ColumnSchema`. It is equivalent to arrow's [Schema](https://docs.rs/arrow/latest/arrow/datatypes/struct.Schema.html) with additional metadata including the index of the time index column and the version of this schema. Same as `ColumnSchema`, we can convert our `Schema` between arrow's `Schema`.
+[Schema](https://github.com/GreptimeTeam/greptimedb/blob/9fa871a3fad07f583dc1863a509414da393747f8/src/datatypes/src/schema.rs#L38) is an ordered sequence of `ColumnSchema`. It is equivalent to arrow's [Schema](https://docs.rs/arrow/latest/arrow/datatypes/struct.Schema.html) with additional metadata including the index of the time index column and the version of this schema. Same as `ColumnSchema`, we can convert our `Schema` from/to arrow's `Schema`.
 
 ```rust
 use arrow::datatypes::Schema as ArrowSchema;
@@ -34,7 +34,7 @@ pub struct Schema {
 pub type SchemaRef = Arc<Schema>;
 ```
 
-We alias `Arc<Schema>` as `SchemaRef` since it is used frequently. Mostly, we use our `ColumnSchema` and `Schema` structs instead of arrow's `Field` and `Schema` unless we need to invoke third-party libraries that rely on arrow.
+We alias `Arc<Schema>` as `SchemaRef` since it is used frequently. Mostly, we use our `ColumnSchema` and `Schema` structs instead of Arrow's `Field` and `Schema` unless we need to invoke third-party libraries (like DataFusion or ArrowFlight) that rely on Arrow.
 
 ## RawSchema
 `Schema` contains fields like a map from column names to their indices in the `ColumnSchema` sequences and a cached arrow `Schema`. We can construct these fields from the `ColumnSchema` sequences thus we don't want to serialize them. This is why we don't derive `Serialize` and `Deserialize` for `Schema`. We introduce a new struct [RawSchema](https://github.com/GreptimeTeam/greptimedb/blob/9fa871a3fad07f583dc1863a509414da393747f8/src/datatypes/src/schema/raw.rs#L24) which keeps all required fields of a `Schema` and derives the serialization traits. To serialize a `Schema`, we need to convert it into a `RawSchema` first and serialize the `RawSchema`.
@@ -108,7 +108,7 @@ We split a table into one or more units with the same schema and then store thes
 The storage engine maintains schemas of regions in more complicated ways because it
 - adds internal columns that are invisible to users to store additional metadata for each row
 - provides a data model similar to the key-value model so it organizes columns in a different order
-- maintains additional metadata like column id, column family
+- maintains additional metadata like column id or column family
 
 So the storage engine defines several schema structs:
 - RegionSchema
@@ -128,7 +128,7 @@ pub struct RegionSchema {
 
 Each region reserves some columns called `internal columns` for internal usage:
 - `__sequence`, sequence number of a row
-- `__op_type`, operation type of a row, such as `PUT`, `DELETE`
+- `__op_type`, operation type of a row, such as `PUT` or `DELETE`
 - `__version`, user-specified version of a row, reserved but not used. We might remove this in the future
 
 The table engine can't see the `__sequence` and `__op_type` columns, so the `RegionSchema` itself maintains two internal schemas:
@@ -302,7 +302,7 @@ So we can construct the following `ProjectedSchema`:
 }
 ```
 
-As you can see, `schema_to_read` doesn't contain column `usage_user`.
+As you can see, `schema_to_read` doesn't contain the column `usage_user` that is not intended to be read (not in projection).
 
 ### ReadAdapter
 As mentioned above, we can alter a table so the underlying files (SSTs) and memtables in the storage engine may have different schemas.
@@ -320,7 +320,7 @@ pub struct ReadAdapter {
 }
 ```
 
-For each column required by `dest_schema`, `indices_in_result` stores the index of that column in the row read from the source memtable or SST. If the source row doesn't contains that column, the index is None.
+For each column required by `dest_schema`, `indices_in_result` stores the index of that column in the row read from the source memtable or SST. If the source row doesn't contain that column, the index is `None`.
 
 The field `is_source_needed` stores whether a column in the source memtable or SST is needed.
 
