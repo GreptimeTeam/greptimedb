@@ -19,7 +19,7 @@ mod writer;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use common_telemetry::{info, logging};
@@ -258,9 +258,6 @@ impl<S: LogStore> RegionImpl<S> {
         store_config: StoreConfig<S>,
         opts: &OpenOptions,
     ) -> Result<Option<RegionImpl<S>>> {
-        // debug
-        let log_name = name.clone();
-
         // Load version meta data from manifest.
         let (version, mut recovered_metadata) = match Self::recover_from_manifest(
             &store_config.manifest,
@@ -336,17 +333,9 @@ impl<S: LogStore> RegionImpl<S> {
             manifest: &store_config.manifest,
         };
         // Replay all unflushed data.
-        // debug
-        let start = SystemTime::now();
         writer
             .replay(recovered_metadata_after_flushed, writer_ctx)
             .await?;
-        info!(
-            "Replay unflushed data for region: {}, elapsed: {:?}",
-            log_name,
-            SystemTime::now().duration_since(start).unwrap().as_millis()
-        );
-
         // Try to do a manifest checkpoint on opening
         if store_config.engine_config.manifest_checkpoint_on_startup {
             let manifest = &store_config.manifest;

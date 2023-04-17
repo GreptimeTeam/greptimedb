@@ -209,12 +209,10 @@ pub(crate) struct MitoEngineInner<S: StorageEngine> {
     ///
     /// Writing to `tables` should also hold the `table_mutex`.
     tables: DashMap<String, Arc<MitoTable<S::Region>>>,
-    // tables: RwLock<HashMap<String, Arc<MitoTable<S::Region>>>>,
     object_store: ObjectStore,
     storage_engine: S,
     /// Table mutex is used to protect the operations such as creating/opening/closing
     /// a table, to avoid things like opening the same table simultaneously.
-    // table_mutex: Mutex<()>,
     table_mutex: Arc<KeyLock<String>>,
 }
 
@@ -395,7 +393,6 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         let mut regions = HashMap::with_capacity(request.region_numbers.len());
 
         let _lock = self.table_mutex.lock(table_ref.to_string()).await;
-        // let _lock = self.table_mutex.lock().await;
         // Checks again, read lock should be enough since we are guarded by the mutex.
         if let Some(table) = self.get_table(&table_ref) {
             return if request.create_if_not_exists {
@@ -514,7 +511,6 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             let table_name_key = table_ref.to_string();
             let _lock = self.table_mutex.lock(table_name_key.clone()).await;
 
-            // let _lock = self.table_mutex.lock().await;
             // Checks again, read lock should be enough since we are guarded by the mutex.
             if let Some(table) = self.get_table(&table_ref) {
                 return Ok(Some(table));

@@ -770,7 +770,6 @@ pub struct RemoteSchemaProvider {
     backend: KvBackendRef,
     tables: Arc<ArcSwap<DashMap<String, TableRef>>>,
     mutex: Arc<KeyLock<String>>,
-    // mutex: Arc<Mutex<()>>,
 }
 
 impl RemoteSchemaProvider {
