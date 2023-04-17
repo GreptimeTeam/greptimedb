@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use api::v1::meta::{CompareAndPutRequest, Peer};
-use catalog::helper::{CatalogKey, SchemaKey};
+use catalog::helper::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::{error, info, warn};
@@ -198,7 +198,7 @@ impl MetaSrv {
         let req = CompareAndPutRequest {
             key: default_catalog_key.into(),
             expect: vec![],
-            value: catalog::helper::CatalogValue {}
+            value: CatalogValue {}
                 .as_bytes()
                 .context(InvalidCatalogValueSnafu)?,
             ..Default::default()
@@ -216,7 +216,7 @@ impl MetaSrv {
         let req = CompareAndPutRequest {
             key: default_schema_key.into(),
             expect: vec![],
-            value: catalog::helper::SchemaValue {}
+            value: SchemaValue {}
                 .as_bytes()
                 .context(InvalidCatalogValueSnafu)?,
             ..Default::default()
