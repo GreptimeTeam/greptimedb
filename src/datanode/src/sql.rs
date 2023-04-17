@@ -32,8 +32,6 @@ use crate::error::{
 use crate::instance::sql::table_idents_to_full_name;
 
 mod alter;
-mod copy_table_from;
-mod copy_table_to;
 mod create;
 mod drop_table;
 mod flush_table;
@@ -46,7 +44,6 @@ pub enum SqlRequest {
     Alter(AlterTableRequest),
     DropTable(DropTableRequest),
     FlushTable(FlushTableRequest),
-    CopyTable(CopyTableRequest),
 }
 
 // Handler to execute SQL except query
@@ -85,10 +82,6 @@ impl SqlHandler {
             SqlRequest::CreateDatabase(req) => self.create_database(req, query_ctx.clone()).await,
             SqlRequest::Alter(req) => self.alter(req).await,
             SqlRequest::DropTable(req) => self.drop_table(req).await,
-            SqlRequest::CopyTable(req) => match req.direction {
-                CopyDirection::Export => self.copy_table_to(req).await,
-                CopyDirection::Import => self.copy_table_from(req).await,
-            },
             SqlRequest::FlushTable(req) => self.flush_table(req).await,
         };
         if let Err(e) = &result {

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_datasource;
 use common_datasource::object_store::{build_backend, parse_url};
 use common_query::physical_plan::SessionContext;
 use common_query::Output;
@@ -23,9 +22,9 @@ use table::engine::TableReference;
 use table::requests::CopyTableRequest;
 
 use crate::error::{self, Result, WriteParquetSnafu};
-use crate::sql::SqlHandler;
+use crate::statement::StatementExecutor;
 
-impl SqlHandler {
+impl StatementExecutor {
     pub(crate) async fn copy_table_to(&self, req: CopyTableRequest) -> Result<Output> {
         let table_ref = TableReference {
             catalog: &req.catalog_name,
