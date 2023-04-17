@@ -139,11 +139,13 @@ impl<S: StorageEngine> DropMitoTable<S> {
     async fn on_close_regions(&mut self) -> Result<Status> {
         // Remove the table from the engine to avoid further access from users.
         let table_ref = self.data.table_ref();
-        self.engine_inner
-            .tables
-            .write()
-            .unwrap()
-            .remove(&table_ref.to_string());
+
+        let _lock = self
+            .engine_inner
+            .table_mutex
+            .lock(table_ref.to_string())
+            .await;
+        self.engine_inner.tables.remove(&table_ref.to_string());
 
         // Close the table to close all regions. Closing a region is idempotent.
         self.table.close().await.map_err(Error::from_error_ext)?;
