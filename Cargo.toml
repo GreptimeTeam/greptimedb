@@ -59,7 +59,7 @@ arrow-schema = { version = "37.0", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
-# TODO(ruihang): use arrow-datafusion once it's up-to-date
+# TODO(ruihang): use arrow-datafusion when it contains https://github.com/apache/arrow-datafusion/pull/6032
 datafusion = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "b14f7a9ffe91257fc3d2a5d654f2a1a14a8fc793" }
 datafusion-common = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "b14f7a9ffe91257fc3d2a5d654f2a1a14a8fc793" }
 datafusion-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "b14f7a9ffe91257fc3d2a5d654f2a1a14a8fc793" }
