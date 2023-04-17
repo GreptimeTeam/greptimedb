@@ -171,7 +171,8 @@ fn eval_rspy(testcase: TestCase, locals: HashMap<String, PyVector>) {
             .compile(&testcase.eval, Mode::Eval, "<embedded>".to_owned())
             .map_err(|err| vm.new_syntax_error(&err))
             .unwrap();
-        let obj = vm.run_code_obj(code_obj, scope)
+        let obj = vm
+            .run_code_obj(code_obj, scope)
             .map_err(|e| {
                 let mut output = String::new();
                 vm.write_exception(&mut output, &e).unwrap();

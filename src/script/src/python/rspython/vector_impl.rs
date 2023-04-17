@@ -24,9 +24,7 @@ use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::value::{self, OrderedFloat};
 use datatypes::vectors::Helper;
 use once_cell::sync::Lazy;
-use rustpython_vm::builtins::{
-    PyBaseExceptionRef, PyBool, PyBytes, PyFloat, PyInt, PyNone, PyStr,
-};
+use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyBytes, PyFloat, PyInt, PyNone, PyStr};
 use rustpython_vm::convert::ToPyResult;
 use rustpython_vm::function::{Either, OptionalArg, PyComparisonValue};
 use rustpython_vm::protocol::{PyMappingMethods, PyNumberMethods, PySequenceMethods};

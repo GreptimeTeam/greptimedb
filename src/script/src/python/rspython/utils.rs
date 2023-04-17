@@ -38,7 +38,10 @@ pub fn is_instance<T: PyPayload>(obj: &PyObjectRef, vm: &VirtualMachine) -> bool
         .unwrap_or(false)
 }
 
-pub fn obj_cast_to<T: PyObjectPayload>(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyRef<T>> {
+pub fn obj_cast_to<T: PyObjectPayload>(
+    obj: PyObjectRef,
+    vm: &VirtualMachine,
+) -> PyResult<PyRef<T>> {
     obj.downcast::<T>().map_err(|e| {
         vm.new_type_error(format!(
             "Can't cast right operand into {}, actual type: {}",

@@ -47,16 +47,16 @@ once_cell = "1.17.0"
 paste = { workspace = true, optional = true }
 query = { path = "../query" }
 # TODO(discord9): This is a forked and tweaked version of RustPython, please update it to newest original RustPython After RustPython support GC
-rustpython-ast = { git = "https://github.com/discord9/RustPython", optional = true, rev = "6e6d0fe0a1ca" }
-rustpython-codegen = { git = "https://github.com/discord9/RustPython", optional = true, rev = "6e6d0fe0a1ca" }
-rustpython-compiler = { git = "https://github.com/discord9/RustPython", optional = true, rev = "6e6d0fe0a1ca" }
-rustpython-compiler-core = { git = "https://github.com/discord9/RustPython", optional = true, rev = "6e6d0fe0a1ca" }
-rustpython-parser = { git = "https://github.com/discord9/RustPython", optional = true, rev = "6e6d0fe0a1ca" }
-rustpython-pylib = { git = "https://github.com/discord9/RustPython", optional = true, rev = "6e6d0fe0a1ca", features = [
+rustpython-ast = { git = "https://github.com/discord9/RustPython", optional = true, rev = "9ed5137412" }
+rustpython-codegen = { git = "https://github.com/discord9/RustPython", optional = true, rev = "9ed5137412" }
+rustpython-compiler = { git = "https://github.com/discord9/RustPython", optional = true, rev = "9ed5137412" }
+rustpython-compiler-core = { git = "https://github.com/discord9/RustPython", optional = true, rev = "9ed5137412" }
+rustpython-parser = { git = "https://github.com/discord9/RustPython", optional = true, rev = "9ed5137412" }
+rustpython-pylib = { git = "https://github.com/discord9/RustPython", optional = true, rev = "9ed5137412", features = [
     "freeze-stdlib",
 ] }
-rustpython-stdlib = { git = "https://github.com/discord9/RustPython", optional = true, rev = "6e6d0fe0a1ca" }
-rustpython-vm = { git = "https://github.com/discord9/RustPython", optional = true, rev = "6e6d0fe0a1ca", features = [
+rustpython-stdlib = { git = "https://github.com/discord9/RustPython", optional = true, rev = "9ed5137412" }
+rustpython-vm = { git = "https://github.com/discord9/RustPython", optional = true, rev = "9ed5137412", features = [
     "default",
     "codegen",
 ] }
