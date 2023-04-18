@@ -76,7 +76,7 @@ struct InformationSchemaTablesBuilder {
     table_names: StringVectorBuilder,
     table_types: StringVectorBuilder,
     table_ids: UInt32VectorBuilder,
-    table_engines: StringVectorBuilder,
+    engines: StringVectorBuilder,
 }
 
 impl InformationSchemaTablesBuilder {
@@ -90,7 +90,7 @@ impl InformationSchemaTablesBuilder {
             table_names: StringVectorBuilder::with_capacity(42),
             table_types: StringVectorBuilder::with_capacity(42),
             table_ids: UInt32VectorBuilder::with_capacity(42),
-            table_engines: StringVectorBuilder::with_capacity(42),
+            engines: StringVectorBuilder::with_capacity(42),
         }
     }
 
@@ -138,7 +138,7 @@ impl InformationSchemaTablesBuilder {
         table_name: &str,
         table_type: TableType,
         table_id: Option<u32>,
-        table_engine: Option<&str>,
+        engine: Option<&str>,
     ) {
         self.catalog_names.push(Some(catalog_name));
         self.schema_names.push(Some(schema_name));
@@ -149,7 +149,7 @@ impl InformationSchemaTablesBuilder {
             TableType::Temporary => "LOCAL TEMPORARY",
         }));
         self.table_ids.push(table_id);
-        self.table_engines.push(table_engine);
+        self.engines.push(engine);
     }
 
     fn finish(&mut self) -> Result<RecordBatch> {
@@ -159,7 +159,7 @@ impl InformationSchemaTablesBuilder {
             Arc::new(self.table_names.finish()),
             Arc::new(self.table_types.finish()),
             Arc::new(self.table_ids.finish()),
-            Arc::new(self.table_engines.finish()),
+            Arc::new(self.engines.finish()),
         ];
         RecordBatch::new(self.schema.clone(), columns).context(CreateRecordBatchSnafu)
     }
