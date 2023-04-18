@@ -42,10 +42,7 @@ pub(crate) fn register_procedure_loaders<S: StorageEngine>(
 
 #[cfg(test)]
 mod procedure_test_util {
-    use async_trait::async_trait;
-    use common_procedure::{
-        BoxedProcedure, Context, ContextProvider, ProcedureId, ProcedureState, Result, Status,
-    };
+    pub use common_procedure_test::execute_procedure_until_done;
     use common_test_util::temp_dir::TempDir;
     use log_store::NoopLogStore;
     use storage::compaction::noop::NoopCompactionScheduler;
@@ -55,18 +52,6 @@ mod procedure_test_util {
     use super::*;
     use crate::engine::{EngineConfig, MitoEngine};
     use crate::table::test_util;
-
-    struct MockContextProvider {}
-
-    #[async_trait]
-    impl ContextProvider for MockContextProvider {
-        async fn procedure_state(
-            &self,
-            _procedure_id: ProcedureId,
-        ) -> Result<Option<ProcedureState>> {
-            Ok(Some(ProcedureState::Done))
-        }
-    }
 
     pub struct TestEnv {
         pub table_engine: MitoEngine<EngineImpl<NoopLogStore>>,
@@ -85,18 +70,5 @@ mod procedure_test_util {
         let table_engine = MitoEngine::new(EngineConfig::default(), storage_engine, object_store);
 
         TestEnv { table_engine, dir }
-    }
-
-    pub async fn execute_procedure_until_done(procedure: &mut BoxedProcedure) {
-        let ctx = Context {
-            procedure_id: ProcedureId::random(),
-            provider: Arc::new(MockContextProvider {}),
-        };
-
-        loop {
-            if let Status::Done = procedure.execute(&ctx).await.unwrap() {
-                break;
-            }
-        }
     }
 }

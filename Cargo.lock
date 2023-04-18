@@ -4930,6 +4930,7 @@ dependencies = [
  "common-catalog",
  "common-error",
  "common-procedure",
+ "common-procedure-test",
  "common-query",
  "common-recordbatch",
  "common-telemetry",

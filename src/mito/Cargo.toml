@@ -40,3 +40,4 @@ tokio.workspace = true
 
 [dev-dependencies]
 common-test-util = { path = "../common/test-util" }
+common-procedure-test = { path = "../common/procedure-test" }
