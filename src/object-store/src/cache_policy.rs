@@ -26,7 +26,7 @@ use opendal::raw::{Accessor, Layer, LayeredAccessor, RpDelete, RpList, RpRead, R
 use opendal::{ErrorKind, Result};
 use tokio::sync::Mutex;
 
-use crate::metrics::*;
+use crate::metrics::{OBJECT_STORE_LRU_CACHE_HIT, OBJECT_STORE_LRU_CACHE_MISS, OBJECT_STORE_LRU_CACHE_ERROR, OBJECT_STORE_LRU_CACHE_ERROR_KIND};
 
 pub struct LruCacheLayer<C> {
     cache: Arc<C>,
