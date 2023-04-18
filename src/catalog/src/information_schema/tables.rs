@@ -45,7 +45,7 @@ impl InformationSchemaTables {
             ColumnSchema::new("table_name", ConcreteDataType::string_datatype(), false),
             ColumnSchema::new("table_type", ConcreteDataType::string_datatype(), false),
             ColumnSchema::new("table_id", ConcreteDataType::uint32_datatype(), true),
-            ColumnSchema::new("table_engine", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("engine", ConcreteDataType::string_datatype(), true),
         ]));
         Self {
             schema,
