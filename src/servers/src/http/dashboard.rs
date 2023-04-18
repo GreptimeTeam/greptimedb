@@ -23,7 +23,7 @@ use snafu::ResultExt;
 use crate::error::{BuildHttpResponseSnafu, Result};
 
 #[derive(RustEmbed)]
-#[folder = "dashboard/"]
+#[folder = "dashboard/dist/"]
 pub struct Assets;
 
 pub(crate) fn dashboard() -> Router {
