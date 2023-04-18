@@ -12,15 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod client;
-mod database;
-mod error;
-pub mod load_balance;
-mod metrics;
-
-pub use api;
-pub use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-
-pub use self::client::Client;
-pub use self::database::Database;
-pub use self::error::{Error, Result};
+//! client metrics
+pub const METRIC_GRPC_CREATE_TABLE: &str = "grpc.create_table";
+pub const METRIC_GRPC_PROMQL_RANGE_QUERY: &str = "grpc.promql.range_query";
+pub const METRIC_GRPC_INSERT: &str = "grpc.insert";
+pub const METRIC_GRPC_SQL: &str = "grpc.sql";
+pub const METRIC_GRPC_LOGICAL_PLAN: &str = "grpc.logical_plan";
+pub const METRIC_GRPC_ALTER: &str = "grpc.alter";
+pub const METRIC_GRPC_DROP_TABLE: &str = "grpc.drop_table";
+pub const METRIC_GRPC_FLUSH_TABLE: &str = "grpc.flush_table";
+pub const METRIC_GRPC_DO_GET: &str = "grpc.do_get";
