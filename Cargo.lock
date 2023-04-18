@@ -1751,7 +1751,7 @@ dependencies = [
 
 [[package]]
 name = "common-procedure-test"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "common-procedure",
@@ -2908,6 +2908,7 @@ dependencies = [
  "common-catalog",
  "common-error",
  "common-procedure",
+ "common-procedure-test",
  "common-query",
  "common-telemetry",
  "common-test-util",

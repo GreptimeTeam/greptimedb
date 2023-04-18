@@ -13,12 +13,15 @@
 // limitations under the License.
 
 use std::assert_matches::assert_matches;
+use std::sync::Arc;
 
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, IMMUTABLE_FILE_ENGINE};
-use table::engine::{EngineContext, TableEngine, TableReference};
+use table::engine::{EngineContext, TableEngine, TableEngineProcedure, TableReference};
 use table::requests::{AlterKind, AlterTableRequest, DropTableRequest, OpenTableRequest};
 use table::{error as table_error, Table};
 
+use crate::config::EngineConfig;
+use crate::engine::immutable::ImmutableFileTableEngine;
 use crate::manifest::immutable::manifest_path;
 use crate::table::immutable::ImmutableFileTable;
 use crate::test_util::{self, TestEngineComponents, TEST_TABLE_NAME};
@@ -186,4 +189,42 @@ async fn test_drop_table() {
         .unwrap();
 
     assert!(!exist);
+}
+
+#[tokio::test]
+async fn test_create_drop_table_procedure() {
+    let (_dir, object_store) = test_util::new_test_object_store("procedure");
+
+    let table_engine = ImmutableFileTableEngine::new(EngineConfig::default(), object_store.clone());
+
+    let schema = Arc::new(test_util::test_schema());
+
+    let engine_ctx = EngineContext::default();
+    // Test create table by procedure.
+    let create_request = test_util::new_create_request(schema);
+    let mut procedure = table_engine
+        .create_table_procedure(&engine_ctx, create_request.clone())
+        .unwrap();
+    common_procedure_test::execute_procedure_until_done(&mut procedure).await;
+
+    assert!(table_engine
+        .get_table(&engine_ctx, &create_request.table_ref())
+        .unwrap()
+        .is_some());
+
+    // Test drop table by procedure.
+    let drop_request = DropTableRequest {
+        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+        schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+        table_name: TEST_TABLE_NAME.to_string(),
+    };
+    let mut procedure = table_engine
+        .drop_table_procedure(&engine_ctx, drop_request)
+        .unwrap();
+    common_procedure_test::execute_procedure_until_done(&mut procedure).await;
+
+    assert!(table_engine
+        .get_table(&engine_ctx, &create_request.table_ref())
+        .unwrap()
+        .is_none());
 }
