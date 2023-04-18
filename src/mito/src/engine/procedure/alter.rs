@@ -265,19 +265,17 @@ impl<S: StorageEngine> AlterMitoTable<S> {
         // Rename key in tables map.
         if let AlterKind::RenameTable { new_table_name } = &self.data.request.alter_kind {
             let mut table_ref = self.data.table_ref();
+            let removed = {
+                let _lock = self.engine_inner.table_mutex.lock(table_ref.to_string());
+                self.engine_inner.tables.remove(&table_ref.to_string())
+            };
+            ensure!(removed.is_some(), TableNotFoundSnafu { table_name });
 
-            // should we lock two together first?
-            {
-                let _lock = self.engine_inner.table_mutex.lock(table_ref.to_string());
-                self.engine_inner.tables.remove(&table_ref.to_string());
-            }
             table_ref.table = new_table_name.as_str();
-            {
-                let _lock = self.engine_inner.table_mutex.lock(table_ref.to_string());
-                self.engine_inner
-                    .tables
-                    .insert(table_ref.to_string(), self.table.clone());
-            }
+            let _lock = self.engine_inner.table_mutex.lock(table_ref.to_string());
+            self.engine_inner
+                .tables
+                .insert(table_ref.to_string(), self.table.clone());
         }
 
         Ok(Status::Done)

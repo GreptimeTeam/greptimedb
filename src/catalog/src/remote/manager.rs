@@ -36,7 +36,6 @@ use table::metadata::TableId;
 use table::requests::{CreateTableRequest, OpenTableRequest};
 use table::TableRef;
 use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
 
 use crate::error::Error::ParallelOpenTable;
 use crate::error::{
@@ -259,19 +258,21 @@ impl RemoteCatalogManager {
         let mut table_num = 0;
         let tables = self.iter_remote_tables(catalog_name, schema_name).await;
         let kvs = tables.collect::<Vec<_>>().await;
-        let mut joins = Vec::with_capacity(kvs.len());
-
         let node_id = self.node_id;
-        for kv in kvs {
-            let (table_key, table_value) = kv?;
-            let engine_manager = self.engine_manager.clone();
-            let join: JoinHandle<Result<TableRef>> = tokio::spawn(async move {
-                let table_ref =
-                    open_or_create_table(node_id, engine_manager, &table_key, &table_value).await?;
-                Ok(table_ref)
-            });
-            joins.push(join);
-        }
+
+        let mut joins = kvs
+            .into_iter()
+            .map(|kv| {
+                let (table_key, table_value) = kv?;
+                let engine_manager = self.engine_manager.clone();
+                Ok(tokio::spawn(async move {
+                    let table_ref =
+                        open_or_create_table(node_id, engine_manager, &table_key, &table_value)
+                            .await?;
+                    Ok(table_ref)
+                }))
+            })
+            .collect::<Result<Vec<_>>>()?;
 
         while !joins.is_empty() {
             match futures::future::select_all(joins).await {

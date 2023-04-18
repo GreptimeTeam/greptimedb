@@ -643,17 +643,14 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             .context(error::AlterTableSnafu { table_name })?;
 
         if let AlterKind::RenameTable { new_table_name } = &req.alter_kind {
-            // two step lock
-            // should we lock two table names together first?
-            {
+            let removed = {
                 let _lock = self.table_mutex.lock(table_ref.to_string()).await;
-                self.tables.remove(&table_ref.to_string());
-            }
+                self.tables.remove(&table_ref.to_string())
+            };
+            ensure!(removed.is_some(), error::TableNotFoundSnafu { table_name });
             table_ref.table = new_table_name.as_str();
-            {
-                let _lock = self.table_mutex.lock(table_ref.to_string()).await;
-                self.tables.insert(table_ref.to_string(), table.clone());
-            }
+            let _lock = self.table_mutex.lock(table_ref.to_string()).await;
+            self.tables.insert(table_ref.to_string(), table.clone());
         }
         Ok(table)
     }
