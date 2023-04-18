@@ -1750,6 +1750,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-procedure-test"
+version = "0.1.1"
+dependencies = [
+ "async-trait",
+ "common-procedure",
+]
+
+[[package]]
 name = "common-query"
 version = "0.2.0"
 dependencies = [

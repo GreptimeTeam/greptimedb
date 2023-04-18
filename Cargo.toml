@@ -15,6 +15,7 @@ members = [
     "src/common/grpc-expr",
     "src/common/mem-prof",
     "src/common/procedure",
+    "src/common/procedure-test",
     "src/common/query",
     "src/common/recordbatch",
     "src/common/runtime",
