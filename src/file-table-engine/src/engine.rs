@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod immutable;
+mod procedure;
 #[cfg(test)]
 mod tests;
 

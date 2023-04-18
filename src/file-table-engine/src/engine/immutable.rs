@@ -39,7 +39,7 @@ use crate::manifest::immutable::{delete_table_manifest, ImmutableMetadata};
 use crate::manifest::table_manifest_dir;
 use crate::table::immutable::{ImmutableFileTable, ImmutableFileTableRef};
 
-///  [TableEngine] implementation.
+/// [TableEngine] implementation.
 #[derive(Clone)]
 pub struct ImmutableFileTableEngine {
     inner: Arc<EngineInner>,
