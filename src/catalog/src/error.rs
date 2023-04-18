@@ -20,6 +20,7 @@ use common_error::prelude::{Snafu, StatusCode};
 use datafusion::error::DataFusionError;
 use datatypes::prelude::ConcreteDataType;
 use snafu::Location;
+use tokio::task::JoinError;
 
 use crate::DeregisterTableRequest;
 
@@ -126,6 +127,9 @@ pub enum Error {
         #[snafu(backtrace)]
         source: table::error::Error,
     },
+
+    #[snafu(display("Failed to open table in parallel, source: {}", source))]
+    ParallelOpenTable { source: JoinError },
 
     #[snafu(display("Table not found while opening table, table info: {}", table_info))]
     TableNotFound {
@@ -261,7 +265,8 @@ impl ErrorExt for Error {
             | Error::IllegalManagerState { .. }
             | Error::CatalogNotFound { .. }
             | Error::InvalidEntryType { .. }
-            | Error::InvalidSystemTableDef { .. } => StatusCode::Unexpected,
+            | Error::InvalidSystemTableDef { .. }
+            | Error::ParallelOpenTable { .. } => StatusCode::Unexpected,
 
             Error::SystemCatalog { .. }
             | Error::EmptyValue { .. }
