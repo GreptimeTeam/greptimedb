@@ -290,11 +290,16 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     let client = TestClient::new(app);
 
     // instant query
-    let res = client.get("/api/v1/query?query=up").send().await;
+    let res = client.get("/api/v1/query?query=up&time=1").send().await;
     assert_eq!(res.status(), StatusCode::OK);
-    let res = client.post("/api/v1/query?query=up").send().await;
+    let res = client
+        .post("/api/v1/query?query=up&time=1")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send()
+        .await;
     assert_eq!(res.status(), StatusCode::OK);
 
+    // range query
     let res = client
         .get("/api/v1/query_range?query=up&start=1&end=100&step=5")
         .send()
