@@ -23,7 +23,7 @@ use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatch
 use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
 use datatypes::prelude::{ConcreteDataType, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
-use datatypes::vectors::StringVectorBuilder;
+use datatypes::vectors::{StringVectorBuilder, UInt32VectorBuilder};
 use snafu::ResultExt;
 use table::metadata::TableType;
 
@@ -44,6 +44,8 @@ impl InformationSchemaTables {
             ColumnSchema::new("table_schema", ConcreteDataType::string_datatype(), false),
             ColumnSchema::new("table_name", ConcreteDataType::string_datatype(), false),
             ColumnSchema::new("table_type", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("table_id", ConcreteDataType::uint32_datatype(), true),
+            ColumnSchema::new("table_engine", ConcreteDataType::string_datatype(), true),
         ]));
         Self {
             schema,
@@ -73,6 +75,8 @@ struct InformationSchemaTablesBuilder {
     schema_names: StringVectorBuilder,
     table_names: StringVectorBuilder,
     table_types: StringVectorBuilder,
+    table_ids: UInt32VectorBuilder,
+    table_engines: StringVectorBuilder,
 }
 
 impl InformationSchemaTablesBuilder {
@@ -85,6 +89,8 @@ impl InformationSchemaTablesBuilder {
             schema_names: StringVectorBuilder::with_capacity(42),
             table_names: StringVectorBuilder::with_capacity(42),
             table_types: StringVectorBuilder::with_capacity(42),
+            table_ids: UInt32VectorBuilder::with_capacity(42),
+            table_engines: StringVectorBuilder::with_capacity(42),
         }
     }
 
@@ -100,7 +106,15 @@ impl InformationSchemaTablesBuilder {
             let Some(schema) = self.catalog_provider.schema(&schema_name)? else { continue };
             for table_name in schema.table_names()? {
                 let Some(table) = schema.table(&table_name).await? else { continue };
-                self.add_table(&catalog_name, &schema_name, &table_name, table.table_type());
+                let table_info = table.table_info();
+                self.add_table(
+                    &catalog_name,
+                    &schema_name,
+                    &table_name,
+                    table.table_type(),
+                    Some(table_info.ident.table_id),
+                    Some(&table_info.meta.engine),
+                );
             }
         }
 
@@ -110,6 +124,8 @@ impl InformationSchemaTablesBuilder {
             INFORMATION_SCHEMA_NAME,
             TABLES,
             TableType::View,
+            None,
+            None,
         );
 
         self.finish()
@@ -121,6 +137,8 @@ impl InformationSchemaTablesBuilder {
         schema_name: &str,
         table_name: &str,
         table_type: TableType,
+        table_id: Option<u32>,
+        table_engine: Option<&str>,
     ) {
         self.catalog_names.push(Some(catalog_name));
         self.schema_names.push(Some(schema_name));
@@ -130,6 +148,8 @@ impl InformationSchemaTablesBuilder {
             TableType::View => "VIEW",
             TableType::Temporary => "LOCAL TEMPORARY",
         }));
+        self.table_ids.push(table_id);
+        self.table_engines.push(table_engine);
     }
 
     fn finish(&mut self) -> Result<RecordBatch> {
@@ -138,6 +158,8 @@ impl InformationSchemaTablesBuilder {
             Arc::new(self.schema_names.finish()),
             Arc::new(self.table_names.finish()),
             Arc::new(self.table_types.finish()),
+            Arc::new(self.table_ids.finish()),
+            Arc::new(self.table_engines.finish()),
         ];
         RecordBatch::new(self.schema.clone(), columns).context(CreateRecordBatchSnafu)
     }
