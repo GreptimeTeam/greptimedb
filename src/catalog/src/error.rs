@@ -128,7 +128,7 @@ pub enum Error {
         source: table::error::Error,
     },
 
-    #[snafu(display("Failed to parallel open table, source: {}", source))]
+    #[snafu(display("Failed to open table in parallel, source: {}", source))]
     ParallelOpenTable { source: JoinError },
 
     #[snafu(display("Table not found while opening table, table info: {}", table_info))]
