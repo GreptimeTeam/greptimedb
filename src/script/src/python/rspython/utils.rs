@@ -44,7 +44,7 @@ pub fn obj_cast_to<T: PyObjectPayload>(
 ) -> PyResult<PyRef<T>> {
     obj.downcast::<T>().map_err(|e| {
         vm.new_type_error(format!(
-            "Can't cast right operand into {}, actual type: {}",
+            "Can't cast object into {}, actual type: {}",
             std::any::type_name::<T>(),
             e.class().name()
         ))

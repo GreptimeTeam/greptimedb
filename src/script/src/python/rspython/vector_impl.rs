@@ -39,7 +39,7 @@ use rustpython_vm::{
 use crate::python::ffi_types::vector::{
     arrow_rfloordiv, arrow_rsub, arrow_rtruediv, rspy_is_pyobj_scalar, wrap_result, PyVector,
 };
-use crate::python::utils::is_instance;
+use crate::python::rspython::utils::{is_instance, obj_cast_to};
 /// PyVectors' rustpython specify methods
 
 fn to_type_error(vm: &'_ VirtualMachine) -> impl FnOnce(String) -> PyBaseExceptionRef + '_ {
@@ -90,7 +90,7 @@ impl PyVector {
     #[pymethod(name = "__radd__")]
     #[pymethod(magic)]
     fn add(zelf: PyObjectRef, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        let zelf = Self::obj_to_vector(zelf, vm)?;
+        let zelf = obj_cast_to::<PyVector>(zelf, vm)?;
         if rspy_is_pyobj_scalar(&other, vm) {
             zelf.rspy_scalar_arith_op(other, None, wrap_result(arithmetic::add_dyn), vm)
         } else {
@@ -100,7 +100,7 @@ impl PyVector {
 
     #[pymethod(magic)]
     fn sub(zelf: PyObjectRef, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        let zelf = Self::obj_to_vector(zelf, vm)?;
+        let zelf = obj_cast_to::<PyVector>(zelf, vm)?;
         if rspy_is_pyobj_scalar(&other, vm) {
             zelf.rspy_scalar_arith_op(other, None, wrap_result(arithmetic::subtract_dyn), vm)
         } else {
@@ -110,7 +110,7 @@ impl PyVector {
 
     #[pymethod(magic)]
     fn rsub(zelf: PyObjectRef, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        let zelf = Self::obj_to_vector(zelf, vm)?;
+        let zelf = obj_cast_to::<PyVector>(zelf, vm)?;
         if rspy_is_pyobj_scalar(&other, vm) {
             zelf.rspy_scalar_arith_op(other, None, arrow_rsub, vm)
         } else {
@@ -126,7 +126,7 @@ impl PyVector {
     #[pymethod(name = "__rmul__")]
     #[pymethod(magic)]
     fn mul(zelf: PyObjectRef, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        let zelf = Self::obj_to_vector(zelf, vm)?;
+        let zelf = obj_cast_to::<PyVector>(zelf, vm)?;
         if rspy_is_pyobj_scalar(&other, vm) {
             zelf.rspy_scalar_arith_op(other, None, wrap_result(arithmetic::multiply_dyn), vm)
         } else {
@@ -136,7 +136,7 @@ impl PyVector {
 
     #[pymethod(magic)]
     fn truediv(zelf: PyObjectRef, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        let zelf = Self::obj_to_vector(zelf, vm)?;
+        let zelf = obj_cast_to::<PyVector>(zelf, vm)?;
         if rspy_is_pyobj_scalar(&other, vm) {
             zelf.rspy_scalar_arith_op(
                 other,
@@ -170,7 +170,7 @@ impl PyVector {
 
     #[pymethod(magic)]
     fn floordiv(zelf: PyObjectRef, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        let zelf = Self::obj_to_vector(zelf, vm)?;
+        let zelf = obj_cast_to::<PyVector>(zelf, vm)?;
         if rspy_is_pyobj_scalar(&other, vm) {
             zelf.rspy_scalar_arith_op(
                 other,
@@ -294,6 +294,8 @@ impl Representable for PyVector {
 
 impl AsNumber for PyVector {
     fn as_number() -> &'static PyNumberMethods {
+        // FIXME(discord9): have to use `&PyObject.to_owned()` here
+        // because it seems to be the only way to convert a `&PyObject` to `PyObjectRef`.
         static AS_NUMBER: PyNumberMethods = PyNumberMethods {
             and: Some(|a, b, vm| PyVector::and(a.to_owned(), b.to_owned(), vm).to_pyresult(vm)),
             or: Some(|a, b, vm| PyVector::or(a.to_owned(), b.to_owned(), vm).to_pyresult(vm)),

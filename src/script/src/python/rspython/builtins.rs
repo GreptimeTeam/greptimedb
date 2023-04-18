@@ -30,7 +30,7 @@ use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyList
 use rustpython_vm::{pymodule, AsObject, PyObjectRef, PyPayload, PyResult, VirtualMachine};
 
 use crate::python::ffi_types::PyVector;
-use crate::python::utils::is_instance;
+use crate::python::rspython::utils::is_instance;
 
 pub fn init_greptime_builtins(module_name: &str, vm: &mut VirtualMachine) {
     vm.add_native_module(

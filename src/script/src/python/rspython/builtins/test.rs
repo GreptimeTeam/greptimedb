@@ -33,8 +33,8 @@ use serde::{Deserialize, Serialize};
 
 use super::*;
 use crate::python::ffi_types::PyVector;
-use crate::python::utils::{format_py_error, is_instance};
-
+use crate::python::rspython::utils::is_instance;
+use crate::python::utils::format_py_error;
 #[test]
 fn convert_scalar_to_py_obj_and_back() {
     rustpython_vm::Interpreter::with_init(Default::default(), |vm| {

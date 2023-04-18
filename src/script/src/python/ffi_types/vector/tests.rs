@@ -168,7 +168,7 @@ fn eval_rspy(testcase: TestCase, locals: HashMap<String, PyVector>) {
                 .unwrap();
         });
         let code_obj = vm
-            .compile(&testcase.eval, Mode::Eval, "<embedded>".to_owned())
+            .compile(&testcase.eval, Mode::Eval, "<embedded>".to_string())
             .map_err(|err| vm.new_syntax_error(&err))
             .unwrap();
         let obj = vm

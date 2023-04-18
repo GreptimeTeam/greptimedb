@@ -19,7 +19,7 @@ pub(crate) mod vector_impl;
 
 pub(crate) mod builtins;
 mod dataframe_impl;
-mod utils;
+pub(crate) mod utils;
 
 #[cfg(test)]
 pub(crate) use copr_impl::init_interpreter;

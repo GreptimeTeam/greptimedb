@@ -38,7 +38,7 @@ use rustpython_vm::{
     VirtualMachine,
 };
 
-use crate::python::utils::is_instance;
+use crate::python::rspython::utils::is_instance;
 
 /// The Main FFI type `PyVector` that is used both in RustPython and PyO3
 #[cfg_attr(feature = "pyo3_backend", pyo3class(name = "vector"))]
