@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod builder;
+mod show_create;
 use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
@@ -72,6 +72,13 @@ static DESCRIBE_TABLE_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
             ConcreteDataType::string_datatype(),
             false,
         ),
+    ]))
+});
+
+static SHOW_CREATE_TABLE_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
+    Arc::new(Schema::new(vec![
+        ColumnSchema::new("Table", ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new("Create Table", ConcreteDataType::string_datatype(), false),
     ]))
 });
 
@@ -150,6 +157,21 @@ pub fn show_tables(
     )]));
     let records = RecordBatches::try_from_columns(schema, vec![tables])
         .context(error::CreateRecordBatchSnafu)?;
+    Ok(Output::RecordBatches(records))
+}
+
+pub fn show_create_table(table: TableRef) -> Result<Output> {
+    let table_info = table.table_info();
+    let table_name = &table_info.name;
+    let stmt = show_create::create_table_stmt(&table_info)?;
+    let sql = format!("{}", stmt);
+    let columns = vec![
+        Arc::new(StringVector::from(vec![table_name.clone()])) as _,
+        Arc::new(StringVector::from(vec![sql])) as _,
+    ];
+    let records = RecordBatches::try_from_columns(SHOW_CREATE_TABLE_OUTPUT_SCHEMA.clone(), columns)
+        .context(error::CreateRecordBatchSnafu)?;
+
     Ok(Output::RecordBatches(records))
 }
 

@@ -24,8 +24,11 @@ const COMMA_SEP: &str = ", ";
 const INDENT: usize = 2;
 
 macro_rules! format_indent {
+    ($fmt: expr, $arg: expr) => {
+        format!($fmt, format_args!("{: >1$}", "", INDENT), $arg)
+    };
     ($arg: expr) => {
-        format!("{}{}", format_args!("{: >1$}", "", INDENT), $arg)
+        format_indent!("{}{}", $arg)
     };
 }
 
@@ -77,7 +80,7 @@ impl CreateTable {
                 if is_time_index(c) {
                     let TableConstraint::Unique { columns, ..} = c else { unreachable!() };
 
-                    format_indent!(format!("TIME INDEX ({})", format_list_comma!(columns)))
+                    format_indent!("{}TIME INDEX ({})", format_list_comma!(columns))
                 } else {
                     format_indent!(c)
                 }
@@ -101,29 +104,6 @@ impl CreateTable {
         } else {
             ""
         }
-    }
-}
-
-impl Display for CreateTable {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            r#"CREATE TABLE {} {} (
-{},
-{}
-)
-{}ENGINE={}
-WITH(
-{}
-)"#,
-            self.format_if_not_exits(),
-            self.name,
-            format_list_indent!(self.columns),
-            self.format_constraints(),
-            self.format_partitions(),
-            self.engine,
-            format_list_indent!(self.options),
-        )
     }
 }
 
@@ -159,6 +139,29 @@ impl Display for Partitions {
 )"#,
             format_list_comma!(self.column_list),
             format_list_indent!(self.entries),
+        )
+    }
+}
+
+impl Display for CreateTable {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            r#"CREATE TABLE {} {} (
+{},
+{}
+)
+{}ENGINE={}
+WITH(
+{}
+)"#,
+            self.format_if_not_exits(),
+            self.name,
+            format_list_indent!(self.columns),
+            self.format_constraints(),
+            self.format_partitions(),
+            self.engine,
+            format_list_indent!(self.options),
         )
     }
 }
@@ -210,9 +213,10 @@ mod tests {
 
         match &result[0] {
             Statement::CreateTable(c) => {
-                let new_sql = format!("{}", c);
+                let new_sql = format!("\n{}", c);
                 assert_eq!(
-                    r#"CREATE TABLE IF NOT EXISTS demo (
+                    r#"
+CREATE TABLE IF NOT EXISTS demo (
   host STRING,
   ts BIGINT,
   cpu DOUBLE DEFAULT 0,

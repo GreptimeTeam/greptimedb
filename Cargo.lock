@@ -6469,7 +6469,7 @@ dependencies = [
  "format_num",
  "futures",
  "futures-util",
- "itertools",
+ "humantime",
  "metrics",
  "num",
  "num-traits",

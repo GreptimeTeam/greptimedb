@@ -17,12 +17,12 @@ use std::any::Any;
 use common_error::prelude::*;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
-use datatypes::prelude::ConcreteDataType;
+use datatypes::prelude::{ConcreteDataType, Value};
 use snafu::Location;
 use sqlparser::parser::ParserError;
 use sqlparser::tokenizer::TokenizerError;
 
-use crate::ast::Expr;
+use crate::ast::{Expr, Value as SqlValue};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -145,6 +145,14 @@ pub enum Error {
         statement: String,
         location: Location,
     },
+    #[snafu(display("Unable to convert sql value {} to datatype {:?}", value, datatype))]
+    ConvertSqlValue {
+        value: SqlValue,
+        datatype: ConcreteDataType,
+        location: Location,
+    },
+    #[snafu(display("Unable to convert value {} to sql value", value))]
+    ConvertValue { value: Value, location: Location },
 }
 
 impl ErrorExt for Error {
@@ -175,6 +183,7 @@ impl ErrorExt for Error {
             SerializeColumnDefaultConstraint { source, .. } => source.status_code(),
             ConvertToGrpcDataType { source, .. } => source.status_code(),
             ConvertToDfStatement { .. } => StatusCode::Internal,
+            ConvertSqlValue { .. } | ConvertValue { .. } => StatusCode::Unsupported,
         }
     }
 

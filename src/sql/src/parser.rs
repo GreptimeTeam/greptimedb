@@ -174,9 +174,7 @@ impl<'a> ParserContext<'a> {
                 name: table_name.to_string(),
             }
         );
-        Ok(Statement::ShowCreateTable(ShowCreateTable {
-            table_name: table_name.to_string(),
-        }))
+        Ok(Statement::ShowCreateTable(ShowCreateTable { table_name }))
     }
 
     fn parse_show_tables(&mut self) -> Result<Statement> {

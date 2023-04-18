@@ -41,9 +41,9 @@ use crate::ast::{
     Value as SqlValue,
 };
 use crate::error::{
-    self, ColumnTypeMismatchSnafu, ConvertToGrpcDataTypeSnafu, InvalidSqlValueSnafu,
-    ParseSqlValueSnafu, Result, SerializeColumnDefaultConstraintSnafu, TimestampOverflowSnafu,
-    UnsupportedDefaultValueSnafu,
+    self, ColumnTypeMismatchSnafu, ConvertSqlValueSnafu, ConvertToGrpcDataTypeSnafu,
+    ConvertValueSnafu, InvalidSqlValueSnafu, ParseSqlValueSnafu, Result,
+    SerializeColumnDefaultConstraintSnafu, TimestampOverflowSnafu, UnsupportedDefaultValueSnafu,
 };
 
 fn parse_string_to_value(
@@ -198,7 +198,38 @@ pub fn sql_value_to_value(
         }
         SqlValue::HexStringLiteral(s) => parse_hex_string(s)?,
         SqlValue::Placeholder(s) => return InvalidSqlValueSnafu { value: s }.fail(),
-        _ => todo!("Other sql value"),
+
+        // TODO(dennis): supports binary string
+        _ => {
+            return ConvertSqlValueSnafu {
+                value: sql_val.clone(),
+                datatype: data_type.clone(),
+            }
+            .fail()
+        }
+    })
+}
+
+pub fn value_to_sql_value(val: &Value) -> Result<SqlValue> {
+    Ok(match val {
+        Value::Int8(v) => SqlValue::Number(format!("{}", v), false),
+        Value::UInt8(v) => SqlValue::Number(format!("{}", v), false),
+        Value::Int16(v) => SqlValue::Number(format!("{}", v), false),
+        Value::UInt16(v) => SqlValue::Number(format!("{}", v), false),
+        Value::Int32(v) => SqlValue::Number(format!("{}", v), false),
+        Value::UInt32(v) => SqlValue::Number(format!("{}", v), false),
+        Value::Int64(v) => SqlValue::Number(format!("{}", v), false),
+        Value::UInt64(v) => SqlValue::Number(format!("{}", v), false),
+        Value::Float32(v) => SqlValue::Number(format!("{}", v), false),
+        Value::Float64(v) => SqlValue::Number(format!("{}", v), false),
+        Value::Boolean(b) => SqlValue::Boolean(*b),
+        Value::Date(d) => SqlValue::SingleQuotedString(format!("{}", d)),
+        Value::DateTime(d) => SqlValue::SingleQuotedString(format!("{}", d)),
+        Value::Timestamp(ts) => SqlValue::SingleQuotedString(ts.to_iso8601_string()),
+        Value::String(s) => SqlValue::SingleQuotedString(s.as_utf8().to_string()),
+        Value::Null => SqlValue::Null,
+        // TODO(dennis): supports binary
+        _ => return ConvertValueSnafu { value: val.clone() }.fail(),
     })
 }
 

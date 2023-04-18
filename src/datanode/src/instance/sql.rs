@@ -104,6 +104,14 @@ impl Instance {
                     .execute(SqlRequest::DropTable(req), query_ctx)
                     .await
             }
+            Statement::ShowCreateTable(show) => {
+                let (catalog, schema, table) =
+                    table_idents_to_full_name(&show.table_name, query_ctx.clone())?;
+                let table_ref = TableReference::full(&catalog, &schema, &table);
+                let table = self.sql_handler.get_table(&table_ref).await?;
+
+                query::sql::show_create_table(table).context(ExecuteStatementSnafu)
+            }
             _ => NotSupportSqlSnafu {
                 msg: format!("not supported to execute {stmt:?}"),
             }

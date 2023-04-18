@@ -14,7 +14,7 @@
 
 use std::fmt;
 
-use crate::ast::{Expr, Ident};
+use crate::ast::{Expr, Ident, ObjectName};
 
 /// Show kind for SQL expressions like `SHOW DATABASE` or `SHOW TABLE`
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,7 +57,7 @@ pub struct ShowTables {
 /// SQL structure for `SHOW CREATE TABLE`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShowCreateTable {
-    pub table_name: String,
+    pub table_name: ObjectName,
 }
 
 #[cfg(test)]
@@ -124,7 +124,7 @@ mod tests {
         assert_matches!(&stmts[0], Statement::ShowCreateTable { .. });
         match &stmts[0] {
             Statement::ShowCreateTable(show) => {
-                let table_name = show.table_name.as_str();
+                let table_name = show.table_name.to_string();
                 assert_eq!(table_name, "test");
             }
             _ => {
