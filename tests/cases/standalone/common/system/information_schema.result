@@ -37,7 +37,7 @@ order by table_schema, table_name;
 | table_catalog | table_schema       | table_name | table_type | table_id | engine |
 +---------------+--------------------+------------+------------+----------+--------+
 | greptime      | information_schema | tables     | VIEW       |          |        |
-| greptime      | my_db              | foo        | BASE TABLE | 1024     | mito   |
+| greptime      | my_db              | foo        | BASE TABLE | 1067     | mito   |
 +---------------+--------------------+------------+------------+----------+--------+
 
 use
