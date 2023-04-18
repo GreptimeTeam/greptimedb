@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// ! object-store metrics
+//! object-store metrics
 
 pub const OBJECT_STORE_LRU_CACHE_HIT: &str = "object_store.lru_cache.hit";
 pub const OBJECT_STORE_LRU_CACHE_MISS: &str = "object_store.lru_cache.miss";
