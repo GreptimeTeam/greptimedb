@@ -19,11 +19,17 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 use lru::LruCache;
+use metrics::increment_counter;
 use opendal::ops::{OpDelete, OpList, OpRead, OpScan, OpWrite};
 use opendal::raw::oio::{Read, Reader, Write};
 use opendal::raw::{Accessor, Layer, LayeredAccessor, RpDelete, RpList, RpRead, RpScan, RpWrite};
 use opendal::{ErrorKind, Result};
 use tokio::sync::Mutex;
+
+use crate::metrics::{
+    OBJECT_STORE_LRU_CACHE_ERROR, OBJECT_STORE_LRU_CACHE_ERROR_KIND, OBJECT_STORE_LRU_CACHE_HIT,
+    OBJECT_STORE_LRU_CACHE_MISS,
+};
 
 pub struct LruCacheLayer<C> {
     cache: Arc<C>,
@@ -89,12 +95,16 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
 
         match self.cache.read(&cache_path, OpRead::default()).await {
             Ok((rp, r)) => {
+                increment_counter!(OBJECT_STORE_LRU_CACHE_HIT);
+
                 // update lru when cache hit
                 let mut lru_cache = lru_cache.lock().await;
                 lru_cache.get_or_insert(cache_path.clone(), || ());
                 Ok(to_output_reader((rp, r)))
             }
             Err(err) if err.kind() == ErrorKind::NotFound => {
+                increment_counter!(OBJECT_STORE_LRU_CACHE_MISS);
+
                 let (rp, mut reader) = self.inner.read(&path, args.clone()).await?;
                 let size = rp.clone().into_metadata().content_length();
                 let (_, mut writer) = self.cache.write(&cache_path, OpWrite::new()).await?;
@@ -122,7 +132,10 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
                     Err(_) => return self.inner.read(&path, args).await.map(to_output_reader),
                 }
             }
-            Err(_) => return self.inner.read(&path, args).await.map(to_output_reader),
+            Err(err) => {
+                increment_counter!(OBJECT_STORE_LRU_CACHE_ERROR, OBJECT_STORE_LRU_CACHE_ERROR_KIND => format!("{}", err.kind()));
+                return self.inner.read(&path, args).await.map(to_output_reader);
+            }
         }
     }
 

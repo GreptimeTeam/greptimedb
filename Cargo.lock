@@ -5333,6 +5333,7 @@ dependencies = [
  "common-test-util",
  "futures",
  "lru 0.9.0",
+ "metrics",
  "opendal",
  "pin-project",
  "tokio",
