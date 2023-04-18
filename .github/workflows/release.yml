@@ -358,12 +358,11 @@ jobs:
           artifacts: |
             **/greptime-*
 
-  docker-push-uhub:
-    name: Push docker image to UCloud Container Registry
+  docker-push-acr:
+    name: Push docker image to alibaba cloud container registry
     needs: [docker]
     runs-on: ubuntu-latest
     if: github.repository == 'GreptimeTeam/greptimedb' && github.event_name != 'workflow_dispatch'
-    # Push to uhub may fail(500 error), but we don't want to block the release process. The failed job will be retried manually.
     continue-on-error: true
     steps:
       - name: Checkout sources
@@ -375,12 +374,12 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
 
-      - name: Login to UCloud Container Registry
+      - name: Login to alibaba cloud container registry
         uses: docker/login-action@v2
         with:
-          registry: uhub.service.ucloud.cn
-          username: ${{ secrets.UCLOUD_USERNAME }}
-          password: ${{ secrets.UCLOUD_PASSWORD }}
+          registry: registry.cn-hangzhou.aliyuncs.com
+          username: ${{ secrets.ALICLOUD_USERNAME }}
+          password: ${{ secrets.ALICLOUD_PASSWORD }}
 
       - name: Configure scheduled build image tag # the tag would be ${SCHEDULED_BUILD_VERSION_PREFIX}-YYYYMMDD-${SCHEDULED_PERIOD}
         shell: bash
@@ -397,9 +396,9 @@ jobs:
           VERSION=${{ github.ref_name }}
           echo "IMAGE_TAG=${VERSION:1}" >> $GITHUB_ENV
 
-      - name: Push image to uhub # Use 'docker buildx imagetools create' to create a new image base on source image.
+      - name: Push image to alibaba cloud container registry # Use 'docker buildx imagetools create' to create a new image base on source image.
         run: |
           docker buildx imagetools create \
-            --tag uhub.service.ucloud.cn/greptime/greptimedb:latest \
-            --tag uhub.service.ucloud.cn/greptime/greptimedb:${{ env.IMAGE_TAG }} \
+            --tag registry.cn-hangzhou.aliyuncs.com/greptime/greptimedb:latest \
+            --tag registry.cn-hangzhou.aliyuncs.com/greptime/greptimedb:${{ env.IMAGE_TAG }} \
             greptime/greptimedb:${{ env.IMAGE_TAG }}
