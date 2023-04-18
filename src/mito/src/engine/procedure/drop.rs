@@ -175,11 +175,7 @@ struct DropTableData {
 
 impl DropTableData {
     fn table_ref(&self) -> TableReference {
-        TableReference {
-            catalog: &self.request.catalog_name,
-            schema: &self.request.schema_name,
-            table: &self.request.table_name,
-        }
+        self.request.table_ref()
     }
 }
 
