@@ -17,4 +17,4 @@
 pub const OBJECT_STORE_LRU_CACHE_HIT: &str = "object_store_lru_cache.hit";
 pub const OBJECT_STORE_LRU_CACHE_MISS: &str = "object_store_lru_cache.miss";
 pub const OBJECT_STORE_LRU_CACHE_ERROR: &str = "object_store_lru_cache.error";
-pub const OBJECT_STORE_LRU_CACHE_ERROR_KIND: &str = "error_kind";
+pub const OBJECT_STORE_LRU_CACHE_ERROR_KIND: &str = "error";
