@@ -15,16 +15,10 @@
 use futures::Future;
 use once_cell::sync::OnceCell;
 use rustpython_vm::builtins::PyBaseExceptionRef;
-use rustpython_vm::{PyObjectRef, PyPayload, VirtualMachine};
+use rustpython_vm::VirtualMachine;
 use tokio::runtime::Runtime;
 
 use crate::python::error;
-
-/// use `rustpython`'s `is_instance` method to check if a PyObject is a instance of class.
-/// if `PyResult` is Err, then this function return `false`
-pub fn is_instance<T: PyPayload>(obj: &PyObjectRef, vm: &VirtualMachine) -> bool {
-    obj.is_instance(T::class(vm).into(), vm).unwrap_or(false)
-}
 
 pub fn format_py_error(excep: PyBaseExceptionRef, vm: &VirtualMachine) -> error::Error {
     let mut msg = String::new();

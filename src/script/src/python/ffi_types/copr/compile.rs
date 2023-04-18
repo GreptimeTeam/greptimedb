@@ -17,7 +17,7 @@ use rustpython_codegen::compile::compile_top;
 use rustpython_compiler::{CompileOpts, Mode};
 use rustpython_compiler_core::CodeObject;
 use rustpython_parser::ast::{ArgData, Located, Location};
-use rustpython_parser::{ast, parser};
+use rustpython_parser::{ast, parse, Mode as ParseMode};
 use snafu::ResultExt;
 
 use crate::fail_parse_error;
@@ -95,8 +95,7 @@ pub fn compile_script(
     script: &str,
 ) -> Result<CodeObject> {
     // note that it's important to use `parser::Mode::Interactive` so the ast can be compile to return a result instead of return None in eval mode
-    let mut top =
-        parser::parse(script, parser::Mode::Interactive, "<embedded>").context(PyParseSnafu)?;
+    let mut top = parse(script, ParseMode::Interactive, "<embedded>").context(PyParseSnafu)?;
     // erase decorator
     if let ast::Mod::Interactive { body } = &mut top {
         let stmts = body;

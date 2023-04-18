@@ -28,8 +28,10 @@ pub(crate) mod data_frame {
     use datafusion::dataframe::DataFrame as DfDataFrame;
     use datafusion::execution::context::SessionContext;
     use datafusion_expr::Expr as DfExpr;
+    use rustpython_vm::convert::ToPyResult;
     use rustpython_vm::function::PyComparisonValue;
-    use rustpython_vm::types::{Comparable, PyComparisonOp};
+    use rustpython_vm::protocol::PyNumberMethods;
+    use rustpython_vm::types::{AsNumber, Comparable, PyComparisonOp};
     use rustpython_vm::{
         pyclass as rspyclass, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
     };
@@ -40,6 +42,7 @@ pub(crate) mod data_frame {
     use crate::python::rspython::builtins::greptime_builtin::{
         lit, query as get_query_engine, PyDataFrame,
     };
+    use crate::python::rspython::utils::obj_cast_to;
     use crate::python::utils::block_on_async;
 
     impl From<DfDataFrame> for PyDataFrame {
@@ -313,7 +316,20 @@ pub(crate) mod data_frame {
         }
     }
 
-    #[rspyclass(with(Comparable))]
+    impl AsNumber for PyExpr {
+        fn as_number() -> &'static PyNumberMethods {
+            static AS_NUMBER: PyNumberMethods = PyNumberMethods {
+                and: Some(|a, b, vm| PyExpr::and(a.to_owned(), b.to_owned(), vm).to_pyresult(vm)),
+                or: Some(|a, b, vm| PyExpr::or(a.to_owned(), b.to_owned(), vm).to_pyresult(vm)),
+                invert: Some(|a, vm| PyExpr::invert((*a).to_owned(), vm).to_pyresult(vm)),
+
+                ..PyNumberMethods::NOT_IMPLEMENTED
+            };
+            &AS_NUMBER
+        }
+    }
+
+    #[rspyclass(with(Comparable, AsNumber))]
     impl PyExpr {
         fn richcompare(
             &self,
@@ -342,18 +358,23 @@ pub(crate) mod data_frame {
         }
 
         #[pymethod(magic)]
-        fn and(&self, other: PyExprRef) -> PyResult<PyExpr> {
-            Ok(self.inner.clone().and(other.inner.clone()).into())
+        fn and(zelf: PyObjectRef, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyExpr> {
+            let zelf = obj_cast_to::<Self>(zelf, vm)?;
+            let other = obj_cast_to::<Self>(other, vm)?;
+            Ok(zelf.inner.clone().and(other.inner.clone()).into())
         }
         #[pymethod(magic)]
-        fn or(&self, other: PyExprRef) -> PyResult<PyExpr> {
-            Ok(self.inner.clone().or(other.inner.clone()).into())
+        fn or(zelf: PyObjectRef, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyExpr> {
+            let zelf = obj_cast_to::<Self>(zelf, vm)?;
+            let other = obj_cast_to::<Self>(other, vm)?;
+            Ok(zelf.inner.clone().or(other.inner.clone()).into())
         }
 
         /// `~` operator, return `!self`
         #[pymethod(magic)]
-        fn invert(&self) -> PyResult<PyExpr> {
-            Ok(self.inner.clone().not().into())
+        fn invert(zelf: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyExpr> {
+            let zelf = obj_cast_to::<Self>(zelf, vm)?;
+            Ok(zelf.inner.clone().not().into())
         }
 
         /// sort ascending&nulls_first

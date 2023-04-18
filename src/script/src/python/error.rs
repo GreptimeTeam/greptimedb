@@ -20,7 +20,7 @@ use datatypes::error::Error as DataTypeError;
 use query::error::Error as QueryError;
 use rustpython_codegen::error::CodegenError;
 use rustpython_parser::ast::Location;
-use rustpython_parser::error::ParseError;
+use rustpython_parser::ParseError;
 pub use snafu::ensure;
 use snafu::prelude::Snafu;
 use snafu::Location as SnafuLocation;

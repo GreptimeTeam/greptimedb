@@ -18,7 +18,7 @@ use std::sync::Arc;
 use datatypes::prelude::ConcreteDataType;
 use query::QueryEngineRef;
 use rustpython_parser::ast::{Arguments, Location};
-use rustpython_parser::{ast, parser};
+use rustpython_parser::{ast, parse_program};
 #[cfg(test)]
 use serde::Deserialize;
 use snafu::{OptionExt, ResultExt};
@@ -443,7 +443,7 @@ pub fn parse_and_compile_copr(
     script: &str,
     query_engine: Option<QueryEngineRef>,
 ) -> Result<Coprocessor> {
-    let python_ast = parser::parse_program(script, "<embedded>").context(PyParseSnafu)?;
+    let python_ast = parse_program(script, "<embedded>").context(PyParseSnafu)?;
 
     let mut coprocessor = None;
 

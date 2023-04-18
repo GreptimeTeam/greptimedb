@@ -22,7 +22,8 @@ use datatypes::vectors::{
     BooleanVector, Float64Vector, Helper, Int64Vector, NullVector, StringVector, VectorRef,
 };
 use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyList, PyStr};
-use rustpython_vm::{PyObjectRef, PyPayload, PyResult, VirtualMachine};
+use rustpython_vm::object::PyObjectPayload;
+use rustpython_vm::{PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine};
 use snafu::{OptionExt, ResultExt};
 
 use crate::python::error;
@@ -33,7 +34,21 @@ use crate::python::rspython::builtins::try_into_columnar_value;
 /// use `rustpython`'s `is_instance` method to check if a PyObject is a instance of class.
 /// if `PyResult` is Err, then this function return `false`
 pub fn is_instance<T: PyPayload>(obj: &PyObjectRef, vm: &VirtualMachine) -> bool {
-    obj.is_instance(T::class(vm).into(), vm).unwrap_or(false)
+    obj.is_instance(T::class(&vm.ctx).into(), vm)
+        .unwrap_or(false)
+}
+
+pub fn obj_cast_to<T: PyObjectPayload>(
+    obj: PyObjectRef,
+    vm: &VirtualMachine,
+) -> PyResult<PyRef<T>> {
+    obj.downcast::<T>().map_err(|e| {
+        vm.new_type_error(format!(
+            "Can't cast object into {}, actual type: {}",
+            std::any::type_name::<T>(),
+            e.class().name()
+        ))
+    })
 }
 
 pub fn format_py_error(excep: PyBaseExceptionRef, vm: &VirtualMachine) -> error::Error {
