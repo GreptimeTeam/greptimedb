@@ -65,6 +65,7 @@ use sql::dialect::GenericDialect;
 use sql::parser::ParserContext;
 use sql::statements::copy::CopyTable;
 use sql::statements::statement::Statement;
+use tokio::sync::Mutex;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
@@ -154,6 +155,9 @@ impl Instance {
             query_engine.clone(),
             dist_instance.clone(),
         ));
+        if let Some(configurator) = plugins.get::<Arc<Mutex<Option<Arc<StatementExecutor>>>>>() {
+            *configurator.lock().await = Some(statement_executor.clone());
+        }
 
         Ok(Instance {
             catalog_manager,

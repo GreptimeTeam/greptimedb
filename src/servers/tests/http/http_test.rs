@@ -28,7 +28,7 @@ fn make_test_app() -> Router {
             MemTable::default_numbers_table(),
         ))
         .build();
-    server.make_app()
+    server.build(server.make_app())
 }
 
 #[tokio::test]

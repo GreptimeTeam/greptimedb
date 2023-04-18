@@ -19,6 +19,7 @@ use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use serde::{Deserialize, Serialize};
 
 pub mod auth;
+pub mod configurator;
 pub mod error;
 pub mod grpc;
 pub mod http;
@@ -62,7 +63,7 @@ pub enum Mode {
 /// schema name
 /// - if `[<catalog>-]` is provided, we split database name with `-` and use
 /// `<catalog>` and `<schema>`.
-pub(crate) fn parse_catalog_and_schema_from_client_database_name(db: &str) -> (&str, &str) {
+pub fn parse_catalog_and_schema_from_client_database_name(db: &str) -> (&str, &str) {
     let parts = db.splitn(2, '-').collect::<Vec<&str>>();
     if parts.len() == 2 {
         (parts[0], parts[1])

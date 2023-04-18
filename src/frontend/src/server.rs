@@ -20,6 +20,7 @@ use common_base::Plugins;
 use common_runtime::Builder as RuntimeBuilder;
 use common_telemetry::info;
 use servers::auth::UserProviderRef;
+use servers::configurator::ConfiguratorRef;
 use servers::error::Error::InternalIo;
 use servers::grpc::GrpcServer;
 use servers::http::HttpServerBuilder;
@@ -179,6 +180,11 @@ impl Services {
             }
             http_server_builder.with_metrics_handler(MetricsHandler);
             http_server_builder.with_script_handler(instance.clone());
+
+            if let Some(http_config) = plugins.get::<ConfiguratorRef>() {
+                let c = http_config.lock().await;
+                http_server_builder.with_http_configurator(c.clone());
+            }
             let http_server = http_server_builder.build();
             result.push((Box::new(http_server), http_addr));
         }

@@ -12,31 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
-#![feature(trait_upcasting)]
+use std::sync::Arc;
 
-pub mod catalog;
-pub mod datanode;
-pub mod error;
-mod expr_factory;
-pub mod frontend;
-pub mod grpc;
-pub mod influxdb;
-pub mod instance;
-pub(crate) mod metrics;
-pub mod mysql;
-pub mod opentsdb;
-pub mod postgres;
-pub mod prom;
-pub mod prometheus;
-mod script;
-mod server;
-pub mod statement;
-mod table;
-#[cfg(test)]
-mod tests;
+use async_trait::async_trait;
+use axum::Router;
+use tokio::sync::Mutex;
 
-#[cfg(test)]
-// allowed because https://docs.rs/rstest_reuse/0.5.0/rstest_reuse/#use-rstest_reuse-at-the-top-of-your-crate
-#[allow(clippy::single_component_path_imports)]
-use rstest_reuse;
+#[async_trait]
+pub trait Configurator: Send + Sync {
+    fn config_http(&self, route: Router) -> Router {
+        route
+    }
+}
+
+pub type ConfiguratorRefOption = Option<Arc<dyn Configurator>>;
+pub type ConfiguratorRef = Arc<Mutex<Option<Arc<dyn Configurator>>>>;
