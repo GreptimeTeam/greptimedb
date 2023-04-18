@@ -26,7 +26,7 @@ use common_catalog::consts::{
 use common_telemetry::{debug, error, info};
 use dashmap::DashMap;
 use futures::Stream;
-use futures_util::StreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use key_lock::KeyLock;
 use parking_lot::RwLock;
 use snafu::{OptionExt, ResultExt};
@@ -37,10 +37,10 @@ use table::requests::{CreateTableRequest, OpenTableRequest};
 use table::TableRef;
 use tokio::sync::Mutex;
 
-use crate::error::Error::ParallelOpenTable;
 use crate::error::{
-    CatalogNotFoundSnafu, CreateTableSnafu, InvalidCatalogValueSnafu, OpenTableSnafu, Result,
-    SchemaNotFoundSnafu, TableEngineNotFoundSnafu, TableExistsSnafu, UnimplementedSnafu,
+    CatalogNotFoundSnafu, CreateTableSnafu, InvalidCatalogValueSnafu, OpenTableSnafu,
+    ParallelOpenTableSnafu, Result, SchemaNotFoundSnafu, TableEngineNotFoundSnafu,
+    TableExistsSnafu, UnimplementedSnafu,
 };
 use crate::helper::{
     build_catalog_prefix, build_schema_prefix, build_table_global_prefix, CatalogKey, CatalogValue,
@@ -257,41 +257,28 @@ impl RemoteCatalogManager {
         info!("initializing tables in {}.{}", catalog_name, schema_name);
         let mut table_num = 0;
         let tables = self.iter_remote_tables(catalog_name, schema_name).await;
-        let kvs = tables.collect::<Vec<_>>().await;
+
+        let kvs = tables.try_collect::<Vec<_>>().await?;
         let node_id = self.node_id;
-
-        let mut joins = kvs
+        let joins = kvs
             .into_iter()
-            .map(|kv| {
-                let (table_key, table_value) = kv?;
+            .map(|(table_key, table_value)| {
                 let engine_manager = self.engine_manager.clone();
-                Ok(tokio::spawn(async move {
-                    let table_ref =
-                        open_or_create_table(node_id, engine_manager, &table_key, &table_value)
-                            .await?;
-                    Ok(table_ref)
-                }))
+                common_runtime::spawn_bg(async move {
+                    open_or_create_table(node_id, engine_manager, &table_key, &table_value).await
+                })
             })
-            .collect::<Result<Vec<_>>>()?;
-
-        while !joins.is_empty() {
-            match futures::future::select_all(joins).await {
-                (Ok(join_re), _, remaining) => {
-                    joins = remaining;
-                    let table_ref = join_re?;
-                    let table_info = table_ref.table_info();
-
-                    let table_name = &table_info.name;
-                    let table_id = table_info.ident.table_id;
-                    schema.register_table(table_name.clone(), table_ref)?;
-                    info!("Registered table {}", table_name);
-                    max_table_id = max_table_id.max(table_id);
-                    table_num += 1;
-                }
-                (Err(source), _, _) => {
-                    return Err(ParallelOpenTable { source });
-                }
-            }
+            .collect::<Vec<_>>();
+        let vec = futures::future::join_all(joins).await;
+        for res in vec {
+            let table_ref = res.context(ParallelOpenTableSnafu)??;
+            let table_info = table_ref.table_info();
+            let table_name = &table_info.name;
+            let table_id = table_info.ident.table_id;
+            schema.register_table(table_name.clone(), table_ref)?;
+            info!("Registered table {}", table_name);
+            max_table_id = max_table_id.max(table_id);
+            table_num += 1;
         }
 
         info!(
