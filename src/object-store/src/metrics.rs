@@ -12,14 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub use opendal::raw::normalize_path as raw_normalize_path;
-pub use opendal::raw::oio::Pager;
-pub use opendal::{
-    layers, services, Builder as ObjectStoreBuilder, Entry, EntryMode, Error, ErrorKind, Metakey,
-    Operator as ObjectStore, Result, Writer,
-};
+// ! object-store metrics
 
-pub mod cache_policy;
-mod metrics;
-pub mod test_util;
-pub mod util;
+pub const OBJECT_STORE_LRU_CACHE_HIT: &str = "object_store_lru_cache.hit";
+pub const OBJECT_STORE_LRU_CACHE_MISS: &str = "object_store_lru_cache.miss";
+pub const OBJECT_STORE_LRU_CACHE_ERROR: &str = "object_store_lru_cache.error";
+pub const OBJECT_STORE_LRU_CACHE_ERROR_KIND: &str = "error_kind";

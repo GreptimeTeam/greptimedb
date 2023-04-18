@@ -262,11 +262,8 @@ async fn test_object_store_cache_policy() -> Result<()> {
     let handle = metric::try_handle().unwrap();
     let metric_text = handle.render();
 
-    assert!(metric_text.contains("lru_cache_hit{lru_cache_name=\"test_file1\""));
-    assert!(metric_text.contains("lru_cache_hit{lru_cache_name=\"test_file2\""));
-    assert!(metric_text.contains("lru_cache_miss{lru_cache_name=\"test_file1\""));
-    assert!(metric_text.contains("lru_cache_miss{lru_cache_name=\"test_file2\""));
-    assert!(metric_text.contains("lru_cache_miss{lru_cache_name=\"test_file3\""));
+    assert!(metric_text.contains("object_store_lru_cache_hit"));
+    assert!(metric_text.contains("object_store_lru_cache_miss"));
 
     Ok(())
 }

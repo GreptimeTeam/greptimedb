@@ -26,10 +26,7 @@ use opendal::raw::{Accessor, Layer, LayeredAccessor, RpDelete, RpList, RpRead, R
 use opendal::{ErrorKind, Result};
 use tokio::sync::Mutex;
 
-const METRIC_LRU_CACHE_NAME_LABEL: &str = "lru_cache.name";
-const METRIC_LRU_CACHE_RANGE_LABEL: &str = "lru_cache.range";
-const METRIC_LRU_CACHE_HIT_COUNTER: &str = "lru_cache.hit";
-const METRIC_LRU_CACHE_MISS_COUNTER: &str = "lru_cache.miss";
+use crate::metrics::*;
 
 pub struct LruCacheLayer<C> {
     cache: Arc<C>,
@@ -95,7 +92,7 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
 
         match self.cache.read(&cache_path, OpRead::default()).await {
             Ok((rp, r)) => {
-                increment_counter!(METRIC_LRU_CACHE_HIT_COUNTER, METRIC_LRU_CACHE_NAME_LABEL => path.clone(), METRIC_LRU_CACHE_RANGE_LABEL => args.range().to_header());
+                increment_counter!(OBJECT_STORE_LRU_CACHE_HIT);
 
                 // update lru when cache hit
                 let mut lru_cache = lru_cache.lock().await;
@@ -103,7 +100,7 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
                 Ok(to_output_reader((rp, r)))
             }
             Err(err) if err.kind() == ErrorKind::NotFound => {
-                increment_counter!(METRIC_LRU_CACHE_MISS_COUNTER, METRIC_LRU_CACHE_NAME_LABEL => path.clone(), METRIC_LRU_CACHE_RANGE_LABEL => args.range().to_header());
+                increment_counter!(OBJECT_STORE_LRU_CACHE_MISS);
 
                 let (rp, mut reader) = self.inner.read(&path, args.clone()).await?;
                 let size = rp.clone().into_metadata().content_length();
@@ -132,8 +129,10 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
                     Err(_) => return self.inner.read(&path, args).await.map(to_output_reader),
                 }
             }
-            // TODO(nearsyh): should we increase the cache miss counter here?
-            Err(_) => return self.inner.read(&path, args).await.map(to_output_reader),
+            Err(err) => {
+                increment_counter!(OBJECT_STORE_LRU_CACHE_ERROR, OBJECT_STORE_LRU_CACHE_ERROR_KIND => format!("{}", err.kind()));
+                return self.inner.read(&path, args).await.map(to_output_reader);
+            }
         }
     }
 
