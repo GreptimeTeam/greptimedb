@@ -351,7 +351,7 @@ jobs:
         uses: ncipollo/release-action@v1
         if: github.event_name != 'schedule'
         with:
-          name: "Release ${{ github.ref_name }}"
+          name: "${{ github.ref_name }}"
           prerelease: ${{ env.prerelease }}
           makeLatest: ${{ env.makeLatest }}
           generateReleaseNotes: true
