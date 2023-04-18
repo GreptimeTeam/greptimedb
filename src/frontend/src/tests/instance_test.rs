@@ -904,6 +904,7 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
 
 #[apply(both_instances_cases)]
 async fn test_information_schema(instance: Arc<dyn MockInstance>) {
+    let is_distributed_mode = instance.is_distributed_mode();
     let instance = instance.frontend();
 
     let sql = "create table another_table(i bigint time index)";
@@ -913,27 +914,55 @@ async fn test_information_schema(instance: Arc<dyn MockInstance>) {
 
     // User can only see information schema under current catalog.
     // A necessary requirement to GreptimeCloud.
-    let sql = "select table_catalog, table_schema, table_name, table_type, engine from information_schema.tables where table_type != 'SYSTEM VIEW' order by table_name";
+    let sql = "select table_catalog, table_schema, table_name, table_type, table_id, engine from information_schema.tables where table_type != 'SYSTEM VIEW' order by table_name";
 
     let output = execute_sql(&instance, sql).await;
-    let expected = "\
-+---------------+--------------------+------------+------------+-------------+
-| table_catalog | table_schema       | table_name | table_type | engine      |
-+---------------+--------------------+------------+------------+-------------+
-| greptime      | public             | numbers    | BASE TABLE | test_engine |
-| greptime      | public             | scripts    | BASE TABLE | mito        |
-| greptime      | information_schema | tables     | VIEW       |             |
-+---------------+--------------------+------------+------------+-------------+";
+    let expected = match is_distributed_mode {
+        true => {
+            "\
++---------------+--------------------+------------+------------+----------+-------------+
+| table_catalog | table_schema       | table_name | table_type | table_id | engine      |
++---------------+--------------------+------------+------------+----------+-------------+
+| greptime      | public             | numbers    | BASE TABLE | 1        | test_engine |
+| greptime      | public             | scripts    | BASE TABLE | 1024     | mito        |
+| greptime      | information_schema | tables     | VIEW       |          |             |
++---------------+--------------------+------------+------------+----------+-------------+"
+        }
+        false => {
+            "\
++---------------+--------------------+------------+------------+----------+-------------+
+| table_catalog | table_schema       | table_name | table_type | table_id | engine      |
++---------------+--------------------+------------+------------+----------+-------------+
+| greptime      | public             | numbers    | BASE TABLE | 1        | test_engine |
+| greptime      | public             | scripts    | BASE TABLE | 1        | mito        |
+| greptime      | information_schema | tables     | VIEW       |          |             |
++---------------+--------------------+------------+------------+----------+-------------+"
+        }
+    };
+
     check_output_stream(output, expected).await;
 
     let output = execute_sql_with(&instance, sql, query_ctx).await;
-    let expected = "\
-+-----------------+--------------------+---------------+------------+--------+
-| table_catalog   | table_schema       | table_name    | table_type | engine |
-+-----------------+--------------------+---------------+------------+--------+
-| another_catalog | another_schema     | another_table | BASE TABLE | mito   |
-| another_catalog | information_schema | tables        | VIEW       |        |
-+-----------------+--------------------+---------------+------------+--------+";
+    let expected = match is_distributed_mode {
+        true => {
+            "\
++-----------------+--------------------+---------------+------------+----------+--------+
+| table_catalog   | table_schema       | table_name    | table_type | table_id | engine |
++-----------------+--------------------+---------------+------------+----------+--------+
+| another_catalog | another_schema     | another_table | BASE TABLE | 1025     | mito   |
+| another_catalog | information_schema | tables        | VIEW       |          |        |
++-----------------+--------------------+---------------+------------+----------+--------+"
+        }
+        false => {
+            "\
++-----------------+--------------------+---------------+------------+----------+--------+
+| table_catalog   | table_schema       | table_name    | table_type | table_id | engine |
++-----------------+--------------------+---------------+------------+----------+--------+
+| another_catalog | another_schema     | another_table | BASE TABLE | 1024     | mito   |
+| another_catalog | information_schema | tables        | VIEW       |          |        |
++-----------------+--------------------+---------------+------------+----------+--------+"
+        }
+    };
     check_output_stream(output, expected).await;
 }
 
