@@ -50,14 +50,10 @@ impl Procedure for CreateImmutableFileTable {
     }
 
     fn lock_key(&self) -> LockKey {
+        // We don't need to support multiple region so we only lock region-0.
         let table_ref = self.data.table_ref();
-        let keys = self
-            .data
-            .request
-            .region_numbers
-            .iter()
-            .map(|number| format!("{table_ref}/region-{number}"));
-        LockKey::new(keys)
+        let key = format!("{table_ref}/region-0");
+        LockKey::single(key)
     }
 }
 

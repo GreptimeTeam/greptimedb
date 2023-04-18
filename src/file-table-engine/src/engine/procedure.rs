@@ -15,11 +15,13 @@
 //! Procedures for immutable file table engine.
 
 mod create;
+mod drop;
 
 use common_procedure::ProcedureManager;
 
 use crate::engine::immutable::ImmutableFileTableEngine;
-use crate::engine::procedure::create::CreateImmutableFileTable;
+pub(crate) use crate::engine::procedure::create::CreateImmutableFileTable;
+pub(crate) use crate::engine::procedure::drop::DropImmutableFileTable;
 
 /// Register all procedure loaders to the procedure manager.
 ///
@@ -31,4 +33,5 @@ pub(crate) fn register_procedure_loaders(
 ) {
     // The procedure names are expected to be unique, so we just panic on error.
     CreateImmutableFileTable::register_loader(engine.clone(), procedure_manager);
+    DropImmutableFileTable::register_loader(engine, procedure_manager);
 }
