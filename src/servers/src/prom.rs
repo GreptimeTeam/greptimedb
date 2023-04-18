@@ -351,20 +351,34 @@ impl PromJsonResponse {
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct InstantQuery {
-    query: String,
+    query: Option<String>,
     time: Option<String>,
     timeout: Option<String>,
+    db: Option<String>,
 }
 
 #[axum_macros::debug_handler]
 pub async fn instant_query(
-    State(_handler): State<PromHandlerRef>,
-    Query(_params): Query<InstantQuery>,
+    State(handler): State<PromHandlerRef>,
+    Query(params): Query<InstantQuery>,
+    Form(form_params): Form<InstantQuery>,
 ) -> Json<PromJsonResponse> {
-    PromJsonResponse::error(
-        "not implemented",
-        "instant query api `/query` is not implemented. Use `/query_range` instead.",
-    )
+    let time = params.time.or(form_params.time).unwrap_or_default();
+    let prom_query = PromQuery {
+        query: params.query.or(form_params.query).unwrap_or_default(),
+        start: time.clone(),
+        end: time,
+        step: "1s".to_string(),
+    };
+
+    let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
+    let (catalog, schema) = super::parse_catalog_and_schema_from_client_database_name(db);
+
+    let query_ctx = QueryContext::with(catalog, schema);
+
+    let result = handler.do_query(&prom_query, Arc::new(query_ctx)).await;
+    let metric_name = retrieve_metric_name(&prom_query.query).unwrap_or_default();
+    PromJsonResponse::from_query_result(result, metric_name).await
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
