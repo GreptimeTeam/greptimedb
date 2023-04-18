@@ -302,7 +302,7 @@ async fn test_execute_insert_query_with_i64_timestamp(instance: Arc<dyn MockInst
     }
 }
 
-#[apply(standalone_instance_case)]
+#[apply(both_instances_cases)]
 async fn test_execute_query(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
