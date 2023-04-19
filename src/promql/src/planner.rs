@@ -393,10 +393,30 @@ impl PromPlanner {
                     .build()
                     .context(DataFusionPlanningSnafu)?
             }
-            PromExpr::Extension(_) => UnsupportedExprSnafu {
-                name: "Prom Extension",
+            PromExpr::Extension(promql_parser::parser::ast::Extension { expr }) => {
+                let children = expr.children();
+                let plan = self.prom_expr_to_plan(children[0].clone()).await?;
+                // Wrapper for the explanation/analyze of the existing plan
+                // https://docs.rs/datafusion-expr/latest/datafusion_expr/logical_plan/builder/struct.LogicalPlanBuilder.html#method.explain
+                // if `analyze` is true, runs the actual plan and produces
+                // information about metrics during run.
+                // if `verbose` is true, prints out additional details when VERBOSE keyword is specified
+                match expr.name() {
+                    "ANALYZE" => LogicalPlanBuilder::from(plan)
+                        .explain(false, true)
+                        .unwrap()
+                        .build()
+                        .context(DataFusionPlanningSnafu)?,
+                    "EXPLAIN" => LogicalPlanBuilder::from(plan)
+                        .explain(false, false)
+                        .unwrap()
+                        .build()
+                        .context(DataFusionPlanningSnafu)?,
+                    _ => LogicalPlanBuilder::empty(true)
+                        .build()
+                        .context(DataFusionPlanningSnafu)?,
+                }
             }
-            .fail()?,
         };
         Ok(res)
     }
@@ -559,7 +579,7 @@ impl PromPlanner {
         Ok(logical_plan)
     }
 
-    /// Convert [AggModifier] to [Column] exprs for aggregation.
+    /// Convert [LabelModifier] to [Column] exprs for aggregation.
     /// Timestamp column and tag columns will be included.
     ///
     /// # Side effect

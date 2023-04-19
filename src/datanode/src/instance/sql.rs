@@ -171,9 +171,7 @@ impl Instance {
     ) -> Result<Output> {
         let query = PromQuery {
             query: promql.to_string(),
-            start: "0".to_string(),
-            end: "0".to_string(),
-            step: "5m".to_string(),
+            ..PromQuery::default()
         };
         let mut stmt = QueryLanguageParser::parse_promql(&query).context(ExecuteSqlSnafu)?;
         match &mut stmt {
