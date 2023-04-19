@@ -14,8 +14,11 @@
 
 use arrow_schema::Schema;
 use async_trait::async_trait;
+use datafusion::error::{DataFusionError, Result as DatafusionResult};
 use datafusion::parquet::arrow::async_reader::AsyncFileReader;
 use datafusion::parquet::arrow::parquet_to_arrow_schema;
+use datafusion::physical_plan::file_format::{FileMeta, ParquetFileReaderFactory};
+use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 
@@ -46,6 +49,49 @@ impl FileFormat for ParquetFormat {
         .context(error::ParquetToSchemaSnafu)?;
 
         Ok(schema)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DefaultParquetFileReaderFactory {
+    object_store: ObjectStore,
+}
+
+/// Returns a AsyncFileReader factory
+impl DefaultParquetFileReaderFactory {
+    pub fn new(object_store: ObjectStore) -> Self {
+        Self { object_store }
+    }
+}
+
+impl ParquetFileReaderFactory for DefaultParquetFileReaderFactory {
+    // TODO(weny): Supports [`metadata_size_hint`].
+    // The upstream has a implementation supports [`metadata_size_hint`],
+    // however it coupled with Box<dyn ObjectStore>.
+    fn create_reader(
+        &self,
+        _partition_index: usize,
+        file_meta: FileMeta,
+        _metadata_size_hint: Option<usize>,
+        _metrics: &ExecutionPlanMetricsSet,
+    ) -> DatafusionResult<Box<dyn AsyncFileReader + Send>> {
+        let path = file_meta.location().to_string();
+
+        let object_store = self.object_store.clone();
+
+        let reader = std::thread::spawn(move || {
+            common_runtime::block_on_read(async move {
+                object_store
+                    .reader(&path)
+                    .await
+                    .map_err(|e| DataFusionError::External(Box::new(e)))
+                    .map(Box::new)
+            })
+        })
+        .join()
+        .unwrap();
+
+        Ok(reader?)
     }
 }
 
