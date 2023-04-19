@@ -14,16 +14,6 @@ WITH(
 
 Affected Rows: 0
 
-SHOW TABLES;
-
-+----------------+
-| Tables         |
-+----------------+
-| numbers        |
-| scripts        |
-| system_metrics |
-+----------------+
-
 SHOW CREATE TABLE system_metrics;
 
 +----------------+------------------------------------------------------+

@@ -41,3 +41,7 @@ DROP TABLE integers;
 
 Affected Rows: 1
 
+DROP TABLE presentations;
+
+Affected Rows: 1
+

@@ -12,8 +12,6 @@ WITH(
   regions = 3
 );
 
-SHOW TABLES;
-
 SHOW CREATE TABLE system_metrics;
 
 DROP TABLE system_metrics;
