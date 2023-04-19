@@ -14,7 +14,7 @@ from information_schema.tables
 where table_schema = 'my_db'
 order by table_name;
 
-select table_catalog, table_schema, table_name, table_type
+select table_catalog, table_schema, table_name, table_type, engine
 from information_schema.tables
 where table_catalog = 'greptime'
   and table_schema != 'public'

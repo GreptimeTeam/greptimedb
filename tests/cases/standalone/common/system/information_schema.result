@@ -27,18 +27,18 @@ order by table_name;
 | foo        |
 +------------+
 
-select table_catalog, table_schema, table_name, table_type
+select table_catalog, table_schema, table_name, table_type, engine
 from information_schema.tables
 where table_catalog = 'greptime'
   and table_schema != 'public'
 order by table_schema, table_name;
 
-+---------------+--------------------+------------+------------+
-| table_catalog | table_schema       | table_name | table_type |
-+---------------+--------------------+------------+------------+
-| greptime      | information_schema | tables     | VIEW       |
-| greptime      | my_db              | foo        | BASE TABLE |
-+---------------+--------------------+------------+------------+
++---------------+--------------------+------------+------------+--------+
+| table_catalog | table_schema       | table_name | table_type | engine |
++---------------+--------------------+------------+------------+--------+
+| greptime      | information_schema | tables     | VIEW       |        |
+| greptime      | my_db              | foo        | BASE TABLE | mito   |
++---------------+--------------------+------------+------------+--------+
 
 use
 public;
