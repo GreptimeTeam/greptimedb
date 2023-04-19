@@ -48,8 +48,8 @@ macro_rules! format_list_comma {
 pub const TIME_INDEX: &str = "__time_index";
 
 #[inline]
-pub fn is_time_index(constrait: &TableConstraint) -> bool {
-    matches!(constrait, TableConstraint::Unique {
+pub fn is_time_index(constraint: &TableConstraint) -> bool {
+    matches!(constraint, TableConstraint::Unique {
         name: Some(name),
         is_primary: false,
         ..
