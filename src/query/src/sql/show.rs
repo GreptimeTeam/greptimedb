@@ -15,15 +15,18 @@ use std::fmt::Display;
 
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, SchemaRef};
 use humantime::format_duration;
+use snafu::ResultExt;
 use sql::ast::{
     ColumnDef, ColumnOption, ColumnOptionDef, Expr, ObjectName, SqlOption, TableConstraint,
     Value as SqlValue,
 };
+use sql::dialect::GenericDialect;
+use sql::parser::ParserContext;
 use sql::statements::create::{CreateTable, TIME_INDEX};
 use sql::statements::{self};
 use table::metadata::{TableInfoRef, TableMeta};
 
-use crate::error::Result;
+use crate::error::{ConvertSqlTypeSnafu, ConvertSqlValueSnafu, Result, SqlSnafu};
 
 #[inline]
 fn number_value<T: Display>(n: T) -> SqlValue {
@@ -83,10 +86,13 @@ fn create_column_def(column_schema: &ColumnSchema) -> Result<ColumnDef> {
 
     if let Some(c) = column_schema.default_constraint() {
         let expr = match c {
-            ColumnDefaultConstraint::Value(v) => {
-                Expr::Value(statements::value_to_sql_value(v).unwrap())
+            ColumnDefaultConstraint::Value(v) => Expr::Value(
+                statements::value_to_sql_value(v)
+                    .with_context(|_| ConvertSqlValueSnafu { value: v.clone() })?,
+            ),
+            ColumnDefaultConstraint::Function(expr) => {
+                ParserContext::parse_function(expr, &GenericDialect {}).context(SqlSnafu)?
             }
-            ColumnDefaultConstraint::Function(_expr) => unimplemented!(),
         };
 
         options.push(column_option_def(ColumnOption::Default(expr)));
@@ -95,7 +101,9 @@ fn create_column_def(column_schema: &ColumnSchema) -> Result<ColumnDef> {
     Ok(ColumnDef {
         name: name[..].into(),
         data_type: statements::concrete_data_type_to_sql_data_type(&column_schema.data_type)
-            .unwrap(),
+            .with_context(|_| ConvertSqlTypeSnafu {
+                datatype: column_schema.data_type.clone(),
+            })?,
         collation: None,
         options,
     })
@@ -175,10 +183,10 @@ mod tests {
                 ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond),
                 false,
             )
-            //            .with_default_constraint(Some(ColumnDefaultConstraint::Function(String::from(
-            //                "current_timestamp()",
-            //            ))))
-            //            .unwrap()
+            .with_default_constraint(Some(ColumnDefaultConstraint::Function(String::from(
+                "current_timestamp()",
+            ))))
+            .unwrap()
             .with_time_index(true),
         ];
         let table_schema = SchemaRef::new(Schema::new(schema));
@@ -224,7 +232,7 @@ CREATE TABLE IF NOT EXISTS system_metrics (
   host STRING NULL,
   cpu DOUBLE NULL,
   disk FLOAT NULL,
-  ts TIMESTAMP NOT NULL,
+  ts TIMESTAMP NOT NULL DEFAULT current_timestamp(),
   TIME INDEX (ts),
   PRIMARY KEY (id, host)
 )
