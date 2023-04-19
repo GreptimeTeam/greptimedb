@@ -15,6 +15,7 @@
 use std::any::Any;
 
 use common_error::prelude::*;
+use datafusion::arrow::error::ArrowError;
 use serde_json::error::Error as JsonError;
 use snafu::Location;
 use table::metadata::{TableInfoBuilderError, TableMetaBuilderError};
@@ -122,6 +123,48 @@ pub enum Error {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
+
+    #[snafu(display("Missing required field: {}", name))]
+    MissingRequiredField { name: String, location: Location },
+
+    #[snafu(display("Failed to build backend, source: {}", source))]
+    BuildBackend {
+        #[snafu(backtrace)]
+        source: common_datasource::error::Error,
+    },
+
+    #[snafu(display("Unsupported file format: {}", format))]
+    UnsupportedFileFormat { format: String },
+
+    #[snafu(display("Failed to build csv config: {}", source))]
+    BuildCsvConfig {
+        source: common_datasource::file_format::csv::CsvConfigBuilderError,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to build stream: {}", source))]
+    BuildStream {
+        source: datafusion::error::DataFusionError,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to project schema: {}", source))]
+    ProjectSchema {
+        source: ArrowError,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to build stream adapter: {}", source))]
+    BuildStreamAdapter {
+        source: common_recordbatch::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to parse file format: {}", source))]
+    ParseFileFormat {
+        source: common_datasource::error::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -134,18 +177,26 @@ impl ErrorExt for Error {
             TableExists { .. }
             | BuildTableMeta { .. }
             | BuildTableInfo { .. }
-            | InvalidRawSchema { .. } => StatusCode::InvalidArguments,
+            | InvalidRawSchema { .. }
+            | UnsupportedFileFormat { .. }
+            | BuildCsvConfig { .. }
+            | ProjectSchema { .. }
+            | ParseFileFormat { .. }
+            | MissingRequiredField { .. } => StatusCode::InvalidArguments,
 
             WriteTableManifest { .. }
             | DeleteTableManifest { .. }
             | ReadTableManifest { .. }
-            | CheckObject { .. } => StatusCode::StorageUnavailable,
+            | CheckObject { .. }
+            | BuildBackend { .. } => StatusCode::StorageUnavailable,
 
             EncodeJson { .. }
             | DecodeJson { .. }
             | ConvertRaw { .. }
             | DropTable { .. }
-            | WriteImmutableManifest { .. } => StatusCode::Unexpected,
+            | WriteImmutableManifest { .. }
+            | BuildStreamAdapter { .. }
+            | BuildStream { .. } => StatusCode::Unexpected,
         }
     }
 

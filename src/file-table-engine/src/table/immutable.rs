@@ -16,26 +16,36 @@ use std::any::Any;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_datasource::object_store::build_backend;
+use common_error::prelude::BoxedError;
 use common_query::physical_plan::PhysicalPlanRef;
 use common_query::prelude::Expr;
 use datatypes::schema::SchemaRef;
 use object_store::ObjectStore;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionNumber;
-use table::error::Result as TableResult;
+use table::error::{self as table_error, Result as TableResult};
 use table::metadata::{RawTableInfo, TableInfo, TableInfoRef, TableType};
+use table::requests::{
+    ImmutableFileTableOptions, IMMUTABLE_TABLE_LOCATION_KEY, IMMUTABLE_TABLE_META_KEY,
+};
 use table::Table;
 
-use crate::error::{ConvertRawSnafu, Result};
+use super::format::{CreateScanPlanContext, ScanPlanConfig, ScanPlaner};
+use crate::error::{self, ConvertRawSnafu, Result};
 use crate::manifest::immutable::{
     read_table_manifest, write_table_manifest, ImmutableMetadata, INIT_META_VERSION,
 };
 use crate::manifest::table_manifest_dir;
+use crate::table::format::Format;
 
 pub struct ImmutableFileTable {
     metadata: ImmutableMetadata,
     // currently, it's immutable
     table_info: Arc<TableInfo>,
+    object_store: ObjectStore,
+    files: Vec<String>,
+    format: Format,
 }
 
 pub type ImmutableFileTableRef = Arc<ImmutableFileTable>;
@@ -46,25 +56,40 @@ impl Table for ImmutableFileTable {
         self
     }
 
+    /// The [`SchemaRef`] before the projection.
+    /// It contains all the columns that may appear in the files (All missing columns should be filled NULLs).
     fn schema(&self) -> SchemaRef {
         self.table_info().meta.schema.clone()
-    }
-
-    fn table_type(&self) -> TableType {
-        self.table_info().table_type
     }
 
     fn table_info(&self) -> TableInfoRef {
         self.table_info.clone()
     }
 
+    fn table_type(&self) -> TableType {
+        self.table_info().table_type
+    }
+
     async fn scan(
         &self,
-        _projection: Option<&Vec<usize>>,
-        _filters: &[Expr],
-        _limit: Option<usize>,
+        projection: Option<&Vec<usize>>,
+        filters: &[Expr],
+        limit: Option<usize>,
     ) -> TableResult<PhysicalPlanRef> {
-        todo!()
+        self.format
+            .create_physical_plan(
+                &CreateScanPlanContext::default(),
+                &ScanPlanConfig {
+                    file_schema: self.schema(),
+                    files: &self.files,
+                    projection,
+                    filters,
+                    limit,
+                    store: self.object_store.clone(),
+                },
+            )
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)
     }
 
     async fn flush(
@@ -87,11 +112,37 @@ impl ImmutableFileTable {
         &self.metadata
     }
 
-    pub(crate) fn new(table_info: TableInfo, metadata: ImmutableMetadata) -> Self {
-        Self {
+    pub(crate) fn new(table_info: TableInfo, metadata: ImmutableMetadata) -> Result<Self> {
+        let table_info = Arc::new(table_info);
+        let options = table_info.meta.options.extra_options.clone();
+
+        let url = &options
+            .get(IMMUTABLE_TABLE_LOCATION_KEY)
+            .context(error::MissingRequiredFieldSnafu {
+                name: IMMUTABLE_TABLE_LOCATION_KEY,
+            })?
+            .clone();
+
+        let meta = &options
+            .get(IMMUTABLE_TABLE_META_KEY)
+            .context(error::MissingRequiredFieldSnafu {
+                name: IMMUTABLE_TABLE_META_KEY,
+            })
+            .cloned()?;
+
+        let meta: ImmutableFileTableOptions =
+            serde_json::from_str(meta).context(error::DecodeJsonSnafu)?;
+        let format = Format::try_from(&options)?;
+
+        let object_store = build_backend(url, &options).context(error::BuildBackendSnafu)?;
+
+        Ok(Self {
             metadata,
-            table_info: Arc::new(table_info),
-        }
+            table_info,
+            object_store,
+            files: meta.files,
+            format,
+        })
     }
 
     pub async fn create(
@@ -113,7 +164,7 @@ impl ImmutableFileTable {
         )
         .await?;
 
-        Ok(ImmutableFileTable::new(table_info, metadata))
+        ImmutableFileTable::new(table_info, metadata)
     }
 
     pub(crate) async fn recover_table_info(

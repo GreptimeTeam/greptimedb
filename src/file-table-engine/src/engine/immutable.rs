@@ -341,7 +341,11 @@ impl EngineInner {
                 table_id, table_info
             );
 
-            let table = Arc::new(ImmutableFileTable::new(table_info, metadata));
+            let table = Arc::new(
+                ImmutableFileTable::new(table_info, metadata)
+                    .map_err(BoxedError::new)
+                    .context(table_error::TableOperationSnafu)?,
+            );
 
             self.tables
                 .write()
