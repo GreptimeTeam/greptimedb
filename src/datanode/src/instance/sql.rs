@@ -110,7 +110,7 @@ impl Instance {
                 let table_ref = TableReference::full(&catalog, &schema, &table);
                 let table = self.sql_handler.get_table(&table_ref).await?;
 
-                query::sql::show_create_table(table).context(ExecuteStatementSnafu)
+                query::sql::show_create_table(table, None).context(ExecuteStatementSnafu)
             }
             _ => NotSupportSqlSnafu {
                 msg: format!("not supported to execute {stmt:?}"),

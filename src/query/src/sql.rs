@@ -25,6 +25,7 @@ use datatypes::vectors::{Helper, StringVector};
 use once_cell::sync::Lazy;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
+use sql::statements::create::Partitions;
 use sql::statements::show::{ShowDatabases, ShowKind, ShowTables};
 use table::TableRef;
 
@@ -160,10 +161,11 @@ pub fn show_tables(
     Ok(Output::RecordBatches(records))
 }
 
-pub fn show_create_table(table: TableRef) -> Result<Output> {
+pub fn show_create_table(table: TableRef, partitions: Option<Partitions>) -> Result<Output> {
     let table_info = table.table_info();
     let table_name = &table_info.name;
-    let stmt = show::create_table_stmt(&table_info)?;
+    let mut stmt = show::create_table_stmt(&table_info)?;
+    stmt.partitions = partitions;
     let sql = format!("{}", stmt);
     let columns = vec![
         Arc::new(StringVector::from(vec![table_name.clone()])) as _,

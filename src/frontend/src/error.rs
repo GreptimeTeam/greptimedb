@@ -180,6 +180,13 @@ pub enum Error {
         source: partition::error::Error,
     },
 
+    #[snafu(display("Failed to find table partition rule for table {}", table_name))]
+    FindTablePartitionRule {
+        table_name: String,
+        #[snafu(backtrace)]
+        source: partition::error::Error,
+    },
+
     #[snafu(display("Failed to create table info, source: {}", source))]
     CreateTableInfo {
         #[snafu(backtrace)]
@@ -536,9 +543,9 @@ impl ErrorExt for Error {
             Error::InvokeDatanode { source } => source.status_code(),
 
             Error::External { source } => source.status_code(),
-            Error::DeserializePartition { source, .. } | Error::FindTableRoute { source, .. } => {
-                source.status_code()
-            }
+            Error::DeserializePartition { source, .. }
+            | Error::FindTablePartitionRule { source, .. }
+            | Error::FindTableRoute { source, .. } => source.status_code(),
             Error::UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
 
             Error::StartScriptManager { source } => source.status_code(),

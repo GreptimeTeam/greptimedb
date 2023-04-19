@@ -323,7 +323,7 @@ impl DistInstance {
                     database_name: stmt.name.to_string(),
                     create_if_not_exists: stmt.if_not_exists,
                 };
-                return self.handle_create_database(expr, query_ctx).await;
+                self.handle_create_database(expr, query_ctx).await
             }
             Statement::CreateTable(stmt) => {
                 let create_expr = &mut expr_factory::create_to_expr(&stmt, query_ctx)?;
@@ -332,7 +332,7 @@ impl DistInstance {
             }
             Statement::Alter(alter_table) => {
                 let expr = grpc::to_alter_expr(alter_table, query_ctx)?;
-                return self.handle_alter_table(expr).await;
+                self.handle_alter_table(expr).await
             }
             Statement::DropTable(stmt) => {
                 let (catalog, schema, table) =
@@ -340,7 +340,7 @@ impl DistInstance {
                         .map_err(BoxedError::new)
                         .context(error::ExternalSnafu)?;
                 let table_name = TableName::new(catalog, schema, table);
-                return self.drop_table(table_name).await;
+                self.drop_table(table_name).await
             }
             Statement::Insert(insert) => {
                 let (catalog, schema, table) =
@@ -360,18 +360,37 @@ impl DistInstance {
                         .await
                         .context(InvokeDatanodeSnafu)?;
 
-                return Ok(Output::AffectedRows(
+                Ok(Output::AffectedRows(
                     table.insert(insert_request).await.context(TableSnafu)?,
-                ));
+                ))
             }
-            _ => {
-                return error::NotSupportedSnafu {
-                    feat: format!("{stmt:?}"),
-                }
-                .fail()
+            Statement::ShowCreateTable(show) => {
+                let (catalog, schema, table) =
+                    table_idents_to_full_name(&show.table_name, query_ctx.clone())
+                        .map_err(BoxedError::new)
+                        .context(error::ExternalSnafu)?;
+
+                let table_ref = self
+                    .catalog_manager
+                    .table(&catalog, &schema, &table)
+                    .await
+                    .context(CatalogSnafu)?
+                    .context(TableNotFoundSnafu { table_name: &table })?;
+                let table_name = TableName::new(catalog, schema, table);
+
+                self.show_create_table(table_name, table_ref).await
             }
+            _ => error::NotSupportedSnafu {
+                feat: format!("{stmt:?}"),
+            }
+            .fail(),
         }
-        .context(error::ExecuteStatementSnafu)
+    }
+
+    async fn show_create_table(&self, _table_name: TableName, table: TableRef) -> Result<Output> {
+        //FIXME(dennis): Create the partitons from partition manager
+        let partitions: Option<Partitions> = None;
+        query::sql::show_create_table(table, partitions).context(error::ExecuteStatementSnafu)
     }
 
     /// Handles distributed database creation
