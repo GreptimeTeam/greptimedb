@@ -74,6 +74,10 @@ impl ScriptsTable {
             .await
             .map_err(BoxedError::new)
             .context(CompileScriptSnafu)?;
+        if records.is_empty() {
+            // scripts table is empty, no need to recompile
+            return Ok(());
+        }
         assert_eq!(records.len(), 1);
         let record = &records[0];
         let get_col_by_name = |name: &str| -> Result<_> {
