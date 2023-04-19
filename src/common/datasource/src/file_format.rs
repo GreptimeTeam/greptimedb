@@ -24,9 +24,8 @@ use std::result;
 use std::sync::Arc;
 use std::task::Poll;
 
-use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
-use arrow_schema::ArrowError;
+use arrow_schema::{ArrowError, Schema};
 use async_trait::async_trait;
 use bytes::{Buf, Bytes};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
@@ -37,9 +36,14 @@ use object_store::ObjectStore;
 use crate::compression::CompressionType;
 use crate::error::Result;
 
+pub const FORMAT_COMPRESSION_TYPE: &str = "COMPRESSION_TYPE";
+pub const FORMAT_DELIMTERL: &str = "DELIMTERL";
+pub const FORMAT_SCHEMA_INFER_MAX_RECORD: &str = "SCHEMA_INFER_MAX_RECORD";
+pub const FORMAT_HAS_HEADER: &str = "FORMAT_HAS_HEADER";
+
 #[async_trait]
 pub trait FileFormat: Send + Sync + std::fmt::Debug {
-    async fn infer_schema(&self, store: &ObjectStore, path: String) -> Result<SchemaRef>;
+    async fn infer_schema(&self, store: &ObjectStore, path: String) -> Result<Schema>;
 }
 
 pub trait ArrowDecoder: Send + 'static {

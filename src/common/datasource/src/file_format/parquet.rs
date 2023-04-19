@@ -12,9 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
-use arrow_schema::SchemaRef;
+use arrow_schema::Schema;
 use async_trait::async_trait;
 use datafusion::parquet::arrow::async_reader::AsyncFileReader;
 use datafusion::parquet::arrow::parquet_to_arrow_schema;
@@ -29,7 +27,7 @@ pub struct ParquetFormat {}
 
 #[async_trait]
 impl FileFormat for ParquetFormat {
-    async fn infer_schema(&self, store: &ObjectStore, path: String) -> Result<SchemaRef> {
+    async fn infer_schema(&self, store: &ObjectStore, path: String) -> Result<Schema> {
         let mut reader = store
             .reader(&path)
             .await
@@ -47,7 +45,7 @@ impl FileFormat for ParquetFormat {
         )
         .context(error::ParquetToSchemaSnafu)?;
 
-        Ok(Arc::new(schema))
+        Ok(schema)
     }
 }
 

@@ -27,7 +27,7 @@ use crate::error::{self, Result};
 pub const FS_SCHEMA: &str = "FS";
 pub const S3_SCHEMA: &str = "S3";
 
-/// parse url returns (schema,Option<host>,path)
+/// Returns (schema, Option<host>, path)
 pub fn parse_url(url: &str) -> Result<(String, Option<String>, String)> {
     let parsed_url = Url::parse(url);
     match parsed_url {
@@ -43,7 +43,7 @@ pub fn parse_url(url: &str) -> Result<(String, Option<String>, String)> {
     }
 }
 
-pub fn build_backend(url: &str, connection: HashMap<String, String>) -> Result<ObjectStore> {
+pub fn build_backend(url: &str, connection: &HashMap<String, String>) -> Result<ObjectStore> {
     let (schema, host, _path) = parse_url(url)?;
 
     match schema.to_uppercase().as_str() {

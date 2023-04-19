@@ -89,6 +89,19 @@ pub enum Error {
         location: Location,
         source: tokio::task::JoinError,
     },
+
+    #[snafu(display("Failed to parse format {} with value: {}", key, value))]
+    ParseFormat {
+        key: &'static str,
+        value: String,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to merge schema: {}", source))]
+    MergeSchema {
+        source: arrow_schema::ArrowError,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -109,7 +122,9 @@ impl ErrorExt for Error {
             | InvalidPath { .. }
             | InferSchema { .. }
             | ReadParquetSnafu { .. }
-            | ParquetToSchema { .. } => StatusCode::InvalidArguments,
+            | ParquetToSchema { .. }
+            | ParseFormat { .. }
+            | MergeSchema { .. } => StatusCode::InvalidArguments,
 
             Decompression { .. } | JoinHandle { .. } => StatusCode::Unexpected,
         }
@@ -130,6 +145,8 @@ impl ErrorExt for Error {
             ParquetToSchema { location, .. } => Some(*location),
             Decompression { location, .. } => Some(*location),
             JoinHandle { location, .. } => Some(*location),
+            ParseFormat { location, .. } => Some(*location),
+            MergeSchema { location, .. } => Some(*location),
 
             UnsupportedBackendProtocol { .. }
             | EmptyHostPath { .. }

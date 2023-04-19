@@ -30,7 +30,7 @@ const ENABLE_VIRTUAL_HOST_STYLE: &str = "ENABLE_VIRTUAL_HOST_STYLE";
 pub fn build_s3_backend(
     host: &str,
     path: &str,
-    connection: HashMap<String, String>,
+    connection: &HashMap<String, String>,
 ) -> Result<ObjectStore> {
     let mut builder = S3::default();
 
