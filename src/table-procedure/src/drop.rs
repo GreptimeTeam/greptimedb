@@ -140,15 +140,29 @@ impl DropTableProcedure {
     }
 
     async fn on_remove_from_catalog(&mut self) -> Result<Status> {
-        let deregister_table_req = DeregisterTableRequest {
-            catalog: self.data.request.catalog_name.clone(),
-            schema: self.data.request.schema_name.clone(),
-            table_name: self.data.request.table_name.clone(),
-        };
-        self.catalog_manager
-            .deregister_table(deregister_table_req)
+        let request = &self.data.request;
+        let has_table = self
+            .catalog_manager
+            .table(
+                &request.catalog_name,
+                &request.schema_name,
+                &request.table_name,
+            )
             .await
-            .map_err(Error::from_error_ext)?;
+            .context(AccessCatalogSnafu)?
+            .is_some();
+        if has_table {
+            // The table is still in the catalog.
+            let deregister_table_req = DeregisterTableRequest {
+                catalog: self.data.request.catalog_name.clone(),
+                schema: self.data.request.schema_name.clone(),
+                table_name: self.data.request.table_name.clone(),
+            };
+            self.catalog_manager
+                .deregister_table(deregister_table_req)
+                .await
+                .context(AccessCatalogSnafu)?;
+        }
 
         self.data.state = DropTableState::EngineDropTable;
         // Assign procedure id to the subprocedure.
