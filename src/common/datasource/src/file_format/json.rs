@@ -12,12 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::io::BufReader;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
 use arrow::json::reader::{infer_json_schema_from_iterator, ValueIter};
 use arrow::json::RawReaderBuilder;
+use arrow_schema::Schema;
 use async_trait::async_trait;
 use common_runtime;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
@@ -30,10 +33,31 @@ use crate::compression::CompressionType;
 use crate::error::{self, Result};
 use crate::file_format::{self, open_with_decoder, FileFormat};
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JsonFormat {
     pub schema_infer_max_record: Option<usize>,
     pub compression_type: CompressionType,
+}
+
+impl TryFrom<&HashMap<String, String>> for JsonFormat {
+    type Error = error::Error;
+
+    fn try_from(value: &HashMap<String, String>) -> Result<Self> {
+        let mut format = JsonFormat::default();
+        if let Some(compression_type) = value.get(file_format::FORMAT_COMPRESSION_TYPE) {
+            format.compression_type = CompressionType::from_str(compression_type)?
+        };
+        if let Some(schema_infer_max_record) =
+            value.get(file_format::FORMAT_SCHEMA_INFER_MAX_RECORD)
+        {
+            format.schema_infer_max_record = Some(
+                schema_infer_max_record
+                    .parse::<usize>()
+                    .context(error::ParseSchemaInferMaxRecordSnafu)?,
+            );
+        };
+        Ok(format)
+    }
 }
 
 impl Default for JsonFormat {
@@ -47,7 +71,7 @@ impl Default for JsonFormat {
 
 #[async_trait]
 impl FileFormat for JsonFormat {
-    async fn infer_schema(&self, store: &ObjectStore, path: String) -> Result<SchemaRef> {
+    async fn infer_schema(&self, store: &ObjectStore, path: String) -> Result<Schema> {
         let reader = store
             .reader(&path)
             .await
@@ -65,7 +89,7 @@ impl FileFormat for JsonFormat {
             let schema = infer_json_schema_from_iterator(iter)
                 .context(error::InferSchemaSnafu { path: &path })?;
 
-            Ok(Arc::new(schema))
+            Ok(schema)
         })
         .await
         .context(error::JoinHandleSnafu)?
@@ -116,7 +140,7 @@ impl FileOpener for JsonOpener {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::file_format::FileFormat;
+    use crate::file_format::{FileFormat, FORMAT_COMPRESSION_TYPE, FORMAT_SCHEMA_INFER_MAX_RECORD};
     use crate::test_util::{self, format_schema, test_store};
 
     fn test_data_root() -> String {
@@ -160,6 +184,31 @@ mod tests {
         assert_eq!(
             vec!["a: Int64: NULL", "b: Float64: NULL", "c: Boolean: NULL"],
             formatted
+        );
+    }
+
+    #[test]
+    fn test_try_from() {
+        let mut map = HashMap::new();
+        let format = JsonFormat::try_from(&map).unwrap();
+
+        assert_eq!(format, JsonFormat::default());
+
+        map.insert(
+            FORMAT_SCHEMA_INFER_MAX_RECORD.to_string(),
+            "2000".to_string(),
+        );
+
+        map.insert(FORMAT_COMPRESSION_TYPE.to_string(), "zstd".to_string());
+
+        let format = JsonFormat::try_from(&map).unwrap();
+
+        assert_eq!(
+            format,
+            JsonFormat {
+                compression_type: CompressionType::ZSTD,
+                schema_infer_max_record: Some(2000),
+            }
         );
     }
 }

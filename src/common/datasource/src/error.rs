@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::num::ParseIntError;
+use std::str::ParseBoolError;
 
 use common_error::prelude::*;
 use snafu::Location;
@@ -89,6 +91,30 @@ pub enum Error {
         location: Location,
         source: tokio::task::JoinError,
     },
+
+    #[snafu(display("Failed to parse delimiter: {}", source))]
+    ParseDelimiter {
+        source: ParseIntError,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to parse shcema infer max record: {}", source))]
+    ParseSchemaInferMaxRecord {
+        source: ParseIntError,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to parse has header: {}", source))]
+    ParseHasHeader {
+        source: ParseBoolError,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to merge schema: {}", source))]
+    MergeSchema {
+        source: arrow_schema::ArrowError,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -109,7 +135,11 @@ impl ErrorExt for Error {
             | InvalidPath { .. }
             | InferSchema { .. }
             | ReadParquetSnafu { .. }
-            | ParquetToSchema { .. } => StatusCode::InvalidArguments,
+            | ParquetToSchema { .. }
+            | ParseDelimiter { .. }
+            | ParseSchemaInferMaxRecord { .. }
+            | ParseHasHeader { .. }
+            | MergeSchema { .. } => StatusCode::InvalidArguments,
 
             Decompression { .. } | JoinHandle { .. } => StatusCode::Unexpected,
         }
@@ -130,6 +160,10 @@ impl ErrorExt for Error {
             ParquetToSchema { location, .. } => Some(*location),
             Decompression { location, .. } => Some(*location),
             JoinHandle { location, .. } => Some(*location),
+            ParseDelimiter { location, .. } => Some(*location),
+            ParseSchemaInferMaxRecord { location, .. } => Some(*location),
+            ParseHasHeader { location, .. } => Some(*location),
+            MergeSchema { location, .. } => Some(*location),
 
             UnsupportedBackendProtocol { .. }
             | EmptyHostPath { .. }

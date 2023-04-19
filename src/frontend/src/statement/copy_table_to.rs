@@ -46,7 +46,7 @@ impl StatementExecutor {
 
         let (_schema, _host, path) = parse_url(&req.location).context(error::ParseUrlSnafu)?;
         let object_store =
-            build_backend(&req.location, req.connection).context(error::BuildBackendSnafu)?;
+            build_backend(&req.location, &req.connection).context(error::BuildBackendSnafu)?;
 
         let writer = ParquetWriter::new(&path, Source::Stream(stream), object_store);
 

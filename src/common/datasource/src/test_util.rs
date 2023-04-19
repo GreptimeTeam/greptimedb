@@ -28,7 +28,7 @@ pub fn get_data_dir(path: &str) -> PathBuf {
     PathBuf::from(dir).join(path)
 }
 
-pub fn format_schema(schema: SchemaRef) -> Vec<String> {
+pub fn format_schema(schema: Schema) -> Vec<String> {
     schema
         .fields()
         .iter()

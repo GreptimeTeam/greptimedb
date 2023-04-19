@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use arrow::csv;
 use arrow::csv::reader::infer_reader_schema as infer_csv_schema;
-use arrow_schema::SchemaRef;
+use arrow_schema::{Schema, SchemaRef};
 use async_trait::async_trait;
 use common_runtime;
 use datafusion::error::Result as DataFusionResult;
@@ -30,12 +32,40 @@ use crate::compression::CompressionType;
 use crate::error::{self, Result};
 use crate::file_format::{self, open_with_decoder, FileFormat};
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CsvFormat {
     pub has_header: bool,
     pub delimiter: u8,
     pub schema_infer_max_record: Option<usize>,
     pub compression_type: CompressionType,
+}
+
+impl TryFrom<&HashMap<String, String>> for CsvFormat {
+    type Error = error::Error;
+
+    fn try_from(value: &HashMap<String, String>) -> Result<Self> {
+        let mut format = CsvFormat::default();
+        if let Some(delimiter) = value.get(file_format::FORMAT_DELIMTERL) {
+            // TODO(weny): considers to support parse like "\t" (not only b'\t')
+            format.delimiter = u8::from_str(delimiter).context(error::ParseDelimiterSnafu)?;
+        };
+        if let Some(compression_type) = value.get(file_format::FORMAT_COMPRESSION_TYPE) {
+            format.compression_type = CompressionType::from_str(compression_type)?;
+        };
+        if let Some(schema_infer_max_record) =
+            value.get(file_format::FORMAT_SCHEMA_INFER_MAX_RECORD)
+        {
+            format.schema_infer_max_record = Some(
+                schema_infer_max_record
+                    .parse::<usize>()
+                    .context(error::ParseSchemaInferMaxRecordSnafu)?,
+            );
+        };
+        if let Some(has_header) = value.get(file_format::FORMAT_HAS_HEADER) {
+            format.has_header = has_header.parse().context(error::ParseHasHeaderSnafu)?
+        }
+        Ok(format)
+    }
 }
 
 impl Default for CsvFormat {
@@ -112,7 +142,7 @@ impl FileOpener for CsvOpener {
 
 #[async_trait]
 impl FileFormat for CsvFormat {
-    async fn infer_schema(&self, store: &ObjectStore, path: String) -> Result<SchemaRef> {
+    async fn infer_schema(&self, store: &ObjectStore, path: String) -> Result<Schema> {
         let reader = store
             .reader(&path)
             .await
@@ -130,8 +160,7 @@ impl FileFormat for CsvFormat {
             let (schema, _records_read) =
                 infer_csv_schema(reader, delimiter, schema_infer_max_record, has_header)
                     .context(error::InferSchemaSnafu { path: &path })?;
-
-            Ok(Arc::new(schema))
+            Ok(schema)
         })
         .await
         .context(error::JoinHandleSnafu)?
@@ -142,7 +171,10 @@ impl FileFormat for CsvFormat {
 mod tests {
 
     use super::*;
-    use crate::file_format::FileFormat;
+    use crate::file_format::{
+        FileFormat, FORMAT_COMPRESSION_TYPE, FORMAT_DELIMTERL, FORMAT_HAS_HEADER,
+        FORMAT_SCHEMA_INFER_MAX_RECORD,
+    };
     use crate::test_util::{self, format_schema, test_store};
 
     fn test_data_root() -> String {
@@ -218,6 +250,35 @@ mod tests {
                 "d: Utf8: NULL"
             ],
             formatted
+        );
+    }
+
+    #[test]
+    fn test_try_from() {
+        let mut map = HashMap::new();
+        let format: CsvFormat = CsvFormat::try_from(&map).unwrap();
+
+        assert_eq!(format, CsvFormat::default());
+
+        map.insert(
+            FORMAT_SCHEMA_INFER_MAX_RECORD.to_string(),
+            "2000".to_string(),
+        );
+
+        map.insert(FORMAT_COMPRESSION_TYPE.to_string(), "zstd".to_string());
+        map.insert(FORMAT_DELIMTERL.to_string(), b'\t'.to_string());
+        map.insert(FORMAT_HAS_HEADER.to_string(), "false".to_string());
+
+        let format = CsvFormat::try_from(&map).unwrap();
+
+        assert_eq!(
+            format,
+            CsvFormat {
+                compression_type: CompressionType::ZSTD,
+                schema_infer_max_record: Some(2000),
+                delimiter: b'\t',
+                has_header: false,
+            }
         );
     }
 }
