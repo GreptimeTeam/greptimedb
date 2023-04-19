@@ -71,6 +71,12 @@ pub enum Error {
         source: query::error::Error,
     },
 
+    #[snafu(display("Failed to find all script in scripts table"))]
+    FindAllScript {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
+
     #[snafu(display("Failed to collect record batch, source: {}", source))]
     CollectRecords {
         #[snafu(backtrace)]
@@ -92,7 +98,7 @@ impl ErrorExt for Error {
             RegisterScriptsTable { source } | FindScriptsTable { source } => source.status_code(),
             InsertScript { source, .. } => source.status_code(),
             CompilePython { source, .. } | ExecutePython { source, .. } => source.status_code(),
-            FindScript { source, .. } => source.status_code(),
+            FindScript { source, .. } | FindAllScript { source } => source.status_code(),
             CollectRecords { source } => source.status_code(),
             ScriptNotFound { .. } => StatusCode::InvalidArguments,
         }

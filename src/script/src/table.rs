@@ -35,8 +35,9 @@ use snafu::{ensure, OptionExt, ResultExt};
 use table::requests::{CreateTableRequest, InsertRequest, TableOptions};
 
 use crate::error::{
-    CastTypeSnafu, CollectRecordsSnafu, FindScriptSnafu, FindScriptsTableSnafu, InsertScriptSnafu,
-    RegisterScriptsTableSnafu, Result, ScriptNotFoundSnafu, ScriptsTableNotFoundSnafu,
+    CastTypeSnafu, CollectRecordsSnafu, FindAllScriptSnafu, FindScriptSnafu, FindScriptsTableSnafu,
+    InsertScriptSnafu, RegisterScriptsTableSnafu, Result, ScriptNotFoundSnafu,
+    ScriptsTableNotFoundSnafu,
 };
 
 pub const SCRIPTS_TABLE_NAME: &str = "scripts";
@@ -199,6 +200,57 @@ impl ScriptsTable {
 
         assert_eq!(script_column.len(), 1);
         Ok(script_column.get_data(0).unwrap().to_string())
+    }
+
+    /// simple query and return all scripts in scripts table in the form of `(name, script)`.
+    pub async fn find_all_scripts(&self) -> Result<Vec<(String, String)>> {
+        let sql = format!("select name, script from {}", self.name());
+        let stmt = QueryLanguageParser::parse_sql(&sql).unwrap();
+
+        let plan = self
+            .query_engine
+            .planner()
+            .plan(stmt, QueryContext::arc())
+            .await
+            .unwrap();
+
+        let stream = match self
+            .query_engine
+            .execute(plan, QueryContext::arc())
+            .await
+            .context(FindAllScriptSnafu)?
+        {
+            Output::Stream(stream) => stream,
+            _ => unreachable!(),
+        };
+        let records = record_util::collect(stream)
+            .await
+            .context(CollectRecordsSnafu)?;
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].num_columns(), 2);
+        let get_i_th_str_col = |i: usize| -> Result<_> {
+            let column = records[0].column(i);
+            let column = column
+                .as_any()
+                .downcast_ref::<StringVector>()
+                .with_context(|| CastTypeSnafu {
+                    msg: format!(
+                        "can't downcast {:?} array into string vector",
+                        column.data_type()
+                    ),
+                })?;
+            Ok(column)
+        };
+        let name_column = get_i_th_str_col(0)?;
+        let script_column = get_i_th_str_col(1)?;
+        let mut ret = Vec::with_capacity(name_column.len());
+        for i in 0..name_column.len() {
+            let name = name_column.get_data(i).unwrap().to_string();
+            let script = script_column.get_data(i).unwrap().to_string();
+            ret.push((name, script));
+        }
+        Ok(ret)
     }
 
     #[inline]

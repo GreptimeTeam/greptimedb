@@ -38,13 +38,16 @@ impl ScriptManager {
         catalog_manager: CatalogManagerRef,
         query_engine: QueryEngineRef,
     ) -> Result<Self> {
-        Ok(Self {
+        let zelf = Self {
             compiled: RwLock::new(HashMap::default()),
             py_engine: PyEngine::new(query_engine.clone()),
             table: ScriptsTable::new(catalog_manager, query_engine).await?,
-        })
+        };
+        zelf.recompile_existing_scripts().await?;
+        Ok(zelf)
     }
 
+    /// compile script, and register them to the query engine and UDF registry
     async fn compile(&self, name: &str, script: &str) -> Result<Arc<PyScript>> {
         let script = Arc::new(
             self.py_engine
@@ -63,6 +66,17 @@ impl ScriptManager {
         logging::info!("Script register as UDF: {}", name);
 
         Ok(script)
+    }
+
+    /// recompile and register all existing scripts, this is useful after a restart
+    pub async fn recompile_existing_scripts(&self) -> Result<()> {
+        let scripts = self.table.find_all_scripts().await?;
+
+        for (name, script) in scripts {
+            self.compile(&name, &script).await?;
+        }
+
+        Ok(())
     }
 
     pub async fn insert_and_compile(
