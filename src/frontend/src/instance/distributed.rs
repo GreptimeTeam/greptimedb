@@ -388,7 +388,7 @@ impl DistInstance {
     }
 
     async fn show_create_table(&self, _table_name: TableName, table: TableRef) -> Result<Output> {
-        //FIXME(dennis): Create the partitons from partition manager
+        //FIXME(dennis): Create the partitions from partition manager
         let partitions: Option<Partitions> = None;
         query::sql::show_create_table(table, partitions).context(error::ExecuteStatementSnafu)
     }
