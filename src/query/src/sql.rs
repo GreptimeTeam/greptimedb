@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod show_create;
+mod show;
 use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
@@ -163,7 +163,7 @@ pub fn show_tables(
 pub fn show_create_table(table: TableRef) -> Result<Output> {
     let table_info = table.table_info();
     let table_name = &table_info.name;
-    let stmt = show_create::create_table_stmt(&table_info)?;
+    let stmt = show::create_table_stmt(&table_info)?;
     let sql = format!("{}", stmt);
     let columns = vec![
         Arc::new(StringVector::from(vec![table_name.clone()])) as _,
