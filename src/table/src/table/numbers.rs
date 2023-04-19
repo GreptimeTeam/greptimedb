@@ -19,8 +19,11 @@ use std::sync::Arc;
 use common_query::physical_plan::PhysicalPlanRef;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::{RecordBatch, RecordBatchStream};
+use datafusion::arrow::compute::SortOptions;
 use datafusion::arrow::record_batch::RecordBatch as DfRecordBatch;
 use datafusion_common::from_slice::FromSlice;
+use datafusion_physical_expr::expressions::Column;
+use datafusion_physical_expr::PhysicalSortRequirement;
 use datatypes::arrow::array::UInt32Array;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
@@ -32,6 +35,8 @@ use crate::error::Result;
 use crate::metadata::{TableId, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType};
 use crate::table::scan::SimpleTableScan;
 use crate::table::{Expr, Table};
+
+const NUMBER_COLUMN: &str = "number";
 
 /// numbers table for test
 #[derive(Debug, Clone)]
@@ -49,7 +54,7 @@ impl NumbersTable {
 
     pub fn with_name(table_id: TableId, name: String) -> Self {
         let column_schemas = vec![ColumnSchema::new(
-            "number",
+            NUMBER_COLUMN,
             ConcreteDataType::uint32_datatype(),
             false,
         )];
@@ -118,7 +123,17 @@ impl Table for NumbersTable {
             schema: self.schema.clone(),
             already_run: false,
         });
-        Ok(Arc::new(SimpleTableScan::new(stream)))
+        let output_ordering = vec![PhysicalSortRequirement::new(
+            Arc::new(Column::new(NUMBER_COLUMN, 0)),
+            Some(SortOptions {
+                descending: false,
+                nulls_first: false,
+            }),
+        )
+        .into()];
+        Ok(Arc::new(
+            SimpleTableScan::new(stream).with_output_ordering(output_ordering),
+        ))
     }
 
     async fn flush(&self, _region_number: Option<RegionNumber>, _wait: Option<bool>) -> Result<()> {
