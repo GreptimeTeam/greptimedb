@@ -13,8 +13,6 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::num::ParseIntError;
-use std::str::ParseBoolError;
 
 use common_error::prelude::*;
 use snafu::Location;
@@ -92,21 +90,10 @@ pub enum Error {
         source: tokio::task::JoinError,
     },
 
-    #[snafu(display("Failed to parse delimiter: {}", source))]
-    ParseDelimiter {
-        source: ParseIntError,
-        location: Location,
-    },
-
-    #[snafu(display("Failed to parse shcema infer max record: {}", source))]
-    ParseSchemaInferMaxRecord {
-        source: ParseIntError,
-        location: Location,
-    },
-
-    #[snafu(display("Failed to parse has header: {}", source))]
-    ParseHasHeader {
-        source: ParseBoolError,
+    #[snafu(display("Failed to parse format {} with value: {}", key, value))]
+    ParseFormat {
+        key: &'static str,
+        value: String,
         location: Location,
     },
 
@@ -136,9 +123,7 @@ impl ErrorExt for Error {
             | InferSchema { .. }
             | ReadParquetSnafu { .. }
             | ParquetToSchema { .. }
-            | ParseDelimiter { .. }
-            | ParseSchemaInferMaxRecord { .. }
-            | ParseHasHeader { .. }
+            | ParseFormat { .. }
             | MergeSchema { .. } => StatusCode::InvalidArguments,
 
             Decompression { .. } | JoinHandle { .. } => StatusCode::Unexpected,
@@ -160,9 +145,7 @@ impl ErrorExt for Error {
             ParquetToSchema { location, .. } => Some(*location),
             Decompression { location, .. } => Some(*location),
             JoinHandle { location, .. } => Some(*location),
-            ParseDelimiter { location, .. } => Some(*location),
-            ParseSchemaInferMaxRecord { location, .. } => Some(*location),
-            ParseHasHeader { location, .. } => Some(*location),
+            ParseFormat { location, .. } => Some(*location),
             MergeSchema { location, .. } => Some(*location),
 
             UnsupportedBackendProtocol { .. }

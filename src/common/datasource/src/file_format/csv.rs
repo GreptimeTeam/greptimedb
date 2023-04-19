@@ -47,7 +47,13 @@ impl TryFrom<&HashMap<String, String>> for CsvFormat {
         let mut format = CsvFormat::default();
         if let Some(delimiter) = value.get(file_format::FORMAT_DELIMTERL) {
             // TODO(weny): considers to support parse like "\t" (not only b'\t')
-            format.delimiter = u8::from_str(delimiter).context(error::ParseDelimiterSnafu)?;
+            format.delimiter = u8::from_str(delimiter).map_err(|_| {
+                error::ParseFormatSnafu {
+                    key: file_format::FORMAT_DELIMTERL,
+                    value: delimiter,
+                }
+                .build()
+            })?;
         };
         if let Some(compression_type) = value.get(file_format::FORMAT_COMPRESSION_TYPE) {
             format.compression_type = CompressionType::from_str(compression_type)?;
@@ -55,14 +61,23 @@ impl TryFrom<&HashMap<String, String>> for CsvFormat {
         if let Some(schema_infer_max_record) =
             value.get(file_format::FORMAT_SCHEMA_INFER_MAX_RECORD)
         {
-            format.schema_infer_max_record = Some(
-                schema_infer_max_record
-                    .parse::<usize>()
-                    .context(error::ParseSchemaInferMaxRecordSnafu)?,
-            );
+            format.schema_infer_max_record =
+                Some(schema_infer_max_record.parse::<usize>().map_err(|_| {
+                    error::ParseFormatSnafu {
+                        key: file_format::FORMAT_SCHEMA_INFER_MAX_RECORD,
+                        value: schema_infer_max_record,
+                    }
+                    .build()
+                })?);
         };
         if let Some(has_header) = value.get(file_format::FORMAT_HAS_HEADER) {
-            format.has_header = has_header.parse().context(error::ParseHasHeaderSnafu)?
+            format.has_header = has_header.parse().map_err(|_| {
+                error::ParseFormatSnafu {
+                    key: file_format::FORMAT_HAS_HEADER,
+                    value: has_header,
+                }
+                .build()
+            })?;
         }
         Ok(format)
     }

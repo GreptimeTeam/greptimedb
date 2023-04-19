@@ -50,11 +50,14 @@ impl TryFrom<&HashMap<String, String>> for JsonFormat {
         if let Some(schema_infer_max_record) =
             value.get(file_format::FORMAT_SCHEMA_INFER_MAX_RECORD)
         {
-            format.schema_infer_max_record = Some(
-                schema_infer_max_record
-                    .parse::<usize>()
-                    .context(error::ParseSchemaInferMaxRecordSnafu)?,
-            );
+            format.schema_infer_max_record =
+                Some(schema_infer_max_record.parse::<usize>().map_err(|_| {
+                    error::ParseFormatSnafu {
+                        key: file_format::FORMAT_SCHEMA_INFER_MAX_RECORD,
+                        value: schema_infer_max_record,
+                    }
+                    .build()
+                })?);
         };
         Ok(format)
     }
