@@ -83,6 +83,27 @@ impl Instance {
                     .execute(SqlRequest::CreateTable(request), query_ctx)
                     .await
             }
+            Statement::CreateExternalTable(create_external_table) => {
+                let table_id = self
+                    .table_id_provider
+                    .as_ref()
+                    .context(TableIdProviderNotFoundSnafu)?
+                    .next_table_id()
+                    .await
+                    .context(BumpTableIdSnafu)?;
+                let name = create_external_table.name.clone();
+                let (catalog, schema, table) = table_idents_to_full_name(&name, query_ctx.clone())?;
+                let table_ref = TableReference::full(&catalog, &schema, &table);
+                let request = self
+                    .sql_handler
+                    .create_external_to_request(table_id, create_external_table, &table_ref)
+                    .await?;
+                let table_id = request.id;
+                info!("Creating external table: {table_ref}, table id = {table_id}",);
+                self.sql_handler
+                    .execute(SqlRequest::CreateTable(request), query_ctx)
+                    .await
+            }
             Statement::Alter(alter_table) => {
                 let name = alter_table.table_name().clone();
                 let (catalog, schema, table) = table_idents_to_full_name(&name, query_ctx.clone())?;

@@ -126,6 +126,48 @@ pub enum Error {
         #[snafu(backtrace)]
         source: sql::error::Error,
     },
+
+    #[snafu(display("Missing required field: {}", name))]
+    MissingRequiredField { name: String, location: Location },
+
+    #[snafu(display("Failed to regex, source: {}", source))]
+    BuildRegex {
+        location: Location,
+        source: regex::Error,
+    },
+
+    #[snafu(display("Failed to build data source backend, source: {}", source))]
+    BuildBackend {
+        #[snafu(backtrace)]
+        source: common_datasource::error::Error,
+    },
+
+    #[snafu(display("Failed to list objects, source: {}", source))]
+    ListObjects {
+        #[snafu(backtrace)]
+        source: common_datasource::error::Error,
+    },
+
+    #[snafu(display("Unsupported file format: {}", format))]
+    UnsupportedFileFormat { format: String },
+
+    #[snafu(display("Failed to parse file format: {}", source))]
+    ParseFileFormat {
+        source: common_datasource::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to infer schema: {}", source))]
+    InferSchema {
+        source: common_datasource::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to convert datafusion schema, source: {}", source))]
+    ConvertSchema {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
 }
 
 impl ErrorExt for Error {
@@ -139,7 +181,16 @@ impl ErrorExt for Error {
             | SchemaNotFound { .. }
             | TableNotFound { .. }
             | ParseTimestamp { .. }
-            | ParseFloat { .. } => StatusCode::InvalidArguments,
+            | ParseFloat { .. }
+            | MissingRequiredField { .. }
+            | BuildRegex { .. }
+            | UnsupportedFileFormat { .. }
+            | ParseFileFormat { .. }
+            | InferSchema { .. }
+            | ConvertSchema { .. } => StatusCode::InvalidArguments,
+
+            BuildBackend { .. } | ListObjects { .. } => StatusCode::StorageUnavailable,
+
             QueryAccessDenied { .. } => StatusCode::AccessDenied,
             Catalog { source } => source.status_code(),
             VectorComputation { source } | ConvertDatafusionSchema { source } => {

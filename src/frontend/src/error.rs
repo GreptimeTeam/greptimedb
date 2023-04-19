@@ -475,6 +475,30 @@ pub enum Error {
         file_schema: String,
         location: Location,
     },
+
+    #[snafu(display("Failed to encode object into json, source: {}", source))]
+    EncodeJson {
+        location: Location,
+        source: serde_json::error::Error,
+    },
+
+    #[snafu(display("Failed to parse file format: {}", source))]
+    ParseFileFormat {
+        source: query::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to options: {}", source))]
+    ParseImmutableTableOptions {
+        source: query::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to infer schema: {}", source))]
+    InferSchema {
+        source: query::error::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -495,7 +519,10 @@ impl ErrorExt for Error {
             | Error::MissingMetasrvOpts { .. }
             | Error::ColumnNoneDefaultValue { .. }
             | Error::BuildRegex { .. }
-            | Error::InvalidSchema { .. } => StatusCode::InvalidArguments,
+            | Error::InvalidSchema { .. }
+            | Error::ParseFileFormat { .. }
+            | Error::InferSchema { .. }
+            | Error::ParseImmutableTableOptions { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
 
@@ -532,7 +559,8 @@ impl ErrorExt for Error {
 
             Error::IllegalFrontendState { .. }
             | Error::IncompleteGrpcResult { .. }
-            | Error::ContextValueNotFound { .. } => StatusCode::Unexpected,
+            | Error::ContextValueNotFound { .. }
+            | Error::EncodeJson { .. } => StatusCode::Unexpected,
 
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,

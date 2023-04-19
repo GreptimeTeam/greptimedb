@@ -19,14 +19,19 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::{Column, ColumnDataType, CreateTableExpr};
 use common_error::prelude::BoxedError;
 use datanode::instance::sql::table_idents_to_full_name;
-use datatypes::schema::ColumnSchema;
+use datatypes::schema::{ColumnSchema, RawSchema};
+use file_table_engine::table::immutable::ImmutableFileTableOptions;
+use query::sql::{
+    infer_immutable_file_table_schema, parse_immutable_file_table_format,
+    prepare_immutable_file_table,
+};
 use session::context::QueryContextRef;
 use snafu::{ensure, ResultExt};
 use sql::ast::{ColumnDef, ColumnOption, TableConstraint};
 use sql::statements::column_def_to_schema;
-use sql::statements::create::{CreateTable, TIME_INDEX};
+use sql::statements::create::{CreateExternalTable, CreateTable, TIME_INDEX};
 use sql::util::to_lowercase_options_map;
-use table::requests::TableOptions;
+use table::requests::{TableOptions, IMMUTABLE_TABLE_META_KEY};
 
 use crate::error::{
     self, BuildCreateExprOnInsertionSnafu, ColumnDataTypeSnafu,
@@ -74,6 +79,65 @@ impl CreateExprFactory for DefaultCreateExprFactory {
 
         Ok(create_expr)
     }
+}
+
+pub(crate) async fn create_external_expr(
+    create: &CreateExternalTable,
+    query_ctx: QueryContextRef,
+) -> Result<CreateTableExpr> {
+    let (catalog_name, schema_name, table_name) =
+        table_idents_to_full_name(&create.name, query_ctx)
+            .map_err(BoxedError::new)
+            .context(error::ExternalSnafu)?;
+    let time_index = "".to_string();
+
+    let mut options = create.options.clone();
+
+    let (object_store, files) = prepare_immutable_file_table(&options)
+        .await
+        .context(error::ParseImmutableTableOptionsSnafu)?;
+
+    let schema = if !create.columns.is_empty() {
+        let columns_schemas: Vec<_> = create
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(_index, column)| {
+                column_def_to_schema(column, false).context(error::ParseSqlSnafu)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        RawSchema::new(columns_schemas)
+    } else {
+        let format =
+            parse_immutable_file_table_format(&options).context(error::ParseFileFormatSnafu)?;
+        infer_immutable_file_table_schema(&object_store, format, &files)
+            .await
+            .context(error::InferSchemaSnafu)?
+    };
+
+    let meta = ImmutableFileTableOptions { files };
+
+    // lists files in the frontend to reduce unnecessary scan requests repeated in each datanode.
+    options.insert(
+        IMMUTABLE_TABLE_META_KEY.to_string(),
+        serde_json::to_string(&meta).context(error::EncodeJsonSnafu)?,
+    );
+
+    let expr = CreateTableExpr {
+        catalog_name,
+        schema_name,
+        table_name,
+        desc: "".to_string(),
+        column_defs: column_schemas_to_defs(schema.column_schemas)?,
+        time_index,
+        primary_keys: vec![],
+        create_if_not_exists: create.if_not_exists,
+        table_options: options,
+        table_id: None,
+        region_ids: vec![],
+        engine: create.engine.to_string(),
+    };
+    Ok(expr)
 }
 
 /// Convert `CreateTable` statement to `CreateExpr` gRPC request.

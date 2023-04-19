@@ -28,13 +28,15 @@ use arrow::record_batch::RecordBatch;
 use arrow_schema::{ArrowError, Schema};
 use async_trait::async_trait;
 use bytes::{Buf, Bytes};
+use datafusion::arrow::datatypes::Schema as ArrowSchema;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::physical_plan::file_format::FileOpenFuture;
 use futures::StreamExt;
 use object_store::ObjectStore;
+use snafu::ResultExt;
 
 use crate::compression::CompressionType;
-use crate::error::Result;
+use crate::error::{self, Result};
 
 pub const FORMAT_COMPRESSION_TYPE: &str = "COMPRESSION_TYPE";
 pub const FORMAT_DELIMTERL: &str = "DELIMTERL";
@@ -44,6 +46,13 @@ pub const FORMAT_HAS_HEADER: &str = "FORMAT_HAS_HEADER";
 #[async_trait]
 pub trait FileFormat: Send + Sync + std::fmt::Debug {
     async fn infer_schema(&self, store: &ObjectStore, path: String) -> Result<Schema>;
+}
+
+#[async_trait]
+impl<T: FileFormat + ?Sized> FileFormat for Box<T> {
+    async fn infer_schema(&self, store: &ObjectStore, path: String) -> Result<Schema> {
+        self.infer_schema(store, path).await
+    }
 }
 
 pub trait ArrowDecoder: Send + 'static {
@@ -123,4 +132,16 @@ pub fn open_with_decoder<T: ArrowDecoder, F: Fn() -> DataFusionResult<T>>(
 
         Ok(stream.boxed())
     }))
+}
+
+pub async fn infer_schemas(
+    store: &ObjectStore,
+    files: &[String],
+    file_format: impl FileFormat,
+) -> Result<Schema> {
+    let mut schemas = Vec::with_capacity(files.len());
+    for file in files {
+        schemas.push(file_format.infer_schema(store, file.to_string()).await?)
+    }
+    ArrowSchema::try_merge(schemas).context(error::MergeSchemaSnafu)
 }

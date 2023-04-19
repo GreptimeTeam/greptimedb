@@ -20,6 +20,7 @@ use common_query::physical_plan::PhysicalPlanRef;
 use common_query::prelude::Expr;
 use datatypes::schema::SchemaRef;
 use object_store::ObjectStore;
+use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::storage::RegionNumber;
 use table::error::Result as TableResult;
@@ -31,6 +32,12 @@ use crate::manifest::immutable::{
     read_table_manifest, write_table_manifest, ImmutableMetadata, INIT_META_VERSION,
 };
 use crate::manifest::table_manifest_dir;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ImmutableFileTableOptions {
+    pub files: Vec<String>,
+}
 
 pub struct ImmutableFileTable {
     metadata: ImmutableMetadata,

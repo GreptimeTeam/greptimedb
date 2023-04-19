@@ -32,6 +32,7 @@ use crate::instance::sql::table_idents_to_full_name;
 
 mod alter;
 mod create;
+mod create_external;
 mod drop_table;
 mod flush_table;
 pub(crate) mod insert;

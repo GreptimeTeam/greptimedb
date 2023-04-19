@@ -14,20 +14,32 @@
 
 mod show;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
+use common_datasource::file_format::csv::CsvFormat;
+use common_datasource::file_format::json::JsonFormat;
+use common_datasource::file_format::{infer_schemas, FileFormat};
+use common_datasource::lister::{Lister, Source};
+use common_datasource::object_store::build_backend;
+use common_datasource::util::find_dir_and_filename;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use datatypes::prelude::*;
-use datatypes::schema::{ColumnSchema, Schema};
+use datatypes::schema::{ColumnSchema, RawSchema, Schema};
 use datatypes::vectors::{Helper, StringVector};
+use object_store::ObjectStore;
 use once_cell::sync::Lazy;
+use regex::Regex;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::create::Partitions;
 use sql::statements::show::{ShowDatabases, ShowKind, ShowTables};
+use table::requests::{
+    IMMUTABLE_TABLE_FORMAT_KEY, IMMUTABLE_TABLE_LOCATION_KEY, IMMUTABLE_TABLE_PATTERN_KEY,
+};
 use table::TableRef;
 
 use crate::error::{self, Result};
@@ -247,6 +259,85 @@ fn describe_column_semantic_types(
                 }
             })
             .collect::<Vec<String>>(),
+    ))
+}
+
+/// Builds [`ImmutableFileTableOptions`] from options.
+pub async fn prepare_immutable_file_table(
+    options: &HashMap<String, String>,
+) -> Result<(ObjectStore, Vec<String>)> {
+    let url =
+        options
+            .get(IMMUTABLE_TABLE_LOCATION_KEY)
+            .context(error::MissingRequiredFieldSnafu {
+                name: IMMUTABLE_TABLE_LOCATION_KEY,
+            })?;
+
+    let (dir, filename) = find_dir_and_filename(url);
+    let source = if let Some(filename) = filename {
+        Source::Filename(filename)
+    } else {
+        Source::Dir
+    };
+    let regex = options
+        .get(IMMUTABLE_TABLE_PATTERN_KEY)
+        .map(|x| Regex::new(x))
+        .transpose()
+        .context(error::BuildRegexSnafu)?;
+    let object_store = build_backend(url, options).context(error::BuildBackendSnafu)?;
+    let lister: Lister = Lister::new(object_store.clone(), source, dir, regex);
+    // If we scan files in a directory every time the database restarts,
+    // then it might lead to a potential undefined behavior:
+    // If a user adds a file with an incompatible schema to that directory,
+    // it will make the external table unavailable.
+    let files = lister
+        .list()
+        .await
+        .context(error::ListObjectsSnafu)?
+        .into_iter()
+        .filter_map(|entry| {
+            if entry.path().ends_with('/') {
+                None
+            } else {
+                Some(entry.path().to_string())
+            }
+        })
+        .collect::<Vec<_>>();
+    Ok((object_store, files))
+}
+
+pub fn parse_immutable_file_table_format(
+    options: &HashMap<String, String>,
+) -> Result<Box<dyn FileFormat>> {
+    let format = options
+        .get(IMMUTABLE_TABLE_FORMAT_KEY)
+        .cloned()
+        .unwrap_or_default()
+        .to_uppercase();
+
+    match format.as_str() {
+        "CSV" => {
+            let file_format = CsvFormat::try_from(options).context(error::ParseFileFormatSnafu)?;
+            Ok(Box::new(file_format))
+        }
+        "JSON" => {
+            let file_format = JsonFormat::try_from(options).context(error::ParseFileFormatSnafu)?;
+            Ok(Box::new(file_format))
+        }
+        format => error::UnsupportedFileFormatSnafu { format }.fail(),
+    }
+}
+
+pub async fn infer_immutable_file_table_schema(
+    object_store: &ObjectStore,
+    file_format: impl FileFormat,
+    files: &[String],
+) -> Result<RawSchema> {
+    let merged = infer_schemas(object_store, files, file_format)
+        .await
+        .context(error::InferSchemaSnafu)?;
+    Ok(RawSchema::from(
+        &Schema::try_from(merged).context(error::ConvertSchemaSnafu)?,
     ))
 }
 

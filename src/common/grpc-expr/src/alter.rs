@@ -101,14 +101,17 @@ pub fn create_table_schema(expr: &CreateTableExpr) -> Result<RawSchema> {
         })
         .collect::<Result<Vec<ColumnSchema>>>()?;
 
-    ensure!(
-        column_schemas
-            .iter()
-            .any(|column| column.name == expr.time_index),
-        MissingTimestampColumnSnafu {
-            msg: format!("CreateExpr: {expr:?}")
-        }
-    );
+    // allow external table schema without the time index
+    if expr.engine != common_catalog::consts::IMMUTABLE_FILE_ENGINE {
+        ensure!(
+            column_schemas
+                .iter()
+                .any(|column| column.name == expr.time_index),
+            MissingTimestampColumnSnafu {
+                msg: format!("CreateExpr: {expr:?}")
+            }
+        );
+    }
 
     let column_schemas = column_schemas
         .into_iter()

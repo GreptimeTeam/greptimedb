@@ -333,6 +333,11 @@ impl DistInstance {
                 let _ = self.create_table(create_expr, stmt.partitions).await?;
                 Ok(Output::AffectedRows(0))
             }
+            Statement::CreateExternalTable(stmt) => {
+                let create_expr = &mut expr_factory::create_external_expr(&stmt, query_ctx).await?;
+                let _ = self.create_table(create_expr, None).await?;
+                Ok(Output::AffectedRows(0))
+            }
             Statement::Alter(alter_table) => {
                 let expr = grpc::to_alter_expr(alter_table, query_ctx)?;
                 self.handle_alter_table(expr).await

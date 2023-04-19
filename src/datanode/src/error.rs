@@ -16,6 +16,7 @@ use std::any::Any;
 
 use common_error::prelude::*;
 use common_procedure::ProcedureId;
+use serde_json::error::Error as JsonError;
 use snafu::Location;
 use storage::error::Error as StorageError;
 use table::error::Error as TableError;
@@ -225,6 +226,9 @@ pub enum Error {
     #[snafu(display("Invalid SQL, error: {}", msg))]
     InvalidSql { msg: String },
 
+    #[snafu(display("Unsupported backend protocol: {}", protocol))]
+    UnsupportedBackendProtocol { protocol: String },
+
     #[snafu(display("Not support SQL, error: {}", msg))]
     NotSupportSql { msg: String },
 
@@ -297,6 +301,24 @@ pub enum Error {
         raw: String,
         #[snafu(backtrace)]
         source: common_time::error::Error,
+    },
+
+    #[snafu(display("Failed to parse file format: {}", source))]
+    ParseFileFormat {
+        source: query::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to options: {}", source))]
+    ParseImmutableTableOptions {
+        source: query::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to infer schema: {}", source))]
+    InferSchema {
+        source: query::error::Error,
+        location: Location,
     },
 
     #[snafu(display("Failed to access catalog, source: {}", source))]
@@ -418,6 +440,12 @@ pub enum Error {
         #[snafu(backtrace)]
         source: BoxedError,
     },
+
+    #[snafu(display("Failed to encode object into json, source: {}", source))]
+    EncodeJson {
+        location: Location,
+        source: JsonError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -459,6 +487,7 @@ impl ErrorExt for Error {
 
             ColumnValuesNumberMismatch { .. }
             | InvalidSql { .. }
+            | UnsupportedBackendProtocol { .. }
             | NotSupportSql { .. }
             | KeyColumnNotFound { .. }
             | IllegalPrimaryKeysDef { .. }
@@ -472,7 +501,12 @@ impl ErrorExt for Error {
             | DatabaseNotFound { .. }
             | MissingNodeId { .. }
             | MissingMetasrvOpts { .. }
-            | ColumnNoneDefaultValue { .. } => StatusCode::InvalidArguments,
+            | ColumnNoneDefaultValue { .. }
+            | ParseFileFormat { .. }
+            | InferSchema { .. }
+            | ParseImmutableTableOptions { .. } => StatusCode::InvalidArguments,
+
+            EncodeJson { .. } => StatusCode::Unexpected,
 
             // TODO(yingwen): Further categorize http error.
             StartServer { .. }

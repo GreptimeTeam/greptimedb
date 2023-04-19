@@ -35,6 +35,11 @@ pub struct CreateDatabaseRequest {
     pub create_if_not_exists: bool,
 }
 
+pub const IMMUTABLE_TABLE_META_KEY: &str = "IMMUTABLE_TABLE_META";
+pub const IMMUTABLE_TABLE_LOCATION_KEY: &str = "LOCATION";
+pub const IMMUTABLE_TABLE_PATTERN_KEY: &str = "PATTERN";
+pub const IMMUTABLE_TABLE_FORMAT_KEY: &str = "FORMAT";
+
 /// Create table request
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateTableRequest {
