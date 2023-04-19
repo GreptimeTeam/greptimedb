@@ -43,18 +43,12 @@ impl ScriptManager {
             py_engine: PyEngine::new(query_engine.clone()),
             table: ScriptsTable::new(catalog_manager, query_engine).await?,
         };
-        zelf.recompile_existing_scripts().await?;
         Ok(zelf)
     }
 
     /// compile script, and register them to the query engine and UDF registry
     async fn compile(&self, name: &str, script: &str) -> Result<Arc<PyScript>> {
-        let script = Arc::new(
-            self.py_engine
-                .compile(script, CompileContext::default())
-                .await
-                .context(CompilePythonSnafu { name })?,
-        );
+        let script = Arc::new(Self::compile_wout_cache(&self.py_engine, name, script).await?);
 
         let mut compiled = self.compiled.write().unwrap();
         compiled.insert(name.to_string(), script.clone());
@@ -68,15 +62,16 @@ impl ScriptManager {
         Ok(script)
     }
 
-    /// recompile and register all existing scripts, this is useful after a restart
-    pub async fn recompile_existing_scripts(&self) -> Result<()> {
-        let scripts = self.table.find_all_scripts().await?;
-
-        for (name, script) in scripts {
-            self.compile(&name, &script).await?;
-        }
-
-        Ok(())
+    /// compile script to PyScript, but not register them to the query engine and UDF registry nor caching in `compiled`
+    async fn compile_wout_cache(
+        py_engine: &PyEngine,
+        name: &str,
+        script: &str,
+    ) -> Result<PyScript> {
+        py_engine
+            .compile(script, CompileContext::default())
+            .await
+            .context(CompilePythonSnafu { name })
     }
 
     pub async fn insert_and_compile(

@@ -27,6 +27,9 @@ pub enum Error {
         source: catalog::error::Error,
     },
 
+    #[snafu(display("Failed to find column in scripts table, name: {}", name))]
+    FindColumnInScriptsTable { name: String, location: Location },
+
     #[snafu(display("Failed to register scripts table, source: {}", source))]
     RegisterScriptsTable {
         #[snafu(backtrace)]
@@ -93,7 +96,7 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
-            CastType { .. } => StatusCode::Unexpected,
+            FindColumnInScriptsTable { .. } | CastType { .. } => StatusCode::Unexpected,
             ScriptsTableNotFound { .. } => StatusCode::TableNotFound,
             RegisterScriptsTable { source } | FindScriptsTable { source } => source.status_code(),
             InsertScript { source, .. } => source.status_code(),

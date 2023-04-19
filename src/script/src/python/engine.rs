@@ -179,6 +179,14 @@ pub struct PyScript {
 }
 
 impl PyScript {
+    pub fn from_script(script: &str, query_engine: QueryEngineRef) -> Result<Self> {
+        let copr = Arc::new(parse::parse_and_compile_copr(
+            script,
+            Some(query_engine.clone()),
+        )?);
+
+        Ok(PyScript { copr, query_engine })
+    }
     /// Register Current Script as UDF, register name is same as script name
     /// FIXME(discord9): possible inject attack?
     pub fn register_udf(&self) {

@@ -16,15 +16,18 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use catalog::{CatalogManagerRef, RegisterSystemTableRequest};
+use catalog::error::CompileScriptSnafu;
+use catalog::{CatalogManagerRef, OpenSystemTableHook, RegisterSystemTableRequest};
 use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE, SCRIPTS_TABLE_ID,
 };
 use common_catalog::format_full_table_name;
+use common_error::prelude::BoxedError;
 use common_query::Output;
 use common_recordbatch::util as record_util;
-use common_telemetry::logging;
+use common_telemetry::{logging, warn};
 use common_time::util;
+use datafusion::prelude::SessionContext;
 use datatypes::prelude::{ConcreteDataType, ScalarVector};
 use datatypes::schema::{ColumnSchema, RawSchema};
 use datatypes::vectors::{StringVector, TimestampMillisecondVector, Vector, VectorRef};
@@ -33,12 +36,15 @@ use query::QueryEngineRef;
 use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::requests::{CreateTableRequest, InsertRequest, TableOptions};
+use table::TableRef;
 
 use crate::error::{
-    CastTypeSnafu, CollectRecordsSnafu, FindAllScriptSnafu, FindScriptSnafu, FindScriptsTableSnafu,
-    InsertScriptSnafu, RegisterScriptsTableSnafu, Result, ScriptNotFoundSnafu,
-    ScriptsTableNotFoundSnafu,
+    CastTypeSnafu, CollectRecordsSnafu, FindAllScriptSnafu, FindColumnInScriptsTableSnafu,
+    FindScriptSnafu, FindScriptsTableSnafu, InsertScriptSnafu, RegisterScriptsTableSnafu, Result,
+    ScriptNotFoundSnafu, ScriptsTableNotFoundSnafu,
 };
+use crate::python::utils::block_on_async;
+use crate::python::PyScript;
 
 pub const SCRIPTS_TABLE_NAME: &str = "scripts";
 
@@ -49,6 +55,69 @@ pub struct ScriptsTable {
 }
 
 impl ScriptsTable {
+    /// this is used as a callback function when scripts table is created. `table` should be `scripts` table.
+    pub async fn recompile_register_udf(
+        table: TableRef,
+        query_engine: QueryEngineRef,
+    ) -> catalog::error::Result<()> {
+        let scan_stream = table
+            .scan(None, &[], None)
+            .await
+            .map_err(BoxedError::new)
+            .context(CompileScriptSnafu)?;
+        let ctx = SessionContext::new();
+        let rbs = scan_stream
+            .execute(0, ctx.task_ctx())
+            .map_err(BoxedError::new)
+            .context(CompileScriptSnafu)?;
+        let records = record_util::collect(rbs)
+            .await
+            .map_err(BoxedError::new)
+            .context(CompileScriptSnafu)?;
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        let get_col_by_name = |name: &str| -> Result<_> {
+            let column = record
+                .column_by_name(name)
+                .with_context(|| FindColumnInScriptsTableSnafu { name })?;
+            let column = column
+                .as_any()
+                .downcast_ref::<StringVector>()
+                .with_context(|| CastTypeSnafu {
+                    msg: format!(
+                        "can't downcast {:?} array into string vector",
+                        column.data_type()
+                    ),
+                })?;
+            Ok(column)
+        };
+        let names = get_col_by_name("name")
+            .map_err(BoxedError::new)
+            .context(CompileScriptSnafu)?;
+        let scripts = get_col_by_name("script")
+            .map_err(BoxedError::new)
+            .context(CompileScriptSnafu)?;
+        let mut script_list: Vec<(String, String)> = Vec::with_capacity(names.len());
+        for i in 0..names.len() {
+            script_list.push((
+                names.get_data(i).unwrap().to_string(),
+                scripts.get_data(i).unwrap().to_string(),
+            ));
+        }
+        for (name, script) in script_list {
+            if let Ok(script) = PyScript::from_script(&script, query_engine.clone()) {
+                script.register_udf();
+
+                logging::info!(
+                    "Script in `scripts` system table re-register as UDF: {}",
+                    name
+                );
+            } else {
+                warn!("Failed to compile script in `scripts` table: {}", name);
+            };
+        }
+        Ok(())
+    }
     pub async fn new(
         catalog_manager: CatalogManagerRef,
         query_engine: QueryEngineRef,
@@ -70,11 +139,19 @@ impl ScriptsTable {
             table_options: TableOptions::default(),
             engine: MITO_ENGINE.to_string(),
         };
+        let callback_query_engine = query_engine.clone();
+        let script_recompile_callback: OpenSystemTableHook = Arc::new(move |table: TableRef| {
+            let callback_query_engine = callback_query_engine.clone();
+            block_on_async(async move {
+                Self::recompile_register_udf(table, callback_query_engine.clone()).await
+            })
+            .unwrap()
+        });
 
         catalog_manager
             .register_system_table(RegisterSystemTableRequest {
                 create_table_request: request,
-                open_hook: None,
+                open_hook: Some(script_recompile_callback),
             })
             .await
             .context(RegisterScriptsTableSnafu)?;

@@ -27,6 +27,11 @@ use crate::DeregisterTableRequest;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Failed to re-compile script scripts table, source: {}", source))]
+    CompileScript {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
     #[snafu(display("Failed to open system catalog table, source: {}", source))]
     OpenSystemCatalog {
         #[snafu(backtrace)]
@@ -300,9 +305,10 @@ impl ErrorExt for Error {
             Error::SystemCatalogTableScan { source } => source.status_code(),
             Error::SystemCatalogTableScanExec { source } => source.status_code(),
             Error::InvalidTableInfoInCatalog { source } => source.status_code(),
-            Error::SchemaProviderOperation { source } | Error::Internal { source } => {
-                source.status_code()
-            }
+
+            Error::CompileScript { source }
+            | Error::SchemaProviderOperation { source }
+            | Error::Internal { source } => source.status_code(),
 
             Error::Unimplemented { .. } | Error::NotSupported { .. } => StatusCode::Unsupported,
             Error::QueryAccessDenied { .. } => StatusCode::AccessDenied,
