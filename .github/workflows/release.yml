@@ -19,8 +19,8 @@ env:
 
   CARGO_PROFILE: nightly
 
-  ## FIXME(zyy17): Enable it after the tests are stabled.
-  DISABLE_RUN_TESTS: true
+  # Controls whether to run tests, include unit-test, integration-test and sqlness.
+  DISABLE_RUN_TESTS: false
 
 jobs:
   build:
