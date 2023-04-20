@@ -13,7 +13,7 @@
 // limitations under the License.
 use std::fmt::Display;
 
-use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, SchemaRef};
+use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, SchemaRef, COMMENT_KEY};
 use humantime::format_duration;
 use snafu::ResultExt;
 use sql::ast::{
@@ -47,7 +47,8 @@ fn sql_option(name: &str, value: SqlValue) -> SqlOption {
 }
 
 fn create_sql_options(table_meta: &TableMeta) -> Vec<SqlOption> {
-    let mut options = Vec::with_capacity(3);
+    let table_opts = &table_meta.options;
+    let mut options = Vec::with_capacity(4 + table_opts.extra_options.len());
 
     if !table_meta.region_numbers.is_empty() {
         options.push(sql_option(
@@ -56,11 +57,10 @@ fn create_sql_options(table_meta: &TableMeta) -> Vec<SqlOption> {
         ));
     }
 
-    let table_opts = &table_meta.options;
     if let Some(write_buffer_size) = table_opts.write_buffer_size {
         options.push(sql_option(
             "write_buffer_size",
-            number_value(write_buffer_size),
+            string_value(write_buffer_size.to_string()),
         ));
     }
     if let Some(ttl) = table_opts.ttl {
@@ -68,6 +68,14 @@ fn create_sql_options(table_meta: &TableMeta) -> Vec<SqlOption> {
             "ttl",
             string_value(format_duration(ttl).to_string()),
         ));
+    }
+
+    if let Some(w) = table_opts.compaction_time_window {
+        options.push(sql_option("compaction_time_window", number_value(w)));
+    }
+
+    for (k, v) in &table_opts.extra_options {
+        options.push(sql_option(k, string_value(v)));
     }
 
     options
@@ -100,6 +108,10 @@ fn create_column_def(column_schema: &ColumnSchema) -> Result<ColumnDef> {
         };
 
         options.push(column_option_def(ColumnOption::Default(expr)));
+    }
+
+    if let Some(c) = column_schema.metadata().get(COMMENT_KEY) {
+        options.push(column_option_def(ColumnOption::Comment(c.to_string())));
     }
 
     Ok(ColumnDef {

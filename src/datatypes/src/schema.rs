@@ -20,13 +20,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow::datatypes::{Field, Schema as ArrowSchema};
-pub use column_schema::TIME_INDEX_KEY;
 use datafusion_common::DFSchemaRef;
 use snafu::{ensure, ResultExt};
 
 use crate::data_type::DataType;
 use crate::error::{self, Error, Result};
-pub use crate::schema::column_schema::{ColumnSchema, Metadata};
+pub use crate::schema::column_schema::{ColumnSchema, Metadata, COMMENT_KEY, TIME_INDEX_KEY};
 pub use crate::schema::constraint::ColumnDefaultConstraint;
 pub use crate::schema::raw::RawSchema;
 

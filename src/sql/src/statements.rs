@@ -31,7 +31,7 @@ use api::helper::ColumnDataTypeWrapper;
 use common_base::bytes::Bytes;
 use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
+use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, COMMENT_KEY};
 use datatypes::types::TimestampType;
 use datatypes::value::Value;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -281,12 +281,26 @@ pub fn column_def_to_schema(column_def: &ColumnDef, is_time_index: bool) -> Resu
     let default_constraint =
         parse_column_default_constraint(&name, &data_type, &column_def.options)?;
 
-    ColumnSchema::new(name, data_type, is_nullable)
+    let mut column_schema = ColumnSchema::new(name, data_type, is_nullable)
         .with_time_index(is_time_index)
         .with_default_constraint(default_constraint)
         .context(error::InvalidDefaultSnafu {
             column: &column_def.name.value,
-        })
+        })?;
+
+    if let Some(ColumnOption::Comment(c)) = column_def.options.iter().find_map(|o| {
+        if matches!(o.option, ColumnOption::Comment(_)) {
+            Some(&o.option)
+        } else {
+            None
+        }
+    }) {
+        column_schema
+            .mut_metadata()
+            .insert(COMMENT_KEY.to_string(), c.to_string());
+    }
+
+    Ok(column_schema)
 }
 
 /// Convert `ColumnDef` in sqlparser to `ColumnDef` in gRPC proto.
@@ -732,10 +746,16 @@ mod tests {
             name: "col2".into(),
             data_type: SqlDataType::String,
             collation: None,
-            options: vec![ColumnOptionDef {
-                name: None,
-                option: ColumnOption::NotNull,
-            }],
+            options: vec![
+                ColumnOptionDef {
+                    name: None,
+                    option: ColumnOption::NotNull,
+                },
+                ColumnOptionDef {
+                    name: None,
+                    option: ColumnOption::Comment("test comment".to_string()),
+                },
+            ],
         };
 
         let column_schema = column_def_to_schema(&column_def, false).unwrap();
@@ -744,6 +764,10 @@ mod tests {
         assert_eq!(ConcreteDataType::string_datatype(), column_schema.data_type);
         assert!(!column_schema.is_nullable());
         assert!(!column_schema.is_time_index());
+        assert_eq!(
+            column_schema.metadata().get(COMMENT_KEY),
+            Some(&"test comment".to_string())
+        );
     }
 
     #[test]

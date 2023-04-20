@@ -192,7 +192,11 @@ pub enum Error {
         source: partition::error::Error,
     },
 
-    #[snafu(display("Failed to find table partition rule for table {}", table_name))]
+    #[snafu(display(
+        "Failed to find table partition rule for table {}, source: {}",
+        table_name,
+        source
+    ))]
     FindTablePartitionRule {
         table_name: String,
         #[snafu(backtrace)]

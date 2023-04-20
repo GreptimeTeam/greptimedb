@@ -3,7 +3,7 @@ CREATE TABLE system_metrics (
   host STRING,
   cpu DOUBLE,
   disk FLOAT,
-  n INT,
+  n INT COMMENT 'range key',
   ts TIMESTAMP NOT NULL DEFAULT current_timestamp(),
   TIME INDEX (ts),
   PRIMARY KEY (id, host)
@@ -13,10 +13,7 @@ PARTITION BY RANGE COLUMNS (n) (
     PARTITION r1 VALUES LESS THAN (9),
     PARTITION r2 VALUES LESS THAN (MAXVALUE),
 )
-ENGINE=mito
-WITH(
-  regions = 3
-);
+ENGINE=mito;
 
 Affected Rows: 0
 

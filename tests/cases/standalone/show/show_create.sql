@@ -1,7 +1,7 @@
 CREATE TABLE system_metrics (
   id INT UNSIGNED NULL,
   host STRING NULL,
-  cpu DOUBLE NULL,
+  cpu DOUBLE NULL COMMENT 'cpu',
   disk FLOAT NULL,
   ts TIMESTAMP NOT NULL DEFAULT current_timestamp(),
   TIME INDEX (ts),
@@ -9,7 +9,8 @@ CREATE TABLE system_metrics (
 )
 ENGINE=mito
 WITH(
-  regions = 3
+  ttl = '7d',
+  write_buffer_size = 1024
 );
 
 SHOW CREATE TABLE system_metrics;
