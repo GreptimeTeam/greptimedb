@@ -72,7 +72,6 @@ pub struct CreateTable {
 }
 
 impl CreateTable {
-    #[inline]
     fn format_constraints(&self) -> String {
         self.constraints
             .iter()
