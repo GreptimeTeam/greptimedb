@@ -181,7 +181,11 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to find table route for table {}", table_name))]
+    #[snafu(display(
+        "Failed to find table route for table {}, source: {}",
+        table_name,
+        source
+    ))]
     FindTableRoute {
         table_name: String,
         #[snafu(backtrace)]

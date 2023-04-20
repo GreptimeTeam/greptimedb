@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod show;
+
 use std::sync::Arc;
 
 use catalog::CatalogManagerRef;

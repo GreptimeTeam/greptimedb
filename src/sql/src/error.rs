@@ -145,12 +145,14 @@ pub enum Error {
         statement: String,
         location: Location,
     },
+
     #[snafu(display("Unable to convert sql value {} to datatype {:?}", value, datatype))]
     ConvertSqlValue {
         value: SqlValue,
         datatype: ConcreteDataType,
         location: Location,
     },
+
     #[snafu(display("Unable to convert value {} to sql value", value))]
     ConvertValue { value: Value, location: Location },
 }
