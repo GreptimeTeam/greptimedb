@@ -22,22 +22,31 @@ use common_query::physical_plan::PhysicalPlanRef;
 use common_query::prelude::Expr;
 use datatypes::schema::SchemaRef;
 use object_store::ObjectStore;
+use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionNumber;
 use table::error::{self as table_error, Result as TableResult};
 use table::metadata::{RawTableInfo, TableInfo, TableInfoRef, TableType};
-use table::requests::{
-    ImmutableFileTableOptions, IMMUTABLE_TABLE_LOCATION_KEY, IMMUTABLE_TABLE_META_KEY,
-};
 use table::Table;
 
-use super::format::{CreateScanPlanContext, ScanPlanConfig, ScanPlaner};
+use super::format::{CreateScanPlanContext, ScanPlanConfig};
 use crate::error::{self, ConvertRawSnafu, Result};
 use crate::manifest::immutable::{
     read_table_manifest, write_table_manifest, ImmutableMetadata, INIT_META_VERSION,
 };
 use crate::manifest::table_manifest_dir;
 use crate::table::format::Format;
+
+pub const IMMUTABLE_TABLE_META_KEY: &str = "IMMUTABLE_TABLE_META";
+pub const IMMUTABLE_TABLE_LOCATION_KEY: &str = "LOCATION";
+pub const IMMUTABLE_TABLE_PATTERN_KEY: &str = "PATTERN";
+pub const IMMUTABLE_TABLE_FORMAT_KEY: &str = "FORMAT";
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ImmutableFileTableOptions {
+    pub files: Vec<String>,
+}
 
 pub struct ImmutableFileTable {
     metadata: ImmutableMetadata,
@@ -114,27 +123,26 @@ impl ImmutableFileTable {
 
     pub(crate) fn new(table_info: TableInfo, metadata: ImmutableMetadata) -> Result<Self> {
         let table_info = Arc::new(table_info);
-        let options = table_info.meta.options.extra_options.clone();
+        let options = &table_info.meta.options.extra_options;
 
-        let url = &options
-            .get(IMMUTABLE_TABLE_LOCATION_KEY)
-            .context(error::MissingRequiredFieldSnafu {
+        let url = options.get(IMMUTABLE_TABLE_LOCATION_KEY).context(
+            error::MissingRequiredFieldSnafu {
                 name: IMMUTABLE_TABLE_LOCATION_KEY,
-            })?
-            .clone();
+            },
+        )?;
 
-        let meta = &options
-            .get(IMMUTABLE_TABLE_META_KEY)
-            .context(error::MissingRequiredFieldSnafu {
-                name: IMMUTABLE_TABLE_META_KEY,
-            })
-            .cloned()?;
+        let meta =
+            options
+                .get(IMMUTABLE_TABLE_META_KEY)
+                .context(error::MissingRequiredFieldSnafu {
+                    name: IMMUTABLE_TABLE_META_KEY,
+                })?;
 
         let meta: ImmutableFileTableOptions =
             serde_json::from_str(meta).context(error::DecodeJsonSnafu)?;
-        let format = Format::try_from(&options)?;
+        let format = Format::try_from(options)?;
 
-        let object_store = build_backend(url, &options).context(error::BuildBackendSnafu)?;
+        let object_store = build_backend(url, options).context(error::BuildBackendSnafu)?;
 
         Ok(Self {
             metadata,

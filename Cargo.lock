@@ -2918,7 +2918,6 @@ dependencies = [
  "datafusion",
  "datatypes",
  "futures",
- "lazy_static",
  "object-store",
  "serde",
  "serde_json",

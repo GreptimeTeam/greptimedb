@@ -22,15 +22,13 @@ use object_store::services::Fs;
 use object_store::ObjectStore;
 use table::engine::{table_dir, EngineContext, TableEngine};
 use table::metadata::{RawTableInfo, TableInfo, TableInfoBuilder, TableMetaBuilder, TableType};
-use table::requests::{
-    CreateTableRequest, ImmutableFileTableOptions, TableOptions, IMMUTABLE_TABLE_FORMAT_KEY,
-    IMMUTABLE_TABLE_LOCATION_KEY, IMMUTABLE_TABLE_META_KEY,
-};
+use table::requests::{CreateTableRequest, TableOptions};
 use table::TableRef;
 
 use crate::config::EngineConfig;
 use crate::engine::immutable::ImmutableFileTableEngine;
 use crate::manifest::immutable::ImmutableMetadata;
+use crate::table::immutable::{self, ImmutableFileTableOptions};
 
 pub const TEST_TABLE_NAME: &str = "demo";
 
@@ -100,16 +98,17 @@ pub struct TestEngineComponents {
 pub fn new_create_request(schema: SchemaRef) -> CreateTableRequest {
     let mut table_options = TableOptions::default();
     table_options.extra_options.insert(
-        IMMUTABLE_TABLE_LOCATION_KEY.to_string(),
+        immutable::IMMUTABLE_TABLE_LOCATION_KEY.to_string(),
         "mock_path".to_string(),
     );
     table_options.extra_options.insert(
-        IMMUTABLE_TABLE_META_KEY.to_string(),
+        immutable::IMMUTABLE_TABLE_META_KEY.to_string(),
         serde_json::to_string(&ImmutableFileTableOptions::default()).unwrap(),
     );
-    table_options
-        .extra_options
-        .insert(IMMUTABLE_TABLE_FORMAT_KEY.to_string(), "csv".to_string());
+    table_options.extra_options.insert(
+        immutable::IMMUTABLE_TABLE_FORMAT_KEY.to_string(),
+        "csv".to_string(),
+    );
 
     CreateTableRequest {
         id: 1,

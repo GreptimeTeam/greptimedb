@@ -27,13 +27,12 @@ use datafusion::datasource::object_store::ObjectStoreUrl;
 use datafusion::physical_plan::file_format::{FileOpener, FileScanConfig, FileStream};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datatypes::schema::SchemaRef;
-use lazy_static::lazy_static;
 use object_store::ObjectStore;
 use snafu::ResultExt;
-use table::requests::IMMUTABLE_TABLE_FORMAT_KEY;
 use table::table::scan::SimpleTableScan;
 
 use crate::error::{self, Result};
+use crate::table::immutable;
 
 const DEFAULT_BATCH_SIZE: usize = 8192;
 
@@ -63,7 +62,7 @@ impl TryFrom<&HashMap<String, String>> for Format {
 
     fn try_from(value: &HashMap<String, String>) -> Result<Self> {
         let format = value
-            .get(IMMUTABLE_TABLE_FORMAT_KEY)
+            .get(immutable::IMMUTABLE_TABLE_FORMAT_KEY)
             .cloned()
             .unwrap_or_default()
             .to_uppercase();
@@ -82,18 +81,6 @@ impl TryFrom<&HashMap<String, String>> for Format {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CreateScanPlanContext {}
-
-pub trait ScanPlaner {
-    fn create_physical_plan(
-        &self,
-        ctx: &CreateScanPlanContext,
-        config: &ScanPlanConfig,
-    ) -> Result<PhysicalPlanRef>;
-}
-
-lazy_static! {
-    static ref EMPTY_OBJECT_STORE_URL: ObjectStoreUrl = ObjectStoreUrl::parse("empty://").unwrap();
-}
 
 impl Format {
     fn build_csv_opener(
@@ -147,7 +134,7 @@ impl Format {
     ) -> Result<PhysicalPlanRef> {
         let stream = FileStream::new(
             &FileScanConfig {
-                object_store_url: EMPTY_OBJECT_STORE_URL.clone(), // won't be used
+                object_store_url: ObjectStoreUrl::parse("empty://").unwrap(), // won't be used
                 file_schema,
                 file_groups: vec![files
                     .iter()
@@ -160,7 +147,7 @@ impl Format {
                 output_ordering: None,
                 infinite_source: false,
             },
-            0, // hard-code
+            0, // partition: hard-code
             opener,
             &ExecutionPlanMetricsSet::new(),
         )
@@ -213,8 +200,8 @@ pub struct ScanPlanConfig<'a> {
     pub store: ObjectStore,
 }
 
-impl ScanPlaner for Format {
-    fn create_physical_plan(
+impl Format {
+    pub fn create_physical_plan(
         &self,
         ctx: &CreateScanPlanContext,
         config: &ScanPlanConfig,

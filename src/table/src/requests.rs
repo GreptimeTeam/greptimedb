@@ -51,7 +51,6 @@ pub struct CreateTableRequest {
     pub engine: String,
 }
 
-<<<<<<< HEAD
 impl CreateTableRequest {
     pub fn table_ref(&self) -> TableReference {
         TableReference {
