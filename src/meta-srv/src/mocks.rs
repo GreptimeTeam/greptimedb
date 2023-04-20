@@ -60,7 +60,7 @@ pub async fn mock(
     let metadata_service = DefaultMetadataService::new(kv_store.clone());
 
     metadata_service
-        .create_schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
+        .create_schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, true)
         .await
         .unwrap();
 

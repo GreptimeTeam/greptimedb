@@ -18,7 +18,7 @@ use api::v1::meta::CompareAndPutRequest;
 use async_trait::async_trait;
 use catalog::helper::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
 use common_telemetry::info;
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 
 use crate::error;
 use crate::error::Result;
@@ -27,7 +27,13 @@ use crate::service::store::kv::KvStoreRef;
 /// This trait defines some methods of metadata
 #[async_trait]
 pub trait MetadataService: Send + Sync {
-    async fn create_schema(&self, catalog_name: &str, schema_name: &str) -> Result<()>;
+    // An error occurs if the schema exists and "if_not_exist" == false.
+    async fn create_schema(
+        &self,
+        catalog_name: &str,
+        schema_name: &str,
+        if_not_exist: bool,
+    ) -> Result<()>;
 
     async fn delete_schema(&self, catalog_name: &str, schema_name: &str) -> Result<()>;
 }
@@ -47,7 +53,12 @@ impl DefaultMetadataService {
 
 #[async_trait]
 impl MetadataService for DefaultMetadataService {
-    async fn create_schema(&self, catalog_name: &str, schema_name: &str) -> Result<()> {
+    async fn create_schema(
+        &self,
+        catalog_name: &str,
+        schema_name: &str,
+        if_not_exist: bool,
+    ) -> Result<()> {
         let kv_store = self.kv_store.clone();
 
         let catalog_key = CatalogKey {
@@ -90,6 +101,11 @@ impl MetadataService for DefaultMetadataService {
             info!("Successfully created a schema: {}", schema_name);
         }
 
+        ensure!(
+            resp.success || if_not_exist,
+            error::SchemaAlreadyExistsSnafu { schema_name }
+        );
+
         Ok(())
     }
 
@@ -102,42 +118,33 @@ impl MetadataService for DefaultMetadataService {
 mod tests {
     use std::sync::Arc;
 
-    use api::v1::meta::PutRequest;
-    use catalog::helper::{CatalogKey, CatalogValue, SchemaKey};
+    use catalog::helper::{CatalogKey, SchemaKey};
 
     use super::{DefaultMetadataService, MetadataService};
     use crate::service::store::ext::KvStoreExt;
-    use crate::service::store::kv::{KvStore, KvStoreRef};
+    use crate::service::store::kv::KvStoreRef;
     use crate::service::store::memory::MemStore;
 
     #[tokio::test]
     async fn test_create_schema() {
-        let empty_kv_store = Arc::new(MemStore::default());
-        do_test_create_schema(empty_kv_store).await;
+        let kv_store = Arc::new(MemStore::default());
+        let service = DefaultMetadataService::new(kv_store.clone());
 
-        let kv_store = MemStore::default();
-        let key: Vec<u8> = CatalogKey {
-            catalog_name: "catalog".to_string(),
-        }
-        .to_string()
-        .into();
+        let result = service.create_schema("catalog", "public", false).await;
 
-        kv_store
-            .put(PutRequest {
-                key,
-                value: CatalogValue {}.as_bytes().unwrap(),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-        do_test_create_schema(Arc::new(kv_store)).await;
+        assert!(result.is_ok());
+        verify_result(kv_store.clone()).await;
+
+        let result = service.create_schema("catalog", "public", false).await;
+        assert!(result.is_err());
+
+        let result = service.create_schema("catalog", "public", true).await;
+
+        assert!(result.is_ok());
+        verify_result(kv_store.clone()).await;
     }
 
-    async fn do_test_create_schema(kv_store: KvStoreRef) {
-        let service = DefaultMetadataService::new(kv_store.clone());
-        let result = service.create_schema("catalog", "public").await;
-        assert!(result.is_ok());
-
+    async fn verify_result(kv_store: KvStoreRef) {
         let key: Vec<u8> = CatalogKey {
             catalog_name: "catalog".to_string(),
         }
