@@ -126,7 +126,7 @@ impl MetaSrv {
             return Ok(());
         }
 
-        self.create_default_catalog_and_schema_if_absent().await?;
+        self.create_default_schema_if_not_exist().await?;
 
         if let Some(election) = self.election() {
             let procedure_manager = self.procedure_manager.clone();
@@ -182,7 +182,7 @@ impl MetaSrv {
         Ok(())
     }
 
-    async fn create_default_catalog_and_schema_if_absent(&self) -> Result<()> {
+    async fn create_default_schema_if_not_exist(&self) -> Result<()> {
         self.metadata_service
             .create_schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, true)
             .await
