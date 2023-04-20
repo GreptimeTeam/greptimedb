@@ -49,13 +49,18 @@ pub trait PhysicalPlan: Debug + Send + Sync {
     /// Specifies the output partitioning scheme of this plan
     fn output_partitioning(&self) -> Partitioning;
 
+    /// returns `Some(keys)` that describes how the output was sorted.
+    fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
+        None
+    }
+
     /// Get a list of child physical plans that provide the input for this plan. The returned list
     /// will be empty for leaf nodes, will contain a single value for unary nodes, or two
     /// values for binary nodes (such as joins).
     fn children(&self) -> Vec<PhysicalPlanRef>;
 
     /// Returns a new plan where all children were replaced by new plans.
-    /// The size of `children` must be equal to the size of `PhysicalPlan::children()`.
+    /// The size of `children` must be equal to the size of [`PhysicalPlan::children()`].
     fn with_new_children(&self, children: Vec<PhysicalPlanRef>) -> Result<PhysicalPlanRef>;
 
     /// Creates an RecordBatch stream.
@@ -149,7 +154,7 @@ impl DfPhysicalPlan for DfPhysicalPlanAdapter {
     }
 
     fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
-        None
+        self.0.output_ordering()
     }
 
     fn children(&self) -> Vec<Arc<dyn DfPhysicalPlan>> {
