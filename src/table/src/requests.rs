@@ -24,6 +24,7 @@ use datatypes::schema::{ColumnSchema, RawSchema};
 use serde::{Deserialize, Serialize};
 use store_api::storage::RegionNumber;
 
+use crate::engine::TableReference;
 use crate::error;
 use crate::error::ParseTableOptionSnafu;
 use crate::metadata::TableId;
@@ -48,6 +49,16 @@ pub struct CreateTableRequest {
     pub create_if_not_exists: bool,
     pub table_options: TableOptions,
     pub engine: String,
+}
+
+impl CreateTableRequest {
+    pub fn table_ref(&self) -> TableReference {
+        TableReference {
+            catalog: &self.catalog_name,
+            schema: &self.schema_name,
+            table: &self.table_name,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -167,6 +178,14 @@ pub struct AlterTableRequest {
 }
 
 impl AlterTableRequest {
+    pub fn table_ref(&self) -> TableReference {
+        TableReference {
+            catalog: &self.catalog_name,
+            schema: &self.schema_name,
+            table: &self.table_name,
+        }
+    }
+
     pub fn is_rename_table(&self) -> bool {
         matches!(self.alter_kind, AlterKind::RenameTable { .. })
     }
@@ -192,6 +211,16 @@ pub struct DropTableRequest {
     pub catalog_name: String,
     pub schema_name: String,
     pub table_name: String,
+}
+
+impl DropTableRequest {
+    pub fn table_ref(&self) -> TableReference {
+        TableReference {
+            catalog: &self.catalog_name,
+            schema: &self.schema_name,
+            table: &self.table_name,
+        }
+    }
 }
 
 #[derive(Debug)]

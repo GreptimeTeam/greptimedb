@@ -13,6 +13,7 @@ async-trait = "0.1"
 common-catalog = { path = "../common/catalog" }
 common-error = { path = "../common/error" }
 common-procedure = { path = "../common/procedure" }
+common-procedure-test = { path = "../common/procedure-test" }
 common-query = { path = "../common/query" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
