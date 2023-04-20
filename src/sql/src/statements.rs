@@ -374,7 +374,7 @@ pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Resu
         ConcreteDataType::DateTime(_) => Ok(SqlDataType::Datetime(None)),
         ConcreteDataType::Timestamp(_) => Ok(SqlDataType::Timestamp(None, TimezoneInfo::None)),
         ConcreteDataType::Binary(_) => Ok(SqlDataType::Varbinary(None)),
-        _ => todo!(),
+        ConcreteDataType::List(_) | ConcreteDataType::Dictionary(_) => unreachable!(),
     }
 }
 
