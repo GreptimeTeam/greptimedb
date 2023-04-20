@@ -20,9 +20,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use async_stream::stream;
 use async_trait::async_trait;
-use common_catalog::consts::{
-    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID, MITO_ENGINE,
-};
+use common_catalog::consts::{MIN_USER_TABLE_ID, MITO_ENGINE};
 use common_telemetry::{debug, error, info};
 use dashmap::DashMap;
 use futures::Stream;
@@ -188,13 +186,6 @@ impl RemoteCatalogManager {
     async fn initiate_catalogs(&self) -> Result<(HashMap<String, CatalogProviderRef>, TableId)> {
         let mut res = HashMap::new();
         let max_table_id = MIN_USER_TABLE_ID - 1;
-
-        // initiate default catalog and schema
-        let default_catalog = self
-            .create_catalog_and_schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
-            .await?;
-        res.insert(DEFAULT_CATALOG_NAME.to_string(), default_catalog);
-        info!("Default catalog and schema registered");
 
         let mut catalogs = self.iter_remote_catalogs().await;
         while let Some(r) = catalogs.next().await {

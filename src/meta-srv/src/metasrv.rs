@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use api::v1::meta::Peer;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::{error, info, warn};
 use serde::{Deserialize, Serialize};
@@ -30,6 +31,7 @@ use crate::election::{Election, LeaderChangeMessage};
 use crate::error::{RecoverProcedureSnafu, Result};
 use crate::handler::HeartbeatHandlerGroup;
 use crate::lock::DistLockRef;
+use crate::metadata_service::MetadataServiceRef;
 use crate::selector::{Selector, SelectorType};
 use crate::sequence::SequenceRef;
 use crate::service::store::kv::{KvStoreRef, ResettableKvStoreRef};
@@ -110,6 +112,7 @@ pub struct MetaSrv {
     meta_peer_client: Option<MetaPeerClient>,
     lock: Option<DistLockRef>,
     procedure_manager: ProcedureManagerRef,
+    metadata_service: MetadataServiceRef,
 }
 
 impl MetaSrv {
@@ -122,6 +125,8 @@ impl MetaSrv {
             warn!("MetaSrv already started");
             return Ok(());
         }
+
+        self.create_default_schema_if_not_exist().await?;
 
         if let Some(election) = self.election() {
             let procedure_manager = self.procedure_manager.clone();
@@ -175,6 +180,12 @@ impl MetaSrv {
 
         info!("MetaSrv started");
         Ok(())
+    }
+
+    async fn create_default_schema_if_not_exist(&self) -> Result<()> {
+        self.metadata_service
+            .create_schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, true)
+            .await
     }
 
     pub fn shutdown(&self) {

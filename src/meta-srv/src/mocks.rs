@@ -18,9 +18,11 @@ use std::time::Duration;
 use api::v1::meta::heartbeat_server::HeartbeatServer;
 use api::v1::meta::router_server::RouterServer;
 use api::v1::meta::store_server::StoreServer;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use tower::service_fn;
 
+use crate::metadata_service::{DefaultMetadataService, MetadataService};
 use crate::metasrv::builder::MetaSrvBuilder;
 use crate::metasrv::{MetaSrvOptions, SelectorRef};
 use crate::service::store::etcd::EtcdStore;
@@ -54,6 +56,13 @@ pub async fn mock(
     selector: Option<SelectorRef>,
 ) -> MockInfo {
     let server_addr = opts.server_addr.clone();
+
+    let metadata_service = DefaultMetadataService::new(kv_store.clone());
+
+    metadata_service
+        .create_schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, true)
+        .await
+        .unwrap();
 
     let builder = MetaSrvBuilder::new().options(opts).kv_store(kv_store);
 
