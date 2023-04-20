@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+dashboard = []
+
 [dependencies]
 api = { path = "../src/api" }
 axum = "0.6"
