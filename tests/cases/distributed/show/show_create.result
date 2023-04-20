@@ -19,27 +19,27 @@ Affected Rows: 0
 
 SHOW CREATE TABLE system_metrics;
 
-+----------------+------------------------------------------------------+
-| Table          | Create Table                                         |
-+----------------+------------------------------------------------------+
-| system_metrics | CREATE TABLE IF NOT EXISTS system_metrics (          |
-|                |   id INT UNSIGNED NULL,                              |
-|                |   host STRING NULL,                                  |
-|                |   cpu DOUBLE NULL,                                   |
-|                |   disk FLOAT NULL,                                   |
-|                |   n INT NULL,                                        |
-|                |   ts TIMESTAMP NOT NULL DEFAULT current_timestamp(), |
-|                |   TIME INDEX (ts),                                   |
-|                |   PRIMARY KEY (id, host)                             |
-|                | )                                                    |
-|                | PARTITION BY RANGE COLUMNS (n) (                     |
-|                |   PARTITION r0 VALUES LESS THAN (5),                 |
-|                |   PARTITION r1 VALUES LESS THAN (9),                 |
-|                |   PARTITION r2 VALUES LESS THAN (MAXVALUE)           |
-|                | )                                                    |
-|                | ENGINE=mito                                          |
-|                |                                                      |
-+----------------+------------------------------------------------------+
++----------------+---------------------------------------------------------+
+| Table          | Create Table                                            |
++----------------+---------------------------------------------------------+
+| system_metrics | CREATE TABLE IF NOT EXISTS system_metrics (             |
+|                |   id INT UNSIGNED NULL,                                 |
+|                |   host STRING NULL,                                     |
+|                |   cpu DOUBLE NULL,                                      |
+|                |   disk FLOAT NULL,                                      |
+|                |   n INT NULL,                                           |
+|                |   ts TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(), |
+|                |   TIME INDEX (ts),                                      |
+|                |   PRIMARY KEY (id, host)                                |
+|                | )                                                       |
+|                | PARTITION BY RANGE COLUMNS (n) (                        |
+|                |   PARTITION r0 VALUES LESS THAN (5),                    |
+|                |   PARTITION r1 VALUES LESS THAN (9),                    |
+|                |   PARTITION r2 VALUES LESS THAN (MAXVALUE)              |
+|                | )                                                       |
+|                | ENGINE=mito                                             |
+|                |                                                         |
++----------------+---------------------------------------------------------+
 
 DROP TABLE system_metrics;
 
