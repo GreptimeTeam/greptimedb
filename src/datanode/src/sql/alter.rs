@@ -221,7 +221,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn alter_table_by_procedure() {
+    async fn test_alter_table_by_procedure() {
         let instance = MockInstance::with_procedure_enabled("alter_table_by_procedure").await;
 
         // Create table first.

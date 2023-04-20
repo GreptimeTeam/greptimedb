@@ -12,44 +12,43 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Procedure to alter a table.
+//! Procedure to drop a table.
 
 use async_trait::async_trait;
-use catalog::{CatalogManagerRef, RenameTableRequest};
+use catalog::{CatalogManagerRef, DeregisterTableRequest};
 use common_procedure::{
     Context, Error, LockKey, Procedure, ProcedureId, ProcedureManager, ProcedureState,
     ProcedureWithId, Result, Status,
 };
 use common_telemetry::logging;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt};
 use table::engine::{EngineContext, TableEngineProcedureRef, TableReference};
-use table::metadata::TableId;
-use table::requests::{AlterKind, AlterTableRequest};
+use table::requests::DropTableRequest;
 
 use crate::error::{
-    AccessCatalogSnafu, CatalogNotFoundSnafu, DeserializeProcedureSnafu, SchemaNotFoundSnafu,
-    SerializeProcedureSnafu, SubprocedureFailedSnafu, TableExistsSnafu, TableNotFoundSnafu,
+    AccessCatalogSnafu, DeserializeProcedureSnafu, SerializeProcedureSnafu,
+    SubprocedureFailedSnafu, TableNotFoundSnafu,
 };
 
-/// Procedure to alter a table.
-pub struct AlterTableProcedure {
-    data: AlterTableData,
+/// Procedure to drop a table.
+pub struct DropTableProcedure {
+    data: DropTableData,
     catalog_manager: CatalogManagerRef,
     engine_procedure: TableEngineProcedureRef,
 }
 
 #[async_trait]
-impl Procedure for AlterTableProcedure {
+impl Procedure for DropTableProcedure {
     fn type_name(&self) -> &str {
         Self::TYPE_NAME
     }
 
     async fn execute(&mut self, ctx: &Context) -> Result<Status> {
         match self.data.state {
-            AlterTableState::Prepare => self.on_prepare().await,
-            AlterTableState::EngineAlterTable => self.on_engine_alter_table(ctx).await,
-            AlterTableState::RenameInCatalog => self.on_rename_in_catalog().await,
+            DropTableState::Prepare => self.on_prepare().await,
+            DropTableState::RemoveFromCatalog => self.on_remove_from_catalog().await,
+            DropTableState::EngineDropTable => self.on_engine_drop_table(ctx).await,
         }
     }
 
@@ -61,35 +60,23 @@ impl Procedure for AlterTableProcedure {
     fn lock_key(&self) -> LockKey {
         // We lock the whole table.
         let table_name = self.data.table_ref().to_string();
-        // If alter kind is rename, we also need to lock the renamed table.
-        if let AlterKind::RenameTable { new_table_name } = &self.data.request.alter_kind {
-            let new_table_name = TableReference {
-                catalog: &self.data.request.catalog_name,
-                schema: &self.data.request.schema_name,
-                table: new_table_name,
-            }
-            .to_string();
-            LockKey::new([table_name, new_table_name])
-        } else {
-            LockKey::single(table_name)
-        }
+        LockKey::single(table_name)
     }
 }
 
-impl AlterTableProcedure {
-    const TYPE_NAME: &str = "table-procedure:AlterTableProcedure";
+impl DropTableProcedure {
+    const TYPE_NAME: &str = "table-procedure::DropTableProcedure";
 
-    /// Returns a new [AlterTableProcedure].
+    /// Returns a new [DropTableProcedure].
     pub fn new(
-        request: AlterTableRequest,
+        request: DropTableRequest,
         catalog_manager: CatalogManagerRef,
         engine_procedure: TableEngineProcedureRef,
-    ) -> AlterTableProcedure {
-        AlterTableProcedure {
-            data: AlterTableData {
-                state: AlterTableState::Prepare,
+    ) -> DropTableProcedure {
+        DropTableProcedure {
+            data: DropTableData {
+                state: DropTableState::Prepare,
                 request,
-                table_id: None,
                 subprocedure_id: None,
             },
             catalog_manager,
@@ -123,9 +110,9 @@ impl AlterTableProcedure {
         catalog_manager: CatalogManagerRef,
         engine_procedure: TableEngineProcedureRef,
     ) -> Result<Self> {
-        let data: AlterTableData = serde_json::from_str(json).context(DeserializeProcedureSnafu)?;
+        let data: DropTableData = serde_json::from_str(json).context(DeserializeProcedureSnafu)?;
 
-        Ok(AlterTableProcedure {
+        Ok(DropTableProcedure {
             data,
             catalog_manager,
             engine_procedure,
@@ -133,56 +120,65 @@ impl AlterTableProcedure {
     }
 
     async fn on_prepare(&mut self) -> Result<Status> {
-        // Check whether catalog and schema exist.
-        let catalog = self
-            .catalog_manager
-            .catalog(&self.data.request.catalog_name)
-            .context(AccessCatalogSnafu)?
-            .context(CatalogNotFoundSnafu {
-                name: &self.data.request.catalog_name,
-            })?;
-        let schema = catalog
-            .schema(&self.data.request.schema_name)
-            .context(AccessCatalogSnafu)?
-            .context(SchemaNotFoundSnafu {
-                name: &self.data.request.schema_name,
-            })?;
-
-        let table = schema
-            .table(&self.data.request.table_name)
+        let request = &self.data.request;
+        // Ensure the table exists.
+        self.catalog_manager
+            .table(
+                &request.catalog_name,
+                &request.schema_name,
+                &request.table_name,
+            )
             .await
             .context(AccessCatalogSnafu)?
             .context(TableNotFoundSnafu {
-                name: &self.data.request.table_name,
+                name: &request.table_name,
             })?;
-        if let AlterKind::RenameTable { new_table_name } = &self.data.request.alter_kind {
-            ensure!(
-                !schema
-                    .table_exist(new_table_name)
-                    .context(AccessCatalogSnafu)?,
-                TableExistsSnafu {
-                    name: new_table_name,
-                }
-            );
-        }
 
-        self.data.state = AlterTableState::EngineAlterTable;
-        // Assign procedure id to the subprocedure.
-        self.data.subprocedure_id = Some(ProcedureId::random());
-        // Set the table id.
-        self.data.table_id = Some(table.table_info().ident.table_id);
+        self.data.state = DropTableState::RemoveFromCatalog;
 
         Ok(Status::executing(true))
     }
 
-    async fn on_engine_alter_table(&mut self, ctx: &Context) -> Result<Status> {
+    async fn on_remove_from_catalog(&mut self) -> Result<Status> {
+        let request = &self.data.request;
+        let has_table = self
+            .catalog_manager
+            .table(
+                &request.catalog_name,
+                &request.schema_name,
+                &request.table_name,
+            )
+            .await
+            .context(AccessCatalogSnafu)?
+            .is_some();
+        if has_table {
+            // The table is still in the catalog.
+            let deregister_table_req = DeregisterTableRequest {
+                catalog: self.data.request.catalog_name.clone(),
+                schema: self.data.request.schema_name.clone(),
+                table_name: self.data.request.table_name.clone(),
+            };
+            self.catalog_manager
+                .deregister_table(deregister_table_req)
+                .await
+                .context(AccessCatalogSnafu)?;
+        }
+
+        self.data.state = DropTableState::EngineDropTable;
+        // Assign procedure id to the subprocedure.
+        self.data.subprocedure_id = Some(ProcedureId::random());
+
+        Ok(Status::executing(true))
+    }
+
+    async fn on_engine_drop_table(&mut self, ctx: &Context) -> Result<Status> {
         // Safety: subprocedure id is always set in this state.
         let sub_id = self.data.subprocedure_id.unwrap();
 
         // Query subprocedure state.
         let Some(sub_state) = ctx.provider.procedure_state(sub_id).await? else {
             logging::info!(
-                "On engine alter table {}, subprocedure not found, sub_id: {}",
+                "On engine drop table {}, subprocedure not found, sub_id: {}",
                 self.data.request.table_name,
                 sub_id
             );
@@ -191,7 +187,7 @@ impl AlterTableProcedure {
             let engine_ctx = EngineContext::default();
             let procedure = self
                 .engine_procedure
-                .alter_table_procedure(&engine_ctx, self.data.request.clone())
+                .drop_table_procedure(&engine_ctx, self.data.request.clone())
                 .map_err(Error::from_error_ext)?;
             return Ok(Status::Suspended {
                 subprocedures: vec![ProcedureWithId {
@@ -209,19 +205,12 @@ impl AlterTableProcedure {
             }),
             ProcedureState::Done => {
                 logging::info!(
-                    "On engine alter table {}, done, sub_id: {}",
+                    "On engine drop table {}, done, sub_id: {}",
                     self.data.request.table_name,
                     sub_id
                 );
-                // The sub procedure is done, we can execute next step.
-                if self.data.request.is_rename_table() {
-                    // We also need to rename the table in the catalog.
-                    self.data.state = AlterTableState::RenameInCatalog;
-                    Ok(Status::executing(true))
-                } else {
-                    // If this isn't a rename operation, we are done.
-                    Ok(Status::Done)
-                }
+
+                Ok(Status::Done)
             }
             ProcedureState::Failed { .. } => {
                 // Return error if the subprocedure is failed.
@@ -232,59 +221,34 @@ impl AlterTableProcedure {
             }
         }
     }
-
-    async fn on_rename_in_catalog(&mut self) -> Result<Status> {
-        // Safety: table id is available in this state.
-        let table_id = self.data.table_id.unwrap();
-        if let AlterKind::RenameTable { new_table_name } = &self.data.request.alter_kind {
-            let rename_req = RenameTableRequest {
-                catalog: self.data.request.catalog_name.clone(),
-                schema: self.data.request.schema_name.clone(),
-                table_name: self.data.request.table_name.clone(),
-                new_table_name: new_table_name.clone(),
-                table_id,
-            };
-
-            self.catalog_manager
-                .rename_table(rename_req)
-                .await
-                .map_err(Error::from_error_ext)?;
-        }
-
-        Ok(Status::Done)
-    }
 }
 
-/// Represents each step while altering a table in the datanode.
+/// Represents each step while dropping a table in the datanode.
 #[derive(Debug, Serialize, Deserialize)]
-enum AlterTableState {
-    /// Validate request and prepare to alter table.
+enum DropTableState {
+    /// Validate request and prepare to drop table.
     Prepare,
-    /// Alter table in the table engine.
-    EngineAlterTable,
-    /// Rename the table in the catalog (optional).
-    RenameInCatalog,
+    /// Remove the table from the catalog.
+    RemoveFromCatalog,
+    /// Drop table in the table engine.
+    EngineDropTable,
 }
 
-/// Serializable data of [AlterTableProcedure].
+/// Serializable data of [DropTableProcedure].
 #[derive(Debug, Serialize, Deserialize)]
-struct AlterTableData {
+struct DropTableData {
     /// Current state.
-    state: AlterTableState,
-    /// Request to alter this table.
-    request: AlterTableRequest,
-    /// Id of the table.
+    state: DropTableState,
+    /// Request to drop this table.
+    request: DropTableRequest,
+    /// Id of the subprocedure to drop this table from the engine.
     ///
-    /// Available after [AlterTableState::Prepare] state.
-    table_id: Option<TableId>,
-    /// Id of the subprocedure to alter this table in the engine.
-    ///
-    /// This id is `Some` while the procedure is in [AlterTableState::EngineAlterTable]
+    /// This id is `Some` while the procedure is in [DropTableState::EngineDropTable]
     /// state.
     subprocedure_id: Option<ProcedureId>,
 }
 
-impl AlterTableData {
+impl DropTableData {
     fn table_ref(&self) -> TableReference {
         TableReference {
             catalog: &self.request.catalog_name,
@@ -297,26 +261,22 @@ impl AlterTableData {
 #[cfg(test)]
 mod tests {
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use table::engine::TableEngine;
 
     use super::*;
     use crate::test_util::TestEnv;
 
     #[tokio::test]
-    async fn test_alter_table_procedure_rename() {
-        let env = TestEnv::new("rename");
-        let table_name = "test_old";
+    async fn test_drop_table_procedure() {
+        let env = TestEnv::new("drop");
+        let table_name = "test_drop";
         env.create_table(table_name).await;
 
-        let new_table_name = "test_new";
-        let request = AlterTableRequest {
+        let request = DropTableRequest {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: table_name.to_string(),
-            alter_kind: AlterKind::RenameTable {
-                new_table_name: new_table_name.to_string(),
-            },
         };
-
         let TestEnv {
             dir: _dir,
             table_engine,
@@ -324,7 +284,7 @@ mod tests {
             catalog_manager,
         } = env;
         let procedure =
-            AlterTableProcedure::new(request, catalog_manager.clone(), table_engine.clone());
+            DropTableProcedure::new(request, catalog_manager.clone(), table_engine.clone());
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
         let mut watcher = procedure_manager.submit(procedure_with_id).await.unwrap();
@@ -335,10 +295,15 @@ mod tests {
             .unwrap()
             .unwrap();
         let schema = catalog.schema(DEFAULT_SCHEMA_NAME).unwrap().unwrap();
-        let table = schema.table(new_table_name).await.unwrap().unwrap();
-        let table_info = table.table_info();
-        assert_eq!(new_table_name, table_info.name);
-
         assert!(schema.table(table_name).await.unwrap().is_none());
+        let ctx = EngineContext::default();
+        assert!(!table_engine.table_exists(
+            &ctx,
+            &TableReference {
+                catalog: DEFAULT_CATALOG_NAME,
+                schema: DEFAULT_SCHEMA_NAME,
+                table: table_name,
+            }
+        ));
     }
 }
