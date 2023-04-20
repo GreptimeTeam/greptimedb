@@ -47,10 +47,14 @@ fn sql_option(name: &str, value: SqlValue) -> SqlOption {
 }
 
 fn create_sql_options(table_meta: &TableMeta) -> Vec<SqlOption> {
-    let mut options = vec![sql_option(
-        "regions",
-        number_value(table_meta.region_numbers.len()),
-    )];
+    let mut options = Vec::with_capacity(3);
+
+    if !table_meta.region_numbers.is_empty() {
+        options.push(sql_option(
+            "regions",
+            number_value(table_meta.region_numbers.len()),
+        ));
+    }
 
     let table_opts = &table_meta.options;
     if let Some(write_buffer_size) = table_opts.write_buffer_size {

@@ -119,6 +119,7 @@ pub enum Error {
         #[snafu(backtrace)]
         source: sql::error::Error,
     },
+
     #[snafu(display("Failed to convert concrete type to sql type: {:?}", datatype))]
     ConvertSqlType {
         datatype: ConcreteDataType,

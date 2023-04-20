@@ -105,6 +105,20 @@ impl CreateTable {
             ""
         }
     }
+
+    #[inline]
+    fn format_options(&self) -> String {
+        if self.options.is_empty() {
+            "".to_string()
+        } else {
+            let options = format_list_indent!(self.options);
+            format!(
+                r#"WITH(
+{options}
+)"#
+            )
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -145,23 +159,22 @@ impl Display for Partitions {
 
 impl Display for CreateTable {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let if_not_exists = self.format_if_not_exits();
+        let name = &self.name;
+        let columns = format_list_indent!(self.columns);
+        let constraints = self.format_constraints();
+        let partitions = self.format_partitions();
+        let engine = &self.engine;
+        let options = self.format_options();
+
         write!(
             f,
-            r#"CREATE TABLE {} {} (
-{},
-{}
+            r#"CREATE TABLE {if_not_exists} {name} (
+{columns},
+{constraints}
 )
-{}ENGINE={}
-WITH(
-{}
-)"#,
-            self.format_if_not_exits(),
-            self.name,
-            format_list_indent!(self.columns),
-            self.format_constraints(),
-            self.format_partitions(),
-            self.engine,
-            format_list_indent!(self.options),
+{partitions}ENGINE={engine}
+{options}"#
         )
     }
 }

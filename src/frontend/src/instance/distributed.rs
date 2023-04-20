@@ -42,15 +42,16 @@ use meta_client::rpc::{
     CompareAndPutRequest, CreateRequest as MetaCreateRequest, Partition as MetaPartition,
     RouteRequest, RouteResponse, TableName,
 };
+use partition::manager::PartitionInfo;
 use partition::partition::{PartitionBound, PartitionDef};
 use query::error::QueryExecutionSnafu;
 use query::query_engine::SqlStatementExecutor;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
-use sql::ast::Value as SqlValue;
-use sql::statements::create::Partitions;
-use sql::statements::sql_value_to_value;
+use sql::ast::{Ident, Value as SqlValue};
+use sql::statements::create::{PartitionEntry, Partitions};
 use sql::statements::statement::Statement;
+use sql::statements::{self, sql_value_to_value};
 use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
 use table::requests::TableOptions;
 use table::table::AlterContext;
@@ -67,6 +68,8 @@ use crate::error::{
 };
 use crate::expr_factory;
 use crate::table::DistTable;
+
+const MAX_VALUE: &str = "MAXVALUE";
 
 #[derive(Clone)]
 pub(crate) struct DistInstance {
@@ -387,9 +390,18 @@ impl DistInstance {
         }
     }
 
-    async fn show_create_table(&self, _table_name: TableName, table: TableRef) -> Result<Output> {
-        //FIXME(dennis): Create the partitions from partition manager
-        let partitions: Option<Partitions> = None;
+    async fn show_create_table(&self, table_name: TableName, table: TableRef) -> Result<Output> {
+        let partitions = self
+            .catalog_manager
+            .partition_manager()
+            .find_table_partitions(&table_name)
+            .await
+            .context(error::FindTablePartitionRuleSnafu {
+                table_name: &table_name.table_name,
+            })?;
+
+        let partitions = create_partitions_stmt(partitions)?;
+
         query::sql::show_create_table(table, partitions).context(error::ExecuteStatementSnafu)
     }
 
@@ -550,6 +562,46 @@ impl SqlStatementExecutor for DistInstance {
     }
 }
 
+fn create_partitions_stmt(partitions: Vec<PartitionInfo>) -> Result<Option<Partitions>> {
+    if partitions.is_empty() {
+        return Ok(None);
+    }
+
+    let column_list: Vec<Ident> = partitions[0]
+        .partition
+        .partition_columns()
+        .iter()
+        .map(|name| name[..].into())
+        .collect();
+
+    let entries = partitions
+        .into_iter()
+        .map(|info| {
+            // Generated the partition name from id
+            let name = &format!("r{}", info.id);
+            let bounds = info.partition.partition_bounds();
+            let value_list = bounds
+                .iter()
+                .map(|b| match b {
+                    PartitionBound::Value(v) => statements::value_to_sql_value(v)
+                        .with_context(|_| error::ConvertSqlValueSnafu { value: v.clone() }),
+                    PartitionBound::MaxValue => Ok(SqlValue::Number(MAX_VALUE.to_string(), false)),
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            Ok(PartitionEntry {
+                name: name[..].into(),
+                value_list,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(Some(Partitions {
+        column_list,
+        entries,
+    }))
+}
+
 fn create_table_info(create_table: &CreateTableExpr) -> Result<RawTableInfo> {
     let mut column_schemas = Vec::with_capacity(create_table.column_defs.len());
     let mut column_name_to_index_map = HashMap::new();
@@ -670,7 +722,7 @@ fn find_partition_entries(
                 // indexing is safe here because we have checked that "value_list" and "column_list" are matched in size
                 let (column_name, data_type) = &column_name_and_type[i];
                 let v = match v {
-                    SqlValue::Number(n, _) if n == "MAXVALUE" => PartitionBound::MaxValue,
+                    SqlValue::Number(n, _) if n == MAX_VALUE => PartitionBound::MaxValue,
                     _ => PartitionBound::Value(
                         sql_value_to_value(column_name, data_type, v).context(ParseSqlSnafu)?,
                     ),
