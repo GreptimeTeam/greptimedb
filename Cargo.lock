@@ -3030,6 +3030,8 @@ dependencies = [
  "itertools",
  "meta-client",
  "meta-srv",
+ "meter-core",
+ "meter-macros",
  "mito",
  "moka",
  "object-store",
@@ -4824,6 +4826,24 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+]
+
+[[package]]
+name = "meter-core"
+version = "0.1.0"
+source = "git+ssh://git@github.com/GreptimeTeam/greptime-meter.git?rev=27b030f8dfaf1542ce6eb64722f084b6855b4c57#27b030f8dfaf1542ce6eb64722f084b6855b4c57"
+dependencies = [
+ "anymap",
+ "once_cell",
+ "parking_lot",
+]
+
+[[package]]
+name = "meter-macros"
+version = "0.1.0"
+source = "git+ssh://git@github.com/GreptimeTeam/greptime-meter.git?rev=27b030f8dfaf1542ce6eb64722f084b6855b4c57#27b030f8dfaf1542ce6eb64722f084b6855b4c57"
+dependencies = [
+ "meter-core",
 ]
 
 [[package]]

@@ -84,6 +84,11 @@ tokio-util = { version = "0.7", features = ["io-util"] }
 tonic = { version = "0.9", features = ["tls"] }
 uuid = { version = "1", features = ["serde", "v4", "fast-rng"] }
 metrics = "0.20"
+meter-core = { git = "ssh://git@github.com/GreptimeTeam/greptime-meter.git", rev = "27b030f8dfaf1542ce6eb64722f084b6855b4c57" }
+
+[workspace.dependencies.meter-macros]
+git = "ssh://git@github.com/GreptimeTeam/greptime-meter.git"
+rev = "27b030f8dfaf1542ce6eb64722f084b6855b4c57"
 
 [profile.release]
 debug = true

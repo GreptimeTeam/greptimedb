@@ -35,6 +35,7 @@ use datafusion::physical_plan::{
 use datafusion_common::DataFusionError;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use meta_client::rpc::TableName;
+use meter_macros::write_meter;
 use partition::manager::PartitionRuleManagerRef;
 use snafu::prelude::*;
 use table::error::TableOperationSnafu;
@@ -75,6 +76,14 @@ impl Table for DistTable {
     }
 
     async fn insert(&self, request: InsertRequest) -> table::Result<usize> {
+        write_meter!(
+            request.catalog_name.clone(),
+            request.schema_name.clone(),
+            request.table_name.clone(),
+            request.region_number,
+            request
+        );
+
         let splits = self
             .partition_manager
             .split_insert_request(&self.table_name, request)
@@ -376,9 +385,10 @@ impl PartitionExec {
 #[cfg(test)]
 mod test {
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     use api::v1::column::SemanticType;
-    use api::v1::{column, Column, ColumnDataType, InsertRequest};
+    use api::v1::{column, Column, ColumnDataType, InsertRequest as GrpcInsertRequest};
     use catalog::error::Result;
     use catalog::remote::{KvBackend, ValueIter};
     use common_query::physical_plan::DfPhysicalPlanAdapter;
@@ -399,6 +409,10 @@ mod test {
     use meta_client::client::MetaClient;
     use meta_client::rpc::router::RegionRoute;
     use meta_client::rpc::{Region, Table, TableRoute};
+    use meter_core::collect::Collect;
+    use meter_core::data::{ReadRecord, WriteRecord};
+    use meter_core::global::global_registry;
+    use meter_core::write_calc::WriteCalculator;
     use partition::columns::RangeColumnsPartitionRule;
     use partition::manager::PartitionRuleManager;
     use partition::partition::{PartitionBound, PartitionDef};
@@ -925,7 +939,7 @@ mod test {
                 ..Default::default()
             },
         ];
-        let request = InsertRequest {
+        let request = GrpcInsertRequest {
             table_name: table_name.table_name.clone(),
             columns,
             row_count,
@@ -1056,5 +1070,56 @@ mod test {
             regions.unwrap_err(),
             partition::error::Error::FindRegions { .. }
         ));
+    }
+
+    #[derive(Default)]
+    struct MockCollector {
+        pub write_sum: AtomicU32,
+    }
+
+    impl Collect for MockCollector {
+        fn on_write(&self, record: WriteRecord) {
+            self.write_sum
+                .fetch_add(record.byte_count, Ordering::Relaxed);
+        }
+
+        fn on_read(&self, _record: ReadRecord) {
+            todo!()
+        }
+    }
+
+    struct MockCalculator;
+
+    impl WriteCalculator<InsertRequest> for MockCalculator {
+        fn calc_byte(&self, _value: &InsertRequest) -> u32 {
+            1024 * 10
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn test_write_meter() {
+        let collector = Arc::new(MockCollector::default());
+        global_registry().set_collector(collector.clone());
+        global_registry().register_calculator(Arc::new(MockCalculator));
+
+        let req = InsertRequest {
+            catalog_name: "greptime".to_string(),
+            schema_name: "public".to_string(),
+            table_name: "numbers".to_string(),
+            columns_values: Default::default(),
+            region_number: 0,
+        };
+
+        write_meter!(
+            req.catalog_name.to_string(),
+            req.schema_name.to_string(),
+            req.table_name.to_string(),
+            req.region_number,
+            req
+        );
+
+        let re = collector.write_sum.load(Ordering::Relaxed);
+        assert_eq!(re, 1024 * 10);
     }
 }
