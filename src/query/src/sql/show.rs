@@ -248,7 +248,7 @@ CREATE TABLE IF NOT EXISTS system_metrics (
   host STRING NULL,
   cpu DOUBLE NULL,
   disk FLOAT NULL,
-  ts TIMESTAMP NOT NULL DEFAULT current_timestamp(),
+  ts TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(),
   TIME INDEX (ts),
   PRIMARY KEY (id, host)
 )
