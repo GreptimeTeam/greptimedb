@@ -28,6 +28,7 @@ use store_api::storage::RegionNumber;
 use crate::error::{Result, UnsupportedSnafu};
 use crate::metadata::{FilterPushDownType, TableId, TableInfoRef, TableType};
 use crate::requests::{AlterTableRequest, DeleteRequest, InsertRequest};
+use crate::stats::Statistics;
 
 pub type AlterContext = anymap::Map<dyn Any + Send + Sync>;
 
@@ -116,6 +117,11 @@ pub trait Table: Send + Sync {
             operation: "REGION_STATS",
         }
         .fail()?
+    }
+
+    /// Get statistics for this table, if available
+    fn statistics(&self) -> Option<Statistics> {
+        None
     }
 }
 

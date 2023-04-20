@@ -80,6 +80,10 @@ impl Table for SystemCatalogTable {
     async fn delete(&self, request: DeleteRequest) -> table::Result<usize> {
         self.0.delete(request).await
     }
+
+    fn statistics(&self) -> Option<table::stats::Statistics> {
+        self.0.statistics()
+    }
 }
 
 impl SystemCatalogTable {
