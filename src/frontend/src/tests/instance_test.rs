@@ -300,7 +300,7 @@ async fn test_execute_insert_by_select(instance: Arc<dyn MockInstance>) {
 
     let output = execute_sql(&instance, "select * from demo2 order by ts").await;
     let expected = "\
-    +-------+------+--------+---------------------+
++-------+------+--------+---------------------+
 | host  | cpu  | memory | ts                  |
 +-------+------+--------+---------------------+
 | host1 | 66.6 | 1024.0 | 2022-06-15T07:02:37 |
@@ -416,7 +416,7 @@ async fn test_execute_show_databases_tables(instance: Arc<dyn MockInstance>) {
     }
 
     let expected = "\
-    +---------+
++---------+
 | Tables  |
 +---------+
 | numbers |
@@ -433,7 +433,7 @@ async fn test_execute_show_databases_tables(instance: Arc<dyn MockInstance>) {
 
     let output = execute_sql(&instance, "show tables").await;
     let expected = "\
-    +---------+
++---------+
 | Tables  |
 +---------+
 | demo    |
@@ -501,7 +501,7 @@ async fn test_rename_table(instance: Arc<dyn MockInstance>) {
         "insert into demo(host, cpu, memory, ts) values ('host1', 1.1, 100, 1000), ('host2', 2.2, 200, 2000)",
         query_ctx.clone(),
     )
-        .await;
+    .await;
     assert!(matches!(output, Output::AffectedRows(2)));
 
     // rename table
@@ -515,7 +515,7 @@ async fn test_rename_table(instance: Arc<dyn MockInstance>) {
 
     let output = execute_sql_with(&instance, "show tables", query_ctx.clone()).await;
     let expect = "\
-    +------------+
++------------+
 | Tables     |
 +------------+
 | test_table |
@@ -529,7 +529,7 @@ async fn test_rename_table(instance: Arc<dyn MockInstance>) {
     )
     .await;
     let expected = "\
-    +-------+-----+--------+---------------------+
++-------+-----+--------+---------------------+
 | host  | cpu | memory | ts                  |
 +-------+-----+--------+---------------------+
 | host1 | 1.1 | 100.0  | 1970-01-01T00:00:01 |
@@ -582,7 +582,7 @@ async fn test_create_table_after_rename_table(instance: Arc<dyn MockInstance>) {
     assert!(matches!(output, Output::AffectedRows(0)));
 
     let expect = "\
-    +------------+
++------------+
 | Tables     |
 +------------+
 | demo       |
@@ -629,7 +629,7 @@ async fn test_alter_table(instance: Arc<dyn MockInstance>) {
 
     let output = execute_sql(&instance, "select * from demo order by ts").await;
     let expected = "\
-    +-------+-----+--------+---------------------+--------+
++-------+-----+--------+---------------------+--------+
 | host  | cpu | memory | ts                  | my_tag |
 +-------+-----+--------+---------------------+--------+
 | host1 | 1.1 | 100.0  | 1970-01-01T00:00:01 |        |
@@ -644,7 +644,7 @@ async fn test_alter_table(instance: Arc<dyn MockInstance>) {
 
     let output = execute_sql(&instance, "select * from demo order by ts").await;
     let expected = "\
-    +-------+-----+---------------------+--------+
++-------+-----+---------------------+--------+
 | host  | cpu | ts                  | my_tag |
 +-------+-----+---------------------+--------+
 | host1 | 1.1 | 1970-01-01T00:00:01 |        |
@@ -663,7 +663,7 @@ async fn test_alter_table(instance: Arc<dyn MockInstance>) {
 
     let output = execute_sql(&instance, "select * from demo order by ts").await;
     let expected = "\
-    +-------+-------+---------------------+--------+
++-------+-------+---------------------+--------+
 | host  | cpu   | ts                  | my_tag |
 +-------+-------+---------------------+--------+
 | host1 | 1.1   | 1970-01-01T00:00:01 |        |
@@ -706,7 +706,7 @@ async fn test_insert_with_default_value_for_type(instance: Arc<Instance>, type_n
 
     let output = execute_sql(&instance, &format!("select host, cpu from {table_name}")).await;
     let expected = "\
-    +-------+-----+
++-------+-----+
 | host  | cpu |
 +-------+-----+
 | host1 | 1.1 |
@@ -740,7 +740,7 @@ async fn test_use_database(instance: Arc<dyn MockInstance>) {
 
     let output = execute_sql_with(&instance, "show tables", query_ctx.clone()).await;
     let expected = "\
-    +--------+
++--------+
 | Tables |
 +--------+
 | tb1    |
@@ -757,7 +757,7 @@ async fn test_use_database(instance: Arc<dyn MockInstance>) {
 
     let output = execute_sql_with(&instance, "select col_i32 from tb1", query_ctx.clone()).await;
     let expected = "\
-    +---------+
++---------+
 | col_i32 |
 +---------+
 | 1       |
@@ -768,7 +768,7 @@ async fn test_use_database(instance: Arc<dyn MockInstance>) {
     // accessing tables in other databases.
     let output = execute_sql(&instance, "select number from public.numbers limit 1").await;
     let expected = "\
-    +--------+
++--------+
 | number |
 +--------+
 | 0      |
@@ -815,7 +815,7 @@ async fn test_delete(instance: Arc<dyn MockInstance>) {
 
     let output = execute_sql(&instance, "select * from test_table").await;
     let expect = "\
-    +-------+---------------------+------+--------+
++-------+---------------------+------+--------+
 | host  | ts                  | cpu  | memory |
 +-------+---------------------+------+--------+
 | host2 | 2022-06-15T07:02:38 | 77.7 | 2048.0 |
@@ -835,7 +835,7 @@ async fn test_execute_copy_to_s3(instance: Arc<dyn MockInstance>) {
                 &instance,
                 "create table demo(host string, cpu double, memory double, ts timestamp time index);",
             )
-                .await;
+            .await;
 
             let output = execute_sql(
                 &instance,
@@ -874,7 +874,7 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
                 &instance,
                 "create table demo(host string, cpu double, memory double, ts timestamp time index);",
             )
-                .await;
+            .await;
 
             let output = execute_sql(
                 &instance,
@@ -929,11 +929,11 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
                 execute_sql(
                     &instance,
                     &format!(
-                        "create table {}(host string, cpu double, memory double, ts timestamp time index);",
-                        test.table_name
-                    ),
+                "create table {}(host string, cpu double, memory double, ts timestamp time index);",
+                test.table_name
+            ),
                 )
-                    .await;
+                .await;
                 let sql = format!(
                     "{} CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',ENDPOINT_URL='{}')",
                     test.sql, key_id, key, url
@@ -949,7 +949,7 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
                 )
                 .await;
                 let expected = "\
-                +-------+------+--------+---------------------+
++-------+------+--------+---------------------+
 | host  | cpu  | memory | ts                  |
 +-------+------+--------+---------------------+
 | host1 | 66.6 | 1024.0 | 2022-06-15T07:02:37 |
@@ -979,7 +979,7 @@ async fn test_information_schema(instance: Arc<dyn MockInstance>) {
     let expected = match is_distributed_mode {
         true => {
             "\
-            +---------------+--------------------+------------+------------+----------+-------------+
++---------------+--------------------+------------+------------+----------+-------------+
 | table_catalog | table_schema       | table_name | table_type | table_id | engine      |
 +---------------+--------------------+------------+------------+----------+-------------+
 | greptime      | public             | numbers    | BASE TABLE | 1        | test_engine |
@@ -989,7 +989,7 @@ async fn test_information_schema(instance: Arc<dyn MockInstance>) {
         }
         false => {
             "\
-            +---------------+--------------------+------------+------------+----------+-------------+
++---------------+--------------------+------------+------------+----------+-------------+
 | table_catalog | table_schema       | table_name | table_type | table_id | engine      |
 +---------------+--------------------+------------+------------+----------+-------------+
 | greptime      | public             | numbers    | BASE TABLE | 1        | test_engine |
@@ -1005,7 +1005,7 @@ async fn test_information_schema(instance: Arc<dyn MockInstance>) {
     let expected = match is_distributed_mode {
         true => {
             "\
-            +-----------------+--------------------+---------------+------------+----------+--------+
++-----------------+--------------------+---------------+------------+----------+--------+
 | table_catalog   | table_schema       | table_name    | table_type | table_id | engine |
 +-----------------+--------------------+---------------+------------+----------+--------+
 | another_catalog | another_schema     | another_table | BASE TABLE | 1025     | mito   |
@@ -1014,7 +1014,7 @@ async fn test_information_schema(instance: Arc<dyn MockInstance>) {
         }
         false => {
             "\
-            +-----------------+--------------------+---------------+------------+----------+--------+
++-----------------+--------------------+---------------+------------+----------+--------+
 | table_catalog   | table_schema       | table_name    | table_type | table_id | engine |
 +-----------------+--------------------+---------------+------------+----------+--------+
 | another_catalog | another_schema     | another_table | BASE TABLE | 1024     | mito   |
