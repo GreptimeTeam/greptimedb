@@ -120,11 +120,9 @@ impl AsyncFileReader for LazyParquetFileReader {
         range: std::ops::Range<usize>,
     ) -> BoxFuture<'_, ParquetResult<bytes::Bytes>> {
         Box::pin(async move {
-            if self.reader.is_none() {
-                self.maybe_initialize()
-                    .await
-                    .map_err(|e| ParquetError::External(Box::new(e)))?;
-            }
+            self.maybe_initialize()
+                .await
+                .map_err(|e| ParquetError::External(Box::new(e)))?;
             // Safety: Must initialized
             self.reader.as_mut().unwrap().get_bytes(range).await
         })
@@ -132,11 +130,9 @@ impl AsyncFileReader for LazyParquetFileReader {
 
     fn get_metadata(&mut self) -> BoxFuture<'_, ParquetResult<Arc<ParquetMetaData>>> {
         Box::pin(async move {
-            if self.reader.is_none() {
-                self.maybe_initialize()
-                    .await
-                    .map_err(|e| ParquetError::External(Box::new(e)))?;
-            }
+            self.maybe_initialize()
+                .await
+                .map_err(|e| ParquetError::External(Box::new(e)))?;
             // Safety: Must initialized
             self.reader.as_mut().unwrap().get_metadata().await
         })
