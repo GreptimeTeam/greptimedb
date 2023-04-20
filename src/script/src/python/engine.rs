@@ -40,7 +40,7 @@ use snafu::{ensure, ResultExt};
 use sql::statements::statement::Statement;
 
 use crate::engine::{CompileContext, EvalContext, Script, ScriptEngine};
-use crate::python::error::{self, PyRuntimeSnafu, Result};
+use crate::python::error::{self, PyRuntimeSnafu, Result, TokioJoinSnafu};
 use crate::python::ffi_types::copr::{exec_parsed, parse, AnnotationInfo, CoprocessorRef};
 const PY_ENGINE: &str = "python";
 
@@ -299,7 +299,11 @@ impl Script for PyScript {
                 _ => unreachable!(),
             }
         } else {
-            let batch = exec_parsed(&self.copr, &None, &params)?;
+            let copr = self.copr.clone();
+            let params = params.clone();
+            let batch = tokio::task::spawn_blocking(move || exec_parsed(&copr, &None, &params))
+                .await
+                .context(TokioJoinSnafu)??;
             let batches = RecordBatches::try_new(batch.schema.clone(), vec![batch]).unwrap();
             Ok(Output::RecordBatches(batches))
         }

@@ -117,6 +117,8 @@ pub enum Error {
         #[snafu(backtrace)]
         source: common_recordbatch::error::Error,
     },
+    #[snafu(display("Failed to create tokio task, source: {}", source))]
+    TokioJoin { source: tokio::task::JoinError },
 }
 
 impl From<QueryError> for Error {
@@ -131,6 +133,7 @@ impl ErrorExt for Error {
             Error::DataFusion { .. }
             | Error::Arrow { .. }
             | Error::PyRuntime { .. }
+            | Error::TokioJoin { .. }
             | Error::Other { .. } => StatusCode::Internal,
 
             Error::RecordBatch { source } | Error::NewRecordBatch { source } => {
