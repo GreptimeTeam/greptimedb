@@ -51,9 +51,9 @@ use crate::extension_plan::{
     EmptyMetric, InstantManipulate, Millisecond, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
 use crate::functions::{
-    AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, HoltWinters, IDelta, Increase,
-    LastOverTime, MaxOverTime, MinOverTime, PredictLinear, PresentOverTime, QuantileOverTime, Rate,
-    Resets, StddevOverTime, StdvarOverTime, SumOverTime,
+    AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, HoltWinters, IDelta,
+    Increase, LastOverTime, MaxOverTime, MinOverTime, PredictLinear, PresentOverTime,
+    QuantileOverTime, Rate, Resets, StddevOverTime, StdvarOverTime, SumOverTime,
 };
 
 const LEFT_PLAN_JOIN_ALIAS: &str = "lhs";
@@ -776,6 +776,7 @@ impl PromPlanner {
             "irate" => ScalarFunc::Udf(IDelta::<true>::scalar_udf()),
             "resets" => ScalarFunc::Udf(Resets::scalar_udf()),
             "changes" => ScalarFunc::Udf(Changes::scalar_udf()),
+            "deriv" => ScalarFunc::Udf(Deriv::scalar_udf()),
             "avg_over_time" => ScalarFunc::Udf(AvgOverTime::scalar_udf()),
             "min_over_time" => ScalarFunc::Udf(MinOverTime::scalar_udf()),
             "max_over_time" => ScalarFunc::Udf(MaxOverTime::scalar_udf()),
