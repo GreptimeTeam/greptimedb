@@ -131,6 +131,11 @@ impl Instance {
             file_table_engine::config::EngineConfig::default(),
             object_store.clone(),
         ));
+        engine_procedures.insert(
+            immutable_file_engine.name().to_string(),
+            immutable_file_engine.clone() as TableEngineProcedureRef,
+        );
+
         // TODO(yingwen): Insert the file table engine into `engine_procedures`
         // once #1372 is ready.
         let engine_manager = Arc::new(
@@ -208,6 +213,7 @@ impl Instance {
         if let Some(procedure_manager) = &procedure_manager {
             // Register procedures of the mito engine.
             mito_engine.register_procedure_loaders(&**procedure_manager);
+            immutable_file_engine.register_procedure_loaders(&**procedure_manager);
             // Register procedures in table-procedure crate.
             table_procedure::register_procedure_loaders(
                 catalog_manager.clone(),
