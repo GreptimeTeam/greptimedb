@@ -29,4 +29,5 @@ pub struct ColumnStatistics {
     pub min_value: Option<Value>,
     /// Number of distinct values
     pub distinct_count: Option<usize>,
+    // TODO(discord9): histogram of values
 }
