@@ -22,22 +22,32 @@ use url::ParseError;
 #[snafu(visibility(pub))]
 pub enum Error {
     #[snafu(display("Unsupported compression type: {}", compression_type))]
-    UnsupportedCompressionType { compression_type: String },
+    UnsupportedCompressionType {
+        compression_type: String,
+        location: Location,
+    },
 
     #[snafu(display("Unsupported backend protocol: {}", protocol))]
-    UnsupportedBackendProtocol { protocol: String },
+    UnsupportedBackendProtocol {
+        protocol: String,
+        location: Location,
+    },
 
     #[snafu(display("Unsupported format protocol: {}", format))]
-    UnsupportedFormat { format: String },
+    UnsupportedFormat { format: String, location: Location },
 
     #[snafu(display("empty host: {}", url))]
-    EmptyHostPath { url: String },
+    EmptyHostPath { url: String, location: Location },
 
     #[snafu(display("Invalid path: {}", path))]
-    InvalidPath { path: String },
+    InvalidPath { path: String, location: Location },
 
     #[snafu(display("Invalid url: {}, error :{}", url, source))]
-    InvalidUrl { url: String, source: ParseError },
+    InvalidUrl {
+        url: String,
+        source: ParseError,
+        location: Location,
+    },
 
     #[snafu(display("Failed to decompression, source: {}", source))]
     Decompression {
@@ -85,7 +95,7 @@ pub enum Error {
     },
 
     #[snafu(display("Invalid connection: {}", msg))]
-    InvalidConnection { msg: String },
+    InvalidConnection { msg: String, location: Location },
 
     #[snafu(display("Failed to join handle: {}", source))]
     JoinHandle {
@@ -157,13 +167,13 @@ impl ErrorExt for Error {
             MergeSchema { location, .. } => Some(*location),
             MissingRequiredField { location, .. } => Some(*location),
 
-            UnsupportedBackendProtocol { .. }
-            | EmptyHostPath { .. }
-            | InvalidPath { .. }
-            | InvalidUrl { .. }
-            | InvalidConnection { .. }
-            | UnsupportedCompressionType { .. }
-            | UnsupportedFormat { .. } => None,
+            UnsupportedBackendProtocol { location, .. } => Some(*location),
+            EmptyHostPath { location, .. } => Some(*location),
+            InvalidPath { location, .. } => Some(*location),
+            InvalidUrl { location, .. } => Some(*location),
+            InvalidConnection { location, .. } => Some(*location),
+            UnsupportedCompressionType { location, .. } => Some(*location),
+            UnsupportedFormat { location, .. } => Some(*location),
         }
     }
 }

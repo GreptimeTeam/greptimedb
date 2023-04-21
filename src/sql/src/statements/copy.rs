@@ -37,7 +37,7 @@ impl CopyTableArgument {
     pub fn with_default_format(value: &mut HashMap<String, String>) {
         value
             .entry(FORMAT.to_string())
-            .or_insert("parquet".to_string());
+            .or_insert_with(|| "parquet".to_string());
     }
 }
 

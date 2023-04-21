@@ -68,10 +68,7 @@ impl<'a> ParserContext<'a> {
         let mut with = options
             .into_iter()
             .filter_map(|option| {
-                if let Some(v) = parse_option_string(option.value) {
-                    return Some((option.name.value.to_uppercase(), v));
-                }
-                None
+                parse_option_string(option.value).map(|v| (option.name.to_string(), v))
             })
             .collect();
 
@@ -85,10 +82,7 @@ impl<'a> ParserContext<'a> {
         let connection = connection_options
             .into_iter()
             .filter_map(|option| {
-                if let Some(v) = parse_option_string(option.value) {
-                    return Some((option.name.value.to_uppercase(), v));
-                }
-                None
+                parse_option_string(option.value).map(|v| (option.name.to_string(), v))
             })
             .collect();
         Ok(CopyTableArgument {
@@ -117,10 +111,7 @@ impl<'a> ParserContext<'a> {
         let mut with = options
             .into_iter()
             .filter_map(|option| {
-                if let Some(v) = parse_option_string(option.value) {
-                    return Some((option.name.value.to_uppercase(), v));
-                }
-                None
+                parse_option_string(option.value).map(|v| (option.name.to_string(), v))
             })
             .collect();
 
@@ -134,11 +125,7 @@ impl<'a> ParserContext<'a> {
         let connection = connection_options
             .into_iter()
             .filter_map(|option| {
-                if let Some(v) = parse_option_string(option.value) {
-                    Some((option.name.value.to_uppercase(), v))
-                } else {
-                    None
-                }
+                parse_option_string(option.value).map(|v| (option.name.to_string(), v))
             })
             .collect();
 

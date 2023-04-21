@@ -33,6 +33,7 @@ use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::physical_plan::file_format::FileOpenFuture;
 use futures::StreamExt;
 use object_store::ObjectStore;
+use snafu::OptionExt;
 
 use self::csv::CsvFormat;
 use self::json::JsonFormat;
@@ -57,16 +58,17 @@ impl TryFrom<&HashMap<String, String>> for Format {
     type Error = error::Error;
 
     fn try_from(value: &HashMap<String, String>) -> Result<Self> {
-        if let Some(format) = value.get(FORMAT_TYPE) {
-            let format = format.to_ascii_uppercase();
-            return match format.as_str() {
-                "CSV" => Ok(Self::Csv(CsvFormat::try_from(value)?)),
-                "JSON" => Ok(Self::Json(JsonFormat::try_from(value)?)),
-                "PARQUET" => Ok(Self::Parquet(ParquetFormat::default())),
-                _ => error::UnsupportedFormatSnafu { format: &format }.fail(),
-            };
-        }
-        error::MissingRequiredFieldSnafu { name: FORMAT_TYPE }.fail()
+        let format = value
+            .get(FORMAT_TYPE)
+            .context(error::MissingRequiredFieldSnafu { name: FORMAT_TYPE })?
+            .to_ascii_uppercase();
+
+        return match format.as_str() {
+            "CSV" => Ok(Self::Csv(CsvFormat::try_from(value)?)),
+            "JSON" => Ok(Self::Json(JsonFormat::try_from(value)?)),
+            "PARQUET" => Ok(Self::Parquet(ParquetFormat::default())),
+            _ => error::UnsupportedFormatSnafu { format: &format }.fail(),
+        };
     }
 }
 
