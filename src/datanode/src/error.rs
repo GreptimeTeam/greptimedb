@@ -106,6 +106,17 @@ pub enum Error {
         source: table::error::Error,
     },
 
+    #[snafu(display(
+        "Table engine procedure not found: {}, source: {}",
+        engine_name,
+        source
+    ))]
+    EngineProcedureNotFound {
+        engine_name: String,
+        #[snafu(backtrace)]
+        source: table::error::Error,
+    },
+
     #[snafu(display("Table not found: {}", table_name))]
     TableNotFound {
         table_name: String,
@@ -432,7 +443,9 @@ impl ErrorExt for Error {
 
             Insert { source, .. } => source.status_code(),
             Delete { source, .. } => source.status_code(),
-            TableEngineNotFound { source, .. } => source.status_code(),
+            TableEngineNotFound { source, .. } | EngineProcedureNotFound { source, .. } => {
+                source.status_code()
+            }
             TableNotFound { .. } => StatusCode::TableNotFound,
             ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
 

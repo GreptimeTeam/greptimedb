@@ -32,9 +32,10 @@ use table_procedure::CreateTableProcedure;
 
 use crate::error::{
     self, CatalogNotFoundSnafu, CatalogSnafu, ConstraintNotSupportedSnafu, CreateTableSnafu,
-    IllegalPrimaryKeysDefSnafu, InsertSystemCatalogSnafu, KeyColumnNotFoundSnafu,
-    RegisterSchemaSnafu, Result, SchemaExistsSnafu, SchemaNotFoundSnafu, SubmitProcedureSnafu,
-    TableEngineNotFoundSnafu, UnrecognizedTableOptionSnafu, WaitProcedureSnafu,
+    EngineProcedureNotFoundSnafu, IllegalPrimaryKeysDefSnafu, InsertSystemCatalogSnafu,
+    KeyColumnNotFoundSnafu, RegisterSchemaSnafu, Result, SchemaExistsSnafu, SchemaNotFoundSnafu,
+    SubmitProcedureSnafu, TableEngineNotFoundSnafu, UnrecognizedTableOptionSnafu,
+    WaitProcedureSnafu,
 };
 use crate::sql::SqlHandler;
 
@@ -150,11 +151,17 @@ impl SqlHandler {
                 .context(TableEngineNotFoundSnafu {
                     engine_name: &req.engine,
                 })?;
+        let engine_procedure = self
+            .table_engine_manager
+            .engine_procedure(&req.engine)
+            .context(EngineProcedureNotFoundSnafu {
+                engine_name: &req.engine,
+            })?;
         let procedure = CreateTableProcedure::new(
             req,
             self.catalog_manager.clone(),
             table_engine.clone(),
-            self.engine_procedure.clone(),
+            engine_procedure,
         );
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
         let procedure_id = procedure_with_id.id;
