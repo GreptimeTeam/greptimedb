@@ -20,6 +20,7 @@ pub mod tests;
 
 pub const DEFAULT_SCHEMA_INFER_MAX_RECORD: usize = 1000;
 
+use std::collections::HashMap;
 use std::result;
 use std::sync::Arc;
 use std::task::Poll;
@@ -33,13 +34,41 @@ use datafusion::physical_plan::file_format::FileOpenFuture;
 use futures::StreamExt;
 use object_store::ObjectStore;
 
+use self::csv::CsvFormat;
+use self::json::JsonFormat;
+use self::parquet::ParquetFormat;
 use crate::compression::CompressionType;
-use crate::error::Result;
+use crate::error::{self, Result};
 
 pub const FORMAT_COMPRESSION_TYPE: &str = "COMPRESSION_TYPE";
 pub const FORMAT_DELIMTERL: &str = "DELIMTERL";
 pub const FORMAT_SCHEMA_INFER_MAX_RECORD: &str = "SCHEMA_INFER_MAX_RECORD";
 pub const FORMAT_HAS_HEADER: &str = "FORMAT_HAS_HEADER";
+pub const FORMAT_TYPE: &str = "FORMAT";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    Csv(CsvFormat),
+    Json(JsonFormat),
+    Parquet(ParquetFormat),
+}
+
+impl TryFrom<&HashMap<String, String>> for Format {
+    type Error = error::Error;
+
+    fn try_from(value: &HashMap<String, String>) -> Result<Self> {
+        if let Some(format) = value.get(FORMAT_TYPE) {
+            let format = format.to_ascii_uppercase();
+            return match format.as_str() {
+                "CSV" => Ok(Self::Csv(CsvFormat::try_from(value)?)),
+                "JSON" => Ok(Self::Json(JsonFormat::try_from(value)?)),
+                "PARQUET" => Ok(Self::Parquet(ParquetFormat::default())),
+                _ => error::UnsupportedFormatSnafu { format: &format }.fail(),
+            };
+        }
+        error::MissingRequiredFieldSnafu { name: FORMAT_TYPE }.fail()
+    }
+}
 
 #[async_trait]
 pub trait FileFormat: Send + Sync + std::fmt::Debug {

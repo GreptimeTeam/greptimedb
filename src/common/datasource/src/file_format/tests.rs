@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::assert_matches::assert_matches;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::vec;
 
@@ -26,10 +28,13 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::SessionContext;
 use futures::StreamExt;
 
+use super::FORMAT_TYPE;
 use crate::compression::CompressionType;
+use crate::error;
 use crate::file_format::csv::{CsvConfigBuilder, CsvOpener};
 use crate::file_format::json::JsonOpener;
 use crate::file_format::parquet::DefaultParquetFileReaderFactory;
+use crate::file_format::Format;
 use crate::test_util::{self, test_basic_schema, test_store};
 
 fn scan_config(file_schema: SchemaRef, limit: Option<usize>, filename: &str) -> FileScanConfig {
@@ -202,5 +207,42 @@ async fn test_parquet_exec() {
             "+-----+-------+",
         ],
         &result
+    );
+}
+
+#[test]
+fn test_format() {
+    let value = [(FORMAT_TYPE.to_string(), "csv".to_string())]
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+
+    assert_matches!(Format::try_from(&value).unwrap(), Format::Csv(_));
+
+    let value = [(FORMAT_TYPE.to_string(), "Parquet".to_string())]
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+
+    assert_matches!(Format::try_from(&value).unwrap(), Format::Parquet(_));
+
+    let value = [(FORMAT_TYPE.to_string(), "JSON".to_string())]
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+
+    assert_matches!(Format::try_from(&value).unwrap(), Format::Json(_));
+
+    let value = [(FORMAT_TYPE.to_string(), "Foobar".to_string())]
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+
+    assert_matches!(
+        Format::try_from(&value).unwrap_err(),
+        error::Error::UnsupportedFormat { .. }
+    );
+
+    let value = HashMap::new();
+
+    assert_matches!(
+        Format::try_from(&value).unwrap_err(),
+        error::Error::MissingRequiredField { .. }
     );
 }

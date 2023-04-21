@@ -18,7 +18,7 @@ use sqlparser::keywords::Keyword;
 
 use crate::error::{self, Result};
 use crate::parser::ParserContext;
-use crate::statements::copy::{CopyTable, CopyTableArgument, Format};
+use crate::statements::copy::{CopyTable, CopyTableArgument};
 use crate::statements::statement::Statement;
 use crate::util::parse_option_string;
 
@@ -65,25 +65,17 @@ impl<'a> ParserContext<'a> {
             .parse_options(Keyword::WITH)
             .context(error::SyntaxSnafu { sql: self.sql })?;
 
-        // default format is parquet
-        let mut format = Format::Parquet;
-        let mut pattern = None;
-        for option in options {
-            match option.name.value.to_ascii_uppercase().as_str() {
-                "FORMAT" => {
-                    if let Some(fmt_str) = parse_option_string(option.value) {
-                        format = Format::try_from(fmt_str)?;
-                    }
+        let mut with = options
+            .into_iter()
+            .filter_map(|option| {
+                if let Some(v) = parse_option_string(option.value) {
+                    return Some((option.name.value.to_uppercase(), v));
                 }
-                "PATTERN" => {
-                    if let Some(v) = parse_option_string(option.value) {
-                        pattern = Some(v);
-                    }
-                }
-                //TODO: throws warnings?
-                _ => (),
-            }
-        }
+                None
+            })
+            .collect();
+
+        CopyTableArgument::with_default_format(&mut with);
 
         let connection_options = self
             .parser
@@ -94,16 +86,14 @@ impl<'a> ParserContext<'a> {
             .into_iter()
             .filter_map(|option| {
                 if let Some(v) = parse_option_string(option.value) {
-                    Some((option.name.value.to_uppercase(), v))
-                } else {
-                    None
+                    return Some((option.name.value.to_uppercase(), v));
                 }
+                None
             })
             .collect();
         Ok(CopyTableArgument {
             table_name,
-            format,
-            pattern,
+            with,
             connection,
             location,
         })
@@ -124,15 +114,17 @@ impl<'a> ParserContext<'a> {
             .parse_options(Keyword::WITH)
             .context(error::SyntaxSnafu { sql: self.sql })?;
 
-        // default format is parquet
-        let mut format = Format::Parquet;
-        for option in options {
-            if option.name.value.eq_ignore_ascii_case("FORMAT") {
-                if let Some(fmt_str) = parse_option_string(option.value) {
-                    format = Format::try_from(fmt_str)?;
+        let mut with = options
+            .into_iter()
+            .filter_map(|option| {
+                if let Some(v) = parse_option_string(option.value) {
+                    return Some((option.name.value.to_uppercase(), v));
                 }
-            }
-        }
+                None
+            })
+            .collect();
+
+        CopyTableArgument::with_default_format(&mut with);
 
         let connection_options = self
             .parser
@@ -152,9 +144,8 @@ impl<'a> ParserContext<'a> {
 
         Ok(CopyTableArgument {
             table_name,
-            format,
+            with,
             connection,
-            pattern: None,
             location,
         })
     }
@@ -198,11 +189,11 @@ mod tests {
                     assert_eq!("schema0", schema);
                     assert_eq!("tbl", table);
 
-                    let file_name = copy_table.location;
+                    let file_name = &copy_table.location;
                     assert_eq!("tbl_file.parquet", file_name);
 
-                    let format = copy_table.format;
-                    assert_eq!(Format::Parquet, format);
+                    let format = copy_table.format().unwrap();
+                    assert_eq!("parquet", format.to_lowercase());
                 }
                 _ => unreachable!(),
             }
@@ -241,11 +232,11 @@ mod tests {
                     assert_eq!("schema0", schema);
                     assert_eq!("tbl", table);
 
-                    let file_name = copy_table.location;
+                    let file_name = &copy_table.location;
                     assert_eq!("tbl_file.parquet", file_name);
 
-                    let format = copy_table.format;
-                    assert_eq!(Format::Parquet, format);
+                    let format = copy_table.format().unwrap();
+                    assert_eq!("parquet", format.to_lowercase());
                 }
                 _ => unreachable!(),
             }
@@ -283,7 +274,7 @@ mod tests {
             match statement {
                 Statement::Copy(CopyTable::From(copy_table)) => {
                     if let Some(expected_pattern) = test.expected_pattern {
-                        assert_eq!(copy_table.pattern.clone().unwrap(), expected_pattern);
+                        assert_eq!(copy_table.pattern().cloned().unwrap(), expected_pattern);
                     }
                     assert_eq!(copy_table.connection.clone(), test.expected_connection);
                 }
@@ -327,25 +318,6 @@ mod tests {
                 }
                 _ => unreachable!(),
             }
-        }
-    }
-
-    #[test]
-    fn test_parse_copy_table_with_unsupopoted_format() {
-        let results = [
-            "COPY catalog0.schema0.tbl TO 'tbl_file.parquet' WITH (FORMAT = 'unknow_format')",
-            "COPY catalog0.schema0.tbl FROM 'tbl_file.parquet' WITH (FORMAT = 'unknow_format')",
-        ]
-        .iter()
-        .map(|sql| ParserContext::create_with_dialect(sql, &GenericDialect {}))
-        .collect::<Vec<_>>();
-
-        for result in results {
-            assert!(result.is_err());
-            assert_matches!(
-                result.err().unwrap(),
-                error::Error::UnsupportedCopyFormatOption { .. }
-            );
         }
     }
 }

@@ -137,9 +137,6 @@ pub enum Error {
         target_unit: TimeUnit,
     },
 
-    #[snafu(display("Unsupported format option: {}", name))]
-    UnsupportedCopyFormatOption { name: String },
-
     #[snafu(display("Unable to convert statement {} to DataFusion statement", statement))]
     ConvertToDfStatement {
         statement: String,
@@ -178,8 +175,7 @@ impl ErrorExt for Error {
             | ColumnTypeMismatch { .. }
             | InvalidTableName { .. }
             | InvalidSqlValue { .. }
-            | TimestampOverflow { .. }
-            | UnsupportedCopyFormatOption { .. } => StatusCode::InvalidArguments,
+            | TimestampOverflow { .. } => StatusCode::InvalidArguments,
 
             UnsupportedAlterTableStatement { .. } => StatusCode::InvalidSyntax,
             SerializeColumnDefaultConstraint { source, .. } => source.status_code(),

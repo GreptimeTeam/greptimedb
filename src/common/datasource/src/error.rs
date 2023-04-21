@@ -27,6 +27,9 @@ pub enum Error {
     #[snafu(display("Unsupported backend protocol: {}", protocol))]
     UnsupportedBackendProtocol { protocol: String },
 
+    #[snafu(display("Unsupported format protocol: {}", format))]
+    UnsupportedFormat { format: String },
+
     #[snafu(display("empty host: {}", url))]
     EmptyHostPath { url: String },
 
@@ -102,6 +105,9 @@ pub enum Error {
         source: arrow_schema::ArrowError,
         location: Location,
     },
+
+    #[snafu(display("Missing required field: {}", name))]
+    MissingRequiredField { name: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -116,6 +122,7 @@ impl ErrorExt for Error {
 
             UnsupportedBackendProtocol { .. }
             | UnsupportedCompressionType { .. }
+            | UnsupportedFormat { .. }
             | InvalidConnection { .. }
             | InvalidUrl { .. }
             | EmptyHostPath { .. }
@@ -124,7 +131,8 @@ impl ErrorExt for Error {
             | ReadParquetSnafu { .. }
             | ParquetToSchema { .. }
             | ParseFormat { .. }
-            | MergeSchema { .. } => StatusCode::InvalidArguments,
+            | MergeSchema { .. }
+            | MissingRequiredField { .. } => StatusCode::InvalidArguments,
 
             Decompression { .. } | JoinHandle { .. } => StatusCode::Unexpected,
         }
@@ -147,13 +155,15 @@ impl ErrorExt for Error {
             JoinHandle { location, .. } => Some(*location),
             ParseFormat { location, .. } => Some(*location),
             MergeSchema { location, .. } => Some(*location),
+            MissingRequiredField { location, .. } => Some(*location),
 
             UnsupportedBackendProtocol { .. }
             | EmptyHostPath { .. }
             | InvalidPath { .. }
             | InvalidUrl { .. }
             | InvalidConnection { .. }
-            | UnsupportedCompressionType { .. } => None,
+            | UnsupportedCompressionType { .. }
+            | UnsupportedFormat { .. } => None,
         }
     }
 }
