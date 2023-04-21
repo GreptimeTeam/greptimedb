@@ -383,7 +383,8 @@ impl DistInstance {
         let catalog = query_ctx.current_catalog();
         if self
             .catalog_manager
-            .schema(&catalog, &expr.database_name)
+            .schema_async(&catalog, &expr.database_name)
+            .await
             .context(CatalogSnafu)?
             .is_some()
         {

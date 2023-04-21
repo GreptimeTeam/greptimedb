@@ -49,7 +49,7 @@ pub async fn sql(
     let db = query_params.db.or(form_params.db);
 
     let resp = if let Some(sql) = &sql {
-        match super::query_context_from_db(sql_handler.clone(), db) {
+        match super::query_context_from_db(sql_handler.clone(), db).await {
             Ok(query_ctx) => {
                 JsonResponse::from_output(sql_handler.do_query(sql, query_ctx).await).await
             }
@@ -97,7 +97,7 @@ pub async fn promql(
     let exec_start = Instant::now();
     let db = params.db.clone();
     let prom_query = params.into();
-    let resp = match super::query_context_from_db(sql_handler.clone(), db) {
+    let resp = match super::query_context_from_db(sql_handler.clone(), db).await {
         Ok(query_ctx) => {
             JsonResponse::from_output(sql_handler.do_promql_query(&prom_query, query_ctx).await)
                 .await

@@ -109,7 +109,9 @@ pub trait CatalogManager: CatalogList {
     async fn register_system_table(&self, request: RegisterSystemTableRequest)
         -> error::Result<()>;
 
-    fn schema(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>>;
+    async fn catalog_async(&self, catalog: &str) -> Result<Option<CatalogProviderRef>>;
+
+    async fn schema_async(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>>;
 
     /// Returns the table by catalog, schema and table name.
     async fn table(

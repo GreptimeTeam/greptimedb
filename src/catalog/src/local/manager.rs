@@ -530,7 +530,7 @@ impl CatalogManager for LocalCatalogManager {
         Ok(())
     }
 
-    fn schema(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>> {
+    async fn schema_async(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>> {
         self.catalogs
             .catalog(catalog)?
             .context(CatalogNotFoundSnafu {
@@ -556,6 +556,10 @@ impl CatalogManager for LocalCatalogManager {
                 schema: schema_name,
             })?;
         schema.table(table_name).await
+    }
+
+    async fn catalog_async(&self, catalog: &str) -> Result<Option<CatalogProviderRef>> {
+        self.catalogs.catalog(catalog)
     }
 }
 

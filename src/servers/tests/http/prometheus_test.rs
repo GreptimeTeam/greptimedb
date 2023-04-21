@@ -110,7 +110,7 @@ impl SqlQueryHandler for DummyInstance {
         unimplemented!()
     }
 
-    fn is_valid_schema(&self, _catalog: &str, _schema: &str) -> Result<bool> {
+    async fn is_valid_schema(&self, _catalog: &str, _schema: &str) -> Result<bool> {
         Ok(true)
     }
 }

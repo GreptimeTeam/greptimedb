@@ -531,9 +531,10 @@ impl SqlQueryHandler for Instance {
         }
     }
 
-    fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
+    async fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
         self.catalog_manager
-            .schema(catalog, schema)
+            .schema_async(catalog, schema)
+            .await
             .map(|s| s.is_some())
             .context(error::CatalogSnafu)
     }

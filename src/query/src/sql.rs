@@ -109,7 +109,7 @@ pub fn show_databases(stmt: ShowDatabases, catalog_manager: CatalogManagerRef) -
     Ok(Output::RecordBatches(records))
 }
 
-pub fn show_tables(
+pub async fn show_tables(
     stmt: ShowTables,
     catalog_manager: CatalogManagerRef,
     query_ctx: QueryContextRef,
@@ -129,7 +129,8 @@ pub fn show_tables(
     };
     // TODO(sunng87): move this function into query_ctx
     let schema = catalog_manager
-        .schema(&query_ctx.current_catalog(), &schema)
+        .schema_async(&query_ctx.current_catalog(), &schema)
+        .await
         .context(error::CatalogSnafu)?
         .context(error::SchemaNotFoundSnafu { schema })?;
     let mut tables = schema.table_names().context(error::CatalogSnafu)?;

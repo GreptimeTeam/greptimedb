@@ -216,7 +216,24 @@ impl CatalogManager for FrontendCatalogManager {
         }
     }
 
-    fn schema(
+    async fn catalog_async(&self, catalog: &str) -> CatalogResult<Option<CatalogProviderRef>> {
+        // get from kv
+        let key = CatalogKey {
+            catalog_name: catalog.to_string(),
+        }
+        .to_string();
+        let res = self.backend.get(key.as_bytes()).await?.map(|_| {
+            Arc::new(FrontendCatalogProvider {
+                catalog_name: catalog.to_string(),
+                backend: self.backend.clone(),
+                partition_manager: self.partition_manager.clone(),
+                datanode_clients: self.datanode_clients.clone(),
+            }) as Arc<_>
+        });
+        Ok(res)
+    }
+
+    async fn schema_async(
         &self,
         catalog: &str,
         schema: &str,
@@ -234,7 +251,8 @@ impl CatalogManager for FrontendCatalogManager {
         schema: &str,
         table_name: &str,
     ) -> catalog::error::Result<Option<TableRef>> {
-        self.schema(catalog, schema)?
+        self.schema_async(catalog, schema)
+            .await?
             .context(catalog::error::SchemaNotFoundSnafu { catalog, schema })?
             .table(table_name)
             .await

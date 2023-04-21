@@ -106,7 +106,7 @@ impl SqlQueryHandler for DummyInstance {
         }
     }
 
-    fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
+    async fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
         Ok(catalog == DEFAULT_CATALOG_NAME && schema == DEFAULT_SCHEMA_NAME)
     }
 }

@@ -48,7 +48,8 @@ impl SqlHandler {
         let schema = req.db_name;
         if self
             .catalog_manager
-            .schema(&catalog, &schema)
+            .schema_async(&catalog, &schema)
+            .await
             .context(CatalogSnafu)?
             .is_some()
         {

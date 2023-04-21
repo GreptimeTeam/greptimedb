@@ -26,12 +26,13 @@ impl StatementExecutor {
             .context(ExecuteStatementSnafu)
     }
 
-    pub(super) fn show_tables(
+    pub(super) async fn show_tables(
         &self,
         stmt: ShowTables,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
         query::sql::show_tables(stmt, self.catalog_manager.clone(), query_ctx)
+            .await
             .context(ExecuteStatementSnafu)
     }
 }

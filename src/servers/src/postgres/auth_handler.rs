@@ -135,7 +135,7 @@ impl StartupHandler for PostgresServerHandler {
                 auth::save_startup_parameters_to_metadata(client, startup);
 
                 // check if db is valid
-                match resolve_db_info(client, self.query_handler.clone())? {
+                match resolve_db_info(client, self.query_handler.clone()).await? {
                     DbResolution::Resolved(catalog, schema) => {
                         client
                             .metadata_mut()
@@ -210,7 +210,7 @@ enum DbResolution {
 }
 
 /// A function extracted to resolve lifetime and readability issues:
-fn resolve_db_info<C>(
+async fn resolve_db_info<C>(
     client: &mut C,
     query_handler: ServerSqlQueryHandlerRef,
 ) -> PgWireResult<DbResolution>
@@ -222,6 +222,7 @@ where
         let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
         if query_handler
             .is_valid_schema(catalog, schema)
+            .await
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?
         {
             Ok(DbResolution::Resolved(

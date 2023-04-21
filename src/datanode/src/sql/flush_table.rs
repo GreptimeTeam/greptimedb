@@ -24,7 +24,8 @@ impl SqlHandler {
     pub(crate) async fn flush_table(&self, req: FlushTableRequest) -> Result<Output> {
         let schema = self
             .catalog_manager
-            .schema(&req.catalog_name, &req.schema_name)
+            .schema_async(&req.catalog_name, &req.schema_name)
+            .await
             .context(CatalogSnafu)?
             .context(DatabaseNotFoundSnafu {
                 catalog: &req.catalog_name,

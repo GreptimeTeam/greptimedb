@@ -471,7 +471,8 @@ impl CatalogManager for RemoteCatalogManager {
         let catalog_name = &request.catalog;
         let schema_name = &request.schema;
         let schema = self
-            .schema(catalog_name, schema_name)?
+            .schema_async(catalog_name, schema_name)
+            .await?
             .context(SchemaNotFoundSnafu {
                 catalog: catalog_name,
                 schema: schema_name,
@@ -505,8 +506,9 @@ impl CatalogManager for RemoteCatalogManager {
         Ok(())
     }
 
-    fn schema(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>> {
-        self.catalog(catalog)?
+    async fn schema_async(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>> {
+        self.catalog_async(catalog)
+            .await?
             .context(CatalogNotFoundSnafu {
                 catalog_name: catalog,
             })?
@@ -520,7 +522,8 @@ impl CatalogManager for RemoteCatalogManager {
         table_name: &str,
     ) -> Result<Option<TableRef>> {
         let catalog = self
-            .catalog(catalog_name)?
+            .catalog_async(catalog_name)
+            .await?
             .with_context(|| CatalogNotFoundSnafu { catalog_name })?;
         let schema = catalog
             .schema(schema_name)?
@@ -530,8 +533,21 @@ impl CatalogManager for RemoteCatalogManager {
             })?;
         schema.table(table_name).await
     }
+
+    async fn catalog_async(&self, catalog: &str) -> Result<Option<CatalogProviderRef>> {
+        let key = CatalogKey {
+            catalog_name: catalog.to_string(),
+        }
+        .to_string();
+        Ok(self
+            .backend
+            .get(key.as_bytes())
+            .await?
+            .map(|_| self.new_catalog_provider(catalog)))
+    }
 }
 
+// TODO(hl): remove impl of [CatalogList]
 impl CatalogList for RemoteCatalogManager {
     fn as_any(&self) -> &dyn Any {
         self

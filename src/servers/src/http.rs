@@ -71,14 +71,14 @@ use crate::server::Server;
 
 /// create query context from database name information, catalog and schema are
 /// resolved from the name
-pub(crate) fn query_context_from_db(
+pub(crate) async fn query_context_from_db(
     query_handler: ServerSqlQueryHandlerRef,
     db: Option<String>,
 ) -> std::result::Result<Arc<QueryContext>, JsonResponse> {
     if let Some(db) = &db {
         let (catalog, schema) = super::parse_catalog_and_schema_from_client_database_name(db);
 
-        match query_handler.is_valid_schema(catalog, schema) {
+        match query_handler.is_valid_schema(catalog, schema).await {
             Ok(true) => Ok(Arc::new(QueryContext::with(catalog, schema))),
             Ok(false) => Err(JsonResponse::with_error(
                 format!("Database not found: {db}"),
@@ -698,7 +698,7 @@ mod test {
             unimplemented!()
         }
 
-        fn is_valid_schema(&self, _catalog: &str, _schema: &str) -> Result<bool> {
+        async fn is_valid_schema(&self, _catalog: &str, _schema: &str) -> Result<bool> {
             Ok(true)
         }
     }

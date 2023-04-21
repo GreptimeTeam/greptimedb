@@ -147,7 +147,7 @@ impl CatalogManager for MemoryCatalogManager {
         Ok(())
     }
 
-    fn schema(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>> {
+    async fn schema_async(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>> {
         let catalogs = self.catalogs.read().unwrap();
         if let Some(c) = catalogs.get(catalog) {
             c.schema(schema)
@@ -171,6 +171,10 @@ impl CatalogManager for MemoryCatalogManager {
             None => Ok(None),
             Some(s) => s.table(table_name).await,
         }
+    }
+
+    async fn catalog_async(&self, catalog: &str) -> Result<Option<CatalogProviderRef>> {
+        Ok(self.catalogs.read().unwrap().get(catalog).cloned())
     }
 }
 
@@ -444,7 +448,8 @@ mod tests {
     async fn test_catalog_rename_table() {
         let catalog = MemoryCatalogManager::default();
         let schema = catalog
-            .schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
+            .schema_async(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
+            .await
             .unwrap()
             .unwrap();
 
@@ -506,7 +511,8 @@ mod tests {
     pub async fn test_catalog_deregister_table() {
         let catalog = MemoryCatalogManager::default();
         let schema = catalog
-            .schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
+            .schema_async(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
+            .await
             .unwrap()
             .unwrap();
 
