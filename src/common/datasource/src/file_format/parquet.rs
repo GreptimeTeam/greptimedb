@@ -12,11 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::result;
+use std::sync::Arc;
+
 use arrow_schema::Schema;
 use async_trait::async_trait;
+use datafusion::error::Result as DatafusionResult;
 use datafusion::parquet::arrow::async_reader::AsyncFileReader;
 use datafusion::parquet::arrow::parquet_to_arrow_schema;
-use object_store::ObjectStore;
+use datafusion::parquet::errors::{ParquetError, Result as ParquetResult};
+use datafusion::parquet::file::metadata::ParquetMetaData;
+use datafusion::physical_plan::file_format::{FileMeta, ParquetFileReaderFactory};
+use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+use futures::future::BoxFuture;
+use object_store::{ObjectStore, Reader};
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
@@ -46,6 +55,87 @@ impl FileFormat for ParquetFormat {
         .context(error::ParquetToSchemaSnafu)?;
 
         Ok(schema)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DefaultParquetFileReaderFactory {
+    object_store: ObjectStore,
+}
+
+/// Returns a AsyncFileReader factory
+impl DefaultParquetFileReaderFactory {
+    pub fn new(object_store: ObjectStore) -> Self {
+        Self { object_store }
+    }
+}
+
+impl ParquetFileReaderFactory for DefaultParquetFileReaderFactory {
+    // TODO(weny): Supports [`metadata_size_hint`].
+    // The upstream has a implementation supports [`metadata_size_hint`],
+    // however it coupled with Box<dyn ObjectStore>.
+    fn create_reader(
+        &self,
+        _partition_index: usize,
+        file_meta: FileMeta,
+        _metadata_size_hint: Option<usize>,
+        _metrics: &ExecutionPlanMetricsSet,
+    ) -> DatafusionResult<Box<dyn AsyncFileReader + Send>> {
+        let path = file_meta.location().to_string();
+        let object_store = self.object_store.clone();
+
+        Ok(Box::new(LazyParquetFileReader::new(object_store, path)))
+    }
+}
+
+pub struct LazyParquetFileReader {
+    object_store: ObjectStore,
+    reader: Option<Reader>,
+    path: String,
+}
+
+impl LazyParquetFileReader {
+    pub fn new(object_store: ObjectStore, path: String) -> Self {
+        LazyParquetFileReader {
+            object_store,
+            path,
+            reader: None,
+        }
+    }
+
+    /// Must initialize the reader, or throw an error from the future.
+    async fn maybe_initialize(&mut self) -> result::Result<(), object_store::Error> {
+        if self.reader.is_none() {
+            let reader = self.object_store.reader(&self.path).await?;
+            self.reader = Some(reader);
+        }
+
+        Ok(())
+    }
+}
+
+impl AsyncFileReader for LazyParquetFileReader {
+    fn get_bytes(
+        &mut self,
+        range: std::ops::Range<usize>,
+    ) -> BoxFuture<'_, ParquetResult<bytes::Bytes>> {
+        Box::pin(async move {
+            self.maybe_initialize()
+                .await
+                .map_err(|e| ParquetError::External(Box::new(e)))?;
+            // Safety: Must initialized
+            self.reader.as_mut().unwrap().get_bytes(range).await
+        })
+    }
+
+    fn get_metadata(&mut self) -> BoxFuture<'_, ParquetResult<Arc<ParquetMetaData>>> {
+        Box::pin(async move {
+            self.maybe_initialize()
+                .await
+                .map_err(|e| ParquetError::External(Box::new(e)))?;
+            // Safety: Must initialized
+            self.reader.as_mut().unwrap().get_metadata().await
+        })
     }
 }
 
