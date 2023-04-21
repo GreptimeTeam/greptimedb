@@ -60,5 +60,7 @@ pub struct CreateExternalTable {
     pub columns: Vec<ColumnDef>,
     pub constraints: Vec<TableConstraint>,
     /// Table options in `WITH`.
+    /// All keys are uppercase.
+    /// TODO(weny): unify the key's case styling.
     pub options: HashMap<String, String>,
 }
