@@ -213,7 +213,7 @@ impl CreateTableProcedure {
             }
             ProcedureState::Failed { error } => {
                 // Return error if the subprocedure is failed.
-                Err(error.clone()).context(SubprocedureFailedSnafu {
+                Err(error).context(SubprocedureFailedSnafu {
                     subprocedure_id: sub_id,
                 })?
             }
