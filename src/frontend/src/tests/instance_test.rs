@@ -80,6 +80,65 @@ async fn test_create_database_and_insert_query(instance: Arc<dyn MockInstance>) 
 }
 
 #[apply(both_instances_cases)]
+async fn test_show_create_table(instance: Arc<dyn MockInstance>) {
+    let frontend = instance.frontend();
+
+    let output = execute_sql(
+        &frontend,
+        r#"create table demo(
+             host STRING,
+             cpu DOUBLE,
+             memory DOUBLE,
+             ts bigint,
+             TIME INDEX(ts)
+)"#,
+    )
+    .await;
+    assert!(matches!(output, Output::AffectedRows(0)));
+
+    let output = execute_sql(&frontend, "show create table demo").await;
+
+    let expected = if instance.is_distributed_mode() {
+        "\
++-------+--------------------------------------------+
+| Table | Create Table                               |
++-------+--------------------------------------------+
+| demo  | CREATE TABLE IF NOT EXISTS demo (          |
+|       |   host STRING NULL,                        |
+|       |   cpu DOUBLE NULL,                         |
+|       |   memory DOUBLE NULL,                      |
+|       |   ts BIGINT NOT NULL,                      |
+|       |   TIME INDEX (ts)                          |
+|       | )                                          |
+|       | PARTITION BY RANGE COLUMNS (ts) (          |
+|       |   PARTITION r0 VALUES LESS THAN (MAXVALUE) |
+|       | )                                          |
+|       | ENGINE=mito                                |
+|       |                                            |
++-------+--------------------------------------------+"
+    } else {
+        "\
++-------+-----------------------------------+
+| Table | Create Table                      |
++-------+-----------------------------------+
+| demo  | CREATE TABLE IF NOT EXISTS demo ( |
+|       |   host STRING NULL,               |
+|       |   cpu DOUBLE NULL,                |
+|       |   memory DOUBLE NULL,             |
+|       |   ts BIGINT NOT NULL,             |
+|       |   TIME INDEX (ts)                 |
+|       | )                                 |
+|       | ENGINE=mito                       |
+|       | WITH(                             |
+|       |   regions = 1                     |
+|       | )                                 |
++-------+-----------------------------------+"
+    };
+
+    check_output_stream(output, expected).await;
+}
+
+#[apply(both_instances_cases)]
 async fn test_issue477_same_table_name_in_different_databases(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 

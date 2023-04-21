@@ -16,6 +16,7 @@ use std::any::Any;
 
 use common_error::prelude::*;
 use datafusion::parquet;
+use datatypes::value::Value;
 use snafu::Location;
 use store_api::storage::RegionId;
 
@@ -60,6 +61,13 @@ pub enum Error {
 
     #[snafu(display("Failed to parse SQL, source: {}", source))]
     ParseSql {
+        #[snafu(backtrace)]
+        source: sql::error::Error,
+    },
+
+    #[snafu(display("Failed to convert value to sql value: {}", value))]
+    ConvertSqlValue {
+        value: Value,
         #[snafu(backtrace)]
         source: sql::error::Error,
     },
@@ -173,8 +181,23 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to find table route for table {}", table_name))]
+    #[snafu(display(
+        "Failed to find table route for table {}, source: {}",
+        table_name,
+        source
+    ))]
     FindTableRoute {
+        table_name: String,
+        #[snafu(backtrace)]
+        source: partition::error::Error,
+    },
+
+    #[snafu(display(
+        "Failed to find table partition rule for table {}, source: {}",
+        table_name,
+        source
+    ))]
+    FindTablePartitionRule {
         table_name: String,
         #[snafu(backtrace)]
         source: partition::error::Error,
@@ -483,7 +506,9 @@ impl ErrorExt for Error {
             Error::StartServer { source, .. } => source.status_code(),
             Error::ShutdownServer { source, .. } => source.status_code(),
 
-            Error::ParseSql { source } => source.status_code(),
+            Error::ConvertSqlValue { source, .. } | Error::ParseSql { source } => {
+                source.status_code()
+            }
 
             Error::Table { source }
             | Error::CopyTable { source, .. }
@@ -536,9 +561,9 @@ impl ErrorExt for Error {
             Error::InvokeDatanode { source } => source.status_code(),
 
             Error::External { source } => source.status_code(),
-            Error::DeserializePartition { source, .. } | Error::FindTableRoute { source, .. } => {
-                source.status_code()
-            }
+            Error::DeserializePartition { source, .. }
+            | Error::FindTablePartitionRule { source, .. }
+            | Error::FindTableRoute { source, .. } => source.status_code(),
             Error::UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
 
             Error::StartScriptManager { source } => source.status_code(),

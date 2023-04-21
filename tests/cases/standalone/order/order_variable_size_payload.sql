@@ -116,6 +116,8 @@ DROP TABLE test4;
 
 DROP TABLE tpch_q1_agg;
 
+DROP TABLE test5;
+
 DROP TABLE test6;
 
 DROP table test7;

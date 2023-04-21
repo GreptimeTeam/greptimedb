@@ -77,6 +77,7 @@ pub struct TableOptions {
 
 pub const WRITE_BUFFER_SIZE_KEY: &str = "write_buffer_size";
 pub const TTL_KEY: &str = "ttl";
+pub const REGIONS_KEY: &str = "regions";
 pub const COMPACTION_TIME_WINDOW_KEY: &str = "compaction_time_window";
 
 impl TryFrom<&HashMap<String, String>> for TableOptions {
@@ -121,7 +122,11 @@ impl TryFrom<&HashMap<String, String>> for TableOptions {
             };
         }
         options.extra_options = HashMap::from_iter(value.iter().filter_map(|(k, v)| {
-            if k != WRITE_BUFFER_SIZE_KEY && k != TTL_KEY && k != COMPACTION_TIME_WINDOW_KEY {
+            if k != WRITE_BUFFER_SIZE_KEY
+                && k != REGIONS_KEY
+                && k != TTL_KEY
+                && k != COMPACTION_TIME_WINDOW_KEY
+            {
                 Some((k.clone(), v.clone()))
             } else {
                 None

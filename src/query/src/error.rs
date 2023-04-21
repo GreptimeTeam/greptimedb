@@ -16,6 +16,8 @@ use std::any::Any;
 
 use common_error::prelude::*;
 use datafusion::error::DataFusionError;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::value::Value;
 use snafu::{Location, Snafu};
 
 #[derive(Debug, Snafu)]
@@ -110,6 +112,20 @@ pub enum Error {
         table_name: String,
         location: Location,
     },
+
+    #[snafu(display("Failed to convert value to sql value: {}", value))]
+    ConvertSqlValue {
+        value: Value,
+        #[snafu(backtrace)]
+        source: sql::error::Error,
+    },
+
+    #[snafu(display("Failed to convert concrete type to sql type: {:?}", datatype))]
+    ConvertSqlType {
+        datatype: ConcreteDataType,
+        #[snafu(backtrace)]
+        source: sql::error::Error,
+    },
 }
 
 impl ErrorExt for Error {
@@ -134,6 +150,7 @@ impl ErrorExt for Error {
             DataFusion { .. } | MissingTimestampColumn { .. } => StatusCode::Internal,
             Sql { source } => source.status_code(),
             PlanSql { .. } => StatusCode::PlanQuery,
+            ConvertSqlType { source, .. } | ConvertSqlValue { source, .. } => source.status_code(),
         }
     }
 

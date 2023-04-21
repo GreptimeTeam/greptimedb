@@ -27,6 +27,7 @@ datafusion-sql.workspace = true
 datatypes = { path = "../datatypes" }
 futures = "0.3"
 futures-util.workspace = true
+humantime = "2.1"
 metrics.workspace = true
 once_cell = "1.10"
 promql = { path = "../promql" }
