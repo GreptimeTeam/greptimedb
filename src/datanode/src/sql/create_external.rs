@@ -43,10 +43,7 @@ impl SqlHandler {
             let columns_schemas: Vec<_> = stmt
                 .columns
                 .iter()
-                .enumerate()
-                .map(|(_index, column)| {
-                    column_def_to_schema(column, false).context(error::ParseSqlSnafu)
-                })
+                .map(|column| column_def_to_schema(column, false).context(error::ParseSqlSnafu))
                 .collect::<Result<Vec<_>>>()?;
             RawSchema::new(columns_schemas)
         } else {

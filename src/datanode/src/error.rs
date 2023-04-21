@@ -227,7 +227,10 @@ pub enum Error {
     InvalidSql { msg: String },
 
     #[snafu(display("Unsupported backend protocol: {}", protocol))]
-    UnsupportedBackendProtocol { protocol: String },
+    UnsupportedBackendProtocol {
+        protocol: String,
+        location: Location,
+    },
 
     #[snafu(display("Not support SQL, error: {}", msg))]
     NotSupportSql { msg: String },
@@ -305,20 +308,20 @@ pub enum Error {
 
     #[snafu(display("Failed to parse file format: {}", source))]
     ParseFileFormat {
+        #[snafu(backtrace)]
         source: query::error::Error,
-        location: Location,
     },
 
     #[snafu(display("Failed to options: {}", source))]
     ParseImmutableTableOptions {
+        #[snafu(backtrace)]
         source: query::error::Error,
-        location: Location,
     },
 
     #[snafu(display("Failed to infer schema: {}", source))]
     InferSchema {
+        #[snafu(backtrace)]
         source: query::error::Error,
-        location: Location,
     },
 
     #[snafu(display("Failed to access catalog, source: {}", source))]
@@ -330,6 +333,7 @@ pub enum Error {
     #[snafu(display("Failed to find table {} from catalog, source: {}", table_name, source))]
     FindTable {
         table_name: String,
+        #[snafu(backtrace)]
         source: catalog::error::Error,
     },
 
@@ -485,6 +489,10 @@ impl ErrorExt for Error {
 
             ConvertSchema { source, .. } | VectorComputation { source } => source.status_code(),
 
+            ParseFileFormat { source, .. }
+            | InferSchema { source, .. }
+            | ParseImmutableTableOptions { source, .. } => source.status_code(),
+
             ColumnValuesNumberMismatch { .. }
             | InvalidSql { .. }
             | UnsupportedBackendProtocol { .. }
@@ -501,10 +509,7 @@ impl ErrorExt for Error {
             | DatabaseNotFound { .. }
             | MissingNodeId { .. }
             | MissingMetasrvOpts { .. }
-            | ColumnNoneDefaultValue { .. }
-            | ParseFileFormat { .. }
-            | InferSchema { .. }
-            | ParseImmutableTableOptions { .. } => StatusCode::InvalidArguments,
+            | ColumnNoneDefaultValue { .. } => StatusCode::InvalidArguments,
 
             EncodeJson { .. } => StatusCode::Unexpected,
 

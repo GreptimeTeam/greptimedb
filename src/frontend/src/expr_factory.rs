@@ -101,10 +101,7 @@ pub(crate) async fn create_external_expr(
         let columns_schemas: Vec<_> = create
             .columns
             .iter()
-            .enumerate()
-            .map(|(_index, column)| {
-                column_def_to_schema(column, false).context(error::ParseSqlSnafu)
-            })
+            .map(|column| column_def_to_schema(column, false).context(error::ParseSqlSnafu))
             .collect::<Result<Vec<_>>>()?;
         RawSchema::new(columns_schemas)
     } else {

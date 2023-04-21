@@ -149,18 +149,18 @@ pub enum Error {
     },
 
     #[snafu(display("Unsupported file format: {}", format))]
-    UnsupportedFileFormat { format: String },
+    UnsupportedFileFormat { format: String, location: Location },
 
     #[snafu(display("Failed to parse file format: {}", source))]
     ParseFileFormat {
+        #[snafu(backtrace)]
         source: common_datasource::error::Error,
-        location: Location,
     },
 
     #[snafu(display("Failed to infer schema: {}", source))]
     InferSchema {
+        #[snafu(backtrace)]
         source: common_datasource::error::Error,
-        location: Location,
     },
 
     #[snafu(display("Failed to convert datafusion schema, source: {}", source))]
@@ -185,11 +185,11 @@ impl ErrorExt for Error {
             | MissingRequiredField { .. }
             | BuildRegex { .. }
             | UnsupportedFileFormat { .. }
-            | ParseFileFormat { .. }
-            | InferSchema { .. }
             | ConvertSchema { .. } => StatusCode::InvalidArguments,
 
             BuildBackend { .. } | ListObjects { .. } => StatusCode::StorageUnavailable,
+
+            ParseFileFormat { source, .. } | InferSchema { source, .. } => source.status_code(),
 
             QueryAccessDenied { .. } => StatusCode::AccessDenied,
             Catalog { source } => source.status_code(),

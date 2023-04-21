@@ -647,7 +647,7 @@ fn create_table_info(create_table: &CreateTableExpr) -> Result<RawTableInfo> {
         schema: raw_schema,
         primary_key_indices,
         value_indices: vec![],
-        engine: "mito".to_string(),
+        engine: create_table.engine.clone(),
         next_column_id: column_schemas.len() as u32,
         region_numbers: vec![],
         engine_options: HashMap::new(),

@@ -478,26 +478,26 @@ pub enum Error {
 
     #[snafu(display("Failed to encode object into json, source: {}", source))]
     EncodeJson {
-        location: Location,
         source: serde_json::error::Error,
+        location: Location,
     },
 
     #[snafu(display("Failed to parse file format: {}", source))]
     ParseFileFormat {
+        #[snafu(backtrace)]
         source: query::error::Error,
-        location: Location,
     },
 
     #[snafu(display("Failed to options: {}", source))]
     ParseImmutableTableOptions {
+        #[snafu(backtrace)]
         source: query::error::Error,
-        location: Location,
     },
 
     #[snafu(display("Failed to infer schema: {}", source))]
     InferSchema {
+        #[snafu(backtrace)]
         source: query::error::Error,
-        location: Location,
     },
 }
 
@@ -519,10 +519,11 @@ impl ErrorExt for Error {
             | Error::MissingMetasrvOpts { .. }
             | Error::ColumnNoneDefaultValue { .. }
             | Error::BuildRegex { .. }
-            | Error::InvalidSchema { .. }
-            | Error::ParseFileFormat { .. }
-            | Error::InferSchema { .. }
-            | Error::ParseImmutableTableOptions { .. } => StatusCode::InvalidArguments,
+            | Error::InvalidSchema { .. } => StatusCode::InvalidArguments,
+
+            Error::ParseFileFormat { source, .. }
+            | Error::InferSchema { source, .. }
+            | Error::ParseImmutableTableOptions { source, .. } => source.status_code(),
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
 
