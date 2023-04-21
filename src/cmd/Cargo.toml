@@ -35,7 +35,8 @@ partition = { path = "../partition" }
 query = { path = "../query" }
 rustyline = "10.1"
 serde.workspace = true
-servers = { path = "../servers" }
+servers = { path = "../servers", features = ["dashboard"] }
+
 session = { path = "../session" }
 snafu.workspace = true
 substrait = { path = "../common/substrait" }

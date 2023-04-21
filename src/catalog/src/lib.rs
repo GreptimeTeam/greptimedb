@@ -41,6 +41,7 @@ pub mod table_source;
 pub mod tables;
 
 /// Represent a list of named catalogs
+// TODO(hl): we can remove this catalog list and use only [CatalogManager]
 pub trait CatalogList: Sync + Send {
     /// Returns the catalog list as [`Any`](std::any::Any)
     /// so that it can be downcast to a specific implementation.

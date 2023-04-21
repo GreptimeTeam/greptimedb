@@ -183,7 +183,7 @@ impl DatafusionQueryEngine {
 
         let catalog = self
             .state
-            .catalog_list()
+            .catalog_manager()
             .catalog(catalog_name)
             .context(CatalogSnafu)?
             .context(CatalogNotFoundSnafu {

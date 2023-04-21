@@ -17,11 +17,12 @@ use std::fmt;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
-use catalog::CatalogListRef;
+use catalog::{CatalogListRef, CatalogManagerRef};
 use common_base::Plugins;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::physical_plan::SessionContext;
 use common_query::prelude::ScalarUdf;
+use datafusion::catalog::catalog::MemoryCatalogList;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::{QueryPlanner, SessionConfig, SessionState};
 use datafusion::execution::runtime_env::RuntimeEnv;
@@ -42,7 +43,7 @@ use crate::query_engine::options::QueryOptions;
 #[derive(Clone)]
 pub struct QueryEngineState {
     df_context: SessionContext,
-    catalog_list: CatalogListRef,
+    catalog_manager: CatalogManagerRef,
     aggregate_functions: Arc<RwLock<HashMap<String, AggregateFunctionMetaRef>>>,
     plugins: Arc<Plugins>,
 }
@@ -55,7 +56,7 @@ impl fmt::Debug for QueryEngineState {
 }
 
 impl QueryEngineState {
-    pub fn new(catalog_list: CatalogListRef, plugins: Arc<Plugins>) -> Self {
+    pub fn new(catalog_list: CatalogManagerRef, plugins: Arc<Plugins>) -> Self {
         let runtime_env = Arc::new(RuntimeEnv::default());
         let session_config = SessionConfig::new().with_create_default_catalog_and_schema(false);
         // Apply the type conversion rule first.
@@ -65,7 +66,7 @@ impl QueryEngineState {
         let session_state = SessionState::with_config_rt_and_catalog_list(
             session_config,
             runtime_env,
-            Arc::new(DfCatalogListAdapter::new(catalog_list.clone())),
+            Arc::new(MemoryCatalogList::default()), // pass a dummy catalog list
         )
         .with_analyzer_rules(analyzer.rules)
         .with_query_planner(Arc::new(DfQueryPlanner::new()));
@@ -74,7 +75,7 @@ impl QueryEngineState {
 
         Self {
             df_context,
-            catalog_list,
+            catalog_manager: catalog_list,
             aggregate_functions: Arc::new(RwLock::new(HashMap::new())),
             plugins,
         }
@@ -104,8 +105,8 @@ impl QueryEngineState {
     }
 
     #[inline]
-    pub fn catalog_list(&self) -> &CatalogListRef {
-        &self.catalog_list
+    pub fn catalog_manager(&self) -> &CatalogManagerRef {
+        &self.catalog_manager
     }
 
     pub(crate) fn disallow_cross_schema_query(&self) -> bool {
