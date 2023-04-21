@@ -21,9 +21,10 @@ use common_telemetry::tracing::{error, info};
 use datatypes::schema::RawSchema;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
-use sql::ast::{ColumnOption, SqlOption, TableConstraint, Value};
+use sql::ast::{ColumnOption, TableConstraint};
 use sql::statements::column_def_to_schema;
 use sql::statements::create::{CreateTable, TIME_INDEX};
+use sql::util::to_lowercase_options_map;
 use table::engine::{EngineContext, TableReference};
 use table::metadata::TableId;
 use table::requests::*;
@@ -284,7 +285,8 @@ impl SqlHandler {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let table_options = stmt_options_to_table_options(&stmt.options)?;
+        let table_options = TableOptions::try_from(&to_lowercase_options_map(&stmt.options))
+            .context(UnrecognizedTableOptionSnafu)?;
         let schema = RawSchema::new(columns_schemas);
         let request = CreateTableRequest {
             id: table_id,
@@ -301,20 +303,6 @@ impl SqlHandler {
         };
         Ok(request)
     }
-}
-
-fn stmt_options_to_table_options(opts: &[SqlOption]) -> error::Result<TableOptions> {
-    let mut map = HashMap::with_capacity(opts.len());
-    for SqlOption { name, value } in opts {
-        let value_str = match value {
-            Value::SingleQuotedString(s) => s.clone(),
-            Value::DoubleQuotedString(s) => s.clone(),
-            _ => value.to_string(),
-        };
-        map.insert(name.value.clone(), value_str);
-    }
-    let options = TableOptions::try_from(&map).context(UnrecognizedTableOptionSnafu)?;
-    Ok(options)
 }
 
 #[cfg(test)]

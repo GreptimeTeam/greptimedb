@@ -22,15 +22,16 @@ use datanode::instance::sql::table_idents_to_full_name;
 use datatypes::schema::ColumnSchema;
 use session::context::QueryContextRef;
 use snafu::{ensure, ResultExt};
-use sql::ast::{ColumnDef, ColumnOption, SqlOption, TableConstraint, Value};
+use sql::ast::{ColumnDef, ColumnOption, TableConstraint};
 use sql::statements::column_def_to_schema;
 use sql::statements::create::{CreateTable, TIME_INDEX};
+use sql::util::to_lowercase_options_map;
 use table::requests::TableOptions;
 
 use crate::error::{
     self, BuildCreateExprOnInsertionSnafu, ColumnDataTypeSnafu,
     ConvertColumnDefaultConstraintSnafu, IllegalPrimaryKeysDefSnafu, InvalidSqlSnafu,
-    ParseSqlSnafu, Result, UnrecognizedTableOptionSnafu,
+    ParseSqlSnafu, Result,
 };
 
 pub type CreateExprFactoryRef = Arc<dyn CreateExprFactory + Send + Sync>;
@@ -86,7 +87,10 @@ pub(crate) fn create_to_expr(
             .context(error::ExternalSnafu)?;
 
     let time_index = find_time_index(&create.constraints)?;
-    let table_options = HashMap::from(&stmt_options_to_table_options(&create.options)?);
+    let table_options = HashMap::from(
+        &TableOptions::try_from(&to_lowercase_options_map(&create.options))
+            .context(error::UnrecognizedTableOptionSnafu)?,
+    );
     let expr = CreateTableExpr {
         catalog_name,
         schema_name,
@@ -227,22 +231,6 @@ pub(crate) fn column_schemas_to_defs(
             })
         })
         .collect()
-}
-
-// TODO(hl): This function is intentionally duplicated with that one in src/datanode/src/sql/create.rs:261
-// since we are going to remove the statement parsing stuff from datanode.
-// Refer: https://github.com/GreptimeTeam/greptimedb/issues/1010
-fn stmt_options_to_table_options(opts: &[SqlOption]) -> error::Result<TableOptions> {
-    let mut map = HashMap::with_capacity(opts.len());
-    for SqlOption { name, value } in opts {
-        let value_str = match value {
-            Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => s.clone(),
-            _ => value.to_string(),
-        };
-        map.insert(name.value.clone(), value_str);
-    }
-    let options = TableOptions::try_from(&map).context(UnrecognizedTableOptionSnafu)?;
-    Ok(options)
 }
 
 #[cfg(test)]

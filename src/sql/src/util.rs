@@ -12,11 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use sqlparser::ast::Value;
+use std::collections::HashMap;
+
+use sqlparser::ast::{SqlOption, Value};
 
 pub fn parse_option_string(value: Value) -> Option<String> {
     match value {
         Value::SingleQuotedString(v) | Value::DoubleQuotedString(v) => Some(v),
         _ => None,
     }
+}
+
+/// Converts options to HashMap<String, String>.
+/// All keys are lowercase.
+pub fn to_lowercase_options_map(opts: &[SqlOption]) -> HashMap<String, String> {
+    let mut map = HashMap::with_capacity(opts.len());
+    for SqlOption { name, value } in opts {
+        let value_str = match value {
+            Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => s.clone(),
+            _ => value.to_string(),
+        };
+        map.insert(name.value.to_lowercase().clone(), value_str);
+    }
+    map
 }
