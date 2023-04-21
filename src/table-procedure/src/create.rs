@@ -211,12 +211,11 @@ impl CreateTableProcedure {
                 self.data.state = CreateTableState::RegisterCatalog;
                 Ok(Status::executing(true))
             }
-            ProcedureState::Failed { .. } => {
+            ProcedureState::Failed { error } => {
                 // Return error if the subprocedure is failed.
-                SubprocedureFailedSnafu {
+                Err(error.clone()).context(SubprocedureFailedSnafu {
                     subprocedure_id: sub_id,
-                }
-                .fail()?
+                })?
             }
         }
     }
