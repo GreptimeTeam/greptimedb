@@ -125,7 +125,8 @@ impl Instance {
             table_engine.name().to_string(),
             table_engine.clone() as TableEngineProcedureRef,
         );
-        // TODO(yingwen): Insert the file table engine to `engine_procedures`.
+        // TODO(yingwen): Insert the file table engine into `engine_procedures`
+        // once #1372 is ready.
         let engine_manager = Arc::new(
             MemoryTableEngineManager::new(table_engine.clone())
                 .with_engine_procedures(engine_procedures),
@@ -205,7 +206,8 @@ impl Instance {
                 table_engine.clone(),
                 &**procedure_manager,
             );
-            // TODO(yingwen): Register procedures of the file table engine.
+            // TODO(yingwen): Register procedures of the file table engine once #1372
+            // is ready.
         }
 
         Ok(Self {
