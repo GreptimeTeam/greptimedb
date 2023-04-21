@@ -12,17 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
+use crate::test_util::{self};
 
-pub mod buffered_writer;
-pub mod compression;
-pub mod error;
-pub mod file_format;
-pub mod lister;
-pub mod object_store;
-pub mod share_buffer;
-#[cfg(test)]
-pub mod test_util;
-#[cfg(test)]
-pub mod tests;
-pub mod util;
+#[tokio::test]
+async fn test_stream_to_json() {
+    // A small threshold
+    // Triggers the flush each writes
+    test_util::setup_stream_to_json_test(
+        &test_util::get_data_dir("tests/json/basic.json")
+            .display()
+            .to_string(),
+        |size| size / 2,
+    )
+    .await;
+
+    // A large threshold
+    // Only triggers the flush at last
+    test_util::setup_stream_to_json_test(
+        &test_util::get_data_dir("tests/json/basic.json")
+            .display()
+            .to_string(),
+        |size| size * 2,
+    )
+    .await;
+}

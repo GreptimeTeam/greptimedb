@@ -17,10 +17,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::vec;
 
-use arrow_schema::SchemaRef;
 use datafusion::assert_batches_eq;
-use datafusion::datasource::listing::PartitionedFile;
-use datafusion::datasource::object_store::ObjectStoreUrl;
 use datafusion::execution::context::TaskContext;
 use datafusion::physical_plan::file_format::{FileOpener, FileScanConfig, FileStream, ParquetExec};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
@@ -35,21 +32,7 @@ use crate::file_format::csv::{CsvConfigBuilder, CsvOpener};
 use crate::file_format::json::JsonOpener;
 use crate::file_format::parquet::DefaultParquetFileReaderFactory;
 use crate::file_format::Format;
-use crate::test_util::{self, test_basic_schema, test_store};
-
-fn scan_config(file_schema: SchemaRef, limit: Option<usize>, filename: &str) -> FileScanConfig {
-    FileScanConfig {
-        object_store_url: ObjectStoreUrl::parse("empty://").unwrap(), // won't be used
-        file_schema,
-        file_groups: vec![vec![PartitionedFile::new(filename.to_string(), 10)]],
-        statistics: Default::default(),
-        projection: None,
-        limit,
-        table_partition_cols: vec![],
-        output_ordering: None,
-        infinite_source: false,
-    }
-}
+use crate::test_util::{self, scan_config, test_basic_schema, test_store};
 
 struct Test<'a, T: FileOpener> {
     config: FileScanConfig,

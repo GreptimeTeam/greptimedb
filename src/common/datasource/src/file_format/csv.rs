@@ -18,19 +18,24 @@ use std::sync::Arc;
 
 use arrow::csv;
 use arrow::csv::reader::infer_reader_schema as infer_csv_schema;
+use arrow::record_batch::RecordBatch;
 use arrow_schema::{Schema, SchemaRef};
 use async_trait::async_trait;
 use common_runtime;
 use datafusion::error::Result as DataFusionResult;
 use datafusion::physical_plan::file_format::{FileMeta, FileOpenFuture, FileOpener};
+use datafusion::physical_plan::SendableRecordBatchStream;
 use derive_builder::Builder;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 use tokio_util::io::SyncIoBridge;
 
+use super::stream_to_file;
+use crate::buffered_writer::DfRecordBatchBuffer;
 use crate::compression::CompressionType;
 use crate::error::{self, Result};
 use crate::file_format::{self, open_with_decoder, FileFormat};
+use crate::share_buffer::SharedBuffer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CsvFormat {
@@ -179,6 +184,51 @@ impl FileFormat for CsvFormat {
         })
         .await
         .context(error::JoinHandleSnafu)?
+    }
+}
+
+pub async fn stream_to_csv(
+    stream: SendableRecordBatchStream,
+    store: ObjectStore,
+    path: String,
+    threshold: usize,
+) -> Result<()> {
+    stream_to_file(
+        stream,
+        store,
+        path,
+        threshold,
+        CsvEncodedBuffer::with_capacity(threshold),
+    )
+    .await
+}
+
+pub struct CsvEncodedBuffer {
+    inner: csv::Writer<SharedBuffer>,
+    buffer: SharedBuffer,
+}
+
+impl CsvEncodedBuffer {
+    pub fn with_capacity(size: usize) -> Self {
+        let buffer = SharedBuffer::with_capacity(size);
+        let inner = csv::Writer::new(buffer.clone());
+        Self { inner, buffer }
+    }
+}
+
+impl DfRecordBatchBuffer for CsvEncodedBuffer {
+    fn write(&mut self, batch: RecordBatch) -> Result<()> {
+        self.inner
+            .write(&batch)
+            .context(error::WriteRecordBatchSnafu)
+    }
+
+    fn consume_all(&mut self) -> bytes::Bytes {
+        self.buffer.buffer.lock().unwrap().split().into()
+    }
+
+    fn len(&self) -> usize {
+        self.buffer.buffer.lock().unwrap().len()
     }
 }
 

@@ -14,6 +14,7 @@
 
 use std::any::Any;
 
+use arrow_schema::ArrowError;
 use common_error::prelude::*;
 use snafu::Location;
 use url::ParseError;
@@ -66,6 +67,31 @@ pub enum Error {
         path: String,
         location: Location,
         source: object_store::Error,
+    },
+
+    #[snafu(display("Failed to write object to path: {}, source: {}", path, source))]
+    WriteObject {
+        path: String,
+        location: Location,
+        source: object_store::Error,
+    },
+
+    #[snafu(display("Failed to write: {}", source))]
+    AsyncWrite {
+        source: std::io::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to write record batch: {}", source))]
+    WriteRecordBatch {
+        location: Location,
+        source: ArrowError,
+    },
+
+    #[snafu(display("Failed to read record batch: {}", source))]
+    ReadRecordBatch {
+        location: Location,
+        source: datafusion::error::DataFusionError,
     },
 
     #[snafu(display("Failed to read parquet source: {}", source))]
@@ -126,9 +152,11 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
-            BuildBackend { .. } | ListObjects { .. } | ReadObject { .. } => {
-                StatusCode::StorageUnavailable
-            }
+            BuildBackend { .. }
+            | ListObjects { .. }
+            | ReadObject { .. }
+            | WriteObject { .. }
+            | AsyncWrite { .. } => StatusCode::StorageUnavailable,
 
             UnsupportedBackendProtocol { .. }
             | UnsupportedCompressionType { .. }
@@ -144,7 +172,10 @@ impl ErrorExt for Error {
             | MergeSchema { .. }
             | MissingRequiredField { .. } => StatusCode::InvalidArguments,
 
-            Decompression { .. } | JoinHandle { .. } => StatusCode::Unexpected,
+            Decompression { .. }
+            | JoinHandle { .. }
+            | ReadRecordBatch { .. }
+            | WriteRecordBatch { .. } => StatusCode::Unexpected,
         }
     }
 
@@ -166,6 +197,10 @@ impl ErrorExt for Error {
             ParseFormat { location, .. } => Some(*location),
             MergeSchema { location, .. } => Some(*location),
             MissingRequiredField { location, .. } => Some(*location),
+            WriteObject { location, .. } => Some(*location),
+            ReadRecordBatch { location, .. } => Some(*location),
+            WriteRecordBatch { location, .. } => Some(*location),
+            AsyncWrite { location, .. } => Some(*location),
 
             UnsupportedBackendProtocol { location, .. } => Some(*location),
             EmptyHostPath { location, .. } => Some(*location),
