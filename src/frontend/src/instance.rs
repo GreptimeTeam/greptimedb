@@ -221,12 +221,8 @@ impl Instance {
         })
     }
 
-    pub async fn build_servers(
-        &mut self,
-        opts: &FrontendOptions,
-        plugins: Arc<Plugins>,
-    ) -> Result<()> {
-        let servers = Services::build(opts, Arc::new(self.clone()), plugins).await?;
+    pub async fn build_servers(&mut self, opts: &FrontendOptions) -> Result<()> {
+        let servers = Services::build(opts, Arc::new(self.clone()), self.plugins.clone()).await?;
         self.servers = Arc::new(servers);
 
         Ok(())
