@@ -307,7 +307,7 @@ pub fn to_table_insert_request(
     })
 }
 
-fn add_values_to_builder(
+pub(crate) fn add_values_to_builder(
     builder: &mut Box<dyn MutableVector>,
     values: Values,
     row_count: usize,

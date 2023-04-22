@@ -13,79 +13,54 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use api::helper::{push_vals, ColumnDataTypeWrapper};
 use api::v1::column::SemanticType;
 use api::v1::{Column, InsertRequest as GrpcInsertRequest};
-use client::Database;
 use common_query::Output;
-use datatypes::prelude::ConcreteDataType;
-use snafu::{ensure, OptionExt, ResultExt};
+use datatypes::prelude::{ConcreteDataType, VectorRef};
+use futures::future;
+use snafu::{ensure, ResultExt};
 use store_api::storage::RegionNumber;
 use table::requests::InsertRequest;
 
 use super::DistTable;
 use crate::error;
-use crate::error::{FindTableRouteSnafu, Result};
-use crate::table::scan::DatanodeInstance;
+use crate::error::{JoinTaskSnafu, RequestDatanodeSnafu, Result};
 
 impl DistTable {
-    pub async fn dist_insert(
-        &self,
-        inserts: HashMap<RegionNumber, InsertRequest>,
-    ) -> Result<Output> {
-        let table_name = &self.table_name;
-        let route = self
-            .partition_manager
-            .find_table_route(&self.table_name)
-            .await
-            .with_context(|_| FindTableRouteSnafu {
-                table_name: table_name.to_string(),
-            })?;
+    pub async fn dist_insert(&self, inserts: Vec<GrpcInsertRequest>) -> Result<Output> {
+        let regions = inserts.iter().map(|x| x.region_number).collect();
+        let instances = self.find_datanode_instances(regions).await?;
 
-        let mut joins = Vec::with_capacity(inserts.len());
-        for (region_id, insert) in inserts {
-            let datanode = route
-                .region_routes
-                .iter()
-                .find_map(|x| {
-                    if x.region.id == region_id as u64 {
-                        x.leader_peer.clone()
-                    } else {
-                        None
-                    }
+        let results = future::try_join_all(instances.into_iter().zip(inserts.into_iter()).map(
+            |(instance, request)| {
+                common_runtime::spawn_write(async move {
+                    instance
+                        .grpc_insert(request)
+                        .await
+                        .context(RequestDatanodeSnafu)
                 })
-                .context(error::FindDatanodeSnafu { region: region_id })?;
+            },
+        ))
+        .await
+        .context(JoinTaskSnafu)?;
 
-            let client = self.datanode_clients.get_client(&datanode).await;
-            let db = Database::new(&table_name.catalog_name, &table_name.schema_name, client);
-            let instance = DatanodeInstance::new(Arc::new(self.clone()) as _, db);
-
-            let join = common_runtime::spawn_write(async move {
-                instance
-                    .grpc_insert(to_grpc_insert_request(region_id, insert)?)
-                    .await
-                    .context(error::RequestDatanodeSnafu)
-            });
-
-            joins.push(join);
-        }
-
-        let mut success = 0;
-        for join in joins {
-            let rows = join.await.context(error::JoinTaskSnafu)?? as usize;
-            success += rows;
-        }
-        Ok(Output::AffectedRows(success))
+        let affected_rows = results.into_iter().collect::<Result<Vec<_>>>()?;
+        Ok(Output::AffectedRows(affected_rows.iter().sum::<u32>() as _))
     }
 }
 
 pub fn insert_request_to_insert_batch(insert: &InsertRequest) -> Result<(Vec<Column>, u32)> {
+    to_grpc_columns(&insert.columns_values)
+}
+
+pub(crate) fn to_grpc_columns(
+    columns_values: &HashMap<String, VectorRef>,
+) -> Result<(Vec<Column>, u32)> {
     let mut row_count = None;
 
-    let columns = insert
-        .columns_values
+    let columns = columns_values
         .iter()
         .map(|(column_name, vector)| {
             match row_count {
@@ -129,7 +104,7 @@ pub fn insert_request_to_insert_batch(insert: &InsertRequest) -> Result<(Vec<Col
     Ok((columns, row_count))
 }
 
-fn to_grpc_insert_request(
+pub(crate) fn to_grpc_insert_request(
     region_number: RegionNumber,
     insert: InsertRequest,
 ) -> Result<GrpcInsertRequest> {

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::iter;
 use std::sync::Arc;
 
 use api::v1::AlterExpr;
@@ -36,18 +37,23 @@ use datafusion_common::DataFusionError;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use meta_client::rpc::TableName;
 use partition::manager::PartitionRuleManagerRef;
+use partition::splitter::WriteSplitter;
 use snafu::prelude::*;
+use store_api::storage::RegionNumber;
 use table::error::TableOperationSnafu;
 use table::metadata::{FilterPushDownType, TableInfo, TableInfoRef};
-use table::requests::{AlterTableRequest, InsertRequest};
+use table::requests::{AlterTableRequest, DeleteRequest, InsertRequest};
 use table::table::AlterContext;
 use table::Table;
 use tokio::sync::RwLock;
 
 use crate::datanode::DatanodeClients;
-use crate::error::{self, Result};
+use crate::error::{self, FindDatanodeSnafu, FindTableRouteSnafu, Result};
+use crate::table::delete::to_grpc_delete_request;
+use crate::table::insert::to_grpc_insert_request;
 use crate::table::scan::{DatanodeInstance, TableScanPlan};
 
+mod delete;
 pub mod insert;
 pub(crate) mod scan;
 
@@ -82,8 +88,15 @@ impl Table for DistTable {
             .map_err(BoxedError::new)
             .context(TableOperationSnafu)?;
 
+        let inserts = splits
+            .into_iter()
+            .map(|(region_number, insert)| to_grpc_insert_request(region_number, insert))
+            .collect::<Result<Vec<_>>>()
+            .map_err(BoxedError::new)
+            .context(TableOperationSnafu)?;
+
         let output = self
-            .dist_insert(splits)
+            .dist_insert(inserts)
             .await
             .map_err(BoxedError::new)
             .context(TableOperationSnafu)?;
@@ -152,6 +165,52 @@ impl Table for DistTable {
             .await
             .map_err(BoxedError::new)
             .context(TableOperationSnafu)
+    }
+
+    async fn delete(&self, request: DeleteRequest) -> table::Result<usize> {
+        let partition_rule = self
+            .partition_manager
+            .find_table_partition_rule(&self.table_name)
+            .await
+            .map_err(BoxedError::new)
+            .context(TableOperationSnafu)?;
+
+        let schema = self.schema();
+        let time_index = &schema
+            .timestamp_column()
+            .with_context(|| table::error::MissingTimeIndexColumnSnafu {
+                table_name: self.table_name.to_string(),
+            })?
+            .name;
+
+        let table_info = self.table_info();
+        let key_column_names = table_info
+            .meta
+            .row_key_column_names()
+            .chain(iter::once(time_index))
+            .collect::<Vec<_>>();
+
+        let requests = WriteSplitter::with_partition_rule(partition_rule)
+            .split_delete(request, key_column_names)
+            .map_err(BoxedError::new)
+            .and_then(|requests| {
+                requests
+                    .into_iter()
+                    .map(|(region_number, request)| {
+                        to_grpc_delete_request(&self.table_name, region_number, request)
+                    })
+                    .collect::<Result<Vec<_>>>()
+                    .map_err(BoxedError::new)
+            })
+            .context(TableOperationSnafu)?;
+
+        let output = self
+            .dist_delete(requests)
+            .await
+            .map_err(BoxedError::new)
+            .context(TableOperationSnafu)?;
+        let Output::AffectedRows(rows) = output else { unreachable!() };
+        Ok(rows)
     }
 }
 
@@ -271,6 +330,46 @@ impl DistTable {
             // TODO(hl): We should further check and track alter result in some global DDL task tracker
         }
         Ok(())
+    }
+
+    async fn find_datanode_instances(
+        &self,
+        regions: Vec<RegionNumber>,
+    ) -> Result<Vec<DatanodeInstance>> {
+        let table_name = &self.table_name;
+        let route = self
+            .partition_manager
+            .find_table_route(table_name)
+            .await
+            .with_context(|_| FindTableRouteSnafu {
+                table_name: table_name.to_string(),
+            })?;
+
+        let datanodes = regions
+            .into_iter()
+            .map(|n| {
+                let region_id = n as u64;
+                route
+                    .region_routes
+                    .iter()
+                    .find_map(|x| {
+                        if x.region.id == region_id {
+                            x.leader_peer.clone()
+                        } else {
+                            None
+                        }
+                    })
+                    .context(FindDatanodeSnafu { region: region_id })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let mut instances = Vec::with_capacity(datanodes.len());
+        for datanode in datanodes {
+            let client = self.datanode_clients.get_client(&datanode).await;
+            let db = Database::new(&table_name.catalog_name, &table_name.schema_name, client);
+            instances.push(DatanodeInstance::new(Arc::new(self.clone()) as _, db));
+        }
+        Ok(instances)
     }
 }
 

@@ -282,6 +282,12 @@ pub enum Error {
         source: common_grpc_expr::error::Error,
     },
 
+    #[snafu(display("Failed to convert delete expr to request: {}", source))]
+    DeleteExprToRequest {
+        #[snafu(backtrace)]
+        source: common_grpc_expr::error::Error,
+    },
+
     #[snafu(display("Failed to parse SQL, source: {}", source))]
     ParseSql {
         #[snafu(backtrace)]
@@ -453,6 +459,7 @@ impl ErrorExt for Error {
 
             AlterExprToRequest { source, .. }
             | CreateExprToRequest { source }
+            | DeleteExprToRequest { source }
             | InsertData { source } => source.status_code(),
 
             ConvertSchema { source, .. } | VectorComputation { source } => source.status_code(),

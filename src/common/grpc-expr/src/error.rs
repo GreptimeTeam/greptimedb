@@ -34,6 +34,9 @@ pub enum Error {
     #[snafu(display("Illegal insert data"))]
     IllegalInsertData { location: Location },
 
+    #[snafu(display("Illegal delete request, reason: {reason}"))]
+    IllegalDeleteRequest { reason: String, location: Location },
+
     #[snafu(display("Column datatype error, source: {}", source))]
     ColumnDataType {
         #[snafu(backtrace)]
@@ -95,9 +98,11 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
-            Error::DecodeInsert { .. } | Error::IllegalInsertData { .. } => {
-                StatusCode::InvalidArguments
-            }
+
+            Error::DecodeInsert { .. }
+            | Error::IllegalInsertData { .. }
+            | Error::IllegalDeleteRequest { .. } => StatusCode::InvalidArguments,
+
             Error::ColumnDataType { .. } => StatusCode::Internal,
             Error::DuplicatedTimestampColumn { .. } | Error::MissingTimestampColumn { .. } => {
                 StatusCode::InvalidArguments
