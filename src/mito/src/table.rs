@@ -241,6 +241,8 @@ impl<R: Region> Table for MitoTable<R> {
                 new_info.meta = new_meta;
             }
         }
+        // Do create_alter_operation first to bump next_column_id in meta.
+        let alter_op = create_alter_operation(table_name, &req.alter_kind, &mut new_info.meta)?;
         // Increase version of the table.
         new_info.ident.version = table_info.ident.version + 1;
 
@@ -263,9 +265,7 @@ impl<R: Region> Table for MitoTable<R> {
             .map_err(BoxedError::new)
             .context(table_error::TableOperationSnafu)?;
 
-        if let Some(alter_op) =
-            create_alter_operation(table_name, &req.alter_kind, &mut new_info.meta)?
-        {
+        if let Some(alter_op) = alter_op {
             // TODO(yingwen): Error handling. Maybe the region need to provide a method to
             // validate the request first.
             let regions = self.regions();
