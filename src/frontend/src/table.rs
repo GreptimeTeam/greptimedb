@@ -35,14 +35,13 @@ use datafusion::physical_plan::{
 use datafusion_common::DataFusionError;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use meta_client::rpc::TableName;
-use meter_macros::write_meter;
 use partition::manager::PartitionRuleManagerRef;
 use snafu::prelude::*;
 use table::error::TableOperationSnafu;
 use table::metadata::{FilterPushDownType, TableInfo, TableInfoRef};
 use table::requests::{AlterTableRequest, InsertRequest};
 use table::table::AlterContext;
-use table::Table;
+use table::{meter_insert_request, Table};
 use tokio::sync::RwLock;
 
 use crate::datanode::DatanodeClients;
@@ -76,13 +75,7 @@ impl Table for DistTable {
     }
 
     async fn insert(&self, request: InsertRequest) -> table::Result<usize> {
-        write_meter!(
-            request.catalog_name.clone(),
-            request.schema_name.clone(),
-            request.table_name.clone(),
-            request.region_number,
-            request
-        );
+        meter_insert_request!(request);
 
         let splits = self
             .partition_manager
@@ -424,7 +417,7 @@ mod test {
     use sql::statements::statement::Statement;
     use store_api::storage::RegionNumber;
     use table::metadata::{TableInfoBuilder, TableMetaBuilder};
-    use table::TableRef;
+    use table::{meter_insert_request, TableRef};
 
     use super::*;
     use crate::expr_factory;
@@ -1098,7 +1091,7 @@ mod test {
 
     #[test]
     #[ignore]
-    fn test_write_meter() {
+    fn test_meter_insert_request() {
         let collector = Arc::new(MockCollector::default());
         global_registry().set_collector(collector.clone());
         global_registry().register_calculator(Arc::new(MockCalculator));
@@ -1110,14 +1103,7 @@ mod test {
             columns_values: Default::default(),
             region_number: 0,
         };
-
-        write_meter!(
-            req.catalog_name.to_string(),
-            req.schema_name.to_string(),
-            req.table_name.to_string(),
-            req.region_number,
-            req
-        );
+        meter_insert_request!(req);
 
         let re = collector.write_sum.load(Ordering::Relaxed);
         assert_eq!(re, 1024 * 10);
