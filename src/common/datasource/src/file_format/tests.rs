@@ -241,8 +241,5 @@ fn test_format() {
 
     let value = HashMap::new();
 
-    assert_matches!(
-        Format::try_from(&value).unwrap_err(),
-        error::Error::MissingRequiredField { .. }
-    );
+    assert_matches!(Format::try_from(&value).unwrap(), Format::Parquet(_));
 }
