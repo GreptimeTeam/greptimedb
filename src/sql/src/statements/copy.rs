@@ -31,23 +31,18 @@ pub struct CopyTableArgument {
     pub location: String,
 }
 
-const FORMAT: &str = "FORMAT";
-
-impl CopyTableArgument {
-    pub fn with_default_format(value: &mut HashMap<String, String>) {
-        value
-            .entry(FORMAT.to_string())
-            .or_insert_with(|| "parquet".to_string());
-    }
-}
-
 #[cfg(test)]
 impl CopyTableArgument {
-    pub fn format(&self) -> Option<&String> {
-        self.with.get(FORMAT)
+    const FORMAT: &str = "FORMAT";
+
+    pub fn format(&self) -> Option<String> {
+        self.with
+            .get(Self::FORMAT)
+            .cloned()
+            .or_else(|| Some("PARQUET".to_string()))
     }
 
-    pub fn pattern(&self) -> Option<&String> {
-        self.with.get("PATTERN")
+    pub fn pattern(&self) -> Option<String> {
+        self.with.get("PATTERN").cloned()
     }
 }

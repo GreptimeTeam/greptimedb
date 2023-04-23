@@ -65,14 +65,12 @@ impl<'a> ParserContext<'a> {
             .parse_options(Keyword::WITH)
             .context(error::SyntaxSnafu { sql: self.sql })?;
 
-        let mut with = options
+        let with = options
             .into_iter()
             .filter_map(|option| {
                 parse_option_string(option.value).map(|v| (option.name.to_string(), v))
             })
             .collect();
-
-        CopyTableArgument::with_default_format(&mut with);
 
         let connection_options = self
             .parser
@@ -108,14 +106,12 @@ impl<'a> ParserContext<'a> {
             .parse_options(Keyword::WITH)
             .context(error::SyntaxSnafu { sql: self.sql })?;
 
-        let mut with = options
+        let with = options
             .into_iter()
             .filter_map(|option| {
                 parse_option_string(option.value).map(|v| (option.name.to_string(), v))
             })
             .collect();
-
-        CopyTableArgument::with_default_format(&mut with);
 
         let connection_options = self
             .parser
@@ -261,7 +257,7 @@ mod tests {
             match statement {
                 Statement::Copy(CopyTable::From(copy_table)) => {
                     if let Some(expected_pattern) = test.expected_pattern {
-                        assert_eq!(copy_table.pattern().cloned().unwrap(), expected_pattern);
+                        assert_eq!(copy_table.pattern().unwrap(), expected_pattern);
                     }
                     assert_eq!(copy_table.connection.clone(), test.expected_connection);
                 }

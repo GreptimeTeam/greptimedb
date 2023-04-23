@@ -33,7 +33,6 @@ use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::physical_plan::file_format::FileOpenFuture;
 use futures::StreamExt;
 use object_store::ObjectStore;
-use snafu::OptionExt;
 
 use self::csv::CsvFormat;
 use self::json::JsonFormat;
@@ -57,18 +56,18 @@ pub enum Format {
 impl TryFrom<&HashMap<String, String>> for Format {
     type Error = error::Error;
 
-    fn try_from(value: &HashMap<String, String>) -> Result<Self> {
-        let format = value
+    fn try_from(options: &HashMap<String, String>) -> Result<Self> {
+        let format = options
             .get(FORMAT_TYPE)
-            .context(error::MissingRequiredFieldSnafu { name: FORMAT_TYPE })?
-            .to_ascii_uppercase();
+            .map(|format| format.to_ascii_uppercase())
+            .unwrap_or_else(|| "PARQUET".to_string());
 
-        return match format.as_str() {
-            "CSV" => Ok(Self::Csv(CsvFormat::try_from(value)?)),
-            "JSON" => Ok(Self::Json(JsonFormat::try_from(value)?)),
+        match format.as_str() {
+            "CSV" => Ok(Self::Csv(CsvFormat::try_from(options)?)),
+            "JSON" => Ok(Self::Json(JsonFormat::try_from(options)?)),
             "PARQUET" => Ok(Self::Parquet(ParquetFormat::default())),
             _ => error::UnsupportedFormatSnafu { format: &format }.fail(),
-        };
+        }
     }
 }
 
