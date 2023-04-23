@@ -119,7 +119,7 @@ impl ScriptHandler for DummyInstance {
             .compile(script, CompileContext::default())
             .await
             .unwrap();
-        script.register_udf();
+        script.register_udf().await;
         self.scripts
             .write()
             .unwrap()

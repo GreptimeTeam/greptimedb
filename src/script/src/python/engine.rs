@@ -189,7 +189,7 @@ impl PyScript {
     }
     /// Register Current Script as UDF, register name is same as script name
     /// FIXME(discord9): possible inject attack?
-    pub fn register_udf(&self) {
+    pub async fn register_udf(&self) {
         let udf = PyUDF::from_copr(self.copr.clone());
         PyUDF::register_as_udf(udf.clone());
         PyUDF::register_to_query_engine(udf, self.query_engine.clone());

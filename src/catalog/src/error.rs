@@ -27,8 +27,11 @@ use crate::DeregisterTableRequest;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Failed to re-compile script scripts table, source: {}", source))]
-    CompileScript {
+    #[snafu(display(
+        "Failed to re-compile script due to internal error, source: {}",
+        source
+    ))]
+    CompileScriptInternal {
         #[snafu(backtrace)]
         source: BoxedError,
     },
@@ -306,7 +309,7 @@ impl ErrorExt for Error {
             Error::SystemCatalogTableScanExec { source } => source.status_code(),
             Error::InvalidTableInfoInCatalog { source } => source.status_code(),
 
-            Error::CompileScript { source }
+            Error::CompileScriptInternal { source }
             | Error::SchemaProviderOperation { source }
             | Error::Internal { source } => source.status_code(),
 

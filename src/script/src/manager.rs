@@ -38,24 +38,24 @@ impl ScriptManager {
         catalog_manager: CatalogManagerRef,
         query_engine: QueryEngineRef,
     ) -> Result<Self> {
-        let zelf = Self {
+        Ok(Self {
             compiled: RwLock::new(HashMap::default()),
             py_engine: PyEngine::new(query_engine.clone()),
             table: ScriptsTable::new(catalog_manager, query_engine).await?,
-        };
-        Ok(zelf)
+        })
     }
 
     /// compile script, and register them to the query engine and UDF registry
     async fn compile(&self, name: &str, script: &str) -> Result<Arc<PyScript>> {
-        let script = Arc::new(Self::compile_wout_cache(&self.py_engine, name, script).await?);
+        let script = Arc::new(Self::compile_without_cache(&self.py_engine, name, script).await?);
 
-        let mut compiled = self.compiled.write().unwrap();
-        compiled.insert(name.to_string(), script.clone());
-
+        {
+            let mut compiled = self.compiled.write().unwrap();
+            compiled.insert(name.to_string(), script.clone());
+        }
         logging::info!("Compiled and cached script: {}", name);
 
-        script.as_ref().register_udf();
+        script.as_ref().register_udf().await;
 
         logging::info!("Script register as UDF: {}", name);
 
@@ -63,7 +63,7 @@ impl ScriptManager {
     }
 
     /// compile script to PyScript, but not register them to the query engine and UDF registry nor caching in `compiled`
-    async fn compile_wout_cache(
+    async fn compile_without_cache(
         py_engine: &PyEngine,
         name: &str,
         script: &str,

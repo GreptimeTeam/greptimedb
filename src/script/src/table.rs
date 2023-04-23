@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use catalog::error::CompileScriptSnafu;
+use catalog::error::CompileScriptInternalSnafu;
 use catalog::{CatalogManagerRef, OpenSystemTableHook, RegisterSystemTableRequest};
 use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE, SCRIPTS_TABLE_ID,
@@ -24,8 +24,8 @@ use common_catalog::consts::{
 use common_catalog::format_full_table_name;
 use common_error::prelude::BoxedError;
 use common_query::Output;
-use common_recordbatch::util as record_util;
-use common_telemetry::{logging, warn};
+use common_recordbatch::{util as record_util, RecordBatch};
+use common_telemetry::logging;
 use common_time::util;
 use datafusion::prelude::SessionContext;
 use datatypes::prelude::{ConcreteDataType, ScalarVector};
@@ -37,10 +37,11 @@ use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::requests::{CreateTableRequest, InsertRequest, TableOptions};
 use table::TableRef;
+use tokio::task::JoinSet;
 
 use crate::error::{
-    CastTypeSnafu, CollectRecordsSnafu, FindAllScriptSnafu, FindColumnInScriptsTableSnafu,
-    FindScriptSnafu, FindScriptsTableSnafu, InsertScriptSnafu, RegisterScriptsTableSnafu, Result,
+    CastTypeSnafu, CollectRecordsSnafu, FindColumnInScriptsTableSnafu, FindScriptSnafu,
+    FindScriptsTableSnafu, InsertScriptSnafu, RegisterScriptsTableSnafu, Result,
     ScriptNotFoundSnafu, ScriptsTableNotFoundSnafu,
 };
 use crate::python::utils::block_on_async;
@@ -55,7 +56,25 @@ pub struct ScriptsTable {
 }
 
 impl ScriptsTable {
+    fn get_str_col_by_name<'a>(record: &'a RecordBatch, name: &str) -> Result<&'a StringVector> {
+        let column = record
+            .column_by_name(name)
+            .with_context(|| FindColumnInScriptsTableSnafu { name })?;
+        let column = column
+            .as_any()
+            .downcast_ref::<StringVector>()
+            .with_context(|| CastTypeSnafu {
+                msg: format!(
+                    "can't downcast {:?} array into string vector",
+                    column.data_type()
+                ),
+            })?;
+        Ok(column)
+    }
     /// this is used as a callback function when scripts table is created. `table` should be `scripts` table.
+    /// the function will try it best to register all scripts, and ignore the error in parsing and register scripts
+    ///  if any, just emit a warning
+    /// TODO(discord9): rethink error handling here
     pub async fn recompile_register_udf(
         table: TableRef,
         query_engine: QueryEngineRef,
@@ -64,61 +83,68 @@ impl ScriptsTable {
             .scan(None, &[], None)
             .await
             .map_err(BoxedError::new)
-            .context(CompileScriptSnafu)?;
+            .context(CompileScriptInternalSnafu)?;
         let ctx = SessionContext::new();
         let rbs = scan_stream
             .execute(0, ctx.task_ctx())
             .map_err(BoxedError::new)
-            .context(CompileScriptSnafu)?;
+            .context(CompileScriptInternalSnafu)?;
         let records = record_util::collect(rbs)
             .await
             .map_err(BoxedError::new)
-            .context(CompileScriptSnafu)?;
-        if records.is_empty() {
-            // scripts table is empty, no need to recompile
-            return Ok(());
-        }
-        assert_eq!(records.len(), 1);
-        let record = &records[0];
-        let get_col_by_name = |name: &str| -> Result<_> {
-            let column = record
-                .column_by_name(name)
-                .with_context(|| FindColumnInScriptsTableSnafu { name })?;
-            let column = column
-                .as_any()
-                .downcast_ref::<StringVector>()
-                .with_context(|| CastTypeSnafu {
-                    msg: format!(
-                        "can't downcast {:?} array into string vector",
-                        column.data_type()
-                    ),
-                })?;
-            Ok(column)
-        };
-        let names = get_col_by_name("name")
-            .map_err(BoxedError::new)
-            .context(CompileScriptSnafu)?;
-        let scripts = get_col_by_name("script")
-            .map_err(BoxedError::new)
-            .context(CompileScriptSnafu)?;
-        let mut script_list: Vec<(String, String)> = Vec::with_capacity(names.len());
-        for i in 0..names.len() {
-            script_list.push((
-                names.get_data(i).unwrap().to_string(),
-                scripts.get_data(i).unwrap().to_string(),
-            ));
-        }
-        for (name, script) in script_list {
-            if let Ok(script) = PyScript::from_script(&script, query_engine.clone()) {
-                script.register_udf();
+            .context(CompileScriptInternalSnafu)?;
 
-                logging::info!(
-                    "Script in `scripts` system table re-register as UDF: {}",
-                    name
-                );
-            } else {
-                warn!("Failed to compile script in `scripts` table: {}", name);
-            };
+        let mut script_list: Vec<(String, String)> = Vec::new();
+        for record in records {
+            let names = Self::get_str_col_by_name(&record, "name")
+                .map_err(BoxedError::new)
+                .context(CompileScriptInternalSnafu)?;
+            let scripts = Self::get_str_col_by_name(&record, "script")
+                .map_err(BoxedError::new)
+                .context(CompileScriptInternalSnafu)?;
+
+            let part_of_scripts_list =
+                names
+                    .iter_data()
+                    .zip(scripts.iter_data())
+                    .filter_map(|i| match i {
+                        (Some(a), Some(b)) => Some((a.to_string(), b.to_string())),
+                        _ => None,
+                    });
+            script_list.extend(part_of_scripts_list);
+        }
+
+        let mut set = JoinSet::new();
+        let _handles: Vec<_> = script_list
+            .into_iter()
+            .filter_map(|(name, script)| {
+                match PyScript::from_script(&script, query_engine.clone()) {
+                    Ok(script) => {
+                        let handle = set.spawn(async move {
+                            script.register_udf().await;
+                            logging::debug!(
+                                "Script in `scripts` system table re-register as UDF: {}",
+                                name
+                            );
+                        });
+                        Some(handle)
+                    }
+                    Err(err) => {
+                        logging::warn!(
+                            r#"Failed to compile script "{name}"" in `scripts` table: {err}"#
+                        );
+                        None
+                    }
+                }
+            })
+            .collect();
+        while let Some(res) = set.join_next().await {
+            match res {
+                Ok(_) => (),
+                Err(err) => {
+                    logging::error!("Unexpected error when re-registering Python UDF: {}", err)
+                }
+            }
         }
         Ok(())
     }
@@ -281,57 +307,6 @@ impl ScriptsTable {
 
         assert_eq!(script_column.len(), 1);
         Ok(script_column.get_data(0).unwrap().to_string())
-    }
-
-    /// simple query and return all scripts in scripts table in the form of `(name, script)`.
-    pub async fn find_all_scripts(&self) -> Result<Vec<(String, String)>> {
-        let sql = format!("select name, script from {}", self.name());
-        let stmt = QueryLanguageParser::parse_sql(&sql).unwrap();
-
-        let plan = self
-            .query_engine
-            .planner()
-            .plan(stmt, QueryContext::arc())
-            .await
-            .unwrap();
-
-        let stream = match self
-            .query_engine
-            .execute(plan, QueryContext::arc())
-            .await
-            .context(FindAllScriptSnafu)?
-        {
-            Output::Stream(stream) => stream,
-            _ => unreachable!(),
-        };
-        let records = record_util::collect(stream)
-            .await
-            .context(CollectRecordsSnafu)?;
-
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].num_columns(), 2);
-        let get_i_th_str_col = |i: usize| -> Result<_> {
-            let column = records[0].column(i);
-            let column = column
-                .as_any()
-                .downcast_ref::<StringVector>()
-                .with_context(|| CastTypeSnafu {
-                    msg: format!(
-                        "can't downcast {:?} array into string vector",
-                        column.data_type()
-                    ),
-                })?;
-            Ok(column)
-        };
-        let name_column = get_i_th_str_col(0)?;
-        let script_column = get_i_th_str_col(1)?;
-        let mut ret = Vec::with_capacity(name_column.len());
-        for i in 0..name_column.len() {
-            let name = name_column.get_data(i).unwrap().to_string();
-            let script = script_column.get_data(i).unwrap().to_string();
-            ret.push((name, script));
-        }
-        Ok(ret)
     }
 
     #[inline]
