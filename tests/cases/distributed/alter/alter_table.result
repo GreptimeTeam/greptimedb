@@ -25,6 +25,7 @@ DESC TABLE t;
 | k     | Int32 | YES  |         | FIELD         |
 +-------+-------+------+---------+---------------+
 
+-- SQLNESS ARG restart=true
 ALTER TABLE t ADD COLUMN m INTEGER;
 
 Affected Rows: 0
