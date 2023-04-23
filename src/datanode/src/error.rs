@@ -226,12 +226,6 @@ pub enum Error {
     #[snafu(display("Invalid SQL, error: {}", msg))]
     InvalidSql { msg: String },
 
-    #[snafu(display("Unsupported backend protocol: {}", protocol))]
-    UnsupportedBackendProtocol {
-        protocol: String,
-        location: Location,
-    },
-
     #[snafu(display("Not support SQL, error: {}", msg))]
     NotSupportSql { msg: String },
 
@@ -306,20 +300,14 @@ pub enum Error {
         source: common_time::error::Error,
     },
 
-    #[snafu(display("Failed to parse file format: {}", source))]
-    ParseFileFormat {
-        #[snafu(backtrace)]
-        source: query::error::Error,
-    },
-
-    #[snafu(display("Failed to options: {}", source))]
-    ParseImmutableTableOptions {
-        #[snafu(backtrace)]
-        source: query::error::Error,
-    },
-
     #[snafu(display("Failed to infer schema: {}", source))]
     InferSchema {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
+
+    #[snafu(display("Failed to prepare immutable table: {}", source))]
+    PrepareImmutableTable {
         #[snafu(backtrace)]
         source: query::error::Error,
     },
@@ -489,13 +477,10 @@ impl ErrorExt for Error {
 
             ConvertSchema { source, .. } | VectorComputation { source } => source.status_code(),
 
-            ParseFileFormat { source, .. }
-            | InferSchema { source, .. }
-            | ParseImmutableTableOptions { source, .. } => source.status_code(),
+            InferSchema { source, .. } => source.status_code(),
 
             ColumnValuesNumberMismatch { .. }
             | InvalidSql { .. }
-            | UnsupportedBackendProtocol { .. }
             | NotSupportSql { .. }
             | KeyColumnNotFound { .. }
             | IllegalPrimaryKeysDef { .. }
@@ -509,7 +494,8 @@ impl ErrorExt for Error {
             | DatabaseNotFound { .. }
             | MissingNodeId { .. }
             | MissingMetasrvOpts { .. }
-            | ColumnNoneDefaultValue { .. } => StatusCode::InvalidArguments,
+            | ColumnNoneDefaultValue { .. }
+            | PrepareImmutableTable { .. } => StatusCode::InvalidArguments,
 
             EncodeJson { .. } => StatusCode::Unexpected,
 

@@ -92,7 +92,10 @@ pub fn alter_expr_to_request(expr: AlterExpr) -> Result<AlterTableRequest> {
     }
 }
 
-pub fn create_table_schema(expr: &CreateTableExpr) -> Result<RawSchema> {
+pub fn create_table_schema_options(
+    expr: &CreateTableExpr,
+    require_time_index: bool,
+) -> Result<RawSchema> {
     let column_schemas = expr
         .column_defs
         .iter()
@@ -102,7 +105,7 @@ pub fn create_table_schema(expr: &CreateTableExpr) -> Result<RawSchema> {
         .collect::<Result<Vec<ColumnSchema>>>()?;
 
     // allow external table schema without the time index
-    if expr.engine != common_catalog::consts::IMMUTABLE_FILE_ENGINE {
+    if require_time_index {
         ensure!(
             column_schemas
                 .iter()
@@ -127,11 +130,17 @@ pub fn create_table_schema(expr: &CreateTableExpr) -> Result<RawSchema> {
     Ok(RawSchema::new(column_schemas))
 }
 
+pub fn create_table_schema(expr: &CreateTableExpr) -> Result<RawSchema> {
+    create_table_schema_options(expr, true)
+}
+
 pub fn create_expr_to_request(
     table_id: TableId,
     expr: CreateTableExpr,
 ) -> Result<CreateTableRequest> {
-    let schema = create_table_schema(&expr)?;
+    let require_time_index = expr.engine != common_catalog::consts::IMMUTABLE_FILE_ENGINE;
+
+    let schema = create_table_schema_options(&expr, require_time_index)?;
     let primary_key_indices = expr
         .primary_keys
         .iter()

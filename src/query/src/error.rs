@@ -127,6 +127,12 @@ pub enum Error {
         source: sql::error::Error,
     },
 
+    #[snafu(display("Failed to parse SQL, source: {}", source))]
+    ParseSql {
+        #[snafu(backtrace)]
+        source: sql::error::Error,
+    },
+
     #[snafu(display("Missing required field: {}", name))]
     MissingRequiredField { name: String, location: Location },
 
@@ -196,6 +202,7 @@ impl ErrorExt for Error {
             VectorComputation { source } | ConvertDatafusionSchema { source } => {
                 source.status_code()
             }
+            ParseSql { source } => source.status_code(),
             CreateRecordBatch { source } => source.status_code(),
             QueryExecution { source } | QueryPlan { source } => source.status_code(),
             DataFusion { .. } | MissingTimestampColumn { .. } => StatusCode::Internal,

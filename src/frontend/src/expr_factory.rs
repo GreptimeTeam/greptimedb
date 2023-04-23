@@ -19,12 +19,9 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::{Column, ColumnDataType, CreateTableExpr};
 use common_error::prelude::BoxedError;
 use datanode::instance::sql::table_idents_to_full_name;
-use datatypes::schema::{ColumnSchema, RawSchema};
+use datatypes::schema::ColumnSchema;
 use file_table_engine::table::immutable::ImmutableFileTableOptions;
-use query::sql::{
-    infer_immutable_file_table_schema, parse_immutable_file_table_format,
-    prepare_immutable_file_table,
-};
+use query::sql::prepare_immutable_file_table_files_and_schema;
 use session::context::QueryContextRef;
 use snafu::{ensure, ResultExt};
 use sql::ast::{ColumnDef, ColumnOption, TableConstraint};
@@ -82,39 +79,21 @@ impl CreateExprFactory for DefaultCreateExprFactory {
 }
 
 pub(crate) async fn create_external_expr(
-    create: &CreateExternalTable,
+    create: CreateExternalTable,
     query_ctx: QueryContextRef,
 ) -> Result<CreateTableExpr> {
     let (catalog_name, schema_name, table_name) =
         table_idents_to_full_name(&create.name, query_ctx)
             .map_err(BoxedError::new)
             .context(error::ExternalSnafu)?;
-    let time_index = "".to_string();
 
-    let mut options = create.options.clone();
+    let mut options = create.options;
 
-    let (object_store, files) = prepare_immutable_file_table(&options)
+    let (files, schema) = prepare_immutable_file_table_files_and_schema(&options, &create.columns)
         .await
-        .context(error::ParseImmutableTableOptionsSnafu)?;
-
-    let schema = if !create.columns.is_empty() {
-        let columns_schemas: Vec<_> = create
-            .columns
-            .iter()
-            .map(|column| column_def_to_schema(column, false).context(error::ParseSqlSnafu))
-            .collect::<Result<Vec<_>>>()?;
-        RawSchema::new(columns_schemas)
-    } else {
-        let format =
-            parse_immutable_file_table_format(&options).context(error::ParseFileFormatSnafu)?;
-        infer_immutable_file_table_schema(&object_store, format, &files)
-            .await
-            .context(error::InferSchemaSnafu)?
-    };
+        .context(error::PrepareImmutableTableSnafu)?;
 
     let meta = ImmutableFileTableOptions { files };
-
-    // lists files in the frontend to reduce unnecessary scan requests repeated in each datanode.
     options.insert(
         IMMUTABLE_TABLE_META_KEY.to_string(),
         serde_json::to_string(&meta).context(error::EncodeJsonSnafu)?,
@@ -126,7 +105,7 @@ pub(crate) async fn create_external_expr(
         table_name,
         desc: "".to_string(),
         column_defs: column_schemas_to_defs(schema.column_schemas)?,
-        time_index,
+        time_index: "".to_string(),
         primary_keys: vec![],
         create_if_not_exists: create.if_not_exists,
         table_options: options,

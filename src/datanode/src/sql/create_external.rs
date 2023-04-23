@@ -12,14 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use datatypes::schema::RawSchema;
 use file_table_engine::table::immutable::ImmutableFileTableOptions;
-use query::sql::{
-    infer_immutable_file_table_schema, parse_immutable_file_table_format,
-    prepare_immutable_file_table,
-};
+use query::sql::prepare_immutable_file_table_files_and_schema;
 use snafu::ResultExt;
-use sql::statements::column_def_to_schema;
 use sql::statements::create::CreateExternalTable;
 use table::engine::TableReference;
 use table::metadata::TableId;
@@ -36,28 +31,18 @@ impl SqlHandler {
         table_ref: &TableReference<'_>,
     ) -> Result<CreateTableRequest> {
         let mut options = stmt.options;
-        let (object_store, files) = prepare_immutable_file_table(&options)
-            .await
-            .context(error::ParseImmutableTableOptionsSnafu)?;
-        let schema = if !stmt.columns.is_empty() {
-            let columns_schemas: Vec<_> = stmt
-                .columns
-                .iter()
-                .map(|column| column_def_to_schema(column, false).context(error::ParseSqlSnafu))
-                .collect::<Result<Vec<_>>>()?;
-            RawSchema::new(columns_schemas)
-        } else {
-            let format =
-                parse_immutable_file_table_format(&options).context(error::ParseFileFormatSnafu)?;
-            infer_immutable_file_table_schema(&object_store, format, &files)
+
+        let (files, schema) =
+            prepare_immutable_file_table_files_and_schema(&options, &stmt.columns)
                 .await
-                .context(error::InferSchemaSnafu)?
-        };
+                .context(error::PrepareImmutableTableSnafu)?;
+
         let meta = ImmutableFileTableOptions { files };
         options.insert(
             IMMUTABLE_TABLE_META_KEY.to_string(),
             serde_json::to_string(&meta).context(error::EncodeJsonSnafu)?,
         );
+
         Ok(CreateTableRequest {
             id: table_id,
             catalog_name: table_ref.catalog.to_string(),

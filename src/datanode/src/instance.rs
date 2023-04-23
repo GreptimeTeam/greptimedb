@@ -136,8 +136,6 @@ impl Instance {
             immutable_file_engine.clone() as TableEngineProcedureRef,
         );
 
-        // TODO(yingwen): Insert the file table engine into `engine_procedures`
-        // once #1372 is ready.
         let engine_manager = Arc::new(
             MemoryTableEngineManager::with(vec![
                 mito_engine.clone(),

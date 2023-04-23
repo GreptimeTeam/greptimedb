@@ -482,20 +482,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to parse file format: {}", source))]
-    ParseFileFormat {
-        #[snafu(backtrace)]
-        source: query::error::Error,
-    },
-
-    #[snafu(display("Failed to options: {}", source))]
-    ParseImmutableTableOptions {
-        #[snafu(backtrace)]
-        source: query::error::Error,
-    },
-
-    #[snafu(display("Failed to infer schema: {}", source))]
-    InferSchema {
+    #[snafu(display("Failed to prepare immutable table: {}", source))]
+    PrepareImmutableTable {
         #[snafu(backtrace)]
         source: query::error::Error,
     },
@@ -519,11 +507,8 @@ impl ErrorExt for Error {
             | Error::MissingMetasrvOpts { .. }
             | Error::ColumnNoneDefaultValue { .. }
             | Error::BuildRegex { .. }
-            | Error::InvalidSchema { .. } => StatusCode::InvalidArguments,
-
-            Error::ParseFileFormat { source, .. }
-            | Error::InferSchema { source, .. }
-            | Error::ParseImmutableTableOptions { source, .. } => source.status_code(),
+            | Error::InvalidSchema { .. }
+            | Error::PrepareImmutableTable { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
 
