@@ -8,3 +8,5 @@ TQL EVAL (0, 10, '5s') test;
 
 -- the point at 1ms will be shadowed by the point at 2ms
 TQL EVAL (0, 10, '5s') test{k="a"};
+
+DROP TABLE test;
