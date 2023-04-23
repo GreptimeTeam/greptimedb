@@ -16,6 +16,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_datasource::file_format::Format;
 use common_datasource::object_store::build_backend;
 use common_error::prelude::BoxedError;
 use common_query::physical_plan::PhysicalPlanRef;
@@ -29,13 +30,12 @@ use table::error::{self as table_error, Result as TableResult};
 use table::metadata::{RawTableInfo, TableInfo, TableInfoRef, TableType};
 use table::Table;
 
-use super::format::{CreateScanPlanContext, ScanPlanConfig};
+use super::format::{create_physical_plan, CreateScanPlanContext, ScanPlanConfig};
 use crate::error::{self, ConvertRawSnafu, Result};
 use crate::manifest::immutable::{
     read_table_manifest, write_table_manifest, ImmutableMetadata, INIT_META_VERSION,
 };
 use crate::manifest::table_manifest_dir;
-use crate::table::format::Format;
 
 pub const IMMUTABLE_TABLE_META_KEY: &str = "IMMUTABLE_TABLE_META";
 pub const IMMUTABLE_TABLE_LOCATION_KEY: &str = "LOCATION";
@@ -85,20 +85,20 @@ impl Table for ImmutableFileTable {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> TableResult<PhysicalPlanRef> {
-        self.format
-            .create_physical_plan(
-                &CreateScanPlanContext::default(),
-                &ScanPlanConfig {
-                    file_schema: self.schema(),
-                    files: &self.files,
-                    projection,
-                    filters,
-                    limit,
-                    store: self.object_store.clone(),
-                },
-            )
-            .map_err(BoxedError::new)
-            .context(table_error::TableOperationSnafu)
+        create_physical_plan(
+            &self.format,
+            &CreateScanPlanContext::default(),
+            &ScanPlanConfig {
+                file_schema: self.schema(),
+                files: &self.files,
+                projection,
+                filters,
+                limit,
+                store: self.object_store.clone(),
+            },
+        )
+        .map_err(BoxedError::new)
+        .context(table_error::TableOperationSnafu)
     }
 
     async fn flush(
@@ -140,7 +140,7 @@ impl ImmutableFileTable {
 
         let meta: ImmutableFileTableOptions =
             serde_json::from_str(meta).context(error::DecodeJsonSnafu)?;
-        let format = Format::try_from(options)?;
+        let format = Format::try_from(options).context(error::ParseFileFormatSnafu)?;
 
         let object_store = build_backend(url, options).context(error::BuildBackendSnafu)?;
 
