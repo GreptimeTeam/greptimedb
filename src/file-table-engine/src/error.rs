@@ -134,7 +134,7 @@ pub enum Error {
     },
 
     #[snafu(display("Unsupported file format: {}", format))]
-    UnsupportedFileFormat { format: String },
+    UnsupportedFileFormat { format: String, location: Location },
 
     #[snafu(display("Failed to build csv config: {}", source))]
     BuildCsvConfig {
@@ -156,14 +156,14 @@ pub enum Error {
 
     #[snafu(display("Failed to build stream adapter: {}", source))]
     BuildStreamAdapter {
+        #[snafu(backtrace)]
         source: common_recordbatch::error::Error,
-        location: Location,
     },
 
     #[snafu(display("Failed to parse file format: {}", source))]
     ParseFileFormat {
+        #[snafu(backtrace)]
         source: common_datasource::error::Error,
-        location: Location,
     },
 }
 
@@ -181,21 +181,22 @@ impl ErrorExt for Error {
             | UnsupportedFileFormat { .. }
             | BuildCsvConfig { .. }
             | ProjectSchema { .. }
-            | ParseFileFormat { .. }
             | MissingRequiredField { .. } => StatusCode::InvalidArguments,
+
+            BuildBackend { source, .. } => source.status_code(),
+            BuildStreamAdapter { source, .. } => source.status_code(),
+            ParseFileFormat { source, .. } => source.status_code(),
 
             WriteTableManifest { .. }
             | DeleteTableManifest { .. }
             | ReadTableManifest { .. }
-            | CheckObject { .. }
-            | BuildBackend { .. } => StatusCode::StorageUnavailable,
+            | CheckObject { .. } => StatusCode::StorageUnavailable,
 
             EncodeJson { .. }
             | DecodeJson { .. }
             | ConvertRaw { .. }
             | DropTable { .. }
             | WriteImmutableManifest { .. }
-            | BuildStreamAdapter { .. }
             | BuildStream { .. } => StatusCode::Unexpected,
         }
     }

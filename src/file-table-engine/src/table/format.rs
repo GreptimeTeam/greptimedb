@@ -209,7 +209,7 @@ impl Format {
         match self {
             Format::Csv(format) => Format::new_csv_scan_plan(ctx, config, format),
             Format::Json(format) => Format::new_json_scan_plan(ctx, config, format),
-            Format::Parquet => todo!(),
+            Format::Parquet => error::UnsupportedFileFormatSnafu { format: "parquet" }.fail(),
         }
     }
 }
