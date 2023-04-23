@@ -19,38 +19,58 @@ use async_trait::async_trait;
 use common_telemetry::error;
 use snafu::{ensure, OptionExt};
 
-use crate::engine::TableEngineRef;
+use crate::engine::{TableEngineProcedureRef, TableEngineRef};
 use crate::error::{EngineExistSnafu, EngineNotFoundSnafu, Result};
 
 #[async_trait::async_trait]
 pub trait TableEngineManager: Send + Sync {
-    /// returns `error::EngineNotFound` if engine not found
+    /// returns [Error::EngineNotFound](crate::error::Error::EngineNotFound) if engine not found
     fn engine(&self, name: &str) -> Result<TableEngineRef>;
 
-    /// returns `error::EngineExist` if engine exists
+    /// returns [Error::EngineExist](crate::error::Error::EngineExist) if engine exists
     fn register_engine(&self, name: &str, engine: TableEngineRef) -> Result<()>;
 
     /// closes all registered engines
     async fn close(&self) -> Result<()>;
+
+    /// returns [TableEngineProcedureRef] of specific engine `name` or
+    /// [Error::EngineNotFound](crate::error::Error::EngineNotFound) if engine not found
+    fn engine_procedure(&self, name: &str) -> Result<TableEngineProcedureRef>;
 }
 pub type TableEngineManagerRef = Arc<dyn TableEngineManager>;
 
 /// Simple in-memory table engine manager
 pub struct MemoryTableEngineManager {
     pub engines: RwLock<HashMap<String, TableEngineRef>>,
+    engine_procedures: RwLock<HashMap<String, TableEngineProcedureRef>>,
 }
 
 impl MemoryTableEngineManager {
+    /// Create a new [MemoryTableEngineManager] with single table `engine`.
     pub fn new(engine: TableEngineRef) -> Self {
         MemoryTableEngineManager::alias(engine.name().to_string(), engine)
     }
 
+    /// Create a new [MemoryTableEngineManager] with single table `engine` and
+    /// an alias `name` instead of the engine's name.
     pub fn alias(name: String, engine: TableEngineRef) -> Self {
         let mut engines = HashMap::new();
         engines.insert(name, engine);
         let engines = RwLock::new(engines);
 
-        MemoryTableEngineManager { engines }
+        MemoryTableEngineManager {
+            engines,
+            engine_procedures: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Attach the `engine_procedures` to the manager.
+    pub fn with_engine_procedures(
+        mut self,
+        engine_procedures: HashMap<String, TableEngineProcedureRef>,
+    ) -> Self {
+        self.engine_procedures = RwLock::new(engine_procedures);
+        self
     }
 }
 
@@ -91,6 +111,14 @@ impl TableEngineManager for MemoryTableEngineManager {
 
         Ok(())
     }
+
+    fn engine_procedure(&self, name: &str) -> Result<TableEngineProcedureRef> {
+        let engine_procedures = self.engine_procedures.read().unwrap();
+        engine_procedures
+            .get(name)
+            .cloned()
+            .context(EngineNotFoundSnafu { engine: name })
+    }
 }
 
 #[cfg(test)]
@@ -108,6 +136,12 @@ mod tests {
         let table_engine_ref = Arc::new(table_engine);
         let table_engine_manager = MemoryTableEngineManager::new(table_engine_ref.clone());
 
+        // Attach engine procedures.
+        let mut engine_procedures = HashMap::new();
+        let engine_procedure: TableEngineProcedureRef = table_engine_ref.clone();
+        engine_procedures.insert(table_engine_ref.name().to_string(), engine_procedure);
+        let table_engine_manager = table_engine_manager.with_engine_procedures(engine_procedures);
+
         table_engine_manager
             .register_engine("yet_another", table_engine_ref.clone())
             .unwrap();
@@ -122,6 +156,17 @@ mod tests {
 
         let missing = table_engine_manager.engine("not_exists");
 
-        assert_matches!(missing.err().unwrap(), error::Error::EngineNotFound { .. })
+        assert_matches!(missing.err().unwrap(), error::Error::EngineNotFound { .. });
+
+        assert!(table_engine_manager
+            .engine_procedure(table_engine_ref.name())
+            .is_ok());
+        assert_matches!(
+            table_engine_manager
+                .engine_procedure("unknown")
+                .err()
+                .unwrap(),
+            error::Error::EngineNotFound { .. }
+        );
     }
 }

@@ -212,12 +212,11 @@ impl DropTableProcedure {
 
                 Ok(Status::Done)
             }
-            ProcedureState::Failed { .. } => {
+            ProcedureState::Failed { error } => {
                 // Return error if the subprocedure is failed.
-                SubprocedureFailedSnafu {
+                Err(error).context(SubprocedureFailedSnafu {
                     subprocedure_id: sub_id,
-                }
-                .fail()?
+                })?
             }
         }
     }

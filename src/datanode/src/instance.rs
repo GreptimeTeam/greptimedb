@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use std::{fs, path};
@@ -46,6 +47,7 @@ use storage::scheduler::{LocalScheduler, SchedulerConfig};
 use storage::EngineImpl;
 use store_api::logstore::LogStore;
 use table::engine::manager::MemoryTableEngineManager;
+use table::engine::{TableEngine, TableEngineProcedureRef};
 use table::requests::FlushTableRequest;
 use table::table::numbers::NumbersTable;
 use table::table::TableIdProviderRef;
@@ -118,7 +120,17 @@ impl Instance {
             object_store,
         ));
 
-        let engine_manager = Arc::new(MemoryTableEngineManager::new(table_engine.clone()));
+        let mut engine_procedures = HashMap::with_capacity(2);
+        engine_procedures.insert(
+            table_engine.name().to_string(),
+            table_engine.clone() as TableEngineProcedureRef,
+        );
+        // TODO(yingwen): Insert the file table engine into `engine_procedures`
+        // once #1372 is ready.
+        let engine_manager = Arc::new(
+            MemoryTableEngineManager::new(table_engine.clone())
+                .with_engine_procedures(engine_procedures),
+        );
 
         // create remote catalog manager
         let (catalog_manager, table_id_provider) = match opts.mode {
@@ -144,7 +156,7 @@ impl Instance {
                     )
                 } else {
                     let catalog = Arc::new(
-                        catalog::local::LocalCatalogManager::try_new(engine_manager)
+                        catalog::local::LocalCatalogManager::try_new(engine_manager.clone())
                             .await
                             .context(CatalogSnafu)?,
                     );
@@ -158,7 +170,7 @@ impl Instance {
 
             Mode::Distributed => {
                 let catalog = Arc::new(catalog::remote::RemoteCatalogManager::new(
-                    engine_manager,
+                    engine_manager.clone(),
                     opts.node_id.context(MissingNodeIdSnafu)?,
                     Arc::new(MetaKvBackend {
                         client: meta_client.as_ref().unwrap().clone(),
@@ -185,21 +197,24 @@ impl Instance {
         let procedure_manager = create_procedure_manager(&opts.procedure).await?;
         // Register all procedures.
         if let Some(procedure_manager) = &procedure_manager {
+            // Register procedures of the mito engine.
             table_engine.register_procedure_loaders(&**procedure_manager);
+            // Register procedures in table-procedure crate.
             table_procedure::register_procedure_loaders(
                 catalog_manager.clone(),
                 table_engine.clone(),
                 table_engine.clone(),
                 &**procedure_manager,
             );
+            // TODO(yingwen): Register procedures of the file table engine once #1372
+            // is ready.
         }
 
         Ok(Self {
             query_engine: query_engine.clone(),
             sql_handler: SqlHandler::new(
-                Arc::new(MemoryTableEngineManager::new(table_engine.clone())),
+                engine_manager,
                 catalog_manager.clone(),
-                table_engine,
                 procedure_manager.clone(),
             ),
             catalog_manager,

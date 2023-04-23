@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::sync::Arc;
 
 use common_error::prelude::*;
 use common_procedure::ProcedureId;
@@ -57,6 +58,7 @@ pub enum Error {
     #[snafu(display("Subprocedure {} failed", subprocedure_id))]
     SubprocedureFailed {
         subprocedure_id: ProcedureId,
+        source: Arc<common_procedure::Error>,
         location: Location,
     },
 
@@ -71,9 +73,8 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            SerializeProcedure { .. } | DeserializeProcedure { .. } | SubprocedureFailed { .. } => {
-                StatusCode::Internal
-            }
+            SerializeProcedure { .. } | DeserializeProcedure { .. } => StatusCode::Internal,
+            SubprocedureFailed { source, .. } => source.status_code(),
             InvalidRawSchema { source, .. } => source.status_code(),
             AccessCatalog { source } => source.status_code(),
             CatalogNotFound { .. } | SchemaNotFound { .. } | TableExists { .. } => {
