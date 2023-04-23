@@ -121,7 +121,7 @@ impl StartCommand {
             .context(error::StartFrontendSnafu)?;
 
         instance
-            .build_servers(&opts, plugins)
+            .build_servers(&opts)
             .await
             .context(error::StartFrontendSnafu)?;
 
