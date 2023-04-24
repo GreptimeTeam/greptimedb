@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::time::Duration;
-
 use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID, MITO_ENGINE,
 };
@@ -34,7 +32,6 @@ use crate::instance::Instance;
 pub(crate) struct MockInstance {
     instance: Instance,
     _guard: TestGuard,
-    _procedure_dir: Option<TempDir>,
 }
 
 impl MockInstance {
@@ -44,33 +41,7 @@ impl MockInstance {
         let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
         instance.start().await.unwrap();
 
-        MockInstance {
-            instance,
-            _guard,
-            _procedure_dir: None,
-        }
-    }
-
-    // TODO(yingwen): Combine with new
-    pub(crate) async fn with_procedure_enabled(name: &str) -> Self {
-        let (mut opts, _guard) = create_tmp_dir_and_datanode_opts(name);
-        let procedure_dir = create_temp_dir(&format!("gt_procedure_{name}"));
-        opts.procedure = ProcedureConfig {
-            store: ObjectStoreConfig::File(FileConfig {
-                data_dir: procedure_dir.path().to_str().unwrap().to_string(),
-            }),
-            max_retry_times: 3,
-            retry_delay: Duration::from_millis(500),
-        };
-
-        let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
-        instance.start().await.unwrap();
-
-        MockInstance {
-            instance,
-            _guard,
-            _procedure_dir: Some(procedure_dir),
-        }
+        MockInstance { instance, _guard }
     }
 
     pub(crate) fn inner(&self) -> &Instance {
@@ -81,11 +52,13 @@ impl MockInstance {
 struct TestGuard {
     _wal_tmp_dir: TempDir,
     _data_tmp_dir: TempDir,
+    _procedure_tmp_dir: TempDir,
 }
 
 fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) {
     let wal_tmp_dir = create_temp_dir(&format!("gt_wal_{name}"));
     let data_tmp_dir = create_temp_dir(&format!("gt_data_{name}"));
+    let procedure_tmp_dir = create_temp_dir(&format!("gt_procedure_{name}"));
     let opts = DatanodeOptions {
         wal: WalConfig {
             dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
@@ -98,6 +71,9 @@ fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) 
             ..Default::default()
         },
         mode: Mode::Standalone,
+        procedure: ProcedureConfig::from_file_path(
+            procedure_tmp_dir.path().to_str().unwrap().to_string(),
+        ),
         ..Default::default()
     };
     (
@@ -105,6 +81,7 @@ fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) 
         TestGuard {
             _wal_tmp_dir: wal_tmp_dir,
             _data_tmp_dir: data_tmp_dir,
+            _procedure_tmp_dir: procedure_tmp_dir,
         },
     )
 }
