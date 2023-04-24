@@ -25,7 +25,9 @@ use object_store::services::Fs;
 use object_store::ObjectStore;
 
 use crate::compression::CompressionType;
+use crate::file_format::csv::{stream_to_csv, CsvConfigBuilder, CsvOpener};
 use crate::file_format::json::{stream_to_json, JsonOpener};
+use crate::test_util;
 
 pub const TEST_BATCH_SIZE: usize = 100;
 
@@ -95,7 +97,7 @@ pub async fn setup_stream_to_json_test(origin_path: &str, threshold: impl Fn(usi
     let schema = test_basic_schema();
 
     let json_opener = JsonOpener::new(
-        100,
+        test_util::TEST_BATCH_SIZE,
         schema.clone(),
         store.clone(),
         CompressionType::UNCOMPRESSED,
@@ -123,7 +125,49 @@ pub async fn setup_stream_to_json_test(origin_path: &str, threshold: impl Fn(usi
     let written = tmp_store.read(&output_path).await.unwrap();
     let origin = store.read(origin_path).await.unwrap();
 
-    // ignores `\n` for
+    // ignores `\n` 
+    assert_eq!(
+        String::from_utf8_lossy(&written).trim_end_matches('\n'),
+        String::from_utf8_lossy(&origin).trim_end_matches('\n'),
+    )
+}
+
+pub async fn setup_stream_to_csv_test(origin_path: &str, threshold: impl Fn(usize) -> usize) {
+    let store = test_store("/");
+
+    let schema = test_basic_schema();
+
+    let csv_conf = CsvConfigBuilder::default()
+        .batch_size(test_util::TEST_BATCH_SIZE)
+        .file_schema(schema.clone())
+        .build()
+        .unwrap();
+
+    let csv_opener = CsvOpener::new(csv_conf, store.clone(), CompressionType::UNCOMPRESSED);
+
+    let size = store.read(origin_path).await.unwrap().len();
+
+    let config = scan_config(schema.clone(), None, origin_path);
+
+    let stream = FileStream::new(&config, 0, csv_opener, &ExecutionPlanMetricsSet::new()).unwrap();
+
+    let (tmp_store, dir) = test_tmp_store("test_stream_to_csv");
+
+    let output_path = format!("{}/{}", dir.path().display(), "output");
+
+    stream_to_csv(
+        Box::pin(stream),
+        tmp_store.clone(),
+        output_path.clone(),
+        threshold(size),
+    )
+    .await
+    .unwrap();
+
+    let written = tmp_store.read(&output_path).await.unwrap();
+    let origin = store.read(origin_path).await.unwrap();
+
+    // ignores `\n` 
     assert_eq!(
         String::from_utf8_lossy(&written).trim_end_matches('\n'),
         String::from_utf8_lossy(&origin).trim_end_matches('\n'),

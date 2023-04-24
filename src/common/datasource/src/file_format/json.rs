@@ -33,7 +33,7 @@ use snafu::ResultExt;
 use tokio_util::io::SyncIoBridge;
 
 use super::stream_to_file;
-use crate::buffered_writer::DfRecordBatchBuffer;
+use crate::buffered_writer::DfRecordBatchEncoder;
 use crate::compression::CompressionType;
 use crate::error::{self, Result};
 use crate::file_format::{self, open_with_decoder, FileFormat};
@@ -152,44 +152,16 @@ pub async fn stream_to_json(
     path: String,
     threshold: usize,
 ) -> Result<()> {
-    stream_to_file(
-        stream,
-        store,
-        path,
-        threshold,
-        JsonEncodedBuffer::with_capacity(threshold),
-    )
+    stream_to_file(stream, store, path, threshold, |buffer| {
+        json::LineDelimitedWriter::new(buffer)
+    })
     .await
 }
 
-pub struct JsonEncodedBuffer {
-    inner: json::Writer<SharedBuffer, LineDelimited>,
-    buffer: SharedBuffer,
-}
-
-pub trait EncodedBuffer {}
-
-impl JsonEncodedBuffer {
-    pub fn with_capacity(size: usize) -> Self {
-        let buffer = SharedBuffer::with_capacity(size);
-        let inner = json::LineDelimitedWriter::new(buffer.clone());
-        Self { inner, buffer }
-    }
-}
-
-impl DfRecordBatchBuffer for JsonEncodedBuffer {
-    fn write(&mut self, batch: RecordBatch) -> Result<()> {
-        self.inner
-            .write(batch)
+impl DfRecordBatchEncoder for json::Writer<SharedBuffer, LineDelimited> {
+    fn write(&mut self, batch: &RecordBatch) -> Result<()> {
+        self.write(batch.clone())
             .context(error::WriteRecordBatchSnafu)
-    }
-
-    fn consume_all(&mut self) -> bytes::Bytes {
-        self.buffer.buffer.lock().unwrap().split().into()
-    }
-
-    fn len(&self) -> usize {
-        self.buffer.buffer.lock().unwrap().len()
     }
 }
 

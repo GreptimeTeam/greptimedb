@@ -14,7 +14,6 @@
 
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
-use bytes::Buf;
 use datafusion::parquet::format::FileMetaData;
 use object_store::Writer;
 use snafu::ResultExt;
@@ -23,73 +22,6 @@ use tokio_util::compat::Compat;
 
 use crate::error::{self, Result};
 use crate::share_buffer::SharedBuffer;
-
-pub trait DfRecordBatchBuffer: Send {
-    fn write(&mut self, batch: RecordBatch) -> Result<()>;
-
-    fn consume_all(&mut self) -> bytes::Bytes;
-
-    fn len(&self) -> usize;
-
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-}
-
-pub struct ApproximateBufWriter<B, T> {
-    threshold: usize,
-    buffer: B,
-    writer: T,
-}
-
-impl<B: DfRecordBatchBuffer, T: AsyncWrite + Send + Unpin> ApproximateBufWriter<B, T> {
-    /// A Buffer keeps an in-memory buffer of encoded data and writes it to an underlying
-    /// writer in large, infrequent batches.
-    ///
-    ///  There is no guarantee of the actual written batches size; it only guarantees
-    ///  the batches size larger than the `threshold`.
-    pub fn new(threshold: usize, buffer: B, writer: T) -> Self {
-        Self {
-            threshold,
-            buffer,
-            writer,
-        }
-    }
-
-    /// Writes batch to inner buffer, flush the buffer when buffer len exceeds the `threshold`.
-    pub async fn write(&mut self, batch: RecordBatch) -> Result<()> {
-        self.write_to_buf(batch)?;
-
-        self.try_flush_all().await
-    }
-
-    fn write_to_buf(&mut self, batch: RecordBatch) -> Result<()> {
-        self.buffer.write(batch)?;
-
-        Ok(())
-    }
-
-    async fn try_flush_all(&mut self) -> Result<()> {
-        if self.buffer.len() > self.threshold {
-            self.flush_inner().await?;
-        }
-
-        Ok(())
-    }
-
-    async fn flush_inner(&mut self) -> Result<()> {
-        self.writer
-            .write_all(self.buffer.consume_all().chunk())
-            .await
-            .context(error::AsyncWriteSnafu)?;
-
-        Ok(())
-    }
-
-    pub async fn flush(&mut self) -> Result<()> {
-        self.flush_inner().await
-    }
-}
 
 pub struct BufferedWriter<T, U> {
     writer: T,

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::test_util::{self};
+use crate::test_util;
 
 #[tokio::test]
 async fn test_stream_to_json() {
@@ -30,6 +30,29 @@ async fn test_stream_to_json() {
     // Only triggers the flush at last
     test_util::setup_stream_to_json_test(
         &test_util::get_data_dir("tests/json/basic.json")
+            .display()
+            .to_string(),
+        |size| size * 2,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_stream_to_csv() {
+    // A small threshold
+    // Triggers the flush each writes
+    test_util::setup_stream_to_csv_test(
+        &test_util::get_data_dir("tests/csv/basic.csv")
+            .display()
+            .to_string(),
+        |size| size / 2,
+    )
+    .await;
+
+    // A large threshold
+    // Only triggers the flush at last
+    test_util::setup_stream_to_csv_test(
+        &test_util::get_data_dir("tests/csv/basic.csv")
             .display()
             .to_string(),
         |size| size * 2,

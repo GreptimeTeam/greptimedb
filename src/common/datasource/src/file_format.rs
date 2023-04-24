@@ -40,9 +40,11 @@ use tokio_util::compat::FuturesAsyncWriteCompatExt;
 use self::csv::CsvFormat;
 use self::json::JsonFormat;
 use self::parquet::ParquetFormat;
-use crate::buffered_writer::{ApproximateBufWriter, DfRecordBatchBuffer};
+use crate::buffered_writer::{BufferedWriter, DfRecordBatchEncoder};
 use crate::compression::CompressionType;
 use crate::error::{self, Result};
+use crate::share_buffer::SharedBuffer;
+
 pub const FORMAT_COMPRESSION_TYPE: &str = "COMPRESSION_TYPE";
 pub const FORMAT_DELIMTERL: &str = "DELIMTERL";
 pub const FORMAT_SCHEMA_INFER_MAX_RECORD: &str = "SCHEMA_INFER_MAX_RECORD";
@@ -170,12 +172,12 @@ pub async fn infer_schemas(
     ArrowSchema::try_merge(schemas).context(error::MergeSchemaSnafu)
 }
 
-pub async fn stream_to_file<B: DfRecordBatchBuffer>(
+pub async fn stream_to_file<T: DfRecordBatchEncoder, U: Fn(SharedBuffer) -> T>(
     mut stream: SendableRecordBatchStream,
     store: ObjectStore,
     path: String,
     threshold: usize,
-    buffer: B,
+    encoder_factory: U,
 ) -> Result<()> {
     let writer = store
         .writer(&path)
@@ -183,13 +185,15 @@ pub async fn stream_to_file<B: DfRecordBatchBuffer>(
         .context(error::WriteObjectSnafu { path: &path })?
         .compat_write();
 
-    let mut writer = ApproximateBufWriter::new(threshold, buffer, writer);
+    let buffer = SharedBuffer::with_capacity(threshold);
+    let encoder = encoder_factory(buffer.clone());
+    let mut writer = BufferedWriter::new(threshold, buffer, encoder, writer);
 
     while let Some(batch) = stream.next().await {
         let batch = batch.context(error::ReadRecordBatchSnafu)?;
-        writer.write(batch).await?
+        writer.write(&batch).await?
     }
 
     // Flushes all pending writes
-    writer.flush().await
+    writer.try_flush_all().await.map(|_| ())
 }
