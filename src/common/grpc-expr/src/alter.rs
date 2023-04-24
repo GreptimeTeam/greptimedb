@@ -130,16 +130,11 @@ pub fn create_table_schema_options(
     Ok(RawSchema::new(column_schemas))
 }
 
-pub fn create_table_schema(expr: &CreateTableExpr) -> Result<RawSchema> {
-    create_table_schema_options(expr, true)
-}
-
 pub fn create_expr_to_request(
     table_id: TableId,
     expr: CreateTableExpr,
+    require_time_index: bool,
 ) -> Result<CreateTableRequest> {
-    let require_time_index = expr.engine != common_catalog::consts::IMMUTABLE_FILE_ENGINE;
-
     let schema = create_table_schema_options(&expr, require_time_index)?;
     let primary_key_indices = expr
         .primary_keys
