@@ -28,19 +28,14 @@ use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionNumber;
 use table::error::{self as table_error, Result as TableResult};
 use table::metadata::{RawTableInfo, TableInfo, TableInfoRef, TableType};
-use table::Table;
+use table::{requests, Table};
 
-use super::format::{create_physical_plan, CreateScanPlanContext, ScanPlanConfig};
 use crate::error::{self, ConvertRawSnafu, Result};
 use crate::manifest::immutable::{
     read_table_manifest, write_table_manifest, ImmutableMetadata, INIT_META_VERSION,
 };
 use crate::manifest::table_manifest_dir;
-
-pub const IMMUTABLE_TABLE_META_KEY: &str = "IMMUTABLE_TABLE_META";
-pub const IMMUTABLE_TABLE_LOCATION_KEY: &str = "LOCATION";
-pub const IMMUTABLE_TABLE_PATTERN_KEY: &str = "PATTERN";
-pub const IMMUTABLE_TABLE_FORMAT_KEY: &str = "FORMAT";
+use crate::table::format::{create_physical_plan, CreateScanPlanContext, ScanPlanConfig};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -125,18 +120,17 @@ impl ImmutableFileTable {
         let table_info = Arc::new(table_info);
         let options = &table_info.meta.options.extra_options;
 
-        let url = options.get(IMMUTABLE_TABLE_LOCATION_KEY).context(
+        let url = options
+            .get(requests::IMMUTABLE_TABLE_LOCATION_KEY)
+            .context(error::MissingRequiredFieldSnafu {
+                name: requests::IMMUTABLE_TABLE_LOCATION_KEY,
+            })?;
+
+        let meta = options.get(requests::IMMUTABLE_TABLE_META_KEY).context(
             error::MissingRequiredFieldSnafu {
-                name: IMMUTABLE_TABLE_LOCATION_KEY,
+                name: requests::IMMUTABLE_TABLE_META_KEY,
             },
         )?;
-
-        let meta =
-            options
-                .get(IMMUTABLE_TABLE_META_KEY)
-                .context(error::MissingRequiredFieldSnafu {
-                    name: IMMUTABLE_TABLE_META_KEY,
-                })?;
 
         let meta: ImmutableFileTableOptions =
             serde_json::from_str(meta).context(error::DecodeJsonSnafu)?;

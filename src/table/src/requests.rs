@@ -29,6 +29,11 @@ use crate::error;
 use crate::error::ParseTableOptionSnafu;
 use crate::metadata::TableId;
 
+pub const IMMUTABLE_TABLE_META_KEY: &str = "IMMUTABLE_TABLE_META";
+pub const IMMUTABLE_TABLE_LOCATION_KEY: &str = "LOCATION";
+pub const IMMUTABLE_TABLE_PATTERN_KEY: &str = "PATTERN";
+pub const IMMUTABLE_TABLE_FORMAT_KEY: &str = "FORMAT";
+
 #[derive(Debug, Clone)]
 pub struct CreateDatabaseRequest {
     pub db_name: String,

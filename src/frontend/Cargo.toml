@@ -32,6 +32,7 @@ datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datanode = { path = "../datanode" }
 datatypes = { path = "../datatypes" }
+file-table-engine = { path = "../file-table-engine" }
 futures = "0.3"
 futures-util.workspace = true
 itertools = "0.10"

@@ -27,6 +27,7 @@ use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::store::state_store::ObjectStateStore;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::info;
+use file_table_engine::engine::immutable::ImmutableFileTableEngine;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::LogConfig;
 use meta_client::client::{MetaClient, MetaClientBuilder};
@@ -109,7 +110,7 @@ impl Instance {
         let object_store = new_object_store(&opts.storage.store).await?;
         let log_store = Arc::new(create_log_store(&opts.wal).await?);
 
-        let table_engine = Arc::new(DefaultEngine::new(
+        let mito_engine = Arc::new(DefaultEngine::new(
             TableEngineConfig::default(),
             EngineImpl::new(
                 StorageEngineConfig::from(opts),
@@ -117,19 +118,30 @@ impl Instance {
                 object_store.clone(),
                 compaction_scheduler,
             ),
-            object_store,
+            object_store.clone(),
         ));
 
         let mut engine_procedures = HashMap::with_capacity(2);
         engine_procedures.insert(
-            table_engine.name().to_string(),
-            table_engine.clone() as TableEngineProcedureRef,
+            mito_engine.name().to_string(),
+            mito_engine.clone() as TableEngineProcedureRef,
         );
-        // TODO(yingwen): Insert the file table engine into `engine_procedures`
-        // once #1372 is ready.
+
+        let immutable_file_engine = Arc::new(ImmutableFileTableEngine::new(
+            file_table_engine::config::EngineConfig::default(),
+            object_store.clone(),
+        ));
+        engine_procedures.insert(
+            immutable_file_engine.name().to_string(),
+            immutable_file_engine.clone() as TableEngineProcedureRef,
+        );
+
         let engine_manager = Arc::new(
-            MemoryTableEngineManager::new(table_engine.clone())
-                .with_engine_procedures(engine_procedures),
+            MemoryTableEngineManager::with(vec![
+                mito_engine.clone(),
+                immutable_file_engine.clone(),
+            ])
+            .with_engine_procedures(engine_procedures),
         );
 
         // create remote catalog manager
@@ -198,12 +210,13 @@ impl Instance {
         // Register all procedures.
         if let Some(procedure_manager) = &procedure_manager {
             // Register procedures of the mito engine.
-            table_engine.register_procedure_loaders(&**procedure_manager);
+            mito_engine.register_procedure_loaders(&**procedure_manager);
+            immutable_file_engine.register_procedure_loaders(&**procedure_manager);
             // Register procedures in table-procedure crate.
             table_procedure::register_procedure_loaders(
                 catalog_manager.clone(),
-                table_engine.clone(),
-                table_engine.clone(),
+                mito_engine.clone(),
+                mito_engine.clone(),
                 &**procedure_manager,
             );
             // TODO(yingwen): Register procedures of the file table engine once #1372

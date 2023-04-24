@@ -334,6 +334,11 @@ impl DistInstance {
                 let _ = self.create_table(create_expr, stmt.partitions).await?;
                 Ok(Output::AffectedRows(0))
             }
+            Statement::CreateExternalTable(stmt) => {
+                let create_expr = &mut expr_factory::create_external_expr(stmt, query_ctx).await?;
+                self.create_table(create_expr, None).await?;
+                Ok(Output::AffectedRows(0))
+            }
             Statement::Alter(alter_table) => {
                 let expr = grpc::to_alter_expr(alter_table, query_ctx)?;
                 self.handle_alter_table(expr).await
@@ -673,7 +678,7 @@ fn create_table_info(create_table: &CreateTableExpr) -> Result<RawTableInfo> {
         schema: raw_schema,
         primary_key_indices,
         value_indices: vec![],
-        engine: "mito".to_string(),
+        engine: create_table.engine.clone(),
         next_column_id: column_schemas.len() as u32,
         region_numbers: vec![],
         engine_options: HashMap::new(),

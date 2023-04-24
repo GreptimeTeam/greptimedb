@@ -479,6 +479,39 @@ async fn test_execute_create(instance: Arc<dyn MockInstance>) {
     assert!(matches!(output, Output::AffectedRows(0)));
 }
 
+#[apply(both_instances_cases)]
+async fn test_execute_external_create(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+
+    let output = execute_sql(
+        &instance,
+        r#"create external table test_table(
+                            host string,
+                            ts timestamp,
+                            cpu double default 0,
+                            memory double
+                        ) with (location='/tmp/', format='csv');"#,
+    )
+    .await;
+    assert!(matches!(output, Output::AffectedRows(0)));
+}
+
+#[apply(both_instances_cases)]
+async fn test_execute_external_create_without_ts_type(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+
+    let output = execute_sql(
+        &instance,
+        r#"create external table test_table(
+                            host string,
+                            cpu double default 0,
+                            memory double
+                        ) with (location='/tmp/', format='csv');"#,
+    )
+    .await;
+    assert!(matches!(output, Output::AffectedRows(0)));
+}
+
 #[apply(standalone_instance_case)]
 async fn test_rename_table(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();

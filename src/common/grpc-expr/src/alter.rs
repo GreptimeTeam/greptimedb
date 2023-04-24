@@ -92,7 +92,7 @@ pub fn alter_expr_to_request(expr: AlterExpr) -> Result<AlterTableRequest> {
     }
 }
 
-pub fn create_table_schema(expr: &CreateTableExpr) -> Result<RawSchema> {
+pub fn create_table_schema(expr: &CreateTableExpr, require_time_index: bool) -> Result<RawSchema> {
     let column_schemas = expr
         .column_defs
         .iter()
@@ -101,14 +101,17 @@ pub fn create_table_schema(expr: &CreateTableExpr) -> Result<RawSchema> {
         })
         .collect::<Result<Vec<ColumnSchema>>>()?;
 
-    ensure!(
-        column_schemas
-            .iter()
-            .any(|column| column.name == expr.time_index),
-        MissingTimestampColumnSnafu {
-            msg: format!("CreateExpr: {expr:?}")
-        }
-    );
+    // allow external table schema without the time index
+    if require_time_index {
+        ensure!(
+            column_schemas
+                .iter()
+                .any(|column| column.name == expr.time_index),
+            MissingTimestampColumnSnafu {
+                msg: format!("CreateExpr: {expr:?}")
+            }
+        );
+    }
 
     let column_schemas = column_schemas
         .into_iter()
@@ -127,8 +130,9 @@ pub fn create_table_schema(expr: &CreateTableExpr) -> Result<RawSchema> {
 pub fn create_expr_to_request(
     table_id: TableId,
     expr: CreateTableExpr,
+    require_time_index: bool,
 ) -> Result<CreateTableRequest> {
-    let schema = create_table_schema(&expr)?;
+    let schema = create_table_schema(&expr, require_time_index)?;
     let primary_key_indices = expr
         .primary_keys
         .iter()

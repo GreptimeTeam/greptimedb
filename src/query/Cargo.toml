@@ -12,6 +12,7 @@ catalog = { path = "../catalog" }
 chrono.workspace = true
 common-base = { path = "../common/base" }
 common-catalog = { path = "../common/catalog" }
+common-datasource = { path = "../common/datasource" }
 common-error = { path = "../common/error" }
 common-function = { path = "../common/function" }
 common-query = { path = "../common/query" }
@@ -29,9 +30,11 @@ futures = "0.3"
 futures-util.workspace = true
 humantime = "2.1"
 metrics.workspace = true
+object-store = { path = "../object-store" }
 once_cell = "1.10"
 promql = { path = "../promql" }
 promql-parser = "0.1.0"
+regex = "1.6"
 serde.workspace = true
 serde_json = "1.0"
 session = { path = "../session" }

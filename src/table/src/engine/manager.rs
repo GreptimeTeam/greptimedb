@@ -72,6 +72,18 @@ impl MemoryTableEngineManager {
         self.engine_procedures = RwLock::new(engine_procedures);
         self
     }
+
+    pub fn with(engines: Vec<TableEngineRef>) -> Self {
+        let engines = engines
+            .into_iter()
+            .map(|engine| (engine.name().to_string(), engine))
+            .collect::<HashMap<_, _>>();
+        let engines = RwLock::new(engines);
+        MemoryTableEngineManager {
+            engines,
+            engine_procedures: RwLock::new(HashMap::new()),
+        }
+    }
 }
 
 #[async_trait]

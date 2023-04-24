@@ -484,6 +484,18 @@ pub enum Error {
         file_schema: String,
         location: Location,
     },
+
+    #[snafu(display("Failed to encode object into json, source: {}", source))]
+    EncodeJson {
+        source: serde_json::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to prepare immutable table: {}", source))]
+    PrepareImmutableTable {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -504,7 +516,8 @@ impl ErrorExt for Error {
             | Error::MissingMetasrvOpts { .. }
             | Error::ColumnNoneDefaultValue { .. }
             | Error::BuildRegex { .. }
-            | Error::InvalidSchema { .. } => StatusCode::InvalidArguments,
+            | Error::InvalidSchema { .. }
+            | Error::PrepareImmutableTable { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
 
@@ -541,7 +554,8 @@ impl ErrorExt for Error {
 
             Error::IllegalFrontendState { .. }
             | Error::IncompleteGrpcResult { .. }
-            | Error::ContextValueNotFound { .. } => StatusCode::Unexpected,
+            | Error::ContextValueNotFound { .. }
+            | Error::EncodeJson { .. } => StatusCode::Unexpected,
 
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
