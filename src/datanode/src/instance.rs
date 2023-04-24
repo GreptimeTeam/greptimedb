@@ -76,7 +76,7 @@ pub struct Instance {
     pub(crate) catalog_manager: CatalogManagerRef,
     pub(crate) table_id_provider: Option<TableIdProviderRef>,
     pub(crate) heartbeat_task: Option<HeartbeatTask>,
-    procedure_manager: Option<ProcedureManagerRef>,
+    procedure_manager: ProcedureManagerRef,
 }
 
 pub type InstanceRef = Arc<Instance>;
@@ -208,20 +208,17 @@ impl Instance {
 
         let procedure_manager = create_procedure_manager(&opts.procedure).await?;
         // Register all procedures.
-        if let Some(procedure_manager) = &procedure_manager {
-            // Register procedures of the mito engine.
-            mito_engine.register_procedure_loaders(&**procedure_manager);
-            immutable_file_engine.register_procedure_loaders(&**procedure_manager);
-            // Register procedures in table-procedure crate.
-            table_procedure::register_procedure_loaders(
-                catalog_manager.clone(),
-                mito_engine.clone(),
-                mito_engine.clone(),
-                &**procedure_manager,
-            );
-            // TODO(yingwen): Register procedures of the file table engine once #1372
-            // is ready.
-        }
+        // Register procedures of the mito engine.
+        mito_engine.register_procedure_loaders(&*procedure_manager);
+        // Register procedures of the file table engine.
+        immutable_file_engine.register_procedure_loaders(&*procedure_manager);
+        // Register procedures in table-procedure crate.
+        table_procedure::register_procedure_loaders(
+            catalog_manager.clone(),
+            mito_engine.clone(),
+            mito_engine.clone(),
+            &*procedure_manager,
+        );
 
         Ok(Self {
             query_engine: query_engine.clone(),
@@ -248,12 +245,10 @@ impl Instance {
 
         // Recover procedures after the catalog manager is started, so we can
         // ensure we can access all tables from the catalog manager.
-        if let Some(procedure_manager) = &self.procedure_manager {
-            procedure_manager
-                .recover()
-                .await
-                .context(RecoverProcedureSnafu)?;
-        }
+        self.procedure_manager
+            .recover()
+            .await
+            .context(RecoverProcedureSnafu)?;
         Ok(())
     }
 
@@ -547,12 +542,8 @@ pub(crate) async fn create_log_store(wal_config: &WalConfig) -> Result<RaftEngin
 }
 
 pub(crate) async fn create_procedure_manager(
-    procedure_config: &Option<ProcedureConfig>,
-) -> Result<Option<ProcedureManagerRef>> {
-    let Some(procedure_config) = procedure_config else {
-        return Ok(None);
-    };
-
+    procedure_config: &ProcedureConfig,
+) -> Result<ProcedureManagerRef> {
     info!(
         "Creating procedure manager with config: {:?}",
         procedure_config
@@ -566,8 +557,5 @@ pub(crate) async fn create_procedure_manager(
         retry_delay: procedure_config.retry_delay,
     };
 
-    Ok(Some(Arc::new(LocalManager::new(
-        manager_config,
-        state_store,
-    ))))
+    Ok(Arc::new(LocalManager::new(manager_config, state_store)))
 }

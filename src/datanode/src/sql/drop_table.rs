@@ -12,14 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use catalog::error::TableNotExistSnafu;
-use catalog::DeregisterTableRequest;
-use common_error::prelude::BoxedError;
 use common_procedure::{watcher, ProcedureManagerRef, ProcedureWithId};
 use common_query::Output;
 use common_telemetry::info;
-use snafu::{OptionExt, ResultExt};
-use table::engine::{EngineContext, TableReference};
+use snafu::ResultExt;
+use table::engine::TableReference;
 use table::requests::DropTableRequest;
 use table_procedure::DropTableProcedure;
 
@@ -28,59 +25,8 @@ use crate::sql::SqlHandler;
 
 impl SqlHandler {
     pub async fn drop_table(&self, req: DropTableRequest) -> Result<Output> {
-        if let Some(procedure_manager) = &self.procedure_manager {
-            return self.drop_table_by_procedure(procedure_manager, req).await;
-        }
-
-        let deregister_table_req = DeregisterTableRequest {
-            catalog: req.catalog_name.clone(),
-            schema: req.schema_name.clone(),
-            table_name: req.table_name.clone(),
-        };
-
-        let table_reference = TableReference {
-            catalog: &req.catalog_name,
-            schema: &req.schema_name,
-            table: &req.table_name,
-        };
-        let table_full_name = table_reference.to_string();
-
-        let table = self
-            .catalog_manager
-            .table(&req.catalog_name, &req.schema_name, &req.table_name)
+        self.drop_table_by_procedure(&self.procedure_manager, req)
             .await
-            .context(error::CatalogSnafu)?
-            .context(TableNotExistSnafu {
-                table: &table_full_name,
-            })
-            .map_err(BoxedError::new)
-            .context(error::DropTableSnafu {
-                table_name: &table_full_name,
-            })?;
-
-        self.catalog_manager
-            .deregister_table(deregister_table_req)
-            .await
-            .map_err(BoxedError::new)
-            .context(error::DropTableSnafu {
-                table_name: &table_full_name,
-            })?;
-
-        let ctx = EngineContext {};
-
-        let engine = self.table_engine(table)?;
-
-        engine
-            .drop_table(&ctx, req)
-            .await
-            .map_err(BoxedError::new)
-            .with_context(|_| error::DropTableSnafu {
-                table_name: table_full_name.clone(),
-            })?;
-
-        info!("Successfully dropped table: {}", table_full_name);
-
-        Ok(Output::AffectedRows(1))
     }
 
     pub(crate) async fn drop_table_by_procedure(

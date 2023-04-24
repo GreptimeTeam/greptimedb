@@ -51,14 +51,14 @@ pub enum SqlRequest {
 pub struct SqlHandler {
     table_engine_manager: TableEngineManagerRef,
     catalog_manager: CatalogManagerRef,
-    procedure_manager: Option<ProcedureManagerRef>,
+    procedure_manager: ProcedureManagerRef,
 }
 
 impl SqlHandler {
     pub fn new(
         table_engine_manager: TableEngineManagerRef,
         catalog_manager: CatalogManagerRef,
-        procedure_manager: Option<ProcedureManagerRef>,
+        procedure_manager: ProcedureManagerRef,
     ) -> Self {
         Self {
             table_engine_manager,

@@ -51,16 +51,17 @@ impl MockInstance {
         }
     }
 
+    // TODO(yingwen): Combine with new
     pub(crate) async fn with_procedure_enabled(name: &str) -> Self {
         let (mut opts, _guard) = create_tmp_dir_and_datanode_opts(name);
         let procedure_dir = create_temp_dir(&format!("gt_procedure_{name}"));
-        opts.procedure = Some(ProcedureConfig {
+        opts.procedure = ProcedureConfig {
             store: ObjectStoreConfig::File(FileConfig {
                 data_dir: procedure_dir.path().to_str().unwrap().to_string(),
             }),
             max_retry_times: 3,
             retry_delay: Duration::from_millis(500),
-        });
+        };
 
         let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
         instance.start().await.unwrap();

@@ -14,10 +14,10 @@
 
 use std::collections::HashMap;
 
-use catalog::{RegisterSchemaRequest, RegisterTableRequest};
+use catalog::RegisterSchemaRequest;
 use common_procedure::{watcher, ProcedureManagerRef, ProcedureWithId};
 use common_query::Output;
-use common_telemetry::tracing::{error, info};
+use common_telemetry::tracing::info;
 use datatypes::schema::RawSchema;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -25,17 +25,16 @@ use sql::ast::{ColumnOption, TableConstraint};
 use sql::statements::column_def_to_schema;
 use sql::statements::create::{CreateTable, TIME_INDEX};
 use sql::util::to_lowercase_options_map;
-use table::engine::{EngineContext, TableReference};
+use table::engine::TableReference;
 use table::metadata::TableId;
 use table::requests::*;
 use table_procedure::CreateTableProcedure;
 
 use crate::error::{
-    self, CatalogNotFoundSnafu, CatalogSnafu, ConstraintNotSupportedSnafu, CreateTableSnafu,
-    EngineProcedureNotFoundSnafu, IllegalPrimaryKeysDefSnafu, InsertSystemCatalogSnafu,
-    KeyColumnNotFoundSnafu, RegisterSchemaSnafu, Result, SchemaExistsSnafu, SchemaNotFoundSnafu,
-    SubmitProcedureSnafu, TableEngineNotFoundSnafu, UnrecognizedTableOptionSnafu,
-    WaitProcedureSnafu,
+    self, CatalogSnafu, ConstraintNotSupportedSnafu, EngineProcedureNotFoundSnafu,
+    IllegalPrimaryKeysDefSnafu, KeyColumnNotFoundSnafu, RegisterSchemaSnafu, Result,
+    SchemaExistsSnafu, SubmitProcedureSnafu, TableEngineNotFoundSnafu,
+    UnrecognizedTableOptionSnafu, WaitProcedureSnafu,
 };
 use crate::sql::SqlHandler;
 
@@ -74,69 +73,8 @@ impl SqlHandler {
     }
 
     pub(crate) async fn create_table(&self, req: CreateTableRequest) -> Result<Output> {
-        if let Some(procedure_manager) = &self.procedure_manager {
-            return self.create_table_by_procedure(procedure_manager, req).await;
-        }
-
-        let ctx = EngineContext {};
-        // first check if catalog and schema exist
-        let catalog = self
-            .catalog_manager
-            .catalog(&req.catalog_name)
-            .context(CatalogSnafu)?
-            .with_context(|| {
-                error!(
-                    "Failed to create table {}.{}.{}, catalog not found",
-                    &req.catalog_name, &req.schema_name, &req.table_name
-                );
-                CatalogNotFoundSnafu {
-                    name: &req.catalog_name,
-                }
-            })?;
-        catalog
-            .schema(&req.schema_name)
-            .context(CatalogSnafu)?
-            .with_context(|| {
-                error!(
-                    "Failed to create table {}.{}.{}, schema not found",
-                    &req.catalog_name, &req.schema_name, &req.table_name
-                );
-                SchemaNotFoundSnafu {
-                    name: &req.schema_name,
-                }
-            })?;
-
-        // determine catalog and schema from the very beginning
-        let table_name = req.table_name.clone();
-        let table_engine =
-            self.table_engine_manager
-                .engine(&req.engine)
-                .context(TableEngineNotFoundSnafu {
-                    engine_name: &req.engine,
-                })?;
-
-        let table = table_engine
-            .create_table(&ctx, req)
+        self.create_table_by_procedure(&self.procedure_manager, req)
             .await
-            .with_context(|_| CreateTableSnafu {
-                table_name: &table_name,
-            })?;
-
-        let register_req = RegisterTableRequest {
-            catalog: table.table_info().catalog_name.clone(),
-            schema: table.table_info().schema_name.clone(),
-            table_name: table_name.clone(),
-            table_id: table.table_info().ident.table_id,
-            table,
-        };
-
-        self.catalog_manager
-            .register_table(register_req)
-            .await
-            .context(InsertSystemCatalogSnafu)?;
-        info!("Successfully created table: {:?}", table_name);
-        // TODO(hl): maybe support create multiple tables
-        Ok(Output::AffectedRows(0))
     }
 
     pub(crate) async fn create_table_by_procedure(
