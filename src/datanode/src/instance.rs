@@ -257,6 +257,7 @@ impl Instance {
             .context(ShutdownInstanceSnafu)?
             .expect("Default schema not found")
             .schema_names()
+            .await
             .map_err(BoxedError::new)
             .context(ShutdownInstanceSnafu)?;
         let flush_requests = schema_list

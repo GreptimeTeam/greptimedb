@@ -36,7 +36,7 @@ impl SqlHandler {
             self.flush_table_inner(schema, table, req.region_number, req.wait)
                 .await?;
         } else {
-            let all_table_names = schema.table_names().context(CatalogSnafu)?;
+            let all_table_names = schema.table_names().await.context(CatalogSnafu)?;
             futures::future::join_all(all_table_names.iter().map(|table| {
                 self.flush_table_inner(schema.clone(), table, req.region_number, req.wait)
             }))

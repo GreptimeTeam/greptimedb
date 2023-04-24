@@ -149,6 +149,7 @@ impl CreateTableProcedure {
             })?;
         catalog
             .schema(&self.data.request.schema_name)
+            .await
             .context(AccessCatalogSnafu)?
             .with_context(|| {
                 logging::error!(
@@ -233,6 +234,7 @@ impl CreateTableProcedure {
             })?;
         let schema = catalog
             .schema(&self.data.request.schema_name)
+            .await
             .context(AccessCatalogSnafu)?
             .context(SchemaNotFoundSnafu {
                 name: &self.data.request.schema_name,

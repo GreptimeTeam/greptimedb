@@ -158,6 +158,7 @@ pub(crate) async fn create_test_table(
         .unwrap();
     schema_provider
         .register_table(table_name.to_string(), table)
+        .await
         .unwrap();
     Ok(())
 }

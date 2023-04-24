@@ -96,6 +96,7 @@ impl SqlHandler {
             })?;
         catalog
             .schema(&req.schema_name)
+            .await
             .context(CatalogSnafu)?
             .with_context(|| {
                 error!(

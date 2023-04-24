@@ -93,7 +93,7 @@ pub async fn show_databases(
         .context(error::CatalogNotFoundSnafu {
             catalog: DEFAULT_CATALOG_NAME,
         })?;
-    let mut databases = catalog.schema_names().context(error::CatalogSnafu)?;
+    let mut databases = catalog.schema_names().await.context(error::CatalogSnafu)?;
     // TODO(dennis): Specify the order of the results in catalog manager API
     databases.sort();
 
@@ -137,7 +137,7 @@ pub async fn show_tables(
         .await
         .context(error::CatalogSnafu)?
         .context(error::SchemaNotFoundSnafu { schema })?;
-    let mut tables = schema.table_names().context(error::CatalogSnafu)?;
+    let mut tables = schema.table_names().await.context(error::CatalogSnafu)?;
     // TODO(dennis): Specify the order of the results in schema provider API
     tables.sort();
 

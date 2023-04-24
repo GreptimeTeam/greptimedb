@@ -22,7 +22,6 @@ use std::time::Duration;
 
 use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
 use catalog::remote::{MetaKvBackend, RemoteCatalogManager};
-use catalog::CatalogProvider;
 use client::Client;
 use common_grpc::channel_manager::ChannelManager;
 use common_runtime::Builder as RuntimeBuilder;
@@ -93,7 +92,7 @@ pub(crate) async fn create_standalone_instance(test_name: &str) -> MockStandalon
     // create another catalog and schema for testing
     let another_catalog = Arc::new(MemoryCatalogProvider::new());
     let _ = another_catalog
-        .register_schema(
+        .register_schema_sync(
             "another_schema".to_string(),
             Arc::new(MemorySchemaProvider::new()),
         )

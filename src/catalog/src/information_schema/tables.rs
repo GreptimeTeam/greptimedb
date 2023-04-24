@@ -98,13 +98,13 @@ impl InformationSchemaTablesBuilder {
     async fn make_tables(&mut self) -> Result<RecordBatch> {
         let catalog_name = self.catalog_name.clone();
 
-        for schema_name in self.catalog_provider.schema_names()? {
+        for schema_name in self.catalog_provider.schema_names().await? {
             if schema_name == INFORMATION_SCHEMA_NAME {
                 continue;
             }
 
-            let Some(schema) = self.catalog_provider.schema(&schema_name)? else { continue };
-            for table_name in schema.table_names()? {
+            let Some(schema) = self.catalog_provider.schema(&schema_name).await? else { continue };
+            for table_name in schema.table_names().await? {
                 let Some(table) = schema.table(&table_name).await? else { continue };
                 let table_info = table.table_info();
                 self.add_table(

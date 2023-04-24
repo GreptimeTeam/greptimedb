@@ -74,12 +74,6 @@ impl RemoteCatalogManager {
         }
     }
 
-    fn build_catalog_key(&self, catalog_name: impl AsRef<str>) -> CatalogKey {
-        CatalogKey {
-            catalog_name: catalog_name.as_ref().to_string(),
-        }
-    }
-
     fn new_catalog_provider(&self, catalog_name: &str) -> CatalogProviderRef {
         Arc::new(RemoteCatalogProvider {
             node_id: self.node_id,
@@ -226,10 +220,12 @@ impl RemoteCatalogManager {
                 ..
             } = r?;
             info!("Found schema: {}.{}", catalog_name, schema_name);
-            let schema = match catalog.schema(&schema_name)? {
+            let schema = match catalog.schema(&schema_name).await? {
                 None => {
                     let schema = self.new_schema_provider(&catalog_name, &schema_name);
-                    catalog.register_schema(schema_name.clone(), schema.clone())?;
+                    catalog
+                        .register_schema(schema_name.clone(), schema.clone())
+                        .await?;
                     info!("Registered schema: {}", &schema_name);
                     schema
                 }
@@ -275,7 +271,7 @@ impl RemoteCatalogManager {
             let table_info = table_ref.table_info();
             let table_name = &table_info.name;
             let table_id = table_info.ident.table_id;
-            schema.register_table(table_name.clone(), table_ref)?;
+            schema.register_table(table_name.clone(), table_ref).await?;
             info!("Registered table {}", table_name);
             max_table_id = max_table_id.max(table_id);
             table_num += 1;
@@ -296,7 +292,9 @@ impl RemoteCatalogManager {
         let schema_provider = self.new_schema_provider(catalog_name, schema_name);
 
         let catalog_provider = self.new_catalog_provider(catalog_name);
-        catalog_provider.register_schema(schema_name.to_string(), schema_provider.clone())?;
+        catalog_provider
+            .register_schema(schema_name.to_string(), schema_provider.clone())
+            .await?;
 
         let schema_key = SchemaKey {
             catalog_name: catalog_name.to_string(),
@@ -453,20 +451,22 @@ impl CatalogManager for RemoteCatalogManager {
                 .context(CatalogNotFoundSnafu {
                     catalog_name: &catalog_name,
                 })?;
-        let schema_provider =
-            catalog_provider
-                .schema(&schema_name)?
-                .with_context(|| SchemaNotFoundSnafu {
-                    catalog: &catalog_name,
-                    schema: &schema_name,
-                })?;
-        if schema_provider.table_exist(&request.table_name)? {
+        let schema_provider = catalog_provider
+            .schema(&schema_name)
+            .await?
+            .with_context(|| SchemaNotFoundSnafu {
+                catalog: &catalog_name,
+                schema: &schema_name,
+            })?;
+        if schema_provider.table_exist(&request.table_name).await? {
             return TableExistsSnafu {
                 table: format!("{}.{}.{}", &catalog_name, &schema_name, &request.table_name),
             }
             .fail();
         }
-        schema_provider.register_table(request.table_name, request.table)?;
+        schema_provider
+            .register_table(request.table_name, request.table)
+            .await?;
         Ok(true)
     }
 
@@ -481,7 +481,7 @@ impl CatalogManager for RemoteCatalogManager {
                 schema: schema_name,
             })?;
 
-        let result = schema.deregister_table(&request.table_name)?;
+        let result = schema.deregister_table(&request.table_name).await?;
         Ok(result.is_none())
     }
 
@@ -495,7 +495,9 @@ impl CatalogManager for RemoteCatalogManager {
                     catalog_name: &catalog_name,
                 })?;
         let schema_provider = self.new_schema_provider(&catalog_name, &schema_name);
-        catalog_provider.register_schema(schema_name, schema_provider)?;
+        catalog_provider
+            .register_schema(schema_name, schema_provider)
+            .await?;
         Ok(true)
     }
 
@@ -519,6 +521,7 @@ impl CatalogManager for RemoteCatalogManager {
                 catalog_name: catalog,
             })?
             .schema(schema)
+            .await
     }
 
     async fn table(
@@ -532,7 +535,8 @@ impl CatalogManager for RemoteCatalogManager {
             .await?
             .with_context(|| CatalogNotFoundSnafu { catalog_name })?;
         let schema = catalog
-            .schema(schema_name)?
+            .schema(schema_name)
+            .await?
             .with_context(|| SchemaNotFoundSnafu {
                 catalog: catalog_name,
                 schema: schema_name,
@@ -661,17 +665,18 @@ impl RemoteCatalogProvider {
     }
 }
 
+#[async_trait::async_trait]
 impl CatalogProvider for RemoteCatalogProvider {
     fn as_any(&self) -> &dyn Any {
         self
     }
 
-    fn schema_names(&self) -> Result<Vec<String>> {
+    async fn schema_names(&self) -> Result<Vec<String>> {
         self.refresh_schemas()?;
         Ok(self.schemas.load().keys().cloned().collect::<Vec<_>>())
     }
 
-    fn register_schema(
+    async fn register_schema(
         &self,
         name: String,
         schema: SchemaProviderRef,
@@ -705,7 +710,7 @@ impl CatalogProvider for RemoteCatalogProvider {
         .unwrap()
     }
 
-    fn schema(&self, name: &str) -> Result<Option<Arc<dyn SchemaProvider>>> {
+    async fn schema(&self, name: &str) -> Result<Option<Arc<dyn SchemaProvider>>> {
         // TODO(hl): We should refresh whole catalog before calling datafusion's query engine.
         self.refresh_schemas()?;
         Ok(self.schemas.load().get(name).cloned())
@@ -754,7 +759,7 @@ impl SchemaProvider for RemoteSchemaProvider {
         self
     }
 
-    fn table_names(&self) -> Result<Vec<String>> {
+    async fn table_names(&self) -> Result<Vec<String>> {
         Ok(self
             .tables
             .load()
@@ -767,7 +772,7 @@ impl SchemaProvider for RemoteSchemaProvider {
         Ok(self.tables.load().get(name).map(|en| en.value().clone()))
     }
 
-    fn register_table(&self, name: String, table: TableRef) -> Result<Option<TableRef>> {
+    async fn register_table(&self, name: String, table: TableRef) -> Result<Option<TableRef>> {
         let table_info = table.table_info();
         let table_version = table_info.ident.version;
         let table_value = TableRegionalValue {
@@ -779,6 +784,7 @@ impl SchemaProvider for RemoteSchemaProvider {
         let tables = self.tables.clone();
         let table_key = self.build_regional_table_key(&name).to_string();
 
+        // TODO(hl): remove spawn
         let prev = std::thread::spawn(move || {
             common_runtime::block_on_read(async move {
                 let _guard = mutex.lock(table_key.clone()).await;
@@ -803,19 +809,20 @@ impl SchemaProvider for RemoteSchemaProvider {
         prev
     }
 
-    fn rename_table(&self, _name: &str, _new_name: String) -> Result<TableRef> {
+    async fn rename_table(&self, _name: &str, _new_name: String) -> Result<TableRef> {
         UnimplementedSnafu {
             operation: "rename table",
         }
         .fail()
     }
 
-    fn deregister_table(&self, name: &str) -> Result<Option<TableRef>> {
+    async fn deregister_table(&self, name: &str) -> Result<Option<TableRef>> {
         let table_name = name.to_string();
         let table_key = self.build_regional_table_key(&table_name).to_string();
         let backend = self.backend.clone();
         let mutex = self.mutex.clone();
         let tables = self.tables.clone();
+        // TODO(hl): remove spawn
         let prev = std::thread::spawn(move || {
             common_runtime::block_on_read(async move {
                 let _guard = mutex.lock(table_key.clone()).await;
@@ -836,7 +843,7 @@ impl SchemaProvider for RemoteSchemaProvider {
     }
 
     /// Checks if table exists in schema provider based on locally opened table map.
-    fn table_exist(&self, name: &str) -> Result<bool> {
+    async fn table_exist(&self, name: &str) -> Result<bool> {
         Ok(self.tables.load().contains_key(name))
     }
 }

@@ -254,10 +254,12 @@ pub async fn create_test_table(
         .unwrap()
         .unwrap()
         .schema(DEFAULT_SCHEMA_NAME)
+        .await
         .unwrap()
         .unwrap();
     schema_provider
         .register_table(table_name.to_string(), table)
+        .await
         .unwrap();
     Ok(())
 }

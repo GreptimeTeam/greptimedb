@@ -28,14 +28,14 @@ pub trait SchemaProvider: Sync + Send {
     fn as_any(&self) -> &dyn Any;
 
     /// Retrieves the list of available table names in this schema.
-    fn table_names(&self) -> Result<Vec<String>>;
+    async fn table_names(&self) -> Result<Vec<String>>;
 
     /// Retrieves a specific table from the schema by name, provided it exists.
     async fn table(&self, name: &str) -> Result<Option<TableRef>>;
 
     /// If supported by the implementation, adds a new table to this schema.
     /// If a table of the same name existed before, it returns "Table already exists" error.
-    fn register_table(&self, name: String, _table: TableRef) -> Result<Option<TableRef>> {
+    async fn register_table(&self, name: String, _table: TableRef) -> Result<Option<TableRef>> {
         NotSupportedSnafu {
             op: format!("register_table({name}, <table>)"),
         }
@@ -44,7 +44,7 @@ pub trait SchemaProvider: Sync + Send {
 
     /// If supported by the implementation, renames an existing table from this schema and returns it.
     /// If no table of that name exists, returns "Table not found" error.
-    fn rename_table(&self, name: &str, new_name: String) -> Result<TableRef> {
+    async fn rename_table(&self, name: &str, new_name: String) -> Result<TableRef> {
         NotSupportedSnafu {
             op: format!("rename_table({name}, {new_name})"),
         }
@@ -53,7 +53,7 @@ pub trait SchemaProvider: Sync + Send {
 
     /// If supported by the implementation, removes an existing table from this schema and returns it.
     /// If no table of that name exists, returns Ok(None).
-    fn deregister_table(&self, name: &str) -> Result<Option<TableRef>> {
+    async fn deregister_table(&self, name: &str) -> Result<Option<TableRef>> {
         NotSupportedSnafu {
             op: format!("deregister_table({name})"),
         }
@@ -63,7 +63,7 @@ pub trait SchemaProvider: Sync + Send {
     /// If supported by the implementation, checks the table exist in the schema provider or not.
     /// If no matched table in the schema provider, return false.
     /// Otherwise, return true.
-    fn table_exist(&self, name: &str) -> Result<bool>;
+    async fn table_exist(&self, name: &str) -> Result<bool>;
 }
 
 pub type SchemaProviderRef = Arc<dyn SchemaProvider>;

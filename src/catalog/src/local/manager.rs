@@ -48,9 +48,9 @@ use crate::system::{
 };
 use crate::tables::SystemCatalog;
 use crate::{
-    handle_system_table_request, CatalogManager, CatalogProvider, CatalogProviderRef,
-    DeregisterTableRequest, RegisterSchemaRequest, RegisterSystemTableRequest,
-    RegisterTableRequest, RenameTableRequest, SchemaProvider, SchemaProviderRef,
+    handle_system_table_request, CatalogManager, CatalogProviderRef, DeregisterTableRequest,
+    RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest,
+    SchemaProviderRef,
 };
 
 /// A `CatalogManager` consists of a system catalog and a bunch of user catalogs.
@@ -116,27 +116,25 @@ impl LocalCatalogManager {
 
     async fn init_system_catalog(&self) -> Result<()> {
         let system_schema = Arc::new(MemorySchemaProvider::new());
-        system_schema.register_table(
+        system_schema.register_table_sync(
             SYSTEM_CATALOG_TABLE_NAME.to_string(),
             self.system.information_schema.system.clone(),
         )?;
         let system_catalog = Arc::new(MemoryCatalogProvider::new());
-        system_catalog.register_schema(INFORMATION_SCHEMA_NAME.to_string(), system_schema)?;
+        system_catalog.register_schema_sync(INFORMATION_SCHEMA_NAME.to_string(), system_schema)?;
         self.catalogs
-            .register_catalog(SYSTEM_CATALOG_NAME.to_string(), system_catalog)
-            .await?;
+            .register_catalog_sync(SYSTEM_CATALOG_NAME.to_string(), system_catalog)?;
 
         let default_catalog = Arc::new(MemoryCatalogProvider::new());
         let default_schema = Arc::new(MemorySchemaProvider::new());
 
         // Add numbers table for test
         let table = Arc::new(NumbersTable::default());
-        default_schema.register_table("numbers".to_string(), table)?;
+        default_schema.register_table_sync("numbers".to_string(), table)?;
 
-        default_catalog.register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema)?;
+        default_catalog.register_schema_sync(DEFAULT_SCHEMA_NAME.to_string(), default_schema)?;
         self.catalogs
-            .register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
-            .await?;
+            .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string(), default_catalog)?;
         Ok(())
     }
 
@@ -222,10 +220,12 @@ impl LocalCatalogManager {
                         .context(CatalogNotFoundSnafu {
                             catalog_name: &s.catalog_name,
                         })?;
-                    catalog.register_schema(
-                        s.schema_name.clone(),
-                        Arc::new(MemorySchemaProvider::new()),
-                    )?;
+                    catalog
+                        .register_schema(
+                            s.schema_name.clone(),
+                            Arc::new(MemorySchemaProvider::new()),
+                        )
+                        .await?;
                     info!("Registered schema: {:?}", s);
                 }
                 Entry::Table(t) => {
@@ -254,7 +254,8 @@ impl LocalCatalogManager {
                 catalog_name: &t.catalog_name,
             })?;
         let schema = catalog
-            .schema(&t.schema_name)?
+            .schema(&t.schema_name)
+            .await?
             .context(SchemaNotFoundSnafu {
                 catalog: &t.catalog_name,
                 schema: &t.schema_name,
@@ -290,7 +291,7 @@ impl LocalCatalogManager {
                 ),
             })?;
 
-        schema.register_table(t.table_name.clone(), option)?;
+        schema.register_table(t.table_name.clone(), option).await?;
         Ok(())
     }
 }
@@ -329,7 +330,8 @@ impl CatalogManager for LocalCatalogManager {
             .await?
             .context(CatalogNotFoundSnafu { catalog_name })?;
         let schema = catalog
-            .schema(schema_name)?
+            .schema(schema_name)
+            .await?
             .with_context(|| SchemaNotFoundSnafu {
                 catalog: catalog_name,
                 schema: schema_name,
@@ -367,7 +369,9 @@ impl CatalogManager for LocalCatalogManager {
                         engine,
                     )
                     .await?;
-                schema.register_table(request.table_name, request.table)?;
+                schema
+                    .register_table(request.table_name, request.table)
+                    .await?;
                 Ok(true)
             }
         }
@@ -393,7 +397,8 @@ impl CatalogManager for LocalCatalogManager {
             .context(CatalogNotFoundSnafu { catalog_name })?;
 
         let schema = catalog
-            .schema(schema_name)?
+            .schema(schema_name)
+            .await?
             .with_context(|| SchemaNotFoundSnafu {
                 catalog: catalog_name,
                 schema: schema_name,
@@ -401,7 +406,7 @@ impl CatalogManager for LocalCatalogManager {
 
         let _lock = self.register_lock.lock().await;
         ensure!(
-            !schema.table_exist(&request.new_table_name)?,
+            !schema.table_exist(&request.new_table_name).await?,
             TableExistsSnafu {
                 table: &request.new_table_name
             }
@@ -427,6 +432,7 @@ impl CatalogManager for LocalCatalogManager {
 
         let renamed = schema
             .rename_table(&request.table_name, request.new_table_name.clone())
+            .await
             .is_ok();
         Ok(renamed)
     }
@@ -484,7 +490,7 @@ impl CatalogManager for LocalCatalogManager {
         {
             let _lock = self.register_lock.lock().await;
             ensure!(
-                catalog.schema(schema_name)?.is_none(),
+                catalog.schema(schema_name).await?.is_none(),
                 SchemaExistsSnafu {
                     schema: schema_name,
                 }
@@ -492,7 +498,9 @@ impl CatalogManager for LocalCatalogManager {
             self.system
                 .register_schema(request.catalog, schema_name.clone())
                 .await?;
-            catalog.register_schema(request.schema, Arc::new(MemorySchemaProvider::new()))?;
+            catalog
+                .register_schema(request.schema, Arc::new(MemorySchemaProvider::new()))
+                .await?;
             Ok(true)
         }
     }
@@ -519,6 +527,7 @@ impl CatalogManager for LocalCatalogManager {
                 catalog_name: catalog,
             })?
             .schema(schema)
+            .await
     }
 
     async fn table(
@@ -533,7 +542,8 @@ impl CatalogManager for LocalCatalogManager {
             .await?
             .context(CatalogNotFoundSnafu { catalog_name })?;
         let schema = catalog
-            .schema(schema_name)?
+            .schema(schema_name)
+            .await?
             .with_context(|| SchemaNotFoundSnafu {
                 catalog: catalog_name,
                 schema: schema_name,

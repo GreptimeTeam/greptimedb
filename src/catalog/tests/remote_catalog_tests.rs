@@ -107,7 +107,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             vec![DEFAULT_SCHEMA_NAME.to_string()],
-            default_catalog.schema_names().unwrap()
+            default_catalog.schema_names().await.unwrap()
         );
     }
 
@@ -168,11 +168,12 @@ mod tests {
             .unwrap();
         assert_eq!(
             vec![DEFAULT_SCHEMA_NAME.to_string()],
-            default_catalog.schema_names().unwrap()
+            default_catalog.schema_names().await.unwrap()
         );
 
         let default_schema = default_catalog
             .schema(DEFAULT_SCHEMA_NAME)
+            .await
             .unwrap()
             .unwrap();
 
@@ -210,7 +211,10 @@ mod tests {
             table,
         };
         assert!(catalog_manager.register_table(reg_req).await.unwrap());
-        assert_eq!(vec![table_name], default_schema.table_names().unwrap());
+        assert_eq!(
+            vec![table_name],
+            default_schema.table_names().await.unwrap()
+        );
     }
 
     #[tokio::test]
@@ -293,13 +297,19 @@ mod tests {
 
         let prev = new_catalog
             .register_schema(schema_name.clone(), schema.clone())
+            .await
             .expect("Register schema should not fail");
         assert!(prev.is_none());
         assert!(catalog_manager.register_table(reg_req).await.unwrap());
 
         assert_eq!(
             HashSet::from([schema_name.clone()]),
-            new_catalog.schema_names().unwrap().into_iter().collect()
+            new_catalog
+                .schema_names()
+                .await
+                .unwrap()
+                .into_iter()
+                .collect()
         )
     }
 }

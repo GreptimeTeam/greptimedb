@@ -41,23 +41,24 @@ pub mod table_source;
 pub mod tables;
 
 /// Represents a catalog, comprising a number of named schemas.
+#[async_trait::async_trait]
 pub trait CatalogProvider: Sync + Send {
     /// Returns the catalog provider as [`Any`](std::any::Any)
     /// so that it can be downcast to a specific implementation.
     fn as_any(&self) -> &dyn Any;
 
     /// Retrieves the list of available schema names in this catalog.
-    fn schema_names(&self) -> Result<Vec<String>>;
+    async fn schema_names(&self) -> Result<Vec<String>>;
 
     /// Registers schema to this catalog.
-    fn register_schema(
+    async fn register_schema(
         &self,
         name: String,
         schema: SchemaProviderRef,
     ) -> Result<Option<SchemaProviderRef>>;
 
     /// Retrieves a specific schema from the catalog by name, provided it exists.
-    fn schema(&self, name: &str) -> Result<Option<SchemaProviderRef>>;
+    async fn schema(&self, name: &str) -> Result<Option<SchemaProviderRef>>;
 }
 
 pub type CatalogProviderRef = Arc<dyn CatalogProvider>;
@@ -232,11 +233,11 @@ pub async fn datanode_stat(catalog_manager: &CatalogManagerRef) -> (u64, Vec<Reg
     for catalog_name in catalog_names {
         let Ok(Some(catalog)) = catalog_manager.catalog_async(&catalog_name).await else { continue };
 
-        let Ok(schema_names) = catalog.schema_names() else { continue };
+        let Ok(schema_names) = catalog.schema_names().await else { continue };
         for schema_name in schema_names {
-            let Ok(Some(schema)) = catalog.schema(&schema_name) else { continue };
+            let Ok(Some(schema)) = catalog.schema(&schema_name).await else { continue };
 
-            let Ok(table_names) = schema.table_names() else { continue };
+            let Ok(table_names) = schema.table_names().await else { continue };
             for table_name in table_names {
                 let Ok(Some(table)) = schema.table(&table_name).await else { continue };
 

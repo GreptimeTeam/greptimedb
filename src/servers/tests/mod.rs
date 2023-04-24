@@ -19,7 +19,6 @@ use api::v1::greptime_request::{Request as GreptimeRequest, Request};
 use api::v1::query_request::Query;
 use async_trait::async_trait;
 use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
-use catalog::{CatalogProvider, SchemaProvider};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use datatypes::schema::Schema;
@@ -202,9 +201,11 @@ fn create_testing_instance(table: MemTable) -> DummyInstance {
     let schema_provider = Arc::new(MemorySchemaProvider::new());
     let catalog_provider = Arc::new(MemoryCatalogProvider::new());
     let catalog_list = Arc::new(MemoryCatalogManager::default());
-    schema_provider.register_table(table_name, table).unwrap();
+    schema_provider
+        .register_table_sync(table_name, table)
+        .unwrap();
     catalog_provider
-        .register_schema(DEFAULT_SCHEMA_NAME.to_string(), schema_provider)
+        .register_schema_sync(DEFAULT_SCHEMA_NAME.to_string(), schema_provider)
         .unwrap();
     catalog_list
         .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string(), catalog_provider)

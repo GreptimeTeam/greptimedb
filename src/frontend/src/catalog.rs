@@ -270,6 +270,7 @@ impl CatalogManager for FrontendCatalogManager {
                 catalog_name: catalog,
             })?
             .schema(schema)
+            .await
     }
 
     async fn table(
@@ -297,12 +298,13 @@ pub struct FrontendCatalogProvider {
     datanode_clients: Arc<DatanodeClients>,
 }
 
+#[async_trait::async_trait]
 impl CatalogProvider for FrontendCatalogProvider {
     fn as_any(&self) -> &dyn Any {
         self
     }
 
-    fn schema_names(&self) -> catalog::error::Result<Vec<String>> {
+    async fn schema_names(&self) -> catalog::error::Result<Vec<String>> {
         let backend = self.backend.clone();
         let catalog_name = self.catalog_name.clone();
         let res = std::thread::spawn(|| {
@@ -325,7 +327,7 @@ impl CatalogProvider for FrontendCatalogProvider {
         res
     }
 
-    fn register_schema(
+    async fn register_schema(
         &self,
         _name: String,
         _schema: SchemaProviderRef,
@@ -333,8 +335,8 @@ impl CatalogProvider for FrontendCatalogProvider {
         unimplemented!("Frontend catalog provider does not support register schema")
     }
 
-    fn schema(&self, name: &str) -> catalog::error::Result<Option<SchemaProviderRef>> {
-        let all_schemas = self.schema_names()?;
+    async fn schema(&self, name: &str) -> catalog::error::Result<Option<SchemaProviderRef>> {
+        let all_schemas = self.schema_names().await?;
         if all_schemas.contains(&name.to_string()) {
             Ok(Some(Arc::new(FrontendSchemaProvider {
                 catalog_name: self.catalog_name.clone(),
@@ -363,7 +365,7 @@ impl SchemaProvider for FrontendSchemaProvider {
         self
     }
 
-    fn table_names(&self) -> catalog::error::Result<Vec<String>> {
+    async fn table_names(&self) -> catalog::error::Result<Vec<String>> {
         let backend = self.backend.clone();
         let catalog_name = self.catalog_name.clone();
         let schema_name = self.schema_name.clone();
@@ -421,8 +423,8 @@ impl SchemaProvider for FrontendSchemaProvider {
         Ok(Some(table))
     }
 
-    fn table_exist(&self, name: &str) -> catalog::error::Result<bool> {
-        Ok(self.table_names()?.contains(&name.to_string()))
+    async fn table_exist(&self, name: &str) -> catalog::error::Result<bool> {
+        Ok(self.table_names().await?.contains(&name.to_string()))
     }
 }
 

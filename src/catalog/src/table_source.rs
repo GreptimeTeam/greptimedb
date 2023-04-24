@@ -108,10 +108,13 @@ impl DfTableSourceProvider {
                 .catalog_async(catalog_name)
                 .await?
                 .context(CatalogNotFoundSnafu { catalog_name })?;
-            catalog.schema(schema_name)?.context(SchemaNotFoundSnafu {
-                catalog: catalog_name,
-                schema: schema_name,
-            })?
+            catalog
+                .schema(schema_name)
+                .await?
+                .context(SchemaNotFoundSnafu {
+                    catalog: catalog_name,
+                    schema: schema_name,
+                })?
         } else {
             let catalog_provider = self
                 .catalog_manager

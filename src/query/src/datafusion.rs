@@ -189,13 +189,13 @@ impl DatafusionQueryEngine {
             .context(CatalogNotFoundSnafu {
                 catalog: catalog_name,
             })?;
-        let schema =
-            catalog
-                .schema(schema_name)
-                .context(CatalogSnafu)?
-                .context(SchemaNotFoundSnafu {
-                    schema: schema_name,
-                })?;
+        let schema = catalog
+            .schema(schema_name)
+            .await
+            .context(CatalogSnafu)?
+            .context(SchemaNotFoundSnafu {
+                schema: schema_name,
+            })?;
         let table = schema
             .table(table_name)
             .await
@@ -390,16 +390,18 @@ mod tests {
     use crate::parser::QueryLanguageParser;
     use crate::query_engine::{QueryEngineFactory, QueryEngineRef};
 
-    fn create_test_engine() -> QueryEngineRef {
+    async fn create_test_engine() -> QueryEngineRef {
         let catalog_list = catalog::local::new_memory_catalog_list().unwrap();
 
         let default_schema = Arc::new(MemorySchemaProvider::new());
         default_schema
             .register_table("numbers".to_string(), Arc::new(NumbersTable::default()))
+            .await
             .unwrap();
         let default_catalog = Arc::new(MemoryCatalogProvider::new());
         default_catalog
             .register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema)
+            .await
             .unwrap();
         catalog_list
             .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
@@ -410,7 +412,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sql_to_plan() {
-        let engine = create_test_engine();
+        let engine = create_test_engine().await;
         let sql = "select sum(number) from numbers limit 20";
 
         let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
@@ -432,7 +434,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute() {
-        let engine = create_test_engine();
+        let engine = create_test_engine().await;
         let sql = "select sum(number) from numbers limit 20";
 
         let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
@@ -470,7 +472,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_describe() {
-        let engine = create_test_engine();
+        let engine = create_test_engine().await;
         let sql = "select sum(number) from numbers limit 20";
 
         let stmt = QueryLanguageParser::parse_sql(sql).unwrap();

@@ -16,8 +16,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::{Buf, Bytes, BytesMut};
-use catalog::CatalogManagerRef;
-use common_catalog::consts::DEFAULT_CATALOG_NAME;
+use datafusion::catalog::catalog::CatalogList;
 use datafusion::prelude::SessionContext;
 use datafusion_expr::LogicalPlan;
 use datafusion_substrait::logical_plan::consumer::from_substrait_plan;
@@ -26,7 +25,6 @@ use prost::Message;
 use snafu::ResultExt;
 use substrait_proto::proto::Plan;
 
-use crate::df_logical::DFLogicalSubstraitConvertorDeprecated;
 use crate::error::{DecodeDfPlanSnafu, DecodeRelSnafu, EncodeDfPlanSnafu, EncodeRelSnafu, Error};
 use crate::SubstraitPlan;
 
@@ -41,30 +39,15 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
     async fn decode<B: Buf + Send>(
         &self,
         message: B,
-        catalog_manager: CatalogManagerRef,
+        catalog_list: Arc<dyn CatalogList>,
     ) -> Result<Self::Plan, Self::Error> {
-        // TODO(hl):
-        todo!()
-        // let mut context = SessionContext::new();
-        //
-        // let plan = Plan::decode(message).context(DecodeRelSnafu)?;
-        //
-        // //resolve
-        // context.register_catalog(
-        //     DEFAULT_CATALOG_NAME,
-        //     Arc::new(DfCatalogProviderAdapter::new(
-        //         catalog_manager
-        //             .catalog_async(DEFAULT_CATALOG_NAME)
-        //             .await
-        //             .unwrap()
-        //             .unwrap(),
-        //     )),
-        // );
-        //
-        // let df_plan = from_substrait_plan(&mut context, &plan)
-        //     .await
-        //     .context(DecodeDfPlanSnafu)?;
-        // Ok(df_plan)
+        let mut context = SessionContext::new();
+        let plan = Plan::decode(message).context(DecodeRelSnafu)?;
+        context.register_catalog_list(catalog_list);
+        let df_plan = from_substrait_plan(&mut context, &plan)
+            .await
+            .context(DecodeDfPlanSnafu)?;
+        Ok(df_plan)
     }
 
     fn encode(&self, plan: Self::Plan) -> Result<Bytes, Self::Error> {
