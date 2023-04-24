@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_procedure::{watcher, ProcedureManagerRef, ProcedureWithId};
+use common_procedure::{watcher, ProcedureWithId};
 use common_query::Output;
 use common_telemetry::logging::info;
 use snafu::prelude::*;
@@ -26,16 +26,7 @@ use crate::error::{self, Result};
 use crate::sql::SqlHandler;
 
 impl SqlHandler {
-    pub(crate) async fn alter(&self, req: AlterTableRequest) -> Result<Output> {
-        self.alter_table_by_procedure(&self.procedure_manager, req)
-            .await
-    }
-
-    pub(crate) async fn alter_table_by_procedure(
-        &self,
-        procedure_manager: &ProcedureManagerRef,
-        req: AlterTableRequest,
-    ) -> Result<Output> {
+    pub(crate) async fn alter_table(&self, req: AlterTableRequest) -> Result<Output> {
         let table_name = req.table_name.clone();
         let table_ref = TableReference {
             catalog: &req.catalog_name,
@@ -53,7 +44,8 @@ impl SqlHandler {
 
         info!("Alter table {} by procedure {}", table_name, procedure_id);
 
-        let mut watcher = procedure_manager
+        let mut watcher = self
+            .procedure_manager
             .submit(procedure_with_id)
             .await
             .context(error::SubmitProcedureSnafu { procedure_id })?;

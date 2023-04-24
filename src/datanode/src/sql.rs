@@ -75,7 +75,7 @@ impl SqlHandler {
         let result = match request {
             SqlRequest::CreateTable(req) => self.create_table(req).await,
             SqlRequest::CreateDatabase(req) => self.create_database(req, query_ctx.clone()).await,
-            SqlRequest::Alter(req) => self.alter(req).await,
+            SqlRequest::Alter(req) => self.alter_table(req).await,
             SqlRequest::DropTable(req) => self.drop_table(req).await,
             SqlRequest::FlushTable(req) => self.flush_table(req).await,
         };

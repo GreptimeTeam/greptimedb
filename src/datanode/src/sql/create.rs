@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 use catalog::RegisterSchemaRequest;
-use common_procedure::{watcher, ProcedureManagerRef, ProcedureWithId};
+use common_procedure::{watcher, ProcedureWithId};
 use common_query::Output;
 use common_telemetry::tracing::info;
 use datatypes::schema::RawSchema;
@@ -73,15 +73,6 @@ impl SqlHandler {
     }
 
     pub(crate) async fn create_table(&self, req: CreateTableRequest) -> Result<Output> {
-        self.create_table_by_procedure(&self.procedure_manager, req)
-            .await
-    }
-
-    pub(crate) async fn create_table_by_procedure(
-        &self,
-        procedure_manager: &ProcedureManagerRef,
-        req: CreateTableRequest,
-    ) -> Result<Output> {
         let table_name = req.table_name.clone();
         let table_engine =
             self.table_engine_manager
@@ -106,7 +97,8 @@ impl SqlHandler {
 
         info!("Create table {} by procedure {}", table_name, procedure_id);
 
-        let mut watcher = procedure_manager
+        let mut watcher = self
+            .procedure_manager
             .submit(procedure_with_id)
             .await
             .context(SubmitProcedureSnafu { procedure_id })?;
