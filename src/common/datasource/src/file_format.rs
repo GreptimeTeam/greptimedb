@@ -197,5 +197,5 @@ pub async fn stream_to_file<T: DfRecordBatchEncoder, U: Fn(SharedBuffer) -> T>(
     // Flushes all pending writes
     writer.try_flush(true).await?;
 
-    writer.shutdown().await
+    writer.close().await
 }

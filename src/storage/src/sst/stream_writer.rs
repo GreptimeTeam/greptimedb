@@ -101,6 +101,9 @@ impl BufferedWriter {
 
     /// Close parquet writer and ensure all buffered data are written into underlying storage.
     pub async fn close(self) -> error::Result<(FileMetaData, u64)> {
-        self.inner.close().await.context(error::WriteBufferSnafu)
+        self.inner
+            .close_with_arrow_writer()
+            .await
+            .context(error::WriteBufferSnafu)
     }
 }

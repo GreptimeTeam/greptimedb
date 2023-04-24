@@ -47,13 +47,13 @@ pub type DefaultBufferedWriter<E> = BufferedWriter<Compat<Writer>, E>;
 impl<T: AsyncWrite + Send + Unpin, U: DfRecordBatchEncoder + ArrowWriterCloser>
     BufferedWriter<T, U>
 {
-    pub async fn close(mut self) -> Result<(FileMetaData, u64)> {
+    pub async fn close_with_arrow_writer(mut self) -> Result<(FileMetaData, u64)> {
         if let Some(encoder) = self.encoder.take() {
             let metadata = encoder.close().await?;
             let written = self.try_flush(true).await?;
 
             // It's important to shut down! flushes all pending writes
-            self.shutdown().await?;
+            self.close().await?;
             return Ok((metadata, written));
         }
         error::BufferedWriterClosedSnafu {}.fail()
@@ -61,7 +61,7 @@ impl<T: AsyncWrite + Send + Unpin, U: DfRecordBatchEncoder + ArrowWriterCloser>
 }
 
 impl<T: AsyncWrite + Send + Unpin, U: DfRecordBatchEncoder> BufferedWriter<T, U> {
-    pub async fn shutdown(&mut self) -> Result<()> {
+    pub async fn close(&mut self) -> Result<()> {
         self.writer.shutdown().await.context(error::AsyncWriteSnafu)
     }
 
