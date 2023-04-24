@@ -151,16 +151,14 @@ impl TryFrom<StartCommand> for FrontendOptions {
 
         let tls_option = TlsOption::new(cmd.tls_mode, cmd.tls_cert_path, cmd.tls_key_path);
 
-        let mut http_options = HttpOptions {
-            disable_dashboard: cmd.disable_dashboard,
-            ..Default::default()
-        };
-
         if let Some(addr) = cmd.http_addr {
-            http_options.addr = addr;
+            opts.http_options
+                .get_or_insert_with(|| HttpOptions {
+                    disable_dashboard: cmd.disable_dashboard,
+                    ..Default::default()
+                })
+                .addr = addr;
         }
-
-        opts.http_options = Some(http_options);
 
         if let Some(addr) = cmd.grpc_addr {
             opts.grpc_options = Some(GrpcOptions {
