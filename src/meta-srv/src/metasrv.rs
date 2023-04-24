@@ -141,9 +141,9 @@ impl MetaSrv {
                                         error!("Failed to recover procedures, error: {e}");
                                     }
                                 }
-                                LeaderChangeMessage::StepDown(_) => {
+                                LeaderChangeMessage::StepDown(leader) => {
                                     // TODO(LFC): TBC
-                                    unimplemented!()
+                                    error!("Leader :{:?} step down", leader);
                                 }
                             }
                         }
