@@ -121,7 +121,7 @@ pub enum Error {
     #[snafu(display("Invalid InsertRequest, reason: {}", reason))]
     InvalidInsertRequest { reason: String, location: Location },
 
-    #[snafu(display("Table `{}` not exist", table_name))]
+    #[snafu(display("Table not found: {}", table_name))]
     TableNotFound {
         table_name: String,
         location: Location,

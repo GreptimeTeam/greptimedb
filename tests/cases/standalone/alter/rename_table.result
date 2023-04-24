@@ -31,11 +31,11 @@ Affected Rows: 0
 
 DESC TABLE t;
 
-Error: 4001(TableNotFound), Table `t` not exist
+Error: 4001(TableNotFound), Table not found: t
 
 SELECT * FROM t;
 
-Error: 4001(TableNotFound), Table `greptime.public.t` not exist
+Error: 4001(TableNotFound), Table not found: greptime.public.t
 
 CREATE TABLE t(i INTEGER, j BIGINT TIME INDEX);
 
