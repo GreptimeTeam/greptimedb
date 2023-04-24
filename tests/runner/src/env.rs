@@ -180,7 +180,7 @@ impl Env {
         };
         if !util::check_port(ip_addr.parse().unwrap(), Duration::from_secs(10)).await {
             Env::stop_server(&mut process).await;
-            panic!("Frontend doesn't up in 10 seconds, quit.")
+            panic!("{subcommand} doesn't up in 10 seconds, quit.")
         }
 
         process
