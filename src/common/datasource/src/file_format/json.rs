@@ -167,6 +167,8 @@ pub struct JsonEncodedBuffer {
     buffer: SharedBuffer,
 }
 
+pub trait EncodedBuffer {}
+
 impl JsonEncodedBuffer {
     pub fn with_capacity(size: usize) -> Self {
         let buffer = SharedBuffer::with_capacity(size);

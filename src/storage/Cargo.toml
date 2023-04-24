@@ -13,6 +13,7 @@ arrow.workspace = true
 arrow-array.workspace = true
 bytes = "1.1"
 common-base = { path = "../common/base" }
+common-datasource = { path = "../common/datasource" }
 common-error = { path = "../common/error" }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }

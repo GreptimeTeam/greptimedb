@@ -15,21 +15,25 @@
 use std::result;
 use std::sync::Arc;
 
+use arrow::record_batch::RecordBatch;
 use arrow_schema::Schema;
 use async_trait::async_trait;
 use datafusion::error::Result as DatafusionResult;
 use datafusion::parquet::arrow::async_reader::AsyncFileReader;
-use datafusion::parquet::arrow::parquet_to_arrow_schema;
+use datafusion::parquet::arrow::{parquet_to_arrow_schema, ArrowWriter};
 use datafusion::parquet::errors::{ParquetError, Result as ParquetResult};
 use datafusion::parquet::file::metadata::ParquetMetaData;
+use datafusion::parquet::format::FileMetaData;
 use datafusion::physical_plan::file_format::{FileMeta, ParquetFileReaderFactory};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use futures::future::BoxFuture;
 use object_store::{ObjectStore, Reader};
 use snafu::ResultExt;
 
+use crate::buffered_writer::{ArrowWriterCloser, DfRecordBatchEncoder};
 use crate::error::{self, Result};
 use crate::file_format::FileFormat;
+use crate::share_buffer::SharedBuffer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ParquetFormat {}
@@ -136,6 +140,19 @@ impl AsyncFileReader for LazyParquetFileReader {
             // Safety: Must initialized
             self.reader.as_mut().unwrap().get_metadata().await
         })
+    }
+}
+
+impl DfRecordBatchEncoder for ArrowWriter<SharedBuffer> {
+    fn write(&mut self, batch: &RecordBatch) -> Result<()> {
+        self.write(batch).context(error::EncodeRecordBatchSnafu)
+    }
+}
+
+#[async_trait]
+impl ArrowWriterCloser for ArrowWriter<SharedBuffer> {
+    async fn close(self) -> Result<FileMetaData> {
+        self.close().context(error::EncodeRecordBatchSnafu)
     }
 }
 

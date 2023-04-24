@@ -49,6 +49,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to write to buffer, source: {}", source))]
+    WriteBuffer {
+        #[snafu(backtrace)]
+        source: common_datasource::error::Error,
+    },
+
     #[snafu(display("Failed to create RecordBatch from vectors, source: {}", source))]
     NewRecordBatch {
         location: Location,
@@ -514,6 +520,7 @@ impl ErrorExt for Error {
             InvalidAlterRequest { source, .. } | InvalidRegionDesc { source, .. } => {
                 source.status_code()
             }
+            WriteBuffer { source, .. } => source.status_code(),
             PushBatch { source, .. } => source.status_code(),
             CreateDefault { source, .. } => source.status_code(),
             ConvertChunk { source, .. } => source.status_code(),

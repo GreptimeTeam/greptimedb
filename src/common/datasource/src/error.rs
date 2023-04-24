@@ -16,6 +16,7 @@ use std::any::Any;
 
 use arrow_schema::ArrowError;
 use common_error::prelude::*;
+use datafusion::parquet::errors::ParquetError;
 use snafu::Location;
 use url::ParseError;
 
@@ -88,6 +89,12 @@ pub enum Error {
         source: ArrowError,
     },
 
+    #[snafu(display("Failed to encode record batch: {}", source))]
+    EncodeRecordBatch {
+        location: Location,
+        source: ParquetError,
+    },
+
     #[snafu(display("Failed to read record batch: {}", source))]
     ReadRecordBatch {
         location: Location,
@@ -144,6 +151,9 @@ pub enum Error {
 
     #[snafu(display("Missing required field: {}", name))]
     MissingRequiredField { name: String, location: Location },
+
+    #[snafu(display("Buffered writer closed"))]
+    BufferedWriterClosed { location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -175,7 +185,9 @@ impl ErrorExt for Error {
             Decompression { .. }
             | JoinHandle { .. }
             | ReadRecordBatch { .. }
-            | WriteRecordBatch { .. } => StatusCode::Unexpected,
+            | WriteRecordBatch { .. }
+            | EncodeRecordBatch { .. }
+            | BufferedWriterClosed { .. } => StatusCode::Unexpected,
         }
     }
 
@@ -201,6 +213,8 @@ impl ErrorExt for Error {
             ReadRecordBatch { location, .. } => Some(*location),
             WriteRecordBatch { location, .. } => Some(*location),
             AsyncWrite { location, .. } => Some(*location),
+            EncodeRecordBatch { location, .. } => Some(*location),
+            BufferedWriterClosed { location, .. } => Some(*location),
 
             UnsupportedBackendProtocol { location, .. } => Some(*location),
             EmptyHostPath { location, .. } => Some(*location),

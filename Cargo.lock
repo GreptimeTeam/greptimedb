@@ -8324,6 +8324,7 @@ dependencies = [
  "atomic_float",
  "bytes",
  "common-base",
+ "common-datasource",
  "common-error",
  "common-query",
  "common-recordbatch",
