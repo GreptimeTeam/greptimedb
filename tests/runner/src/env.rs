@@ -90,6 +90,7 @@ impl Env {
             frontend_process: None,
             client: Mutex::new(db),
             ctx: db_ctx,
+            is_standalone: true,
         }
     }
 
@@ -112,6 +113,7 @@ impl Env {
             frontend_process: Some(frontend),
             client: Mutex::new(db),
             ctx: db_ctx,
+            is_standalone: false,
         }
     }
 
@@ -190,10 +192,10 @@ impl Env {
         Env::stop_server(&mut server_process).await;
 
         // check if the server is distributed or standalone
-        let subcommand = if db.frontend_process.is_some() {
-            "datanode"
-        } else {
+        let subcommand = if db.is_standalone {
             "standalone"
+        } else {
+            "datanode"
         };
         let new_server_process = Env::start_server(subcommand, &db.ctx, false).await;
         *server_process = new_server_process;
@@ -252,6 +254,7 @@ pub struct GreptimeDB {
     frontend_process: Option<Child>,
     client: Mutex<DB>,
     ctx: GreptimeDBContext,
+    is_standalone: bool,
 }
 
 #[async_trait]
