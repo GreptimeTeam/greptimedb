@@ -364,7 +364,6 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         .into_inner()
         .body;
     let instant_query_result = serde_json::from_slice::<PromJsonResponse>(&json_bytes).unwrap();
-    println!("{:?}", instant_query_result);
     let expected = PromJsonResponse {
         status: "success".to_string(),
         data: PromData {
