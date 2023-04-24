@@ -30,12 +30,12 @@ use table::error::{self as table_error, Result as TableResult};
 use table::metadata::{RawTableInfo, TableInfo, TableInfoRef, TableType};
 use table::Table;
 
-use super::format::{create_physical_plan, CreateScanPlanContext, ScanPlanConfig};
 use crate::error::{self, ConvertRawSnafu, Result};
 use crate::manifest::immutable::{
     read_table_manifest, write_table_manifest, ImmutableMetadata, INIT_META_VERSION,
 };
 use crate::manifest::table_manifest_dir;
+use crate::table::format::{create_physical_plan, CreateScanPlanContext, ScanPlanConfig};
 
 pub const IMMUTABLE_TABLE_META_KEY: &str = "IMMUTABLE_TABLE_META";
 pub const IMMUTABLE_TABLE_LOCATION_KEY: &str = "LOCATION";
