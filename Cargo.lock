@@ -1750,6 +1750,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-procedure-test"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "common-procedure",
+]
+
+[[package]]
 name = "common-query"
 version = "0.2.0"
 dependencies = [
@@ -2461,6 +2469,7 @@ dependencies = [
  "datafusion-common",
  "datafusion-expr",
  "datatypes",
+ "file-table-engine",
  "futures",
  "futures-util",
  "humantime-serde",
@@ -2898,12 +2907,16 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "common-catalog",
+ "common-datasource",
  "common-error",
  "common-procedure",
+ "common-procedure-test",
  "common-query",
+ "common-recordbatch",
  "common-telemetry",
  "common-test-util",
  "common-time",
+ "datafusion",
  "datatypes",
  "futures",
  "object-store",
@@ -3013,11 +3026,14 @@ dependencies = [
  "datafusion-expr",
  "datanode",
  "datatypes",
+ "file-table-engine",
  "futures",
  "futures-util",
  "itertools",
  "meta-client",
  "meta-srv",
+ "meter-core",
+ "meter-macros",
  "mito",
  "moka",
  "object-store",
@@ -3807,7 +3823,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=0bebe5f69c91cdfbce85cb8f45f9fcd28185261c#0bebe5f69c91cdfbce85cb8f45f9fcd28185261c"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=57e6a032db70264ec394cbb8a2f327ad33705d76#57e6a032db70264ec394cbb8a2f327ad33705d76"
 dependencies = [
  "prost",
  "tonic 0.9.1",
@@ -4815,6 +4831,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "meter-core"
+version = "0.1.0"
+source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=f0798c4c648d89f51abe63e870919c75dd463199#f0798c4c648d89f51abe63e870919c75dd463199"
+dependencies = [
+ "anymap",
+ "once_cell",
+ "parking_lot",
+]
+
+[[package]]
+name = "meter-macros"
+version = "0.1.0"
+source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=f0798c4c648d89f51abe63e870919c75dd463199#f0798c4c648d89f51abe63e870919c75dd463199"
+dependencies = [
+ "meter-core",
+]
+
+[[package]]
 name = "metrics"
 version = "0.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4922,6 +4956,7 @@ dependencies = [
  "common-catalog",
  "common-error",
  "common-procedure",
+ "common-procedure-test",
  "common-query",
  "common-recordbatch",
  "common-telemetry",
@@ -6442,6 +6477,7 @@ dependencies = [
  "chrono",
  "common-base",
  "common-catalog",
+ "common-datasource",
  "common-error",
  "common-function",
  "common-function-macro",
@@ -6459,14 +6495,17 @@ dependencies = [
  "format_num",
  "futures",
  "futures-util",
+ "humantime",
  "metrics",
  "num",
  "num-traits",
+ "object-store",
  "once_cell",
  "paste",
  "promql",
  "promql-parser",
  "rand",
+ "regex",
  "serde",
  "serde_json",
  "session",

@@ -15,7 +15,7 @@
 use std::fmt::Formatter;
 use std::sync::Arc;
 
-use api::v1::InsertRequest;
+use api::v1::{DeleteRequest, InsertRequest};
 use client::Database;
 use common_query::prelude::Expr;
 use common_query::Output;
@@ -49,6 +49,10 @@ impl DatanodeInstance {
 
     pub(crate) async fn grpc_insert(&self, request: InsertRequest) -> client::Result<u32> {
         self.db.insert(request).await
+    }
+
+    pub(crate) async fn grpc_delete(&self, request: DeleteRequest) -> client::Result<u32> {
+        self.db.delete(request).await
     }
 
     pub(crate) async fn grpc_table_scan(&self, plan: TableScanPlan) -> Result<RecordBatches> {

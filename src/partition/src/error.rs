@@ -93,6 +93,9 @@ pub enum Error {
     #[snafu(display("Invalid InsertRequest, reason: {}", reason))]
     InvalidInsertRequest { reason: String, location: Location },
 
+    #[snafu(display("Invalid DeleteRequest, reason: {}", reason))]
+    InvalidDeleteRequest { reason: String, location: Location },
+
     #[snafu(display(
         "Invalid table route data in meta, table name: {}, msg: {}",
         table_name,
@@ -127,6 +130,7 @@ impl ErrorExt for Error {
             | Error::FindRegions { .. }
             | Error::RegionKeysSize { .. }
             | Error::InvalidInsertRequest { .. }
+            | Error::InvalidDeleteRequest { .. }
             | Error::FindPartitionColumn { .. } => StatusCode::InvalidArguments,
             Error::SerializeJson { .. } | Error::DeserializeJson { .. } => StatusCode::Internal,
             Error::InvalidTableRouteData { .. } => StatusCode::Internal,

@@ -409,6 +409,10 @@ DROP TABLE tpch_q1_agg;
 
 Affected Rows: 1
 
+DROP TABLE test5;
+
+Affected Rows: 1
+
 DROP TABLE test6;
 
 Affected Rows: 1

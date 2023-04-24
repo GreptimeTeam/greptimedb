@@ -77,6 +77,10 @@ impl StatementExecutor {
         let mut rows_inserted = 0;
         for entry in entries.iter() {
             let path = entry.path();
+            // skips directories.
+            if entry.path().ends_with('/') {
+                continue;
+            }
             let reader = object_store
                 .reader(path)
                 .await

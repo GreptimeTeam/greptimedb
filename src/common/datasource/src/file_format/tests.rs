@@ -12,19 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::assert_matches::assert_matches;
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::vec;
 
 use arrow_schema::SchemaRef;
 use datafusion::assert_batches_eq;
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::object_store::ObjectStoreUrl;
-use datafusion::physical_plan::file_format::{FileOpener, FileScanConfig, FileStream};
+use datafusion::execution::context::TaskContext;
+use datafusion::physical_plan::file_format::{FileOpener, FileScanConfig, FileStream, ParquetExec};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+use datafusion::physical_plan::ExecutionPlan;
+use datafusion::prelude::SessionContext;
 use futures::StreamExt;
 
+use super::FORMAT_TYPE;
 use crate::compression::CompressionType;
+use crate::error;
 use crate::file_format::csv::{CsvConfigBuilder, CsvOpener};
 use crate::file_format::json::JsonOpener;
+use crate::file_format::parquet::DefaultParquetFileReaderFactory;
+use crate::file_format::Format;
 use crate::test_util::{self, test_basic_schema, test_store};
 
 fn scan_config(file_schema: SchemaRef, limit: Option<usize>, filename: &str) -> FileScanConfig {
@@ -158,4 +168,78 @@ async fn test_csv_opener() {
     for test in tests {
         test.run().await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_parquet_exec() {
+    let store = test_store("/");
+
+    let schema = test_basic_schema();
+
+    let path = &test_util::get_data_dir("tests/parquet/basic.parquet")
+        .display()
+        .to_string();
+    let base_config = scan_config(schema.clone(), None, path);
+
+    let exec = ParquetExec::new(base_config, None, None)
+        .with_parquet_file_reader_factory(Arc::new(DefaultParquetFileReaderFactory::new(store)));
+
+    let ctx = SessionContext::new();
+
+    let context = Arc::new(TaskContext::from(&ctx));
+
+    // The stream batch size can be set by ctx.session_config.batch_size
+    let result = exec
+        .execute(0, context)
+        .unwrap()
+        .map(|b| b.unwrap())
+        .collect::<Vec<_>>()
+        .await;
+
+    assert_batches_eq!(
+        vec![
+            "+-----+-------+",
+            "| num | str   |",
+            "+-----+-------+",
+            "| 5   | test  |",
+            "| 2   | hello |",
+            "| 4   | foo   |",
+            "+-----+-------+",
+        ],
+        &result
+    );
+}
+
+#[test]
+fn test_format() {
+    let value = [(FORMAT_TYPE.to_string(), "csv".to_string())]
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+
+    assert_matches!(Format::try_from(&value).unwrap(), Format::Csv(_));
+
+    let value = [(FORMAT_TYPE.to_string(), "Parquet".to_string())]
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+
+    assert_matches!(Format::try_from(&value).unwrap(), Format::Parquet(_));
+
+    let value = [(FORMAT_TYPE.to_string(), "JSON".to_string())]
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+
+    assert_matches!(Format::try_from(&value).unwrap(), Format::Json(_));
+
+    let value = [(FORMAT_TYPE.to_string(), "Foobar".to_string())]
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+
+    assert_matches!(
+        Format::try_from(&value).unwrap_err(),
+        error::Error::UnsupportedFormat { .. }
+    );
+
+    let value = HashMap::new();
+
+    assert_matches!(Format::try_from(&value).unwrap(), Format::Parquet(_));
 }

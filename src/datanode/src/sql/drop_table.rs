@@ -89,11 +89,17 @@ impl SqlHandler {
         req: DropTableRequest,
     ) -> Result<Output> {
         let table_name = req.table_name.clone();
-        let procedure = DropTableProcedure::new(
-            req,
-            self.catalog_manager.clone(),
-            self.engine_procedure.clone(),
-        );
+        let table_ref = TableReference {
+            catalog: &req.catalog_name,
+            schema: &req.schema_name,
+            table: &table_name,
+        };
+
+        let table = self.get_table(&table_ref).await?;
+        let engine_procedure = self.engine_procedure(table)?;
+
+        let procedure =
+            DropTableProcedure::new(req, self.catalog_manager.clone(), engine_procedure);
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
         let procedure_id = procedure_with_id.id;

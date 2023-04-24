@@ -21,10 +21,10 @@ use common_telemetry::tracing::{error, info};
 use datatypes::schema::RawSchema;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
-use sql::ast::{ColumnOption, SqlOption, TableConstraint, Value};
+use sql::ast::{ColumnOption, TableConstraint};
 use sql::statements::column_def_to_schema;
-use sql::statements::create::CreateTable;
-use store_api::storage::consts::TIME_INDEX_NAME;
+use sql::statements::create::{CreateTable, TIME_INDEX};
+use sql::util::to_lowercase_options_map;
 use table::engine::{EngineContext, TableReference};
 use table::metadata::TableId;
 use table::requests::*;
@@ -32,9 +32,10 @@ use table_procedure::CreateTableProcedure;
 
 use crate::error::{
     self, CatalogNotFoundSnafu, CatalogSnafu, ConstraintNotSupportedSnafu, CreateTableSnafu,
-    IllegalPrimaryKeysDefSnafu, InsertSystemCatalogSnafu, KeyColumnNotFoundSnafu,
-    RegisterSchemaSnafu, Result, SchemaExistsSnafu, SchemaNotFoundSnafu, SubmitProcedureSnafu,
-    TableEngineNotFoundSnafu, UnrecognizedTableOptionSnafu, WaitProcedureSnafu,
+    EngineProcedureNotFoundSnafu, IllegalPrimaryKeysDefSnafu, InsertSystemCatalogSnafu,
+    KeyColumnNotFoundSnafu, RegisterSchemaSnafu, Result, SchemaExistsSnafu, SchemaNotFoundSnafu,
+    SubmitProcedureSnafu, TableEngineNotFoundSnafu, UnrecognizedTableOptionSnafu,
+    WaitProcedureSnafu,
 };
 use crate::sql::SqlHandler;
 
@@ -153,11 +154,17 @@ impl SqlHandler {
                 .context(TableEngineNotFoundSnafu {
                     engine_name: &req.engine,
                 })?;
+        let engine_procedure = self
+            .table_engine_manager
+            .engine_procedure(&req.engine)
+            .context(EngineProcedureNotFoundSnafu {
+                engine_name: &req.engine,
+            })?;
         let procedure = CreateTableProcedure::new(
             req,
             self.catalog_manager.clone(),
             table_engine.clone(),
-            self.engine_procedure.clone(),
+            engine_procedure,
         );
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
         let procedure_id = procedure_with_id.id;
@@ -226,7 +233,7 @@ impl SqlHandler {
                     is_primary,
                 } => {
                     if let Some(name) = name {
-                        if name.value == TIME_INDEX_NAME {
+                        if name.value == TIME_INDEX {
                             ts_index = *col_map.get(&columns[0].value).context(
                                 KeyColumnNotFoundSnafu {
                                     name: columns[0].value.to_string(),
@@ -288,7 +295,8 @@ impl SqlHandler {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let table_options = stmt_options_to_table_options(&stmt.options)?;
+        let table_options = TableOptions::try_from(&to_lowercase_options_map(&stmt.options))
+            .context(UnrecognizedTableOptionSnafu)?;
         let schema = RawSchema::new(columns_schemas);
         let request = CreateTableRequest {
             id: table_id,
@@ -305,20 +313,6 @@ impl SqlHandler {
         };
         Ok(request)
     }
-}
-
-fn stmt_options_to_table_options(opts: &[SqlOption]) -> error::Result<TableOptions> {
-    let mut map = HashMap::with_capacity(opts.len());
-    for SqlOption { name, value } in opts {
-        let value_str = match value {
-            Value::SingleQuotedString(s) => s.clone(),
-            Value::DoubleQuotedString(s) => s.clone(),
-            _ => value.to_string(),
-        };
-        map.insert(name.value.clone(), value_str);
-    }
-    let options = TableOptions::try_from(&map).context(UnrecognizedTableOptionSnafu)?;
-    Ok(options)
 }
 
 #[cfg(test)]
@@ -355,7 +349,7 @@ mod tests {
     async fn test_create_table_with_options() {
         let sql = r#"
             CREATE TABLE demo_table (
-                "timestamp" BIGINT TIME INDEX, 
+                "timestamp" BIGINT TIME INDEX,
                 "value" DOUBLE,
                 host STRING PRIMARY KEY
             ) engine=mito with(regions=1, ttl='7days',write_buffer_size='32MB',some='other');"#;
@@ -379,7 +373,7 @@ mod tests {
         let parsed_stmt = sql_to_statement(
             r#"
             CREATE TABLE demo_table(
-                "timestamp" BIGINT TIME INDEX, 
+                "timestamp" BIGINT TIME INDEX,
                 "value" DOUBLE,
                 host STRING PRIMARY KEY
             ) engine=mito with(regions=1);"#,

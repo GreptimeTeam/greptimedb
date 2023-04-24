@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use catalog::CatalogManagerRef;
 use common_error::prelude::BoxedError;
 use common_procedure::ProcedureManagerRef;
@@ -24,15 +22,17 @@ use snafu::{OptionExt, ResultExt};
 use table::engine::manager::TableEngineManagerRef;
 use table::engine::{TableEngineProcedureRef, TableEngineRef, TableReference};
 use table::requests::*;
-use table::{Table, TableRef};
+use table::TableRef;
 
 use crate::error::{
-    self, CloseTableEngineSnafu, Result, TableEngineNotFoundSnafu, TableNotFoundSnafu,
+    self, CloseTableEngineSnafu, EngineProcedureNotFoundSnafu, Result, TableEngineNotFoundSnafu,
+    TableNotFoundSnafu,
 };
 use crate::instance::sql::table_idents_to_full_name;
 
 mod alter;
 mod create;
+mod create_external;
 mod drop_table;
 mod flush_table;
 pub(crate) mod insert;
@@ -51,9 +51,6 @@ pub enum SqlRequest {
 pub struct SqlHandler {
     table_engine_manager: TableEngineManagerRef,
     catalog_manager: CatalogManagerRef,
-    // TODO(yingwen): Support multiple table engine. We need to add a method
-    // to TableEngineManagerRef to return engine procedure by engine name.
-    engine_procedure: TableEngineProcedureRef,
     procedure_manager: Option<ProcedureManagerRef>,
 }
 
@@ -61,13 +58,11 @@ impl SqlHandler {
     pub fn new(
         table_engine_manager: TableEngineManagerRef,
         catalog_manager: CatalogManagerRef,
-        engine_procedure: TableEngineProcedureRef,
         procedure_manager: Option<ProcedureManagerRef>,
     ) -> Self {
         Self {
             table_engine_manager,
             catalog_manager,
-            engine_procedure,
             procedure_manager,
         }
     }
@@ -111,12 +106,21 @@ impl SqlHandler {
         self.table_engine_manager.clone()
     }
 
-    pub fn table_engine(&self, table: Arc<dyn Table>) -> Result<TableEngineRef> {
+    pub fn table_engine(&self, table: TableRef) -> Result<TableEngineRef> {
         let engine_name = &table.table_info().meta.engine;
         let engine = self
             .table_engine_manager
             .engine(engine_name)
             .context(TableEngineNotFoundSnafu { engine_name })?;
+        Ok(engine)
+    }
+
+    pub fn engine_procedure(&self, table: TableRef) -> Result<TableEngineProcedureRef> {
+        let engine_name = &table.table_info().meta.engine;
+        let engine = self
+            .table_engine_manager
+            .engine_procedure(engine_name)
+            .context(EngineProcedureNotFoundSnafu { engine_name })?;
         Ok(engine)
     }
 

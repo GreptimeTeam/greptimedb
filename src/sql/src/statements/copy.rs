@@ -16,8 +16,6 @@ use std::collections::HashMap;
 
 use sqlparser::ast::ObjectName;
 
-use crate::error::{self, Result};
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CopyTable {
     To(CopyTableArgument),
@@ -27,25 +25,24 @@ pub enum CopyTable {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CopyTableArgument {
     pub table_name: ObjectName,
-    pub format: Format,
+    pub with: HashMap<String, String>,
     pub connection: HashMap<String, String>,
-    pub pattern: Option<String>,
     /// Copy tbl [To|From] 'location'.
     pub location: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Format {
-    Parquet,
-}
+#[cfg(test)]
+impl CopyTableArgument {
+    const FORMAT: &str = "FORMAT";
 
-impl TryFrom<String> for Format {
-    type Error = error::Error;
+    pub fn format(&self) -> Option<String> {
+        self.with
+            .get(Self::FORMAT)
+            .cloned()
+            .or_else(|| Some("PARQUET".to_string()))
+    }
 
-    fn try_from(name: String) -> Result<Self> {
-        if name.eq_ignore_ascii_case("PARQUET") {
-            return Ok(Format::Parquet);
-        }
-        error::UnsupportedCopyFormatOptionSnafu { name }.fail()
+    pub fn pattern(&self) -> Option<String> {
+        self.with.get("PATTERN").cloned()
     }
 }

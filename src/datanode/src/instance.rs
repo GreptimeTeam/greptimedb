@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use std::{fs, path};
@@ -26,6 +27,7 @@ use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::store::state_store::ObjectStateStore;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::info;
+use file_table_engine::engine::immutable::ImmutableFileTableEngine;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::LogConfig;
 use meta_client::client::{MetaClient, MetaClientBuilder};
@@ -46,6 +48,7 @@ use storage::scheduler::{LocalScheduler, SchedulerConfig};
 use storage::EngineImpl;
 use store_api::logstore::LogStore;
 use table::engine::manager::MemoryTableEngineManager;
+use table::engine::{TableEngine, TableEngineProcedureRef};
 use table::requests::FlushTableRequest;
 use table::table::numbers::NumbersTable;
 use table::table::TableIdProviderRef;
@@ -107,7 +110,7 @@ impl Instance {
         let object_store = new_object_store(&opts.storage.store).await?;
         let log_store = Arc::new(create_log_store(&opts.wal).await?);
 
-        let table_engine = Arc::new(DefaultEngine::new(
+        let mito_engine = Arc::new(DefaultEngine::new(
             TableEngineConfig::default(),
             EngineImpl::new(
                 StorageEngineConfig::from(opts),
@@ -115,10 +118,31 @@ impl Instance {
                 object_store.clone(),
                 compaction_scheduler,
             ),
-            object_store,
+            object_store.clone(),
         ));
 
-        let engine_manager = Arc::new(MemoryTableEngineManager::new(table_engine.clone()));
+        let mut engine_procedures = HashMap::with_capacity(2);
+        engine_procedures.insert(
+            mito_engine.name().to_string(),
+            mito_engine.clone() as TableEngineProcedureRef,
+        );
+
+        let immutable_file_engine = Arc::new(ImmutableFileTableEngine::new(
+            file_table_engine::config::EngineConfig::default(),
+            object_store.clone(),
+        ));
+        engine_procedures.insert(
+            immutable_file_engine.name().to_string(),
+            immutable_file_engine.clone() as TableEngineProcedureRef,
+        );
+
+        let engine_manager = Arc::new(
+            MemoryTableEngineManager::with(vec![
+                mito_engine.clone(),
+                immutable_file_engine.clone(),
+            ])
+            .with_engine_procedures(engine_procedures),
+        );
 
         // create remote catalog manager
         let (catalog_manager, table_id_provider) = match opts.mode {
@@ -144,7 +168,7 @@ impl Instance {
                     )
                 } else {
                     let catalog = Arc::new(
-                        catalog::local::LocalCatalogManager::try_new(engine_manager)
+                        catalog::local::LocalCatalogManager::try_new(engine_manager.clone())
                             .await
                             .context(CatalogSnafu)?,
                     );
@@ -158,7 +182,7 @@ impl Instance {
 
             Mode::Distributed => {
                 let catalog = Arc::new(catalog::remote::RemoteCatalogManager::new(
-                    engine_manager,
+                    engine_manager.clone(),
                     opts.node_id.context(MissingNodeIdSnafu)?,
                     Arc::new(MetaKvBackend {
                         client: meta_client.as_ref().unwrap().clone(),
@@ -185,21 +209,25 @@ impl Instance {
         let procedure_manager = create_procedure_manager(&opts.procedure).await?;
         // Register all procedures.
         if let Some(procedure_manager) = &procedure_manager {
-            table_engine.register_procedure_loaders(&**procedure_manager);
+            // Register procedures of the mito engine.
+            mito_engine.register_procedure_loaders(&**procedure_manager);
+            immutable_file_engine.register_procedure_loaders(&**procedure_manager);
+            // Register procedures in table-procedure crate.
             table_procedure::register_procedure_loaders(
                 catalog_manager.clone(),
-                table_engine.clone(),
-                table_engine.clone(),
+                mito_engine.clone(),
+                mito_engine.clone(),
                 &**procedure_manager,
             );
+            // TODO(yingwen): Register procedures of the file table engine once #1372
+            // is ready.
         }
 
         Ok(Self {
             query_engine: query_engine.clone(),
             sql_handler: SqlHandler::new(
-                Arc::new(MemoryTableEngineManager::new(table_engine.clone())),
+                engine_manager,
                 catalog_manager.clone(),
-                table_engine,
                 procedure_manager.clone(),
             ),
             catalog_manager,

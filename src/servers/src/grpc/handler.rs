@@ -117,7 +117,7 @@ impl GreptimeRequestHandler {
     }
 }
 
-fn create_query_context(header: Option<&RequestHeader>) -> QueryContextRef {
+pub(crate) fn create_query_context(header: Option<&RequestHeader>) -> QueryContextRef {
     let ctx = QueryContext::arc();
     if let Some(header) = header {
         // We provide dbname field in newer versions of protos/sdks

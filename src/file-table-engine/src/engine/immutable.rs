@@ -18,11 +18,12 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use common_catalog::consts::IMMUTABLE_FILE_ENGINE;
 use common_error::prelude::BoxedError;
+use common_procedure::{BoxedProcedure, ProcedureManager};
 use common_telemetry::{debug, logging};
 use datatypes::schema::Schema;
 use object_store::ObjectStore;
 use snafu::ResultExt;
-use table::engine::{table_dir, EngineContext, TableEngine, TableReference};
+use table::engine::{table_dir, EngineContext, TableEngine, TableEngineProcedure, TableReference};
 use table::error::TableOperationSnafu;
 use table::metadata::{TableInfo, TableInfoBuilder, TableMetaBuilder, TableType};
 use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
@@ -30,6 +31,7 @@ use table::{error as table_error, Result as TableResult, Table, TableRef};
 use tokio::sync::Mutex;
 
 use crate::config::EngineConfig;
+use crate::engine::procedure::{self, CreateImmutableFileTable, DropImmutableFileTable};
 use crate::engine::INIT_TABLE_VERSION;
 use crate::error::{
     BuildTableInfoSnafu, BuildTableMetaSnafu, DropTableSnafu, InvalidRawSchemaSnafu, Result,
@@ -39,7 +41,7 @@ use crate::manifest::immutable::{delete_table_manifest, ImmutableMetadata};
 use crate::manifest::table_manifest_dir;
 use crate::table::immutable::{ImmutableFileTable, ImmutableFileTableRef};
 
-///  [TableEngine] implementation.
+/// [TableEngine] implementation.
 #[derive(Clone)]
 pub struct ImmutableFileTableEngine {
     inner: Arc<EngineInner>,
@@ -115,6 +117,38 @@ impl TableEngine for ImmutableFileTableEngine {
     }
 }
 
+#[async_trait]
+impl TableEngineProcedure for ImmutableFileTableEngine {
+    fn create_table_procedure(
+        &self,
+        _ctx: &EngineContext,
+        request: CreateTableRequest,
+    ) -> TableResult<BoxedProcedure> {
+        let procedure = Box::new(CreateImmutableFileTable::new(request, self.clone()));
+        Ok(procedure)
+    }
+
+    fn alter_table_procedure(
+        &self,
+        _ctx: &EngineContext,
+        _request: AlterTableRequest,
+    ) -> TableResult<BoxedProcedure> {
+        table_error::UnsupportedSnafu {
+            operation: "ALTER TABLE",
+        }
+        .fail()
+    }
+
+    fn drop_table_procedure(
+        &self,
+        _ctx: &EngineContext,
+        request: DropTableRequest,
+    ) -> TableResult<BoxedProcedure> {
+        let procedure = Box::new(DropImmutableFileTable::new(request, self.clone()));
+        Ok(procedure)
+    }
+}
+
 #[cfg(test)]
 impl ImmutableFileTableEngine {
     pub async fn close_table(&self, table_ref: &TableReference<'_>) -> TableResult<()> {
@@ -127,6 +161,14 @@ impl ImmutableFileTableEngine {
         ImmutableFileTableEngine {
             inner: Arc::new(EngineInner::new(config, object_store)),
         }
+    }
+
+    /// Register all procedure loaders to the procedure manager.
+    ///
+    /// # Panics
+    /// Panics on error.
+    pub fn register_procedure_loaders(&self, procedure_manager: &dyn ProcedureManager) {
+        procedure::register_procedure_loaders(self.clone(), procedure_manager);
     }
 }
 
@@ -299,7 +341,11 @@ impl EngineInner {
                 table_id, table_info
             );
 
-            let table = Arc::new(ImmutableFileTable::new(table_info, metadata));
+            let table = Arc::new(
+                ImmutableFileTable::new(table_info, metadata)
+                    .map_err(BoxedError::new)
+                    .context(table_error::TableOperationSnafu)?,
+            );
 
             self.tables
                 .write()

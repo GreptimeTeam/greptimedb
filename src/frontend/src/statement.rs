@@ -167,7 +167,7 @@ fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<
     let CopyTableArgument {
         location,
         connection,
-        pattern,
+        with,
         table_name,
         ..
     } = match stmt {
@@ -178,11 +178,14 @@ fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
 
+    let pattern = with.get("PATTERN").cloned();
+
     Ok(CopyTableRequest {
         catalog_name,
         schema_name,
         table_name,
         location,
+        with,
         connection,
         pattern,
         direction,

@@ -20,7 +20,7 @@ use datafusion_expr::{BinaryExpr, Expr as DfExpr, Operator};
 use datatypes::prelude::Value;
 use meta_client::rpc::{Peer, TableName, TableRoute};
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::storage::RegionNumber;
+use store_api::storage::{RegionId, RegionNumber};
 use table::requests::InsertRequest;
 
 use crate::columns::RangeColumnsPartitionRule;
@@ -39,6 +39,12 @@ pub type PartitionRuleManagerRef = Arc<PartitionRuleManager>;
 /// - filters (in case of select, deletion and update)
 pub struct PartitionRuleManager {
     table_routes: Arc<TableRoutes>,
+}
+
+#[derive(Debug)]
+pub struct PartitionInfo {
+    pub id: RegionId,
+    pub partition: PartitionDef,
 }
 
 impl PartitionRuleManager {
@@ -68,7 +74,7 @@ impl PartitionRuleManager {
                 .region_routes
                 .iter()
                 .find_map(|x| {
-                    if x.region.id == *region as u64 {
+                    if x.region.id == *region as RegionId {
                         x.leader_peer.clone()
                     } else {
                         None
@@ -86,8 +92,7 @@ impl PartitionRuleManager {
         Ok(datanodes)
     }
 
-    /// Get partition rule of given table.
-    pub async fn find_table_partition_rule(&self, table: &TableName) -> Result<PartitionRuleRef> {
+    pub async fn find_table_partitions(&self, table: &TableName) -> Result<Vec<PartitionInfo>> {
         let route = self.table_routes.get_route(table).await?;
         ensure!(
             !route.region_routes.is_empty(),
@@ -107,20 +112,36 @@ impl PartitionRuleManager {
                     table_name: table.to_string(),
                 })?;
             let partition_def = PartitionDef::try_from(partition)?;
-            partitions.push((r.region.id, partition_def));
+
+            partitions.push(PartitionInfo {
+                id: r.region.id,
+                partition: partition_def,
+            });
         }
-        partitions.sort_by(|a, b| a.1.partition_bounds().cmp(b.1.partition_bounds()));
+        partitions.sort_by(|a, b| {
+            a.partition
+                .partition_bounds()
+                .cmp(b.partition.partition_bounds())
+        });
 
         ensure!(
             partitions
                 .windows(2)
-                .all(|w| w[0].1.partition_columns() == w[1].1.partition_columns()),
+                .all(|w| w[0].partition.partition_columns() == w[1].partition.partition_columns()),
             error::InvalidTableRouteDataSnafu {
                 table_name: table.to_string(),
                 err_msg: "partition columns of all regions are not the same"
             }
         );
-        let partition_columns = partitions[0].1.partition_columns();
+
+        Ok(partitions)
+    }
+
+    /// Get partition rule of given table.
+    pub async fn find_table_partition_rule(&self, table: &TableName) -> Result<PartitionRuleRef> {
+        let partitions = self.find_table_partitions(table).await?;
+
+        let partition_columns = partitions[0].partition.partition_columns();
         ensure!(
             !partition_columns.is_empty(),
             error::InvalidTableRouteDataSnafu {
@@ -131,7 +152,7 @@ impl PartitionRuleManager {
 
         let regions = partitions
             .iter()
-            .map(|x| x.0 as u32)
+            .map(|x| x.id as u32)
             .collect::<Vec<RegionNumber>>();
 
         // TODO(LFC): Serializing and deserializing partition rule is ugly, must find a much more elegant way.
@@ -140,7 +161,7 @@ impl PartitionRuleManager {
                 // Omit the last "MAXVALUE".
                 let bounds = partitions
                     .iter()
-                    .filter_map(|(_, p)| match &p.partition_bounds()[0] {
+                    .filter_map(|info| match &info.partition.partition_bounds()[0] {
                         PartitionBound::Value(v) => Some(v.clone()),
                         PartitionBound::MaxValue => None,
                     })
@@ -154,7 +175,7 @@ impl PartitionRuleManager {
             _ => {
                 let bounds = partitions
                     .iter()
-                    .map(|x| x.1.partition_bounds().clone())
+                    .map(|x| x.partition.partition_bounds().clone())
                     .collect::<Vec<Vec<PartitionBound>>>();
                 Arc::new(RangeColumnsPartitionRule::new(
                     partition_columns.clone(),
@@ -188,7 +209,7 @@ impl PartitionRuleManager {
             }
             target.into_iter().collect::<Vec<_>>()
         } else {
-            partition_rule.find_regions(&[])?
+            partition_rule.find_regions_by_exprs(&[])?
         };
         ensure!(
             !regions.is_empty(),
@@ -228,7 +249,7 @@ fn find_regions0(partition_rule: PartitionRuleRef, filter: &Expr) -> Result<Hash
                     }
                 })?;
                 return Ok(partition_rule
-                    .find_regions(&[PartitionExpr::new(column, op, value)])?
+                    .find_regions_by_exprs(&[PartitionExpr::new(column, op, value)])?
                     .into_iter()
                     .collect::<HashSet<RegionNumber>>());
             }
@@ -256,7 +277,7 @@ fn find_regions0(partition_rule: PartitionRuleRef, filter: &Expr) -> Result<Hash
 
     // Returns all regions for not supported partition expr as a safety hatch.
     Ok(partition_rule
-        .find_regions(&[])?
+        .find_regions_by_exprs(&[])?
         .into_iter()
         .collect::<HashSet<RegionNumber>>())
 }

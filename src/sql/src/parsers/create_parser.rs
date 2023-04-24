@@ -15,7 +15,6 @@
 use std::cmp::Ordering;
 
 use itertools::Itertools;
-use mito::engine;
 use once_cell::sync::Lazy;
 use snafu::{ensure, OptionExt, ResultExt};
 use sqlparser::ast::{ColumnOption, ColumnOptionDef, DataType, Value};
@@ -66,7 +65,9 @@ impl<'a> ParserContext<'a> {
         self.parser
             .expect_keyword(Keyword::TABLE)
             .context(error::SyntaxSnafu { sql: self.sql })?;
-
+        let if_not_exists =
+            self.parser
+                .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
         let table_name = self
             .parser
             .parse_object_name()
@@ -75,9 +76,8 @@ impl<'a> ParserContext<'a> {
                 expected: "a table name",
                 actual: self.peek_token_as_string(),
             })?;
-
         let (columns, constraints) = self.parse_columns()?;
-
+        let engine = self.parse_table_engine(common_catalog::consts::IMMUTABLE_FILE_ENGINE)?;
         let options = self
             .parser
             .parse_options(Keyword::WITH)
@@ -97,6 +97,8 @@ impl<'a> ParserContext<'a> {
             columns,
             constraints,
             options,
+            if_not_exists,
+            engine,
         }))
     }
 
@@ -141,7 +143,7 @@ impl<'a> ParserContext<'a> {
 
         let partitions = self.parse_partitions()?;
 
-        let engine = self.parse_table_engine()?;
+        let engine = self.parse_table_engine(common_catalog::consts::MITO_ENGINE)?;
         let options = self
             .parser
             .parse_options(Keyword::WITH)
@@ -552,9 +554,9 @@ impl<'a> ParserContext<'a> {
     }
 
     /// Parses the set of valid formats
-    fn parse_table_engine(&mut self) -> Result<String> {
+    fn parse_table_engine(&mut self, default: &str) -> Result<String> {
         if !self.consume_token(ENGINE) {
-            return Ok(engine::MITO_ENGINE.to_string());
+            return Ok(default.to_string());
         }
 
         self.parser
@@ -780,6 +782,7 @@ mod tests {
     use std::assert_matches::assert_matches;
     use std::collections::HashMap;
 
+    use common_catalog::consts::IMMUTABLE_FILE_ENGINE;
     use sqlparser::ast::ColumnOption::NotNull;
     use sqlparser::dialect::GenericDialect;
 
@@ -791,16 +794,32 @@ mod tests {
             sql: &'a str,
             expected_table_name: &'a str,
             expected_options: HashMap<String, String>,
+            expected_engine: &'a str,
+            expected_if_not_exist: bool,
         }
 
-        let tests = [Test {
-            sql: "CREATE EXTERNAL TABLE city with(location='/var/data/city.csv',format='csv');",
-            expected_table_name: "city",
-            expected_options: HashMap::from([
-                ("LOCATION".to_string(), "/var/data/city.csv".to_string()),
-                ("FORMAT".to_string(), "csv".to_string()),
-            ]),
-        }];
+        let tests = [
+            Test {
+                sql: "CREATE EXTERNAL TABLE city with(location='/var/data/city.csv',format='csv');",
+                expected_table_name: "city",
+                expected_options: HashMap::from([
+                    ("LOCATION".to_string(), "/var/data/city.csv".to_string()),
+                    ("FORMAT".to_string(), "csv".to_string()),
+                ]),
+                expected_engine: IMMUTABLE_FILE_ENGINE,
+                expected_if_not_exist: false,
+            },
+            Test {
+                sql: "CREATE EXTERNAL TABLE IF NOT EXISTS city ENGINE=foo with(location='/var/data/city.csv',format='csv');",
+                expected_table_name: "city",
+                expected_options: HashMap::from([
+                    ("LOCATION".to_string(), "/var/data/city.csv".to_string()),
+                    ("FORMAT".to_string(), "csv".to_string()),
+                ]),
+                expected_engine: "foo",
+                expected_if_not_exist: true,
+            },
+        ];
 
         for test in tests {
             let stmts = ParserContext::create_with_dialect(test.sql, &GenericDialect {}).unwrap();
@@ -809,6 +828,8 @@ mod tests {
                 Statement::CreateExternalTable(c) => {
                     assert_eq!(c.name.to_string(), test.expected_table_name.to_string());
                     assert_eq!(c.options, test.expected_options);
+                    assert_eq!(c.if_not_exists, test.expected_if_not_exist);
+                    assert_eq!(c.engine, test.expected_engine);
                 }
                 _ => unreachable!(),
             }

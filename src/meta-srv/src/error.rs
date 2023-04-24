@@ -285,6 +285,12 @@ pub enum Error {
         #[snafu(backtrace)]
         source: common_procedure::Error,
     },
+
+    #[snafu(display("Schema already exists, name: {schema_name}"))]
+    SchemaAlreadyExists {
+        schema_name: String,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -325,6 +331,7 @@ impl ErrorExt for Error {
             | Error::ExceededRetryLimit { .. }
             | Error::SendShutdownSignal { .. }
             | Error::ParseAddr { .. }
+            | Error::SchemaAlreadyExists { .. }
             | Error::StartGrpc { .. } => StatusCode::Internal,
             Error::EmptyKey { .. }
             | Error::MissingRequiredParameter { .. }

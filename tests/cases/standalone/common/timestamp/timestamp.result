@@ -19,3 +19,7 @@ SELECT * FROM timestamp_with_precision ORDER BY ts ASC;
 | 2023-04-04T08:00:00.005200 | 1   |
 +----------------------------+-----+
 
+DROP TABLE timestamp_with_precision;
+
+Affected Rows: 1
+

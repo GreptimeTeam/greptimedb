@@ -134,9 +134,7 @@ impl Election for EtcdElection {
             .context(error::EtcdFailedSnafu)?;
 
         if let Some(leader) = res.leader() {
-            let (mut keeper, mut receiver) = self
-                .client
-                .lease_client()
+            let (mut keeper, mut receiver) = lease_client
                 .keep_alive(lease_id)
                 .await
                 .context(error::EtcdFailedSnafu)?;
@@ -165,11 +163,13 @@ impl Election for EtcdElection {
                             }
                         }
                     } else {
-                        if let Err(e) = self
-                            .leader_watcher
-                            .send(LeaderChangeMessage::StepDown(Arc::new(leader.clone())))
-                        {
-                            error!("Failed to send leader change message, error: {e}");
+                        if self.is_leader.load(Ordering::Relaxed) {
+                            if let Err(e) = self
+                                .leader_watcher
+                                .send(LeaderChangeMessage::StepDown(Arc::new(leader.clone())))
+                            {
+                                error!("Failed to send leader change message, error: {e}");
+                            }
                         }
                         break;
                     }

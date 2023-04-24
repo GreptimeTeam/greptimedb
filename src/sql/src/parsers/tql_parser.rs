@@ -114,7 +114,8 @@ impl<'a> ParserContext<'a> {
                 // TODO(dennis): supports multi TQL statements separated by ';'?
             }
 
-            Ok(query.trim().to_string())
+            // remove the last ';' or tailing space if exists
+            Ok(query.trim().trim_end_matches(';').to_string())
         } else {
             Err(ParserError::ParserError(format!("{delimiter} not found",)))
         }

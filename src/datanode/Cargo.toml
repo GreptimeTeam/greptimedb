@@ -30,6 +30,7 @@ datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datatypes = { path = "../datatypes" }
+file-table-engine = { path = "../file-table-engine" }
 futures = "0.3"
 futures-util.workspace = true
 hyper = { version = "0.14", features = ["full"] }

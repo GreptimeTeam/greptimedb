@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use common_error::prelude::*;
 use datatypes::data_type::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, Metadata};
+use datatypes::schema::{ColumnSchema, Metadata, COMMENT_KEY};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, Location, OptionExt};
 use store_api::storage::consts::{self, ReservedColumnId};
@@ -380,7 +380,6 @@ impl TryFrom<RawRegionMetadata> for RegionMetadata {
 
 const METADATA_CF_ID_KEY: &str = "greptime:storage:cf_id";
 const METADATA_COLUMN_ID_KEY: &str = "greptime:storage:column_id";
-const METADATA_COMMENT_KEY: &str = "greptime:storage:comment";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ColumnMetadata {
@@ -416,10 +415,7 @@ impl ColumnMetadata {
         let metadata = column_schema.metadata();
         let cf_id = try_parse_int(metadata, METADATA_CF_ID_KEY, Some(consts::DEFAULT_CF_ID))?;
         let column_id = try_parse_int(metadata, METADATA_COLUMN_ID_KEY, None)?;
-        let comment = metadata
-            .get(METADATA_COMMENT_KEY)
-            .cloned()
-            .unwrap_or_default();
+        let comment = metadata.get(COMMENT_KEY).cloned().unwrap_or_default();
 
         let desc = ColumnDescriptorBuilder::new(
             column_id,
@@ -443,7 +439,7 @@ impl ColumnMetadata {
         }
         metadata.insert(METADATA_COLUMN_ID_KEY.to_string(), self.desc.id.to_string());
         if !self.desc.comment.is_empty() {
-            metadata.insert(METADATA_COMMENT_KEY.to_string(), self.desc.comment.clone());
+            metadata.insert(COMMENT_KEY.to_string(), self.desc.comment.clone());
         }
 
         metadata

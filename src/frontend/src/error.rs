@@ -16,6 +16,7 @@ use std::any::Any;
 
 use common_error::prelude::*;
 use datafusion::parquet;
+use datatypes::value::Value;
 use snafu::Location;
 use store_api::storage::RegionId;
 
@@ -60,6 +61,13 @@ pub enum Error {
 
     #[snafu(display("Failed to parse SQL, source: {}", source))]
     ParseSql {
+        #[snafu(backtrace)]
+        source: sql::error::Error,
+    },
+
+    #[snafu(display("Failed to convert value to sql value: {}", value))]
+    ConvertSqlValue {
+        value: Value,
         #[snafu(backtrace)]
         source: sql::error::Error,
     },
@@ -173,8 +181,23 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to find table route for table {}", table_name))]
+    #[snafu(display(
+        "Failed to find table route for table {}, source: {}",
+        table_name,
+        source
+    ))]
     FindTableRoute {
+        table_name: String,
+        #[snafu(backtrace)]
+        source: partition::error::Error,
+    },
+
+    #[snafu(display(
+        "Failed to find table partition rule for table {}, source: {}",
+        table_name,
+        source
+    ))]
+    FindTablePartitionRule {
         table_name: String,
         #[snafu(backtrace)]
         source: partition::error::Error,
@@ -197,6 +220,15 @@ pub enum Error {
         source
     ))]
     ToTableInsertRequest {
+        #[snafu(backtrace)]
+        source: common_grpc_expr::error::Error,
+    },
+
+    #[snafu(display(
+        "Failed to convert GRPC DeleteRequest to table DeleteRequest, source: {}",
+        source
+    ))]
+    ToTableDeleteRequest {
         #[snafu(backtrace)]
         source: common_grpc_expr::error::Error,
     },
@@ -452,6 +484,18 @@ pub enum Error {
         file_schema: String,
         location: Location,
     },
+
+    #[snafu(display("Failed to encode object into json, source: {}", source))]
+    EncodeJson {
+        source: serde_json::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to prepare immutable table: {}", source))]
+    PrepareImmutableTable {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -472,7 +516,8 @@ impl ErrorExt for Error {
             | Error::MissingMetasrvOpts { .. }
             | Error::ColumnNoneDefaultValue { .. }
             | Error::BuildRegex { .. }
-            | Error::InvalidSchema { .. } => StatusCode::InvalidArguments,
+            | Error::InvalidSchema { .. }
+            | Error::PrepareImmutableTable { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
 
@@ -483,7 +528,9 @@ impl ErrorExt for Error {
             Error::StartServer { source, .. } => source.status_code(),
             Error::ShutdownServer { source, .. } => source.status_code(),
 
-            Error::ParseSql { source } => source.status_code(),
+            Error::ConvertSqlValue { source, .. } | Error::ParseSql { source } => {
+                source.status_code()
+            }
 
             Error::Table { source }
             | Error::CopyTable { source, .. }
@@ -507,7 +554,8 @@ impl ErrorExt for Error {
 
             Error::IllegalFrontendState { .. }
             | Error::IncompleteGrpcResult { .. }
-            | Error::ContextValueNotFound { .. } => StatusCode::Unexpected,
+            | Error::ContextValueNotFound { .. }
+            | Error::EncodeJson { .. } => StatusCode::Unexpected,
 
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
@@ -521,6 +569,7 @@ impl ErrorExt for Error {
             }
             Error::BuildCreateExprOnInsertion { source }
             | Error::ToTableInsertRequest { source }
+            | Error::ToTableDeleteRequest { source }
             | Error::FindNewColumnsOnInsertion { source } => source.status_code(),
 
             Error::ExecuteStatement { source, .. }
@@ -536,9 +585,9 @@ impl ErrorExt for Error {
             Error::InvokeDatanode { source } => source.status_code(),
 
             Error::External { source } => source.status_code(),
-            Error::DeserializePartition { source, .. } | Error::FindTableRoute { source, .. } => {
-                source.status_code()
-            }
+            Error::DeserializePartition { source, .. }
+            | Error::FindTablePartitionRule { source, .. }
+            | Error::FindTableRoute { source, .. } => source.status_code(),
             Error::UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
 
             Error::StartScriptManager { source } => source.status_code(),

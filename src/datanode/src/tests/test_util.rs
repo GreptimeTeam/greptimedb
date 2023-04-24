@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,7 +27,7 @@ use mito::table::test_util::{new_test_object_store, MockEngine, MockMitoEngine};
 use servers::Mode;
 use snafu::ResultExt;
 use table::engine::manager::MemoryTableEngineManager;
-use table::engine::{EngineContext, TableEngineRef};
+use table::engine::{EngineContext, TableEngine, TableEngineProcedureRef, TableEngineRef};
 use table::requests::{CreateTableRequest, TableOptions};
 
 use crate::datanode::{
@@ -170,11 +171,18 @@ pub async fn create_mock_sql_handler() -> SqlHandler {
         MockEngine::default(),
         object_store,
     ));
-    let engine_manager = Arc::new(MemoryTableEngineManager::new(mock_engine.clone()));
+    let mut engine_procedures = HashMap::new();
+    engine_procedures.insert(
+        mock_engine.name().to_string(),
+        mock_engine.clone() as TableEngineProcedureRef,
+    );
+    let engine_manager = Arc::new(
+        MemoryTableEngineManager::new(mock_engine).with_engine_procedures(engine_procedures),
+    );
     let catalog_manager = Arc::new(
         catalog::local::LocalCatalogManager::try_new(engine_manager.clone())
             .await
             .unwrap(),
     );
-    SqlHandler::new(engine_manager, catalog_manager, mock_engine, None)
+    SqlHandler::new(engine_manager, catalog_manager, None)
 }

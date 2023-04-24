@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use api::v1::{AlterExpr, CreateTableExpr, DropTableExpr, FlushTableExpr};
+use common_catalog::consts::IMMUTABLE_FILE_ENGINE;
 use common_grpc_expr::{alter_expr_to_request, create_expr_to_request};
 use common_query::Output;
 use common_telemetry::info;
@@ -58,7 +59,9 @@ impl Instance {
             table_id
         };
 
-        let request = create_expr_to_request(table_id, expr).context(CreateExprToRequestSnafu)?;
+        let require_time_index = expr.engine != IMMUTABLE_FILE_ENGINE;
+        let request = create_expr_to_request(table_id, expr, require_time_index)
+            .context(CreateExprToRequestSnafu)?;
 
         self.sql_handler()
             .execute(SqlRequest::CreateTable(request), QueryContext::arc())
@@ -118,7 +121,7 @@ mod tests {
     async fn test_create_expr_to_request() {
         common_telemetry::init_default_ut_logging();
         let expr = testing_create_expr();
-        let request = create_expr_to_request(1024, expr).unwrap();
+        let request = create_expr_to_request(1024, expr, true).unwrap();
         assert_eq!(request.id, MIN_USER_TABLE_ID);
         assert_eq!(request.catalog_name, "greptime".to_string());
         assert_eq!(request.schema_name, "public".to_string());
@@ -130,7 +133,7 @@ mod tests {
 
         let mut expr = testing_create_expr();
         expr.primary_keys = vec!["host".to_string(), "not-exist-column".to_string()];
-        let result = create_expr_to_request(1025, expr);
+        let result = create_expr_to_request(1025, expr, true);
         let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("Column `not-exist-column` not found in table `my-metrics`"),
@@ -142,11 +145,11 @@ mod tests {
     #[test]
     fn test_create_table_schema() {
         let mut expr = testing_create_expr();
-        let schema = create_table_schema(&expr).unwrap();
+        let schema = create_table_schema(&expr, true).unwrap();
         assert_eq!(schema, expected_table_schema());
 
         expr.time_index = "not-exist-column".to_string();
-        let result = create_table_schema(&expr);
+        let result = create_table_schema(&expr, true);
         let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("Missing timestamp column"),

@@ -22,19 +22,32 @@ use url::ParseError;
 #[snafu(visibility(pub))]
 pub enum Error {
     #[snafu(display("Unsupported compression type: {}", compression_type))]
-    UnsupportedCompressionType { compression_type: String },
+    UnsupportedCompressionType {
+        compression_type: String,
+        location: Location,
+    },
 
     #[snafu(display("Unsupported backend protocol: {}", protocol))]
-    UnsupportedBackendProtocol { protocol: String },
+    UnsupportedBackendProtocol {
+        protocol: String,
+        location: Location,
+    },
+
+    #[snafu(display("Unsupported format protocol: {}", format))]
+    UnsupportedFormat { format: String, location: Location },
 
     #[snafu(display("empty host: {}", url))]
-    EmptyHostPath { url: String },
+    EmptyHostPath { url: String, location: Location },
 
     #[snafu(display("Invalid path: {}", path))]
-    InvalidPath { path: String },
+    InvalidPath { path: String, location: Location },
 
     #[snafu(display("Invalid url: {}, error :{}", url, source))]
-    InvalidUrl { url: String, source: ParseError },
+    InvalidUrl {
+        url: String,
+        source: ParseError,
+        location: Location,
+    },
 
     #[snafu(display("Failed to decompression, source: {}", source))]
     Decompression {
@@ -82,7 +95,7 @@ pub enum Error {
     },
 
     #[snafu(display("Invalid connection: {}", msg))]
-    InvalidConnection { msg: String },
+    InvalidConnection { msg: String, location: Location },
 
     #[snafu(display("Failed to join handle: {}", source))]
     JoinHandle {
@@ -102,6 +115,9 @@ pub enum Error {
         source: arrow_schema::ArrowError,
         location: Location,
     },
+
+    #[snafu(display("Missing required field: {}", name))]
+    MissingRequiredField { name: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -116,6 +132,7 @@ impl ErrorExt for Error {
 
             UnsupportedBackendProtocol { .. }
             | UnsupportedCompressionType { .. }
+            | UnsupportedFormat { .. }
             | InvalidConnection { .. }
             | InvalidUrl { .. }
             | EmptyHostPath { .. }
@@ -124,7 +141,8 @@ impl ErrorExt for Error {
             | ReadParquetSnafu { .. }
             | ParquetToSchema { .. }
             | ParseFormat { .. }
-            | MergeSchema { .. } => StatusCode::InvalidArguments,
+            | MergeSchema { .. }
+            | MissingRequiredField { .. } => StatusCode::InvalidArguments,
 
             Decompression { .. } | JoinHandle { .. } => StatusCode::Unexpected,
         }
@@ -147,13 +165,15 @@ impl ErrorExt for Error {
             JoinHandle { location, .. } => Some(*location),
             ParseFormat { location, .. } => Some(*location),
             MergeSchema { location, .. } => Some(*location),
+            MissingRequiredField { location, .. } => Some(*location),
 
-            UnsupportedBackendProtocol { .. }
-            | EmptyHostPath { .. }
-            | InvalidPath { .. }
-            | InvalidUrl { .. }
-            | InvalidConnection { .. }
-            | UnsupportedCompressionType { .. } => None,
+            UnsupportedBackendProtocol { location, .. } => Some(*location),
+            EmptyHostPath { location, .. } => Some(*location),
+            InvalidPath { location, .. } => Some(*location),
+            InvalidUrl { location, .. } => Some(*location),
+            InvalidConnection { location, .. } => Some(*location),
+            UnsupportedCompressionType { location, .. } => Some(*location),
+            UnsupportedFormat { location, .. } => Some(*location),
         }
     }
 }

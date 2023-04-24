@@ -12,11 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! frontend metrics
+pub(crate) const METRIC_HANDLE_SQL_ELAPSED: &str = "frontend.handle_sql_elapsed";
+pub(crate) const METRIC_HANDLE_SCRIPTS_ELAPSED: &str = "frontend.handle_scripts_elapsed";
+pub(crate) const METRIC_RUN_SCRIPT_ELAPSED: &str = "frontend.run_script_elapsed";
 
+/// frontend metrics
 /// Metrics for creating table in dist mode.
 pub const DIST_CREATE_TABLE: &str = "frontend.dist.create_table";
-
 pub const DIST_CREATE_TABLE_IN_META: &str = "frontend.dist.create_table.update_meta";
-
 pub const DIST_CREATE_TABLE_IN_DATANODE: &str = "frontend.dist.create_table.invoke_datanode";

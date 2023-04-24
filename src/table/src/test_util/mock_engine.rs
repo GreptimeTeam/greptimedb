@@ -16,9 +16,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_procedure::BoxedProcedure;
 use tokio::sync::Mutex;
 
-use crate::engine::{EngineContext, TableEngine, TableReference};
+use crate::engine::{EngineContext, TableEngine, TableEngineProcedure, TableReference};
 use crate::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
 use crate::test_util::EmptyTable;
 use crate::{Result, TableRef};
@@ -99,5 +100,31 @@ impl TableEngine for MockTableEngine {
 
     async fn close(&self) -> Result<()> {
         Ok(())
+    }
+}
+
+impl TableEngineProcedure for MockTableEngine {
+    fn create_table_procedure(
+        &self,
+        _ctx: &EngineContext,
+        _request: CreateTableRequest,
+    ) -> Result<BoxedProcedure> {
+        unimplemented!()
+    }
+
+    fn alter_table_procedure(
+        &self,
+        _ctx: &EngineContext,
+        _request: AlterTableRequest,
+    ) -> Result<BoxedProcedure> {
+        unimplemented!()
+    }
+
+    fn drop_table_procedure(
+        &self,
+        _ctx: &EngineContext,
+        _request: DropTableRequest,
+    ) -> Result<BoxedProcedure> {
+        unimplemented!()
     }
 }

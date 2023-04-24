@@ -18,6 +18,7 @@ use sqlparser::keywords::Keyword;
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, TokenWithLocation};
 
+use crate::ast::{Expr, ObjectName};
 use crate::error::{self, InvalidDatabaseNameSnafu, InvalidTableNameSnafu, Result, SyntaxSnafu};
 use crate::parsers::tql_parser;
 use crate::statements::describe::DescribeTable;
@@ -62,6 +63,17 @@ impl<'a> ParserContext<'a> {
         }
 
         Ok(stmts)
+    }
+
+    pub fn parse_function(sql: &'a str, dialect: &dyn Dialect) -> Result<Expr> {
+        let mut parser = Parser::new(dialect)
+            .try_with_sql(sql)
+            .context(SyntaxSnafu { sql })?;
+
+        let function_name = parser.parse_identifier().context(SyntaxSnafu { sql })?;
+        parser
+            .parse_function(ObjectName(vec![function_name]))
+            .context(SyntaxSnafu { sql })
     }
 
     /// Parses parser context to a set of statements.
@@ -174,9 +186,7 @@ impl<'a> ParserContext<'a> {
                 name: table_name.to_string(),
             }
         );
-        Ok(Statement::ShowCreateTable(ShowCreateTable {
-            table_name: table_name.to_string(),
-        }))
+        Ok(Statement::ShowCreateTable(ShowCreateTable { table_name }))
     }
 
     fn parse_show_tables(&mut self) -> Result<Statement> {
@@ -658,5 +668,12 @@ mod tests {
             "create table demo (ts timestamp(1) time index, cnt int);",
             ConcreteDataType::timestamp_millisecond_datatype(),
         );
+    }
+
+    #[test]
+    fn test_parse_function() {
+        let expr =
+            ParserContext::parse_function("current_timestamp()", &GenericDialect {}).unwrap();
+        assert!(matches!(expr, Expr::Function(_)));
     }
 }

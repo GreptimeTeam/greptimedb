@@ -209,6 +209,8 @@ fn create_mysql_column(column_schema: &ColumnSchema) -> Result<Column> {
             Ok(ColumnType::MYSQL_TYPE_VARCHAR)
         }
         ConcreteDataType::Timestamp(_) => Ok(ColumnType::MYSQL_TYPE_TIMESTAMP),
+        ConcreteDataType::Date(_) => Ok(ColumnType::MYSQL_TYPE_DATE),
+        ConcreteDataType::DateTime(_) => Ok(ColumnType::MYSQL_TYPE_DATETIME),
         _ => error::InternalSnafu {
             err_msg: format!(
                 "not implemented for column datatype {:?}",

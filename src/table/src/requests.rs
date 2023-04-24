@@ -24,9 +24,15 @@ use datatypes::schema::{ColumnSchema, RawSchema};
 use serde::{Deserialize, Serialize};
 use store_api::storage::RegionNumber;
 
+use crate::engine::TableReference;
 use crate::error;
 use crate::error::ParseTableOptionSnafu;
 use crate::metadata::TableId;
+
+pub const IMMUTABLE_TABLE_META_KEY: &str = "IMMUTABLE_TABLE_META";
+pub const IMMUTABLE_TABLE_LOCATION_KEY: &str = "LOCATION";
+pub const IMMUTABLE_TABLE_PATTERN_KEY: &str = "PATTERN";
+pub const IMMUTABLE_TABLE_FORMAT_KEY: &str = "FORMAT";
 
 #[derive(Debug, Clone)]
 pub struct CreateDatabaseRequest {
@@ -50,6 +56,16 @@ pub struct CreateTableRequest {
     pub engine: String,
 }
 
+impl CreateTableRequest {
+    pub fn table_ref(&self) -> TableReference {
+        TableReference {
+            catalog: &self.catalog_name,
+            schema: &self.schema_name,
+            table: &self.table_name,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct TableOptions {
@@ -66,6 +82,7 @@ pub struct TableOptions {
 
 pub const WRITE_BUFFER_SIZE_KEY: &str = "write_buffer_size";
 pub const TTL_KEY: &str = "ttl";
+pub const REGIONS_KEY: &str = "regions";
 pub const COMPACTION_TIME_WINDOW_KEY: &str = "compaction_time_window";
 
 impl TryFrom<&HashMap<String, String>> for TableOptions {
@@ -110,7 +127,11 @@ impl TryFrom<&HashMap<String, String>> for TableOptions {
             };
         }
         options.extra_options = HashMap::from_iter(value.iter().filter_map(|(k, v)| {
-            if k != WRITE_BUFFER_SIZE_KEY && k != TTL_KEY && k != COMPACTION_TIME_WINDOW_KEY {
+            if k != WRITE_BUFFER_SIZE_KEY
+                && k != REGIONS_KEY
+                && k != TTL_KEY
+                && k != COMPACTION_TIME_WINDOW_KEY
+            {
                 Some((k.clone(), v.clone()))
             } else {
                 None
@@ -167,6 +188,14 @@ pub struct AlterTableRequest {
 }
 
 impl AlterTableRequest {
+    pub fn table_ref(&self) -> TableReference {
+        TableReference {
+            catalog: &self.catalog_name,
+            schema: &self.schema_name,
+            table: &self.table_name,
+        }
+    }
+
     pub fn is_rename_table(&self) -> bool {
         matches!(self.alter_kind, AlterKind::RenameTable { .. })
     }
@@ -192,6 +221,16 @@ pub struct DropTableRequest {
     pub catalog_name: String,
     pub schema_name: String,
     pub table_name: String,
+}
+
+impl DropTableRequest {
+    pub fn table_ref(&self) -> TableReference {
+        TableReference {
+            catalog: &self.catalog_name,
+            schema: &self.schema_name,
+            table: &self.table_name,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -225,6 +264,7 @@ pub struct CopyTableRequest {
     pub schema_name: String,
     pub table_name: String,
     pub location: String,
+    pub with: HashMap<String, String>,
     pub connection: HashMap<String, String>,
     pub pattern: Option<String>,
     pub direction: CopyDirection,
@@ -238,6 +278,19 @@ pub struct FlushTableRequest {
     pub region_number: Option<RegionNumber>,
     /// Wait until the flush is done.
     pub wait: Option<bool>,
+}
+
+#[macro_export]
+macro_rules! meter_insert_request {
+    ($req: expr) => {
+        meter_macros::write_meter!(
+            $req.catalog_name.to_string(),
+            $req.schema_name.to_string(),
+            $req.table_name.to_string(),
+            $req.region_number,
+            $req
+        );
+    };
 }
 
 #[cfg(test)]

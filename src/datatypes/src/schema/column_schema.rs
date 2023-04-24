@@ -28,6 +28,7 @@ pub type Metadata = HashMap<String, String>;
 
 /// Key used to store whether the column is time index in arrow field's metadata.
 pub const TIME_INDEX_KEY: &str = "greptime:time_index";
+pub const COMMENT_KEY: &str = "greptime:storage:comment";
 /// Key used to store default constraint in arrow field's metadata.
 const DEFAULT_CONSTRAINT_KEY: &str = "greptime:default_constraint";
 
@@ -76,6 +77,11 @@ impl ColumnSchema {
     #[inline]
     pub fn metadata(&self) -> &Metadata {
         &self.metadata
+    }
+
+    #[inline]
+    pub fn mut_metadata(&mut self) -> &mut Metadata {
+        &mut self.metadata
     }
 
     pub fn with_time_index(mut self, is_time_index: bool) -> Self {

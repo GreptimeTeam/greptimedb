@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::{
-    column_def, AlterExpr, CreateDatabaseExpr, CreateTableExpr, DropTableExpr, FlushTableExpr,
-    InsertRequest, TableId,
+    column_def, AlterExpr, CreateDatabaseExpr, CreateTableExpr, DeleteRequest, DropTableExpr,
+    FlushTableExpr, InsertRequest, TableId,
 };
 use async_trait::async_trait;
 use catalog::helper::{SchemaKey, SchemaValue};
@@ -42,15 +42,17 @@ use meta_client::rpc::{
     CompareAndPutRequest, CreateRequest as MetaCreateRequest, Partition as MetaPartition,
     RouteRequest, RouteResponse, TableName,
 };
+use partition::manager::PartitionInfo;
 use partition::partition::{PartitionBound, PartitionDef};
 use query::error::QueryExecutionSnafu;
 use query::query_engine::SqlStatementExecutor;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
-use sql::ast::Value as SqlValue;
-use sql::statements::create::Partitions;
-use sql::statements::sql_value_to_value;
+use sql::ast::{Ident, Value as SqlValue};
+use sql::statements::create::{PartitionEntry, Partitions};
 use sql::statements::statement::Statement;
+use sql::statements::{self, sql_value_to_value};
+use table::engine::TableReference;
 use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
 use table::requests::TableOptions;
 use table::table::AlterContext;
@@ -62,11 +64,13 @@ use crate::error::{
     self, AlterExprToRequestSnafu, CatalogEntrySerdeSnafu, CatalogSnafu, ColumnDataTypeSnafu,
     DeserializePartitionSnafu, InvokeDatanodeSnafu, ParseSqlSnafu, PrimaryKeyNotFoundSnafu,
     RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaExistsSnafu, StartMetaClientSnafu,
-    TableAlreadyExistSnafu, TableNotFoundSnafu, TableSnafu, ToTableInsertRequestSnafu,
-    UnrecognizedTableOptionSnafu,
+    TableAlreadyExistSnafu, TableNotFoundSnafu, TableSnafu, ToTableDeleteRequestSnafu,
+    ToTableInsertRequestSnafu, UnrecognizedTableOptionSnafu,
 };
 use crate::expr_factory;
 use crate::table::DistTable;
+
+const MAX_VALUE: &str = "MAXVALUE";
 
 #[derive(Clone)]
 pub(crate) struct DistInstance {
@@ -323,16 +327,21 @@ impl DistInstance {
                     database_name: stmt.name.to_string(),
                     create_if_not_exists: stmt.if_not_exists,
                 };
-                return self.handle_create_database(expr, query_ctx).await;
+                self.handle_create_database(expr, query_ctx).await
             }
             Statement::CreateTable(stmt) => {
                 let create_expr = &mut expr_factory::create_to_expr(&stmt, query_ctx)?;
                 let _ = self.create_table(create_expr, stmt.partitions).await?;
                 Ok(Output::AffectedRows(0))
             }
+            Statement::CreateExternalTable(stmt) => {
+                let create_expr = &mut expr_factory::create_external_expr(stmt, query_ctx).await?;
+                self.create_table(create_expr, None).await?;
+                Ok(Output::AffectedRows(0))
+            }
             Statement::Alter(alter_table) => {
                 let expr = grpc::to_alter_expr(alter_table, query_ctx)?;
-                return self.handle_alter_table(expr).await;
+                self.handle_alter_table(expr).await
             }
             Statement::DropTable(stmt) => {
                 let (catalog, schema, table) =
@@ -340,7 +349,7 @@ impl DistInstance {
                         .map_err(BoxedError::new)
                         .context(error::ExternalSnafu)?;
                 let table_name = TableName::new(catalog, schema, table);
-                return self.drop_table(table_name).await;
+                self.drop_table(table_name).await
             }
             Statement::Insert(insert) => {
                 let (catalog, schema, table) =
@@ -360,18 +369,46 @@ impl DistInstance {
                         .await
                         .context(InvokeDatanodeSnafu)?;
 
-                return Ok(Output::AffectedRows(
+                Ok(Output::AffectedRows(
                     table.insert(insert_request).await.context(TableSnafu)?,
-                ));
+                ))
             }
-            _ => {
-                return error::NotSupportedSnafu {
-                    feat: format!("{stmt:?}"),
-                }
-                .fail()
+            Statement::ShowCreateTable(show) => {
+                let (catalog, schema, table) =
+                    table_idents_to_full_name(&show.table_name, query_ctx.clone())
+                        .map_err(BoxedError::new)
+                        .context(error::ExternalSnafu)?;
+
+                let table_ref = self
+                    .catalog_manager
+                    .table(&catalog, &schema, &table)
+                    .await
+                    .context(CatalogSnafu)?
+                    .context(TableNotFoundSnafu { table_name: &table })?;
+                let table_name = TableName::new(catalog, schema, table);
+
+                self.show_create_table(table_name, table_ref).await
             }
+            _ => error::NotSupportedSnafu {
+                feat: format!("{stmt:?}"),
+            }
+            .fail(),
         }
-        .context(error::ExecuteStatementSnafu)
+    }
+
+    async fn show_create_table(&self, table_name: TableName, table: TableRef) -> Result<Output> {
+        let partitions = self
+            .catalog_manager
+            .partition_manager()
+            .find_table_partitions(&table_name)
+            .await
+            .context(error::FindTablePartitionRuleSnafu {
+                table_name: &table_name.table_name,
+            })?;
+
+        let partitions = create_partitions_stmt(partitions)?;
+
+        query::sql::show_create_table(table, partitions).context(error::ExecuteStatementSnafu)
     }
 
     /// Handles distributed database creation
@@ -486,10 +523,10 @@ impl DistInstance {
             .context(RequestMetaSnafu)
     }
 
-    // TODO(LFC): Refactor insertion implementation for DistTable,
-    // GRPC InsertRequest to Table InsertRequest, than split Table InsertRequest, than assemble each GRPC InsertRequest, is rather inefficient,
-    // should operate on GRPC InsertRequest directly.
-    // Also remember to check the "region_number" carried in InsertRequest, too.
+    // TODO(LFC): Refactor GRPC insertion and deletion implementation here,
+    // Take insertion as an example. GRPC insertion is converted to Table InsertRequest here,
+    // than split the Table InsertRequest in DistTable, than assemble each GRPC InsertRequest there.
+    // Rather inefficient, should operate on GRPC InsertRequest directly.
     async fn handle_dist_insert(
         &self,
         request: InsertRequest,
@@ -498,17 +535,47 @@ impl DistInstance {
         let catalog = &ctx.current_catalog();
         let schema = &ctx.current_schema();
         let table_name = &request.table_name;
+        let table_ref = TableReference::full(catalog, schema, table_name);
+
         let table = self
             .catalog_manager
             .table(catalog, schema, table_name)
             .await
             .context(CatalogSnafu)?
-            .context(TableNotFoundSnafu { table_name })?;
+            .with_context(|| TableNotFoundSnafu {
+                table_name: table_ref.to_string(),
+            })?;
 
         let request = common_grpc_expr::insert::to_table_insert_request(catalog, schema, request)
             .context(ToTableInsertRequestSnafu)?;
 
         let affected_rows = table.insert(request).await.context(TableSnafu)?;
+        Ok(Output::AffectedRows(affected_rows))
+    }
+
+    async fn handle_dist_delete(
+        &self,
+        request: DeleteRequest,
+        ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let catalog = &ctx.current_catalog();
+        let schema = &ctx.current_schema();
+        let table_name = &request.table_name;
+        let table_ref = TableReference::full(catalog, schema, table_name);
+
+        let table = self
+            .catalog_manager
+            .table(catalog, schema, table_name)
+            .await
+            .context(CatalogSnafu)?
+            .with_context(|| TableNotFoundSnafu {
+                table_name: table_ref.to_string(),
+            })?;
+
+        let request = common_grpc_expr::delete::to_table_delete_request(request)
+            .context(ToTableDeleteRequestSnafu)?;
+
+        let affected_rows = table.delete(request).await.context(TableSnafu)?;
         Ok(Output::AffectedRows(affected_rows))
     }
 
@@ -530,6 +597,46 @@ impl SqlStatementExecutor for DistInstance {
             .map_err(BoxedError::new)
             .context(QueryExecutionSnafu)
     }
+}
+
+fn create_partitions_stmt(partitions: Vec<PartitionInfo>) -> Result<Option<Partitions>> {
+    if partitions.is_empty() {
+        return Ok(None);
+    }
+
+    let column_list: Vec<Ident> = partitions[0]
+        .partition
+        .partition_columns()
+        .iter()
+        .map(|name| name[..].into())
+        .collect();
+
+    let entries = partitions
+        .into_iter()
+        .map(|info| {
+            // Generated the partition name from id
+            let name = &format!("r{}", info.id);
+            let bounds = info.partition.partition_bounds();
+            let value_list = bounds
+                .iter()
+                .map(|b| match b {
+                    PartitionBound::Value(v) => statements::value_to_sql_value(v)
+                        .with_context(|_| error::ConvertSqlValueSnafu { value: v.clone() }),
+                    PartitionBound::MaxValue => Ok(SqlValue::Number(MAX_VALUE.to_string(), false)),
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            Ok(PartitionEntry {
+                name: name[..].into(),
+                value_list,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(Some(Partitions {
+        column_list,
+        entries,
+    }))
 }
 
 fn create_table_info(create_table: &CreateTableExpr) -> Result<RawTableInfo> {
@@ -572,7 +679,7 @@ fn create_table_info(create_table: &CreateTableExpr) -> Result<RawTableInfo> {
         schema: raw_schema,
         primary_key_indices,
         value_indices: vec![],
-        engine: "mito".to_string(),
+        engine: create_table.engine.clone(),
         next_column_id: column_schemas.len() as u32,
         region_numbers: vec![],
         engine_options: HashMap::new(),
@@ -652,7 +759,7 @@ fn find_partition_entries(
                 // indexing is safe here because we have checked that "value_list" and "column_list" are matched in size
                 let (column_name, data_type) = &column_name_and_type[i];
                 let v = match v {
-                    SqlValue::Number(n, _) if n == "MAXVALUE" => PartitionBound::MaxValue,
+                    SqlValue::Number(n, _) if n == MAX_VALUE => PartitionBound::MaxValue,
                     _ => PartitionBound::Value(
                         sql_value_to_value(column_name, data_type, v).context(ParseSqlSnafu)?,
                     ),
