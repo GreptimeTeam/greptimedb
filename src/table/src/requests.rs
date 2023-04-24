@@ -275,6 +275,19 @@ pub struct FlushTableRequest {
     pub wait: Option<bool>,
 }
 
+#[macro_export]
+macro_rules! meter_insert_request {
+    ($req: expr) => {
+        meter_macros::write_meter!(
+            $req.catalog_name.to_string(),
+            $req.schema_name.to_string(),
+            $req.table_name.to_string(),
+            $req.region_number,
+            $req
+        );
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
