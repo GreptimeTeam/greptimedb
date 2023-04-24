@@ -21,3 +21,9 @@ metasrv_addrs = ['127.0.0.1:3002']
 timeout_millis = 3000
 connect_timeout_millis = 5000
 tcp_nodelay = false
+
+[procedure.store]
+type = "File"
+data_dir = "{procedure_dir}"
+max_retry_times = 3
+retry_delay = "500ms"

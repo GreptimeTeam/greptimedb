@@ -214,12 +214,14 @@ impl Env {
         struct Context {
             wal_dir: String,
             data_dir: String,
+            procedure_dir: String,
         }
 
         let greptimedb_dir = format!("/tmp/greptimedb-{subcommand}-{}", db_ctx.time);
         let ctx = Context {
             wal_dir: format!("{greptimedb_dir}/wal/"),
             data_dir: format!("{greptimedb_dir}/data/"),
+            procedure_dir: format!("{greptimedb_dir}/procedure/"),
         };
         let rendered = tt.render(subcommand, &ctx).unwrap();
 

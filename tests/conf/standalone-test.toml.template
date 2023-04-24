@@ -16,3 +16,9 @@ data_dir = '{data_dir}'
 [grpc_options]
 addr = '127.0.0.1:4001'
 runtime_size = 8
+
+[procedure.store]
+type = "File"
+data_dir = "{procedure_dir}"
+max_retry_times = 3
+retry_delay = "500ms"
