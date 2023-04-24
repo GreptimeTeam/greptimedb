@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::iter;
 use std::sync::Arc;
 
 use api::v1::AlterExpr;
@@ -36,18 +37,23 @@ use datafusion_common::DataFusionError;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use meta_client::rpc::TableName;
 use partition::manager::PartitionRuleManagerRef;
+use partition::splitter::WriteSplitter;
 use snafu::prelude::*;
+use store_api::storage::RegionNumber;
 use table::error::TableOperationSnafu;
 use table::metadata::{FilterPushDownType, TableInfo, TableInfoRef};
-use table::requests::{AlterTableRequest, InsertRequest};
+use table::requests::{AlterTableRequest, DeleteRequest, InsertRequest};
 use table::table::AlterContext;
-use table::Table;
+use table::{meter_insert_request, Table};
 use tokio::sync::RwLock;
 
 use crate::datanode::DatanodeClients;
-use crate::error::{self, Result};
+use crate::error::{self, FindDatanodeSnafu, FindTableRouteSnafu, Result};
+use crate::table::delete::to_grpc_delete_request;
+use crate::table::insert::to_grpc_insert_request;
 use crate::table::scan::{DatanodeInstance, TableScanPlan};
 
+mod delete;
 pub mod insert;
 pub(crate) mod scan;
 
@@ -75,6 +81,8 @@ impl Table for DistTable {
     }
 
     async fn insert(&self, request: InsertRequest) -> table::Result<usize> {
+        meter_insert_request!(request);
+
         let splits = self
             .partition_manager
             .split_insert_request(&self.table_name, request)
@@ -82,8 +90,15 @@ impl Table for DistTable {
             .map_err(BoxedError::new)
             .context(TableOperationSnafu)?;
 
+        let inserts = splits
+            .into_iter()
+            .map(|(region_number, insert)| to_grpc_insert_request(region_number, insert))
+            .collect::<Result<Vec<_>>>()
+            .map_err(BoxedError::new)
+            .context(TableOperationSnafu)?;
+
         let output = self
-            .dist_insert(splits)
+            .dist_insert(inserts)
             .await
             .map_err(BoxedError::new)
             .context(TableOperationSnafu)?;
@@ -152,6 +167,52 @@ impl Table for DistTable {
             .await
             .map_err(BoxedError::new)
             .context(TableOperationSnafu)
+    }
+
+    async fn delete(&self, request: DeleteRequest) -> table::Result<usize> {
+        let partition_rule = self
+            .partition_manager
+            .find_table_partition_rule(&self.table_name)
+            .await
+            .map_err(BoxedError::new)
+            .context(TableOperationSnafu)?;
+
+        let schema = self.schema();
+        let time_index = &schema
+            .timestamp_column()
+            .with_context(|| table::error::MissingTimeIndexColumnSnafu {
+                table_name: self.table_name.to_string(),
+            })?
+            .name;
+
+        let table_info = self.table_info();
+        let key_column_names = table_info
+            .meta
+            .row_key_column_names()
+            .chain(iter::once(time_index))
+            .collect::<Vec<_>>();
+
+        let requests = WriteSplitter::with_partition_rule(partition_rule)
+            .split_delete(request, key_column_names)
+            .map_err(BoxedError::new)
+            .and_then(|requests| {
+                requests
+                    .into_iter()
+                    .map(|(region_number, request)| {
+                        to_grpc_delete_request(&self.table_name, region_number, request)
+                    })
+                    .collect::<Result<Vec<_>>>()
+                    .map_err(BoxedError::new)
+            })
+            .context(TableOperationSnafu)?;
+
+        let output = self
+            .dist_delete(requests)
+            .await
+            .map_err(BoxedError::new)
+            .context(TableOperationSnafu)?;
+        let Output::AffectedRows(rows) = output else { unreachable!() };
+        Ok(rows)
     }
 }
 
@@ -272,6 +333,46 @@ impl DistTable {
         }
         Ok(())
     }
+
+    async fn find_datanode_instances(
+        &self,
+        regions: &[RegionNumber],
+    ) -> Result<Vec<DatanodeInstance>> {
+        let table_name = &self.table_name;
+        let route = self
+            .partition_manager
+            .find_table_route(table_name)
+            .await
+            .with_context(|_| FindTableRouteSnafu {
+                table_name: table_name.to_string(),
+            })?;
+
+        let datanodes = regions
+            .iter()
+            .map(|&n| {
+                let region_id = n as u64;
+                route
+                    .region_routes
+                    .iter()
+                    .find_map(|x| {
+                        if x.region.id == region_id {
+                            x.leader_peer.clone()
+                        } else {
+                            None
+                        }
+                    })
+                    .context(FindDatanodeSnafu { region: region_id })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let mut instances = Vec::with_capacity(datanodes.len());
+        for datanode in datanodes {
+            let client = self.datanode_clients.get_client(&datanode).await;
+            let db = Database::new(&table_name.catalog_name, &table_name.schema_name, client);
+            instances.push(DatanodeInstance::new(Arc::new(self.clone()) as _, db));
+        }
+        Ok(instances)
+    }
 }
 
 fn project_schema(table_schema: SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {
@@ -376,9 +477,10 @@ impl PartitionExec {
 #[cfg(test)]
 mod test {
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     use api::v1::column::SemanticType;
-    use api::v1::{column, Column, ColumnDataType, InsertRequest};
+    use api::v1::{column, Column, ColumnDataType, InsertRequest as GrpcInsertRequest};
     use catalog::error::Result;
     use catalog::remote::{KvBackend, ValueIter};
     use common_query::physical_plan::DfPhysicalPlanAdapter;
@@ -399,6 +501,10 @@ mod test {
     use meta_client::client::MetaClient;
     use meta_client::rpc::router::RegionRoute;
     use meta_client::rpc::{Region, Table, TableRoute};
+    use meter_core::collect::Collect;
+    use meter_core::data::{ReadRecord, WriteRecord};
+    use meter_core::global::global_registry;
+    use meter_core::write_calc::WriteCalculator;
     use partition::columns::RangeColumnsPartitionRule;
     use partition::manager::PartitionRuleManager;
     use partition::partition::{PartitionBound, PartitionDef};
@@ -410,7 +516,7 @@ mod test {
     use sql::statements::statement::Statement;
     use store_api::storage::RegionNumber;
     use table::metadata::{TableInfoBuilder, TableMetaBuilder};
-    use table::TableRef;
+    use table::{meter_insert_request, TableRef};
 
     use super::*;
     use crate::expr_factory;
@@ -925,7 +1031,7 @@ mod test {
                 ..Default::default()
             },
         ];
-        let request = InsertRequest {
+        let request = GrpcInsertRequest {
             table_name: table_name.table_name.clone(),
             columns,
             row_count,
@@ -1056,5 +1162,49 @@ mod test {
             regions.unwrap_err(),
             partition::error::Error::FindRegions { .. }
         ));
+    }
+
+    #[derive(Default)]
+    struct MockCollector {
+        pub write_sum: AtomicU32,
+    }
+
+    impl Collect for MockCollector {
+        fn on_write(&self, record: WriteRecord) {
+            self.write_sum
+                .fetch_add(record.byte_count, Ordering::Relaxed);
+        }
+
+        fn on_read(&self, _record: ReadRecord) {
+            todo!()
+        }
+    }
+
+    struct MockCalculator;
+
+    impl WriteCalculator<InsertRequest> for MockCalculator {
+        fn calc_byte(&self, _value: &InsertRequest) -> u32 {
+            1024 * 10
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn test_meter_insert_request() {
+        let collector = Arc::new(MockCollector::default());
+        global_registry().set_collector(collector.clone());
+        global_registry().register_calculator(Arc::new(MockCalculator));
+
+        let req = InsertRequest {
+            catalog_name: "greptime".to_string(),
+            schema_name: "public".to_string(),
+            table_name: "numbers".to_string(),
+            columns_values: Default::default(),
+            region_number: 0,
+        };
+        meter_insert_request!(req);
+
+        let re = collector.write_sum.load(Ordering::Relaxed);
+        assert_eq!(re, 1024 * 10);
     }
 }

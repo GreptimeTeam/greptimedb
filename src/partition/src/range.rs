@@ -120,7 +120,7 @@ impl PartitionRule for RangePartitionRule {
         })
     }
 
-    fn find_regions(&self, exprs: &[PartitionExpr]) -> Result<Vec<RegionNumber>, Error> {
+    fn find_regions_by_exprs(&self, exprs: &[PartitionExpr]) -> Result<Vec<RegionNumber>, Error> {
         if exprs.is_empty() {
             return Ok(self.regions.clone());
         }
@@ -197,7 +197,7 @@ mod test {
                     op,
                     value: value.into(),
                 };
-                let regions = rule.find_regions(&[expr]).unwrap();
+                let regions = rule.find_regions_by_exprs(&[expr]).unwrap();
                 assert_eq!(
                     regions,
                     expected_regions.into_iter().collect::<Vec<RegionNumber>>()

@@ -74,9 +74,8 @@ impl GrpcQueryHandler for Instance {
                     }
                 }
             }
-            Request::Ddl(request) => {
-                let query = Request::Ddl(request);
-                GrpcQueryHandler::do_query(&*self.grpc_query_handler, query, ctx).await?
+            Request::Ddl(_) | Request::Delete(_) => {
+                GrpcQueryHandler::do_query(self.grpc_query_handler.as_ref(), request, ctx).await?
             }
             Request::Delete(_) => todo!(),
         };
@@ -92,8 +91,8 @@ mod test {
     use api::v1::ddl_request::Expr as DdlExpr;
     use api::v1::{
         alter_expr, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef,
-        CreateDatabaseExpr, CreateTableExpr, DdlRequest, DropTableExpr, FlushTableExpr,
-        InsertRequest, QueryRequest,
+        CreateDatabaseExpr, CreateTableExpr, DdlRequest, DeleteRequest, DropTableExpr,
+        FlushTableExpr, InsertRequest, QueryRequest,
     };
     use catalog::helper::{TableGlobalKey, TableGlobalValue};
     use common_catalog::consts::MITO_ENGINE;
@@ -242,11 +241,11 @@ mod test {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_distributed_insert_and_query() {
+    async fn test_distributed_insert_delete_and_query() {
         common_telemetry::init_default_ut_logging();
 
         let instance =
-            tests::create_distributed_instance("test_distributed_insert_and_query").await;
+            tests::create_distributed_instance("test_distributed_insert_delete_and_query").await;
         let frontend = instance.frontend.as_ref();
 
         let table_name = "my_dist_table";
@@ -254,6 +253,7 @@ mod test {
             r"
 CREATE TABLE {table_name} (
     a INT,
+    b STRING PRIMARY KEY,
     ts TIMESTAMP,
     TIME INDEX (ts)
 ) PARTITION BY RANGE COLUMNS(a) (
@@ -265,7 +265,7 @@ CREATE TABLE {table_name} (
         );
         create_table(frontend, sql).await;
 
-        test_insert_and_query_on_existing_table(frontend, table_name).await;
+        test_insert_delete_and_query_on_existing_table(frontend, table_name).await;
 
         verify_data_distribution(
             &instance,
@@ -274,48 +274,52 @@ CREATE TABLE {table_name} (
                 (
                     0u32,
                     "\
-+---------------------+---+
-| ts                  | a |
-+---------------------+---+
-| 2023-01-01T07:26:12 | 1 |
-| 2023-01-01T07:26:14 |   |
-+---------------------+---+",
++---------------------+---+-------------------+
+| ts                  | a | b                 |
++---------------------+---+-------------------+
+| 2023-01-01T07:26:12 | 1 | ts: 1672557972000 |
+| 2023-01-01T07:26:14 | 3 | ts: 1672557974000 |
+| 2023-01-01T07:26:15 | 4 | ts: 1672557975000 |
+| 2023-01-01T07:26:16 | 5 | ts: 1672557976000 |
+| 2023-01-01T07:26:17 |   | ts: 1672557977000 |
++---------------------+---+-------------------+",
                 ),
                 (
                     1u32,
                     "\
-+---------------------+----+
-| ts                  | a  |
-+---------------------+----+
-| 2023-01-01T07:26:13 | 11 |
-+---------------------+----+",
++---------------------+----+-------------------+
+| ts                  | a  | b                 |
++---------------------+----+-------------------+
+| 2023-01-01T07:26:18 | 11 | ts: 1672557978000 |
++---------------------+----+-------------------+",
                 ),
                 (
                     2u32,
                     "\
-+---------------------+----+
-| ts                  | a  |
-+---------------------+----+
-| 2023-01-01T07:26:15 | 20 |
-| 2023-01-01T07:26:16 | 22 |
-+---------------------+----+",
++---------------------+----+-------------------+
+| ts                  | a  | b                 |
++---------------------+----+-------------------+
+| 2023-01-01T07:26:20 | 20 | ts: 1672557980000 |
+| 2023-01-01T07:26:21 | 21 | ts: 1672557981000 |
+| 2023-01-01T07:26:23 | 23 | ts: 1672557983000 |
++---------------------+----+-------------------+",
                 ),
                 (
                     3u32,
                     "\
-+---------------------+----+
-| ts                  | a  |
-+---------------------+----+
-| 2023-01-01T07:26:17 | 50 |
-| 2023-01-01T07:26:18 | 55 |
-| 2023-01-01T07:26:19 | 99 |
-+---------------------+----+",
++---------------------+----+-------------------+
+| ts                  | a  | b                 |
++---------------------+----+-------------------+
+| 2023-01-01T07:26:24 | 50 | ts: 1672557984000 |
+| 2023-01-01T07:26:25 | 51 | ts: 1672557985000 |
+| 2023-01-01T07:26:27 | 53 | ts: 1672557987000 |
++---------------------+----+-------------------+",
                 ),
             ]),
         )
         .await;
 
-        test_insert_and_query_on_auto_created_table(frontend).await;
+        test_insert_delete_and_query_on_auto_created_table(frontend).await;
 
         // Auto created table has only one region.
         verify_data_distribution(
@@ -324,16 +328,14 @@ CREATE TABLE {table_name} (
             HashMap::from([(
                 0u32,
                 "\
-+---------------------+---+
-| ts                  | a |
-+---------------------+---+
-| 2023-01-01T07:26:15 | 4 |
-| 2023-01-01T07:26:16 |   |
-| 2023-01-01T07:26:17 | 6 |
-| 2023-01-01T07:26:18 |   |
-| 2023-01-01T07:26:19 |   |
-| 2023-01-01T07:26:20 |   |
-+---------------------+---+",
++---------------------+---+---+
+| ts                  | a | b |
++---------------------+---+---+
+| 2023-01-01T07:26:16 |   |   |
+| 2023-01-01T07:26:17 | 6 |   |
+| 2023-01-01T07:26:18 |   | x |
+| 2023-01-01T07:26:20 |   | z |
++---------------------+---+---+",
             )]),
         )
         .await;
@@ -348,12 +350,12 @@ CREATE TABLE {table_name} (
         let instance = &standalone.instance;
 
         let table_name = "my_table";
-        let sql = format!("CREATE TABLE {table_name} (a INT, ts TIMESTAMP, TIME INDEX (ts))");
+        let sql = format!("CREATE TABLE {table_name} (a INT, b STRING, ts TIMESTAMP, TIME INDEX (ts), PRIMARY KEY (a, b))");
         create_table(instance, sql).await;
 
-        test_insert_and_query_on_existing_table(instance, table_name).await;
+        test_insert_delete_and_query_on_existing_table(instance, table_name).await;
 
-        test_insert_and_query_on_auto_created_table(instance).await
+        test_insert_delete_and_query_on_auto_created_table(instance).await
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -380,7 +382,7 @@ CREATE TABLE {table_name} (
         );
         create_table(frontend, sql).await;
 
-        test_insert_and_query_on_existing_table(frontend, table_name).await;
+        test_insert_delete_and_query_on_existing_table(frontend, table_name).await;
 
         flush_table(frontend, "greptime", "public", table_name, None).await;
         // Wait for previous task finished
@@ -435,11 +437,11 @@ CREATE TABLE {table_name} (
         let data_tmp_dir = standalone.data_tmp_dir();
 
         let table_name = "my_table";
-        let sql = format!("CREATE TABLE {table_name} (a INT, ts TIMESTAMP, TIME INDEX (ts))");
+        let sql = format!("CREATE TABLE {table_name} (a INT, b STRING, ts TIMESTAMP, TIME INDEX (ts), PRIMARY KEY (a, b))");
 
         create_table(instance, sql).await;
 
-        test_insert_and_query_on_existing_table(instance, table_name).await;
+        test_insert_delete_and_query_on_existing_table(instance, table_name).await;
 
         let table_id = 1024;
         let region_id = 0;
@@ -487,33 +489,55 @@ CREATE TABLE {table_name} (
         assert!(matches!(output, Output::AffectedRows(0)));
     }
 
-    async fn test_insert_and_query_on_existing_table(instance: &Instance, table_name: &str) {
+    async fn test_insert_delete_and_query_on_existing_table(instance: &Instance, table_name: &str) {
+        let ts_millisecond_values = vec![
+            1672557972000,
+            1672557973000,
+            1672557974000,
+            1672557975000,
+            1672557976000,
+            1672557977000,
+            1672557978000,
+            1672557979000,
+            1672557980000,
+            1672557981000,
+            1672557982000,
+            1672557983000,
+            1672557984000,
+            1672557985000,
+            1672557986000,
+            1672557987000,
+        ];
         let insert = InsertRequest {
             table_name: table_name.to_string(),
             columns: vec![
                 Column {
                     column_name: "a".to_string(),
                     values: Some(Values {
-                        i32_values: vec![1, 11, 20, 22, 50, 55, 99],
+                        i32_values: vec![1, 2, 3, 4, 5, 11, 12, 20, 21, 22, 23, 50, 51, 52, 53],
                         ..Default::default()
                     }),
-                    null_mask: vec![4],
+                    null_mask: vec![32, 0],
                     semantic_type: SemanticType::Field as i32,
                     datatype: ColumnDataType::Int32 as i32,
                 },
                 Column {
+                    column_name: "b".to_string(),
+                    values: Some(Values {
+                        string_values: ts_millisecond_values
+                            .iter()
+                            .map(|x| format!("ts: {x}"))
+                            .collect(),
+                        ..Default::default()
+                    }),
+                    semantic_type: SemanticType::Tag as i32,
+                    datatype: ColumnDataType::String as i32,
+                    ..Default::default()
+                },
+                Column {
                     column_name: "ts".to_string(),
                     values: Some(Values {
-                        ts_millisecond_values: vec![
-                            1672557972000,
-                            1672557973000,
-                            1672557974000,
-                            1672557975000,
-                            1672557976000,
-                            1672557977000,
-                            1672557978000,
-                            1672557979000,
-                        ],
+                        ts_millisecond_values,
                         ..Default::default()
                     }),
                     semantic_type: SemanticType::Timestamp as i32,
@@ -521,35 +545,113 @@ CREATE TABLE {table_name} (
                     ..Default::default()
                 },
             ],
-            row_count: 8,
+            row_count: 16,
             ..Default::default()
         };
-
-        let request = Request::Insert(insert);
-        let output = query(instance, request).await;
-        assert!(matches!(output, Output::AffectedRows(8)));
+        let output = query(instance, Request::Insert(insert)).await;
+        assert!(matches!(output, Output::AffectedRows(16)));
 
         let request = Request::Query(QueryRequest {
             query: Some(Query::Sql(format!(
-                "SELECT ts, a FROM {table_name} ORDER BY ts"
+                "SELECT ts, a, b FROM {table_name} ORDER BY ts"
             ))),
         });
+        let output = query(instance, request.clone()).await;
+        let Output::Stream(stream) = output else { unreachable!() };
+        let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
+        let expected = "\
++---------------------+----+-------------------+
+| ts                  | a  | b                 |
++---------------------+----+-------------------+
+| 2023-01-01T07:26:12 | 1  | ts: 1672557972000 |
+| 2023-01-01T07:26:13 | 2  | ts: 1672557973000 |
+| 2023-01-01T07:26:14 | 3  | ts: 1672557974000 |
+| 2023-01-01T07:26:15 | 4  | ts: 1672557975000 |
+| 2023-01-01T07:26:16 | 5  | ts: 1672557976000 |
+| 2023-01-01T07:26:17 |    | ts: 1672557977000 |
+| 2023-01-01T07:26:18 | 11 | ts: 1672557978000 |
+| 2023-01-01T07:26:19 | 12 | ts: 1672557979000 |
+| 2023-01-01T07:26:20 | 20 | ts: 1672557980000 |
+| 2023-01-01T07:26:21 | 21 | ts: 1672557981000 |
+| 2023-01-01T07:26:22 | 22 | ts: 1672557982000 |
+| 2023-01-01T07:26:23 | 23 | ts: 1672557983000 |
+| 2023-01-01T07:26:24 | 50 | ts: 1672557984000 |
+| 2023-01-01T07:26:25 | 51 | ts: 1672557985000 |
+| 2023-01-01T07:26:26 | 52 | ts: 1672557986000 |
+| 2023-01-01T07:26:27 | 53 | ts: 1672557987000 |
++---------------------+----+-------------------+";
+        assert_eq!(recordbatches.pretty_print().unwrap(), expected);
+
+        let delete = DeleteRequest {
+            table_name: table_name.to_string(),
+            region_number: 0,
+            key_columns: vec![
+                Column {
+                    column_name: "a".to_string(),
+                    semantic_type: SemanticType::Field as i32,
+                    values: Some(Values {
+                        i32_values: vec![2, 12, 22, 52],
+                        ..Default::default()
+                    }),
+                    datatype: ColumnDataType::Int32 as i32,
+                    ..Default::default()
+                },
+                Column {
+                    column_name: "b".to_string(),
+                    semantic_type: SemanticType::Tag as i32,
+                    values: Some(Values {
+                        string_values: vec![
+                            "ts: 1672557973000".to_string(),
+                            "ts: 1672557979000".to_string(),
+                            "ts: 1672557982000".to_string(),
+                            "ts: 1672557986000".to_string(),
+                        ],
+                        ..Default::default()
+                    }),
+                    datatype: ColumnDataType::String as i32,
+                    ..Default::default()
+                },
+                Column {
+                    column_name: "ts".to_string(),
+                    semantic_type: SemanticType::Timestamp as i32,
+                    values: Some(Values {
+                        ts_millisecond_values: vec![
+                            1672557973000,
+                            1672557979000,
+                            1672557982000,
+                            1672557986000,
+                        ],
+                        ..Default::default()
+                    }),
+                    datatype: ColumnDataType::TimestampMillisecond as i32,
+                    ..Default::default()
+                },
+            ],
+            row_count: 4,
+        };
+        let output = query(instance, Request::Delete(delete)).await;
+        assert!(matches!(output, Output::AffectedRows(4)));
+
         let output = query(instance, request).await;
         let Output::Stream(stream) = output else { unreachable!() };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
         let expected = "\
-+---------------------+----+
-| ts                  | a  |
-+---------------------+----+
-| 2023-01-01T07:26:12 | 1  |
-| 2023-01-01T07:26:13 | 11 |
-| 2023-01-01T07:26:14 |    |
-| 2023-01-01T07:26:15 | 20 |
-| 2023-01-01T07:26:16 | 22 |
-| 2023-01-01T07:26:17 | 50 |
-| 2023-01-01T07:26:18 | 55 |
-| 2023-01-01T07:26:19 | 99 |
-+---------------------+----+";
++---------------------+----+-------------------+
+| ts                  | a  | b                 |
++---------------------+----+-------------------+
+| 2023-01-01T07:26:12 | 1  | ts: 1672557972000 |
+| 2023-01-01T07:26:14 | 3  | ts: 1672557974000 |
+| 2023-01-01T07:26:15 | 4  | ts: 1672557975000 |
+| 2023-01-01T07:26:16 | 5  | ts: 1672557976000 |
+| 2023-01-01T07:26:17 |    | ts: 1672557977000 |
+| 2023-01-01T07:26:18 | 11 | ts: 1672557978000 |
+| 2023-01-01T07:26:20 | 20 | ts: 1672557980000 |
+| 2023-01-01T07:26:21 | 21 | ts: 1672557981000 |
+| 2023-01-01T07:26:23 | 23 | ts: 1672557983000 |
+| 2023-01-01T07:26:24 | 50 | ts: 1672557984000 |
+| 2023-01-01T07:26:25 | 51 | ts: 1672557985000 |
+| 2023-01-01T07:26:27 | 53 | ts: 1672557987000 |
++---------------------+----+-------------------+";
         assert_eq!(recordbatches.pretty_print().unwrap(), expected);
     }
 
@@ -584,7 +686,7 @@ CREATE TABLE {table_name} (
 
         for (region, dn) in region_to_dn_map.iter() {
             let stmt = QueryLanguageParser::parse_sql(&format!(
-                "SELECT ts, a FROM {table_name} ORDER BY ts"
+                "SELECT ts, a, b FROM {table_name} ORDER BY ts"
             ))
             .unwrap();
             let dn = instance.datanodes.get(dn).unwrap();
@@ -604,7 +706,7 @@ CREATE TABLE {table_name} (
         }
     }
 
-    async fn test_insert_and_query_on_auto_created_table(instance: &Instance) {
+    async fn test_insert_delete_and_query_on_auto_created_table(instance: &Instance) {
         let insert = InsertRequest {
             table_name: "auto_created_table".to_string(),
             columns: vec![
@@ -676,7 +778,7 @@ CREATE TABLE {table_name} (
                 "SELECT ts, a, b FROM auto_created_table".to_string(),
             )),
         });
-        let output = query(instance, request).await;
+        let output = query(instance, request.clone()).await;
         let Output::Stream(stream) = output else { unreachable!() };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
         let expected = "\
@@ -688,6 +790,39 @@ CREATE TABLE {table_name} (
 | 2023-01-01T07:26:17 | 6 |   |
 | 2023-01-01T07:26:18 |   | x |
 | 2023-01-01T07:26:19 |   |   |
+| 2023-01-01T07:26:20 |   | z |
++---------------------+---+---+";
+        assert_eq!(recordbatches.pretty_print().unwrap(), expected);
+
+        let delete = DeleteRequest {
+            table_name: "auto_created_table".to_string(),
+            region_number: 0,
+            key_columns: vec![Column {
+                column_name: "ts".to_string(),
+                values: Some(Values {
+                    ts_millisecond_values: vec![1672557975000, 1672557979000],
+                    ..Default::default()
+                }),
+                semantic_type: SemanticType::Timestamp as i32,
+                datatype: ColumnDataType::TimestampMillisecond as i32,
+                ..Default::default()
+            }],
+            row_count: 2,
+        };
+
+        let output = query(instance, Request::Delete(delete)).await;
+        assert!(matches!(output, Output::AffectedRows(2)));
+
+        let output = query(instance, request).await;
+        let Output::Stream(stream) = output else { unreachable!() };
+        let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
+        let expected = "\
++---------------------+---+---+
+| ts                  | a | b |
++---------------------+---+---+
+| 2023-01-01T07:26:16 |   |   |
+| 2023-01-01T07:26:17 | 6 |   |
+| 2023-01-01T07:26:18 |   | x |
 | 2023-01-01T07:26:20 |   | z |
 +---------------------+---+---+";
         assert_eq!(recordbatches.pretty_print().unwrap(), expected);

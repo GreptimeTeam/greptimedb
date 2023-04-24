@@ -18,8 +18,8 @@ use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{
     greptime_response, AffectedRows, AlterExpr, AuthHeader, CreateTableExpr, DdlRequest,
-    DropTableExpr, FlushTableExpr, GreptimeRequest, InsertRequest, PromRangeQuery, QueryRequest,
-    RequestHeader,
+    DeleteRequest, DropTableExpr, FlushTableExpr, GreptimeRequest, InsertRequest, PromRangeQuery,
+    QueryRequest, RequestHeader,
 };
 use arrow_flight::{FlightData, Ticket};
 use common_error::prelude::*;
@@ -108,6 +108,15 @@ impl Database {
 
     pub async fn insert(&self, request: InsertRequest) -> Result<u32> {
         let _timer = timer!(metrics::METRIC_GRPC_INSERT);
+        self.handle(Request::Insert(request)).await
+    }
+
+    pub async fn delete(&self, request: DeleteRequest) -> Result<u32> {
+        let _timer = timer!(metrics::METRIC_GRPC_DELETE);
+        self.handle(Request::Delete(request)).await
+    }
+
+    async fn handle(&self, request: Request) -> Result<u32> {
         let mut client = self.client.make_database_client()?.inner;
         let request = GreptimeRequest {
             header: Some(RequestHeader {
@@ -116,7 +125,7 @@ impl Database {
                 authorization: self.ctx.auth_header.clone(),
                 dbname: self.dbname.clone(),
             }),
-            request: Some(Request::Insert(request)),
+            request: Some(request),
         };
         let response = client
             .handle(request)

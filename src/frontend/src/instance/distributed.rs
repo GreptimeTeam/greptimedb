@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::{
-    column_def, AlterExpr, CreateDatabaseExpr, CreateTableExpr, DropTableExpr, FlushTableExpr,
-    InsertRequest, TableId,
+    column_def, AlterExpr, CreateDatabaseExpr, CreateTableExpr, DeleteRequest, DropTableExpr,
+    FlushTableExpr, InsertRequest, TableId,
 };
 use async_trait::async_trait;
 use catalog::helper::{SchemaKey, SchemaValue};
@@ -52,6 +52,7 @@ use sql::ast::{Ident, Value as SqlValue};
 use sql::statements::create::{PartitionEntry, Partitions};
 use sql::statements::statement::Statement;
 use sql::statements::{self, sql_value_to_value};
+use table::engine::TableReference;
 use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
 use table::requests::TableOptions;
 use table::table::AlterContext;
@@ -63,8 +64,8 @@ use crate::error::{
     self, AlterExprToRequestSnafu, CatalogEntrySerdeSnafu, CatalogSnafu, ColumnDataTypeSnafu,
     DeserializePartitionSnafu, InvokeDatanodeSnafu, ParseSqlSnafu, PrimaryKeyNotFoundSnafu,
     RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaExistsSnafu, StartMetaClientSnafu,
-    TableAlreadyExistSnafu, TableNotFoundSnafu, TableSnafu, ToTableInsertRequestSnafu,
-    UnrecognizedTableOptionSnafu,
+    TableAlreadyExistSnafu, TableNotFoundSnafu, TableSnafu, ToTableDeleteRequestSnafu,
+    ToTableInsertRequestSnafu, UnrecognizedTableOptionSnafu,
 };
 use crate::expr_factory;
 use crate::table::DistTable;
@@ -333,6 +334,11 @@ impl DistInstance {
                 let _ = self.create_table(create_expr, stmt.partitions).await?;
                 Ok(Output::AffectedRows(0))
             }
+            Statement::CreateExternalTable(stmt) => {
+                let create_expr = &mut expr_factory::create_external_expr(stmt, query_ctx).await?;
+                self.create_table(create_expr, None).await?;
+                Ok(Output::AffectedRows(0))
+            }
             Statement::Alter(alter_table) => {
                 let expr = grpc::to_alter_expr(alter_table, query_ctx)?;
                 self.handle_alter_table(expr).await
@@ -516,10 +522,10 @@ impl DistInstance {
             .context(RequestMetaSnafu)
     }
 
-    // TODO(LFC): Refactor insertion implementation for DistTable,
-    // GRPC InsertRequest to Table InsertRequest, than split Table InsertRequest, than assemble each GRPC InsertRequest, is rather inefficient,
-    // should operate on GRPC InsertRequest directly.
-    // Also remember to check the "region_number" carried in InsertRequest, too.
+    // TODO(LFC): Refactor GRPC insertion and deletion implementation here,
+    // Take insertion as an example. GRPC insertion is converted to Table InsertRequest here,
+    // than split the Table InsertRequest in DistTable, than assemble each GRPC InsertRequest there.
+    // Rather inefficient, should operate on GRPC InsertRequest directly.
     async fn handle_dist_insert(
         &self,
         request: InsertRequest,
@@ -528,17 +534,47 @@ impl DistInstance {
         let catalog = &ctx.current_catalog();
         let schema = &ctx.current_schema();
         let table_name = &request.table_name;
+        let table_ref = TableReference::full(catalog, schema, table_name);
+
         let table = self
             .catalog_manager
             .table(catalog, schema, table_name)
             .await
             .context(CatalogSnafu)?
-            .context(TableNotFoundSnafu { table_name })?;
+            .with_context(|| TableNotFoundSnafu {
+                table_name: table_ref.to_string(),
+            })?;
 
         let request = common_grpc_expr::insert::to_table_insert_request(catalog, schema, request)
             .context(ToTableInsertRequestSnafu)?;
 
         let affected_rows = table.insert(request).await.context(TableSnafu)?;
+        Ok(Output::AffectedRows(affected_rows))
+    }
+
+    async fn handle_dist_delete(
+        &self,
+        request: DeleteRequest,
+        ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let catalog = &ctx.current_catalog();
+        let schema = &ctx.current_schema();
+        let table_name = &request.table_name;
+        let table_ref = TableReference::full(catalog, schema, table_name);
+
+        let table = self
+            .catalog_manager
+            .table(catalog, schema, table_name)
+            .await
+            .context(CatalogSnafu)?
+            .with_context(|| TableNotFoundSnafu {
+                table_name: table_ref.to_string(),
+            })?;
+
+        let request = common_grpc_expr::delete::to_table_delete_request(request)
+            .context(ToTableDeleteRequestSnafu)?;
+
+        let affected_rows = table.delete(request).await.context(TableSnafu)?;
         Ok(Output::AffectedRows(affected_rows))
     }
 
@@ -642,7 +678,7 @@ fn create_table_info(create_table: &CreateTableExpr) -> Result<RawTableInfo> {
         schema: raw_schema,
         primary_key_indices,
         value_indices: vec![],
-        engine: "mito".to_string(),
+        engine: create_table.engine.clone(),
         next_column_id: column_schemas.len() as u32,
         region_numbers: vec![],
         engine_options: HashMap::new(),

@@ -75,7 +75,7 @@ use crate::error::{
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::FrontendOptions;
 use crate::instance::standalone::StandaloneGrpcQueryHandler;
-use crate::metric;
+use crate::metrics;
 use crate::script::ScriptExecutor;
 use crate::server::{start_server, ServerHandlers, Services};
 use crate::statement::StatementExecutor;
@@ -451,7 +451,7 @@ impl SqlQueryHandler for Instance {
     type Error = Error;
 
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
-        let _timer = timer!(metric::METRIC_HANDLE_SQL_ELAPSED);
+        let _timer = timer!(metrics::METRIC_HANDLE_SQL_ELAPSED);
 
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query = match query_interceptor.pre_parsing(query, query_ctx.clone()) {

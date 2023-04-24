@@ -16,6 +16,7 @@ use std::any::Any;
 
 use common_error::prelude::*;
 use common_procedure::ProcedureId;
+use serde_json::error::Error as JsonError;
 use snafu::Location;
 use storage::error::Error as StorageError;
 use table::error::Error as TableError;
@@ -282,6 +283,12 @@ pub enum Error {
         source: common_grpc_expr::error::Error,
     },
 
+    #[snafu(display("Failed to convert delete expr to request: {}", source))]
+    DeleteExprToRequest {
+        #[snafu(backtrace)]
+        source: common_grpc_expr::error::Error,
+    },
+
     #[snafu(display("Failed to parse SQL, source: {}", source))]
     ParseSql {
         #[snafu(backtrace)]
@@ -299,6 +306,18 @@ pub enum Error {
         source: common_time::error::Error,
     },
 
+    #[snafu(display("Failed to infer schema: {}", source))]
+    InferSchema {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
+
+    #[snafu(display("Failed to prepare immutable table: {}", source))]
+    PrepareImmutableTable {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
+
     #[snafu(display("Failed to access catalog, source: {}", source))]
     Catalog {
         #[snafu(backtrace)]
@@ -308,6 +327,7 @@ pub enum Error {
     #[snafu(display("Failed to find table {} from catalog, source: {}", table_name, source))]
     FindTable {
         table_name: String,
+        #[snafu(backtrace)]
         source: catalog::error::Error,
     },
 
@@ -418,6 +438,12 @@ pub enum Error {
         #[snafu(backtrace)]
         source: BoxedError,
     },
+
+    #[snafu(display("Failed to encode object into json, source: {}", source))]
+    EncodeJson {
+        location: Location,
+        source: JsonError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -453,9 +479,12 @@ impl ErrorExt for Error {
 
             AlterExprToRequest { source, .. }
             | CreateExprToRequest { source }
+            | DeleteExprToRequest { source }
             | InsertData { source } => source.status_code(),
 
             ConvertSchema { source, .. } | VectorComputation { source } => source.status_code(),
+
+            InferSchema { source, .. } => source.status_code(),
 
             ColumnValuesNumberMismatch { .. }
             | InvalidSql { .. }
@@ -472,7 +501,10 @@ impl ErrorExt for Error {
             | DatabaseNotFound { .. }
             | MissingNodeId { .. }
             | MissingMetasrvOpts { .. }
-            | ColumnNoneDefaultValue { .. } => StatusCode::InvalidArguments,
+            | ColumnNoneDefaultValue { .. }
+            | PrepareImmutableTable { .. } => StatusCode::InvalidArguments,
+
+            EncodeJson { .. } => StatusCode::Unexpected,
 
             // TODO(yingwen): Further categorize http error.
             StartServer { .. }

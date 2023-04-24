@@ -15,7 +15,7 @@
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request as GrpcRequest;
 use api::v1::query_request::Query;
-use api::v1::{CreateDatabaseExpr, DdlRequest, InsertRequest};
+use api::v1::{CreateDatabaseExpr, DdlRequest, DeleteRequest, InsertRequest};
 use async_trait::async_trait;
 use common_query::Output;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
@@ -26,11 +26,13 @@ use session::context::{QueryContext, QueryContextRef};
 use snafu::prelude::*;
 use sql::statements::statement::Statement;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
+use table::engine::TableReference;
 use table::requests::CreateDatabaseRequest;
 
 use crate::error::{
-    self, DecodeLogicalPlanSnafu, ExecuteLogicalPlanSnafu, ExecuteSqlSnafu, PlanStatementSnafu,
-    Result,
+    self, CatalogSnafu, DecodeLogicalPlanSnafu, DeleteExprToRequestSnafu, DeleteSnafu,
+    ExecuteLogicalPlanSnafu, ExecuteSqlSnafu, InsertSnafu, PlanStatementSnafu, Result,
+    TableNotFoundSnafu,
 };
 use crate::instance::Instance;
 
@@ -104,20 +106,47 @@ impl Instance {
         let catalog = &ctx.current_catalog();
         let schema = &ctx.current_schema();
         let table_name = &request.table_name.clone();
+        let table_ref = TableReference::full(catalog, schema, table_name);
+
         let table = self
             .catalog_manager
             .table(catalog, schema, table_name)
             .await
-            .context(error::CatalogSnafu)?
-            .context(error::TableNotFoundSnafu { table_name })?;
+            .context(CatalogSnafu)?
+            .with_context(|| TableNotFoundSnafu {
+                table_name: table_ref.to_string(),
+            })?;
 
         let request = common_grpc_expr::insert::to_table_insert_request(catalog, schema, request)
             .context(error::InsertDataSnafu)?;
 
-        let affected_rows = table
-            .insert(request)
+        let affected_rows = table.insert(request).await.with_context(|_| InsertSnafu {
+            table_name: table_ref.to_string(),
+        })?;
+        Ok(Output::AffectedRows(affected_rows))
+    }
+
+    async fn handle_delete(&self, request: DeleteRequest, ctx: QueryContextRef) -> Result<Output> {
+        let catalog = &ctx.current_catalog();
+        let schema = &ctx.current_schema();
+        let table_name = &request.table_name.clone();
+        let table_ref = TableReference::full(catalog, schema, table_name);
+
+        let table = self
+            .catalog_manager
+            .table(catalog, schema, table_name)
             .await
-            .context(error::InsertSnafu { table_name })?;
+            .context(CatalogSnafu)?
+            .with_context(|| TableNotFoundSnafu {
+                table_name: table_ref.to_string(),
+            })?;
+
+        let request = common_grpc_expr::delete::to_table_delete_request(request)
+            .context(DeleteExprToRequestSnafu)?;
+
+        let affected_rows = table.delete(request).await.with_context(|_| DeleteSnafu {
+            table_name: table_ref.to_string(),
+        })?;
         Ok(Output::AffectedRows(affected_rows))
     }
 
@@ -142,6 +171,7 @@ impl GrpcQueryHandler for Instance {
     async fn do_query(&self, request: GrpcRequest, ctx: QueryContextRef) -> Result<Output> {
         match request {
             GrpcRequest::Insert(request) => self.handle_insert(request, ctx).await,
+            GrpcRequest::Delete(request) => self.handle_delete(request, ctx).await,
             GrpcRequest::Query(query_request) => {
                 let query = query_request
                     .query
@@ -332,6 +362,72 @@ mod test {
 | 2022-12-30T07:09:01 | host2 |     |
 | 2022-12-30T07:09:02 | host3 | 3.0 |
 +---------------------+-------+-----+";
+        assert_eq!(recordbatches.pretty_print().unwrap(), expected);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_handle_delete() {
+        let instance = MockInstance::new("test_handle_delete").await;
+        let instance = instance.inner();
+        test_util::create_test_table(instance, ConcreteDataType::timestamp_millisecond_datatype())
+            .await
+            .unwrap();
+
+        let query = GrpcRequest::Query(QueryRequest {
+            query: Some(Query::Sql(
+                "INSERT INTO demo(host, cpu, memory, ts) VALUES \
+                            ('host1', 66.6, 1024, 1672201025000),\
+                            ('host2', 88.8, 333.3, 1672201026000),\
+                            ('host3', 88.8, 333.3, 1672201026000)"
+                    .to_string(),
+            )),
+        });
+        let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
+        assert!(matches!(output, Output::AffectedRows(3)));
+
+        let request = DeleteRequest {
+            table_name: "demo".to_string(),
+            region_number: 0,
+            key_columns: vec![
+                Column {
+                    column_name: "host".to_string(),
+                    values: Some(Values {
+                        string_values: vec!["host2".to_string()],
+                        ..Default::default()
+                    }),
+                    datatype: ColumnDataType::String as i32,
+                    ..Default::default()
+                },
+                Column {
+                    column_name: "ts".to_string(),
+                    values: Some(Values {
+                        ts_millisecond_values: vec![1672201026000],
+                        ..Default::default()
+                    }),
+                    datatype: ColumnDataType::TimestampMillisecond as i32,
+                    ..Default::default()
+                },
+            ],
+            row_count: 1,
+        };
+
+        let request = GrpcRequest::Delete(request);
+        let output = instance
+            .do_query(request, QueryContext::arc())
+            .await
+            .unwrap();
+        assert!(matches!(output, Output::AffectedRows(1)));
+
+        let output = exec_selection(instance, "SELECT ts, host, cpu FROM demo").await;
+        let Output::Stream(stream) = output else { unreachable!() };
+        let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
+        let expected = "\
++---------------------+-------+------+
+| ts                  | host  | cpu  |
++---------------------+-------+------+
+| 2022-12-28T04:17:05 | host1 | 66.6 |
+| 2022-12-28T04:17:06 | host3 | 88.8 |
++---------------------+-------+------+";
         assert_eq!(recordbatches.pretty_print().unwrap(), expected);
     }
 

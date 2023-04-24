@@ -29,6 +29,11 @@ use crate::error;
 use crate::error::ParseTableOptionSnafu;
 use crate::metadata::TableId;
 
+pub const IMMUTABLE_TABLE_META_KEY: &str = "IMMUTABLE_TABLE_META";
+pub const IMMUTABLE_TABLE_LOCATION_KEY: &str = "LOCATION";
+pub const IMMUTABLE_TABLE_PATTERN_KEY: &str = "PATTERN";
+pub const IMMUTABLE_TABLE_FORMAT_KEY: &str = "FORMAT";
+
 #[derive(Debug, Clone)]
 pub struct CreateDatabaseRequest {
     pub db_name: String,
@@ -273,6 +278,19 @@ pub struct FlushTableRequest {
     pub region_number: Option<RegionNumber>,
     /// Wait until the flush is done.
     pub wait: Option<bool>,
+}
+
+#[macro_export]
+macro_rules! meter_insert_request {
+    ($req: expr) => {
+        meter_macros::write_meter!(
+            $req.catalog_name.to_string(),
+            $req.schema_name.to_string(),
+            $req.table_name.to_string(),
+            $req.region_number,
+            $req
+        );
+    };
 }
 
 #[cfg(test)]

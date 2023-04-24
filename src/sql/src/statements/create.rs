@@ -195,6 +195,8 @@ pub struct CreateExternalTable {
     /// All keys are uppercase.
     /// TODO(weny): unify the key's case styling.
     pub options: HashMap<String, String>,
+    pub if_not_exists: bool,
+    pub engine: String,
 }
 
 #[cfg(test)]

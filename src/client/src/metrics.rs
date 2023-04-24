@@ -16,6 +16,7 @@
 pub const METRIC_GRPC_CREATE_TABLE: &str = "grpc.create_table";
 pub const METRIC_GRPC_PROMQL_RANGE_QUERY: &str = "grpc.promql.range_query";
 pub const METRIC_GRPC_INSERT: &str = "grpc.insert";
+pub const METRIC_GRPC_DELETE: &str = "grpc.delete";
 pub const METRIC_GRPC_SQL: &str = "grpc.sql";
 pub const METRIC_GRPC_LOGICAL_PLAN: &str = "grpc.logical_plan";
 pub const METRIC_GRPC_ALTER: &str = "grpc.alter";
