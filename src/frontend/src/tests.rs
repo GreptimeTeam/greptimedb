@@ -160,6 +160,7 @@ pub(crate) async fn create_datanode_client(
     let grpc_server = GrpcServer::new(
         ServerGrpcQueryHandlerAdaptor::arc(datanode_instance),
         None,
+        None,
         runtime,
     );
     tokio::spawn(async move {

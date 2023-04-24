@@ -15,12 +15,14 @@
 mod database;
 pub mod flight;
 pub mod handler;
+pub mod prom_query_gateway;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use api::v1::greptime_database_server::{GreptimeDatabase, GreptimeDatabaseServer};
 use api::v1::health_check_server::{HealthCheck, HealthCheckServer};
+use api::v1::prometheus_gateway_server::{PrometheusGateway, PrometheusGatewayServer};
 use api::v1::{HealthCheckRequest, HealthCheckResponse};
 use arrow_flight::flight_service_server::{FlightService, FlightServiceServer};
 use async_trait::async_trait;
@@ -34,6 +36,7 @@ use tokio::sync::Mutex;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
 
+use self::prom_query_gateway::PrometheusGatewayService;
 use crate::auth::UserProviderRef;
 use crate::error::{
     AlreadyStartedSnafu, GrpcReflectionServiceSnafu, Result, StartGrpcSnafu, TcpBindSnafu,
@@ -41,6 +44,7 @@ use crate::error::{
 use crate::grpc::database::DatabaseService;
 use crate::grpc::flight::FlightHandler;
 use crate::grpc::handler::GreptimeRequestHandler;
+use crate::prom::PromHandlerRef;
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 use crate::server::Server;
 
@@ -49,11 +53,14 @@ type TonicResult<T> = std::result::Result<T, Status>;
 pub struct GrpcServer {
     shutdown_tx: Mutex<Option<Sender<()>>>,
     request_handler: Arc<GreptimeRequestHandler>,
+    /// Handler for Prometheus-compatible PromQL queries. Only present for frontend server.
+    promql_handler: Option<PromHandlerRef>,
 }
 
 impl GrpcServer {
     pub fn new(
         query_handler: ServerGrpcQueryHandlerRef,
+        promql_handler: Option<PromHandlerRef>,
         user_provider: Option<UserProviderRef>,
         runtime: Arc<Runtime>,
     ) -> Self {
@@ -65,6 +72,7 @@ impl GrpcServer {
         Self {
             shutdown_tx: Mutex::new(None),
             request_handler,
+            promql_handler,
         }
     }
 
@@ -78,6 +86,13 @@ impl GrpcServer {
 
     pub fn create_healthcheck_service(&self) -> HealthCheckServer<impl HealthCheck> {
         HealthCheckServer::new(HealthCheckHandler)
+    }
+
+    pub fn create_prom_query_gateway_service(
+        &self,
+        handler: PromHandlerRef,
+    ) -> PrometheusGatewayServer<impl PrometheusGateway> {
+        PrometheusGatewayServer::new(PrometheusGatewayService::new(handler))
     }
 }
 
@@ -137,10 +152,15 @@ impl Server for GrpcServer {
             .context(GrpcReflectionServiceSnafu)?;
 
         // Would block to serve requests.
-        tonic::transport::Server::builder()
+        let mut builder = tonic::transport::Server::builder()
             .add_service(self.create_flight_service())
             .add_service(self.create_database_service())
-            .add_service(self.create_healthcheck_service())
+            .add_service(self.create_healthcheck_service());
+        if let Some(promql_handler) = &self.promql_handler {
+            builder =
+                builder.add_service(self.create_prom_query_gateway_service(promql_handler.clone()))
+        }
+        builder
             .add_service(reflection_service)
             .serve_with_incoming_shutdown(TcpListenerStream::new(listener), rx.map(drop))
             .await
