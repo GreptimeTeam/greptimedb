@@ -19,7 +19,7 @@ use datatypes::value::Value;
 use snafu::ensure;
 use store_api::storage::RegionNumber;
 
-use crate::error::{self, Error};
+use crate::error::{self, Result};
 use crate::partition::{PartitionBound, PartitionExpr, PartitionRule};
 
 /// A [RangeColumnsPartitionRule] is very similar to [RangePartitionRule] except that it allows
@@ -145,7 +145,7 @@ impl PartitionRule for RangeColumnsPartitionRule {
         self.column_list.clone()
     }
 
-    fn find_region(&self, values: &[Value]) -> Result<RegionNumber, Error> {
+    fn find_region(&self, values: &[Value]) -> Result<RegionNumber> {
         ensure!(
             values.len() == self.column_list.len(),
             error::RegionKeysSizeSnafu {
@@ -166,7 +166,7 @@ impl PartitionRule for RangeColumnsPartitionRule {
         })
     }
 
-    fn find_regions(&self, exprs: &[PartitionExpr]) -> Result<Vec<RegionNumber>, Error> {
+    fn find_regions_by_exprs(&self, exprs: &[PartitionExpr]) -> Result<Vec<RegionNumber>> {
         let regions = if exprs.iter().all(|x| self.column_list.contains(&x.column)) {
             let PartitionExpr {
                 column: _,
@@ -269,7 +269,7 @@ mod tests {
                     value: value.into(),
                 },
             ];
-            let regions = rule.find_regions(&exprs).unwrap();
+            let regions = rule.find_regions_by_exprs(&exprs).unwrap();
             assert_eq!(
                 regions,
                 expected_regions.into_iter().collect::<Vec<RegionNumber>>()
@@ -332,7 +332,7 @@ mod tests {
                 value: "hz".into(),
             },
         ];
-        let regions = rule.find_regions(&exprs).unwrap();
+        let regions = rule.find_regions_by_exprs(&exprs).unwrap();
         assert_eq!(regions, vec![1, 2, 3, 4, 5, 6]);
     }
 

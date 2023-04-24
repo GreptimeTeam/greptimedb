@@ -776,8 +776,7 @@ async fn test_use_database(instance: Arc<dyn MockInstance>) {
     check_output_stream(output, expected).await;
 }
 
-// should apply to both instances. tracked in #755
-#[apply(standalone_instance_case)]
+#[apply(both_instances_cases)]
 async fn test_delete(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 

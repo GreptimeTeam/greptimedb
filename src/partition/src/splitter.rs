@@ -22,7 +22,10 @@ use snafu::{ensure, OptionExt};
 use store_api::storage::RegionNumber;
 use table::requests::{DeleteRequest, InsertRequest};
 
-use crate::error::{FindPartitionColumnSnafu, FindRegionSnafu, InvalidInsertRequestSnafu, Result};
+use crate::error::{
+    FindPartitionColumnSnafu, FindRegionSnafu, InvalidDeleteRequestSnafu,
+    InvalidInsertRequestSnafu, Result,
+};
 use crate::PartitionRuleRef;
 
 pub type InsertRequestSplit = HashMap<RegionNumber, InsertRequest>;
@@ -43,10 +46,75 @@ impl WriteSplitter {
         check_req(&insert)?;
 
         let column_names = self.partition_rule.partition_columns();
-        let partition_columns = find_partitioning_values(&insert, &column_names)?;
+        let values = &insert.columns_values;
+        let partition_columns = find_partitioning_values(values, &column_names)?;
         let region_map = self.split_partitioning_values(&partition_columns)?;
 
         Ok(split_insert_request(&insert, region_map))
+    }
+
+    pub fn split_delete(
+        &self,
+        request: DeleteRequest,
+        key_column_names: Vec<&String>,
+    ) -> Result<DeleteRequestSplit> {
+        Self::validate_delete_request(&request)?;
+
+        let partition_columns = self.partition_rule.partition_columns();
+        let values = find_partitioning_values(&request.key_column_values, &partition_columns)?;
+        let regional_value_indexes = self.split_partitioning_values(&values)?;
+
+        let requests = regional_value_indexes
+            .into_iter()
+            .map(|(region_id, value_indexes)| {
+                let key_column_values = request
+                    .key_column_values
+                    .iter()
+                    .filter(|(column_name, _)| key_column_names.contains(column_name))
+                    .map(|(column_name, vector)| {
+                        let mut builder = vector
+                            .data_type()
+                            .create_mutable_vector(value_indexes.len());
+
+                        value_indexes.iter().for_each(|&index| {
+                            builder.push_value_ref(vector.get(index).as_value_ref());
+                        });
+
+                        (column_name.to_string(), builder.to_vector())
+                    })
+                    .collect();
+                (region_id, DeleteRequest { key_column_values })
+            })
+            .collect();
+        Ok(requests)
+    }
+
+    fn validate_delete_request(request: &DeleteRequest) -> Result<()> {
+        let rows = request
+            .key_column_values
+            .values()
+            .next()
+            .map(|x| x.len())
+            .context(InvalidDeleteRequestSnafu {
+                reason: "no key column values",
+            })?;
+        ensure!(
+            rows > 0,
+            InvalidDeleteRequestSnafu {
+                reason: "no rows in delete request"
+            }
+        );
+        ensure!(
+            request
+                .key_column_values
+                .values()
+                .map(|x| x.len())
+                .all(|x| x == rows),
+            InvalidDeleteRequestSnafu {
+                reason: "the lengths of key column values are not the same"
+            }
+        );
+        Ok(())
     }
 
     fn split_partitioning_values(
@@ -95,11 +163,9 @@ fn check_req(insert: &InsertRequest) -> Result<()> {
 }
 
 fn find_partitioning_values(
-    insert: &InsertRequest,
+    values: &HashMap<String, VectorRef>,
     partition_columns: &[String],
 ) -> Result<Vec<VectorRef>> {
-    let values = &insert.columns_values;
-
     partition_columns
         .iter()
         .map(|column_name| {
@@ -190,9 +256,7 @@ mod tests {
     use store_api::storage::RegionNumber;
     use table::requests::InsertRequest;
 
-    use super::{
-        check_req, find_partitioning_values, partition_values, split_insert_request, WriteSplitter,
-    };
+    use super::*;
     use crate::error::Error;
     use crate::partition::{PartitionExpr, PartitionRule};
     use crate::PartitionRuleRef;
@@ -331,7 +395,8 @@ mod tests {
         let insert = mock_insert_request();
 
         let partition_column_names = vec!["host".to_string(), "id".to_string()];
-        let columns = find_partitioning_values(&insert, &partition_column_names).unwrap();
+        let columns =
+            find_partitioning_values(&insert.columns_values, &partition_column_names).unwrap();
 
         let host_column = columns[0].clone();
         assert_eq!(
@@ -461,7 +526,7 @@ mod tests {
             unreachable!()
         }
 
-        fn find_regions(&self, _: &[PartitionExpr]) -> Result<Vec<RegionNumber>, Error> {
+        fn find_regions_by_exprs(&self, _: &[PartitionExpr]) -> Result<Vec<RegionNumber>, Error> {
             unimplemented!()
         }
     }

@@ -130,6 +130,12 @@ pub enum Error {
         table_id: TableId,
         location: Location,
     },
+
+    #[snafu(display("Missing time index column in table: {}", table_name))]
+    MissingTimeIndexColumn {
+        table_name: String,
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -152,7 +158,10 @@ impl ErrorExt for Error {
             Error::ParseTableOption { .. }
             | Error::EngineNotFound { .. }
             | Error::EngineExist { .. } => StatusCode::InvalidArguments,
-            Error::InvalidTable { .. } => StatusCode::Internal,
+
+            Error::InvalidTable { .. } | Error::MissingTimeIndexColumn { .. } => {
+                StatusCode::Internal
+            }
         }
     }
 

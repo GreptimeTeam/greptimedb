@@ -37,6 +37,7 @@ impl GrpcQueryHandler for DistInstance {
     async fn do_query(&self, request: Request, ctx: QueryContextRef) -> Result<Output> {
         match request {
             Request::Insert(request) => self.handle_dist_insert(request, ctx).await,
+            Request::Delete(request) => self.handle_dist_delete(request, ctx).await,
             Request::Query(_) => {
                 unreachable!("Query should have been handled directly in Frontend Instance!")
             }

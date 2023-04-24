@@ -209,7 +209,7 @@ impl PartitionRuleManager {
             }
             target.into_iter().collect::<Vec<_>>()
         } else {
-            partition_rule.find_regions(&[])?
+            partition_rule.find_regions_by_exprs(&[])?
         };
         ensure!(
             !regions.is_empty(),
@@ -249,7 +249,7 @@ fn find_regions0(partition_rule: PartitionRuleRef, filter: &Expr) -> Result<Hash
                     }
                 })?;
                 return Ok(partition_rule
-                    .find_regions(&[PartitionExpr::new(column, op, value)])?
+                    .find_regions_by_exprs(&[PartitionExpr::new(column, op, value)])?
                     .into_iter()
                     .collect::<HashSet<RegionNumber>>());
             }
@@ -277,7 +277,7 @@ fn find_regions0(partition_rule: PartitionRuleRef, filter: &Expr) -> Result<Hash
 
     // Returns all regions for not supported partition expr as a safety hatch.
     Ok(partition_rule
-        .find_regions(&[])?
+        .find_regions_by_exprs(&[])?
         .into_iter()
         .collect::<HashSet<RegionNumber>>())
 }

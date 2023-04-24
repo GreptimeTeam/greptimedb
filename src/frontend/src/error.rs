@@ -224,6 +224,15 @@ pub enum Error {
         source: common_grpc_expr::error::Error,
     },
 
+    #[snafu(display(
+        "Failed to convert GRPC DeleteRequest to table DeleteRequest, source: {}",
+        source
+    ))]
+    ToTableDeleteRequest {
+        #[snafu(backtrace)]
+        source: common_grpc_expr::error::Error,
+    },
+
     #[snafu(display("Failed to find catalog by name: {}", catalog_name))]
     CatalogNotFound {
         catalog_name: String,
@@ -546,6 +555,7 @@ impl ErrorExt for Error {
             }
             Error::BuildCreateExprOnInsertion { source }
             | Error::ToTableInsertRequest { source }
+            | Error::ToTableDeleteRequest { source }
             | Error::FindNewColumnsOnInsertion { source } => source.status_code(),
 
             Error::ExecuteStatement { source, .. }
