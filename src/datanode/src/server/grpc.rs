@@ -110,7 +110,7 @@ impl Instance {
 mod tests {
     use api::v1::{column_def, ColumnDataType, ColumnDef, TableId};
     use common_catalog::consts::{MIN_USER_TABLE_ID, MITO_ENGINE};
-    use common_grpc_expr::create_table_schema_options;
+    use common_grpc_expr::create_table_schema;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, RawSchema};
     use datatypes::value::Value;
@@ -145,11 +145,11 @@ mod tests {
     #[test]
     fn test_create_table_schema() {
         let mut expr = testing_create_expr();
-        let schema = create_table_schema_options(&expr, true).unwrap();
+        let schema = create_table_schema(&expr, true).unwrap();
         assert_eq!(schema, expected_table_schema());
 
         expr.time_index = "not-exist-column".to_string();
-        let result = create_table_schema_options(&expr, true);
+        let result = create_table_schema(&expr, true);
         let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("Missing timestamp column"),

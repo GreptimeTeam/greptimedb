@@ -92,10 +92,7 @@ pub fn alter_expr_to_request(expr: AlterExpr) -> Result<AlterTableRequest> {
     }
 }
 
-pub fn create_table_schema_options(
-    expr: &CreateTableExpr,
-    require_time_index: bool,
-) -> Result<RawSchema> {
+pub fn create_table_schema(expr: &CreateTableExpr, require_time_index: bool) -> Result<RawSchema> {
     let column_schemas = expr
         .column_defs
         .iter()
@@ -135,7 +132,7 @@ pub fn create_expr_to_request(
     expr: CreateTableExpr,
     require_time_index: bool,
 ) -> Result<CreateTableRequest> {
-    let schema = create_table_schema_options(&expr, require_time_index)?;
+    let schema = create_table_schema(&expr, require_time_index)?;
     let primary_key_indices = expr
         .primary_keys
         .iter()
