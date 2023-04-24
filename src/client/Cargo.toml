@@ -37,4 +37,4 @@ prost.workspace = true
 
 [dev-dependencies.substrait_proto]
 package = "substrait"
-version = "0.4"
+version = "0.7"
