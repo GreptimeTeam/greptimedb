@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! prom supply the prometheus HTTP API Server compliance
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -156,30 +156,30 @@ impl Server for PromServer {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct PromSeries {
-    metric: HashMap<String, String>,
-    values: Vec<(f64, String)>,
+    pub metric: HashMap<String, String>,
+    pub values: Vec<(f64, String)>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct PromData {
     #[serde(rename = "resultType")]
-    result_type: String,
-    result: Vec<PromSeries>,
+    pub result_type: String,
+    pub result: Vec<PromSeries>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct PromJsonResponse {
-    status: String,
-    data: PromData,
+    pub status: String,
+    pub data: PromData,
     #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+    pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "errorType")]
-    error_type: Option<String>,
+    pub error_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    warnings: Option<Vec<String>>,
+    pub warnings: Option<Vec<String>>,
 }
 
 impl PromJsonResponse {
@@ -281,7 +281,7 @@ impl PromJsonResponse {
         })?;
 
         let metric_name = (METRIC_NAME.to_string(), metric_name);
-        let mut buffer = HashMap::<Vec<(String, String)>, Vec<(f64, String)>>::new();
+        let mut buffer = BTreeMap::<Vec<(String, String)>, Vec<(f64, String)>>::new();
 
         for batch in batches.iter() {
             // prepare things...
@@ -338,7 +338,7 @@ impl PromJsonResponse {
                 metric: tags.into_iter().collect(),
                 values,
             })
-            .collect();
+            .collect::<Vec<_>>();
 
         let data = PromData {
             result_type: "matrix".to_string(),

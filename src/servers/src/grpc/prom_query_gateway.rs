@@ -20,8 +20,10 @@ use api::v1::promql_request::Promql;
 use api::v1::{PromqlRequest, PromqlResponse, ResponseHeader};
 use async_trait::async_trait;
 use query::parser::PromQuery;
+use snafu::OptionExt;
 use tonic::{Request, Response};
 
+use crate::error::InvalidQuerySnafu;
 use crate::grpc::handler::create_query_context;
 use crate::grpc::TonicResult;
 use crate::prom::{retrieve_metric_name, PromHandlerRef, PromJsonResponse};
@@ -34,14 +36,21 @@ pub struct PrometheusGatewayService {
 impl PrometheusGateway for PrometheusGatewayService {
     async fn handle(&self, req: Request<PromqlRequest>) -> TonicResult<Response<PromqlResponse>> {
         let inner = req.into_inner();
-        let prom_query = match inner.promql {
-            Some(Promql::RangeQuery(range_query)) => PromQuery {
+        let prom_query = match inner.promql.context(InvalidQuerySnafu {
+            reason: "Expecting non-empty PromqlRequest.",
+        })? {
+            Promql::RangeQuery(range_query) => PromQuery {
                 query: range_query.query,
                 start: range_query.start,
                 end: range_query.end,
                 step: range_query.step,
             },
-            _ => unimplemented!(),
+            Promql::InstantQuery(instant_query) => PromQuery {
+                query: instant_query.query,
+                start: instant_query.time.clone(),
+                end: instant_query.time,
+                step: String::from("1s"),
+            },
         };
 
         let query_context = create_query_context(inner.header.as_ref());
