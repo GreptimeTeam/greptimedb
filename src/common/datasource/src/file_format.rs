@@ -27,7 +27,6 @@ use std::task::Poll;
 
 use arrow::record_batch::RecordBatch;
 use arrow_schema::{ArrowError, Schema as ArrowSchema};
-use async_compression::tokio::write;
 use async_trait::async_trait;
 use bytes::{Buf, Bytes};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
