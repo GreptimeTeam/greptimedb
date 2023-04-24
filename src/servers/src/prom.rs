@@ -414,7 +414,7 @@ pub async fn range_query(
     PromJsonResponse::from_query_result(result, metric_name).await
 }
 
-fn retrieve_metric_name(promql: &str) -> Option<String> {
+pub(crate) fn retrieve_metric_name(promql: &str) -> Option<String> {
     let promql_expr = promql_parser::parser::parse(promql).ok()?;
     promql_expr_to_metric_name(promql_expr)
 }
