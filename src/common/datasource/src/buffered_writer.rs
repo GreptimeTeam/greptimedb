@@ -50,7 +50,10 @@ impl<T: AsyncWrite + Send + Unpin, U: DfRecordBatchEncoder + ArrowWriterCloser>
     pub async fn close(mut self) -> Result<(FileMetaData, u64)> {
         if let Some(encoder) = self.encoder.take() {
             let metadata = encoder.close().await?;
-            let written = self.try_flush_all().await?;
+            let written = self.try_flush(true).await?;
+
+            // It's important to shut down! flushes all pending writes
+            self.shutdown().await?;
             return Ok((metadata, written));
         }
         error::BufferedWriterClosedSnafu {}.fail()
@@ -58,6 +61,10 @@ impl<T: AsyncWrite + Send + Unpin, U: DfRecordBatchEncoder + ArrowWriterCloser>
 }
 
 impl<T: AsyncWrite + Send + Unpin, U: DfRecordBatchEncoder> BufferedWriter<T, U> {
+    pub async fn shutdown(&mut self) -> Result<()> {
+        self.writer.shutdown().await.context(error::AsyncWriteSnafu)
+    }
+
     pub fn new(threshold: usize, buffer: SharedBuffer, encoder: U, writer: T) -> Self {
         Self {
             threshold,
@@ -118,7 +125,7 @@ impl<T: AsyncWrite + Send + Unpin, U: DfRecordBatchEncoder> BufferedWriter<T, U>
         Ok(bytes_written)
     }
 
-    pub async fn try_flush_all(&mut self) -> Result<u64> {
+    async fn try_flush_all(&mut self) -> Result<u64> {
         let remain = self.buffer.buffer.lock().unwrap().split();
         let size = remain.len();
 

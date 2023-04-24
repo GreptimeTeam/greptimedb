@@ -55,7 +55,7 @@ impl BufferedWriter {
         let arrow_writer = ArrowWriter::try_new(buffer.clone(), arrow_schema.clone(), props)
             .context(WriteParquetSnafu)?;
 
-        let writer: tokio_util::compat::Compat<object_store::Writer> = writer.compat_write();
+        let writer = writer.compat_write();
 
         Ok(Self {
             inner: Box::new(DatasourceBufferedWriter::new(

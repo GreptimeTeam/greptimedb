@@ -27,6 +27,7 @@ use std::task::Poll;
 
 use arrow::record_batch::RecordBatch;
 use arrow_schema::{ArrowError, Schema as ArrowSchema};
+use async_compression::tokio::write;
 use async_trait::async_trait;
 use bytes::{Buf, Bytes};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
@@ -195,5 +196,7 @@ pub async fn stream_to_file<T: DfRecordBatchEncoder, U: Fn(SharedBuffer) -> T>(
     }
 
     // Flushes all pending writes
-    writer.try_flush_all().await.map(|_| ())
+    writer.try_flush(true).await?;
+
+    writer.shutdown().await
 }
