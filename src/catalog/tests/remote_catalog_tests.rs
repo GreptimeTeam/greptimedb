@@ -30,7 +30,7 @@ mod tests {
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
     use datatypes::schema::RawSchema;
     use futures_util::StreamExt;
-    use table::engine::manager::MemoryTableEngineManager;
+    use table::engine::manager::{MemoryTableEngineManager, TableEngineManagerRef};
     use table::engine::{EngineContext, TableEngineRef};
     use table::requests::CreateTableRequest;
 
@@ -78,23 +78,34 @@ mod tests {
 
     async fn prepare_components(
         node_id: u64,
-    ) -> (KvBackendRef, TableEngineRef, Arc<RemoteCatalogManager>) {
+    ) -> (
+        KvBackendRef,
+        TableEngineRef,
+        Arc<RemoteCatalogManager>,
+        TableEngineManagerRef,
+    ) {
         let backend = Arc::new(MockKvBackend::default()) as KvBackendRef;
         let table_engine = Arc::new(MockTableEngine::default());
         let engine_manager = Arc::new(MemoryTableEngineManager::alias(
             MITO_ENGINE.to_string(),
             table_engine.clone(),
         ));
-        let catalog_manager = RemoteCatalogManager::new(engine_manager, node_id, backend.clone());
+        let catalog_manager =
+            RemoteCatalogManager::new(engine_manager.clone(), node_id, backend.clone());
         catalog_manager.start().await.unwrap();
-        (backend, table_engine, Arc::new(catalog_manager))
+        (
+            backend,
+            table_engine,
+            Arc::new(catalog_manager),
+            engine_manager as Arc<_>,
+        )
     }
 
     #[tokio::test]
     async fn test_remote_catalog_default() {
         common_telemetry::init_default_ut_logging();
         let node_id = 42;
-        let (_, _, catalog_manager) = prepare_components(node_id).await;
+        let (_, _, catalog_manager, _) = prepare_components(node_id).await;
         assert_eq!(
             vec![DEFAULT_CATALOG_NAME.to_string()],
             catalog_manager.catalog_names_async().await.unwrap()
@@ -115,7 +126,7 @@ mod tests {
     async fn test_remote_catalog_register_nonexistent() {
         common_telemetry::init_default_ut_logging();
         let node_id = 42;
-        let (_, table_engine, catalog_manager) = prepare_components(node_id).await;
+        let (_, table_engine, catalog_manager, _) = prepare_components(node_id).await;
         // register a new table with an nonexistent catalog
         let catalog_name = "nonexistent_catalog".to_string();
         let schema_name = "nonexistent_schema".to_string();
@@ -160,7 +171,7 @@ mod tests {
     #[tokio::test]
     async fn test_register_table() {
         let node_id = 42;
-        let (_, table_engine, catalog_manager) = prepare_components(node_id).await;
+        let (_, table_engine, catalog_manager, _) = prepare_components(node_id).await;
         let default_catalog = catalog_manager
             .catalog_async(DEFAULT_CATALOG_NAME)
             .await
@@ -220,13 +231,15 @@ mod tests {
     #[tokio::test]
     async fn test_register_catalog_schema_table() {
         let node_id = 42;
-        let (backend, table_engine, catalog_manager) = prepare_components(node_id).await;
+        let (backend, table_engine, catalog_manager, engine_manager) =
+            prepare_components(node_id).await;
 
         let catalog_name = "test_catalog".to_string();
         let schema_name = "nonexistent_schema".to_string();
         let catalog = Arc::new(RemoteCatalogProvider::new(
             catalog_name.clone(),
             backend.clone(),
+            engine_manager.clone(),
             node_id,
         ));
 
@@ -292,6 +305,7 @@ mod tests {
             catalog_name.clone(),
             schema_name.clone(),
             node_id,
+            engine_manager,
             backend.clone(),
         ));
 
