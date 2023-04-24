@@ -65,6 +65,7 @@ impl GrpcQueryHandler for DistInstance {
                     }
                 }
             }
+            Request::Delete(_) => todo!(),
         }
     }
 }

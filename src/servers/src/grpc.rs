@@ -15,6 +15,7 @@
 mod database;
 pub mod flight;
 pub mod handler;
+pub mod prom_query_gateway;
 
 use std::net::SocketAddr;
 use std::sync::Arc;

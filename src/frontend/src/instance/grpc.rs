@@ -78,6 +78,7 @@ impl GrpcQueryHandler for Instance {
                 let query = Request::Ddl(request);
                 GrpcQueryHandler::do_query(&*self.grpc_query_handler, query, ctx).await?
             }
+            Request::Delete(_) => todo!(),
         };
         Ok(output)
     }
