@@ -30,8 +30,8 @@ use crate::error::{JoinTaskSnafu, RequestDatanodeSnafu, Result};
 
 impl DistTable {
     pub async fn dist_insert(&self, inserts: Vec<GrpcInsertRequest>) -> Result<Output> {
-        let regions = inserts.iter().map(|x| x.region_number).collect();
-        let instances = self.find_datanode_instances(regions).await?;
+        let regions = inserts.iter().map(|x| x.region_number).collect::<Vec<_>>();
+        let instances = self.find_datanode_instances(&regions).await?;
 
         let results = future::try_join_all(instances.into_iter().zip(inserts.into_iter()).map(
             |(instance, request)| {
@@ -46,8 +46,8 @@ impl DistTable {
         .await
         .context(JoinTaskSnafu)?;
 
-        let affected_rows = results.into_iter().collect::<Result<Vec<_>>>()?;
-        Ok(Output::AffectedRows(affected_rows.iter().sum::<u32>() as _))
+        let affected_rows = results.into_iter().sum::<Result<u32>>()?;
+        Ok(Output::AffectedRows(affected_rows as _))
     }
 }
 

@@ -334,7 +334,7 @@ impl DistTable {
 
     async fn find_datanode_instances(
         &self,
-        regions: Vec<RegionNumber>,
+        regions: &[RegionNumber],
     ) -> Result<Vec<DatanodeInstance>> {
         let table_name = &self.table_name;
         let route = self
@@ -346,8 +346,8 @@ impl DistTable {
             })?;
 
         let datanodes = regions
-            .into_iter()
-            .map(|n| {
+            .iter()
+            .map(|&n| {
                 let region_id = n as u64;
                 route
                     .region_routes

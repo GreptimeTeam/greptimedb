@@ -10,8 +10,7 @@ common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
 common-time = { path = "../common/time" }
 datatypes = { path = "../datatypes" }
-# TODO(LFC): wait for https://github.com/GreptimeTeam/greptime-proto/pull/28
-greptime-proto = { git = "https://github.com/MichaelScofield/greptime-proto.git", rev = "36237e16a2c7ec268bf102a078934c3e9d0ea075" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "57e6a032db70264ec394cbb8a2f327ad33705d76" }
 prost.workspace = true
 snafu = { version = "0.7", features = ["backtraces"] }
 tonic.workspace = true
