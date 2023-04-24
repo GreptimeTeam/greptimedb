@@ -181,7 +181,6 @@ impl GrpcQueryHandler for Instance {
                 self.handle_query(query, ctx).await
             }
             GrpcRequest::Ddl(request) => self.handle_ddl(request, ctx).await,
-            GrpcRequest::Delete(_) => todo!(),
         }
     }
 }
