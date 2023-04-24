@@ -27,7 +27,7 @@ SELECT * from t;
 
 ALTER TABLE t RENAME new_table;
 
-Error: 1003(Internal), Operation rename table not implemented yet
+Error: 1001(Unsupported), Operation rename table not implemented yet
 
 DROP TABLE t;
 
