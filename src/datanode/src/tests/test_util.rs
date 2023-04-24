@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 use common_catalog::consts::{
@@ -22,12 +20,9 @@ use common_catalog::consts::{
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema};
-use mito::config::EngineConfig;
-use mito::table::test_util::{new_test_object_store, MockEngine, MockMitoEngine};
 use servers::Mode;
 use snafu::ResultExt;
-use table::engine::manager::MemoryTableEngineManager;
-use table::engine::{EngineContext, TableEngine, TableEngineProcedureRef, TableEngineRef};
+use table::engine::{EngineContext, TableEngineRef};
 use table::requests::{CreateTableRequest, TableOptions};
 
 use crate::datanode::{
@@ -35,7 +30,6 @@ use crate::datanode::{
 };
 use crate::error::{CreateTableSnafu, Result};
 use crate::instance::Instance;
-use crate::sql::SqlHandler;
 
 pub(crate) struct MockInstance {
     instance: Instance,
@@ -160,27 +154,4 @@ pub(crate) async fn create_test_table(
         .register_table(table_name.to_string(), table)
         .unwrap();
     Ok(())
-}
-
-pub async fn create_mock_sql_handler() -> SqlHandler {
-    let (_dir, object_store) = new_test_object_store("setup_mock_engine_and_table").await;
-    let mock_engine = Arc::new(MockMitoEngine::new(
-        EngineConfig::default(),
-        MockEngine::default(),
-        object_store,
-    ));
-    let mut engine_procedures = HashMap::new();
-    engine_procedures.insert(
-        mock_engine.name().to_string(),
-        mock_engine.clone() as TableEngineProcedureRef,
-    );
-    let engine_manager = Arc::new(
-        MemoryTableEngineManager::new(mock_engine).with_engine_procedures(engine_procedures),
-    );
-    let catalog_manager = Arc::new(
-        catalog::local::LocalCatalogManager::try_new(engine_manager.clone())
-            .await
-            .unwrap(),
-    );
-    SqlHandler::new(engine_manager, catalog_manager, None)
 }

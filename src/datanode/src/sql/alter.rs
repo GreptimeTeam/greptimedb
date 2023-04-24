@@ -112,7 +112,6 @@ impl SqlHandler {
     }
 
     pub(crate) fn alter_to_request(
-        &self,
         alter_table: AlterTable,
         table_ref: TableReference,
     ) -> Result<AlterTableRequest> {
@@ -160,7 +159,7 @@ mod tests {
     use sql::statements::statement::Statement;
 
     use super::*;
-    use crate::tests::test_util::{create_mock_sql_handler, MockInstance};
+    use crate::tests::test_util::MockInstance;
 
     fn parse_sql(sql: &str) -> AlterTable {
         let mut stmt = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
@@ -175,14 +174,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_alter_to_request_with_adding_column() {
-        let handler = create_mock_sql_handler().await;
         let alter_table = parse_sql("ALTER TABLE my_metric_1 ADD tagk_i STRING Null;");
-        let req = handler
-            .alter_to_request(
-                alter_table,
-                TableReference::full("greptime", "public", "my_metric_1"),
-            )
-            .unwrap();
+        let req = SqlHandler::alter_to_request(
+            alter_table,
+            TableReference::full("greptime", "public", "my_metric_1"),
+        )
+        .unwrap();
         assert_eq!(req.catalog_name, "greptime");
         assert_eq!(req.schema_name, "public");
         assert_eq!(req.table_name, "my_metric_1");
@@ -203,14 +200,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_alter_to_request_with_renaming_table() {
-        let handler = create_mock_sql_handler().await;
         let alter_table = parse_sql("ALTER TABLE test_table RENAME table_t;");
-        let req = handler
-            .alter_to_request(
-                alter_table,
-                TableReference::full("greptime", "public", "test_table"),
-            )
-            .unwrap();
+        let req = SqlHandler::alter_to_request(
+            alter_table,
+            TableReference::full("greptime", "public", "test_table"),
+        )
+        .unwrap();
         assert_eq!(req.catalog_name, "greptime");
         assert_eq!(req.schema_name, "public");
         assert_eq!(req.table_name, "test_table");

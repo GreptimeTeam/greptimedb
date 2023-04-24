@@ -73,9 +73,7 @@ impl Instance {
                 let name = create_table.name.clone();
                 let (catalog, schema, table) = table_idents_to_full_name(&name, query_ctx.clone())?;
                 let table_ref = TableReference::full(&catalog, &schema, &table);
-                let request =
-                    self.sql_handler
-                        .create_to_request(table_id, create_table, &table_ref)?;
+                let request = SqlHandler::create_to_request(table_id, create_table, &table_ref)?;
                 let table_id = request.id;
                 info!("Creating table: {table_ref}, table id = {table_id}",);
 
@@ -108,7 +106,7 @@ impl Instance {
                 let name = alter_table.table_name().clone();
                 let (catalog, schema, table) = table_idents_to_full_name(&name, query_ctx.clone())?;
                 let table_ref = TableReference::full(&catalog, &schema, &table);
-                let req = self.sql_handler.alter_to_request(alter_table, table_ref)?;
+                let req = SqlHandler::alter_to_request(alter_table, table_ref)?;
                 self.sql_handler
                     .execute(SqlRequest::Alter(req), query_ctx)
                     .await
