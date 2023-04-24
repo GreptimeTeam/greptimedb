@@ -134,26 +134,30 @@ impl AlterTableProcedure {
 
     async fn on_prepare(&mut self) -> Result<Status> {
         // Check whether catalog and schema exist.
+        let request = &self.data.request;
         let catalog = self
             .catalog_manager
-            .catalog(&self.data.request.catalog_name)
+            .catalog(&request.catalog_name)
             .context(AccessCatalogSnafu)?
             .context(CatalogNotFoundSnafu {
-                name: &self.data.request.catalog_name,
+                name: &request.catalog_name,
             })?;
         let schema = catalog
-            .schema(&self.data.request.schema_name)
+            .schema(&request.schema_name)
             .context(AccessCatalogSnafu)?
             .context(SchemaNotFoundSnafu {
-                name: &self.data.request.schema_name,
+                name: &request.schema_name,
             })?;
 
         let table = schema
-            .table(&self.data.request.table_name)
+            .table(&request.table_name)
             .await
             .context(AccessCatalogSnafu)?
-            .context(TableNotFoundSnafu {
-                name: &self.data.request.table_name,
+            .with_context(|| TableNotFoundSnafu {
+                name: format!(
+                    "{}.{}.{}",
+                    &request.catalog_name, &request.schema_name, &request.table_name
+                ),
             })?;
         if let AlterKind::RenameTable { new_table_name } = &self.data.request.alter_kind {
             ensure!(
@@ -161,7 +165,10 @@ impl AlterTableProcedure {
                     .table_exist(new_table_name)
                     .context(AccessCatalogSnafu)?,
                 TableExistsSnafu {
-                    name: new_table_name,
+                    name: format!(
+                        "{}.{}.{}",
+                        request.catalog_name, request.schema_name, new_table_name
+                    ),
                 }
             );
         }

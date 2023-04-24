@@ -62,7 +62,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Table {} already exists", name))]
+    #[snafu(display("Table already exists: {}", name))]
     TableExists { name: String },
 }
 
