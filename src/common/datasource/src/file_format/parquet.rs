@@ -31,7 +31,7 @@ use snafu::ResultExt;
 use crate::error::{self, Result};
 use crate::file_format::FileFormat;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ParquetFormat {}
 
 #[async_trait]
@@ -142,7 +142,6 @@ impl AsyncFileReader for LazyParquetFileReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::file_format::FileFormat;
     use crate::test_util::{self, format_schema, test_store};
 
     fn test_data_root() -> String {

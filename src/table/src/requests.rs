@@ -264,6 +264,7 @@ pub struct CopyTableRequest {
     pub schema_name: String,
     pub table_name: String,
     pub location: String,
+    pub with: HashMap<String, String>,
     pub connection: HashMap<String, String>,
     pub pattern: Option<String>,
     pub direction: CopyDirection,

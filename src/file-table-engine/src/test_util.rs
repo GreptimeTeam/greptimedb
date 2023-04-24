@@ -28,6 +28,7 @@ use table::TableRef;
 use crate::config::EngineConfig;
 use crate::engine::immutable::ImmutableFileTableEngine;
 use crate::manifest::immutable::ImmutableMetadata;
+use crate::table::immutable::{self, ImmutableFileTableOptions};
 
 pub const TEST_TABLE_NAME: &str = "demo";
 
@@ -95,6 +96,20 @@ pub struct TestEngineComponents {
 }
 
 pub fn new_create_request(schema: SchemaRef) -> CreateTableRequest {
+    let mut table_options = TableOptions::default();
+    table_options.extra_options.insert(
+        immutable::IMMUTABLE_TABLE_LOCATION_KEY.to_string(),
+        "mock_path".to_string(),
+    );
+    table_options.extra_options.insert(
+        immutable::IMMUTABLE_TABLE_META_KEY.to_string(),
+        serde_json::to_string(&ImmutableFileTableOptions::default()).unwrap(),
+    );
+    table_options.extra_options.insert(
+        immutable::IMMUTABLE_TABLE_FORMAT_KEY.to_string(),
+        "csv".to_string(),
+    );
+
     CreateTableRequest {
         id: 1,
         catalog_name: "greptime".to_string(),
@@ -105,7 +120,7 @@ pub fn new_create_request(schema: SchemaRef) -> CreateTableRequest {
         region_numbers: vec![0],
         create_if_not_exists: true,
         primary_key_indices: vec![0],
-        table_options: TableOptions::default(),
+        table_options,
         engine: IMMUTABLE_FILE_ENGINE.to_string(),
     }
 }

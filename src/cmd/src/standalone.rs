@@ -223,7 +223,7 @@ impl StartCommand {
         let mut frontend = build_frontend(plugins.clone(), datanode.get_instance()).await?;
 
         frontend
-            .build_servers(&fe_opts, plugins)
+            .build_servers(&fe_opts)
             .await
             .context(StartFrontendSnafu)?;
 
