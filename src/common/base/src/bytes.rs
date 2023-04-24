@@ -203,7 +203,7 @@ mod tests {
         assert_eq!(bytes.len(), hello.len());
 
         let zero = b"".to_vec();
-        let bytes = Bytes::from(zero.clone());
+        let bytes = Bytes::from(zero);
         assert!(bytes.is_empty());
     }
 
@@ -227,7 +227,7 @@ mod tests {
         assert_eq!(bytes.len(), hello.len());
 
         let zero = "".to_string();
-        let bytes = StringBytes::from(zero.clone());
+        let bytes = StringBytes::from(zero);
         assert!(bytes.is_empty());
     }
 
