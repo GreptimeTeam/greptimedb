@@ -15,19 +15,15 @@
 //! PrometheusGateway provides a gRPC interface to query Prometheus metrics
 //! by PromQL. The behavior is similar to the Prometheus HTTP API.
 
-use std::sync::Arc;
-
-use api::v1::greptime_request::Request as GrpcRequest;
 use api::v1::prometheus_gateway_server::PrometheusGateway;
 use api::v1::promql_request::Promql;
-use api::v1::{GreptimeRequest, PromqlRequest, PromqlResponse, QueryRequest, ResponseHeader};
+use api::v1::{PromqlRequest, PromqlResponse, ResponseHeader};
 use async_trait::async_trait;
 use query::parser::PromQuery;
-use session::context::QueryContext;
 use tonic::{Request, Response};
 
-use crate::grpc::{GreptimeRequestHandler, TonicResult};
-use crate::http::handler::PromqlQuery;
+use crate::grpc::handler::create_query_context;
+use crate::grpc::TonicResult;
 use crate::prom::{retrieve_metric_name, PromHandlerRef, PromJsonResponse};
 
 pub struct PrometheusGatewayService {
@@ -48,11 +44,8 @@ impl PrometheusGateway for PrometheusGatewayService {
             _ => unimplemented!(),
         };
 
-        // TODO(ruihang): set query context
-        let result = self
-            .handler
-            .do_query(&prom_query, Arc::new(QueryContext::default()))
-            .await;
+        let query_context = create_query_context(inner.header.as_ref());
+        let result = self.handler.do_query(&prom_query, query_context).await;
         let metric_name = retrieve_metric_name(&prom_query.query).unwrap_or_default();
         let json_response = PromJsonResponse::from_query_result(result, metric_name)
             .await
