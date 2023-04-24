@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
-use catalog::{CatalogList, CatalogProvider, SchemaProvider};
+use catalog::{CatalogProvider, SchemaProvider};
 use common_base::Plugins;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::BoxedError;
@@ -117,7 +117,7 @@ fn catalog_list() -> Result<Arc<MemoryCatalogManager>> {
         .register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema)
         .unwrap();
     catalog_list
-        .register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
+        .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
         .unwrap();
     Ok(catalog_list)
 }

@@ -19,7 +19,7 @@ mod state;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use catalog::{CatalogListRef, CatalogManagerRef};
+use catalog::CatalogManagerRef;
 use common_base::Plugins;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::{FunctionRef, FUNCTION_REGISTRY};

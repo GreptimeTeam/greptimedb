@@ -17,7 +17,7 @@ use std::fmt;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
-use catalog::{CatalogListRef, CatalogManagerRef};
+use catalog::CatalogManagerRef;
 use common_base::Plugins;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::physical_plan::SessionContext;
@@ -32,7 +32,6 @@ use datafusion_expr::LogicalPlan as DfLogicalPlan;
 use datafusion_optimizer::analyzer::Analyzer;
 use promql::extension_plan::PromExtensionPlanner;
 
-use crate::datafusion::DfCatalogListAdapter;
 use crate::optimizer::TypeConversionRule;
 use crate::query_engine::options::QueryOptions;
 

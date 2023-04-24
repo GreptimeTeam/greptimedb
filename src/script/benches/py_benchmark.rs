@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
-use catalog::{CatalogList, CatalogProvider, SchemaProvider};
+use catalog::{CatalogProvider, SchemaProvider};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
@@ -62,7 +62,7 @@ pub(crate) fn sample_script_engine() -> PyEngine {
         .register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema)
         .unwrap();
     catalog_list
-        .register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
+        .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
         .unwrap();
 
     let factory = QueryEngineFactory::new(catalog_list);

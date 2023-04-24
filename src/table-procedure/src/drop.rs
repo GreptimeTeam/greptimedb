@@ -291,7 +291,8 @@ mod tests {
         watcher.changed().await.unwrap();
 
         let catalog = catalog_manager
-            .catalog(DEFAULT_CATALOG_NAME)
+            .catalog_async(DEFAULT_CATALOG_NAME)
+            .await
             .unwrap()
             .unwrap();
         let schema = catalog.schema(DEFAULT_SCHEMA_NAME).unwrap().unwrap();

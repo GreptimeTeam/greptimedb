@@ -26,7 +26,7 @@ mod tests {
     use catalog::remote::{
         KvBackend, KvBackendRef, RemoteCatalogManager, RemoteCatalogProvider, RemoteSchemaProvider,
     };
-    use catalog::{CatalogList, CatalogManager, RegisterTableRequest};
+    use catalog::{CatalogManager, RegisterTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
     use datatypes::schema::RawSchema;
     use futures_util::StreamExt;
@@ -97,11 +97,12 @@ mod tests {
         let (_, _, catalog_manager) = prepare_components(node_id).await;
         assert_eq!(
             vec![DEFAULT_CATALOG_NAME.to_string()],
-            catalog_manager.catalog_names().unwrap()
+            catalog_manager.catalog_names_async().await.unwrap()
         );
 
         let default_catalog = catalog_manager
-            .catalog(DEFAULT_CATALOG_NAME)
+            .catalog_async(DEFAULT_CATALOG_NAME)
+            .await
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -161,7 +162,8 @@ mod tests {
         let node_id = 42;
         let (_, table_engine, catalog_manager) = prepare_components(node_id).await;
         let default_catalog = catalog_manager
-            .catalog(DEFAULT_CATALOG_NAME)
+            .catalog_async(DEFAULT_CATALOG_NAME)
+            .await
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -225,14 +227,20 @@ mod tests {
         ));
 
         // register catalog to catalog manager
-        catalog_manager
-            .register_catalog(catalog_name.clone(), catalog)
+        CatalogManager::register_catalog(&*catalog_manager, catalog_name.clone(), catalog)
+            .await
             .unwrap();
         assert_eq!(
             HashSet::<String>::from_iter(
                 vec![DEFAULT_CATALOG_NAME.to_string(), catalog_name.clone()].into_iter()
             ),
-            HashSet::from_iter(catalog_manager.catalog_names().unwrap().into_iter())
+            HashSet::from_iter(
+                catalog_manager
+                    .catalog_names_async()
+                    .await
+                    .unwrap()
+                    .into_iter()
+            )
         );
 
         let table_to_register = table_engine
@@ -272,7 +280,8 @@ mod tests {
         );
 
         let new_catalog = catalog_manager
-            .catalog(&catalog_name)
+            .catalog_async(&catalog_name)
+            .await
             .unwrap()
             .expect("catalog should exist since it's already registered");
         let schema = Arc::new(RemoteSchemaProvider::new(

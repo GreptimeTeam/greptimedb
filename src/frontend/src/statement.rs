@@ -88,7 +88,7 @@ impl StatementExecutor {
 
             Statement::Use(db) => self.handle_use(db, query_ctx).await,
 
-            Statement::ShowDatabases(stmt) => self.show_databases(stmt),
+            Statement::ShowDatabases(stmt) => self.show_databases(stmt).await,
 
             Statement::ShowTables(stmt) => self.show_tables(stmt, query_ctx).await,
 

@@ -338,7 +338,7 @@ pub(crate) use tests::sample_script_engine;
 #[cfg(test)]
 mod tests {
     use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
-    use catalog::{CatalogList, CatalogProvider, SchemaProvider};
+    use catalog::{CatalogProvider, SchemaProvider};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_recordbatch::util;
     use datatypes::prelude::ScalarVector;
@@ -361,7 +361,7 @@ mod tests {
             .register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema)
             .unwrap();
         catalog_list
-            .register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
+            .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
             .unwrap();
 
         let factory = QueryEngineFactory::new(catalog_list);

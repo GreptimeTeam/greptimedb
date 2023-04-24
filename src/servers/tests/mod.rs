@@ -19,7 +19,7 @@ use api::v1::greptime_request::{Request as GreptimeRequest, Request};
 use api::v1::query_request::Query;
 use async_trait::async_trait;
 use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
-use catalog::{CatalogList, CatalogProvider, SchemaProvider};
+use catalog::{CatalogProvider, SchemaProvider};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use datatypes::schema::Schema;
@@ -207,7 +207,7 @@ fn create_testing_instance(table: MemTable) -> DummyInstance {
         .register_schema(DEFAULT_SCHEMA_NAME.to_string(), schema_provider)
         .unwrap();
     catalog_list
-        .register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider)
+        .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string(), catalog_provider)
         .unwrap();
 
     let factory = QueryEngineFactory::new(catalog_list);

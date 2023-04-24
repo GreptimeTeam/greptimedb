@@ -28,7 +28,7 @@ use crate::error::{
     CatalogNotFoundSnafu, QueryAccessDeniedSnafu, Result, SchemaNotFoundSnafu, TableNotExistSnafu,
 };
 use crate::information_schema::InformationSchemaProvider;
-use crate::{CatalogListRef, CatalogManagerRef};
+use crate::CatalogManagerRef;
 
 pub struct DfTableSourceProvider {
     catalog_manager: CatalogManagerRef,
@@ -105,7 +105,8 @@ impl DfTableSourceProvider {
         let schema = if schema_name != INFORMATION_SCHEMA_NAME {
             let catalog = self
                 .catalog_manager
-                .catalog(catalog_name)?
+                .catalog_async(catalog_name)
+                .await?
                 .context(CatalogNotFoundSnafu { catalog_name })?;
             catalog.schema(schema_name)?.context(SchemaNotFoundSnafu {
                 catalog: catalog_name,
@@ -114,7 +115,8 @@ impl DfTableSourceProvider {
         } else {
             let catalog_provider = self
                 .catalog_manager
-                .catalog(catalog_name)?
+                .catalog_async(catalog_name)
+                .await?
                 .context(CatalogNotFoundSnafu { catalog_name })?;
             Arc::new(InformationSchemaProvider::new(
                 catalog_name.to_string(),

@@ -28,7 +28,7 @@ use catalog::helper::{
 };
 use catalog::remote::{Kv, KvBackendRef};
 use catalog::{
-    CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, DeregisterTableRequest,
+    CatalogManager, CatalogProvider, CatalogProviderRef, DeregisterTableRequest,
     RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest,
     SchemaProvider, SchemaProviderRef,
 };
@@ -97,6 +97,14 @@ impl FrontendCatalogManager {
 impl CatalogManager for FrontendCatalogManager {
     async fn start(&self) -> catalog::error::Result<()> {
         Ok(())
+    }
+
+    async fn register_catalog(
+        &self,
+        _name: String,
+        _catalog: CatalogProviderRef,
+    ) -> CatalogResult<Option<CatalogProviderRef>> {
+        unimplemented!("Frontend catalog list does not support register catalog")
     }
 
     // TODO(LFC): Handle the table caching in (de)register_table.
@@ -216,6 +224,24 @@ impl CatalogManager for FrontendCatalogManager {
         }
     }
 
+    async fn catalog_names_async(&self) -> CatalogResult<Vec<String>> {
+        let key = build_catalog_prefix();
+        let mut iter = self.backend.range(key.as_bytes());
+        let mut res = HashSet::new();
+
+        while let Some(r) = iter.next().await {
+            let Kv(k, _) = r?;
+
+            let catalog_key = String::from_utf8_lossy(&k);
+            if let Ok(key) = CatalogKey::parse(catalog_key.as_ref()) {
+                res.insert(key.catalog_name);
+            } else {
+                error!("invalid catalog key: {:?}", catalog_key);
+            }
+        }
+        Ok(res.into_iter().collect())
+    }
+
     async fn catalog_async(&self, catalog: &str) -> CatalogResult<Option<CatalogProviderRef>> {
         // get from kv
         let key = CatalogKey {
@@ -238,7 +264,8 @@ impl CatalogManager for FrontendCatalogManager {
         catalog: &str,
         schema: &str,
     ) -> catalog::error::Result<Option<SchemaProviderRef>> {
-        self.catalog(catalog)?
+        self.catalog_async(catalog)
+            .await?
             .context(catalog::error::CatalogNotFoundSnafu {
                 catalog_name: catalog,
             })?
@@ -257,59 +284,9 @@ impl CatalogManager for FrontendCatalogManager {
             .table(table_name)
             .await
     }
-}
 
-impl CatalogList for FrontendCatalogManager {
     fn as_any(&self) -> &dyn Any {
         self
-    }
-
-    fn register_catalog(
-        &self,
-        _name: String,
-        _catalog: CatalogProviderRef,
-    ) -> catalog::error::Result<Option<CatalogProviderRef>> {
-        unimplemented!("Frontend catalog list does not support register catalog")
-    }
-
-    fn catalog_names(&self) -> catalog::error::Result<Vec<String>> {
-        let backend = self.backend.clone();
-        let res = std::thread::spawn(|| {
-            common_runtime::block_on_read(async move {
-                let key = build_catalog_prefix();
-                let mut iter = backend.range(key.as_bytes());
-                let mut res = HashSet::new();
-
-                while let Some(r) = iter.next().await {
-                    let Kv(k, _) = r?;
-
-                    let catalog_key = String::from_utf8_lossy(&k);
-                    if let Ok(key) = CatalogKey::parse(catalog_key.as_ref()) {
-                        res.insert(key.catalog_name);
-                    } else {
-                        error!("invalid catalog key: {:?}", catalog_key);
-                    }
-                }
-                Ok(res.into_iter().collect())
-            })
-        })
-        .join()
-        .unwrap();
-        res
-    }
-
-    fn catalog(&self, name: &str) -> catalog::error::Result<Option<CatalogProviderRef>> {
-        let all_catalogs = self.catalog_names()?;
-        if all_catalogs.contains(&name.to_string()) {
-            Ok(Some(Arc::new(FrontendCatalogProvider {
-                catalog_name: name.to_string(),
-                backend: self.backend.clone(),
-                partition_manager: self.partition_manager.clone(),
-                datanode_clients: self.datanode_clients.clone(),
-            })))
-        } else {
-            Ok(None)
-        }
     }
 }
 

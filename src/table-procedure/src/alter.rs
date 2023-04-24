@@ -136,7 +136,8 @@ impl AlterTableProcedure {
         // Check whether catalog and schema exist.
         let catalog = self
             .catalog_manager
-            .catalog(&self.data.request.catalog_name)
+            .catalog_async(&self.data.request.catalog_name)
+            .await
             .context(AccessCatalogSnafu)?
             .context(CatalogNotFoundSnafu {
                 name: &self.data.request.catalog_name,
@@ -331,7 +332,8 @@ mod tests {
         watcher.changed().await.unwrap();
 
         let catalog = catalog_manager
-            .catalog(DEFAULT_CATALOG_NAME)
+            .catalog_async(DEFAULT_CATALOG_NAME)
+            .await
             .unwrap()
             .unwrap();
         let schema = catalog.schema(DEFAULT_SCHEMA_NAME).unwrap().unwrap();

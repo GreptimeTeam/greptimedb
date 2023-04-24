@@ -21,7 +21,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-pub use catalog::datafusion::catalog_adapter::DfCatalogListAdapter;
 use common_error::prelude::BoxedError;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::udf::create_udf;
@@ -184,7 +183,8 @@ impl DatafusionQueryEngine {
         let catalog = self
             .state
             .catalog_manager()
-            .catalog(catalog_name)
+            .catalog_async(catalog_name)
+            .await
             .context(CatalogSnafu)?
             .context(CatalogNotFoundSnafu {
                 catalog: catalog_name,
@@ -377,7 +377,7 @@ mod tests {
     use std::sync::Arc;
 
     use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
-    use catalog::{CatalogList, CatalogProvider, SchemaProvider};
+    use catalog::{CatalogProvider, SchemaProvider};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_query::Output;
     use common_recordbatch::util;
@@ -402,7 +402,7 @@ mod tests {
             .register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema)
             .unwrap();
         catalog_list
-            .register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
+            .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
             .unwrap();
 
         QueryEngineFactory::new(catalog_list).query_engine()

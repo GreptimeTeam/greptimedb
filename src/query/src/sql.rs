@@ -74,7 +74,10 @@ static DESCRIBE_TABLE_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
     ]))
 });
 
-pub fn show_databases(stmt: ShowDatabases, catalog_manager: CatalogManagerRef) -> Result<Output> {
+pub async fn show_databases(
+    stmt: ShowDatabases,
+    catalog_manager: CatalogManagerRef,
+) -> Result<Output> {
     // TODO(LFC): supports WHERE
     ensure!(
         matches!(stmt.kind, ShowKind::All | ShowKind::Like(_)),
@@ -84,7 +87,8 @@ pub fn show_databases(stmt: ShowDatabases, catalog_manager: CatalogManagerRef) -
     );
 
     let catalog = catalog_manager
-        .catalog(DEFAULT_CATALOG_NAME)
+        .catalog_async(DEFAULT_CATALOG_NAME)
+        .await
         .context(error::CatalogSnafu)?
         .context(error::CatalogNotFoundSnafu {
             catalog: DEFAULT_CATALOG_NAME,

@@ -17,7 +17,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
-use catalog::{CatalogList, CatalogProvider, SchemaProvider};
+use catalog::{CatalogProvider, SchemaProvider};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_function::scalars::aggregate::AggregateFunctionMeta;
 use common_function_macro::{as_aggr_func_creator, AggrFuncTypeStore};
@@ -239,7 +239,7 @@ fn new_query_engine_factory(table: MemTable) -> QueryEngineFactory {
         .register_schema(DEFAULT_SCHEMA_NAME.to_string(), schema_provider)
         .unwrap();
     catalog_list
-        .register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider)
+        .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string(), catalog_provider)
         .unwrap();
 
     QueryEngineFactory::new(catalog_list)

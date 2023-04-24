@@ -31,7 +31,7 @@ use crate::error::{
 };
 use crate::schema::SchemaProvider;
 use crate::{
-    CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, DeregisterTableRequest,
+    CatalogManager, CatalogProvider, CatalogProviderRef, DeregisterTableRequest,
     RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest,
     SchemaProviderRef,
 };
@@ -51,7 +51,7 @@ impl Default for MemoryCatalogManager {
         };
         let default_catalog = Arc::new(MemoryCatalogProvider::new());
         manager
-            .register_catalog("greptime".to_string(), default_catalog.clone())
+            .register_catalog_sync("greptime".to_string(), default_catalog.clone())
             .unwrap();
         default_catalog
             .register_schema("public".to_string(), Arc::new(MemorySchemaProvider::new()))
@@ -176,6 +176,22 @@ impl CatalogManager for MemoryCatalogManager {
     async fn catalog_async(&self, catalog: &str) -> Result<Option<CatalogProviderRef>> {
         Ok(self.catalogs.read().unwrap().get(catalog).cloned())
     }
+
+    async fn catalog_names_async(&self) -> Result<Vec<String>> {
+        Ok(self.catalogs.read().unwrap().keys().cloned().collect())
+    }
+
+    async fn register_catalog(
+        &self,
+        name: String,
+        catalog: CatalogProviderRef,
+    ) -> Result<Option<CatalogProviderRef>> {
+        self.register_catalog_sync(name, catalog)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 impl MemoryCatalogManager {
@@ -196,30 +212,14 @@ impl MemoryCatalogManager {
             }
         }
     }
-}
 
-impl CatalogList for MemoryCatalogManager {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn register_catalog(
+    pub fn register_catalog_sync(
         &self,
         name: String,
         catalog: CatalogProviderRef,
     ) -> Result<Option<CatalogProviderRef>> {
         let mut catalogs = self.catalogs.write().unwrap();
         Ok(catalogs.insert(name, catalog))
-    }
-
-    fn catalog_names(&self) -> Result<Vec<String>> {
-        let catalogs = self.catalogs.read().unwrap();
-        Ok(catalogs.keys().map(|s| s.to_string()).collect())
-    }
-
-    fn catalog(&self, name: &str) -> Result<Option<CatalogProviderRef>> {
-        let catalogs = self.catalogs.read().unwrap();
-        Ok(catalogs.get(name).cloned())
     }
 }
 
@@ -372,7 +372,11 @@ mod tests {
     #[tokio::test]
     async fn test_new_memory_catalog_list() {
         let catalog_list = new_memory_catalog_list().unwrap();
-        let default_catalog = catalog_list.catalog(DEFAULT_CATALOG_NAME).unwrap().unwrap();
+        let default_catalog = catalog_list
+            .catalog_async(DEFAULT_CATALOG_NAME)
+            .await
+            .unwrap()
+            .unwrap();
 
         let default_schema = default_catalog
             .schema(DEFAULT_SCHEMA_NAME)

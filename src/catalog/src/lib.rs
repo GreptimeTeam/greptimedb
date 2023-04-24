@@ -40,28 +40,6 @@ pub mod system;
 pub mod table_source;
 pub mod tables;
 
-/// Represent a list of named catalogs
-// TODO(hl): we can remove this catalog list and use only [CatalogManager]
-pub trait CatalogList: Sync + Send {
-    /// Returns the catalog list as [`Any`](std::any::Any)
-    /// so that it can be downcast to a specific implementation.
-    fn as_any(&self) -> &dyn Any;
-
-    /// Adds a new catalog to this catalog list
-    /// If a catalog of the same name existed before, it is replaced in the list and returned.
-    fn register_catalog(
-        &self,
-        name: String,
-        catalog: CatalogProviderRef,
-    ) -> Result<Option<CatalogProviderRef>>;
-
-    /// Retrieves the list of available catalog names
-    fn catalog_names(&self) -> Result<Vec<String>>;
-
-    /// Retrieves a specific catalog by name, provided it exists.
-    fn catalog(&self, name: &str) -> Result<Option<CatalogProviderRef>>;
-}
-
 /// Represents a catalog, comprising a number of named schemas.
 pub trait CatalogProvider: Sync + Send {
     /// Returns the catalog provider as [`Any`](std::any::Any)
@@ -82,13 +60,18 @@ pub trait CatalogProvider: Sync + Send {
     fn schema(&self, name: &str) -> Result<Option<SchemaProviderRef>>;
 }
 
-pub type CatalogListRef = Arc<dyn CatalogList>;
 pub type CatalogProviderRef = Arc<dyn CatalogProvider>;
 
 #[async_trait::async_trait]
-pub trait CatalogManager: CatalogList {
+pub trait CatalogManager: Send + Sync {
     /// Starts a catalog manager.
     async fn start(&self) -> Result<()>;
+
+    async fn register_catalog(
+        &self,
+        name: String,
+        catalog: CatalogProviderRef,
+    ) -> Result<Option<CatalogProviderRef>>;
 
     /// Registers a table within given catalog/schema to catalog manager,
     /// returns whether the table registered.
@@ -109,6 +92,8 @@ pub trait CatalogManager: CatalogList {
     async fn register_system_table(&self, request: RegisterSystemTableRequest)
         -> error::Result<()>;
 
+    async fn catalog_names_async(&self) -> Result<Vec<String>>;
+
     async fn catalog_async(&self, catalog: &str) -> Result<Option<CatalogProviderRef>>;
 
     async fn schema_async(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>>;
@@ -120,6 +105,8 @@ pub trait CatalogManager: CatalogList {
         schema: &str,
         table_name: &str,
     ) -> Result<Option<TableRef>>;
+
+    fn as_any(&self) -> &dyn Any;
 }
 
 pub type CatalogManagerRef = Arc<dyn CatalogManager>;
@@ -241,9 +228,9 @@ pub async fn datanode_stat(catalog_manager: &CatalogManagerRef) -> (u64, Vec<Reg
     let mut region_number: u64 = 0;
     let mut region_stats = Vec::new();
 
-    let Ok(catalog_names) = catalog_manager.catalog_names() else { return (region_number, region_stats) };
+    let Ok(catalog_names) = catalog_manager.catalog_names_async().await else { return (region_number, region_stats) };
     for catalog_name in catalog_names {
-        let Ok(Some(catalog)) = catalog_manager.catalog(&catalog_name) else { continue };
+        let Ok(Some(catalog)) = catalog_manager.catalog_async(&catalog_name).await else { continue };
 
         let Ok(schema_names) = catalog.schema_names() else { continue };
         for schema_name in schema_names {

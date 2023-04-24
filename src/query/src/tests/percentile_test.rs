@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
-use catalog::{CatalogList, CatalogProvider, SchemaProvider};
+use catalog::{CatalogProvider, SchemaProvider};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_recordbatch::RecordBatch;
 use datatypes::for_all_primitive_types;
@@ -109,7 +109,7 @@ fn create_correctness_engine() -> Arc<dyn QueryEngine> {
         .register_schema(DEFAULT_SCHEMA_NAME.to_string(), schema_provider)
         .unwrap();
     catalog_list
-        .register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider)
+        .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string(), catalog_provider)
         .unwrap();
 
     QueryEngineFactory::new(catalog_list).query_engine()

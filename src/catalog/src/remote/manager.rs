@@ -49,7 +49,7 @@ use crate::helper::{
 };
 use crate::remote::{Kv, KvBackendRef};
 use crate::{
-    handle_system_table_request, CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef,
+    handle_system_table_request, CatalogManager, CatalogProvider, CatalogProviderRef,
     DeregisterTableRequest, RegisterSchemaRequest, RegisterSystemTableRequest,
     RegisterTableRequest, RenameTableRequest, SchemaProvider, SchemaProviderRef,
 };
@@ -447,9 +447,12 @@ impl CatalogManager for RemoteCatalogManager {
     async fn register_table(&self, request: RegisterTableRequest) -> Result<bool> {
         let catalog_name = request.catalog;
         let schema_name = request.schema;
-        let catalog_provider = self.catalog(&catalog_name)?.context(CatalogNotFoundSnafu {
-            catalog_name: &catalog_name,
-        })?;
+        let catalog_provider =
+            self.catalog_async(&catalog_name)
+                .await?
+                .context(CatalogNotFoundSnafu {
+                    catalog_name: &catalog_name,
+                })?;
         let schema_provider =
             catalog_provider
                 .schema(&schema_name)?
@@ -485,9 +488,12 @@ impl CatalogManager for RemoteCatalogManager {
     async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool> {
         let catalog_name = request.catalog;
         let schema_name = request.schema;
-        let catalog_provider = self.catalog(&catalog_name)?.context(CatalogNotFoundSnafu {
-            catalog_name: &catalog_name,
-        })?;
+        let catalog_provider =
+            self.catalog_async(&catalog_name)
+                .await?
+                .context(CatalogNotFoundSnafu {
+                    catalog_name: &catalog_name,
+                })?;
         let schema_provider = self.new_schema_provider(&catalog_name, &schema_name);
         catalog_provider.register_schema(schema_name, schema_provider)?;
         Ok(true)
@@ -545,105 +551,44 @@ impl CatalogManager for RemoteCatalogManager {
             .await?
             .map(|_| self.new_catalog_provider(catalog)))
     }
-}
 
-// TODO(hl): remove impl of [CatalogList]
-impl CatalogList for RemoteCatalogManager {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
+    async fn catalog_names_async(&self) -> Result<Vec<String>> {
+        let mut stream = self.backend.range(CATALOG_KEY_PREFIX.as_bytes());
+        let mut catalogs = HashSet::new();
 
-    fn register_catalog(
-        &self,
-        name: String,
-        catalog: CatalogProviderRef,
-    ) -> Result<Option<CatalogProviderRef>> {
-        let key = self.build_catalog_key(&name).to_string();
-        let backend = self.backend.clone();
-        let catalogs = self.catalogs.clone();
+        while let Some(catalog) = stream.next().await {
+            if let Ok(catalog) = catalog {
+                let catalog_key = String::from_utf8_lossy(&catalog.0);
 
-        std::thread::spawn(|| {
-            common_runtime::block_on_write(async move {
-                backend
-                    .set(
-                        key.as_bytes(),
-                        &CatalogValue {}
-                            .as_bytes()
-                            .context(InvalidCatalogValueSnafu)?,
-                    )
-                    .await?;
-
-                let catalogs = catalogs.read();
-                let prev = catalogs.insert(name, catalog.clone());
-
-                Ok(prev)
-            })
-        })
-        .join()
-        .unwrap()
-    }
-
-    /// List all catalogs from metasrv
-    fn catalog_names(&self) -> Result<Vec<String>> {
-        let catalogs = self.catalogs.read();
-        Ok(catalogs.iter().map(|k| k.key().to_string()).collect())
-    }
-
-    /// Read catalog info of given name from metasrv.
-    fn catalog(&self, name: &str) -> Result<Option<CatalogProviderRef>> {
-        {
-            let catalogs = self.catalogs.read();
-            let catalog = catalogs.get(name);
-
-            if let Some(catalog) = catalog {
-                return Ok(Some(catalog.clone()));
+                if let Ok(key) = CatalogKey::parse(&catalog_key) {
+                    catalogs.insert(key.catalog_name);
+                }
             }
         }
 
-        let catalogs = self.catalogs.write();
+        Ok(catalogs.into_iter().collect())
+    }
 
-        let catalog = catalogs.get(name);
-        if let Some(catalog) = catalog {
-            return Ok(Some(catalog.clone()));
-        }
+    async fn register_catalog(
+        &self,
+        name: String,
+        _catalog: CatalogProviderRef,
+    ) -> Result<Option<CatalogProviderRef>> {
+        let key = CatalogKey { catalog_name: name }.to_string();
+        // TODO(hl): use compare_and_swap to prevent concurrent update
+        self.backend
+            .set(
+                key.as_bytes(),
+                &CatalogValue {}
+                    .as_bytes()
+                    .context(InvalidCatalogValueSnafu)?,
+            )
+            .await?;
+        Ok(None)
+    }
 
-        // It's for lack of incremental catalog syncing between datanode and meta. Here we fetch catalog
-        // from meta on demand. This can be removed when incremental catalog syncing is done in datanode.
-
-        let backend = self.backend.clone();
-
-        let catalogs_from_meta: HashSet<String> = std::thread::spawn(|| {
-            common_runtime::block_on_read(async move {
-                let mut stream = backend.range(CATALOG_KEY_PREFIX.as_bytes());
-                let mut catalogs = HashSet::new();
-
-                while let Some(catalog) = stream.next().await {
-                    if let Ok(catalog) = catalog {
-                        let catalog_key = String::from_utf8_lossy(&catalog.0);
-
-                        if let Ok(key) = CatalogKey::parse(&catalog_key) {
-                            catalogs.insert(key.catalog_name);
-                        }
-                    }
-                }
-
-                catalogs
-            })
-        })
-        .join()
-        .unwrap();
-
-        catalogs.retain(|catalog_name, _| catalogs_from_meta.get(catalog_name).is_some());
-
-        for catalog in catalogs_from_meta {
-            catalogs
-                .entry(catalog.clone())
-                .or_insert(self.new_catalog_provider(&catalog));
-        }
-
-        let catalog = catalogs.get(name);
-
-        Ok(catalog.as_deref().cloned())
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

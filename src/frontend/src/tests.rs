@@ -101,6 +101,7 @@ pub(crate) async fn create_standalone_instance(test_name: &str) -> MockStandalon
     let _ = dn_instance
         .catalog_manager()
         .register_catalog("another_catalog".to_string(), another_catalog)
+        .await
         .unwrap();
 
     dn_instance.start().await.unwrap();

@@ -16,7 +16,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use catalog::local::{new_memory_catalog_list, MemoryCatalogProvider, MemorySchemaProvider};
-use catalog::{CatalogList, CatalogProvider, SchemaProvider};
+use catalog::{CatalogProvider, SchemaProvider};
 use common_query::physical_plan::PhysicalPlanRef;
 use common_query::prelude::Expr;
 use common_recordbatch::RecordBatch;
@@ -116,7 +116,7 @@ fn create_test_engine() -> TimeRangeTester {
         .register_schema("public".to_string(), default_schema)
         .unwrap();
     catalog_list
-        .register_catalog("greptime".to_string(), default_catalog)
+        .register_catalog_sync("greptime".to_string(), default_catalog)
         .unwrap();
 
     let engine = QueryEngineFactory::new(catalog_list).query_engine();

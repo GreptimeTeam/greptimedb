@@ -82,7 +82,8 @@ impl SqlHandler {
         // first check if catalog and schema exist
         let catalog = self
             .catalog_manager
-            .catalog(&req.catalog_name)
+            .catalog_async(&req.catalog_name)
+            .await
             .context(CatalogSnafu)?
             .with_context(|| {
                 error!(

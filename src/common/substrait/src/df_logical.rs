@@ -542,7 +542,7 @@ fn same_schema_without_metadata(lhs: &ArrowSchemaRef, rhs: &ArrowSchemaRef) -> b
 #[cfg(test)]
 mod test {
     use catalog::local::{LocalCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
-    use catalog::{CatalogList, CatalogProvider, RegisterTableRequest};
+    use catalog::{CatalogManager, CatalogProvider, RegisterTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
     use datafusion::common::{DFSchema, ToDFSchema};
     use datafusion_expr::TableSource;
@@ -570,6 +570,7 @@ mod test {
             .unwrap();
         catalog_manager
             .register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider)
+            .await
             .unwrap();
 
         catalog_manager.init().await.unwrap();

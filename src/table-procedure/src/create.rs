@@ -47,7 +47,7 @@ impl Procedure for CreateTableProcedure {
 
     async fn execute(&mut self, ctx: &Context) -> Result<Status> {
         match self.data.state {
-            CreateTableState::Prepare => self.on_prepare(),
+            CreateTableState::Prepare => self.on_prepare().await,
             CreateTableState::EngineCreateTable => self.on_engine_create_table(ctx).await,
             CreateTableState::RegisterCatalog => self.on_register_catalog().await,
         }
@@ -131,11 +131,12 @@ impl CreateTableProcedure {
         })
     }
 
-    fn on_prepare(&mut self) -> Result<Status> {
+    async fn on_prepare(&mut self) -> Result<Status> {
         // Check whether catalog and schema exist.
         let catalog = self
             .catalog_manager
-            .catalog(&self.data.request.catalog_name)
+            .catalog_async(&self.data.request.catalog_name)
+            .await
             .context(AccessCatalogSnafu)?
             .with_context(|| {
                 logging::error!(
@@ -224,7 +225,8 @@ impl CreateTableProcedure {
     async fn on_register_catalog(&mut self) -> Result<Status> {
         let catalog = self
             .catalog_manager
-            .catalog(&self.data.request.catalog_name)
+            .catalog_async(&self.data.request.catalog_name)
+            .await
             .context(AccessCatalogSnafu)?
             .context(CatalogNotFoundSnafu {
                 name: &self.data.request.catalog_name,
