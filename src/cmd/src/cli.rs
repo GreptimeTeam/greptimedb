@@ -56,7 +56,7 @@ impl Command {
         if let Some(level) = top_level_opts.log_level {
             logging_opts.level = level;
         }
-        Ok(ConfigOptions::Cli(logging_opts))
+        Ok(ConfigOptions::Cli(Box::new(logging_opts)))
     }
 }
 
