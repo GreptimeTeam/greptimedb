@@ -488,11 +488,38 @@ impl CatalogManager for RemoteCatalogManager {
         Ok(true)
     }
 
-    async fn rename_table(&self, _request: RenameTableRequest) -> Result<bool> {
-        UnimplementedSnafu {
-            operation: "rename table",
-        }
-        .fail()
+    async fn rename_table(&self, request: RenameTableRequest) -> Result<bool> {
+        let RenameTableRequest {
+            catalog,
+            schema,
+            table_name,
+            new_table_name,
+            ..
+        } = request;
+        let old_table_key = TableRegionalKey {
+            catalog_name: catalog.clone(),
+            schema_name: schema.clone(),
+            table_name: table_name.clone(),
+            node_id: self.node_id,
+        };
+
+        let Some(Kv(_, value_bytes)) = self.backend.get(old_table_key.to_string().as_bytes()).await? else {
+            return Ok(false)
+        };
+
+        let new_table_key = TableRegionalKey {
+            catalog_name: catalog.clone(),
+            schema_name: schema.clone(),
+            table_name: new_table_name,
+            node_id: self.node_id,
+        };
+        self.backend
+            .set(new_table_key.to_string().as_bytes(), &value_bytes)
+            .await?;
+        self.backend
+            .delete(old_table_key.to_string().as_bytes())
+            .await?;
+        Ok(true)
     }
 
     async fn register_system_table(&self, request: RegisterSystemTableRequest) -> Result<()> {
@@ -733,36 +760,40 @@ impl SchemaProvider for RemoteSchemaProvider {
 
     async fn table(&self, name: &str) -> Result<Option<TableRef>> {
         let key = self.build_regional_table_key(name).to_string();
-        let table_opt = self
-            .backend
-            .get(key.as_bytes())
-            .await?
-            .map(|Kv(_, v)| {
-                // TODO(hl): we should put engine info in table regional value
-                // so that here we can use correct engine name
-                let TableRegionalValue { .. } =
-                    TableRegionalValue::parse(&String::from_utf8_lossy(&v))
-                        .context(InvalidCatalogValueSnafu)?;
+        info!("Try get table {}", name);
+        let table_opt =
+            self.backend
+                .get(key.as_bytes())
+                .await?
+                .map(|Kv(_, v)| {
+                    // TODO(hl): we should put engine info in table regional value
+                    // so that here we can use correct engine name
+                    let TableRegionalValue { .. } =
+                        TableRegionalValue::parse(&String::from_utf8_lossy(&v))
+                            .context(InvalidCatalogValueSnafu)?;
 
-                let reference = TableReference {
-                    catalog: &self.catalog_name,
-                    schema: &self.schema_name,
-                    table: name,
-                };
-                let table = self
-                    .engine_manager
-                    .engine(MITO_ENGINE)
-                    .context(TableEngineNotFoundSnafu {
-                        engine_name: MITO_ENGINE,
-                    })?
-                    .get_table(&EngineContext {}, &reference)
-                    .with_context(|_| OpenTableSnafu {
-                        table_info: reference.to_string(),
-                    })?;
-                Ok(table)
-            })
-            .transpose()?
-            .flatten();
+                    let reference = TableReference {
+                        catalog: &self.catalog_name,
+                        schema: &self.schema_name,
+                        table: name,
+                    };
+
+                    let engine = self.engine_manager.engine(MITO_ENGINE).context(
+                        TableEngineNotFoundSnafu {
+                            engine_name: MITO_ENGINE,
+                        },
+                    )?;
+
+                    let table = engine
+                        .get_table(&EngineContext {}, &reference)
+                        .with_context(|_| OpenTableSnafu {
+                            table_info: reference.to_string(),
+                        })?;
+
+                    Ok(table)
+                })
+                .transpose()?
+                .flatten();
 
         Ok(table_opt)
     }
@@ -805,6 +836,11 @@ impl SchemaProvider for RemoteSchemaProvider {
             table_key
         );
 
+        let reference = TableReference {
+            catalog: &self.catalog_name,
+            schema: &self.schema_name,
+            table: name,
+        };
         // deregistering table does not necessarily mean dropping the table
         let table = self
             .engine_manager

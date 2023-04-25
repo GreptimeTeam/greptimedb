@@ -60,6 +60,8 @@ impl SqlHandler {
             .context(error::AlterTableSnafu {
                 table_name: full_table_name,
             })?;
+
+        info!("Table engine alter finished");
         if is_rename {
             let table_info = &table.table_info();
             let rename_table_req = RenameTableRequest {

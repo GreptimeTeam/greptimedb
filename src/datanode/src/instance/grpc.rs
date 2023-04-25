@@ -282,12 +282,10 @@ async fn new_dummy_catalog_list(
         .register_schema(schema_name, Arc::new(schema_provider) as Arc<_>)
         .unwrap();
     let catalog_list = MemoryCatalogList::new();
-    catalog_list
-        .register_catalog(
-            catalog_name.to_string(),
-            Arc::new(catalog_provider) as Arc<_>,
-        )
-        .unwrap();
+    catalog_list.register_catalog(
+        catalog_name.to_string(),
+        Arc::new(catalog_provider) as Arc<_>,
+    );
     Ok(catalog_list)
 }
 

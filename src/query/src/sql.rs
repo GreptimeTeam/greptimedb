@@ -99,7 +99,6 @@ static SHOW_CREATE_TABLE_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
     ]))
 });
 
-pub fn show_databases(stmt: ShowDatabases, catalog_manager: CatalogManagerRef) -> Result<Output> {
 pub async fn show_databases(
     stmt: ShowDatabases,
     catalog_manager: CatalogManagerRef,
