@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use api::v1::greptime_database_client::GreptimeDatabaseClient;
 use api::v1::health_check_client::HealthCheckClient;
+use api::v1::prometheus_gateway_client::PrometheusGatewayClient;
 use api::v1::HealthCheckRequest;
 use arrow_flight::flight_service_client::FlightServiceClient;
 use common_grpc::channel_manager::ChannelManager;
@@ -154,6 +155,11 @@ impl Client {
         Ok(DatabaseClient {
             inner: GreptimeDatabaseClient::new(channel),
         })
+    }
+
+    pub fn make_prometheus_gateway_client(&self) -> Result<PrometheusGatewayClient<Channel>> {
+        let (_, channel) = self.find_channel()?;
+        Ok(PrometheusGatewayClient::new(channel))
     }
 
     pub async fn health_check(&self) -> Result<()> {
