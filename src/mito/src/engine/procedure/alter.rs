@@ -30,7 +30,8 @@ use table::{Table, TableRef};
 
 use crate::engine::MitoEngineInner;
 use crate::error::{
-    BuildTableMetaSnafu, TableNotFoundSnafu, UpdateTableManifestSnafu, VersionChangedSnafu,
+    BuildTableMetaSnafu, TableExistsSnafu, TableNotFoundSnafu, UpdateTableManifestSnafu,
+    VersionChangedSnafu,
 };
 use crate::manifest::action::{TableChange, TableMetaAction, TableMetaActionList};
 use crate::metrics;
@@ -171,6 +172,17 @@ impl<S: StorageEngine> AlterMitoTable<S> {
                 actual: current_info.ident.version,
             }
         );
+
+        if let AlterKind::RenameTable { new_table_name } = &self.data.request.alter_kind {
+            let mut table_ref = self.data.table_ref();
+            table_ref.table = &new_table_name;
+            ensure!(
+                self.engine_inner.get_mito_table(&table_ref).is_none(),
+                TableExistsSnafu {
+                    table_name: table_ref.to_string(),
+                }
+            );
+        }
 
         self.init_new_info(&current_info)?;
         self.data.state = AlterTableState::EngineAlterTable;
