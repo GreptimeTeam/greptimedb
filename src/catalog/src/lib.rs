@@ -29,7 +29,6 @@ use table::TableRef;
 use crate::error::{CreateTableSnafu, Result};
 pub use crate::schema::{SchemaProvider, SchemaProviderRef};
 
-pub mod datafusion;
 pub mod error;
 pub mod helper;
 pub(crate) mod information_schema;

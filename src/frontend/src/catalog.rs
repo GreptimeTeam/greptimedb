@@ -229,10 +229,8 @@ impl CatalogManager for FrontendCatalogManager {
         let key = build_catalog_prefix();
         let mut iter = self.backend.range(key.as_bytes());
         let mut res = HashSet::new();
-
         while let Some(r) = iter.next().await {
             let Kv(k, _) = r?;
-
             let catalog_key = String::from_utf8_lossy(&k);
             if let Ok(key) = CatalogKey::parse(catalog_key.as_ref()) {
                 res.insert(key.catalog_name);
@@ -244,21 +242,18 @@ impl CatalogManager for FrontendCatalogManager {
     }
 
     async fn catalog_async(&self, catalog: &str) -> CatalogResult<Option<CatalogProviderRef>> {
-        // get from kv
         let key = CatalogKey {
             catalog_name: catalog.to_string(),
         }
         .to_string();
-        let res = self.backend.get(key.as_bytes()).await?;
-        let res = res.map(|_| {
+        Ok(self.backend.get(key.as_bytes()).await?.map(|_| {
             Arc::new(FrontendCatalogProvider {
                 catalog_name: catalog.to_string(),
                 backend: self.backend.clone(),
                 partition_manager: self.partition_manager.clone(),
                 datanode_clients: self.datanode_clients.clone(),
             }) as Arc<_>
-        });
-        Ok(res)
+        }))
     }
 
     async fn schema_async(
@@ -266,14 +261,13 @@ impl CatalogManager for FrontendCatalogManager {
         catalog: &str,
         schema: &str,
     ) -> catalog::error::Result<Option<SchemaProviderRef>> {
-        let catalog =
-            self.catalog_async(catalog)
-                .await?
-                .context(catalog::error::CatalogNotFoundSnafu {
-                    catalog_name: catalog,
-                })?;
-        let result = catalog.schema(schema).await;
-        result
+        self.catalog_async(catalog)
+            .await?
+            .context(catalog::error::CatalogNotFoundSnafu {
+                catalog_name: catalog,
+            })?
+            .schema(schema)
+            .await
     }
 
     async fn table(
@@ -311,7 +305,6 @@ impl CatalogProvider for FrontendCatalogProvider {
         let key = build_schema_prefix(&self.catalog_name);
         let mut iter = self.backend.range(key.as_bytes());
         let mut res = HashSet::new();
-
         while let Some(r) = iter.next().await {
             let Kv(k, _) = r?;
             let key =
@@ -375,7 +368,6 @@ impl SchemaProvider for FrontendSchemaProvider {
             })
             .try_collect::<Vec<_>>()
             .await?;
-
         tables.extend(result);
         Ok(tables)
     }

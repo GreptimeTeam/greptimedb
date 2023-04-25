@@ -213,14 +213,12 @@ impl LocalCatalogManager {
                     info!("Register catalog: {}", c.catalog_name);
                 }
                 Entry::Schema(s) => {
-                    let catalog = self
-                        .catalogs
+                    self.catalogs
                         .catalog_async(&s.catalog_name)
                         .await?
                         .context(CatalogNotFoundSnafu {
                             catalog_name: &s.catalog_name,
-                        })?;
-                    catalog
+                        })?
                         .register_schema(
                             s.schema_name.clone(),
                             Arc::new(MemorySchemaProvider::new()),
@@ -324,12 +322,11 @@ impl CatalogManager for LocalCatalogManager {
         let catalog_name = &request.catalog;
         let schema_name = &request.schema;
 
-        let catalog = self
+        let schema = self
             .catalogs
             .catalog_async(catalog_name)
             .await?
-            .context(CatalogNotFoundSnafu { catalog_name })?;
-        let schema = catalog
+            .context(CatalogNotFoundSnafu { catalog_name })?
             .schema(schema_name)
             .await?
             .with_context(|| SchemaNotFoundSnafu {

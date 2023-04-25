@@ -75,23 +75,17 @@ impl CatalogManager for MemoryCatalogManager {
     }
 
     async fn register_table(&self, request: RegisterTableRequest) -> Result<bool> {
-        let catalog = {
-            let catalogs = self.catalogs.write().unwrap();
-            catalogs
-                .get(&request.catalog)
-                .context(CatalogNotFoundSnafu {
-                    catalog_name: &request.catalog,
-                })?
-                .clone()
-        };
-        let schema =
-            catalog
-                .schema(&request.schema)
-                .await?
-                .with_context(|| SchemaNotFoundSnafu {
-                    catalog: &request.catalog,
-                    schema: &request.schema,
-                })?;
+        let schema = self
+            .catalog(&request.catalog)
+            .context(CatalogNotFoundSnafu {
+                catalog_name: &request.catalog,
+            })?
+            .schema(&request.schema)
+            .await?
+            .context(SchemaNotFoundSnafu {
+                catalog: &request.catalog,
+                schema: &request.schema,
+            })?;
         schema
             .register_table(request.table_name, request.table)
             .await
@@ -99,15 +93,11 @@ impl CatalogManager for MemoryCatalogManager {
     }
 
     async fn rename_table(&self, request: RenameTableRequest) -> Result<bool> {
-        let catalog = {
-            let catalogs = self.catalogs.write().unwrap();
-            catalogs
-                .get(&request.catalog)
-                .context(CatalogNotFoundSnafu {
-                    catalog_name: &request.catalog,
-                })?
-                .clone()
-        };
+        let catalog = self
+            .catalog(&request.catalog)
+            .context(CatalogNotFoundSnafu {
+                catalog_name: &request.catalog,
+            })?;
         let schema =
             catalog
                 .schema(&request.schema)
@@ -123,23 +113,17 @@ impl CatalogManager for MemoryCatalogManager {
     }
 
     async fn deregister_table(&self, request: DeregisterTableRequest) -> Result<bool> {
-        let catalog = {
-            let catalogs = self.catalogs.write().unwrap();
-            catalogs
-                .get(&request.catalog)
-                .context(CatalogNotFoundSnafu {
-                    catalog_name: &request.catalog,
-                })?
-                .clone()
-        };
-        let schema =
-            catalog
-                .schema(&request.schema)
-                .await?
-                .with_context(|| SchemaNotFoundSnafu {
-                    catalog: &request.catalog,
-                    schema: &request.schema,
-                })?;
+        let schema = self
+            .catalog(&request.catalog)
+            .context(CatalogNotFoundSnafu {
+                catalog_name: &request.catalog,
+            })?
+            .schema(&request.schema)
+            .await?
+            .with_context(|| SchemaNotFoundSnafu {
+                catalog: &request.catalog,
+                schema: &request.schema,
+            })?;
         schema
             .deregister_table(&request.table_name)
             .await
@@ -147,16 +131,11 @@ impl CatalogManager for MemoryCatalogManager {
     }
 
     async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool> {
-        let catalog = {
-            let catalogs = self.catalogs.write().unwrap();
-            catalogs
-                .get(&request.catalog)
-                .context(CatalogNotFoundSnafu {
-                    catalog_name: &request.catalog,
-                })?
-                .clone()
-        };
-
+        let catalog = self
+            .catalog(&request.catalog)
+            .context(CatalogNotFoundSnafu {
+                catalog_name: &request.catalog,
+            })?;
         catalog
             .register_schema(request.schema, Arc::new(MemorySchemaProvider::new()))
             .await?;
@@ -169,11 +148,7 @@ impl CatalogManager for MemoryCatalogManager {
     }
 
     async fn schema_async(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>> {
-        let catalog = {
-            let catalogs = self.catalogs.read().unwrap();
-            catalogs.get(catalog).cloned()
-        };
-        if let Some(c) = catalog {
+        if let Some(c) = self.catalog(catalog) {
             c.schema(schema).await
         } else {
             Ok(None)
@@ -186,15 +161,10 @@ impl CatalogManager for MemoryCatalogManager {
         schema: &str,
         table_name: &str,
     ) -> Result<Option<TableRef>> {
-        let catalog = {
-            let c = self.catalogs.read().unwrap();
-            let Some(c) = c.get(catalog) else { return Ok(None) };
-            c.clone()
-        };
-        match catalog.schema(schema).await? {
-            None => Ok(None),
-            Some(s) => s.table(table_name).await,
-        }
+        let Some(catalog) = self
+            .catalog(catalog) else { return Ok(None)};
+        let Some(s) = catalog.schema(schema).await? else { return Ok(None) };
+        s.table(table_name).await
     }
 
     async fn catalog_async(&self, catalog: &str) -> Result<Option<CatalogProviderRef>> {
@@ -244,6 +214,10 @@ impl MemoryCatalogManager {
     ) -> Result<Option<CatalogProviderRef>> {
         let mut catalogs = self.catalogs.write().unwrap();
         Ok(catalogs.insert(name, catalog))
+    }
+
+    fn catalog(&self, catalog_name: &str) -> Option<CatalogProviderRef> {
+        self.catalogs.write().unwrap().get(catalog_name).cloned()
     }
 }
 

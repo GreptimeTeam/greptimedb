@@ -177,6 +177,7 @@ impl TableMeta {
                 meta_builder
                     .schema(self.schema.clone())
                     .primary_key_indices(self.primary_key_indices.clone())
+                    .engine(self.engine.clone())
                     .next_column_id(self.next_column_id);
                 Ok(meta_builder)
             }

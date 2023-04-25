@@ -27,9 +27,13 @@ SELECT * from t;
 
 ALTER TABLE t RENAME new_table;
 
-Error: 1003(Internal), Operation rename table not implemented yet
+Affected Rows: 0
+
+DESC TABLE t;
+
+Error: 4001(TableNotFound), Table `t` not exist
 
 DROP TABLE t;
 
-Affected Rows: 1
+Error: 4001(TableNotFound), Table `greptime.public.t` not exist
 

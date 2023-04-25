@@ -664,7 +664,7 @@ impl CatalogProvider for RemoteCatalogProvider {
         let res = remote_schemas
             .map(|kv| {
                 let Kv(k, _) = kv?;
-                let schema_key = SchemaKey::parse(&String::from_utf8_lossy(&k))
+                let schema_key = SchemaKey::parse(String::from_utf8_lossy(&k))
                     .context(InvalidCatalogValueSnafu)?;
                 Ok(schema_key.schema_name)
             })
@@ -749,7 +749,7 @@ impl SchemaProvider for RemoteSchemaProvider {
         let table_names = iter
             .map(|kv| {
                 let Kv(key, _) = kv?;
-                let regional_key = TableRegionalKey::parse(&String::from_utf8_lossy(&key))
+                let regional_key = TableRegionalKey::parse(String::from_utf8_lossy(&key))
                     .context(InvalidCatalogValueSnafu)?;
                 Ok(regional_key.table_name)
             })
@@ -769,7 +769,7 @@ impl SchemaProvider for RemoteSchemaProvider {
                     // TODO(hl): we should put engine info in table regional value
                     // so that here we can use correct engine name
                     let TableRegionalValue { .. } =
-                        TableRegionalValue::parse(&String::from_utf8_lossy(&v))
+                        TableRegionalValue::parse(String::from_utf8_lossy(&v))
                             .context(InvalidCatalogValueSnafu)?;
 
                     let reference = TableReference {
