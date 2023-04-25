@@ -156,7 +156,7 @@ impl AlterTableProcedure {
             .with_context(|| TableNotFoundSnafu {
                 name: format!(
                     "{}.{}.{}",
-                    &request.catalog_name, &request.schema_name, &request.table_name
+                    request.catalog_name, request.schema_name, request.table_name
                 ),
             })?;
         if let AlterKind::RenameTable { new_table_name } = &self.data.request.alter_kind {
