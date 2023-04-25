@@ -20,4 +20,5 @@ pub mod error;
 pub mod frontend;
 pub mod metasrv;
 pub mod standalone;
+pub mod options;
 mod toml_loader;

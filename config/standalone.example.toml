@@ -127,3 +127,10 @@ data_dir = "/tmp/greptimedb/procedure/"
 max_retry_times = 3
 # Initial retry delay of procedures, increases exponentially
 retry_delay = "500ms"
+
+# Log options
+[logging]
+# Specify logs directory.
+dir = "/tmp/greptimedb/logs"
+# Specify the log level [info | debug | error | warn]
+level = "debug"

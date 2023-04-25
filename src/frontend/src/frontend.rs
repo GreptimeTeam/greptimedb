@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_telemetry::logging::LoggingOptions;
 use meta_client::MetaClientOptions;
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
@@ -38,6 +39,7 @@ pub struct FrontendOptions {
     pub prometheus_options: Option<PrometheusOptions>,
     pub prom_options: Option<PromOptions>,
     pub meta_client_options: Option<MetaClientOptions>,
+    pub logging: LoggingOptions,
 }
 
 impl Default for FrontendOptions {
@@ -53,6 +55,7 @@ impl Default for FrontendOptions {
             prometheus_options: Some(PrometheusOptions::default()),
             prom_options: Some(PromOptions::default()),
             meta_client_options: None,
+            logging: LoggingOptions::default(),
         }
     }
 }

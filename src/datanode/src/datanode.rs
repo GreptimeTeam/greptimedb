@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
 use common_telemetry::info;
+use common_telemetry::logging::LoggingOptions;
 use meta_client::MetaClientOptions;
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
@@ -238,6 +239,7 @@ pub struct DatanodeOptions {
     pub wal: WalConfig,
     pub storage: StorageConfig,
     pub procedure: ProcedureConfig,
+    pub logging: LoggingOptions,
 }
 
 impl Default for DatanodeOptions {
@@ -256,6 +258,7 @@ impl Default for DatanodeOptions {
             wal: WalConfig::default(),
             storage: StorageConfig::default(),
             procedure: ProcedureConfig::default(),
+            logging: LoggingOptions::default(),
         }
     }
 }

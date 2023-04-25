@@ -17,9 +17,10 @@ mod helper;
 mod repl;
 
 use clap::Parser;
+use common_telemetry::logging::LoggingOptions;
 pub use repl::Repl;
 
-use crate::error::Result;
+use crate::{error::Result, options::ConfigOptions};
 
 pub struct Instance {
     repl: Repl,
@@ -44,6 +45,17 @@ pub struct Command {
 impl Command {
     pub async fn build(self) -> Result<Instance> {
         self.cmd.build().await
+    }
+
+    pub fn load_options(&self, log_dir: Option<String>, log_level: Option<String>) -> Result<ConfigOptions> {
+        let mut logging_opts = LoggingOptions::default();
+        if let Some(dir) = log_dir {
+            logging_opts.dir = dir;
+        }
+        if let Some(level) = log_level {
+            logging_opts.level = level;
+        }
+        Ok(ConfigOptions::Cli(logging_opts))
     }
 }
 

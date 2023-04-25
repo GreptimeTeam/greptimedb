@@ -17,6 +17,7 @@ use std::sync::Arc;
 use clap::Parser;
 use common_base::Plugins;
 use common_telemetry::info;
+use common_telemetry::logging::LoggingOptions;
 use datanode::datanode::{Datanode, DatanodeOptions, ProcedureConfig, StorageConfig, WalConfig};
 use datanode::instance::InstanceRef;
 use frontend::frontend::FrontendOptions;
@@ -39,6 +40,7 @@ use crate::error::{
     StartDatanodeSnafu, StartFrontendSnafu,
 };
 use crate::frontend::load_frontend_plugins;
+use crate::options::ConfigOptions;
 use crate::toml_loader;
 
 #[derive(Parser)]
@@ -51,6 +53,10 @@ impl Command {
     pub async fn build(self) -> Result<Instance> {
         self.subcmd.build().await
     }
+
+    pub fn load_options(&self, log_dir: Option<String>, log_level: Option<String>) -> Result<ConfigOptions> {
+        self.subcmd.load_options(log_dir, log_level)
+    }
 }
 
 #[derive(Parser)]
@@ -62,6 +68,12 @@ impl SubCommand {
     async fn build(self) -> Result<Instance> {
         match self {
             SubCommand::Start(cmd) => cmd.build().await,
+        }
+    }
+
+    fn load_options(&self, log_dir: Option<String>, log_level: Option<String>) -> Result<ConfigOptions> {
+        match self {
+            SubCommand::Start(cmd) => cmd.load_options(log_level, log_dir),
         }
     }
 }
@@ -82,6 +94,7 @@ pub struct StandaloneOptions {
     pub wal: WalConfig,
     pub storage: StorageConfig,
     pub procedure: ProcedureConfig,
+    pub logging: LoggingOptions,
 }
 
 impl Default for StandaloneOptions {
@@ -100,6 +113,7 @@ impl Default for StandaloneOptions {
             wal: WalConfig::default(),
             storage: StorageConfig::default(),
             procedure: ProcedureConfig::default(),
+            logging: LoggingOptions::default(),
         }
     }
 }
@@ -117,6 +131,7 @@ impl StandaloneOptions {
             prometheus_options: self.prometheus_options,
             prom_options: self.prom_options,
             meta_client_options: None,
+            logging: self.logging,
         }
     }
 
@@ -196,6 +211,105 @@ struct StartCommand {
 }
 
 impl StartCommand {
+    fn load_options(
+        &self,
+        log_dir: Option<String>,
+        log_level: Option<String>,
+    ) -> Result<ConfigOptions> {
+        let enable_memory_catalog = self.enable_memory_catalog;
+        let config_file = self.config_file.clone();
+        let mut opts: StandaloneOptions = if let Some(path) = config_file {
+            toml_loader::from_file!(&path)?
+        } else {
+            StandaloneOptions::default()
+        };
+
+        opts.enable_memory_catalog = enable_memory_catalog;
+
+        let mut fe_opts = opts.clone().frontend_options();
+        let mut logging_opts = opts.logging.clone();
+        let dn_opts = opts.datanode_options();
+
+        if let Some(dir) = log_dir {
+            logging_opts.dir = dir;
+        }
+        if let Some(level) = log_level {
+            logging_opts.level = level;
+        }
+
+        fe_opts.mode = Mode::Standalone;
+
+        if let Some(addr) = self.http_addr.clone() {
+            fe_opts.http_options = Some(HttpOptions {
+                addr,
+                ..Default::default()
+            });
+        }
+        if let Some(addr) = self.rpc_addr.clone() {
+            // frontend grpc addr conflict with datanode default grpc addr
+            let datanode_grpc_addr = DatanodeOptions::default().rpc_addr;
+            if addr == datanode_grpc_addr {
+                return IllegalConfigSnafu {
+                    msg: format!(
+                        "gRPC listen address conflicts with datanode reserved gRPC addr: {datanode_grpc_addr}",
+                    ),
+                }
+                .fail();
+            }
+            fe_opts.grpc_options = Some(GrpcOptions {
+                addr,
+                ..Default::default()
+            });
+        }
+
+        if let Some(addr) = self.mysql_addr.clone() {
+            fe_opts.mysql_options = Some(MysqlOptions {
+                addr,
+                ..Default::default()
+            })
+        }
+
+        if let Some(addr) = self.prom_addr.clone() {
+            fe_opts.prom_options = Some(PromOptions { addr })
+        }
+
+        if let Some(addr) = self.postgres_addr.clone() {
+            fe_opts.postgres_options = Some(PostgresOptions {
+                addr,
+                ..Default::default()
+            })
+        }
+
+        if let Some(addr) = self.opentsdb_addr.clone() {
+            fe_opts.opentsdb_options = Some(OpentsdbOptions {
+                addr,
+                ..Default::default()
+            });
+        }
+
+        if self.influxdb_enable {
+            fe_opts.influxdb_options = Some(InfluxdbOptions { enable: true });
+        }
+
+        let tls_option = TlsOption::new(
+            self.tls_mode.clone(),
+            self.tls_cert_path.clone(),
+            self.tls_key_path.clone(),
+        );
+
+        if let Some(mut mysql_options) = fe_opts.mysql_options {
+            mysql_options.tls = tls_option.clone();
+            fe_opts.mysql_options = Some(mysql_options);
+        }
+
+        if let Some(mut postgres_options) = fe_opts.postgres_options {
+            postgres_options.tls = tls_option;
+            fe_opts.postgres_options = Some(postgres_options);
+        }
+
+        Ok(ConfigOptions::Standalone(fe_opts, dn_opts, logging_opts))
+    }
+
     async fn build(self) -> Result<Instance> {
         let enable_memory_catalog = self.enable_memory_catalog;
         let config_file = self.config_file.clone();
@@ -327,9 +441,12 @@ impl TryFrom<StartCommand> for FrontendOptions {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
     use std::time::Duration;
 
+    use common_test_util::temp_dir::create_named_temp_file;
     use servers::auth::{Identity, Password, UserProviderRef};
+    use servers::Mode;
 
     use super::*;
 
@@ -415,5 +532,79 @@ mod tests {
         let opts = StandaloneOptions::default();
         let toml_string = toml::to_string(&opts).unwrap();
         let _parsed: StandaloneOptions = toml::from_str(&toml_string).unwrap();
+    }
+
+    #[test]
+    fn test_load_options() {
+        let mut file = create_named_temp_file();
+        let toml_str = r#"
+            mode = "distributed"
+
+            enable_memory_catalog = true
+
+            [wal]
+            dir = "/tmp/greptimedb/test/wal"
+            file_size = "1GB"
+            purge_threshold = "50GB"
+            purge_interval = "10m"
+            read_batch_size = 128
+            sync_write = false
+
+            [storage]
+            type = "File"
+            data_dir = "/tmp/greptimedb/data/"
+
+            [storage.compaction]
+            max_inflight_tasks = 3
+            max_files_in_level0 = 7
+            max_purge_tasks = 32
+
+            [storage.manifest]
+            checkpoint_margin = 9
+            gc_duration = '7s'
+            checkpoint_on_startup = true
+
+            [http_options]
+            addr = "127.0.0.1:4001"
+            timeout = "30s"
+
+            [logging]
+            level = "debug"
+            dir = "/tmp/greptimedb/test/logs"
+        "#;
+        write!(file, "{}", toml_str).unwrap();
+        let cmd = StartCommand {
+            http_addr: None,
+            rpc_addr: None,
+            prom_addr: None,
+            mysql_addr: None,
+            postgres_addr: None,
+            opentsdb_addr: None,
+            config_file: Some(file.path().to_str().unwrap().to_string()),
+            influxdb_enable: false,
+            enable_memory_catalog: false,
+            tls_mode: None,
+            tls_cert_path: None,
+            tls_key_path: None,
+            user_provider: Some("static_user_provider:cmd:test=test".to_string()),
+        };
+
+        let opts = cmd.load_options(None, None).unwrap();
+        if let ConfigOptions::Standalone(fe_opts, dn_opts, logging_opts) = opts {
+            assert_eq!(Mode::Standalone, fe_opts.mode);
+            assert_eq!(
+                "127.0.0.1:4001".to_string(),
+                fe_opts.http_options.as_ref().unwrap().addr
+            );
+            assert_eq!(
+                Duration::from_secs(30),
+                fe_opts.http_options.as_ref().unwrap().timeout
+            );
+
+            assert_eq!("/tmp/greptimedb/test/wal", dn_opts.wal.dir);
+
+            assert_eq!("debug".to_string(), logging_opts.level);
+            assert_eq!("/tmp/greptimedb/test/logs".to_string(), logging_opts.dir);
+        }
     }
 }

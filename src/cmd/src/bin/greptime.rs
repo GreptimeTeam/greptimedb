@@ -18,16 +18,17 @@ use std::fmt;
 
 use clap::Parser;
 use cmd::error::Result;
+use cmd::options::ConfigOptions;
 use cmd::{cli, datanode, frontend, metasrv, standalone};
 use common_telemetry::logging::{error, info};
 
 #[derive(Parser)]
 #[clap(name = "greptimedb", version = print_version())]
 struct Command {
-    #[clap(long, default_value = "/tmp/greptimedb/logs")]
-    log_dir: String,
-    #[clap(long, default_value = "info")]
-    log_level: String,
+    #[clap(long)]
+    log_dir: Option<String>,
+    #[clap(long)]
+    log_level: Option<String>,
     #[clap(subcommand)]
     subcmd: SubCommand,
 }
@@ -65,6 +66,14 @@ impl Application {
 impl Command {
     async fn build(self) -> Result<Application> {
         self.subcmd.build().await
+    }
+
+    fn load_options(
+        &self,
+        log_dir: Option<String>,
+        log_level: Option<String>,
+    ) -> Result<ConfigOptions> {
+        self.subcmd.load_options(log_dir, log_level)
     }
 }
 
@@ -107,6 +116,20 @@ impl SubCommand {
             }
         }
     }
+
+    fn load_options(
+        &self,
+        log_dir: Option<String>,
+        log_level: Option<String>,
+    ) -> Result<ConfigOptions> {
+        match self {
+            SubCommand::Datanode(cmd) => cmd.load_options(log_dir, log_level),
+            SubCommand::Frontend(cmd) => cmd.load_options(log_dir, log_level),
+            SubCommand::Metasrv(cmd) => cmd.load_options(log_dir, log_level),
+            SubCommand::Standalone(cmd) => cmd.load_options(log_dir, log_level),
+            SubCommand::Cli(cmd) => cmd.load_options(log_dir, log_level),
+        }
+    }
 }
 
 impl fmt::Display for SubCommand {
@@ -144,12 +167,20 @@ async fn main() -> Result<()> {
     // TODO(dennis):
     // 1. adds ip/port to app
     let app_name = &cmd.subcmd.to_string();
-    let log_dir = &cmd.log_dir;
-    let log_level = &cmd.log_level;
+    let log_dir = cmd.log_dir.clone();
+    let log_level = cmd.log_level.clone();
+
+    let opts = cmd.load_options(log_dir, log_level)?;
+    let logging_opts = opts.logging_options();
 
     common_telemetry::set_panic_hook();
     common_telemetry::init_default_metrics_recorder();
-    let _guard = common_telemetry::init_global_logging(app_name, log_dir, log_level, false);
+    let _guard = common_telemetry::init_global_logging(
+        app_name,
+        &logging_opts.dir,
+        &logging_opts.level,
+        logging_opts.enable_jaeger_tracing,
+    );
 
     let mut app = cmd.build().await?;
 

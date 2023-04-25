@@ -31,6 +31,7 @@ use servers::{auth, Mode};
 use snafu::ResultExt;
 
 use crate::error::{self, IllegalAuthConfigSnafu, Result};
+use crate::options::ConfigOptions;
 use crate::toml_loader;
 
 pub struct Instance {
@@ -63,6 +64,14 @@ impl Command {
     pub async fn build(self) -> Result<Instance> {
         self.subcmd.build().await
     }
+
+    pub fn load_options(
+        &self,
+        log_dir: Option<String>,
+        log_level: Option<String>,
+    ) -> Result<ConfigOptions> {
+        self.subcmd.load_options(log_dir, log_level)
+    }
 }
 
 #[derive(Parser)]
@@ -74,6 +83,16 @@ impl SubCommand {
     async fn build(self) -> Result<Instance> {
         match self {
             SubCommand::Start(cmd) => cmd.build().await,
+        }
+    }
+
+    fn load_options(
+        &self,
+        log_dir: Option<String>,
+        log_level: Option<String>,
+    ) -> Result<ConfigOptions> {
+        match self {
+            SubCommand::Start(cmd) => cmd.load_options(log_dir, log_level),
         }
     }
 }
@@ -111,6 +130,87 @@ pub struct StartCommand {
 }
 
 impl StartCommand {
+    fn load_options(
+        &self,
+        log_dir: Option<String>,
+        log_level: Option<String>,
+    ) -> Result<ConfigOptions> {
+        let mut opts: FrontendOptions = if let Some(path) = self.config_file.clone() {
+            toml_loader::from_file!(&path)?
+        } else {
+            FrontendOptions::default()
+        };
+
+        if let Some(dir) = log_dir {
+            opts.logging.dir = dir;
+        }
+        if let Some(level) = log_level {
+            opts.logging.level = level;
+        }
+
+        let tls_option = TlsOption::new(
+            self.tls_mode.clone(),
+            self.tls_cert_path.clone(),
+            self.tls_key_path.clone(),
+        );
+
+        if let Some(addr) = self.http_addr.clone() {
+            opts.http_options.get_or_insert_with(Default::default).addr = addr;
+        }
+
+        if let Some(disable_dashboard) = self.disable_dashboard.clone() {
+            opts.http_options
+                .get_or_insert_with(Default::default)
+                .disable_dashboard = disable_dashboard;
+        }
+
+        if let Some(addr) = self.grpc_addr.clone() {
+            opts.grpc_options = Some(GrpcOptions {
+                addr,
+                ..Default::default()
+            });
+        }
+
+        if let Some(addr) = self.mysql_addr.clone() {
+            opts.mysql_options = Some(MysqlOptions {
+                addr,
+                tls: tls_option.clone(),
+                ..Default::default()
+            });
+        }
+        if let Some(addr) = self.prom_addr.clone() {
+            opts.prom_options = Some(PromOptions { addr });
+        }
+        if let Some(addr) = self.postgres_addr.clone() {
+            opts.postgres_options = Some(PostgresOptions {
+                addr,
+                tls: tls_option,
+                ..Default::default()
+            });
+        }
+        if let Some(addr) = self.opentsdb_addr.clone() {
+            opts.opentsdb_options = Some(OpentsdbOptions {
+                addr,
+                ..Default::default()
+            });
+        }
+        if let Some(enable) = self.influxdb_enable.clone() {
+            opts.influxdb_options = Some(InfluxdbOptions { enable });
+        }
+        if let Some(metasrv_addr) = self.metasrv_addr.clone() {
+            opts.meta_client_options
+                .get_or_insert_with(MetaClientOptions::default)
+                .metasrv_addrs = metasrv_addr
+                .split(',')
+                .map(&str::trim)
+                .map(&str::to_string)
+                .collect::<Vec<_>>();
+            opts.mode = Mode::Distributed;
+        }
+
+        Ok(ConfigOptions::Frontend(opts))
+    }
+
     async fn build(self) -> Result<Instance> {
         let plugins = Arc::new(load_frontend_plugins(&self.user_provider)?);
         let opts: FrontendOptions = self.try_into()?;
@@ -309,6 +409,56 @@ mod tests {
             Duration::from_secs(30),
             fe_opts.http_options.as_ref().unwrap().timeout
         );
+    }
+
+    #[test]
+    fn test_load_options() {
+        let mut file = create_named_temp_file();
+        let toml_str = r#"
+            mode = "distributed"
+
+            [http_options]
+            addr = "127.0.0.1:4000"
+            timeout = "30s"
+            
+            [logging]
+            level = "debug"
+            dir = "/tmp/greptimedb/test/logs"
+        "#;
+        write!(file, "{}", toml_str).unwrap();
+
+        let command = StartCommand {
+            http_addr: None,
+            grpc_addr: None,
+            mysql_addr: None,
+            prom_addr: None,
+            postgres_addr: None,
+            opentsdb_addr: None,
+            influxdb_enable: None,
+            config_file: Some(file.path().to_str().unwrap().to_string()),
+            metasrv_addr: None,
+            tls_mode: None,
+            tls_cert_path: None,
+            tls_key_path: None,
+            user_provider: None,
+            disable_dashboard: Some(false),
+        };
+
+        if let ConfigOptions::Frontend(fe_opts) = command.load_options(None, None).unwrap()
+        {
+            assert_eq!(Mode::Distributed, fe_opts.mode);
+            assert_eq!(
+                "127.0.0.1:4000".to_string(),
+                fe_opts.http_options.as_ref().unwrap().addr
+            );
+            assert_eq!(
+                Duration::from_secs(30),
+                fe_opts.http_options.as_ref().unwrap().timeout
+            );
+
+            assert_eq!("debug".to_string(), fe_opts.logging.level);
+            assert_eq!("/tmp/greptimedb/test/logs".to_string(), fe_opts.logging.dir);
+        }
     }
 
     #[tokio::test]

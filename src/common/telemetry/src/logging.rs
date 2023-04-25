@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex, Once};
 use once_cell::sync::Lazy;
 use opentelemetry::global;
 use opentelemetry::sdk::propagation::TraceContextPropagator;
+use serde::{Deserialize, Serialize};
 pub use tracing::{event, span, Level};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
@@ -30,6 +31,24 @@ use tracing_subscriber::prelude::*;
 use tracing_subscriber::{filter, EnvFilter, Registry};
 
 pub use crate::{debug, error, info, log, trace, warn};
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LoggingOptions {
+    pub dir: String,
+    pub level: String,
+    pub enable_jaeger_tracing: bool,
+}
+
+impl Default for LoggingOptions {
+    fn default() -> Self {
+        Self {
+            dir: "/tmp/greptimedb/logs".to_string(),
+            level: "info".to_string(),
+            enable_jaeger_tracing: false
+        }
+    }
+}
 
 /// Init tracing for unittest.
 /// Write logs to file `unittest`.
