@@ -270,7 +270,7 @@ impl<S: StorageEngine> CreateMitoTable<S> {
         let table_ref = self.data.table_ref();
         if let Some((manifest, table_info)) = self
             .engine_inner
-            .recover_table_manifest_and_info(&self.data.request.table_name, &table_dir)
+            .recover_table_manifest_and_info(&self.data.request.table_name, table_dir)
             .await?
         {
             let table = Arc::new(MitoTable::new(table_info, self.regions.clone(), manifest));
