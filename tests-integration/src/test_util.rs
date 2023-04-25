@@ -60,8 +60,10 @@ fn get_port() -> usize {
         .fetch_add(1, Ordering::Relaxed)
 }
 
+#[derive(Debug, Eq, PartialEq)]
 pub enum StorageType {
     S3,
+    S3WithCache,
     File,
     Oss,
 }
@@ -72,7 +74,7 @@ impl StorageType {
 
         match self {
             StorageType::File => true, // always test file
-            StorageType::S3 => {
+            StorageType::S3 | StorageType::S3WithCache => {
                 if let Ok(b) = env::var("GT_S3_BUCKET") {
                     !b.is_empty()
                 } else {
@@ -87,6 +89,16 @@ impl StorageType {
                 }
             }
         }
+    }
+}
+
+fn s3_test_config() -> S3Config {
+    S3Config {
+        root: uuid::Uuid::new_v4().to_string(),
+        access_key_id: env::var("GT_S3_ACCESS_KEY_ID").unwrap(),
+        secret_access_key: env::var("GT_S3_ACCESS_KEY").unwrap(),
+        bucket: env::var("GT_S3_BUCKET").unwrap(),
+        ..Default::default()
     }
 }
 
@@ -124,14 +136,12 @@ fn get_test_store_config(
                 Some(TempDirGuard::Oss(TempFolder::new(&store, "/"))),
             )
         }
-        StorageType::S3 => {
-            let s3_config = S3Config {
-                root: uuid::Uuid::new_v4().to_string(),
-                access_key_id: env::var("GT_S3_ACCESS_KEY_ID").unwrap(),
-                secret_access_key: env::var("GT_S3_ACCESS_KEY").unwrap(),
-                bucket: env::var("GT_S3_BUCKET").unwrap(),
-                ..Default::default()
-            };
+        StorageType::S3 | StorageType::S3WithCache => {
+            let mut s3_config = s3_test_config();
+
+            if *store_type == StorageType::S3WithCache {
+                s3_config.cache_path = Some("/tmp/greptimedb_cache".to_string());
+            }
 
             let mut builder = S3::default();
             builder
