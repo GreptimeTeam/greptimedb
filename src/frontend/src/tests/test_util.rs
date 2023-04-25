@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use common_query::Output;
@@ -117,4 +118,10 @@ pub(crate) async fn check_unordered_output_stream(output: Output, expected: &str
     let pretty_print = sort_table(&recordbatches.pretty_print().unwrap());
     let expected = sort_table(expected);
     assert_eq!(pretty_print, expected);
+}
+
+pub fn get_data_dir(path: &str) -> PathBuf {
+    let dir = env!("CARGO_MANIFEST_DIR");
+
+    PathBuf::from(dir).join(path)
 }
