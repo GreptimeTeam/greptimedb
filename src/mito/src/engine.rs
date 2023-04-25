@@ -21,10 +21,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 pub use common_catalog::consts::MITO_ENGINE;
-use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
 use common_procedure::{BoxedProcedure, ProcedureManager};
-use common_telemetry::tracing::log::info;
 use common_telemetry::{debug, logging};
 use dashmap::DashMap;
 use datatypes::schema::Schema;
@@ -33,14 +31,13 @@ use object_store::ObjectStore;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{
     ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyDescriptorBuilder, ColumnId,
-    CreateOptions, EngineContext as StorageEngineContext, OpenOptions, Region,
-    RegionDescriptorBuilder, RowKeyDescriptor, RowKeyDescriptorBuilder, StorageEngine,
+    EngineContext as StorageEngineContext, OpenOptions, RowKeyDescriptor, RowKeyDescriptorBuilder,
+    StorageEngine,
 };
 use table::engine::{
-    region_id, region_name, table_dir, EngineContext, TableEngine, TableEngineProcedure,
-    TableReference,
+    region_name, table_dir, EngineContext, TableEngine, TableEngineProcedure, TableReference,
 };
-use table::metadata::{TableInfo, TableInfoBuilder, TableMetaBuilder, TableType, TableVersion};
+use table::metadata::{TableInfo, TableVersion};
 use table::requests::{
     AlterKind, AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest,
 };
@@ -50,9 +47,9 @@ use table::{error as table_error, Result as TableResult, Table};
 use crate::config::EngineConfig;
 use crate::engine::procedure::{AlterMitoTable, CreateMitoTable, DropMitoTable};
 use crate::error::{
-    self, BuildColumnDescriptorSnafu, BuildColumnFamilyDescriptorSnafu, BuildRegionDescriptorSnafu,
-    BuildRowKeyDescriptorSnafu, InvalidPrimaryKeySnafu, InvalidRawSchemaSnafu,
-    MissingTimestampIndexSnafu, RegionNotFoundSnafu, Result, TableExistsSnafu,
+    self, BuildColumnDescriptorSnafu, BuildColumnFamilyDescriptorSnafu, BuildRowKeyDescriptorSnafu,
+    InvalidPrimaryKeySnafu, MissingTimestampIndexSnafu, RegionNotFoundSnafu, Result,
+    TableExistsSnafu,
 };
 use crate::manifest::TableManifest;
 use crate::metrics;
@@ -93,12 +90,21 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
 
     async fn create_table(
         &self,
-        ctx: &EngineContext,
+        _ctx: &EngineContext,
         request: CreateTableRequest,
     ) -> TableResult<TableRef> {
         let _timer = common_telemetry::timer!(metrics::MITO_CREATE_TABLE_ELAPSED);
-        self.inner
-            .create_table(ctx, request)
+
+        validate_create_table_request(&request)
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)?;
+
+        let mut procedure = CreateMitoTable::new(request, self.inner.clone())
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)?;
+
+        procedure
+            .engine_create_table()
             .await
             .map_err(BoxedError::new)
             .context(table_error::TableOperationSnafu)
@@ -345,148 +351,6 @@ fn validate_create_table_request(request: &CreateTableRequest) -> Result<()> {
 }
 
 impl<S: StorageEngine> MitoEngineInner<S> {
-    async fn create_table(
-        &self,
-        _ctx: &EngineContext,
-        request: CreateTableRequest,
-    ) -> Result<TableRef> {
-        let catalog_name = &request.catalog_name;
-        let schema_name = &request.schema_name;
-        let table_name = &request.table_name;
-        let table_ref = TableReference {
-            catalog: catalog_name,
-            schema: schema_name,
-            table: table_name,
-        };
-
-        validate_create_table_request(&request)?;
-
-        if let Some(table) = self.get_table(&table_ref) {
-            if request.create_if_not_exists {
-                return Ok(table);
-            } else {
-                return TableExistsSnafu {
-                    table_name: format_full_table_name(catalog_name, schema_name, table_name),
-                }
-                .fail();
-            }
-        }
-
-        let table_schema =
-            Arc::new(Schema::try_from(request.schema).context(InvalidRawSchemaSnafu)?);
-        let primary_key_indices = &request.primary_key_indices;
-        let (next_column_id, default_cf) = build_column_family(
-            INIT_COLUMN_ID,
-            table_name,
-            &table_schema,
-            primary_key_indices,
-        )?;
-        let (next_column_id, row_key) = build_row_key_desc(
-            next_column_id,
-            table_name,
-            &table_schema,
-            primary_key_indices,
-        )?;
-
-        let table_id = request.id;
-        let table_dir = table_dir(catalog_name, schema_name, table_id);
-        let mut regions = HashMap::with_capacity(request.region_numbers.len());
-
-        let _lock = self.table_mutex.lock(table_ref.to_string()).await;
-        // Checks again, read lock should be enough since we are guarded by the mutex.
-        if let Some(table) = self.get_table(&table_ref) {
-            return if request.create_if_not_exists {
-                Ok(table)
-            } else {
-                TableExistsSnafu { table_name }.fail()
-            };
-        }
-
-        for region_number in &request.region_numbers {
-            let region_id = region_id(table_id, *region_number);
-
-            let region_name = region_name(table_id, *region_number);
-            let region_descriptor = RegionDescriptorBuilder::default()
-                .id(region_id)
-                .name(&region_name)
-                .row_key(row_key.clone())
-                .compaction_time_window(request.table_options.compaction_time_window)
-                .default_cf(default_cf.clone())
-                .build()
-                .context(BuildRegionDescriptorSnafu {
-                    table_name,
-                    region_name,
-                })?;
-            let opts = CreateOptions {
-                parent_dir: table_dir.clone(),
-                write_buffer_size: request
-                    .table_options
-                    .write_buffer_size
-                    .map(|size| size.0 as usize),
-                ttl: request.table_options.ttl,
-                compaction_time_window: request.table_options.compaction_time_window,
-            };
-
-            let region = {
-                let _timer = common_telemetry::timer!(crate::metrics::MITO_CREATE_REGION_ELAPSED);
-                self.storage_engine
-                    .create_region(&StorageEngineContext::default(), region_descriptor, &opts)
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(error::CreateRegionSnafu)?
-            };
-            info!(
-                "Mito engine created region: {}, id: {}",
-                region.name(),
-                region.id()
-            );
-            regions.insert(*region_number, region);
-        }
-
-        let table_meta = TableMetaBuilder::default()
-            .schema(table_schema)
-            .engine(MITO_ENGINE)
-            .next_column_id(next_column_id)
-            .primary_key_indices(request.primary_key_indices.clone())
-            .options(request.table_options)
-            .region_numbers(request.region_numbers)
-            .build()
-            .context(error::BuildTableMetaSnafu { table_name })?;
-
-        let table_info = TableInfoBuilder::new(table_name.clone(), table_meta)
-            .ident(table_id)
-            .table_version(INIT_TABLE_VERSION)
-            .table_type(TableType::Base)
-            .catalog_name(catalog_name.to_string())
-            .schema_name(schema_name.to_string())
-            .desc(request.desc)
-            .build()
-            .context(error::BuildTableInfoSnafu { table_name })?;
-
-        let table = Arc::new(
-            MitoTable::create(
-                table_name,
-                &table_dir,
-                table_info,
-                regions,
-                self.object_store.clone(),
-            )
-            .await?,
-        );
-
-        logging::info!(
-            "Mito engine created table: {} in schema: {}, table_id: {}.",
-            table_name,
-            schema_name,
-            table_id
-        );
-
-        // already locked
-        self.tables.insert(table_ref.to_string(), table.clone());
-
-        Ok(table)
-    }
-
     async fn open_table(
         &self,
         _ctx: &EngineContext,
