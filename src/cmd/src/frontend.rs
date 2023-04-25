@@ -31,7 +31,7 @@ use servers::{auth, Mode};
 use snafu::ResultExt;
 
 use crate::error::{self, IllegalAuthConfigSnafu, Result};
-use crate::options::ConfigOptions;
+use crate::options::{ConfigOptions, TopLevelOptions};
 use crate::toml_loader;
 
 pub struct Instance {
@@ -65,12 +65,8 @@ impl Command {
         self.subcmd.build(opts).await
     }
 
-    pub fn load_options(
-        &self,
-        log_dir: Option<String>,
-        log_level: Option<String>,
-    ) -> Result<ConfigOptions> {
-        self.subcmd.load_options(log_dir, log_level)
+    pub fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<ConfigOptions> {
+        self.subcmd.load_options(top_level_opts)
     }
 }
 
@@ -86,13 +82,9 @@ impl SubCommand {
         }
     }
 
-    fn load_options(
-        &self,
-        log_dir: Option<String>,
-        log_level: Option<String>,
-    ) -> Result<ConfigOptions> {
+    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<ConfigOptions> {
         match self {
-            SubCommand::Start(cmd) => cmd.load_options(log_dir, log_level),
+            SubCommand::Start(cmd) => cmd.load_options(top_level_opts),
         }
     }
 }
@@ -130,21 +122,17 @@ pub struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(
-        &self,
-        log_dir: Option<String>,
-        log_level: Option<String>,
-    ) -> Result<ConfigOptions> {
+    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<ConfigOptions> {
         let mut opts: FrontendOptions = if let Some(path) = self.config_file.clone() {
             toml_loader::from_file!(&path)?
         } else {
             FrontendOptions::default()
         };
 
-        if let Some(dir) = log_dir {
+        if let Some(dir) = top_level_opts.log_dir {
             opts.logging.dir = dir;
         }
-        if let Some(level) = log_level {
+        if let Some(level) = top_level_opts.log_level {
             opts.logging.level = level;
         }
 
@@ -266,7 +254,9 @@ mod tests {
             disable_dashboard: Some(false),
         };
 
-        if let ConfigOptions::Frontend(opts) = command.load_options(None, None).unwrap() {
+        if let ConfigOptions::Frontend(opts) =
+            command.load_options(TopLevelOptions::default()).unwrap()
+        {
             assert_eq!(opts.http_options.as_ref().unwrap().addr, "127.0.0.1:1234");
             assert_eq!(opts.mysql_options.as_ref().unwrap().addr, "127.0.0.1:5678");
             assert_eq!(
@@ -336,7 +326,9 @@ mod tests {
             disable_dashboard: Some(false),
         };
 
-        if let ConfigOptions::Frontend(fe_opts) = command.load_options(None, None).unwrap() {
+        if let ConfigOptions::Frontend(fe_opts) =
+            command.load_options(TopLevelOptions::default()).unwrap()
+        {
             assert_eq!(Mode::Distributed, fe_opts.mode);
             assert_eq!(
                 "127.0.0.1:4000".to_string(),

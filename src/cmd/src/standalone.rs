@@ -40,7 +40,7 @@ use crate::error::{
     StartFrontendSnafu,
 };
 use crate::frontend::load_frontend_plugins;
-use crate::options::ConfigOptions;
+use crate::options::{ConfigOptions, TopLevelOptions};
 use crate::toml_loader;
 
 #[derive(Parser)]
@@ -58,12 +58,8 @@ impl Command {
         self.subcmd.build(fe_opts, dn_opts).await
     }
 
-    pub fn load_options(
-        &self,
-        log_dir: Option<String>,
-        log_level: Option<String>,
-    ) -> Result<ConfigOptions> {
-        self.subcmd.load_options(log_dir, log_level)
+    pub fn load_options(&self, top_level_options: TopLevelOptions) -> Result<ConfigOptions> {
+        self.subcmd.load_options(top_level_options)
     }
 }
 
@@ -79,13 +75,9 @@ impl SubCommand {
         }
     }
 
-    fn load_options(
-        &self,
-        log_dir: Option<String>,
-        log_level: Option<String>,
-    ) -> Result<ConfigOptions> {
+    fn load_options(&self, top_level_options: TopLevelOptions) -> Result<ConfigOptions> {
         match self {
-            SubCommand::Start(cmd) => cmd.load_options(log_level, log_dir),
+            SubCommand::Start(cmd) => cmd.load_options(top_level_options),
         }
     }
 }
@@ -223,11 +215,7 @@ struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(
-        &self,
-        log_dir: Option<String>,
-        log_level: Option<String>,
-    ) -> Result<ConfigOptions> {
+    fn load_options(&self, top_level_options: TopLevelOptions) -> Result<ConfigOptions> {
         let enable_memory_catalog = self.enable_memory_catalog;
         let config_file = self.config_file.clone();
         let mut opts: StandaloneOptions = if let Some(path) = config_file {
@@ -242,10 +230,10 @@ impl StartCommand {
         let mut logging_opts = opts.logging.clone();
         let dn_opts = Box::new(opts.datanode_options());
 
-        if let Some(dir) = log_dir {
+        if let Some(dir) = top_level_options.log_dir {
             logging_opts.dir = dir;
         }
-        if let Some(level) = log_level {
+        if let Some(level) = top_level_options.log_level {
             logging_opts.level = level;
         }
 
@@ -323,18 +311,6 @@ impl StartCommand {
     }
 
     async fn build(self, fe_opts: FrontendOptions, dn_opts: DatanodeOptions) -> Result<Instance> {
-        // let enable_memory_catalog = self.enable_memory_catalog;
-        // let config_file = self.config_file.clone();
-        // let fe_opts = FrontendOptions::try_from(self)?;
-        // let dn_opts: DatanodeOptions = {
-        //     let mut opts: StandaloneOptions = if let Some(path) = config_file {
-        //         toml_loader::from_file!(&path)?
-        //     } else {
-        //         StandaloneOptions::default()
-        //     };
-        //     opts.enable_memory_catalog = enable_memory_catalog;
-        //     opts.datanode_options()
-
         let plugins = Arc::new(load_frontend_plugins(&self.user_provider)?);
 
         info!(
@@ -472,7 +448,7 @@ mod tests {
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
         };
 
-        let opts = cmd.load_options(None, None).unwrap();
+        let opts = cmd.load_options(TopLevelOptions::default()).unwrap();
         if let ConfigOptions::Standalone(fe_opts, dn_opts, logging_opts) = opts {
             assert_eq!(Mode::Standalone, fe_opts.mode);
             assert_eq!(

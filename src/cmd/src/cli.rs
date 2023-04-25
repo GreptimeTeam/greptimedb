@@ -21,7 +21,7 @@ use common_telemetry::logging::LoggingOptions;
 pub use repl::Repl;
 
 use crate::error::Result;
-use crate::options::ConfigOptions;
+use crate::options::{ConfigOptions, TopLevelOptions};
 
 pub struct Instance {
     repl: Repl,
@@ -48,16 +48,12 @@ impl Command {
         self.cmd.build().await
     }
 
-    pub fn load_options(
-        &self,
-        log_dir: Option<String>,
-        log_level: Option<String>,
-    ) -> Result<ConfigOptions> {
+    pub fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<ConfigOptions> {
         let mut logging_opts = LoggingOptions::default();
-        if let Some(dir) = log_dir {
+        if let Some(dir) = top_level_opts.log_dir {
             logging_opts.dir = dir;
         }
-        if let Some(level) = log_level {
+        if let Some(level) = top_level_opts.log_level {
             logging_opts.level = level;
         }
         Ok(ConfigOptions::Cli(logging_opts))

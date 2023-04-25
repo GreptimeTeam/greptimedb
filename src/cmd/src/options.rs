@@ -35,3 +35,9 @@ impl ConfigOptions {
         }
     }
 }
+
+#[derive(Clone, Debug, Default)]
+pub struct TopLevelOptions {
+    pub log_dir: Option<String>,
+    pub log_level: Option<String>,
+}

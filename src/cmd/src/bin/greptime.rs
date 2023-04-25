@@ -18,7 +18,7 @@ use std::fmt;
 
 use clap::Parser;
 use cmd::error::Result;
-use cmd::options::ConfigOptions;
+use cmd::options::{ConfigOptions, TopLevelOptions};
 use cmd::{cli, datanode, frontend, metasrv, standalone};
 use common_telemetry::logging::{error, info};
 
@@ -68,12 +68,16 @@ impl Command {
         self.subcmd.build(opts).await
     }
 
-    fn load_options(
-        &self,
-        log_dir: Option<String>,
-        log_level: Option<String>,
-    ) -> Result<ConfigOptions> {
-        self.subcmd.load_options(log_dir, log_level)
+    fn load_options(&self) -> Result<ConfigOptions> {
+        let top_level_opts = self.top_level_options();
+        self.subcmd.load_options(top_level_opts)
+    }
+
+    fn top_level_options(&self) -> TopLevelOptions {
+        TopLevelOptions {
+            log_dir: self.log_dir.clone(),
+            log_level: self.log_level.clone(),
+        }
     }
 }
 
@@ -119,17 +123,13 @@ impl SubCommand {
         }
     }
 
-    fn load_options(
-        &self,
-        log_dir: Option<String>,
-        log_level: Option<String>,
-    ) -> Result<ConfigOptions> {
+    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<ConfigOptions> {
         match self {
-            SubCommand::Datanode(cmd) => cmd.load_options(log_dir, log_level),
-            SubCommand::Frontend(cmd) => cmd.load_options(log_dir, log_level),
-            SubCommand::Metasrv(cmd) => cmd.load_options(log_dir, log_level),
-            SubCommand::Standalone(cmd) => cmd.load_options(log_dir, log_level),
-            SubCommand::Cli(cmd) => cmd.load_options(log_dir, log_level),
+            SubCommand::Datanode(cmd) => cmd.load_options(top_level_opts),
+            SubCommand::Frontend(cmd) => cmd.load_options(top_level_opts),
+            SubCommand::Metasrv(cmd) => cmd.load_options(top_level_opts),
+            SubCommand::Standalone(cmd) => cmd.load_options(top_level_opts),
+            SubCommand::Cli(cmd) => cmd.load_options(top_level_opts),
         }
     }
 }
@@ -169,10 +169,8 @@ async fn main() -> Result<()> {
     // TODO(dennis):
     // 1. adds ip/port to app
     let app_name = &cmd.subcmd.to_string();
-    let log_dir = cmd.log_dir.clone();
-    let log_level = cmd.log_level.clone();
 
-    let opts = cmd.load_options(log_dir, log_level)?;
+    let opts = cmd.load_options()?;
     let logging_opts = opts.logging_options();
 
     common_telemetry::set_panic_hook();
