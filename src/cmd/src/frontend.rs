@@ -108,7 +108,7 @@ pub struct StartCommand {
     #[clap(long)]
     user_provider: Option<String>,
     #[clap(long)]
-    disable_dashboard: bool,
+    disable_dashboard: Option<bool>,
 }
 
 impl StartCommand {
@@ -153,11 +153,14 @@ impl TryFrom<StartCommand> for FrontendOptions {
 
         if let Some(addr) = cmd.http_addr {
             opts.http_options
-                .get_or_insert_with(|| HttpOptions {
-                    disable_dashboard: cmd.disable_dashboard,
-                    ..Default::default()
-                })
+                .get_or_insert_with(|| Default::default())
                 .addr = addr;
+        }
+
+        if let Some(disable_dashboard) = cmd.disable_dashboard {
+            opts.http_options
+                .get_or_insert_with(|| Default::default())
+                .disable_dashboard = disable_dashboard;
         }
 
         if let Some(addr) = cmd.grpc_addr {
