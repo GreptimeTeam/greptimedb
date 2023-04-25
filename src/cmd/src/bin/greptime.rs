@@ -94,9 +94,8 @@ enum SubCommand {
 impl SubCommand {
     async fn build(self, opts: ConfigOptions) -> Result<Application> {
         match (self, opts) {
-
             (SubCommand::Datanode(cmd), ConfigOptions::Datanode(dn_opts)) => {
-                let app = cmd.build(dn_opts).await?;
+                let app = cmd.build(*dn_opts).await?;
                 Ok(Application::Datanode(app))
             }
             (SubCommand::Frontend(cmd), ConfigOptions::Frontend(fe_opts)) => {
@@ -108,7 +107,7 @@ impl SubCommand {
                 Ok(Application::Metasrv(app))
             }
             (SubCommand::Standalone(cmd), ConfigOptions::Standalone(fe_opts, dn_opts, _)) => {
-                let app = cmd.build(fe_opts, dn_opts).await?;
+                let app = cmd.build(fe_opts, *dn_opts).await?;
                 Ok(Application::Standalone(app))
             }
             (SubCommand::Cli(cmd), ConfigOptions::Cli(_)) => {
@@ -116,7 +115,7 @@ impl SubCommand {
                 Ok(Application::Cli(app))
             }
 
-            _ => unreachable!()
+            _ => unreachable!(),
         }
     }
 
@@ -178,12 +177,7 @@ async fn main() -> Result<()> {
 
     common_telemetry::set_panic_hook();
     common_telemetry::init_default_metrics_recorder();
-    let _guard = common_telemetry::init_global_logging(
-        app_name,
-        &logging_opts.dir,
-        &logging_opts.level,
-        logging_opts.enable_jaeger_tracing,
-    );
+    let _guard = common_telemetry::init_global_logging(app_name, logging_opts);
 
     let mut app = cmd.build(opts).await?;
 
