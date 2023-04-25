@@ -26,7 +26,8 @@ use common_catalog::consts::{
 use common_runtime::Builder as RuntimeBuilder;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datanode::datanode::{
-    DatanodeOptions, FileConfig, ObjectStoreConfig, OssConfig, S3Config, StorageConfig, WalConfig,
+    DatanodeOptions, FileConfig, ObjectStoreConfig, OssConfig, ProcedureConfig, S3Config,
+    StorageConfig, WalConfig,
 };
 use datanode::error::{CreateTableSnafu, Result};
 use datanode::instance::Instance;
@@ -169,6 +170,7 @@ enum TempDirGuard {
 pub struct TestGuard {
     _wal_tmp_dir: TempDir,
     data_tmp_dir: Option<TempDirGuard>,
+    _procedure_tmp_dir: TempDir,
 }
 
 impl TestGuard {
@@ -187,6 +189,7 @@ pub fn create_tmp_dir_and_datanode_opts(
     name: &str,
 ) -> (DatanodeOptions, TestGuard) {
     let wal_tmp_dir = create_temp_dir(&format!("gt_wal_{name}"));
+    let procedure_tmp_dir = create_temp_dir(&format!("gt_procedure_{name}"));
 
     let (store, data_tmp_dir) = get_test_store_config(&store_type, name);
 
@@ -200,6 +203,9 @@ pub fn create_tmp_dir_and_datanode_opts(
             ..Default::default()
         },
         mode: Mode::Standalone,
+        procedure: ProcedureConfig::from_file_path(
+            procedure_tmp_dir.path().to_str().unwrap().to_string(),
+        ),
         ..Default::default()
     };
     (
@@ -207,6 +213,7 @@ pub fn create_tmp_dir_and_datanode_opts(
         TestGuard {
             _wal_tmp_dir: wal_tmp_dir,
             data_tmp_dir,
+            _procedure_tmp_dir: procedure_tmp_dir,
         },
     )
 }

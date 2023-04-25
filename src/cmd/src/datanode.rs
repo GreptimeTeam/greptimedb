@@ -159,7 +159,7 @@ impl TryFrom<StartCommand> for DatanodeOptions {
             opts.wal.dir = wal_dir;
         }
         if let Some(procedure_dir) = cmd.procedure_dir {
-            opts.procedure = Some(ProcedureConfig::from_file_path(procedure_dir));
+            opts.procedure = ProcedureConfig::from_file_path(procedure_dir);
         }
         if let Some(http_addr) = cmd.http_addr {
             opts.http_opts.addr = http_addr

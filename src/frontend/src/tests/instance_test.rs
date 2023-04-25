@@ -29,7 +29,7 @@ use crate::error::{Error, Result};
 use crate::instance::Instance;
 use crate::tests::test_util::{
     both_instances_cases, check_output_stream, check_unordered_output_stream, distributed,
-    standalone, standalone_instance_case, MockInstance,
+    get_data_dir, standalone, standalone_instance_case, MockInstance,
 };
 
 #[apply(both_instances_cases)]
@@ -510,6 +510,179 @@ async fn test_execute_external_create_without_ts_type(instance: Arc<dyn MockInst
     )
     .await;
     assert!(matches!(output, Output::AffectedRows(0)));
+}
+
+#[apply(both_instances_cases)]
+async fn test_execute_query_external_table_csv(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+    let format = "csv";
+    let location = get_data_dir("../../tests/data/csv/various_type.csv")
+        .canonicalize()
+        .unwrap()
+        .display()
+        .to_string();
+
+    let table_name = "various_type_csv";
+
+    let output = execute_sql(
+        &instance,
+        &format!(
+            r#"create external table {table_name} with (location='{location}', format='{format}');"#,
+        ),
+    )
+    .await;
+    assert!(matches!(output, Output::AffectedRows(0)));
+
+    let output = execute_sql(&instance, &format!("desc table {table_name};")).await;
+    let expect = "\
++------------+-----------------+------+---------+---------------+
+| Field      | Type            | Null | Default | Semantic Type |
++------------+-----------------+------+---------+---------------+
+| c_int      | Int64           | YES  |         | FIELD         |
+| c_float    | Float64         | YES  |         | FIELD         |
+| c_string   | Float64         | YES  |         | FIELD         |
+| c_bool     | Boolean         | YES  |         | FIELD         |
+| c_date     | Date            | YES  |         | FIELD         |
+| c_datetime | TimestampSecond | YES  |         | FIELD         |
++------------+-----------------+------+---------+---------------+";
+    check_output_stream(output, expect).await;
+
+    let output = execute_sql(&instance, &format!("select * from {table_name};")).await;
+    let expect = "\
++-------+-----------+----------+--------+------------+---------------------+
+| c_int | c_float   | c_string | c_bool | c_date     | c_datetime          |
++-------+-----------+----------+--------+------------+---------------------+
+| 1     | 1.1       | 1.11     | true   | 1970-01-01 | 1970-01-01T00:00:00 |
+| 2     | 2.2       | 2.22     | true   | 2020-11-08 | 2020-11-08T01:00:00 |
+| 3     |           | 3.33     | true   | 1969-12-31 | 1969-11-08T02:00:00 |
+| 4     | 4.4       |          | false  |            |                     |
+| 5     | 6.6       |          | false  | 1990-01-01 | 1990-01-01T03:00:00 |
+| 4     | 4000000.0 |          | false  |            |                     |
+| 4     | 4.0e-6    |          | false  |            |                     |
++-------+-----------+----------+--------+------------+---------------------+";
+    check_output_stream(output, expect).await;
+}
+
+#[apply(both_instances_cases)]
+async fn test_execute_query_external_table_json(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+    let format = "json";
+    let location = get_data_dir("../../tests/data/json/various_type.json")
+        .canonicalize()
+        .unwrap()
+        .display()
+        .to_string();
+
+    let table_name = "various_type_json";
+
+    let output = execute_sql(
+        &instance,
+        &format!(
+            r#"create external table {table_name} with (location='{location}', format='{format}');"#,
+        ),
+    )
+    .await;
+    assert!(matches!(output, Output::AffectedRows(0)));
+
+    let output = execute_sql(&instance, &format!("desc table {table_name};")).await;
+    let expect = "\
++-------+---------+------+---------+---------------+
+| Field | Type    | Null | Default | Semantic Type |
++-------+---------+------+---------+---------------+
+| a     | Int64   | YES  |         | FIELD         |
+| b     | Float64 | YES  |         | FIELD         |
+| c     | Boolean | YES  |         | FIELD         |
+| d     | String  | YES  |         | FIELD         |
+| e     | Int64   | YES  |         | FIELD         |
+| f     | String  | YES  |         | FIELD         |
+| g     | String  | YES  |         | FIELD         |
++-------+---------+------+---------+---------------+";
+    check_output_stream(output, expect).await;
+
+    let output = execute_sql(&instance, &format!("select * from {table_name};")).await;
+    let expect = "\
++-----------------+------+-------+------+------------+----------------+-------------------------+
+| a               | b    | c     | d    | e          | f              | g                       |
++-----------------+------+-------+------+------------+----------------+-------------------------+
+| 1               | 2.0  | false | 4    | 1681319393 | 1.02           | 2012-04-23T18:25:43.511 |
+| -10             | -3.5 | true  | 4    | 1681356393 | -0.3           | 2016-04-23T18:25:43.511 |
+| 2               | 0.6  | false | text | 1681329393 | 1377.223       |                         |
+| 1               | 2.0  | false | 4    |            | 1337.009       |                         |
+| 7               | -3.5 | true  | 4    |            | 1              |                         |
+| 1               | 0.6  | false | text |            | 1338           | 2018-10-23T18:33:16.481 |
+| 1               | 2.0  | false | 4    |            | 12345829100000 |                         |
+| 5               | -3.5 | true  | 4    |            | 99999999.99    |                         |
+| 1               | 0.6  | false | text |            | 1              |                         |
+| 1               | 2.0  | false | 4    |            | 1              |                         |
+| 1               | -3.5 | true  | 4    |            | 1              |                         |
+| 100000000000000 | 0.6  | false | text |            | 1              |                         |
++-----------------+------+-------+------+------------+----------------+-------------------------+";
+    check_output_stream(output, expect).await;
+}
+
+#[apply(both_instances_cases)]
+async fn test_execute_query_external_table_json_with_schame(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+    let format = "json";
+    let location = get_data_dir("../../tests/data/json/various_type.json")
+        .canonicalize()
+        .unwrap()
+        .display()
+        .to_string();
+
+    let table_name = "various_type_json_with_schema";
+
+    let output = execute_sql(
+        &instance,
+        &format!(
+            r#"CREATE EXTERNAL TABLE {table_name} (
+                a BIGINT NULL,
+                b DOUBLE NULL,
+                c BOOLEAN NULL,
+                d STRING NULL,
+                e TIMESTAMP(0) NULL,
+                f DOUBLE NULL,
+                g TIMESTAMP(0) NULL,
+              ) WITH (location='{location}', format='{format}');"#,
+        ),
+    )
+    .await;
+    assert!(matches!(output, Output::AffectedRows(0)));
+
+    let output = execute_sql(&instance, &format!("desc table {table_name};")).await;
+    let expect = "\
++-------+-----------------+------+---------+---------------+
+| Field | Type            | Null | Default | Semantic Type |
++-------+-----------------+------+---------+---------------+
+| a     | Int64           | YES  |         | FIELD         |
+| b     | Float64         | YES  |         | FIELD         |
+| c     | Boolean         | YES  |         | FIELD         |
+| d     | String          | YES  |         | FIELD         |
+| e     | TimestampSecond | YES  |         | FIELD         |
+| f     | Float64         | YES  |         | FIELD         |
+| g     | TimestampSecond | YES  |         | FIELD         |
++-------+-----------------+------+---------+---------------+";
+    check_output_stream(output, expect).await;
+
+    let output = execute_sql(&instance, &format!("select * from {table_name};")).await;
+    let expect = "\
++-----------------+------+-------+------+---------------------+---------------+---------------------+
+| a               | b    | c     | d    | e                   | f             | g                   |
++-----------------+------+-------+------+---------------------+---------------+---------------------+
+| 1               | 2.0  | false | 4    | 2023-04-12T17:09:53 | 1.02          | 2012-04-23T18:25:43 |
+| -10             | -3.5 | true  | 4    | 2023-04-13T03:26:33 | -0.3          | 2016-04-23T18:25:43 |
+| 2               | 0.6  | false | text | 2023-04-12T19:56:33 | 1377.223      |                     |
+| 1               | 2.0  | false | 4    |                     | 1337.009      |                     |
+| 7               | -3.5 | true  | 4    |                     | 1.0           |                     |
+| 1               | 0.6  | false | text |                     | 1338.0        | 2018-10-23T18:33:16 |
+| 1               | 2.0  | false | 4    |                     | 1.23458291e13 |                     |
+| 5               | -3.5 | true  | 4    |                     | 99999999.99   |                     |
+| 1               | 0.6  | false | text |                     | 1.0           |                     |
+| 1               | 2.0  | false | 4    |                     | 1.0           |                     |
+| 1               | -3.5 | true  | 4    |                     | 1.0           |                     |
+| 100000000000000 | 0.6  | false | text |                     | 1.0           |                     |
++-----------------+------+-------+------+---------------------+---------------+---------------------+";
+    check_output_stream(output, expect).await;
 }
 
 #[apply(standalone_instance_case)]

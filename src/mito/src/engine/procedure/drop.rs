@@ -18,21 +18,20 @@ use async_trait::async_trait;
 use common_procedure::error::{Error, FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{Context, LockKey, Procedure, ProcedureManager, Result, Status};
 use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use store_api::storage::StorageEngine;
 use table::engine::TableReference;
 use table::requests::DropTableRequest;
 use table::Table;
 
 use crate::engine::MitoEngineInner;
-use crate::error::TableNotFoundSnafu;
 use crate::table::MitoTable;
 
 /// Procedure to drop a [MitoTable].
 pub(crate) struct DropMitoTable<S: StorageEngine> {
     data: DropTableData,
     engine_inner: Arc<MitoEngineInner<S>>,
-    table: Arc<MitoTable<S::Region>>,
+    table: Option<Arc<MitoTable<S::Region>>>,
 }
 
 #[async_trait]
@@ -55,7 +54,8 @@ impl<S: StorageEngine> Procedure for DropMitoTable<S> {
 
     fn lock_key(&self) -> LockKey {
         let table_ref = self.data.table_ref();
-        let info = self.table.table_info();
+        let Some(table) = &self.table else { return LockKey::default() };
+        let info = table.table_info();
         let keys = info
             .meta
             .region_numbers
@@ -78,12 +78,7 @@ impl<S: StorageEngine> DropMitoTable<S> {
             request,
         };
         let table_ref = data.table_ref();
-        let table =
-            engine_inner
-                .get_mito_table(&table_ref)
-                .with_context(|| TableNotFoundSnafu {
-                    table_name: table_ref.to_string(),
-                })?;
+        let table = engine_inner.get_mito_table(&table_ref);
 
         Ok(DropMitoTable {
             data,
@@ -114,12 +109,7 @@ impl<S: StorageEngine> DropMitoTable<S> {
     fn from_json(json: &str, engine_inner: Arc<MitoEngineInner<S>>) -> Result<Self> {
         let data: DropTableData = serde_json::from_str(json).context(FromJsonSnafu)?;
         let table_ref = data.table_ref();
-        let table =
-            engine_inner
-                .get_mito_table(&table_ref)
-                .with_context(|| TableNotFoundSnafu {
-                    table_name: table_ref.to_string(),
-                })?;
+        let table = engine_inner.get_mito_table(&table_ref);
 
         Ok(DropMitoTable {
             data,
@@ -148,7 +138,9 @@ impl<S: StorageEngine> DropMitoTable<S> {
         self.engine_inner.tables.remove(&table_ref.to_string());
 
         // Close the table to close all regions. Closing a region is idempotent.
-        self.table.close().await.map_err(Error::from_error_ext)?;
+        if let Some(table) = &self.table {
+            table.close().await.map_err(Error::from_error_ext)?;
+        }
 
         // TODO(yingwen): Currently, DROP TABLE doesn't remove data. We can
         // write a drop meta update to the table and remove all files in the

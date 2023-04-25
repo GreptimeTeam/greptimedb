@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::{Buf, Bytes, BytesMut};
-use datafusion::catalog::catalog::CatalogList;
+use catalog::CatalogManagerRef;
 use datafusion::prelude::SessionContext;
 use datafusion_expr::LogicalPlan;
 use datafusion_substrait::logical_plan::consumer::from_substrait_plan;

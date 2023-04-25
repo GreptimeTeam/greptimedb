@@ -127,9 +127,9 @@ fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) 
             ..Default::default()
         },
         mode: Mode::Standalone,
-        procedure: Some(ProcedureConfig::from_file_path(
+        procedure: ProcedureConfig::from_file_path(
             procedure_tmp_dir.path().to_str().unwrap().to_string(),
-        )),
+        ),
         ..Default::default()
     };
     (
@@ -224,9 +224,9 @@ async fn create_distributed_datanode(
             ..Default::default()
         },
         mode: Mode::Distributed,
-        procedure: Some(ProcedureConfig::from_file_path(
+        procedure: ProcedureConfig::from_file_path(
             procedure_tmp_dir.path().to_str().unwrap().to_string(),
-        )),
+        ),
         ..Default::default()
     };
 
