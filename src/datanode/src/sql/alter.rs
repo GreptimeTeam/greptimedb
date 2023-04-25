@@ -12,14 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use catalog::RenameTableRequest;
-use common_procedure::{watcher, ProcedureManagerRef, ProcedureWithId};
+use common_procedure::{watcher, ProcedureWithId};
 use common_query::Output;
 use common_telemetry::logging::info;
 use snafu::prelude::*;
 use sql::statements::alter::{AlterTable, AlterTableOperation};
 use sql::statements::column_def_to_schema;
-use table::engine::{EngineContext, TableReference};
+use table::engine::TableReference;
 use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest};
 use table_procedure::AlterTableProcedure;
 
@@ -27,62 +26,7 @@ use crate::error::{self, Result};
 use crate::sql::SqlHandler;
 
 impl SqlHandler {
-    pub(crate) async fn alter(&self, req: AlterTableRequest) -> Result<Output> {
-        if let Some(procedure_manager) = &self.procedure_manager {
-            return self.alter_table_by_procedure(procedure_manager, req).await;
-        }
-
-        let ctx = EngineContext {};
-        let table_name = req.table_name.clone();
-        let table_ref = TableReference {
-            catalog: &req.catalog_name,
-            schema: &req.schema_name,
-            table: &table_name,
-        };
-
-        let full_table_name = table_ref.to_string();
-
-        // fetches table via catalog
-        let table = self.get_table(&table_ref).await?;
-        // checks the table engine exist
-        let table_engine = self.table_engine(table)?;
-        ensure!(
-            table_engine.table_exists(&ctx, &table_ref),
-            error::TableNotFoundSnafu {
-                table_name: &full_table_name,
-            }
-        );
-        let is_rename = req.is_rename_table();
-
-        let table = table_engine
-            .alter_table(&ctx, req)
-            .await
-            .context(error::AlterTableSnafu {
-                table_name: full_table_name,
-            })?;
-        if is_rename {
-            let table_info = &table.table_info();
-            let rename_table_req = RenameTableRequest {
-                catalog: table_info.catalog_name.clone(),
-                schema: table_info.schema_name.clone(),
-                table_name,
-                new_table_name: table_info.name.clone(),
-                table_id: table_info.ident.table_id,
-            };
-            self.catalog_manager
-                .rename_table(rename_table_req)
-                .await
-                .context(error::RenameTableSnafu)?;
-        }
-        // Tried in MySQL, it really prints "Affected Rows: 0".
-        Ok(Output::AffectedRows(0))
-    }
-
-    pub(crate) async fn alter_table_by_procedure(
-        &self,
-        procedure_manager: &ProcedureManagerRef,
-        req: AlterTableRequest,
-    ) -> Result<Output> {
+    pub(crate) async fn alter_table(&self, req: AlterTableRequest) -> Result<Output> {
         let table_name = req.table_name.clone();
         let table_ref = TableReference {
             catalog: &req.catalog_name,
@@ -100,7 +44,8 @@ impl SqlHandler {
 
         info!("Alter table {} by procedure {}", table_name, procedure_id);
 
-        let mut watcher = procedure_manager
+        let mut watcher = self
+            .procedure_manager
             .submit(procedure_with_id)
             .await
             .context(error::SubmitProcedureSnafu { procedure_id })?;
@@ -108,11 +53,11 @@ impl SqlHandler {
         watcher::wait(&mut watcher)
             .await
             .context(error::WaitProcedureSnafu { procedure_id })?;
+        // Tried in MySQL, it really prints "Affected Rows: 0".
         Ok(Output::AffectedRows(0))
     }
 
     pub(crate) fn alter_to_request(
-        &self,
         alter_table: AlterTable,
         table_ref: TableReference,
     ) -> Result<AlterTableRequest> {
@@ -160,7 +105,7 @@ mod tests {
     use sql::statements::statement::Statement;
 
     use super::*;
-    use crate::tests::test_util::{create_mock_sql_handler, MockInstance};
+    use crate::tests::test_util::MockInstance;
 
     fn parse_sql(sql: &str) -> AlterTable {
         let mut stmt = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
@@ -175,14 +120,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_alter_to_request_with_adding_column() {
-        let handler = create_mock_sql_handler().await;
         let alter_table = parse_sql("ALTER TABLE my_metric_1 ADD tagk_i STRING Null;");
-        let req = handler
-            .alter_to_request(
-                alter_table,
-                TableReference::full("greptime", "public", "my_metric_1"),
-            )
-            .unwrap();
+        let req = SqlHandler::alter_to_request(
+            alter_table,
+            TableReference::full("greptime", "public", "my_metric_1"),
+        )
+        .unwrap();
         assert_eq!(req.catalog_name, "greptime");
         assert_eq!(req.schema_name, "public");
         assert_eq!(req.table_name, "my_metric_1");
@@ -203,14 +146,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_alter_to_request_with_renaming_table() {
-        let handler = create_mock_sql_handler().await;
         let alter_table = parse_sql("ALTER TABLE test_table RENAME table_t;");
-        let req = handler
-            .alter_to_request(
-                alter_table,
-                TableReference::full("greptime", "public", "test_table"),
-            )
-            .unwrap();
+        let req = SqlHandler::alter_to_request(
+            alter_table,
+            TableReference::full("greptime", "public", "test_table"),
+        )
+        .unwrap();
         assert_eq!(req.catalog_name, "greptime");
         assert_eq!(req.schema_name, "public");
         assert_eq!(req.table_name, "test_table");
@@ -228,7 +169,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_alter_table_by_procedure() {
-        let instance = MockInstance::with_procedure_enabled("alter_table_by_procedure").await;
+        let instance = MockInstance::new("alter_table_by_procedure").await;
 
         // Create table first.
         let sql = r#"create table test_alter(

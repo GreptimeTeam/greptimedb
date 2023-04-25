@@ -81,7 +81,7 @@ pub struct StandaloneOptions {
     pub prom_options: Option<PromOptions>,
     pub wal: WalConfig,
     pub storage: StorageConfig,
-    pub procedure: Option<ProcedureConfig>,
+    pub procedure: ProcedureConfig,
 }
 
 impl Default for StandaloneOptions {
@@ -99,7 +99,7 @@ impl Default for StandaloneOptions {
             prom_options: Some(PromOptions::default()),
             wal: WalConfig::default(),
             storage: StorageConfig::default(),
-            procedure: None,
+            procedure: ProcedureConfig::default(),
         }
     }
 }

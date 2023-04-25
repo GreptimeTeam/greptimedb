@@ -106,7 +106,7 @@ pub enum Error {
     #[snafu(display("Table `{}` already exists", table))]
     TableExists { table: String, location: Location },
 
-    #[snafu(display("Table `{}` not exist", table))]
+    #[snafu(display("Table not found: {}", table))]
     TableNotExist { table: String, location: Location },
 
     #[snafu(display("Schema {} already exists", schema))]

@@ -51,14 +51,14 @@ pub enum SqlRequest {
 pub struct SqlHandler {
     table_engine_manager: TableEngineManagerRef,
     catalog_manager: CatalogManagerRef,
-    procedure_manager: Option<ProcedureManagerRef>,
+    procedure_manager: ProcedureManagerRef,
 }
 
 impl SqlHandler {
     pub fn new(
         table_engine_manager: TableEngineManagerRef,
         catalog_manager: CatalogManagerRef,
-        procedure_manager: Option<ProcedureManagerRef>,
+        procedure_manager: ProcedureManagerRef,
     ) -> Self {
         Self {
             table_engine_manager,
@@ -75,7 +75,7 @@ impl SqlHandler {
         let result = match request {
             SqlRequest::CreateTable(req) => self.create_table(req).await,
             SqlRequest::CreateDatabase(req) => self.create_database(req, query_ctx.clone()).await,
-            SqlRequest::Alter(req) => self.alter(req).await,
+            SqlRequest::Alter(req) => self.alter_table(req).await,
             SqlRequest::DropTable(req) => self.drop_table(req).await,
             SqlRequest::FlushTable(req) => self.flush_table(req).await,
         };

@@ -81,7 +81,7 @@ Affected Rows: 1
 
 DROP TABLE hello;
 
-Error: 4001(TableNotFound), Table `greptime.test_public_schema.hello` not exist
+Error: 4001(TableNotFound), Table not found: greptime.test_public_schema.hello
 
 SHOW TABLES FROM test_public_schema;
 
@@ -105,7 +105,7 @@ Error: 1001(Unsupported), SQL statement is not supported:  DROP SCHEMA test_publ
 
 SELECT * FROM test_public_schema.hello;
 
-Error: 4001(TableNotFound), Table `greptime.test_public_schema.hello` not exist
+Error: 4001(TableNotFound), Table not found: greptime.test_public_schema.hello
 
 USE public;
 

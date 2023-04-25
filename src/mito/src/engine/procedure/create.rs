@@ -290,6 +290,7 @@ impl<S: StorageEngine> CreateMitoTable<S> {
             .engine(engine::MITO_ENGINE)
             .next_column_id(next_column_id)
             .primary_key_indices(self.data.request.primary_key_indices.clone())
+            .options(self.data.request.table_options.clone())
             .region_numbers(self.data.request.region_numbers.clone())
             .build()
             .context(BuildTableMetaSnafu {

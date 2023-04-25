@@ -237,7 +237,7 @@ pub struct DatanodeOptions {
     pub meta_client_options: Option<MetaClientOptions>,
     pub wal: WalConfig,
     pub storage: StorageConfig,
-    pub procedure: Option<ProcedureConfig>,
+    pub procedure: ProcedureConfig,
 }
 
 impl Default for DatanodeOptions {
@@ -255,7 +255,7 @@ impl Default for DatanodeOptions {
             meta_client_options: None,
             wal: WalConfig::default(),
             storage: StorageConfig::default(),
-            procedure: None,
+            procedure: ProcedureConfig::default(),
         }
     }
 }
