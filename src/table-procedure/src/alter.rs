@@ -137,7 +137,7 @@ impl AlterTableProcedure {
         let request = &self.data.request;
         let catalog = self
             .catalog_manager
-            .catalog(&request.catalog_name)
+            .catalog_async(&request.catalog_name)
             .await
             .context(AccessCatalogSnafu)?
             .context(CatalogNotFoundSnafu {
@@ -145,6 +145,7 @@ impl AlterTableProcedure {
             })?;
         let schema = catalog
             .schema(&request.schema_name)
+            .await
             .context(AccessCatalogSnafu)?
             .context(SchemaNotFoundSnafu {
                 name: &request.schema_name,

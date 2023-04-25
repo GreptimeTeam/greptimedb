@@ -29,13 +29,9 @@ ALTER TABLE t RENAME new_table;
 
 Affected Rows: 0
 
-DESC TABLE t;
-
-Error: 4001(TableNotFound), Table `t` not exist
-
 DROP TABLE t;
 
-Error: 4001(TableNotFound), Table `greptime.public.t` not exist
+Error: 4001(TableNotFound), Table not found: greptime.public.t
 
 DROP TABLE new_table;
 

@@ -22,6 +22,7 @@ use api::v1::{CreateDatabaseExpr, DdlRequest, DeleteRequest, InsertRequest};
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_query::Output;
+use common_telemetry::info;
 use datafusion::catalog::catalog::{
     CatalogList, CatalogProvider, MemoryCatalogList, MemoryCatalogProvider,
 };
@@ -252,6 +253,7 @@ impl SchemaProvider for DummySchemaProvider {
     }
 
     async fn table(&self, name: &str) -> Option<Arc<dyn TableProvider>> {
+        info!("DummySchemaProvider table: {}", name);
         self.catalog_manager
             .table(&self.catalog, &self.schema, name)
             .await

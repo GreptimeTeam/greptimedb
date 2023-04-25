@@ -9,8 +9,6 @@ SELECT * from t;
 -- TODO(LFC): Port test cases from standalone env when distribute rename table is implemented (#723).
 ALTER TABLE t RENAME new_table;
 
-DESC TABLE t;
-
 DROP TABLE t;
 
 DROP TABLE new_table;

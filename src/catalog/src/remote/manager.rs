@@ -760,40 +760,37 @@ impl SchemaProvider for RemoteSchemaProvider {
 
     async fn table(&self, name: &str) -> Result<Option<TableRef>> {
         let key = self.build_regional_table_key(name).to_string();
-        info!("Try get table {}", name);
-        let table_opt =
-            self.backend
-                .get(key.as_bytes())
-                .await?
-                .map(|Kv(_, v)| {
-                    // TODO(hl): we should put engine info in table regional value
-                    // so that here we can use correct engine name
-                    let TableRegionalValue { .. } =
-                        TableRegionalValue::parse(String::from_utf8_lossy(&v))
-                            .context(InvalidCatalogValueSnafu)?;
+        let table_opt = self
+            .backend
+            .get(key.as_bytes())
+            .await?
+            .map(|Kv(_, v)| {
+                let TableRegionalValue { engine_name, .. } =
+                    TableRegionalValue::parse(String::from_utf8_lossy(&v))
+                        .context(InvalidCatalogValueSnafu)?;
 
-                    let reference = TableReference {
-                        catalog: &self.catalog_name,
-                        schema: &self.schema_name,
-                        table: name,
-                    };
+                let reference = TableReference {
+                    catalog: &self.catalog_name,
+                    schema: &self.schema_name,
+                    table: name,
+                };
 
-                    let engine = self.engine_manager.engine(MITO_ENGINE).context(
-                        TableEngineNotFoundSnafu {
-                            engine_name: MITO_ENGINE,
-                        },
-                    )?;
+                let engine_name = engine_name.as_deref().unwrap_or(MITO_ENGINE);
+                let engine = self
+                    .engine_manager
+                    .engine(engine_name)
+                    .context(TableEngineNotFoundSnafu { engine_name })?;
 
-                    let table = engine
-                        .get_table(&EngineContext {}, &reference)
-                        .with_context(|_| OpenTableSnafu {
-                            table_info: reference.to_string(),
-                        })?;
+                let table = engine
+                    .get_table(&EngineContext {}, &reference)
+                    .with_context(|_| OpenTableSnafu {
+                        table_info: reference.to_string(),
+                    })?;
 
-                    Ok(table)
-                })
-                .transpose()?
-                .flatten();
+                Ok(table)
+            })
+            .transpose()?
+            .flatten();
 
         Ok(table_opt)
     }
@@ -804,6 +801,7 @@ impl SchemaProvider for RemoteSchemaProvider {
         let table_value = TableRegionalValue {
             version: table_version,
             regions_ids: table.table_info().meta.region_numbers.clone(),
+            engine_name: Some(table_info.meta.engine.clone()),
         };
         let table_key = self.build_regional_table_key(&name).to_string();
         self.backend
