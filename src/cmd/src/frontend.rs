@@ -26,7 +26,6 @@ use frontend::postgres::PostgresOptions;
 use frontend::prom::PromOptions;
 use meta_client::MetaClientOptions;
 use servers::auth::UserProviderRef;
-use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
 use servers::{auth, Mode};
 use snafu::ResultExt;
@@ -152,14 +151,12 @@ impl TryFrom<StartCommand> for FrontendOptions {
         let tls_option = TlsOption::new(cmd.tls_mode, cmd.tls_cert_path, cmd.tls_key_path);
 
         if let Some(addr) = cmd.http_addr {
-            opts.http_options
-                .get_or_insert_with(|| Default::default())
-                .addr = addr;
+            opts.http_options.get_or_insert_with(Default::default).addr = addr;
         }
 
         if let Some(disable_dashboard) = cmd.disable_dashboard {
             opts.http_options
-                .get_or_insert_with(|| Default::default())
+                .get_or_insert_with(Default::default)
                 .disable_dashboard = disable_dashboard;
         }
 
@@ -236,7 +233,7 @@ mod tests {
             tls_cert_path: None,
             tls_key_path: None,
             user_provider: None,
-            disable_dashboard: false,
+            disable_dashboard: Some(false),
         };
 
         let opts: FrontendOptions = command.try_into().unwrap();
@@ -299,7 +296,7 @@ mod tests {
             tls_cert_path: None,
             tls_key_path: None,
             user_provider: None,
-            disable_dashboard: false,
+            disable_dashboard: Some(false),
         };
 
         let fe_opts = FrontendOptions::try_from(command).unwrap();
@@ -330,7 +327,7 @@ mod tests {
             tls_cert_path: None,
             tls_key_path: None,
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
-            disable_dashboard: false,
+            disable_dashboard: Some(false),
         };
 
         let plugins = load_frontend_plugins(&command.user_provider);
