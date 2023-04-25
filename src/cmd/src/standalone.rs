@@ -36,8 +36,8 @@ use servers::Mode;
 use snafu::ResultExt;
 
 use crate::error::{
-    Error, IllegalConfigSnafu, Result, ShutdownDatanodeSnafu, ShutdownFrontendSnafu,
-    StartDatanodeSnafu, StartFrontendSnafu,
+    IllegalConfigSnafu, Result, ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu,
+    StartFrontendSnafu,
 };
 use crate::frontend::load_frontend_plugins;
 use crate::options::ConfigOptions;
@@ -50,11 +50,19 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(self) -> Result<Instance> {
-        self.subcmd.build().await
+    pub async fn build(
+        self,
+        fe_opts: FrontendOptions,
+        dn_opts: DatanodeOptions,
+    ) -> Result<Instance> {
+        self.subcmd.build(fe_opts, dn_opts).await
     }
 
-    pub fn load_options(&self, log_dir: Option<String>, log_level: Option<String>) -> Result<ConfigOptions> {
+    pub fn load_options(
+        &self,
+        log_dir: Option<String>,
+        log_level: Option<String>,
+    ) -> Result<ConfigOptions> {
         self.subcmd.load_options(log_dir, log_level)
     }
 }
@@ -65,13 +73,17 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(self) -> Result<Instance> {
+    async fn build(self, fe_opts: FrontendOptions, dn_opts: DatanodeOptions) -> Result<Instance> {
         match self {
-            SubCommand::Start(cmd) => cmd.build().await,
+            SubCommand::Start(cmd) => cmd.build(fe_opts, dn_opts).await,
         }
     }
 
-    fn load_options(&self, log_dir: Option<String>, log_level: Option<String>) -> Result<ConfigOptions> {
+    fn load_options(
+        &self,
+        log_dir: Option<String>,
+        log_level: Option<String>,
+    ) -> Result<ConfigOptions> {
         match self {
             SubCommand::Start(cmd) => cmd.load_options(log_level, log_dir),
         }
@@ -310,20 +322,20 @@ impl StartCommand {
         Ok(ConfigOptions::Standalone(fe_opts, dn_opts, logging_opts))
     }
 
-    async fn build(self) -> Result<Instance> {
-        let enable_memory_catalog = self.enable_memory_catalog;
-        let config_file = self.config_file.clone();
+    async fn build(self, fe_opts: FrontendOptions, dn_opts: DatanodeOptions) -> Result<Instance> {
+        // let enable_memory_catalog = self.enable_memory_catalog;
+        // let config_file = self.config_file.clone();
+        // let fe_opts = FrontendOptions::try_from(self)?;
+        // let dn_opts: DatanodeOptions = {
+        //     let mut opts: StandaloneOptions = if let Some(path) = config_file {
+        //         toml_loader::from_file!(&path)?
+        //     } else {
+        //         StandaloneOptions::default()
+        //     };
+        //     opts.enable_memory_catalog = enable_memory_catalog;
+        //     opts.datanode_options()
+
         let plugins = Arc::new(load_frontend_plugins(&self.user_provider)?);
-        let fe_opts = FrontendOptions::try_from(self)?;
-        let dn_opts: DatanodeOptions = {
-            let mut opts: StandaloneOptions = if let Some(path) = config_file {
-                toml_loader::from_file!(&path)?
-            } else {
-                StandaloneOptions::default()
-            };
-            opts.enable_memory_catalog = enable_memory_catalog;
-            opts.datanode_options()
-        };
 
         info!(
             "Standalone frontend options: {:#?}, datanode options: {:#?}",
@@ -357,88 +369,6 @@ async fn build_frontend(
     Ok(frontend_instance)
 }
 
-impl TryFrom<StartCommand> for FrontendOptions {
-    type Error = Error;
-
-    fn try_from(cmd: StartCommand) -> std::result::Result<Self, Self::Error> {
-        let opts: StandaloneOptions = if let Some(path) = cmd.config_file {
-            toml_loader::from_file!(&path)?
-        } else {
-            StandaloneOptions::default()
-        };
-
-        let mut opts = opts.frontend_options();
-
-        opts.mode = Mode::Standalone;
-
-        if let Some(addr) = cmd.http_addr {
-            opts.http_options = Some(HttpOptions {
-                addr,
-                ..Default::default()
-            });
-        }
-        if let Some(addr) = cmd.rpc_addr {
-            // frontend grpc addr conflict with datanode default grpc addr
-            let datanode_grpc_addr = DatanodeOptions::default().rpc_addr;
-            if addr == datanode_grpc_addr {
-                return IllegalConfigSnafu {
-                    msg: format!(
-                        "gRPC listen address conflicts with datanode reserved gRPC addr: {datanode_grpc_addr}",
-                    ),
-                }
-                .fail();
-            }
-            opts.grpc_options = Some(GrpcOptions {
-                addr,
-                ..Default::default()
-            });
-        }
-
-        if let Some(addr) = cmd.mysql_addr {
-            opts.mysql_options = Some(MysqlOptions {
-                addr,
-                ..Default::default()
-            })
-        }
-
-        if let Some(addr) = cmd.prom_addr {
-            opts.prom_options = Some(PromOptions { addr })
-        }
-
-        if let Some(addr) = cmd.postgres_addr {
-            opts.postgres_options = Some(PostgresOptions {
-                addr,
-                ..Default::default()
-            })
-        }
-
-        if let Some(addr) = cmd.opentsdb_addr {
-            opts.opentsdb_options = Some(OpentsdbOptions {
-                addr,
-                ..Default::default()
-            });
-        }
-
-        if cmd.influxdb_enable {
-            opts.influxdb_options = Some(InfluxdbOptions { enable: true });
-        }
-
-        let tls_option = TlsOption::new(cmd.tls_mode, cmd.tls_cert_path, cmd.tls_key_path);
-
-        if let Some(mut mysql_options) = opts.mysql_options {
-            mysql_options.tls = tls_option.clone();
-            opts.mysql_options = Some(mysql_options);
-        }
-
-        if let Some(mut postgres_options) = opts.postgres_options {
-            postgres_options.tls = tls_option;
-            opts.postgres_options = Some(postgres_options);
-        }
-
-        Ok(opts)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::io::Write;
@@ -449,53 +379,6 @@ mod tests {
     use servers::Mode;
 
     use super::*;
-
-    #[test]
-    fn test_read_config_file() {
-        let cmd = StartCommand {
-            http_addr: None,
-            rpc_addr: None,
-            mysql_addr: None,
-            prom_addr: None,
-            postgres_addr: None,
-            opentsdb_addr: None,
-            config_file: Some(format!(
-                "{}/../../config/standalone.example.toml",
-                std::env::current_dir().unwrap().as_path().to_str().unwrap()
-            )),
-            influxdb_enable: false,
-            enable_memory_catalog: false,
-            tls_mode: None,
-            tls_cert_path: None,
-            tls_key_path: None,
-            user_provider: None,
-        };
-
-        let fe_opts = FrontendOptions::try_from(cmd).unwrap();
-        assert_eq!(Mode::Standalone, fe_opts.mode);
-        assert_eq!(
-            "127.0.0.1:4000".to_string(),
-            fe_opts.http_options.as_ref().unwrap().addr
-        );
-        assert_eq!(
-            Duration::from_secs(30),
-            fe_opts.http_options.as_ref().unwrap().timeout
-        );
-        assert_eq!(
-            "127.0.0.1:4001".to_string(),
-            fe_opts.grpc_options.unwrap().addr
-        );
-        assert_eq!(
-            "127.0.0.1:4002",
-            fe_opts.mysql_options.as_ref().unwrap().addr
-        );
-        assert_eq!(2, fe_opts.mysql_options.as_ref().unwrap().runtime_size);
-        assert_eq!(
-            None,
-            fe_opts.mysql_options.as_ref().unwrap().reject_no_database
-        );
-        assert!(fe_opts.influxdb_options.as_ref().unwrap().enable);
-    }
 
     #[tokio::test]
     async fn test_try_from_start_command_to_anymap() {
@@ -535,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn test_load_options() {
+    fn test_read_from_config_file() {
         let mut file = create_named_temp_file();
         let toml_str = r#"
             mode = "distributed"
@@ -565,7 +448,7 @@ mod tests {
             checkpoint_on_startup = true
 
             [http_options]
-            addr = "127.0.0.1:4001"
+            addr = "127.0.0.1:4000"
             timeout = "30s"
 
             [logging]
@@ -593,13 +476,27 @@ mod tests {
         if let ConfigOptions::Standalone(fe_opts, dn_opts, logging_opts) = opts {
             assert_eq!(Mode::Standalone, fe_opts.mode);
             assert_eq!(
-                "127.0.0.1:4001".to_string(),
+                "127.0.0.1:4000".to_string(),
                 fe_opts.http_options.as_ref().unwrap().addr
             );
             assert_eq!(
                 Duration::from_secs(30),
                 fe_opts.http_options.as_ref().unwrap().timeout
             );
+            assert_eq!(
+                "127.0.0.1:4001".to_string(),
+                fe_opts.grpc_options.unwrap().addr
+            );
+            assert_eq!(
+                "127.0.0.1:4002",
+                fe_opts.mysql_options.as_ref().unwrap().addr
+            );
+            assert_eq!(2, fe_opts.mysql_options.as_ref().unwrap().runtime_size);
+            assert_eq!(
+                None,
+                fe_opts.mysql_options.as_ref().unwrap().reject_no_database
+            );
+            assert!(fe_opts.influxdb_options.as_ref().unwrap().enable);
 
             assert_eq!("/tmp/greptimedb/test/wal", dn_opts.wal.dir);
 

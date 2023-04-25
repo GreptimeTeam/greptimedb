@@ -64,8 +64,8 @@ impl Application {
 }
 
 impl Command {
-    async fn build(self) -> Result<Application> {
-        self.subcmd.build().await
+    async fn build(self, opts: ConfigOptions) -> Result<Application> {
+        self.subcmd.build(opts).await
     }
 
     fn load_options(
@@ -92,28 +92,31 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(self) -> Result<Application> {
-        match self {
-            SubCommand::Datanode(cmd) => {
-                let app = cmd.build().await?;
+    async fn build(self, opts: ConfigOptions) -> Result<Application> {
+        match (self, opts) {
+
+            (SubCommand::Datanode(cmd), ConfigOptions::Datanode(dn_opts)) => {
+                let app = cmd.build(dn_opts).await?;
                 Ok(Application::Datanode(app))
             }
-            SubCommand::Frontend(cmd) => {
-                let app = cmd.build().await?;
+            (SubCommand::Frontend(cmd), ConfigOptions::Frontend(fe_opts)) => {
+                let app = cmd.build(fe_opts).await?;
                 Ok(Application::Frontend(app))
             }
-            SubCommand::Metasrv(cmd) => {
-                let app = cmd.build().await?;
+            (SubCommand::Metasrv(cmd), ConfigOptions::Metasrv(meta_opts)) => {
+                let app = cmd.build(meta_opts).await?;
                 Ok(Application::Metasrv(app))
             }
-            SubCommand::Standalone(cmd) => {
-                let app = cmd.build().await?;
+            (SubCommand::Standalone(cmd), ConfigOptions::Standalone(fe_opts, dn_opts, _)) => {
+                let app = cmd.build(fe_opts, dn_opts).await?;
                 Ok(Application::Standalone(app))
             }
-            SubCommand::Cli(cmd) => {
+            (SubCommand::Cli(cmd), ConfigOptions::Cli(_)) => {
                 let app = cmd.build().await?;
                 Ok(Application::Cli(app))
             }
+
+            _ => unreachable!()
         }
     }
 
@@ -182,7 +185,7 @@ async fn main() -> Result<()> {
         logging_opts.enable_jaeger_tracing,
     );
 
-    let mut app = cmd.build().await?;
+    let mut app = cmd.build(opts).await?;
 
     tokio::select! {
         result = app.run() => {

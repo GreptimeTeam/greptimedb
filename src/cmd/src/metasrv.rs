@@ -15,12 +15,12 @@
 use std::time::Duration;
 
 use clap::Parser;
-use common_telemetry::{info, logging, warn};
+use common_telemetry::logging;
 use meta_srv::bootstrap::MetaSrvInstance;
 use meta_srv::metasrv::MetaSrvOptions;
 use snafu::ResultExt;
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::options::ConfigOptions;
 use crate::{error, toml_loader};
 
@@ -51,8 +51,8 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(self) -> Result<Instance> {
-        self.subcmd.build().await
+    pub async fn build(self, opts: MetaSrvOptions) -> Result<Instance> {
+        self.subcmd.build(opts).await
     }
 
     pub fn load_options(
@@ -70,9 +70,9 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(self) -> Result<Instance> {
+    async fn build(self, opts: MetaSrvOptions) -> Result<Instance> {
         match self {
-            SubCommand::Start(cmd) => cmd.build().await,
+            SubCommand::Start(cmd) => cmd.build(opts).await,
         }
     }
 
@@ -139,11 +139,11 @@ impl StartCommand {
             opts.selector = selector_type[..]
                 .try_into()
                 .context(error::UnsupportedSelectorTypeSnafu { selector_type })?;
-            info!("Using {} selector", selector_type);
+            // info!("Using {} selector", selector_type);
         }
 
         if self.use_memory_store {
-            warn!("Using memory store for Meta. Make sure you are in running tests.");
+            // warn!("Using memory store for Meta. Make sure you are in running tests.");
             opts.use_memory_store = true;
         }
 
@@ -160,62 +160,16 @@ impl StartCommand {
         Ok(ConfigOptions::Metasrv(opts))
     }
 
-    async fn build(self) -> Result<Instance> {
+    async fn build(self, opts: MetaSrvOptions) -> Result<Instance> {
         logging::info!("MetaSrv start command: {:#?}", self);
 
-        let opts: MetaSrvOptions = self.try_into()?;
-
         logging::info!("MetaSrv options: {:#?}", opts);
+
         let instance = MetaSrvInstance::new(opts)
             .await
             .context(error::BuildMetaServerSnafu)?;
 
         Ok(Instance { instance })
-    }
-}
-
-impl TryFrom<StartCommand> for MetaSrvOptions {
-    type Error = Error;
-
-    fn try_from(cmd: StartCommand) -> Result<Self> {
-        let mut opts: MetaSrvOptions = if let Some(path) = cmd.config_file {
-            toml_loader::from_file!(&path)?
-        } else {
-            MetaSrvOptions::default()
-        };
-
-        if let Some(addr) = cmd.bind_addr {
-            opts.bind_addr = addr;
-        }
-        if let Some(addr) = cmd.server_addr {
-            opts.server_addr = addr;
-        }
-        if let Some(addr) = cmd.store_addr {
-            opts.store_addr = addr;
-        }
-        if let Some(selector_type) = &cmd.selector {
-            opts.selector = selector_type[..]
-                .try_into()
-                .context(error::UnsupportedSelectorTypeSnafu { selector_type })?;
-            info!("Using {} selector", selector_type);
-        }
-
-        if cmd.use_memory_store {
-            warn!("Using memory store for Meta. Make sure you are in running tests.");
-            opts.use_memory_store = true;
-        }
-
-        if let Some(http_addr) = cmd.http_addr {
-            opts.http_opts.addr = http_addr;
-        }
-        if let Some(http_timeout) = cmd.http_timeout {
-            opts.http_opts.timeout = Duration::from_secs(http_timeout);
-        }
-
-        // Disable dashboard in metasrv.
-        opts.http_opts.disable_dashboard = true;
-
-        Ok(opts)
     }
 }
 
@@ -240,46 +194,19 @@ mod tests {
             http_addr: None,
             http_timeout: None,
         };
-        let options: MetaSrvOptions = cmd.try_into().unwrap();
-        assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
-        assert_eq!("127.0.0.1:3002".to_string(), options.server_addr);
-        assert_eq!("127.0.0.1:2380".to_string(), options.store_addr);
-        assert_eq!(SelectorType::LoadBased, options.selector);
+
+        if let ConfigOptions::Metasrv(options) = cmd.load_options(None, None).unwrap() {
+            assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
+            assert_eq!("127.0.0.1:3002".to_string(), options.server_addr);
+            assert_eq!("127.0.0.1:2380".to_string(), options.store_addr);
+            assert_eq!(SelectorType::LoadBased, options.selector);
+        } else {
+            unreachable!()
+        }
     }
 
     #[test]
     fn test_read_from_config_file() {
-        let mut file = create_named_temp_file();
-        let toml_str = r#"
-            bind_addr = "127.0.0.1:3002"
-            server_addr = "127.0.0.1:3002"
-            store_addr = "127.0.0.1:2379"
-            datanode_lease_secs = 15
-            selector = "LeaseBased"
-            use_memory_store = false
-        "#;
-        write!(file, "{}", toml_str).unwrap();
-
-        let cmd = StartCommand {
-            bind_addr: None,
-            server_addr: None,
-            store_addr: None,
-            selector: None,
-            config_file: Some(file.path().to_str().unwrap().to_string()),
-            use_memory_store: false,
-            http_addr: None,
-            http_timeout: None,
-        };
-        let options: MetaSrvOptions = cmd.try_into().unwrap();
-        assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
-        assert_eq!("127.0.0.1:3002".to_string(), options.server_addr);
-        assert_eq!("127.0.0.1:2379".to_string(), options.store_addr);
-        assert_eq!(15, options.datanode_lease_secs);
-        assert_eq!(SelectorType::LeaseBased, options.selector);
-    }
-
-    #[test]
-    fn test_load_options() {
         let mut file = create_named_temp_file();
         let toml_str = r#"
             bind_addr = "127.0.0.1:3002"

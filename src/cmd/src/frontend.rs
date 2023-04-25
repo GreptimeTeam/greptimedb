@@ -61,8 +61,8 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(self) -> Result<Instance> {
-        self.subcmd.build().await
+    pub async fn build(self, opts: FrontendOptions) -> Result<Instance> {
+        self.subcmd.build(opts).await
     }
 
     pub fn load_options(
@@ -80,9 +80,9 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(self) -> Result<Instance> {
+    async fn build(self, opts: FrontendOptions) -> Result<Instance> {
         match self {
-            SubCommand::Start(cmd) => cmd.build().await,
+            SubCommand::Start(cmd) => cmd.build(opts).await,
         }
     }
 
@@ -211,9 +211,8 @@ impl StartCommand {
         Ok(ConfigOptions::Frontend(opts))
     }
 
-    async fn build(self) -> Result<Instance> {
+    async fn build(self, opts: FrontendOptions) -> Result<Instance> {
         let plugins = Arc::new(load_frontend_plugins(&self.user_provider)?);
-        let opts: FrontendOptions = self.try_into()?;
 
         let mut instance = FeInstance::try_new_distributed(&opts, plugins.clone())
             .await
@@ -236,75 +235,6 @@ pub fn load_frontend_plugins(user_provider: &Option<String>) -> Result<Plugins> 
         plugins.insert::<UserProviderRef>(provider);
     }
     Ok(plugins)
-}
-
-impl TryFrom<StartCommand> for FrontendOptions {
-    type Error = error::Error;
-
-    fn try_from(cmd: StartCommand) -> Result<Self> {
-        let mut opts: FrontendOptions = if let Some(path) = cmd.config_file {
-            toml_loader::from_file!(&path)?
-        } else {
-            FrontendOptions::default()
-        };
-
-        let tls_option = TlsOption::new(cmd.tls_mode, cmd.tls_cert_path, cmd.tls_key_path);
-
-        if let Some(addr) = cmd.http_addr {
-            opts.http_options.get_or_insert_with(Default::default).addr = addr;
-        }
-
-        if let Some(disable_dashboard) = cmd.disable_dashboard {
-            opts.http_options
-                .get_or_insert_with(Default::default)
-                .disable_dashboard = disable_dashboard;
-        }
-
-        if let Some(addr) = cmd.grpc_addr {
-            opts.grpc_options = Some(GrpcOptions {
-                addr,
-                ..Default::default()
-            });
-        }
-
-        if let Some(addr) = cmd.mysql_addr {
-            opts.mysql_options = Some(MysqlOptions {
-                addr,
-                tls: tls_option.clone(),
-                ..Default::default()
-            });
-        }
-        if let Some(addr) = cmd.prom_addr {
-            opts.prom_options = Some(PromOptions { addr });
-        }
-        if let Some(addr) = cmd.postgres_addr {
-            opts.postgres_options = Some(PostgresOptions {
-                addr,
-                tls: tls_option,
-                ..Default::default()
-            });
-        }
-        if let Some(addr) = cmd.opentsdb_addr {
-            opts.opentsdb_options = Some(OpentsdbOptions {
-                addr,
-                ..Default::default()
-            });
-        }
-        if let Some(enable) = cmd.influxdb_enable {
-            opts.influxdb_options = Some(InfluxdbOptions { enable });
-        }
-        if let Some(metasrv_addr) = cmd.metasrv_addr {
-            opts.meta_client_options
-                .get_or_insert_with(MetaClientOptions::default)
-                .metasrv_addrs = metasrv_addr
-                .split(',')
-                .map(&str::trim)
-                .map(&str::to_string)
-                .collect::<Vec<_>>();
-            opts.mode = Mode::Distributed;
-        }
-        Ok(opts)
-    }
 }
 
 #[cfg(test)]
@@ -336,83 +266,45 @@ mod tests {
             disable_dashboard: Some(false),
         };
 
-        let opts: FrontendOptions = command.try_into().unwrap();
-        assert_eq!(opts.http_options.as_ref().unwrap().addr, "127.0.0.1:1234");
-        assert_eq!(opts.mysql_options.as_ref().unwrap().addr, "127.0.0.1:5678");
-        assert_eq!(
-            opts.postgres_options.as_ref().unwrap().addr,
-            "127.0.0.1:5432"
-        );
-        assert_eq!(
-            opts.opentsdb_options.as_ref().unwrap().addr,
-            "127.0.0.1:4321"
-        );
-        assert_eq!(opts.prom_options.as_ref().unwrap().addr, "127.0.0.1:4444");
+        if let ConfigOptions::Frontend(opts) = command.load_options(None, None).unwrap() {
+            assert_eq!(opts.http_options.as_ref().unwrap().addr, "127.0.0.1:1234");
+            assert_eq!(opts.mysql_options.as_ref().unwrap().addr, "127.0.0.1:5678");
+            assert_eq!(
+                opts.postgres_options.as_ref().unwrap().addr,
+                "127.0.0.1:5432"
+            );
+            assert_eq!(
+                opts.opentsdb_options.as_ref().unwrap().addr,
+                "127.0.0.1:4321"
+            );
+            assert_eq!(opts.prom_options.as_ref().unwrap().addr, "127.0.0.1:4444");
 
-        let default_opts = FrontendOptions::default();
-        assert_eq!(
-            opts.grpc_options.unwrap().addr,
-            default_opts.grpc_options.unwrap().addr
-        );
-        assert_eq!(
-            opts.mysql_options.as_ref().unwrap().runtime_size,
-            default_opts.mysql_options.as_ref().unwrap().runtime_size
-        );
-        assert_eq!(
-            opts.postgres_options.as_ref().unwrap().runtime_size,
-            default_opts.postgres_options.as_ref().unwrap().runtime_size
-        );
-        assert_eq!(
-            opts.opentsdb_options.as_ref().unwrap().runtime_size,
-            default_opts.opentsdb_options.as_ref().unwrap().runtime_size
-        );
+            let default_opts = FrontendOptions::default();
+            assert_eq!(
+                opts.grpc_options.unwrap().addr,
+                default_opts.grpc_options.unwrap().addr
+            );
+            assert_eq!(
+                opts.mysql_options.as_ref().unwrap().runtime_size,
+                default_opts.mysql_options.as_ref().unwrap().runtime_size
+            );
+            assert_eq!(
+                opts.postgres_options.as_ref().unwrap().runtime_size,
+                default_opts.postgres_options.as_ref().unwrap().runtime_size
+            );
+            assert_eq!(
+                opts.opentsdb_options.as_ref().unwrap().runtime_size,
+                default_opts.opentsdb_options.as_ref().unwrap().runtime_size
+            );
 
-        assert!(!opts.influxdb_options.unwrap().enable);
+            assert!(!opts.influxdb_options.unwrap().enable);
+        } else {
+            unreachable!()
+        }
     }
 
     #[test]
     fn test_read_from_config_file() {
-        let mut file = create_named_temp_file();
-        let toml_str = r#"
-            mode = "distributed"
-
-            [http_options]
-            addr = "127.0.0.1:4000"
-            timeout = "30s"
-        "#;
-        write!(file, "{}", toml_str).unwrap();
-
-        let command = StartCommand {
-            http_addr: None,
-            grpc_addr: None,
-            mysql_addr: None,
-            prom_addr: None,
-            postgres_addr: None,
-            opentsdb_addr: None,
-            influxdb_enable: None,
-            config_file: Some(file.path().to_str().unwrap().to_string()),
-            metasrv_addr: None,
-            tls_mode: None,
-            tls_cert_path: None,
-            tls_key_path: None,
-            user_provider: None,
-            disable_dashboard: Some(false),
-        };
-
-        let fe_opts = FrontendOptions::try_from(command).unwrap();
-        assert_eq!(Mode::Distributed, fe_opts.mode);
-        assert_eq!(
-            "127.0.0.1:4000".to_string(),
-            fe_opts.http_options.as_ref().unwrap().addr
-        );
-        assert_eq!(
-            Duration::from_secs(30),
-            fe_opts.http_options.as_ref().unwrap().timeout
-        );
-    }
-
-    #[test]
-    fn test_load_options() {
         let mut file = create_named_temp_file();
         let toml_str = r#"
             mode = "distributed"
@@ -444,8 +336,7 @@ mod tests {
             disable_dashboard: Some(false),
         };
 
-        if let ConfigOptions::Frontend(fe_opts) = command.load_options(None, None).unwrap()
-        {
+        if let ConfigOptions::Frontend(fe_opts) = command.load_options(None, None).unwrap() {
             assert_eq!(Mode::Distributed, fe_opts.mode);
             assert_eq!(
                 "127.0.0.1:4000".to_string(),
