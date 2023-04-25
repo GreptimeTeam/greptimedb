@@ -38,18 +38,15 @@ use table::engine::{
     region_name, table_dir, EngineContext, TableEngine, TableEngineProcedure, TableReference,
 };
 use table::metadata::{TableInfo, TableVersion};
-use table::requests::{
-    AlterKind, AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest,
-};
-use table::table::{AlterContext, TableRef};
-use table::{error as table_error, Result as TableResult, Table};
+use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
+use table::table::TableRef;
+use table::{error as table_error, Result as TableResult};
 
 use crate::config::EngineConfig;
 use crate::engine::procedure::{AlterMitoTable, CreateMitoTable, DropMitoTable};
 use crate::error::{
-    self, BuildColumnDescriptorSnafu, BuildColumnFamilyDescriptorSnafu, BuildRowKeyDescriptorSnafu,
+    BuildColumnDescriptorSnafu, BuildColumnFamilyDescriptorSnafu, BuildRowKeyDescriptorSnafu,
     InvalidPrimaryKeySnafu, MissingTimestampIndexSnafu, RegionNotFoundSnafu, Result,
-    TableExistsSnafu,
 };
 use crate::manifest::TableManifest;
 use crate::metrics;
@@ -125,12 +122,17 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
 
     async fn alter_table(
         &self,
-        ctx: &EngineContext,
+        _ctx: &EngineContext,
         req: AlterTableRequest,
     ) -> TableResult<TableRef> {
         let _timer = common_telemetry::timer!(metrics::MITO_ALTER_TABLE_ELAPSED);
-        self.inner
-            .alter_table(ctx, req)
+
+        let mut procedure = AlterMitoTable::new(req, self.inner.clone())
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)?;
+
+        procedure
+            .engine_alter_table()
             .await
             .map_err(BoxedError::new)
             .context(table_error::TableOperationSnafu)
@@ -469,54 +471,6 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         self.tables
             .get(&table_ref.to_string())
             .map(|en| en.value().clone())
-    }
-
-    async fn alter_table(&self, _ctx: &EngineContext, req: AlterTableRequest) -> Result<TableRef> {
-        let catalog_name = &req.catalog_name;
-        let schema_name = &req.schema_name;
-        let table_name = &req.table_name;
-
-        if let AlterKind::RenameTable { new_table_name } = &req.alter_kind {
-            let table_ref = TableReference {
-                catalog: catalog_name,
-                schema: schema_name,
-                table: new_table_name,
-            };
-
-            if self.get_table(&table_ref).is_some() {
-                return TableExistsSnafu {
-                    table_name: table_ref.to_string(),
-                }
-                .fail();
-            }
-        }
-
-        let mut table_ref = TableReference {
-            catalog: catalog_name,
-            schema: schema_name,
-            table: table_name,
-        };
-        let table = self
-            .get_mito_table(&table_ref)
-            .context(error::TableNotFoundSnafu { table_name })?;
-
-        logging::info!("start altering table {} with request {:?}", table_name, req);
-        table
-            .alter(AlterContext::new(), &req)
-            .await
-            .context(error::AlterTableSnafu { table_name })?;
-
-        if let AlterKind::RenameTable { new_table_name } = &req.alter_kind {
-            let removed = {
-                let _lock = self.table_mutex.lock(table_ref.to_string()).await;
-                self.tables.remove(&table_ref.to_string())
-            };
-            ensure!(removed.is_some(), error::TableNotFoundSnafu { table_name });
-            table_ref.table = new_table_name.as_str();
-            let _lock = self.table_mutex.lock(table_ref.to_string()).await;
-            self.tables.insert(table_ref.to_string(), table.clone());
-        }
-        Ok(table)
     }
 
     /// Drop table. Returns whether a table is dropped (true) or not exist (false).

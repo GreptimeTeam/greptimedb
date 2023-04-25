@@ -26,7 +26,7 @@ use store_api::storage::{AlterRequest, Region, RegionMeta, StorageEngine};
 use table::engine::TableReference;
 use table::metadata::{RawTableInfo, TableInfo, TableVersion};
 use table::requests::{AlterKind, AlterTableRequest};
-use table::Table;
+use table::{Table, TableRef};
 
 use crate::engine::MitoEngineInner;
 use crate::error::{
@@ -55,8 +55,10 @@ impl<S: StorageEngine> Procedure for AlterMitoTable<S> {
     async fn execute(&mut self, _ctx: &Context) -> Result<Status> {
         match self.data.state {
             AlterTableState::Prepare => self.on_prepare(),
-            AlterTableState::AlterRegions => self.on_alter_regions().await,
-            AlterTableState::UpdateTableManifest => self.on_update_table_manifest().await,
+            AlterTableState::EngineAlterTable => {
+                self.engine_alter_table().await?;
+                Ok(Status::Done)
+            }
         }
     }
 
@@ -171,13 +173,24 @@ impl<S: StorageEngine> AlterMitoTable<S> {
         );
 
         self.init_new_info(&current_info)?;
-        self.data.state = AlterTableState::AlterRegions;
+        self.data.state = AlterTableState::EngineAlterTable;
 
         Ok(Status::executing(true))
     }
 
+    /// Engine alters the table.
+    ///
+    /// Note that calling this method directly (without submitting the procedure
+    /// to the manager) to rename a table might have concurrent issue when
+    /// we renaming two tables to the same table name.
+    pub(crate) async fn engine_alter_table(&mut self) -> Result<TableRef> {
+        self.alter_regions().await?;
+
+        self.update_table_manifest().await
+    }
+
     /// Alter regions.
-    async fn on_alter_regions(&mut self) -> Result<Status> {
+    async fn alter_regions(&mut self) -> Result<()> {
         let current_info = self.table.table_info();
         ensure!(
             current_info.ident.version == self.data.table_version,
@@ -194,9 +207,7 @@ impl<S: StorageEngine> AlterMitoTable<S> {
         let Some(alter_op) = create_alter_operation(table_name, &self.data.request.alter_kind, &mut new_info.meta)
             .map_err(Error::from_error_ext)? else {
                 // Don't need to alter the region.
-                self.data.state = AlterTableState::UpdateTableManifest;
-
-                return Ok(Status::executing(true));
+                return Ok(());
             };
 
         let regions = self.table.regions();
@@ -225,26 +236,12 @@ impl<S: StorageEngine> AlterMitoTable<S> {
                 .map_err(Error::from_error_ext)?;
         }
 
-        self.data.state = AlterTableState::UpdateTableManifest;
-
-        Ok(Status::executing(true))
+        Ok(())
     }
 
     /// Persist the alteration to the manifest and update table info.
-    async fn on_update_table_manifest(&mut self) -> Result<Status> {
-        // Get current table info.
-        let current_info = self.table.table_info();
-        if current_info.ident.version > self.data.table_version {
-            logging::info!(
-                "table {} version is already updated, current: {}, old_version: {}",
-                self.data.request.table_name,
-                current_info.ident.version,
-                self.data.table_version,
-            );
-            return Ok(Status::Done);
-        }
-
-        self.init_new_info(&current_info)?;
+    async fn update_table_manifest(&mut self) -> Result<TableRef> {
+        // Safety: We init new info in alter_regions()
         let new_info = self.new_info.as_ref().unwrap();
         let table_name = &self.data.request.table_name;
 
@@ -283,7 +280,7 @@ impl<S: StorageEngine> AlterMitoTable<S> {
                 .insert(table_ref.to_string(), self.table.clone());
         }
 
-        Ok(Status::Done)
+        Ok(self.table.clone())
     }
 
     fn init_new_info(&mut self, current_info: &TableInfo) -> Result<()> {
@@ -320,12 +317,10 @@ impl<S: StorageEngine> AlterMitoTable<S> {
 /// Represents each step while altering table in the mito engine.
 #[derive(Debug, Serialize, Deserialize)]
 enum AlterTableState {
-    /// Prepare to alter table.
+    /// Prepare to alter the table.
     Prepare,
-    /// Alter regions.
-    AlterRegions,
-    /// Update table manifest.
-    UpdateTableManifest,
+    /// Engine alters the table.
+    EngineAlterTable,
 }
 
 /// Serializable data of [AlterMitoTable].

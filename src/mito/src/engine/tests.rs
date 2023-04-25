@@ -36,6 +36,7 @@ use table::metadata::TableType;
 use table::requests::{
     AddColumnRequest, AlterKind, DeleteRequest, FlushTableRequest, TableOptions,
 };
+use table::Table;
 
 use super::*;
 use crate::table::test_util::{
