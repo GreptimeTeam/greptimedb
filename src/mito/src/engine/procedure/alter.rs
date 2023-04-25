@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use common_procedure::error::{Error, FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{Context, LockKey, Procedure, ProcedureManager, Result, Status};
 use common_telemetry::logging;
+use common_telemetry::metric::Timer;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::manifest::Manifest;
@@ -32,6 +33,7 @@ use crate::error::{
     BuildTableMetaSnafu, TableNotFoundSnafu, UpdateTableManifestSnafu, VersionChangedSnafu,
 };
 use crate::manifest::action::{TableChange, TableMetaAction, TableMetaActionList};
+use crate::metrics;
 use crate::table::{create_alter_operation, MitoTable};
 
 /// Procedure to alter a [MitoTable].
@@ -41,6 +43,7 @@ pub(crate) struct AlterMitoTable<S: StorageEngine> {
     table: Arc<MitoTable<S::Region>>,
     /// The table info after alteration.
     new_info: Option<TableInfo>,
+    _timer: Timer,
 }
 
 #[async_trait]
@@ -114,6 +117,7 @@ impl<S: StorageEngine> AlterMitoTable<S> {
             engine_inner,
             table,
             new_info: None,
+            _timer: common_telemetry::timer!(metrics::MITO_ALTER_TABLE_ELAPSED),
         })
     }
 
@@ -151,6 +155,7 @@ impl<S: StorageEngine> AlterMitoTable<S> {
             engine_inner,
             table,
             new_info: None,
+            _timer: common_telemetry::timer!(metrics::MITO_ALTER_TABLE_ELAPSED),
         })
     }
 

@@ -18,6 +18,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{Context, Error, LockKey, Procedure, ProcedureManager, Result, Status};
+use common_telemetry::metric::Timer;
 use datatypes::schema::{Schema, SchemaRef};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
@@ -34,6 +35,7 @@ use crate::error::{
     BuildRegionDescriptorSnafu, BuildTableInfoSnafu, BuildTableMetaSnafu, InvalidRawSchemaSnafu,
     TableExistsSnafu,
 };
+use crate::metrics;
 use crate::table::MitoTable;
 
 /// Procedure to create a [MitoTable].
@@ -44,6 +46,7 @@ pub(crate) struct CreateMitoTable<S: StorageEngine> {
     regions: HashMap<RegionNumber, S::Region>,
     /// Schema of the table.
     table_schema: SchemaRef,
+    _timer: Timer,
 }
 
 #[async_trait]
@@ -97,6 +100,7 @@ impl<S: StorageEngine> CreateMitoTable<S> {
             engine_inner,
             regions: HashMap::new(),
             table_schema: Arc::new(table_schema),
+            _timer: common_telemetry::timer!(metrics::MITO_CREATE_TABLE_ELAPSED),
         })
     }
 
@@ -129,6 +133,7 @@ impl<S: StorageEngine> CreateMitoTable<S> {
             engine_inner,
             regions: HashMap::new(),
             table_schema: Arc::new(table_schema),
+            _timer: common_telemetry::timer!(metrics::MITO_CREATE_TABLE_ELAPSED),
         })
     }
 
