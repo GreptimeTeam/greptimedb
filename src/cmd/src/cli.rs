@@ -89,3 +89,46 @@ impl AttachCommand {
         Ok(Instance { repl })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_load_options() {
+        let cmd = Command {
+            cmd: SubCommand::Attach(AttachCommand {
+                grpc_addr: String::from(""),
+                meta_addr: None,
+                disable_helper: false,
+            }),
+        };
+
+        let opts = cmd.load_options(TopLevelOptions::default()).unwrap();
+        let logging_opts = opts.logging_options();
+        assert_eq!("/tmp/greptimedb/logs", logging_opts.dir);
+        assert_eq!("info", logging_opts.level);
+        assert!(!logging_opts.enable_jaeger_tracing);
+    }
+
+    #[test]
+    fn test_top_level_options() {
+        let cmd = Command {
+            cmd: SubCommand::Attach(AttachCommand {
+                grpc_addr: String::from(""),
+                meta_addr: None,
+                disable_helper: false,
+            }),
+        };
+
+        let opts = cmd
+            .load_options(TopLevelOptions {
+                log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
+                log_level: Some("debug".to_string()),
+            })
+            .unwrap();
+        let logging_opts = opts.logging_options();
+        assert_eq!("/tmp/greptimedb/test/logs", logging_opts.dir);
+        assert_eq!("debug", logging_opts.level);
+    }
+}

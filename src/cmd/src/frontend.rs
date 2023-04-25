@@ -375,4 +375,35 @@ mod tests {
             .await;
         assert!(result.is_ok());
     }
+
+    #[test]
+    fn test_top_level_options() {
+        let cmd = StartCommand {
+            http_addr: None,
+            grpc_addr: None,
+            mysql_addr: None,
+            prom_addr: None,
+            postgres_addr: None,
+            opentsdb_addr: None,
+            influxdb_enable: None,
+            config_file: None,
+            metasrv_addr: None,
+            tls_mode: None,
+            tls_cert_path: None,
+            tls_key_path: None,
+            user_provider: None,
+            disable_dashboard: Some(false),
+        };
+
+        let options = cmd
+            .load_options(TopLevelOptions {
+                log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
+                log_level: Some("debug".to_string()),
+            })
+            .unwrap();
+
+        let logging_opt = options.logging_options();
+        assert_eq!("/tmp/greptimedb/test/logs", logging_opt.dir);
+        assert_eq!("debug", logging_opt.level);
+    }
 }

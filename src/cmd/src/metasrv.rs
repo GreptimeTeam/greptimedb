@@ -235,4 +235,29 @@ mod tests {
             assert_eq!("/tmp/greptimedb/test/logs".to_string(), options.logging.dir);
         }
     }
+
+    #[test]
+    fn test_top_level_options() {
+        let cmd = StartCommand {
+            bind_addr: Some("127.0.0.1:3002".to_string()),
+            server_addr: Some("127.0.0.1:3002".to_string()),
+            store_addr: Some("127.0.0.1:2380".to_string()),
+            config_file: None,
+            selector: Some("LoadBased".to_string()),
+            use_memory_store: false,
+            http_addr: None,
+            http_timeout: None,
+        };
+
+        let options = cmd
+            .load_options(TopLevelOptions {
+                log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
+                log_level: Some("debug".to_string()),
+            })
+            .unwrap();
+
+        let logging_opt = options.logging_options();
+        assert_eq!("/tmp/greptimedb/test/logs", logging_opt.dir);
+        assert_eq!("debug", logging_opt.level);
+    }
 }

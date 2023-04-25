@@ -344,4 +344,20 @@ mod tests {
         .load_options(TopLevelOptions::default())
         .unwrap();
     }
+
+    #[test]
+    fn test_top_level_options() {
+        let cmd = StartCommand::default();
+
+        let options = cmd
+            .load_options(TopLevelOptions {
+                log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
+                log_level: Some("debug".to_string()),
+            })
+            .unwrap();
+
+        let logging_opt = options.logging_options();
+        assert_eq!("/tmp/greptimedb/test/logs", logging_opt.dir);
+        assert_eq!("debug", logging_opt.level);
+    }
 }

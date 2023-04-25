@@ -480,4 +480,35 @@ mod tests {
             assert_eq!("/tmp/greptimedb/test/logs".to_string(), logging_opts.dir);
         }
     }
+
+    #[test]
+    fn test_top_level_options() {
+        let cmd = StartCommand {
+            http_addr: None,
+            rpc_addr: None,
+            prom_addr: None,
+            mysql_addr: None,
+            postgres_addr: None,
+            opentsdb_addr: None,
+            config_file: None,
+            influxdb_enable: false,
+            enable_memory_catalog: false,
+            tls_mode: None,
+            tls_cert_path: None,
+            tls_key_path: None,
+            user_provider: Some("static_user_provider:cmd:test=test".to_string()),
+        };
+
+        let opts = cmd
+            .load_options(TopLevelOptions {
+                log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
+                log_level: Some("debug".to_string()),
+            })
+            .unwrap();
+
+        if let ConfigOptions::Standalone(_, _, logging_opts) = opts {
+            assert_eq!("/tmp/greptimedb/test/logs", logging_opts.dir);
+            assert_eq!("debug", logging_opts.level);
+        }
+    }
 }
