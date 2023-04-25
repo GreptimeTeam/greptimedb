@@ -20,7 +20,8 @@ use clap::Parser;
 use common_telemetry::logging::LoggingOptions;
 pub use repl::Repl;
 
-use crate::{error::Result, options::ConfigOptions};
+use crate::error::Result;
+use crate::options::ConfigOptions;
 
 pub struct Instance {
     repl: Repl,
@@ -47,7 +48,11 @@ impl Command {
         self.cmd.build().await
     }
 
-    pub fn load_options(&self, log_dir: Option<String>, log_level: Option<String>) -> Result<ConfigOptions> {
+    pub fn load_options(
+        &self,
+        log_dir: Option<String>,
+        log_level: Option<String>,
+    ) -> Result<ConfigOptions> {
         let mut logging_opts = LoggingOptions::default();
         if let Some(dir) = log_dir {
             logging_opts.dir = dir;

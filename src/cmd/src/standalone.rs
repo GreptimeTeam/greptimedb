@@ -240,7 +240,7 @@ impl StartCommand {
 
         let mut fe_opts = opts.clone().frontend_options();
         let mut logging_opts = opts.logging.clone();
-        let dn_opts = opts.datanode_options();
+        let dn_opts = Box::new(opts.datanode_options());
 
         if let Some(dir) = log_dir {
             logging_opts.dir = dir;

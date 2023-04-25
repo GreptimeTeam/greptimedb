@@ -158,7 +158,7 @@ impl StartCommand {
             opts.http_options.get_or_insert_with(Default::default).addr = addr;
         }
 
-        if let Some(disable_dashboard) = self.disable_dashboard.clone() {
+        if let Some(disable_dashboard) = self.disable_dashboard {
             opts.http_options
                 .get_or_insert_with(Default::default)
                 .disable_dashboard = disable_dashboard;
@@ -194,7 +194,7 @@ impl StartCommand {
                 ..Default::default()
             });
         }
-        if let Some(enable) = self.influxdb_enable.clone() {
+        if let Some(enable) = self.influxdb_enable {
             opts.influxdb_options = Some(InfluxdbOptions { enable });
         }
         if let Some(metasrv_addr) = self.metasrv_addr.clone() {

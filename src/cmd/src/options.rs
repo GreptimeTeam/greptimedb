@@ -11,17 +11,16 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 use common_telemetry::logging::LoggingOptions;
 use datanode::datanode::DatanodeOptions;
 use frontend::frontend::FrontendOptions;
 use meta_srv::metasrv::MetaSrvOptions;
 
 pub enum ConfigOptions {
-    Datanode(DatanodeOptions),
+    Datanode(Box<DatanodeOptions>),
     Frontend(FrontendOptions),
     Metasrv(MetaSrvOptions),
-    Standalone(FrontendOptions, DatanodeOptions, LoggingOptions),
+    Standalone(FrontendOptions, Box<DatanodeOptions>, LoggingOptions),
     Cli(LoggingOptions),
 }
 
@@ -31,8 +30,8 @@ impl ConfigOptions {
             ConfigOptions::Datanode(opts) => &opts.logging,
             ConfigOptions::Frontend(opts) => &opts.logging,
             ConfigOptions::Metasrv(opts) => &opts.logging,
-            ConfigOptions::Standalone(_, _, opts) => &opts,
-            ConfigOptions::Cli(opts) => &opts,
+            ConfigOptions::Standalone(_, _, opts) => opts,
+            ConfigOptions::Cli(opts) => opts,
         }
     }
 }

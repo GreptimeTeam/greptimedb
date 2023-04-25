@@ -130,10 +130,10 @@ impl StartCommand {
             opts.bind_addr = addr;
         }
         if let Some(addr) = self.server_addr.clone() {
-            opts.server_addr = addr.clone();
+            opts.server_addr = addr;
         }
         if let Some(addr) = self.store_addr.clone() {
-            opts.store_addr = addr.clone();
+            opts.store_addr = addr;
         }
         if let Some(selector_type) = &self.selector {
             opts.selector = selector_type[..]

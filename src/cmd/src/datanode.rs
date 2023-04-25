@@ -179,14 +179,14 @@ impl StartCommand {
         if let Some(http_addr) = self.http_addr.clone() {
             opts.http_opts.addr = http_addr
         }
-        if let Some(http_timeout) = self.http_timeout.clone() {
+        if let Some(http_timeout) = self.http_timeout {
             opts.http_opts.timeout = Duration::from_secs(http_timeout)
         }
 
         // Disable dashboard in datanode.
         opts.http_opts.disable_dashboard = true;
 
-        Ok(ConfigOptions::Datanode(opts))
+        Ok(ConfigOptions::Datanode(Box::new(opts)))
     }
 
     async fn build(self, opts: DatanodeOptions) -> Result<Instance> {
@@ -341,13 +341,16 @@ mod tests {
         assert!((StartCommand {
             metasrv_addr: Some("127.0.0.1:3002".to_string()),
             ..Default::default()
-        }).load_options(None, None).is_err());
+        })
+        .load_options(None, None)
+        .is_err());
 
         // Providing node_id but leave metasrv_addr absent is ok since metasrv_addr has default value
         (StartCommand {
             node_id: Some(42),
             ..Default::default()
-        }).load_options(None, None).unwrap();
-
+        })
+        .load_options(None, None)
+        .unwrap();
     }
 }
