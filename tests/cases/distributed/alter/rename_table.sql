@@ -12,3 +12,5 @@ ALTER TABLE t RENAME new_table;
 DESC TABLE t;
 
 DROP TABLE t;
+
+DROP TABLE new_table;
