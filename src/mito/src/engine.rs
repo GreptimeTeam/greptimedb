@@ -131,6 +131,9 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
             .map_err(BoxedError::new)
             .context(table_error::TableOperationSnafu)?;
 
+        // TODO(yingwen): Rename has concurrent issue without the procedure runtime. But
+        // users can't use this method to alter a table so it is still safe. We should
+        // refactor the table engine to avoid using table name as key.
         procedure
             .engine_alter_table()
             .await
@@ -155,8 +158,12 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
         _ctx: &EngineContext,
         request: DropTableRequest,
     ) -> TableResult<bool> {
-        self.inner
-            .drop_table(request)
+        let mut procedure = DropMitoTable::new(request, self.inner.clone())
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)?;
+
+        procedure
+            .engine_drop_table()
             .await
             .map_err(BoxedError::new)
             .context(table_error::TableOperationSnafu)
@@ -471,18 +478,6 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         self.tables
             .get(&table_ref.to_string())
             .map(|en| en.value().clone())
-    }
-
-    /// Drop table. Returns whether a table is dropped (true) or not exist (false).
-    async fn drop_table(&self, req: DropTableRequest) -> Result<bool> {
-        let table_reference = TableReference {
-            catalog: &req.catalog_name,
-            schema: &req.schema_name,
-            table: &req.table_name,
-        };
-        // todo(ruihang): reclaim persisted data
-        let _lock = self.table_mutex.lock(table_reference.to_string()).await;
-        Ok(self.tables.remove(&table_reference.to_string()).is_some())
     }
 
     async fn close(&self) -> TableResult<()> {
