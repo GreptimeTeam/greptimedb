@@ -145,7 +145,7 @@ impl StartCommand {
         // Disable dashboard in metasrv.
         opts.http_opts.disable_dashboard = true;
 
-        Ok(ConfigOptions::Metasrv(opts))
+        Ok(ConfigOptions::Metasrv(Box::new(opts)))
     }
 
     async fn build(self, opts: MetaSrvOptions) -> Result<Instance> {

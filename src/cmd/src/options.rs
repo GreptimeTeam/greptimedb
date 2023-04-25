@@ -16,12 +16,18 @@ use datanode::datanode::DatanodeOptions;
 use frontend::frontend::FrontendOptions;
 use meta_srv::metasrv::MetaSrvOptions;
 
+pub struct MixOptions {
+    pub fe_opts: FrontendOptions,
+    pub dn_opts: DatanodeOptions,
+    pub logging: LoggingOptions,
+}
+
 pub enum ConfigOptions {
     Datanode(Box<DatanodeOptions>),
-    Frontend(FrontendOptions),
-    Metasrv(MetaSrvOptions),
-    Standalone(FrontendOptions, Box<DatanodeOptions>, LoggingOptions),
-    Cli(LoggingOptions),
+    Frontend(Box<FrontendOptions>),
+    Metasrv(Box<MetaSrvOptions>),
+    Standalone(Box<MixOptions>),
+    Cli(Box<LoggingOptions>),
 }
 
 impl ConfigOptions {
@@ -30,7 +36,7 @@ impl ConfigOptions {
             ConfigOptions::Datanode(opts) => &opts.logging,
             ConfigOptions::Frontend(opts) => &opts.logging,
             ConfigOptions::Metasrv(opts) => &opts.logging,
-            ConfigOptions::Standalone(_, _, opts) => opts,
+            ConfigOptions::Standalone(opts) => &opts.logging,
             ConfigOptions::Cli(opts) => opts,
         }
     }

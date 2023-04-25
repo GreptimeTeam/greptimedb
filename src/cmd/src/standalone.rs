@@ -40,7 +40,7 @@ use crate::error::{
     StartFrontendSnafu,
 };
 use crate::frontend::load_frontend_plugins;
-use crate::options::{ConfigOptions, TopLevelOptions};
+use crate::options::{ConfigOptions, MixOptions, TopLevelOptions};
 use crate::toml_loader;
 
 #[derive(Parser)]
@@ -227,14 +227,14 @@ impl StartCommand {
         opts.enable_memory_catalog = enable_memory_catalog;
 
         let mut fe_opts = opts.clone().frontend_options();
-        let mut logging_opts = opts.logging.clone();
-        let dn_opts = Box::new(opts.datanode_options());
+        let mut logging = opts.logging.clone();
+        let dn_opts = opts.datanode_options();
 
         if let Some(dir) = top_level_options.log_dir {
-            logging_opts.dir = dir;
+            logging.dir = dir;
         }
         if let Some(level) = top_level_options.log_level {
-            logging_opts.level = level;
+            logging.level = level;
         }
 
         fe_opts.mode = Mode::Standalone;
@@ -307,7 +307,11 @@ impl StartCommand {
             fe_opts.postgres_options = Some(postgres_options);
         }
 
-        Ok(ConfigOptions::Standalone(fe_opts, dn_opts, logging_opts))
+        Ok(ConfigOptions::Standalone(Box::new(MixOptions {
+            fe_opts,
+            dn_opts,
+            logging,
+        })))
     }
 
     async fn build(self, fe_opts: FrontendOptions, dn_opts: DatanodeOptions) -> Result<Instance> {
@@ -449,7 +453,10 @@ mod tests {
         };
 
         let opts = cmd.load_options(TopLevelOptions::default()).unwrap();
-        if let ConfigOptions::Standalone(fe_opts, dn_opts, logging_opts) = opts {
+        if let ConfigOptions::Standalone(options) = opts {
+            let fe_opts = options.fe_opts;
+            let dn_opts = options.dn_opts;
+            let logging_opts = options.logging;
             assert_eq!(Mode::Standalone, fe_opts.mode);
             assert_eq!(
                 "127.0.0.1:4000".to_string(),
@@ -506,9 +513,9 @@ mod tests {
             })
             .unwrap();
 
-        if let ConfigOptions::Standalone(_, _, logging_opts) = opts {
-            assert_eq!("/tmp/greptimedb/test/logs", logging_opts.dir);
-            assert_eq!("debug", logging_opts.level);
+        if let ConfigOptions::Standalone(opts) = opts {
+            assert_eq!("/tmp/greptimedb/test/logs", opts.logging.dir);
+            assert_eq!("debug", opts.logging.level);
         }
     }
 }

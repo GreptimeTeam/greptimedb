@@ -196,7 +196,7 @@ impl StartCommand {
             opts.mode = Mode::Distributed;
         }
 
-        Ok(ConfigOptions::Frontend(opts))
+        Ok(ConfigOptions::Frontend(Box::new(opts)))
     }
 
     async fn build(self, opts: FrontendOptions) -> Result<Instance> {

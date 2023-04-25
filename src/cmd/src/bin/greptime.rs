@@ -103,15 +103,15 @@ impl SubCommand {
                 Ok(Application::Datanode(app))
             }
             (SubCommand::Frontend(cmd), ConfigOptions::Frontend(fe_opts)) => {
-                let app = cmd.build(fe_opts).await?;
+                let app = cmd.build(*fe_opts).await?;
                 Ok(Application::Frontend(app))
             }
             (SubCommand::Metasrv(cmd), ConfigOptions::Metasrv(meta_opts)) => {
-                let app = cmd.build(meta_opts).await?;
+                let app = cmd.build(*meta_opts).await?;
                 Ok(Application::Metasrv(app))
             }
-            (SubCommand::Standalone(cmd), ConfigOptions::Standalone(fe_opts, dn_opts, _)) => {
-                let app = cmd.build(fe_opts, *dn_opts).await?;
+            (SubCommand::Standalone(cmd), ConfigOptions::Standalone(opts)) => {
+                let app = cmd.build(opts.fe_opts, opts.dn_opts).await?;
                 Ok(Application::Standalone(app))
             }
             (SubCommand::Cli(cmd), ConfigOptions::Cli(_)) => {
