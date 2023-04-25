@@ -37,7 +37,6 @@ use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::requests::{CreateTableRequest, InsertRequest, TableOptions};
 use table::TableRef;
-use tokio::task::JoinSet;
 
 use crate::error::{
     CastTypeSnafu, CollectRecordsSnafu, FindColumnInScriptsTableSnafu, FindScriptSnafu,
@@ -114,37 +113,35 @@ impl ScriptsTable {
             script_list.extend(part_of_scripts_list);
         }
 
-        let mut set = JoinSet::new();
-        let _handles: Vec<_> = script_list
+        let handles: Vec<_> = script_list
             .into_iter()
             .filter_map(|(name, script)| {
                 match PyScript::from_script(&script, query_engine.clone()) {
                     Ok(script) => {
-                        let handle = set.spawn(async move {
+                        let future = async move {
                             script.register_udf().await;
                             logging::debug!(
                                 "Script in `scripts` system table re-register as UDF: {}",
                                 name
                             );
-                        });
-                        Some(handle)
+                            Result::Ok(())
+                        };
+                        Some(future)
                     }
                     Err(err) => {
                         logging::warn!(
-                            r#"Failed to compile script "{name}"" in `scripts` table: {err}"#
+                            r#"Failed to compile script "{}"" in `scripts` table: {}"#,
+                            name,
+                            err
                         );
                         None
                     }
                 }
             })
             .collect();
-        while let Some(res) = set.join_next().await {
-            match res {
-                Ok(_) => (),
-                Err(err) => {
-                    logging::error!("Unexpected error when re-registering Python UDF: {}", err)
-                }
-            }
+        match futures::future::try_join_all(handles).await {
+            Ok(_) => (),
+            Err(err) => logging::error!("Unexpected error when re-registering Python UDF: {}", err),
         }
         Ok(())
     }
