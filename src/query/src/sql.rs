@@ -19,10 +19,7 @@ use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
-use common_datasource::file_format::csv::CsvFormat;
-use common_datasource::file_format::json::JsonFormat;
-use common_datasource::file_format::parquet::ParquetFormat;
-use common_datasource::file_format::{infer_schemas, FileFormat};
+use common_datasource::file_format::{infer_schemas, FileFormat, Format};
 use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::build_backend;
 use common_datasource::util::find_dir_and_filename;
@@ -40,9 +37,7 @@ use sql::ast::ColumnDef;
 use sql::statements::column_def_to_schema;
 use sql::statements::create::Partitions;
 use sql::statements::show::{ShowDatabases, ShowKind, ShowTables};
-use table::requests::{
-    IMMUTABLE_TABLE_FORMAT_KEY, IMMUTABLE_TABLE_LOCATION_KEY, IMMUTABLE_TABLE_PATTERN_KEY,
-};
+use table::requests::{IMMUTABLE_TABLE_LOCATION_KEY, IMMUTABLE_TABLE_PATTERN_KEY};
 use table::TableRef;
 
 use crate::error::{self, Result};
@@ -331,24 +326,13 @@ async fn prepare_immutable_file_table(
 fn parse_immutable_file_table_format(
     options: &HashMap<String, String>,
 ) -> Result<Box<dyn FileFormat>> {
-    let format = options
-        .get(IMMUTABLE_TABLE_FORMAT_KEY)
-        .cloned()
-        .unwrap_or_default()
-        .to_uppercase();
-
-    match format.as_str() {
-        "CSV" => {
-            let file_format = CsvFormat::try_from(options).context(error::ParseFileFormatSnafu)?;
-            Ok(Box::new(file_format))
-        }
-        "JSON" => {
-            let file_format = JsonFormat::try_from(options).context(error::ParseFileFormatSnafu)?;
-            Ok(Box::new(file_format))
-        }
-        "PARQUET" => Ok(Box::new(ParquetFormat {})),
-        format => error::UnsupportedFileFormatSnafu { format }.fail(),
-    }
+    Ok(
+        match Format::try_from(options).context(error::ParseFileFormatSnafu)? {
+            Format::Csv(format) => Box::new(format),
+            Format::Json(format) => Box::new(format),
+            Format::Parquet(format) => Box::new(format),
+        },
+    )
 }
 
 async fn infer_immutable_file_table_schema(
