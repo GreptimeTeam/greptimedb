@@ -21,33 +21,28 @@ fn main() {
 fn fetch_dashboard_assets() {
     use std::process::{Command, Stdio};
 
-    macro_rules! p {
-        ($($tokens: tt)*) => {
-            println!("cargo:warning={}", format!($($tokens)*))
-        }
-    }
-
+    let message = "Failed to fetch dashboard assets";
+    let help = r#"
+You can manually execute './scripts/fetch-dashboard-assets.sh' to see why, 
+or it's a network error, just try again or enable/disable some proxy."#;
+    let out_dir = std::env::var("OUT_DIR").unwrap();
     let output = Command::new("./fetch-dashboard-assets.sh")
+        .arg(&out_dir)
         .current_dir("../../scripts")
         .stdout(Stdio::piped())
         .spawn()
         .and_then(|p| p.wait_with_output());
     match output {
         Ok(output) => {
-            String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .for_each(|x| p!("{}", x));
+            let script_output = String::from_utf8_lossy(&output.stdout);
 
-            assert!(output.status.success());
+            assert!(
+                output.status.success(),
+                "{message}.\n{script_output}\n{help}"
+            );
         }
         Err(e) => {
-            let e = format!(
-                r#"
-Failed to fetch dashboard assets: {}. 
-You can manually execute './scripts/fetch-dashboard-assets.sh' to see why, 
-or it's a network error, just try again or enable/disable some proxy."#,
-                e
-            );
+            let e = format!(r#"{message}: {e}.\n{help}"#);
             panic!("{}", e);
         }
     }
