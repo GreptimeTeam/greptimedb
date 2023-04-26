@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use common_base::BitVec;
 use datatypes::prelude::ScalarVector;
 use datatypes::vectors::BooleanVector;
+use store_api::storage::SstStatistics;
 
 use crate::error::Result;
 use crate::read::{Batch, BatchOp, BatchReader};
@@ -87,6 +88,10 @@ impl<R: BatchReader> BatchReader for DedupReader<R> {
         }
 
         Ok(None)
+    }
+
+    fn statistics(&self) -> SstStatistics {
+        self.reader.statistics()
     }
 }
 

@@ -27,6 +27,7 @@ use datatypes::vectors::{BooleanVector, MutableVector, VectorRef};
 pub use dedup::DedupReader;
 pub use merge::{MergeReader, MergeReaderBuilder};
 use snafu::{ensure, ResultExt};
+use store_api::storage::SstStatistics;
 
 use crate::error::{self, Result};
 
@@ -254,6 +255,12 @@ pub trait BatchReader: Send {
     /// If `Err` is returned, caller should not call this method again, the implementor
     /// may or may not panic in such case.
     async fn next_batch(&mut self) -> Result<Option<Batch>>;
+
+    // TODO(ruihang): implement this method for all readers.
+    /// Fetch the [SstStatistics] of this reader
+    fn statistics(&self) -> SstStatistics {
+        SstStatistics::default()
+    }
 }
 
 /// Pointer to [BatchReader].

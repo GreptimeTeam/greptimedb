@@ -436,8 +436,8 @@ pub enum Error {
 
     #[snafu(display("Failed to calculate SST expire time, source: {}", source))]
     TtlCalculation {
-        #[snafu(backtrace)]
         source: common_time::error::Error,
+        location: Location,
     },
 
     #[snafu(display("Failed to create a checkpoint: {}", msg))]
@@ -447,6 +447,13 @@ pub enum Error {
     CompactTaskCancel {
         region_id: RegionId,
         source: tokio::sync::oneshot::error::RecvError,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to merge statistics"))]
+    MergeStatistics {
+        source: store_api::error::Error,
+        location: Location,
     },
 }
 
@@ -493,7 +500,10 @@ impl ErrorExt for Error {
             | DecodeArrow { .. }
             | EncodeArrow { .. }
             | ManifestCheckpoint { .. }
-            | ParseSchema { .. } => StatusCode::Unexpected,
+            | ParseSchema { .. }
+            | StartManifestGcTask { .. }
+            | StopManifestGcTask { .. }
+            | IllegalSchedulerState { .. } => StatusCode::Unexpected,
 
             WriteParquet { .. }
             | ReadObject { .. }
@@ -519,14 +529,11 @@ impl ErrorExt for Error {
             ConvertChunk { source, .. } => source.status_code(),
             MarkWalObsolete { source, .. } => source.status_code(),
             DecodeParquetTimeRange { .. } => StatusCode::Unexpected,
-            RateLimited { .. } | StopScheduler { .. } | CompactTaskCancel { .. } => {
-                StatusCode::Internal
-            }
+            RateLimited { .. }
+            | StopScheduler { .. }
+            | CompactTaskCancel { .. }
+            | MergeStatistics { .. } => StatusCode::Internal,
             DeleteSst { .. } => StatusCode::StorageUnavailable,
-
-            StartManifestGcTask { .. }
-            | StopManifestGcTask { .. }
-            | IllegalSchedulerState { .. } => StatusCode::Unexpected,
 
             TtlCalculation { source, .. } => source.status_code(),
         }

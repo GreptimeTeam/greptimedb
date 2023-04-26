@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use datatypes::vectors::VectorRef;
-use store_api::storage::{consts, OpType, SequenceNumber};
+use store_api::storage::{consts, OpType, SequenceNumber, SstStatistics};
 
 use crate::error::Result;
 use crate::memtable::btree::BTreeMemtable;
@@ -115,6 +115,12 @@ pub trait BatchIterator: Iterator<Item = Result<Batch>> + Send + Sync {
 
     /// Returns the ordering of the output rows from this iterator.
     fn ordering(&self) -> RowOrdering;
+
+    // TODO(ruihang): implement statistics for memtable
+    /// Return the statistics of this iterator.
+    fn statistics(&self) -> SstStatistics {
+        SstStatistics::default()
+    }
 }
 
 pub type BoxedBatchIterator = Box<dyn BatchIterator>;

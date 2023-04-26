@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 use datatypes::vectors::VectorRef;
 
+use super::SstStatistics;
 use crate::storage::SchemaRef;
 
 /// A bunch of rows in columnar format.
@@ -39,6 +40,9 @@ pub trait ChunkReader: Send {
     /// Schema of the chunks returned by this reader.
     /// This schema does not contain internal columns.
     fn user_schema(&self) -> &SchemaRef;
+
+    /// SST statistics of the chunks returned by this reader.
+    fn statistics(&self) -> SstStatistics;
 
     /// Fetch next chunk from the reader.
     async fn next_chunk(&mut self) -> Result<Option<Chunk>, Self::Error>;

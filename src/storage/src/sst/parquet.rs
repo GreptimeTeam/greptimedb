@@ -15,6 +15,7 @@
 //! Parquet sst format.
 
 use std::collections::HashMap;
+use std::ops::AddAssign;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -38,6 +39,7 @@ use datatypes::prelude::ConcreteDataType;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::{ArrowPredicate, RowFilter};
+use parquet::arrow::async_reader::AsyncFileReader;
 use parquet::arrow::{ParquetRecordBatchStreamBuilder, ProjectionMask};
 use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::metadata::KeyValue;
@@ -45,6 +47,7 @@ use parquet::file::properties::WriterProperties;
 use parquet::format::FileMetaData;
 use parquet::schema::types::SchemaDescriptor;
 use snafu::{OptionExt, ResultExt};
+use store_api::storage::{SstColumnStatistics, SstStatistics};
 use table::predicate::Predicate;
 use tokio::io::BufReader;
 
@@ -242,22 +245,15 @@ impl ParquetReader {
 
     pub async fn chunk_stream(&self) -> Result<ChunkStream> {
         let file_path = self.file_handle.file_path();
-        let operator = self.object_store.clone();
-
-        let reader = operator
-            .reader(&file_path)
-            .await
-            .context(ReadObjectSnafu { path: &file_path })?
-            .compat();
-        let buf_reader = BufReader::new(reader);
+        let buf_reader = self.buf_reader().await?;
         let builder = ParquetRecordBatchStreamBuilder::new(buf_reader)
             .await
-            .context(ReadParquetSnafu { file: &file_path })?;
+            .with_context(|_| ReadParquetSnafu { file: &file_path })?;
         let arrow_schema = builder.schema().clone();
 
         let store_schema = Arc::new(
             StoreSchema::try_from(arrow_schema)
-                .context(error::ConvertStoreSchemaSnafu { file: &file_path })?,
+                .with_context(|_| error::ConvertStoreSchemaSnafu { file: &file_path })?,
         );
 
         let adapter = ReadAdapter::new(store_schema.clone(), self.projected_schema.clone())?;
@@ -287,15 +283,62 @@ impl ParquetReader {
 
         let mut stream = builder
             .build()
-            .context(ReadParquetSnafu { file: &file_path })?;
+            .with_context(|_| ReadParquetSnafu { file: &file_path })?;
 
         let chunk_stream = try_stream!({
             while let Some(res) = stream.next().await {
-                yield res.context(ReadParquetSnafu { file: &file_path })?
+                yield res.with_context(|_| ReadParquetSnafu { file: &file_path })?
             }
         });
 
-        ChunkStream::new(self.file_handle.clone(), adapter, Box::pin(chunk_stream))
+        // TODO(ruihang): check projection
+        let statistics = self.fetch_statistics().await?;
+        ChunkStream::new(
+            self.file_handle.clone(),
+            adapter,
+            Box::pin(chunk_stream),
+            statistics,
+        )
+    }
+
+    pub async fn fetch_statistics(&self) -> Result<SstStatistics> {
+        let file_path = self.file_handle.file_path();
+        let mut sst_statistics = SstStatistics::default();
+
+        let mut buf_reader = self.buf_reader().await?;
+        let parquet_metadata = buf_reader
+            .get_metadata()
+            .await
+            .with_context(|_| ReadParquetSnafu { file: &file_path })?;
+        let file_metadata = parquet_metadata.file_metadata();
+        sst_statistics.row_count = Some(file_metadata.num_rows() as usize);
+
+        let num_fields = self.projected_schema.schema_to_read().columns().len();
+        let mut column_statistics = vec![SstColumnStatistics::default(); num_fields];
+
+        for row_group_metadata in parquet_metadata.row_groups() {
+            for (index, column_metadata) in row_group_metadata.columns().iter().enumerate() {
+                if let Some(stat) = column_metadata.statistics() {
+                    // TODO(ruihang): add min/max statistics
+                    let null_count = stat.null_count();
+                    let distinct_count = stat.distinct_count();
+
+                    column_statistics[index]
+                        .null_count
+                        .get_or_insert_default()
+                        .add_assign(null_count as usize);
+                    if let Some(distinct_count) = distinct_count {
+                        column_statistics[index]
+                            .distinct_count
+                            .get_or_insert_default()
+                            .add_assign(distinct_count as usize);
+                    }
+                }
+            }
+        }
+
+        sst_statistics.column_statistics = column_statistics;
+        Ok(sst_statistics)
     }
 
     /// Builds time range row filter.
@@ -349,6 +392,18 @@ impl ParquetReader {
         };
         let filter = RowFilter::new(vec![row_filter]);
         Some(filter)
+    }
+
+    async fn buf_reader(&self) -> Result<impl AsyncFileReader + Send + 'static> {
+        let file_path = self.file_handle.file_path();
+        let operator = self.object_store.clone();
+
+        let reader = operator
+            .reader(&file_path)
+            .await
+            .with_context(|_| ReadObjectSnafu { path: &file_path })?
+            .compat();
+        Ok(BufReader::new(reader))
     }
 }
 
@@ -502,6 +557,7 @@ pub struct ChunkStream {
     _file_handle: FileHandle,
     adapter: ReadAdapter,
     stream: SendableChunkStream,
+    statistics: SstStatistics,
 }
 
 impl ChunkStream {
@@ -509,11 +565,13 @@ impl ChunkStream {
         file_handle: FileHandle,
         adapter: ReadAdapter,
         stream: SendableChunkStream,
+        statistics: SstStatistics,
     ) -> Result<Self> {
         Ok(Self {
             _file_handle: file_handle,
             adapter,
             stream,
+            statistics,
         })
     }
 }
@@ -526,6 +584,10 @@ impl BatchReader for ChunkStream {
             .await?
             .map(|rb| self.adapter.arrow_record_batch_to_batch(&rb))
             .transpose()
+    }
+
+    fn statistics(&self) -> SstStatistics {
+        self.statistics.clone()
     }
 }
 

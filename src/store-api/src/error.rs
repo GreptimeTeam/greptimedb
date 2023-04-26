@@ -12,38 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Storage engine implementation.
+use common_error::prelude::*;
+use snafu::Location;
 
-#![feature(option_get_or_insert_default)]
+pub type Result<T> = std::result::Result<T, Error>;
 
-mod background;
-mod chunk;
-pub mod codec;
-pub mod compaction;
-pub mod config;
-mod engine;
-pub mod error;
-mod flush;
-pub mod manifest;
-pub mod memtable;
-pub mod metadata;
-pub mod proto;
-pub mod read;
-pub mod region;
-pub mod scheduler;
-pub mod schema;
-mod snapshot;
-pub mod sst;
-mod sync;
-#[cfg(test)]
-mod test_util;
-mod version;
-mod wal;
-pub mod write_batch;
-
-pub use engine::EngineImpl;
-mod file_purger;
-mod metrics;
-
-pub use sst::parquet::ParquetWriter;
-pub use sst::Source;
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub))]
+pub enum Error {
+    #[snafu(display(
+        "Two group of columns have different number of element: {} v.s. {}",
+        left,
+        right
+    ))]
+    ColumnNumberMismatch {
+        left: usize,
+        right: usize,
+        location: Location,
+    },
+}

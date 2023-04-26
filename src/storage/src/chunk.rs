@@ -19,12 +19,12 @@ use common_query::logical_plan::Expr;
 use common_telemetry::debug;
 use common_time::range::TimestampRange;
 use snafu::ResultExt;
-use store_api::storage::{Chunk, ChunkReader, SchemaRef, SequenceNumber};
+use store_api::storage::{Chunk, ChunkReader, SchemaRef, SequenceNumber, SstStatistics};
 use table::predicate::{Predicate, TimeRangePredicateBuilder};
 
 use crate::error::{self, Error, Result};
 use crate::memtable::{IterContext, MemtableRef};
-use crate::read::{Batch, BoxedBatchReader, DedupReader, MergeReaderBuilder};
+use crate::read::{Batch, BatchReader, BoxedBatchReader, DedupReader, MergeReaderBuilder};
 use crate::schema::{ProjectedSchema, ProjectedSchemaRef, RegionSchemaRef};
 use crate::sst::{AccessLayerRef, FileHandle, LevelMetas, ReadOptions};
 
@@ -35,6 +35,7 @@ use crate::sst::{AccessLayerRef, FileHandle, LevelMetas, ReadOptions};
 pub struct ChunkReaderImpl {
     schema: ProjectedSchemaRef,
     batch_reader: BoxedBatchReader,
+    stats: SstStatistics,
 }
 
 #[async_trait]
@@ -43,6 +44,10 @@ impl ChunkReader for ChunkReaderImpl {
 
     fn user_schema(&self) -> &SchemaRef {
         self.schema.projected_user_schema()
+    }
+
+    fn statistics(&self) -> SstStatistics {
+        self.stats.clone()
     }
 
     async fn next_chunk(&mut self) -> Result<Option<Chunk>> {
@@ -62,10 +67,15 @@ impl ChunkReader for ChunkReaderImpl {
 }
 
 impl ChunkReaderImpl {
-    pub fn new(schema: ProjectedSchemaRef, batch_reader: BoxedBatchReader) -> ChunkReaderImpl {
+    pub fn new(
+        schema: ProjectedSchemaRef,
+        batch_reader: BoxedBatchReader,
+        stats: SstStatistics,
+    ) -> ChunkReaderImpl {
         ChunkReaderImpl {
             schema,
             batch_reader,
+            stats,
         }
     }
 
@@ -192,10 +202,12 @@ impl ChunkReaderBuilder {
             reader_builder = reader_builder.push_batch_reader(reader);
         }
 
-        let reader = reader_builder.build();
+        // TODO(ruihang): make merge/dedup reader optional.
+        let reader = reader_builder.build()?;
         let reader = DedupReader::new(schema.clone(), reader);
 
-        Ok(ChunkReaderImpl::new(schema, Box::new(reader)))
+        let statistics = reader.statistics();
+        Ok(ChunkReaderImpl::new(schema, Box::new(reader), statistics))
     }
 
     /// Build time range predicate from schema and filters.

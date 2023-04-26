@@ -59,9 +59,10 @@ use std::collections::BinaryHeap;
 use std::fmt;
 
 use async_trait::async_trait;
-use store_api::storage::consts;
+use snafu::ResultExt;
+use store_api::storage::{consts, SstStatistics};
 
-use crate::error::Result;
+use crate::error::{MergeStatisticsSnafu, Result};
 use crate::memtable::BoxedBatchIterator;
 use crate::read::{Batch, BatchBuilder, BatchOp, BatchReader, BoxedBatchReader};
 use crate::schema::{ProjectedSchema, ProjectedSchemaRef};
@@ -90,6 +91,13 @@ impl Source {
             }
         }
         Ok(None)
+    }
+
+    fn statistics(&self) -> SstStatistics {
+        match self {
+            Source::Iter(iter) => iter.statistics(),
+            Source::Reader(reader) => reader.statistics(),
+        }
     }
 }
 
@@ -405,12 +413,19 @@ pub struct MergeReader {
     batch_size: usize,
     /// Buffered batch.
     batch_builder: BatchBuilder,
+
+    /// Statistics of this reader
+    statistics: SstStatistics,
 }
 
 #[async_trait]
 impl BatchReader for MergeReader {
     async fn next_batch(&mut self) -> Result<Option<Batch>> {
         self.fetch_next_batch().await
+    }
+
+    fn statistics(&self) -> SstStatistics {
+        self.statistics.clone()
     }
 }
 
@@ -448,7 +463,7 @@ impl MergeReaderBuilder {
         self
     }
 
-    pub fn build(self) -> MergeReader {
+    pub fn build(self) -> Result<MergeReader> {
         let num_sources = self.sources.len();
         let column_schemas = self.schema.schema_to_read().schema().column_schemas();
         let batch_builder = BatchBuilder::with_capacity(
@@ -456,7 +471,14 @@ impl MergeReaderBuilder {
             self.batch_size,
         );
 
-        MergeReader {
+        let statistics = self
+            .sources
+            .iter()
+            .map(|s| s.statistics())
+            .try_fold(SstStatistics::default(), |acc, s| acc.try_merge(s))
+            .context(MergeStatisticsSnafu)?;
+
+        Ok(MergeReader {
             initialized: false,
             schema: self.schema,
             sources: self.sources,
@@ -464,7 +486,8 @@ impl MergeReaderBuilder {
             cold: BinaryHeap::with_capacity(num_sources),
             batch_size: self.batch_size,
             batch_builder,
-        }
+            statistics,
+        })
     }
 }
 
@@ -614,7 +637,7 @@ mod tests {
     async fn test_merge_reader_empty() {
         let schema = read_util::new_projected_schema();
 
-        let mut reader = MergeReaderBuilder::new(schema).build();
+        let mut reader = MergeReaderBuilder::new(schema).build().unwrap();
 
         assert!(reader.next_batch().await.unwrap().is_none());
         // Call next_batch() again is allowed.
@@ -668,7 +691,7 @@ mod tests {
             }
         }
 
-        builder.build()
+        builder.build().unwrap()
     }
 
     async fn check_merge_reader_result(mut reader: MergeReader, input: &[Batches<'_>]) {

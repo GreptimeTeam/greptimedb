@@ -28,7 +28,7 @@ use storage::write_batch::WriteBatch;
 use store_api::storage::{
     AlterRequest, Chunk, ChunkReader, CreateOptions, EngineContext, FlushContext, GetRequest,
     GetResponse, OpenOptions, ReadContext, Region, RegionDescriptor, RegionId, ScanRequest,
-    ScanResponse, SchemaRef, Snapshot, StorageEngine, WriteContext, WriteResponse,
+    ScanResponse, SchemaRef, Snapshot, SstStatistics, StorageEngine, WriteContext, WriteResponse,
 };
 
 pub type Result<T> = std::result::Result<T, MockError>;
@@ -72,6 +72,10 @@ impl ChunkReader for MockChunkReader {
 
     fn project_chunk(&self, chunk: Chunk) -> Chunk {
         chunk
+    }
+
+    fn statistics(&self) -> SstStatistics {
+        SstStatistics::default()
     }
 }
 
