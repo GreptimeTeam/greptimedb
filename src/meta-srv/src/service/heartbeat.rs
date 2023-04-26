@@ -54,8 +54,8 @@ impl heartbeat_server::Heartbeat for MetaSrv {
                             if let Some(peer) = &req.peer {
                                 let key = format!(
                                     "{}-{}-{}",
-                                    peer.addr,
                                     peer.id,
+                                    peer.addr,
                                     PUSHER_ID.fetch_add(1, Ordering::Relaxed)
                                 );
                                 handler_group.register(&key, tx.clone()).await;
