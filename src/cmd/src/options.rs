@@ -22,7 +22,7 @@ pub struct MixOptions {
     pub logging: LoggingOptions,
 }
 
-pub enum ConfigOptions {
+pub enum Options {
     Datanode(Box<DatanodeOptions>),
     Frontend(Box<FrontendOptions>),
     Metasrv(Box<MetaSrvOptions>),
@@ -30,14 +30,14 @@ pub enum ConfigOptions {
     Cli(Box<LoggingOptions>),
 }
 
-impl ConfigOptions {
+impl Options {
     pub fn logging_options(&self) -> &LoggingOptions {
         match self {
-            ConfigOptions::Datanode(opts) => &opts.logging,
-            ConfigOptions::Frontend(opts) => &opts.logging,
-            ConfigOptions::Metasrv(opts) => &opts.logging,
-            ConfigOptions::Standalone(opts) => &opts.logging,
-            ConfigOptions::Cli(opts) => opts,
+            Options::Datanode(opts) => &opts.logging,
+            Options::Frontend(opts) => &opts.logging,
+            Options::Metasrv(opts) => &opts.logging,
+            Options::Standalone(opts) => &opts.logging,
+            Options::Cli(opts) => opts,
         }
     }
 }

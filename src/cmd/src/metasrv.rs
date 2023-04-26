@@ -21,7 +21,7 @@ use meta_srv::metasrv::MetaSrvOptions;
 use snafu::ResultExt;
 
 use crate::error::Result;
-use crate::options::{ConfigOptions, TopLevelOptions};
+use crate::options::{Options, TopLevelOptions};
 use crate::{error, toml_loader};
 
 pub struct Instance {
@@ -55,7 +55,7 @@ impl Command {
         self.subcmd.build(opts).await
     }
 
-    pub fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<ConfigOptions> {
+    pub fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
         self.subcmd.load_options(top_level_opts)
     }
 }
@@ -72,7 +72,7 @@ impl SubCommand {
         }
     }
 
-    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<ConfigOptions> {
+    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
         match self {
             SubCommand::Start(cmd) => cmd.load_options(top_level_opts),
         }
@@ -100,9 +100,9 @@ struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<ConfigOptions> {
-        let mut opts: MetaSrvOptions = if let Some(path) = self.config_file.clone() {
-            toml_loader::from_file!(&path)?
+    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
+        let mut opts: MetaSrvOptions = if let Some(path) = &self.config_file {
+            toml_loader::from_file!(path)?
         } else {
             MetaSrvOptions::default()
         };
@@ -127,11 +127,9 @@ impl StartCommand {
             opts.selector = selector_type[..]
                 .try_into()
                 .context(error::UnsupportedSelectorTypeSnafu { selector_type })?;
-            // info!("Using {} selector", selector_type);
         }
 
         if self.use_memory_store {
-            // warn!("Using memory store for Meta. Make sure you are in running tests.");
             opts.use_memory_store = true;
         }
 
@@ -145,7 +143,7 @@ impl StartCommand {
         // Disable dashboard in metasrv.
         opts.http_opts.disable_dashboard = true;
 
-        Ok(ConfigOptions::Metasrv(Box::new(opts)))
+        Ok(Options::Metasrv(Box::new(opts)))
     }
 
     async fn build(self, opts: MetaSrvOptions) -> Result<Instance> {
@@ -183,16 +181,11 @@ mod tests {
             http_timeout: None,
         };
 
-        if let ConfigOptions::Metasrv(options) =
-            cmd.load_options(TopLevelOptions::default()).unwrap()
-        {
-            assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
-            assert_eq!("127.0.0.1:3002".to_string(), options.server_addr);
-            assert_eq!("127.0.0.1:2380".to_string(), options.store_addr);
-            assert_eq!(SelectorType::LoadBased, options.selector);
-        } else {
-            unreachable!()
-        }
+        let Options::Metasrv(options) =
+        cmd.load_options(TopLevelOptions::default()).unwrap() else { unreachable!() };
+        assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
+        assert_eq!("127.0.0.1:2380".to_string(), options.store_addr);
+        assert_eq!(SelectorType::LoadBased, options.selector);
     }
 
     #[test]
@@ -223,17 +216,15 @@ mod tests {
             http_timeout: None,
         };
 
-        if let ConfigOptions::Metasrv(options) =
-            cmd.load_options(TopLevelOptions::default()).unwrap()
-        {
-            assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
-            assert_eq!("127.0.0.1:3002".to_string(), options.server_addr);
-            assert_eq!("127.0.0.1:2379".to_string(), options.store_addr);
-            assert_eq!(15, options.datanode_lease_secs);
-            assert_eq!(SelectorType::LeaseBased, options.selector);
-            assert_eq!("debug".to_string(), options.logging.level);
-            assert_eq!("/tmp/greptimedb/test/logs".to_string(), options.logging.dir);
-        }
+        let Options::Metasrv(options) =
+            cmd.load_options(TopLevelOptions::default()).unwrap() else { unreachable!() };
+        assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
+        assert_eq!("127.0.0.1:3002".to_string(), options.server_addr);
+        assert_eq!("127.0.0.1:2379".to_string(), options.store_addr);
+        assert_eq!(15, options.datanode_lease_secs);
+        assert_eq!(SelectorType::LeaseBased, options.selector);
+        assert_eq!("debug".to_string(), options.logging.level);
+        assert_eq!("/tmp/greptimedb/test/logs".to_string(), options.logging.dir);
     }
 
     #[test]

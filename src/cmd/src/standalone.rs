@@ -40,7 +40,7 @@ use crate::error::{
     StartFrontendSnafu,
 };
 use crate::frontend::load_frontend_plugins;
-use crate::options::{ConfigOptions, MixOptions, TopLevelOptions};
+use crate::options::{MixOptions, Options, TopLevelOptions};
 use crate::toml_loader;
 
 #[derive(Parser)]
@@ -58,7 +58,7 @@ impl Command {
         self.subcmd.build(fe_opts, dn_opts).await
     }
 
-    pub fn load_options(&self, top_level_options: TopLevelOptions) -> Result<ConfigOptions> {
+    pub fn load_options(&self, top_level_options: TopLevelOptions) -> Result<Options> {
         self.subcmd.load_options(top_level_options)
     }
 }
@@ -75,7 +75,7 @@ impl SubCommand {
         }
     }
 
-    fn load_options(&self, top_level_options: TopLevelOptions) -> Result<ConfigOptions> {
+    fn load_options(&self, top_level_options: TopLevelOptions) -> Result<Options> {
         match self {
             SubCommand::Start(cmd) => cmd.load_options(top_level_options),
         }
@@ -215,11 +215,11 @@ struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(&self, top_level_options: TopLevelOptions) -> Result<ConfigOptions> {
+    fn load_options(&self, top_level_options: TopLevelOptions) -> Result<Options> {
         let enable_memory_catalog = self.enable_memory_catalog;
-        let config_file = self.config_file.clone();
+        let config_file = &self.config_file;
         let mut opts: StandaloneOptions = if let Some(path) = config_file {
-            toml_loader::from_file!(&path)?
+            toml_loader::from_file!(path)?
         } else {
             StandaloneOptions::default()
         };
@@ -307,7 +307,7 @@ impl StartCommand {
             fe_opts.postgres_options = Some(postgres_options);
         }
 
-        Ok(ConfigOptions::Standalone(Box::new(MixOptions {
+        Ok(Options::Standalone(Box::new(MixOptions {
             fe_opts,
             dn_opts,
             logging,
@@ -452,40 +452,38 @@ mod tests {
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
         };
 
-        let opts = cmd.load_options(TopLevelOptions::default()).unwrap();
-        if let ConfigOptions::Standalone(options) = opts {
-            let fe_opts = options.fe_opts;
-            let dn_opts = options.dn_opts;
-            let logging_opts = options.logging;
-            assert_eq!(Mode::Standalone, fe_opts.mode);
-            assert_eq!(
-                "127.0.0.1:4000".to_string(),
-                fe_opts.http_options.as_ref().unwrap().addr
-            );
-            assert_eq!(
-                Duration::from_secs(30),
-                fe_opts.http_options.as_ref().unwrap().timeout
-            );
-            assert_eq!(
-                "127.0.0.1:4001".to_string(),
-                fe_opts.grpc_options.unwrap().addr
-            );
-            assert_eq!(
-                "127.0.0.1:4002",
-                fe_opts.mysql_options.as_ref().unwrap().addr
-            );
-            assert_eq!(2, fe_opts.mysql_options.as_ref().unwrap().runtime_size);
-            assert_eq!(
-                None,
-                fe_opts.mysql_options.as_ref().unwrap().reject_no_database
-            );
-            assert!(fe_opts.influxdb_options.as_ref().unwrap().enable);
+        let Options::Standalone(options) = cmd.load_options(TopLevelOptions::default()).unwrap() else {unreachable!()};
+        let fe_opts = options.fe_opts;
+        let dn_opts = options.dn_opts;
+        let logging_opts = options.logging;
+        assert_eq!(Mode::Standalone, fe_opts.mode);
+        assert_eq!(
+            "127.0.0.1:4000".to_string(),
+            fe_opts.http_options.as_ref().unwrap().addr
+        );
+        assert_eq!(
+            Duration::from_secs(30),
+            fe_opts.http_options.as_ref().unwrap().timeout
+        );
+        assert_eq!(
+            "127.0.0.1:4001".to_string(),
+            fe_opts.grpc_options.unwrap().addr
+        );
+        assert_eq!(
+            "127.0.0.1:4002",
+            fe_opts.mysql_options.as_ref().unwrap().addr
+        );
+        assert_eq!(2, fe_opts.mysql_options.as_ref().unwrap().runtime_size);
+        assert_eq!(
+            None,
+            fe_opts.mysql_options.as_ref().unwrap().reject_no_database
+        );
+        assert!(fe_opts.influxdb_options.as_ref().unwrap().enable);
 
-            assert_eq!("/tmp/greptimedb/test/wal", dn_opts.wal.dir);
+        assert_eq!("/tmp/greptimedb/test/wal", dn_opts.wal.dir);
 
-            assert_eq!("debug".to_string(), logging_opts.level);
-            assert_eq!("/tmp/greptimedb/test/logs".to_string(), logging_opts.dir);
-        }
+        assert_eq!("debug".to_string(), logging_opts.level);
+        assert_eq!("/tmp/greptimedb/test/logs".to_string(), logging_opts.dir);
     }
 
     #[test]
@@ -506,16 +504,16 @@ mod tests {
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
         };
 
-        let opts = cmd
+        let Options::Standalone(opts) = cmd
             .load_options(TopLevelOptions {
                 log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
             })
-            .unwrap();
+            .unwrap() else {
+            unreachable!()
+        };
 
-        if let ConfigOptions::Standalone(opts) = opts {
-            assert_eq!("/tmp/greptimedb/test/logs", opts.logging.dir);
-            assert_eq!("debug", opts.logging.level);
-        }
+        assert_eq!("/tmp/greptimedb/test/logs", opts.logging.dir);
+        assert_eq!("debug", opts.logging.level);
     }
 }

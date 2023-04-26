@@ -1821,7 +1821,6 @@ dependencies = [
  "opentelemetry-jaeger",
  "parking_lot",
  "serde",
- "serde_json",
  "tracing",
  "tracing-appender",
  "tracing-bunyan-formatter",

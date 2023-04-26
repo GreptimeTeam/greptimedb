@@ -24,7 +24,7 @@ use servers::Mode;
 use snafu::ResultExt;
 
 use crate::error::{MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu};
-use crate::options::{ConfigOptions, TopLevelOptions};
+use crate::options::{Options, TopLevelOptions};
 use crate::toml_loader;
 
 pub struct Instance {
@@ -55,7 +55,7 @@ impl Command {
         self.subcmd.build(opts).await
     }
 
-    pub fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<ConfigOptions> {
+    pub fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
         self.subcmd.load_options(top_level_opts)
     }
 }
@@ -72,7 +72,7 @@ impl SubCommand {
         }
     }
 
-    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<ConfigOptions> {
+    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
         match self {
             SubCommand::Start(cmd) => cmd.load_options(top_level_opts),
         }
@@ -106,9 +106,9 @@ struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<ConfigOptions> {
-        let mut opts: DatanodeOptions = if let Some(path) = self.config_file.clone() {
-            toml_loader::from_file!(&path)?
+    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
+        let mut opts: DatanodeOptions = if let Some(path) = &self.config_file {
+            toml_loader::from_file!(path)?
         } else {
             DatanodeOptions::default()
         };
@@ -174,7 +174,7 @@ impl StartCommand {
         // Disable dashboard in datanode.
         opts.http_opts.disable_dashboard = true;
 
-        Ok(ConfigOptions::Datanode(Box::new(opts)))
+        Ok(Options::Datanode(Box::new(opts)))
     }
 
     async fn build(self, opts: DatanodeOptions) -> Result<Instance> {
@@ -251,74 +251,71 @@ mod tests {
             ..Default::default()
         };
 
-        if let ConfigOptions::Datanode(options) =
-            cmd.load_options(TopLevelOptions::default()).unwrap()
-        {
-            assert_eq!("127.0.0.1:3001".to_string(), options.rpc_addr);
-            assert_eq!("127.0.0.1:4406".to_string(), options.mysql_addr);
-            assert_eq!(2, options.mysql_runtime_size);
-            assert_eq!(Some(42), options.node_id);
+        let Options::Datanode(options) =
+            cmd.load_options(TopLevelOptions::default()).unwrap() else { unreachable!() };
 
-            assert_eq!(Duration::from_secs(600), options.wal.purge_interval);
-            assert_eq!(1024 * 1024 * 1024, options.wal.file_size.0);
-            assert_eq!(1024 * 1024 * 1024 * 50, options.wal.purge_threshold.0);
-            assert!(!options.wal.sync_write);
+        assert_eq!("127.0.0.1:3001".to_string(), options.rpc_addr);
+        assert_eq!("127.0.0.1:4406".to_string(), options.mysql_addr);
+        assert_eq!(2, options.mysql_runtime_size);
+        assert_eq!(Some(42), options.node_id);
 
-            let MetaClientOptions {
-                metasrv_addrs: metasrv_addr,
-                timeout_millis,
-                connect_timeout_millis,
-                tcp_nodelay,
-            } = options.meta_client_options.unwrap();
+        assert_eq!(Duration::from_secs(600), options.wal.purge_interval);
+        assert_eq!(1024 * 1024 * 1024, options.wal.file_size.0);
+        assert_eq!(1024 * 1024 * 1024 * 50, options.wal.purge_threshold.0);
+        assert!(!options.wal.sync_write);
 
-            assert_eq!(vec!["127.0.0.1:3002".to_string()], metasrv_addr);
-            assert_eq!(5000, connect_timeout_millis);
-            assert_eq!(3000, timeout_millis);
-            assert!(tcp_nodelay);
+        let MetaClientOptions {
+            metasrv_addrs: metasrv_addr,
+            timeout_millis,
+            connect_timeout_millis,
+            tcp_nodelay,
+        } = options.meta_client_options.unwrap();
 
-            match &options.storage.store {
-                ObjectStoreConfig::File(FileConfig { data_dir, .. }) => {
-                    assert_eq!("/tmp/greptimedb/data/", data_dir)
-                }
-                ObjectStoreConfig::S3 { .. } => unreachable!(),
-                ObjectStoreConfig::Oss { .. } => unreachable!(),
-            };
+        assert_eq!(vec!["127.0.0.1:3002".to_string()], metasrv_addr);
+        assert_eq!(5000, connect_timeout_millis);
+        assert_eq!(3000, timeout_millis);
+        assert!(tcp_nodelay);
 
-            assert_eq!(
-                CompactionConfig {
-                    max_inflight_tasks: 3,
-                    max_files_in_level0: 7,
-                    max_purge_tasks: 32,
-                    sst_write_buffer_size: ReadableSize::mb(8),
-                },
-                options.storage.compaction,
-            );
-            assert_eq!(
-                RegionManifestConfig {
-                    checkpoint_margin: Some(9),
-                    gc_duration: Some(Duration::from_secs(7)),
-                    checkpoint_on_startup: true,
-                },
-                options.storage.manifest,
-            );
+        match &options.storage.store {
+            ObjectStoreConfig::File(FileConfig { data_dir, .. }) => {
+                assert_eq!("/tmp/greptimedb/data/", data_dir)
+            }
+            ObjectStoreConfig::S3 { .. } => unreachable!(),
+            ObjectStoreConfig::Oss { .. } => unreachable!(),
+        };
 
-            assert_eq!("debug".to_string(), options.logging.level);
-            assert_eq!("/tmp/greptimedb/test/logs".to_string(), options.logging.dir);
-        } else {
-            unreachable!()
-        }
+        assert_eq!(
+            CompactionConfig {
+                max_inflight_tasks: 3,
+                max_files_in_level0: 7,
+                max_purge_tasks: 32,
+                sst_write_buffer_size: ReadableSize::mb(8),
+            },
+            options.storage.compaction,
+        );
+        assert_eq!(
+            RegionManifestConfig {
+                checkpoint_margin: Some(9),
+                gc_duration: Some(Duration::from_secs(7)),
+                checkpoint_on_startup: true,
+            },
+            options.storage.manifest,
+        );
+
+        assert_eq!("debug".to_string(), options.logging.level);
+        assert_eq!("/tmp/greptimedb/test/logs".to_string(), options.logging.dir);
     }
 
     #[test]
     fn test_try_from_cmd() {
-        if let ConfigOptions::Datanode(opt) = StartCommand::default()
+        if let Options::Datanode(opt) = StartCommand::default()
             .load_options(TopLevelOptions::default())
             .unwrap()
         {
             assert_eq!(Mode::Standalone, opt.mode)
         }
 
-        if let ConfigOptions::Datanode(opt) = (StartCommand {
+        if let Options::Datanode(opt) = (StartCommand {
             node_id: Some(42),
             metasrv_addr: Some("127.0.0.1:3002".to_string()),
             ..Default::default()

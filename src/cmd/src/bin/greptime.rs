@@ -18,7 +18,7 @@ use std::fmt;
 
 use clap::Parser;
 use cmd::error::Result;
-use cmd::options::{ConfigOptions, TopLevelOptions};
+use cmd::options::{Options, TopLevelOptions};
 use cmd::{cli, datanode, frontend, metasrv, standalone};
 use common_telemetry::logging::{error, info};
 
@@ -64,11 +64,11 @@ impl Application {
 }
 
 impl Command {
-    async fn build(self, opts: ConfigOptions) -> Result<Application> {
+    async fn build(self, opts: Options) -> Result<Application> {
         self.subcmd.build(opts).await
     }
 
-    fn load_options(&self) -> Result<ConfigOptions> {
+    fn load_options(&self) -> Result<Options> {
         let top_level_opts = self.top_level_options();
         self.subcmd.load_options(top_level_opts)
     }
@@ -96,25 +96,25 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(self, opts: ConfigOptions) -> Result<Application> {
+    async fn build(self, opts: Options) -> Result<Application> {
         match (self, opts) {
-            (SubCommand::Datanode(cmd), ConfigOptions::Datanode(dn_opts)) => {
+            (SubCommand::Datanode(cmd), Options::Datanode(dn_opts)) => {
                 let app = cmd.build(*dn_opts).await?;
                 Ok(Application::Datanode(app))
             }
-            (SubCommand::Frontend(cmd), ConfigOptions::Frontend(fe_opts)) => {
+            (SubCommand::Frontend(cmd), Options::Frontend(fe_opts)) => {
                 let app = cmd.build(*fe_opts).await?;
                 Ok(Application::Frontend(app))
             }
-            (SubCommand::Metasrv(cmd), ConfigOptions::Metasrv(meta_opts)) => {
+            (SubCommand::Metasrv(cmd), Options::Metasrv(meta_opts)) => {
                 let app = cmd.build(*meta_opts).await?;
                 Ok(Application::Metasrv(app))
             }
-            (SubCommand::Standalone(cmd), ConfigOptions::Standalone(opts)) => {
+            (SubCommand::Standalone(cmd), Options::Standalone(opts)) => {
                 let app = cmd.build(opts.fe_opts, opts.dn_opts).await?;
                 Ok(Application::Standalone(app))
             }
-            (SubCommand::Cli(cmd), ConfigOptions::Cli(_)) => {
+            (SubCommand::Cli(cmd), Options::Cli(_)) => {
                 let app = cmd.build().await?;
                 Ok(Application::Cli(app))
             }
@@ -123,7 +123,7 @@ impl SubCommand {
         }
     }
 
-    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<ConfigOptions> {
+    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
         match self {
             SubCommand::Datanode(cmd) => cmd.load_options(top_level_opts),
             SubCommand::Frontend(cmd) => cmd.load_options(top_level_opts),
