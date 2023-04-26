@@ -435,6 +435,12 @@ pub enum Error {
         source: common_datasource::error::Error,
     },
 
+    #[snafu(display("Failed to parse file format, source: {}", source))]
+    ParseFileFormat {
+        #[snafu(backtrace)]
+        source: common_datasource::error::Error,
+    },
+
     #[snafu(display("Failed to build data source backend, source: {}", source))]
     BuildBackend {
         #[snafu(backtrace)]
@@ -452,6 +458,12 @@ pub enum Error {
         path: String,
         location: Location,
         source: object_store::Error,
+    },
+
+    #[snafu(display("Failed to read record batch, source: {}", source))]
+    ReadRecordBatch {
+        source: datafusion::error::DataFusionError,
+        location: Location,
     },
 
     #[snafu(display("Failed to read parquet file, source: {}", source))]
@@ -532,6 +544,8 @@ impl ErrorExt for Error {
                 source.status_code()
             }
 
+            Error::ParseFileFormat { source } => source.status_code(),
+
             Error::Table { source }
             | Error::CopyTable { source, .. }
             | Error::Insert { source, .. } => source.status_code(),
@@ -596,7 +610,8 @@ impl ErrorExt for Error {
 
             Error::ReadObject { .. }
             | Error::ReadParquet { .. }
-            | Error::BuildParquetRecordBatchStream { .. } => StatusCode::StorageUnavailable,
+            | Error::BuildParquetRecordBatchStream { .. }
+            | Error::ReadRecordBatch { .. } => StatusCode::StorageUnavailable,
 
             Error::ListObjects { source }
             | Error::ParseUrl { source }

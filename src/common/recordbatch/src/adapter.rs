@@ -19,6 +19,7 @@ use std::task::{Context, Poll};
 
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::error::Result as DfResult;
+use datafusion::parquet::arrow::async_reader::{AsyncFileReader, ParquetRecordBatchStream};
 use datafusion::physical_plan::RecordBatchStream as DfRecordBatchStream;
 use datafusion_common::DataFusionError;
 use datatypes::schema::{Schema, SchemaRef};
@@ -38,6 +39,45 @@ type FutureStream = Pin<
             > + Send,
     >,
 >;
+
+/// ParquetRecordBatchStream -> DataFusion RecordBatchStream
+pub struct ParquetRecordBatchStreamAdapter<T> {
+    stream: ParquetRecordBatchStream<T>,
+}
+
+impl<T: Unpin + AsyncFileReader + Send + 'static> ParquetRecordBatchStreamAdapter<T> {
+    pub fn new(stream: ParquetRecordBatchStream<T>) -> Self {
+        Self { stream }
+    }
+}
+
+impl<T: Unpin + AsyncFileReader + Send + 'static> DfRecordBatchStream
+    for ParquetRecordBatchStreamAdapter<T>
+{
+    fn schema(&self) -> DfSchemaRef {
+        self.stream.schema().clone()
+    }
+}
+
+impl<T: Unpin + AsyncFileReader + Send + 'static> Stream for ParquetRecordBatchStreamAdapter<T> {
+    type Item = DfResult<DfRecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match Pin::new(&mut self.stream).poll_next(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Some(recordbatch)) => match recordbatch {
+                Ok(recordbatch) => Poll::Ready(Some(Ok(recordbatch))),
+                Err(e) => Poll::Ready(Some(Err(DataFusionError::External(Box::new(e))))),
+            },
+            Poll::Ready(None) => Poll::Ready(None),
+        }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.stream.size_hint()
+    }
+}
 
 /// Greptime SendableRecordBatchStream -> DataFusion RecordBatchStream
 pub struct DfRecordBatchStreamAdapter {

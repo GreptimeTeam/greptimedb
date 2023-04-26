@@ -17,14 +17,18 @@ use std::future::Future;
 
 use async_compat::CompatExt;
 use common_base::readable_size::ReadableSize;
+use common_datasource::file_format::Format;
 use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::{build_backend, parse_url};
 use common_datasource::util::find_dir_and_filename;
 use common_query::Output;
+use common_recordbatch::adapter::ParquetRecordBatchStreamAdapter;
+use common_recordbatch::DfSendableRecordBatchStream;
 use datafusion::parquet::arrow::ParquetRecordBatchStreamBuilder;
 use datatypes::arrow::datatypes::{DataType, SchemaRef};
 use datatypes::vectors::Helper;
 use futures_util::StreamExt;
+use object_store::{Entry, ObjectStore};
 use regex::Regex;
 use snafu::ResultExt;
 use table::engine::TableReference;
@@ -35,14 +39,10 @@ use crate::error::{self, IntoVectorsSnafu, Result};
 use crate::statement::StatementExecutor;
 
 impl StatementExecutor {
-    pub(crate) async fn copy_table_from(&self, req: CopyTableRequest) -> Result<Output> {
-        let table_ref = TableReference {
-            catalog: &req.catalog_name,
-            schema: &req.schema_name,
-            table: &req.table_name,
-        };
-        let table = self.get_table(&table_ref).await?;
-
+    async fn list_copy_from_entries(
+        &self,
+        req: &CopyTableRequest,
+    ) -> Result<(ObjectStore, Vec<Entry>)> {
         let (_schema, _host, path) = parse_url(&req.location).context(error::ParseUrlSnafu)?;
 
         let object_store =
@@ -66,6 +66,74 @@ impl StatementExecutor {
 
         let entries = lister.list().await.context(error::ListObjectsSnafu)?;
 
+        Ok((object_store, entries))
+    }
+
+    pub async fn infer_schema(
+        &self,
+        format: &Format,
+        object_store: ObjectStore,
+        path: &str,
+    ) -> Result<SchemaRef> {
+        match format {
+            Format::Csv(_) => todo!(),
+            Format::Json(_) => todo!(),
+            Format::Parquet(_) => {
+                let reader = object_store
+                    .reader(path)
+                    .await
+                    .context(error::ReadObjectSnafu { path })?;
+
+                let buf_reader = BufReader::new(reader);
+
+                let builder = ParquetRecordBatchStreamBuilder::new(buf_reader)
+                    .await
+                    .context(error::ReadParquetSnafu)?;
+                Ok(builder.schema().clone())
+            }
+        }
+    }
+
+    pub async fn build_read_stream(
+        &self,
+        format: &Format,
+        object_store: ObjectStore,
+        path: &str,
+    ) -> Result<DfSendableRecordBatchStream> {
+        match format {
+            Format::Csv(_) => todo!(),
+            Format::Json(_) => todo!(),
+            Format::Parquet(_) => {
+                let reader = object_store
+                    .reader(path)
+                    .await
+                    .context(error::ReadObjectSnafu { path })?;
+
+                let buf_reader = BufReader::new(reader.compat());
+
+                let builder = ParquetRecordBatchStreamBuilder::new(buf_reader)
+                    .await
+                    .context(error::ReadParquetSnafu)?;
+
+                let upstream = builder
+                    .build()
+                    .context(error::BuildParquetRecordBatchStreamSnafu)?;
+
+                Ok(Box::pin(ParquetRecordBatchStreamAdapter::new(upstream)))
+            }
+        }
+    }
+
+    pub(crate) async fn copy_table_from(&self, req: CopyTableRequest) -> Result<Output> {
+        let table_ref = TableReference {
+            catalog: &req.catalog_name,
+            schema: &req.schema_name,
+            table: &req.table_name,
+        };
+        let table = self.get_table(&table_ref).await?;
+
+        let format = Format::try_from(&req.with).context(error::ParseFileFormatSnafu)?;
+
         let fields = table
             .schema()
             .arrow_schema()
@@ -74,29 +142,34 @@ impl StatementExecutor {
             .map(|f| f.name().to_string())
             .collect::<Vec<_>>();
 
+        let (object_store, entries) = self.list_copy_from_entries(&req).await?;
+
+        let skip = |entry: &Entry| entry.path().ends_with('/');
+
+        //TODO(weny): Makes it configurable, e.g., skip_schema_check='true'
+        for entry in entries.iter() {
+            let path = entry.path();
+            // skips directories.
+            if skip(entry) {
+                continue;
+            }
+            let file_schema = self
+                .infer_schema(&format, object_store.clone(), path)
+                .await?;
+
+            ensure_schema_matches_ignore_timezone(&file_schema, table.schema().arrow_schema())?;
+        }
+
         let mut rows_inserted = 0;
         for entry in entries.iter() {
             let path = entry.path();
             // skips directories.
-            if entry.path().ends_with('/') {
+            if skip(entry) {
                 continue;
             }
-            let reader = object_store
-                .reader(path)
-                .await
-                .context(error::ReadObjectSnafu { path })?;
-
-            let buf_reader = BufReader::new(reader.compat());
-
-            let builder = ParquetRecordBatchStreamBuilder::new(buf_reader)
-                .await
-                .context(error::ReadParquetSnafu)?;
-
-            ensure_schema_matches_ignore_timezone(builder.schema(), table.schema().arrow_schema())?;
-
-            let mut stream = builder
-                .build()
-                .context(error::BuildParquetRecordBatchStreamSnafu)?;
+            let mut stream = self
+                .build_read_stream(&format, object_store.clone(), path)
+                .await?;
 
             // TODO(hl): make this configurable through options.
             let pending_mem_threshold = ReadableSize::mb(32).as_bytes();
@@ -104,7 +177,7 @@ impl StatementExecutor {
             let mut pending = vec![];
 
             while let Some(r) = stream.next().await {
-                let record_batch = r.context(error::ReadParquetSnafu)?;
+                let record_batch = r.context(error::ReadRecordBatchSnafu)?;
                 let vectors =
                     Helper::try_into_vectors(record_batch.columns()).context(IntoVectorsSnafu)?;
 
