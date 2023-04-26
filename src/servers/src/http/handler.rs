@@ -52,7 +52,7 @@ pub async fn sql(
     let db = query_params.db.or(form_params.db);
 
     let resp = if let Some(sql) = &sql {
-        match super::query_context_from_db(sql_handler.clone(), db).await {
+        match crate::http::query_context_from_db(sql_handler.clone(), db).await {
             Ok(query_ctx) => {
                 JsonResponse::from_output(sql_handler.do_query(sql, query_ctx).await).await
             }
