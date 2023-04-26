@@ -12,12 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
+use std::sync::Arc;
+
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request as GrpcRequest;
 use api::v1::query_request::Query;
 use api::v1::{CreateDatabaseExpr, DdlRequest, DeleteRequest, InsertRequest};
 use async_trait::async_trait;
+use catalog::CatalogManagerRef;
 use common_query::Output;
+use datafusion::catalog::catalog::{
+    CatalogList, CatalogProvider, MemoryCatalogList, MemoryCatalogProvider,
+};
+use datafusion::catalog::schema::SchemaProvider;
+use datafusion::datasource::TableProvider;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::plan::LogicalPlan;
 use query::query_engine::SqlStatementExecutor;
@@ -28,11 +37,12 @@ use sql::statements::statement::Statement;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::engine::TableReference;
 use table::requests::CreateDatabaseRequest;
+use table::table::adapter::DfTableProviderAdapter;
 
 use crate::error::{
-    self, CatalogSnafu, DecodeLogicalPlanSnafu, DeleteExprToRequestSnafu, DeleteSnafu,
-    ExecuteLogicalPlanSnafu, ExecuteSqlSnafu, InsertSnafu, PlanStatementSnafu, Result,
-    TableNotFoundSnafu,
+    self, CatalogNotFoundSnafu, CatalogSnafu, DecodeLogicalPlanSnafu, DeleteExprToRequestSnafu,
+    DeleteSnafu, ExecuteLogicalPlanSnafu, ExecuteSqlSnafu, InsertSnafu, PlanStatementSnafu, Result,
+    SchemaNotFoundSnafu, TableNotFoundSnafu,
 };
 use crate::instance::Instance;
 
@@ -49,9 +59,20 @@ impl Instance {
         self.sql_handler.create_database(req, query_ctx).await
     }
 
-    pub(crate) async fn execute_logical(&self, plan_bytes: Vec<u8>) -> Result<Output> {
+    pub(crate) async fn execute_logical(
+        &self,
+        plan_bytes: Vec<u8>,
+        ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let catalog_list = new_dummy_catalog_list(
+            &ctx.current_catalog(),
+            &ctx.current_schema(),
+            self.catalog_manager.clone(),
+        )
+        .await?;
+
         let logical_plan = DFLogicalSubstraitConvertor
-            .decode(plan_bytes.as_slice(), self.catalog_manager.clone())
+            .decode(plan_bytes.as_slice(), Arc::new(catalog_list) as Arc<_>)
             .await
             .context(DecodeLogicalPlanSnafu)?;
 
@@ -85,7 +106,7 @@ impl Instance {
                     }
                 }
             }
-            Query::LogicalPlan(plan) => self.execute_logical(plan).await,
+            Query::LogicalPlan(plan) => self.execute_logical(plan, ctx).await,
             Query::PromRangeQuery(promql) => {
                 let prom_query = PromQuery {
                     query: promql.query,
@@ -183,6 +204,89 @@ impl GrpcQueryHandler for Instance {
             GrpcRequest::Ddl(request) => self.handle_ddl(request, ctx).await,
         }
     }
+}
+
+struct DummySchemaProvider {
+    catalog: String,
+    schema: String,
+    table_names: Vec<String>,
+    catalog_manager: CatalogManagerRef,
+}
+
+impl DummySchemaProvider {
+    pub async fn try_new(
+        catalog_name: String,
+        schema_name: String,
+        catalog_manager: CatalogManagerRef,
+    ) -> Result<Self> {
+        let catalog = catalog_manager
+            .catalog(&catalog_name)
+            .await
+            .context(CatalogSnafu)?
+            .context(CatalogNotFoundSnafu {
+                name: &catalog_name,
+            })?;
+        let schema = catalog
+            .schema(&schema_name)
+            .await
+            .context(CatalogSnafu)?
+            .context(SchemaNotFoundSnafu { name: &schema_name })?;
+        let table_names = schema.table_names().await.context(CatalogSnafu)?;
+        Ok(Self {
+            catalog: catalog_name,
+            schema: schema_name,
+            table_names,
+            catalog_manager,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl SchemaProvider for DummySchemaProvider {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn table_names(&self) -> Vec<String> {
+        self.table_names.clone()
+    }
+
+    async fn table(&self, name: &str) -> Option<Arc<dyn TableProvider>> {
+        self.catalog_manager
+            .table(&self.catalog, &self.schema, name)
+            .await
+            .context(CatalogSnafu)
+            .ok()
+            .flatten()
+            .map(|t| Arc::new(DfTableProviderAdapter::new(t)) as Arc<_>)
+    }
+
+    fn table_exist(&self, name: &str) -> bool {
+        self.table_names.iter().any(|t| t == name)
+    }
+}
+
+async fn new_dummy_catalog_list(
+    catalog_name: &str,
+    schema_name: &str,
+    catalog_manager: CatalogManagerRef,
+) -> Result<MemoryCatalogList> {
+    let schema_provider = DummySchemaProvider::try_new(
+        catalog_name.to_string(),
+        schema_name.to_string(),
+        catalog_manager,
+    )
+    .await?;
+    let catalog_provider = MemoryCatalogProvider::new();
+    catalog_provider
+        .register_schema(schema_name, Arc::new(schema_provider) as Arc<_>)
+        .unwrap();
+    let catalog_list = MemoryCatalogList::new();
+    catalog_list.register_catalog(
+        catalog_name.to_string(),
+        Arc::new(catalog_provider) as Arc<_>,
+    );
+    Ok(catalog_list)
 }
 
 #[cfg(test)]

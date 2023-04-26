@@ -27,9 +27,13 @@ SELECT * from t;
 
 ALTER TABLE t RENAME new_table;
 
-Error: 1001(Unsupported), Operation rename table not implemented yet
+Affected Rows: 0
 
 DROP TABLE t;
 
-Affected Rows: 1
+Error: 4001(TableNotFound), Table not found: greptime.public.t
+
+DROP TABLE new_table;
+
+Error: 1003(Internal), status: Internal, message: "Table route not found: __meta_table_route-greptime-public-new_table-1025", details: [], metadata: MetadataMap { headers: {} }
 

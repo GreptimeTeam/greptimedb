@@ -19,7 +19,7 @@ mod state;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use catalog::CatalogListRef;
+use catalog::CatalogManagerRef;
 use common_base::Plugins;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::{FunctionRef, FUNCTION_REGISTRY};
@@ -65,12 +65,12 @@ pub struct QueryEngineFactory {
 }
 
 impl QueryEngineFactory {
-    pub fn new(catalog_list: CatalogListRef) -> Self {
-        Self::new_with_plugins(catalog_list, Default::default())
+    pub fn new(catalog_manager: CatalogManagerRef) -> Self {
+        Self::new_with_plugins(catalog_manager, Default::default())
     }
 
-    pub fn new_with_plugins(catalog_list: CatalogListRef, plugins: Arc<Plugins>) -> Self {
-        let state = Arc::new(QueryEngineState::new(catalog_list, plugins));
+    pub fn new_with_plugins(catalog_manager: CatalogManagerRef, plugins: Arc<Plugins>) -> Self {
+        let state = Arc::new(QueryEngineState::new(catalog_manager, plugins));
         let query_engine = Arc::new(DatafusionQueryEngine::new(state));
         register_functions(&query_engine);
         Self { query_engine }

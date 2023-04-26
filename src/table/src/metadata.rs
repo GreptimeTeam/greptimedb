@@ -89,7 +89,7 @@ pub struct TableIdent {
     pub version: TableVersion,
 }
 
-/// The table medatadata
+/// The table metadata
 /// Note: if you add new fields to this struct, please ensure 'new_meta_builder' function works.
 /// TODO(dennis): find a better way to ensure 'new_meta_builder' works when adding new fields.
 #[derive(Clone, Debug, Builder, PartialEq, Eq)]
@@ -172,7 +172,15 @@ impl TableMeta {
             AlterKind::AddColumns { columns } => self.add_columns(table_name, columns),
             AlterKind::DropColumns { names } => self.remove_columns(table_name, names),
             // No need to rebuild table meta when renaming tables.
-            AlterKind::RenameTable { .. } => Ok(TableMetaBuilder::default()),
+            AlterKind::RenameTable { .. } => {
+                let mut meta_builder = TableMetaBuilder::default();
+                meta_builder
+                    .schema(self.schema.clone())
+                    .primary_key_indices(self.primary_key_indices.clone())
+                    .engine(self.engine.clone())
+                    .next_column_id(self.next_column_id);
+                Ok(meta_builder)
+            }
         }
     }
 

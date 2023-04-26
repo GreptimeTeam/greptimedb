@@ -29,7 +29,6 @@ use table::TableRef;
 use crate::error::{CreateTableSnafu, Result};
 pub use crate::schema::{SchemaProvider, SchemaProviderRef};
 
-pub mod datafusion;
 pub mod error;
 pub mod helper;
 pub(crate) mod information_schema;
@@ -40,54 +39,39 @@ pub mod system;
 pub mod table_source;
 pub mod tables;
 
-/// Represent a list of named catalogs
-pub trait CatalogList: Sync + Send {
-    /// Returns the catalog list as [`Any`](std::any::Any)
-    /// so that it can be downcast to a specific implementation.
-    fn as_any(&self) -> &dyn Any;
-
-    /// Adds a new catalog to this catalog list
-    /// If a catalog of the same name existed before, it is replaced in the list and returned.
-    fn register_catalog(
-        &self,
-        name: String,
-        catalog: CatalogProviderRef,
-    ) -> Result<Option<CatalogProviderRef>>;
-
-    /// Retrieves the list of available catalog names
-    fn catalog_names(&self) -> Result<Vec<String>>;
-
-    /// Retrieves a specific catalog by name, provided it exists.
-    fn catalog(&self, name: &str) -> Result<Option<CatalogProviderRef>>;
-}
-
 /// Represents a catalog, comprising a number of named schemas.
+#[async_trait::async_trait]
 pub trait CatalogProvider: Sync + Send {
     /// Returns the catalog provider as [`Any`](std::any::Any)
     /// so that it can be downcast to a specific implementation.
     fn as_any(&self) -> &dyn Any;
 
     /// Retrieves the list of available schema names in this catalog.
-    fn schema_names(&self) -> Result<Vec<String>>;
+    async fn schema_names(&self) -> Result<Vec<String>>;
 
     /// Registers schema to this catalog.
-    fn register_schema(
+    async fn register_schema(
         &self,
         name: String,
         schema: SchemaProviderRef,
     ) -> Result<Option<SchemaProviderRef>>;
 
     /// Retrieves a specific schema from the catalog by name, provided it exists.
-    fn schema(&self, name: &str) -> Result<Option<SchemaProviderRef>>;
+    async fn schema(&self, name: &str) -> Result<Option<SchemaProviderRef>>;
 }
 
-pub type CatalogListRef = Arc<dyn CatalogList>;
 pub type CatalogProviderRef = Arc<dyn CatalogProvider>;
 
 #[async_trait::async_trait]
-pub trait CatalogManager: CatalogList {
+pub trait CatalogManager: Send + Sync {
     /// Starts a catalog manager.
     async fn start(&self) -> Result<()>;
+
+    async fn register_catalog(
+        &self,
+        name: String,
+        catalog: CatalogProviderRef,
+    ) -> Result<Option<CatalogProviderRef>>;
 
     /// Registers a table within given catalog/schema to catalog manager,
     /// returns whether the table registered.
@@ -108,7 +92,11 @@ pub trait CatalogManager: CatalogList {
     async fn register_system_table(&self, request: RegisterSystemTableRequest)
         -> error::Result<()>;
 
-    fn schema(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>>;
+    async fn catalog_names(&self) -> Result<Vec<String>>;
+
+    async fn catalog(&self, catalog: &str) -> Result<Option<CatalogProviderRef>>;
+
+    async fn schema(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>>;
 
     /// Returns the table by catalog, schema and table name.
     async fn table(
@@ -117,6 +105,8 @@ pub trait CatalogManager: CatalogList {
         schema: &str,
         table_name: &str,
     ) -> Result<Option<TableRef>>;
+
+    fn as_any(&self) -> &dyn Any;
 }
 
 pub type CatalogManagerRef = Arc<dyn CatalogManager>;
@@ -238,15 +228,15 @@ pub async fn datanode_stat(catalog_manager: &CatalogManagerRef) -> (u64, Vec<Reg
     let mut region_number: u64 = 0;
     let mut region_stats = Vec::new();
 
-    let Ok(catalog_names) = catalog_manager.catalog_names() else { return (region_number, region_stats) };
+    let Ok(catalog_names) = catalog_manager.catalog_names().await else { return (region_number, region_stats) };
     for catalog_name in catalog_names {
-        let Ok(Some(catalog)) = catalog_manager.catalog(&catalog_name) else { continue };
+        let Ok(Some(catalog)) = catalog_manager.catalog(&catalog_name).await else { continue };
 
-        let Ok(schema_names) = catalog.schema_names() else { continue };
+        let Ok(schema_names) = catalog.schema_names().await else { continue };
         for schema_name in schema_names {
-            let Ok(Some(schema)) = catalog.schema(&schema_name) else { continue };
+            let Ok(Some(schema)) = catalog.schema(&schema_name).await else { continue };
 
-            let Ok(table_names) = schema.table_names() else { continue };
+            let Ok(table_names) = schema.table_names().await else { continue };
             for table_name in table_names {
                 let Ok(Some(table)) = schema.table(&table_name).await else { continue };
 

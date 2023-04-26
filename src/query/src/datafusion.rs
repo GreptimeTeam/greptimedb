@@ -21,7 +21,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-pub use catalog::datafusion::catalog_adapter::DfCatalogListAdapter;
 use common_error::prelude::BoxedError;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::udf::create_udf;
@@ -183,19 +182,20 @@ impl DatafusionQueryEngine {
 
         let catalog = self
             .state
-            .catalog_list()
+            .catalog_manager()
             .catalog(catalog_name)
+            .await
             .context(CatalogSnafu)?
             .context(CatalogNotFoundSnafu {
                 catalog: catalog_name,
             })?;
-        let schema =
-            catalog
-                .schema(schema_name)
-                .context(CatalogSnafu)?
-                .context(SchemaNotFoundSnafu {
-                    schema: schema_name,
-                })?;
+        let schema = catalog
+            .schema(schema_name)
+            .await
+            .context(CatalogSnafu)?
+            .context(SchemaNotFoundSnafu {
+                schema: schema_name,
+            })?;
         let table = schema
             .table(table_name)
             .await
@@ -377,7 +377,7 @@ mod tests {
     use std::sync::Arc;
 
     use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
-    use catalog::{CatalogList, CatalogProvider, SchemaProvider};
+    use catalog::{CatalogProvider, SchemaProvider};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_query::Output;
     use common_recordbatch::util;
@@ -390,19 +390,21 @@ mod tests {
     use crate::parser::QueryLanguageParser;
     use crate::query_engine::{QueryEngineFactory, QueryEngineRef};
 
-    fn create_test_engine() -> QueryEngineRef {
+    async fn create_test_engine() -> QueryEngineRef {
         let catalog_list = catalog::local::new_memory_catalog_list().unwrap();
 
         let default_schema = Arc::new(MemorySchemaProvider::new());
         default_schema
             .register_table("numbers".to_string(), Arc::new(NumbersTable::default()))
+            .await
             .unwrap();
         let default_catalog = Arc::new(MemoryCatalogProvider::new());
         default_catalog
             .register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema)
+            .await
             .unwrap();
         catalog_list
-            .register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
+            .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
             .unwrap();
 
         QueryEngineFactory::new(catalog_list).query_engine()
@@ -410,7 +412,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sql_to_plan() {
-        let engine = create_test_engine();
+        let engine = create_test_engine().await;
         let sql = "select sum(number) from numbers limit 20";
 
         let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
@@ -432,7 +434,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute() {
-        let engine = create_test_engine();
+        let engine = create_test_engine().await;
         let sql = "select sum(number) from numbers limit 20";
 
         let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
@@ -470,7 +472,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_describe() {
-        let engine = create_test_engine();
+        let engine = create_test_engine().await;
         let sql = "select sum(number) from numbers limit 20";
 
         let stmt = QueryLanguageParser::parse_sql(sql).unwrap();

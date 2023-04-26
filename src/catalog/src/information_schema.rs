@@ -49,7 +49,7 @@ impl SchemaProvider for InformationSchemaProvider {
         self
     }
 
-    fn table_names(&self) -> Result<Vec<String>> {
+    async fn table_names(&self) -> Result<Vec<String>> {
         Ok(vec![TABLES.to_string()])
     }
 
@@ -74,7 +74,7 @@ impl SchemaProvider for InformationSchemaProvider {
         Ok(Some(Arc::new(table)))
     }
 
-    fn table_exist(&self, name: &str) -> Result<bool> {
+    async fn table_exist(&self, name: &str) -> Result<bool> {
         Ok(matches!(name.to_ascii_lowercase().as_str(), TABLES))
     }
 }

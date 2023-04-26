@@ -49,6 +49,7 @@ impl SqlHandler {
         if self
             .catalog_manager
             .schema(&catalog, &schema)
+            .await
             .context(CatalogSnafu)?
             .is_some()
         {

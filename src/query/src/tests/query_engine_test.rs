@@ -15,7 +15,6 @@
 use std::sync::Arc;
 
 use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
-use catalog::{CatalogList, CatalogProvider, SchemaProvider};
 use common_base::Plugins;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::BoxedError;
@@ -110,14 +109,14 @@ fn catalog_list() -> Result<Arc<MemoryCatalogManager>> {
 
     let default_schema = Arc::new(MemorySchemaProvider::new());
     default_schema
-        .register_table("numbers".to_string(), Arc::new(NumbersTable::default()))
+        .register_table_sync("numbers".to_string(), Arc::new(NumbersTable::default()))
         .unwrap();
     let default_catalog = Arc::new(MemoryCatalogProvider::new());
     default_catalog
-        .register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema)
+        .register_schema_sync(DEFAULT_SCHEMA_NAME.to_string(), default_schema)
         .unwrap();
     catalog_list
-        .register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
+        .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
         .unwrap();
     Ok(catalog_list)
 }

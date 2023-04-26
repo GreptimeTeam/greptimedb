@@ -55,7 +55,7 @@ impl DfContextProviderAdapter {
             .context(DataFusionSnafu)?;
 
         let mut table_provider = DfTableSourceProvider::new(
-            engine_state.catalog_list().clone(),
+            engine_state.catalog_manager().clone(),
             engine_state.disallow_cross_schema_query(),
             query_ctx.as_ref(),
         );

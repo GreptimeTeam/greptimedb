@@ -40,7 +40,7 @@ impl SchemaProvider for InformationSchema {
         self
     }
 
-    fn table_names(&self) -> Result<Vec<String>, Error> {
+    async fn table_names(&self) -> Result<Vec<String>, Error> {
         Ok(vec![SYSTEM_CATALOG_TABLE_NAME.to_string()])
     }
 
@@ -52,7 +52,7 @@ impl SchemaProvider for InformationSchema {
         }
     }
 
-    fn table_exist(&self, name: &str) -> Result<bool, Error> {
+    async fn table_exist(&self, name: &str) -> Result<bool, Error> {
         Ok(name.eq_ignore_ascii_case(SYSTEM_CATALOG_TABLE_NAME))
     }
 }
@@ -116,16 +116,17 @@ impl SystemCatalog {
     }
 }
 
+#[async_trait::async_trait]
 impl CatalogProvider for SystemCatalog {
     fn as_any(&self) -> &dyn Any {
         self
     }
 
-    fn schema_names(&self) -> Result<Vec<String>, Error> {
+    async fn schema_names(&self) -> Result<Vec<String>, Error> {
         Ok(vec![INFORMATION_SCHEMA_NAME.to_string()])
     }
 
-    fn register_schema(
+    async fn register_schema(
         &self,
         _name: String,
         _schema: SchemaProviderRef,
@@ -133,7 +134,7 @@ impl CatalogProvider for SystemCatalog {
         panic!("System catalog does not support registering schema!")
     }
 
-    fn schema(&self, name: &str) -> Result<Option<Arc<dyn SchemaProvider>>, Error> {
+    async fn schema(&self, name: &str) -> Result<Option<Arc<dyn SchemaProvider>>, Error> {
         if name.eq_ignore_ascii_case(INFORMATION_SCHEMA_NAME) {
             Ok(Some(self.information_schema.clone()))
         } else {

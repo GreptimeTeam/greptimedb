@@ -86,11 +86,11 @@ impl StatementExecutor {
 
             Statement::DescribeTable(stmt) => self.describe_table(stmt, query_ctx).await,
 
-            Statement::Use(db) => self.handle_use(db, query_ctx),
+            Statement::Use(db) => self.handle_use(db, query_ctx).await,
 
-            Statement::ShowDatabases(stmt) => self.show_databases(stmt),
+            Statement::ShowDatabases(stmt) => self.show_databases(stmt).await,
 
-            Statement::ShowTables(stmt) => self.show_tables(stmt, query_ctx),
+            Statement::ShowTables(stmt) => self.show_tables(stmt, query_ctx).await,
 
             Statement::Copy(stmt) => {
                 let req = to_copy_table_request(stmt, query_ctx)?;
@@ -126,11 +126,12 @@ impl StatementExecutor {
             .context(ExecLogicalPlanSnafu)
     }
 
-    fn handle_use(&self, db: String, query_ctx: QueryContextRef) -> Result<Output> {
+    async fn handle_use(&self, db: String, query_ctx: QueryContextRef) -> Result<Output> {
         let catalog = &query_ctx.current_catalog();
         ensure!(
             self.catalog_manager
                 .schema(catalog, &db)
+                .await
                 .context(CatalogSnafu)?
                 .is_some(),
             SchemaNotFoundSnafu { schema_info: &db }

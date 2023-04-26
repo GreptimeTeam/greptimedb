@@ -82,7 +82,7 @@ impl DfLogicalPlanner {
 
     async fn plan_pql(&self, stmt: EvalStmt, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
         let table_provider = DfTableSourceProvider::new(
-            self.engine_state.catalog_list().clone(),
+            self.engine_state.catalog_manager().clone(),
             self.engine_state.disallow_cross_schema_query(),
             query_ctx.as_ref(),
         );

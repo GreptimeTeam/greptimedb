@@ -99,7 +99,10 @@ static SHOW_CREATE_TABLE_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
     ]))
 });
 
-pub fn show_databases(stmt: ShowDatabases, catalog_manager: CatalogManagerRef) -> Result<Output> {
+pub async fn show_databases(
+    stmt: ShowDatabases,
+    catalog_manager: CatalogManagerRef,
+) -> Result<Output> {
     // TODO(LFC): supports WHERE
     ensure!(
         matches!(stmt.kind, ShowKind::All | ShowKind::Like(_)),
@@ -110,11 +113,12 @@ pub fn show_databases(stmt: ShowDatabases, catalog_manager: CatalogManagerRef) -
 
     let catalog = catalog_manager
         .catalog(DEFAULT_CATALOG_NAME)
+        .await
         .context(error::CatalogSnafu)?
         .context(error::CatalogNotFoundSnafu {
             catalog: DEFAULT_CATALOG_NAME,
         })?;
-    let mut databases = catalog.schema_names().context(error::CatalogSnafu)?;
+    let mut databases = catalog.schema_names().await.context(error::CatalogSnafu)?;
     // TODO(dennis): Specify the order of the results in catalog manager API
     databases.sort();
 
@@ -134,7 +138,7 @@ pub fn show_databases(stmt: ShowDatabases, catalog_manager: CatalogManagerRef) -
     Ok(Output::RecordBatches(records))
 }
 
-pub fn show_tables(
+pub async fn show_tables(
     stmt: ShowTables,
     catalog_manager: CatalogManagerRef,
     query_ctx: QueryContextRef,
@@ -155,9 +159,10 @@ pub fn show_tables(
     // TODO(sunng87): move this function into query_ctx
     let schema = catalog_manager
         .schema(&query_ctx.current_catalog(), &schema)
+        .await
         .context(error::CatalogSnafu)?
         .context(error::SchemaNotFoundSnafu { schema })?;
-    let mut tables = schema.table_names().context(error::CatalogSnafu)?;
+    let mut tables = schema.table_names().await.context(error::CatalogSnafu)?;
     // TODO(dennis): Specify the order of the results in schema provider API
     tables.sort();
 

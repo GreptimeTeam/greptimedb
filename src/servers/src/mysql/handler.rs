@@ -234,7 +234,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
     async fn on_init<'a>(&'a mut self, database: &'a str, w: InitWriter<'a, W>) -> Result<()> {
         let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(database);
         ensure!(
-            self.query_handler.is_valid_schema(catalog, schema)?,
+            self.query_handler.is_valid_schema(catalog, schema).await?,
             error::DatabaseNotFoundSnafu { catalog, schema }
         );
 

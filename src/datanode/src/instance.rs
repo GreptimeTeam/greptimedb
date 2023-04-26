@@ -275,10 +275,12 @@ impl Instance {
         let schema_list = self
             .catalog_manager
             .catalog(DEFAULT_CATALOG_NAME)
+            .await
             .map_err(BoxedError::new)
             .context(ShutdownInstanceSnafu)?
             .expect("Default schema not found")
             .schema_names()
+            .await
             .map_err(BoxedError::new)
             .context(ShutdownInstanceSnafu)?;
         let flush_requests = schema_list

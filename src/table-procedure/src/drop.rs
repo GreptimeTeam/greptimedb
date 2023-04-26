@@ -291,9 +291,10 @@ mod tests {
 
         let catalog = catalog_manager
             .catalog(DEFAULT_CATALOG_NAME)
+            .await
             .unwrap()
             .unwrap();
-        let schema = catalog.schema(DEFAULT_SCHEMA_NAME).unwrap().unwrap();
+        let schema = catalog.schema(DEFAULT_SCHEMA_NAME).await.unwrap().unwrap();
         assert!(schema.table(table_name).await.unwrap().is_none());
         let ctx = EngineContext::default();
         assert!(!table_engine.table_exists(

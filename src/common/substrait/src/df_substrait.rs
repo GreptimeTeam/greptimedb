@@ -16,13 +16,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::{Buf, Bytes, BytesMut};
-use catalog::CatalogManagerRef;
+use datafusion::catalog::catalog::CatalogList;
 use datafusion::prelude::SessionContext;
 use datafusion_expr::LogicalPlan;
 use datafusion_substrait::logical_plan::consumer::from_substrait_plan;
 use datafusion_substrait::logical_plan::producer::to_substrait_plan;
 use prost::Message;
-use query::datafusion::DfCatalogListAdapter;
 use snafu::ResultExt;
 use substrait_proto::proto::Plan;
 
@@ -40,13 +39,11 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
     async fn decode<B: Buf + Send>(
         &self,
         message: B,
-        catalog_manager: CatalogManagerRef,
+        catalog_list: Arc<dyn CatalogList>,
     ) -> Result<Self::Plan, Self::Error> {
         let mut context = SessionContext::new();
-        let df_catalog_list = Arc::new(DfCatalogListAdapter::new(catalog_manager));
-        context.register_catalog_list(df_catalog_list);
-
         let plan = Plan::decode(message).context(DecodeRelSnafu)?;
+        context.register_catalog_list(catalog_list);
         let df_plan = from_substrait_plan(&mut context, &plan)
             .await
             .context(DecodeDfPlanSnafu)?;

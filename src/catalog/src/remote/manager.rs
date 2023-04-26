@@ -17,19 +17,17 @@ use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 
-use arc_swap::ArcSwap;
 use async_stream::stream;
 use async_trait::async_trait;
 use common_catalog::consts::{MIN_USER_TABLE_ID, MITO_ENGINE};
-use common_telemetry::{debug, error, info};
+use common_telemetry::{debug, error, info, warn};
 use dashmap::DashMap;
 use futures::Stream;
 use futures_util::{StreamExt, TryStreamExt};
-use key_lock::KeyLock;
 use parking_lot::RwLock;
 use snafu::{OptionExt, ResultExt};
 use table::engine::manager::TableEngineManagerRef;
-use table::engine::EngineContext;
+use table::engine::{EngineContext, TableReference};
 use table::metadata::TableId;
 use table::requests::{CreateTableRequest, OpenTableRequest};
 use table::TableRef;
@@ -41,13 +39,13 @@ use crate::error::{
     TableExistsSnafu, UnimplementedSnafu,
 };
 use crate::helper::{
-    build_catalog_prefix, build_schema_prefix, build_table_global_prefix, CatalogKey, CatalogValue,
-    SchemaKey, SchemaValue, TableGlobalKey, TableGlobalValue, TableRegionalKey, TableRegionalValue,
-    CATALOG_KEY_PREFIX,
+    build_catalog_prefix, build_schema_prefix, build_table_global_prefix,
+    build_table_regional_prefix, CatalogKey, CatalogValue, SchemaKey, SchemaValue, TableGlobalKey,
+    TableGlobalValue, TableRegionalKey, TableRegionalValue, CATALOG_KEY_PREFIX,
 };
 use crate::remote::{Kv, KvBackendRef};
 use crate::{
-    handle_system_table_request, CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef,
+    handle_system_table_request, CatalogManager, CatalogProvider, CatalogProviderRef,
     DeregisterTableRequest, RegisterSchemaRequest, RegisterSystemTableRequest,
     RegisterTableRequest, RenameTableRequest, SchemaProvider, SchemaProviderRef,
 };
@@ -72,19 +70,12 @@ impl RemoteCatalogManager {
         }
     }
 
-    fn build_catalog_key(&self, catalog_name: impl AsRef<str>) -> CatalogKey {
-        CatalogKey {
-            catalog_name: catalog_name.as_ref().to_string(),
-        }
-    }
-
     fn new_catalog_provider(&self, catalog_name: &str) -> CatalogProviderRef {
         Arc::new(RemoteCatalogProvider {
             node_id: self.node_id,
             catalog_name: catalog_name.to_string(),
             backend: self.backend.clone(),
-            schemas: Default::default(),
-            mutex: Default::default(),
+            engine_manager: self.engine_manager.clone(),
         }) as _
     }
 
@@ -92,10 +83,9 @@ impl RemoteCatalogManager {
         Arc::new(RemoteSchemaProvider {
             catalog_name: catalog_name.to_string(),
             schema_name: schema_name.to_string(),
-            tables: Default::default(),
             node_id: self.node_id,
             backend: self.backend.clone(),
-            mutex: Default::default(),
+            engine_manager: self.engine_manager.clone(),
         }) as _
     }
 
@@ -217,10 +207,12 @@ impl RemoteCatalogManager {
                 ..
             } = r?;
             info!("Found schema: {}.{}", catalog_name, schema_name);
-            let schema = match catalog.schema(&schema_name)? {
+            let schema = match catalog.schema(&schema_name).await? {
                 None => {
                     let schema = self.new_schema_provider(&catalog_name, &schema_name);
-                    catalog.register_schema(schema_name.clone(), schema.clone())?;
+                    catalog
+                        .register_schema(schema_name.clone(), schema.clone())
+                        .await?;
                     info!("Registered schema: {}", &schema_name);
                     schema
                 }
@@ -266,7 +258,7 @@ impl RemoteCatalogManager {
             let table_info = table_ref.table_info();
             let table_name = &table_info.name;
             let table_id = table_info.ident.table_id;
-            schema.register_table(table_name.clone(), table_ref)?;
+            schema.register_table(table_name.clone(), table_ref).await?;
             info!("Registered table {}", table_name);
             max_table_id = max_table_id.max(table_id);
             table_num += 1;
@@ -287,7 +279,9 @@ impl RemoteCatalogManager {
         let schema_provider = self.new_schema_provider(catalog_name, schema_name);
 
         let catalog_provider = self.new_catalog_provider(catalog_name);
-        catalog_provider.register_schema(schema_name.to_string(), schema_provider.clone())?;
+        catalog_provider
+            .register_schema(schema_name.to_string(), schema_provider.clone())
+            .await?;
 
         let schema_key = SchemaKey {
             catalog_name: catalog_name.to_string(),
@@ -438,56 +432,85 @@ impl CatalogManager for RemoteCatalogManager {
     async fn register_table(&self, request: RegisterTableRequest) -> Result<bool> {
         let catalog_name = request.catalog;
         let schema_name = request.schema;
-        let catalog_provider = self.catalog(&catalog_name)?.context(CatalogNotFoundSnafu {
-            catalog_name: &catalog_name,
-        })?;
-        let schema_provider =
-            catalog_provider
-                .schema(&schema_name)?
-                .with_context(|| SchemaNotFoundSnafu {
-                    catalog: &catalog_name,
-                    schema: &schema_name,
-                })?;
-        if schema_provider.table_exist(&request.table_name)? {
+        let schema_provider = self
+            .catalog(&catalog_name)
+            .await?
+            .context(CatalogNotFoundSnafu {
+                catalog_name: &catalog_name,
+            })?
+            .schema(&schema_name)
+            .await?
+            .with_context(|| SchemaNotFoundSnafu {
+                catalog: &catalog_name,
+                schema: &schema_name,
+            })?;
+        if schema_provider.table_exist(&request.table_name).await? {
             return TableExistsSnafu {
                 table: format!("{}.{}.{}", &catalog_name, &schema_name, &request.table_name),
             }
             .fail();
         }
-        schema_provider.register_table(request.table_name, request.table)?;
+        schema_provider
+            .register_table(request.table_name, request.table)
+            .await?;
         Ok(true)
     }
 
     async fn deregister_table(&self, request: DeregisterTableRequest) -> Result<bool> {
         let catalog_name = &request.catalog;
         let schema_name = &request.schema;
-        let schema = self
-            .schema(catalog_name, schema_name)?
+        let result = self
+            .schema(catalog_name, schema_name)
+            .await?
             .context(SchemaNotFoundSnafu {
                 catalog: catalog_name,
                 schema: schema_name,
-            })?;
-
-        let result = schema.deregister_table(&request.table_name)?;
+            })?
+            .deregister_table(&request.table_name)
+            .await?;
         Ok(result.is_none())
     }
 
     async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool> {
         let catalog_name = request.catalog;
         let schema_name = request.schema;
-        let catalog_provider = self.catalog(&catalog_name)?.context(CatalogNotFoundSnafu {
-            catalog_name: &catalog_name,
-        })?;
+        let catalog_provider =
+            self.catalog(&catalog_name)
+                .await?
+                .context(CatalogNotFoundSnafu {
+                    catalog_name: &catalog_name,
+                })?;
         let schema_provider = self.new_schema_provider(&catalog_name, &schema_name);
-        catalog_provider.register_schema(schema_name, schema_provider)?;
+        catalog_provider
+            .register_schema(schema_name, schema_provider)
+            .await?;
         Ok(true)
     }
 
-    async fn rename_table(&self, _request: RenameTableRequest) -> Result<bool> {
-        UnimplementedSnafu {
-            operation: "rename table",
+    async fn rename_table(&self, request: RenameTableRequest) -> Result<bool> {
+        let old_table_key = TableRegionalKey {
+            catalog_name: request.catalog.clone(),
+            schema_name: request.schema.clone(),
+            table_name: request.table_name.clone(),
+            node_id: self.node_id,
         }
-        .fail()
+        .to_string();
+        let Some(Kv(_, value_bytes)) = self.backend.get(old_table_key.as_bytes()).await? else {
+            return Ok(false)
+        };
+        let new_table_key = TableRegionalKey {
+            catalog_name: request.catalog.clone(),
+            schema_name: request.schema.clone(),
+            table_name: request.new_table_name,
+            node_id: self.node_id,
+        };
+        self.backend
+            .set(new_table_key.to_string().as_bytes(), &value_bytes)
+            .await?;
+        self.backend
+            .delete(old_table_key.to_string().as_bytes())
+            .await?;
+        Ok(true)
     }
 
     async fn register_system_table(&self, request: RegisterSystemTableRequest) -> Result<()> {
@@ -496,12 +519,14 @@ impl CatalogManager for RemoteCatalogManager {
         Ok(())
     }
 
-    fn schema(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>> {
-        self.catalog(catalog)?
+    async fn schema(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>> {
+        self.catalog(catalog)
+            .await?
             .context(CatalogNotFoundSnafu {
                 catalog_name: catalog,
             })?
             .schema(schema)
+            .await
     }
 
     async fn table(
@@ -511,114 +536,67 @@ impl CatalogManager for RemoteCatalogManager {
         table_name: &str,
     ) -> Result<Option<TableRef>> {
         let catalog = self
-            .catalog(catalog_name)?
+            .catalog(catalog_name)
+            .await?
             .with_context(|| CatalogNotFoundSnafu { catalog_name })?;
         let schema = catalog
-            .schema(schema_name)?
+            .schema(schema_name)
+            .await?
             .with_context(|| SchemaNotFoundSnafu {
                 catalog: catalog_name,
                 schema: schema_name,
             })?;
         schema.table(table_name).await
     }
-}
 
-impl CatalogList for RemoteCatalogManager {
-    fn as_any(&self) -> &dyn Any {
-        self
+    async fn catalog(&self, catalog: &str) -> Result<Option<CatalogProviderRef>> {
+        let key = CatalogKey {
+            catalog_name: catalog.to_string(),
+        };
+        Ok(self
+            .backend
+            .get(key.to_string().as_bytes())
+            .await?
+            .map(|_| self.new_catalog_provider(catalog)))
     }
 
-    fn register_catalog(
-        &self,
-        name: String,
-        catalog: CatalogProviderRef,
-    ) -> Result<Option<CatalogProviderRef>> {
-        let key = self.build_catalog_key(&name).to_string();
-        let backend = self.backend.clone();
-        let catalogs = self.catalogs.clone();
+    async fn catalog_names(&self) -> Result<Vec<String>> {
+        let mut stream = self.backend.range(CATALOG_KEY_PREFIX.as_bytes());
+        let mut catalogs = HashSet::new();
 
-        std::thread::spawn(|| {
-            common_runtime::block_on_write(async move {
-                backend
-                    .set(
-                        key.as_bytes(),
-                        &CatalogValue {}
-                            .as_bytes()
-                            .context(InvalidCatalogValueSnafu)?,
-                    )
-                    .await?;
+        while let Some(catalog) = stream.next().await {
+            if let Ok(catalog) = catalog {
+                let catalog_key = String::from_utf8_lossy(&catalog.0);
 
-                let catalogs = catalogs.read();
-                let prev = catalogs.insert(name, catalog.clone());
-
-                Ok(prev)
-            })
-        })
-        .join()
-        .unwrap()
-    }
-
-    /// List all catalogs from metasrv
-    fn catalog_names(&self) -> Result<Vec<String>> {
-        let catalogs = self.catalogs.read();
-        Ok(catalogs.iter().map(|k| k.key().to_string()).collect())
-    }
-
-    /// Read catalog info of given name from metasrv.
-    fn catalog(&self, name: &str) -> Result<Option<CatalogProviderRef>> {
-        {
-            let catalogs = self.catalogs.read();
-            let catalog = catalogs.get(name);
-
-            if let Some(catalog) = catalog {
-                return Ok(Some(catalog.clone()));
+                if let Ok(key) = CatalogKey::parse(&catalog_key) {
+                    catalogs.insert(key.catalog_name);
+                }
             }
         }
 
-        let catalogs = self.catalogs.write();
+        Ok(catalogs.into_iter().collect())
+    }
 
-        let catalog = catalogs.get(name);
-        if let Some(catalog) = catalog {
-            return Ok(Some(catalog.clone()));
-        }
+    async fn register_catalog(
+        &self,
+        name: String,
+        _catalog: CatalogProviderRef,
+    ) -> Result<Option<CatalogProviderRef>> {
+        let key = CatalogKey { catalog_name: name }.to_string();
+        // TODO(hl): use compare_and_swap to prevent concurrent update
+        self.backend
+            .set(
+                key.as_bytes(),
+                &CatalogValue {}
+                    .as_bytes()
+                    .context(InvalidCatalogValueSnafu)?,
+            )
+            .await?;
+        Ok(None)
+    }
 
-        // It's for lack of incremental catalog syncing between datanode and meta. Here we fetch catalog
-        // from meta on demand. This can be removed when incremental catalog syncing is done in datanode.
-
-        let backend = self.backend.clone();
-
-        let catalogs_from_meta: HashSet<String> = std::thread::spawn(|| {
-            common_runtime::block_on_read(async move {
-                let mut stream = backend.range(CATALOG_KEY_PREFIX.as_bytes());
-                let mut catalogs = HashSet::new();
-
-                while let Some(catalog) = stream.next().await {
-                    if let Ok(catalog) = catalog {
-                        let catalog_key = String::from_utf8_lossy(&catalog.0);
-
-                        if let Ok(key) = CatalogKey::parse(&catalog_key) {
-                            catalogs.insert(key.catalog_name);
-                        }
-                    }
-                }
-
-                catalogs
-            })
-        })
-        .join()
-        .unwrap();
-
-        catalogs.retain(|catalog_name, _| catalogs_from_meta.get(catalog_name).is_some());
-
-        for catalog in catalogs_from_meta {
-            catalogs
-                .entry(catalog.clone())
-                .or_insert(self.new_catalog_provider(&catalog));
-        }
-
-        let catalog = catalogs.get(name);
-
-        Ok(catalog.as_deref().cloned())
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -626,61 +604,22 @@ pub struct RemoteCatalogProvider {
     node_id: u64,
     catalog_name: String,
     backend: KvBackendRef,
-    schemas: Arc<ArcSwap<HashMap<String, SchemaProviderRef>>>,
-    mutex: Arc<Mutex<()>>,
+    engine_manager: TableEngineManagerRef,
 }
 
 impl RemoteCatalogProvider {
-    pub fn new(catalog_name: String, backend: KvBackendRef, node_id: u64) -> Self {
+    pub fn new(
+        catalog_name: String,
+        backend: KvBackendRef,
+        engine_manager: TableEngineManagerRef,
+        node_id: u64,
+    ) -> Self {
         Self {
             node_id,
             catalog_name,
             backend,
-            schemas: Default::default(),
-            mutex: Default::default(),
+            engine_manager,
         }
-    }
-
-    pub fn refresh_schemas(&self) -> Result<()> {
-        let schemas = self.schemas.clone();
-        let schema_prefix = build_schema_prefix(&self.catalog_name);
-        let catalog_name = self.catalog_name.clone();
-        let mutex = self.mutex.clone();
-        let backend = self.backend.clone();
-        let node_id = self.node_id;
-
-        std::thread::spawn(move || {
-            common_runtime::block_on_write(async move {
-                let _guard = mutex.lock().await;
-                let prev_schemas = schemas.load();
-                let mut new_schemas = HashMap::with_capacity(prev_schemas.len() + 1);
-                new_schemas.clone_from(&prev_schemas);
-
-                let mut remote_schemas = backend.range(schema_prefix.as_bytes());
-                while let Some(r) = remote_schemas.next().await {
-                    let Kv(k, _) = r?;
-                    let schema_key = SchemaKey::parse(&String::from_utf8_lossy(&k))
-                        .context(InvalidCatalogValueSnafu)?;
-                    if !new_schemas.contains_key(&schema_key.schema_name) {
-                        new_schemas.insert(
-                            schema_key.schema_name.clone(),
-                            Arc::new(RemoteSchemaProvider::new(
-                                catalog_name.clone(),
-                                schema_key.schema_name,
-                                node_id,
-                                backend.clone(),
-                            )),
-                        );
-                    }
-                }
-                schemas.store(Arc::new(new_schemas));
-                Ok(())
-            })
-        })
-        .join()
-        .unwrap()?;
-
-        Ok(())
     }
 
     fn build_schema_key(&self, schema_name: impl AsRef<str>) -> SchemaKey {
@@ -689,56 +628,67 @@ impl RemoteCatalogProvider {
             schema_name: schema_name.as_ref().to_string(),
         }
     }
+
+    fn build_schema_provider(&self, schema_name: &str) -> SchemaProviderRef {
+        let provider = RemoteSchemaProvider {
+            catalog_name: self.catalog_name.clone(),
+            schema_name: schema_name.to_string(),
+            node_id: self.node_id,
+            backend: self.backend.clone(),
+            engine_manager: self.engine_manager.clone(),
+        };
+        Arc::new(provider) as Arc<_>
+    }
 }
 
+#[async_trait::async_trait]
 impl CatalogProvider for RemoteCatalogProvider {
     fn as_any(&self) -> &dyn Any {
         self
     }
 
-    fn schema_names(&self) -> Result<Vec<String>> {
-        self.refresh_schemas()?;
-        Ok(self.schemas.load().keys().cloned().collect::<Vec<_>>())
+    async fn schema_names(&self) -> Result<Vec<String>> {
+        let schema_prefix = build_schema_prefix(&self.catalog_name);
+
+        let remote_schemas = self.backend.range(schema_prefix.as_bytes());
+        let res = remote_schemas
+            .map(|kv| {
+                let Kv(k, _) = kv?;
+                let schema_key = SchemaKey::parse(String::from_utf8_lossy(&k))
+                    .context(InvalidCatalogValueSnafu)?;
+                Ok(schema_key.schema_name)
+            })
+            .try_collect()
+            .await?;
+        Ok(res)
     }
 
-    fn register_schema(
+    async fn register_schema(
         &self,
         name: String,
         schema: SchemaProviderRef,
     ) -> Result<Option<SchemaProviderRef>> {
+        let _ = schema; // we don't care about schema provider
         let key = self.build_schema_key(&name).to_string();
-        let backend = self.backend.clone();
-        let mutex = self.mutex.clone();
-        let schemas = self.schemas.clone();
-
-        std::thread::spawn(|| {
-            common_runtime::block_on_write(async move {
-                let _guard = mutex.lock().await;
-                backend
-                    .set(
-                        key.as_bytes(),
-                        &SchemaValue {}
-                            .as_bytes()
-                            .context(InvalidCatalogValueSnafu)?,
-                    )
-                    .await?;
-
-                let prev_schemas = schemas.load();
-                let mut new_schemas = HashMap::with_capacity(prev_schemas.len() + 1);
-                new_schemas.clone_from(&prev_schemas);
-                let prev_schema = new_schemas.insert(name, schema);
-                schemas.store(Arc::new(new_schemas));
-                Ok(prev_schema)
-            })
-        })
-        .join()
-        .unwrap()
+        self.backend
+            .set(
+                key.as_bytes(),
+                &SchemaValue {}
+                    .as_bytes()
+                    .context(InvalidCatalogValueSnafu)?,
+            )
+            .await?;
+        // TODO(hl): maybe return preview schema by cas
+        Ok(None)
     }
 
-    fn schema(&self, name: &str) -> Result<Option<Arc<dyn SchemaProvider>>> {
-        // TODO(hl): We should refresh whole catalog before calling datafusion's query engine.
-        self.refresh_schemas()?;
-        Ok(self.schemas.load().get(name).cloned())
+    async fn schema(&self, name: &str) -> Result<Option<SchemaProviderRef>> {
+        let key = self.build_schema_key(name).to_string();
+        Ok(self
+            .backend
+            .get(key.as_bytes())
+            .await?
+            .map(|_| self.build_schema_provider(name)))
     }
 }
 
@@ -747,8 +697,7 @@ pub struct RemoteSchemaProvider {
     schema_name: String,
     node_id: u64,
     backend: KvBackendRef,
-    tables: Arc<ArcSwap<DashMap<String, TableRef>>>,
-    mutex: Arc<KeyLock<String>>,
+    engine_manager: TableEngineManagerRef,
 }
 
 impl RemoteSchemaProvider {
@@ -756,6 +705,7 @@ impl RemoteSchemaProvider {
         catalog_name: String,
         schema_name: String,
         node_id: u64,
+        engine_manager: TableEngineManagerRef,
         backend: KvBackendRef,
     ) -> Self {
         Self {
@@ -763,8 +713,7 @@ impl RemoteSchemaProvider {
             schema_name,
             node_id,
             backend,
-            tables: Default::default(),
-            mutex: Default::default(),
+            engine_manager,
         }
     }
 
@@ -784,89 +733,132 @@ impl SchemaProvider for RemoteSchemaProvider {
         self
     }
 
-    fn table_names(&self) -> Result<Vec<String>> {
-        Ok(self
-            .tables
-            .load()
-            .iter()
-            .map(|en| en.key().clone())
-            .collect::<Vec<_>>())
+    async fn table_names(&self) -> Result<Vec<String>> {
+        let key_prefix = build_table_regional_prefix(&self.catalog_name, &self.schema_name);
+        let iter = self.backend.range(key_prefix.as_bytes());
+        let table_names = iter
+            .map(|kv| {
+                let Kv(key, _) = kv?;
+                let regional_key = TableRegionalKey::parse(String::from_utf8_lossy(&key))
+                    .context(InvalidCatalogValueSnafu)?;
+                Ok(regional_key.table_name)
+            })
+            .try_collect()
+            .await?;
+        Ok(table_names)
     }
 
     async fn table(&self, name: &str) -> Result<Option<TableRef>> {
-        Ok(self.tables.load().get(name).map(|en| en.value().clone()))
+        let key = self.build_regional_table_key(name).to_string();
+        let table_opt = self
+            .backend
+            .get(key.as_bytes())
+            .await?
+            .map(|Kv(_, v)| {
+                let TableRegionalValue { engine_name, .. } =
+                    TableRegionalValue::parse(String::from_utf8_lossy(&v))
+                        .context(InvalidCatalogValueSnafu)?;
+                let reference = TableReference {
+                    catalog: &self.catalog_name,
+                    schema: &self.schema_name,
+                    table: name,
+                };
+                let engine_name = engine_name.as_deref().unwrap_or(MITO_ENGINE);
+                let engine = self
+                    .engine_manager
+                    .engine(engine_name)
+                    .context(TableEngineNotFoundSnafu { engine_name })?;
+                let table = engine
+                    .get_table(&EngineContext {}, &reference)
+                    .with_context(|_| OpenTableSnafu {
+                        table_info: reference.to_string(),
+                    })?;
+                Ok(table)
+            })
+            .transpose()?
+            .flatten();
+
+        Ok(table_opt)
     }
 
-    fn register_table(&self, name: String, table: TableRef) -> Result<Option<TableRef>> {
+    async fn register_table(&self, name: String, table: TableRef) -> Result<Option<TableRef>> {
         let table_info = table.table_info();
         let table_version = table_info.ident.version;
         let table_value = TableRegionalValue {
             version: table_version,
             regions_ids: table.table_info().meta.region_numbers.clone(),
+            engine_name: Some(table_info.meta.engine.clone()),
         };
-        let backend = self.backend.clone();
-        let mutex = self.mutex.clone();
-        let tables = self.tables.clone();
         let table_key = self.build_regional_table_key(&name).to_string();
+        self.backend
+            .set(
+                table_key.as_bytes(),
+                &table_value.as_bytes().context(InvalidCatalogValueSnafu)?,
+            )
+            .await?;
+        debug!(
+            "Successfully set catalog table entry, key: {}, table value: {:?}",
+            table_key, table_value
+        );
 
-        let prev = std::thread::spawn(move || {
-            common_runtime::block_on_read(async move {
-                let _guard = mutex.lock(table_key.clone()).await;
-                backend
-                    .set(
-                        table_key.as_bytes(),
-                        &table_value.as_bytes().context(InvalidCatalogValueSnafu)?,
-                    )
-                    .await?;
-                debug!(
-                    "Successfully set catalog table entry, key: {}, table value: {:?}",
-                    table_key, table_value
-                );
-
-                let tables = tables.load();
-                let prev = tables.insert(name, table);
-                Ok(prev)
-            })
-        })
-        .join()
-        .unwrap();
-        prev
+        // TODO(hl): retrieve prev table info using cas
+        Ok(None)
     }
 
-    fn rename_table(&self, _name: &str, _new_name: String) -> Result<TableRef> {
+    async fn rename_table(&self, _name: &str, _new_name: String) -> Result<TableRef> {
         UnimplementedSnafu {
             operation: "rename table",
         }
         .fail()
     }
 
-    fn deregister_table(&self, name: &str) -> Result<Option<TableRef>> {
-        let table_name = name.to_string();
-        let table_key = self.build_regional_table_key(&table_name).to_string();
-        let backend = self.backend.clone();
-        let mutex = self.mutex.clone();
-        let tables = self.tables.clone();
-        let prev = std::thread::spawn(move || {
-            common_runtime::block_on_read(async move {
-                let _guard = mutex.lock(table_key.clone()).await;
-                backend.delete(table_key.as_bytes()).await?;
-                debug!(
-                    "Successfully deleted catalog table entry, key: {}",
-                    table_key
-                );
+    async fn deregister_table(&self, name: &str) -> Result<Option<TableRef>> {
+        let table_key = self.build_regional_table_key(name).to_string();
 
-                let tables = tables.load();
-                let prev = tables.remove(&table_name).map(|en| en.1);
-                Ok(prev)
+        let engine_opt = self
+            .backend
+            .get(table_key.as_bytes())
+            .await?
+            .map(|Kv(_, v)| {
+                let TableRegionalValue { engine_name, .. } =
+                    TableRegionalValue::parse(String::from_utf8_lossy(&v))
+                        .context(InvalidCatalogValueSnafu)?;
+                Ok(engine_name)
             })
-        })
-        .join()
-        .unwrap();
-        prev
+            .transpose()?
+            .flatten();
+
+        let engine_name = engine_opt.as_deref().unwrap_or_else(|| {
+            warn!("Cannot find table engine name for {table_key}");
+            MITO_ENGINE
+        });
+
+        self.backend.delete(table_key.as_bytes()).await?;
+        debug!(
+            "Successfully deleted catalog table entry, key: {}",
+            table_key
+        );
+
+        let reference = TableReference {
+            catalog: &self.catalog_name,
+            schema: &self.schema_name,
+            table: name,
+        };
+        // deregistering table does not necessarily mean dropping the table
+        let table = self
+            .engine_manager
+            .engine(engine_name)
+            .context(TableEngineNotFoundSnafu { engine_name })?
+            .get_table(&EngineContext {}, &reference)
+            .with_context(|_| OpenTableSnafu {
+                table_info: reference.to_string(),
+            })?;
+        Ok(table)
     }
 
     /// Checks if table exists in schema provider based on locally opened table map.
-    fn table_exist(&self, name: &str) -> Result<bool> {
-        Ok(self.tables.load().contains_key(name))
+    async fn table_exist(&self, name: &str) -> Result<bool> {
+        let key = self.build_regional_table_key(name).to_string();
+        Ok(self.backend.get(key.as_bytes()).await?.is_some())
     }
 }

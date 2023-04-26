@@ -28,10 +28,10 @@ use crate::error::{
     CatalogNotFoundSnafu, QueryAccessDeniedSnafu, Result, SchemaNotFoundSnafu, TableNotExistSnafu,
 };
 use crate::information_schema::InformationSchemaProvider;
-use crate::CatalogListRef;
+use crate::CatalogManagerRef;
 
 pub struct DfTableSourceProvider {
-    catalog_list: CatalogListRef,
+    catalog_manager: CatalogManagerRef,
     resolved_tables: HashMap<String, Arc<dyn TableSource>>,
     disallow_cross_schema_query: bool,
     default_catalog: String,
@@ -40,12 +40,12 @@ pub struct DfTableSourceProvider {
 
 impl DfTableSourceProvider {
     pub fn new(
-        catalog_list: CatalogListRef,
+        catalog_manager: CatalogManagerRef,
         disallow_cross_schema_query: bool,
         query_ctx: &QueryContext,
     ) -> Self {
         Self {
-            catalog_list,
+            catalog_manager,
             disallow_cross_schema_query,
             resolved_tables: HashMap::new(),
             default_catalog: query_ctx.current_catalog(),
@@ -104,17 +104,22 @@ impl DfTableSourceProvider {
 
         let schema = if schema_name != INFORMATION_SCHEMA_NAME {
             let catalog = self
-                .catalog_list
-                .catalog(catalog_name)?
+                .catalog_manager
+                .catalog(catalog_name)
+                .await?
                 .context(CatalogNotFoundSnafu { catalog_name })?;
-            catalog.schema(schema_name)?.context(SchemaNotFoundSnafu {
-                catalog: catalog_name,
-                schema: schema_name,
-            })?
+            catalog
+                .schema(schema_name)
+                .await?
+                .context(SchemaNotFoundSnafu {
+                    catalog: catalog_name,
+                    schema: schema_name,
+                })?
         } else {
             let catalog_provider = self
-                .catalog_list
-                .catalog(catalog_name)?
+                .catalog_manager
+                .catalog(catalog_name)
+                .await?
                 .context(CatalogNotFoundSnafu { catalog_name })?;
             Arc::new(InformationSchemaProvider::new(
                 catalog_name.to_string(),

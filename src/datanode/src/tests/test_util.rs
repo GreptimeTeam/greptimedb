@@ -126,10 +126,12 @@ pub(crate) async fn create_test_table(
     let schema_provider = instance
         .catalog_manager
         .schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
+        .await
         .unwrap()
         .unwrap();
     schema_provider
         .register_table(table_name.to_string(), table)
+        .await
         .unwrap();
     Ok(())
 }

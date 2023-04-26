@@ -28,7 +28,7 @@ use catalog::helper::{
 };
 use catalog::remote::{Kv, KvBackendRef};
 use catalog::{
-    CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, DeregisterTableRequest,
+    CatalogManager, CatalogProvider, CatalogProviderRef, DeregisterTableRequest,
     RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest,
     SchemaProvider, SchemaProviderRef,
 };
@@ -36,6 +36,7 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::BoxedError;
 use common_telemetry::warn;
 use futures::StreamExt;
+use futures_util::TryStreamExt;
 use meta_client::rpc::TableName;
 use partition::manager::PartitionRuleManagerRef;
 use snafu::prelude::*;
@@ -97,6 +98,14 @@ impl FrontendCatalogManager {
 impl CatalogManager for FrontendCatalogManager {
     async fn start(&self) -> catalog::error::Result<()> {
         Ok(())
+    }
+
+    async fn register_catalog(
+        &self,
+        _name: String,
+        _catalog: CatalogProviderRef,
+    ) -> CatalogResult<Option<CatalogProviderRef>> {
+        unimplemented!("Frontend catalog list does not support register catalog")
     }
 
     // TODO(LFC): Handle the table caching in (de)register_table.
@@ -216,16 +225,49 @@ impl CatalogManager for FrontendCatalogManager {
         }
     }
 
-    fn schema(
+    async fn catalog_names(&self) -> CatalogResult<Vec<String>> {
+        let key = build_catalog_prefix();
+        let mut iter = self.backend.range(key.as_bytes());
+        let mut res = HashSet::new();
+        while let Some(r) = iter.next().await {
+            let Kv(k, _) = r?;
+            let catalog_key = String::from_utf8_lossy(&k);
+            if let Ok(key) = CatalogKey::parse(catalog_key.as_ref()) {
+                res.insert(key.catalog_name);
+            } else {
+                warn!("invalid catalog key: {:?}", catalog_key);
+            }
+        }
+        Ok(res.into_iter().collect())
+    }
+
+    async fn catalog(&self, catalog: &str) -> CatalogResult<Option<CatalogProviderRef>> {
+        let key = CatalogKey {
+            catalog_name: catalog.to_string(),
+        }
+        .to_string();
+        Ok(self.backend.get(key.as_bytes()).await?.map(|_| {
+            Arc::new(FrontendCatalogProvider {
+                catalog_name: catalog.to_string(),
+                backend: self.backend.clone(),
+                partition_manager: self.partition_manager.clone(),
+                datanode_clients: self.datanode_clients.clone(),
+            }) as Arc<_>
+        }))
+    }
+
+    async fn schema(
         &self,
         catalog: &str,
         schema: &str,
     ) -> catalog::error::Result<Option<SchemaProviderRef>> {
-        self.catalog(catalog)?
+        self.catalog(catalog)
+            .await?
             .context(catalog::error::CatalogNotFoundSnafu {
                 catalog_name: catalog,
             })?
             .schema(schema)
+            .await
     }
 
     async fn table(
@@ -234,64 +276,15 @@ impl CatalogManager for FrontendCatalogManager {
         schema: &str,
         table_name: &str,
     ) -> catalog::error::Result<Option<TableRef>> {
-        self.schema(catalog, schema)?
+        self.schema(catalog, schema)
+            .await?
             .context(catalog::error::SchemaNotFoundSnafu { catalog, schema })?
             .table(table_name)
             .await
     }
-}
 
-impl CatalogList for FrontendCatalogManager {
     fn as_any(&self) -> &dyn Any {
         self
-    }
-
-    fn register_catalog(
-        &self,
-        _name: String,
-        _catalog: CatalogProviderRef,
-    ) -> catalog::error::Result<Option<CatalogProviderRef>> {
-        unimplemented!("Frontend catalog list does not support register catalog")
-    }
-
-    fn catalog_names(&self) -> catalog::error::Result<Vec<String>> {
-        let backend = self.backend.clone();
-        let res = std::thread::spawn(|| {
-            common_runtime::block_on_read(async move {
-                let key = build_catalog_prefix();
-                let mut iter = backend.range(key.as_bytes());
-                let mut res = HashSet::new();
-
-                while let Some(r) = iter.next().await {
-                    let Kv(k, _) = r?;
-
-                    let catalog_key = String::from_utf8_lossy(&k);
-                    if let Ok(key) = CatalogKey::parse(catalog_key.as_ref()) {
-                        res.insert(key.catalog_name);
-                    } else {
-                        warn!("invalid catalog key: {:?}", catalog_key);
-                    }
-                }
-                Ok(res.into_iter().collect())
-            })
-        })
-        .join()
-        .unwrap();
-        res
-    }
-
-    fn catalog(&self, name: &str) -> catalog::error::Result<Option<CatalogProviderRef>> {
-        let all_catalogs = self.catalog_names()?;
-        if all_catalogs.contains(&name.to_string()) {
-            Ok(Some(Arc::new(FrontendCatalogProvider {
-                catalog_name: name.to_string(),
-                backend: self.backend.clone(),
-                partition_manager: self.partition_manager.clone(),
-                datanode_clients: self.datanode_clients.clone(),
-            })))
-        } else {
-            Ok(None)
-        }
     }
 }
 
@@ -302,35 +295,26 @@ pub struct FrontendCatalogProvider {
     datanode_clients: Arc<DatanodeClients>,
 }
 
+#[async_trait::async_trait]
 impl CatalogProvider for FrontendCatalogProvider {
     fn as_any(&self) -> &dyn Any {
         self
     }
 
-    fn schema_names(&self) -> catalog::error::Result<Vec<String>> {
-        let backend = self.backend.clone();
-        let catalog_name = self.catalog_name.clone();
-        let res = std::thread::spawn(|| {
-            common_runtime::block_on_read(async move {
-                let key = build_schema_prefix(&catalog_name);
-                let mut iter = backend.range(key.as_bytes());
-                let mut res = HashSet::new();
-
-                while let Some(r) = iter.next().await {
-                    let Kv(k, _) = r?;
-                    let key = SchemaKey::parse(String::from_utf8_lossy(&k))
-                        .context(InvalidCatalogValueSnafu)?;
-                    res.insert(key.schema_name);
-                }
-                Ok(res.into_iter().collect())
-            })
-        })
-        .join()
-        .unwrap();
-        res
+    async fn schema_names(&self) -> catalog::error::Result<Vec<String>> {
+        let key = build_schema_prefix(&self.catalog_name);
+        let mut iter = self.backend.range(key.as_bytes());
+        let mut res = HashSet::new();
+        while let Some(r) = iter.next().await {
+            let Kv(k, _) = r?;
+            let key =
+                SchemaKey::parse(String::from_utf8_lossy(&k)).context(InvalidCatalogValueSnafu)?;
+            res.insert(key.schema_name);
+        }
+        Ok(res.into_iter().collect())
     }
 
-    fn register_schema(
+    async fn register_schema(
         &self,
         _name: String,
         _schema: SchemaProviderRef,
@@ -338,8 +322,8 @@ impl CatalogProvider for FrontendCatalogProvider {
         unimplemented!("Frontend catalog provider does not support register schema")
     }
 
-    fn schema(&self, name: &str) -> catalog::error::Result<Option<SchemaProviderRef>> {
-        let all_schemas = self.schema_names()?;
+    async fn schema(&self, name: &str) -> catalog::error::Result<Option<SchemaProviderRef>> {
+        let all_schemas = self.schema_names().await?;
         if all_schemas.contains(&name.to_string()) {
             Ok(Some(Arc::new(FrontendSchemaProvider {
                 catalog_name: self.catalog_name.clone(),
@@ -368,32 +352,24 @@ impl SchemaProvider for FrontendSchemaProvider {
         self
     }
 
-    fn table_names(&self) -> catalog::error::Result<Vec<String>> {
-        let backend = self.backend.clone();
-        let catalog_name = self.catalog_name.clone();
-        let schema_name = self.schema_name.clone();
-
-        std::thread::spawn(|| {
-            common_runtime::block_on_read(async move {
-                let mut tables = vec![];
-                if catalog_name == DEFAULT_CATALOG_NAME && schema_name == DEFAULT_SCHEMA_NAME {
-                    tables.push("numbers".to_string());
-                }
-
-                let key = build_table_global_prefix(catalog_name, schema_name);
-                let mut iter = backend.range(key.as_bytes());
-
-                while let Some(r) = iter.next().await {
-                    let Kv(k, _) = r?;
-                    let key = TableGlobalKey::parse(String::from_utf8_lossy(&k))
-                        .context(InvalidCatalogValueSnafu)?;
-                    tables.push(key.table_name);
-                }
-                Ok(tables)
+    async fn table_names(&self) -> catalog::error::Result<Vec<String>> {
+        let mut tables = vec![];
+        if self.catalog_name == DEFAULT_CATALOG_NAME && self.schema_name == DEFAULT_SCHEMA_NAME {
+            tables.push("numbers".to_string());
+        }
+        let key = build_table_global_prefix(&self.catalog_name, &self.schema_name);
+        let iter = self.backend.range(key.as_bytes());
+        let result = iter
+            .map(|r| {
+                let Kv(k, _) = r?;
+                let key = TableGlobalKey::parse(String::from_utf8_lossy(&k))
+                    .context(InvalidCatalogValueSnafu)?;
+                Ok(key.table_name)
             })
-        })
-        .join()
-        .unwrap()
+            .try_collect::<Vec<_>>()
+            .await?;
+        tables.extend(result);
+        Ok(tables)
     }
 
     async fn table(&self, name: &str) -> catalog::error::Result<Option<TableRef>> {
@@ -426,8 +402,8 @@ impl SchemaProvider for FrontendSchemaProvider {
         Ok(Some(table))
     }
 
-    fn table_exist(&self, name: &str) -> catalog::error::Result<bool> {
-        Ok(self.table_names()?.contains(&name.to_string()))
+    async fn table_exist(&self, name: &str) -> catalog::error::Result<bool> {
+        Ok(self.table_names().await?.contains(&name.to_string()))
     }
 }
 

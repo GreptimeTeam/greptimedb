@@ -138,12 +138,14 @@ impl AlterTableProcedure {
         let catalog = self
             .catalog_manager
             .catalog(&request.catalog_name)
+            .await
             .context(AccessCatalogSnafu)?
             .context(CatalogNotFoundSnafu {
                 name: &request.catalog_name,
             })?;
         let schema = catalog
             .schema(&request.schema_name)
+            .await
             .context(AccessCatalogSnafu)?
             .context(SchemaNotFoundSnafu {
                 name: &request.schema_name,
@@ -163,6 +165,7 @@ impl AlterTableProcedure {
             ensure!(
                 !schema
                     .table_exist(new_table_name)
+                    .await
                     .context(AccessCatalogSnafu)?,
                 TableExistsSnafu {
                     name: format!(
@@ -338,9 +341,10 @@ mod tests {
 
         let catalog = catalog_manager
             .catalog(DEFAULT_CATALOG_NAME)
+            .await
             .unwrap()
             .unwrap();
-        let schema = catalog.schema(DEFAULT_SCHEMA_NAME).unwrap().unwrap();
+        let schema = catalog.schema(DEFAULT_SCHEMA_NAME).await.unwrap().unwrap();
         let table = schema.table(new_table_name).await.unwrap().unwrap();
         let table_info = table.table_info();
         assert_eq!(new_table_name, table_info.name);

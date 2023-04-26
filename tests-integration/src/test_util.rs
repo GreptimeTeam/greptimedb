@@ -267,13 +267,16 @@ pub async fn create_test_table(
 
     let schema_provider = catalog_manager
         .catalog(DEFAULT_CATALOG_NAME)
+        .await
         .unwrap()
         .unwrap()
         .schema(DEFAULT_SCHEMA_NAME)
+        .await
         .unwrap()
         .unwrap();
     schema_provider
         .register_table(table_name.to_string(), table)
+        .await
         .unwrap();
     Ok(())
 }

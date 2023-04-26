@@ -10,3 +10,6 @@ SELECT * from t;
 ALTER TABLE t RENAME new_table;
 
 DROP TABLE t;
+
+-- TODO: this clause should success
+DROP TABLE new_table;

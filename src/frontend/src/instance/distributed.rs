@@ -421,6 +421,7 @@ impl DistInstance {
         if self
             .catalog_manager
             .schema(&catalog, &expr.database_name)
+            .await
             .context(CatalogSnafu)?
             .is_some()
         {

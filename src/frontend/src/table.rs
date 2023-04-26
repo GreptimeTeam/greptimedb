@@ -42,7 +42,7 @@ use snafu::prelude::*;
 use store_api::storage::RegionNumber;
 use table::error::TableOperationSnafu;
 use table::metadata::{FilterPushDownType, TableInfo, TableInfoRef};
-use table::requests::{AlterTableRequest, DeleteRequest, InsertRequest};
+use table::requests::{AlterKind, AlterTableRequest, DeleteRequest, InsertRequest};
 use table::table::AlterContext;
 use table::{meter_insert_request, Table};
 use tokio::sync::RwLock;
@@ -261,6 +261,13 @@ impl DistTable {
             .context(error::CatalogSnafu)
     }
 
+    async fn delete_table_global_value(&self, key: TableGlobalKey) -> Result<()> {
+        self.backend
+            .delete(key.to_string().as_bytes())
+            .await
+            .context(error::CatalogSnafu)
+    }
+
     async fn handle_alter(&self, context: AlterContext, request: &AlterTableRequest) -> Result<()> {
         let alter_expr = context
             .get::<AlterExpr>()
@@ -297,7 +304,17 @@ impl DistTable {
 
         value.table_info = new_info.into();
 
-        self.set_table_global_value(key, value).await
+        if let AlterKind::RenameTable { new_table_name } = &request.alter_kind {
+            let new_key = TableGlobalKey {
+                catalog_name: alter_expr.catalog_name.clone(),
+                schema_name: alter_expr.schema_name.clone(),
+                table_name: new_table_name.clone(),
+            };
+            self.set_table_global_value(new_key, value).await?;
+            self.delete_table_global_value(key).await
+        } else {
+            self.set_table_global_value(key, value).await
+        }
     }
 
     /// Define a `alter_by_expr` instead of impl [`Table::alter`] to avoid redundant conversion between

@@ -352,7 +352,6 @@ pub(crate) use tests::sample_script_engine;
 #[cfg(test)]
 mod tests {
     use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
-    use catalog::{CatalogList, CatalogProvider, SchemaProvider};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_recordbatch::util;
     use datatypes::prelude::ScalarVector;
@@ -368,14 +367,14 @@ mod tests {
 
         let default_schema = Arc::new(MemorySchemaProvider::new());
         default_schema
-            .register_table("numbers".to_string(), Arc::new(NumbersTable::default()))
+            .register_table_sync("numbers".to_string(), Arc::new(NumbersTable::default()))
             .unwrap();
         let default_catalog = Arc::new(MemoryCatalogProvider::new());
         default_catalog
-            .register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema)
+            .register_schema_sync(DEFAULT_SCHEMA_NAME.to_string(), default_schema)
             .unwrap();
         catalog_list
-            .register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
+            .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
             .unwrap();
 
         let factory = QueryEngineFactory::new(catalog_list);

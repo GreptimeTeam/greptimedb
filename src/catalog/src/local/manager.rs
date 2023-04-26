@@ -48,9 +48,9 @@ use crate::system::{
 };
 use crate::tables::SystemCatalog;
 use crate::{
-    handle_system_table_request, CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef,
-    DeregisterTableRequest, RegisterSchemaRequest, RegisterSystemTableRequest,
-    RegisterTableRequest, RenameTableRequest, SchemaProvider, SchemaProviderRef,
+    handle_system_table_request, CatalogManager, CatalogProviderRef, DeregisterTableRequest,
+    RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest,
+    SchemaProviderRef,
 };
 
 /// A `CatalogManager` consists of a system catalog and a bunch of user catalogs.
@@ -88,7 +88,7 @@ impl LocalCatalogManager {
 
     /// Scan all entries from system catalog table
     pub async fn init(&self) -> Result<()> {
-        self.init_system_catalog()?;
+        self.init_system_catalog().await?;
         let system_records = self.system.information_schema.system.records().await?;
         let entries = self.collect_system_catalog_entries(system_records).await?;
         let max_table_id = self.handle_system_catalog_entries(entries).await?;
@@ -114,27 +114,27 @@ impl LocalCatalogManager {
         Ok(())
     }
 
-    fn init_system_catalog(&self) -> Result<()> {
+    async fn init_system_catalog(&self) -> Result<()> {
         let system_schema = Arc::new(MemorySchemaProvider::new());
-        system_schema.register_table(
+        system_schema.register_table_sync(
             SYSTEM_CATALOG_TABLE_NAME.to_string(),
             self.system.information_schema.system.clone(),
         )?;
         let system_catalog = Arc::new(MemoryCatalogProvider::new());
-        system_catalog.register_schema(INFORMATION_SCHEMA_NAME.to_string(), system_schema)?;
+        system_catalog.register_schema_sync(INFORMATION_SCHEMA_NAME.to_string(), system_schema)?;
         self.catalogs
-            .register_catalog(SYSTEM_CATALOG_NAME.to_string(), system_catalog)?;
+            .register_catalog_sync(SYSTEM_CATALOG_NAME.to_string(), system_catalog)?;
 
         let default_catalog = Arc::new(MemoryCatalogProvider::new());
         let default_schema = Arc::new(MemorySchemaProvider::new());
 
         // Add numbers table for test
         let table = Arc::new(NumbersTable::default());
-        default_schema.register_table("numbers".to_string(), table)?;
+        default_schema.register_table_sync("numbers".to_string(), table)?;
 
-        default_catalog.register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema)?;
+        default_catalog.register_schema_sync(DEFAULT_SCHEMA_NAME.to_string(), default_schema)?;
         self.catalogs
-            .register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog)?;
+            .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string(), default_catalog)?;
         Ok(())
     }
 
@@ -213,16 +213,17 @@ impl LocalCatalogManager {
                     info!("Register catalog: {}", c.catalog_name);
                 }
                 Entry::Schema(s) => {
-                    let catalog =
-                        self.catalogs
-                            .catalog(&s.catalog_name)?
-                            .context(CatalogNotFoundSnafu {
-                                catalog_name: &s.catalog_name,
-                            })?;
-                    catalog.register_schema(
-                        s.schema_name.clone(),
-                        Arc::new(MemorySchemaProvider::new()),
-                    )?;
+                    self.catalogs
+                        .catalog(&s.catalog_name)
+                        .await?
+                        .context(CatalogNotFoundSnafu {
+                            catalog_name: &s.catalog_name,
+                        })?
+                        .register_schema(
+                            s.schema_name.clone(),
+                            Arc::new(MemorySchemaProvider::new()),
+                        )
+                        .await?;
                     info!("Registered schema: {:?}", s);
                 }
                 Entry::Table(t) => {
@@ -243,14 +244,16 @@ impl LocalCatalogManager {
     }
 
     async fn open_and_register_table(&self, t: &TableEntry) -> Result<()> {
-        let catalog = self
-            .catalogs
-            .catalog(&t.catalog_name)?
-            .context(CatalogNotFoundSnafu {
-                catalog_name: &t.catalog_name,
-            })?;
+        let catalog =
+            self.catalogs
+                .catalog(&t.catalog_name)
+                .await?
+                .context(CatalogNotFoundSnafu {
+                    catalog_name: &t.catalog_name,
+                })?;
         let schema = catalog
-            .schema(&t.schema_name)?
+            .schema(&t.schema_name)
+            .await?
             .context(SchemaNotFoundSnafu {
                 catalog: &t.catalog_name,
                 schema: &t.schema_name,
@@ -286,34 +289,8 @@ impl LocalCatalogManager {
                 ),
             })?;
 
-        schema.register_table(t.table_name.clone(), option)?;
+        schema.register_table(t.table_name.clone(), option).await?;
         Ok(())
-    }
-}
-
-impl CatalogList for LocalCatalogManager {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn register_catalog(
-        &self,
-        name: String,
-        catalog: CatalogProviderRef,
-    ) -> Result<Option<CatalogProviderRef>> {
-        self.catalogs.register_catalog(name, catalog)
-    }
-
-    fn catalog_names(&self) -> Result<Vec<String>> {
-        self.catalogs.catalog_names()
-    }
-
-    fn catalog(&self, name: &str) -> Result<Option<CatalogProviderRef>> {
-        if name.eq_ignore_ascii_case(SYSTEM_CATALOG_NAME) {
-            Ok(Some(self.system.clone()))
-        } else {
-            self.catalogs.catalog(name)
-        }
     }
 }
 
@@ -347,10 +324,12 @@ impl CatalogManager for LocalCatalogManager {
 
         let catalog = self
             .catalogs
-            .catalog(catalog_name)?
+            .catalog(catalog_name)
+            .await?
             .context(CatalogNotFoundSnafu { catalog_name })?;
         let schema = catalog
-            .schema(schema_name)?
+            .schema(schema_name)
+            .await?
             .with_context(|| SchemaNotFoundSnafu {
                 catalog: catalog_name,
                 schema: schema_name,
@@ -388,7 +367,9 @@ impl CatalogManager for LocalCatalogManager {
                         engine,
                     )
                     .await?;
-                schema.register_table(request.table_name, request.table)?;
+                schema
+                    .register_table(request.table_name, request.table)
+                    .await?;
                 Ok(true)
             }
         }
@@ -409,11 +390,13 @@ impl CatalogManager for LocalCatalogManager {
 
         let catalog = self
             .catalogs
-            .catalog(catalog_name)?
+            .catalog(catalog_name)
+            .await?
             .context(CatalogNotFoundSnafu { catalog_name })?;
 
         let schema = catalog
-            .schema(schema_name)?
+            .schema(schema_name)
+            .await?
             .with_context(|| SchemaNotFoundSnafu {
                 catalog: catalog_name,
                 schema: schema_name,
@@ -421,7 +404,7 @@ impl CatalogManager for LocalCatalogManager {
 
         let _lock = self.register_lock.lock().await;
         ensure!(
-            !schema.table_exist(&request.new_table_name)?,
+            !schema.table_exist(&request.new_table_name).await?,
             TableExistsSnafu {
                 table: &request.new_table_name
             }
@@ -447,6 +430,7 @@ impl CatalogManager for LocalCatalogManager {
 
         let renamed = schema
             .rename_table(&request.table_name, request.new_table_name.clone())
+            .await
             .is_ok();
         Ok(renamed)
     }
@@ -497,13 +481,14 @@ impl CatalogManager for LocalCatalogManager {
 
         let catalog = self
             .catalogs
-            .catalog(catalog_name)?
+            .catalog(catalog_name)
+            .await?
             .context(CatalogNotFoundSnafu { catalog_name })?;
 
         {
             let _lock = self.register_lock.lock().await;
             ensure!(
-                catalog.schema(schema_name)?.is_none(),
+                catalog.schema(schema_name).await?.is_none(),
                 SchemaExistsSnafu {
                     schema: schema_name,
                 }
@@ -511,7 +496,9 @@ impl CatalogManager for LocalCatalogManager {
             self.system
                 .register_schema(request.catalog, schema_name.clone())
                 .await?;
-            catalog.register_schema(request.schema, Arc::new(MemorySchemaProvider::new()))?;
+            catalog
+                .register_schema(request.schema, Arc::new(MemorySchemaProvider::new()))
+                .await?;
             Ok(true)
         }
     }
@@ -530,13 +517,15 @@ impl CatalogManager for LocalCatalogManager {
         Ok(())
     }
 
-    fn schema(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>> {
+    async fn schema(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>> {
         self.catalogs
-            .catalog(catalog)?
+            .catalog(catalog)
+            .await?
             .context(CatalogNotFoundSnafu {
                 catalog_name: catalog,
             })?
             .schema(schema)
+            .await
     }
 
     async fn table(
@@ -547,15 +536,41 @@ impl CatalogManager for LocalCatalogManager {
     ) -> Result<Option<TableRef>> {
         let catalog = self
             .catalogs
-            .catalog(catalog_name)?
+            .catalog(catalog_name)
+            .await?
             .context(CatalogNotFoundSnafu { catalog_name })?;
         let schema = catalog
-            .schema(schema_name)?
+            .schema(schema_name)
+            .await?
             .with_context(|| SchemaNotFoundSnafu {
                 catalog: catalog_name,
                 schema: schema_name,
             })?;
         schema.table(table_name).await
+    }
+
+    async fn catalog(&self, catalog: &str) -> Result<Option<CatalogProviderRef>> {
+        if catalog.eq_ignore_ascii_case(SYSTEM_CATALOG_NAME) {
+            Ok(Some(self.system.clone()))
+        } else {
+            self.catalogs.catalog(catalog).await
+        }
+    }
+
+    async fn catalog_names(&self) -> Result<Vec<String>> {
+        self.catalogs.catalog_names().await
+    }
+
+    async fn register_catalog(
+        &self,
+        name: String,
+        catalog: CatalogProviderRef,
+    ) -> Result<Option<CatalogProviderRef>> {
+        self.catalogs.register_catalog(name, catalog).await
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

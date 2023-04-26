@@ -191,6 +191,7 @@ impl TableRegionalKey {
 pub struct TableRegionalValue {
     pub version: TableVersion,
     pub regions_ids: Vec<u32>,
+    pub engine_name: Option<String>,
 }
 
 pub struct CatalogKey {
