@@ -175,14 +175,14 @@ pub async fn infer_schemas(
 pub async fn stream_to_file<T: DfRecordBatchEncoder, U: Fn(SharedBuffer) -> T>(
     mut stream: SendableRecordBatchStream,
     store: ObjectStore,
-    path: String,
+    path: &str,
     threshold: usize,
     encoder_factory: U,
 ) -> Result<usize> {
     let writer = store
-        .writer(&path)
+        .writer(path)
         .await
-        .context(error::WriteObjectSnafu { path: &path })?
+        .context(error::WriteObjectSnafu { path })?
         .compat_write();
 
     let buffer = SharedBuffer::with_capacity(threshold);

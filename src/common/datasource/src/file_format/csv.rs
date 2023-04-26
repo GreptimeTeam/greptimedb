@@ -190,7 +190,7 @@ impl FileFormat for CsvFormat {
 pub async fn stream_to_csv(
     stream: SendableRecordBatchStream,
     store: ObjectStore,
-    path: String,
+    path: &str,
     threshold: usize,
 ) -> Result<usize> {
     stream_to_file(stream, store, path, threshold, |buffer| {

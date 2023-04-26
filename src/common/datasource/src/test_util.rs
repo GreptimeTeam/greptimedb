@@ -116,7 +116,7 @@ pub async fn setup_stream_to_json_test(origin_path: &str, threshold: impl Fn(usi
     stream_to_json(
         Box::pin(stream),
         tmp_store.clone(),
-        output_path.clone(),
+        &output_path,
         threshold(size),
     )
     .await
@@ -158,7 +158,7 @@ pub async fn setup_stream_to_csv_test(origin_path: &str, threshold: impl Fn(usiz
     stream_to_csv(
         Box::pin(stream),
         tmp_store.clone(),
-        output_path.clone(),
+        &output_path,
         threshold(size),
     )
     .await

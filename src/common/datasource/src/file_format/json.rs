@@ -149,7 +149,7 @@ impl FileOpener for JsonOpener {
 pub async fn stream_to_json(
     stream: SendableRecordBatchStream,
     store: ObjectStore,
-    path: String,
+    path: &str,
     threshold: usize,
 ) -> Result<usize> {
     stream_to_file(stream, store, path, threshold, |buffer| {

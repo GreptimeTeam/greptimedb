@@ -466,6 +466,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to write stream to path: {}, source: {}", path, source))]
+    WriteStreamToFile {
+        path: String,
+        #[snafu(backtrace)]
+        source: common_datasource::error::Error,
+    },
+
     #[snafu(display("Failed to read object in path: {}, source: {}", path, source))]
     ReadObject {
         path: String,
@@ -599,7 +606,8 @@ impl ErrorExt for Error {
             Error::JoinTask { .. }
             | Error::BuildParquetRecordBatchStream { .. }
             | Error::ReadRecordBatch { .. }
-            | Error::BuildFileStream { .. } => StatusCode::Unexpected,
+            | Error::BuildFileStream { .. }
+            | Error::WriteStreamToFile { .. } => StatusCode::Unexpected,
 
             Error::Catalog { source, .. } => source.status_code(),
             Error::CatalogEntrySerde { source, .. } => source.status_code(),
