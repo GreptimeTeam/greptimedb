@@ -22,7 +22,7 @@ use common_telemetry::metric::Timer;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::manifest::Manifest;
-use store_api::storage::{AlterRequest, Region, RegionMeta, StorageEngine};
+use store_api::storage::{AlterOperation, AlterRequest, Region, RegionMeta, StorageEngine};
 use table::engine::TableReference;
 use table::metadata::{RawTableInfo, TableInfo, TableVersion};
 use table::requests::{AlterKind, AlterTableRequest};
@@ -44,6 +44,8 @@ pub(crate) struct AlterMitoTable<S: StorageEngine> {
     table: Arc<MitoTable<S::Region>>,
     /// The table info after alteration.
     new_info: Option<TableInfo>,
+    /// The region alter operation.
+    alter_op: Option<AlterOperation>,
     _timer: Timer,
 }
 
@@ -120,6 +122,7 @@ impl<S: StorageEngine> AlterMitoTable<S> {
             engine_inner,
             table,
             new_info: None,
+            alter_op: None,
             _timer: common_telemetry::timer!(metrics::MITO_ALTER_TABLE_ELAPSED),
         })
     }
@@ -158,6 +161,7 @@ impl<S: StorageEngine> AlterMitoTable<S> {
             engine_inner,
             table,
             new_info: None,
+            alter_op: None,
             _timer: common_telemetry::timer!(metrics::MITO_ALTER_TABLE_ELAPSED),
         })
     }
@@ -200,7 +204,7 @@ impl<S: StorageEngine> AlterMitoTable<S> {
             // The table is already altered.
             return Ok(self.table.clone());
         }
-        self.init_new_info(&current_info)?;
+        self.init_new_info_and_op(&current_info)?;
 
         self.alter_regions().await?;
 
@@ -209,15 +213,12 @@ impl<S: StorageEngine> AlterMitoTable<S> {
 
     /// Alter regions.
     async fn alter_regions(&mut self) -> Result<()> {
-        let new_info = self.new_info.as_mut().unwrap();
-        let table_name = &self.data.request.table_name;
-
-        let Some(alter_op) = create_alter_operation(table_name, &self.data.request.alter_kind, &mut new_info.meta)
-            .map_err(Error::from_error_ext)? else {
+        let Some(alter_op) = &self.alter_op else {
                 // Don't need to alter the region.
                 return Ok(());
             };
 
+        let table_name = &self.data.request.table_name;
         let regions = self.table.regions();
         // For each region, alter it if its version is not updated.
         for region in regions.values() {
@@ -249,7 +250,7 @@ impl<S: StorageEngine> AlterMitoTable<S> {
 
     /// Persist the alteration to the manifest and update table info.
     async fn update_table_manifest(&mut self) -> Result<TableRef> {
-        // Safety: We init new info in alter_regions()
+        // Safety: We init new info in engine_alter_table()
         let new_info = self.new_info.as_ref().unwrap();
         let table_name = &self.data.request.table_name;
 
@@ -293,7 +294,7 @@ impl<S: StorageEngine> AlterMitoTable<S> {
         Ok(self.table.clone())
     }
 
-    fn init_new_info(&mut self, current_info: &TableInfo) -> Result<()> {
+    fn init_new_info_and_op(&mut self, current_info: &TableInfo) -> Result<()> {
         if self.new_info.is_some() {
             return Ok(());
         }
@@ -318,7 +319,16 @@ impl<S: StorageEngine> AlterMitoTable<S> {
         // Increase version of the table.
         new_info.ident.version = current_info.ident.version + 1;
 
+        // Do create_alter_operation first to bump next_column_id in meta.
+        let alter_op = create_alter_operation(
+            table_name,
+            &self.data.request.alter_kind,
+            &mut new_info.meta,
+        )
+        .map_err(Error::from_error_ext)?;
+
         self.new_info = Some(new_info);
+        self.alter_op = alter_op;
 
         Ok(())
     }
