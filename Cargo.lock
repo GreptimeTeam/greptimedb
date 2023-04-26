@@ -4812,6 +4812,7 @@ dependencies = [
  "h2",
  "http-body",
  "lazy_static",
+ "metrics",
  "parking_lot",
  "prost",
  "rand",
