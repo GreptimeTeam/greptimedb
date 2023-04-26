@@ -23,4 +23,5 @@ pub mod table;
 pub mod test_util;
 
 pub use crate::error::{Error, Result};
+pub use crate::stats::{ColumnStatistics, Statistics};
 pub use crate::table::{Table, TableRef};
