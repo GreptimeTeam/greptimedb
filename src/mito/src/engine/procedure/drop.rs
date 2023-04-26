@@ -44,7 +44,11 @@ impl<S: StorageEngine> Procedure for DropMitoTable<S> {
         match self.data.state {
             DropTableState::Prepare => self.on_prepare(),
             DropTableState::EngineDropTable => {
-                self.engine_drop_table().await?;
+                self.engine_inner
+                    .drop_table(self.data.request.clone())
+                    .await
+                    .map_err(Error::from_error_ext)?;
+
                 Ok(Status::Done)
             }
         }
@@ -126,29 +130,6 @@ impl<S: StorageEngine> DropMitoTable<S> {
         self.data.state = DropTableState::EngineDropTable;
 
         Ok(Status::executing(true))
-    }
-
-    /// Close all regions and drop the table, return whether the table is dropped.
-    pub(crate) async fn engine_drop_table(&mut self) -> Result<bool> {
-        // Remove the table from the engine to avoid further access from users.
-        let table_ref = self.data.table_ref();
-
-        let _lock = self
-            .engine_inner
-            .table_mutex
-            .lock(table_ref.to_string())
-            .await;
-        self.engine_inner.tables.remove(&table_ref.to_string());
-
-        // Close the table to close all regions. Closing a region is idempotent.
-        if let Some(table) = &self.table {
-            table.close().await.map_err(Error::from_error_ext)?;
-        }
-
-        // TODO(yingwen): Currently, DROP TABLE doesn't remove data. We can
-        // write a drop meta update to the table and remove all files in the
-        // background.
-        Ok(self.table.is_some())
     }
 }
 

@@ -41,8 +41,7 @@ use table::metadata::{TableInfo, TableVersion};
 use table::requests::{
     AlterKind, AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest,
 };
-use table::table::TableRef;
-use table::{error as table_error, Result as TableResult};
+use table::{error as table_error, Result as TableResult, Table, TableRef};
 
 use crate::config::EngineConfig;
 use crate::engine::procedure::{AlterMitoTable, CreateMitoTable, DropMitoTable, TableCreator};
@@ -189,15 +188,7 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
         _ctx: &EngineContext,
         request: DropTableRequest,
     ) -> TableResult<bool> {
-        let mut procedure = DropMitoTable::new(request, self.inner.clone())
-            .map_err(BoxedError::new)
-            .context(table_error::TableOperationSnafu)?;
-
-        procedure
-            .engine_drop_table()
-            .await
-            .map_err(BoxedError::new)
-            .context(table_error::TableOperationSnafu)
+        self.inner.drop_table(request).await
     }
 
     async fn close(&self) -> TableResult<()> {
@@ -480,6 +471,27 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         );
 
         Ok(table)
+    }
+
+    async fn drop_table(&self, request: DropTableRequest) -> TableResult<bool> {
+        // Remove the table from the engine to avoid further access from users.
+        let table_ref = request.table_ref();
+
+        let _lock = self.table_mutex.lock(table_ref.to_string()).await;
+        let removed_table = self.tables.remove(&table_ref.to_string());
+
+        // Close the table to close all regions. Closing a region is idempotent.
+        if let Some((_, table)) = &removed_table {
+            table
+                .close()
+                .await
+                .map_err(BoxedError::new)
+                .context(table_error::TableOperationSnafu)?;
+
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     async fn recover_table_manifest_and_info(

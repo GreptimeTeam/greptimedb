@@ -236,7 +236,7 @@ impl EngineInner {
             } else {
                 // If the procedure retry this method. It is possible to return error
                 // when the table is already created.
-                // TODO(yingwen): Refactor this.
+                // TODO(yingwen): Refactor this like the mito engine.
                 TableExistsSnafu { table_name }.fail()
             };
         }
