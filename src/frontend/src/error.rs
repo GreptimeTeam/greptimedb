@@ -453,6 +453,19 @@ pub enum Error {
         source: common_datasource::error::Error,
     },
 
+    #[snafu(display("Failed to infer schema from path: {}, source: {}", path, source))]
+    InferSchema {
+        path: String,
+        #[snafu(backtrace)]
+        source: common_datasource::error::Error,
+    },
+
+    #[snafu(display("Failed to build csv config: {}", source))]
+    BuildCsvConfig {
+        source: common_datasource::file_format::csv::CsvConfigBuilderError,
+        location: Location,
+    },
+
     #[snafu(display("Failed to read object in path: {}, source: {}", path, source))]
     ReadObject {
         path: String,
@@ -476,6 +489,12 @@ pub enum Error {
     BuildParquetRecordBatchStream {
         location: Location,
         source: parquet::errors::ParquetError,
+    },
+
+    #[snafu(display("Failed to build file stream, source: {}", source))]
+    BuildFileStream {
+        location: Location,
+        source: datafusion::error::DataFusionError,
     },
 
     #[snafu(display("Failed to write parquet file, source: {}", source))]
@@ -529,7 +548,8 @@ impl ErrorExt for Error {
             | Error::ColumnNoneDefaultValue { .. }
             | Error::BuildRegex { .. }
             | Error::InvalidSchema { .. }
-            | Error::PrepareImmutableTable { .. } => StatusCode::InvalidArguments,
+            | Error::PrepareImmutableTable { .. }
+            | Error::BuildCsvConfig { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
 
@@ -544,7 +564,9 @@ impl ErrorExt for Error {
                 source.status_code()
             }
 
-            Error::ParseFileFormat { source } => source.status_code(),
+            Error::ParseFileFormat { source, .. } | Error::InferSchema { source, .. } => {
+                source.status_code()
+            }
 
             Error::Table { source }
             | Error::CopyTable { source, .. }
@@ -574,7 +596,11 @@ impl ErrorExt for Error {
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
 
-            Error::JoinTask { .. } => StatusCode::Unexpected,
+            Error::JoinTask { .. }
+            | Error::BuildParquetRecordBatchStream { .. }
+            | Error::ReadRecordBatch { .. }
+            | Error::BuildFileStream { .. } => StatusCode::Unexpected,
+
             Error::Catalog { source, .. } => source.status_code(),
             Error::CatalogEntrySerde { source, .. } => source.status_code(),
 
@@ -608,10 +634,7 @@ impl ErrorExt for Error {
 
             Error::TableScanExec { source, .. } => source.status_code(),
 
-            Error::ReadObject { .. }
-            | Error::ReadParquet { .. }
-            | Error::BuildParquetRecordBatchStream { .. }
-            | Error::ReadRecordBatch { .. } => StatusCode::StorageUnavailable,
+            Error::ReadObject { .. } | Error::ReadParquet { .. } => StatusCode::StorageUnavailable,
 
             Error::ListObjects { source }
             | Error::ParseUrl { source }
