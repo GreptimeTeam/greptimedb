@@ -34,7 +34,7 @@ use catalog::{
 };
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::BoxedError;
-use common_telemetry::error;
+use common_telemetry::warn;
 use futures::StreamExt;
 use futures_util::TryStreamExt;
 use meta_client::rpc::TableName;
@@ -235,7 +235,7 @@ impl CatalogManager for FrontendCatalogManager {
             if let Ok(key) = CatalogKey::parse(catalog_key.as_ref()) {
                 res.insert(key.catalog_name);
             } else {
-                error!("invalid catalog key: {:?}", catalog_key);
+                warn!("invalid catalog key: {:?}", catalog_key);
             }
         }
         Ok(res.into_iter().collect())

@@ -125,9 +125,7 @@ impl Inner {
         req.set_header(self.id);
         let res = client.delete(req).await.map_err(|mut source| {
             // FIXME(hl): here intentionally clear the metadata field so that error date does not changes which will break sqlness test.
-            // we can remove this hack as soon as either:
-            // - sqlness supports regex result match
-            // - or greptimedb supports renaming table routes
+            // we can remove this hack as soon as either: sqlness supports regex result match or greptimedb supports renaming table routes
             source.metadata_mut().clear();
             TonicStatus {
                 source,

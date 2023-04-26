@@ -26,6 +26,7 @@ pub mod lease;
 pub mod lock;
 pub mod metadata_service;
 pub mod metasrv;
+mod metrics;
 #[cfg(feature = "mock")]
 pub mod mocks;
 mod procedure;

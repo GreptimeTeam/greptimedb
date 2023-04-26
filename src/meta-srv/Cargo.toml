@@ -28,6 +28,7 @@ futures.workspace = true
 h2 = "0.3"
 http-body = "0.4"
 lazy_static = "1.4"
+metrics.workspace = true
 parking_lot = "0.12"
 prost.workspace = true
 rand.workspace = true

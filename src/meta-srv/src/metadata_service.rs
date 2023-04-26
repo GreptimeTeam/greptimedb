@@ -17,7 +17,8 @@ use std::sync::Arc;
 use api::v1::meta::CompareAndPutRequest;
 use async_trait::async_trait;
 use catalog::helper::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
-use common_telemetry::info;
+use common_telemetry::{info, timer};
+use metrics::increment_counter;
 use snafu::{ensure, ResultExt};
 
 use crate::error;
@@ -59,6 +60,7 @@ impl MetadataService for DefaultMetadataService {
         schema_name: &str,
         if_not_exist: bool,
     ) -> Result<()> {
+        let _timer = timer!(crate::metrics::METRIC_META_CREATE_SCHEMA);
         let kv_store = self.kv_store.clone();
 
         let catalog_key = CatalogKey {
@@ -84,6 +86,7 @@ impl MetadataService for DefaultMetadataService {
         let resp = kv_store.compare_and_put(req).await?;
 
         if resp.success {
+            increment_counter!(crate::metrics::METRIC_META_CREATE_CATALOG);
             info!("Successfully created a catalog: {}", catalog_name);
         }
 

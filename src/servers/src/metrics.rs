@@ -12,10 +12,5 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[macro_use]
-mod grpc;
-#[macro_use]
-mod http;
-
-grpc_tests!(File, S3, S3WithCache, Oss);
-http_tests!(File, S3, S3WithCache, Oss);
+pub(crate) const METRIC_HTTP_SQL_ELAPSED: &str = "servers.http_sql_elapsed";
+pub(crate) const METRIC_HTTP_PROMQL_ELAPSED: &str = "servers.http_promql_elapsed";

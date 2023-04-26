@@ -19,6 +19,7 @@ use aide::transform::TransformOperation;
 use axum::extract::{Json, Query, State};
 use axum::{Extension, Form};
 use common_error::status_code::StatusCode;
+use common_telemetry::timer;
 use query::parser::PromQuery;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -42,6 +43,8 @@ pub async fn sql(
     _user_info: Extension<UserInfo>,
     Form(form_params): Form<SqlQuery>,
 ) -> Json<JsonResponse> {
+    let _timer = timer!(crate::metrics::METRIC_HTTP_SQL_ELAPSED);
+
     let sql_handler = &state.sql_handler;
 
     let start = Instant::now();
@@ -93,6 +96,8 @@ pub async fn promql(
     // TODO(fys): pass _user_info into query context
     _user_info: Extension<UserInfo>,
 ) -> Json<JsonResponse> {
+    let _timer = timer!(crate::metrics::METRIC_HTTP_PROMQL_ELAPSED);
+
     let sql_handler = &state.sql_handler;
     let exec_start = Instant::now();
     let db = params.db.clone();
