@@ -17,6 +17,7 @@ use std::panic;
 use std::time::Duration;
 
 use backtrace::Backtrace;
+use metrics::increment_counter;
 
 pub fn set_panic_hook() {
     // Set a panic hook that records the panic as a `tracing` event at the
@@ -40,6 +41,7 @@ pub fn set_panic_hook() {
         } else {
             tracing::error!(message = %panic, backtrace = %backtrace);
         }
+        increment_counter!("panic_counter");
         default_hook(panic);
     }));
 
