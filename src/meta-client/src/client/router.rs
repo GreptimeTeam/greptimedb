@@ -18,13 +18,12 @@ use std::sync::Arc;
 use api::v1::meta::router_client::RouterClient;
 use api::v1::meta::{CreateRequest, DeleteRequest, RouteRequest, RouteResponse};
 use common_grpc::channel_manager::ChannelManager;
-use snafu::{ensure, Location, OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
 
 use crate::client::{load_balance as lb, Id};
 use crate::error;
-use crate::error::Error::TonicStatus;
 use crate::error::Result;
 
 #[derive(Clone, Debug)]
@@ -123,15 +122,8 @@ impl Inner {
     async fn delete(&self, mut req: DeleteRequest) -> Result<RouteResponse> {
         let mut client = self.random_client()?;
         req.set_header(self.id);
-        let res = client.delete(req).await.map_err(|mut source| {
-            // FIXME(hl): here intentionally clear the metadata field so that error date does not changes which will break sqlness test.
-            // we can remove this hack as soon as either: sqlness supports regex result match or greptimedb supports renaming table routes
-            source.metadata_mut().clear();
-            TonicStatus {
-                source,
-                location: Location::default(),
-            }
-        })?;
+        let res = client.delete(req).await.context(error::TonicStatusSnafu)?;
+
         Ok(res.into_inner())
     }
 

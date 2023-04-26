@@ -34,6 +34,6 @@ async fn main() {
         .follow_links(true)
         .build()
         .unwrap();
-    let runner = Runner::new_with_config(config, Env {}).await.unwrap();
+    let runner = Runner::new(config, Env {});
     runner.run().await.unwrap();
 }

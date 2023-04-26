@@ -33,7 +33,8 @@ DROP TABLE t;
 
 Error: 4001(TableNotFound), Table not found: greptime.public.t
 
+-- SQLNESS REPLACE details.*
 DROP TABLE new_table;
 
-Error: 1003(Internal), status: Internal, message: "Table route not found: __meta_table_route-greptime-public-new_table-1025", details: [], metadata: MetadataMap { headers: {} }
+Error: 1003(Internal), status: Internal, message: "Table route not found: __meta_table_route-greptime-public-new_table-1025", 
 
