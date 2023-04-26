@@ -43,7 +43,7 @@ use table::error::{
     InvalidTableSnafu, RegionSchemaMismatchSnafu, Result as TableResult, TableOperationSnafu,
 };
 use table::metadata::{
-    FilterPushDownType, RawTableInfo, TableInfo, TableInfoRef, TableMeta, TableType,
+    FilterPushDownType, RawTableInfo, TableInfo, TableInfoRef, TableMeta, TableType, TableVersion,
 };
 use table::requests::{
     AddColumnRequest, AlterKind, AlterTableRequest, DeleteRequest, InsertRequest,
@@ -222,29 +222,14 @@ impl<R: Region> Table for MitoTable<R> {
         let _lock = self.alter_lock.lock().await;
 
         let table_info = self.table_info();
+        let table_version = table_info.ident.version;
+        let (new_info, alter_op) = self.info_and_op_for_alter(&table_info, &req.alter_kind)?;
         let table_name = &table_info.name;
 
-        let mut new_info = TableInfo::clone(&*table_info);
-        // setup new table info
-        match &req.alter_kind {
-            AlterKind::RenameTable { new_table_name } => {
-                new_info.name = new_table_name.clone();
-            }
-            AlterKind::AddColumns { .. } | AlterKind::DropColumns { .. } => {
-                let table_meta = &table_info.meta;
-                let new_meta = table_meta
-                    .builder_with_alter_kind(table_name, &req.alter_kind)?
-                    .build()
-                    .context(error::BuildTableMetaSnafu { table_name })
-                    .map_err(BoxedError::new)
-                    .context(table_error::TableOperationSnafu)?;
-                new_info.meta = new_meta;
-            }
+        if let Some(alter_op) = &alter_op {
+            self.alter_regions(table_name, table_version, alter_op)
+                .await?;
         }
-        // Do create_alter_operation first to bump next_column_id in meta.
-        let alter_op = create_alter_operation(table_name, &req.alter_kind, &mut new_info.meta)?;
-        // Increase version of the table.
-        new_info.ident.version = table_info.ident.version + 1;
 
         // Persist the alteration to the manifest.
         logging::debug!(
@@ -265,30 +250,6 @@ impl<R: Region> Table for MitoTable<R> {
             .map_err(BoxedError::new)
             .context(table_error::TableOperationSnafu)?;
 
-        if let Some(alter_op) = alter_op {
-            // TODO(yingwen): Error handling. Maybe the region need to provide a method to
-            // validate the request first.
-            let regions = self.regions();
-            for region in regions.values() {
-                let region_meta = region.in_memory_metadata();
-                let alter_req = AlterRequest {
-                    operation: alter_op.clone(),
-                    version: region_meta.version(),
-                };
-                // Alter the region.
-                logging::debug!(
-                    "start altering region {} of table {}, with request {:?}",
-                    region.name(),
-                    table_name,
-                    alter_req,
-                );
-                region
-                    .alter(alter_req)
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(TableOperationSnafu)?;
-            }
-        }
         // Update in memory metadata of the table.
         self.set_table_info(new_info);
 
@@ -561,6 +522,74 @@ impl<R: Region> MitoTable<R> {
     fn manifest_scan_range() -> (ManifestVersion, ManifestVersion) {
         // TODO(dennis): use manifest version in catalog ?
         (manifest::MIN_VERSION, manifest::MAX_VERSION)
+    }
+
+    /// For each region, alter it if its version is not updated.
+    pub(crate) async fn alter_regions(
+        &self,
+        table_name: &str,
+        table_version: TableVersion,
+        alter_op: &AlterOperation,
+    ) -> TableResult<()> {
+        let regions = self.regions();
+        for region in regions.values() {
+            let region_meta = region.in_memory_metadata();
+            if u64::from(region_meta.version()) > table_version {
+                // Region is already altered.
+                continue;
+            }
+
+            let alter_req = AlterRequest {
+                operation: alter_op.clone(),
+                version: region_meta.version(),
+            };
+            // Alter the region.
+            logging::debug!(
+                "start altering region {} of table {}, with request {:?}",
+                region.name(),
+                table_name,
+                alter_req,
+            );
+            region
+                .alter(alter_req)
+                .await
+                .map_err(BoxedError::new)
+                .context(TableOperationSnafu)?;
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn info_and_op_for_alter(
+        &self,
+        current_info: &TableInfo,
+        alter_kind: &AlterKind,
+    ) -> TableResult<(TableInfo, Option<AlterOperation>)> {
+        let table_name = &current_info.name;
+        let mut new_info = TableInfo::clone(current_info);
+        // setup new table info
+        match &alter_kind {
+            AlterKind::RenameTable { new_table_name } => {
+                new_info.name = new_table_name.clone();
+            }
+            AlterKind::AddColumns { .. } | AlterKind::DropColumns { .. } => {
+                let table_meta = &current_info.meta;
+                let new_meta = table_meta
+                    .builder_with_alter_kind(table_name, alter_kind)?
+                    .build()
+                    .context(error::BuildTableMetaSnafu { table_name })
+                    .map_err(BoxedError::new)
+                    .context(table_error::TableOperationSnafu)?;
+                new_info.meta = new_meta;
+            }
+        }
+        // Increase version of the table.
+        new_info.ident.version = current_info.ident.version + 1;
+
+        // Do create_alter_operation first to bump next_column_id in meta.
+        let alter_op = create_alter_operation(table_name, alter_kind, &mut new_info.meta)?;
+
+        Ok((new_info, alter_op))
     }
 }
 

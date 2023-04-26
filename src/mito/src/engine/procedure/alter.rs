@@ -22,7 +22,7 @@ use common_telemetry::metric::Timer;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::manifest::Manifest;
-use store_api::storage::{AlterOperation, AlterRequest, Region, RegionMeta, StorageEngine};
+use store_api::storage::{AlterOperation, StorageEngine};
 use table::engine::TableReference;
 use table::metadata::{RawTableInfo, TableInfo, TableVersion};
 use table::requests::{AlterKind, AlterTableRequest};
@@ -30,12 +30,11 @@ use table::{Table, TableRef};
 
 use crate::engine::MitoEngineInner;
 use crate::error::{
-    BuildTableMetaSnafu, TableExistsSnafu, TableNotFoundSnafu, UpdateTableManifestSnafu,
-    VersionChangedSnafu,
+    TableExistsSnafu, TableNotFoundSnafu, UpdateTableManifestSnafu, VersionChangedSnafu,
 };
 use crate::manifest::action::{TableChange, TableMetaAction, TableMetaActionList};
 use crate::metrics;
-use crate::table::{create_alter_operation, MitoTable};
+use crate::table::MitoTable;
 
 /// Procedure to alter a [MitoTable].
 pub(crate) struct AlterMitoTable<S: StorageEngine> {
@@ -219,33 +218,11 @@ impl<S: StorageEngine> AlterMitoTable<S> {
             };
 
         let table_name = &self.data.request.table_name;
-        let regions = self.table.regions();
-        // For each region, alter it if its version is not updated.
-        for region in regions.values() {
-            let region_meta = region.in_memory_metadata();
-            if u64::from(region_meta.version()) > self.data.table_version {
-                // Region is already altered.
-                continue;
-            }
-
-            let alter_req = AlterRequest {
-                operation: alter_op.clone(),
-                version: region_meta.version(),
-            };
-            // Alter the region.
-            logging::debug!(
-                "start altering region {} of table {}, with request {:?}",
-                region.name(),
-                table_name,
-                alter_req,
-            );
-            region
-                .alter(alter_req)
-                .await
-                .map_err(Error::from_error_ext)?;
-        }
-
-        Ok(())
+        let table_version = self.data.table_version;
+        self.table
+            .alter_regions(table_name, table_version, alter_op)
+            .await
+            .map_err(Error::from_error_ext)
     }
 
     /// Persist the alteration to the manifest and update table info.
@@ -299,33 +276,10 @@ impl<S: StorageEngine> AlterMitoTable<S> {
             return Ok(());
         }
 
-        let table_name = &current_info.name;
-        let mut new_info = TableInfo::clone(current_info);
-        // setup new table info
-        match &self.data.request.alter_kind {
-            AlterKind::RenameTable { new_table_name } => {
-                new_info.name = new_table_name.clone();
-            }
-            AlterKind::AddColumns { .. } | AlterKind::DropColumns { .. } => {
-                let table_meta = &current_info.meta;
-                let new_meta = table_meta
-                    .builder_with_alter_kind(table_name, &self.data.request.alter_kind)
-                    .map_err(Error::from_error_ext)?
-                    .build()
-                    .context(BuildTableMetaSnafu { table_name })?;
-                new_info.meta = new_meta;
-            }
-        }
-        // Increase version of the table.
-        new_info.ident.version = current_info.ident.version + 1;
-
-        // Do create_alter_operation first to bump next_column_id in meta.
-        let alter_op = create_alter_operation(
-            table_name,
-            &self.data.request.alter_kind,
-            &mut new_info.meta,
-        )
-        .map_err(Error::from_error_ext)?;
+        let (new_info, alter_op) = self
+            .table
+            .info_and_op_for_alter(current_info, &self.data.request.alter_kind)
+            .map_err(Error::from_error_ext)?;
 
         self.new_info = Some(new_info);
         self.alter_op = alter_op;
