@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::meta::{Error, HeartbeatRequest};
+use api::v1::meta::{Error, HeartbeatRequest, Role};
 
 use crate::error::Result;
 use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
@@ -23,6 +23,10 @@ pub struct CheckLeaderHandler;
 
 #[async_trait::async_trait]
 impl HeartbeatHandler for CheckLeaderHandler {
+    fn is_acceptable(&self, role: Option<Role>) -> bool {
+        role.map_or(false, |r| r == Role::Datanode)
+    }
+
     async fn handle(
         &self,
         _req: &HeartbeatRequest,

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::meta::{HeartbeatRequest, ResponseHeader, PROTOCOL_VERSION};
+use api::v1::meta::{HeartbeatRequest, ResponseHeader, Role, PROTOCOL_VERSION};
 
 use crate::error::Result;
 use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
@@ -23,6 +23,10 @@ pub struct ResponseHeaderHandler;
 
 #[async_trait::async_trait]
 impl HeartbeatHandler for ResponseHeaderHandler {
+    fn is_acceptable(&self, role: Option<Role>) -> bool {
+        role.map_or(false, |r| r == Role::Datanode)
+    }
+
     async fn handle(
         &self,
         req: &HeartbeatRequest,
@@ -82,7 +86,7 @@ mod tests {
         let header = std::mem::take(&mut acc.header);
         let res = HeartbeatResponse {
             header,
-            payload: acc.into_payload(),
+            mailbox_messages: acc.into_mailbox_messages(),
         };
         assert_eq!(1, res.header.unwrap().cluster_id);
     }

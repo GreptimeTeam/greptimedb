@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::meta::{HeartbeatRequest, PutRequest};
+use api::v1::meta::{HeartbeatRequest, PutRequest, Role};
 use dashmap::DashMap;
 
 use crate::error::Result;
@@ -30,6 +30,10 @@ pub struct PersistStatsHandler {
 
 #[async_trait::async_trait]
 impl HeartbeatHandler for PersistStatsHandler {
+    fn is_acceptable(&self, role: Option<Role>) -> bool {
+        role.map_or(false, |r| r == Role::Datanode)
+    }
+
     async fn handle(
         &self,
         _req: &HeartbeatRequest,

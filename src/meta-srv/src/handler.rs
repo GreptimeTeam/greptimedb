@@ -33,7 +33,7 @@ mod response_header_handler;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use api::v1::meta::{HeartbeatRequest, HeartbeatResponse, ResponseHeader};
+use api::v1::meta::{HeartbeatRequest, HeartbeatResponse, MailboxMessage, ResponseHeader, Role};
 use common_telemetry::info;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::RwLock;
@@ -45,6 +45,8 @@ use crate::metasrv::Context;
 
 #[async_trait::async_trait]
 pub trait HeartbeatHandler: Send + Sync {
+    fn is_acceptable(&self, role: Option<Role>) -> bool;
+
     async fn handle(
         &self,
         req: &HeartbeatRequest,
@@ -61,7 +63,7 @@ pub struct HeartbeatAccumulator {
 }
 
 impl HeartbeatAccumulator {
-    pub fn into_payload(self) -> Vec<Vec<u8>> {
+    pub fn into_mailbox_messages(self) -> Vec<MailboxMessage> {
         // TODO(jiachun): to HeartbeatResponse payload
         vec![]
     }
@@ -103,12 +105,15 @@ impl HeartbeatHandlerGroup {
         let mut acc = HeartbeatAccumulator::default();
         let handlers = self.handlers.read().await;
         for h in handlers.iter() {
-            h.handle(&req, &mut ctx, &mut acc).await?;
+            let role = req.header.as_ref().and_then(|h| Role::from_i32(h.role));
+            if h.is_acceptable(role) {
+                h.handle(&req, &mut ctx, &mut acc).await?;
+            }
         }
         let header = std::mem::take(&mut acc.header);
         let res = HeartbeatResponse {
             header,
-            payload: acc.into_payload(),
+            mailbox_messages: acc.into_mailbox_messages(),
         };
         Ok(res)
     }

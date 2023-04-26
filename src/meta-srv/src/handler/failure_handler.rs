@@ -14,7 +14,7 @@
 
 mod runner;
 
-use api::v1::meta::HeartbeatRequest;
+use api::v1::meta::{HeartbeatRequest, Role};
 use async_trait::async_trait;
 
 use crate::error::Result;
@@ -58,6 +58,10 @@ impl RegionFailureHandler {
 
 #[async_trait]
 impl HeartbeatHandler for RegionFailureHandler {
+    fn is_acceptable(&self, role: Option<Role>) -> bool {
+        role.map_or(false, |r| r == Role::Datanode)
+    }
+
     async fn handle(
         &self,
         _: &HeartbeatRequest,

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::meta::{BatchPutRequest, HeartbeatRequest, KeyValue};
+use api::v1::meta::{BatchPutRequest, HeartbeatRequest, KeyValue, Role};
 use common_telemetry::{trace, warn};
 use common_time::util as time_util;
 use tokio::sync::mpsc::{self, Sender};
@@ -55,6 +55,10 @@ impl KeepLeaseHandler {
 
 #[async_trait::async_trait]
 impl HeartbeatHandler for KeepLeaseHandler {
+    fn is_acceptable(&self, role: Option<Role>) -> bool {
+        role.map_or(false, |r| r == Role::Datanode)
+    }
+
     async fn handle(
         &self,
         req: &HeartbeatRequest,
