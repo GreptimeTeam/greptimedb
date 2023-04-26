@@ -41,7 +41,7 @@ where
 
 /// Please only use this method because you are calling from (optionally first as async) to sync then to a async
 /// a terrible hack to call async from sync by:
-/// 
+///
 /// TODO(discord9): find a better way
 /// 1. using a cached runtime
 /// 2. block on that runtime
