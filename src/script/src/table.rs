@@ -113,37 +113,21 @@ impl ScriptsTable {
             script_list.extend(part_of_scripts_list);
         }
 
-        let handles: Vec<_> = script_list
-            .into_iter()
-            .filter_map(|(name, script)| {
-                match PyScript::from_script(&script, query_engine.clone()) {
-                    Ok(script) => {
-                        let future = async move {
-                            script.register_udf().await;
-                            logging::debug!(
-                                "Script in `scripts` system table re-register as UDF: {}",
-                                name
-                            );
-                            Result::Ok(())
-                        };
-                        Some(future)
-                    }
-                    Err(err) => {
-                        logging::warn!(
-                            r#"Failed to compile script "{}"" in `scripts` table: {}"#,
-                            name,
-                            err
-                        );
-                        None
-                    }
+        for (name, script) in script_list {
+            match PyScript::from_script(&script, query_engine.clone()) {
+                Ok(script) => {
+                    script.register_udf().await;
+                    logging::debug!(
+                        "Script in `scripts` system table re-register as UDF: {}",
+                        name
+                    );
                 }
-            })
-            .collect();
-        for i in handles {
-            match i.await {
-                Ok(_) => (),
                 Err(err) => {
-                    logging::error!("Unexpected error when re-registering Python UDF: {}", err)
+                    logging::warn!(
+                        r#"Failed to compile script "{}"" in `scripts` table: {}"#,
+                        name,
+                        err
+                    );
                 }
             }
         }
