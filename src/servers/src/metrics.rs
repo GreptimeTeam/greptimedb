@@ -12,27 +12,5 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(async_closure)]
-#![feature(btree_drain_filter)]
-
-pub mod bootstrap;
-pub mod cluster;
-pub mod election;
-pub mod error;
-mod failure_detector;
-pub mod handler;
-pub mod keys;
-pub mod lease;
-pub mod lock;
-pub mod metadata_service;
-pub mod metasrv;
-mod metrics;
-#[cfg(feature = "mock")]
-pub mod mocks;
-mod procedure;
-pub mod selector;
-mod sequence;
-pub mod service;
-pub mod util;
-
-pub use crate::error::Result;
+pub(crate) const METRIC_HTTP_SQL_ELAPSED: &str = "servers.http_sql_elapsed";
+pub(crate) const METRIC_HTTP_PROMQL_ELAPSED: &str = "servers.http_promql_elapsed";

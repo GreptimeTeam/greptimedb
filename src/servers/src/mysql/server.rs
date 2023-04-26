@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_runtime::Runtime;
-use common_telemetry::logging::{error, info};
+use common_telemetry::logging::{info, warn};
 use futures::StreamExt;
 use opensrv_mysql::{
     plain_run_with_options, secure_run_with_options, AsyncMysqlIntermediary, IntermediaryOptions,
@@ -134,12 +134,12 @@ impl MysqlServer {
 
             async move {
                 match tcp_stream {
-                    Err(error) => error!("Broken pipe: {}", error), // IoError doesn't impl ErrorExt.
+                    Err(error) => warn!("Broken pipe: {}", error), // IoError doesn't impl ErrorExt.
                     Ok(io_stream) => {
                         if let Err(error) =
                             Self::handle(io_stream, io_runtime, spawn_ref, spawn_config).await
                         {
-                            error!(error; "Unexpected error when handling TcpStream");
+                            warn!("Unexpected error when handling TcpStream {}", error);
                         };
                     }
                 };
@@ -159,7 +159,7 @@ impl MysqlServer {
             if let Err(e)  = Self::do_handle(stream, spawn_ref, spawn_config).await {
                 // TODO(LFC): Write this error to client as well, in MySQL text protocol.
                 // Looks like we have to expose opensrv-mysql's `PacketWriter`?
-                error!(e; "Internal error occurred during query exec, server actively close the channel to let client try next time.")
+                warn!("Internal error occurred during query exec, server actively close the channel to let client try next time: {}.", e)
             }
         });
 
