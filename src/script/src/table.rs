@@ -139,9 +139,13 @@ impl ScriptsTable {
                 }
             })
             .collect();
-        match futures::future::try_join_all(handles).await {
-            Ok(_) => (),
-            Err(err) => logging::error!("Unexpected error when re-registering Python UDF: {}", err),
+        for i in handles {
+            match i.await {
+                Ok(_) => (),
+                Err(err) => {
+                    logging::error!("Unexpected error when re-registering Python UDF: {}", err)
+                }
+            }
         }
         Ok(())
     }
