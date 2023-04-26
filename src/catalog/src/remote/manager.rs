@@ -20,7 +20,7 @@ use std::sync::Arc;
 use async_stream::stream;
 use async_trait::async_trait;
 use common_catalog::consts::{MIN_USER_TABLE_ID, MITO_ENGINE};
-use common_telemetry::{debug, error, info};
+use common_telemetry::{debug, error, info, warn};
 use dashmap::DashMap;
 use futures::Stream;
 use futures_util::{StreamExt, TryStreamExt};
@@ -432,13 +432,12 @@ impl CatalogManager for RemoteCatalogManager {
     async fn register_table(&self, request: RegisterTableRequest) -> Result<bool> {
         let catalog_name = request.catalog;
         let schema_name = request.schema;
-        let catalog_provider =
-            self.catalog(&catalog_name)
-                .await?
-                .context(CatalogNotFoundSnafu {
-                    catalog_name: &catalog_name,
-                })?;
-        let schema_provider = catalog_provider
+        let schema_provider = self
+            .catalog(&catalog_name)
+            .await?
+            .context(CatalogNotFoundSnafu {
+                catalog_name: &catalog_name,
+            })?
             .schema(&schema_name)
             .await?
             .with_context(|| SchemaNotFoundSnafu {
@@ -460,15 +459,15 @@ impl CatalogManager for RemoteCatalogManager {
     async fn deregister_table(&self, request: DeregisterTableRequest) -> Result<bool> {
         let catalog_name = &request.catalog;
         let schema_name = &request.schema;
-        let schema =
-            self.schema(catalog_name, schema_name)
-                .await?
-                .context(SchemaNotFoundSnafu {
-                    catalog: catalog_name,
-                    schema: schema_name,
-                })?;
-
-        let result = schema.deregister_table(&request.table_name).await?;
+        let result = self
+            .schema(catalog_name, schema_name)
+            .await?
+            .context(SchemaNotFoundSnafu {
+                catalog: catalog_name,
+                schema: schema_name,
+            })?
+            .deregister_table(&request.table_name)
+            .await?;
         Ok(result.is_none())
     }
 
@@ -489,28 +488,20 @@ impl CatalogManager for RemoteCatalogManager {
     }
 
     async fn rename_table(&self, request: RenameTableRequest) -> Result<bool> {
-        let RenameTableRequest {
-            catalog,
-            schema,
-            table_name,
-            new_table_name,
-            ..
-        } = request;
         let old_table_key = TableRegionalKey {
-            catalog_name: catalog.clone(),
-            schema_name: schema.clone(),
-            table_name: table_name.clone(),
+            catalog_name: request.catalog.clone(),
+            schema_name: request.schema.clone(),
+            table_name: request.table_name.clone(),
             node_id: self.node_id,
-        };
-
-        let Some(Kv(_, value_bytes)) = self.backend.get(old_table_key.to_string().as_bytes()).await? else {
+        }
+        .to_string();
+        let Some(Kv(_, value_bytes)) = self.backend.get(old_table_key.as_bytes()).await? else {
             return Ok(false)
         };
-
         let new_table_key = TableRegionalKey {
-            catalog_name: catalog.clone(),
-            schema_name: schema.clone(),
-            table_name: new_table_name,
+            catalog_name: request.catalog.clone(),
+            schema_name: request.schema.clone(),
+            table_name: request.new_table_name,
             node_id: self.node_id,
         };
         self.backend
@@ -561,11 +552,10 @@ impl CatalogManager for RemoteCatalogManager {
     async fn catalog(&self, catalog: &str) -> Result<Option<CatalogProviderRef>> {
         let key = CatalogKey {
             catalog_name: catalog.to_string(),
-        }
-        .to_string();
+        };
         Ok(self
             .backend
-            .get(key.as_bytes())
+            .get(key.to_string().as_bytes())
             .await?
             .map(|_| self.new_catalog_provider(catalog)))
     }
@@ -768,25 +758,21 @@ impl SchemaProvider for RemoteSchemaProvider {
                 let TableRegionalValue { engine_name, .. } =
                     TableRegionalValue::parse(String::from_utf8_lossy(&v))
                         .context(InvalidCatalogValueSnafu)?;
-
                 let reference = TableReference {
                     catalog: &self.catalog_name,
                     schema: &self.schema_name,
                     table: name,
                 };
-
                 let engine_name = engine_name.as_deref().unwrap_or(MITO_ENGINE);
                 let engine = self
                     .engine_manager
                     .engine(engine_name)
                     .context(TableEngineNotFoundSnafu { engine_name })?;
-
                 let table = engine
                     .get_table(&EngineContext {}, &reference)
                     .with_context(|_| OpenTableSnafu {
                         table_info: reference.to_string(),
                     })?;
-
                 Ok(table)
             })
             .transpose()?
@@ -828,6 +814,25 @@ impl SchemaProvider for RemoteSchemaProvider {
 
     async fn deregister_table(&self, name: &str) -> Result<Option<TableRef>> {
         let table_key = self.build_regional_table_key(name).to_string();
+
+        let engine_opt = self
+            .backend
+            .get(table_key.as_bytes())
+            .await?
+            .map(|Kv(_, v)| {
+                let TableRegionalValue { engine_name, .. } =
+                    TableRegionalValue::parse(String::from_utf8_lossy(&v))
+                        .context(InvalidCatalogValueSnafu)?;
+                Ok(engine_name)
+            })
+            .transpose()?
+            .flatten();
+
+        let engine_name = engine_opt.as_deref().unwrap_or_else(|| {
+            warn!("Cannot find table engine name for {table_key}");
+            MITO_ENGINE
+        });
+
         self.backend.delete(table_key.as_bytes()).await?;
         debug!(
             "Successfully deleted catalog table entry, key: {}",
@@ -842,10 +847,8 @@ impl SchemaProvider for RemoteSchemaProvider {
         // deregistering table does not necessarily mean dropping the table
         let table = self
             .engine_manager
-            .engine(MITO_ENGINE)
-            .context(TableEngineNotFoundSnafu {
-                engine_name: MITO_ENGINE,
-            })?
+            .engine(engine_name)
+            .context(TableEngineNotFoundSnafu { engine_name })?
             .get_table(&EngineContext {}, &reference)
             .with_context(|_| OpenTableSnafu {
                 table_info: reference.to_string(),

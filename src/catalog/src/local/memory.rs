@@ -403,7 +403,6 @@ mod tests {
     #[tokio::test]
     async fn test_new_memory_catalog_list() {
         let catalog_list = new_memory_catalog_list().unwrap();
-
         let default_catalog = CatalogManager::catalog(&*catalog_list, DEFAULT_CATALOG_NAME)
             .await
             .unwrap()
@@ -430,10 +429,7 @@ mod tests {
         let provider = MemorySchemaProvider::new();
         let table_name = "numbers";
         assert!(!provider.table_exist_sync(table_name).unwrap());
-        assert!(provider
-            .deregister_table_sync(table_name)
-            .unwrap()
-            .is_none());
+        provider.deregister_table_sync(table_name).unwrap();
         let test_table = NumbersTable::default();
         // register table successfully
         assert!(provider
@@ -468,10 +464,7 @@ mod tests {
 
         // test old table name not exist
         assert!(!provider.table_exist_sync(table_name).unwrap());
-        assert!(provider
-            .deregister_table_sync(table_name)
-            .unwrap()
-            .is_none());
+        provider.deregister_table_sync(table_name).unwrap();
 
         // test new table name exists
         assert!(provider.table_exist_sync(new_table_name).unwrap());

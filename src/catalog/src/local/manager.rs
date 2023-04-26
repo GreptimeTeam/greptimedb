@@ -322,11 +322,12 @@ impl CatalogManager for LocalCatalogManager {
         let catalog_name = &request.catalog;
         let schema_name = &request.schema;
 
-        let schema = self
+        let catalog = self
             .catalogs
             .catalog(catalog_name)
             .await?
-            .context(CatalogNotFoundSnafu { catalog_name })?
+            .context(CatalogNotFoundSnafu { catalog_name })?;
+        let schema = catalog
             .schema(schema_name)
             .await?
             .with_context(|| SchemaNotFoundSnafu {
