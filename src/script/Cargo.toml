@@ -34,6 +34,7 @@ common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
+common-runtime = { path = "../common/runtime" }
 console = "0.15"
 crossbeam-utils = "0.8.14"
 datafusion = { workspace = true, optional = true }

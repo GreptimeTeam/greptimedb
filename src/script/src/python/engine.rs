@@ -42,6 +42,7 @@ use sql::statements::statement::Statement;
 use crate::engine::{CompileContext, EvalContext, Script, ScriptEngine};
 use crate::python::error::{self, PyRuntimeSnafu, Result, TokioJoinSnafu};
 use crate::python::ffi_types::copr::{exec_parsed, parse, AnnotationInfo, CoprocessorRef};
+use crate::python::utils::spawn_blocking_script;
 const PY_ENGINE: &str = "python";
 
 #[derive(Debug)]
@@ -301,7 +302,7 @@ impl Script for PyScript {
         } else {
             let copr = self.copr.clone();
             let params = params.clone();
-            let batch = tokio::task::spawn_blocking(move || exec_parsed(&copr, &None, &params))
+            let batch = spawn_blocking_script(move || exec_parsed(&copr, &None, &params))
                 .await
                 .context(TokioJoinSnafu)??;
             let batches = RecordBatches::try_new(batch.schema.clone(), vec![batch]).unwrap();
@@ -347,6 +348,7 @@ impl ScriptEngine for PyEngine {
 }
 #[cfg(test)]
 pub(crate) use tests::sample_script_engine;
+
 #[cfg(test)]
 mod tests {
     use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
