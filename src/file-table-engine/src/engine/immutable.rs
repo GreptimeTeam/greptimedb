@@ -234,6 +234,9 @@ impl EngineInner {
             return if request.create_if_not_exists {
                 Ok(table)
             } else {
+                // If the procedure retry this method. It is possible to return error
+                // when the table is already created.
+                // TODO(yingwen): Refactor this.
                 TableExistsSnafu { table_name }.fail()
             };
         }

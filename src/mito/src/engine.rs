@@ -45,7 +45,7 @@ use table::table::TableRef;
 use table::{error as table_error, Result as TableResult};
 
 use crate::config::EngineConfig;
-use crate::engine::procedure::{AlterMitoTable, CreateMitoTable, DropMitoTable};
+use crate::engine::procedure::{AlterMitoTable, CreateMitoTable, DropMitoTable, TableCreator};
 use crate::error::{
     BuildColumnDescriptorSnafu, BuildColumnFamilyDescriptorSnafu, BuildRowKeyDescriptorSnafu,
     InvalidPrimaryKeySnafu, MissingTimestampIndexSnafu, RegionNotFoundSnafu, Result,
@@ -100,28 +100,26 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
             .context(table_error::TableOperationSnafu)?;
 
         let table_ref = request.table_ref();
-        {
-            let _lock = self.inner.table_mutex.lock(table_ref.to_string()).await;
-            if let Some(table) = self.inner.get_mito_table(&table_ref) {
-                if request.create_if_not_exists {
-                    return Ok(table);
-                } else {
-                    return TableExistsSnafu {
-                        table_name: request.table_name,
-                    }
-                    .fail()
-                    .map_err(BoxedError::new)
-                    .context(table_error::TableOperationSnafu)?;
+        let _lock = self.inner.table_mutex.lock(table_ref.to_string()).await;
+        if let Some(table) = self.inner.get_mito_table(&table_ref) {
+            if request.create_if_not_exists {
+                return Ok(table);
+            } else {
+                return TableExistsSnafu {
+                    table_name: request.table_name,
                 }
+                .fail()
+                .map_err(BoxedError::new)
+                .context(table_error::TableOperationSnafu)?;
             }
         }
 
-        let mut procedure = CreateMitoTable::new(request, self.inner.clone())
+        let mut creator = TableCreator::new(request, self.inner.clone())
             .map_err(BoxedError::new)
             .context(table_error::TableOperationSnafu)?;
 
-        procedure
-            .engine_create_table()
+        creator
+            .create_table()
             .await
             .map_err(BoxedError::new)
             .context(table_error::TableOperationSnafu)
@@ -149,7 +147,7 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
 
         if let AlterKind::RenameTable { new_table_name } = &req.alter_kind {
             let mut table_ref = req.table_ref();
-            table_ref.table = &new_table_name;
+            table_ref.table = new_table_name;
             if self.inner.get_mito_table(&table_ref).is_some() {
                 return TableExistsSnafu {
                     table_name: table_ref.to_string(),

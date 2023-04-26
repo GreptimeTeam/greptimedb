@@ -175,7 +175,7 @@ impl<S: StorageEngine> AlterMitoTable<S> {
 
         if let AlterKind::RenameTable { new_table_name } = &self.data.request.alter_kind {
             let mut table_ref = self.data.table_ref();
-            table_ref.table = &new_table_name;
+            table_ref.table = new_table_name;
             ensure!(
                 self.engine_inner.get_mito_table(&table_ref).is_none(),
                 TableExistsSnafu {
