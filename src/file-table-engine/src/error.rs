@@ -175,8 +175,8 @@ pub enum Error {
 
     #[snafu(display("Failed to convert schema: {}", source))]
     ConvertSchema {
-        #[snafu(backtrace)]
         source: datatypes::error::Error,
+        location: Location,
     },
 }
 
