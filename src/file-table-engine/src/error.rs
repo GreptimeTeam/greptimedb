@@ -16,6 +16,7 @@ use std::any::Any;
 
 use common_error::prelude::*;
 use datafusion::arrow::error::ArrowError;
+use datafusion::error::DataFusionError;
 use serde_json::error::Error as JsonError;
 use snafu::Location;
 use table::metadata::{TableInfoBuilderError, TableMetaBuilderError};
@@ -165,6 +166,18 @@ pub enum Error {
         #[snafu(backtrace)]
         source: common_datasource::error::Error,
     },
+
+    #[snafu(display("Failed to generate parquet scan plan: {}", source))]
+    ParquetScanPlan {
+        source: DataFusionError,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to convert schema: {}", source))]
+    ConvertSchema {
+        source: datatypes::error::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -181,7 +194,8 @@ impl ErrorExt for Error {
             | UnsupportedFileFormat { .. }
             | BuildCsvConfig { .. }
             | ProjectSchema { .. }
-            | MissingRequiredField { .. } => StatusCode::InvalidArguments,
+            | MissingRequiredField { .. }
+            | ConvertSchema { .. } => StatusCode::InvalidArguments,
 
             BuildBackend { source, .. } => source.status_code(),
             BuildStreamAdapter { source, .. } => source.status_code(),
@@ -197,7 +211,8 @@ impl ErrorExt for Error {
             | ConvertRaw { .. }
             | DropTable { .. }
             | WriteImmutableManifest { .. }
-            | BuildStream { .. } => StatusCode::Unexpected,
+            | BuildStream { .. }
+            | ParquetScanPlan { .. } => StatusCode::Unexpected,
         }
     }
 

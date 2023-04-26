@@ -513,6 +513,76 @@ async fn test_execute_external_create_without_ts_type(instance: Arc<dyn MockInst
 }
 
 #[apply(both_instances_cases)]
+async fn test_execute_query_external_table_parquet(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+    let format = "parquet";
+    let location = get_data_dir("../../tests/data/parquet/various_type.parquet")
+        .canonicalize()
+        .unwrap()
+        .display()
+        .to_string();
+
+    let table_name = "various_type_parquet";
+
+    let output = execute_sql(
+        &instance,
+        &format!(
+            r#"create external table {table_name} with (location='{location}', format='{format}');"#,
+        ),
+    )
+    .await;
+    assert!(matches!(output, Output::AffectedRows(0)));
+
+    let output = execute_sql(&instance, &format!("desc table {table_name};")).await;
+    let expect = "\
++------------+-----------------+------+---------+---------------+
+| Field      | Type            | Null | Default | Semantic Type |
++------------+-----------------+------+---------+---------------+
+| c_int      | Int64           | YES  |         | FIELD         |
+| c_float    | Float64         | YES  |         | FIELD         |
+| c_string   | Float64         | YES  |         | FIELD         |
+| c_bool     | Boolean         | YES  |         | FIELD         |
+| c_date     | Date            | YES  |         | FIELD         |
+| c_datetime | TimestampSecond | YES  |         | FIELD         |
++------------+-----------------+------+---------+---------------+";
+    check_output_stream(output, expect).await;
+
+    let output = execute_sql(&instance, &format!("select * from {table_name};")).await;
+    let expect = "\
++-------+-----------+----------+--------+------------+---------------------+
+| c_int | c_float   | c_string | c_bool | c_date     | c_datetime          |
++-------+-----------+----------+--------+------------+---------------------+
+| 1     | 1.1       | 1.11     | true   | 1970-01-01 | 1970-01-01T00:00:00 |
+| 2     | 2.2       | 2.22     | true   | 2020-11-08 | 2020-11-08T01:00:00 |
+| 3     |           | 3.33     | true   | 1969-12-31 | 1969-11-08T02:00:00 |
+| 4     | 4.4       |          | false  |            |                     |
+| 5     | 6.6       |          | false  | 1990-01-01 | 1990-01-01T03:00:00 |
+| 4     | 4000000.0 |          | false  |            |                     |
+| 4     | 4.0e-6    |          | false  |            |                     |
++-------+-----------+----------+--------+------------+---------------------+";
+    check_output_stream(output, expect).await;
+
+    let output = execute_sql(
+        &instance,
+        &format!("select c_bool,c_int,c_bool as b from {table_name};"),
+    )
+    .await;
+    let expect = "\
++--------+-------+-------+
+| c_bool | c_int | b     |
++--------+-------+-------+
+| true   | 1     | true  |
+| true   | 2     | true  |
+| true   | 3     | true  |
+| false  | 4     | false |
+| false  | 5     | false |
+| false  | 4     | false |
+| false  | 4     | false |
++--------+-------+-------+";
+    check_output_stream(output, expect).await;
+}
+
+#[apply(both_instances_cases)]
 async fn test_execute_query_external_table_csv(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
     let format = "csv";

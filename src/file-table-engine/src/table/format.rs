@@ -16,16 +16,21 @@ use std::sync::Arc;
 
 use common_datasource::file_format::csv::{CsvConfigBuilder, CsvFormat, CsvOpener};
 use common_datasource::file_format::json::{JsonFormat, JsonOpener};
+use common_datasource::file_format::parquet::{DefaultParquetFileReaderFactory, ParquetFormat};
 use common_datasource::file_format::Format;
-use common_query::physical_plan::PhysicalPlanRef;
+use common_query::physical_plan::{PhysicalPlanAdapter, PhysicalPlanRef};
 use common_query::prelude::Expr;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
-use datafusion::arrow::datatypes::Schema;
+use datafusion::common::ToDFSchema;
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::object_store::ObjectStoreUrl;
-use datafusion::physical_plan::file_format::{FileOpener, FileScanConfig, FileStream};
+use datafusion::optimizer::utils::conjunction;
+use datafusion::physical_expr::create_physical_expr;
+use datafusion::physical_expr::execution_props::ExecutionProps;
+use datafusion::physical_plan::file_format::{FileOpener, FileScanConfig, FileStream, ParquetExec};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
-use datatypes::schema::SchemaRef;
+use datatypes::arrow::datatypes::Schema as ArrowSchema;
+use datatypes::schema::{Schema, SchemaRef};
 use object_store::ObjectStore;
 use snafu::ResultExt;
 use table::table::scan::SimpleTableScan;
@@ -38,7 +43,7 @@ const DEFAULT_BATCH_SIZE: usize = 8192;
 pub struct CreateScanPlanContext {}
 
 fn build_csv_opener(
-    file_schema: Arc<Schema>,
+    file_schema: Arc<ArrowSchema>,
     config: &ScanPlanConfig,
     format: &CsvFormat,
 ) -> Result<CsvOpener> {
@@ -58,7 +63,7 @@ fn build_csv_opener(
 }
 
 fn build_json_opener(
-    file_schema: Arc<Schema>,
+    file_schema: Arc<ArrowSchema>,
     config: &ScanPlanConfig,
     format: &JsonFormat,
 ) -> Result<JsonOpener> {
@@ -81,7 +86,7 @@ fn build_json_opener(
 
 fn build_scan_plan<T: FileOpener + Send + 'static>(
     opener: T,
-    file_schema: Arc<Schema>,
+    file_schema: Arc<ArrowSchema>,
     files: &[String],
     projection: Option<&Vec<usize>>,
     limit: Option<usize>,
@@ -143,6 +148,76 @@ fn new_json_scan_plan(
     )
 }
 
+fn new_parquet_scan_plan(
+    _ctx: &CreateScanPlanContext,
+    config: &ScanPlanConfig,
+    _format: &ParquetFormat,
+) -> Result<PhysicalPlanRef> {
+    let file_schema = config.file_schema.arrow_schema().clone();
+    let ScanPlanConfig {
+        files,
+        projection,
+        limit,
+        filters,
+        store,
+        ..
+    } = config;
+
+    let scan_config = FileScanConfig {
+        object_store_url: ObjectStoreUrl::parse("empty://").unwrap(), // won't be used
+        file_schema: file_schema.clone(),
+        file_groups: vec![files
+            .iter()
+            .map(|filename| PartitionedFile::new(filename.to_string(), 0))
+            .collect::<Vec<_>>()],
+        statistics: Default::default(),
+        projection: projection.cloned(),
+        limit: *limit,
+        table_partition_cols: vec![],
+        output_ordering: None,
+        infinite_source: false,
+    };
+
+    let filters = filters
+        .iter()
+        .map(|f| f.df_expr().clone())
+        .collect::<Vec<_>>();
+
+    let filters = if let Some(expr) = conjunction(filters) {
+        let df_schema = file_schema
+            .clone()
+            .to_dfschema_ref()
+            .context(error::ParquetScanPlanSnafu)?;
+
+        let filters = create_physical_expr(&expr, &df_schema, &file_schema, &ExecutionProps::new())
+            .context(error::ParquetScanPlanSnafu)?;
+        Some(filters)
+    } else {
+        None
+    };
+
+    let exec = ParquetExec::new(scan_config, filters, None).with_parquet_file_reader_factory(
+        Arc::new(DefaultParquetFileReaderFactory::new(store.clone())),
+    );
+
+    let projected_schema = if let Some(projection) = config.projection {
+        Arc::new(
+            file_schema
+                .project(projection)
+                .context(error::ProjectSchemaSnafu)?,
+        )
+    } else {
+        file_schema
+    };
+
+    let schema = Schema::try_from(projected_schema).context(error::ConvertSchemaSnafu)?;
+
+    Ok(Arc::new(PhysicalPlanAdapter::new(
+        Arc::new(schema),
+        Arc::new(exec),
+    )))
+}
+
 #[derive(Debug, Clone)]
 pub struct ScanPlanConfig<'a> {
     pub file_schema: SchemaRef,
@@ -161,6 +236,6 @@ pub fn create_physical_plan(
     match format {
         Format::Csv(format) => new_csv_scan_plan(ctx, config, format),
         Format::Json(format) => new_json_scan_plan(ctx, config, format),
-        Format::Parquet(_) => error::UnsupportedFileFormatSnafu { format: "parquet" }.fail(),
+        Format::Parquet(format) => new_parquet_scan_plan(ctx, config, format),
     }
 }
