@@ -16,7 +16,7 @@ use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use datafusion::parquet::format::FileMetaData;
 use object_store::Writer;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio_util::compat::Compat;
 
@@ -48,15 +48,15 @@ impl<T: AsyncWrite + Send + Unpin, U: DfRecordBatchEncoder + ArrowWriterCloser>
     BufferedWriter<T, U>
 {
     pub async fn close_with_arrow_writer(mut self) -> Result<(FileMetaData, u64)> {
-        if let Some(encoder) = self.encoder.take() {
-            let metadata = encoder.close().await?;
-            let written = self.try_flush(true).await?;
-
-            // It's important to shut down! flushes all pending writes
-            self.close().await?;
-            return Ok((metadata, written));
-        }
-        error::BufferedWriterClosedSnafu {}.fail()
+        let encoder = self
+            .encoder
+            .take()
+            .context(error::BufferedWriterClosedSnafu)?;
+        let metadata = encoder.close().await?;
+        let written = self.try_flush(true).await?;
+        // It's important to shut down! flushes all pending writes
+        self.close().await?;
+        Ok((metadata, written))
     }
 }
 
@@ -81,14 +81,13 @@ impl<T: AsyncWrite + Send + Unpin, U: DfRecordBatchEncoder> BufferedWriter<T, U>
     }
 
     pub async fn write(&mut self, batch: &RecordBatch) -> Result<()> {
-        if let Some(encoder) = &mut self.encoder {
-            encoder.write(batch)?;
-
-            self.try_flush(false).await?;
-
-            return Ok(());
-        }
-        error::BufferedWriterClosedSnafu {}.fail()
+        let encoder = self
+            .encoder
+            .as_mut()
+            .context(error::BufferedWriterClosedSnafu)?;
+        encoder.write(batch)?;
+        self.try_flush(false).await?;
+        Ok(())
     }
 
     pub fn flushed(&self) -> bool {
@@ -112,7 +111,6 @@ impl<T: AsyncWrite + Send + Unpin, U: DfRecordBatchEncoder> BufferedWriter<T, U>
                 .await
                 .context(error::AsyncWriteSnafu)?;
 
-            self.flushed = true;
             bytes_written += size as u64;
         }
 
@@ -120,6 +118,7 @@ impl<T: AsyncWrite + Send + Unpin, U: DfRecordBatchEncoder> BufferedWriter<T, U>
             bytes_written += self.try_flush_all().await?;
         }
 
+        self.flushed = bytes_written > 0;
         self.bytes_written += bytes_written;
 
         Ok(bytes_written)
@@ -133,7 +132,6 @@ impl<T: AsyncWrite + Send + Unpin, U: DfRecordBatchEncoder> BufferedWriter<T, U>
             .write_all(&remain)
             .await
             .context(error::AsyncWriteSnafu)?;
-        self.flushed = true;
 
         self.bytes_written += size as u64;
 

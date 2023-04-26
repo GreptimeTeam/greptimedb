@@ -31,7 +31,7 @@ use crate::read::Batch;
 /// Parquet writer that buffers row groups in memory and writes buffered data to an underlying
 /// storage by chunks to reduce memory consumption.
 pub struct BufferedWriter {
-    inner: Box<InnerBufferedWriter>,
+    inner: InnerBufferedWriter,
     arrow_schema: arrow::datatypes::SchemaRef,
 }
 
@@ -58,12 +58,12 @@ impl BufferedWriter {
         let writer = writer.compat_write();
 
         Ok(Self {
-            inner: Box::new(DatasourceBufferedWriter::new(
+            inner: DatasourceBufferedWriter::new(
                 buffer_threshold,
                 buffer.clone(),
                 arrow_writer,
                 writer,
-            )),
+            ),
             arrow_schema: arrow_schema.clone(),
         })
     }
