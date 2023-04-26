@@ -178,7 +178,7 @@ pub async fn stream_to_file<T: DfRecordBatchEncoder, U: Fn(SharedBuffer) -> T>(
     path: String,
     threshold: usize,
     encoder_factory: U,
-) -> Result<()> {
+) -> Result<usize> {
     let writer = store
         .writer(&path)
         .await
@@ -189,13 +189,18 @@ pub async fn stream_to_file<T: DfRecordBatchEncoder, U: Fn(SharedBuffer) -> T>(
     let encoder = encoder_factory(buffer.clone());
     let mut writer = BufferedWriter::new(threshold, buffer, encoder, writer);
 
+    let mut rows = 0;
+
     while let Some(batch) = stream.next().await {
         let batch = batch.context(error::ReadRecordBatchSnafu)?;
-        writer.write(&batch).await?
+        writer.write(&batch).await?;
+        rows += batch.num_rows();
     }
 
     // Flushes all pending writes
     writer.try_flush(true).await?;
 
-    writer.close().await
+    writer.close().await?;
+
+    Ok(rows)
 }

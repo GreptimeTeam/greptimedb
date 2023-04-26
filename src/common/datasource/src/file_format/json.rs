@@ -151,7 +151,7 @@ pub async fn stream_to_json(
     store: ObjectStore,
     path: String,
     threshold: usize,
-) -> Result<()> {
+) -> Result<usize> {
     stream_to_file(stream, store, path, threshold, |buffer| {
         json::LineDelimitedWriter::new(buffer)
     })
