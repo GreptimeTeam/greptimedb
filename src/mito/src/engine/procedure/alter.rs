@@ -184,7 +184,6 @@ impl<S: StorageEngine> AlterMitoTable<S> {
             );
         }
 
-        self.init_new_info(&current_info)?;
         self.data.state = AlterTableState::EngineAlterTable;
 
         Ok(Status::executing(true))
@@ -196,6 +195,13 @@ impl<S: StorageEngine> AlterMitoTable<S> {
     /// to the manager) to rename a table might have concurrent issue when
     /// we renaming two tables to the same table name.
     pub(crate) async fn engine_alter_table(&mut self) -> Result<TableRef> {
+        let current_info = self.table.table_info();
+        if current_info.ident.version > self.data.table_version {
+            // The table is already altered.
+            return Ok(self.table.clone());
+        }
+        self.init_new_info(&current_info)?;
+
         self.alter_regions().await?;
 
         self.update_table_manifest().await
@@ -203,16 +209,6 @@ impl<S: StorageEngine> AlterMitoTable<S> {
 
     /// Alter regions.
     async fn alter_regions(&mut self) -> Result<()> {
-        let current_info = self.table.table_info();
-        ensure!(
-            current_info.ident.version == self.data.table_version,
-            VersionChangedSnafu {
-                expect: self.data.table_version,
-                actual: current_info.ident.version,
-            }
-        );
-
-        self.init_new_info(&current_info)?;
         let new_info = self.new_info.as_mut().unwrap();
         let table_name = &self.data.request.table_name;
 
@@ -263,6 +259,8 @@ impl<S: StorageEngine> AlterMitoTable<S> {
             new_info
         );
 
+        // It is possible that we write the manifest multiple times and bump the manifest
+        // version, but it is still correct as we always write the new table info.
         self.table
             .manifest()
             .update(TableMetaActionList::with_action(TableMetaAction::Change(
