@@ -12,11 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_runtime::JoinHandle;
 use futures::Future;
-use once_cell::sync::OnceCell;
 use rustpython_vm::builtins::PyBaseExceptionRef;
 use rustpython_vm::VirtualMachine;
-use tokio::runtime::Runtime;
 
 use crate::python::error;
 
@@ -30,22 +29,29 @@ pub fn format_py_error(excep: PyBaseExceptionRef, vm: &VirtualMachine) -> error:
     }
     error::PyRuntimeSnafu { msg }.build()
 }
-static LOCAL_RUNTIME: OnceCell<tokio::runtime::Runtime> = OnceCell::new();
-fn get_local_runtime() -> std::thread::Result<&'static Runtime> {
-    let rt = LOCAL_RUNTIME
-        .get_or_try_init(|| tokio::runtime::Runtime::new().map_err(|e| Box::new(e) as _))?;
-    Ok(rt)
+
+/// just like [`tokio::task::spawn_blocking`] but using a dedicated runtime(runtime `bg`) using by `scripts` crate
+pub fn spawn_blocking_script<F, R>(f: F) -> JoinHandle<R>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    common_runtime::spawn_blocking_bg(f)
 }
+
+/// Please only use this method because you are calling from (optionally first as async) to sync then to a async
 /// a terrible hack to call async from sync by:
+///
 /// TODO(discord9): find a better way
-/// 1. spawn a new thread
-/// 2. create a new runtime in new thread and call `block_on` on it
+/// 1. using a cached runtime
+/// 2. block on that runtime
 pub fn block_on_async<T, F>(f: F) -> std::thread::Result<T>
 where
     F: Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
-    let rt = get_local_runtime()?;
-
+    let rt = common_runtime::bg_runtime();
+    // spawn a thread to block on the runtime, also should prevent `start a runtime inside of runtime` error
+    // it's ok to block here, assume calling from async to sync is using a `spawn_blocking_*` call
     std::thread::spawn(move || rt.block_on(f)).join()
 }

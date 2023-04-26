@@ -40,8 +40,9 @@ use snafu::{ensure, ResultExt};
 use sql::statements::statement::Statement;
 
 use crate::engine::{CompileContext, EvalContext, Script, ScriptEngine};
-use crate::python::error::{self, PyRuntimeSnafu, Result};
+use crate::python::error::{self, PyRuntimeSnafu, Result, TokioJoinSnafu};
 use crate::python::ffi_types::copr::{exec_parsed, parse, AnnotationInfo, CoprocessorRef};
+use crate::python::utils::spawn_blocking_script;
 const PY_ENGINE: &str = "python";
 
 #[derive(Debug)]
@@ -179,9 +180,17 @@ pub struct PyScript {
 }
 
 impl PyScript {
+    pub fn from_script(script: &str, query_engine: QueryEngineRef) -> Result<Self> {
+        let copr = Arc::new(parse::parse_and_compile_copr(
+            script,
+            Some(query_engine.clone()),
+        )?);
+
+        Ok(PyScript { copr, query_engine })
+    }
     /// Register Current Script as UDF, register name is same as script name
     /// FIXME(discord9): possible inject attack?
-    pub fn register_udf(&self) {
+    pub async fn register_udf(&self) {
         let udf = PyUDF::from_copr(self.copr.clone());
         PyUDF::register_as_udf(udf.clone());
         PyUDF::register_to_query_engine(udf, self.query_engine.clone());
@@ -291,7 +300,11 @@ impl Script for PyScript {
                 _ => unreachable!(),
             }
         } else {
-            let batch = exec_parsed(&self.copr, &None, &params)?;
+            let copr = self.copr.clone();
+            let params = params.clone();
+            let batch = spawn_blocking_script(move || exec_parsed(&copr, &None, &params))
+                .await
+                .context(TokioJoinSnafu)??;
             let batches = RecordBatches::try_new(batch.schema.clone(), vec![batch]).unwrap();
             Ok(Output::RecordBatches(batches))
         }
@@ -335,6 +348,7 @@ impl ScriptEngine for PyEngine {
 }
 #[cfg(test)]
 pub(crate) use tests::sample_script_engine;
+
 #[cfg(test)]
 mod tests {
     use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
