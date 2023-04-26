@@ -225,7 +225,7 @@ impl CatalogManager for FrontendCatalogManager {
         }
     }
 
-    async fn catalog_names_async(&self) -> CatalogResult<Vec<String>> {
+    async fn catalog_names(&self) -> CatalogResult<Vec<String>> {
         let key = build_catalog_prefix();
         let mut iter = self.backend.range(key.as_bytes());
         let mut res = HashSet::new();
@@ -241,7 +241,7 @@ impl CatalogManager for FrontendCatalogManager {
         Ok(res.into_iter().collect())
     }
 
-    async fn catalog_async(&self, catalog: &str) -> CatalogResult<Option<CatalogProviderRef>> {
+    async fn catalog(&self, catalog: &str) -> CatalogResult<Option<CatalogProviderRef>> {
         let key = CatalogKey {
             catalog_name: catalog.to_string(),
         }
@@ -256,12 +256,12 @@ impl CatalogManager for FrontendCatalogManager {
         }))
     }
 
-    async fn schema_async(
+    async fn schema(
         &self,
         catalog: &str,
         schema: &str,
     ) -> catalog::error::Result<Option<SchemaProviderRef>> {
-        self.catalog_async(catalog)
+        self.catalog(catalog)
             .await?
             .context(catalog::error::CatalogNotFoundSnafu {
                 catalog_name: catalog,
@@ -276,7 +276,7 @@ impl CatalogManager for FrontendCatalogManager {
         schema: &str,
         table_name: &str,
     ) -> catalog::error::Result<Option<TableRef>> {
-        self.schema_async(catalog, schema)
+        self.schema(catalog, schema)
             .await?
             .context(catalog::error::SchemaNotFoundSnafu { catalog, schema })?
             .table(table_name)

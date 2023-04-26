@@ -183,7 +183,7 @@ impl DatafusionQueryEngine {
         let catalog = self
             .state
             .catalog_manager()
-            .catalog_async(catalog_name)
+            .catalog(catalog_name)
             .await
             .context(CatalogSnafu)?
             .context(CatalogNotFoundSnafu {

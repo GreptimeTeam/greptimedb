@@ -433,7 +433,7 @@ impl CatalogManager for RemoteCatalogManager {
         let catalog_name = request.catalog;
         let schema_name = request.schema;
         let catalog_provider =
-            self.catalog_async(&catalog_name)
+            self.catalog(&catalog_name)
                 .await?
                 .context(CatalogNotFoundSnafu {
                     catalog_name: &catalog_name,
@@ -460,13 +460,13 @@ impl CatalogManager for RemoteCatalogManager {
     async fn deregister_table(&self, request: DeregisterTableRequest) -> Result<bool> {
         let catalog_name = &request.catalog;
         let schema_name = &request.schema;
-        let schema = self
-            .schema_async(catalog_name, schema_name)
-            .await?
-            .context(SchemaNotFoundSnafu {
-                catalog: catalog_name,
-                schema: schema_name,
-            })?;
+        let schema =
+            self.schema(catalog_name, schema_name)
+                .await?
+                .context(SchemaNotFoundSnafu {
+                    catalog: catalog_name,
+                    schema: schema_name,
+                })?;
 
         let result = schema.deregister_table(&request.table_name).await?;
         Ok(result.is_none())
@@ -476,7 +476,7 @@ impl CatalogManager for RemoteCatalogManager {
         let catalog_name = request.catalog;
         let schema_name = request.schema;
         let catalog_provider =
-            self.catalog_async(&catalog_name)
+            self.catalog(&catalog_name)
                 .await?
                 .context(CatalogNotFoundSnafu {
                     catalog_name: &catalog_name,
@@ -528,8 +528,8 @@ impl CatalogManager for RemoteCatalogManager {
         Ok(())
     }
 
-    async fn schema_async(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>> {
-        self.catalog_async(catalog)
+    async fn schema(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>> {
+        self.catalog(catalog)
             .await?
             .context(CatalogNotFoundSnafu {
                 catalog_name: catalog,
@@ -545,7 +545,7 @@ impl CatalogManager for RemoteCatalogManager {
         table_name: &str,
     ) -> Result<Option<TableRef>> {
         let catalog = self
-            .catalog_async(catalog_name)
+            .catalog(catalog_name)
             .await?
             .with_context(|| CatalogNotFoundSnafu { catalog_name })?;
         let schema = catalog
@@ -558,7 +558,7 @@ impl CatalogManager for RemoteCatalogManager {
         schema.table(table_name).await
     }
 
-    async fn catalog_async(&self, catalog: &str) -> Result<Option<CatalogProviderRef>> {
+    async fn catalog(&self, catalog: &str) -> Result<Option<CatalogProviderRef>> {
         let key = CatalogKey {
             catalog_name: catalog.to_string(),
         }
@@ -570,7 +570,7 @@ impl CatalogManager for RemoteCatalogManager {
             .map(|_| self.new_catalog_provider(catalog)))
     }
 
-    async fn catalog_names_async(&self) -> Result<Vec<String>> {
+    async fn catalog_names(&self) -> Result<Vec<String>> {
         let mut stream = self.backend.range(CATALOG_KEY_PREFIX.as_bytes());
         let mut catalogs = HashSet::new();
 

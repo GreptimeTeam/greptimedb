@@ -112,7 +112,7 @@ pub async fn show_databases(
     );
 
     let catalog = catalog_manager
-        .catalog_async(DEFAULT_CATALOG_NAME)
+        .catalog(DEFAULT_CATALOG_NAME)
         .await
         .context(error::CatalogSnafu)?
         .context(error::CatalogNotFoundSnafu {
@@ -158,7 +158,7 @@ pub async fn show_tables(
     };
     // TODO(sunng87): move this function into query_ctx
     let schema = catalog_manager
-        .schema_async(&query_ctx.current_catalog(), &schema)
+        .schema(&query_ctx.current_catalog(), &schema)
         .await
         .context(error::CatalogSnafu)?
         .context(error::SchemaNotFoundSnafu { schema })?;

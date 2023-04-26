@@ -108,11 +108,11 @@ mod tests {
         let (_, _, catalog_manager, _) = prepare_components(node_id).await;
         assert_eq!(
             vec![DEFAULT_CATALOG_NAME.to_string()],
-            catalog_manager.catalog_names_async().await.unwrap()
+            catalog_manager.catalog_names().await.unwrap()
         );
 
         let default_catalog = catalog_manager
-            .catalog_async(DEFAULT_CATALOG_NAME)
+            .catalog(DEFAULT_CATALOG_NAME)
             .await
             .unwrap()
             .unwrap();
@@ -173,7 +173,7 @@ mod tests {
         let node_id = 42;
         let (_, table_engine, catalog_manager, _) = prepare_components(node_id).await;
         let default_catalog = catalog_manager
-            .catalog_async(DEFAULT_CATALOG_NAME)
+            .catalog(DEFAULT_CATALOG_NAME)
             .await
             .unwrap()
             .unwrap();
@@ -251,13 +251,7 @@ mod tests {
             HashSet::<String>::from_iter(
                 vec![DEFAULT_CATALOG_NAME.to_string(), catalog_name.clone()].into_iter()
             ),
-            HashSet::from_iter(
-                catalog_manager
-                    .catalog_names_async()
-                    .await
-                    .unwrap()
-                    .into_iter()
-            )
+            HashSet::from_iter(catalog_manager.catalog_names().await.unwrap().into_iter())
         );
 
         let table_to_register = table_engine
@@ -297,7 +291,7 @@ mod tests {
         );
 
         let new_catalog = catalog_manager
-            .catalog_async(&catalog_name)
+            .catalog(&catalog_name)
             .await
             .unwrap()
             .expect("catalog should exist since it's already registered");

@@ -105,7 +105,7 @@ impl DfTableSourceProvider {
         let schema = if schema_name != INFORMATION_SCHEMA_NAME {
             let catalog = self
                 .catalog_manager
-                .catalog_async(catalog_name)
+                .catalog(catalog_name)
                 .await?
                 .context(CatalogNotFoundSnafu { catalog_name })?;
             catalog
@@ -118,7 +118,7 @@ impl DfTableSourceProvider {
         } else {
             let catalog_provider = self
                 .catalog_manager
-                .catalog_async(catalog_name)
+                .catalog(catalog_name)
                 .await?
                 .context(CatalogNotFoundSnafu { catalog_name })?;
             Arc::new(InformationSchemaProvider::new(

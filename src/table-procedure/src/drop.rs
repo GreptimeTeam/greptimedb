@@ -290,7 +290,7 @@ mod tests {
         watcher.changed().await.unwrap();
 
         let catalog = catalog_manager
-            .catalog_async(DEFAULT_CATALOG_NAME)
+            .catalog(DEFAULT_CATALOG_NAME)
             .await
             .unwrap()
             .unwrap();

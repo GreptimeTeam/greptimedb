@@ -137,7 +137,7 @@ impl AlterTableProcedure {
         let request = &self.data.request;
         let catalog = self
             .catalog_manager
-            .catalog_async(&request.catalog_name)
+            .catalog(&request.catalog_name)
             .await
             .context(AccessCatalogSnafu)?
             .context(CatalogNotFoundSnafu {
@@ -340,7 +340,7 @@ mod tests {
         watcher.changed().await.unwrap();
 
         let catalog = catalog_manager
-            .catalog_async(DEFAULT_CATALOG_NAME)
+            .catalog(DEFAULT_CATALOG_NAME)
             .await
             .unwrap()
             .unwrap();

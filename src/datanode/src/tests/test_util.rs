@@ -125,7 +125,7 @@ pub(crate) async fn create_test_table(
 
     let schema_provider = instance
         .catalog_manager
-        .schema_async(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
+        .schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
         .await
         .unwrap()
         .unwrap();

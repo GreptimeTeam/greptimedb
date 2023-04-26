@@ -135,7 +135,7 @@ impl CreateTableProcedure {
         // Check whether catalog and schema exist.
         let catalog = self
             .catalog_manager
-            .catalog_async(&self.data.request.catalog_name)
+            .catalog(&self.data.request.catalog_name)
             .await
             .context(AccessCatalogSnafu)?
             .with_context(|| {
@@ -225,7 +225,7 @@ impl CreateTableProcedure {
     async fn on_register_catalog(&mut self) -> Result<Status> {
         let catalog = self
             .catalog_manager
-            .catalog_async(&self.data.request.catalog_name)
+            .catalog(&self.data.request.catalog_name)
             .await
             .context(AccessCatalogSnafu)?
             .context(CatalogNotFoundSnafu {

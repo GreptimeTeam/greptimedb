@@ -274,7 +274,7 @@ impl Instance {
         info!("going to flush all schemas");
         let schema_list = self
             .catalog_manager
-            .catalog_async(DEFAULT_CATALOG_NAME)
+            .catalog(DEFAULT_CATALOG_NAME)
             .await
             .map_err(BoxedError::new)
             .context(ShutdownInstanceSnafu)?

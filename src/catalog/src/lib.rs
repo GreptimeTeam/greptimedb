@@ -92,11 +92,11 @@ pub trait CatalogManager: Send + Sync {
     async fn register_system_table(&self, request: RegisterSystemTableRequest)
         -> error::Result<()>;
 
-    async fn catalog_names_async(&self) -> Result<Vec<String>>;
+    async fn catalog_names(&self) -> Result<Vec<String>>;
 
-    async fn catalog_async(&self, catalog: &str) -> Result<Option<CatalogProviderRef>>;
+    async fn catalog(&self, catalog: &str) -> Result<Option<CatalogProviderRef>>;
 
-    async fn schema_async(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>>;
+    async fn schema(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>>;
 
     /// Returns the table by catalog, schema and table name.
     async fn table(
@@ -228,9 +228,9 @@ pub async fn datanode_stat(catalog_manager: &CatalogManagerRef) -> (u64, Vec<Reg
     let mut region_number: u64 = 0;
     let mut region_stats = Vec::new();
 
-    let Ok(catalog_names) = catalog_manager.catalog_names_async().await else { return (region_number, region_stats) };
+    let Ok(catalog_names) = catalog_manager.catalog_names().await else { return (region_number, region_stats) };
     for catalog_name in catalog_names {
-        let Ok(Some(catalog)) = catalog_manager.catalog_async(&catalog_name).await else { continue };
+        let Ok(Some(catalog)) = catalog_manager.catalog(&catalog_name).await else { continue };
 
         let Ok(schema_names) = catalog.schema_names().await else { continue };
         for schema_name in schema_names {

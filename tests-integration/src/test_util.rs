@@ -256,7 +256,7 @@ pub async fn create_test_table(
         .context(CreateTableSnafu { table_name })?;
 
     let schema_provider = catalog_manager
-        .catalog_async(DEFAULT_CATALOG_NAME)
+        .catalog(DEFAULT_CATALOG_NAME)
         .await
         .unwrap()
         .unwrap()

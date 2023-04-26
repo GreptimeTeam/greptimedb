@@ -147,7 +147,7 @@ impl CatalogManager for MemoryCatalogManager {
         Ok(())
     }
 
-    async fn schema_async(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>> {
+    async fn schema(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>> {
         if let Some(c) = self.catalog(catalog) {
             c.schema(schema).await
         } else {
@@ -167,11 +167,11 @@ impl CatalogManager for MemoryCatalogManager {
         s.table(table_name).await
     }
 
-    async fn catalog_async(&self, catalog: &str) -> Result<Option<CatalogProviderRef>> {
+    async fn catalog(&self, catalog: &str) -> Result<Option<CatalogProviderRef>> {
         Ok(self.catalogs.read().unwrap().get(catalog).cloned())
     }
 
-    async fn catalog_names_async(&self) -> Result<Vec<String>> {
+    async fn catalog_names(&self) -> Result<Vec<String>> {
         Ok(self.catalogs.read().unwrap().keys().cloned().collect())
     }
 
@@ -217,7 +217,7 @@ impl MemoryCatalogManager {
     }
 
     fn catalog(&self, catalog_name: &str) -> Option<CatalogProviderRef> {
-        self.catalogs.write().unwrap().get(catalog_name).cloned()
+        self.catalogs.read().unwrap().get(catalog_name).cloned()
     }
 }
 
@@ -403,8 +403,8 @@ mod tests {
     #[tokio::test]
     async fn test_new_memory_catalog_list() {
         let catalog_list = new_memory_catalog_list().unwrap();
-        let default_catalog = catalog_list
-            .catalog_async(DEFAULT_CATALOG_NAME)
+
+        let default_catalog = CatalogManager::catalog(&*catalog_list, DEFAULT_CATALOG_NAME)
             .await
             .unwrap()
             .unwrap();
@@ -493,7 +493,7 @@ mod tests {
     async fn test_catalog_rename_table() {
         let catalog = MemoryCatalogManager::default();
         let schema = catalog
-            .schema_async(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
+            .schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
             .await
             .unwrap()
             .unwrap();
@@ -556,7 +556,7 @@ mod tests {
     pub async fn test_catalog_deregister_table() {
         let catalog = MemoryCatalogManager::default();
         let schema = catalog
-            .schema_async(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
+            .schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
             .await
             .unwrap()
             .unwrap();

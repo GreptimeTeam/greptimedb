@@ -130,7 +130,7 @@ impl StatementExecutor {
         let catalog = &query_ctx.current_catalog();
         ensure!(
             self.catalog_manager
-                .schema_async(catalog, &db)
+                .schema(catalog, &db)
                 .await
                 .context(CatalogSnafu)?
                 .is_some(),

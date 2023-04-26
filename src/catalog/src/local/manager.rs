@@ -214,7 +214,7 @@ impl LocalCatalogManager {
                 }
                 Entry::Schema(s) => {
                     self.catalogs
-                        .catalog_async(&s.catalog_name)
+                        .catalog(&s.catalog_name)
                         .await?
                         .context(CatalogNotFoundSnafu {
                             catalog_name: &s.catalog_name,
@@ -244,13 +244,13 @@ impl LocalCatalogManager {
     }
 
     async fn open_and_register_table(&self, t: &TableEntry) -> Result<()> {
-        let catalog = self
-            .catalogs
-            .catalog_async(&t.catalog_name)
-            .await?
-            .context(CatalogNotFoundSnafu {
-                catalog_name: &t.catalog_name,
-            })?;
+        let catalog =
+            self.catalogs
+                .catalog(&t.catalog_name)
+                .await?
+                .context(CatalogNotFoundSnafu {
+                    catalog_name: &t.catalog_name,
+                })?;
         let schema = catalog
             .schema(&t.schema_name)
             .await?
@@ -324,7 +324,7 @@ impl CatalogManager for LocalCatalogManager {
 
         let schema = self
             .catalogs
-            .catalog_async(catalog_name)
+            .catalog(catalog_name)
             .await?
             .context(CatalogNotFoundSnafu { catalog_name })?
             .schema(schema_name)
@@ -389,7 +389,7 @@ impl CatalogManager for LocalCatalogManager {
 
         let catalog = self
             .catalogs
-            .catalog_async(catalog_name)
+            .catalog(catalog_name)
             .await?
             .context(CatalogNotFoundSnafu { catalog_name })?;
 
@@ -480,7 +480,7 @@ impl CatalogManager for LocalCatalogManager {
 
         let catalog = self
             .catalogs
-            .catalog_async(catalog_name)
+            .catalog(catalog_name)
             .await?
             .context(CatalogNotFoundSnafu { catalog_name })?;
 
@@ -516,9 +516,9 @@ impl CatalogManager for LocalCatalogManager {
         Ok(())
     }
 
-    async fn schema_async(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>> {
+    async fn schema(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>> {
         self.catalogs
-            .catalog_async(catalog)
+            .catalog(catalog)
             .await?
             .context(CatalogNotFoundSnafu {
                 catalog_name: catalog,
@@ -535,7 +535,7 @@ impl CatalogManager for LocalCatalogManager {
     ) -> Result<Option<TableRef>> {
         let catalog = self
             .catalogs
-            .catalog_async(catalog_name)
+            .catalog(catalog_name)
             .await?
             .context(CatalogNotFoundSnafu { catalog_name })?;
         let schema = catalog
@@ -548,16 +548,16 @@ impl CatalogManager for LocalCatalogManager {
         schema.table(table_name).await
     }
 
-    async fn catalog_async(&self, catalog: &str) -> Result<Option<CatalogProviderRef>> {
+    async fn catalog(&self, catalog: &str) -> Result<Option<CatalogProviderRef>> {
         if catalog.eq_ignore_ascii_case(SYSTEM_CATALOG_NAME) {
             Ok(Some(self.system.clone()))
         } else {
-            self.catalogs.catalog_async(catalog).await
+            self.catalogs.catalog(catalog).await
         }
     }
 
-    async fn catalog_names_async(&self) -> Result<Vec<String>> {
-        self.catalogs.catalog_names_async().await
+    async fn catalog_names(&self) -> Result<Vec<String>> {
+        self.catalogs.catalog_names().await
     }
 
     async fn register_catalog(
