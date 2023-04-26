@@ -206,12 +206,6 @@ impl<S: StorageEngine> TableCreator<S> {
         );
 
         let table_ref = self.data.table_ref();
-        let _lock = self
-            .engine_inner
-            .table_mutex
-            .lock(table_ref.to_string())
-            .await;
-
         // It is possible that the procedure retries `CREATE TABLE` many times, so we
         // return the table if it exists.
         if let Some(table) = self.engine_inner.get_table(&table_ref) {
