@@ -197,14 +197,16 @@ mod tests {
 
         let region_meta = Arc::new(build_region_meta());
 
-        assert!(manifest
-            .scan(0, MAX_VERSION)
-            .await
-            .unwrap()
-            .next_action()
-            .await
-            .unwrap()
-            .is_none());
+        assert_eq!(
+            None,
+            manifest
+                .scan(0, MAX_VERSION)
+                .await
+                .unwrap()
+                .next_action()
+                .await
+                .unwrap()
+        );
 
         manifest
             .update(RegionMetaActionList::with_action(RegionMetaAction::Change(
@@ -365,14 +367,16 @@ mod tests {
                          files.contains_key(&file_ids[1]) &&
                          *metadata == alterd_raw_meta));
         // all actions were compacted
-        assert!(manifest
-            .scan(0, MAX_VERSION)
-            .await
-            .unwrap()
-            .next_action()
-            .await
-            .unwrap()
-            .is_none());
+        assert_eq!(
+            None,
+            manifest
+                .scan(0, MAX_VERSION)
+                .await
+                .unwrap()
+                .next_action()
+                .await
+                .unwrap()
+        );
 
         assert!(manifest.do_checkpoint().await.unwrap().is_none());
         let last_checkpoint = manifest.last_checkpoint().await.unwrap().unwrap();
@@ -441,14 +445,16 @@ mod tests {
                          *metadata == RawRegionMetadata::from(region_meta.as_ref())));
 
         // all actions were compacted
-        assert!(manifest
-            .scan(0, MAX_VERSION)
-            .await
-            .unwrap()
-            .next_action()
-            .await
-            .unwrap()
-            .is_none());
+        assert_eq!(
+            None,
+            manifest
+                .scan(0, MAX_VERSION)
+                .await
+                .unwrap()
+                .next_action()
+                .await
+                .unwrap()
+        );
 
         // wait for gc
         tokio::time::sleep(Duration::from_millis(60)).await;
