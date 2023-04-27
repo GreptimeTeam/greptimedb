@@ -34,9 +34,9 @@ use datafusion::sql::TableReference;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use promql_parser::label::{MatchOp, Matcher, Matchers, METRIC_NAME};
 use promql_parser::parser::{
-    token, AggModifier, AggregateExpr, BinaryExpr as PromBinaryExpr, Call, EvalStmt,
-    Expr as PromExpr, Function, MatrixSelector, NumberLiteral, Offset, ParenExpr, StringLiteral,
-    SubqueryExpr, TokenType, UnaryExpr, VectorSelector,
+    token, AggregateExpr, BinaryExpr as PromBinaryExpr, Call, EvalStmt, Expr as PromExpr, Function,
+    LabelModifier, MatrixSelector, NumberLiteral, Offset, ParenExpr, StringLiteral, SubqueryExpr,
+    TokenType, UnaryExpr, VectorSelector,
 };
 use snafu::{ensure, OptionExt, ResultExt};
 use table::table::adapter::DfTableProviderAdapter;
@@ -393,6 +393,10 @@ impl PromPlanner {
                     .build()
                     .context(DataFusionPlanningSnafu)?
             }
+            PromExpr::Extension(_) => UnsupportedExprSnafu {
+                name: "Prom Extension",
+            }
+            .fail()?,
         };
         Ok(res)
     }
@@ -564,10 +568,10 @@ impl PromPlanner {
     fn agg_modifier_to_col(
         &mut self,
         input_schema: &DFSchemaRef,
-        modifier: &AggModifier,
+        modifier: &LabelModifier,
     ) -> Result<Vec<DfExpr>> {
         match modifier {
-            AggModifier::By(labels) => {
+            LabelModifier::Include(labels) => {
                 let mut exprs = Vec::with_capacity(labels.len());
                 for label in labels {
                     // nonexistence label will be ignored
@@ -584,7 +588,7 @@ impl PromPlanner {
 
                 Ok(exprs)
             }
-            AggModifier::Without(labels) => {
+            LabelModifier::Exclude(labels) => {
                 let mut all_fields = input_schema
                     .fields()
                     .iter()
@@ -730,6 +734,7 @@ impl PromPlanner {
                 | PromExpr::Subquery(_)
                 | PromExpr::VectorSelector(_)
                 | PromExpr::MatrixSelector(_)
+                | PromExpr::Extension(_)
                 | PromExpr::Call(_) => {
                     if result.input.replace(*arg.clone()).is_some() {
                         MultipleVectorSnafu { expr: *arg.clone() }.fail()?;
@@ -1018,6 +1023,7 @@ impl PromPlanner {
             PromExpr::VectorSelector(_)
             | PromExpr::MatrixSelector(_)
             | PromExpr::Call(_)
+            | PromExpr::Extension(_)
             | PromExpr::Aggregate(_)
             | PromExpr::Subquery(_) => None,
             PromExpr::Paren(ParenExpr { expr }) => Self::try_build_literal_expr(expr),
@@ -1530,7 +1536,7 @@ mod test {
 
         // test group without
         if let PromExpr::Aggregate(AggregateExpr { modifier, .. }) = &mut eval_stmt.expr {
-            *modifier = Some(AggModifier::Without(
+            *modifier = Some(LabelModifier::Exclude(
                 vec![String::from("tag_1")].into_iter().collect(),
             ));
         }
