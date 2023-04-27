@@ -133,8 +133,6 @@ impl<T: AsyncWrite + Send + Unpin, U: DfRecordBatchEncoder> BufferedWriter<T, U>
             .await
             .context(error::AsyncWriteSnafu)?;
 
-        self.bytes_written += size as u64;
-
         Ok(size as u64)
     }
 }
