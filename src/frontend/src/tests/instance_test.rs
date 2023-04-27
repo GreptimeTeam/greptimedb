@@ -1123,11 +1123,12 @@ async fn test_execute_copy_to_s3(instance: Arc<dyn MockInstance>) {
             assert!(matches!(output, Output::AffectedRows(2)));
             let key_id = env::var("GT_S3_ACCESS_KEY_ID").unwrap();
             let key = env::var("GT_S3_ACCESS_KEY").unwrap();
+            let region = env::var("GT_S3_REGION").unwrap();
 
             let root = uuid::Uuid::new_v4().to_string();
 
             // exports
-            let copy_to_stmt = format!("Copy demo TO 's3://{}/{}/export/demo.parquet' CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}')", bucket, root, key_id, key);
+            let copy_to_stmt = format!("Copy demo TO 's3://{}/{}/export/demo.parquet' CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',REGION='{}')", bucket, root, key_id, key, region);
 
             let output = execute_sql(&instance, &copy_to_stmt).await;
             assert!(matches!(output, Output::AffectedRows(2)));
@@ -1163,8 +1164,9 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
             let root = uuid::Uuid::new_v4().to_string();
             let key_id = env::var("GT_S3_ACCESS_KEY_ID").unwrap();
             let key = env::var("GT_S3_ACCESS_KEY").unwrap();
+            let region = env::var("GT_S3_REGION").unwrap();
 
-            let copy_to_stmt = format!("Copy demo TO 's3://{}/{}/export/demo.parquet' CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}')", bucket, root, key_id, key);
+            let copy_to_stmt = format!("Copy demo TO 's3://{}/{}/export/demo.parquet' CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',REGION='{}')", bucket, root, key_id, key, region);
 
             let output = execute_sql(&instance, &copy_to_stmt).await;
             assert!(matches!(output, Output::AffectedRows(2)));
@@ -1205,8 +1207,8 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
                 )
                 .await;
                 let sql = format!(
-                    "{} CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}')",
-                    test.sql, key_id, key
+                    "{} CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',REGION='{}')",
+                    test.sql, key_id, key, region,
                 );
                 logging::info!("Running sql: {}", sql);
 
