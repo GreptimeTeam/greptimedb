@@ -279,6 +279,7 @@ impl Database for GreptimeDB {
 }
 
 impl GreptimeDB {
+    #![allow(clippy::print_stdout)]
     fn stop(&mut self) {
         let mut server = self.server_process.lock().unwrap();
         Env::stop_server(&mut server);
