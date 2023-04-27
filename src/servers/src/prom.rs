@@ -372,7 +372,7 @@ pub async fn instant_query(
     let time = params
         .time
         .or(form_params.time)
-        .unwrap_or_else(|| current_time_rfc3339());
+        .unwrap_or_else(current_time_rfc3339);
     let prom_query = PromQuery {
         query: params.query.or(form_params.query).unwrap_or_default(),
         start: time.clone(),
