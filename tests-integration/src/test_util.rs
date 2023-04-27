@@ -98,6 +98,7 @@ fn s3_test_config() -> S3Config {
         access_key_id: env::var("GT_S3_ACCESS_KEY_ID").unwrap(),
         secret_access_key: env::var("GT_S3_ACCESS_KEY").unwrap(),
         bucket: env::var("GT_S3_BUCKET").unwrap(),
+        region: Some(env::var("GT_S3_REGION").unwrap()),
         ..Default::default()
     }
 }
