@@ -20,6 +20,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_grpc::writer::Precision;
+use common_telemetry::timer;
 use session::context::QueryContext;
 
 use crate::error::{Result, TimePrecisionSnafu};
@@ -45,6 +46,7 @@ pub async fn influxdb_write(
     Query(mut params): Query<HashMap<String, String>>,
     lines: String,
 ) -> Result<impl IntoResponse> {
+    let _timer = timer!(crate::metrics::METRIC_HTTP_INFLUXDB_WRITE_ELAPSED);
     let db = params
         .remove("db")
         .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());

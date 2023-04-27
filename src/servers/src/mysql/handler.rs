@@ -22,7 +22,8 @@ use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveDateTime};
 use common_query::Output;
 use common_telemetry::tracing::log;
-use common_telemetry::{error, trace};
+use common_telemetry::{error, timer, trace, warn};
+use metrics::increment_counter;
 use opensrv_mysql::{
     AsyncMysqlShim, Column, ColumnFlags, ColumnType, ErrorKind, InitWriter, ParamParser,
     ParamValue, QueryResultWriter, StatementMetaWriter, ValueInner,
@@ -154,7 +155,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                     user_info = Some(userinfo);
                 }
                 Err(e) => {
-                    error!("Failed to auth, err: {:?}", e);
+                    warn!("Failed to auth, err: {:?}", e);
                     return false;
                 }
             };
@@ -182,6 +183,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         let params = dummy_params(param_num);
 
         w.reply(stmt_id, &params, &[]).await?;
+        increment_counter!(crate::metrics::METRIC_MYSQL_PREPARED_COUNT);
         return Ok(());
     }
 
@@ -191,6 +193,13 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         p: ParamParser<'a>,
         w: QueryResultWriter<'a, W>,
     ) -> Result<()> {
+        let _timer = timer!(
+            crate::metrics::METRIC_MYSQL_QUERY_TIMER,
+            &[(
+                crate::metrics::METRIC_MYSQL_SUBPROTOCOL_LABEL,
+                crate::metrics::METRIC_MYSQL_BINQUERY
+            )]
+        );
         let params: Vec<ParamValue> = p.into_iter().collect();
         let query = match self.query(stmt_id) {
             None => {
@@ -226,6 +235,13 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         query: &'a str,
         writer: QueryResultWriter<'a, W>,
     ) -> Result<()> {
+        let _timer = timer!(
+            crate::metrics::METRIC_MYSQL_QUERY_TIMER,
+            &[(
+                crate::metrics::METRIC_MYSQL_SUBPROTOCOL_LABEL,
+                crate::metrics::METRIC_MYSQL_TEXTQUERY
+            )]
+        );
         let outputs = self.do_query(query).await;
         writer::write_output(writer, query, outputs).await?;
         Ok(())

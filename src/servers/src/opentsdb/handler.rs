@@ -14,6 +14,7 @@
 
 //! Modified from Tokio's mini-redis example.
 
+use common_telemetry::timer;
 use session::context::QueryContext;
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -91,6 +92,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> Handler<S> {
 
             match DataPoint::try_create(&line) {
                 Ok(data_point) => {
+                    let _timer = timer!(crate::metrics::METRIC_TCP_OPENTSDB_LINE_WRITE_ELAPSED);
                     let result = self.query_handler.exec(&data_point, ctx.clone()).await;
                     if let Err(e) = result {
                         self.connection.write_line(e.to_string()).await?;

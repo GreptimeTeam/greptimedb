@@ -19,6 +19,7 @@ use axum::extract::{Query, RawBody, State};
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
+use common_telemetry::timer;
 use hyper::Body;
 use prost::Message;
 use schemars::JsonSchema;
@@ -50,6 +51,7 @@ pub async fn remote_write(
     Query(params): Query<DatabaseQuery>,
     RawBody(body): RawBody,
 ) -> Result<(StatusCode, ())> {
+    let _timer = timer!(crate::metrics::METRIC_HTTP_PROMETHEUS_WRITE_ELAPSED);
     let request = decode_remote_write_request(body).await?;
 
     let ctx = if let Some(db) = params.db {
@@ -83,6 +85,7 @@ pub async fn remote_read(
     Query(params): Query<DatabaseQuery>,
     RawBody(body): RawBody,
 ) -> Result<PrometheusResponse> {
+    let _timer = timer!(crate::metrics::METRIC_HTTP_PROMETHEUS_READ_ELAPSED);
     let request = decode_remote_read_request(body).await?;
 
     let ctx = if let Some(db) = params.db {
