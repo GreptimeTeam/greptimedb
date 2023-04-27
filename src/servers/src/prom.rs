@@ -444,6 +444,7 @@ fn promql_expr_to_metric_name(expr: &PromqlExpr) -> Option<String> {
         PromqlExpr::Subquery(SubqueryExpr { expr, .. }) => promql_expr_to_metric_name(expr),
         PromqlExpr::NumberLiteral(_) => None,
         PromqlExpr::StringLiteral(_) => None,
+        PromqlExpr::Extension(_) => None,
         PromqlExpr::VectorSelector(VectorSelector { matchers, .. }) => {
             matchers.find_matchers(METRIC_NAME).pop().cloned()
         }
