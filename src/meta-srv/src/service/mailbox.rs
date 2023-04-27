@@ -20,28 +20,39 @@ use crate::error::Result;
 
 pub type MessageId = u64;
 
+pub enum Channel {
+    Datanode(u64),
+    Frontend(u64),
+}
+
 #[async_trait::async_trait]
 pub trait Mailbox {
-    /// Send a message to the mailbox, returning a id immediately,
-    /// then we can call the `recv` to with the id.
-    async fn send(&self, msg: MailboxMessage) -> Result<MessageId>;
+    /// Send a message to the mailbox, it will return a `id` immediately,
+    /// then we can use the `id` to call `recv` to get the response.
+    async fn send(&self, ch: &Channel, msg: MailboxMessage) -> Result<MessageId>;
 
-    /// Receive a message from the mailbox with the given id.
-    async fn recv(&self, id: MessageId) -> Result<MailboxMessage>;
+    /// Receive a message from the mailbox with the given `id`.
+    async fn recv(&self, ch: &Channel, id: MessageId) -> Result<MailboxMessage>;
 
-    async fn recv_timeout(&self, id: MessageId, timeout: Duration) -> Result<MailboxMessage>;
+    async fn recv_timeout(
+        &self,
+        ch: &Channel,
+        id: MessageId,
+        timeout: Duration,
+    ) -> Result<MailboxMessage>;
 
-    async fn send_and_recv(&self, msg: MailboxMessage) -> Result<MailboxMessage> {
-        let id = self.send(msg).await?;
-        self.recv(id).await
+    async fn send_and_recv(&self, ch: &Channel, msg: MailboxMessage) -> Result<MailboxMessage> {
+        let id = self.send(ch, msg).await?;
+        self.recv(ch, id).await
     }
 
     async fn send_and_recv_timeout(
         &self,
+        ch: &Channel,
         msg: MailboxMessage,
         timeout: Duration,
     ) -> Result<MailboxMessage> {
-        let id = self.send(msg).await?;
-        self.recv_timeout(id, timeout).await
+        let id = self.send(ch, msg).await?;
+        self.recv_timeout(ch, id, timeout).await
     }
 }
