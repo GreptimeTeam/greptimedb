@@ -2,7 +2,7 @@
 
 # This script is used to download built dashboard assets from the "GreptimeTeam/dashboard" repository.
 
-set -x
+set -e
 
 declare -r SCRIPT_DIR=$(cd $(dirname ${0}) >/dev/null 2>&1 && pwd)
 declare -r ROOT_DIR=$(dirname ${SCRIPT_DIR})
@@ -12,7 +12,7 @@ OUT_DIR="${1:-$SCRIPT_DIR}"
 RELEASE_VERSION="$(cat $STATIC_DIR/VERSION)"
 
 echo "Downloading assets to dir: $OUT_DIR"
-pushd $OUT_DIR
+cd $OUT_DIR
 # Download the SHA256 checksum attached to the release. To verify the integrity
 # of the download, this checksum will be used to check the download tar file
 # containing the built dashboard assets.
@@ -38,7 +38,5 @@ esac
 tar -xzf build.tar.gz -C "$STATIC_DIR"
 rm sha256.txt
 rm build.tar.gz
-
-popd
 
 echo "Successfully download dashboard assets to $STATIC_DIR"
