@@ -176,7 +176,7 @@ impl BufferedWriter {
             };
             let size = chunk.len();
             object_writer
-                .append(chunk)
+                .write(chunk)
                 .await
                 .context(WriteObjectSnafu { path: file_name })?;
             *flushed = true;
@@ -187,7 +187,7 @@ impl BufferedWriter {
             let remain = shared_buffer.buffer.lock().unwrap().split();
             let size = remain.len();
             object_writer
-                .append(remain)
+                .write(remain)
                 .await
                 .context(WriteObjectSnafu { path: file_name })?;
             *flushed = true;
