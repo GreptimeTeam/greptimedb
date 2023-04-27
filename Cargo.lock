@@ -696,7 +696,7 @@ version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2bb524613be645939e280b7279f7b017f98cf7f5ef084ec374df373530e73277"
 dependencies = [
- "heck 0.4.1",
+ "heck",
  "proc-macro2",
  "quote",
  "syn 2.0.15",
@@ -1409,7 +1409,7 @@ version = "3.2.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ea0c8bce528c4be4da13ea6fead8965e95b6073585a2f05204bd8f4119f82a65"
 dependencies = [
- "heck 0.4.1",
+ "heck",
  "proc-macro-error",
  "proc-macro2",
  "quote",
@@ -1422,7 +1422,7 @@ version = "4.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9644cd56d6b87dbe899ef8b053e331c0637664e9e21a33dfcdc36093f5c5c4"
 dependencies = [
- "heck 0.4.1",
+ "heck",
  "proc-macro2",
  "quote",
  "syn 2.0.15",
@@ -1865,7 +1865,7 @@ version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d79fbe8970a77e3e34151cc13d3b3e248aa0faaecb9f6091fa07ebefe5ad60"
 dependencies = [
- "encode_unicode 0.3.6",
+ "encode_unicode",
  "lazy_static",
  "libc",
  "unicode-width",
@@ -2744,12 +2744,6 @@ name = "encode_unicode"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a357d28ed41a50f9c765dbfe56cbc04a64e53e5fc58ba79fbc34c10ef3df831f"
-
-[[package]]
-name = "encode_unicode"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
 
 [[package]]
 name = "encoding_rs"
@@ -3900,15 +3894,6 @@ dependencies = [
 
 [[package]]
 name = "heck"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d621efb26863f0e9924c6ac577e8275e5e6b77455db64ffa6c65c904e9e132c"
-dependencies = [
- "unicode-segmentation",
-]
-
-[[package]]
-name = "heck"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "95505c38b4572b2d910cecb0281560f54b440a19336cbbcb27bf6ce6adc6f5a8"
@@ -5030,7 +5015,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8c3c1f30203977ce6134381bd895ba82892f967578442a0894484858594de992"
 dependencies = [
  "darling",
- "heck 0.4.1",
+ "heck",
  "num-bigint",
  "proc-macro-crate 1.3.1",
  "proc-macro-error",
@@ -6097,8 +6082,6 @@ checksum = "8ff1fec61082821f8236cf6c0c14e8172b62ce8a72a0eedc30d3b247bb68dc11"
 dependencies = [
  "ansi_term",
  "pad",
- "prettytable-rs",
- "structopt",
 ]
 
 [[package]]
@@ -6119,20 +6102,6 @@ checksum = "1ceca8aaf45b5c46ec7ed39fff75f57290368c1846d33d24a122ca81416ab058"
 dependencies = [
  "proc-macro2",
  "syn 2.0.15",
-]
-
-[[package]]
-name = "prettytable-rs"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eea25e07510aa6ab6547308ebe3c036016d162b8da920dbb079e3ba8acf3d95a"
-dependencies = [
- "csv",
- "encode_unicode 1.0.0",
- "is-terminal",
- "lazy_static",
- "term",
- "unicode-width",
 ]
 
 [[package]]
@@ -6288,7 +6257,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "119533552c9a7ffacc21e099c24a0ac8bb19c2a2a3f363de84cd9b844feab270"
 dependencies = [
  "bytes",
- "heck 0.4.1",
+ "heck",
  "itertools",
  "lazy_static",
  "log",
@@ -8127,7 +8096,7 @@ version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "475b3bbe5245c26f2d8a6f62d67c1f30eb9fffeccee721c45d162c3ebbdf81b2"
 dependencies = [
- "heck 0.4.1",
+ "heck",
  "proc-macro2",
  "quote",
  "syn 1.0.109",
@@ -8220,14 +8189,12 @@ dependencies = [
 [[package]]
 name = "sqlness"
 version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3d4907079f624d8c150ef65e14e833bf7f6afb0f4943b2c35d5de9ff44b4423"
+source = "git+https://github.com/CeresDB/sqlness.git?rev=dde4b19d7e4a41319d05a0c5bfae5c4422fde14f#dde4b19d7e4a41319d05a0c5bfae5c4422fde14f"
 dependencies = [
  "async-trait",
  "derive_builder 0.11.2",
  "prettydiff",
  "regex",
- "serde",
  "thiserror",
  "toml",
  "walkdir",
@@ -8437,30 +8404,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "73473c0e59e6d5812c5dfe2a064a6444949f089e20eec9a2e5506596494e4623"
 
 [[package]]
-name = "structopt"
-version = "0.3.26"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c6b5c64445ba8094a6ab0c3cd2ad323e07171012d9c98b0b15651daf1787a10"
-dependencies = [
- "clap 2.34.0",
- "lazy_static",
- "structopt-derive",
-]
-
-[[package]]
-name = "structopt-derive"
-version = "0.4.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dcb5ae327f9cc13b68763b5749770cb9e048a99bd9dfdfa58d0cf05d5f64afe0"
-dependencies = [
- "heck 0.3.3",
- "proc-macro-error",
- "proc-macro2",
- "quote",
- "syn 1.0.109",
-]
-
-[[package]]
 name = "strum"
 version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8475,7 +8418,7 @@ version = "0.24.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e385be0d24f186b4ce2f9982191e7101bb737312ad61c1f2f984f34bcf85d59"
 dependencies = [
- "heck 0.4.1",
+ "heck",
  "proc-macro2",
  "quote",
  "rustversion",
@@ -8524,7 +8467,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3ae64fb7ad0670c7d6d53d57b1b91beb2212afc30e164cc8edb02d6b2cff32a"
 dependencies = [
  "gix",
- "heck 0.4.1",
+ "heck",
  "prettyplease 0.2.4",
  "prost",
  "prost-build",
@@ -9466,7 +9409,7 @@ version = "0.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "95d27d749378ceab6ec22188ed7ad102205c89ddb92ab662371c850ffc71aa1a"
 dependencies = [
- "heck 0.4.1",
+ "heck",
  "log",
  "proc-macro2",
  "quote",

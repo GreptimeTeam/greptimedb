@@ -16,6 +16,9 @@ use std::fmt::Display;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+// use tokio::process::{Child, Command};
+use std::process::{Child, Command};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -28,8 +31,7 @@ use common_query::Output;
 use serde::Serialize;
 use sqlness::{Database, EnvController, QueryContext};
 use tinytemplate::TinyTemplate;
-use tokio::process::{Child, Command};
-use tokio::sync::Mutex;
+use tokio::sync::Mutex as TokioMutex;
 
 use crate::util;
 
@@ -58,15 +60,7 @@ impl EnvController for Env {
 
     /// Stop one [`Database`].
     async fn stop(&self, _mode: &str, mut database: Self::DB) {
-        let mut server = database.server_process.lock().await;
-        Env::stop_server(&mut server).await;
-        if let Some(mut metasrv) = database.metasrv_process.take() {
-            Env::stop_server(&mut metasrv).await;
-        }
-        if let Some(mut datanode) = database.frontend_process.take() {
-            Env::stop_server(&mut datanode).await;
-        }
-        println!("Stopped DB.");
+        database.stop();
     }
 }
 
@@ -85,10 +79,10 @@ impl Env {
         let db = DB::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
 
         GreptimeDB {
-            server_process: Mutex::new(server_process),
+            server_process: Arc::new(Mutex::new(server_process)),
             metasrv_process: None,
             frontend_process: None,
-            client: Mutex::new(db),
+            client: TokioMutex::new(db),
             ctx: db_ctx,
             is_standalone: true,
         }
@@ -108,18 +102,18 @@ impl Env {
         let db = DB::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
 
         GreptimeDB {
-            server_process: Mutex::new(datanode),
+            server_process: Arc::new(Mutex::new(datanode)),
             metasrv_process: Some(meta_server),
             frontend_process: Some(frontend),
-            client: Mutex::new(db),
+            client: TokioMutex::new(db),
             ctx: db_ctx,
             is_standalone: false,
         }
     }
 
-    async fn stop_server(process: &mut Child) {
-        process.kill().await.unwrap();
-        let _ = process.wait().await;
+    fn stop_server(process: &mut Child) {
+        let _ = process.kill();
+        let _ = process.wait();
     }
 
     async fn start_server(
@@ -179,7 +173,7 @@ impl Env {
             _ => panic!("Unexpected subcommand: {subcommand}"),
         };
         if !util::check_port(ip_addr.parse().unwrap(), Duration::from_secs(10)).await {
-            Env::stop_server(&mut process).await;
+            Env::stop_server(&mut process);
             panic!("{subcommand} doesn't up in 10 seconds, quit.")
         }
 
@@ -188,8 +182,10 @@ impl Env {
 
     /// stop and restart the server process
     async fn restart_server(db: &GreptimeDB) {
-        let mut server_process = db.server_process.lock().await;
-        Env::stop_server(&mut server_process).await;
+        {
+            let mut server_process = db.server_process.lock().unwrap();
+            Env::stop_server(&mut server_process);
+        }
 
         // check if the server is distributed or standalone
         let subcommand = if db.is_standalone {
@@ -198,6 +194,8 @@ impl Env {
             "datanode"
         };
         let new_server_process = Env::start_server(subcommand, &db.ctx, false).await;
+
+        let mut server_process = db.server_process.lock().unwrap();
         *server_process = new_server_process;
     }
 
@@ -240,7 +238,6 @@ impl Env {
             .args(["build", "--bin", "greptime"])
             .stdout(Stdio::null())
             .output()
-            .await
             .expect("Failed to start GreptimeDB")
             .status;
         if !cargo_build_result.success() {
@@ -251,10 +248,10 @@ impl Env {
 }
 
 pub struct GreptimeDB {
-    server_process: Mutex<Child>,
+    server_process: Arc<Mutex<Child>>,
     metasrv_process: Option<Child>,
     frontend_process: Option<Child>,
-    client: Mutex<DB>,
+    client: TokioMutex<DB>,
     ctx: GreptimeDBContext,
     is_standalone: bool,
 }
@@ -278,6 +275,27 @@ impl Database for GreptimeDB {
 
         let result = client.sql(&query).await;
         Box::new(ResultDisplayer { result }) as _
+    }
+}
+
+impl GreptimeDB {
+    #![allow(clippy::print_stdout)]
+    fn stop(&mut self) {
+        let mut server = self.server_process.lock().unwrap();
+        Env::stop_server(&mut server);
+        if let Some(mut metasrv) = self.metasrv_process.take() {
+            Env::stop_server(&mut metasrv);
+        }
+        if let Some(mut datanode) = self.frontend_process.take() {
+            Env::stop_server(&mut datanode);
+        }
+        println!("Stopped DB.");
+    }
+}
+
+impl Drop for GreptimeDB {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
