@@ -5071,7 +5071,7 @@ dependencies = [
  "twox-hash",
  "url",
  "webpki",
- "webpki-roots 0.23.0",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -5430,9 +5430,9 @@ checksum = "0ab1bc2a289d34bd04a330323ac98a1b4bc82c9d9fcb1e66b63caa84da26b575"
 
 [[package]]
 name = "opendal"
-version = "0.30.5"
+version = "0.33.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a89d32f1761175aff31cb233330e206c2a8d9c3e96b0af3e74d0e7eff978b46a"
+checksum = "8c582b11500656b4f6210f868a0a26395cdf30183c5597c45d0a34525dd94512"
 dependencies = [
  "anyhow",
  "async-compat",
@@ -5440,6 +5440,7 @@ dependencies = [
  "backon 0.4.0",
  "base64 0.21.0",
  "bytes",
+ "chrono",
  "flagset",
  "futures",
  "http",
@@ -5456,10 +5457,8 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "time 0.3.20",
  "tokio",
  "tracing",
- "ureq",
  "uuid",
 ]
 
@@ -6760,18 +6759,19 @@ dependencies = [
 
 [[package]]
 name = "reqsign"
-version = "0.8.5"
+version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7db6d8d2cd7fa61403d14de670f98d7cedac38143681c124943d7bb69258b3a"
+checksum = "6f753b768a9d691395e7db3dc74452cc39a5da55293c3fa2241e2aeaf9d94028"
 dependencies = [
  "anyhow",
- "backon 0.4.0",
+ "async-trait",
  "base64 0.21.0",
  "bytes",
- "dirs",
+ "chrono",
  "form_urlencoded",
  "hex",
  "hmac",
+ "home",
  "http",
  "jsonwebtoken",
  "log",
@@ -6779,14 +6779,14 @@ dependencies = [
  "percent-encoding",
  "quick-xml 0.28.2",
  "rand",
+ "reqwest",
  "rsa",
  "rust-ini",
  "serde",
  "serde_json",
  "sha1",
  "sha2",
- "time 0.3.20",
- "ureq",
+ "tokio",
 ]
 
 [[package]]
@@ -9724,22 +9724,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a156c684c91ea7d62626509bce3cb4e1d9ed5c4d978f7b4352658f96a4c26b4a"
 
 [[package]]
-name = "ureq"
-version = "2.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "338b31dd1314f68f3aabf3ed57ab922df95ffcd902476ca7ba3c4ce7b908c46d"
-dependencies = [
- "base64 0.13.1",
- "log",
- "once_cell",
- "rustls 0.20.8",
- "rustls-native-certs",
- "url",
- "webpki",
- "webpki-roots 0.22.6",
-]
-
-[[package]]
 name = "url"
 version = "2.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9971,15 +9955,6 @@ checksum = "f095d78192e208183081cc07bc5515ef55216397af48b873e5edcd72637fa1bd"
 dependencies = [
  "ring",
  "untrusted",
-]
-
-[[package]]
-name = "webpki-roots"
-version = "0.22.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6c71e40d7d2c34a5106301fb632274ca37242cd0c9d3e64dbece371a40a2d87"
-dependencies = [
- "webpki",
 ]
 
 [[package]]
