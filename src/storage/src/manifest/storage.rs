@@ -216,9 +216,10 @@ impl ManifestLogStorage for ManifestObjectStore {
         let ret = paths.len();
 
         logging::debug!(
-            "Deleting {} logs from manifest storage path {}.",
+            "Deleting {} logs from manifest storage path {} until end {}.",
             ret,
-            self.path
+            self.path,
+            end,
         );
 
         self.object_store
@@ -233,6 +234,9 @@ impl ManifestLogStorage for ManifestObjectStore {
 
     async fn save(&self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {
         let path = self.delta_file_path(version);
+
+        logging::debug!("Save log to manifest storage, version: {}", version);
+
         self.object_store
             .write(&path, bytes.to_vec())
             .await
@@ -243,6 +247,12 @@ impl ManifestLogStorage for ManifestObjectStore {
         let raw_paths = (start..end)
             .map(|v| self.delta_file_path(v))
             .collect::<Vec<_>>();
+
+        logging::debug!(
+            "Deleting logs from manifest storage, start: {}, end: {}",
+            start,
+            end
+        );
 
         let paths = raw_paths
             .iter()
