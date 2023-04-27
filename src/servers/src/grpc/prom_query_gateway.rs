@@ -19,6 +19,7 @@ use api::v1::prometheus_gateway_server::PrometheusGateway;
 use api::v1::promql_request::Promql;
 use api::v1::{PromqlRequest, PromqlResponse, ResponseHeader};
 use async_trait::async_trait;
+use common_time::util::current_time_rfc3339;
 use query::parser::PromQuery;
 use snafu::OptionExt;
 use tonic::{Request, Response};
@@ -26,7 +27,7 @@ use tonic::{Request, Response};
 use crate::error::InvalidQuerySnafu;
 use crate::grpc::handler::create_query_context;
 use crate::grpc::TonicResult;
-use crate::prom::{retrieve_metric_name, PromHandlerRef, PromJsonResponse};
+use crate::prom::{retrieve_metric_name_and_result_type, PromHandlerRef, PromJsonResponse};
 
 pub struct PrometheusGatewayService {
     handler: PromHandlerRef,
@@ -45,18 +46,26 @@ impl PrometheusGateway for PrometheusGatewayService {
                 end: range_query.end,
                 step: range_query.step,
             },
-            Promql::InstantQuery(instant_query) => PromQuery {
-                query: instant_query.query,
-                start: instant_query.time.clone(),
-                end: instant_query.time,
-                step: String::from("1s"),
-            },
+            Promql::InstantQuery(instant_query) => {
+                let time = if instant_query.time.is_empty() {
+                    current_time_rfc3339()
+                } else {
+                    instant_query.time
+                };
+                PromQuery {
+                    query: instant_query.query,
+                    start: time.clone(),
+                    end: time,
+                    step: String::from("1s"),
+                }
+            }
         };
 
         let query_context = create_query_context(inner.header.as_ref());
         let result = self.handler.do_query(&prom_query, query_context).await;
-        let metric_name = retrieve_metric_name(&prom_query.query).unwrap_or_default();
-        let json_response = PromJsonResponse::from_query_result(result, metric_name)
+        let (metric_name, result_type) =
+            retrieve_metric_name_and_result_type(&prom_query.query).unwrap_or_default();
+        let json_response = PromJsonResponse::from_query_result(result, metric_name, result_type)
             .await
             .0;
         let json_bytes = serde_json::to_string(&json_response).unwrap().into_bytes();

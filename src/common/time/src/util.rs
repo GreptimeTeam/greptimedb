@@ -17,6 +17,11 @@ pub fn current_time_millis() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
+/// Returns the current time in rfc3339 format.
+pub fn current_time_rfc3339() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
 /// Port of rust unstable features `int_roundings`.
 pub(crate) fn div_ceil(this: i64, rhs: i64) -> i64 {
     let d = this / rhs;
