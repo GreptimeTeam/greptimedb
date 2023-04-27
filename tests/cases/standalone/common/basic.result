@@ -58,3 +58,25 @@ DROP TABLE system_metrics;
 
 Affected Rows: 1
 
+create table foo (
+    host string,
+    ts timestamp DEFAULT CURRENT_TIMESTAMP,
+    cpu double default 0,
+    TIME INDEX (ts),
+    PRIMARY KEY(host)
+) engine=mito with(regions=1);
+
+Affected Rows: 0
+
+insert into foo (host, cpu, ts) values ('host1', 1.1, 1000);
+
+Affected Rows: 1
+
+insert into foo (host, cpu) values ('host2', 2.2);
+
+Affected Rows: 1
+
+DROP TABLE foo;
+
+Affected Rows: 1
+

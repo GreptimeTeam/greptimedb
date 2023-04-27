@@ -85,7 +85,7 @@ impl Table for DistTable {
 
         let splits = self
             .partition_manager
-            .split_insert_request(&self.table_name, request)
+            .split_insert_request(&self.table_name, request, &self.schema())
             .await
             .map_err(BoxedError::new)
             .context(TableOperationSnafu)?;

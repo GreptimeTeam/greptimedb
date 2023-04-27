@@ -16,15 +16,16 @@ use std::collections::HashMap;
 
 use datatypes::data_type::DataType;
 use datatypes::prelude::MutableVector;
+use datatypes::schema::Schema;
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
-use snafu::{ensure, OptionExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionNumber;
 use table::requests::{DeleteRequest, InsertRequest};
 
 use crate::error::{
-    FindPartitionColumnSnafu, FindRegionSnafu, InvalidDeleteRequestSnafu,
-    InvalidInsertRequestSnafu, Result,
+    CreateDefaultToReadSnafu, FindPartitionColumnSnafu, FindRegionSnafu, InvalidDeleteRequestSnafu,
+    InvalidInsertRequestSnafu, MissingDefaultValueSnafu, Result,
 };
 use crate::PartitionRuleRef;
 
@@ -42,12 +43,35 @@ impl WriteSplitter {
         }
     }
 
-    pub fn split_insert(&self, insert: InsertRequest) -> Result<InsertRequestSplit> {
+    pub fn split_insert(
+        &self,
+        insert: InsertRequest,
+        schema: &Schema,
+    ) -> Result<InsertRequestSplit> {
         check_req(&insert)?;
-
-        let column_names = self.partition_rule.partition_columns();
-        let values = &insert.columns_values;
-        let partition_columns = find_partitioning_values(values, &column_names)?;
+        let mut insert = insert;
+        let partition_columns = self.partition_rule.partition_columns();
+        for column_schema in schema.column_schemas() {
+            let key = insert.columns_values.keys().next().unwrap();
+            let row_nums = insert.columns_values.get(key).unwrap().len();
+            if partition_columns.contains(&column_schema.name)
+                && (!insert.columns_values.contains_key(&column_schema.name))
+            {
+                let default_values = column_schema
+                    .create_default_vector(row_nums)
+                    .context(CreateDefaultToReadSnafu {
+                        column: &column_schema.name,
+                    })?
+                    .context(MissingDefaultValueSnafu {
+                        column: &column_schema.name,
+                    })?;
+                insert
+                    .columns_values
+                    .insert(column_schema.name.clone(), default_values);
+            }
+        }
+        let partition_columns =
+            find_partitioning_values(&insert.columns_values, &partition_columns)?;
         let region_map = self.split_partitioning_values(&partition_columns)?;
 
         Ok(split_insert_request(&insert, region_map))
@@ -247,6 +271,7 @@ mod tests {
 
     use datatypes::data_type::ConcreteDataType;
     use datatypes::prelude::ScalarVectorBuilder;
+    use datatypes::schema::Schema as DataTypesSchema;
     use datatypes::types::StringType;
     use datatypes::value::Value;
     use datatypes::vectors::{
@@ -277,7 +302,8 @@ mod tests {
         let insert = mock_insert_request();
         let rule = Arc::new(MockPartitionRule) as PartitionRuleRef;
         let spliter = WriteSplitter::with_partition_rule(rule);
-        let ret = spliter.split_insert(insert).unwrap();
+        let stub_schema = DataTypesSchema::new(vec![]);
+        let ret = spliter.split_insert(insert, &stub_schema).unwrap();
 
         assert_eq!(2, ret.len());
 

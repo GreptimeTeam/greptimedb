@@ -24,3 +24,17 @@ SELECT avg(cpu_util) FROM system_metrics;
 SELECT idc, avg(memory_util) FROM system_metrics GROUP BY idc ORDER BY idc;
 
 DROP TABLE system_metrics;
+
+create table foo (
+    host string,
+    ts timestamp DEFAULT CURRENT_TIMESTAMP,
+    cpu double default 0,
+    TIME INDEX (ts),
+    PRIMARY KEY(host)
+) engine=mito with(regions=1);
+
+insert into foo (host, cpu, ts) values ('host1', 1.1, 1000);
+
+insert into foo (host, cpu) values ('host2', 2.2);
+
+DROP TABLE foo;
