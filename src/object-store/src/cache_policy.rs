@@ -17,7 +17,6 @@ use std::ops::DerefMut;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bytes::Bytes;
 use lru::LruCache;
 use metrics::increment_counter;
 use opendal::ops::{OpDelete, OpList, OpRead, OpScan, OpWrite};
@@ -105,15 +104,13 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
             Err(err) if err.kind() == ErrorKind::NotFound => {
                 increment_counter!(OBJECT_STORE_LRU_CACHE_MISS);
 
-                let (rp, mut reader) = self.inner.read(&path, args.clone()).await?;
-                let size = rp.clone().into_metadata().content_length();
+                let (_, mut reader) = self.inner.read(&path, args.clone()).await?;
                 let (_, mut writer) = self.cache.write(&cache_path, OpWrite::new()).await?;
 
-                // TODO(hl): We can use [Writer::append](https://docs.rs/opendal/0.30.4/opendal/struct.Writer.html#method.append)
-                // here to avoid loading whole file into memory once all our backend supports `Writer`.
-                let mut buf = vec![0; size as usize];
-                reader.read(&mut buf).await?;
-                writer.write(Bytes::from(buf)).await?;
+                while let Some(bytes) = reader.next().await {
+                    writer.write(bytes?).await?;
+                }
+
                 writer.close().await?;
 
                 match self.cache.read(&cache_path, args.clone()).await {
