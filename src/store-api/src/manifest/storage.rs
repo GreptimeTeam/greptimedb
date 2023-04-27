@@ -40,14 +40,14 @@ pub trait ManifestLogStorage {
     /// Returns the delete logs number.
     async fn delete_until(&self, version: ManifestVersion) -> Result<usize, Self::Error>;
 
-    /// Save  a log
+    /// Save a log
     async fn save(&self, version: ManifestVersion, bytes: &[u8]) -> Result<(), Self::Error>;
 
     /// Delete logs in [start, end)
     async fn delete(&self, start: ManifestVersion, end: ManifestVersion)
         -> Result<(), Self::Error>;
 
-    /// Save a checkpoint
+    /// Save a checkpoint.
     async fn save_checkpoint(
         &self,
         version: ManifestVersion,

@@ -251,12 +251,13 @@ impl<S: Checkpoint<Error = Error>, M: MetaAction<Error = Error>> TaskFunction<Er
 
     async fn call(&self) -> Result<()> {
         if let Some((last_version, _)) = self.store.load_last_checkpoint().await? {
-            // Purge all manifest and checkpoint files before last_version.
-            let deleted = self.store.delete_until(last_version).await?;
+            // Purge all manifest and checkpoint files <= last_version.
+            let deleted = self.store.delete_until(last_version + 1).await?;
             debug!(
-                "Deleted {} logs from region manifest storage(path={}).",
+                "Deleted {} logs from region manifest storage(path={}), last_version: {}.",
                 deleted,
-                self.store.path()
+                self.store.path(),
+                last_version,
             );
         }
 

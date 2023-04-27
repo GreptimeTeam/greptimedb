@@ -128,6 +128,7 @@ impl ManifestObjectStore {
 #[derive(Serialize, Deserialize, Debug)]
 struct CheckpointMetadata {
     pub size: usize,
+    /// The latest version this checkpoint contains.
     pub version: ManifestVersion,
     pub checksum: Option<String>,
     pub extend_metadata: Option<HashMap<String, String>>,
