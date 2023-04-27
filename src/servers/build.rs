@@ -42,7 +42,7 @@ or it's a network error, just try again or enable/disable some proxy."#;
             );
         }
         Err(e) => {
-            let e = format!(r#"{message}: {e}.\n{help}"#);
+            let e = format!("{message}: {e}.\n{help}");
             panic!("{}", e);
         }
     }
