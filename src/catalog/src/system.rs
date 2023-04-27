@@ -81,7 +81,7 @@ impl Table for SystemCatalogTable {
         self.0.delete(request).await
     }
 
-    fn statistics(&self) -> Option<table::stats::Statistics> {
+    fn statistics(&self) -> Option<table::stats::TableStatistics> {
         self.0.statistics()
     }
 }

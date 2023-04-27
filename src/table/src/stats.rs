@@ -19,7 +19,7 @@ use datatypes::value::Value;
 /// sometimes provide approximate estimates for performance reasons
 /// and the transformations output are not always predictable.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Statistics {
+pub struct TableStatistics {
     /// The number of table rows
     pub num_rows: Option<usize>,
     /// total bytes of the table rows

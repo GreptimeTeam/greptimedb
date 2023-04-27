@@ -28,7 +28,8 @@ use store_api::storage::RegionNumber;
 use crate::error::{Result, UnsupportedSnafu};
 use crate::metadata::{FilterPushDownType, TableId, TableInfoRef, TableType};
 use crate::requests::{AlterTableRequest, DeleteRequest, InsertRequest};
-use crate::stats::Statistics;
+use crate::stats::TableStatistics;
+use crate::RegionStat;
 
 pub type AlterContext = anymap::Map<dyn Any + Send + Sync>;
 
@@ -120,7 +121,7 @@ pub trait Table: Send + Sync {
     }
 
     /// Get statistics for this table, if available
-    fn statistics(&self) -> Option<Statistics> {
+    fn statistics(&self) -> Option<TableStatistics> {
         None
     }
 }
@@ -133,9 +134,3 @@ pub trait TableIdProvider {
 }
 
 pub type TableIdProviderRef = Arc<dyn TableIdProvider + Send + Sync>;
-
-#[derive(Default, Debug)]
-pub struct RegionStat {
-    pub region_id: u64,
-    pub disk_usage_bytes: u64,
-}
