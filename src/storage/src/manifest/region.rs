@@ -121,14 +121,17 @@ impl Checkpointer for RegionManifestCheckpointer {
             .delete(start_version, last_version + 1)
             .await
         {
-            // It doesn't matter when deletion fails, they will be purged by gc task.
-            warn!(
-                "Failed to delete manifest logs [{},{}] in path: {}. err: {}",
-                start_version,
-                last_version,
-                manifest.manifest_store().path(),
-                e
-            );
+            // We only log when the error kind isn't `NotFound`
+            if !e.is_object_to_delete_not_found() {
+                // It doesn't matter when deletion fails, they will be purged by gc task.
+                warn!(
+                    "Failed to delete manifest logs [{},{}] in path: {}. err: {}",
+                    start_version,
+                    last_version,
+                    manifest.manifest_store().path(),
+                    e
+                );
+            }
         }
 
         info!("Region manifest checkpoint, start_version: {}, last_version: {}, compacted actions: {}", start_version, last_version, compacted_actions);
