@@ -56,3 +56,8 @@ metasrv_addrs = ["127.0.0.1:3002"]
 timeout_millis = 3000
 connect_timeout_millis = 5000
 tcp_nodelay = true
+
+# Log options, see `standalone.example.toml`
+[logging]
+dir = "/tmp/greptimedb/logs"
+level = "info"

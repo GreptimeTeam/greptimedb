@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex, Once};
 use once_cell::sync::Lazy;
 use opentelemetry::global;
 use opentelemetry::sdk::propagation::TraceContextPropagator;
+use serde::{Deserialize, Serialize};
 pub use tracing::{event, span, Level};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
@@ -30,6 +31,24 @@ use tracing_subscriber::prelude::*;
 use tracing_subscriber::{filter, EnvFilter, Registry};
 
 pub use crate::{debug, error, info, log, trace, warn};
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LoggingOptions {
+    pub dir: String,
+    pub level: String,
+    pub enable_jaeger_tracing: bool,
+}
+
+impl Default for LoggingOptions {
+    fn default() -> Self {
+        Self {
+            dir: "/tmp/greptimedb/logs".to_string(),
+            level: "info".to_string(),
+            enable_jaeger_tracing: false,
+        }
+    }
+}
 
 /// Init tracing for unittest.
 /// Write logs to file `unittest`.
@@ -47,7 +66,12 @@ pub fn init_default_ut_logging() {
             env::var("UNITTEST_LOG_DIR").unwrap_or_else(|_| "/tmp/__unittest_logs".to_string());
 
         let level = env::var("UNITTEST_LOG_LEVEL").unwrap_or_else(|_| "DEBUG".to_string());
-        *g = Some(init_global_logging("unittest", &dir, &level, false));
+        let opts = LoggingOptions {
+            dir: dir.clone(),
+            level,
+            ..Default::default()
+        };
+        *g = Some(init_global_logging("unittest", &opts));
 
         info!("logs dir = {}", dir);
     });
@@ -56,13 +80,11 @@ pub fn init_default_ut_logging() {
 static GLOBAL_UT_LOG_GUARD: Lazy<Arc<Mutex<Option<Vec<WorkerGuard>>>>> =
     Lazy::new(|| Arc::new(Mutex::new(None)));
 
-pub fn init_global_logging(
-    app_name: &str,
-    dir: &str,
-    level: &str,
-    enable_jaeger_tracing: bool,
-) -> Vec<WorkerGuard> {
+pub fn init_global_logging(app_name: &str, opts: &LoggingOptions) -> Vec<WorkerGuard> {
     let mut guards = vec![];
+    let dir = &opts.dir;
+    let level = &opts.level;
+    let enable_jaeger_tracing = opts.enable_jaeger_tracing;
 
     // Enable log compatible layer to convert log record to tracing span.
     LogTracer::init().expect("log tracer must be valid");

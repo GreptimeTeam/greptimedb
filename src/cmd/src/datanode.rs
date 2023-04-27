@@ -23,7 +23,8 @@ use meta_client::MetaClientOptions;
 use servers::Mode;
 use snafu::ResultExt;
 
-use crate::error::{Error, MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu};
+use crate::error::{MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu};
+use crate::options::{Options, TopLevelOptions};
 use crate::toml_loader;
 
 pub struct Instance {
@@ -50,8 +51,12 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(self) -> Result<Instance> {
-        self.subcmd.build().await
+    pub async fn build(self, opts: DatanodeOptions) -> Result<Instance> {
+        self.subcmd.build(opts).await
+    }
+
+    pub fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
+        self.subcmd.load_options(top_level_opts)
     }
 }
 
@@ -61,9 +66,15 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(self) -> Result<Instance> {
+    async fn build(self, opts: DatanodeOptions) -> Result<Instance> {
         match self {
-            SubCommand::Start(cmd) => cmd.build().await,
+            SubCommand::Start(cmd) => cmd.build(opts).await,
+        }
+    }
+
+    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
+        match self {
+            SubCommand::Start(cmd) => cmd.load_options(top_level_opts),
         }
     }
 }
@@ -95,45 +106,37 @@ struct StartCommand {
 }
 
 impl StartCommand {
-    async fn build(self) -> Result<Instance> {
-        logging::info!("Datanode start command: {:#?}", self);
-
-        let opts: DatanodeOptions = self.try_into()?;
-
-        logging::info!("Datanode options: {:#?}", opts);
-
-        let datanode = Datanode::new(opts).await.context(StartDatanodeSnafu)?;
-
-        Ok(Instance { datanode })
-    }
-}
-
-impl TryFrom<StartCommand> for DatanodeOptions {
-    type Error = Error;
-    fn try_from(cmd: StartCommand) -> Result<Self> {
-        let mut opts: DatanodeOptions = if let Some(path) = cmd.config_file {
-            toml_loader::from_file!(&path)?
+    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
+        let mut opts: DatanodeOptions = if let Some(path) = &self.config_file {
+            toml_loader::from_file!(path)?
         } else {
             DatanodeOptions::default()
         };
 
-        if let Some(addr) = cmd.rpc_addr {
+        if let Some(dir) = top_level_opts.log_dir {
+            opts.logging.dir = dir;
+        }
+        if let Some(level) = top_level_opts.log_level {
+            opts.logging.level = level;
+        }
+
+        if let Some(addr) = self.rpc_addr.clone() {
             opts.rpc_addr = addr;
         }
 
-        if cmd.rpc_hostname.is_some() {
-            opts.rpc_hostname = cmd.rpc_hostname;
+        if self.rpc_hostname.is_some() {
+            opts.rpc_hostname = self.rpc_hostname.clone();
         }
 
-        if let Some(addr) = cmd.mysql_addr {
+        if let Some(addr) = self.mysql_addr.clone() {
             opts.mysql_addr = addr;
         }
 
-        if let Some(node_id) = cmd.node_id {
+        if let Some(node_id) = self.node_id {
             opts.node_id = Some(node_id);
         }
 
-        if let Some(meta_addr) = cmd.metasrv_addr {
+        if let Some(meta_addr) = self.metasrv_addr.clone() {
             opts.meta_client_options
                 .get_or_insert_with(MetaClientOptions::default)
                 .metasrv_addrs = meta_addr
@@ -151,33 +154,41 @@ impl TryFrom<StartCommand> for DatanodeOptions {
             .fail();
         }
 
-        if let Some(data_dir) = cmd.data_dir {
+        if let Some(data_dir) = self.data_dir.clone() {
             opts.storage.store = ObjectStoreConfig::File(FileConfig { data_dir });
         }
 
-        if let Some(wal_dir) = cmd.wal_dir {
+        if let Some(wal_dir) = self.wal_dir.clone() {
             opts.wal.dir = wal_dir;
         }
-        if let Some(procedure_dir) = cmd.procedure_dir {
+        if let Some(procedure_dir) = self.procedure_dir.clone() {
             opts.procedure = ProcedureConfig::from_file_path(procedure_dir);
         }
-        if let Some(http_addr) = cmd.http_addr {
+        if let Some(http_addr) = self.http_addr.clone() {
             opts.http_opts.addr = http_addr
         }
-        if let Some(http_timeout) = cmd.http_timeout {
+        if let Some(http_timeout) = self.http_timeout {
             opts.http_opts.timeout = Duration::from_secs(http_timeout)
         }
 
         // Disable dashboard in datanode.
         opts.http_opts.disable_dashboard = true;
 
-        Ok(opts)
+        Ok(Options::Datanode(Box::new(opts)))
+    }
+
+    async fn build(self, opts: DatanodeOptions) -> Result<Instance> {
+        logging::info!("Datanode start command: {:#?}", self);
+        logging::info!("Datanode options: {:#?}", opts);
+
+        let datanode = Datanode::new(opts).await.context(StartDatanodeSnafu)?;
+
+        Ok(Instance { datanode })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
     use std::io::Write;
     use std::time::Duration;
 
@@ -228,6 +239,10 @@ mod tests {
             checkpoint_margin = 9
             gc_duration = '7s'
             checkpoint_on_startup = true
+
+            [logging]
+            level = "debug"
+            dir = "/tmp/greptimedb/test/logs"
         "#;
         write!(file, "{}", toml_str).unwrap();
 
@@ -235,7 +250,10 @@ mod tests {
             config_file: Some(file.path().to_str().unwrap().to_string()),
             ..Default::default()
         };
-        let options: DatanodeOptions = cmd.try_into().unwrap();
+
+        let Options::Datanode(options) =
+            cmd.load_options(TopLevelOptions::default()).unwrap() else { unreachable!() };
+
         assert_eq!("127.0.0.1:3001".to_string(), options.rpc_addr);
         assert_eq!("127.0.0.1:4406".to_string(), options.mysql_addr);
         assert_eq!(2, options.mysql_runtime_size);
@@ -283,37 +301,60 @@ mod tests {
             },
             options.storage.manifest,
         );
+
+        assert_eq!("debug".to_string(), options.logging.level);
+        assert_eq!("/tmp/greptimedb/test/logs".to_string(), options.logging.dir);
     }
 
     #[test]
     fn test_try_from_cmd() {
-        assert_eq!(
-            Mode::Standalone,
-            DatanodeOptions::try_from(StartCommand::default())
-                .unwrap()
-                .mode
-        );
+        if let Options::Datanode(opt) = StartCommand::default()
+            .load_options(TopLevelOptions::default())
+            .unwrap()
+        {
+            assert_eq!(Mode::Standalone, opt.mode)
+        }
 
-        let mode = DatanodeOptions::try_from(StartCommand {
+        if let Options::Datanode(opt) = (StartCommand {
             node_id: Some(42),
             metasrv_addr: Some("127.0.0.1:3002".to_string()),
             ..Default::default()
         })
+        .load_options(TopLevelOptions::default())
         .unwrap()
-        .mode;
-        assert_matches!(mode, Mode::Distributed);
+        {
+            assert_eq!(Mode::Distributed, opt.mode)
+        }
 
-        assert!(DatanodeOptions::try_from(StartCommand {
+        assert!((StartCommand {
             metasrv_addr: Some("127.0.0.1:3002".to_string()),
             ..Default::default()
         })
+        .load_options(TopLevelOptions::default())
         .is_err());
 
         // Providing node_id but leave metasrv_addr absent is ok since metasrv_addr has default value
-        DatanodeOptions::try_from(StartCommand {
+        (StartCommand {
             node_id: Some(42),
             ..Default::default()
         })
+        .load_options(TopLevelOptions::default())
         .unwrap();
+    }
+
+    #[test]
+    fn test_top_level_options() {
+        let cmd = StartCommand::default();
+
+        let options = cmd
+            .load_options(TopLevelOptions {
+                log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
+                log_level: Some("debug".to_string()),
+            })
+            .unwrap();
+
+        let logging_opt = options.logging_options();
+        assert_eq!("/tmp/greptimedb/test/logs", logging_opt.dir);
+        assert_eq!("debug", logging_opt.level);
     }
 }

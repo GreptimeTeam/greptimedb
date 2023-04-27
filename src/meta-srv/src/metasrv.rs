@@ -20,6 +20,7 @@ use std::sync::Arc;
 use api::v1::meta::Peer;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_procedure::ProcedureManagerRef;
+use common_telemetry::logging::LoggingOptions;
 use common_telemetry::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
@@ -48,6 +49,7 @@ pub struct MetaSrvOptions {
     pub selector: SelectorType,
     pub use_memory_store: bool,
     pub http_opts: HttpOptions,
+    pub logging: LoggingOptions,
 }
 
 impl Default for MetaSrvOptions {
@@ -60,6 +62,7 @@ impl Default for MetaSrvOptions {
             selector: SelectorType::default(),
             use_memory_store: false,
             http_opts: HttpOptions::default(),
+            logging: LoggingOptions::default(),
         }
     }
 }

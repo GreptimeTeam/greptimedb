@@ -23,6 +23,7 @@ opentelemetry-jaeger = { version = "0.16", features = ["rt-tokio"] }
 parking_lot = { version = "0.12", features = [
     "deadlock_detection",
 ], optional = true }
+serde = "1.0"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-bunyan-formatter = "0.3"

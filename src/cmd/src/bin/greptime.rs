@@ -18,16 +18,17 @@ use std::fmt;
 
 use clap::Parser;
 use cmd::error::Result;
+use cmd::options::{Options, TopLevelOptions};
 use cmd::{cli, datanode, frontend, metasrv, standalone};
 use common_telemetry::logging::{error, info};
 
 #[derive(Parser)]
 #[clap(name = "greptimedb", version = print_version())]
 struct Command {
-    #[clap(long, default_value = "/tmp/greptimedb/logs")]
-    log_dir: String,
-    #[clap(long, default_value = "info")]
-    log_level: String,
+    #[clap(long)]
+    log_dir: Option<String>,
+    #[clap(long)]
+    log_level: Option<String>,
     #[clap(subcommand)]
     subcmd: SubCommand,
 }
@@ -63,8 +64,20 @@ impl Application {
 }
 
 impl Command {
-    async fn build(self) -> Result<Application> {
-        self.subcmd.build().await
+    async fn build(self, opts: Options) -> Result<Application> {
+        self.subcmd.build(opts).await
+    }
+
+    fn load_options(&self) -> Result<Options> {
+        let top_level_opts = self.top_level_options();
+        self.subcmd.load_options(top_level_opts)
+    }
+
+    fn top_level_options(&self) -> TopLevelOptions {
+        TopLevelOptions {
+            log_dir: self.log_dir.clone(),
+            log_level: self.log_level.clone(),
+        }
     }
 }
 
@@ -83,28 +96,40 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(self) -> Result<Application> {
-        match self {
-            SubCommand::Datanode(cmd) => {
-                let app = cmd.build().await?;
+    async fn build(self, opts: Options) -> Result<Application> {
+        match (self, opts) {
+            (SubCommand::Datanode(cmd), Options::Datanode(dn_opts)) => {
+                let app = cmd.build(*dn_opts).await?;
                 Ok(Application::Datanode(app))
             }
-            SubCommand::Frontend(cmd) => {
-                let app = cmd.build().await?;
+            (SubCommand::Frontend(cmd), Options::Frontend(fe_opts)) => {
+                let app = cmd.build(*fe_opts).await?;
                 Ok(Application::Frontend(app))
             }
-            SubCommand::Metasrv(cmd) => {
-                let app = cmd.build().await?;
+            (SubCommand::Metasrv(cmd), Options::Metasrv(meta_opts)) => {
+                let app = cmd.build(*meta_opts).await?;
                 Ok(Application::Metasrv(app))
             }
-            SubCommand::Standalone(cmd) => {
-                let app = cmd.build().await?;
+            (SubCommand::Standalone(cmd), Options::Standalone(opts)) => {
+                let app = cmd.build(opts.fe_opts, opts.dn_opts).await?;
                 Ok(Application::Standalone(app))
             }
-            SubCommand::Cli(cmd) => {
+            (SubCommand::Cli(cmd), Options::Cli(_)) => {
                 let app = cmd.build().await?;
                 Ok(Application::Cli(app))
             }
+
+            _ => unreachable!(),
+        }
+    }
+
+    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
+        match self {
+            SubCommand::Datanode(cmd) => cmd.load_options(top_level_opts),
+            SubCommand::Frontend(cmd) => cmd.load_options(top_level_opts),
+            SubCommand::Metasrv(cmd) => cmd.load_options(top_level_opts),
+            SubCommand::Standalone(cmd) => cmd.load_options(top_level_opts),
+            SubCommand::Cli(cmd) => cmd.load_options(top_level_opts),
         }
     }
 }
@@ -144,14 +169,15 @@ async fn main() -> Result<()> {
     // TODO(dennis):
     // 1. adds ip/port to app
     let app_name = &cmd.subcmd.to_string();
-    let log_dir = &cmd.log_dir;
-    let log_level = &cmd.log_level;
+
+    let opts = cmd.load_options()?;
+    let logging_opts = opts.logging_options();
 
     common_telemetry::set_panic_hook();
     common_telemetry::init_default_metrics_recorder();
-    let _guard = common_telemetry::init_global_logging(app_name, log_dir, log_level, false);
+    let _guard = common_telemetry::init_global_logging(app_name, logging_opts);
 
-    let mut app = cmd.build().await?;
+    let mut app = cmd.build(opts).await?;
 
     tokio::select! {
         result = app.run() => {
