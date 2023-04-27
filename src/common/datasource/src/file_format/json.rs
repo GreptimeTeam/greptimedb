@@ -19,19 +19,25 @@ use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
 use arrow::json::reader::{infer_json_schema_from_iterator, ValueIter};
-use arrow::json::RawReaderBuilder;
+use arrow::json::writer::LineDelimited;
+use arrow::json::{self, RawReaderBuilder};
+use arrow::record_batch::RecordBatch;
 use arrow_schema::Schema;
 use async_trait::async_trait;
 use common_runtime;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::physical_plan::file_format::{FileMeta, FileOpenFuture, FileOpener};
+use datafusion::physical_plan::SendableRecordBatchStream;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 use tokio_util::io::SyncIoBridge;
 
+use super::stream_to_file;
+use crate::buffered_writer::DfRecordBatchEncoder;
 use crate::compression::CompressionType;
 use crate::error::{self, Result};
 use crate::file_format::{self, open_with_decoder, FileFormat};
+use crate::share_buffer::SharedBuffer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JsonFormat {
@@ -137,6 +143,25 @@ impl FileOpener for JsonOpener {
                     .map_err(DataFusionError::from)
             },
         )
+    }
+}
+
+pub async fn stream_to_json(
+    stream: SendableRecordBatchStream,
+    store: ObjectStore,
+    path: String,
+    threshold: usize,
+) -> Result<usize> {
+    stream_to_file(stream, store, path, threshold, |buffer| {
+        json::LineDelimitedWriter::new(buffer)
+    })
+    .await
+}
+
+impl DfRecordBatchEncoder for json::Writer<SharedBuffer, LineDelimited> {
+    fn write(&mut self, batch: &RecordBatch) -> Result<()> {
+        self.write(batch.clone())
+            .context(error::WriteRecordBatchSnafu)
     }
 }
 

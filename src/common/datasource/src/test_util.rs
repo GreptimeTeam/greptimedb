@@ -16,8 +16,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
+use common_test_util::temp_dir::{create_temp_dir, TempDir};
+use datafusion::datasource::listing::PartitionedFile;
+use datafusion::datasource::object_store::ObjectStoreUrl;
+use datafusion::physical_plan::file_format::{FileScanConfig, FileStream};
+use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use object_store::services::Fs;
 use object_store::ObjectStore;
+
+use crate::compression::CompressionType;
+use crate::file_format::csv::{stream_to_csv, CsvConfigBuilder, CsvOpener};
+use crate::file_format::json::{stream_to_json, JsonOpener};
+use crate::test_util;
 
 pub const TEST_BATCH_SIZE: usize = 100;
 
@@ -50,10 +60,116 @@ pub fn test_store(root: &str) -> ObjectStore {
     ObjectStore::new(builder).unwrap().finish()
 }
 
+pub fn test_tmp_store(root: &str) -> (ObjectStore, TempDir) {
+    let dir = create_temp_dir(root);
+
+    let mut builder = Fs::default();
+    builder.root("/");
+
+    (ObjectStore::new(builder).unwrap().finish(), dir)
+}
+
 pub fn test_basic_schema() -> SchemaRef {
     let schema = Schema::new(vec![
         Field::new("num", DataType::Int64, false),
         Field::new("str", DataType::Utf8, false),
     ]);
     Arc::new(schema)
+}
+
+pub fn scan_config(file_schema: SchemaRef, limit: Option<usize>, filename: &str) -> FileScanConfig {
+    FileScanConfig {
+        object_store_url: ObjectStoreUrl::parse("empty://").unwrap(), // won't be used
+        file_schema,
+        file_groups: vec![vec![PartitionedFile::new(filename.to_string(), 10)]],
+        statistics: Default::default(),
+        projection: None,
+        limit,
+        table_partition_cols: vec![],
+        output_ordering: None,
+        infinite_source: false,
+    }
+}
+
+pub async fn setup_stream_to_json_test(origin_path: &str, threshold: impl Fn(usize) -> usize) {
+    let store = test_store("/");
+
+    let schema = test_basic_schema();
+
+    let json_opener = JsonOpener::new(
+        test_util::TEST_BATCH_SIZE,
+        schema.clone(),
+        store.clone(),
+        CompressionType::UNCOMPRESSED,
+    );
+
+    let size = store.read(origin_path).await.unwrap().len();
+
+    let config = scan_config(schema.clone(), None, origin_path);
+
+    let stream = FileStream::new(&config, 0, json_opener, &ExecutionPlanMetricsSet::new()).unwrap();
+
+    let (tmp_store, dir) = test_tmp_store("test_stream_to_json");
+
+    let output_path = format!("{}/{}", dir.path().display(), "output");
+
+    stream_to_json(
+        Box::pin(stream),
+        tmp_store.clone(),
+        output_path.clone(),
+        threshold(size),
+    )
+    .await
+    .unwrap();
+
+    let written = tmp_store.read(&output_path).await.unwrap();
+    let origin = store.read(origin_path).await.unwrap();
+
+    // ignores `\n`
+    assert_eq!(
+        String::from_utf8_lossy(&written).trim_end_matches('\n'),
+        String::from_utf8_lossy(&origin).trim_end_matches('\n'),
+    )
+}
+
+pub async fn setup_stream_to_csv_test(origin_path: &str, threshold: impl Fn(usize) -> usize) {
+    let store = test_store("/");
+
+    let schema = test_basic_schema();
+
+    let csv_conf = CsvConfigBuilder::default()
+        .batch_size(test_util::TEST_BATCH_SIZE)
+        .file_schema(schema.clone())
+        .build()
+        .unwrap();
+
+    let csv_opener = CsvOpener::new(csv_conf, store.clone(), CompressionType::UNCOMPRESSED);
+
+    let size = store.read(origin_path).await.unwrap().len();
+
+    let config = scan_config(schema.clone(), None, origin_path);
+
+    let stream = FileStream::new(&config, 0, csv_opener, &ExecutionPlanMetricsSet::new()).unwrap();
+
+    let (tmp_store, dir) = test_tmp_store("test_stream_to_csv");
+
+    let output_path = format!("{}/{}", dir.path().display(), "output");
+
+    stream_to_csv(
+        Box::pin(stream),
+        tmp_store.clone(),
+        output_path.clone(),
+        threshold(size),
+    )
+    .await
+    .unwrap();
+
+    let written = tmp_store.read(&output_path).await.unwrap();
+    let origin = store.read(origin_path).await.unwrap();
+
+    // ignores `\n`
+    assert_eq!(
+        String::from_utf8_lossy(&written).trim_end_matches('\n'),
+        String::from_utf8_lossy(&origin).trim_end_matches('\n'),
+    )
 }

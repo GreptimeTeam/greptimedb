@@ -31,15 +31,19 @@ use async_trait::async_trait;
 use bytes::{Buf, Bytes};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::physical_plan::file_format::FileOpenFuture;
+use datafusion::physical_plan::SendableRecordBatchStream;
 use futures::StreamExt;
 use object_store::ObjectStore;
 use snafu::ResultExt;
+use tokio_util::compat::FuturesAsyncWriteCompatExt;
 
 use self::csv::CsvFormat;
 use self::json::JsonFormat;
 use self::parquet::ParquetFormat;
+use crate::buffered_writer::{BufferedWriter, DfRecordBatchEncoder};
 use crate::compression::CompressionType;
 use crate::error::{self, Result};
+use crate::share_buffer::SharedBuffer;
 
 pub const FORMAT_COMPRESSION_TYPE: &str = "COMPRESSION_TYPE";
 pub const FORMAT_DELIMTERL: &str = "DELIMTERL";
@@ -166,4 +170,37 @@ pub async fn infer_schemas(
         schemas.push(file_format.infer_schema(store, file.to_string()).await?)
     }
     ArrowSchema::try_merge(schemas).context(error::MergeSchemaSnafu)
+}
+
+pub async fn stream_to_file<T: DfRecordBatchEncoder, U: Fn(SharedBuffer) -> T>(
+    mut stream: SendableRecordBatchStream,
+    store: ObjectStore,
+    path: String,
+    threshold: usize,
+    encoder_factory: U,
+) -> Result<usize> {
+    let writer = store
+        .writer(&path)
+        .await
+        .context(error::WriteObjectSnafu { path: &path })?
+        .compat_write();
+
+    let buffer = SharedBuffer::with_capacity(threshold);
+    let encoder = encoder_factory(buffer.clone());
+    let mut writer = BufferedWriter::new(threshold, buffer, encoder, writer);
+
+    let mut rows = 0;
+
+    while let Some(batch) = stream.next().await {
+        let batch = batch.context(error::ReadRecordBatchSnafu)?;
+        writer.write(&batch).await?;
+        rows += batch.num_rows();
+    }
+
+    // Flushes all pending writes
+    writer.try_flush(true).await?;
+
+    writer.close().await?;
+
+    Ok(rows)
 }
