@@ -16,9 +16,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use common_telemetry::logging;
-use datanode::datanode::{
-    Datanode, DatanodeOptions, FileConfig, ObjectStoreConfig, ProcedureConfig,
-};
+use datanode::datanode::{Datanode, DatanodeOptions, FileConfig, ObjectStoreConfig};
 use meta_client::MetaClientOptions;
 use servers::Mode;
 use snafu::ResultExt;
@@ -98,8 +96,6 @@ struct StartCommand {
     #[clap(long)]
     wal_dir: Option<String>,
     #[clap(long)]
-    procedure_dir: Option<String>,
-    #[clap(long)]
     http_addr: Option<String>,
     #[clap(long)]
     http_timeout: Option<u64>,
@@ -160,9 +156,6 @@ impl StartCommand {
 
         if let Some(wal_dir) = self.wal_dir.clone() {
             opts.wal.dir = wal_dir;
-        }
-        if let Some(procedure_dir) = self.procedure_dir.clone() {
-            opts.procedure = ProcedureConfig::from_file_path(procedure_dir);
         }
         if let Some(http_addr) = self.http_addr.clone() {
             opts.http_opts.addr = http_addr

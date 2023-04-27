@@ -206,7 +206,7 @@ impl Instance {
             )),
         };
 
-        let procedure_manager = create_procedure_manager(&opts.procedure).await?;
+        let procedure_manager = create_procedure_manager(&opts.procedure, object_store).await?;
         // Register all procedures.
         // Register procedures of the mito engine.
         mito_engine.register_procedure_loaders(&*procedure_manager);
@@ -545,13 +545,13 @@ pub(crate) async fn create_log_store(wal_config: &WalConfig) -> Result<RaftEngin
 
 pub(crate) async fn create_procedure_manager(
     procedure_config: &ProcedureConfig,
+    object_store: ObjectStore,
 ) -> Result<ProcedureManagerRef> {
     info!(
         "Creating procedure manager with config: {:?}",
         procedure_config
     );
 
-    let object_store = new_object_store(&procedure_config.store).await?;
     let state_store = Arc::new(ObjectStateStore::new(object_store));
 
     let manager_config = ManagerConfig {

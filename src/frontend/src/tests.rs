@@ -55,7 +55,6 @@ use crate::instance::Instance;
 pub struct TestGuard {
     _wal_tmp_dir: TempDir,
     _data_tmp_dir: TempDir,
-    _procedure_dir: TempDir,
 }
 
 pub(crate) struct MockDistributedInstance {
@@ -114,7 +113,6 @@ pub(crate) async fn create_standalone_instance(test_name: &str) -> MockStandalon
 fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) {
     let wal_tmp_dir = create_temp_dir(&format!("gt_wal_{name}"));
     let data_tmp_dir = create_temp_dir(&format!("gt_data_{name}"));
-    let procedure_tmp_dir = create_temp_dir(&format!("gt_procedure_{name}"));
     let opts = DatanodeOptions {
         wal: WalConfig {
             dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
@@ -127,9 +125,7 @@ fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) 
             ..Default::default()
         },
         mode: Mode::Standalone,
-        procedure: ProcedureConfig::from_file_path(
-            procedure_tmp_dir.path().to_str().unwrap().to_string(),
-        ),
+        procedure: ProcedureConfig::default(),
         ..Default::default()
     };
     (
@@ -137,7 +133,6 @@ fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) 
         TestGuard {
             _wal_tmp_dir: wal_tmp_dir,
             _data_tmp_dir: data_tmp_dir,
-            _procedure_dir: procedure_tmp_dir,
         },
     )
 }
@@ -209,8 +204,6 @@ async fn create_distributed_datanode(
 ) -> (Arc<DatanodeInstance>, TestGuard) {
     let wal_tmp_dir = create_temp_dir(&format!("gt_wal_{test_name}_dist_dn_{datanode_id}"));
     let data_tmp_dir = create_temp_dir(&format!("gt_data_{test_name}_dist_dn_{datanode_id}"));
-    let procedure_tmp_dir =
-        create_temp_dir(&format!("gt_procedure_{test_name}_dist_dn_{datanode_id}"));
     let opts = DatanodeOptions {
         node_id: Some(datanode_id),
         wal: WalConfig {
@@ -224,9 +217,7 @@ async fn create_distributed_datanode(
             ..Default::default()
         },
         mode: Mode::Distributed,
-        procedure: ProcedureConfig::from_file_path(
-            procedure_tmp_dir.path().to_str().unwrap().to_string(),
-        ),
+        procedure: ProcedureConfig::default(),
         ..Default::default()
     };
 
@@ -252,7 +243,6 @@ async fn create_distributed_datanode(
         TestGuard {
             _wal_tmp_dir: wal_tmp_dir,
             _data_tmp_dir: data_tmp_dir,
-            _procedure_dir: procedure_tmp_dir,
         },
     )
 }
