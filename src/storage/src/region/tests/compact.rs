@@ -51,6 +51,7 @@ fn new_object_store(store_dir: &str, s3_bucket: Option<String>) -> ObjectStore {
                 .root(&root)
                 .access_key_id(&env::var("GT_S3_ACCESS_KEY_ID").unwrap())
                 .secret_access_key(&env::var("GT_S3_ACCESS_KEY").unwrap())
+                .region(&env::var("GT_S3_REGION").unwrap())
                 .bucket(&bucket);
 
             return ObjectStore::new(builder).unwrap().finish();
