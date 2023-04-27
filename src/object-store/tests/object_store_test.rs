@@ -114,6 +114,7 @@ async fn test_s3_backend() -> Result<()> {
                 .root(&root)
                 .access_key_id(&env::var("GT_S3_ACCESS_KEY_ID")?)
                 .secret_access_key(&env::var("GT_S3_ACCESS_KEY")?)
+                .region(&env::var("GT_S3_REGION")?)
                 .bucket(&bucket);
 
             let store = ObjectStore::new(builder).unwrap().finish();
