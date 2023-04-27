@@ -49,7 +49,7 @@ parking_lot = "0.12"
 pgwire = "0.13"
 pin-project = "1.0"
 postgres-types = { version = "0.2", features = ["with-chrono-0_4"] }
-promql-parser = "0.1.0"
+promql-parser = "0.1.1"
 prost.workspace = true
 query = { path = "../query" }
 rand.workspace = true
