@@ -151,6 +151,13 @@ fn get_test_store_config(
                 .secret_access_key(&s3_config.secret_access_key)
                 .bucket(&s3_config.bucket);
 
+            if s3_config.endpoint.is_some() {
+                builder.endpoint(s3_config.endpoint.as_ref().unwrap());
+            }
+            if s3_config.region.is_some() {
+                builder.region(s3_config.region.as_ref().unwrap());
+            }
+
             let config = ObjectStoreConfig::S3(s3_config);
 
             let store = ObjectStore::new(builder).unwrap().finish();
