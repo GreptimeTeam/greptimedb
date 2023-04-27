@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use common_telemetry::{error, info};
+use common_telemetry::{info, warn};
 use object_store::ObjectStore;
 use store_api::manifest::action::ProtocolAction;
 use store_api::manifest::{
@@ -122,10 +122,13 @@ impl Checkpointer for RegionManifestCheckpointer {
             .await
         {
             // It doesn't matter when deletion fails, they will be purged by gc task.
-            error!(e; "Failed to delete manifest logs [{},{}] in path: {}.",
-                   start_version,
-                   last_version,
-                   manifest.manifest_store().path());
+            warn!(
+                "Failed to delete manifest logs [{},{}] in path: {}. err: {}",
+                start_version,
+                last_version,
+                manifest.manifest_store().path(),
+                e
+            );
         }
 
         info!("Region manifest checkpoint, start_version: {}, last_version: {}, compacted actions: {}", start_version, last_version, compacted_actions);
