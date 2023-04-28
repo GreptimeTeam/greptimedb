@@ -16,6 +16,7 @@ use std::marker::PhantomData;
 
 use axum::http::{self, Request, StatusCode};
 use axum::response::Response;
+use common_error::prelude::ErrorExt;
 use common_telemetry::warn;
 use futures::future::BoxFuture;
 use http_body::Body;
@@ -82,7 +83,13 @@ where
                 Ok((username, password)) => (username, password),
                 Err(e) => {
                     warn!("extract username and password failed: {}", e);
-                    increment_counter!(crate::metrics::METRIC_AUTH_FAILURE);
+                    increment_counter!(
+                        crate::metrics::METRIC_AUTH_FAILURE,
+                        &[(
+                            crate::metrics::METRIC_CODE_LABEL,
+                            format!("{}", e.status_code())
+                        )]
+                    );
                     return Err(unauthorized_resp());
                 }
             };
@@ -91,7 +98,13 @@ where
                 Ok((catalog, schema)) => (catalog, schema),
                 Err(e) => {
                     warn!("extract catalog and schema failed: {}", e);
-                    increment_counter!(crate::metrics::METRIC_AUTH_FAILURE);
+                    increment_counter!(
+                        crate::metrics::METRIC_AUTH_FAILURE,
+                        &[(
+                            crate::metrics::METRIC_CODE_LABEL,
+                            format!("{}", e.status_code())
+                        )]
+                    );
                     return Err(unauthorized_resp());
                 }
             };
@@ -111,7 +124,13 @@ where
                 }
                 Err(e) => {
                     warn!("authenticate failed: {}", e);
-                    increment_counter!(crate::metrics::METRIC_AUTH_FAILURE);
+                    increment_counter!(
+                        crate::metrics::METRIC_AUTH_FAILURE,
+                        &[(
+                            crate::metrics::METRIC_CODE_LABEL,
+                            format!("{}", e.status_code())
+                        )]
+                    );
                     Err(unauthorized_resp())
                 }
             }

@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveDateTime};
+use common_error::prelude::ErrorExt;
 use common_query::Output;
 use common_telemetry::tracing::log;
 use common_telemetry::{error, timer, trace, warn};
@@ -277,7 +278,13 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
 
         if let Some(schema_validator) = &self.user_provider {
             if let Err(e) = schema_validator.authorize(catalog, schema, user_info).await {
-                increment_counter!(crate::metrics::METRIC_AUTH_FAILURE);
+                increment_counter!(
+                    crate::metrics::METRIC_AUTH_FAILURE,
+                    &[(
+                        crate::metrics::METRIC_CODE_LABEL,
+                        format!("{}", e.status_code())
+                    )]
+                );
                 return w
                     .error(
                         ErrorKind::ER_DBACCESS_DENIED_ERROR,

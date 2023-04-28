@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use api::v1::auth_header::AuthScheme;
 use api::v1::{Basic, GreptimeRequest, RequestHeader};
+use common_error::prelude::ErrorExt;
 use common_query::Output;
 use common_runtime::Runtime;
 use common_telemetry::timer;
@@ -119,7 +120,13 @@ impl GreptimeRequestHandler {
             }),
         }
         .map_err(|e| {
-            increment_counter!(crate::metrics::METRIC_AUTH_FAILURE);
+            increment_counter!(
+                crate::metrics::METRIC_AUTH_FAILURE,
+                &[(
+                    crate::metrics::METRIC_CODE_LABEL,
+                    format!("{}", e.status_code())
+                )]
+            );
             Status::unauthenticated(e.to_string())
         })?;
         Ok(())
