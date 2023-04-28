@@ -43,7 +43,14 @@ impl<S: StorageEngine> Procedure for DropMitoTable<S> {
     async fn execute(&mut self, _ctx: &Context) -> Result<Status> {
         match self.data.state {
             DropTableState::Prepare => self.on_prepare(),
-            DropTableState::CloseRegions => self.on_close_regions().await,
+            DropTableState::EngineDropTable => {
+                self.engine_inner
+                    .drop_table(self.data.request.clone())
+                    .await
+                    .map_err(Error::from_error_ext)?;
+
+                Ok(Status::Done)
+            }
         }
     }
 
@@ -120,42 +127,19 @@ impl<S: StorageEngine> DropMitoTable<S> {
 
     /// Prepare table info.
     fn on_prepare(&mut self) -> Result<Status> {
-        self.data.state = DropTableState::CloseRegions;
+        self.data.state = DropTableState::EngineDropTable;
 
         Ok(Status::executing(true))
-    }
-
-    /// Close all regions.
-    async fn on_close_regions(&mut self) -> Result<Status> {
-        // Remove the table from the engine to avoid further access from users.
-        let table_ref = self.data.table_ref();
-
-        let _lock = self
-            .engine_inner
-            .table_mutex
-            .lock(table_ref.to_string())
-            .await;
-        self.engine_inner.tables.remove(&table_ref.to_string());
-
-        // Close the table to close all regions. Closing a region is idempotent.
-        if let Some(table) = &self.table {
-            table.close().await.map_err(Error::from_error_ext)?;
-        }
-
-        // TODO(yingwen): Currently, DROP TABLE doesn't remove data. We can
-        // write a drop meta update to the table and remove all files in the
-        // background.
-        Ok(Status::Done)
     }
 }
 
 /// Represents each step while dropping table in the mito engine.
 #[derive(Debug, Serialize, Deserialize)]
 enum DropTableState {
-    /// Prepare to drop table.
+    /// Prepare to drop the table.
     Prepare,
-    /// Close regions of this table.
-    CloseRegions,
+    /// Engine drop the table.
+    EngineDropTable,
 }
 
 /// Serializable data of [DropMitoTable].

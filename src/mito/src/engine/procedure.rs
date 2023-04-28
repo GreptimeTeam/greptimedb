@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 pub(crate) use alter::AlterMitoTable;
 use common_procedure::ProcedureManager;
-pub(crate) use create::CreateMitoTable;
+pub(crate) use create::{CreateMitoTable, TableCreator};
 pub(crate) use drop::DropMitoTable;
 use store_api::storage::StorageEngine;
 

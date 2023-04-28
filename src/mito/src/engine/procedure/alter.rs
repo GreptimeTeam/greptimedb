@@ -18,21 +18,23 @@ use async_trait::async_trait;
 use common_procedure::error::{Error, FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{Context, LockKey, Procedure, ProcedureManager, Result, Status};
 use common_telemetry::logging;
+use common_telemetry::metric::Timer;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::manifest::Manifest;
-use store_api::storage::{AlterRequest, Region, RegionMeta, StorageEngine};
+use store_api::storage::{AlterOperation, StorageEngine};
 use table::engine::TableReference;
 use table::metadata::{RawTableInfo, TableInfo, TableVersion};
 use table::requests::{AlterKind, AlterTableRequest};
-use table::Table;
+use table::{Table, TableRef};
 
 use crate::engine::MitoEngineInner;
 use crate::error::{
-    BuildTableMetaSnafu, TableNotFoundSnafu, UpdateTableManifestSnafu, VersionChangedSnafu,
+    TableExistsSnafu, TableNotFoundSnafu, UpdateTableManifestSnafu, VersionChangedSnafu,
 };
 use crate::manifest::action::{TableChange, TableMetaAction, TableMetaActionList};
-use crate::table::{create_alter_operation, MitoTable};
+use crate::metrics;
+use crate::table::MitoTable;
 
 /// Procedure to alter a [MitoTable].
 pub(crate) struct AlterMitoTable<S: StorageEngine> {
@@ -41,6 +43,9 @@ pub(crate) struct AlterMitoTable<S: StorageEngine> {
     table: Arc<MitoTable<S::Region>>,
     /// The table info after alteration.
     new_info: Option<TableInfo>,
+    /// The region alter operation.
+    alter_op: Option<AlterOperation>,
+    _timer: Timer,
 }
 
 #[async_trait]
@@ -52,8 +57,10 @@ impl<S: StorageEngine> Procedure for AlterMitoTable<S> {
     async fn execute(&mut self, _ctx: &Context) -> Result<Status> {
         match self.data.state {
             AlterTableState::Prepare => self.on_prepare(),
-            AlterTableState::AlterRegions => self.on_alter_regions().await,
-            AlterTableState::UpdateTableManifest => self.on_update_table_manifest().await,
+            AlterTableState::EngineAlterTable => {
+                self.engine_alter_table().await?;
+                Ok(Status::Done)
+            }
         }
     }
 
@@ -114,6 +121,8 @@ impl<S: StorageEngine> AlterMitoTable<S> {
             engine_inner,
             table,
             new_info: None,
+            alter_op: None,
+            _timer: common_telemetry::timer!(metrics::MITO_ALTER_TABLE_ELAPSED),
         })
     }
 
@@ -151,6 +160,8 @@ impl<S: StorageEngine> AlterMitoTable<S> {
             engine_inner,
             table,
             new_info: None,
+            alter_op: None,
+            _timer: common_telemetry::timer!(metrics::MITO_ALTER_TABLE_ELAPSED),
         })
     }
 
@@ -165,81 +176,58 @@ impl<S: StorageEngine> AlterMitoTable<S> {
             }
         );
 
-        self.init_new_info(&current_info)?;
-        self.data.state = AlterTableState::AlterRegions;
+        if let AlterKind::RenameTable { new_table_name } = &self.data.request.alter_kind {
+            let mut table_ref = self.data.table_ref();
+            table_ref.table = new_table_name;
+            ensure!(
+                self.engine_inner.get_mito_table(&table_ref).is_none(),
+                TableExistsSnafu {
+                    table_name: table_ref.to_string(),
+                }
+            );
+        }
+
+        self.data.state = AlterTableState::EngineAlterTable;
 
         Ok(Status::executing(true))
+    }
+
+    /// Engine alters the table.
+    ///
+    /// Note that calling this method directly (without submitting the procedure
+    /// to the manager) to rename a table might have concurrent issue when
+    /// we renaming two tables to the same table name.
+    pub(crate) async fn engine_alter_table(&mut self) -> Result<TableRef> {
+        let current_info = self.table.table_info();
+        if current_info.ident.version > self.data.table_version {
+            // The table is already altered.
+            return Ok(self.table.clone());
+        }
+        self.init_new_info_and_op(&current_info)?;
+
+        self.alter_regions().await?;
+
+        self.update_table_manifest().await
     }
 
     /// Alter regions.
-    async fn on_alter_regions(&mut self) -> Result<Status> {
-        let current_info = self.table.table_info();
-        ensure!(
-            current_info.ident.version == self.data.table_version,
-            VersionChangedSnafu {
-                expect: self.data.table_version,
-                actual: current_info.ident.version,
-            }
-        );
-
-        self.init_new_info(&current_info)?;
-        let new_info = self.new_info.as_mut().unwrap();
-        let table_name = &self.data.request.table_name;
-
-        let Some(alter_op) = create_alter_operation(table_name, &self.data.request.alter_kind, &mut new_info.meta)
-            .map_err(Error::from_error_ext)? else {
+    async fn alter_regions(&mut self) -> Result<()> {
+        let Some(alter_op) = &self.alter_op else {
                 // Don't need to alter the region.
-                self.data.state = AlterTableState::UpdateTableManifest;
-
-                return Ok(Status::executing(true));
+                return Ok(());
             };
 
-        let regions = self.table.regions();
-        // For each region, alter it if its version is not updated.
-        for region in regions.values() {
-            let region_meta = region.in_memory_metadata();
-            if u64::from(region_meta.version()) > self.data.table_version {
-                // Region is already altered.
-                continue;
-            }
-
-            let alter_req = AlterRequest {
-                operation: alter_op.clone(),
-                version: region_meta.version(),
-            };
-            // Alter the region.
-            logging::debug!(
-                "start altering region {} of table {}, with request {:?}",
-                region.name(),
-                table_name,
-                alter_req,
-            );
-            region
-                .alter(alter_req)
-                .await
-                .map_err(Error::from_error_ext)?;
-        }
-
-        self.data.state = AlterTableState::UpdateTableManifest;
-
-        Ok(Status::executing(true))
+        let table_name = &self.data.request.table_name;
+        let table_version = self.data.table_version;
+        self.table
+            .alter_regions(table_name, table_version, alter_op)
+            .await
+            .map_err(Error::from_error_ext)
     }
 
     /// Persist the alteration to the manifest and update table info.
-    async fn on_update_table_manifest(&mut self) -> Result<Status> {
-        // Get current table info.
-        let current_info = self.table.table_info();
-        if current_info.ident.version > self.data.table_version {
-            logging::info!(
-                "table {} version is already updated, current: {}, old_version: {}",
-                self.data.request.table_name,
-                current_info.ident.version,
-                self.data.table_version,
-            );
-            return Ok(Status::Done);
-        }
-
-        self.init_new_info(&current_info)?;
+    async fn update_table_manifest(&mut self) -> Result<TableRef> {
+        // Safety: We init new info in engine_alter_table()
         let new_info = self.new_info.as_ref().unwrap();
         let table_name = &self.data.request.table_name;
 
@@ -249,6 +237,8 @@ impl<S: StorageEngine> AlterMitoTable<S> {
             new_info
         );
 
+        // It is possible that we write the manifest multiple times and bump the manifest
+        // version, but it is still correct as we always write the new table info.
         self.table
             .manifest()
             .update(TableMetaActionList::with_action(TableMetaAction::Change(
@@ -278,35 +268,21 @@ impl<S: StorageEngine> AlterMitoTable<S> {
                 .insert(table_ref.to_string(), self.table.clone());
         }
 
-        Ok(Status::Done)
+        Ok(self.table.clone())
     }
 
-    fn init_new_info(&mut self, current_info: &TableInfo) -> Result<()> {
+    fn init_new_info_and_op(&mut self, current_info: &TableInfo) -> Result<()> {
         if self.new_info.is_some() {
             return Ok(());
         }
 
-        let table_name = &current_info.name;
-        let mut new_info = TableInfo::clone(current_info);
-        // setup new table info
-        match &self.data.request.alter_kind {
-            AlterKind::RenameTable { new_table_name } => {
-                new_info.name = new_table_name.clone();
-            }
-            AlterKind::AddColumns { .. } | AlterKind::DropColumns { .. } => {
-                let table_meta = &current_info.meta;
-                let new_meta = table_meta
-                    .builder_with_alter_kind(table_name, &self.data.request.alter_kind)
-                    .map_err(Error::from_error_ext)?
-                    .build()
-                    .context(BuildTableMetaSnafu { table_name })?;
-                new_info.meta = new_meta;
-            }
-        }
-        // Increase version of the table.
-        new_info.ident.version = current_info.ident.version + 1;
+        let (new_info, alter_op) = self
+            .table
+            .info_and_op_for_alter(current_info, &self.data.request.alter_kind)
+            .map_err(Error::from_error_ext)?;
 
         self.new_info = Some(new_info);
+        self.alter_op = alter_op;
 
         Ok(())
     }
@@ -315,12 +291,10 @@ impl<S: StorageEngine> AlterMitoTable<S> {
 /// Represents each step while altering table in the mito engine.
 #[derive(Debug, Serialize, Deserialize)]
 enum AlterTableState {
-    /// Prepare to alter table.
+    /// Prepare to alter the table.
     Prepare,
-    /// Alter regions.
-    AlterRegions,
-    /// Update table manifest.
-    UpdateTableManifest,
+    /// Engine alters the table.
+    EngineAlterTable,
 }
 
 /// Serializable data of [AlterMitoTable].

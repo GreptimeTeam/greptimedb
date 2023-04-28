@@ -31,9 +31,12 @@ use storage::region::RegionImpl;
 use storage::EngineImpl;
 use store_api::manifest::Manifest;
 use store_api::storage::ReadContext;
+use table::engine::region_id;
+use table::metadata::TableType;
 use table::requests::{
     AddColumnRequest, AlterKind, DeleteRequest, FlushTableRequest, TableOptions,
 };
+use table::Table;
 
 use super::*;
 use crate::table::test_util::{
