@@ -451,6 +451,7 @@ mod tests {
 
     use super::*;
     use crate::local::test_util;
+    use crate::store::PROC_PATH;
     use crate::{ContextProvider, Error, LockKey, Procedure};
 
     const ROOT_ID: &str = "9f805a1f-05f7-490c-9f91-bd56e3cc54c1";
@@ -472,7 +473,7 @@ mod tests {
     }
 
     async fn check_files(object_store: &ObjectStore, procedure_id: ProcedureId, files: &[&str]) {
-        let dir = format!("{procedure_id}/");
+        let dir = format!("{PROC_PATH}/{procedure_id}/");
         let lister = object_store.list(&dir).await.unwrap();
         let mut files_in_dir: Vec<_> = lister
             .map_ok(|de| de.name().to_string())

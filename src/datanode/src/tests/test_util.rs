@@ -52,13 +52,11 @@ impl MockInstance {
 struct TestGuard {
     _wal_tmp_dir: TempDir,
     _data_tmp_dir: TempDir,
-    _procedure_tmp_dir: TempDir,
 }
 
 fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) {
     let wal_tmp_dir = create_temp_dir(&format!("gt_wal_{name}"));
     let data_tmp_dir = create_temp_dir(&format!("gt_data_{name}"));
-    let procedure_tmp_dir = create_temp_dir(&format!("gt_procedure_{name}"));
     let opts = DatanodeOptions {
         wal: WalConfig {
             dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
@@ -71,9 +69,7 @@ fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) 
             ..Default::default()
         },
         mode: Mode::Standalone,
-        procedure: ProcedureConfig::from_file_path(
-            procedure_tmp_dir.path().to_str().unwrap().to_string(),
-        ),
+        procedure: ProcedureConfig::default(),
         ..Default::default()
     };
     (
@@ -81,7 +77,6 @@ fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) 
         TestGuard {
             _wal_tmp_dir: wal_tmp_dir,
             _data_tmp_dir: data_tmp_dir,
-            _procedure_tmp_dir: procedure_tmp_dir,
         },
     )
 }

@@ -198,8 +198,6 @@ pub struct ProcedureConfig {
     /// Initial retry delay of procedures, increases exponentially.
     #[serde(with = "humantime_serde")]
     pub retry_delay: Duration,
-    /// Storage config for procedure manager.
-    pub store: ObjectStoreConfig,
 }
 
 impl Default for ProcedureConfig {
@@ -207,18 +205,6 @@ impl Default for ProcedureConfig {
         ProcedureConfig {
             max_retry_times: 3,
             retry_delay: Duration::from_millis(500),
-            store: ObjectStoreConfig::File(FileConfig {
-                data_dir: "/tmp/greptimedb/procedure/".to_string(),
-            }),
-        }
-    }
-}
-
-impl ProcedureConfig {
-    pub fn from_file_path(path: String) -> ProcedureConfig {
-        ProcedureConfig {
-            store: ObjectStoreConfig::File(FileConfig { data_dir: path }),
-            ..Default::default()
         }
     }
 }
