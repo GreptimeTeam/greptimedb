@@ -34,6 +34,7 @@ use crate::lock::DistLockRef;
 use crate::metadata_service::MetadataServiceRef;
 use crate::selector::{Selector, SelectorType};
 use crate::sequence::SequenceRef;
+use crate::service::mailbox::MailboxRef;
 use crate::service::store::kv::{KvStoreRef, ResettableKvStoreRef};
 
 pub const TABLE_ID_SEQ: &str = "table_id";
@@ -70,6 +71,7 @@ pub struct Context {
     pub server_addr: String,
     pub in_memory: ResettableKvStoreRef,
     pub kv_store: KvStoreRef,
+    pub mailbox: MailboxRef,
     pub election: Option<ElectionRef>,
     pub skip_all: Arc<AtomicBool>,
     pub catalog: Option<String>,
@@ -113,6 +115,7 @@ pub struct MetaSrv {
     lock: Option<DistLockRef>,
     procedure_manager: ProcedureManagerRef,
     metadata_service: MetadataServiceRef,
+    mailbox: MailboxRef,
 }
 
 impl MetaSrv {
@@ -238,11 +241,17 @@ impl MetaSrv {
     }
 
     #[inline]
+    pub fn mailbox(&self) -> MailboxRef {
+        self.mailbox.clone()
+    }
+
+    #[inline]
     pub fn new_ctx(&self) -> Context {
         let datanode_lease_secs = self.options().datanode_lease_secs;
         let server_addr = self.options().server_addr.clone();
         let in_memory = self.in_memory();
         let kv_store = self.kv_store();
+        let mailbox = self.mailbox();
         let election = self.election();
         let skip_all = Arc::new(AtomicBool::new(false));
         Context {
@@ -250,6 +259,7 @@ impl MetaSrv {
             server_addr,
             in_memory,
             kv_store,
+            mailbox,
             election,
             skip_all,
             catalog: None,

@@ -291,6 +291,24 @@ pub enum Error {
         schema_name: String,
         location: Location,
     },
+
+    #[snafu(display("Pusher not found: {pusher_id}"))]
+    PusherNotFound {
+        pusher_id: String,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to push message: {err_msg}"))]
+    PushMessage { err_msg: String, location: Location },
+
+    #[snafu(display("Mailbox already closed: {id}"))]
+    MailboxClosed { id: u64, location: Location },
+
+    #[snafu(display("Mailbox not found: {id}"))]
+    MailboxNotFound { id: u64, location: Location },
+
+    #[snafu(display("Mailbox timeout: {id}"))]
+    MailboxTimeout { id: u64, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -332,6 +350,11 @@ impl ErrorExt for Error {
             | Error::SendShutdownSignal { .. }
             | Error::ParseAddr { .. }
             | Error::SchemaAlreadyExists { .. }
+            | Error::PusherNotFound { .. }
+            | Error::PushMessage { .. }
+            | Error::MailboxClosed { .. }
+            | Error::MailboxNotFound { .. }
+            | Error::MailboxTimeout { .. }
             | Error::StartGrpc { .. } => StatusCode::Internal,
             Error::EmptyKey { .. }
             | Error::MissingRequiredParameter { .. }

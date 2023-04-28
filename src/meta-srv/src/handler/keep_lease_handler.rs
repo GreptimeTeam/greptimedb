@@ -62,13 +62,9 @@ impl HeartbeatHandler for KeepLeaseHandler {
     async fn handle(
         &self,
         req: &HeartbeatRequest,
-        ctx: &mut Context,
+        _ctx: &mut Context,
         _acc: &mut HeartbeatAccumulator,
     ) -> Result<()> {
-        if ctx.is_skip_all() {
-            return Ok(());
-        }
-
         let HeartbeatRequest { header, peer, .. } = req;
         if let Some(peer) = &peer {
             let key = LeaseKey {

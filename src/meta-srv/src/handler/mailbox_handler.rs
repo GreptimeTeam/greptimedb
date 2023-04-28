@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,17 +13,16 @@
 // limitations under the License.
 
 use api::v1::meta::{HeartbeatRequest, Role};
-use common_telemetry::debug;
 
-use super::node_stat::Stat;
 use crate::error::Result;
 use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
 
-pub struct CollectStatsHandler;
+#[derive(Default)]
+pub struct MailboxHandler;
 
 #[async_trait::async_trait]
-impl HeartbeatHandler for CollectStatsHandler {
+impl HeartbeatHandler for MailboxHandler {
     fn is_acceptable(&self, role: Option<Role>) -> bool {
         role.map_or(false, |r| r == Role::Datanode)
     }
@@ -31,17 +30,17 @@ impl HeartbeatHandler for CollectStatsHandler {
     async fn handle(
         &self,
         req: &HeartbeatRequest,
-        _ctx: &mut Context,
-        acc: &mut HeartbeatAccumulator,
+        ctx: &mut Context,
+        _acc: &mut HeartbeatAccumulator,
     ) -> Result<()> {
-        match Stat::try_from(req.clone()) {
-            Ok(stat) => {
-                let _ = acc.stat.insert(stat);
-            }
-            Err(_) => {
-                debug!("Incomplete heartbeat data: {:?}", req);
-            }
-        };
+        if req.mailbox_messages.is_empty() {
+            return Ok(());
+        }
+
+        let mailbox_messages = req.mailbox_messages.clone();
+        for msg in mailbox_messages {
+            ctx.mailbox.clone().on_recv(msg.id, Ok(msg)).await?;
+        }
 
         Ok(())
     }

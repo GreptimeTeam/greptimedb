@@ -18,9 +18,11 @@ use std::sync::Arc;
 use common_procedure::local::{LocalManager, ManagerConfig};
 
 use crate::cluster::MetaPeerClient;
+use crate::handler::mailbox_handler::MailboxHandler;
 use crate::handler::{
-    CheckLeaderHandler, CollectStatsHandler, HeartbeatHandlerGroup, KeepLeaseHandler,
-    OnLeaderStartHandler, PersistStatsHandler, RegionFailureHandler, ResponseHeaderHandler,
+    CheckLeaderHandler, CollectStatsHandler, HeartbeatHandlerGroup, HeartbeatMailbox,
+    KeepLeaseHandler, OnLeaderStartHandler, PersistStatsHandler, RegionFailureHandler,
+    ResponseHeaderHandler,
 };
 use crate::lock::DistLockRef;
 use crate::metadata_service::{DefaultMetadataService, MetadataServiceRef};
@@ -143,6 +145,7 @@ impl MetaSrvBuilder {
                 group.add_handler(CheckLeaderHandler::default()).await;
                 group.add_handler(OnLeaderStartHandler::default()).await;
                 group.add_handler(CollectStatsHandler).await;
+                group.add_handler(MailboxHandler).await;
                 group.add_handler(region_failure_handler).await;
                 group.add_handler(PersistStatsHandler::default()).await;
                 group
@@ -158,6 +161,9 @@ impl MetaSrvBuilder {
         let metadata_service = metadata_service
             .unwrap_or_else(|| Arc::new(DefaultMetadataService::new(kv_store.clone())));
 
+        let mailbox_sequence = Sequence::new("heartbeat_mailbox", 0, 100, kv_store.clone());
+        let mailbox = HeartbeatMailbox::with_timeout(handler_group.pushers(), mailbox_sequence, 5);
+
         MetaSrv {
             started,
             options,
@@ -171,6 +177,7 @@ impl MetaSrvBuilder {
             lock,
             procedure_manager,
             metadata_service,
+            mailbox,
         }
     }
 }

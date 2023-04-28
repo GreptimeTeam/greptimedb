@@ -74,10 +74,6 @@ impl HeartbeatHandler for RegionFailureHandler {
                 .await;
         }
 
-        if ctx.is_skip_all() {
-            return Ok(());
-        }
-
         let Some(stat) = acc.stat.as_ref() else { return Ok(()) };
 
         let heartbeat = DatanodeHeartbeat {

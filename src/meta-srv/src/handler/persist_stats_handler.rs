@@ -40,10 +40,6 @@ impl HeartbeatHandler for PersistStatsHandler {
         ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
     ) -> Result<()> {
-        if ctx.is_skip_all() {
-            return Ok(());
-        }
-
         let Some(stat) = acc.stat.take() else { return Ok(()) };
 
         let key = stat.stat_key();
@@ -82,18 +78,23 @@ mod tests {
     use api::v1::meta::RangeRequest;
 
     use super::*;
+    use crate::handler::HeartbeatMailbox;
     use crate::keys::StatKey;
+    use crate::sequence::Sequence;
     use crate::service::store::memory::MemStore;
 
     #[tokio::test]
     async fn test_handle_datanode_stats() {
         let in_memory = Arc::new(MemStore::new());
         let kv_store = Arc::new(MemStore::new());
+        let seq = Sequence::new("test_seq", 0, 10, kv_store.clone());
+        let mailbox = HeartbeatMailbox::with_timeout(Arc::new(Default::default()), seq, 0);
         let mut ctx = Context {
             datanode_lease_secs: 30,
             server_addr: "127.0.0.1:0000".to_string(),
             in_memory,
             kv_store,
+            mailbox,
             election: None,
             skip_all: Arc::new(AtomicBool::new(false)),
             catalog: None,

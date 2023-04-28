@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
 
 use crate::error::Result;
+
+pub type MailboxRef = Arc<dyn Mailbox>;
 
 pub type MessageId = u64;
 
@@ -26,24 +29,19 @@ pub enum Channel {
 }
 
 #[async_trait::async_trait]
-pub trait Mailbox {
+pub trait Mailbox: Send + Sync {
     /// Send a message to the mailbox, it will return a `id` immediately,
     /// then we can use the `id` to call `recv` to get the response.
     async fn send(&self, ch: &Channel, msg: MailboxMessage) -> Result<MessageId>;
 
     /// Receive a message from the mailbox with the given `id`.
-    async fn recv(&self, ch: &Channel, id: MessageId) -> Result<MailboxMessage>;
+    async fn recv(&self, id: MessageId) -> Result<MailboxMessage>;
 
-    async fn recv_timeout(
-        &self,
-        ch: &Channel,
-        id: MessageId,
-        timeout: Duration,
-    ) -> Result<MailboxMessage>;
+    async fn recv_timeout(&self, id: MessageId, timeout: Duration) -> Result<MailboxMessage>;
 
     async fn send_and_recv(&self, ch: &Channel, msg: MailboxMessage) -> Result<MailboxMessage> {
         let id = self.send(ch, msg).await?;
-        self.recv(ch, id).await
+        self.recv(id).await
     }
 
     async fn send_and_recv_timeout(
@@ -53,6 +51,8 @@ pub trait Mailbox {
         timeout: Duration,
     ) -> Result<MailboxMessage> {
         let id = self.send(ch, msg).await?;
-        self.recv_timeout(ch, id, timeout).await
+        self.recv_timeout(id, timeout).await
     }
+
+    async fn on_recv(&self, id: MessageId, maybe_msg: Result<MailboxMessage>) -> Result<()>;
 }

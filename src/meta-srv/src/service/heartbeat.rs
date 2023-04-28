@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::io::ErrorKind;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use api::v1::meta::{
     heartbeat_server, AskLeaderRequest, AskLeaderResponse, HeartbeatRequest, HeartbeatResponse,
@@ -29,8 +28,6 @@ use crate::error;
 use crate::error::Result;
 use crate::metasrv::{Context, MetaSrv};
 use crate::service::{GrpcResult, GrpcStream};
-
-static PUSHER_ID: AtomicU64 = AtomicU64::new(0);
 
 #[async_trait::async_trait]
 impl heartbeat_server::Heartbeat for MetaSrv {
@@ -50,14 +47,10 @@ impl heartbeat_server::Heartbeat for MetaSrv {
                 let mut quit = false;
                 match msg {
                     Ok(req) => {
+                        let role = req.header.as_ref().map_or(0, |h| h.role);
                         if pusher_key.is_none() {
                             if let Some(peer) = &req.peer {
-                                let key = format!(
-                                    "{}-{}-{}",
-                                    peer.id,
-                                    peer.addr,
-                                    PUSHER_ID.fetch_add(1, Ordering::Relaxed)
-                                );
+                                let key = format!("{}-{}", role, peer.id,);
                                 handler_group.register(&key, tx.clone()).await;
                                 pusher_key = Some(key);
                             }

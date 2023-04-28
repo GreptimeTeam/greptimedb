@@ -52,18 +52,22 @@ mod tests {
     use api::v1::meta::{HeartbeatResponse, RequestHeader};
 
     use super::*;
-    use crate::handler::Context;
+    use crate::handler::{Context, HeartbeatMailbox};
+    use crate::sequence::Sequence;
     use crate::service::store::memory::MemStore;
 
     #[tokio::test]
     async fn test_handle_heartbeat_resp_header() {
         let in_memory = Arc::new(MemStore::new());
         let kv_store = Arc::new(MemStore::new());
+        let seq = Sequence::new("test_seq", 0, 10, kv_store.clone());
+        let mailbox = HeartbeatMailbox::with_timeout(Arc::new(Default::default()), seq, 0);
         let mut ctx = Context {
             datanode_lease_secs: 30,
             server_addr: "127.0.0.1:0000".to_string(),
             in_memory,
             kv_store,
+            mailbox,
             election: None,
             skip_all: Arc::new(AtomicBool::new(false)),
             catalog: None,
