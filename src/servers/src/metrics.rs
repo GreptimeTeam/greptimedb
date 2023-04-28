@@ -37,3 +37,6 @@ pub(crate) const METRIC_POSTGRES_SUBPROTOCOL_LABEL: &str = "subprotocol";
 pub(crate) const METRIC_POSTGRES_SIMPLE_QUERY: &str = "simple";
 pub(crate) const METRIC_POSTGRES_EXTENDED_QUERY: &str = "extended";
 pub(crate) const METRIC_POSTGRES_PREPARED_COUNT: &str = "servers.postgres_prepared_count";
+
+pub(crate) const METRIC_SERVER_GRPC_DB_REQUEST_TIMER: &str = "servers.grpc.db_request_timer";
+pub(crate) const METRIC_SERVER_GRPC_PROM_REQUEST_TIMER: &str = "servers.grpc.prom_request_timer";
