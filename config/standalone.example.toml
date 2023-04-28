@@ -118,11 +118,7 @@ gc_duration = '30s'
 checkpoint_on_startup = false
 
 # Procedure storage options.
-[procedure.store]
-# Storage type.
-type = "File"
-# Procedure data path.
-data_dir = "/tmp/greptimedb/procedure/"
+[procedure]
 # Procedure max retry time.
 max_retry_times = 3
 # Initial retry delay of procedures, increases exponentially
