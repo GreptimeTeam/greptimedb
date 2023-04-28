@@ -15,7 +15,9 @@
 use std::fmt::Debug;
 
 use async_trait::async_trait;
+use common_error::prelude::ErrorExt;
 use futures::{Sink, SinkExt};
+use metrics::increment_counter;
 use pgwire::api::auth::StartupHandler;
 use pgwire::api::{auth, ClientInfo, PgWireConnectionState};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
@@ -87,16 +89,26 @@ impl PgLoginVerifier {
             None => return Ok(false),
         };
 
-        let _user_info = user_provider
+        if let Err(e) = user_provider
             .auth(
                 Identity::UserId(user_name, None),
                 Password::PlainText(password),
                 catalog,
                 schema,
             )
-            .await?;
-
-        Ok(true)
+            .await
+        {
+            increment_counter!(
+                crate::metrics::METRIC_AUTH_FAILURE,
+                &[(
+                    crate::metrics::METRIC_CODE_LABEL,
+                    format!("{}", e.status_code())
+                )]
+            );
+            Err(e.into())
+        } else {
+            Ok(true)
+        }
     }
 }
 

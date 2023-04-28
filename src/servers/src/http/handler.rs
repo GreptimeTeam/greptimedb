@@ -43,13 +43,15 @@ pub async fn sql(
     _user_info: Extension<UserInfo>,
     Form(form_params): Form<SqlQuery>,
 ) -> Json<JsonResponse> {
-    let _timer = timer!(crate::metrics::METRIC_HTTP_SQL_ELAPSED);
-
     let sql_handler = &state.sql_handler;
 
     let start = Instant::now();
     let sql = query_params.sql.or(form_params.sql);
     let db = query_params.db.or(form_params.db);
+    let _timer = timer!(
+        crate::metrics::METRIC_HTTP_SQL_ELAPSED,
+        &[(crate::metrics::METRIC_DB_LABEL, db.as_deref().unwrap_or(""))]
+    );
 
     let resp = if let Some(sql) = &sql {
         match crate::http::query_context_from_db(sql_handler.clone(), db).await {
@@ -96,11 +98,14 @@ pub async fn promql(
     // TODO(fys): pass _user_info into query context
     _user_info: Extension<UserInfo>,
 ) -> Json<JsonResponse> {
-    let _timer = timer!(crate::metrics::METRIC_HTTP_PROMQL_ELAPSED);
-
     let sql_handler = &state.sql_handler;
     let exec_start = Instant::now();
     let db = params.db.clone();
+    let _timer = timer!(
+        crate::metrics::METRIC_HTTP_PROMQL_ELAPSED,
+        &[(crate::metrics::METRIC_DB_LABEL, db.as_deref().unwrap_or(""))]
+    );
+
     let prom_query = params.into();
     let resp = match super::query_context_from_db(sql_handler.clone(), db).await {
         Ok(query_ctx) => {

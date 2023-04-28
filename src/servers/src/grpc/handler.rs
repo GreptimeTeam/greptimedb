@@ -16,8 +16,11 @@ use std::sync::Arc;
 
 use api::v1::auth_header::AuthScheme;
 use api::v1::{Basic, GreptimeRequest, RequestHeader};
+use common_error::prelude::ErrorExt;
 use common_query::Output;
 use common_runtime::Runtime;
+use common_telemetry::timer;
+use metrics::increment_counter;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::OptionExt;
 use tonic::Status;
@@ -57,6 +60,10 @@ impl GreptimeRequestHandler {
 
         self.auth(header, &query_ctx).await?;
 
+        let _timer = timer!(
+            crate::metrics::METRIC_SERVER_GRPC_DB_REQUEST_TIMER,
+            &[(crate::metrics::METRIC_DB_LABEL, &query_ctx.get_db_string())]
+        );
         let handler = self.handler.clone();
 
         // Executes requests in another runtime to
@@ -112,7 +119,16 @@ impl GreptimeRequestHandler {
                 name: "Token AuthScheme".to_string(),
             }),
         }
-        .map_err(|e| Status::unauthenticated(e.to_string()))?;
+        .map_err(|e| {
+            increment_counter!(
+                crate::metrics::METRIC_AUTH_FAILURE,
+                &[(
+                    crate::metrics::METRIC_CODE_LABEL,
+                    format!("{}", e.status_code())
+                )]
+            );
+            Status::unauthenticated(e.to_string())
+        })?;
         Ok(())
     }
 }

@@ -16,9 +16,11 @@ use std::marker::PhantomData;
 
 use axum::http::{self, Request, StatusCode};
 use axum::response::Response;
-use common_telemetry::error;
+use common_error::prelude::ErrorExt;
+use common_telemetry::warn;
 use futures::future::BoxFuture;
 use http_body::Body;
+use metrics::increment_counter;
 use session::context::UserInfo;
 use snafu::{ensure, OptionExt, ResultExt};
 use tower_http::auth::AsyncAuthorizeRequest;
@@ -80,7 +82,14 @@ where
             let (username, password) = match extract_username_and_password(&request) {
                 Ok((username, password)) => (username, password),
                 Err(e) => {
-                    error!("extract username and password failed: {}", e);
+                    warn!("extract username and password failed: {}", e);
+                    increment_counter!(
+                        crate::metrics::METRIC_AUTH_FAILURE,
+                        &[(
+                            crate::metrics::METRIC_CODE_LABEL,
+                            format!("{}", e.status_code())
+                        )]
+                    );
                     return Err(unauthorized_resp());
                 }
             };
@@ -88,7 +97,14 @@ where
             let (catalog, schema) = match extract_catalog_and_schema(&request) {
                 Ok((catalog, schema)) => (catalog, schema),
                 Err(e) => {
-                    error!("extract catalog and schema failed: {}", e);
+                    warn!("extract catalog and schema failed: {}", e);
+                    increment_counter!(
+                        crate::metrics::METRIC_AUTH_FAILURE,
+                        &[(
+                            crate::metrics::METRIC_CODE_LABEL,
+                            format!("{}", e.status_code())
+                        )]
+                    );
                     return Err(unauthorized_resp());
                 }
             };
@@ -107,7 +123,14 @@ where
                     Ok(request)
                 }
                 Err(e) => {
-                    error!("authenticate failed: {}", e);
+                    warn!("authenticate failed: {}", e);
+                    increment_counter!(
+                        crate::metrics::METRIC_AUTH_FAILURE,
+                        &[(
+                            crate::metrics::METRIC_CODE_LABEL,
+                            format!("{}", e.status_code())
+                        )]
+                    );
                     Err(unauthorized_resp())
                 }
             }

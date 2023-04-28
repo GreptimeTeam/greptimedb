@@ -19,6 +19,7 @@ use api::v1::prometheus_gateway_server::PrometheusGateway;
 use api::v1::promql_request::Promql;
 use api::v1::{PromqlRequest, PromqlResponse, ResponseHeader};
 use async_trait::async_trait;
+use common_telemetry::timer;
 use common_time::util::current_time_rfc3339;
 use query::parser::PromQuery;
 use snafu::OptionExt;
@@ -62,6 +63,13 @@ impl PrometheusGateway for PrometheusGatewayService {
         };
 
         let query_context = create_query_context(inner.header.as_ref());
+        let _timer = timer!(
+            crate::metrics::METRIC_SERVER_GRPC_PROM_REQUEST_TIMER,
+            &[(
+                crate::metrics::METRIC_DB_LABEL,
+                &query_context.get_db_string()
+            )]
+        );
         let result = self.handler.do_query(&prom_query, query_context).await;
         let (metric_name, result_type) =
             retrieve_metric_name_and_result_type(&prom_query.query).unwrap_or_default();

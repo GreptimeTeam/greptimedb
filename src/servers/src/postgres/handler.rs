@@ -19,9 +19,11 @@ use async_trait::async_trait;
 use common_query::Output;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::RecordBatch;
+use common_telemetry::timer;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::{Schema, SchemaRef};
 use futures::{future, stream, Stream, StreamExt};
+use metrics::increment_counter;
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler, StatementOrPortal};
 use pgwire::api::results::{
@@ -44,6 +46,19 @@ impl SimpleQueryHandler for PostgresServerHandler {
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
+        let _timer = timer!(
+            crate::metrics::METRIC_POSTGRES_QUERY_TIMER,
+            &[
+                (
+                    crate::metrics::METRIC_POSTGRES_SUBPROTOCOL_LABEL,
+                    crate::metrics::METRIC_POSTGRES_SIMPLE_QUERY
+                ),
+                (
+                    crate::metrics::METRIC_DB_LABEL,
+                    &self.query_ctx.get_db_string()
+                )
+            ]
+        );
         let outputs = self
             .query_handler
             .do_query(query, self.query_ctx.clone())
@@ -244,6 +259,7 @@ impl QueryParser for POCQueryParser {
     type Statement = (Statement, String);
 
     fn parse_sql(&self, sql: &str, types: &[Type]) -> PgWireResult<Self::Statement> {
+        increment_counter!(crate::metrics::METRIC_POSTGRES_PREPARED_COUNT);
         let mut stmts = ParserContext::create_with_dialect(sql, &GenericDialect {})
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         if stmts.len() != 1 {
@@ -336,9 +352,23 @@ impl ExtendedQueryHandler for PostgresServerHandler {
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
+        let _timer = timer!(
+            crate::metrics::METRIC_POSTGRES_QUERY_TIMER,
+            &[
+                (
+                    crate::metrics::METRIC_POSTGRES_SUBPROTOCOL_LABEL,
+                    crate::metrics::METRIC_POSTGRES_EXTENDED_QUERY
+                ),
+                (
+                    crate::metrics::METRIC_DB_LABEL,
+                    &self.query_ctx.get_db_string()
+                )
+            ]
+        );
         let (_, sql) = portal.statement().statement();
 
         // manually replace variables in prepared statement
+        // FIXME(sunng87)
         let mut sql = sql.clone();
         for i in 0..portal.parameter_len() {
             sql = sql.replace(&format!("${}", i + 1), &parameter_to_string(portal, i)?);
