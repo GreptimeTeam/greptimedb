@@ -321,8 +321,10 @@ impl PromJsonResponse {
                 // TODO(ruihang): push table name `__metric__`
                 let mut tags = vec![metric_name.clone()];
                 for (tag_column, tag_name) in tag_columns.iter().zip(tag_names.iter()) {
-                    let tag_value = tag_column.get_data(row_index).unwrap().to_string();
-                    tags.push((tag_name.to_string(), tag_value));
+                    // TODO(ruihang): add test for NULL tag
+                    if let Some(tag_value) = tag_column.get_data(row_index) {
+                        tags.push((tag_name.to_string(), tag_value.to_string()));
+                    }
                 }
 
                 // retrieve timestamp
