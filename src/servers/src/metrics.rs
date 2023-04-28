@@ -31,8 +31,9 @@ pub(crate) const METRIC_MYSQL_BINQUERY: &str = "binquery";
 pub(crate) const METRIC_MYSQL_TEXTQUERY: &str = "textquery";
 pub(crate) const METRIC_MYSQL_PREPARED_COUNT: &str = "servers.mysql_prepared_count";
 
-// pub(crate) const METRIC_POSTGRES_CONNECTIONS: &str = "servers.postgres_connection_count";
-// pub(crate) const METRIC_POSTGRES_QUERY_TIMER: &str = "servers.postgres_query";
-// pub(crate) const METRIC_POSTGRES_SUBPROTOCOL_LABEL: &str = "subprotocol";
-// pub(crate) const METRIC_POSTGRES_SIMPLE_QUERY: &str = "simple";
-// pub(crate) const METRIC_POSTGRES_EXTENDED_QUERY: &str = "extended";
+pub(crate) const METRIC_POSTGRES_CONNECTIONS: &str = "servers.postgres_connection_count";
+pub(crate) const METRIC_POSTGRES_QUERY_TIMER: &str = "servers.postgres_query";
+pub(crate) const METRIC_POSTGRES_SUBPROTOCOL_LABEL: &str = "subprotocol";
+pub(crate) const METRIC_POSTGRES_SIMPLE_QUERY: &str = "simple";
+pub(crate) const METRIC_POSTGRES_EXTENDED_QUERY: &str = "extended";
+pub(crate) const METRIC_POSTGRES_PREPARED_COUNT: &str = "servers.postgres_prepared_count";
