@@ -96,7 +96,11 @@ impl QueryContext {
     pub fn get_db_string(&self) -> String {
         let catalog = self.current_catalog();
         let schema = self.current_schema();
-        format!("{catalog}-{schema}")
+        if catalog == DEFAULT_CATALOG_NAME {
+            schema
+        } else {
+            format!("{catalog}-{schema}")
+        }
     }
 }
 
@@ -183,5 +187,10 @@ mod test {
         context.set_current_schema("test");
 
         assert_eq!("a0b1c2d3-test", context.get_db_string());
+
+        context.set_current_catalog(DEFAULT_CATALOG_NAME);
+        context.set_current_schema("test");
+
+        assert_eq!("test", context.get_db_string());
     }
 }
