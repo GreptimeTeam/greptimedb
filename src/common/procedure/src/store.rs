@@ -29,7 +29,7 @@ use crate::{BoxedProcedure, ProcedureId};
 pub mod state_store;
 
 /// Key prefix of procedure store.
-pub(crate) const KEY_PREFIX: &str = "procedure/";
+pub(crate) const PROC_PATH: &str = "procedure/";
 
 /// Serialized data of a procedure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,7 +126,7 @@ impl ProcedureStore {
         let mut procedure_key_values: HashMap<_, (ParsedKey, Vec<u8>)> = HashMap::new();
 
         // Scan all procedures.
-        let mut key_values = self.0.walk_top_down(KEY_PREFIX).await?;
+        let mut key_values = self.0.walk_top_down(PROC_PATH).await?;
         while let Some((key, value)) = key_values.try_next().await? {
             let Some(curr_key) = ParsedKey::parse_str(&key) else {
                 logging::warn!("Unknown key while loading procedures, key: {}", key);
@@ -216,7 +216,7 @@ impl fmt::Display for ParsedKey {
         write!(
             f,
             "{}{}/{:010}.{}",
-            KEY_PREFIX,
+            PROC_PATH,
             self.procedure_id,
             self.step,
             self.key_type.as_str(),
@@ -227,7 +227,7 @@ impl fmt::Display for ParsedKey {
 impl ParsedKey {
     /// Try to parse the key from specific `input`.
     fn parse_str(input: &str) -> Option<ParsedKey> {
-        let input = input.strip_prefix(KEY_PREFIX)?;
+        let input = input.strip_prefix(PROC_PATH)?;
         let mut iter = input.rsplit('/');
         let name = iter.next()?;
         let id_str = iter.next()?;
@@ -266,6 +266,11 @@ mod tests {
         ProcedureStore::from(object_store)
     }
 
+    macro_rules! proc_path {
+        ($fmt:expr) => { format!("{}{}", PROC_PATH, format_args!($fmt)) };
+        ($fmt:expr, $($args:tt)*) => { format!("{}{}", PROC_PATH, format_args!($fmt, $($args)*)) };
+    }
+
     #[test]
     fn test_parsed_key() {
         let procedure_id = ProcedureId::random();
@@ -275,7 +280,7 @@ mod tests {
             key_type: KeyType::Step,
         };
         assert_eq!(
-            format!("{KEY_PREFIX}{procedure_id}/0000000002.step"),
+            proc_path!("{procedure_id}/0000000002.step"),
             key.to_string()
         );
         assert_eq!(key, ParsedKey::parse_str(&key.to_string()).unwrap());
@@ -286,7 +291,7 @@ mod tests {
             key_type: KeyType::Commit,
         };
         assert_eq!(
-            format!("{KEY_PREFIX}{procedure_id}/0000000002.commit"),
+            proc_path!("{procedure_id}/0000000002.commit"),
             key.to_string()
         );
         assert_eq!(key, ParsedKey::parse_str(&key.to_string()).unwrap());
@@ -297,7 +302,7 @@ mod tests {
             key_type: KeyType::Rollback,
         };
         assert_eq!(
-            format!("{KEY_PREFIX}{procedure_id}/0000000002.rollback"),
+            proc_path!("{procedure_id}/0000000002.rollback"),
             key.to_string()
         );
         assert_eq!(key, ParsedKey::parse_str(&key.to_string()).unwrap());
@@ -311,24 +316,24 @@ mod tests {
         assert!(ParsedKey::parse_str("procedure-0000000003.step").is_none());
 
         let procedure_id = ProcedureId::random();
-        let input = format!("{KEY_PREFIX}{procedure_id}");
+        let input = proc_path!("{procedure_id}");
         assert!(ParsedKey::parse_str(&input).is_none());
 
-        let input = format!("{KEY_PREFIX}{procedure_id}/");
+        let input = proc_path!("{procedure_id}/");
         assert!(ParsedKey::parse_str(&input).is_none());
 
-        let input = format!("{KEY_PREFIX}{procedure_id}/0000000003");
+        let input = proc_path!("{procedure_id}/0000000003");
         assert!(ParsedKey::parse_str(&input).is_none());
 
-        let input = format!("{KEY_PREFIX}{procedure_id}/0000000003.");
+        let input = proc_path!("{procedure_id}/0000000003.");
         assert!(ParsedKey::parse_str(&input).is_none());
 
-        let input = format!("{KEY_PREFIX}{procedure_id}/0000000003.other");
+        let input = proc_path!("{procedure_id}/0000000003.other");
         assert!(ParsedKey::parse_str(&input).is_none());
 
         assert!(ParsedKey::parse_str("12345/0000000003.step").is_none());
 
-        let input = format!("{KEY_PREFIX}{procedure_id}-0000000003.commit");
+        let input = proc_path!("{procedure_id}-0000000003.commit");
         assert!(ParsedKey::parse_str(&input).is_none());
     }
 
