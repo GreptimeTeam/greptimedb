@@ -58,7 +58,7 @@ use tower_http::trace::TraceLayer;
 use self::authorize::HttpAuth;
 use self::influxdb::{influxdb_health, influxdb_ping, influxdb_write};
 use crate::auth::UserProviderRef;
-use crate::configurator::ConfiguratorRefOption;
+use crate::configurator::ConfiguratorRef;
 use crate::error::{AlreadyStartedSnafu, Result, StartHttpSnafu};
 use crate::http::admin::flush;
 use crate::metrics_handler::MetricsHandler;
@@ -113,7 +113,7 @@ pub struct HttpServer {
     shutdown_tx: Mutex<Option<Sender<()>>>,
     user_provider: Option<UserProviderRef>,
     metrics_handler: Option<MetricsHandler>,
-    http_configurator: ConfiguratorRefOption,
+    configurator: Option<ConfiguratorRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -384,7 +384,7 @@ impl HttpServerBuilder {
                 script_handler: None,
                 metrics_handler: None,
                 shutdown_tx: Mutex::new(None),
-                http_configurator: None,
+                configurator: None,
             },
         }
     }
@@ -429,8 +429,8 @@ impl HttpServerBuilder {
         self
     }
 
-    pub fn with_http_configurator(&mut self, configurator: ConfiguratorRefOption) -> &mut Self {
-        self.inner.http_configurator = configurator;
+    pub fn with_configurator(&mut self, configurator: Option<ConfiguratorRef>) -> &mut Self {
+        self.inner.configurator = configurator;
         self
     }
 
@@ -618,7 +618,7 @@ impl Server for HttpServer {
             );
 
             let mut app = self.make_app();
-            if let Some(configurator) = self.http_configurator.as_ref() {
+            if let Some(configurator) = self.configurator.as_ref() {
                 app = configurator.config_http(app);
             }
             let app = self.build(app);

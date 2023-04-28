@@ -57,7 +57,7 @@ impl Services {
         T: FrontendInstance,
     {
         let mut result = Vec::<ServerHandler>::with_capacity(plugins.len());
-        let user_provider = plugins.get::<UserProviderRef>().cloned();
+        let user_provider = plugins.get::<UserProviderRef>();
 
         if let Some(opts) = &opts.grpc_options {
             let grpc_addr = parse_addr(&opts.addr)?;
@@ -181,9 +181,8 @@ impl Services {
             http_server_builder.with_metrics_handler(MetricsHandler);
             http_server_builder.with_script_handler(instance.clone());
 
-            if let Some(http_config) = plugins.get::<ConfiguratorRef>() {
-                let c = http_config.lock().await;
-                http_server_builder.with_http_configurator(c.clone());
+            if let Some(configurator) = plugins.get::<Option<ConfiguratorRef>>() {
+                http_server_builder.with_configurator(configurator);
             }
             let http_server = http_server_builder.build();
             result.push((Box::new(http_server), http_addr));

@@ -127,7 +127,7 @@ async fn test_query_validate() -> Result<()> {
     let catalog_list = catalog_list()?;
 
     // set plugins
-    let mut plugins = Plugins::new();
+    let plugins = Plugins::new();
     plugins.insert(QueryOptions {
         disallow_cross_schema_query: true,
     });

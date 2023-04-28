@@ -14,16 +14,12 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use axum::Router;
-use tokio::sync::Mutex;
 
-#[async_trait]
 pub trait Configurator: Send + Sync {
     fn config_http(&self, route: Router) -> Router {
         route
     }
 }
 
-pub type ConfiguratorRefOption = Option<Arc<dyn Configurator>>;
-pub type ConfiguratorRef = Arc<Mutex<Option<Arc<dyn Configurator>>>>;
+pub type ConfiguratorRef = Arc<dyn Configurator>;

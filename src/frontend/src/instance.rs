@@ -65,7 +65,6 @@ use sql::dialect::GenericDialect;
 use sql::parser::ParserContext;
 use sql::statements::copy::CopyTable;
 use sql::statements::statement::Statement;
-use tokio::sync::Mutex;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
@@ -98,6 +97,7 @@ pub trait FrontendInstance:
 }
 
 pub type FrontendInstanceRef = Arc<dyn FrontendInstance>;
+pub type StatementExecutorRef = Arc<StatementExecutor>;
 
 #[derive(Clone)]
 pub struct Instance {
@@ -155,9 +155,7 @@ impl Instance {
             query_engine.clone(),
             dist_instance.clone(),
         ));
-        if let Some(configurator) = plugins.get::<Arc<Mutex<Option<Arc<StatementExecutor>>>>>() {
-            *configurator.lock().await = Some(statement_executor.clone());
-        }
+        plugins.insert::<Option<StatementExecutorRef>>(Some(statement_executor.clone()));
 
         Ok(Instance {
             catalog_manager,
@@ -456,8 +454,8 @@ impl SqlQueryHandler for Instance {
 
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
         let _timer = timer!(metrics::METRIC_HANDLE_SQL_ELAPSED);
-
-        let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
+        let query_interceptor_opt = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
+        let query_interceptor = query_interceptor_opt.as_ref();
         let query = match query_interceptor.pre_parsing(query, query_ctx.clone()) {
             Ok(q) => q,
             Err(e) => return vec![Err(e)],
@@ -733,7 +731,7 @@ mod tests {
     #[test]
     fn test_exec_validation() {
         let query_ctx = Arc::new(QueryContext::new());
-        let mut plugins = Plugins::new();
+        let plugins = Plugins::new();
         plugins.insert(QueryOptions {
             disallow_cross_schema_query: true,
         });
@@ -798,7 +796,7 @@ mod tests {
 
         fn do_test(sql: &str, plugins: Arc<Plugins>, query_ctx: &QueryContextRef, is_ok: bool) {
             let stmt = &parse_stmt(sql).unwrap()[0];
-            let re = check_permission(plugins.clone(), stmt, query_ctx);
+            let re = check_permission(plugins, stmt, query_ctx);
             if is_ok {
                 assert!(re.is_ok());
             } else {
@@ -836,7 +834,7 @@ mod tests {
 
         // test describe table
         let sql = "DESC TABLE {catalog}{schema}demo;";
-        replace_test(sql, plugins.clone(), &query_ctx);
+        replace_test(sql, plugins, &query_ctx);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1102,7 +1100,7 @@ mod tests {
         let standalone = tests::create_standalone_instance("test_hook").await;
         let mut instance = standalone.instance;
 
-        let mut plugins = Plugins::new();
+        let plugins = Plugins::new();
         let counter_hook = Arc::new(AssertionHook::default());
         plugins.insert::<SqlQueryInterceptorRef<Error>>(counter_hook.clone());
         Arc::make_mut(&mut instance).set_plugins(Arc::new(plugins));
@@ -1162,7 +1160,7 @@ mod tests {
         let standalone = tests::create_standalone_instance("test_db_hook").await;
         let mut instance = standalone.instance;
 
-        let mut plugins = Plugins::new();
+        let plugins = Plugins::new();
         let hook = Arc::new(DisableDBOpHook::default());
         plugins.insert::<SqlQueryInterceptorRef<Error>>(hook.clone());
         Arc::make_mut(&mut instance).set_plugins(Arc::new(plugins));
