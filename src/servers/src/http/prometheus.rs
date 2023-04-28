@@ -51,9 +51,15 @@ pub async fn remote_write(
     Query(params): Query<DatabaseQuery>,
     RawBody(body): RawBody,
 ) -> Result<(StatusCode, ())> {
-    let _timer = timer!(crate::metrics::METRIC_HTTP_PROMETHEUS_WRITE_ELAPSED);
     let request = decode_remote_write_request(body).await?;
 
+    let _timer = timer!(
+        crate::metrics::METRIC_HTTP_PROMETHEUS_WRITE_ELAPSED,
+        &[(
+            crate::metrics::METRIC_DB_LABEL,
+            params.db.as_deref().unwrap_or("")
+        )]
+    );
     let ctx = if let Some(db) = params.db {
         let (catalog, schema) = parse_catalog_and_schema_from_client_database_name(&db);
         Arc::new(QueryContext::with(catalog, schema))
@@ -85,9 +91,15 @@ pub async fn remote_read(
     Query(params): Query<DatabaseQuery>,
     RawBody(body): RawBody,
 ) -> Result<PrometheusResponse> {
-    let _timer = timer!(crate::metrics::METRIC_HTTP_PROMETHEUS_READ_ELAPSED);
     let request = decode_remote_read_request(body).await?;
 
+    let _timer = timer!(
+        crate::metrics::METRIC_HTTP_PROMETHEUS_READ_ELAPSED,
+        &[(
+            crate::metrics::METRIC_DB_LABEL,
+            params.db.as_deref().unwrap_or("")
+        )]
+    );
     let ctx = if let Some(db) = params.db {
         let (catalog, schema) = parse_catalog_and_schema_from_client_database_name(&db);
         Arc::new(QueryContext::with(catalog, schema))

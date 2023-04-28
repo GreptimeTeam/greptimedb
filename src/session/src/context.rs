@@ -92,6 +92,12 @@ impl QueryContext {
             )
         }
     }
+
+    pub fn get_db_string(&self) -> String {
+        let catalog = self.current_catalog();
+        let schema = self.current_schema();
+        format!("{catalog}-{schema}")
+    }
 }
 
 pub const DEFAULT_USERNAME: &str = "greptime";
@@ -148,6 +154,7 @@ pub enum Channel {
 
 #[cfg(test)]
 mod test {
+    use super::*;
     use crate::context::{Channel, UserInfo};
     use crate::Session;
 
@@ -166,5 +173,15 @@ mod test {
             "127.0.0.1"
         );
         assert_eq!(session.conn_info().client_host.port(), 9000);
+    }
+
+    #[test]
+    fn test_context_db_string() {
+        let context = QueryContext::new();
+
+        context.set_current_catalog("a0b1c2d3");
+        context.set_current_schema("test");
+
+        assert_eq!("a0b1c2d3-test", context.get_db_string());
     }
 }

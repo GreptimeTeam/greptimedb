@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) const METRIC_DB_LABEL: &str = "db";
+
 pub(crate) const METRIC_HTTP_SQL_ELAPSED: &str = "servers.http_sql_elapsed";
 pub(crate) const METRIC_HTTP_PROMQL_ELAPSED: &str = "servers.http_promql_elapsed";
 pub(crate) const METRIC_AUTH_FAILURE: &str = "servers.auth_failure_count";
