@@ -215,15 +215,22 @@ impl PromJsonResponse {
         result_type: String,
     ) -> Json<Self> {
         let response: Result<Json<Self>> = try {
+            let result_type = result_type.clone();
             let json = match result? {
-                Output::RecordBatches(batches) => {
-                    Self::success(Self::record_batches_to_data(batches, metric_name)?)
-                }
+                Output::RecordBatches(batches) => Self::success(Self::record_batches_to_data(
+                    batches,
+                    metric_name,
+                    result_type,
+                )?),
                 Output::Stream(stream) => {
                     let record_batches = RecordBatches::try_collect(stream)
                         .await
                         .context(CollectRecordbatchSnafu)?;
-                    Self::success(Self::record_batches_to_data(record_batches, metric_name)?)
+                    Self::success(Self::record_batches_to_data(
+                        record_batches,
+                        metric_name,
+                        result_type,
+                    )?)
                 }
                 Output::AffectedRows(_) => Self::error(
                     "unexpected result",
@@ -252,7 +259,11 @@ impl PromJsonResponse {
         }
     }
 
-    fn record_batches_to_data(batches: RecordBatches, metric_name: String) -> Result<PromData> {
+    fn record_batches_to_data(
+        batches: RecordBatches,
+        metric_name: String,
+        result_type: String,
+    ) -> Result<PromData> {
         // infer semantic type of each column from schema.
         // TODO(ruihang): wish there is a better way to do this.
         let mut timestamp_column_index = None;
@@ -348,7 +359,7 @@ impl PromJsonResponse {
             .collect::<Vec<_>>();
 
         let data = PromData {
-            result_type: "matrix".to_string(),
+            result_type,
             result,
         };
 
@@ -422,9 +433,9 @@ pub async fn range_query(
     let query_ctx = QueryContext::with(catalog, schema);
 
     let result = handler.do_query(&prom_query, Arc::new(query_ctx)).await;
-    let (metric_name, result_type) =
+    let (metric_name, _) =
         retrieve_metric_name_and_result_type(&prom_query.query).unwrap_or_default();
-    PromJsonResponse::from_query_result(result, metric_name, result_type).await
+    PromJsonResponse::from_query_result(result, metric_name, "matrix".to_string()).await
 }
 
 pub(crate) fn retrieve_metric_name_and_result_type(promql: &str) -> Option<(String, String)> {
