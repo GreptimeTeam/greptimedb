@@ -410,13 +410,16 @@ fn create_object_store_with_cache(
     };
 
     if let Some(path) = cache_path {
-        let cache_store =
-            FsBuilder::default()
-                .root(path)
-                .build()
-                .with_context(|_| error::InitBackendSnafu {
-                    config: store_config.clone(),
-                })?;
+        let atomic_temp_dir = format!("{path}/.tmp/");
+        clean_temp_dir(&atomic_temp_dir)?;
+        let cache_store = FsBuilder::default()
+            .root(path)
+            .atomic_write_dir(&atomic_temp_dir)
+            .build()
+            .with_context(|_| error::InitBackendSnafu {
+                config: store_config.clone(),
+            })?;
+
         let cache_layer = LruCacheLayer::new(Arc::new(cache_store), cache_capacity.0 as usize);
         Ok(object_store.layer(cache_layer))
     } else {
@@ -460,6 +463,16 @@ pub(crate) async fn new_s3_object_store(store_config: &ObjectStoreConfig) -> Res
     )
 }
 
+fn clean_temp_dir(dir: &str) -> Result<()> {
+    if path::Path::new(&dir).exists() {
+        info!("Begin to clean temp storage directory: {}", &dir);
+        fs::remove_dir_all(dir).context(error::RemoveDirSnafu { dir })?;
+        info!("Cleaned temp storage directory: {}", &dir);
+    }
+
+    Ok(())
+}
+
 pub(crate) async fn new_fs_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {
     let file_config = match store_config {
         ObjectStoreConfig::File(config) => config,
@@ -471,16 +484,7 @@ pub(crate) async fn new_fs_object_store(store_config: &ObjectStoreConfig) -> Res
     info!("The file storage directory is: {}", &data_dir);
 
     let atomic_write_dir = format!("{data_dir}/.tmp/");
-    if path::Path::new(&atomic_write_dir).exists() {
-        info!(
-            "Begin to clean temp storage directory: {}",
-            &atomic_write_dir
-        );
-        fs::remove_dir_all(&atomic_write_dir).context(error::RemoveDirSnafu {
-            dir: &atomic_write_dir,
-        })?;
-        info!("Cleaned temp storage directory: {}", &atomic_write_dir);
-    }
+    clean_temp_dir(&atomic_write_dir)?;
 
     let mut builder = FsBuilder::default();
     builder.root(&data_dir).atomic_write_dir(&atomic_write_dir);
