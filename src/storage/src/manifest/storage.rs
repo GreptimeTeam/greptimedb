@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::iter::Iterator;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_telemetry::logging;
@@ -25,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 use store_api::manifest::{LogIterator, ManifestLogStorage, ManifestVersion};
 
+use super::layer::{ComposeLayer, ObjectStoreLayer};
 use crate::error::{
     DecodeJsonSnafu, DeleteObjectSnafu, EncodeJsonSnafu, Error, InvalidScanIndexSnafu,
     ListObjectsSnafu, ReadObjectSnafu, Result, Utf8Snafu, WriteObjectSnafu,
@@ -69,6 +71,7 @@ pub fn is_checkpoint_file(file_name: &str) -> bool {
 
 pub struct ObjectStoreLogIterator {
     object_store: ObjectStore,
+    layer: Arc<ComposeLayer>,
     iter: Box<dyn Iterator<Item = (ManifestVersion, Entry)> + Send + Sync>,
 }
 
@@ -84,7 +87,8 @@ impl LogIterator for ObjectStoreLogIterator {
                     .read(entry.path())
                     .await
                     .context(ReadObjectSnafu { path: entry.path() })?;
-                Ok(Some((v, bytes)))
+                let data = self.layer.backward(bytes).await?;
+                Ok(Some((v, data)))
             }
             None => Ok(None),
         }
@@ -94,6 +98,7 @@ impl LogIterator for ObjectStoreLogIterator {
 #[derive(Clone, Debug)]
 pub struct ManifestObjectStore {
     object_store: ObjectStore,
+    layer: Arc<ComposeLayer>,
     path: String,
 }
 
@@ -101,6 +106,7 @@ impl ManifestObjectStore {
     pub fn new(path: &str, object_store: ObjectStore) -> Self {
         Self {
             object_store,
+            layer: Arc::new(ComposeLayer::new()),
             path: util::normalize_dir(path),
         }
     }
@@ -186,6 +192,7 @@ impl ManifestLogStorage for ManifestObjectStore {
 
         Ok(ObjectStoreLogIterator {
             object_store: self.object_store.clone(),
+            layer: self.layer.clone(),
             iter: Box::new(entries.into_iter()),
         })
     }
@@ -282,8 +289,9 @@ impl ManifestLogStorage for ManifestObjectStore {
 
         logging::debug!("Save log to manifest storage, version: {}", version);
 
+        let data = self.layer.forward(bytes.to_vec()).await?;
         self.object_store
-            .write(&path, bytes.to_vec())
+            .write(&path, data)
             .await
             .context(WriteObjectSnafu { path })
     }
@@ -316,8 +324,9 @@ impl ManifestLogStorage for ManifestObjectStore {
 
     async fn save_checkpoint(&self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {
         let path = self.checkpoint_file_path(version);
+        let data = self.layer.forward(bytes.to_vec()).await?;
         self.object_store
-            .write(&path, bytes.to_vec())
+            .write(&path, data)
             .await
             .context(WriteObjectSnafu { path })?;
 
@@ -337,9 +346,9 @@ impl ManifestLogStorage for ManifestObjectStore {
         );
 
         let bs = checkpoint_metadata.encode()?;
-
+        let bs_data = self.layer.forward(bs.as_ref().to_vec()).await?;
         self.object_store
-            .write(&last_checkpoint_path, bs.as_ref().to_vec())
+            .write(&last_checkpoint_path, bs_data)
             .await
             .context(WriteObjectSnafu {
                 path: last_checkpoint_path,
@@ -354,7 +363,10 @@ impl ManifestLogStorage for ManifestObjectStore {
     ) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
         let path = self.checkpoint_file_path(version);
         match self.object_store.read(&path).await {
-            Ok(checkpoint) => Ok(Some((version, checkpoint))),
+            Ok(checkpoint) => {
+                let checkpoint_back = self.layer.backward(checkpoint).await?;
+                Ok(Some((version, checkpoint_back)))
+            }
             Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e).context(ReadObjectSnafu { path }),
         }
@@ -371,9 +383,8 @@ impl ManifestLogStorage for ManifestObjectStore {
 
     async fn load_last_checkpoint(&self) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
         let last_checkpoint_path = self.last_checkpoint_path();
-
         let last_checkpoint_data = match self.object_store.read(&last_checkpoint_path).await {
-            Ok(last_checkpoint_data) => last_checkpoint_data,
+            Ok(last_checkpoint_data) => self.layer.backward(last_checkpoint_data).await?,
             Err(e) if e.kind() == ErrorKind::NotFound => {
                 return Ok(None);
             }
