@@ -277,6 +277,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
 
         if let Some(schema_validator) = &self.user_provider {
             if let Err(e) = schema_validator.authorize(catalog, schema, user_info).await {
+                increment_counter!(crate::metrics::METRIC_AUTH_FAILURE);
                 return w
                     .error(
                         ErrorKind::ER_DBACCESS_DENIED_ERROR,

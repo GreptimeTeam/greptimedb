@@ -16,6 +16,7 @@ use std::fmt::Debug;
 
 use async_trait::async_trait;
 use futures::{Sink, SinkExt};
+use metrics::increment_counter;
 use pgwire::api::auth::StartupHandler;
 use pgwire::api::{auth, ClientInfo, PgWireConnectionState};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
@@ -173,6 +174,7 @@ impl StartupHandler for PostgresServerHandler {
                 // do authenticate
                 let auth_result = self.login_verifier.auth(&login_info, pwd.password()).await;
                 if !matches!(auth_result, Ok(true)) {
+                    increment_counter!(crate::metrics::METRIC_AUTH_FAILURE);
                     return send_error(
                         client,
                         "FATAL",
