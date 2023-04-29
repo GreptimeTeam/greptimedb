@@ -27,6 +27,7 @@ futures-util.workspace = true
 key-lock = "0.1"
 lazy_static = "1.4"
 meta-client = { path = "../meta-client" }
+metrics.workspace = true
 parking_lot = "0.12"
 regex = "1.6"
 serde = "1.0"
