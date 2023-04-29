@@ -76,6 +76,10 @@ insert into foo (host, cpu) values ('host2', 2.2);
 
 Affected Rows: 1
 
+insert into foo (host) values ('host3');
+
+Affected Rows: 1
+
 select * from foo;
 
 +-------+---------------------+-----+
@@ -83,6 +87,7 @@ select * from foo;
 +-------+---------------------+-----+
 | host1 | 2000-01-01T00:00:00 | 1.1 |
 | host2 | 2023-04-29T00:00:00 | 2.2 |
+| host3 | 2023-04-29T00:00:00 | 0.0 |
 +-------+---------------------+-----+
 
 DROP TABLE foo;

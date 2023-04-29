@@ -150,9 +150,8 @@ impl ErrorExt for Error {
             Error::InvalidTableRouteData { .. } => StatusCode::Internal,
             Error::ConvertScalarValue { .. } => StatusCode::Internal,
             Error::FindDatanode { .. } => StatusCode::InvalidArguments,
-            Error::CreateDefaultToRead { .. } | Error::MissingDefaultValue { .. } => {
-                StatusCode::Internal
-            }
+            Error::CreateDefaultToRead { source, .. } => source.status_code(),
+            Error::MissingDefaultValue { .. } => StatusCode::Internal,
         }
     }
 

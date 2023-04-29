@@ -48,27 +48,29 @@ impl WriteSplitter {
         insert: InsertRequest,
         schema: &Schema,
     ) -> Result<InsertRequestSplit> {
-        check_req(&insert)?;
+        let row_nums = check_req(&insert)?;
         let mut insert = insert;
         let partition_columns = self.partition_rule.partition_columns();
-        for column_schema in schema.column_schemas() {
-            if partition_columns.contains(&column_schema.name)
-                && (!insert.columns_values.contains_key(&column_schema.name))
-            {
-                let key = insert.columns_values.keys().next().unwrap();
-                let row_nums = insert.columns_values.get(key).unwrap().len();
-                let default_values = column_schema
-                    .create_default_vector(row_nums)
-                    .context(CreateDefaultToReadSnafu {
-                        column: &column_schema.name,
-                    })?
-                    .context(MissingDefaultValueSnafu {
-                        column: &column_schema.name,
-                    })?;
-                insert
-                    .columns_values
-                    .insert(column_schema.name.clone(), default_values);
-            }
+        let missing_columns = schema
+            .column_schemas()
+            .iter()
+            .filter(|schema| {
+                partition_columns.contains(&schema.name)
+                    && !insert.columns_values.contains_key(&schema.name)
+            })
+            .collect::<Vec<_>>();
+        for column_schema in missing_columns {
+            let default_values = column_schema
+                .create_default_vector(row_nums)
+                .context(CreateDefaultToReadSnafu {
+                    column: &column_schema.name,
+                })?
+                .context(MissingDefaultValueSnafu {
+                    column: &column_schema.name,
+                })?;
+            insert
+                .columns_values
+                .insert(column_schema.name.clone(), default_values);
         }
         let partition_columns =
             find_partitioning_values(&insert.columns_values, &partition_columns)?;
@@ -170,7 +172,7 @@ impl WriteSplitter {
     }
 }
 
-fn check_req(insert: &InsertRequest) -> Result<()> {
+fn check_req(insert: &InsertRequest) -> Result<usize> {
     let mut len: Option<usize> = None;
     for vector in insert.columns_values.values() {
         match len {
@@ -183,7 +185,10 @@ fn check_req(insert: &InsertRequest) -> Result<()> {
             None => len = Some(vector.len()),
         }
     }
-    Ok(())
+    let len = len.context(InvalidInsertRequestSnafu {
+        reason: "The columns in the insert statement are empty.",
+    })?;
+    Ok(len)
 }
 
 fn find_partitioning_values(
@@ -291,6 +296,7 @@ mod tests {
         let right = mock_insert_request();
         let ret = check_req(&right);
         assert!(ret.is_ok());
+        assert_eq!(ret.unwrap(), 3);
 
         let wrong = mock_wrong_insert_request();
         let ret = check_req(&wrong);
@@ -386,40 +392,25 @@ mod tests {
 
         let r1_columns = &r1_insert.columns_values;
         assert_eq!(3, r1_columns.len());
+        assert_eq!(Value::from(1_i16), r1_columns.get("id").unwrap().get(0));
+        assert_eq!(Value::from("host1"), r1_columns.get("host").unwrap().get(0));
         assert_eq!(
-            <i16 as Into<Value>>::into(1),
-            r1_columns.get("id").unwrap().get(0)
-        );
-        assert_eq!(
-            <&str as Into<Value>>::into("host1"),
-            r1_columns.get("host").unwrap().get(0)
-        );
-        assert_eq!(
-            <bool as Into<Value>>::into(true),
+            Value::from(true),
             r1_columns.get("enable_reboot").unwrap().get(0)
         );
 
         let r2_columns = &r2_insert.columns_values;
         assert_eq!(3, r2_columns.len());
-        assert_eq!(
-            <i16 as Into<Value>>::into(2),
-            r2_columns.get("id").unwrap().get(0)
-        );
-        assert_eq!(
-            <i16 as Into<Value>>::into(3),
-            r2_columns.get("id").unwrap().get(1)
-        );
+        assert_eq!(Value::from(2_i16), r2_columns.get("id").unwrap().get(0));
+        assert_eq!(Value::from(3_i16), r2_columns.get("id").unwrap().get(1));
         assert_eq!(Value::Null, r2_columns.get("host").unwrap().get(0));
+        assert_eq!(Value::from("host3"), r2_columns.get("host").unwrap().get(1));
         assert_eq!(
-            <&str as Into<Value>>::into("host3"),
-            r2_columns.get("host").unwrap().get(1)
-        );
-        assert_eq!(
-            <bool as Into<Value>>::into(false),
+            Value::from(false),
             r2_columns.get("enable_reboot").unwrap().get(0)
         );
         assert_eq!(
-            <bool as Into<Value>>::into(true),
+            Value::from(true),
             r2_columns.get("enable_reboot").unwrap().get(1)
         );
     }

@@ -37,6 +37,8 @@ insert into foo (host, cpu, ts) values ('host1', 1.1, '2000-01-01 00:00:00+00:00
 
 insert into foo (host, cpu) values ('host2', 2.2);
 
+insert into foo (host) values ('host3');
+
 select * from foo;
 
 DROP TABLE foo;
