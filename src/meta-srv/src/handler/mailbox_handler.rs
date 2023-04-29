@@ -23,8 +23,8 @@ pub struct MailboxHandler;
 
 #[async_trait::async_trait]
 impl HeartbeatHandler for MailboxHandler {
-    fn is_acceptable(&self, role: Option<Role>) -> bool {
-        role.map_or(false, |r| r == Role::Datanode)
+    fn is_acceptable(&self, _role: Option<Role>) -> bool {
+        true
     }
 
     async fn handle(
@@ -39,7 +39,7 @@ impl HeartbeatHandler for MailboxHandler {
 
         let mailbox_messages = req.mailbox_messages.clone();
         for msg in mailbox_messages {
-            ctx.mailbox.clone().on_recv(msg.id, Ok(msg)).await?;
+            ctx.mailbox.on_recv(msg.id, Ok(msg)).await?;
         }
 
         Ok(())

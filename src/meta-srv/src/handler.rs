@@ -28,7 +28,7 @@ pub use persist_stats_handler::PersistStatsHandler;
 pub use response_header_handler::ResponseHeaderHandler;
 use snafu::OptionExt;
 use tokio::sync::mpsc::Sender;
-use tokio::sync::{oneshot, RwLock};
+use tokio::sync::{oneshot, Notify, RwLock};
 
 use self::instruction::Instruction;
 use self::node_stat::Stat;
@@ -141,32 +141,33 @@ pub struct HeartbeatMailbox {
     senders: DashMap<MessageId, Tx>,
     recervers: DashMap<MessageId, Rx>,
     timeouts: DashMap<MessageId, Duration>,
+    timeout_notify: Notify,
 }
 
 impl HeartbeatMailbox {
-    pub fn with_timeout(
+    pub fn create(
         pushers: Arc<RwLock<BTreeMap<String, Pusher>>>,
         sequence: Sequence,
-        check_interval_millis: u64,
     ) -> MailboxRef {
-        let ins = Arc::new(Self {
+        let mailbox = Arc::new(Self::new(pushers, sequence));
+
+        let timeout_checker = mailbox.clone();
+        common_runtime::spawn_bg(async move {
+            timeout_checker.check_timeout_bg(1).await;
+        });
+
+        mailbox
+    }
+
+    fn new(pushers: Arc<RwLock<BTreeMap<String, Pusher>>>, sequence: Sequence) -> Self {
+        Self {
             pushers,
             sequence,
             senders: DashMap::default(),
             recervers: DashMap::default(),
             timeouts: DashMap::default(),
-        });
-
-        if check_interval_millis > 0 {
-            let timeout_checker = ins.clone();
-            common_runtime::spawn_bg(async move {
-                timeout_checker
-                    .check_timeout_bg(check_interval_millis)
-                    .await;
-            });
+            timeout_notify: Notify::new(),
         }
-
-        ins
     }
 
     async fn check_timeout_bg(&self, interval_millis: u64) {
@@ -174,6 +175,10 @@ impl HeartbeatMailbox {
 
         loop {
             interval.tick().await;
+
+            if self.timeouts.is_empty() {
+                self.timeout_notify.notified().await;
+            }
 
             let now = Duration::from_millis(common_time::util::current_time_millis() as u64);
             let timeout_ids = self
@@ -244,6 +249,7 @@ impl Mailbox for HeartbeatMailbox {
         let deadline =
             Duration::from_millis(common_time::util::current_time_millis() as u64) + timeout;
         self.timeouts.insert(id, deadline);
+        self.timeout_notify.notify_one();
         self.recv(id).await
     }
 
@@ -254,5 +260,75 @@ impl Mailbox for HeartbeatMailbox {
                 .map_err(|_| error::MailboxClosedSnafu { id }.build())?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use api::v1::meta::MailboxMessage;
+    use tokio::sync::mpsc;
+
+    use crate::handler::{HeartbeatHandlerGroup, HeartbeatMailbox, Pusher};
+    use crate::sequence::Sequence;
+    use crate::service::mailbox::{Channel, MailboxRef};
+    use crate::service::store::memory::MemStore;
+
+    #[tokio::test]
+    async fn test_mailbox() {
+        let (id, mailbox) = push_msg_via_mailbox().await;
+
+        let resp_msg = MailboxMessage {
+            id,
+            subject: "resp-test".to_string(),
+            timestamp_millis: 456,
+            ..Default::default()
+        };
+
+        mailbox.on_recv(id, Ok(resp_msg)).await.unwrap();
+
+        let recv_msg = mailbox.recv(id).await.unwrap();
+        assert_eq!(recv_msg.id, id);
+        assert_eq!(recv_msg.timestamp_millis, 456);
+        assert_eq!(recv_msg.subject, "resp-test".to_string());
+    }
+
+    #[tokio::test]
+    async fn test_mailbox_timeout() {
+        let (id, mailbox) = push_msg_via_mailbox().await;
+        let res = mailbox.recv_timeout(id, Duration::from_millis(100)).await;
+        assert!(res.is_err());
+    }
+
+    async fn push_msg_via_mailbox() -> (u64, MailboxRef) {
+        let datanode_id = 12;
+        let (pusher_tx, mut pusher_rx) = mpsc::channel(16);
+        let pusher: Pusher = pusher_tx;
+        let handler_group = HeartbeatHandlerGroup::default();
+        handler_group
+            .register(format!("0-{}", datanode_id), pusher)
+            .await;
+
+        let kv_store = Arc::new(MemStore::new());
+        let seq = Sequence::new("test_seq", 0, 10, kv_store);
+        let mailbox = HeartbeatMailbox::create(handler_group.pushers(), seq);
+
+        let msg = MailboxMessage {
+            id: 0,
+            subject: "req-test".to_string(),
+            timestamp_millis: 123,
+            ..Default::default()
+        };
+        let ch = Channel::Datanode(datanode_id);
+        let msg_id = mailbox.send(&ch, msg).await.unwrap();
+
+        let recv_obj = pusher_rx.recv().await.unwrap().unwrap();
+        assert_eq!(recv_obj.mailbox_messages[0].id, msg_id);
+        assert_eq!(recv_obj.mailbox_messages[0].timestamp_millis, 123);
+        assert_eq!(recv_obj.mailbox_messages[0].subject, "req-test".to_string());
+
+        (msg_id, mailbox)
     }
 }

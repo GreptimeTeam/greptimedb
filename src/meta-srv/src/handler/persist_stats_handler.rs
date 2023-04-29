@@ -88,7 +88,7 @@ mod tests {
         let in_memory = Arc::new(MemStore::new());
         let kv_store = Arc::new(MemStore::new());
         let seq = Sequence::new("test_seq", 0, 10, kv_store.clone());
-        let mailbox = HeartbeatMailbox::with_timeout(Arc::new(Default::default()), seq, 0);
+        let mailbox = HeartbeatMailbox::create(Arc::new(Default::default()), seq);
         let mut ctx = Context {
             datanode_lease_secs: 30,
             server_addr: "127.0.0.1:0000".to_string(),
