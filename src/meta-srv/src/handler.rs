@@ -19,7 +19,7 @@ use std::time::Duration;
 use api::v1::meta::{HeartbeatRequest, HeartbeatResponse, MailboxMessage, ResponseHeader, Role};
 pub use check_leader_handler::CheckLeaderHandler;
 pub use collect_stats_handler::CollectStatsHandler;
-use common_telemetry::info;
+use common_telemetry::{info, warn};
 use dashmap::DashMap;
 pub use failure_handler::RegionFailureHandler;
 pub use keep_lease_handler::KeepLeaseHandler;
@@ -50,7 +50,7 @@ mod response_header_handler;
 
 #[async_trait::async_trait]
 pub trait HeartbeatHandler: Send + Sync {
-    fn is_acceptable(&self, role: Option<Role>) -> bool;
+    fn is_acceptable(&self, role: Role) -> bool;
 
     async fn handle(
         &self,
@@ -118,7 +118,14 @@ impl HeartbeatHandlerGroup {
                 break;
             }
 
-            let role = req.header.as_ref().and_then(|h| Role::from_i32(h.role));
+            let role = req
+                .header
+                .as_ref()
+                .and_then(|h| Role::from_i32(h.role))
+                .context(error::InvalidArgumentsSnafu {
+                    err_msg: format!("invalid role: {:?}", req.header),
+                })?;
+
             if h.is_acceptable(role) {
                 h.handle(&req, &mut ctx, &mut acc).await?;
             }
@@ -142,6 +149,7 @@ pub struct HeartbeatMailbox {
     recervers: DashMap<MessageId, Rx>,
     timeouts: DashMap<MessageId, Duration>,
     timeout_notify: Notify,
+    default_timeout: Duration,
 }
 
 impl HeartbeatMailbox {
@@ -167,6 +175,7 @@ impl HeartbeatMailbox {
             recervers: DashMap::default(),
             timeouts: DashMap::default(),
             timeout_notify: Notify::new(),
+            default_timeout: Duration::from_secs(180), // 3 minutes, some operations may take a long time
         }
     }
 
@@ -215,8 +224,8 @@ impl Mailbox for HeartbeatMailbox {
         };
 
         let pusher_id = match ch {
-            Channel::Datanode(id) => format!("0-{}", id),
-            Channel::Frontend(id) => format!("1-{}", id),
+            Channel::Datanode(id) => format!("{}-{}", Role::Datanode as i32, id),
+            Channel::Frontend(id) => format!("{}-{}", Role::Frontend as i32, id),
         };
         let pushers = self.pushers.read().await;
         let pusher = pushers
@@ -237,6 +246,14 @@ impl Mailbox for HeartbeatMailbox {
     }
 
     async fn recv(&self, id: MessageId) -> Result<MailboxMessage> {
+        self.recv_timeout(id, self.default_timeout).await
+    }
+
+    async fn recv_timeout(&self, id: MessageId, timeout: Duration) -> Result<MailboxMessage> {
+        let deadline =
+            Duration::from_millis(common_time::util::current_time_millis() as u64) + timeout;
+        self.timeouts.insert(id, deadline);
+        self.timeout_notify.notify_one();
         let (_, rx) = self
             .recervers
             .remove(&id)
@@ -245,19 +262,21 @@ impl Mailbox for HeartbeatMailbox {
             .map_err(|_| error::MailboxClosedSnafu { id }.build())?
     }
 
-    async fn recv_timeout(&self, id: MessageId, timeout: Duration) -> Result<MailboxMessage> {
-        let deadline =
-            Duration::from_millis(common_time::util::current_time_millis() as u64) + timeout;
-        self.timeouts.insert(id, deadline);
-        self.timeout_notify.notify_one();
-        self.recv(id).await
-    }
-
     async fn on_recv(&self, id: MessageId, maybe_msg: Result<MailboxMessage>) -> Result<()> {
         self.timeouts.remove(&id);
         if let Some((_, tx)) = self.senders.remove(&id) {
             tx.0.send(maybe_msg)
                 .map_err(|_| error::MailboxClosedSnafu { id }.build())?;
+        } else if let Ok(finally_msg) = maybe_msg {
+            let MailboxMessage {
+                id,
+                subject,
+                from,
+                to,
+                timestamp_millis,
+                ..
+            } = finally_msg;
+            warn!("The response arrived too late, id={id}, subject={subject}, from={from}, to={to}, timestamp={timestamp_millis}");
         }
         Ok(())
     }
@@ -268,7 +287,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use api::v1::meta::MailboxMessage;
+    use api::v1::meta::{MailboxMessage, Role};
     use tokio::sync::mpsc;
 
     use crate::handler::{HeartbeatHandlerGroup, HeartbeatMailbox, Pusher};
@@ -308,7 +327,7 @@ mod tests {
         let pusher: Pusher = pusher_tx;
         let handler_group = HeartbeatHandlerGroup::default();
         handler_group
-            .register(format!("0-{}", datanode_id), pusher)
+            .register(format!("{}-{}", Role::Datanode as i32, datanode_id), pusher)
             .await;
 
         let kv_store = Arc::new(MemStore::new());
@@ -322,6 +341,7 @@ mod tests {
             ..Default::default()
         };
         let ch = Channel::Datanode(datanode_id);
+
         let msg_id = mailbox.send(&ch, msg).await.unwrap();
 
         let recv_obj = pusher_rx.recv().await.unwrap().unwrap();

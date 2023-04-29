@@ -23,7 +23,7 @@ pub struct MailboxHandler;
 
 #[async_trait::async_trait]
 impl HeartbeatHandler for MailboxHandler {
-    fn is_acceptable(&self, _role: Option<Role>) -> bool {
+    fn is_acceptable(&self, _role: Role) -> bool {
         true
     }
 

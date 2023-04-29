@@ -55,8 +55,8 @@ impl KeepLeaseHandler {
 
 #[async_trait::async_trait]
 impl HeartbeatHandler for KeepLeaseHandler {
-    fn is_acceptable(&self, role: Option<Role>) -> bool {
-        role.map_or(false, |r| r == Role::Datanode)
+    fn is_acceptable(&self, role: Role) -> bool {
+        role == Role::Datanode
     }
 
     async fn handle(
