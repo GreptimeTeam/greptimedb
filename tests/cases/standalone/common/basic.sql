@@ -27,14 +27,16 @@ DROP TABLE system_metrics;
 
 create table foo (
     host string,
-    ts timestamp DEFAULT CURRENT_TIMESTAMP,
+    ts timestamp DEFAULT '2023-04-29 00:00:00+00:00',
     cpu double default 0,
     TIME INDEX (ts),
     PRIMARY KEY(host)
 ) engine=mito with(regions=1);
 
-insert into foo (host, cpu, ts) values ('host1', 1.1, 1000);
+insert into foo (host, cpu, ts) values ('host1', 1.1, '2000-01-01 00:00:00+00:00');
 
 insert into foo (host, cpu) values ('host2', 2.2);
+
+select * from foo;
 
 DROP TABLE foo;

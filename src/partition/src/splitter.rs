@@ -52,11 +52,11 @@ impl WriteSplitter {
         let mut insert = insert;
         let partition_columns = self.partition_rule.partition_columns();
         for column_schema in schema.column_schemas() {
-            let key = insert.columns_values.keys().next().unwrap();
-            let row_nums = insert.columns_values.get(key).unwrap().len();
             if partition_columns.contains(&column_schema.name)
                 && (!insert.columns_values.contains_key(&column_schema.name))
             {
+                let key = insert.columns_values.keys().next().unwrap();
+                let row_nums = insert.columns_values.get(key).unwrap().len();
                 let default_values = column_schema
                     .create_default_vector(row_nums)
                     .context(CreateDefaultToReadSnafu {
@@ -271,8 +271,8 @@ mod tests {
 
     use datatypes::data_type::ConcreteDataType;
     use datatypes::prelude::ScalarVectorBuilder;
-    use datatypes::schema::Schema as DataTypesSchema;
-    use datatypes::types::StringType;
+    use datatypes::schema::{ColumnSchema, Schema as DataTypesSchema};
+    use datatypes::types::{BooleanType, Int16Type, StringType};
     use datatypes::value::Value;
     use datatypes::vectors::{
         BooleanVectorBuilder, Int16VectorBuilder, MutableVector, StringVectorBuilder,
@@ -302,8 +302,79 @@ mod tests {
         let insert = mock_insert_request();
         let rule = Arc::new(MockPartitionRule) as PartitionRuleRef;
         let spliter = WriteSplitter::with_partition_rule(rule);
-        let stub_schema = DataTypesSchema::new(vec![]);
-        let ret = spliter.split_insert(insert, &stub_schema).unwrap();
+        let mock_schema = DataTypesSchema::new(vec![
+            ColumnSchema::new(
+                "enable_reboot",
+                ConcreteDataType::Boolean(BooleanType),
+                false,
+            ),
+            ColumnSchema::new("id", ConcreteDataType::Int16(Int16Type {}), false),
+            ColumnSchema::new("host", ConcreteDataType::String(StringType), true),
+        ]);
+        let ret = spliter.split_insert(insert, &mock_schema).unwrap();
+
+        assert_eq!(2, ret.len());
+
+        let r1_insert = ret.get(&0).unwrap();
+        let r2_insert = ret.get(&1).unwrap();
+
+        assert_eq!("demo", r1_insert.table_name);
+        assert_eq!("demo", r2_insert.table_name);
+
+        let r1_columns = &r1_insert.columns_values;
+        assert_eq!(3, r1_columns.len());
+        assert_eq!(
+            <i16 as Into<Value>>::into(1),
+            r1_columns.get("id").unwrap().get(0)
+        );
+        assert_eq!(
+            <&str as Into<Value>>::into("host1"),
+            r1_columns.get("host").unwrap().get(0)
+        );
+        assert_eq!(
+            <bool as Into<Value>>::into(true),
+            r1_columns.get("enable_reboot").unwrap().get(0)
+        );
+
+        let r2_columns = &r2_insert.columns_values;
+        assert_eq!(3, r2_columns.len());
+        assert_eq!(
+            <i16 as Into<Value>>::into(2),
+            r2_columns.get("id").unwrap().get(0)
+        );
+        assert_eq!(
+            <i16 as Into<Value>>::into(3),
+            r2_columns.get("id").unwrap().get(1)
+        );
+        assert_eq!(Value::Null, r2_columns.get("host").unwrap().get(0));
+        assert_eq!(
+            <&str as Into<Value>>::into("host3"),
+            r2_columns.get("host").unwrap().get(1)
+        );
+        assert_eq!(
+            <bool as Into<Value>>::into(false),
+            r2_columns.get("enable_reboot").unwrap().get(0)
+        );
+        assert_eq!(
+            <bool as Into<Value>>::into(true),
+            r2_columns.get("enable_reboot").unwrap().get(1)
+        );
+    }
+
+    #[test]
+    fn test_writer_spliter_when_insert_columns_len_is_not_equal_to_schema_columns_len() {
+        let insert = mock_insert_request();
+        let rule = Arc::new(MockPartitionRule) as PartitionRuleRef;
+        let spliter = WriteSplitter::with_partition_rule(rule);
+        let mock_schema = DataTypesSchema::new(vec![
+            ColumnSchema::new(
+                "enable_reboot",
+                ConcreteDataType::Boolean(BooleanType),
+                false,
+            ),
+            ColumnSchema::new("host", ConcreteDataType::String(StringType), true),
+        ]);
+        let ret = spliter.split_insert(insert, &mock_schema).unwrap();
 
         assert_eq!(2, ret.len());
 
