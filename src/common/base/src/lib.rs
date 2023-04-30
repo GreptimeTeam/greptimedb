@@ -15,6 +15,7 @@
 pub mod bit_vec;
 pub mod buffer;
 pub mod bytes;
+pub mod secret;
 #[allow(clippy::all)]
 pub mod readable_size;
 
