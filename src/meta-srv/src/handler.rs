@@ -146,7 +146,7 @@ pub struct HeartbeatMailbox {
     pushers: Arc<RwLock<BTreeMap<String, Pusher>>>,
     sequence: Sequence,
     senders: DashMap<MessageId, Tx>,
-    recervers: DashMap<MessageId, Rx>,
+    receivers: DashMap<MessageId, Rx>,
     timeouts: DashMap<MessageId, Duration>,
     timeout_notify: Notify,
     default_timeout: Duration,
@@ -172,7 +172,7 @@ impl HeartbeatMailbox {
             pushers,
             sequence,
             senders: DashMap::default(),
-            recervers: DashMap::default(),
+            receivers: DashMap::default(),
             timeouts: DashMap::default(),
             timeout_notify: Notify::new(),
             default_timeout: Duration::from_secs(180), // 3 minutes, some operations may take a long time
@@ -240,7 +240,7 @@ impl Mailbox for HeartbeatMailbox {
 
         let (tx, rx) = oneshot::channel();
         self.senders.insert(message_id, Tx(tx));
-        self.recervers.insert(message_id, Rx(rx));
+        self.receivers.insert(message_id, Rx(rx));
 
         Ok(message_id)
     }
@@ -255,7 +255,7 @@ impl Mailbox for HeartbeatMailbox {
         self.timeouts.insert(id, deadline);
         self.timeout_notify.notify_one();
         let (_, rx) = self
-            .recervers
+            .receivers
             .remove(&id)
             .context(error::MailboxNotFoundSnafu { id })?;
         rx.0.await
