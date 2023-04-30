@@ -33,12 +33,23 @@ pub enum Channel {
 }
 
 pub struct MailboxReceiver {
-    pub message_id: MessageId,
-    pub rx: oneshot::Receiver<Result<MailboxMessage>>,
+    message_id: MessageId,
+    rx: oneshot::Receiver<Result<MailboxMessage>>,
+}
+
+impl MailboxReceiver {
+    pub fn new(message_id: MessageId, rx: oneshot::Receiver<Result<MailboxMessage>>) -> Self {
+        Self { message_id, rx }
+    }
+
+    pub fn message_id(&self) -> MessageId {
+        self.message_id
+    }
 }
 
 impl Future for MailboxReceiver {
     type Output = Result<Result<MailboxMessage>>;
+
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         Pin::new(&mut self.rx).poll(cx).map(|r| {
             r.map_err(|e| {

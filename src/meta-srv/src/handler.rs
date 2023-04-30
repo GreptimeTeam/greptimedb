@@ -139,12 +139,10 @@ impl HeartbeatHandlerGroup {
     }
 }
 
-struct Tx(oneshot::Sender<Result<MailboxMessage>>);
-
 pub struct HeartbeatMailbox {
     pushers: Arc<RwLock<BTreeMap<String, Pusher>>>,
     sequence: Sequence,
-    senders: DashMap<MessageId, Tx>,
+    senders: DashMap<MessageId, oneshot::Sender<Result<MailboxMessage>>>,
     timeouts: DashMap<MessageId, Duration>,
     timeout_notify: Notify,
 }
@@ -231,6 +229,14 @@ impl Mailbox for HeartbeatMailbox {
         let pusher = pushers
             .get(&pusher_id)
             .context(error::PusherNotFoundSnafu { pusher_id })?;
+
+        let (tx, rx) = oneshot::channel();
+        self.senders.insert(message_id, tx);
+        let deadline =
+            Duration::from_millis(common_time::util::current_time_millis() as u64) + timeout;
+        self.timeouts.insert(message_id, deadline);
+        self.timeout_notify.notify_one();
+
         pusher.send(Ok(res)).await.map_err(|e| {
             error::PushMessageSnafu {
                 err_msg: e.to_string(),
@@ -238,21 +244,14 @@ impl Mailbox for HeartbeatMailbox {
             .build()
         })?;
 
-        let (tx, rx) = oneshot::channel();
-        self.senders.insert(message_id, Tx(tx));
-
-        let deadline =
-            Duration::from_millis(common_time::util::current_time_millis() as u64) + timeout;
-        self.timeouts.insert(message_id, deadline);
-        self.timeout_notify.notify_one();
-
-        Ok(MailboxReceiver { message_id, rx })
+        Ok(MailboxReceiver::new(message_id, rx))
     }
 
     async fn on_recv(&self, id: MessageId, maybe_msg: Result<MailboxMessage>) -> Result<()> {
         self.timeouts.remove(&id);
+
         if let Some((_, tx)) = self.senders.remove(&id) {
-            tx.0.send(maybe_msg)
+            tx.send(maybe_msg)
                 .map_err(|_| error::MailboxClosedSnafu { id }.build())?;
         } else if let Ok(finally_msg) = maybe_msg {
             let MailboxMessage {
@@ -265,6 +264,7 @@ impl Mailbox for HeartbeatMailbox {
             } = finally_msg;
             warn!("The response arrived too late, id={id}, subject={subject}, from={from}, to={to}, timestamp={timestamp_millis}");
         }
+
         Ok(())
     }
 }
@@ -285,7 +285,7 @@ mod tests {
     #[tokio::test]
     async fn test_mailbox() {
         let (mailbox, receiver) = push_msg_via_mailbox().await;
-        let id = receiver.message_id;
+        let id = receiver.message_id();
 
         let resp_msg = MailboxMessage {
             id,

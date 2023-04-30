@@ -304,9 +304,6 @@ pub enum Error {
     #[snafu(display("Mailbox already closed: {id}"))]
     MailboxClosed { id: u64, location: Location },
 
-    #[snafu(display("Mailbox not found: {id}"))]
-    MailboxNotFound { id: u64, location: Location },
-
     #[snafu(display("Mailbox timeout: {id}"))]
     MailboxTimeout { id: u64, location: Location },
 
@@ -360,7 +357,6 @@ impl ErrorExt for Error {
             | Error::PusherNotFound { .. }
             | Error::PushMessage { .. }
             | Error::MailboxClosed { .. }
-            | Error::MailboxNotFound { .. }
             | Error::MailboxTimeout { .. }
             | Error::MailboxReceiver { .. }
             | Error::StartGrpc { .. } => StatusCode::Internal,
