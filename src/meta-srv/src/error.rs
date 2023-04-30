@@ -309,6 +309,13 @@ pub enum Error {
 
     #[snafu(display("Mailbox timeout: {id}"))]
     MailboxTimeout { id: u64, location: Location },
+
+    #[snafu(display("Mailbox receiver got an error: {id}, {err_msg}"))]
+    MailboxReceiver {
+        id: u64,
+        err_msg: String,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -355,6 +362,7 @@ impl ErrorExt for Error {
             | Error::MailboxClosed { .. }
             | Error::MailboxNotFound { .. }
             | Error::MailboxTimeout { .. }
+            | Error::MailboxReceiver { .. }
             | Error::StartGrpc { .. } => StatusCode::Internal,
             Error::EmptyKey { .. }
             | Error::MissingRequiredParameter { .. }

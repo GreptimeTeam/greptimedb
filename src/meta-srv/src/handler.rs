@@ -35,7 +35,7 @@ use self::node_stat::Stat;
 use crate::error::{self, Result};
 use crate::metasrv::Context;
 use crate::sequence::Sequence;
-use crate::service::mailbox::{Channel, Mailbox, MailboxRef, MessageId};
+use crate::service::mailbox::{Channel, Mailbox, MailboxReceiver, MailboxRef, MessageId};
 
 mod check_leader_handler;
 mod collect_stats_handler;
@@ -140,16 +140,13 @@ impl HeartbeatHandlerGroup {
 }
 
 struct Tx(oneshot::Sender<Result<MailboxMessage>>);
-struct Rx(oneshot::Receiver<Result<MailboxMessage>>);
 
 pub struct HeartbeatMailbox {
     pushers: Arc<RwLock<BTreeMap<String, Pusher>>>,
     sequence: Sequence,
     senders: DashMap<MessageId, Tx>,
-    receivers: DashMap<MessageId, Rx>,
     timeouts: DashMap<MessageId, Duration>,
     timeout_notify: Notify,
-    default_timeout: Duration,
 }
 
 impl HeartbeatMailbox {
@@ -172,10 +169,8 @@ impl HeartbeatMailbox {
             pushers,
             sequence,
             senders: DashMap::default(),
-            receivers: DashMap::default(),
             timeouts: DashMap::default(),
             timeout_notify: Notify::new(),
-            default_timeout: Duration::from_secs(180), // 3 minutes, some operations may take a long time
         }
     }
 
@@ -214,7 +209,12 @@ impl HeartbeatMailbox {
 
 #[async_trait::async_trait]
 impl Mailbox for HeartbeatMailbox {
-    async fn send(&self, ch: &Channel, mut msg: MailboxMessage) -> Result<MessageId> {
+    async fn send(
+        &self,
+        ch: &Channel,
+        mut msg: MailboxMessage,
+        timeout: Duration,
+    ) -> Result<MailboxReceiver> {
         let message_id = self.sequence.next().await?;
 
         msg.id = message_id;
@@ -240,26 +240,13 @@ impl Mailbox for HeartbeatMailbox {
 
         let (tx, rx) = oneshot::channel();
         self.senders.insert(message_id, Tx(tx));
-        self.receivers.insert(message_id, Rx(rx));
 
-        Ok(message_id)
-    }
-
-    async fn recv(&self, id: MessageId) -> Result<MailboxMessage> {
-        self.recv_timeout(id, self.default_timeout).await
-    }
-
-    async fn recv_timeout(&self, id: MessageId, timeout: Duration) -> Result<MailboxMessage> {
         let deadline =
             Duration::from_millis(common_time::util::current_time_millis() as u64) + timeout;
-        self.timeouts.insert(id, deadline);
+        self.timeouts.insert(message_id, deadline);
         self.timeout_notify.notify_one();
-        let (_, rx) = self
-            .receivers
-            .remove(&id)
-            .context(error::MailboxNotFoundSnafu { id })?;
-        rx.0.await
-            .map_err(|_| error::MailboxClosedSnafu { id }.build())?
+
+        Ok(MailboxReceiver { message_id, rx })
     }
 
     async fn on_recv(&self, id: MessageId, maybe_msg: Result<MailboxMessage>) -> Result<()> {
@@ -292,12 +279,13 @@ mod tests {
 
     use crate::handler::{HeartbeatHandlerGroup, HeartbeatMailbox, Pusher};
     use crate::sequence::Sequence;
-    use crate::service::mailbox::{Channel, MailboxRef};
+    use crate::service::mailbox::{Channel, MailboxReceiver, MailboxRef};
     use crate::service::store::memory::MemStore;
 
     #[tokio::test]
     async fn test_mailbox() {
-        let (id, mailbox) = push_msg_via_mailbox().await;
+        let (mailbox, receiver) = push_msg_via_mailbox().await;
+        let id = receiver.message_id;
 
         let resp_msg = MailboxMessage {
             id,
@@ -308,7 +296,7 @@ mod tests {
 
         mailbox.on_recv(id, Ok(resp_msg)).await.unwrap();
 
-        let recv_msg = mailbox.recv(id).await.unwrap();
+        let recv_msg = receiver.await.unwrap().unwrap();
         assert_eq!(recv_msg.id, id);
         assert_eq!(recv_msg.timestamp_millis, 456);
         assert_eq!(recv_msg.subject, "resp-test".to_string());
@@ -316,12 +304,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_mailbox_timeout() {
-        let (id, mailbox) = push_msg_via_mailbox().await;
-        let res = mailbox.recv_timeout(id, Duration::from_millis(100)).await;
+        let (_, receiver) = push_msg_via_mailbox().await;
+        let res = receiver.await.unwrap();
         assert!(res.is_err());
     }
 
-    async fn push_msg_via_mailbox() -> (u64, MailboxRef) {
+    async fn push_msg_via_mailbox() -> (MailboxRef, MailboxReceiver) {
         let datanode_id = 12;
         let (pusher_tx, mut pusher_rx) = mpsc::channel(16);
         let pusher: Pusher = pusher_tx;
@@ -342,13 +330,15 @@ mod tests {
         };
         let ch = Channel::Datanode(datanode_id);
 
-        let msg_id = mailbox.send(&ch, msg).await.unwrap();
+        let receiver = mailbox
+            .send(&ch, msg, Duration::from_secs(1))
+            .await
+            .unwrap();
 
         let recv_obj = pusher_rx.recv().await.unwrap().unwrap();
-        assert_eq!(recv_obj.mailbox_messages[0].id, msg_id);
         assert_eq!(recv_obj.mailbox_messages[0].timestamp_millis, 123);
         assert_eq!(recv_obj.mailbox_messages[0].subject, "req-test".to_string());
 
-        (msg_id, mailbox)
+        (mailbox, receiver)
     }
 }

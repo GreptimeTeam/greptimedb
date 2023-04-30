@@ -12,12 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
+use futures::Future;
+use tokio::sync::oneshot;
 
-use crate::error::Result;
+use crate::error::{self, Result};
 
 pub type MailboxRef = Arc<dyn Mailbox>;
 
@@ -28,31 +32,34 @@ pub enum Channel {
     Frontend(u64),
 }
 
+pub struct MailboxReceiver {
+    pub message_id: MessageId,
+    pub rx: oneshot::Receiver<Result<MailboxMessage>>,
+}
+
+impl Future for MailboxReceiver {
+    type Output = Result<Result<MailboxMessage>>;
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.rx).poll(cx).map(|r| {
+            r.map_err(|e| {
+                error::MailboxReceiverSnafu {
+                    id: self.message_id,
+                    err_msg: e.to_string(),
+                }
+                .build()
+            })
+        })
+    }
+}
+
 #[async_trait::async_trait]
 pub trait Mailbox: Send + Sync {
-    /// Send a message to the mailbox, it will return a `id` immediately,
-    /// then we can use the `id` to call `recv` to get the response.
-    async fn send(&self, ch: &Channel, msg: MailboxMessage) -> Result<MessageId>;
-
-    /// Receive a message from the mailbox with the given `id`.
-    async fn recv(&self, id: MessageId) -> Result<MailboxMessage>;
-
-    async fn recv_timeout(&self, id: MessageId, timeout: Duration) -> Result<MailboxMessage>;
-
-    async fn send_and_recv(&self, ch: &Channel, msg: MailboxMessage) -> Result<MailboxMessage> {
-        let id = self.send(ch, msg).await?;
-        self.recv(id).await
-    }
-
-    async fn send_and_recv_timeout(
+    async fn send(
         &self,
         ch: &Channel,
         msg: MailboxMessage,
         timeout: Duration,
-    ) -> Result<MailboxMessage> {
-        let id = self.send(ch, msg).await?;
-        self.recv_timeout(id, timeout).await
-    }
+    ) -> Result<MailboxReceiver>;
 
     async fn on_recv(&self, id: MessageId, maybe_msg: Result<MailboxMessage>) -> Result<()>;
 }
