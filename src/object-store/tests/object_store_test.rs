@@ -208,7 +208,11 @@ async fn test_object_store_cache_policy() -> Result<()> {
     let cache_store = OperatorBuilder::new(cache_accessor.clone()).finish();
 
     // create operator for cache dir to verify cache file
-    let store = store.layer(LruCacheLayer::new(Arc::new(cache_accessor), 3));
+    let store = store.layer(
+        LruCacheLayer::new(Arc::new(cache_accessor), 3)
+            .await
+            .unwrap(),
+    );
 
     // create several object handler.
     // write data into object;

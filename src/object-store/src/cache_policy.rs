@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use lru::LruCache;
 use metrics::increment_counter;
 use opendal::ops::{OpDelete, OpList, OpRead, OpScan, OpWrite};
-use opendal::raw::oio::{Read, Reader, Write};
+use opendal::raw::oio::{Page, Read, Reader, Write};
 use opendal::raw::{Accessor, Layer, LayeredAccessor, RpDelete, RpList, RpRead, RpScan, RpWrite};
 use opendal::{ErrorKind, Result};
 use tokio::sync::Mutex;
@@ -36,13 +36,30 @@ pub struct LruCacheLayer<C> {
 }
 
 impl<C: Accessor> LruCacheLayer<C> {
-    pub fn new(cache: Arc<C>, capacity: usize) -> Self {
-        Self {
+    pub async fn new(cache: Arc<C>, capacity: usize) -> Result<Self> {
+        let zelf = Self {
             cache,
             lru_cache: Arc::new(Mutex::new(LruCache::new(
                 NonZeroUsize::new(capacity).unwrap(),
             ))),
+        };
+        zelf.recover_keys().await?;
+
+        Ok(zelf)
+    }
+
+    /// Recover existing keys from `cache` to `lru_cache`.
+    async fn recover_keys(&self) -> Result<()> {
+        let (_, mut pager) = self.cache.list("/", OpList::default()).await?;
+
+        let mut lru_cache = self.lru_cache.lock().await;
+        while let Some(entries) = pager.next().await? {
+            for entry in entries {
+                lru_cache.push(entry.path().to_string(), ());
+            }
         }
+
+        Ok(())
     }
 }
 

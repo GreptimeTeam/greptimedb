@@ -384,10 +384,10 @@ pub(crate) async fn new_oss_object_store(store_config: &ObjectStoreConfig) -> Re
         })?
         .finish();
 
-    create_object_store_with_cache(object_store, store_config)
+    create_object_store_with_cache(object_store, store_config).await
 }
 
-fn create_object_store_with_cache(
+async fn create_object_store_with_cache(
     object_store: ObjectStore,
     store_config: &ObjectStoreConfig,
 ) -> Result<ObjectStore> {
@@ -420,7 +420,11 @@ fn create_object_store_with_cache(
                 config: store_config.clone(),
             })?;
 
-        let cache_layer = LruCacheLayer::new(Arc::new(cache_store), cache_capacity.0 as usize);
+        let cache_layer = LruCacheLayer::new(Arc::new(cache_store), cache_capacity.0 as usize)
+            .await
+            .with_context(|_| error::InitBackendSnafu {
+                config: store_config.clone(),
+            })?;
         Ok(object_store.layer(cache_layer))
     } else {
         Ok(object_store)
@@ -461,6 +465,7 @@ pub(crate) async fn new_s3_object_store(store_config: &ObjectStoreConfig) -> Res
             .finish(),
         store_config,
     )
+    .await
 }
 
 fn clean_temp_dir(dir: &str) -> Result<()> {
