@@ -95,8 +95,8 @@ impl StorageType {
 fn s3_test_config() -> S3Config {
     S3Config {
         root: uuid::Uuid::new_v4().to_string(),
-        access_key_id: env::var("GT_S3_ACCESS_KEY_ID").unwrap(),
-        secret_access_key: env::var("GT_S3_ACCESS_KEY").unwrap(),
+        access_key_id: env::var("GT_S3_ACCESS_KEY_ID").unwrap().into(),
+        secret_access_key: env::var("GT_S3_ACCESS_KEY").unwrap().into(),
         bucket: env::var("GT_S3_BUCKET").unwrap(),
         region: Some(env::var("GT_S3_REGION").unwrap()),
         ..Default::default()
@@ -113,8 +113,8 @@ fn get_test_store_config(
         StorageType::Oss => {
             let oss_config = OssConfig {
                 root: uuid::Uuid::new_v4().to_string(),
-                access_key_id: env::var("GT_OSS_ACCESS_KEY_ID").unwrap(),
-                access_key_secret: env::var("GT_OSS_ACCESS_KEY").unwrap(),
+                access_key_id: env::var("GT_OSS_ACCESS_KEY_ID").unwrap().into(),
+                access_key_secret: env::var("GT_OSS_ACCESS_KEY").unwrap().into(),
                 bucket: env::var("GT_OSS_BUCKET").unwrap(),
                 endpoint: env::var("GT_OSS_ENDPOINT").unwrap(),
                 ..Default::default()

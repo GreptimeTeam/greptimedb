@@ -16,6 +16,7 @@ use std::marker::PhantomData;
 
 use axum::http::{self, Request, StatusCode};
 use axum::response::Response;
+use common_base::secret::SecretString;
 use common_error::prelude::ErrorExt;
 use common_telemetry::warn;
 use futures::future::BoxFuture;
@@ -112,7 +113,7 @@ where
             match user_provider
                 .auth(
                     Identity::UserId(username.as_str(), None),
-                    crate::auth::Password::PlainText(password.as_str()),
+                    crate::auth::Password::PlainText(password),
                     catalog,
                     schema,
                 )
@@ -172,16 +173,14 @@ fn get_influxdb_credentials<B: Send + Sync + 'static>(
             .split_once(':')
             .context(InvalidAuthorizationHeaderSnafu)?;
 
-        Ok(Some((username.to_string(), password.to_string())))
+        Ok(Some((username.to_string(), password.into())))
     } else {
         // try v1
         let Some(query_str) = request.uri().query() else { return Ok(None) };
 
         match extract_influxdb_user_from_query(query_str) {
             (None, None) => Ok(None),
-            (Some(username), Some(password)) => {
-                Ok(Some((username.to_string(), password.to_string())))
-            }
+            (Some(username), Some(password)) => Ok(Some((username.to_string(), password.into()))),
             _ => Err(Auth {
                 source: IllegalParam {
                     msg: "influxdb auth: username and password must be provided together"
@@ -222,7 +221,7 @@ pub enum AuthScheme {
 }
 
 type Username = String;
-type Password = String;
+type Password = SecretString;
 
 impl TryFrom<&str> for AuthScheme {
     type Error = error::Error;
@@ -262,7 +261,7 @@ fn decode_basic(credential: Credential) -> Result<(Username, Password)> {
     let as_utf8 = String::from_utf8(decoded).context(error::InvalidUtf8ValueSnafu)?;
 
     if let Some((user_id, password)) = as_utf8.split_once(':') {
-        return Ok((user_id.to_string(), password.to_string()));
+        return Ok((user_id.to_string(), password.into()));
     }
 
     InvalidAuthorizationHeaderSnafu {}.fail()
@@ -339,7 +338,7 @@ mod tests {
         let credential = "dXNlcm5hbWU6cGFzc3dvcmQ=";
         let (username, pwd) = decode_basic(credential).unwrap();
         assert_eq!("username", username);
-        assert_eq!("password", pwd);
+        assert_eq!("password", &pwd);
 
         let wrong_credential = "dXNlcm5hbWU6cG Fzc3dvcmQ=";
         let result = decode_basic(wrong_credential);
@@ -354,7 +353,7 @@ mod tests {
 
         let auth_scheme_str = "basic dGVzdDp0ZXN0";
         let scheme: AuthScheme = auth_scheme_str.try_into().unwrap();
-        assert_matches!(scheme, AuthScheme::Basic(username, pwd) if username == "test" && pwd == "test");
+        assert_matches!(scheme, AuthScheme::Basic(username, pwd) if username == "test" && &pwd == "test");
 
         let unsupported = "digest";
         let auth_scheme: Result<AuthScheme> = unsupported.try_into();
@@ -367,7 +366,7 @@ mod tests {
         let req = mock_http_request(Some("Basic dXNlcm5hbWU6cGFzc3dvcmQ="), None).unwrap();
 
         let auth_scheme = auth_header(&req).unwrap();
-        assert_matches!(auth_scheme, AuthScheme::Basic(username, pwd) if username == "username" && pwd == "password");
+        assert_matches!(auth_scheme, AuthScheme::Basic(username, pwd) if username == "username" && &pwd == "password");
 
         let wrong_req = mock_http_request(Some("Basic dXNlcm5hbWU6 cGFzc3dvcmQ="), None).unwrap();
         let res = auth_header(&wrong_req);

@@ -92,7 +92,7 @@ impl PgLoginVerifier {
         if let Err(e) = user_provider
             .auth(
                 Identity::UserId(user_name, None),
-                Password::PlainText(password),
+                Password::PlainText(password.into()),
                 catalog,
                 schema,
             )

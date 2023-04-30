@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
+use common_base::secret::SecretString;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
 use meta_client::MetaClientOptions;
@@ -61,8 +62,8 @@ pub struct FileConfig {
 pub struct S3Config {
     pub bucket: String,
     pub root: String,
-    pub access_key_id: String,
-    pub secret_access_key: String,
+    pub access_key_id: SecretString,
+    pub secret_access_key: SecretString,
     pub endpoint: Option<String>,
     pub region: Option<String>,
     pub cache_path: Option<String>,
@@ -74,8 +75,8 @@ pub struct S3Config {
 pub struct OssConfig {
     pub bucket: String,
     pub root: String,
-    pub access_key_id: String,
-    pub access_key_secret: String,
+    pub access_key_id: SecretString,
+    pub access_key_secret: SecretString,
     pub endpoint: String,
     pub cache_path: Option<String>,
     pub cache_capacity: Option<ReadableSize>,

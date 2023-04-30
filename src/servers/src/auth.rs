@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use common_base::secret::{SecretBytes, SecretString};
 use common_error::ext::BoxedError;
 use common_error::prelude::ErrorExt;
 use common_error::status_code::StatusCode;
@@ -61,12 +62,12 @@ pub enum Identity<'a> {
     UserId(Username<'a>, Option<HostOrIp<'a>>),
 }
 
-pub type HashedPassword<'a> = &'a [u8];
-pub type Salt<'a> = &'a [u8];
+pub type HashedPassword<'a> = SecretBytes<'a>;
+pub type Salt<'a> = SecretBytes<'a>;
 
 /// Authentication information sent by the client.
 pub enum Password<'a> {
-    PlainText(&'a str),
+    PlainText(SecretString),
     MysqlNativePassword(HashedPassword<'a>, Salt<'a>),
     PgMD5(HashedPassword<'a>, Salt<'a>),
 }

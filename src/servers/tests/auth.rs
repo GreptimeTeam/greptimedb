@@ -64,7 +64,7 @@ impl UserProvider for MockUserProvider {
             Identity::UserId(username, _host) => match password {
                 Password::PlainText(password) => {
                     if username == "greptime" {
-                        if password == "greptime" {
+                        if &password == "greptime" {
                             Ok(UserInfo::new("greptime"))
                         } else {
                             UserPasswordMismatchSnafu {
@@ -120,7 +120,7 @@ async fn test_auth_by_plain_text() {
     let auth_result = user_provider
         .authenticate(
             Identity::UserId("greptime", None),
-            Password::PlainText("greptime"),
+            Password::PlainText("greptime".into()),
         )
         .await;
     assert!(auth_result.is_ok());
@@ -130,7 +130,7 @@ async fn test_auth_by_plain_text() {
     let auth_result = user_provider
         .authenticate(
             Identity::UserId("greptime", None),
-            Password::PgMD5(b"hashed_value", b"salt"),
+            Password::PgMD5("hashed_value".as_bytes().into(), "salt".as_bytes().into()),
         )
         .await;
     assert!(auth_result.is_err());
@@ -143,7 +143,7 @@ async fn test_auth_by_plain_text() {
     let auth_result = user_provider
         .authenticate(
             Identity::UserId("not_exist_username", None),
-            Password::PlainText("greptime"),
+            Password::PlainText("greptime".into()),
         )
         .await;
     assert!(auth_result.is_err());
@@ -156,7 +156,7 @@ async fn test_auth_by_plain_text() {
     let auth_result = user_provider
         .authenticate(
             Identity::UserId("greptime", None),
-            Password::PlainText("wrong_password"),
+            Password::PlainText("wrong_password".into()),
         )
         .await;
     assert!(auth_result.is_err());

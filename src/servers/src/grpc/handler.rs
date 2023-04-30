@@ -109,7 +109,7 @@ impl GreptimeRequestHandler {
             AuthScheme::Basic(Basic { username, password }) => user_provider
                 .auth(
                     Identity::UserId(&username, None),
-                    Password::PlainText(&password),
+                    Password::PlainText(password.into()),
                     &query_ctx.current_catalog(),
                     &query_ctx.current_schema(),
                 )

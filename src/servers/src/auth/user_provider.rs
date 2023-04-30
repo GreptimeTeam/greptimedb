@@ -167,7 +167,7 @@ pub fn auth_mysql(
 ) -> Result<()> {
     // ref: https://github.com/mysql/mysql-server/blob/a246bad76b9271cb4333634e954040a970222e0a/sql/auth/password.cc#L62
     let hash_stage_2 = double_sha1(save_pwd);
-    let tmp = sha1_two(salt, &hash_stage_2);
+    let tmp = sha1_two(&salt, &hash_stage_2);
     // xor auth_data and tmp
     let mut xor_result = [0u8; 20];
     for i in 0..20 {
@@ -240,7 +240,7 @@ pub mod test {
         let re = provider
             .authenticate(
                 Identity::UserId(username, None),
-                Password::PlainText(password),
+                Password::PlainText(password.into()),
             )
             .await;
         assert!(re.is_ok());
