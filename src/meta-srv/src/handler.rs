@@ -156,7 +156,7 @@ impl HeartbeatMailbox {
 
         let timeout_checker = mailbox.clone();
         common_runtime::spawn_bg(async move {
-            timeout_checker.check_timeout_bg(1).await;
+            timeout_checker.check_timeout_bg(10).await;
         });
 
         mailbox
@@ -215,12 +215,6 @@ impl Mailbox for HeartbeatMailbox {
     ) -> Result<MailboxReceiver> {
         let message_id = self.sequence.next().await?;
 
-        msg.id = message_id;
-        let res = HeartbeatResponse {
-            header: None,
-            mailbox_messages: vec![msg],
-        };
-
         let pusher_id = match ch {
             Channel::Datanode(id) => format!("{}-{}", Role::Datanode as i32, id),
             Channel::Frontend(id) => format!("{}-{}", Role::Frontend as i32, id),
@@ -237,6 +231,11 @@ impl Mailbox for HeartbeatMailbox {
         self.timeouts.insert(message_id, deadline);
         self.timeout_notify.notify_one();
 
+        msg.id = message_id;
+        let res = HeartbeatResponse {
+            header: None,
+            mailbox_messages: vec![msg],
+        };
         pusher.send(Ok(res)).await.map_err(|e| {
             error::PushMessageSnafu {
                 err_msg: e.to_string(),
