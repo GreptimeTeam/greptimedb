@@ -28,7 +28,6 @@ use snafu::ResultExt;
 use table::metadata::TableType;
 
 use crate::error::{CreateRecordBatchSnafu, Result};
-use crate::information_schema::TABLES;
 use crate::CatalogProviderRef;
 
 pub(super) struct InformationSchemaTables {
@@ -117,16 +116,6 @@ impl InformationSchemaTablesBuilder {
                 );
             }
         }
-
-        // Add a final list for the information schema tables themselves
-        self.add_table(
-            &catalog_name,
-            INFORMATION_SCHEMA_NAME,
-            TABLES,
-            TableType::View,
-            None,
-            None,
-        );
 
         self.finish()
     }
