@@ -35,6 +35,7 @@ const COLUMNS: &str = "columns";
 pub(crate) struct InformationSchemaProvider {
     catalog_name: String,
     catalog_provider: CatalogProviderRef,
+    tables: Vec<String>,
 }
 
 impl InformationSchemaProvider {
@@ -42,6 +43,7 @@ impl InformationSchemaProvider {
         Self {
             catalog_name,
             catalog_provider,
+            tables: vec![TABLES.to_string(), COLUMNS.to_string()],
         }
     }
 }
@@ -53,7 +55,7 @@ impl SchemaProvider for InformationSchemaProvider {
     }
 
     async fn table_names(&self) -> Result<Vec<String>> {
-        Ok(vec![TABLES.to_string(), COLUMNS.to_string()])
+        Ok(self.tables.clone())
     }
 
     async fn table(&self, name: &str) -> Result<Option<TableRef>> {
@@ -95,6 +97,6 @@ impl SchemaProvider for InformationSchemaProvider {
 
     async fn table_exist(&self, name: &str) -> Result<bool> {
         let normalized_name = name.to_ascii_lowercase();
-        Ok(self.table_names()?.contains(&normalized_name))
+        Ok(self.tables.contains(&normalized_name))
     }
 }
