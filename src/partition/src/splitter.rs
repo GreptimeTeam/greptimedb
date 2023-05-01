@@ -280,7 +280,7 @@ mod tests {
     use datatypes::types::{BooleanType, Int16Type, StringType};
     use datatypes::value::Value;
     use datatypes::vectors::{
-        BooleanVectorBuilder, Int16VectorBuilder, MutableVector, StringVectorBuilder,
+        BooleanVectorBuilder, Int16VectorBuilder, MutableVector, StringVectorBuilder, Vector,
     };
     use serde::{Deserialize, Serialize};
     use store_api::storage::RegionNumber;
@@ -301,6 +301,14 @@ mod tests {
         let wrong = mock_wrong_insert_request();
         let ret = check_req(&wrong);
         assert!(ret.is_err());
+    }
+
+    fn assert_columns(columns: &HashMap<String, Arc<dyn Vector>>, expected: &[(&str, &[Value])]) {
+        for (col_name, values) in expected {
+            for (idx, value) in values.iter().enumerate() {
+                assert_eq!(*value, columns.get(*col_name).unwrap().get(idx));
+            }
+        }
     }
 
     #[test]
@@ -329,26 +337,25 @@ mod tests {
 
         let r1_columns = &r1_insert.columns_values;
         assert_eq!(3, r1_columns.len());
-        assert_eq!(Value::from(1_i16), r1_columns.get("id").unwrap().get(0));
-        assert_eq!(Value::from("host1"), r1_columns.get("host").unwrap().get(0));
-        assert_eq!(
-            Value::from(true),
-            r1_columns.get("enable_reboot").unwrap().get(0)
+        assert_columns(
+            r1_columns,
+            &[
+                ("id", &[Value::from(1_i16)]),
+                ("host", &[Value::from("host1")]),
+                ("enable_reboot", &[Value::from(true)]),
+            ],
         );
 
         let r2_columns = &r2_insert.columns_values;
         assert_eq!(3, r2_columns.len());
-        assert_eq!(Value::from(2_i16), r2_columns.get("id").unwrap().get(0));
-        assert_eq!(Value::from(3_i16), r2_columns.get("id").unwrap().get(1));
-        assert_eq!(Value::Null, r2_columns.get("host").unwrap().get(0));
-        assert_eq!(Value::from("host3"), r2_columns.get("host").unwrap().get(1));
-        assert_eq!(
-            Value::from(false),
-            r2_columns.get("enable_reboot").unwrap().get(0)
-        );
-        assert_eq!(
-            Value::from(true),
-            r2_columns.get("enable_reboot").unwrap().get(1)
+
+        assert_columns(
+            r2_columns,
+            &[
+                ("id", &[Value::from(2_i16), Value::from(3_i16)]),
+                ("host", &[Value::Null, Value::from("host3")]),
+                ("enable_reboot", &[Value::from(false), Value::from(true)]),
+            ],
         );
     }
 
@@ -367,23 +374,22 @@ mod tests {
 
         let r1_columns = &r1_insert.columns_values;
         assert_eq!(3, r1_columns.len());
-        assert_eq!(Value::from(1_i16), r1_columns.get("id").unwrap().get(0));
-        assert_eq!(Value::from(1_i16), r1_columns.get("id").unwrap().get(1));
-        assert_eq!(Value::from(1_i16), r1_columns.get("id").unwrap().get(2));
-        assert_eq!(Value::from("host1"), r1_columns.get("host").unwrap().get(0));
-        assert_eq!(Value::Null, r1_columns.get("host").unwrap().get(1));
-        assert_eq!(Value::from("host3"), r1_columns.get("host").unwrap().get(2));
-        assert_eq!(
-            Value::from(true),
-            r1_columns.get("enable_reboot").unwrap().get(0)
-        );
-        assert_eq!(
-            Value::from(false),
-            r1_columns.get("enable_reboot").unwrap().get(1)
-        );
-        assert_eq!(
-            Value::from(true),
-            r1_columns.get("enable_reboot").unwrap().get(2)
+        assert_columns(
+            r1_columns,
+            &[
+                (
+                    "id",
+                    &[Value::from(1_i16), Value::from(1_i16), Value::from(1_i16)],
+                ),
+                (
+                    "host",
+                    &[Value::from("host1"), Value::Null, Value::from("host3")],
+                ),
+                (
+                    "enable_reboot",
+                    &[Value::from(true), Value::from(false), Value::from(true)],
+                ),
+            ],
         );
     }
 
