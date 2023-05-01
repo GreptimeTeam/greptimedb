@@ -22,6 +22,7 @@ use object_store::cache_policy::LruCacheLayer;
 use object_store::services::{Fs, S3};
 use object_store::test_util::TempFolder;
 use object_store::{util, ObjectStore, ObjectStoreBuilder};
+use opendal::raw::Accessor;
 use opendal::services::Oss;
 use opendal::{EntryMode, Operator, OperatorBuilder};
 
@@ -157,6 +158,15 @@ async fn test_oss_backend() -> Result<()> {
     Ok(())
 }
 
+async fn assert_lru_cache<C: Accessor + Clone>(
+    cache_layer: &LruCacheLayer<C>,
+    file_names: &[&str],
+) {
+    for file_name in file_names {
+        assert!(cache_layer.lru_contains_key(file_name).await);
+    }
+}
+
 async fn assert_cache_files(
     store: &Operator,
     file_names: &[&str],
@@ -188,7 +198,7 @@ async fn test_object_store_cache_policy() -> Result<()> {
     common_telemetry::init_default_ut_logging();
     common_telemetry::init_default_metrics_recorder();
     // create file storage
-    let root_dir = create_temp_dir("test_fs_backend");
+    let root_dir = create_temp_dir("test_object_store_cache_policy");
     let store = OperatorBuilder::new(
         Fs::default()
             .root(&root_dir.path().to_string_lossy())
@@ -199,7 +209,7 @@ async fn test_object_store_cache_policy() -> Result<()> {
     .finish();
 
     // create file cache layer
-    let cache_dir = create_temp_dir("test_fs_cache");
+    let cache_dir = create_temp_dir("test_object_store_cache_policy_cache");
     let mut builder = Fs::default();
     builder
         .root(&cache_dir.path().to_string_lossy())
@@ -208,11 +218,10 @@ async fn test_object_store_cache_policy() -> Result<()> {
     let cache_store = OperatorBuilder::new(cache_accessor.clone()).finish();
 
     // create operator for cache dir to verify cache file
-    let store = store.layer(
-        LruCacheLayer::new(Arc::new(cache_accessor), 3)
-            .await
-            .unwrap(),
-    );
+    let cache_layer = LruCacheLayer::new(Arc::new(cache_accessor.clone()), 3)
+        .await
+        .unwrap();
+    let store = store.layer(cache_layer.clone());
 
     // create several object handler.
     // write data into object;
@@ -237,6 +246,11 @@ async fn test_object_store_cache_policy() -> Result<()> {
         &["Hello, object1!", "object2!", "Hello, object2!"],
     )
     .await?;
+    assert_lru_cache(
+        &cache_layer,
+        &["test_file1.cache-bytes=0-", "test_file2.cache-bytes=0-"],
+    )
+    .await;
 
     store.delete(p2).await.unwrap();
 
@@ -246,6 +260,7 @@ async fn test_object_store_cache_policy() -> Result<()> {
         &["Hello, object1!"],
     )
     .await?;
+    assert_lru_cache(&cache_layer, &["test_file1.cache-bytes=0-"]).await;
 
     let p3 = "test_file3";
     store.write(p3, "Hello, object3!").await.unwrap();
@@ -263,12 +278,36 @@ async fn test_object_store_cache_policy() -> Result<()> {
         &["Hello, object1!", "Hello, object3!", "Hello"],
     )
     .await?;
+    assert_lru_cache(
+        &cache_layer,
+        &[
+            "test_file1.cache-bytes=0-",
+            "test_file3.cache-bytes=0-",
+            "test_file3.cache-bytes=0-4",
+        ],
+    )
+    .await;
 
     let handle = metric::try_handle().unwrap();
     let metric_text = handle.render();
 
     assert!(metric_text.contains("object_store_lru_cache_hit"));
     assert!(metric_text.contains("object_store_lru_cache_miss"));
+
+    drop(cache_layer);
+    let cache_layer = LruCacheLayer::new(Arc::new(cache_accessor), 3)
+        .await
+        .unwrap();
+
+    assert_lru_cache(
+        &cache_layer,
+        &[
+            "test_file1.cache-bytes=0-",
+            "test_file3.cache-bytes=0-",
+            "test_file3.cache-bytes=0-4",
+        ],
+    )
+    .await;
 
     Ok(())
 }

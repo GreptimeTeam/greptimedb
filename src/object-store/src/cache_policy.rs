@@ -30,12 +30,13 @@ use crate::metrics::{
     OBJECT_STORE_LRU_CACHE_MISS,
 };
 
+#[derive(Clone)]
 pub struct LruCacheLayer<C> {
     cache: Arc<C>,
     lru_cache: Arc<Mutex<LruCache<String, ()>>>,
 }
 
-impl<C: Accessor> LruCacheLayer<C> {
+impl<C: Accessor + Clone> LruCacheLayer<C> {
     pub async fn new(cache: Arc<C>, capacity: usize) -> Result<Self> {
         let zelf = Self {
             cache,
@@ -60,6 +61,10 @@ impl<C: Accessor> LruCacheLayer<C> {
         }
 
         Ok(())
+    }
+
+    pub async fn lru_contains_key(&self, key: &str) -> bool {
+        self.lru_cache.lock().await.contains(key)
     }
 }
 
