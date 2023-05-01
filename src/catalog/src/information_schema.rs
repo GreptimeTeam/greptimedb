@@ -95,6 +95,6 @@ impl SchemaProvider for InformationSchemaProvider {
 
     async fn table_exist(&self, name: &str) -> Result<bool> {
         let normalized_name = name.to_ascii_lowercase();
-        Ok(normalized_name == TABLES || normalized_name == COLUMNS)
+        Ok(self.table_names()?.contains(&normalized_name))
     }
 }
