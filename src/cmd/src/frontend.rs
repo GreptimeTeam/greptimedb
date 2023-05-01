@@ -368,7 +368,7 @@ mod tests {
         let result = provider
             .authenticate(
                 Identity::UserId("test", None),
-                Password::PlainText("test".into()),
+                Password::PlainText("test".to_string().into()),
             )
             .await;
         assert!(result.is_ok());

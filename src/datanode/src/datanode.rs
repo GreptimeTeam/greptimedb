@@ -16,10 +16,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
-use common_base::secret::SecretString;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
 use meta_client::MetaClientOptions;
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
 use servers::Mode;
@@ -57,12 +57,14 @@ pub struct FileConfig {
     pub data_dir: String,
 }
 
-#[derive(Debug, Clone, Serialize, Default, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct S3Config {
     pub bucket: String,
     pub root: String,
+    #[serde(skip_serializing)]
     pub access_key_id: SecretString,
+    #[serde(skip_serializing)]
     pub secret_access_key: SecretString,
     pub endpoint: Option<String>,
     pub region: Option<String>,
@@ -70,16 +72,47 @@ pub struct S3Config {
     pub cache_capacity: Option<ReadableSize>,
 }
 
-#[derive(Debug, Clone, Serialize, Default, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OssConfig {
     pub bucket: String,
     pub root: String,
+    #[serde(skip_serializing)]
     pub access_key_id: SecretString,
+    #[serde(skip_serializing)]
     pub access_key_secret: SecretString,
     pub endpoint: String,
     pub cache_path: Option<String>,
     pub cache_capacity: Option<ReadableSize>,
+}
+
+impl Default for S3Config {
+    fn default() -> Self {
+        Self {
+            bucket: String::default(),
+            root: String::default(),
+            access_key_id: SecretString::from(String::default()),
+            secret_access_key: SecretString::from(String::default()),
+            endpoint: Option::default(),
+            region: Option::default(),
+            cache_path: Option::default(),
+            cache_capacity: Option::default(),
+        }
+    }
+}
+
+impl Default for OssConfig {
+    fn default() -> Self {
+        Self {
+            bucket: String::default(),
+            root: String::default(),
+            access_key_id: SecretString::from(String::default()),
+            access_key_secret: SecretString::from(String::default()),
+            endpoint: String::default(),
+            cache_path: Option::default(),
+            cache_capacity: Option::default(),
+        }
+    }
 }
 
 impl Default for ObjectStoreConfig {
@@ -316,6 +349,8 @@ impl Datanode {
 
 #[cfg(test)]
 mod tests {
+    use secrecy::ExposeSecret;
+
     use super::*;
 
     #[test]
@@ -323,5 +358,26 @@ mod tests {
         let opts = DatanodeOptions::default();
         let toml_string = toml::to_string(&opts).unwrap();
         let _parsed: DatanodeOptions = toml::from_str(&toml_string).unwrap();
+    }
+
+    #[test]
+    fn test_secstr() {
+        let toml_str = r#"
+            [storage]
+            type = "S3"
+            access_key_id = "access_key_id"
+            secret_access_key = "secret_access_key"
+        "#;
+        let opts: DatanodeOptions = toml::from_str(toml_str).unwrap();
+        match opts.storage.store {
+            ObjectStoreConfig::S3(cfg) => {
+                assert_eq!(
+                    "Secret([REDACTED alloc::string::String])".to_string(),
+                    format!("{:?}", cfg.access_key_id)
+                );
+                assert_eq!("access_key_id", cfg.access_key_id.expose_secret());
+            }
+            _ => unreachable!(),
+        }
     }
 }

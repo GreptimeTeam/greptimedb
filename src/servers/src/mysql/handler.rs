@@ -145,9 +145,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             let user_id = Identity::UserId(&username, Some(addr.as_str()));
 
             let password = match auth_plugin {
-                "mysql_native_password" => {
-                    Password::MysqlNativePassword(auth_data.into(), salt.into())
-                }
+                "mysql_native_password" => Password::MysqlNativePassword(auth_data, salt),
                 other => {
                     error!("Unsupported mysql auth plugin: {}", other);
                     return false;

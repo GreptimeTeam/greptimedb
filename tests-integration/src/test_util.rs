@@ -40,6 +40,7 @@ use object_store::test_util::TempFolder;
 use object_store::ObjectStore;
 use once_cell::sync::OnceCell;
 use rand::Rng;
+use secrecy::ExposeSecret;
 use servers::grpc::GrpcServer;
 use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
@@ -124,8 +125,8 @@ fn get_test_store_config(
             builder
                 .root(&oss_config.root)
                 .endpoint(&oss_config.endpoint)
-                .access_key_id(&oss_config.access_key_id)
-                .access_key_secret(&oss_config.access_key_secret)
+                .access_key_id(oss_config.access_key_id.expose_secret())
+                .access_key_secret(oss_config.access_key_secret.expose_secret())
                 .bucket(&oss_config.bucket);
 
             let config = ObjectStoreConfig::Oss(oss_config);
@@ -147,8 +148,8 @@ fn get_test_store_config(
             let mut builder = S3::default();
             builder
                 .root(&s3_config.root)
-                .access_key_id(&s3_config.access_key_id)
-                .secret_access_key(&s3_config.secret_access_key)
+                .access_key_id(s3_config.access_key_id.expose_secret())
+                .secret_access_key(s3_config.secret_access_key.expose_secret())
                 .bucket(&s3_config.bucket);
 
             if s3_config.endpoint.is_some() {

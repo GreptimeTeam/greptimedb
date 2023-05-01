@@ -387,7 +387,7 @@ mod tests {
         let result = provider
             .authenticate(
                 Identity::UserId("test", None),
-                Password::PlainText("test".into()),
+                Password::PlainText("test".to_string().into()),
             )
             .await;
         assert!(result.is_ok());
@@ -487,8 +487,10 @@ mod tests {
         assert_eq!("/tmp/greptimedb/test/wal", dn_opts.wal.dir);
         match &dn_opts.storage.store {
             datanode::datanode::ObjectStoreConfig::S3(s3_config) => {
-                assert_eq!("******", s3_config.access_key_id.to_string());
-                assert_eq!("access_key_id", &s3_config.access_key_id);
+                assert_eq!(
+                    "Secret([REDACTED alloc::string::String])".to_string(),
+                    format!("{:?}", s3_config.access_key_id)
+                );
             }
             _ => {
                 unreachable!()
