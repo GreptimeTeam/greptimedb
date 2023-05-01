@@ -276,7 +276,7 @@ mod tests {
 
     use datatypes::data_type::ConcreteDataType;
     use datatypes::prelude::ScalarVectorBuilder;
-    use datatypes::schema::{ColumnSchema, Schema as DataTypesSchema};
+    use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, Schema as DataTypesSchema};
     use datatypes::types::{BooleanType, Int16Type, StringType};
     use datatypes::value::Value;
     use datatypes::vectors::{
@@ -329,69 +329,6 @@ mod tests {
 
         let r1_columns = &r1_insert.columns_values;
         assert_eq!(3, r1_columns.len());
-        assert_eq!(
-            <i16 as Into<Value>>::into(1),
-            r1_columns.get("id").unwrap().get(0)
-        );
-        assert_eq!(
-            <&str as Into<Value>>::into("host1"),
-            r1_columns.get("host").unwrap().get(0)
-        );
-        assert_eq!(
-            <bool as Into<Value>>::into(true),
-            r1_columns.get("enable_reboot").unwrap().get(0)
-        );
-
-        let r2_columns = &r2_insert.columns_values;
-        assert_eq!(3, r2_columns.len());
-        assert_eq!(
-            <i16 as Into<Value>>::into(2),
-            r2_columns.get("id").unwrap().get(0)
-        );
-        assert_eq!(
-            <i16 as Into<Value>>::into(3),
-            r2_columns.get("id").unwrap().get(1)
-        );
-        assert_eq!(Value::Null, r2_columns.get("host").unwrap().get(0));
-        assert_eq!(
-            <&str as Into<Value>>::into("host3"),
-            r2_columns.get("host").unwrap().get(1)
-        );
-        assert_eq!(
-            <bool as Into<Value>>::into(false),
-            r2_columns.get("enable_reboot").unwrap().get(0)
-        );
-        assert_eq!(
-            <bool as Into<Value>>::into(true),
-            r2_columns.get("enable_reboot").unwrap().get(1)
-        );
-    }
-
-    #[test]
-    fn test_writer_spliter_when_insert_columns_len_is_not_equal_to_schema_columns_len() {
-        let insert = mock_insert_request();
-        let rule = Arc::new(MockPartitionRule) as PartitionRuleRef;
-        let spliter = WriteSplitter::with_partition_rule(rule);
-        let mock_schema = DataTypesSchema::new(vec![
-            ColumnSchema::new(
-                "enable_reboot",
-                ConcreteDataType::Boolean(BooleanType),
-                false,
-            ),
-            ColumnSchema::new("host", ConcreteDataType::String(StringType), true),
-        ]);
-        let ret = spliter.split_insert(insert, &mock_schema).unwrap();
-
-        assert_eq!(2, ret.len());
-
-        let r1_insert = ret.get(&0).unwrap();
-        let r2_insert = ret.get(&1).unwrap();
-
-        assert_eq!("demo", r1_insert.table_name);
-        assert_eq!("demo", r2_insert.table_name);
-
-        let r1_columns = &r1_insert.columns_values;
-        assert_eq!(3, r1_columns.len());
         assert_eq!(Value::from(1_i16), r1_columns.get("id").unwrap().get(0));
         assert_eq!(Value::from("host1"), r1_columns.get("host").unwrap().get(0));
         assert_eq!(
@@ -412,6 +349,41 @@ mod tests {
         assert_eq!(
             Value::from(true),
             r2_columns.get("enable_reboot").unwrap().get(1)
+        );
+    }
+
+    #[test]
+    fn test_writer_spliter_without_partition_columns() {
+        let (mock_schema, insert) = mock_schema_and_insert_request_without_partition_columns();
+        let rule = Arc::new(MockPartitionRule) as PartitionRuleRef;
+        let spliter = WriteSplitter::with_partition_rule(rule);
+        let ret = spliter.split_insert(insert, &mock_schema).unwrap();
+
+        assert_eq!(1, ret.len());
+
+        let r1_insert = ret.get(&0).unwrap();
+
+        assert_eq!("demo", r1_insert.table_name);
+
+        let r1_columns = &r1_insert.columns_values;
+        assert_eq!(3, r1_columns.len());
+        assert_eq!(Value::from(1_i16), r1_columns.get("id").unwrap().get(0));
+        assert_eq!(Value::from(1_i16), r1_columns.get("id").unwrap().get(1));
+        assert_eq!(Value::from(1_i16), r1_columns.get("id").unwrap().get(2));
+        assert_eq!(Value::from("host1"), r1_columns.get("host").unwrap().get(0));
+        assert_eq!(Value::Null, r1_columns.get("host").unwrap().get(1));
+        assert_eq!(Value::from("host3"), r1_columns.get("host").unwrap().get(2));
+        assert_eq!(
+            Value::from(true),
+            r1_columns.get("enable_reboot").unwrap().get(0)
+        );
+        assert_eq!(
+            Value::from(false),
+            r1_columns.get("enable_reboot").unwrap().get(1)
+        );
+        assert_eq!(
+            Value::from(true),
+            r1_columns.get("enable_reboot").unwrap().get(2)
         );
     }
 
@@ -554,6 +526,45 @@ mod tests {
             columns_values,
             region_number: 0,
         }
+    }
+
+    fn mock_schema_and_insert_request_without_partition_columns() -> (Schema, InsertRequest) {
+        let mut columns_values = HashMap::with_capacity(4);
+        let mut builder = BooleanVectorBuilder::with_capacity(3);
+        builder.push(Some(true));
+        builder.push(Some(false));
+        builder.push(Some(true));
+        columns_values.insert("enable_reboot".to_string(), builder.to_vector());
+
+        let mut builder = StringVectorBuilder::with_capacity(3);
+        builder.push(Some("host1"));
+        builder.push(None);
+        builder.push(Some("host3"));
+        columns_values.insert("host".to_string(), builder.to_vector());
+
+        let insert_request = InsertRequest {
+            catalog_name: common_catalog::consts::DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: common_catalog::consts::DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: "demo".to_string(),
+            columns_values,
+            region_number: 0,
+        };
+
+        let id_column = ColumnSchema::new("id", ConcreteDataType::Int16(Int16Type {}), false);
+        let id_column = id_column
+            .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::from(1_i16))))
+            .unwrap();
+        let mock_schema = DataTypesSchema::new(vec![
+            ColumnSchema::new(
+                "enable_reboot",
+                ConcreteDataType::Boolean(BooleanType),
+                false,
+            ),
+            id_column,
+            ColumnSchema::new("host", ConcreteDataType::String(StringType), true),
+        ]);
+
+        (mock_schema, insert_request)
     }
 
     fn mock_wrong_insert_request() -> InsertRequest {
