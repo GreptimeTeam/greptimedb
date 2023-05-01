@@ -40,6 +40,7 @@ use object_store::test_util::TempFolder;
 use object_store::ObjectStore;
 use once_cell::sync::OnceCell;
 use rand::Rng;
+use secrecy::ExposeSecret;
 use servers::grpc::GrpcServer;
 use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
@@ -95,8 +96,8 @@ impl StorageType {
 fn s3_test_config() -> S3Config {
     S3Config {
         root: uuid::Uuid::new_v4().to_string(),
-        access_key_id: env::var("GT_S3_ACCESS_KEY_ID").unwrap(),
-        secret_access_key: env::var("GT_S3_ACCESS_KEY").unwrap(),
+        access_key_id: env::var("GT_S3_ACCESS_KEY_ID").unwrap().into(),
+        secret_access_key: env::var("GT_S3_ACCESS_KEY").unwrap().into(),
         bucket: env::var("GT_S3_BUCKET").unwrap(),
         region: Some(env::var("GT_S3_REGION").unwrap()),
         ..Default::default()
@@ -113,8 +114,8 @@ fn get_test_store_config(
         StorageType::Oss => {
             let oss_config = OssConfig {
                 root: uuid::Uuid::new_v4().to_string(),
-                access_key_id: env::var("GT_OSS_ACCESS_KEY_ID").unwrap(),
-                access_key_secret: env::var("GT_OSS_ACCESS_KEY").unwrap(),
+                access_key_id: env::var("GT_OSS_ACCESS_KEY_ID").unwrap().into(),
+                access_key_secret: env::var("GT_OSS_ACCESS_KEY").unwrap().into(),
                 bucket: env::var("GT_OSS_BUCKET").unwrap(),
                 endpoint: env::var("GT_OSS_ENDPOINT").unwrap(),
                 ..Default::default()
@@ -124,8 +125,8 @@ fn get_test_store_config(
             builder
                 .root(&oss_config.root)
                 .endpoint(&oss_config.endpoint)
-                .access_key_id(&oss_config.access_key_id)
-                .access_key_secret(&oss_config.access_key_secret)
+                .access_key_id(oss_config.access_key_id.expose_secret())
+                .access_key_secret(oss_config.access_key_secret.expose_secret())
                 .bucket(&oss_config.bucket);
 
             let config = ObjectStoreConfig::Oss(oss_config);
@@ -147,8 +148,8 @@ fn get_test_store_config(
             let mut builder = S3::default();
             builder
                 .root(&s3_config.root)
-                .access_key_id(&s3_config.access_key_id)
-                .secret_access_key(&s3_config.secret_access_key)
+                .access_key_id(s3_config.access_key_id.expose_secret())
+                .secret_access_key(s3_config.secret_access_key.expose_secret())
                 .bucket(&s3_config.bucket);
 
             if s3_config.endpoint.is_some() {

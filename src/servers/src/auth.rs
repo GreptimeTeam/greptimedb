@@ -17,6 +17,7 @@ use std::sync::Arc;
 use common_error::ext::BoxedError;
 use common_error::prelude::ErrorExt;
 use common_error::status_code::StatusCode;
+use secrecy::SecretString;
 use session::context::UserInfo;
 use snafu::{Location, OptionExt, Snafu};
 
@@ -66,7 +67,7 @@ pub type Salt<'a> = &'a [u8];
 
 /// Authentication information sent by the client.
 pub enum Password<'a> {
-    PlainText(&'a str),
+    PlainText(SecretString),
     MysqlNativePassword(HashedPassword<'a>, Salt<'a>),
     PgMD5(HashedPassword<'a>, Salt<'a>),
 }

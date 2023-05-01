@@ -21,6 +21,7 @@ use std::path::Path;
 use async_trait::async_trait;
 use digest;
 use digest::Digest;
+use secrecy::ExposeSecret;
 use session::context::UserInfo;
 use sha1::Sha1;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -120,12 +121,12 @@ impl UserProvider for StaticUserProvider {
                 match input_pwd {
                     Password::PlainText(pwd) => {
                         ensure!(
-                            !pwd.is_empty(),
+                            !pwd.expose_secret().is_empty(),
                             IllegalParamSnafu {
                                 msg: "blank password"
                             }
                         );
-                        return if save_pwd == pwd.as_bytes() {
+                        return if save_pwd == pwd.expose_secret().as_bytes() {
                             Ok(UserInfo::new(username))
                         } else {
                             UserPasswordMismatchSnafu {
@@ -240,7 +241,7 @@ pub mod test {
         let re = provider
             .authenticate(
                 Identity::UserId(username, None),
-                Password::PlainText(password),
+                Password::PlainText(password.to_string().into()),
             )
             .await;
         assert!(re.is_ok());

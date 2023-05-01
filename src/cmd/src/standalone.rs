@@ -385,7 +385,10 @@ mod tests {
         assert!(provider.is_some());
         let provider = provider.unwrap();
         let result = provider
-            .authenticate(Identity::UserId("test", None), Password::PlainText("test"))
+            .authenticate(
+                Identity::UserId("test", None),
+                Password::PlainText("test".to_string().into()),
+            )
             .await;
         assert!(result.is_ok());
     }
@@ -414,8 +417,9 @@ mod tests {
             sync_write = false
 
             [storage]
-            type = "File"
-            data_dir = "/tmp/greptimedb/data/"
+            type = "S3"
+            access_key_id = "access_key_id"
+            secret_access_key = "secret_access_key"
 
             [storage.compaction]
             max_inflight_tasks = 3
@@ -481,6 +485,17 @@ mod tests {
         assert!(fe_opts.influxdb_options.as_ref().unwrap().enable);
 
         assert_eq!("/tmp/greptimedb/test/wal", dn_opts.wal.dir);
+        match &dn_opts.storage.store {
+            datanode::datanode::ObjectStoreConfig::S3(s3_config) => {
+                assert_eq!(
+                    "Secret([REDACTED alloc::string::String])".to_string(),
+                    format!("{:?}", s3_config.access_key_id)
+                );
+            }
+            _ => {
+                unreachable!()
+            }
+        }
 
         assert_eq!("debug".to_string(), logging_opts.level);
         assert_eq!("/tmp/greptimedb/test/logs".to_string(), logging_opts.dir);

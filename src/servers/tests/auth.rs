@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use secrecy::ExposeSecret;
 use servers::auth::user_provider::auth_mysql;
 use servers::auth::{
     AccessDeniedSnafu, Identity, Password, UnsupportedPasswordTypeSnafu, UserNotFoundSnafu,
@@ -64,7 +65,7 @@ impl UserProvider for MockUserProvider {
             Identity::UserId(username, _host) => match password {
                 Password::PlainText(password) => {
                     if username == "greptime" {
-                        if password == "greptime" {
+                        if password.expose_secret() == "greptime" {
                             Ok(UserInfo::new("greptime"))
                         } else {
                             UserPasswordMismatchSnafu {
@@ -120,7 +121,7 @@ async fn test_auth_by_plain_text() {
     let auth_result = user_provider
         .authenticate(
             Identity::UserId("greptime", None),
-            Password::PlainText("greptime"),
+            Password::PlainText("greptime".to_string().into()),
         )
         .await;
     assert!(auth_result.is_ok());
@@ -143,7 +144,7 @@ async fn test_auth_by_plain_text() {
     let auth_result = user_provider
         .authenticate(
             Identity::UserId("not_exist_username", None),
-            Password::PlainText("greptime"),
+            Password::PlainText("greptime".to_string().into()),
         )
         .await;
     assert!(auth_result.is_err());
@@ -156,7 +157,7 @@ async fn test_auth_by_plain_text() {
     let auth_result = user_provider
         .authenticate(
             Identity::UserId("greptime", None),
-            Password::PlainText("wrong_password"),
+            Password::PlainText("wrong_password".to_string().into()),
         )
         .await;
     assert!(auth_result.is_err());

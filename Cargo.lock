@@ -2488,6 +2488,7 @@ dependencies = [
  "prost",
  "query",
  "regex",
+ "secrecy",
  "serde",
  "serde_json",
  "servers",
@@ -7652,6 +7653,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c107b6f4780854c8b126e228ea8869f4d7b71260f962fefb57b996b8959ba6b"
 
 [[package]]
+name = "secrecy"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9bd1c54ea06cfd2f6b63219704de0b9b4f72dcc2b8fdef820be6cd799780e91e"
+dependencies = [
+ "serde",
+ "zeroize",
+]
+
+[[package]]
 name = "security-framework"
 version = "2.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7873,6 +7884,7 @@ dependencies = [
  "rustls-pemfile",
  "schemars",
  "script",
+ "secrecy",
  "serde",
  "serde_json",
  "session",
@@ -8691,6 +8703,7 @@ dependencies = [
  "once_cell",
  "paste",
  "rand",
+ "secrecy",
  "serde",
  "serde_json",
  "servers",

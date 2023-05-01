@@ -39,6 +39,7 @@ use object_store::layers::{LoggingLayer, MetricsLayer, RetryLayer, TracingLayer}
 use object_store::services::{Fs as FsBuilder, Oss as OSSBuilder, S3 as S3Builder};
 use object_store::{util, ObjectStore, ObjectStoreBuilder};
 use query::query_engine::{QueryEngineFactory, QueryEngineRef};
+use secrecy::ExposeSecret;
 use servers::Mode;
 use session::context::QueryContext;
 use snafu::prelude::*;
@@ -374,8 +375,8 @@ pub(crate) async fn new_oss_object_store(store_config: &ObjectStoreConfig) -> Re
         .root(&root)
         .bucket(&oss_config.bucket)
         .endpoint(&oss_config.endpoint)
-        .access_key_id(&oss_config.access_key_id)
-        .access_key_secret(&oss_config.access_key_secret);
+        .access_key_id(oss_config.access_key_id.expose_secret())
+        .access_key_secret(oss_config.access_key_secret.expose_secret());
 
     let object_store = ObjectStore::new(builder)
         .with_context(|_| error::InitBackendSnafu {
@@ -439,8 +440,8 @@ pub(crate) async fn new_s3_object_store(store_config: &ObjectStoreConfig) -> Res
     builder
         .root(&root)
         .bucket(&s3_config.bucket)
-        .access_key_id(&s3_config.access_key_id)
-        .secret_access_key(&s3_config.secret_access_key);
+        .access_key_id(s3_config.access_key_id.expose_secret())
+        .secret_access_key(s3_config.secret_access_key.expose_secret());
 
     if s3_config.endpoint.is_some() {
         builder.endpoint(s3_config.endpoint.as_ref().unwrap());
