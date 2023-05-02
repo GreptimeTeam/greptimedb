@@ -18,6 +18,7 @@ use std::sync::Arc;
 use common_query::prelude::Expr;
 use datafusion_expr::{BinaryExpr, Expr as DfExpr, Operator};
 use datatypes::prelude::Value;
+use datatypes::schema::Schema;
 use meta_client::rpc::{Peer, TableName, TableRoute};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{RegionId, RegionNumber};
@@ -226,10 +227,11 @@ impl PartitionRuleManager {
         &self,
         table: &TableName,
         req: InsertRequest,
+        schema: &Schema,
     ) -> Result<InsertRequestSplit> {
         let partition_rule = self.find_table_partition_rule(table).await.unwrap();
         let splitter = WriteSplitter::with_partition_rule(partition_rule);
-        splitter.split_insert(req)
+        splitter.split_insert(req, schema)
     }
 }
 

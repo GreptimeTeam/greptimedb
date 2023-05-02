@@ -68,6 +68,20 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Failed to read column {}, could not create default value, source: {}",
+        column,
+        source
+    ))]
+    CreateDefaultToRead {
+        column: String,
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
+
+    #[snafu(display("The column '{}' does not have a default value.", column))]
+    MissingDefaultValue { column: String },
+
     #[snafu(display("Expect {} region keys, actual {}", expect, actual))]
     RegionKeysSize {
         expect: usize,
@@ -136,6 +150,8 @@ impl ErrorExt for Error {
             Error::InvalidTableRouteData { .. } => StatusCode::Internal,
             Error::ConvertScalarValue { .. } => StatusCode::Internal,
             Error::FindDatanode { .. } => StatusCode::InvalidArguments,
+            Error::CreateDefaultToRead { source, .. } => source.status_code(),
+            Error::MissingDefaultValue { .. } => StatusCode::Internal,
         }
     }
 

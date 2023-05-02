@@ -58,3 +58,39 @@ DROP TABLE system_metrics;
 
 Affected Rows: 1
 
+create table foo (
+    host string,
+    ts timestamp DEFAULT '2023-04-29 00:00:00+00:00',
+    cpu double default 0,
+    TIME INDEX (ts),
+    PRIMARY KEY(host)
+) engine=mito with(regions=1);
+
+Affected Rows: 0
+
+insert into foo (host, cpu, ts) values ('host1', 1.1, '2000-01-01 00:00:00+00:00');
+
+Affected Rows: 1
+
+insert into foo (host, cpu) values ('host2', 2.2);
+
+Affected Rows: 1
+
+insert into foo (host) values ('host3');
+
+Affected Rows: 1
+
+select * from foo;
+
++-------+---------------------+-----+
+| host  | ts                  | cpu |
++-------+---------------------+-----+
+| host1 | 2000-01-01T00:00:00 | 1.1 |
+| host2 | 2023-04-29T00:00:00 | 2.2 |
+| host3 | 2023-04-29T00:00:00 | 0.0 |
++-------+---------------------+-----+
+
+DROP TABLE foo;
+
+Affected Rows: 1
+
