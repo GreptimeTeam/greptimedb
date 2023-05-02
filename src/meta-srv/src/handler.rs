@@ -16,7 +16,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::v1::meta::{HeartbeatRequest, HeartbeatResponse, MailboxMessage, ResponseHeader, Role};
+use api::v1::meta::{
+    HeartbeatRequest, HeartbeatResponse, MailboxMessage, RequestHeader, ResponseHeader, Role,
+    PROTOCOL_VERSION,
+};
 pub use check_leader_handler::CheckLeaderHandler;
 pub use collect_stats_handler::CollectStatsHandler;
 use common_telemetry::{info, warn};
@@ -74,7 +77,40 @@ impl HeartbeatAccumulator {
     }
 }
 
-pub type Pusher = Sender<std::result::Result<HeartbeatResponse, tonic::Status>>;
+pub struct Pusher {
+    sender: Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
+    res_header: ResponseHeader,
+}
+
+impl Pusher {
+    pub fn new(
+        sender: Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
+        req_header: &Option<RequestHeader>,
+    ) -> Self {
+        let res_header = ResponseHeader {
+            protocol_version: PROTOCOL_VERSION,
+            cluster_id: req_header.as_ref().map_or(0, |h| h.cluster_id),
+            ..Default::default()
+        };
+
+        Self { sender, res_header }
+    }
+
+    #[inline]
+    pub async fn push(&self, res: HeartbeatResponse) -> Result<()> {
+        self.sender.send(Ok(res)).await.map_err(|e| {
+            error::PushMessageSnafu {
+                err_msg: e.to_string(),
+            }
+            .build()
+        })
+    }
+
+    #[inline]
+    pub fn header(&self) -> ResponseHeader {
+        self.res_header.clone()
+    }
+}
 
 #[derive(Clone, Default)]
 pub struct HeartbeatHandlerGroup {
@@ -231,17 +267,14 @@ impl Mailbox for HeartbeatMailbox {
         self.timeouts.insert(message_id, deadline);
         self.timeout_notify.notify_one();
 
+        let header = pusher.header();
         msg.id = message_id;
         let res = HeartbeatResponse {
-            header: None,
+            header: Some(header),
             mailbox_messages: vec![msg],
         };
-        pusher.send(Ok(res)).await.map_err(|e| {
-            error::PushMessageSnafu {
-                err_msg: e.to_string(),
-            }
-            .build()
-        })?;
+
+        pusher.push(res).await?;
 
         Ok(MailboxReceiver::new(message_id, rx))
     }
@@ -273,7 +306,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use api::v1::meta::{MailboxMessage, Role};
+    use api::v1::meta::{MailboxMessage, RequestHeader, Role, PROTOCOL_VERSION};
     use tokio::sync::mpsc;
 
     use crate::handler::{HeartbeatHandlerGroup, HeartbeatMailbox, Pusher};
@@ -311,7 +344,11 @@ mod tests {
     async fn push_msg_via_mailbox() -> (MailboxRef, MailboxReceiver) {
         let datanode_id = 12;
         let (pusher_tx, mut pusher_rx) = mpsc::channel(16);
-        let pusher: Pusher = pusher_tx;
+        let res_header = RequestHeader {
+            protocol_version: PROTOCOL_VERSION,
+            ..Default::default()
+        };
+        let pusher: Pusher = Pusher::new(pusher_tx, &Option::from(res_header));
         let handler_group = HeartbeatHandlerGroup::default();
         handler_group
             .register(format!("{}-{}", Role::Datanode as i32, datanode_id), pusher)

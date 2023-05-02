@@ -26,6 +26,7 @@ use tonic::{Request, Response, Streaming};
 
 use crate::error;
 use crate::error::Result;
+use crate::handler::Pusher;
 use crate::metasrv::{Context, MetaSrv};
 use crate::service::{GrpcResult, GrpcStream};
 
@@ -51,7 +52,8 @@ impl heartbeat_server::Heartbeat for MetaSrv {
                         if pusher_key.is_none() {
                             if let Some(peer) = &req.peer {
                                 let key = format!("{}-{}", role, peer.id,);
-                                handler_group.register(&key, tx.clone()).await;
+                                let pusher = Pusher::new(tx.clone(), &req.header);
+                                handler_group.register(&key, pusher).await;
                                 pusher_key = Some(key);
                             }
                         }
