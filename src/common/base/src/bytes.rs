@@ -20,16 +20,6 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 #[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 pub struct Bytes(bytes::Bytes);
 
-impl Bytes {
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-}
-
 impl From<Bytes> for bytes::Bytes {
     fn from(value: Bytes) -> Self {
         value.0
