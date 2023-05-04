@@ -89,7 +89,11 @@ pub struct LruCacheAccessor<I, C> {
 
 impl<I, C> LruCacheAccessor<I, C> {
     fn cache_path(&self, path: &str, args: &OpRead) -> String {
-        format!("{}.cache-{}", path, args.range().to_header())
+        format!(
+            "{:x}.cache-{}",
+            md5::compute(path),
+            args.range().to_header()
+        )
     }
 }
 
@@ -112,7 +116,7 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
     async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
         let path = path.to_string();
         let cache_path = self.cache_path(&path, &args);
-        let lru_cache = self.lru_cache.clone();
+        let lru_cache = &self.lru_cache;
 
         match self.cache.read(&cache_path, args.clone()).await {
             Ok((rp, r)) => {
