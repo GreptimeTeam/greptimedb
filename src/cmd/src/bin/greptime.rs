@@ -20,7 +20,7 @@ use clap::Parser;
 use cmd::error::Result;
 use cmd::options::{Options, TopLevelOptions};
 use cmd::{cli, datanode, frontend, metasrv, standalone};
-use common_telemetry::logging::{error, info};
+use common_telemetry::logging::{error, info, TracingOptions};
 
 #[derive(Parser)]
 #[clap(name = "greptimedb", version = print_version())]
@@ -29,6 +29,8 @@ struct Command {
     log_dir: Option<String>,
     #[clap(long)]
     log_level: Option<String>,
+    #[clap(long)]
+    tokio_console_addr: Option<String>,
     #[clap(subcommand)]
     subcmd: SubCommand,
 }
@@ -172,10 +174,13 @@ async fn main() -> Result<()> {
 
     let opts = cmd.load_options()?;
     let logging_opts = opts.logging_options();
+    let tracing_opts = TracingOptions {
+        tokio_console_addr: cmd.tokio_console_addr.clone(),
+    };
 
     common_telemetry::set_panic_hook();
     common_telemetry::init_default_metrics_recorder();
-    let _guard = common_telemetry::init_global_logging(app_name, logging_opts);
+    let _guard = common_telemetry::init_global_logging(app_name, logging_opts, tracing_opts);
 
     let mut app = cmd.build(opts).await?;
 

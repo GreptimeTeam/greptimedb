@@ -502,7 +502,10 @@ async fn new_metasrv_client(node_id: u64, meta_config: &MetaClientOptions) -> Re
         .timeout(Duration::from_millis(meta_config.timeout_millis))
         .connect_timeout(Duration::from_millis(meta_config.connect_timeout_millis))
         .tcp_nodelay(meta_config.tcp_nodelay);
-    let channel_manager = ChannelManager::with_config(config);
+
+    let mut channel_manager = ChannelManager::with_config(config);
+    channel_manager.start_channel_recycle();
+
     let mut meta_client = MetaClientBuilder::new(cluster_id, member_id)
         .enable_heartbeat()
         .enable_router()

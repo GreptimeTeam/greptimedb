@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use common_telemetry::info;
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use snafu::{OptionExt, ResultExt};
@@ -33,6 +34,7 @@ pub struct ChannelManager {
     config: ChannelConfig,
     client_tls_config: Option<ClientTlsConfig>,
     pool: Arc<Pool>,
+    channel_recycle_started: bool,
 }
 
 impl Default for ChannelManager {
@@ -48,17 +50,26 @@ impl ChannelManager {
 
     pub fn with_config(config: ChannelConfig) -> Self {
         let pool = Arc::new(Pool::default());
-        let cloned_pool = pool.clone();
-
-        common_runtime::spawn_bg(async {
-            recycle_channel_in_loop(cloned_pool, RECYCLE_CHANNEL_INTERVAL_SECS).await;
-        });
-
         Self {
             config,
             client_tls_config: None,
             pool,
+            channel_recycle_started: false,
         }
+    }
+
+    pub fn start_channel_recycle(&mut self) {
+        if self.channel_recycle_started {
+            return;
+        }
+
+        let pool = self.pool.clone();
+        common_runtime::spawn_bg(async {
+            recycle_channel_in_loop(pool, RECYCLE_CHANNEL_INTERVAL_SECS).await;
+        });
+        info!("Channel recycle is started, running in the background!");
+
+        self.channel_recycle_started = true;
     }
 
     pub fn with_tls_config(config: ChannelConfig) -> Result<Self> {
@@ -224,8 +235,8 @@ pub struct ChannelConfig {
 impl Default for ChannelConfig {
     fn default() -> Self {
         Self {
-            timeout: None,
-            connect_timeout: None,
+            timeout: Some(Duration::from_secs(2)),
+            connect_timeout: Some(Duration::from_secs(4)),
             concurrency_limit: None,
             rate_limit: None,
             initial_stream_window_size: None,
@@ -455,13 +466,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_access_count() {
-        let pool = Arc::new(Pool::default());
-        let config = ChannelConfig::new();
-        let mgr = Arc::new(ChannelManager {
-            pool,
-            config,
-            client_tls_config: None,
-        });
+        let mgr = Arc::new(ChannelManager::new());
         let addr = "test_uri";
 
         let mut joins = Vec::with_capacity(10);
@@ -491,8 +496,8 @@ mod tests {
         let default_cfg = ChannelConfig::new();
         assert_eq!(
             ChannelConfig {
-                timeout: None,
-                connect_timeout: None,
+                timeout: Some(Duration::from_secs(2)),
+                connect_timeout: Some(Duration::from_secs(4)),
                 concurrency_limit: None,
                 rate_limit: None,
                 initial_stream_window_size: None,
@@ -553,7 +558,6 @@ mod tests {
 
     #[test]
     fn test_build_endpoint() {
-        let pool = Arc::new(Pool::default());
         let config = ChannelConfig::new()
             .timeout(Duration::from_secs(3))
             .connect_timeout(Duration::from_secs(5))
@@ -567,11 +571,7 @@ mod tests {
             .http2_adaptive_window(true)
             .tcp_keepalive(Duration::from_secs(2))
             .tcp_nodelay(true);
-        let mgr = ChannelManager {
-            pool,
-            config,
-            client_tls_config: None,
-        };
+        let mgr = ChannelManager::with_config(config);
 
         let res = mgr.build_endpoint("test_addr");
 
@@ -580,18 +580,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_channel_with_connector() {
-        let pool = Pool {
-            channels: DashMap::default(),
-        };
-
-        let pool = Arc::new(pool);
-
-        let config = ChannelConfig::new();
-        let mgr = ChannelManager {
-            pool,
-            config,
-            client_tls_config: None,
-        };
+        let mgr = ChannelManager::new();
 
         let addr = "test_addr";
         let res = mgr.get(addr);

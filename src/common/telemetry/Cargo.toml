@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-console = ["console-subscriber"]
+console = ["console-subscriber", "tokio/tracing"]
 deadlock_detection = ["parking_lot"]
 
 [dependencies]
@@ -24,6 +24,7 @@ parking_lot = { version = "0.12", features = [
     "deadlock_detection",
 ], optional = true }
 serde = "1.0"
+tokio.workspace = true
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-bunyan-formatter = "0.3"

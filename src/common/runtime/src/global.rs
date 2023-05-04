@@ -16,7 +16,7 @@
 use std::future::Future;
 use std::sync::{Mutex, Once};
 
-use common_telemetry::logging;
+use common_telemetry::info;
 use once_cell::sync::Lazy;
 use paste::paste;
 
@@ -26,13 +26,10 @@ const READ_WORKERS: usize = 8;
 const WRITE_WORKERS: usize = 8;
 const BG_WORKERS: usize = 8;
 
-pub fn create_runtime(thread_name: &str, worker_threads: usize) -> Runtime {
-    logging::info!(
-        "Creating runtime, thread name: {}, work_threads: {}.",
-        thread_name,
-        worker_threads
-    );
+pub fn create_runtime(runtime_name: &str, thread_name: &str, worker_threads: usize) -> Runtime {
+    info!("Creating runtime with runtime_name: {runtime_name}, thread_name: {thread_name}, work_threads: {worker_threads}.");
     Builder::default()
+        .runtime_name(runtime_name)
         .thread_name(thread_name)
         .worker_threads(worker_threads)
         .build()
@@ -79,9 +76,12 @@ impl GlobalRuntimes {
 
     fn new(read: Option<Runtime>, write: Option<Runtime>, background: Option<Runtime>) -> Self {
         Self {
-            read_runtime: read.unwrap_or_else(|| create_runtime("read-worker", READ_WORKERS)),
-            write_runtime: write.unwrap_or_else(|| create_runtime("write-worker", WRITE_WORKERS)),
-            bg_runtime: background.unwrap_or_else(|| create_runtime("bg-worker", BG_WORKERS)),
+            read_runtime: read
+                .unwrap_or_else(|| create_runtime("global-read", "read-worker", READ_WORKERS)),
+            write_runtime: write
+                .unwrap_or_else(|| create_runtime("global-write", "write-worker", WRITE_WORKERS)),
+            bg_runtime: background
+                .unwrap_or_else(|| create_runtime("global-bg", "bg-worker", BG_WORKERS)),
         }
     }
 }

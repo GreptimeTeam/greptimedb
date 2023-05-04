@@ -127,7 +127,10 @@ impl Instance {
         });
         let table_routes = Arc::new(TableRoutes::new(meta_client.clone()));
         let partition_manager = Arc::new(PartitionRuleManager::new(table_routes));
-        let datanode_clients = Arc::new(DatanodeClients::default());
+
+        let mut datanode_clients = DatanodeClients::default();
+        datanode_clients.start();
+        let datanode_clients = Arc::new(datanode_clients);
 
         let mut catalog_manager =
             FrontendCatalogManager::new(meta_backend, partition_manager, datanode_clients.clone());
@@ -183,7 +186,9 @@ impl Instance {
             .timeout(Duration::from_millis(meta_config.timeout_millis))
             .connect_timeout(Duration::from_millis(meta_config.connect_timeout_millis))
             .tcp_nodelay(meta_config.tcp_nodelay);
-        let channel_manager = ChannelManager::with_config(channel_config);
+
+        let mut channel_manager = ChannelManager::with_config(channel_config);
+        channel_manager.start_channel_recycle();
 
         let mut meta_client = MetaClientBuilder::new(0, 0)
             .enable_router()

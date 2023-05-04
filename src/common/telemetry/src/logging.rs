@@ -50,6 +50,11 @@ impl Default for LoggingOptions {
     }
 }
 
+#[derive(Default)]
+pub struct TracingOptions {
+    pub tokio_console_addr: Option<String>,
+}
+
 /// Init tracing for unittest.
 /// Write logs to file `unittest`.
 pub fn init_default_ut_logging() {
@@ -71,7 +76,11 @@ pub fn init_default_ut_logging() {
             level,
             ..Default::default()
         };
-        *g = Some(init_global_logging("unittest", &opts));
+        *g = Some(init_global_logging(
+            "unittest",
+            &opts,
+            TracingOptions::default(),
+        ));
 
         info!("logs dir = {}", dir);
     });
@@ -80,7 +89,12 @@ pub fn init_default_ut_logging() {
 static GLOBAL_UT_LOG_GUARD: Lazy<Arc<Mutex<Option<Vec<WorkerGuard>>>>> =
     Lazy::new(|| Arc::new(Mutex::new(None)));
 
-pub fn init_global_logging(app_name: &str, opts: &LoggingOptions) -> Vec<WorkerGuard> {
+#[allow(clippy::print_stdout, clippy::print_stderr)]
+pub fn init_global_logging(
+    app_name: &str,
+    opts: &LoggingOptions,
+    tracing_opts: TracingOptions,
+) -> Vec<WorkerGuard> {
     let mut guards = vec![];
     let dir = &opts.dir;
     let level = &opts.level;
@@ -127,16 +141,52 @@ pub fn init_global_logging(app_name: &str, opts: &LoggingOptions) -> Vec<WorkerG
                 .expect("error parsing level string"),
         );
 
+    // Must enable 'tokio_unstable' cfg to use this feature.
+    // For example: `RUSTFLAGS="--cfg tokio_unstable" cargo run -F common-telemetry/console -- standalone start`
+    #[cfg(feature = "console")]
+    let subscriber = {
+        let tokio_console_layer = if let Some(tokio_console_addr) = &tracing_opts.tokio_console_addr
+        {
+            let addr: std::net::SocketAddr = tokio_console_addr.parse().unwrap_or_else(|e| {
+                panic!("Invalid binding address '{tokio_console_addr}' for tokio-console: {e}");
+            });
+            println!("tokio-console listening on {addr}");
+
+            Some(
+                console_subscriber::ConsoleLayer::builder()
+                    .server_addr(addr)
+                    .spawn(),
+            )
+        } else {
+            None
+        };
+
+        let stdout_logging_layer = stdout_logging_layer.with_filter(filter.clone());
+
+        let file_logging_layer = file_logging_layer.with_filter(filter);
+
+        Registry::default()
+            .with(tokio_console_layer)
+            .with(JsonStorageLayer)
+            .with(stdout_logging_layer)
+            .with(file_logging_layer)
+            .with(err_file_logging_layer.with_filter(filter::LevelFilter::ERROR))
+    };
+    #[cfg(not(feature = "console"))]
+    if tracing_opts.tokio_console_addr.is_some() {
+        eprintln!(
+            "You have set the tokio console address. \
+            However, it needs 'console' feature to be enabled, too!"
+        );
+    }
+
+    #[cfg(not(feature = "console"))]
     let subscriber = Registry::default()
         .with(filter)
         .with(JsonStorageLayer)
         .with(stdout_logging_layer)
         .with(file_logging_layer)
         .with(err_file_logging_layer.with_filter(filter::LevelFilter::ERROR));
-
-    // Must enable 'tokio_unstable' cfg, https://github.com/tokio-rs/console
-    #[cfg(feature = "console")]
-    let subscriber = subscriber.with(console_subscriber::spawn());
 
     if enable_jaeger_tracing {
         // Jaeger layer.
