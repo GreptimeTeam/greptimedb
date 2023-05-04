@@ -336,7 +336,9 @@ pub(crate) fn add_values_to_builder(
         let null_mask = BitVec::from_vec(null_mask);
         ensure!(
             null_mask.count_ones() + values.len() == row_count,
-            UnexpectedValuesLengthSnafu {reason: "If null_mask is not empty, the sum of the number of nulls and the length of values must be equal to row_count."}
+            UnexpectedValuesLengthSnafu {
+                reason: "If null_mask is not empty, the sum of the number of nulls and the length of values must be equal to row_count."
+            }
         );
 
         let mut idx_of_values = 0;
