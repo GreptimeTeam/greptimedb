@@ -25,6 +25,7 @@ use sql::parser::ParserContext;
 use sql::statements::create::{CreateTable, TIME_INDEX};
 use sql::statements::{self};
 use table::metadata::{TableInfoRef, TableMeta};
+use table::requests::IMMUTABLE_TABLE_META_KEY;
 
 use crate::error::{ConvertSqlTypeSnafu, ConvertSqlValueSnafu, Result, SqlSnafu};
 
@@ -74,7 +75,11 @@ fn create_sql_options(table_meta: &TableMeta) -> Vec<SqlOption> {
         options.push(sql_option("compaction_time_window", number_value(w)));
     }
 
-    for (k, v) in &table_opts.extra_options {
+    for (k, v) in table_opts
+        .extra_options
+        .iter()
+        .filter(|(k, _)| k != &IMMUTABLE_TABLE_META_KEY)
+    {
         options.push(sql_option(k, string_value(v)));
     }
 
@@ -184,6 +189,10 @@ mod tests {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{Schema, SchemaRef};
     use table::metadata::*;
+    use table::requests::{
+        TableOptions, IMMUTABLE_TABLE_FORMAT_KEY, IMMUTABLE_TABLE_LOCATION_KEY,
+        IMMUTABLE_TABLE_META_KEY,
+    };
 
     use super::*;
 
@@ -255,6 +264,72 @@ CREATE TABLE IF NOT EXISTS system_metrics (
 ENGINE=mito
 WITH(
   regions = 3
+)"#,
+            sql
+        );
+    }
+
+    #[test]
+    fn test_show_create_external_table_sql() {
+        let schema = vec![
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
+        ];
+        let table_schema = SchemaRef::new(Schema::new(schema));
+        let table_name = "system_metrics";
+        let schema_name = "public".to_string();
+        let catalog_name = "greptime".to_string();
+        let mut options: TableOptions = Default::default();
+        options.extra_options.insert(
+            IMMUTABLE_TABLE_LOCATION_KEY.to_string(),
+            "foo.csv".to_string(),
+        );
+        options.extra_options.insert(
+            IMMUTABLE_TABLE_META_KEY.to_string(),
+            "{{\"files\":[\"foo.csv\"]}}".to_string(),
+        );
+        options
+            .extra_options
+            .insert(IMMUTABLE_TABLE_FORMAT_KEY.to_string(), "csv".to_string());
+        let meta = TableMetaBuilder::default()
+            .schema(table_schema)
+            .primary_key_indices(vec![])
+            .engine("file".to_string())
+            .next_column_id(0)
+            .engine_options(Default::default())
+            .options(options)
+            .created_on(Default::default())
+            .build()
+            .unwrap();
+
+        let info = Arc::new(
+            TableInfoBuilder::default()
+                .table_id(1024)
+                .table_version(0 as TableVersion)
+                .name(table_name)
+                .schema_name(schema_name)
+                .catalog_name(catalog_name)
+                .desc(None)
+                .table_type(TableType::Base)
+                .meta(meta)
+                .build()
+                .unwrap(),
+        );
+
+        let stmt = create_table_stmt(&info).unwrap();
+
+        let sql = format!("\n{}", stmt);
+        assert_eq!(
+            r#"
+CREATE TABLE IF NOT EXISTS system_metrics (
+  host STRING NULL,
+  cpu DOUBLE NULL,
+
+)
+ENGINE=file
+WITH(
+  FORMAT = 'csv',
+  LOCATION = 'foo.csv'
 )"#,
             sql
         );
