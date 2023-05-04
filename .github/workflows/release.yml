@@ -29,16 +29,16 @@ jobs:
       matrix:
         # The file format is greptime-<os>-<arch>
         include:
-          - arch: x86_64-unknown-linux-gnu
-            os: ubuntu-2004-16-cores
-            file: greptime-linux-amd64
-            continue-on-error: false
-            opts: "-F servers/dashboard"
-          - arch: aarch64-unknown-linux-gnu
-            os: ubuntu-2004-16-cores
-            file: greptime-linux-arm64
-            continue-on-error: false
-            opts: "-F servers/dashboard"
+          # - arch: x86_64-unknown-linux-gnu
+          #   os: ubuntu-2004-16-cores
+          #   file: greptime-linux-amd64
+          #   continue-on-error: false
+          #   opts: "-F servers/dashboard"
+          # - arch: aarch64-unknown-linux-gnu
+          #   os: ubuntu-2004-16-cores
+          #   file: greptime-linux-arm64
+          #   continue-on-error: false
+          #   opts: "-F servers/dashboard"
           - arch: aarch64-apple-darwin
             os: macos-latest
             file: greptime-darwin-arm64
@@ -49,16 +49,16 @@ jobs:
             file: greptime-darwin-amd64
             continue-on-error: false
             opts: "-F servers/dashboard"
-          - arch: x86_64-unknown-linux-gnu
-            os: ubuntu-2004-16-cores
-            file: greptime-linux-amd64-pyo3
-            continue-on-error: false
-            opts: "-F pyo3_backend,servers/dashboard"
-          - arch: aarch64-unknown-linux-gnu
-            os: ubuntu-2004-16-cores
-            file: greptime-linux-arm64-pyo3
-            continue-on-error: false
-            opts: "-F pyo3_backend,servers/dashboard"
+          # - arch: x86_64-unknown-linux-gnu
+          #   os: ubuntu-2004-16-cores
+          #   file: greptime-linux-amd64-pyo3
+          #   continue-on-error: false
+          #   opts: "-F pyo3_backend,servers/dashboard"
+          # - arch: aarch64-unknown-linux-gnu
+          #   os: ubuntu-2004-16-cores
+          #   file: greptime-linux-arm64-pyo3
+          #   continue-on-error: false
+          #   opts: "-F pyo3_backend,servers/dashboard"
           - arch: aarch64-apple-darwin
             os: macos-latest
             file: greptime-darwin-arm64-pyo3
