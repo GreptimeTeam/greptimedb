@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::meta::{HeartbeatRequest, PutRequest};
+use api::v1::meta::{HeartbeatRequest, PutRequest, Role};
 use dashmap::DashMap;
 
 use crate::error::Result;
@@ -30,16 +30,16 @@ pub struct PersistStatsHandler {
 
 #[async_trait::async_trait]
 impl HeartbeatHandler for PersistStatsHandler {
+    fn is_acceptable(&self, role: Role) -> bool {
+        role == Role::Datanode
+    }
+
     async fn handle(
         &self,
         _req: &HeartbeatRequest,
         ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
     ) -> Result<()> {
-        if ctx.is_skip_all() {
-            return Ok(());
-        }
-
         let Some(stat) = acc.stat.take() else { return Ok(()) };
 
         let key = stat.stat_key();
@@ -78,18 +78,23 @@ mod tests {
     use api::v1::meta::RangeRequest;
 
     use super::*;
+    use crate::handler::HeartbeatMailbox;
     use crate::keys::StatKey;
+    use crate::sequence::Sequence;
     use crate::service::store::memory::MemStore;
 
     #[tokio::test]
     async fn test_handle_datanode_stats() {
         let in_memory = Arc::new(MemStore::new());
         let kv_store = Arc::new(MemStore::new());
+        let seq = Sequence::new("test_seq", 0, 10, kv_store.clone());
+        let mailbox = HeartbeatMailbox::create(Arc::new(Default::default()), seq);
         let mut ctx = Context {
             datanode_lease_secs: 30,
             server_addr: "127.0.0.1:0000".to_string(),
             in_memory,
             kv_store,
+            mailbox,
             election: None,
             skip_all: Arc::new(AtomicBool::new(false)),
             catalog: None,

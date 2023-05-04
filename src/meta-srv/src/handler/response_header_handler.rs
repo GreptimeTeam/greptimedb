@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::meta::{HeartbeatRequest, ResponseHeader, PROTOCOL_VERSION};
+use api::v1::meta::{HeartbeatRequest, ResponseHeader, Role, PROTOCOL_VERSION};
 
 use crate::error::Result;
 use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
@@ -23,6 +23,10 @@ pub struct ResponseHeaderHandler;
 
 #[async_trait::async_trait]
 impl HeartbeatHandler for ResponseHeaderHandler {
+    fn is_acceptable(&self, role: Role) -> bool {
+        role == Role::Datanode
+    }
+
     async fn handle(
         &self,
         req: &HeartbeatRequest,
@@ -48,18 +52,22 @@ mod tests {
     use api::v1::meta::{HeartbeatResponse, RequestHeader};
 
     use super::*;
-    use crate::handler::Context;
+    use crate::handler::{Context, HeartbeatMailbox};
+    use crate::sequence::Sequence;
     use crate::service::store::memory::MemStore;
 
     #[tokio::test]
     async fn test_handle_heartbeat_resp_header() {
         let in_memory = Arc::new(MemStore::new());
         let kv_store = Arc::new(MemStore::new());
+        let seq = Sequence::new("test_seq", 0, 10, kv_store.clone());
+        let mailbox = HeartbeatMailbox::create(Arc::new(Default::default()), seq);
         let mut ctx = Context {
             datanode_lease_secs: 30,
             server_addr: "127.0.0.1:0000".to_string(),
             in_memory,
             kv_store,
+            mailbox,
             election: None,
             skip_all: Arc::new(AtomicBool::new(false)),
             catalog: None,
@@ -82,7 +90,7 @@ mod tests {
         let header = std::mem::take(&mut acc.header);
         let res = HeartbeatResponse {
             header,
-            payload: acc.into_payload(),
+            mailbox_messages: acc.into_mailbox_messages(),
         };
         assert_eq!(1, res.header.unwrap().cluster_id);
     }

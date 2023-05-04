@@ -12,36 +12,36 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::meta::{Error, HeartbeatRequest, Role};
+use api::v1::meta::{HeartbeatRequest, Role};
 
 use crate::error::Result;
 use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
 
 #[derive(Default)]
-pub struct CheckLeaderHandler;
+pub struct MailboxHandler;
 
 #[async_trait::async_trait]
-impl HeartbeatHandler for CheckLeaderHandler {
-    fn is_acceptable(&self, role: Role) -> bool {
-        role == Role::Datanode
+impl HeartbeatHandler for MailboxHandler {
+    fn is_acceptable(&self, _role: Role) -> bool {
+        true
     }
 
     async fn handle(
         &self,
-        _req: &HeartbeatRequest,
+        req: &HeartbeatRequest,
         ctx: &mut Context,
-        acc: &mut HeartbeatAccumulator,
+        _acc: &mut HeartbeatAccumulator,
     ) -> Result<()> {
-        if let Some(election) = &ctx.election {
-            if election.is_leader() {
-                return Ok(());
-            }
-            if let Some(header) = &mut acc.header {
-                header.error = Some(Error::is_not_leader());
-                ctx.set_skip_all();
-            }
+        if req.mailbox_messages.is_empty() {
+            return Ok(());
         }
+
+        let mailbox_messages = req.mailbox_messages.clone();
+        for msg in mailbox_messages {
+            ctx.mailbox.on_recv(msg.id, Ok(msg)).await?;
+        }
+
         Ok(())
     }
 }
