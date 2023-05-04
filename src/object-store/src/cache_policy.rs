@@ -118,7 +118,8 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
         let cache_path = self.cache_path(&path, &args);
         let lru_cache = &self.lru_cache;
 
-        match self.cache.read(&cache_path, args.clone()).await {
+        // the args is already in the cache path, so we must create a new OpRead.
+        match self.cache.read(&cache_path, OpRead::default()).await {
             Ok((rp, r)) => {
                 increment_counter!(OBJECT_STORE_LRU_CACHE_HIT);
 
@@ -139,7 +140,7 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
 
                 writer.close().await?;
 
-                match self.cache.read(&cache_path, args.clone()).await {
+                match self.cache.read(&cache_path, OpRead::default()).await {
                     Ok((rp, reader)) => {
                         let r = {
                             // push new cache file name to lru
