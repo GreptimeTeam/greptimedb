@@ -164,14 +164,14 @@ impl Timestamp {
     /// Format timestamp to ISO8601 string. If the timestamp exceeds what chrono timestamp can
     /// represent, this function simply print the timestamp unit and value in plain string.
     pub fn to_iso8601_string(&self) -> String {
-        self.to_formatted_string("%Y-%m-%d %H:%M:%S%.f%z")
+        self.as_formatted_string("%Y-%m-%d %H:%M:%S%.f%z")
     }
 
     pub fn to_local_string(&self) -> String {
-        self.to_formatted_string("%Y-%m-%d %H:%M:%S%.f")
+        self.as_formatted_string("%Y-%m-%d %H:%M:%S%.f")
     }
 
-    fn to_formatted_string(&self, pattern: &str) -> String {
+    fn as_formatted_string(self, pattern: &str) -> String {
         if let Some(v) = self.to_chrono_datetime() {
             let local = Local {};
             format!("{}", local.from_utc_datetime(&v).format(pattern))
