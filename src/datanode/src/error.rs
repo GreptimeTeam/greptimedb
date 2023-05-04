@@ -21,8 +21,6 @@ use snafu::Location;
 use storage::error::Error as StorageError;
 use table::error::Error as TableError;
 
-use crate::datanode::ObjectStoreConfig;
-
 /// Business error of datanode.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -210,9 +208,8 @@ pub enum Error {
     #[snafu(display("Failed to storage engine, source: {}", source))]
     OpenStorageEngine { source: StorageError },
 
-    #[snafu(display("Failed to init backend, config: {:#?}, source: {}", config, source))]
+    #[snafu(display("Failed to init backend, source: {}", source))]
     InitBackend {
-        config: Box<ObjectStoreConfig>,
         source: object_store::Error,
         location: Location,
     },

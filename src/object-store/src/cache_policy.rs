@@ -17,11 +17,10 @@ use std::ops::DerefMut;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bytes::Bytes;
 use lru::LruCache;
 use metrics::increment_counter;
 use opendal::ops::{OpDelete, OpList, OpRead, OpScan, OpWrite};
-use opendal::raw::oio::{Read, Reader, Write};
+use opendal::raw::oio::{Page, Read, Reader, Write};
 use opendal::raw::{Accessor, Layer, LayeredAccessor, RpDelete, RpList, RpRead, RpScan, RpWrite};
 use opendal::{ErrorKind, Result};
 use tokio::sync::Mutex;
@@ -31,19 +30,41 @@ use crate::metrics::{
     OBJECT_STORE_LRU_CACHE_MISS,
 };
 
+#[derive(Clone)]
 pub struct LruCacheLayer<C> {
     cache: Arc<C>,
     lru_cache: Arc<Mutex<LruCache<String, ()>>>,
 }
 
-impl<C: Accessor> LruCacheLayer<C> {
-    pub fn new(cache: Arc<C>, capacity: usize) -> Self {
-        Self {
+impl<C: Accessor + Clone> LruCacheLayer<C> {
+    pub async fn new(cache: Arc<C>, capacity: usize) -> Result<Self> {
+        let layer = Self {
             cache,
             lru_cache: Arc::new(Mutex::new(LruCache::new(
                 NonZeroUsize::new(capacity).unwrap(),
             ))),
+        };
+        layer.recover_keys().await?;
+
+        Ok(layer)
+    }
+
+    /// Recover existing keys from `cache` to `lru_cache`.
+    async fn recover_keys(&self) -> Result<()> {
+        let (_, mut pager) = self.cache.list("/", OpList::default()).await?;
+
+        let mut lru_cache = self.lru_cache.lock().await;
+        while let Some(entries) = pager.next().await? {
+            for entry in entries {
+                lru_cache.push(entry.path().to_string(), ());
+            }
         }
+
+        Ok(())
+    }
+
+    pub async fn lru_contains_key(&self, key: &str) -> bool {
+        self.lru_cache.lock().await.contains(key)
     }
 }
 
@@ -68,7 +89,11 @@ pub struct LruCacheAccessor<I, C> {
 
 impl<I, C> LruCacheAccessor<I, C> {
     fn cache_path(&self, path: &str, args: &OpRead) -> String {
-        format!("{}.cache-{}", path, args.range().to_header())
+        format!(
+            "{:x}.cache-{}",
+            md5::compute(path),
+            args.range().to_header()
+        )
     }
 }
 
@@ -91,9 +116,10 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
     async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
         let path = path.to_string();
         let cache_path = self.cache_path(&path, &args);
-        let lru_cache = self.lru_cache.clone();
+        let lru_cache = &self.lru_cache;
 
-        match self.cache.read(&cache_path, args.clone()).await {
+        // the args is already in the cache path, so we must create a new OpRead.
+        match self.cache.read(&cache_path, OpRead::default()).await {
             Ok((rp, r)) => {
                 increment_counter!(OBJECT_STORE_LRU_CACHE_HIT);
 
@@ -105,18 +131,16 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
             Err(err) if err.kind() == ErrorKind::NotFound => {
                 increment_counter!(OBJECT_STORE_LRU_CACHE_MISS);
 
-                let (rp, mut reader) = self.inner.read(&path, args.clone()).await?;
-                let size = rp.clone().into_metadata().content_length();
+                let (_, mut reader) = self.inner.read(&path, args.clone()).await?;
                 let (_, mut writer) = self.cache.write(&cache_path, OpWrite::new()).await?;
 
-                // TODO(hl): We can use [Writer::append](https://docs.rs/opendal/0.30.4/opendal/struct.Writer.html#method.append)
-                // here to avoid loading whole file into memory once all our backend supports `Writer`.
-                let mut buf = vec![0; size as usize];
-                reader.read(&mut buf).await?;
-                writer.write(Bytes::from(buf)).await?;
+                while let Some(bytes) = reader.next().await {
+                    writer.write(bytes?).await?;
+                }
+
                 writer.close().await?;
 
-                match self.cache.read(&cache_path, args.clone()).await {
+                match self.cache.read(&cache_path, OpRead::default()).await {
                     Ok((rp, reader)) => {
                         let r = {
                             // push new cache file name to lru
@@ -144,15 +168,15 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
     }
 
     async fn delete(&self, path: &str, args: OpDelete) -> Result<RpDelete> {
-        let path = path.to_string();
-        let lru_cache = self.lru_cache.clone();
+        let cache_path = md5::compute(path);
+        let lru_cache = &self.lru_cache;
 
         let cache_files: Vec<String> = {
             let mut guard = lru_cache.lock().await;
             let lru = guard.deref_mut();
             let cache_files = lru
                 .iter()
-                .filter(|(k, _v)| k.starts_with(format!("{path}.cache-").as_str()))
+                .filter(|(k, _v)| k.starts_with(format!("{:x}.cache-", cache_path).as_str()))
                 .map(|(k, _v)| k.clone())
                 .collect::<Vec<_>>();
             for k in &cache_files {
@@ -163,7 +187,7 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
         for file in cache_files {
             let _ = self.cache.delete(&file, OpDelete::new()).await;
         }
-        return self.inner.delete(&path, args).await;
+        self.inner.delete(path, args).await
     }
 
     async fn list(&self, path: &str, args: OpList) -> Result<(RpList, Self::Pager)> {
