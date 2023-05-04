@@ -470,9 +470,9 @@ pub(crate) async fn new_s3_object_store(store_config: &ObjectStoreConfig) -> Res
 
 fn clean_temp_dir(dir: &str) -> Result<()> {
     if path::Path::new(&dir).exists() {
-        info!("Begin to clean temp storage directory: {}", &dir);
+        info!("Begin to clean temp storage directory: {}", dir);
         fs::remove_dir_all(dir).context(error::RemoveDirSnafu { dir })?;
-        info!("Cleaned temp storage directory: {}", &dir);
+        info!("Cleaned temp storage directory: {}", dir);
     }
 
     Ok(())
