@@ -234,21 +234,25 @@ async fn test_object_store_cache_policy() -> Result<()> {
     store.range_read(p1, 0..).await?;
     store.read(p1).await?;
     store.range_read(p2, 0..).await?;
+    store.range_read(p2, 7..).await?;
     store.read(p2).await?;
 
     assert_cache_files(
         &cache_store,
         &[
-            "test_file1.cache-bytes=0-",
-            "test_file2.cache-bytes=7-",
-            "test_file2.cache-bytes=0-",
+            "6d29752bdc6e4d5ba5483b96615d6c48.cache-bytes=0-",
+            "ecfe0dce85de452eb0a325158e7bfb75.cache-bytes=7-",
+            "ecfe0dce85de452eb0a325158e7bfb75.cache-bytes=0-",
         ],
         &["Hello, object1!", "object2!", "Hello, object2!"],
     )
     .await?;
     assert_lru_cache(
         &cache_layer,
-        &["test_file1.cache-bytes=0-", "test_file2.cache-bytes=0-"],
+        &[
+            "6d29752bdc6e4d5ba5483b96615d6c48.cache-bytes=0-",
+            "ecfe0dce85de452eb0a325158e7bfb75.cache-bytes=0-",
+        ],
     )
     .await;
 
@@ -256,11 +260,15 @@ async fn test_object_store_cache_policy() -> Result<()> {
 
     assert_cache_files(
         &cache_store,
-        &["test_file1.cache-bytes=0-"],
+        &["6d29752bdc6e4d5ba5483b96615d6c48.cache-bytes=0-"],
         &["Hello, object1!"],
     )
     .await?;
-    assert_lru_cache(&cache_layer, &["test_file1.cache-bytes=0-"]).await;
+    assert_lru_cache(
+        &cache_layer,
+        &["6d29752bdc6e4d5ba5483b96615d6c48.cache-bytes=0-"],
+    )
+    .await;
 
     let p3 = "test_file3";
     store.write(p3, "Hello, object3!").await.unwrap();
@@ -271,9 +279,9 @@ async fn test_object_store_cache_policy() -> Result<()> {
     assert_cache_files(
         &cache_store,
         &[
-            "test_file1.cache-bytes=0-",
-            "test_file3.cache-bytes=0-",
-            "test_file3.cache-bytes=0-4",
+            "6d29752bdc6e4d5ba5483b96615d6c48.cache-bytes=0-",
+            "a8b1dc21e24bb55974e3e68acc77ed52.cache-bytes=0-",
+            "a8b1dc21e24bb55974e3e68acc77ed52.cache-bytes=0-4",
         ],
         &["Hello, object1!", "Hello, object3!", "Hello"],
     )
@@ -281,9 +289,9 @@ async fn test_object_store_cache_policy() -> Result<()> {
     assert_lru_cache(
         &cache_layer,
         &[
-            "test_file1.cache-bytes=0-",
-            "test_file3.cache-bytes=0-",
-            "test_file3.cache-bytes=0-4",
+            "6d29752bdc6e4d5ba5483b96615d6c48.cache-bytes=0-",
+            "a8b1dc21e24bb55974e3e68acc77ed52.cache-bytes=0-",
+            "a8b1dc21e24bb55974e3e68acc77ed52.cache-bytes=0-4",
         ],
     )
     .await;
@@ -302,9 +310,9 @@ async fn test_object_store_cache_policy() -> Result<()> {
     assert_lru_cache(
         &cache_layer,
         &[
-            "test_file1.cache-bytes=0-",
-            "test_file3.cache-bytes=0-",
-            "test_file3.cache-bytes=0-4",
+            "6d29752bdc6e4d5ba5483b96615d6c48.cache-bytes=0-",
+            "a8b1dc21e24bb55974e3e68acc77ed52.cache-bytes=0-",
+            "a8b1dc21e24bb55974e3e68acc77ed52.cache-bytes=0-4",
         ],
     )
     .await;

@@ -167,15 +167,15 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
     }
 
     async fn delete(&self, path: &str, args: OpDelete) -> Result<RpDelete> {
-        let path = path.to_string();
-        let lru_cache = self.lru_cache.clone();
+        let cache_path = md5::compute(path);
+        let lru_cache = &self.lru_cache;
 
         let cache_files: Vec<String> = {
             let mut guard = lru_cache.lock().await;
             let lru = guard.deref_mut();
             let cache_files = lru
                 .iter()
-                .filter(|(k, _v)| k.starts_with(format!("{path}.cache-").as_str()))
+                .filter(|(k, _v)| k.starts_with(format!("{:x}.cache-", cache_path).as_str()))
                 .map(|(k, _v)| k.clone())
                 .collect::<Vec<_>>();
             for k in &cache_files {
@@ -186,7 +186,7 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
         for file in cache_files {
             let _ = self.cache.delete(&file, OpDelete::new()).await;
         }
-        return self.inner.delete(&path, args).await;
+        return self.inner.delete(path, args).await;
     }
 
     async fn list(&self, path: &str, args: OpList) -> Result<(RpList, Self::Pager)> {
