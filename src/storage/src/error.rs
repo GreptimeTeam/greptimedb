@@ -83,16 +83,31 @@ pub enum Error {
         location: Location,
         source: object_store::Error,
     },
-    #[snafu(display("Fail to compress object by {}, source: {}", compress_type, err_msg))]
+
+    #[snafu(display(
+        "Fail to compress object by {}, path: {}, source: {}",
+        compress_type,
+        path,
+        source
+    ))]
     CompressObject {
         compress_type: CompressionType,
-        err_msg: String,
+        path: String,
+        source: std::io::Error,
     },
-    #[snafu(display("Fail to compress object by {}, source: {}", compress_type, err_msg))]
+
+    #[snafu(display(
+        "Fail to decompress object by {}, path: {}, source: {}",
+        compress_type,
+        path,
+        source
+    ))]
     DecompressObject {
         compress_type: CompressionType,
-        err_msg: String,
+        path: String,
+        source: std::io::Error,
     },
+
     #[snafu(display("Fail to list objects in path: {}, source: {}", path, source))]
     ListObjects {
         path: String,

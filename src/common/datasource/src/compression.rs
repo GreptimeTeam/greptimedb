@@ -74,73 +74,39 @@ impl CompressionType {
         !matches!(self, &Self::Uncompressed)
     }
 
-    pub async fn encode(&self, content: impl AsRef<[u8]>) -> io::Result<Vec<u8>> {
-        match self {
-            CompressionType::GZIP => {
-                let mut buffer = Vec::new();
-                let mut encoder = write::GzipEncoder::new(&mut buffer);
-                encoder.write_all(content.as_ref()).await?;
-                encoder.shutdown().await?;
-                Ok(buffer)
-            }
-            CompressionType::BZIP2 => {
-                let mut buffer = Vec::new();
-                let mut encoder = write::BzEncoder::new(&mut buffer);
-                encoder.write_all(content.as_ref()).await?;
-                encoder.shutdown().await?;
-                Ok(buffer)
-            }
-            CompressionType::XZ => {
-                let mut buffer = Vec::new();
-                let mut encoder = write::XzEncoder::new(&mut buffer);
-                encoder.write_all(content.as_ref()).await?;
-                encoder.shutdown().await?;
-                Ok(buffer)
-            }
-            CompressionType::ZSTD => {
-                let mut buffer = Vec::new();
-                let mut encoder = write::ZstdEncoder::new(&mut buffer);
-                encoder.write_all(content.as_ref()).await?;
-                encoder.shutdown().await?;
-                Ok(buffer)
-            }
-            CompressionType::UNCOMPRESSED => Ok(content.as_ref().to_vec()),
-        }
-    }
+macro_rules! impl_compression_type {
+    ($(($enum_item:ident, $prefix:ident)),*) => {
+        paste::item! {
+            impl CompressionType {
+                pub async fn encode(&self, content: impl AsRef<[u8]>) -> io::Result<Vec<u8>> {
+                    match self {
+                        $(
+                            CompressionType::$enum_item => {
+                                let mut buffer = Vec::new();
+                                let mut encoder = write::[<$prefix Encoder>]::new(&mut buffer);
+                                encoder.write_all(content.as_ref()).await?;
+                                encoder.shutdown().await?;
+                                Ok(buffer)
+                            }
+                        )*
+                        CompressionType::UNCOMPRESSED => Ok(content.as_ref().to_vec()),
+                    }
+                }
 
-    pub async fn decode(&self, content: impl AsRef<[u8]>) -> io::Result<Vec<u8>> {
-        match self {
-            CompressionType::GZIP => {
-                let mut buffer = Vec::new();
-                let mut decoder = write::GzipDecoder::new(&mut buffer);
-                decoder.write_all(content.as_ref()).await?;
-                decoder.shutdown().await?;
-                Ok(buffer)
-            }
-            CompressionType::BZIP2 => {
-                let mut buffer = Vec::new();
-                let mut decoder = write::BzDecoder::new(&mut buffer);
-                decoder.write_all(content.as_ref()).await?;
-                decoder.shutdown().await?;
-                Ok(buffer)
-            }
-            CompressionType::XZ => {
-                let mut buffer = Vec::new();
-                let mut decoder = write::XzDecoder::new(&mut buffer);
-                decoder.write_all(content.as_ref()).await?;
-                decoder.shutdown().await?;
-                Ok(buffer)
-            }
-            CompressionType::ZSTD => {
-                let mut buffer = Vec::new();
-                let mut decoder = write::ZstdDecoder::new(&mut buffer);
-                decoder.write_all(content.as_ref()).await?;
-                decoder.shutdown().await?;
-                Ok(buffer)
-            }
-            CompressionType::UNCOMPRESSED => Ok(content.as_ref().to_vec()),
-        }
-    }
+                pub async fn decode(&self, content: impl AsRef<[u8]>) -> io::Result<Vec<u8>> {
+                    match self {
+                        $(
+                            CompressionType::$enum_item => {
+                                let mut buffer = Vec::new();
+                                let mut encoder = write::[<$prefix Decoder>]::new(&mut buffer);
+                                encoder.write_all(content.as_ref()).await?;
+                                encoder.shutdown().await?;
+                                Ok(buffer)
+                            }
+                        )*
+                        CompressionType::UNCOMPRESSED => Ok(content.as_ref().to_vec()),
+                    }
+                }
 
     pub fn convert_async_read<T: AsyncRead + Unpin + Send + 'static>(
         &self,
@@ -177,77 +143,41 @@ impl CompressionType {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::CompressionType;
+            #[cfg(test)]
+            mod tests {
+                use super::CompressionType;
 
-    #[tokio::test]
-    async fn test_gzip_compression() {
-        let string = "foo_bar".as_bytes().to_vec();
-        let compress = CompressionType::GZIP
-            .encode(&mut string.clone())
-            .await
-            .unwrap();
-        let decompress = CompressionType::GZIP
-            .decode(&mut compress.clone())
-            .await
-            .unwrap();
-        assert_eq!(decompress, string);
-    }
+                $(
+                #[tokio::test]
+                async fn [<test_ $enum_item:lower _compression>]() {
+                    let string = "foo_bar".as_bytes().to_vec();
+                    let compress = CompressionType::$enum_item
+                        .encode(&mut string.clone())
+                        .await
+                        .unwrap();
+                    let decompress = CompressionType::$enum_item
+                        .decode(&mut compress.clone())
+                        .await
+                        .unwrap();
+                    assert_eq!(decompress, string);
+                })*
 
-    #[tokio::test]
-    async fn test_bzip_compression() {
-        let string = "foo_bar".as_bytes().to_vec();
-        let compress = CompressionType::BZIP2
-            .encode(&mut string.clone())
-            .await
-            .unwrap();
-        let decompress = CompressionType::BZIP2
-            .decode(&mut compress.clone())
-            .await
-            .unwrap();
-        assert_eq!(decompress, string);
-    }
-
-    #[tokio::test]
-    async fn test_xz_compression() {
-        let string = "foo_bar".as_bytes().to_vec();
-        let compress = CompressionType::XZ
-            .encode(&mut string.clone())
-            .await
-            .unwrap();
-        let decompress = CompressionType::XZ
-            .decode(&mut compress.clone())
-            .await
-            .unwrap();
-        assert_eq!(decompress, string);
-    }
-
-    #[tokio::test]
-    async fn test_zstd_compression() {
-        let string = "foo_bar".as_bytes().to_vec();
-        let compress = CompressionType::ZSTD
-            .encode(&mut string.clone())
-            .await
-            .unwrap();
-        let decompress = CompressionType::ZSTD
-            .decode(&mut compress.clone())
-            .await
-            .unwrap();
-        assert_eq!(decompress, string);
-    }
-
-    #[tokio::test]
-    async fn test_uncompression() {
-        let string = "foo_bar".as_bytes().to_vec();
-        let compress = CompressionType::UNCOMPRESSED
-            .encode(&mut string.clone())
-            .await
-            .unwrap();
-        let decompress = CompressionType::UNCOMPRESSED
-            .decode(&mut compress.clone())
-            .await
-            .unwrap();
-        assert_eq!(decompress, string);
-    }
+                #[tokio::test]
+                async fn test_uncompression() {
+                    let string = "foo_bar".as_bytes().to_vec();
+                    let compress = CompressionType::UNCOMPRESSED
+                        .encode(&mut string.clone())
+                        .await
+                        .unwrap();
+                    let decompress = CompressionType::UNCOMPRESSED
+                        .decode(&mut compress.clone())
+                        .await
+                        .unwrap();
+                    assert_eq!(decompress, string);
+                }
+            }
+        }
+    };
 }
+
+impl_compression_type!((GZIP, Gzip), (BZIP2, Bz), (XZ, Xz), (ZSTD, Zstd));

@@ -1621,6 +1621,7 @@ dependencies = [
  "derive_builder 0.12.0",
  "futures",
  "object-store",
+ "paste",
  "regex",
  "snafu",
  "tokio",
