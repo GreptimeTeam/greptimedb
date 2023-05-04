@@ -12,9 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_base::readable_size::ReadableSize;
+use common_datasource::file_format::csv::stream_to_csv;
+use common_datasource::file_format::json::stream_to_json;
+use common_datasource::file_format::Format;
 use common_datasource::object_store::{build_backend, parse_url};
 use common_query::physical_plan::SessionContext;
 use common_query::Output;
+use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
+use common_recordbatch::SendableRecordBatchStream;
+use object_store::ObjectStore;
 use snafu::ResultExt;
 use storage::sst::SstInfo;
 use storage::{ParquetWriter, Source};
@@ -25,6 +32,46 @@ use crate::error::{self, Result, WriteParquetSnafu};
 use crate::statement::StatementExecutor;
 
 impl StatementExecutor {
+    async fn stream_to_file(
+        &self,
+        stream: SendableRecordBatchStream,
+        format: &Format,
+        object_store: ObjectStore,
+        path: &str,
+    ) -> Result<usize> {
+        let threshold = ReadableSize::mb(4).as_bytes() as usize;
+
+        match format {
+            Format::Csv(_) => stream_to_csv(
+                Box::pin(DfRecordBatchStreamAdapter::new(stream)),
+                object_store,
+                path,
+                threshold,
+            )
+            .await
+            .context(error::WriteStreamToFileSnafu { path }),
+            Format::Json(_) => stream_to_json(
+                Box::pin(DfRecordBatchStreamAdapter::new(stream)),
+                object_store,
+                path,
+                threshold,
+            )
+            .await
+            .context(error::WriteStreamToFileSnafu { path }),
+            Format::Parquet(_) => {
+                let writer = ParquetWriter::new(path, Source::Stream(stream), object_store);
+                let rows_copied = writer
+                    .write_sst(&storage::sst::WriteOptions::default())
+                    .await
+                    .context(WriteParquetSnafu)?
+                    .map(|SstInfo { num_rows, .. }| num_rows)
+                    .unwrap_or(0);
+
+                Ok(rows_copied)
+            }
+        }
+    }
+
     pub(crate) async fn copy_table_to(&self, req: CopyTableRequest) -> Result<Output> {
         let table_ref = TableReference {
             catalog: &req.catalog_name,
@@ -32,6 +79,8 @@ impl StatementExecutor {
             table: &req.table_name,
         };
         let table = self.get_table(&table_ref).await?;
+
+        let format = Format::try_from(&req.with).context(error::ParseFileFormatSnafu)?;
 
         let stream = table
             .scan(None, &[], None)
@@ -48,14 +97,9 @@ impl StatementExecutor {
         let object_store =
             build_backend(&req.location, &req.connection).context(error::BuildBackendSnafu)?;
 
-        let writer = ParquetWriter::new(&path, Source::Stream(stream), object_store);
-
-        let rows_copied = writer
-            .write_sst(&storage::sst::WriteOptions::default())
-            .await
-            .context(WriteParquetSnafu)?
-            .map(|SstInfo { num_rows, .. }| num_rows)
-            .unwrap_or(0);
+        let rows_copied = self
+            .stream_to_file(stream, &format, object_store, &path)
+            .await?;
 
         Ok(Output::AffectedRows(rows_copied))
     }

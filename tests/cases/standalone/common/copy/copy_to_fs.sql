@@ -4,4 +4,8 @@ insert into demo(host, cpu, memory, ts) values ('host1', 66.6, 1024, 16552765570
 
 Copy demo TO '/tmp/export/demo.parquet';
 
+Copy demo TO '/tmp/export/demo.csv' with (format='csv');
+
+Copy demo TO '/tmp/export/demo.json' with (format='json');
+
 drop table demo;

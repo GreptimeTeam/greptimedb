@@ -40,11 +40,11 @@ pub struct ParquetFormat {}
 
 #[async_trait]
 impl FileFormat for ParquetFormat {
-    async fn infer_schema(&self, store: &ObjectStore, path: String) -> Result<Schema> {
+    async fn infer_schema(&self, store: &ObjectStore, path: &str) -> Result<Schema> {
         let mut reader = store
-            .reader(&path)
+            .reader(path)
             .await
-            .context(error::ReadObjectSnafu { path: &path })?;
+            .context(error::ReadObjectSnafu { path })?;
 
         let metadata = reader
             .get_metadata()
@@ -171,10 +171,7 @@ mod tests {
     async fn infer_schema_basic() {
         let json = ParquetFormat::default();
         let store = test_store(&test_data_root());
-        let schema = json
-            .infer_schema(&store, "basic.parquet".to_string())
-            .await
-            .unwrap();
+        let schema = json.infer_schema(&store, "basic.parquet").await.unwrap();
         let formatted: Vec<_> = format_schema(schema);
 
         assert_eq!(vec!["num: Int64: NULL", "str: Utf8: NULL"], formatted);
