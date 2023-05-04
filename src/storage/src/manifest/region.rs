@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use common_telemetry::{error, info};
+use common_telemetry::{info, warn};
 use object_store::ObjectStore;
 use store_api::manifest::action::ProtocolAction;
 use store_api::manifest::{
@@ -121,11 +121,17 @@ impl Checkpointer for RegionManifestCheckpointer {
             .delete(start_version, last_version + 1)
             .await
         {
-            // It doesn't matter when deletion fails, they will be purged by gc task.
-            error!(e; "Failed to delete manifest logs [{},{}] in path: {}.",
-                   start_version,
-                   last_version,
-                   manifest.manifest_store().path());
+            // We only log when the error kind isn't `NotFound`
+            if !e.is_object_to_delete_not_found() {
+                // It doesn't matter when deletion fails, they will be purged by gc task.
+                warn!(
+                    "Failed to delete manifest logs [{},{}] in path: {}. err: {}",
+                    start_version,
+                    last_version,
+                    manifest.manifest_store().path(),
+                    e
+                );
+            }
         }
 
         info!("Region manifest checkpoint, start_version: {}, last_version: {}, compacted actions: {}", start_version, last_version, compacted_actions);
@@ -197,14 +203,16 @@ mod tests {
 
         let region_meta = Arc::new(build_region_meta());
 
-        assert!(manifest
-            .scan(0, MAX_VERSION)
-            .await
-            .unwrap()
-            .next_action()
-            .await
-            .unwrap()
-            .is_none());
+        assert_eq!(
+            None,
+            manifest
+                .scan(0, MAX_VERSION)
+                .await
+                .unwrap()
+                .next_action()
+                .await
+                .unwrap()
+        );
 
         manifest
             .update(RegionMetaActionList::with_action(RegionMetaAction::Change(
@@ -365,14 +373,16 @@ mod tests {
                          files.contains_key(&file_ids[1]) &&
                          *metadata == alterd_raw_meta));
         // all actions were compacted
-        assert!(manifest
-            .scan(0, MAX_VERSION)
-            .await
-            .unwrap()
-            .next_action()
-            .await
-            .unwrap()
-            .is_none());
+        assert_eq!(
+            None,
+            manifest
+                .scan(0, MAX_VERSION)
+                .await
+                .unwrap()
+                .next_action()
+                .await
+                .unwrap()
+        );
 
         assert!(manifest.do_checkpoint().await.unwrap().is_none());
         let last_checkpoint = manifest.last_checkpoint().await.unwrap().unwrap();
@@ -441,14 +451,16 @@ mod tests {
                          *metadata == RawRegionMetadata::from(region_meta.as_ref())));
 
         // all actions were compacted
-        assert!(manifest
-            .scan(0, MAX_VERSION)
-            .await
-            .unwrap()
-            .next_action()
-            .await
-            .unwrap()
-            .is_none());
+        assert_eq!(
+            None,
+            manifest
+                .scan(0, MAX_VERSION)
+                .await
+                .unwrap()
+                .next_action()
+                .await
+                .unwrap()
+        );
 
         // wait for gc
         tokio::time::sleep(Duration::from_millis(60)).await;

@@ -20,6 +20,7 @@ use common_error::prelude::*;
 use common_runtime::error::Error as RuntimeError;
 use datatypes::arrow::error::ArrowError;
 use datatypes::prelude::ConcreteDataType;
+use object_store::ErrorKind;
 use serde_json::error::Error as JsonError;
 use snafu::Location;
 use store_api::manifest::action::ProtocolVersion;
@@ -457,6 +458,18 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl Error {
+    /// Returns true if the error is the object path to delete
+    /// doesn't exist.
+    pub(crate) fn is_object_to_delete_not_found(&self) -> bool {
+        if let Error::DeleteObject { source, .. } = self {
+            source.kind() == ErrorKind::NotFound
+        } else {
+            false
+        }
+    }
+}
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {

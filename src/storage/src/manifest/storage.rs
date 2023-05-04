@@ -128,6 +128,7 @@ impl ManifestObjectStore {
 #[derive(Serialize, Deserialize, Debug)]
 struct CheckpointMetadata {
     pub size: usize,
+    /// The latest version this checkpoint contains.
     pub version: ManifestVersion,
     pub checksum: Option<String>,
     pub extend_metadata: Option<HashMap<String, String>>,
@@ -189,20 +190,26 @@ impl ManifestLogStorage for ManifestObjectStore {
         })
     }
 
-    async fn delete_until(&self, end: ManifestVersion) -> Result<usize> {
+    async fn delete_until(
+        &self,
+        end: ManifestVersion,
+        keep_last_checkpoint: bool,
+    ) -> Result<usize> {
         let streamer = self
             .object_store
             .list(&self.path)
             .await
             .context(ListObjectsSnafu { path: &self.path })?;
 
-        let paths: Vec<_> = streamer
+        // Stores (entry, is_checkpoint, version) in a Vec.
+        let entries: Vec<_> = streamer
             .try_filter_map(|e| async move {
                 let file_name = e.name();
+                let is_checkpoint = is_checkpoint_file(file_name);
                 if is_delta_file(file_name) || is_checkpoint_file(file_name) {
                     let version = file_version(file_name);
                     if version < end {
-                        Ok(Some(e.path().to_string()))
+                        Ok(Some((e, is_checkpoint, version)))
                     } else {
                         Ok(None)
                     }
@@ -213,12 +220,51 @@ impl ManifestLogStorage for ManifestObjectStore {
             .try_collect::<Vec<_>>()
             .await
             .context(ListObjectsSnafu { path: &self.path })?;
+        let checkpoint_version = if keep_last_checkpoint {
+            // Note that the order of entries is unspecific.
+            entries
+                .iter()
+                .filter_map(
+                    |(_e, is_checkpoint, version)| {
+                        if *is_checkpoint {
+                            Some(version)
+                        } else {
+                            None
+                        }
+                    },
+                )
+                .max()
+        } else {
+            None
+        };
+
+        let paths: Vec<_> = entries
+            .iter()
+            .filter(|(_e, is_checkpoint, version)| {
+                if let Some(max_version) = checkpoint_version {
+                    if *is_checkpoint {
+                        // We need to keep the checkpoint file.
+                        version < max_version
+                    } else {
+                        // We can delete the log file with max_version as the checkpoint
+                        // file contains the log file's content.
+                        version <= max_version
+                    }
+                } else {
+                    true
+                }
+            })
+            .map(|e| e.0.path().to_string())
+            .collect();
         let ret = paths.len();
 
         logging::debug!(
-            "Deleting {} logs from manifest storage path {}.",
+            "Deleting {} logs from manifest storage path {} until {}, checkpoint: {:?}, paths: {:?}",
             ret,
-            self.path
+            self.path,
+            end,
+            checkpoint_version,
+            paths,
         );
 
         self.object_store
@@ -233,6 +279,9 @@ impl ManifestLogStorage for ManifestObjectStore {
 
     async fn save(&self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {
         let path = self.delta_file_path(version);
+
+        logging::debug!("Save log to manifest storage, version: {}", version);
+
         self.object_store
             .write(&path, bytes.to_vec())
             .await
@@ -243,6 +292,12 @@ impl ManifestLogStorage for ManifestObjectStore {
         let raw_paths = (start..end)
             .map(|v| self.delta_file_path(v))
             .collect::<Vec<_>>();
+
+        logging::debug!(
+            "Deleting logs from manifest storage, start: {}, end: {}",
+            start,
+            end
+        );
 
         let paths = raw_paths
             .iter()
@@ -405,10 +460,10 @@ mod tests {
         assert_eq!(checkpoint, "checkpoint".as_bytes());
         assert_eq!(3, v);
 
-        //delete (,4) logs and checkpoints
-        log_store.delete_until(4).await.unwrap();
-        assert!(log_store.load_checkpoint(3).await.unwrap().is_none());
-        assert!(log_store.load_last_checkpoint().await.unwrap().is_none());
+        //delete (,4) logs and keep checkpoint 3.
+        log_store.delete_until(4, true).await.unwrap();
+        assert!(log_store.load_checkpoint(3).await.unwrap().is_some());
+        assert!(log_store.load_last_checkpoint().await.unwrap().is_some());
         let mut it = log_store.scan(0, 11).await.unwrap();
         let (version, bytes) = it.next_log().await.unwrap().unwrap();
         assert_eq!(4, version);
@@ -416,7 +471,7 @@ mod tests {
         assert!(it.next_log().await.unwrap().is_none());
 
         // delete all logs and checkpoints
-        log_store.delete_until(11).await.unwrap();
+        log_store.delete_until(11, false).await.unwrap();
         assert!(log_store.load_checkpoint(3).await.unwrap().is_none());
         assert!(log_store.load_last_checkpoint().await.unwrap().is_none());
         let mut it = log_store.scan(0, 11).await.unwrap();

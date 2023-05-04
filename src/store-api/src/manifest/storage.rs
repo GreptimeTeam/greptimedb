@@ -36,18 +36,24 @@ pub trait ManifestLogStorage {
         end: ManifestVersion,
     ) -> Result<Self::Iter, Self::Error>;
 
-    /// Delete logs which version is less than specified version.
+    /// Delete logs and checkpoints which version is less than specified `end`.
+    /// Keep the last checkpoint and remaining logs if `keep_last_checkpoint` is true.
+    ///
     /// Returns the delete logs number.
-    async fn delete_until(&self, version: ManifestVersion) -> Result<usize, Self::Error>;
+    async fn delete_until(
+        &self,
+        end: ManifestVersion,
+        keep_last_checkpoint: bool,
+    ) -> Result<usize, Self::Error>;
 
-    /// Save  a log
+    /// Save a log
     async fn save(&self, version: ManifestVersion, bytes: &[u8]) -> Result<(), Self::Error>;
 
-    /// Delete logs in [start, end)
+    /// Delete logs in [start, end) and ignore checkpoints.
     async fn delete(&self, start: ManifestVersion, end: ManifestVersion)
         -> Result<(), Self::Error>;
 
-    /// Save a checkpoint
+    /// Save a checkpoint.
     async fn save_checkpoint(
         &self,
         version: ManifestVersion,
