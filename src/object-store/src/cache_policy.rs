@@ -38,15 +38,15 @@ pub struct LruCacheLayer<C> {
 
 impl<C: Accessor + Clone> LruCacheLayer<C> {
     pub async fn new(cache: Arc<C>, capacity: usize) -> Result<Self> {
-        let zelf = Self {
+        let layer = Self {
             cache,
             lru_cache: Arc::new(Mutex::new(LruCache::new(
                 NonZeroUsize::new(capacity).unwrap(),
             ))),
         };
-        zelf.recover_keys().await?;
+        layer.recover_keys().await?;
 
-        Ok(zelf)
+        Ok(layer)
     }
 
     /// Recover existing keys from `cache` to `lru_cache`.

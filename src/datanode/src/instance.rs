@@ -379,9 +379,7 @@ pub(crate) async fn new_oss_object_store(store_config: &ObjectStoreConfig) -> Re
         .access_key_secret(oss_config.access_key_secret.expose_secret());
 
     let object_store = ObjectStore::new(builder)
-        .with_context(|_| error::InitBackendSnafu {
-            config: store_config.clone(),
-        })?
+        .context(error::InitBackendSnafu)?
         .finish();
 
     create_object_store_with_cache(object_store, store_config).await
@@ -416,15 +414,11 @@ async fn create_object_store_with_cache(
             .root(path)
             .atomic_write_dir(&atomic_temp_dir)
             .build()
-            .with_context(|_| error::InitBackendSnafu {
-                config: store_config.clone(),
-            })?;
+            .context(error::InitBackendSnafu)?;
 
         let cache_layer = LruCacheLayer::new(Arc::new(cache_store), cache_capacity.0 as usize)
             .await
-            .with_context(|_| error::InitBackendSnafu {
-                config: store_config.clone(),
-            })?;
+            .context(error::InitBackendSnafu)?;
         Ok(object_store.layer(cache_layer))
     } else {
         Ok(object_store)
@@ -459,9 +453,7 @@ pub(crate) async fn new_s3_object_store(store_config: &ObjectStoreConfig) -> Res
 
     create_object_store_with_cache(
         ObjectStore::new(builder)
-            .with_context(|_| error::InitBackendSnafu {
-                config: store_config.clone(),
-            })?
+            .context(error::InitBackendSnafu)?
             .finish(),
         store_config,
     )
@@ -495,9 +487,7 @@ pub(crate) async fn new_fs_object_store(store_config: &ObjectStoreConfig) -> Res
     builder.root(&data_dir).atomic_write_dir(&atomic_write_dir);
 
     let object_store = ObjectStore::new(builder)
-        .context(error::InitBackendSnafu {
-            config: store_config.clone(),
-        })?
+        .context(error::InitBackendSnafu)?
         .finish();
 
     Ok(object_store)
