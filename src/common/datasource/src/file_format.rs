@@ -78,7 +78,7 @@ impl TryFrom<&HashMap<String, String>> for Format {
 
 #[async_trait]
 pub trait FileFormat: Send + Sync + std::fmt::Debug {
-    async fn infer_schema(&self, store: &ObjectStore, path: String) -> Result<ArrowSchema>;
+    async fn infer_schema(&self, store: &ObjectStore, path: &str) -> Result<ArrowSchema>;
 }
 
 pub trait ArrowDecoder: Send + 'static {
@@ -167,7 +167,7 @@ pub async fn infer_schemas(
 ) -> Result<ArrowSchema> {
     let mut schemas = Vec::with_capacity(files.len());
     for file in files {
-        schemas.push(file_format.infer_schema(store, file.to_string()).await?)
+        schemas.push(file_format.infer_schema(store, file).await?)
     }
     ArrowSchema::try_merge(schemas).context(error::MergeSchemaSnafu)
 }

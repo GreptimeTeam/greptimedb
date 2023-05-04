@@ -162,11 +162,11 @@ impl FileOpener for CsvOpener {
 
 #[async_trait]
 impl FileFormat for CsvFormat {
-    async fn infer_schema(&self, store: &ObjectStore, path: String) -> Result<Schema> {
+    async fn infer_schema(&self, store: &ObjectStore, path: &str) -> Result<Schema> {
         let reader = store
-            .reader(&path)
+            .reader(path)
             .await
-            .context(error::ReadObjectSnafu { path: &path })?;
+            .context(error::ReadObjectSnafu { path })?;
 
         let decoded = self.compression_type.convert_async_read(reader);
 
@@ -179,7 +179,7 @@ impl FileFormat for CsvFormat {
 
             let (schema, _records_read) =
                 infer_csv_schema(reader, delimiter, schema_infer_max_record, has_header)
-                    .context(error::InferSchemaSnafu { path: &path })?;
+                    .context(error::InferSchemaSnafu)?;
             Ok(schema)
         })
         .await
@@ -223,10 +223,7 @@ mod tests {
     async fn infer_schema_basic() {
         let csv = CsvFormat::default();
         let store = test_store(&test_data_root());
-        let schema = csv
-            .infer_schema(&store, "simple.csv".to_string())
-            .await
-            .unwrap();
+        let schema = csv.infer_schema(&store, "simple.csv").await.unwrap();
         let formatted: Vec<_> = format_schema(schema);
 
         assert_eq!(
@@ -257,7 +254,7 @@ mod tests {
         };
         let store = test_store(&test_data_root());
         let schema = json
-            .infer_schema(&store, "schema_infer_limit.csv".to_string())
+            .infer_schema(&store, "schema_infer_limit.csv")
             .await
             .unwrap();
         let formatted: Vec<_> = format_schema(schema);
@@ -275,7 +272,7 @@ mod tests {
         let json = CsvFormat::default();
         let store = test_store(&test_data_root());
         let schema = json
-            .infer_schema(&store, "schema_infer_limit.csv".to_string())
+            .infer_schema(&store, "schema_infer_limit.csv")
             .await
             .unwrap();
         let formatted: Vec<_> = format_schema(schema);

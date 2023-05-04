@@ -63,14 +63,9 @@ impl<T: Unpin + AsyncFileReader + Send + 'static> Stream for ParquetRecordBatchS
     type Item = DfResult<DfRecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match Pin::new(&mut self.stream).poll_next(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Some(recordbatch)) => match recordbatch {
-                Ok(recordbatch) => Poll::Ready(Some(Ok(recordbatch))),
-                Err(e) => Poll::Ready(Some(Err(DataFusionError::External(Box::new(e))))),
-            },
-            Poll::Ready(None) => Poll::Ready(None),
-        }
+        let batch = futures::ready!(Pin::new(&mut self.stream).poll_next(cx))
+            .map(|r| r.map_err(|e| DataFusionError::External(Box::new(e))));
+        Poll::Ready(batch)
     }
 
     #[inline]

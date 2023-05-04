@@ -35,7 +35,7 @@ use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datatypes::arrow::datatypes::{DataType, SchemaRef};
 use datatypes::vectors::Helper;
 use futures_util::StreamExt;
-use object_store::{Entry, ObjectStore};
+use object_store::{Entry, EntryMode, Metakey, ObjectStore};
 use regex::Regex;
 use snafu::ResultExt;
 use table::engine::TableReference;
@@ -87,13 +87,13 @@ impl StatementExecutor {
         match format {
             Format::Csv(format) => Ok(Arc::new(
                 format
-                    .infer_schema(&object_store, path.to_string())
+                    .infer_schema(&object_store, path)
                     .await
                     .context(error::InferSchemaSnafu { path })?,
             )),
             Format::Json(format) => Ok(Arc::new(
                 format
-                    .infer_schema(&object_store, path.to_string())
+                    .infer_schema(&object_store, path)
                     .await
                     .context(error::InferSchemaSnafu { path })?,
             )),
@@ -216,14 +216,16 @@ impl StatementExecutor {
 
         let (object_store, entries) = self.list_copy_from_entries(&req).await?;
 
-        let entries = entries
-            .into_iter()
-            .filter(|entry| !entry.path().ends_with('/'))
-            .collect::<Vec<_>>();
-
         let mut files = Vec::with_capacity(entries.len());
 
         for entry in entries.iter() {
+            let metadata = object_store
+                .metadata(entry, Metakey::Mode)
+                .await
+                .context(error::ReadObjectSnafu { path: entry.path() })?;
+            if metadata.mode() != EntryMode::FILE {
+                continue;
+            }
             let path = entry.path();
             let file_schema = self
                 .infer_schema(&format, object_store.clone(), path)
