@@ -116,8 +116,9 @@ impl ErrorExt for Error {
             Error::ColumnDefaultConstraint { source, .. } => source.status_code(),
             Error::InvalidColumnDef { source, .. } => source.status_code(),
             Error::UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
-            Error::UnexpectedValuesLength { .. } => StatusCode::Internal,
-            Error::ColumnAlreadyExists { .. } => StatusCode::Internal,
+            Error::UnexpectedValuesLength { .. } | Error::ColumnAlreadyExists { .. } => {
+                StatusCode::InvalidArguments
+            }
         }
     }
 
