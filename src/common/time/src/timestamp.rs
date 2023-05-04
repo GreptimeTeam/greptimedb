@@ -164,12 +164,17 @@ impl Timestamp {
     /// Format timestamp to ISO8601 string. If the timestamp exceeds what chrono timestamp can
     /// represent, this function simply print the timestamp unit and value in plain string.
     pub fn to_iso8601_string(&self) -> String {
+        self.as_formatted_string("%Y-%m-%d %H:%M:%S%.f%z")
+    }
+
+    pub fn to_local_string(&self) -> String {
+        self.as_formatted_string("%Y-%m-%d %H:%M:%S%.f")
+    }
+
+    fn as_formatted_string(self, pattern: &str) -> String {
         if let Some(v) = self.to_chrono_datetime() {
             let local = Local {};
-            format!(
-                "{}",
-                local.from_utc_datetime(&v).format("%Y-%m-%d %H:%M:%S%.f%z")
-            )
+            format!("{}", local.from_utc_datetime(&v).format(pattern))
         } else {
             format!("[Timestamp{}: {}]", self.unit, self.value)
         }
@@ -887,6 +892,26 @@ mod tests {
         assert_eq!(
             Timestamp::new(0, TimeUnit::Second),
             Timestamp::from_str("1970-01-01 08:00:00").unwrap()
+        );
+    }
+
+    #[test]
+    fn test_to_local_string() {
+        std::env::set_var("TZ", "Asia/Shanghai");
+
+        assert_eq!(
+            "1970-01-01 08:00:00.000000001",
+            Timestamp::new(1, TimeUnit::Nanosecond).to_local_string()
+        );
+
+        assert_eq!(
+            "1970-01-01 08:00:00.001",
+            Timestamp::new(1, TimeUnit::Millisecond).to_local_string()
+        );
+
+        assert_eq!(
+            "1970-01-01 08:00:01",
+            Timestamp::new(1, TimeUnit::Second).to_local_string()
         );
     }
 }
