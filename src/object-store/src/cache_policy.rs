@@ -187,7 +187,7 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
         for file in cache_files {
             let _ = self.cache.delete(&file, OpDelete::new()).await;
         }
-        return self.inner.delete(path, args).await;
+        self.inner.delete(path, args).await
     }
 
     async fn list(&self, path: &str, args: OpList) -> Result<(RpList, Self::Pager)> {
