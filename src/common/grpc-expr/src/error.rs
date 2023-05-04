@@ -31,9 +31,6 @@ pub enum Error {
     #[snafu(display("Failed to convert bytes to insert batch, source: {}", source))]
     DecodeInsert { source: DecodeError },
 
-    #[snafu(display("Illegal insert data"))]
-    IllegalInsertData { location: Location },
-
     #[snafu(display("Illegal delete request, reason: {reason}"))]
     IllegalDeleteRequest { reason: String, location: Location },
 
@@ -90,6 +87,12 @@ pub enum Error {
         #[snafu(backtrace)]
         source: table::error::Error,
     },
+
+    #[snafu(display("Unexpected values length, reason: {}", reason))]
+    UnexpectedValuesLength { reason: String, location: Location },
+
+    #[snafu(display("The column name already exists, column: {}", column))]
+    ColumnAlreadyExists { column: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -99,9 +102,9 @@ impl ErrorExt for Error {
         match self {
             Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
 
-            Error::DecodeInsert { .. }
-            | Error::IllegalInsertData { .. }
-            | Error::IllegalDeleteRequest { .. } => StatusCode::InvalidArguments,
+            Error::DecodeInsert { .. } | Error::IllegalDeleteRequest { .. } => {
+                StatusCode::InvalidArguments
+            }
 
             Error::ColumnDataType { .. } => StatusCode::Internal,
             Error::DuplicatedTimestampColumn { .. } | Error::MissingTimestampColumn { .. } => {
@@ -113,6 +116,9 @@ impl ErrorExt for Error {
             Error::ColumnDefaultConstraint { source, .. } => source.status_code(),
             Error::InvalidColumnDef { source, .. } => source.status_code(),
             Error::UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
+            Error::UnexpectedValuesLength { .. } | Error::ColumnAlreadyExists { .. } => {
+                StatusCode::InvalidArguments
+            }
         }
     }
 

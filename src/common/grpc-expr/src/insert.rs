@@ -34,8 +34,9 @@ use table::metadata::TableId;
 use table::requests::InsertRequest;
 
 use crate::error::{
-    ColumnDataTypeSnafu, CreateVectorSnafu, DuplicatedTimestampColumnSnafu, IllegalInsertDataSnafu,
-    InvalidColumnProtoSnafu, MissingTimestampColumnSnafu, Result,
+    ColumnAlreadyExistsSnafu, ColumnDataTypeSnafu, CreateVectorSnafu,
+    DuplicatedTimestampColumnSnafu, InvalidColumnProtoSnafu, MissingTimestampColumnSnafu, Result,
+    UnexpectedValuesLengthSnafu,
 };
 const TAG_SEMANTIC_TYPE: i32 = SemanticType::Tag as i32;
 const TIMESTAMP_SEMANTIC_TYPE: i32 = SemanticType::Timestamp as i32;
@@ -292,9 +293,11 @@ pub fn to_table_insert_request(
 
         ensure!(
             columns_values
-                .insert(column_name, vector_builder.to_vector())
+                .insert(column_name.clone(), vector_builder.to_vector())
                 .is_none(),
-            IllegalInsertDataSnafu
+            ColumnAlreadyExistsSnafu {
+                column: column_name
+            }
         );
     }
 
@@ -317,7 +320,12 @@ pub(crate) fn add_values_to_builder(
     let values = convert_values(&data_type, values);
 
     if null_mask.is_empty() {
-        ensure!(values.len() == row_count, IllegalInsertDataSnafu);
+        ensure!(
+            values.len() == row_count,
+            UnexpectedValuesLengthSnafu {
+                reason: "If null_mask is empty, the length of values must be equal to row_count."
+            }
+        );
 
         values.iter().try_for_each(|value| {
             builder
@@ -328,7 +336,9 @@ pub(crate) fn add_values_to_builder(
         let null_mask = BitVec::from_vec(null_mask);
         ensure!(
             null_mask.count_ones() + values.len() == row_count,
-            IllegalInsertDataSnafu
+            UnexpectedValuesLengthSnafu {
+                reason: "If null_mask is not empty, the sum of the number of nulls and the length of values must be equal to row_count."
+            }
         );
 
         let mut idx_of_values = 0;
