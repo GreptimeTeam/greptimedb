@@ -83,10 +83,12 @@ pub enum StatusCode {
 }
 
 impl StatusCode {
+    /// Returns `true` if `code` is success.
     pub fn is_success(code: u32) -> bool {
         Self::Success as u32 == code
     }
 
+    /// Returns `true` if the error with this code is retryable.
     pub fn is_retryable(&self) -> bool {
         match self {
             StatusCode::StorageUnavailable
@@ -101,6 +103,35 @@ impl StatusCode {
             | StatusCode::InvalidSyntax
             | StatusCode::PlanQuery
             | StatusCode::EngineExecuteQuery
+            | StatusCode::TableAlreadyExists
+            | StatusCode::TableNotFound
+            | StatusCode::TableColumnNotFound
+            | StatusCode::TableColumnExists
+            | StatusCode::DatabaseNotFound
+            | StatusCode::UserNotFound
+            | StatusCode::UnsupportedPasswordType
+            | StatusCode::UserPasswordMismatch
+            | StatusCode::AuthHeaderNotFound
+            | StatusCode::InvalidAuthHeader
+            | StatusCode::AccessDenied => false,
+        }
+    }
+
+    /// Returns `true` if we should print an error log for an error with
+    /// this status code.
+    pub fn should_log_error(&self) -> bool {
+        match self {
+            StatusCode::Unknown
+            | StatusCode::Unsupported
+            | StatusCode::Unexpected
+            | StatusCode::Internal
+            | StatusCode::PlanQuery
+            | StatusCode::EngineExecuteQuery
+            | StatusCode::StorageUnavailable
+            | StatusCode::RuntimeResourcesExhausted => true,
+            StatusCode::Success
+            | StatusCode::InvalidArguments
+            | StatusCode::InvalidSyntax
             | StatusCode::TableAlreadyExists
             | StatusCode::TableNotFound
             | StatusCode::TableColumnNotFound
