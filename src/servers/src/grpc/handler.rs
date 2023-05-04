@@ -19,7 +19,7 @@ use api::v1::{Basic, GreptimeRequest, RequestHeader};
 use common_error::prelude::ErrorExt;
 use common_query::Output;
 use common_runtime::Runtime;
-use common_telemetry::timer;
+use common_telemetry::{logging, timer};
 use metrics::increment_counter;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::OptionExt;
@@ -73,11 +73,22 @@ impl GreptimeRequestHandler {
         //   - Obtaining a `JoinHandle` to get the panic message (if there's any).
         //     From its docs, `JoinHandle` is cancel safe. The task keeps running even it's handle been dropped.
         // 2. avoid the handler blocks the gRPC runtime incidentally.
-        let handle = self
-            .runtime
-            .spawn(async move { handler.do_query(query, query_ctx).await });
+        let handle = self.runtime.spawn(async move {
+            handler.do_query(query, query_ctx).await.map_err(|e| {
+                if e.status_code().should_log_error() {
+                    logging::error!(e; "Failed to handle request");
+                } else {
+                    // Currently, we still print a debug log.
+                    logging::debug!("Failed to handle request, err: {}", e);
+                }
+                e
+            })
+        });
 
         let output = handle.await.map_err(|e| {
+            // logs the runtime join error.
+            logging::error!("Failed to join handle, err: {}", e);
+
             if e.is_cancelled() {
                 Status::cancelled(e.to_string())
             } else if e.is_panic() {
