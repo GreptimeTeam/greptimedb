@@ -161,7 +161,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                     Value::Binary(v) => row_writer.write_col(v.deref())?,
                     Value::Date(v) => row_writer.write_col(v.val())?,
                     Value::DateTime(v) => row_writer.write_col(v.val())?,
-                    Value::Timestamp(v) => row_writer.write_col(v.to_iso8601_string())?,
+                    Value::Timestamp(v) => row_writer.write_col(v.to_local_string())?,
                     Value::List(_) => {
                         return Err(Error::Internal {
                             err_msg: format!(
