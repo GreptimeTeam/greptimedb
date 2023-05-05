@@ -145,9 +145,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Task already cancelled"))]
-    Cancelled { location: Location },
-
     #[snafu(display(
         "Manifest protocol forbid to read, min_version: {}, supported_version: {}",
         min_version,
@@ -499,7 +496,6 @@ impl ErrorExt for Error {
             | EncodeJson { .. }
             | DecodeJson { .. }
             | WaitFlush { .. }
-            | Cancelled { .. }
             | DecodeMetaActionList { .. }
             | Readline { .. }
             | WalDataCorrupted { .. }

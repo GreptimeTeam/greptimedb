@@ -26,7 +26,6 @@ use store_api::storage::{
     CreateOptions, EngineContext, OpenOptions, Region, RegionDescriptor, StorageEngine,
 };
 
-use crate::background::JobPoolImpl;
 use crate::compaction::CompactionSchedulerRef;
 use crate::config::EngineConfig;
 use crate::error::{self, Error, Result};
@@ -237,7 +236,6 @@ impl<S: LogStore> EngineInner<S> {
         object_store: ObjectStore,
         compaction_scheduler: CompactionSchedulerRef<S>,
     ) -> Self {
-        let job_pool = Arc::new(JobPoolImpl {});
         // TODO(yingwen): max inflight flush tasks.
         let flush_scheduler = Arc::new(FlushScheduler::new(
             SchedulerConfig::default(),

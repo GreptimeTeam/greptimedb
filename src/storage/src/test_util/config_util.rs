@@ -20,7 +20,6 @@ use object_store::services::Fs;
 use object_store::ObjectStore;
 use store_api::manifest::Manifest;
 
-use crate::background::JobPoolImpl;
 use crate::compaction::noop::NoopCompactionScheduler;
 use crate::engine;
 use crate::file_purger::noop::NoopFilePurgeHandler;

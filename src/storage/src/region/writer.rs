@@ -16,7 +16,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
-use common_error::prelude::BoxedError;
 use common_telemetry::logging;
 use futures::TryStreamExt;
 use snafu::{ensure, ResultExt};
@@ -25,13 +24,10 @@ use store_api::manifest::{Manifest, ManifestVersion, MetaAction};
 use store_api::storage::{AlterRequest, FlushContext, SequenceNumber, WriteContext, WriteResponse};
 use tokio::sync::{oneshot, Mutex};
 
-use crate::background::JobHandle;
 use crate::compaction::{CompactionRequestImpl, CompactionSchedulerRef};
 use crate::config::EngineConfig;
 use crate::error::{self, Result};
-use crate::flush::{
-    FlushCallback, FlushHandle, FlushJob, FlushRequest, FlushSchedulerRef, FlushStrategyRef,
-};
+use crate::flush::{FlushHandle, FlushRequest, FlushSchedulerRef, FlushStrategyRef};
 use crate::manifest::action::{
     RawRegionMetadata, RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList,
 };
@@ -43,7 +39,7 @@ use crate::region::{
 };
 use crate::schema::compat::CompatWrite;
 use crate::sst::AccessLayerRef;
-use crate::version::{VersionControl, VersionControlRef, VersionEdit, VersionRef};
+use crate::version::{VersionControl, VersionControlRef, VersionEdit};
 use crate::wal::Wal;
 use crate::write_batch::WriteBatch;
 
@@ -643,14 +639,6 @@ impl WriterInner {
             return Ok(());
         }
 
-        let cb = Self::build_flush_callback(
-            &current_version,
-            ctx,
-            &self.engine_config,
-            self.ttl,
-            self.compaction_time_window,
-        );
-
         let flush_req = FlushRequest {
             max_memtable_id: max_memtable_id.unwrap(),
             memtables: mem_to_flush,
@@ -729,41 +717,6 @@ impl WriterInner {
         }
 
         Ok(())
-    }
-
-    fn build_flush_callback<S: LogStore>(
-        version: &VersionRef,
-        ctx: &WriterContext<S>,
-        config: &Arc<EngineConfig>,
-        ttl: Option<Duration>,
-        compaction_time_window: Option<i64>,
-    ) -> Option<FlushCallback> {
-        let region_id = version.metadata().id();
-        let compaction_request = CompactionRequestImpl {
-            region_id,
-            sst_layer: ctx.sst_layer.clone(),
-            writer: ctx.writer.clone(),
-            shared: ctx.shared.clone(),
-            manifest: ctx.manifest.clone(),
-            wal: ctx.wal.clone(),
-            ttl,
-            compaction_time_window,
-            sender: None,
-            sst_write_buffer_size: config.sst_write_buffer_size,
-        };
-        let compaction_scheduler = ctx.compaction_scheduler.clone();
-        let shared_data = ctx.shared.clone();
-        let max_files_in_l0 = config.max_files_in_l0;
-
-        let schedule_compaction_cb = Box::pin(async move {
-            schedule_compaction(
-                shared_data,
-                compaction_scheduler,
-                compaction_request,
-                max_files_in_l0,
-            );
-        });
-        Some(schedule_compaction_cb)
     }
 
     async fn manual_flush<S: LogStore>(&mut self, writer_ctx: WriterContext<'_, S>) -> Result<()> {

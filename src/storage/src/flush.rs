@@ -18,16 +18,14 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use common_telemetry::logging;
 pub use scheduler::{FlushHandle, FlushRequest, FlushScheduler, FlushSchedulerRef};
 use store_api::logstore::LogStore;
 use store_api::storage::consts::WRITE_ROW_GROUP_SIZE;
 use store_api::storage::SequenceNumber;
 
-use crate::background::{Context, Job, JobHandle, JobPoolRef};
 use crate::config::EngineConfig;
-use crate::error::{CancelledSnafu, Result};
+use crate::error::Result;
 use crate::manifest::action::*;
 use crate::manifest::region::RegionManifest;
 use crate::memtable::{IterContext, MemtableId, MemtableRef};
@@ -183,7 +181,8 @@ pub struct FlushJob<S: LogStore> {
 }
 
 impl<S: LogStore> FlushJob<S> {
-    async fn execute_job(&mut self) -> Result<()> {
+    /// Execute the flush job.
+    async fn run(&mut self) -> Result<()> {
         let file_metas = self.write_memtables_to_layer().await?;
         self.write_manifest_and_apply(&file_metas).await?;
 
@@ -264,18 +263,6 @@ impl<S: LogStore> FlushJob<S> {
             )
             .await?;
         self.wal.obsolete(self.flush_sequence).await
-    }
-}
-
-#[async_trait]
-impl<S: LogStore> Job for FlushJob<S> {
-    // TODO(yingwen): [flush] Support in-job parallelism (Flush memtables concurrently)
-    async fn run(&mut self, ctx: &Context) -> Result<()> {
-        if ctx.is_cancelled() {
-            return CancelledSnafu {}.fail();
-        }
-
-        self.execute_job().await
     }
 }
 

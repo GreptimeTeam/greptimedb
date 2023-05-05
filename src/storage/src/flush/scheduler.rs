@@ -200,7 +200,7 @@ async fn execute_flush<S: LogStore>(
         engine_config: req.engine_config.clone(),
     };
 
-    if let Err(e) = flush_job.execute_job().await {
+    if let Err(e) = flush_job.run().await {
         logging::error!(e; "Failed to flush regoin {}", req.region_id());
 
         req.complete(Err(e));
