@@ -19,7 +19,6 @@ use std::sync::Arc;
 
 use async_stream::stream;
 use async_trait::async_trait;
-use common_catalog::build_db_string;
 use common_catalog::consts::{MAX_SYS_TABLE_ID, MITO_ENGINE};
 use common_telemetry::{debug, error, info, warn};
 use dashmap::DashMap;
@@ -234,10 +233,7 @@ impl RemoteCatalogManager {
             increment_gauge!(
                 crate::metrics::METRIC_CATALOG_MANAGER_SCHEMA_COUNT,
                 1.0,
-                &[(
-                    crate::metrics::METRIC_DB_LABEL,
-                    build_db_string(&catalog_name, &schema_name)
-                )],
+                &[crate::metrics::db_label(&catalog_name, &schema_name)],
             );
             self.initiate_tables(&catalog_name, &schema_name, schema, max_table_id)
                 .await?;
@@ -283,10 +279,7 @@ impl RemoteCatalogManager {
         increment_gauge!(
             crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
             1.0,
-            &[(
-                crate::metrics::METRIC_DB_LABEL,
-                build_db_string(catalog_name, schema_name)
-            )],
+            &[crate::metrics::db_label(catalog_name, schema_name)],
         );
         info!(
             "initialized tables in {}.{}, total: {}",
@@ -476,10 +469,7 @@ impl CatalogManager for RemoteCatalogManager {
         increment_gauge!(
             crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
             1.0,
-            &[(
-                crate::metrics::METRIC_DB_LABEL,
-                build_db_string(&catalog_name, &schema_name)
-            )],
+            &[crate::metrics::db_label(&catalog_name, &schema_name)],
         );
         schema_provider
             .register_table(request.table_name, request.table)
@@ -503,10 +493,7 @@ impl CatalogManager for RemoteCatalogManager {
         decrement_gauge!(
             crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
             1.0,
-            &[(
-                crate::metrics::METRIC_DB_LABEL,
-                build_db_string(catalog_name, schema_name)
-            )],
+            &[crate::metrics::db_label(catalog_name, schema_name)],
         );
         Ok(result.is_none())
     }
@@ -563,10 +550,7 @@ impl CatalogManager for RemoteCatalogManager {
         increment_gauge!(
             crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
             1.0,
-            &[(
-                crate::metrics::METRIC_DB_LABEL,
-                build_db_string(&catalog_name, &schema_name)
-            )],
+            &[crate::metrics::db_label(&catalog_name, &schema_name)],
         );
         Ok(())
     }

@@ -20,7 +20,7 @@ use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, MIN_USER_TABLE_ID,
     MITO_ENGINE, SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_NAME,
 };
-use common_catalog::{build_db_string, format_full_table_name};
+use common_catalog::format_full_table_name;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use common_telemetry::{error, info};
 use datatypes::prelude::ScalarVector;
@@ -374,10 +374,7 @@ impl CatalogManager for LocalCatalogManager {
                 increment_gauge!(
                     crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
                     1.0,
-                    &[(
-                        crate::metrics::METRIC_DB_LABEL,
-                        build_db_string(catalog_name, schema_name)
-                    )],
+                    &[crate::metrics::db_label(catalog_name, schema_name)],
                 );
                 Ok(true)
             }
@@ -529,10 +526,7 @@ impl CatalogManager for LocalCatalogManager {
         increment_gauge!(
             crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
             1.0,
-            &[(
-                crate::metrics::METRIC_DB_LABEL,
-                build_db_string(&catalog_name, &schema_name)
-            )],
+            &[crate::metrics::db_label(&catalog_name, &schema_name)],
         );
         Ok(())
     }
