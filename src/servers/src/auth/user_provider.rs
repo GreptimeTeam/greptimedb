@@ -54,7 +54,7 @@ impl TryFrom<&str> for StaticUserProvider {
                 let file = File::open(path).context(IoSnafu)?;
                 let credential = io::BufReader::new(file)
                     .lines()
-                    .filter_map(|line| line.ok())
+                    .map_while(std::result::Result::ok)
                     .filter_map(|line| {
                         if let Some((k, v)) = line.split_once('=') {
                             Some((k.to_string(), v.as_bytes().to_vec()))
