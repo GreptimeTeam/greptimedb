@@ -341,13 +341,14 @@ pub async fn test_metrics_api(store_type: StorageType) {
 pub async fn test_catalog_metrics(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     common_telemetry::init_default_metrics_recorder();
+
     let (app, mut guard) = setup_test_http_app(store_type, "metrics_api").await;
     let client = TestClient::new(app);
 
     // Call metrics api
     let body = client.get("/metrics").send().await.text().await;
     assert!(body.contains("catalog_schema_count 3"));
-    assert!(body.contains("catalog_table_count 2"));
+    assert!(body.contains("catalog_table_count{db=\"public\"}"));
 
     // create new schema
     let res = client.get("/v1/sql?sql=create database tommy").send().await;
@@ -356,7 +357,7 @@ pub async fn test_catalog_metrics(store_type: StorageType) {
     // Call metrics api
     let body = client.get("/metrics").send().await.text().await;
     assert!(body.contains("catalog_schema_count 4"));
-    assert!(body.contains("catalog_table_count 2"));
+    assert!(body.contains("catalog_table_count{db=\"public\"}"));
 
     // create new schema
     let res = client
@@ -368,7 +369,7 @@ pub async fn test_catalog_metrics(store_type: StorageType) {
     // Call metrics api
     let body = client.get("/metrics").send().await.text().await;
     assert!(body.contains("catalog_schema_count 4"));
-    assert!(body.contains("catalog_table_count 3"));
+    assert!(body.contains("catalog_table_count{db=\"public\"}"));
 
     // create new schema
     let res = client.get("/v1/sql?sql=drop table ints").send().await;
@@ -377,7 +378,7 @@ pub async fn test_catalog_metrics(store_type: StorageType) {
     // Call metrics api
     let body = client.get("/metrics").send().await.text().await;
     assert!(body.contains("catalog_schema_count 4"));
-    assert!(body.contains("catalog_table_count 2"));
+    assert!(body.contains("catalog_table_count{db=\"public\"}"));
 
     guard.remove_all().await;
 }
