@@ -50,11 +50,11 @@ impl TryFrom<&HashMap<String, String>> for CsvFormat {
 
     fn try_from(value: &HashMap<String, String>) -> Result<Self> {
         let mut format = CsvFormat::default();
-        if let Some(delimiter) = value.get(file_format::FORMAT_DELIMTERL) {
+        if let Some(delimiter) = value.get(file_format::FORMAT_DELIMITER) {
             // TODO(weny): considers to support parse like "\t" (not only b'\t')
             format.delimiter = u8::from_str(delimiter).map_err(|_| {
                 error::ParseFormatSnafu {
-                    key: file_format::FORMAT_DELIMTERL,
+                    key: file_format::FORMAT_DELIMITER,
                     value: delimiter,
                 }
                 .build()
@@ -94,7 +94,7 @@ impl Default for CsvFormat {
             has_header: true,
             delimiter: b',',
             schema_infer_max_record: Some(file_format::DEFAULT_SCHEMA_INFER_MAX_RECORD),
-            compression_type: CompressionType::UNCOMPRESSED,
+            compression_type: CompressionType::Uncompressed,
         }
     }
 }
@@ -210,7 +210,7 @@ mod tests {
 
     use super::*;
     use crate::file_format::{
-        FileFormat, FORMAT_COMPRESSION_TYPE, FORMAT_DELIMTERL, FORMAT_HAS_HEADER,
+        FileFormat, FORMAT_COMPRESSION_TYPE, FORMAT_DELIMITER, FORMAT_HAS_HEADER,
         FORMAT_SCHEMA_INFER_MAX_RECORD,
     };
     use crate::test_util::{self, format_schema, test_store};
@@ -301,7 +301,7 @@ mod tests {
         );
 
         map.insert(FORMAT_COMPRESSION_TYPE.to_string(), "zstd".to_string());
-        map.insert(FORMAT_DELIMTERL.to_string(), b'\t'.to_string());
+        map.insert(FORMAT_DELIMITER.to_string(), b'\t'.to_string());
         map.insert(FORMAT_HAS_HEADER.to_string(), "false".to_string());
 
         let format = CsvFormat::try_from(&map).unwrap();
@@ -309,7 +309,7 @@ mod tests {
         assert_eq!(
             format,
             CsvFormat {
-                compression_type: CompressionType::ZSTD,
+                compression_type: CompressionType::Zstd,
                 schema_infer_max_record: Some(2000),
                 delimiter: b'\t',
                 has_header: false,

@@ -67,7 +67,7 @@ async fn test_json_opener() {
         100,
         schema.clone(),
         store.clone(),
-        CompressionType::UNCOMPRESSED,
+        CompressionType::Uncompressed,
     );
 
     let path = &test_util::get_data_dir("tests/json/basic.json")
@@ -119,7 +119,7 @@ async fn test_csv_opener() {
         .build()
         .unwrap();
 
-    let csv_opener = CsvOpener::new(csv_conf, store, CompressionType::UNCOMPRESSED);
+    let csv_opener = CsvOpener::new(csv_conf, store, CompressionType::Uncompressed);
 
     let tests = [
         Test {

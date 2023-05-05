@@ -45,11 +45,11 @@ use crate::compression::CompressionType;
 use crate::error::{self, Result};
 use crate::share_buffer::SharedBuffer;
 
-pub const FORMAT_COMPRESSION_TYPE: &str = "COMPRESSION_TYPE";
-pub const FORMAT_DELIMTERL: &str = "DELIMTERL";
-pub const FORMAT_SCHEMA_INFER_MAX_RECORD: &str = "SCHEMA_INFER_MAX_RECORD";
-pub const FORMAT_HAS_HEADER: &str = "FORMAT_HAS_HEADER";
-pub const FORMAT_TYPE: &str = "FORMAT";
+pub const FORMAT_COMPRESSION_TYPE: &str = "compression_type";
+pub const FORMAT_DELIMITER: &str = "delimiter";
+pub const FORMAT_SCHEMA_INFER_MAX_RECORD: &str = "schema_infer_max_record";
+pub const FORMAT_HAS_HEADER: &str = "has_header";
+pub const FORMAT_TYPE: &str = "format";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {

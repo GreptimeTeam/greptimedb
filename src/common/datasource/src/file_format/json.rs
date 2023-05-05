@@ -73,7 +73,7 @@ impl Default for JsonFormat {
     fn default() -> Self {
         Self {
             schema_infer_max_record: Some(file_format::DEFAULT_SCHEMA_INFER_MAX_RECORD),
-            compression_type: CompressionType::UNCOMPRESSED,
+            compression_type: CompressionType::Uncompressed,
         }
     }
 }
@@ -230,7 +230,7 @@ mod tests {
         assert_eq!(
             format,
             JsonFormat {
-                compression_type: CompressionType::ZSTD,
+                compression_type: CompressionType::Zstd,
                 schema_infer_max_record: Some(2000),
             }
         );

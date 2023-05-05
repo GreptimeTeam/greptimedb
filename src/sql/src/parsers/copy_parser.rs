@@ -109,7 +109,7 @@ impl<'a> ParserContext<'a> {
         let with = options
             .into_iter()
             .filter_map(|option| {
-                parse_option_string(option.value).map(|v| (option.name.to_string(), v))
+                parse_option_string(option.value).map(|v| (option.name.value.to_lowercase(), v))
             })
             .collect();
 
@@ -121,7 +121,7 @@ impl<'a> ParserContext<'a> {
         let connection = connection_options
             .into_iter()
             .filter_map(|option| {
-                parse_option_string(option.value).map(|v| (option.name.to_string(), v))
+                parse_option_string(option.value).map(|v| (option.name.value.to_lowercase(), v))
             })
             .collect();
 
@@ -280,11 +280,11 @@ mod tests {
             },
             Test {
                 sql: "COPY catalog0.schema0.tbl TO 'tbl_file.parquet' CONNECTION (FOO='Bar', ONE='two')",
-                expected_connection: [("FOO","Bar"),("ONE","two")].into_iter().map(|(k,v)|{(k.to_string(),v.to_string())}).collect()
+                expected_connection: [("foo","Bar"),("one","two")].into_iter().map(|(k,v)|{(k.to_string(),v.to_string())}).collect()
             },
             Test {
                 sql:"COPY catalog0.schema0.tbl TO 'tbl_file.parquet' WITH (FORMAT = 'parquet') CONNECTION (FOO='Bar', ONE='two')",
-                expected_connection: [("FOO","Bar"),("ONE","two")].into_iter().map(|(k,v)|{(k.to_string(),v.to_string())}).collect()
+                expected_connection: [("foo","Bar"),("one","two")].into_iter().map(|(k,v)|{(k.to_string(),v.to_string())}).collect()
             },
         ];
 

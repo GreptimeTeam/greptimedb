@@ -85,7 +85,7 @@ impl<'a> ParserContext<'a> {
             .into_iter()
             .filter_map(|option| {
                 if let Some(v) = parse_option_string(option.value) {
-                    Some((option.name.value.to_uppercase(), v))
+                    Some((option.name.value.to_lowercase(), v))
                 } else {
                     None
                 }
@@ -803,8 +803,8 @@ mod tests {
                 sql: "CREATE EXTERNAL TABLE city with(location='/var/data/city.csv',format='csv');",
                 expected_table_name: "city",
                 expected_options: HashMap::from([
-                    ("LOCATION".to_string(), "/var/data/city.csv".to_string()),
-                    ("FORMAT".to_string(), "csv".to_string()),
+                    ("location".to_string(), "/var/data/city.csv".to_string()),
+                    ("format".to_string(), "csv".to_string()),
                 ]),
                 expected_engine: IMMUTABLE_FILE_ENGINE,
                 expected_if_not_exist: false,
@@ -813,8 +813,8 @@ mod tests {
                 sql: "CREATE EXTERNAL TABLE IF NOT EXISTS city ENGINE=foo with(location='/var/data/city.csv',format='csv');",
                 expected_table_name: "city",
                 expected_options: HashMap::from([
-                    ("LOCATION".to_string(), "/var/data/city.csv".to_string()),
-                    ("FORMAT".to_string(), "csv".to_string()),
+                    ("location".to_string(), "/var/data/city.csv".to_string()),
+                    ("format".to_string(), "csv".to_string()),
                 ]),
                 expected_engine: "foo",
                 expected_if_not_exist: true,
@@ -848,8 +848,8 @@ mod tests {
         ) with(location='/var/data/city.csv',format='csv');";
 
         let options = HashMap::from([
-            ("LOCATION".to_string(), "/var/data/city.csv".to_string()),
-            ("FORMAT".to_string(), "csv".to_string()),
+            ("location".to_string(), "/var/data/city.csv".to_string()),
+            ("format".to_string(), "csv".to_string()),
         ]);
 
         let stmts = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();

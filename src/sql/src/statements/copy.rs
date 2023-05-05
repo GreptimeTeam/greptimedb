@@ -33,7 +33,7 @@ pub struct CopyTableArgument {
 
 #[cfg(test)]
 impl CopyTableArgument {
-    const FORMAT: &str = "FORMAT";
+    const FORMAT: &str = "format";
 
     pub fn format(&self) -> Option<String> {
         self.with
