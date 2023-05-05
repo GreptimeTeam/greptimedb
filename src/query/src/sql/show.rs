@@ -13,6 +13,7 @@
 // limitations under the License.
 use std::fmt::Display;
 
+use common_catalog::consts::IMMUTABLE_FILE_ENGINE;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, SchemaRef, COMMENT_KEY};
 use humantime::format_duration;
 use snafu::ResultExt;
@@ -321,7 +322,7 @@ WITH(
         let sql = format!("\n{}", stmt);
         assert_eq!(
             r#"
-CREATE TABLE IF NOT EXISTS system_metrics (
+CREATE EXTERNAL TABLE IF NOT EXISTS system_metrics (
   host STRING NULL,
   cpu DOUBLE NULL,
 

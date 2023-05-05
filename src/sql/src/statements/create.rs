@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 
+use common_catalog::consts::IMMUTABLE_FILE_ENGINE;
 use itertools::Itertools;
 
 use crate::ast::{ColumnDef, Ident, ObjectName, SqlOption, TableConstraint, Value as SqlValue};
@@ -110,7 +111,8 @@ impl CreateTable {
         if self.options.is_empty() {
             "".to_string()
         } else {
-            let options = format_list_indent!(self.options);
+            let options: Vec<&SqlOption> = self.options.iter().sorted().collect();
+            let options = format_list_indent!(options);
             format!(
                 r#"WITH(
 {options}
@@ -165,10 +167,14 @@ impl Display for CreateTable {
         let partitions = self.format_partitions();
         let engine = &self.engine;
         let options = self.format_options();
-
+        let maybe_external = if self.engine == IMMUTABLE_FILE_ENGINE {
+            "EXTERNAL "
+        } else {
+            ""
+        };
         write!(
             f,
-            r#"CREATE TABLE {if_not_exists} {name} (
+            r#"CREATE {maybe_external}TABLE {if_not_exists} {name} (
 {columns},
 {constraints}
 )
