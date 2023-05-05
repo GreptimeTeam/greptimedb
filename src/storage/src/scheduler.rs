@@ -310,14 +310,14 @@ mod tests {
 
     struct CountdownLatch {
         counter: std::sync::Mutex<usize>,
-        notifies: std::sync::RwLock<Vec<Arc<Notify>>>,
+        notify: Notify,
     }
 
     impl CountdownLatch {
         fn new(size: usize) -> Self {
             Self {
                 counter: std::sync::Mutex::new(size),
-                notifies: std::sync::RwLock::new(vec![]),
+                notify: Notify::new(),
             }
         }
 
@@ -326,22 +326,14 @@ mod tests {
             if *counter >= 1 {
                 *counter -= 1;
                 if *counter == 0 {
-                    let notifies = self.notifies.read().unwrap();
-                    for waiter in notifies.iter() {
-                        waiter.notify_one();
-                    }
+                    self.notify.notify_one();
                 }
             }
         }
 
+        /// Users should only call this once.
         async fn wait(&self) {
-            let notify = Arc::new(Notify::new());
-            {
-                let notify = notify.clone();
-                let mut notifies = self.notifies.write().unwrap();
-                notifies.push(notify);
-            }
-            notify.notified().await
+            self.notify.notified().await
         }
     }
 
