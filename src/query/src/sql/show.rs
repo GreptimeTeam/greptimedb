@@ -13,7 +13,6 @@
 // limitations under the License.
 use std::fmt::Display;
 
-use common_catalog::consts::IMMUTABLE_FILE_ENGINE;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, SchemaRef, COMMENT_KEY};
 use humantime::format_duration;
 use snafu::ResultExt;
