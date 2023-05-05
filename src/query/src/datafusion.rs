@@ -25,6 +25,7 @@ use common_error::prelude::BoxedError;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::udf::create_udf;
 use common_function::scalars::FunctionRef;
+use common_query::physical_plan::metrics::MetricsReporter;
 use common_query::physical_plan::{DfPhysicalPlanAdapter, PhysicalPlan, PhysicalPlanAdapter};
 use common_query::prelude::ScalarUdf;
 use common_query::Output;
@@ -67,12 +68,19 @@ impl DatafusionQueryEngine {
         Self { state }
     }
 
-    async fn exec_query_plan(&self, plan: LogicalPlan) -> Result<Output> {
+    async fn exec_query_plan(
+        &self,
+        plan: LogicalPlan,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
         let mut ctx = QueryEngineContext::new(self.state.session_state());
 
         // `create_physical_plan` will optimize logical plan internally
         let physical_plan = self.create_physical_plan(&mut ctx, &plan).await?;
         let physical_plan = self.optimize_physical_plan(&mut ctx, physical_plan)?;
+
+        let physical_plan =
+            Arc::new(MetricsReporter::new(physical_plan, query_ctx)) as Arc<dyn PhysicalPlan>;
 
         Ok(Output::Stream(self.execute_stream(&ctx, &physical_plan)?))
     }
@@ -95,7 +103,7 @@ impl DatafusionQueryEngine {
         let table = self.find_table(&table_name).await?;
 
         let output = self
-            .exec_query_plan(LogicalPlan::DfPlan((*dml.input).clone()))
+            .exec_query_plan(LogicalPlan::DfPlan((*dml.input).clone()), query_ctx)
             .await?;
         let mut stream = match output {
             Output::RecordBatches(batches) => batches.as_stream(),
@@ -227,7 +235,7 @@ impl QueryEngine for DatafusionQueryEngine {
             LogicalPlan::DfPlan(DfLogicalPlan::Dml(dml)) => {
                 self.exec_dml_statement(dml, query_ctx).await
             }
-            _ => self.exec_query_plan(plan).await,
+            _ => self.exec_query_plan(plan, query_ctx).await,
         }
     }
 

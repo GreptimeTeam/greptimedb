@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod metrics;
+pub mod stream;
+pub mod visitor;
+
 use std::any::Any;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -22,6 +26,7 @@ use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::error::Result as DfResult;
 pub use datafusion::execution::context::{SessionContext, TaskContext};
 use datafusion::physical_plan::expressions::PhysicalSortExpr;
+use datafusion::physical_plan::metrics::MetricsSet;
 pub use datafusion::physical_plan::Partitioning;
 use datafusion::physical_plan::Statistics;
 use datatypes::schema::SchemaRef;
@@ -69,6 +74,10 @@ pub trait PhysicalPlan: Debug + Send + Sync {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream>;
+
+    fn metrics(&self) -> Option<MetricsSet> {
+        None
+    }
 }
 
 #[derive(Debug)]
@@ -134,6 +143,10 @@ impl PhysicalPlan for PhysicalPlanAdapter {
             .context(error::ConvertDfRecordBatchStreamSnafu)?;
 
         Ok(Box::pin(adapter))
+    }
+
+    fn metrics(&self) -> Option<MetricsSet> {
+        self.df_plan().metrics()
     }
 }
 

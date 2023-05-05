@@ -84,11 +84,11 @@ tokio-util = { version = "0.7", features = ["io-util", "compat"] }
 tonic = { version = "0.9", features = ["tls"] }
 uuid = { version = "1", features = ["serde", "v4", "fast-rng"] }
 metrics = "0.20"
-meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "f0798c4c648d89f51abe63e870919c75dd463199" }
+meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "85ab2540b1a471918995ddd225645f0e0b358a96" }
 
 [workspace.dependencies.meter-macros]
 git = "https://github.com/GreptimeTeam/greptime-meter.git"
-rev = "f0798c4c648d89f51abe63e870919c75dd463199"
+rev = "85ab2540b1a471918995ddd225645f0e0b358a96"
 
 [profile.release]
 debug = true
