@@ -1,0 +1,160 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use common_telemetry::logging;
+use store_api::logstore::LogStore;
+use store_api::storage::{RegionId, SequenceNumber};
+use tokio::sync::Notify;
+
+use crate::compaction::{CompactionRequestImpl, CompactionSchedulerRef};
+use crate::config::EngineConfig;
+use crate::error::Result;
+use crate::flush::FlushJob;
+use crate::manifest::region::RegionManifest;
+use crate::memtable::{MemtableId, MemtableRef};
+use crate::region;
+use crate::region::{RegionWriterRef, SharedDataRef};
+use crate::scheduler::rate_limit::BoxedRateLimitToken;
+use crate::scheduler::{Handler, Request};
+use crate::sst::AccessLayerRef;
+use crate::wal::Wal;
+
+/// Key for [FlushRequest], consist of a region id and the flush
+/// sequence.
+type FlushKey = (RegionId, SequenceNumber);
+
+/// Region flush request.
+pub struct FlushRequest<S: LogStore> {
+    /// The region to flush.
+    pub region_id: RegionId,
+    /// Max memtable id in these memtables,
+    /// used to remove immutable memtables in current version.
+    pub max_memtable_id: MemtableId,
+    /// Memtables to be flushed.
+    pub memtables: Vec<MemtableRef>,
+    /// Last sequence of data to be flushed.
+    pub flush_sequence: SequenceNumber,
+    /// Shared data of region to be flushed.
+    pub shared: SharedDataRef,
+    /// Sst access layer of the region.
+    pub sst_layer: AccessLayerRef,
+    /// Region writer, used to persist log entry that points to the latest manifest file.
+    pub writer: RegionWriterRef,
+    /// Region write-ahead logging, used to write data/meta to the log file.
+    pub wal: Wal<S>,
+    /// Region manifest service, used to persist metadata.
+    pub manifest: RegionManifest,
+    /// Storage engine config
+    pub engine_config: Arc<EngineConfig>,
+    // Compaction related options:
+    /// TTL of the region.
+    pub ttl: Option<Duration>,
+    /// Time window for compaction.
+    pub compaction_time_window: Option<i64>,
+}
+
+impl<S: LogStore> Request for FlushRequest<S> {
+    type Key = FlushKey;
+
+    #[inline]
+    fn key(&self) -> FlushKey {
+        (self.region_id, self.flush_sequence)
+    }
+
+    fn complete(self, _result: Result<()>) {
+        // TODO(yingwen): notify waiter.
+    }
+}
+
+struct FlushHandler<S: LogStore> {
+    compaction_scheduler: CompactionSchedulerRef<S>,
+}
+
+#[async_trait::async_trait]
+impl<S: LogStore> Handler for FlushHandler<S> {
+    type Request = FlushRequest<S>;
+
+    async fn handle_request(
+        &self,
+        req: FlushRequest<S>,
+        token: BoxedRateLimitToken,
+        finish_notifier: Arc<Notify>,
+    ) -> Result<()> {
+        let compaction_scheduler = self.compaction_scheduler.clone();
+        common_runtime::spawn_bg(async move {
+            execute_flush(req, compaction_scheduler).await;
+
+            // releases rate limit token
+            token.try_release();
+            // notify scheduler to schedule next task when current task finishes.
+            finish_notifier.notify_one();
+        });
+
+        Ok(())
+    }
+}
+
+async fn execute_flush<S: LogStore>(
+    req: FlushRequest<S>,
+    compaction_scheduler: CompactionSchedulerRef<S>,
+) {
+    let mut flush_job = FlushJob {
+        max_memtable_id: req.max_memtable_id,
+        memtables: req.memtables.clone(),
+        flush_sequence: req.flush_sequence,
+        shared: req.shared.clone(),
+        sst_layer: req.sst_layer.clone(),
+        writer: req.writer.clone(),
+        wal: req.wal.clone(),
+        manifest: req.manifest.clone(),
+        on_success: None,
+        engine_config: req.engine_config.clone(),
+    };
+
+    if let Err(e) = flush_job.execute_job().await {
+        logging::error!(e; "Failed to flush regoin {}", req.region_id);
+
+        req.complete(Err(e));
+    } else {
+        logging::info!("Successfully flush region: {}", req.region_id);
+
+        let compaction_request = CompactionRequestImpl {
+            region_id: req.region_id,
+            sst_layer: req.sst_layer.clone(),
+            writer: req.writer.clone(),
+            shared: req.shared.clone(),
+            manifest: req.manifest.clone(),
+            wal: req.wal.clone(),
+            ttl: req.ttl,
+            compaction_time_window: req.compaction_time_window,
+            sender: None,
+            sst_write_buffer_size: req.engine_config.sst_write_buffer_size,
+        };
+        let max_files_in_l0 = req.engine_config.max_files_in_l0;
+        let shared_data = req.shared.clone();
+
+        // If flush is success, schedule a compaction request for this region.
+        region::schedule_compaction(
+            shared_data,
+            compaction_scheduler,
+            compaction_request,
+            max_files_in_l0,
+        );
+
+        req.complete(Ok(()));
+    }
+}

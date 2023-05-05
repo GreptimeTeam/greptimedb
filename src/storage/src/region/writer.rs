@@ -711,26 +711,23 @@ impl WriterInner {
             let (sender, receiver) = oneshot::channel();
             compaction_request.sender = Some(sender);
 
-            if Self::schedule_compaction(
+            if schedule_compaction(
                 shared_data,
                 compaction_scheduler,
                 compaction_request,
                 compact_ctx.max_files_in_l0,
-            )
-            .await
-            {
+            ) {
                 receiver
                     .await
                     .context(error::CompactTaskCancelSnafu { region_id })??;
             }
         } else {
-            Self::schedule_compaction(
+            schedule_compaction(
                 shared_data,
                 compaction_scheduler,
                 compaction_request,
                 compact_ctx.max_files_in_l0,
-            )
-            .await;
+            );
         }
 
         Ok(())
@@ -761,54 +758,14 @@ impl WriterInner {
         let max_files_in_l0 = config.max_files_in_l0;
 
         let schedule_compaction_cb = Box::pin(async move {
-            Self::schedule_compaction(
+            schedule_compaction(
                 shared_data,
                 compaction_scheduler,
                 compaction_request,
                 max_files_in_l0,
-            )
-            .await;
+            );
         });
         Some(schedule_compaction_cb)
-    }
-
-    /// Schedule compaction task, returns whether the task is scheduled.
-    async fn schedule_compaction<S: LogStore>(
-        shared_data: SharedDataRef,
-        compaction_scheduler: CompactionSchedulerRef<S>,
-        compaction_request: CompactionRequestImpl<S>,
-        max_files_in_l0: usize,
-    ) -> bool {
-        let region_id = shared_data.id();
-        let level0_file_num = shared_data
-            .version_control
-            .current()
-            .ssts()
-            .level(0)
-            .file_num();
-
-        if level0_file_num <= max_files_in_l0 {
-            debug!(
-                "No enough SST files in level 0 (threshold: {}), skip compaction",
-                max_files_in_l0
-            );
-            return false;
-        }
-        match compaction_scheduler.schedule(compaction_request) {
-            Ok(scheduled) => {
-                info!(
-                    "Schedule region {} compaction request result: {}",
-                    region_id, scheduled
-                );
-
-                scheduled
-            }
-            Err(e) => {
-                error!(e;"Failed to schedule region compaction request {}", region_id);
-
-                false
-            }
-        }
     }
 
     async fn manual_flush<S: LogStore>(&mut self, writer_ctx: WriterContext<'_, S>) -> Result<()> {
@@ -824,5 +781,44 @@ impl WriterInner {
     #[inline]
     fn mark_closed(&mut self) {
         self.closed = true;
+    }
+}
+
+/// Schedule compaction task, returns whether the task is scheduled.
+pub(crate) fn schedule_compaction<S: LogStore>(
+    shared_data: SharedDataRef,
+    compaction_scheduler: CompactionSchedulerRef<S>,
+    compaction_request: CompactionRequestImpl<S>,
+    max_files_in_l0: usize,
+) -> bool {
+    let region_id = shared_data.id();
+    let level0_file_num = shared_data
+        .version_control
+        .current()
+        .ssts()
+        .level(0)
+        .file_num();
+
+    if level0_file_num <= max_files_in_l0 {
+        debug!(
+            "No enough SST files in level 0 (threshold: {}), skip compaction",
+            max_files_in_l0
+        );
+        return false;
+    }
+    match compaction_scheduler.schedule(compaction_request) {
+        Ok(scheduled) => {
+            info!(
+                "Schedule region {} compaction request result: {}",
+                region_id, scheduled
+            );
+
+            scheduled
+        }
+        Err(e) => {
+            error!(e;"Failed to schedule region compaction request {}", region_id);
+
+            false
+        }
     }
 }

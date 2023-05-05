@@ -42,6 +42,7 @@ use crate::manifest::action::{
 use crate::manifest::region::RegionManifest;
 use crate::memtable::MemtableBuilderRef;
 use crate::metadata::{RegionMetaImpl, RegionMetadata, RegionMetadataRef};
+pub(crate) use crate::region::writer::schedule_compaction;
 pub use crate::region::writer::{AlterContext, RegionWriter, RegionWriterRef, WriterContext};
 use crate::schema::compat::CompatWrite;
 use crate::snapshot::SnapshotImpl;

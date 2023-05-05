@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod scheduler;
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -180,11 +182,17 @@ pub struct FlushJob<S: LogStore> {
 }
 
 impl<S: LogStore> FlushJob<S> {
-    async fn write_memtables_to_layer(&mut self, ctx: &Context) -> Result<Vec<FileMeta>> {
-        if ctx.is_cancelled() {
-            return CancelledSnafu {}.fail();
-        }
+    async fn execute_job(&mut self) -> Result<()> {
+        let file_metas = self.write_memtables_to_layer().await?;
+        self.write_manifest_and_apply(&file_metas).await?;
 
+        if let Some(cb) = self.on_success.take() {
+            cb.await;
+        }
+        Ok(())
+    }
+
+    async fn write_memtables_to_layer(&mut self) -> Result<Vec<FileMeta>> {
         let region_id = self.shared.id();
         let mut futures = Vec::with_capacity(self.memtables.len());
         let iter_ctx = IterContext {
@@ -262,13 +270,11 @@ impl<S: LogStore> FlushJob<S> {
 impl<S: LogStore> Job for FlushJob<S> {
     // TODO(yingwen): [flush] Support in-job parallelism (Flush memtables concurrently)
     async fn run(&mut self, ctx: &Context) -> Result<()> {
-        let file_metas = self.write_memtables_to_layer(ctx).await?;
-        self.write_manifest_and_apply(&file_metas).await?;
-
-        if let Some(cb) = self.on_success.take() {
-            cb.await;
+        if ctx.is_cancelled() {
+            return CancelledSnafu {}.fail();
         }
-        Ok(())
+
+        self.execute_job().await
     }
 }
 
