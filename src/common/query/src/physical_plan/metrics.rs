@@ -113,7 +113,7 @@ impl<'a> Wrapper<'a> {
     pub fn cpu_time_ns(&self) -> u64 {
         let mut vistor = MetricsVisitor::new();
 
-        // Safety: pre_visit and post_visit mthod in MetricsVisitor will not return Err.
+        // Safety: pre_visit and post_visit method in MetricsVisitor not return Err.
         accept(self.inner, &mut vistor).unwrap();
 
         vistor.cpu_time
