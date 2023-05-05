@@ -35,11 +35,12 @@ use futures::FutureExt;
 use promql_parser::label::METRIC_NAME;
 use promql_parser::parser::{
     AggregateExpr, BinaryExpr, Call, Expr as PromqlExpr, MatrixSelector, ParenExpr, SubqueryExpr,
-    UnaryExpr, VectorSelector,
+    UnaryExpr, ValueType, VectorSelector,
 };
 use query::parser::PromQuery;
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Serialize, Serializer};
 use session::context::{QueryContext, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::oneshot::Sender;
@@ -51,7 +52,8 @@ use tower_http::trace::TraceLayer;
 
 use crate::auth::UserProviderRef;
 use crate::error::{
-    AlreadyStartedSnafu, CollectRecordbatchSnafu, InternalSnafu, Result, StartHttpSnafu,
+    AlreadyStartedSnafu, CollectRecordbatchSnafu, InternalSnafu, NotSupportedSnafu,
+    QueryResultNotFoundSnafu, Result, StartHttpSnafu,
 };
 use crate::http::authorize::HttpAuth;
 use crate::server::Server;
@@ -157,20 +159,41 @@ impl Server for PromServer {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[derive(Debug, Default, JsonSchema, PartialEq)]
 pub struct PromSeries {
     pub metric: HashMap<String, String>,
-    pub values: Vec<(f64, String)>,
+    pub matrix_values: Vec<(f64, String)>,
+    pub vector_values: (f64, String),
+    /// This field won't be serialized, it's only used to indicate which type this series is.
+    #[serde(skip)]
+    pub result_type: Option<ValueType>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+impl Serialize for PromSeries {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state: <S as Serializer>::SerializeStruct =
+            serializer.serialize_struct("PromSeries", 2)?;
+        state.serialize_field("metric", &self.metric)?;
+        if self.result_type == Some(ValueType::Vector) {
+            state.serialize_field("value", &self.vector_values)?;
+        } else if self.result_type == Some(ValueType::Matrix) {
+            state.serialize_field("values", &self.matrix_values)?;
+        }
+        state.end()
+    }
+}
+
+#[derive(Debug, Default, Serialize, JsonSchema, PartialEq)]
 pub struct PromData {
     #[serde(rename = "resultType")]
     pub result_type: String,
     pub result: Vec<PromSeries>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[derive(Debug, Default, Serialize, JsonSchema, PartialEq)]
 pub struct PromJsonResponse {
     pub status: String,
     pub data: PromData,
@@ -212,7 +235,7 @@ impl PromJsonResponse {
     pub async fn from_query_result(
         result: Result<Output>,
         metric_name: String,
-        result_type: String,
+        result_type: Option<ValueType>,
     ) -> Json<Self> {
         let response: Result<Json<Self>> = try {
             let result_type = result_type.clone();
@@ -241,6 +264,8 @@ impl PromJsonResponse {
             json
         };
 
+        let result_type_string = result_type.map(|t| t.to_string()).unwrap_or_default();
+
         match response {
             Ok(resp) => resp,
             Err(err) => {
@@ -249,7 +274,7 @@ impl PromJsonResponse {
                     || err.status_code() == StatusCode::TableColumnNotFound
                 {
                     Self::success(PromData {
-                        result_type,
+                        result_type: result_type_string,
                         ..Default::default()
                     })
                 } else {
@@ -259,10 +284,11 @@ impl PromJsonResponse {
         }
     }
 
+    /// Convert [RecordBatches] to [PromData]
     fn record_batches_to_data(
         batches: RecordBatches,
         metric_name: String,
-        result_type: String,
+        result_type: Option<ValueType>,
     ) -> Result<PromData> {
         // infer semantic type of each column from schema.
         // TODO(ruihang): wish there is a better way to do this.
@@ -352,14 +378,32 @@ impl PromJsonResponse {
 
         let result = buffer
             .into_iter()
-            .map(|(tags, values)| PromSeries {
-                metric: tags.into_iter().collect(),
-                values,
+            .map(|(tags, mut values)| {
+                let metric = tags.into_iter().collect();
+                match result_type {
+                    Some(ValueType::Vector) => Ok(PromSeries {
+                        metric,
+                        vector_values: values.pop().context(QueryResultNotFoundSnafu)?,
+                        result_type,
+                        ..Default::default()
+                    }),
+                    Some(ValueType::Matrix) => Ok(PromSeries {
+                        metric,
+                        matrix_values: values,
+                        result_type,
+                        ..Default::default()
+                    }),
+                    other => NotSupportedSnafu {
+                        feat: format!("PromQL result type {other:?}"),
+                    }
+                    .fail(),
+                }
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
 
+        let result_type_string = result_type.map(|t| t.to_string()).unwrap_or_default();
         let data = PromData {
-            result_type,
+            result_type: result_type_string,
             result,
         };
 
@@ -435,13 +479,15 @@ pub async fn range_query(
     let result = handler.do_query(&prom_query, Arc::new(query_ctx)).await;
     let (metric_name, _) =
         retrieve_metric_name_and_result_type(&prom_query.query).unwrap_or_default();
-    PromJsonResponse::from_query_result(result, metric_name, "matrix".to_string()).await
+    PromJsonResponse::from_query_result(result, metric_name, Some(ValueType::Matrix)).await
 }
 
-pub(crate) fn retrieve_metric_name_and_result_type(promql: &str) -> Option<(String, String)> {
+pub(crate) fn retrieve_metric_name_and_result_type(
+    promql: &str,
+) -> Option<(String, Option<ValueType>)> {
     let promql_expr = promql_parser::parser::parse(promql).ok()?;
     let metric_name = promql_expr_to_metric_name(&promql_expr)?;
-    let result_type = promql_expr.value_type().to_string();
+    let result_type = Some(promql_expr.value_type());
 
     Some((metric_name, result_type))
 }

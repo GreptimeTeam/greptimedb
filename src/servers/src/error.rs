@@ -184,6 +184,9 @@ pub enum Error {
     #[snafu(display("Invalid prometheus remote read query result, msg: {}", msg))]
     InvalidPromRemoteReadQueryResult { msg: String, location: Location },
 
+    #[snafu(display("Expect query result but not found"))]
+    QueryResultNotFound { location: Location },
+
     #[snafu(display("Invalid Flight ticket, source: {}", source))]
     InvalidFlightTicket {
         source: api::DecodeError,
@@ -301,6 +304,7 @@ impl ErrorExt for Error {
             | CatalogError { .. }
             | GrpcReflectionService { .. }
             | BuildingContext { .. }
+            | QueryResultNotFound { .. }
             | BuildHttpResponse { .. } => StatusCode::Internal,
 
             InsertScript { source, .. }
