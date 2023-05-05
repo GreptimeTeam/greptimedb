@@ -20,7 +20,7 @@ use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, MIN_USER_TABLE_ID,
     MITO_ENGINE, SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_NAME,
 };
-use common_catalog::format_full_table_name;
+use common_catalog::{build_db_string, format_full_table_name};
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use common_telemetry::{error, info};
 use datatypes::prelude::ScalarVector;
@@ -371,7 +371,14 @@ impl CatalogManager for LocalCatalogManager {
                 schema
                     .register_table(request.table_name, request.table)
                     .await?;
-                increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT, 1.0);
+                increment_gauge!(
+                    crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
+                    1.0,
+                    &[(
+                        crate::metrics::METRIC_DB_LABEL,
+                        build_db_string(catalog_name, schema_name)
+                    )],
+                );
                 Ok(true)
             }
         }
@@ -507,6 +514,9 @@ impl CatalogManager for LocalCatalogManager {
     }
 
     async fn register_system_table(&self, request: RegisterSystemTableRequest) -> Result<()> {
+        let catalog_name = request.create_table_request.catalog_name.clone();
+        let schema_name = request.create_table_request.schema_name.clone();
+
         ensure!(
             !*self.init_lock.lock().await,
             IllegalManagerStateSnafu {
@@ -516,7 +526,14 @@ impl CatalogManager for LocalCatalogManager {
 
         let mut sys_table_requests = self.system_table_requests.lock().await;
         sys_table_requests.push(request);
-        increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT, 1.0);
+        increment_gauge!(
+            crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
+            1.0,
+            &[(
+                crate::metrics::METRIC_DB_LABEL,
+                build_db_string(&catalog_name, &schema_name)
+            )],
+        );
         Ok(())
     }
 

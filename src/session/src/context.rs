@@ -17,6 +17,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use common_catalog::build_db_string;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_telemetry::debug;
 
@@ -96,11 +97,7 @@ impl QueryContext {
     pub fn get_db_string(&self) -> String {
         let catalog = self.current_catalog();
         let schema = self.current_schema();
-        if catalog == DEFAULT_CATALOG_NAME {
-            schema
-        } else {
-            format!("{catalog}-{schema}")
-        }
+        build_db_string(&catalog, &schema)
     }
 }
 

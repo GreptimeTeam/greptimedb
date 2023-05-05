@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use async_stream::stream;
 use async_trait::async_trait;
+use common_catalog::build_db_string;
 use common_catalog::consts::{MAX_SYS_TABLE_ID, MITO_ENGINE};
 use common_telemetry::{debug, error, info, warn};
 use dashmap::DashMap;
@@ -230,7 +231,14 @@ impl RemoteCatalogManager {
                 "Fetch schema from metasrv: {}.{}",
                 &catalog_name, &schema_name
             );
-            increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_SCHEMA_COUNT, 1.0);
+            increment_gauge!(
+                crate::metrics::METRIC_CATALOG_MANAGER_SCHEMA_COUNT,
+                1.0,
+                &[(
+                    crate::metrics::METRIC_DB_LABEL,
+                    build_db_string(&catalog_name, &schema_name)
+                )],
+            );
             self.initiate_tables(&catalog_name, &schema_name, schema, max_table_id)
                 .await?;
         }
@@ -272,7 +280,14 @@ impl RemoteCatalogManager {
             table_num += 1;
         }
 
-        increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT, 1.0);
+        increment_gauge!(
+            crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
+            1.0,
+            &[(
+                crate::metrics::METRIC_DB_LABEL,
+                build_db_string(catalog_name, schema_name)
+            )],
+        );
         info!(
             "initialized tables in {}.{}, total: {}",
             catalog_name, schema_name, table_num
@@ -458,7 +473,14 @@ impl CatalogManager for RemoteCatalogManager {
             .fail();
         }
 
-        increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT, 1.0);
+        increment_gauge!(
+            crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
+            1.0,
+            &[(
+                crate::metrics::METRIC_DB_LABEL,
+                build_db_string(&catalog_name, &schema_name)
+            )],
+        );
         schema_provider
             .register_table(request.table_name, request.table)
             .await?;
@@ -478,7 +500,14 @@ impl CatalogManager for RemoteCatalogManager {
             })?
             .deregister_table(&request.table_name)
             .await?;
-        decrement_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT, 1.0);
+        decrement_gauge!(
+            crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
+            1.0,
+            &[(
+                crate::metrics::METRIC_DB_LABEL,
+                build_db_string(catalog_name, schema_name)
+            )],
+        );
         Ok(result.is_none())
     }
 
@@ -526,9 +555,19 @@ impl CatalogManager for RemoteCatalogManager {
     }
 
     async fn register_system_table(&self, request: RegisterSystemTableRequest) -> Result<()> {
+        let catalog_name = request.create_table_request.catalog_name.clone();
+        let schema_name = request.create_table_request.schema_name.clone();
+
         let mut requests = self.system_table_requests.lock().await;
         requests.push(request);
-        increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT, 1.0);
+        increment_gauge!(
+            crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
+            1.0,
+            &[(
+                crate::metrics::METRIC_DB_LABEL,
+                build_db_string(&catalog_name, &schema_name)
+            )],
+        );
         Ok(())
     }
 

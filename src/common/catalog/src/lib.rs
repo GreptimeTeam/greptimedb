@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use consts::DEFAULT_CATALOG_NAME;
+
 pub mod consts;
 pub mod error;
 
@@ -19,4 +21,24 @@ pub mod error;
 #[inline]
 pub fn format_full_table_name(catalog: &str, schema: &str, table: &str) -> String {
     format!("{catalog}.{schema}.{table}")
+}
+
+/// Build db name from catalog and schema string
+pub fn build_db_string(catalog: &str, schema: &str) -> String {
+    if catalog == DEFAULT_CATALOG_NAME {
+        schema.to_string()
+    } else {
+        format!("{catalog}-{schema}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_db_string() {
+        assert_eq!("test", build_db_string(DEFAULT_CATALOG_NAME, "test"));
+        assert_eq!("a0b1c2d3-test", build_db_string("a0b1c2d3", "test"));
+    }
 }

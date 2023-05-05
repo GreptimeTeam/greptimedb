@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
+use common_catalog::build_db_string;
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_telemetry::error;
 use metrics::{decrement_gauge, increment_gauge};
@@ -87,7 +88,14 @@ impl CatalogManager for MemoryCatalogManager {
                 catalog: &request.catalog,
                 schema: &request.schema,
             })?;
-        increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT, 1.0);
+        increment_gauge!(
+            crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
+            1.0,
+            &[(
+                crate::metrics::METRIC_DB_LABEL,
+                build_db_string(&request.catalog, &request.schema)
+            )],
+        );
         schema
             .register_table(request.table_name, request.table)
             .await
@@ -126,7 +134,14 @@ impl CatalogManager for MemoryCatalogManager {
                 catalog: &request.catalog,
                 schema: &request.schema,
             })?;
-        decrement_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT, 1.0);
+        decrement_gauge!(
+            crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
+            1.0,
+            &[(
+                crate::metrics::METRIC_DB_LABEL,
+                build_db_string(&request.catalog, &request.schema)
+            )],
+        );
         schema
             .deregister_table(&request.table_name)
             .await
