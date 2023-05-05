@@ -24,6 +24,7 @@ use common_telemetry::{debug, error, info, warn};
 use dashmap::DashMap;
 use futures::Stream;
 use futures_util::{StreamExt, TryStreamExt};
+use metrics::{decrement_gauge, increment_gauge};
 use parking_lot::RwLock;
 use snafu::{OptionExt, ResultExt};
 use table::engine::manager::TableEngineManagerRef;
@@ -185,6 +186,7 @@ impl RemoteCatalogManager {
                 .entry(catalog_name.clone())
                 .or_insert_with(|| self.new_catalog_provider(&catalog_name))
                 .clone();
+            increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_CATALOG_COUNT, 1.0);
 
             self.initiate_schemas(&catalog_name, catalog, &mut max_table_id)
                 .await?;
@@ -228,6 +230,11 @@ impl RemoteCatalogManager {
                 "Fetch schema from metasrv: {}.{}",
                 &catalog_name, &schema_name
             );
+            increment_gauge!(
+                crate::metrics::METRIC_CATALOG_MANAGER_SCHEMA_COUNT,
+                1.0,
+                &[crate::metrics::db_label(&catalog_name, &schema_name)],
+            );
             self.initiate_tables(&catalog_name, &schema_name, schema, max_table_id)
                 .await?;
         }
@@ -269,6 +276,11 @@ impl RemoteCatalogManager {
             table_num += 1;
         }
 
+        increment_gauge!(
+            crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
+            1.0,
+            &[crate::metrics::db_label(catalog_name, schema_name)],
+        );
         info!(
             "initialized tables in {}.{}, total: {}",
             catalog_name, schema_name, table_num
@@ -453,9 +465,16 @@ impl CatalogManager for RemoteCatalogManager {
             }
             .fail();
         }
+
+        increment_gauge!(
+            crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
+            1.0,
+            &[crate::metrics::db_label(&catalog_name, &schema_name)],
+        );
         schema_provider
             .register_table(request.table_name, request.table)
             .await?;
+
         Ok(true)
     }
 
@@ -471,6 +490,11 @@ impl CatalogManager for RemoteCatalogManager {
             })?
             .deregister_table(&request.table_name)
             .await?;
+        decrement_gauge!(
+            crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
+            1.0,
+            &[crate::metrics::db_label(catalog_name, schema_name)],
+        );
         Ok(result.is_none())
     }
 
@@ -487,6 +511,7 @@ impl CatalogManager for RemoteCatalogManager {
         catalog_provider
             .register_schema(schema_name, schema_provider)
             .await?;
+        increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_SCHEMA_COUNT, 1.0);
         Ok(true)
     }
 
@@ -517,8 +542,16 @@ impl CatalogManager for RemoteCatalogManager {
     }
 
     async fn register_system_table(&self, request: RegisterSystemTableRequest) -> Result<()> {
+        let catalog_name = request.create_table_request.catalog_name.clone();
+        let schema_name = request.create_table_request.schema_name.clone();
+
         let mut requests = self.system_table_requests.lock().await;
         requests.push(request);
+        increment_gauge!(
+            crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
+            1.0,
+            &[crate::metrics::db_label(&catalog_name, &schema_name)],
+        );
         Ok(())
     }
 
@@ -595,6 +628,7 @@ impl CatalogManager for RemoteCatalogManager {
                     .context(InvalidCatalogValueSnafu)?,
             )
             .await?;
+        increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_CATALOG_COUNT, 1.0);
         Ok(None)
     }
 
