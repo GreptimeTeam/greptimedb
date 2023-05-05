@@ -110,7 +110,20 @@ where
     R: Request + Send + Sync,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LocalScheduler<...>").finish()
+        f.debug_struct("LocalScheduler")
+            .field("state", &self.state)
+            .finish()
+    }
+}
+
+impl<R> Drop for LocalScheduler<R>
+where
+    R: Request,
+{
+    fn drop(&mut self) {
+        self.state.store(STATE_STOP, Ordering::Relaxed);
+
+        self.cancel_token.cancel();
     }
 }
 
