@@ -16,20 +16,22 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_telemetry::logging;
+use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::storage::{RegionId, SequenceNumber};
-use tokio::sync::Notify;
+use tokio::sync::oneshot::{Receiver, Sender};
+use tokio::sync::{oneshot, Notify};
 
 use crate::compaction::{CompactionRequestImpl, CompactionSchedulerRef};
 use crate::config::EngineConfig;
-use crate::error::Result;
+use crate::error::{DuplicateFlushSnafu, Result, WaitFlushSnafu};
 use crate::flush::FlushJob;
 use crate::manifest::region::RegionManifest;
 use crate::memtable::{MemtableId, MemtableRef};
 use crate::region;
 use crate::region::{RegionWriterRef, SharedDataRef};
 use crate::scheduler::rate_limit::BoxedRateLimitToken;
-use crate::scheduler::{Handler, Request};
+use crate::scheduler::{Handler, LocalScheduler, Request, Scheduler, SchedulerConfig};
 use crate::sst::AccessLayerRef;
 use crate::wal::Wal;
 
@@ -39,8 +41,6 @@ type FlushKey = (RegionId, SequenceNumber);
 
 /// Region flush request.
 pub struct FlushRequest<S: LogStore> {
-    /// The region to flush.
-    pub region_id: RegionId,
     /// Max memtable id in these memtables,
     /// used to remove immutable memtables in current version.
     pub max_memtable_id: MemtableId,
@@ -60,6 +60,9 @@ pub struct FlushRequest<S: LogStore> {
     pub manifest: RegionManifest,
     /// Storage engine config
     pub engine_config: Arc<EngineConfig>,
+    /// Flush result sender. Callers should set the sender to None.
+    pub sender: Option<Sender<Result<()>>>,
+
     // Compaction related options:
     /// TTL of the region.
     pub ttl: Option<Duration>,
@@ -67,16 +70,88 @@ pub struct FlushRequest<S: LogStore> {
     pub compaction_time_window: Option<i64>,
 }
 
+impl<S: LogStore> FlushRequest<S> {
+    #[inline]
+    fn region_id(&self) -> RegionId {
+        self.shared.id()
+    }
+}
+
 impl<S: LogStore> Request for FlushRequest<S> {
     type Key = FlushKey;
 
     #[inline]
     fn key(&self) -> FlushKey {
-        (self.region_id, self.flush_sequence)
+        (self.shared.id(), self.flush_sequence)
     }
 
-    fn complete(self, _result: Result<()>) {
-        // TODO(yingwen): notify waiter.
+    fn complete(self, result: Result<()>) {
+        if let Some(sender) = self.sender {
+            let _ = sender.send(result);
+        }
+    }
+}
+
+/// A handle to get the flush result.
+#[derive(Debug)]
+pub struct FlushHandle {
+    region_id: RegionId,
+    receiver: Receiver<Result<()>>,
+}
+
+impl FlushHandle {
+    /// Waits until the flush job is finished.
+    pub async fn wait(self) -> Result<()> {
+        self.receiver.await.context(WaitFlushSnafu {
+            region_id: self.region_id,
+        })?
+    }
+}
+
+/// Flush scheduler.
+pub struct FlushScheduler<S: LogStore> {
+    scheduler: LocalScheduler<FlushRequest<S>>,
+}
+
+pub type FlushSchedulerRef<S> = Arc<FlushScheduler<S>>;
+
+impl<S: LogStore> FlushScheduler<S> {
+    /// Returns a new [FlushScheduler].
+    pub fn new(config: SchedulerConfig, compaction_scheduler: CompactionSchedulerRef<S>) -> Self {
+        let handler = FlushHandler {
+            compaction_scheduler,
+        };
+        Self {
+            scheduler: LocalScheduler::new(config, handler),
+        }
+    }
+
+    /// Schedules a flush request and return the handle to the flush task.
+    ///
+    /// # Panics
+    /// Panics if `sender` of the `req` is not `None`.
+    pub fn schedule_flush(&self, mut req: FlushRequest<S>) -> Result<FlushHandle> {
+        assert!(req.sender.is_none());
+
+        let region_id = req.region_id();
+        let sequence = req.flush_sequence;
+        let (sender, receiver) = oneshot::channel();
+        req.sender = Some(sender);
+
+        let scheduled = self.scheduler.schedule(req)?;
+        // Normally we should not have duplicate flush request.
+        ensure!(
+            scheduled,
+            DuplicateFlushSnafu {
+                region_id,
+                sequence,
+            }
+        );
+
+        Ok(FlushHandle {
+            region_id,
+            receiver,
+        })
     }
 }
 
@@ -126,14 +201,14 @@ async fn execute_flush<S: LogStore>(
     };
 
     if let Err(e) = flush_job.execute_job().await {
-        logging::error!(e; "Failed to flush regoin {}", req.region_id);
+        logging::error!(e; "Failed to flush regoin {}", req.region_id());
 
         req.complete(Err(e));
     } else {
-        logging::info!("Successfully flush region: {}", req.region_id);
+        logging::info!("Successfully flush region: {}", req.region_id());
 
         let compaction_request = CompactionRequestImpl {
-            region_id: req.region_id,
+            region_id: req.region_id(),
             sst_layer: req.sst_layer.clone(),
             writer: req.writer.clone(),
             shared: req.shared.clone(),

@@ -17,8 +17,7 @@ use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
 use common_error::prelude::BoxedError;
-use common_telemetry::tracing::log::{debug, info};
-use common_telemetry::{error, logging};
+use common_telemetry::logging;
 use futures::TryStreamExt;
 use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
@@ -30,7 +29,9 @@ use crate::background::JobHandle;
 use crate::compaction::{CompactionRequestImpl, CompactionSchedulerRef};
 use crate::config::EngineConfig;
 use crate::error::{self, Result};
-use crate::flush::{FlushCallback, FlushJob, FlushSchedulerRef, FlushStrategyRef};
+use crate::flush::{
+    FlushCallback, FlushHandle, FlushJob, FlushRequest, FlushSchedulerRef, FlushStrategyRef,
+};
 use crate::manifest::action::{
     RawRegionMetadata, RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList,
 };
@@ -267,7 +268,7 @@ impl RegionWriter {
         }
         // we release the writer lock once for rejecting any following potential writing requests immediately.
 
-        self.cancel_flush().await?;
+        self.wait_flush().await?;
 
         // TODO: canncel the compaction task
 
@@ -288,7 +289,7 @@ impl RegionWriter {
 
         if ctx.wait {
             if let Some(handle) = inner.flush_handle.take() {
-                handle.join().await?;
+                handle.wait().await?;
             }
         }
 
@@ -310,15 +311,12 @@ impl RegionWriter {
             .await
     }
 
-    /// Cancel flush task if any
-    async fn cancel_flush(&self) -> Result<()> {
+    /// Wait flush task if any
+    async fn wait_flush(&self) -> Result<()> {
         let mut inner = self.inner.lock().await;
 
-        if let Some(task) = inner.flush_handle.take() {
-            task.cancel()
-                .await
-                .map_err(BoxedError::new)
-                .context(error::CancelFlushSnafu)?;
+        if let Some(handle) = inner.flush_handle.take() {
+            handle.wait().await?;
         }
 
         Ok(())
@@ -328,7 +326,7 @@ impl RegionWriter {
 pub struct WriterContext<'a, S: LogStore> {
     pub shared: &'a SharedDataRef,
     pub flush_strategy: &'a FlushStrategyRef,
-    pub flush_scheduler: &'a FlushSchedulerRef,
+    pub flush_scheduler: &'a FlushSchedulerRef<S>,
     pub compaction_scheduler: &'a CompactionSchedulerRef<S>,
     pub sst_layer: &'a AccessLayerRef,
     pub wal: &'a Wal<S>,
@@ -359,7 +357,7 @@ impl<'a, S: LogStore> AlterContext<'a, S> {
 #[derive(Debug)]
 struct WriterInner {
     memtable_builder: MemtableBuilderRef,
-    flush_handle: Option<JobHandle>,
+    flush_handle: Option<FlushHandle>,
 
     /// `WriterInner` will reject any future writing, if the closed flag is set.
     ///
@@ -625,15 +623,13 @@ impl WriterInner {
         version_control.freeze_mutable(new_mutable);
 
         if let Some(flush_handle) = self.flush_handle.take() {
-            // Previous flush job is incomplete, wait util it is finished (write stall).
+            // Previous flush job is incomplete, wait util it is finished.
             // However the last flush job may fail, in which case, we just return error
             // and abort current write request. The flush handle is left empty, so the next
             // time we still have chance to trigger a new flush.
-            logging::info!("Write stall, region: {}", ctx.shared.name);
-
             // TODO(yingwen): We should release the write lock during waiting flush done, which
             // needs something like async condvar.
-            flush_handle.join().await.map_err(|e| {
+            flush_handle.wait().await.map_err(|e| {
                 logging::error!(e; "Previous flush job failed, region: {}", ctx.shared.name);
                 e
             })?;
@@ -655,7 +651,7 @@ impl WriterInner {
             self.compaction_time_window,
         );
 
-        let flush_req = FlushJob {
+        let flush_req = FlushRequest {
             max_memtable_id: max_memtable_id.unwrap(),
             memtables: mem_to_flush,
             // In write thread, safe to use current committed sequence.
@@ -665,14 +661,16 @@ impl WriterInner {
             writer: ctx.writer.clone(),
             wal: ctx.wal.clone(),
             manifest: ctx.manifest.clone(),
-            on_success: cb,
             engine_config: self.engine_config.clone(),
+            sender: None,
+            ttl: self.ttl,
+            compaction_time_window: self.compaction_time_window,
         };
 
-        let flush_handle = ctx
-            .flush_scheduler
-            .schedule_flush(Box::new(flush_req))
-            .await?;
+        let flush_handle = ctx.flush_scheduler.schedule_flush(flush_req).map_err(|e| {
+            logging::error!(e; "Failed to schedule flush request");
+            e
+        })?;
         self.flush_handle = Some(flush_handle);
 
         Ok(())
@@ -800,7 +798,7 @@ pub(crate) fn schedule_compaction<S: LogStore>(
         .file_num();
 
     if level0_file_num <= max_files_in_l0 {
-        debug!(
+        logging::debug!(
             "No enough SST files in level 0 (threshold: {}), skip compaction",
             max_files_in_l0
         );
@@ -808,15 +806,16 @@ pub(crate) fn schedule_compaction<S: LogStore>(
     }
     match compaction_scheduler.schedule(compaction_request) {
         Ok(scheduled) => {
-            info!(
+            logging::info!(
                 "Schedule region {} compaction request result: {}",
-                region_id, scheduled
+                region_id,
+                scheduled
             );
 
             scheduled
         }
         Err(e) => {
-            error!(e;"Failed to schedule region compaction request {}", region_id);
+            logging::error!(e;"Failed to schedule region compaction request {}", region_id);
 
             false
         }

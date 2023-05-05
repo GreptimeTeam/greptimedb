@@ -31,7 +31,7 @@ use crate::compaction::CompactionSchedulerRef;
 use crate::config::EngineConfig;
 use crate::error::{self, Error, Result};
 use crate::file_purger::{FilePurgeHandler, FilePurgerRef};
-use crate::flush::{FlushSchedulerImpl, FlushSchedulerRef, FlushStrategyRef, SizeBasedStrategy};
+use crate::flush::{FlushScheduler, FlushSchedulerRef, FlushStrategyRef, SizeBasedStrategy};
 use crate::manifest::region::RegionManifest;
 use crate::memtable::{DefaultMemtableBuilder, MemtableBuilderRef};
 use crate::metadata::RegionMetadata;
@@ -223,7 +223,7 @@ struct EngineInner<S: LogStore> {
     log_store: Arc<S>,
     regions: RwLock<RegionMap<S>>,
     memtable_builder: MemtableBuilderRef,
-    flush_scheduler: FlushSchedulerRef,
+    flush_scheduler: FlushSchedulerRef<S>,
     flush_strategy: FlushStrategyRef,
     compaction_scheduler: CompactionSchedulerRef<S>,
     file_purger: FilePurgerRef,
@@ -238,7 +238,11 @@ impl<S: LogStore> EngineInner<S> {
         compaction_scheduler: CompactionSchedulerRef<S>,
     ) -> Self {
         let job_pool = Arc::new(JobPoolImpl {});
-        let flush_scheduler = Arc::new(FlushSchedulerImpl::new(job_pool));
+        // TODO(yingwen): max inflight flush tasks.
+        let flush_scheduler = Arc::new(FlushScheduler::new(
+            SchedulerConfig::default(),
+            compaction_scheduler.clone(),
+        ));
 
         let file_purger = Arc::new(LocalScheduler::new(
             SchedulerConfig {

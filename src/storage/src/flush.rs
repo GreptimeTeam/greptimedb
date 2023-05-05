@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_telemetry::logging;
+pub use scheduler::{FlushHandle, FlushRequest, FlushScheduler, FlushSchedulerRef};
 use store_api::logstore::LogStore;
 use store_api::storage::consts::WRITE_ROW_GROUP_SIZE;
 use store_api::storage::SequenceNumber;
@@ -129,31 +130,31 @@ impl FlushStrategy for SizeBasedStrategy {
     }
 }
 
-#[async_trait]
-pub trait FlushScheduler: Send + Sync + std::fmt::Debug {
-    async fn schedule_flush(&self, flush_job: Box<dyn Job>) -> Result<JobHandle>;
-}
+// #[async_trait]
+// pub trait FlushScheduler: Send + Sync + std::fmt::Debug {
+//     async fn schedule_flush(&self, flush_job: Box<dyn Job>) -> Result<JobHandle>;
+// }
 
-#[derive(Debug)]
-pub struct FlushSchedulerImpl {
-    job_pool: JobPoolRef,
-}
+// #[derive(Debug)]
+// pub struct FlushSchedulerImpl {
+//     job_pool: JobPoolRef,
+// }
 
-impl FlushSchedulerImpl {
-    pub fn new(job_pool: JobPoolRef) -> FlushSchedulerImpl {
-        FlushSchedulerImpl { job_pool }
-    }
-}
+// impl FlushSchedulerImpl {
+//     pub fn new(job_pool: JobPoolRef) -> FlushSchedulerImpl {
+//         FlushSchedulerImpl { job_pool }
+//     }
+// }
 
-#[async_trait]
-impl FlushScheduler for FlushSchedulerImpl {
-    async fn schedule_flush(&self, flush_job: Box<dyn Job>) -> Result<JobHandle> {
-        // TODO(yingwen): [flush] Implements flush schedule strategy, controls max background flushes.
-        self.job_pool.submit(flush_job).await
-    }
-}
+// #[async_trait]
+// impl FlushScheduler for FlushSchedulerImpl {
+//     async fn schedule_flush(&self, flush_job: Box<dyn Job>) -> Result<JobHandle> {
+//         // TODO(yingwen): [flush] Implements flush schedule strategy, controls max background flushes.
+//         self.job_pool.submit(flush_job).await
+//     }
+// }
 
-pub type FlushSchedulerRef = Arc<dyn FlushScheduler>;
+// pub type FlushSchedulerRef = Arc<dyn FlushScheduler>;
 
 pub type FlushCallback = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 

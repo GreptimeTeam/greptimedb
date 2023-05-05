@@ -63,7 +63,8 @@ pub struct JobHandle {
 impl JobHandle {
     /// Waits until this background job is finished.
     pub async fn join(self) -> Result<()> {
-        self.handle.await.context(error::JoinTaskSnafu)?
+        // self.handle.await.context(error::JoinTaskSnafu)?
+        unimplemented!()
     }
 
     /// Cancels this background job gracefully and waits until it exits.

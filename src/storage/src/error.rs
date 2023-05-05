@@ -138,20 +138,15 @@ pub enum Error {
         source: std::io::Error,
     },
 
-    #[snafu(display("Failed to join task, source: {}", source))]
-    JoinTask {
-        source: common_runtime::JoinError,
+    #[snafu(display("Failed to wait flush, region_id: {}, source: {}", region_id, source))]
+    WaitFlush {
+        region_id: RegionId,
+        source: tokio::sync::oneshot::error::RecvError,
         location: Location,
     },
 
     #[snafu(display("Task already cancelled"))]
     Cancelled { location: Location },
-
-    #[snafu(display("Failed to cancel flush, source: {}", source))]
-    CancelFlush {
-        #[snafu(backtrace)]
-        source: BoxedError,
-    },
 
     #[snafu(display(
         "Manifest protocol forbid to read, min_version: {}, supported_version: {}",
@@ -455,6 +450,17 @@ pub enum Error {
         region_id: RegionId,
         source: tokio::sync::oneshot::error::RecvError,
     },
+
+    #[snafu(display(
+        "The flush request is duplicate, region_id: {}, sequence: {}",
+        region_id,
+        sequence
+    ))]
+    DuplicateFlush {
+        region_id: RegionId,
+        sequence: SequenceNumber,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -492,9 +498,8 @@ impl ErrorExt for Error {
             Utf8 { .. }
             | EncodeJson { .. }
             | DecodeJson { .. }
-            | JoinTask { .. }
+            | WaitFlush { .. }
             | Cancelled { .. }
-            | CancelFlush { .. }
             | DecodeMetaActionList { .. }
             | Readline { .. }
             | WalDataCorrupted { .. }
@@ -539,9 +544,10 @@ impl ErrorExt for Error {
             ConvertChunk { source, .. } => source.status_code(),
             MarkWalObsolete { source, .. } => source.status_code(),
             DecodeParquetTimeRange { .. } => StatusCode::Unexpected,
-            RateLimited { .. } | StopScheduler { .. } | CompactTaskCancel { .. } => {
-                StatusCode::Internal
-            }
+            RateLimited { .. }
+            | StopScheduler { .. }
+            | CompactTaskCancel { .. }
+            | DuplicateFlush { .. } => StatusCode::Internal,
             DeleteSst { .. } => StatusCode::StorageUnavailable,
 
             StartManifestGcTask { .. }
