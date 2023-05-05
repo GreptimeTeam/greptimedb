@@ -1,3 +1,17 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::any::Any;
 use std::sync::Arc;
 
@@ -66,12 +80,13 @@ impl PhysicalPlan for MetricsReporter {
 
         let join_handle = tokio::spawn(async move {
             while let Some(b) = input_stream.next().await {
-                // TODO(fys): use unwrap safe
-                tx.send(b).await.unwrap();
+                if tx.send(b).await.is_err() {
+                    return;
+                }
             }
 
             let wrapper = Wrapper::new(captured_input.as_ref());
-            let cpu_time = wrapper.cpu_time_ns() as u64;
+            let cpu_time = wrapper.cpu_time_ns();
             let catalog = captured_ctx.current_catalog();
             let schema = captured_ctx.current_schema();
 
@@ -95,9 +110,10 @@ impl<'a> Wrapper<'a> {
         Self { inner }
     }
 
-    pub fn cpu_time_ns(&self) -> usize {
+    pub fn cpu_time_ns(&self) -> u64 {
         let mut vistor = MetricsVisitor::new();
 
+        // Safety: pre_visit and post_visit mthod in MetricsVisitor will not return Err.
         accept(self.inner, &mut vistor).unwrap();
 
         vistor.cpu_time
@@ -105,7 +121,7 @@ impl<'a> Wrapper<'a> {
 }
 
 struct MetricsVisitor {
-    cpu_time: usize,
+    cpu_time: u64,
 }
 
 impl MetricsVisitor {
@@ -122,7 +138,7 @@ impl PhysicalPlanVisitor for MetricsVisitor {
 
         if let Some(m) = metrics {
             if let Some(cpu_time) = m.elapsed_compute() {
-                self.cpu_time += cpu_time;
+                self.cpu_time += cpu_time as u64;
             }
         }
 

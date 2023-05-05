@@ -14,6 +14,7 @@
 
 use crate::physical_plan::PhysicalPlan;
 
+// TODO(fys): add some docs
 pub trait PhysicalPlanVisitor {
     type Error;
 
