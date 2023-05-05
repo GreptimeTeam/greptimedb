@@ -21,6 +21,8 @@ pub const DEFAULT_SCHEMA_NAME: &str = "public";
 /// Reserves [0,MIN_USER_TABLE_ID) for internal usage.
 /// User defined table id starts from this value.
 pub const MIN_USER_TABLE_ID: u32 = 1024;
+/// the max system table id
+pub const MAX_SYS_TABLE_ID: u32 = MIN_USER_TABLE_ID - 1;
 /// system_catalog table id
 pub const SYSTEM_CATALOG_TABLE_ID: u32 = 0;
 /// scripts table id

@@ -107,6 +107,6 @@ The core team will be thrilled if you participate in any way you like. When you 
 
 Also, see some extra GreptimeDB content:
 
-- [GreptimeDB Docs](https://greptime.com/docs)
-- [Learn GreptimeDB](https://greptime.com/products/db)
+- [GreptimeDB Docs](https://docs.greptime.com/)
+- [Learn GreptimeDB](https://greptime.com/product/db)
 - [Greptime Inc. Website](https://greptime.com)

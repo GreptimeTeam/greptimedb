@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use async_stream::stream;
 use async_trait::async_trait;
-use common_catalog::consts::{MIN_USER_TABLE_ID, MITO_ENGINE};
+use common_catalog::consts::{MAX_SYS_TABLE_ID, MITO_ENGINE};
 use common_telemetry::{debug, error, info, warn};
 use dashmap::DashMap;
 use futures::Stream;
@@ -173,12 +173,12 @@ impl RemoteCatalogManager {
     }
 
     /// Fetch catalogs/schemas/tables from remote catalog manager along with max table id allocated.
-    async fn initiate_catalogs(&self) -> Result<(HashMap<String, CatalogProviderRef>, TableId)> {
+    async fn initiate_catalogs(&self) -> Result<HashMap<String, CatalogProviderRef>> {
         let mut res = HashMap::new();
-        let max_table_id = MIN_USER_TABLE_ID - 1;
 
         let mut catalogs = self.iter_remote_catalogs().await;
         while let Some(r) = catalogs.next().await {
+            let mut max_table_id = MAX_SYS_TABLE_ID;
             let CatalogKey { catalog_name, .. } = r?;
             info!("Fetch catalog from metasrv: {}", catalog_name);
             let catalog = res
@@ -186,20 +186,25 @@ impl RemoteCatalogManager {
                 .or_insert_with(|| self.new_catalog_provider(&catalog_name))
                 .clone();
 
-            self.initiate_schemas(catalog_name, catalog, max_table_id)
+            self.initiate_schemas(&catalog_name, catalog, &mut max_table_id)
                 .await?;
+
+            info!(
+                "Catalog name: {}, max table id allocated: {}",
+                &catalog_name, max_table_id
+            );
         }
 
-        Ok((res, max_table_id))
+        Ok(res)
     }
 
     async fn initiate_schemas(
         &self,
-        catalog_name: String,
+        catalog_name: &str,
         catalog: CatalogProviderRef,
-        max_table_id: TableId,
+        max_table_id: &mut TableId,
     ) -> Result<()> {
-        let mut schemas = self.iter_remote_schemas(&catalog_name).await;
+        let mut schemas = self.iter_remote_schemas(catalog_name).await;
         while let Some(r) = schemas.next().await {
             let SchemaKey {
                 catalog_name,
@@ -235,7 +240,7 @@ impl RemoteCatalogManager {
         catalog_name: &'a str,
         schema_name: &'a str,
         schema: SchemaProviderRef,
-        mut max_table_id: TableId,
+        max_table_id: &mut TableId,
     ) -> Result<()> {
         info!("initializing tables in {}.{}", catalog_name, schema_name);
         let mut table_num = 0;
@@ -260,7 +265,7 @@ impl RemoteCatalogManager {
             let table_id = table_info.ident.table_id;
             schema.register_table(table_name.clone(), table_ref).await?;
             info!("Registered table {}", table_name);
-            max_table_id = max_table_id.max(table_id);
+            *max_table_id = (*max_table_id).max(table_id);
             table_num += 1;
         }
 
@@ -402,7 +407,7 @@ async fn open_or_create_table(
 #[async_trait::async_trait]
 impl CatalogManager for RemoteCatalogManager {
     async fn start(&self) -> Result<()> {
-        let (catalogs, max_table_id) = self.initiate_catalogs().await?;
+        let catalogs = self.initiate_catalogs().await?;
         info!(
             "Initialized catalogs: {:?}",
             catalogs.keys().cloned().collect::<Vec<_>>()
@@ -414,8 +419,6 @@ impl CatalogManager for RemoteCatalogManager {
                 self_catalogs.insert(k, v);
             });
         }
-
-        info!("Max table id allocated: {}", max_table_id);
 
         let mut system_table_requests = self.system_table_requests.lock().await;
         let engine = self
