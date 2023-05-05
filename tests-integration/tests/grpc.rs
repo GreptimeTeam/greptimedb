@@ -367,7 +367,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
     let expected = PromJsonResponse {
         status: "success".to_string(),
         data: PromData {
-            result_type: "matrix".to_string(),
+            result_type: "vector".to_string(),
             result: vec![
                 PromSeries {
                     metric: [
@@ -376,7 +376,8 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                     ]
                     .into_iter()
                     .collect(),
-                    values: vec![(5.0, "2".to_string())],
+                    value: Some((5.0, "2".to_string())),
+                    ..Default::default()
                 },
                 PromSeries {
                     metric: [
@@ -385,7 +386,8 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                     ]
                     .into_iter()
                     .collect(),
-                    values: vec![(5.0, "1".to_string())],
+                    value: Some((5.0, "1".to_string())),
+                    ..Default::default()
                 },
             ],
         },
@@ -426,6 +428,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                     .into_iter()
                     .collect(),
                     values: vec![(5.0, "2".to_string()), (10.0, "2".to_string())],
+                    ..Default::default()
                 },
                 PromSeries {
                     metric: [
@@ -435,6 +438,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                     .into_iter()
                     .collect(),
                     values: vec![(5.0, "1".to_string()), (10.0, "1".to_string())],
+                    ..Default::default()
                 },
             ],
         },
