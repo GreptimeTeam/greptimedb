@@ -328,8 +328,8 @@ CREATE EXTERNAL TABLE IF NOT EXISTS system_metrics (
 )
 ENGINE=file
 WITH(
-  FORMAT = 'csv',
-  LOCATION = 'foo.csv'
+  format = 'csv',
+  location = 'foo.csv'
 )"#,
             sql
         );
