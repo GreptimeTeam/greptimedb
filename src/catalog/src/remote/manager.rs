@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use async_stream::stream;
 use async_trait::async_trait;
-use common_catalog::consts::{MIN_USER_TABLE_ID, MITO_ENGINE};
+use common_catalog::consts::{MAX_SYS_TABLE_ID, MITO_ENGINE};
 use common_telemetry::{debug, error, info, warn};
 use dashmap::DashMap;
 use futures::Stream;
@@ -178,7 +178,7 @@ impl RemoteCatalogManager {
 
         let mut catalogs = self.iter_remote_catalogs().await;
         while let Some(r) = catalogs.next().await {
-            let mut max_table_id = MIN_USER_TABLE_ID - 1;
+            let mut max_table_id = MAX_SYS_TABLE_ID;
             let CatalogKey { catalog_name, .. } = r?;
             info!("Fetch catalog from metasrv: {}", catalog_name);
             let catalog = res
