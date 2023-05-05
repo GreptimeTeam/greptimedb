@@ -39,8 +39,7 @@ use promql_parser::parser::{
 };
 use query::parser::PromQuery;
 use schemars::JsonSchema;
-use serde::ser::SerializeStruct;
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use session::context::{QueryContext, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::oneshot::Sender;
@@ -52,8 +51,8 @@ use tower_http::trace::TraceLayer;
 
 use crate::auth::UserProviderRef;
 use crate::error::{
-    AlreadyStartedSnafu, CollectRecordbatchSnafu, InternalSnafu, NotSupportedSnafu,
-    QueryResultNotFoundSnafu, Result, StartHttpSnafu,
+    AlreadyStartedSnafu, CollectRecordbatchSnafu, InternalSnafu, NotSupportedSnafu, Result,
+    StartHttpSnafu,
 };
 use crate::http::authorize::HttpAuth;
 use crate::server::Server;
@@ -159,41 +158,24 @@ impl Server for PromServer {
     }
 }
 
-#[derive(Debug, Default, JsonSchema, PartialEq)]
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct PromSeries {
     pub metric: HashMap<String, String>,
-    pub matrix_values: Vec<(f64, String)>,
-    pub vector_values: (f64, String),
-    /// This field won't be serialized, it's only used to indicate which type this series is.
-    #[serde(skip)]
-    pub result_type: Option<ValueType>,
+    /// For [ValueType::Matrix] result type
+    pub values: Vec<(f64, String)>,
+    /// For [ValueType::Vector] result type
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<(f64, String)>,
 }
 
-impl Serialize for PromSeries {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut state: <S as Serializer>::SerializeStruct =
-            serializer.serialize_struct("PromSeries", 2)?;
-        state.serialize_field("metric", &self.metric)?;
-        if self.result_type == Some(ValueType::Vector) {
-            state.serialize_field("value", &self.vector_values)?;
-        } else if self.result_type == Some(ValueType::Matrix) {
-            state.serialize_field("values", &self.matrix_values)?;
-        }
-        state.end()
-    }
-}
-
-#[derive(Debug, Default, Serialize, JsonSchema, PartialEq)]
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct PromData {
     #[serde(rename = "resultType")]
     pub result_type: String,
     pub result: Vec<PromSeries>,
 }
 
-#[derive(Debug, Default, Serialize, JsonSchema, PartialEq)]
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct PromJsonResponse {
     pub status: String,
     pub data: PromData,
@@ -238,7 +220,6 @@ impl PromJsonResponse {
         result_type: Option<ValueType>,
     ) -> Json<Self> {
         let response: Result<Json<Self>> = try {
-            let result_type = result_type.clone();
             let json = match result? {
                 Output::RecordBatches(batches) => Self::success(Self::record_batches_to_data(
                     batches,
@@ -383,14 +364,12 @@ impl PromJsonResponse {
                 match result_type {
                     Some(ValueType::Vector) => Ok(PromSeries {
                         metric,
-                        vector_values: values.pop().context(QueryResultNotFoundSnafu)?,
-                        result_type,
+                        value: values.pop(),
                         ..Default::default()
                     }),
                     Some(ValueType::Matrix) => Ok(PromSeries {
                         metric,
-                        matrix_values: values,
-                        result_type,
+                        values,
                         ..Default::default()
                     }),
                     other => NotSupportedSnafu {
