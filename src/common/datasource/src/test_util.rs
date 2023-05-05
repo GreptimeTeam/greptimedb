@@ -100,7 +100,7 @@ pub async fn setup_stream_to_json_test(origin_path: &str, threshold: impl Fn(usi
         test_util::TEST_BATCH_SIZE,
         schema.clone(),
         store.clone(),
-        CompressionType::UNCOMPRESSED,
+        CompressionType::Uncompressed,
     );
 
     let size = store.read(origin_path).await.unwrap().len();
@@ -143,7 +143,7 @@ pub async fn setup_stream_to_csv_test(origin_path: &str, threshold: impl Fn(usiz
         .build()
         .unwrap();
 
-    let csv_opener = CsvOpener::new(csv_conf, store.clone(), CompressionType::UNCOMPRESSED);
+    let csv_opener = CsvOpener::new(csv_conf, store.clone(), CompressionType::Uncompressed);
 
     let size = store.read(origin_path).await.unwrap().len();
 

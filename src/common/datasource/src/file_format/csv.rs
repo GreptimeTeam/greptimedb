@@ -94,7 +94,7 @@ impl Default for CsvFormat {
             has_header: true,
             delimiter: b',',
             schema_infer_max_record: Some(file_format::DEFAULT_SCHEMA_INFER_MAX_RECORD),
-            compression_type: CompressionType::UNCOMPRESSED,
+            compression_type: CompressionType::Uncompressed,
         }
     }
 }
@@ -309,7 +309,7 @@ mod tests {
         assert_eq!(
             format,
             CsvFormat {
-                compression_type: CompressionType::ZSTD,
+                compression_type: CompressionType::Zstd,
                 schema_infer_max_record: Some(2000),
                 delimiter: b'\t',
                 has_header: false,
