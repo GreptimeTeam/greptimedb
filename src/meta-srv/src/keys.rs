@@ -243,7 +243,7 @@ pub struct StatValue {
 
 impl StatValue {
     /// Get the region number from stat value.
-    pub fn region_num(&self) -> Option<u64> {
+    pub fn region_count(&self) -> Option<u64> {
         for stat in self.stats.iter() {
             match stat.region_num {
                 Some(region_num) => return Some(region_num),
@@ -364,7 +364,7 @@ mod tests {
     #[test]
     fn test_get_region_num_from_stat_val() {
         let empty = StatValue { stats: vec![] };
-        let region_num = empty.region_num();
+        let region_num = empty.region_count();
         assert!(region_num.is_none());
 
         let wrong = StatValue {
@@ -373,7 +373,7 @@ mod tests {
                 ..Default::default()
             }],
         };
-        let right = wrong.region_num();
+        let right = wrong.region_count();
         assert!(right.is_none());
 
         let stat_val = StatValue {
@@ -392,7 +392,7 @@ mod tests {
                 },
             ],
         };
-        let region_num = stat_val.region_num().unwrap();
+        let region_num = stat_val.region_count().unwrap();
         assert_eq!(1, region_num);
     }
 }

@@ -24,6 +24,8 @@ use crate::lease;
 use crate::metasrv::Context;
 use crate::selector::{Namespace, Selector};
 
+const LARGER_REGION_COUNT: u64 = 100000;
+
 pub struct LoadBasedSelector {
     pub meta_peer_client: MetaPeerClient,
 }
@@ -44,6 +46,10 @@ impl Selector for LoadBasedSelector {
                 .into_iter()
                 .collect();
 
+        if lease_kvs.is_empty() {
+            return Ok(vec![]);
+        }
+
         // get stats of alive datanodes
         let stat_keys: Vec<StatKey> = lease_kvs
             .keys()
@@ -54,17 +60,16 @@ impl Selector for LoadBasedSelector {
             .collect();
         let stat_kvs = self.meta_peer_client.get_dn_stat_kvs(stat_keys).await?;
 
-        // aggregate lease and stat information
-        let mut tuples: Vec<(LeaseKey, LeaseValue, u64)> = stat_kvs
+        let mut tuples: Vec<(LeaseKey, LeaseValue, u64)> = lease_kvs
             .into_iter()
-            .filter_map(|(stat_key, stat_val)| {
-                let lease_key = to_lease_key(&stat_key);
-                match (lease_kvs.get(&lease_key), stat_val.region_num()) {
-                    (Some(lease_val), Some(region_num)) => {
-                        Some((lease_key, lease_val.clone(), region_num))
-                    }
-                    _ => None,
-                }
+            .map(|(lease_k, lease_v)| {
+                let stat_key: StatKey = to_stat_key(&lease_k);
+                let region_count = stat_kvs
+                    .get(&stat_key)
+                    .and_then(|v| v.region_count())
+                    .unwrap_or(LARGER_REGION_COUNT);
+
+                (lease_k, lease_v, region_count)
             })
             .collect();
 
@@ -81,8 +86,8 @@ impl Selector for LoadBasedSelector {
     }
 }
 
-fn to_lease_key(k: &StatKey) -> LeaseKey {
-    LeaseKey {
+fn to_stat_key(k: &LeaseKey) -> StatKey {
+    StatKey {
         cluster_id: k.cluster_id,
         node_id: k.node_id,
     }
@@ -90,17 +95,17 @@ fn to_lease_key(k: &StatKey) -> LeaseKey {
 
 #[cfg(test)]
 mod tests {
-    use super::to_lease_key;
-    use crate::keys::StatKey;
+    use super::to_stat_key;
+    use crate::keys::LeaseKey;
 
     #[test]
     fn test_to_lease_key() {
-        let statkey = StatKey {
+        let lease_key = LeaseKey {
             cluster_id: 1,
             node_id: 101,
         };
-        let lease_key = to_lease_key(&statkey);
-        assert_eq!(1, lease_key.cluster_id);
-        assert_eq!(101, lease_key.node_id);
+        let stat_key = to_stat_key(&lease_key);
+        assert_eq!(1, stat_key.cluster_id);
+        assert_eq!(101, stat_key.node_id);
     }
 }
