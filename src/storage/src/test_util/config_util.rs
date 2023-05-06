@@ -21,9 +21,9 @@ use object_store::ObjectStore;
 use store_api::manifest::Manifest;
 
 use crate::compaction::noop::NoopCompactionScheduler;
-use crate::engine;
+use crate::engine::{self, RegionMap};
 use crate::file_purger::noop::NoopFilePurgeHandler;
-use crate::flush::{FlushScheduler, SizeBasedStrategy};
+use crate::flush::{FlushPicker, FlushScheduler, PickerConfig, SizeBasedStrategy};
 use crate::manifest::region::RegionManifest;
 use crate::memtable::DefaultMemtableBuilder;
 use crate::region::StoreConfig;
@@ -65,8 +65,11 @@ pub async fn new_store_config_with_object_store(
     };
     let log_store = Arc::new(RaftEngineLogStore::try_new(log_config).await.unwrap());
     let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
+    // We use an empty region map so actually the background worker of the picker is disabled.
+    let picker = FlushPicker::new(Arc::new(RegionMap::new()), PickerConfig::default()).unwrap();
     let flush_scheduler = Arc::new(FlushScheduler::new(
         SchedulerConfig::default(),
+        picker,
         compaction_scheduler.clone(),
     ));
     let file_purger = Arc::new(LocalScheduler::new(

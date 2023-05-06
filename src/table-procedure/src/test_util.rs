@@ -57,7 +57,8 @@ impl TestEnv {
             Arc::new(NoopLogStore::default()),
             object_store.clone(),
             compaction_scheduler,
-        );
+        )
+        .unwrap();
         let table_engine = Arc::new(MitoEngine::new(
             EngineConfig::default(),
             storage_engine,

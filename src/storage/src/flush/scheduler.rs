@@ -26,7 +26,7 @@ use tokio::sync::{oneshot, Notify};
 use crate::compaction::{CompactionRequestImpl, CompactionSchedulerRef};
 use crate::config::EngineConfig;
 use crate::error::{DuplicateFlushSnafu, Result, WaitFlushSnafu};
-use crate::flush::FlushJob;
+use crate::flush::{FlushJob, FlushPicker};
 use crate::manifest::region::RegionManifest;
 use crate::memtable::{MemtableId, MemtableRef};
 use crate::metrics::{FLUSH_ERRORS_TOTAL, FLUSH_REQUESTS_TOTAL};
@@ -145,19 +145,27 @@ impl FlushHandle {
 
 /// Flush scheduler.
 pub struct FlushScheduler<S: LogStore> {
+    /// Flush task scheduler.
     scheduler: LocalScheduler<FlushRequest<S>>,
+    /// Flush picker.
+    picker: FlushPicker<S>,
 }
 
 pub type FlushSchedulerRef<S> = Arc<FlushScheduler<S>>;
 
 impl<S: LogStore> FlushScheduler<S> {
     /// Returns a new [FlushScheduler].
-    pub fn new(config: SchedulerConfig, compaction_scheduler: CompactionSchedulerRef<S>) -> Self {
+    pub fn new(
+        config: SchedulerConfig,
+        picker: FlushPicker<S>,
+        compaction_scheduler: CompactionSchedulerRef<S>,
+    ) -> Self {
         let handler = FlushHandler {
             compaction_scheduler,
         };
         Self {
             scheduler: LocalScheduler::new(config, handler),
+            picker,
         }
     }
 
@@ -235,6 +243,9 @@ async fn execute_flush<S: LogStore>(
     } else {
         logging::debug!("Successfully flush region: {}", req.region_id());
 
+        // Update last flush time.
+        req.shared.update_flush_millis();
+
         let compaction_request = CompactionRequestImpl::from(&req);
         let max_files_in_l0 = req.engine_config.max_files_in_l0;
         let shared_data = req.shared.clone();
@@ -247,6 +258,7 @@ async fn execute_flush<S: LogStore>(
             max_files_in_l0,
         );
 
+        // Complete the request.
         req.complete(Ok(()));
     }
 }

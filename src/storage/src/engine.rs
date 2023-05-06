@@ -30,7 +30,10 @@ use crate::compaction::CompactionSchedulerRef;
 use crate::config::EngineConfig;
 use crate::error::{self, Error, Result};
 use crate::file_purger::{FilePurgeHandler, FilePurgerRef};
-use crate::flush::{FlushScheduler, FlushSchedulerRef, FlushStrategyRef, SizeBasedStrategy};
+use crate::flush::{
+    FlushPicker, FlushScheduler, FlushSchedulerRef, FlushStrategyRef, PickerConfig,
+    SizeBasedStrategy,
+};
 use crate::manifest::region::RegionManifest;
 use crate::memtable::{DefaultMemtableBuilder, MemtableBuilderRef};
 use crate::metadata::RegionMetadata;
@@ -93,15 +96,15 @@ impl<S: LogStore> EngineImpl<S> {
         log_store: Arc<S>,
         object_store: ObjectStore,
         compaction_scheduler: CompactionSchedulerRef<S>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        Ok(Self {
             inner: Arc::new(EngineInner::new(
                 config,
                 log_store,
                 object_store,
                 compaction_scheduler,
-            )),
-        }
+            )?),
+        })
     }
 }
 
@@ -208,11 +211,11 @@ impl<'a, S: LogStore> Drop for SlotGuard<'a, S> {
 }
 
 /// Region slot map.
-struct RegionMap<S: LogStore>(RwLock<HashMap<String, RegionSlot<S>>>);
+pub struct RegionMap<S: LogStore>(RwLock<HashMap<String, RegionSlot<S>>>);
 
 impl<S: LogStore> RegionMap<S> {
     /// Returns a new region map.
-    fn new() -> RegionMap<S> {
+    pub fn new() -> RegionMap<S> {
         RegionMap(RwLock::new(HashMap::new()))
     }
 
@@ -258,6 +261,15 @@ impl<S: LogStore> RegionMap<S> {
         let mut regions = self.0.write().unwrap();
         regions.remove(name);
     }
+
+    /// Collects regions.
+    pub(crate) fn list_regions(&self) -> Vec<RegionImpl<S>> {
+        let regions = self.0.read().unwrap();
+        regions
+            .values()
+            .filter_map(|slot| slot.get_ready_region())
+            .collect()
+    }
 }
 
 struct EngineInner<S: LogStore> {
@@ -278,10 +290,12 @@ impl<S: LogStore> EngineInner<S> {
         log_store: Arc<S>,
         object_store: ObjectStore,
         compaction_scheduler: CompactionSchedulerRef<S>,
-    ) -> Self {
+    ) -> Result<Self> {
+        let regions = Arc::new(RegionMap::new());
         // TODO(yingwen): max inflight flush tasks.
         let flush_scheduler = Arc::new(FlushScheduler::new(
             SchedulerConfig::default(),
+            FlushPicker::new(regions.clone(), PickerConfig::default())?,
             compaction_scheduler.clone(),
         ));
 
@@ -291,17 +305,17 @@ impl<S: LogStore> EngineInner<S> {
             },
             FilePurgeHandler,
         ));
-        Self {
+        Ok(Self {
             object_store,
             log_store,
-            regions: Arc::new(RegionMap::new()),
+            regions,
             memtable_builder: Arc::new(DefaultMemtableBuilder::default()),
             flush_scheduler,
             flush_strategy: Arc::new(SizeBasedStrategy::default()),
             compaction_scheduler,
             file_purger,
             config: Arc::new(config),
-        }
+        })
     }
 
     async fn open_region(&self, name: &str, opts: &OpenOptions) -> Result<Option<RegionImpl<S>>> {
@@ -462,7 +476,8 @@ mod tests {
             Arc::new(log_store),
             object_store,
             compaction_scheduler,
-        );
+        )
+        .unwrap();
 
         let region_name = "region-0";
         let desc = RegionDescBuilder::new(region_name)

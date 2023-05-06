@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod picker;
 mod scheduler;
 
 use std::sync::Arc;
 
 use common_telemetry::{logging, timer};
+pub use picker::{FlushPicker, PickerConfig};
 pub use scheduler::{FlushHandle, FlushRequest, FlushScheduler, FlushSchedulerRef};
 use store_api::logstore::LogStore;
 use store_api::storage::consts::WRITE_ROW_GROUP_SIZE;

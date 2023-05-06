@@ -509,7 +509,8 @@ mod tests {
                 Arc::new(NoopLogStore::default()),
                 object_store.clone(),
                 noop_compaction_scheduler,
-            ),
+            )
+            .unwrap(),
             object_store,
         ));
         (dir, table_engine)

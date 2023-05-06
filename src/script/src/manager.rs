@@ -160,7 +160,8 @@ mod tests {
                 Arc::new(log_store),
                 object_store.clone(),
                 compaction_scheduler,
-            ),
+            )
+            .unwrap(),
             object_store,
         ));
         let engine_manager = Arc::new(MemoryTableEngineManager::new(mock_engine.clone()));

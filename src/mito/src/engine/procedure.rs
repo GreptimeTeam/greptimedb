@@ -66,7 +66,8 @@ mod procedure_test_util {
             Arc::new(NoopLogStore::default()),
             object_store.clone(),
             compaction_scheduler,
-        );
+        )
+        .unwrap();
         let table_engine = MitoEngine::new(EngineConfig::default(), storage_engine, object_store);
 
         TestEnv { table_engine, dir }
