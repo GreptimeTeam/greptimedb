@@ -18,8 +18,12 @@ pub mod error;
 pub mod metadata;
 pub mod predicate;
 pub mod requests;
+pub mod stats;
 pub mod table;
 pub mod test_util;
 
+pub use store_api::storage::RegionStat;
+
 pub use crate::error::{Error, Result};
+pub use crate::stats::{ColumnStatistics, TableStatistics};
 pub use crate::table::{Table, TableRef};

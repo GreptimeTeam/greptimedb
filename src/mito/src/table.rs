@@ -38,7 +38,6 @@ use store_api::storage::{
     AddColumn, AlterOperation, AlterRequest, ChunkReader, FlushContext, ReadContext, Region,
     RegionMeta, RegionNumber, ScanRequest, SchemaRef, Snapshot, WriteContext, WriteRequest,
 };
-use table::error as table_error;
 use table::error::{
     InvalidTableSnafu, RegionSchemaMismatchSnafu, Result as TableResult, TableOperationSnafu,
 };
@@ -49,7 +48,8 @@ use table::requests::{
     AddColumnRequest, AlterKind, AlterTableRequest, DeleteRequest, InsertRequest,
 };
 use table::table::scan::SimpleTableScan;
-use table::table::{AlterContext, RegionStat, Table};
+use table::table::{AlterContext, Table};
+use table::{error as table_error, RegionStat};
 use tokio::sync::Mutex;
 
 use crate::error;
