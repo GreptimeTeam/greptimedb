@@ -18,7 +18,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
-use common_catalog::consts::DEFAULT_CATALOG_NAME;
+use common_catalog::consts::{
+    DEFAULT_CATALOG_NAME, SEMANTIC_TYPE_FIELD, SEMANTIC_TYPE_PRIMARY_KEY, SEMANTIC_TYPE_TIME_INDEX,
+};
 use common_datasource::file_format::{infer_schemas, FileFormat, Format};
 use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::build_backend;
@@ -49,10 +51,6 @@ const COLUMN_TYPE_COLUMN: &str = "Type";
 const COLUMN_NULLABLE_COLUMN: &str = "Null";
 const COLUMN_DEFAULT_COLUMN: &str = "Default";
 const COLUMN_SEMANTIC_TYPE_COLUMN: &str = "Semantic Type";
-
-const SEMANTIC_TYPE_PRIMARY_KEY: &str = "PRIMARY KEY";
-const SEMANTIC_TYPE_FIELD: &str = "FIELD";
-const SEMANTIC_TYPE_TIME_INDEX: &str = "TIME INDEX";
 
 const NULLABLE_YES: &str = "YES";
 const NULLABLE_NO: &str = "NO";

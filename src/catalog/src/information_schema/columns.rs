@@ -15,6 +15,9 @@
 use std::sync::Arc;
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
+use common_catalog::consts::{
+    SEMANTIC_TYPE_FIELD, SEMANTIC_TYPE_PRIMARY_KEY, SEMANTIC_TYPE_TIME_INDEX,
+};
 use common_query::physical_plan::TaskContext;
 use common_recordbatch::RecordBatch;
 use datafusion::datasource::streaming::PartitionStream as DfPartitionStream;
@@ -40,6 +43,7 @@ const TABLE_SCHEMA: &str = "table_schema";
 const TABLE_NAME: &str = "table_name";
 const COLUMN_NAME: &str = "column_name";
 const DATA_TYPE: &str = "data_type";
+const SEMANTIC_TYPE: &str = "semantic_type";
 
 impl InformationSchemaColumns {
     pub(super) fn new(catalog_name: String, catalog_provider: CatalogProviderRef) -> Self {
@@ -49,6 +53,7 @@ impl InformationSchemaColumns {
             ColumnSchema::new(TABLE_NAME, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(COLUMN_NAME, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(DATA_TYPE, ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(SEMANTIC_TYPE, ConcreteDataType::string_datatype(), false),
         ]));
         Self {
             schema,
@@ -76,6 +81,7 @@ struct InformationSchemaColumnsBuilder {
     table_names: StringVectorBuilder,
     column_names: StringVectorBuilder,
     data_types: StringVectorBuilder,
+    semantic_types: StringVectorBuilder,
 }
 
 impl InformationSchemaColumnsBuilder {
@@ -89,6 +95,7 @@ impl InformationSchemaColumnsBuilder {
             table_names: StringVectorBuilder::with_capacity(42),
             column_names: StringVectorBuilder::with_capacity(42),
             data_types: StringVectorBuilder::with_capacity(42),
+            semantic_types: StringVectorBuilder::with_capacity(42),
         }
     }
 
@@ -100,14 +107,23 @@ impl InformationSchemaColumnsBuilder {
             let Some(schema) = self.catalog_provider.schema(&schema_name).await? else { continue };
             for table_name in schema.table_names().await? {
                 let Some(table) = schema.table(&table_name).await? else { continue };
+                let keys = &table.table_info().meta.primary_key_indices;
                 let schema = table.schema();
-                for column in schema.column_schemas() {
+                for (idx, column) in schema.column_schemas().iter().enumerate() {
+                    let semantic_type = if column.is_time_index() {
+                        SEMANTIC_TYPE_TIME_INDEX
+                    } else if keys.contains(&idx) {
+                        SEMANTIC_TYPE_PRIMARY_KEY
+                    } else {
+                        SEMANTIC_TYPE_FIELD
+                    };
                     self.add_column(
                         &catalog_name,
                         &schema_name,
                         &table_name,
                         &column.name,
                         column.data_type.name(),
+                        semantic_type,
                     );
                 }
             }
@@ -123,12 +139,14 @@ impl InformationSchemaColumnsBuilder {
         table_name: &str,
         column_name: &str,
         data_type: &str,
+        semantic_type: &str,
     ) {
         self.catalog_names.push(Some(catalog_name));
         self.schema_names.push(Some(schema_name));
         self.table_names.push(Some(table_name));
         self.column_names.push(Some(column_name));
         self.data_types.push(Some(data_type));
+        self.semantic_types.push(Some(semantic_type));
     }
 
     fn finish(&mut self) -> Result<RecordBatch> {
@@ -138,6 +156,7 @@ impl InformationSchemaColumnsBuilder {
             Arc::new(self.table_names.finish()),
             Arc::new(self.column_names.finish()),
             Arc::new(self.data_types.finish()),
+            Arc::new(self.semantic_types.finish()),
         ];
         RecordBatch::new(self.schema.clone(), columns).context(CreateRecordBatchSnafu)
     }
