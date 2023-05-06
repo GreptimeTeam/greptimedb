@@ -20,7 +20,7 @@ where table_catalog = 'greptime'
   and table_schema != 'public'
 order by table_schema, table_name;
 
-select table_catalog, table_schema, table_name, column_name, data_type
+select table_catalog, table_schema, table_name, column_name, data_type, semantic_type
 from information_schema.columns
 where table_catalog = 'greptime'
   and table_schema != 'public'

@@ -1304,32 +1304,32 @@ async fn test_information_schema_dot_columns(instance: Arc<dyn MockInstance>) {
 
     // User can only see information schema under current catalog.
     // A necessary requirement to GreptimeCloud.
-    let sql = "select table_catalog, table_schema, table_name, column_name, data_type from information_schema.columns  order by table_name";
+    let sql = "select table_catalog, table_schema, table_name, column_name, data_type, semantic_type from information_schema.columns  order by table_name";
 
     let output = execute_sql(&instance, sql).await;
     let expected = "\
-+---------------+--------------+------------+--------------+----------------------+
-| table_catalog | table_schema | table_name | column_name  | data_type            |
-+---------------+--------------+------------+--------------+----------------------+
-| greptime      | public       | numbers    | number       | UInt32               |
-| greptime      | public       | scripts    | schema       | String               |
-| greptime      | public       | scripts    | name         | String               |
-| greptime      | public       | scripts    | script       | String               |
-| greptime      | public       | scripts    | engine       | String               |
-| greptime      | public       | scripts    | timestamp    | TimestampMillisecond |
-| greptime      | public       | scripts    | gmt_created  | TimestampMillisecond |
-| greptime      | public       | scripts    | gmt_modified | TimestampMillisecond |
-+---------------+--------------+------------+--------------+----------------------+";
++---------------+--------------+------------+--------------+----------------------+---------------+
+| table_catalog | table_schema | table_name | column_name  | data_type            | semantic_type |
++---------------+--------------+------------+--------------+----------------------+---------------+
+| greptime      | public       | numbers    | number       | UInt32               | PRIMARY KEY   |
+| greptime      | public       | scripts    | schema       | String               | PRIMARY KEY   |
+| greptime      | public       | scripts    | name         | String               | PRIMARY KEY   |
+| greptime      | public       | scripts    | script       | String               | FIELD         |
+| greptime      | public       | scripts    | engine       | String               | FIELD         |
+| greptime      | public       | scripts    | timestamp    | TimestampMillisecond | TIME INDEX    |
+| greptime      | public       | scripts    | gmt_created  | TimestampMillisecond | FIELD         |
+| greptime      | public       | scripts    | gmt_modified | TimestampMillisecond | FIELD         |
++---------------+--------------+------------+--------------+----------------------+---------------+";
 
     check_output_stream(output, expected).await;
 
     let output = execute_sql_with(&instance, sql, query_ctx).await;
     let expected = "\
-+-----------------+----------------+---------------+-------------+-----------+
-| table_catalog   | table_schema   | table_name    | column_name | data_type |
-+-----------------+----------------+---------------+-------------+-----------+
-| another_catalog | another_schema | another_table | i           | Int64     |
-+-----------------+----------------+---------------+-------------+-----------+";
++-----------------+----------------+---------------+-------------+-----------+---------------+
+| table_catalog   | table_schema   | table_name    | column_name | data_type | semantic_type |
++-----------------+----------------+---------------+-------------+-----------+---------------+
+| another_catalog | another_schema | another_table | i           | Int64     | TIME INDEX    |
++-----------------+----------------+---------------+-------------+-----------+---------------+";
 
     check_output_stream(output, expected).await;
 }

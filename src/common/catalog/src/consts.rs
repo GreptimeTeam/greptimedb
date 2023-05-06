@@ -30,3 +30,7 @@ pub const SCRIPTS_TABLE_ID: u32 = 1;
 
 pub const MITO_ENGINE: &str = "mito";
 pub const IMMUTABLE_FILE_ENGINE: &str = "file";
+
+pub const SEMANTIC_TYPE_PRIMARY_KEY: &str = "PRIMARY KEY";
+pub const SEMANTIC_TYPE_FIELD: &str = "FIELD";
+pub const SEMANTIC_TYPE_TIME_INDEX: &str = "TIME INDEX";
