@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-///! Common actions for manifest
+//! Common actions for manifest
 use serde::{Deserialize, Serialize};
 
 use crate::manifest::ManifestVersion;

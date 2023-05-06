@@ -12,4 +12,5 @@ rustflags = [
     "-Wclippy::print_stdout",
     "-Wclippy::print_stderr",
     "-Wclippy::implicit_clone",
+    "-Aclippy::items_after_test_module",
 ]
