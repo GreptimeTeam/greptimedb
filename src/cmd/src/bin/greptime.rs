@@ -29,10 +29,12 @@ struct Command {
     log_dir: Option<String>,
     #[clap(long)]
     log_level: Option<String>,
-    #[clap(long)]
-    tokio_console_addr: Option<String>,
     #[clap(subcommand)]
     subcmd: SubCommand,
+
+    #[cfg(feature = "tokio-console")]
+    #[clap(long)]
+    tokio_console_addr: Option<String>,
 }
 
 pub enum Application {
@@ -175,6 +177,7 @@ async fn main() -> Result<()> {
     let opts = cmd.load_options()?;
     let logging_opts = opts.logging_options();
     let tracing_opts = TracingOptions {
+        #[cfg(feature = "tokio-console")]
         tokio_console_addr: cmd.tokio_console_addr.clone(),
     };
 

@@ -52,6 +52,7 @@ impl Default for LoggingOptions {
 
 #[derive(Default)]
 pub struct TracingOptions {
+    #[cfg(feature = "tokio-console")]
     pub tokio_console_addr: Option<String>,
 }
 
@@ -143,7 +144,7 @@ pub fn init_global_logging(
 
     // Must enable 'tokio_unstable' cfg to use this feature.
     // For example: `RUSTFLAGS="--cfg tokio_unstable" cargo run -F common-telemetry/console -- standalone start`
-    #[cfg(feature = "console")]
+    #[cfg(feature = "tokio-console")]
     let subscriber = {
         let tokio_console_layer = if let Some(tokio_console_addr) = &tracing_opts.tokio_console_addr
         {
@@ -172,15 +173,11 @@ pub fn init_global_logging(
             .with(file_logging_layer)
             .with(err_file_logging_layer.with_filter(filter::LevelFilter::ERROR))
     };
-    #[cfg(not(feature = "console"))]
-    if tracing_opts.tokio_console_addr.is_some() {
-        eprintln!(
-            "You have set the tokio console address. \
-            However, it needs 'console' feature to be enabled, too!"
-        );
-    }
 
-    #[cfg(not(feature = "console"))]
+    // consume the `tracing_opts`, to avoid "unused" warnings
+    let _ = tracing_opts;
+
+    #[cfg(not(feature = "tokio-console"))]
     let subscriber = Registry::default()
         .with(filter)
         .with(JsonStorageLayer)
