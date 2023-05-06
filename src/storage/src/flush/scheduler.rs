@@ -196,7 +196,6 @@ async fn execute_flush<S: LogStore>(
         writer: req.writer.clone(),
         wal: req.wal.clone(),
         manifest: req.manifest.clone(),
-        on_success: None,
         engine_config: req.engine_config.clone(),
     };
 

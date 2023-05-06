@@ -14,8 +14,6 @@
 
 mod scheduler;
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use common_telemetry::logging;
@@ -128,34 +126,6 @@ impl FlushStrategy for SizeBasedStrategy {
     }
 }
 
-// #[async_trait]
-// pub trait FlushScheduler: Send + Sync + std::fmt::Debug {
-//     async fn schedule_flush(&self, flush_job: Box<dyn Job>) -> Result<JobHandle>;
-// }
-
-// #[derive(Debug)]
-// pub struct FlushSchedulerImpl {
-//     job_pool: JobPoolRef,
-// }
-
-// impl FlushSchedulerImpl {
-//     pub fn new(job_pool: JobPoolRef) -> FlushSchedulerImpl {
-//         FlushSchedulerImpl { job_pool }
-//     }
-// }
-
-// #[async_trait]
-// impl FlushScheduler for FlushSchedulerImpl {
-//     async fn schedule_flush(&self, flush_job: Box<dyn Job>) -> Result<JobHandle> {
-//         // TODO(yingwen): [flush] Implements flush schedule strategy, controls max background flushes.
-//         self.job_pool.submit(flush_job).await
-//     }
-// }
-
-// pub type FlushSchedulerRef = Arc<dyn FlushScheduler>;
-
-pub type FlushCallback = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
-
 pub struct FlushJob<S: LogStore> {
     /// Max memtable id in these memtables,
     /// used to remove immutable memtables in current version.
@@ -174,8 +144,6 @@ pub struct FlushJob<S: LogStore> {
     pub wal: Wal<S>,
     /// Region manifest service, used to persist metadata.
     pub manifest: RegionManifest,
-    /// Callbacks that get invoked on flush success.
-    pub on_success: Option<FlushCallback>,
     /// Storage engine config
     pub engine_config: Arc<EngineConfig>,
 }
@@ -186,9 +154,6 @@ impl<S: LogStore> FlushJob<S> {
         let file_metas = self.write_memtables_to_layer().await?;
         self.write_manifest_and_apply(&file_metas).await?;
 
-        if let Some(cb) = self.on_success.take() {
-            cb.await;
-        }
         Ok(())
     }
 
