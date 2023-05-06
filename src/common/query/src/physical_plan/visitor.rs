@@ -14,40 +14,62 @@
 
 use crate::physical_plan::PhysicalPlan;
 
-// TODO(fys): add some docs
+/// Trait that implements the [Visitor
+/// pattern](https://en.wikipedia.org/wiki/Visitor_pattern) for a
+/// depth first walk of `PhysicalPlan` nodes. `pre_visit` is called
+/// before any children are visited, and then `post_visit` is called
+/// after all children have been visited.
+///
+/// To use, define a struct that implements this trait and then invoke
+/// ['accept'].
+///
+/// For example, for an physical plan that looks like:
+///
+/// ```text
+/// ProjectionExec: id
+///    FilterExec: state = CO
+///       CsvExec:
+/// ```
+///
+/// The sequence of visit operations would be:
+/// ```text
+/// visitor.pre_visit(ProjectionExec)
+/// visitor.pre_visit(FilterExec)
+/// visitor.pre_visit(CsvExec)
+/// visitor.post_visit(CsvExec)
+/// visitor.post_visit(FilterExec)
+/// visitor.post_visit(ProjectionExec)
+/// ```
 pub trait PhysicalPlanVisitor {
+    /// The type of error returned by this visitor.
     type Error;
 
+    /// Invoked on an `PhysicalPlan` plan before any of its child
+    /// inputs have been visited. If Ok(true) is returned, the
+    /// recursion continues. If Err(..) or Ok(false) are returned, the
+    /// recursion stops immediately and the error, if any, is returned
+    /// to `accept`.
     fn pre_visit(&mut self, plan: &dyn PhysicalPlan) -> Result<bool, Self::Error>;
 
+    /// Invoked on an `PhysicalPlan` plan *after* all of its child
+    /// inputs have been visited. The return value is handled the same
+    /// as the return value of `pre_visit`. The provided default
+    /// implementation returns `Ok(true)`.
     fn post_visit(&mut self, _plan: &dyn PhysicalPlan) -> Result<bool, Self::Error> {
         Ok(true)
     }
 }
 
-pub fn visit_execution_plan<V: PhysicalPlanVisitor>(
+/// Recursively calls `pre_visit` and `post_visit` for this node and
+/// all of its children, as described on [`PhysicalPlanVisitor`]
+pub fn visit_physical_plan<V: PhysicalPlanVisitor>(
     plan: &dyn PhysicalPlan,
     visitor: &mut V,
 ) -> Result<(), V::Error> {
     visitor.pre_visit(plan)?;
 
     for child in plan.children() {
-        visit_execution_plan(child.as_ref(), visitor)?;
-    }
-
-    visitor.post_visit(plan)?;
-
-    Ok(())
-}
-
-pub fn accept<V: PhysicalPlanVisitor>(
-    plan: &dyn PhysicalPlan,
-    visitor: &mut V,
-) -> Result<(), V::Error> {
-    visitor.pre_visit(plan)?;
-
-    for child in plan.children() {
-        visit_execution_plan(child.as_ref(), visitor)?;
+        visit_physical_plan(child.as_ref(), visitor)?;
     }
 
     visitor.post_visit(plan)?;

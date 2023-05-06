@@ -79,7 +79,6 @@ impl DatafusionQueryEngine {
         let physical_plan = self.create_physical_plan(&mut ctx, &plan).await?;
         let physical_plan = self.optimize_physical_plan(&mut ctx, physical_plan)?;
 
-// TODO(fys): add some docs
         let physical_plan =
             Arc::new(MetricsReporter::new(physical_plan, query_ctx)) as Arc<dyn PhysicalPlan>;
 

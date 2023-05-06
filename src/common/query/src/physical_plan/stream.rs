@@ -23,7 +23,8 @@ use tokio::sync::mpsc::Receiver;
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 
-// TODO(fys): add some docs
+/// Adapter for a tokio [`ReceiverStream`] that implements the
+/// [`SendableRecordBatchStream`] interface
 pub struct RecordBatchReceiverStream {
     schema: SchemaRef,
 

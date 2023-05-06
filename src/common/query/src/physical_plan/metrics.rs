@@ -23,7 +23,7 @@ use futures::StreamExt;
 use meter_macros::read_meter;
 use session::context::QueryContextRef;
 
-use super::visitor::{accept, PhysicalPlanVisitor};
+use super::visitor::{visit_physical_plan, PhysicalPlanVisitor};
 use super::{PhysicalPlan, PhysicalPlanRef};
 use crate::error::Result;
 use crate::physical_plan::stream::RecordBatchReceiverStream;
@@ -114,7 +114,7 @@ impl<'a> Wrapper<'a> {
         let mut vistor = MetricsVisitor::new();
 
         // Safety: pre_visit and post_visit method in MetricsVisitor not return Err.
-        accept(self.inner, &mut vistor).unwrap();
+        visit_physical_plan(self.inner, &mut vistor).unwrap();
 
         vistor.cpu_time
     }
