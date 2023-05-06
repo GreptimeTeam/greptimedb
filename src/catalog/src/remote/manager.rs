@@ -29,7 +29,6 @@ use parking_lot::RwLock;
 use snafu::{OptionExt, ResultExt};
 use table::engine::manager::TableEngineManagerRef;
 use table::engine::{EngineContext, TableReference};
-use table::metadata::TableId;
 use table::requests::{CreateTableRequest, OpenTableRequest};
 use table::TableRef;
 use tokio::sync::Mutex;
@@ -125,28 +124,22 @@ impl RemoteCatalogManager {
             increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_CATALOG_COUNT, 1.0);
 
             joins.push(common_runtime::spawn_bg(async move {
-                let mut max_table_id = MAX_SYS_TABLE_ID;
-                initiate_schemas(
-                    node_id,
-                    backend,
-                    engine_manager,
-                    &catalog_name,
-                    catalog,
-                    &mut max_table_id,
-                )
-                .await?;
+                let max_table_id =
+                    initiate_schemas(node_id, backend, engine_manager, &catalog_name, catalog)
+                        .await?;
                 info!(
                     "Catalog name: {}, max table id allocated: {}",
                     &catalog_name, max_table_id
                 );
-                Ok(()) as Result<()>
+                Ok(())
             }));
         }
 
-        let join_res = futures::future::join_all(joins).await;
-        for item in join_res {
-            item.context(ParallelOpenTableSnafu)??;
-        }
+        futures::future::try_join_all(joins)
+            .await
+            .context(ParallelOpenTableSnafu)?
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
 
         Ok(res)
     }
@@ -239,14 +232,15 @@ async fn iter_remote_schemas<'a>(
     }))
 }
 
+/// Initiates all schemas inside the catalog by fetching data from metasrv.
+/// Return maximum table id in the catalog.
 async fn initiate_schemas(
     node_id: u64,
     backend: KvBackendRef,
     engine_manager: TableEngineManagerRef,
     catalog_name: &str,
     catalog: CatalogProviderRef,
-    max_table_id: &mut TableId,
-) -> Result<()> {
+) -> Result<u32> {
     let mut schemas = iter_remote_schemas(&backend, catalog_name).await;
     let mut joins = Vec::new();
     while let Some(r) = schemas.next().await {
@@ -289,7 +283,6 @@ async fn initiate_schemas(
         let engine_manager = engine_manager.clone();
 
         joins.push(common_runtime::spawn_bg(async move {
-            let mut max_table_id = MAX_SYS_TABLE_ID;
             initiate_tables(
                 node_id,
                 backend,
@@ -297,20 +290,24 @@ async fn initiate_schemas(
                 &catalog_name,
                 &schema_name,
                 schema,
-                &mut max_table_id,
             )
-            .await?;
-            Ok(max_table_id) as Result<TableId>
+            .await
         }));
     }
 
-    let join_res = futures::future::join_all(joins).await;
-    for item in join_res {
-        let table_id = item.context(ParallelOpenTableSnafu)??;
-        *max_table_id = (*max_table_id).max(table_id);
+    let mut max_table_id = MAX_SYS_TABLE_ID;
+    if let Some(found_max_table_id) = futures::future::try_join_all(joins)
+        .await
+        .context(ParallelOpenTableSnafu)?
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .max()
+    {
+        max_table_id = max_table_id.max(found_max_table_id);
     }
 
-    Ok(())
+    Ok(max_table_id)
 }
 
 /// Iterate over all table entries on metasrv
@@ -350,7 +347,8 @@ async fn iter_remote_tables<'a>(
     }))
 }
 
-/// Initiates all tables inside a catalog by fetching data from metasrv.
+/// Initiates all tables inside the catalog by fetching data from metasrv.
+/// Return maximum table id in the schema.
 async fn initiate_tables(
     node_id: u64,
     backend: KvBackendRef,
@@ -358,33 +356,37 @@ async fn initiate_tables(
     catalog_name: &str,
     schema_name: &str,
     schema: SchemaProviderRef,
-    max_table_id: &mut TableId,
-) -> Result<()> {
+) -> Result<u32> {
     info!("initializing tables in {}.{}", catalog_name, schema_name);
-    let mut table_num = 0;
     let tables = iter_remote_tables(node_id, &backend, catalog_name, schema_name).await;
 
     let kvs = tables.try_collect::<Vec<_>>().await?;
+    let table_num = kvs.len();
     let joins = kvs
         .into_iter()
         .map(|(table_key, table_value)| {
             let engine_manager = engine_manager.clone();
+            let schema = schema.clone();
             common_runtime::spawn_bg(async move {
-                open_or_create_table(node_id, engine_manager, &table_key, &table_value).await
+                let table_ref =
+                    open_or_create_table(node_id, engine_manager, &table_key, &table_value).await?;
+                let table_info = table_ref.table_info();
+                let table_name = &table_info.name;
+                schema.register_table(table_name.clone(), table_ref).await?;
+                info!("Registered table {}", table_name);
+                Ok(table_info.ident.table_id)
             })
         })
         .collect::<Vec<_>>();
-    let vec = futures::future::join_all(joins).await;
-    for res in vec {
-        let table_ref = res.context(ParallelOpenTableSnafu)??;
-        let table_info = table_ref.table_info();
-        let table_name = &table_info.name;
-        let table_id = table_info.ident.table_id;
-        schema.register_table(table_name.clone(), table_ref).await?;
-        info!("Registered table {}", table_name);
-        *max_table_id = (*max_table_id).max(table_id);
-        table_num += 1;
-    }
+
+    let max_table_id = futures::future::try_join_all(joins)
+        .await
+        .context(ParallelOpenTableSnafu)?
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .max()
+        .unwrap_or(MAX_SYS_TABLE_ID);
 
     increment_gauge!(
         crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
@@ -395,7 +397,8 @@ async fn initiate_tables(
         "initialized tables in {}.{}, total: {}",
         catalog_name, schema_name, table_num
     );
-    Ok(())
+
+    Ok(max_table_id)
 }
 
 async fn open_or_create_table(
