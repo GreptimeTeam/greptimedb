@@ -20,9 +20,9 @@ use meta_srv::bootstrap::MetaSrvInstance;
 use meta_srv::metasrv::MetaSrvOptions;
 use snafu::ResultExt;
 
+use crate::error;
 use crate::error::Result;
 use crate::options::{Options, TopLevelOptions};
-use crate::{error, toml_loader};
 
 pub struct Instance {
     instance: MetaSrvInstance,
@@ -101,11 +101,8 @@ struct StartCommand {
 
 impl StartCommand {
     fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
-        let mut opts: MetaSrvOptions = if let Some(path) = &self.config_file {
-            toml_loader::from_file!(path)?
-        } else {
-            MetaSrvOptions::default()
-        };
+        let mut opts: MetaSrvOptions =
+            Options::load_layered_options(self.config_file.clone(), "METASRV")?;
 
         if let Some(dir) = top_level_opts.log_dir {
             opts.logging.dir = dir;

@@ -41,7 +41,6 @@ use crate::error::{
 };
 use crate::frontend::load_frontend_plugins;
 use crate::options::{MixOptions, Options, TopLevelOptions};
-use crate::toml_loader;
 
 #[derive(Parser)]
 pub struct Command {
@@ -216,16 +215,10 @@ struct StartCommand {
 
 impl StartCommand {
     fn load_options(&self, top_level_options: TopLevelOptions) -> Result<Options> {
-        let enable_memory_catalog = self.enable_memory_catalog;
-        let config_file = &self.config_file;
-        let mut opts: StandaloneOptions = if let Some(path) = config_file {
-            toml_loader::from_file!(path)?
-        } else {
-            StandaloneOptions::default()
-        };
+        let mut opts: StandaloneOptions =
+            Options::load_layered_options(self.config_file.clone(), "STANDALONE")?;
 
-        opts.enable_memory_catalog = enable_memory_catalog;
-
+        opts.enable_memory_catalog = self.enable_memory_catalog;
         let mut fe_opts = opts.clone().frontend_options();
         let mut logging = opts.logging.clone();
         let dn_opts = opts.datanode_options();

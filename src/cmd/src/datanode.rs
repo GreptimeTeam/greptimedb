@@ -23,7 +23,6 @@ use snafu::ResultExt;
 
 use crate::error::{MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu};
 use crate::options::{Options, TopLevelOptions};
-use crate::toml_loader;
 
 pub struct Instance {
     datanode: Datanode,
@@ -103,11 +102,8 @@ struct StartCommand {
 
 impl StartCommand {
     fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
-        let mut opts: DatanodeOptions = if let Some(path) = &self.config_file {
-            toml_loader::from_file!(path)?
-        } else {
-            DatanodeOptions::default()
-        };
+        let mut opts: DatanodeOptions =
+            Options::load_layered_options(self.config_file.clone(), "DATANODE")?;
 
         if let Some(dir) = top_level_opts.log_dir {
             opts.logging.dir = dir;

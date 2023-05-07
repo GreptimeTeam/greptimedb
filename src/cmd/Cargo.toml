@@ -24,6 +24,7 @@ common-recordbatch = { path = "../common/recordbatch" }
 common-telemetry = { path = "../common/telemetry", features = [
     "deadlock_detection",
 ] }
+config = "0.13.3"
 datanode = { path = "../datanode" }
 either = "1.8"
 frontend = { path = "../frontend" }
@@ -36,7 +37,6 @@ query = { path = "../query" }
 rustyline = "10.1"
 serde.workspace = true
 servers = { path = "../servers" }
-
 session = { path = "../session" }
 snafu.workspace = true
 substrait = { path = "../common/substrait" }
@@ -45,10 +45,10 @@ tikv-jemallocator = { version = "0.5", optional = true }
 tokio.workspace = true
 toml = "0.5"
 
-
 [dev-dependencies]
 common-test-util = { path = "../common/test-util" }
 rexpect = "0.5"
+temp-env = "0.3.4"
 serde.workspace = true
 
 [build-dependencies]

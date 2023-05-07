@@ -32,7 +32,6 @@ use snafu::ResultExt;
 
 use crate::error::{self, IllegalAuthConfigSnafu, Result};
 use crate::options::{Options, TopLevelOptions};
-use crate::toml_loader;
 
 pub struct Instance {
     frontend: FeInstance,
@@ -123,11 +122,8 @@ pub struct StartCommand {
 
 impl StartCommand {
     fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
-        let mut opts: FrontendOptions = if let Some(path) = &self.config_file {
-            toml_loader::from_file!(path)?
-        } else {
-            FrontendOptions::default()
-        };
+        let mut opts: FrontendOptions =
+            Options::load_layered_options(self.config_file.clone(), "FRONTEND")?;
 
         if let Some(dir) = top_level_opts.log_dir {
             opts.logging.dir = dir;
@@ -403,5 +399,65 @@ mod tests {
         let logging_opt = options.logging_options();
         assert_eq!("/tmp/greptimedb/test/logs", logging_opt.dir);
         assert_eq!("debug", logging_opt.level);
+    }
+
+    #[test]
+    fn test_config_precedence_order() {
+        let mut file = create_named_temp_file();
+        let toml_str = r#"
+            mode = "distributed"
+    
+            [logging]
+            dir = "/tmp/greptimedb/logs"
+            level = "info"
+        "#;
+        write!(file, "{}", toml_str).unwrap();
+
+        temp_env::with_vars(
+            vec![
+                ("FRONTEND-LOGGING.DIR", Some("/tmp/greptimedb/test/logs")),
+                ("FRONTEND-LOGGING.LEVEL", Some("debug")),
+            ],
+            || {
+                let command = StartCommand {
+                    config_file: Some(file.path().to_str().unwrap().to_string()),
+                    http_addr: None,
+                    grpc_addr: None,
+                    mysql_addr: None,
+                    prom_addr: None,
+                    postgres_addr: None,
+                    opentsdb_addr: None,
+                    influxdb_enable: None,
+                    metasrv_addr: None,
+                    tls_mode: None,
+                    tls_cert_path: None,
+                    tls_key_path: None,
+                    user_provider: None,
+                    disable_dashboard: None,
+                };
+
+                let top_level_opts = TopLevelOptions {
+                    log_dir: None,
+                    log_level: Some("error".to_string()),
+                };
+                let Options::Frontend(fe_opts) =
+                    command.load_options(top_level_opts).unwrap() else {unreachable!()};
+
+                // Should be read from config file.
+                assert_eq!(fe_opts.mode, Mode::Distributed);
+
+                // Should be read from cli, cli > env > config file.
+                assert_eq!(fe_opts.logging.level, "error");
+
+                // Should be read from env, env > config file.
+                assert_eq!(fe_opts.logging.dir, "/tmp/greptimedb/test/logs".to_string());
+
+                // Should be default value.
+                assert_eq!(
+                    fe_opts.grpc_options.unwrap().addr,
+                    GrpcOptions::default().addr
+                );
+            },
+        );
     }
 }

@@ -15,6 +15,7 @@
 use std::any::Any;
 
 use common_error::prelude::*;
+use config::ConfigError;
 use rustyline::error::ReadlineError;
 use snafu::Location;
 
@@ -67,12 +68,6 @@ pub enum Error {
     ReadConfig {
         path: String,
         source: std::io::Error,
-        location: Location,
-    },
-
-    #[snafu(display("Failed to parse config, source: {}", source))]
-    ParseConfig {
-        source: toml::de::Error,
         location: Location,
     },
 
@@ -153,6 +148,9 @@ pub enum Error {
         #[snafu(backtrace)]
         source: substrait::error::Error,
     },
+
+    #[snafu(display("Failed to load config, source: {}", source))]
+    LoadConfig { source: ConfigError },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -168,13 +166,12 @@ impl ErrorExt for Error {
             Error::ShutdownMetaServer { source } => source.status_code(),
             Error::BuildMetaServer { source } => source.status_code(),
             Error::UnsupportedSelectorType { source, .. } => source.status_code(),
-            Error::ReadConfig { .. } | Error::ParseConfig { .. } | Error::MissingConfig { .. } => {
-                StatusCode::InvalidArguments
-            }
-            Error::IllegalConfig { .. } | Error::InvalidReplCommand { .. } => {
-                StatusCode::InvalidArguments
-            }
-            Error::IllegalAuthConfig { .. } => StatusCode::InvalidArguments,
+            Error::ReadConfig { .. }
+            | Error::MissingConfig { .. }
+            | Error::LoadConfig { .. }
+            | Error::IllegalConfig { .. }
+            | Error::InvalidReplCommand { .. }
+            | Error::IllegalAuthConfig { .. } => StatusCode::InvalidArguments,
             Error::ReplCreation { .. } | Error::Readline { .. } => StatusCode::Internal,
             Error::RequestDatabase { source, .. } => source.status_code(),
             Error::CollectRecordBatches { source } | Error::PrettyPrintRecordBatches { source } => {
