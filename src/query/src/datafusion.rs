@@ -25,7 +25,7 @@ use common_error::prelude::BoxedError;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::udf::create_udf;
 use common_function::scalars::FunctionRef;
-use common_query::physical_plan::metrics::MetricsReporter;
+use common_query::physical_plan::metrics::MetricsPhysicalPlan;
 use common_query::physical_plan::{DfPhysicalPlanAdapter, PhysicalPlan, PhysicalPlanAdapter};
 use common_query::prelude::ScalarUdf;
 use common_query::Output;
@@ -80,7 +80,7 @@ impl DatafusionQueryEngine {
         let physical_plan = self.optimize_physical_plan(&mut ctx, physical_plan)?;
 
         let physical_plan =
-            Arc::new(MetricsReporter::new(physical_plan, query_ctx)) as Arc<dyn PhysicalPlan>;
+            Arc::new(MetricsPhysicalPlan::new(physical_plan, query_ctx)) as Arc<dyn PhysicalPlan>;
 
         Ok(Output::Stream(self.execute_stream(&ctx, &physical_plan)?))
     }

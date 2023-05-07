@@ -28,19 +28,21 @@ use super::{PhysicalPlan, PhysicalPlanRef};
 use crate::error::Result;
 use crate::physical_plan::stream::RecordBatchReceiverStream;
 
+/// Metrics physical plan operator. This operation will collect some metrics(ex: sql_cpu_time,
+/// table_scan_size, etc) after the input operator is executed.
 #[derive(Debug, Clone)]
-pub struct MetricsReporter {
+pub struct MetricsPhysicalPlan {
     input: PhysicalPlanRef,
     query_ctx: QueryContextRef,
 }
 
-impl MetricsReporter {
+impl MetricsPhysicalPlan {
     pub fn new(input: Arc<dyn PhysicalPlan>, query_ctx: QueryContextRef) -> Self {
         Self { input, query_ctx }
     }
 }
 
-impl PhysicalPlan for MetricsReporter {
+impl PhysicalPlan for MetricsPhysicalPlan {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -85,12 +87,22 @@ impl PhysicalPlan for MetricsReporter {
                 }
             }
 
-            let wrapper = Wrapper::new(captured_input.as_ref());
-            let cpu_time = wrapper.cpu_time_ns();
+            let mut collector = MetricsCollector::new(captured_input.as_ref());
+            collector.collect();
+
+            let cpu_time = collector.cpu_time_ns();
+            let table_scan_bytes = collector.table_scan_bytes();
+
             let catalog = captured_ctx.current_catalog();
             let schema = captured_ctx.current_schema();
 
-            read_meter!(catalog, schema, cpu_time: cpu_time);
+            if let Some(cpu_time) = cpu_time {
+                read_meter!(&catalog, &schema, cpu_time: cpu_time);
+            }
+
+            if let Some(table_scan) = table_scan_bytes {
+                read_meter!(&catalog, &schema, table_scan: table_scan);
+            }
         });
 
         Ok(RecordBatchReceiverStream::create(
@@ -101,32 +113,48 @@ impl PhysicalPlan for MetricsReporter {
     }
 }
 
-pub struct Wrapper<'a> {
+pub struct MetricsCollector<'a> {
     inner: &'a dyn PhysicalPlan,
+    vistor: Option<MetricsVisitor>,
 }
 
-impl<'a> Wrapper<'a> {
+impl<'a> MetricsCollector<'a> {
     pub fn new(inner: &'a dyn PhysicalPlan) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            vistor: None,
+        }
     }
 
-    pub fn cpu_time_ns(&self) -> u64 {
+    pub fn collect(&mut self) {
         let mut vistor = MetricsVisitor::new();
 
         // Safety: pre_visit and post_visit method in MetricsVisitor not return Err.
         visit_physical_plan(self.inner, &mut vistor).unwrap();
 
-        vistor.cpu_time
+        self.vistor = Some(vistor);
+    }
+
+    pub fn cpu_time_ns(&self) -> Option<u64> {
+        self.vistor.as_ref().map(|v| v.cpu_time_ns)
+    }
+
+    pub fn table_scan_bytes(&self) -> Option<u64> {
+        self.vistor.as_ref().map(|v| v.table_scan_bytes)
     }
 }
 
 struct MetricsVisitor {
-    cpu_time: u64,
+    cpu_time_ns: u64,
+    table_scan_bytes: u64,
 }
 
 impl MetricsVisitor {
     pub fn new() -> Self {
-        Self { cpu_time: 0 }
+        Self {
+            cpu_time_ns: 0,
+            table_scan_bytes: 0,
+        }
     }
 }
 
@@ -137,8 +165,12 @@ impl PhysicalPlanVisitor for MetricsVisitor {
         let metrics = plan.metrics();
 
         if let Some(m) = metrics {
-            if let Some(cpu_time) = m.elapsed_compute() {
-                self.cpu_time += cpu_time as u64;
+            if let Some(val) = m.elapsed_compute() {
+                self.cpu_time_ns += val as u64;
+            }
+
+            if let Some(val) = m.sum_by_name("table_scan_bytes") {
+                self.table_scan_bytes += val.as_usize() as u64;
             }
         }
 

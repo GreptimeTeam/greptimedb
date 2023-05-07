@@ -4828,7 +4828,7 @@ dependencies = [
 [[package]]
 name = "meter-core"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=85ab2540b1a471918995ddd225645f0e0b358a96#85ab2540b1a471918995ddd225645f0e0b358a96"
+source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=abbd357c1e193cd270ea65ee7652334a150b628f#abbd357c1e193cd270ea65ee7652334a150b628f"
 dependencies = [
  "anymap",
  "once_cell",
@@ -4838,7 +4838,7 @@ dependencies = [
 [[package]]
 name = "meter-macros"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=85ab2540b1a471918995ddd225645f0e0b358a96#85ab2540b1a471918995ddd225645f0e0b358a96"
+source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=abbd357c1e193cd270ea65ee7652334a150b628f#abbd357c1e193cd270ea65ee7652334a150b628f"
 dependencies = [
  "meter-core",
 ]
