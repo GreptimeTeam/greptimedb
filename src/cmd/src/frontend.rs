@@ -17,12 +17,8 @@ use std::sync::Arc;
 use clap::Parser;
 use common_base::Plugins;
 use frontend::frontend::FrontendOptions;
-use frontend::grpc::GrpcOptions;
 use frontend::influxdb::InfluxdbOptions;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
-use frontend::mysql::MysqlOptions;
-use frontend::opentsdb::OpentsdbOptions;
-use frontend::postgres::PostgresOptions;
 use frontend::prom::PromOptions;
 use meta_client::MetaClientOptions;
 use servers::auth::UserProviderRef;
@@ -32,6 +28,8 @@ use snafu::ResultExt;
 
 use crate::error::{self, IllegalAuthConfigSnafu, Result};
 use crate::options::{Options, TopLevelOptions};
+
+const FRONTEND_ENV_VAR_PREFIX: &str = "FRONTEND";
 
 pub struct Instance {
     frontend: FeInstance,
@@ -83,7 +81,7 @@ impl SubCommand {
 
     fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
         match self {
-            SubCommand::Start(cmd) => cmd.load_options(top_level_opts),
+            SubCommand::Start(cmd) => cmd.load_options(top_level_opts, FRONTEND_ENV_VAR_PREFIX),
         }
     }
 }
@@ -121,9 +119,13 @@ pub struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
+    fn load_options(
+        &self,
+        top_level_opts: TopLevelOptions,
+        env_var_prefix: &str,
+    ) -> Result<Options> {
         let mut opts: FrontendOptions =
-            Options::load_layered_options(self.config_file.clone(), "FRONTEND")?;
+            Options::load_layered_options(self.config_file.clone(), env_var_prefix)?;
 
         if let Some(dir) = top_level_opts.log_dir {
             opts.logging.dir = dir;
@@ -149,38 +151,39 @@ impl StartCommand {
         }
 
         if let Some(addr) = self.grpc_addr.clone() {
-            opts.grpc_options = Some(GrpcOptions {
-                addr,
-                ..Default::default()
-            });
+            if let Some(ref mut grpc_opts) = opts.grpc_options {
+                grpc_opts.addr = addr
+            }
         }
 
         if let Some(addr) = self.mysql_addr.clone() {
-            opts.mysql_options = Some(MysqlOptions {
-                addr,
-                tls: tls_option.clone(),
-                ..Default::default()
-            });
+            if let Some(ref mut mysql_options) = opts.mysql_options {
+                mysql_options.addr = addr;
+                mysql_options.tls = tls_option.clone();
+            }
         }
+
         if let Some(addr) = self.prom_addr.clone() {
             opts.prom_options = Some(PromOptions { addr });
         }
+
         if let Some(addr) = self.postgres_addr.clone() {
-            opts.postgres_options = Some(PostgresOptions {
-                addr,
-                tls: tls_option,
-                ..Default::default()
-            });
+            if let Some(ref mut postgres_options) = opts.postgres_options {
+                postgres_options.addr = addr;
+                postgres_options.tls = tls_option.clone();
+            }
         }
+
         if let Some(addr) = self.opentsdb_addr.clone() {
-            opts.opentsdb_options = Some(OpentsdbOptions {
-                addr,
-                ..Default::default()
-            });
+            if let Some(ref mut opentsdb_addr) = opts.opentsdb_options {
+                opentsdb_addr.addr = addr;
+            }
         }
+
         if let Some(enable) = self.influxdb_enable {
             opts.influxdb_options = Some(InfluxdbOptions { enable });
         }
+
         if let Some(metasrv_addr) = self.metasrv_addr.clone() {
             opts.meta_client_options
                 .get_or_insert_with(MetaClientOptions::default)
@@ -227,6 +230,7 @@ mod tests {
     use std::time::Duration;
 
     use common_test_util::temp_dir::create_named_temp_file;
+    use frontend::grpc::GrpcOptions;
     use servers::auth::{Identity, Password, UserProviderRef};
 
     use super::*;
@@ -251,7 +255,7 @@ mod tests {
         };
 
         let Options::Frontend(opts) =
-            command.load_options(TopLevelOptions::default()).unwrap() else { unreachable!() };
+            command.load_options(TopLevelOptions::default(), FRONTEND_ENV_VAR_PREFIX).unwrap() else { unreachable!() };
 
         assert_eq!(opts.http_options.as_ref().unwrap().addr, "127.0.0.1:1234");
         assert_eq!(opts.mysql_options.as_ref().unwrap().addr, "127.0.0.1:5678");
@@ -320,7 +324,7 @@ mod tests {
         };
 
         let Options::Frontend(fe_opts) =
-            command.load_options(TopLevelOptions::default()).unwrap() else {unreachable!()};
+            command.load_options(TopLevelOptions::default(),FRONTEND_ENV_VAR_PREFIX).unwrap() else {unreachable!()};
         assert_eq!(Mode::Distributed, fe_opts.mode);
         assert_eq!(
             "127.0.0.1:4000".to_string(),
@@ -390,10 +394,13 @@ mod tests {
         };
 
         let options = cmd
-            .load_options(TopLevelOptions {
-                log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
-                log_level: Some("debug".to_string()),
-            })
+            .load_options(
+                TopLevelOptions {
+                    log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
+                    log_level: Some("debug".to_string()),
+                },
+                FRONTEND_ENV_VAR_PREFIX,
+            )
             .unwrap();
 
         let logging_opt = options.logging_options();
@@ -407,23 +414,23 @@ mod tests {
         let toml_str = r#"
             mode = "distributed"
     
-            [logging]
-            dir = "/tmp/greptimedb/logs"
-            level = "info"
+            [mysql_options]
+            addr = "127.0.0.1:4002"
+            runtime_size = 2
         "#;
         write!(file, "{}", toml_str).unwrap();
 
         temp_env::with_vars(
             vec![
-                ("FRONTEND-LOGGING.DIR", Some("/tmp/greptimedb/test/logs")),
-                ("FRONTEND-LOGGING.LEVEL", Some("debug")),
+                ("FRONTEND_UT-MYSQL_OPTIONS.ADDR", Some("127.0.0.1:14002")),
+                ("FRONTEND_UT-MYSQL_OPTIONS.RUNTIME_SIZE", Some("11")),
             ],
             || {
                 let command = StartCommand {
                     config_file: Some(file.path().to_str().unwrap().to_string()),
                     http_addr: None,
                     grpc_addr: None,
-                    mysql_addr: None,
+                    mysql_addr: Some("127.0.0.1:3306".to_string()),
                     prom_addr: None,
                     postgres_addr: None,
                     opentsdb_addr: None,
@@ -441,16 +448,19 @@ mod tests {
                     log_level: Some("error".to_string()),
                 };
                 let Options::Frontend(fe_opts) =
-                    command.load_options(top_level_opts).unwrap() else {unreachable!()};
+                    command.load_options(top_level_opts, "FRONTEND_UT").unwrap() else {unreachable!()};
 
                 // Should be read from config file.
                 assert_eq!(fe_opts.mode, Mode::Distributed);
 
                 // Should be read from cli, cli > env > config file.
-                assert_eq!(fe_opts.logging.level, "error");
+                assert_eq!(
+                    fe_opts.mysql_options.as_ref().unwrap().addr,
+                    "127.0.0.1:3306"
+                );
 
                 // Should be read from env, env > config file.
-                assert_eq!(fe_opts.logging.dir, "/tmp/greptimedb/test/logs".to_string());
+                assert_eq!(fe_opts.mysql_options.unwrap().runtime_size, 11);
 
                 // Should be default value.
                 assert_eq!(

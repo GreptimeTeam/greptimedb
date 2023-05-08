@@ -24,6 +24,8 @@ use crate::error;
 use crate::error::Result;
 use crate::options::{Options, TopLevelOptions};
 
+const METASRV_ENV_VAR_PREFIX: &str = "METASRV";
+
 pub struct Instance {
     instance: MetaSrvInstance,
 }
@@ -74,7 +76,7 @@ impl SubCommand {
 
     fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
         match self {
-            SubCommand::Start(cmd) => cmd.load_options(top_level_opts),
+            SubCommand::Start(cmd) => cmd.load_options(top_level_opts, METASRV_ENV_VAR_PREFIX),
         }
     }
 }
@@ -100,9 +102,9 @@ struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
+    fn load_options(&self, top_level_opts: TopLevelOptions, env_prefix: &str) -> Result<Options> {
         let mut opts: MetaSrvOptions =
-            Options::load_layered_options(self.config_file.clone(), "METASRV")?;
+            Options::load_layered_options(self.config_file.clone(), env_prefix)?;
 
         if let Some(dir) = top_level_opts.log_dir {
             opts.logging.dir = dir;
@@ -179,7 +181,7 @@ mod tests {
         };
 
         let Options::Metasrv(options) =
-        cmd.load_options(TopLevelOptions::default()).unwrap() else { unreachable!() };
+        cmd.load_options(TopLevelOptions::default(),METASRV_ENV_VAR_PREFIX).unwrap() else { unreachable!() };
         assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
         assert_eq!("127.0.0.1:2380".to_string(), options.store_addr);
         assert_eq!(SelectorType::LoadBased, options.selector);
@@ -214,7 +216,7 @@ mod tests {
         };
 
         let Options::Metasrv(options) =
-            cmd.load_options(TopLevelOptions::default()).unwrap() else { unreachable!() };
+            cmd.load_options(TopLevelOptions::default(), METASRV_ENV_VAR_PREFIX).unwrap() else { unreachable!() };
         assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
         assert_eq!("127.0.0.1:3002".to_string(), options.server_addr);
         assert_eq!("127.0.0.1:2379".to_string(), options.store_addr);
@@ -238,10 +240,13 @@ mod tests {
         };
 
         let options = cmd
-            .load_options(TopLevelOptions {
-                log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
-                log_level: Some("debug".to_string()),
-            })
+            .load_options(
+                TopLevelOptions {
+                    log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
+                    log_level: Some("debug".to_string()),
+                },
+                METASRV_ENV_VAR_PREFIX,
+            )
             .unwrap();
 
         let logging_opt = options.logging_options();

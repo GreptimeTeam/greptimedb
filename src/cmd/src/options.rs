@@ -55,15 +55,15 @@ impl Options {
 
     /// Load the configuration from multiple sources and merge them.
     /// The precedence order is: environment variables > config file > default function.
-    /// `env_prefix` is the prefix of environment variables, e.g. "FRONTEND-xxx".
+    /// `env_var_prefix` is the prefix of environment variables, e.g. "FRONTEND-xxx".
     /// The function will use `.` as the separator for environment variables, for example:
     /// `DATANODE-STORAGE.MANIFEST.CHECKPOINT_MARGIN` will be mapped to `DatanodeOptions.storage.manifest.checkpoint_margin` field in the configuration.
     pub fn load_layered_options<'de, T: Serialize + Deserialize<'de> + Default>(
         config_file: Option<String>,
-        env_prefix: &str,
+        env_var_prefix: &str,
     ) -> Result<T> {
         let default_opts = T::default();
-        let env_source = Environment::with_prefix(env_prefix)
+        let env_source = Environment::with_prefix(env_var_prefix)
             .try_parsing(true)
             .prefix_separator("-")
             .separator(".")
