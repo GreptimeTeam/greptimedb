@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 
 use api::v1::meta::Peer;
+use common_telemetry::warn;
 use common_time::util as time_util;
 
 use crate::cluster::MetaPeerClient;
@@ -24,7 +25,7 @@ use crate::lease;
 use crate::metasrv::Context;
 use crate::selector::{Namespace, Selector};
 
-const LARGER_REGION_COUNT: u64 = 100000;
+const LARGEST_REGION_COUNT: u64 = 100000;
 
 pub struct LoadBasedSelector {
     pub meta_peer_client: MetaPeerClient,
@@ -64,10 +65,17 @@ impl Selector for LoadBasedSelector {
             .into_iter()
             .map(|(lease_k, lease_v)| {
                 let stat_key: StatKey = to_stat_key(&lease_k);
-                let region_count = stat_kvs
+
+                let region_count = match stat_kvs
                     .get(&stat_key)
-                    .and_then(|v| v.region_count())
-                    .unwrap_or(LARGER_REGION_COUNT);
+                    .and_then(|stat_val| stat_val.region_count())
+                {
+                    Some(region_count) => region_count,
+                    None => {
+                        warn!("failed to get stat_val by stat_key {:?}", stat_key);
+                        LARGEST_REGION_COUNT
+                    }
+                };
 
                 (lease_k, lease_v, region_count)
             })
