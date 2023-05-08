@@ -29,7 +29,7 @@ use tokio::sync::Notify;
 use crate::error::{DuplicateProcedureSnafu, LoaderConflictSnafu, Result};
 use crate::local::lock::LockMap;
 use crate::local::runner::Runner;
-use crate::procedure::{self, BoxedProcedureLoader};
+use crate::procedure::BoxedProcedureLoader;
 use crate::store::{ProcedureMessage, ProcedureStore, StateStoreRef};
 use crate::{
     BoxedProcedure, ContextProvider, LockKey, ProcedureId, ProcedureManager, ProcedureState,
@@ -304,7 +304,7 @@ impl ManagerContext {
     }
 
     /// Remove metadata of outdated procedures.
-    fn remove_outdated_meta(&self) {
+    fn remove_outdated_meta(&self, ttl: Duration) {
         let ids = {
             let finished_procedures = self.finished_procedures.read().unwrap();
             if finished_procedures.is_empty() {
@@ -314,7 +314,7 @@ impl ManagerContext {
             finished_procedures
                 .iter()
                 .filter_map(|(id, finish_time)| {
-                    if finish_time.elapsed() > META_TTL {
+                    if finish_time.elapsed() > ttl {
                         Some(*id)
                     } else {
                         None
@@ -420,7 +420,7 @@ impl ProcedureManager for LocalManager {
             DuplicateProcedureSnafu { procedure_id }
         );
 
-        self.manager_ctx.remove_outdated_meta();
+        self.manager_ctx.remove_outdated_meta(META_TTL);
 
         self.submit_root(procedure.id, 0, procedure.procedure)
     }
@@ -461,13 +461,13 @@ impl ProcedureManager for LocalManager {
     }
 
     async fn procedure_state(&self, procedure_id: ProcedureId) -> Result<Option<ProcedureState>> {
-        self.manager_ctx.remove_outdated_meta();
+        self.manager_ctx.remove_outdated_meta(META_TTL);
 
         Ok(self.manager_ctx.state(procedure_id))
     }
 
     fn procedure_watcher(&self, procedure_id: ProcedureId) -> Option<Watcher> {
-        self.manager_ctx.remove_outdated_meta();
+        self.manager_ctx.remove_outdated_meta(META_TTL);
 
         self.manager_ctx.watcher(procedure_id)
     }

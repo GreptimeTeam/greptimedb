@@ -732,25 +732,27 @@ mod tests {
         // Manually add this procedure to the manager ctx.
         assert!(manager_ctx.try_insert_procedure(meta));
         // Replace the manager ctx.
-        runner.manager_ctx = manager_ctx;
+        runner.manager_ctx = manager_ctx.clone();
 
         runner.run().await;
 
-        // Check files on store.
+        // Check child procedures.
         for child_id in children_ids {
-            check_files(
-                &object_store,
-                child_id,
-                &["0000000000.step", "0000000001.commit"],
-            )
-            .await;
+            let state = manager_ctx.state(child_id).unwrap();
+            assert!(state.is_done(), "{state:?}");
         }
-        check_files(
-            &object_store,
-            procedure_id,
-            &["0000000000.step", "0000000001.commit"],
-        )
-        .await;
+        let state = manager_ctx.state(procedure_id).unwrap();
+        assert!(state.is_done(), "{state:?}");
+        // Files are removed.
+        check_files(&object_store, procedure_id, &[]).await;
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        // Clean outdated meta.
+        manager_ctx.remove_outdated_meta(Duration::from_millis(1));
+        assert!(manager_ctx.state(procedure_id).is_none());
+        for child_id in children_ids {
+            assert!(manager_ctx.state(child_id).is_none());
+        }
     }
 
     #[tokio::test]
