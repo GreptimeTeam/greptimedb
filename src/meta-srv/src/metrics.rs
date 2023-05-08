@@ -15,3 +15,4 @@
 pub(crate) const METRIC_META_CREATE_CATALOG: &str = "meta.create_catalog";
 pub(crate) const METRIC_META_CREATE_SCHEMA: &str = "meta.create_schema";
 pub(crate) const METRIC_META_KV_REQUEST: &str = "meta.kv_request";
+pub(crate) const METRIC_META_ROUTE_REQUEST: &str = "meta.route_request";
