@@ -127,6 +127,45 @@ impl ProcedureStore {
         Ok(())
     }
 
+    /// Delete states of procedure from the storage.
+    pub(crate) async fn delete_procedure(&self, procedure_id: ProcedureId) -> Result<()> {
+        let path = proc_path!("{procedure_id}/");
+        // TODO(yingwen): We can optimize this to avoid reading the value.
+        let mut key_values = self.0.walk_top_down(&path).await?;
+        // 8 should be enough for most procedures.
+        let mut step_keys = Vec::with_capacity(8);
+        let mut finish_keys = Vec::new();
+        while let Some((key, _)) = key_values.try_next().await? {
+            let Some(curr_key) = ParsedKey::parse_str(&key) else {
+                logging::warn!("Unknown key while deleting procedures, key: {}", key);
+                continue;
+            };
+            if curr_key.key_type == KeyType::Step {
+                step_keys.push(key);
+            } else {
+                // .commit or .rollback
+                finish_keys.push(key);
+            }
+        }
+
+        logging::debug!(
+            "Delete keys for procedure {}, step_keys: {:?}, finish_keys: {:?}",
+            procedure_id,
+            step_keys,
+            finish_keys
+        );
+        // We delete all step keys first.
+        self.0.batch_delete(step_keys.as_slice()).await?;
+        // Then we delete the finish keys, to ensure
+        self.0.batch_delete(finish_keys.as_slice()).await?;
+        // Finally we remove the directory itself.
+        self.0.delete(&path).await?;
+        // Maybe we could use procedure_id.commit/rollback as the file name so we could
+        // use remove_all to remove the directory and then remove the commit/rollback file.
+
+        Ok(())
+    }
+
     /// Load uncommitted procedures from the storage.
     pub(crate) async fn load_messages(&self) -> Result<HashMap<ProcedureId, ProcedureMessage>> {
         let mut messages = HashMap::new();
@@ -260,6 +299,7 @@ impl ParsedKey {
 mod tests {
     use async_trait::async_trait;
     use common_test_util::temp_dir::{create_temp_dir, TempDir};
+    use futures_util::StreamExt;
     use object_store::services::Fs as Builder;
 
     use super::*;
@@ -452,6 +492,59 @@ mod tests {
 
         let messages = store.load_messages().await.unwrap();
         assert!(messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_delete_procedure() {
+        let dir = create_temp_dir("delete_procedure");
+        let store = procedure_store_for_test(&dir);
+
+        let procedure_id = ProcedureId::random();
+        let procedure: BoxedProcedure = Box::new(MockProcedure::new("test store procedure"));
+
+        store
+            .store_procedure(procedure_id, 0, &procedure, None)
+            .await
+            .unwrap();
+        store
+            .store_procedure(procedure_id, 1, &procedure, None)
+            .await
+            .unwrap();
+
+        store.delete_procedure(procedure_id).await.unwrap();
+
+        let messages = store.load_messages().await.unwrap();
+        assert!(messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_delete_committed_procedure() {
+        let dir = create_temp_dir("delete_committed");
+        let store = procedure_store_for_test(&dir);
+
+        let procedure_id = ProcedureId::random();
+        let procedure: BoxedProcedure = Box::new(MockProcedure::new("test store procedure"));
+
+        store
+            .store_procedure(procedure_id, 0, &procedure, None)
+            .await
+            .unwrap();
+        store
+            .store_procedure(procedure_id, 1, &procedure, None)
+            .await
+            .unwrap();
+        store.commit_procedure(procedure_id, 2).await.unwrap();
+
+        store.delete_procedure(procedure_id).await.unwrap();
+
+        let key_values: Vec<_> = store
+            .0
+            .walk_top_down(PROC_PATH)
+            .await
+            .unwrap()
+            .collect()
+            .await;
+        assert!(key_values.is_empty(), "key_values: {:?}", key_values)
     }
 
     #[tokio::test]
