@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use api::v1::meta::Role;
 use meta_srv::metasrv::SelectorRef;
 use meta_srv::mocks as server_mock;
 use meta_srv::mocks::MockInfo;
@@ -41,7 +42,7 @@ pub async fn mock_client_by(mock_info: MockInfo) -> MetaClient {
     } = mock_info;
 
     let id = (1000u64, 2000u64);
-    let mut meta_client = MetaClientBuilder::new(id.0, id.1)
+    let mut meta_client = MetaClientBuilder::new(id.0, id.1, Role::Datanode)
         .enable_heartbeat()
         .enable_router()
         .enable_store()

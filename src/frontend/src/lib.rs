@@ -21,6 +21,7 @@ pub mod error;
 pub mod expr_factory;
 pub mod frontend;
 pub mod grpc;
+pub mod heartbeat;
 pub mod influxdb;
 pub mod instance;
 pub(crate) mod metrics;

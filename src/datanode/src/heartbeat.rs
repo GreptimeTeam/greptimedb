@@ -126,6 +126,7 @@ impl HeartbeatTask {
         let addr = resolve_addr(&self.server_addr, &self.server_hostname);
         let meta_client = self.meta_client.clone();
         let catalog_manager_clone = self.catalog_manager.clone();
+
         let handler_executor = self.heartbeat_response_handler_exector.clone();
 
         let (outgoing_tx, mut outgoing_rx) = mpsc::channel(16);

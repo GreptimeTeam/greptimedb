@@ -27,6 +27,7 @@ use std::time::Duration;
 use api::v1::alter_expr::Kind;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
+use api::v1::meta::Role;
 use api::v1::{AddColumns, AlterExpr, Column, DdlRequest, InsertRequest};
 use async_trait::async_trait;
 use catalog::remote::MetaKvBackend;
@@ -74,6 +75,7 @@ use crate::error::{
 };
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::FrontendOptions;
+use crate::heartbeat::HeartbeatTask;
 use crate::instance::standalone::StandaloneGrpcQueryHandler;
 use crate::metrics;
 use crate::script::ScriptExecutor;
@@ -114,6 +116,8 @@ pub struct Instance {
     plugins: Arc<Plugins>,
 
     servers: Arc<ServerHandlers>,
+
+    heartbeat_task: Option<HeartbeatTask>,
 }
 
 impl Instance {
@@ -137,7 +141,7 @@ impl Instance {
             FrontendCatalogManager::new(meta_backend, partition_manager, datanode_clients.clone());
 
         let dist_instance = DistInstance::new(
-            meta_client,
+            meta_client.clone(),
             Arc::new(catalog_manager.clone()),
             datanode_clients,
         );
@@ -161,6 +165,8 @@ impl Instance {
 
         plugins.insert::<StatementExecutorRef>(statement_executor.clone());
 
+        let heartbeat_task = Some(HeartbeatTask::new(meta_client, 5, 5));
+
         Ok(Instance {
             catalog_manager,
             script_executor,
@@ -170,6 +176,7 @@ impl Instance {
             grpc_query_handler: dist_instance,
             plugins: plugins.clone(),
             servers: Arc::new(HashMap::new()),
+            heartbeat_task,
         })
     }
 
@@ -193,9 +200,10 @@ impl Instance {
         let mut channel_manager = ChannelManager::with_config(channel_config);
         channel_manager.start_channel_recycle();
 
-        let mut meta_client = MetaClientBuilder::new(0, 0)
+        let mut meta_client = MetaClientBuilder::new(0, 0, Role::Frontend)
             .enable_router()
             .enable_store()
+            .enable_heartbeat()
             .channel_manager(channel_manager)
             .build();
         meta_client
@@ -226,6 +234,7 @@ impl Instance {
             grpc_query_handler: StandaloneGrpcQueryHandler::arc(dn_instance.clone()),
             plugins: Default::default(),
             servers: Arc::new(HashMap::new()),
+            heartbeat_task: None,
         })
     }
 
@@ -262,6 +271,7 @@ impl Instance {
             grpc_query_handler: dist_instance,
             plugins: Default::default(),
             servers: Arc::new(HashMap::new()),
+            heartbeat_task: None,
         }
     }
 
@@ -431,6 +441,10 @@ impl Instance {
 impl FrontendInstance for Instance {
     async fn start(&mut self) -> Result<()> {
         // TODO(hl): Frontend init should move to here
+
+        if let Some(heartbeat_task) = &self.heartbeat_task {
+            heartbeat_task.start().await?;
+        }
 
         futures::future::try_join_all(self.servers.values().map(start_server))
             .await

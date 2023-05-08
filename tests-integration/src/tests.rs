@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use api::v1::meta::Role;
 use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
 use catalog::remote::{MetaKvBackend, RemoteCatalogManager};
 use client::Client;
@@ -286,7 +287,7 @@ pub(crate) async fn create_distributed_instance(test_name: &str) -> MockDistribu
         server_addr,
         channel_manager,
     } = meta_srv.clone();
-    let mut meta_client = MetaClientBuilder::new(1000, 0)
+    let mut meta_client = MetaClientBuilder::new(1000, 0, Role::Frontend)
         .enable_router()
         .enable_store()
         .channel_manager(channel_manager)

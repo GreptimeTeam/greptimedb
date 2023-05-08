@@ -20,7 +20,7 @@ use api::v1::meta::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
     DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest, PutResponse,
-    RangeRequest, RangeResponse,
+    RangeRequest, RangeResponse, Role,
 };
 use common_grpc::channel_manager::ChannelManager;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -37,9 +37,10 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(id: Id, channel_manager: ChannelManager) -> Self {
+    pub fn new(id: Id, role: Role, channel_manager: ChannelManager) -> Self {
         let inner = Arc::new(RwLock::new(Inner {
             id,
+            role,
             channel_manager,
             peers: vec![],
         }));
@@ -108,6 +109,7 @@ impl Client {
 #[derive(Debug)]
 struct Inner {
     id: Id,
+    role: Role,
     channel_manager: ChannelManager,
     peers: Vec<String>,
 }
@@ -138,7 +140,7 @@ impl Inner {
 
     async fn range(&self, mut req: RangeRequest) -> Result<RangeResponse> {
         let mut client = self.random_client()?;
-        req.set_header(self.id);
+        req.set_header(self.id, self.role);
         let res = client.range(req).await.context(error::TonicStatusSnafu)?;
 
         Ok(res.into_inner())
@@ -146,7 +148,7 @@ impl Inner {
 
     async fn put(&self, mut req: PutRequest) -> Result<PutResponse> {
         let mut client = self.random_client()?;
-        req.set_header(self.id);
+        req.set_header(self.id, self.role);
         let res = client.put(req).await.context(error::TonicStatusSnafu)?;
 
         Ok(res.into_inner())
@@ -154,7 +156,7 @@ impl Inner {
 
     async fn batch_get(&self, mut req: BatchGetRequest) -> Result<BatchGetResponse> {
         let mut client = self.random_client()?;
-        req.set_header(self.id);
+        req.set_header(self.id, self.role);
 
         let res = client
             .batch_get(req)
@@ -166,7 +168,7 @@ impl Inner {
 
     async fn batch_put(&self, mut req: BatchPutRequest) -> Result<BatchPutResponse> {
         let mut client = self.random_client()?;
-        req.set_header(self.id);
+        req.set_header(self.id, self.role);
         let res = client
             .batch_put(req)
             .await
@@ -177,7 +179,7 @@ impl Inner {
 
     async fn batch_delete(&self, mut req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
         let mut client = self.random_client()?;
-        req.set_header(self.id);
+        req.set_header(self.id, self.role);
         let res = client
             .batch_delete(req)
             .await
@@ -191,7 +193,7 @@ impl Inner {
         mut req: CompareAndPutRequest,
     ) -> Result<CompareAndPutResponse> {
         let mut client = self.random_client()?;
-        req.set_header(self.id);
+        req.set_header(self.id, self.role);
         let res = client
             .compare_and_put(req)
             .await
@@ -202,7 +204,7 @@ impl Inner {
 
     async fn delete_range(&self, mut req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
         let mut client = self.random_client()?;
-        req.set_header(self.id);
+        req.set_header(self.id, self.role);
         let res = client
             .delete_range(req)
             .await
@@ -213,7 +215,7 @@ impl Inner {
 
     async fn move_value(&self, mut req: MoveValueRequest) -> Result<MoveValueResponse> {
         let mut client = self.random_client()?;
-        req.set_header(self.id);
+        req.set_header(self.id, self.role);
         let res = client
             .move_value(req)
             .await
@@ -254,7 +256,7 @@ mod test {
 
     #[tokio::test]
     async fn test_start_client() {
-        let mut client = Client::new((0, 0), ChannelManager::default());
+        let mut client = Client::new((0, 0), Role::Frontend, ChannelManager::default());
         assert!(!client.is_started().await);
         client
             .start(&["127.0.0.1:1000", "127.0.0.1:1001"])
@@ -265,7 +267,7 @@ mod test {
 
     #[tokio::test]
     async fn test_already_start() {
-        let mut client = Client::new((0, 0), ChannelManager::default());
+        let mut client = Client::new((0, 0), Role::Frontend, ChannelManager::default());
         client
             .start(&["127.0.0.1:1000", "127.0.0.1:1001"])
             .await
@@ -281,7 +283,7 @@ mod test {
 
     #[tokio::test]
     async fn test_start_with_duplicate_peers() {
-        let mut client = Client::new((0, 0), ChannelManager::default());
+        let mut client = Client::new((0, 0), Role::Frontend, ChannelManager::default());
         client
             .start(&["127.0.0.1:1000", "127.0.0.1:1000", "127.0.0.1:1000"])
             .await

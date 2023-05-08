@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::v1::meta::router_client::RouterClient;
-use api::v1::meta::{CreateRequest, DeleteRequest, RouteRequest, RouteResponse};
+use api::v1::meta::{CreateRequest, DeleteRequest, Role, RouteRequest, RouteResponse};
 use common_grpc::channel_manager::ChannelManager;
 use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::RwLock;
@@ -32,9 +32,10 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(id: Id, channel_manager: ChannelManager) -> Self {
+    pub fn new(id: Id, role: Role, channel_manager: ChannelManager) -> Self {
         let inner = Arc::new(RwLock::new(Inner {
             id,
+            role,
             channel_manager,
             peers: vec![],
         }));
@@ -75,6 +76,7 @@ impl Client {
 #[derive(Debug)]
 struct Inner {
     id: Id,
+    role: Role,
     channel_manager: ChannelManager,
     peers: Vec<String>,
 }
@@ -105,7 +107,7 @@ impl Inner {
 
     async fn create(&self, mut req: CreateRequest) -> Result<RouteResponse> {
         let mut client = self.random_client()?;
-        req.set_header(self.id);
+        req.set_header(self.id, self.role);
         let res = client.create(req).await.context(error::TonicStatusSnafu)?;
 
         Ok(res.into_inner())
@@ -113,7 +115,7 @@ impl Inner {
 
     async fn route(&self, mut req: RouteRequest) -> Result<RouteResponse> {
         let mut client = self.random_client()?;
-        req.set_header(self.id);
+        req.set_header(self.id, self.role);
         let res = client.route(req).await.context(error::TonicStatusSnafu)?;
 
         Ok(res.into_inner())
@@ -121,7 +123,7 @@ impl Inner {
 
     async fn delete(&self, mut req: DeleteRequest) -> Result<RouteResponse> {
         let mut client = self.random_client()?;
-        req.set_header(self.id);
+        req.set_header(self.id, self.role);
         let res = client.delete(req).await.context(error::TonicStatusSnafu)?;
 
         Ok(res.into_inner())
@@ -159,7 +161,7 @@ mod test {
 
     #[tokio::test]
     async fn test_start_client() {
-        let mut client = Client::new((0, 0), ChannelManager::default());
+        let mut client = Client::new((0, 0), Role::Frontend, ChannelManager::default());
         assert!(!client.is_started().await);
         client
             .start(&["127.0.0.1:1000", "127.0.0.1:1001"])
@@ -170,7 +172,7 @@ mod test {
 
     #[tokio::test]
     async fn test_already_start() {
-        let mut client = Client::new((0, 0), ChannelManager::default());
+        let mut client = Client::new((0, 0), Role::Frontend, ChannelManager::default());
         client
             .start(&["127.0.0.1:1000", "127.0.0.1:1001"])
             .await
@@ -186,7 +188,7 @@ mod test {
 
     #[tokio::test]
     async fn test_start_with_duplicate_peers() {
-        let mut client = Client::new((0, 0), ChannelManager::default());
+        let mut client = Client::new((0, 0), Role::Frontend, ChannelManager::default());
         client
             .start(&["127.0.0.1:1000", "127.0.0.1:1000", "127.0.0.1:1000"])
             .await
