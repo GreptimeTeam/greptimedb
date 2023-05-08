@@ -179,7 +179,7 @@ mod tests {
                     opts.storage.manifest.gc_duration,
                     Some(Duration::from_secs(42))
                 );
-                assert_eq!(opts.storage.manifest.checkpoint_on_startup, true);
+                assert!(opts.storage.manifest.checkpoint_on_startup);
 
                 // Should be the values from config file.
                 assert_eq!(opts.wal.dir, "/tmp/greptimedb/wal".to_string());

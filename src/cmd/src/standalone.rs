@@ -279,7 +279,7 @@ impl StartCommand {
         if let Some(addr) = self.postgres_addr.clone() {
             if let Some(ref mut postgres_opts) = opts.postgres_options {
                 postgres_opts.addr = addr;
-                postgres_opts.tls = tls_opts.clone();
+                postgres_opts.tls = tls_opts;
             }
         }
 
