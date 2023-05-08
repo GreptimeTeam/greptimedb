@@ -208,6 +208,10 @@ jobs:
         if: env.DISABLE_RUN_TESTS == 'false'
         run: make unit-test integration-test sqlness-test
 
+      - name: Run cargo build
+        if: contains(matrix.arch, 'darwin') || contains(matrix.opts, 'pyo3_backend') == false
+        run: cargo build --profile ${{ env.CARGO_PROFILE }} --locked --target ${{ matrix.arch }} ${{ matrix.opts }}
+
       - name: Run cargo build with pyo3 for aarch64-linux
         if: contains(matrix.arch, 'aarch64-unknown-linux-gnu') && contains(matrix.opts, 'pyo3_backend')
         run: |
