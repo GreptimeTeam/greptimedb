@@ -72,7 +72,7 @@ impl Selector for LoadBasedSelector {
                 {
                     Some(region_count) => region_count,
                     None => {
-                        warn!("failed to get stat_val by stat_key {:?}", stat_key);
+                        warn!("Failed to get stat_val by stat_key {:?}", stat_key);
                         LARGEST_REGION_COUNT
                     }
                 };
