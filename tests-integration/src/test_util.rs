@@ -306,7 +306,7 @@ pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router
         .with_grpc_handler(ServerGrpcQueryHandlerAdaptor::arc(instance.clone()))
         .with_metrics_handler(MetricsHandler)
         .build();
-    (http_server.make_app(), guard)
+    (http_server.build(http_server.make_app()), guard)
 }
 
 pub async fn setup_test_http_app_with_frontend(
@@ -332,7 +332,7 @@ pub async fn setup_test_http_app_with_frontend(
         .with_grpc_handler(ServerGrpcQueryHandlerAdaptor::arc(frontend_ref.clone()))
         .with_script_handler(frontend_ref)
         .build();
-    let app = http_server.make_app();
+    let app = http_server.build(http_server.make_app());
     (app, guard)
 }
 

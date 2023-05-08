@@ -20,6 +20,7 @@ use common_base::Plugins;
 use common_runtime::Builder as RuntimeBuilder;
 use common_telemetry::info;
 use servers::auth::UserProviderRef;
+use servers::configurator::ConfiguratorRef;
 use servers::error::Error::InternalIo;
 use servers::grpc::GrpcServer;
 use servers::http::HttpServerBuilder;
@@ -56,7 +57,7 @@ impl Services {
         T: FrontendInstance,
     {
         let mut result = Vec::<ServerHandler>::with_capacity(plugins.len());
-        let user_provider = plugins.get::<UserProviderRef>().cloned();
+        let user_provider = plugins.get::<UserProviderRef>();
 
         if let Some(opts) = &opts.grpc_options {
             let grpc_addr = parse_addr(&opts.addr)?;
@@ -179,6 +180,10 @@ impl Services {
             }
             http_server_builder.with_metrics_handler(MetricsHandler);
             http_server_builder.with_script_handler(instance.clone());
+
+            if let Some(configurator) = plugins.get::<Option<ConfiguratorRef>>() {
+                http_server_builder.with_configurator(configurator);
+            }
             let http_server = http_server_builder.build();
             result.push((Box::new(http_server), http_addr));
         }

@@ -110,8 +110,7 @@ impl QueryEngineState {
 
     pub(crate) fn disallow_cross_schema_query(&self) -> bool {
         self.plugins
-            .get::<QueryOptions>()
-            .map(|x| x.disallow_cross_schema_query)
+            .map::<QueryOptions, _, _>(|x| x.disallow_cross_schema_query)
             .unwrap_or(false)
     }
 

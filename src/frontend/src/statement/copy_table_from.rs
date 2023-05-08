@@ -196,7 +196,7 @@ impl StatementExecutor {
         }
     }
 
-    pub(crate) async fn copy_table_from(&self, req: CopyTableRequest) -> Result<Output> {
+    pub async fn copy_table_from(&self, req: CopyTableRequest) -> Result<Output> {
         let table_ref = TableReference {
             catalog: &req.catalog_name,
             schema: &req.schema_name,

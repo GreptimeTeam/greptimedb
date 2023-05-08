@@ -109,7 +109,7 @@ fn make_test_app(tx: Arc<mpsc::Sender<(String, String)>>, db_name: Option<&str>)
 
     server_builder.with_influxdb_handler(instance);
     let server = server_builder.build();
-    server.make_app()
+    server.build(server.make_app())
 }
 
 #[tokio::test]

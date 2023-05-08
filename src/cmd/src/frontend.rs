@@ -216,7 +216,7 @@ impl StartCommand {
 }
 
 pub fn load_frontend_plugins(user_provider: &Option<String>) -> Result<Plugins> {
-    let mut plugins = Plugins::new();
+    let plugins = Plugins::new();
 
     if let Some(provider) = user_provider {
         let provider = auth::user_provider_from_option(provider).context(IllegalAuthConfigSnafu)?;

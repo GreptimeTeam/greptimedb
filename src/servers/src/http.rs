@@ -58,6 +58,7 @@ use tower_http::trace::TraceLayer;
 use self::authorize::HttpAuth;
 use self::influxdb::{influxdb_health, influxdb_ping, influxdb_write};
 use crate::auth::UserProviderRef;
+use crate::configurator::ConfiguratorRef;
 use crate::error::{AlreadyStartedSnafu, Result, StartHttpSnafu};
 use crate::http::admin::flush;
 use crate::metrics_handler::MetricsHandler;
@@ -112,6 +113,7 @@ pub struct HttpServer {
     shutdown_tx: Mutex<Option<Sender<()>>>,
     user_provider: Option<UserProviderRef>,
     metrics_handler: Option<MetricsHandler>,
+    configurator: Option<ConfiguratorRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,7 +258,7 @@ pub struct JsonResponse {
 }
 
 impl JsonResponse {
-    fn with_error(error: String, error_code: StatusCode) -> Self {
+    pub fn with_error(error: String, error_code: StatusCode) -> Self {
         JsonResponse {
             error: Some(error),
             code: error_code as u32,
@@ -280,7 +282,7 @@ impl JsonResponse {
     }
 
     /// Create a json response from query result
-    async fn from_output(outputs: Vec<Result<Output>>) -> Self {
+    pub async fn from_output(outputs: Vec<Result<Output>>) -> Self {
         // TODO(sunng87): this api response structure cannot represent error
         // well. It hides successful execution results from error response
         let mut results = Vec::with_capacity(outputs.len());
@@ -382,6 +384,7 @@ impl HttpServerBuilder {
                 script_handler: None,
                 metrics_handler: None,
                 shutdown_tx: Mutex::new(None),
+                configurator: None,
             },
         }
     }
@@ -425,6 +428,12 @@ impl HttpServerBuilder {
         self.inner.metrics_handler.get_or_insert(handler);
         self
     }
+
+    pub fn with_configurator(&mut self, configurator: Option<ConfiguratorRef>) -> &mut Self {
+        self.inner.configurator = configurator;
+        self
+    }
+
     pub fn build(&mut self) -> HttpServer {
         std::mem::take(self).inner
     }
@@ -512,7 +521,10 @@ impl HttpServer {
                 router = router.nest("/dashboard", dashboard::dashboard());
             }
         }
+        router
+    }
 
+    pub fn build(&self, router: Router) -> Router {
         router
             // middlewares
             .layer(
@@ -605,7 +617,11 @@ impl Server for HttpServer {
                 AlreadyStartedSnafu { server: "HTTP" }
             );
 
-            let app = self.make_app();
+            let mut app = self.make_app();
+            if let Some(configurator) = self.configurator.as_ref() {
+                app = configurator.config_http(app);
+            }
+            let app = self.build(app);
             let server = axum::Server::bind(&listening).serve(app.into_make_service());
 
             *shutdown_tx = Some(tx);
@@ -719,7 +735,7 @@ mod test {
             .with_sql_handler(sql_instance)
             .with_grpc_handler(grpc_instance)
             .build();
-        server.make_app().route(
+        server.build(server.make_app()).route(
             "/test/timeout",
             get(forever.layer(
                 ServiceBuilder::new()
