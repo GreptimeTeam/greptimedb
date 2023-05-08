@@ -68,7 +68,11 @@ impl KvStore for EtcdStore {
             .await
             .context(error::EtcdFailedSnafu)?;
 
-        let kvs = res.kvs().iter().map(KvPair::to_kv).collect::<Vec<_>>();
+        let kvs = res
+            .kvs()
+            .iter()
+            .map(KvPair::from_etcd_kv)
+            .collect::<Vec<_>>();
 
         let header = Some(ResponseHeader::success(cluster_id));
         Ok(RangeResponse {
@@ -93,7 +97,7 @@ impl KvStore for EtcdStore {
             .await
             .context(error::EtcdFailedSnafu)?;
 
-        let prev_kv = res.prev_key().map(KvPair::to_kv);
+        let prev_kv = res.prev_key().map(KvPair::from_etcd_kv);
 
         let header = Some(ResponseHeader::success(cluster_id));
         Ok(PutResponse { header, prev_kv })
@@ -126,7 +130,7 @@ impl KvStore for EtcdStore {
                 _ => unreachable!(),
             };
 
-            kvs.extend(get_res.kvs().iter().map(KvPair::to_kv));
+            kvs.extend(get_res.kvs().iter().map(KvPair::from_etcd_kv));
         }
 
         let header = Some(ResponseHeader::success(cluster_id));
@@ -158,7 +162,7 @@ impl KvStore for EtcdStore {
             match op_res {
                 TxnOpResponse::Put(put_res) => {
                     if let Some(prev_kv) = put_res.prev_key() {
-                        prev_kvs.push(KvPair::to_kv(prev_kv));
+                        prev_kvs.push(KvPair::from_etcd_kv(prev_kv));
                     }
                 }
                 _ => unreachable!(), // never get here
@@ -195,7 +199,7 @@ impl KvStore for EtcdStore {
             match op_res {
                 TxnOpResponse::Delete(delete_res) => {
                     delete_res.prev_kvs().iter().for_each(|kv| {
-                        prev_kvs.push(KvPair::to_kv(kv));
+                        prev_kvs.push(KvPair::from_etcd_kv(kv));
                     });
                 }
                 _ => unreachable!(), // never get here
@@ -247,8 +251,8 @@ impl KvStore for EtcdStore {
             })?;
 
         let prev_kv = match op_res {
-            TxnOpResponse::Put(res) => res.prev_key().map(KvPair::to_kv),
-            TxnOpResponse::Get(res) => res.kvs().first().map(KvPair::to_kv),
+            TxnOpResponse::Put(res) => res.prev_key().map(KvPair::from_etcd_kv),
+            TxnOpResponse::Get(res) => res.kvs().first().map(KvPair::from_etcd_kv),
             _ => unreachable!(), // never get here
         };
 
@@ -274,7 +278,11 @@ impl KvStore for EtcdStore {
             .await
             .context(error::EtcdFailedSnafu)?;
 
-        let prev_kvs = res.prev_kvs().iter().map(KvPair::to_kv).collect::<Vec<_>>();
+        let prev_kvs = res
+            .prev_kvs()
+            .iter()
+            .map(KvPair::from_etcd_kv)
+            .collect::<Vec<_>>();
 
         let header = Some(ResponseHeader::success(cluster_id));
         Ok(DeleteRangeResponse {
@@ -341,13 +349,13 @@ impl KvStore for EtcdStore {
                     TxnOpResponse::Get(res) => {
                         return Ok(MoveValueResponse {
                             header,
-                            kv: res.kvs().first().map(KvPair::to_kv),
+                            kv: res.kvs().first().map(KvPair::from_etcd_kv),
                         });
                     }
                     TxnOpResponse::Delete(res) => {
                         return Ok(MoveValueResponse {
                             header,
-                            kv: res.prev_kvs().first().map(KvPair::to_kv),
+                            kv: res.prev_kvs().first().map(KvPair::from_etcd_kv),
                         });
                     }
                     _ => {}
@@ -613,7 +621,7 @@ impl<'a> KvPair<'a> {
     }
 
     #[inline]
-    fn to_kv(kv: &etcd_client::KeyValue) -> KeyValue {
+    fn from_etcd_kv(kv: &etcd_client::KeyValue) -> KeyValue {
         KeyValue::from(KvPair::new(kv))
     }
 }
