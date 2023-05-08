@@ -21,7 +21,7 @@ use common_datasource::compression::CompressionType;
 use common_telemetry::logging;
 use futures::TryStreamExt;
 use lazy_static::lazy_static;
-use object_store::{util, Entry, ErrorKind, ObjectStore};
+use object_store::{raw_normalize_path, util, Entry, ErrorKind, ObjectStore};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
@@ -39,6 +39,7 @@ lazy_static! {
 }
 
 const LAST_CHECKPOINT_FILE: &str = "_last_checkpoint";
+const DEFAULT_COMPRESSION_TYPE: CompressionType = CompressionType::GZIP;
 
 #[inline]
 pub fn delta_file(version: ManifestVersion) -> String {
@@ -55,7 +56,7 @@ pub fn gen_path(path: &str, file: &str, compress_type: CompressionType) -> Strin
     if compress_type == CompressionType::UNCOMPRESSED {
         format!("{}{}", path, file)
     } else {
-        format!("{}{}.{}", path, file, compress_type)
+        format!("{}{}.{}", path, file, compress_type.file_extension())
     }
 }
 
@@ -132,7 +133,7 @@ impl ManifestObjectStore {
     pub fn new(path: &str, object_store: ObjectStore) -> Self {
         Self {
             object_store,
-            compress_type: CompressionType::ZSTD,
+            compress_type: DEFAULT_COMPRESSION_TYPE,
             path: util::normalize_dir(path),
         }
     }
@@ -326,18 +327,25 @@ impl ManifestLogStorage for ManifestObjectStore {
     }
 
     async fn delete(&self, start: ManifestVersion, end: ManifestVersion) -> Result<()> {
-        let paths = self
-            .get_paths(|entry| {
-                let file_name = entry.name();
-                if is_delta_file(file_name) {
-                    let version = file_version(file_name);
-                    if start <= version && version < end {
-                        return Some(entry.path().to_string());
-                    }
-                }
-                None
-            })
-            .await?;
+        ensure!(start <= end, InvalidScanIndexSnafu { start, end });
+
+        // Due to backward compatibility, it is possible that the user's log between start and end has not been compressed,
+        // so we need to delete the uncompressed file corresponding to that version, even if the uncompressed file in that version do not exist.
+        let mut paths = Vec::with_capacity(((end - start) * 2) as usize);
+        for version in start..end {
+            paths.push(raw_normalize_path(&self.delta_file_path(version)));
+            paths.push(raw_normalize_path(&gen_path(
+                &self.path,
+                &delta_file(version),
+                CompressionType::UNCOMPRESSED,
+            )));
+        }
+
+        logging::debug!(
+            "Deleting logs from manifest storage, start: {}, end: {}",
+            start,
+            end
+        );
 
         self.object_store
             .remove(paths.clone())
@@ -395,47 +403,51 @@ impl ManifestLogStorage for ManifestObjectStore {
         &self,
         version: ManifestVersion,
     ) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
-        let entry = self
-            .get_paths(|entry| {
-                let file_name = entry.name();
-                if is_checkpoint_file(file_name) && version == file_version(file_name) {
-                    return Some(entry.path().to_string());
+        let mut path = self.checkpoint_file_path(version);
+        // Due to backward compatibility, it is possible that the user's checkpoint not compressed,
+        // so if we don't find file by compressed type. fall back to checkpoint not compressed find again.
+        let checkpoint_data = match self.object_store.read(&path).await {
+            Ok(checkpoint) => Ok(Some(checkpoint)),
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                path = gen_path(
+                    &self.path,
+                    &checkpoint_file(version),
+                    CompressionType::UNCOMPRESSED,
+                );
+                match self.object_store.read(&path).await {
+                    Ok(checkpoint) => Ok(Some(checkpoint)),
+                    Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+                    Err(e) => Err(e).context(ReadObjectSnafu { path: &path }),
                 }
-                None
-            })
-            .await?;
-        if entry.is_empty() {
-            return Ok(None);
+            }
+            Err(e) => Err(e).context(ReadObjectSnafu { path: &path }),
+        }?;
+        if let Some(data) = checkpoint_data {
+            let decompress_data =
+                self.compress_type
+                    .decode(data)
+                    .await
+                    .context(DecompressObjectSnafu {
+                        compress_type: self.compress_type,
+                        path,
+                    })?;
+            Ok(Some((version, decompress_data)))
+        } else {
+            Ok(None)
         }
-
-        let path = &entry[0];
-
-        let data = self
-            .object_store
-            .read(path)
-            .await
-            .context(ReadObjectSnafu { path })?;
-        let decompress_data =
-            self.compress_type
-                .decode(data)
-                .await
-                .context(DecompressObjectSnafu {
-                    compress_type: self.compress_type,
-                    path,
-                })?;
-        Ok(Some((version, decompress_data)))
     }
 
     async fn delete_checkpoint(&self, version: ManifestVersion) -> Result<()> {
-        let paths = self
-            .get_paths(|entry| {
-                let file_name = entry.name();
-                if is_checkpoint_file(file_name) && version == file_version(file_name) {
-                    return Some(entry.path().to_string());
-                }
-                None
-            })
-            .await?;
+        // Due to backward compatibility, it is possible that the user's checkpoint file has not been compressed,
+        // so we need to delete the uncompressed checkpoint file corresponding to that version, even if the uncompressed checkpoint file in that version do not exist.
+        let paths = vec![
+            raw_normalize_path(&self.checkpoint_file_path(version)),
+            raw_normalize_path(&gen_path(
+                &self.path,
+                &checkpoint_file(version),
+                CompressionType::UNCOMPRESSED,
+            )),
+        ];
 
         self.object_store
             .remove(paths.clone())
@@ -479,6 +491,15 @@ mod tests {
     use object_store::ObjectStore;
 
     use super::*;
+
+    #[test]
+    // Define this test mainly to prevent future unintentional changes may break the backward compatibility.
+    fn test_compress_file_path_generation() {
+        let path = "/foo/bar/";
+        let version: ManifestVersion = 0;
+        let file_path = gen_path(path, &delta_file(version), CompressionType::GZIP);
+        assert_eq!(file_path.as_str(), "/foo/bar/00000000000000000000.json.gz")
+    }
 
     #[tokio::test]
     async fn test_manifest_log_store() {

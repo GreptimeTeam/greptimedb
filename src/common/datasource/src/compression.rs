@@ -74,6 +74,17 @@ impl CompressionType {
         !matches!(self, &Self::Uncompressed)
     }
 
+    pub const fn file_extension(&self) -> &'static str {
+        match self {
+            Self::GZIP => "gz",
+            Self::BZIP2 => "bz2",
+            Self::XZ => "xz",
+            Self::ZSTD => "zst",
+            Self::UNCOMPRESSED => "",
+        }
+    }
+}
+
 macro_rules! impl_compression_type {
     ($(($enum_item:ident, $prefix:ident)),*) => {
         paste::item! {
@@ -82,7 +93,7 @@ macro_rules! impl_compression_type {
                     match self {
                         $(
                             CompressionType::$enum_item => {
-                                let mut buffer = Vec::new();
+                                let mut buffer = Vec::with_capacity(content.as_ref().len());
                                 let mut encoder = write::[<$prefix Encoder>]::new(&mut buffer);
                                 encoder.write_all(content.as_ref()).await?;
                                 encoder.shutdown().await?;
@@ -97,7 +108,7 @@ macro_rules! impl_compression_type {
                     match self {
                         $(
                             CompressionType::$enum_item => {
-                                let mut buffer = Vec::new();
+                                let mut buffer = Vec::with_capacity(content.as_ref().len() * 2);
                                 let mut encoder = write::[<$prefix Decoder>]::new(&mut buffer);
                                 encoder.write_all(content.as_ref()).await?;
                                 encoder.shutdown().await?;
@@ -152,11 +163,11 @@ macro_rules! impl_compression_type {
                 async fn [<test_ $enum_item:lower _compression>]() {
                     let string = "foo_bar".as_bytes().to_vec();
                     let compress = CompressionType::$enum_item
-                        .encode(&mut string.clone())
+                        .encode(&string)
                         .await
                         .unwrap();
                     let decompress = CompressionType::$enum_item
-                        .decode(&mut compress.clone())
+                        .decode(&compress)
                         .await
                         .unwrap();
                     assert_eq!(decompress, string);
@@ -166,11 +177,11 @@ macro_rules! impl_compression_type {
                 async fn test_uncompression() {
                     let string = "foo_bar".as_bytes().to_vec();
                     let compress = CompressionType::UNCOMPRESSED
-                        .encode(&mut string.clone())
+                        .encode(&string)
                         .await
                         .unwrap();
                     let decompress = CompressionType::UNCOMPRESSED
-                        .decode(&mut compress.clone())
+                        .decode(&compress)
                         .await
                         .unwrap();
                     assert_eq!(decompress, string);
