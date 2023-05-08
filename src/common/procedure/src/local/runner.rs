@@ -150,7 +150,19 @@ impl Runner {
         // If this is the root procedure, clean up message cache.
         if self.meta.parent_id.is_none() {
             let procedure_ids = self.manager_ctx.procedures_in_tree(&self.meta);
-            self.manager_ctx.remove_messages(&procedure_ids);
+            // Clean resources.
+            self.manager_ctx.on_procedures_finish(&procedure_ids);
+            for id in procedure_ids {
+                if let Err(e) = self.store.delete_procedure(id).await {
+                    logging::error!(
+                        e;
+                        "Runner {}-{} failed to delete procedure {}",
+                        self.procedure.type_name(),
+                        self.meta.id,
+                        id,
+                    );
+                }
+            }
         }
 
         logging::info!(
