@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod columns;
 mod tables;
 
 use std::any::Any;
@@ -23,15 +24,18 @@ use snafu::ResultExt;
 use table::table::adapter::TableAdapter;
 use table::TableRef;
 
+use self::columns::InformationSchemaColumns;
 use crate::error::{DatafusionSnafu, Result, TableSchemaMismatchSnafu};
 use crate::information_schema::tables::InformationSchemaTables;
 use crate::{CatalogProviderRef, SchemaProvider};
 
 const TABLES: &str = "tables";
+const COLUMNS: &str = "columns";
 
 pub(crate) struct InformationSchemaProvider {
     catalog_name: String,
     catalog_provider: CatalogProviderRef,
+    tables: Vec<String>,
 }
 
 impl InformationSchemaProvider {
@@ -39,6 +43,7 @@ impl InformationSchemaProvider {
         Self {
             catalog_name,
             catalog_provider,
+            tables: vec![TABLES.to_string(), COLUMNS.to_string()],
         }
     }
 }
@@ -50,31 +55,48 @@ impl SchemaProvider for InformationSchemaProvider {
     }
 
     async fn table_names(&self) -> Result<Vec<String>> {
-        Ok(vec![TABLES.to_string()])
+        Ok(self.tables.clone())
     }
 
     async fn table(&self, name: &str) -> Result<Option<TableRef>> {
-        let table = if name.eq_ignore_ascii_case(TABLES) {
-            Arc::new(InformationSchemaTables::new(
-                self.catalog_name.clone(),
-                self.catalog_provider.clone(),
-            ))
-        } else {
-            return Ok(None);
+        let table = match name.to_ascii_lowercase().as_ref() {
+            TABLES => {
+                let inner = Arc::new(InformationSchemaTables::new(
+                    self.catalog_name.clone(),
+                    self.catalog_provider.clone(),
+                ));
+                Arc::new(
+                    StreamingTable::try_new(inner.schema().clone(), vec![inner]).with_context(
+                        |_| DatafusionSnafu {
+                            msg: format!("Failed to get InformationSchema table '{name}'"),
+                        },
+                    )?,
+                )
+            }
+            COLUMNS => {
+                let inner = Arc::new(InformationSchemaColumns::new(
+                    self.catalog_name.clone(),
+                    self.catalog_provider.clone(),
+                ));
+                Arc::new(
+                    StreamingTable::try_new(inner.schema().clone(), vec![inner]).with_context(
+                        |_| DatafusionSnafu {
+                            msg: format!("Failed to get InformationSchema table '{name}'"),
+                        },
+                    )?,
+                )
+            }
+            _ => {
+                return Ok(None);
+            }
         };
 
-        let table = Arc::new(
-            StreamingTable::try_new(table.schema().clone(), vec![table]).with_context(|_| {
-                DatafusionSnafu {
-                    msg: format!("Failed to get InformationSchema table '{name}'"),
-                }
-            })?,
-        );
         let table = TableAdapter::new(table).context(TableSchemaMismatchSnafu)?;
         Ok(Some(Arc::new(table)))
     }
 
     async fn table_exist(&self, name: &str) -> Result<bool> {
-        Ok(matches!(name.to_ascii_lowercase().as_str(), TABLES))
+        let normalized_name = name.to_ascii_lowercase();
+        Ok(self.tables.contains(&normalized_name))
     }
 }

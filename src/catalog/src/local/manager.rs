@@ -26,6 +26,7 @@ use common_telemetry::{error, info};
 use datatypes::prelude::ScalarVector;
 use datatypes::vectors::{BinaryVector, UInt8Vector};
 use futures_util::lock::Mutex;
+use metrics::increment_gauge;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::engine::manager::TableEngineManagerRef;
 use table::engine::EngineContext;
@@ -370,6 +371,11 @@ impl CatalogManager for LocalCatalogManager {
                 schema
                     .register_table(request.table_name, request.table)
                     .await?;
+                increment_gauge!(
+                    crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
+                    1.0,
+                    &[crate::metrics::db_label(catalog_name, schema_name)],
+                );
                 Ok(true)
             }
         }
@@ -499,11 +505,15 @@ impl CatalogManager for LocalCatalogManager {
             catalog
                 .register_schema(request.schema, Arc::new(MemorySchemaProvider::new()))
                 .await?;
+
             Ok(true)
         }
     }
 
     async fn register_system_table(&self, request: RegisterSystemTableRequest) -> Result<()> {
+        let catalog_name = request.create_table_request.catalog_name.clone();
+        let schema_name = request.create_table_request.schema_name.clone();
+
         ensure!(
             !*self.init_lock.lock().await,
             IllegalManagerStateSnafu {
@@ -513,7 +523,11 @@ impl CatalogManager for LocalCatalogManager {
 
         let mut sys_table_requests = self.system_table_requests.lock().await;
         sys_table_requests.push(request);
-
+        increment_gauge!(
+            crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
+            1.0,
+            &[crate::metrics::db_label(&catalog_name, &schema_name)],
+        );
         Ok(())
     }
 

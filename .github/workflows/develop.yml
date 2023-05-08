@@ -24,7 +24,7 @@ on:
 name: CI
 
 env:
-  RUST_TOOLCHAIN: nightly-2023-02-26
+  RUST_TOOLCHAIN: nightly-2023-05-03
 
 jobs:
   typos:

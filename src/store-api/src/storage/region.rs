@@ -77,8 +77,21 @@ pub trait Region: Send + Sync + Clone + std::fmt::Debug + 'static {
 
     fn disk_usage_bytes(&self) -> u64;
 
+    fn region_stat(&self) -> RegionStat {
+        RegionStat {
+            region_id: self.id(),
+            disk_usage_bytes: self.disk_usage_bytes(),
+        }
+    }
+
     /// Flush memtable of the region to disk.
     async fn flush(&self, ctx: &FlushContext) -> Result<(), Self::Error>;
+}
+
+#[derive(Default, Debug)]
+pub struct RegionStat {
+    pub region_id: u64,
+    pub disk_usage_bytes: u64,
 }
 
 /// Context for write operations.

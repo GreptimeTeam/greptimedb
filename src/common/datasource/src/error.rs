@@ -113,9 +113,8 @@ pub enum Error {
         source: datafusion::parquet::errors::ParquetError,
     },
 
-    #[snafu(display("Failed to infer schema from file: {}, source: {}", path, source))]
+    #[snafu(display("Failed to infer schema from file, source: {}", source))]
     InferSchema {
-        path: String,
         location: Location,
         source: arrow_schema::ArrowError,
     },

@@ -379,15 +379,13 @@ pub(crate) async fn new_oss_object_store(store_config: &ObjectStoreConfig) -> Re
         .access_key_secret(oss_config.access_key_secret.expose_secret());
 
     let object_store = ObjectStore::new(builder)
-        .with_context(|_| error::InitBackendSnafu {
-            config: store_config.clone(),
-        })?
+        .context(error::InitBackendSnafu)?
         .finish();
 
-    create_object_store_with_cache(object_store, store_config)
+    create_object_store_with_cache(object_store, store_config).await
 }
 
-fn create_object_store_with_cache(
+async fn create_object_store_with_cache(
     object_store: ObjectStore,
     store_config: &ObjectStoreConfig,
 ) -> Result<ObjectStore> {
@@ -410,14 +408,17 @@ fn create_object_store_with_cache(
     };
 
     if let Some(path) = cache_path {
-        let cache_store =
-            FsBuilder::default()
-                .root(path)
-                .build()
-                .with_context(|_| error::InitBackendSnafu {
-                    config: store_config.clone(),
-                })?;
-        let cache_layer = LruCacheLayer::new(Arc::new(cache_store), cache_capacity.0 as usize);
+        let atomic_temp_dir = format!("{path}/.tmp/");
+        clean_temp_dir(&atomic_temp_dir)?;
+        let cache_store = FsBuilder::default()
+            .root(path)
+            .atomic_write_dir(&atomic_temp_dir)
+            .build()
+            .context(error::InitBackendSnafu)?;
+
+        let cache_layer = LruCacheLayer::new(Arc::new(cache_store), cache_capacity.0 as usize)
+            .await
+            .context(error::InitBackendSnafu)?;
         Ok(object_store.layer(cache_layer))
     } else {
         Ok(object_store)
@@ -452,12 +453,21 @@ pub(crate) async fn new_s3_object_store(store_config: &ObjectStoreConfig) -> Res
 
     create_object_store_with_cache(
         ObjectStore::new(builder)
-            .with_context(|_| error::InitBackendSnafu {
-                config: store_config.clone(),
-            })?
+            .context(error::InitBackendSnafu)?
             .finish(),
         store_config,
     )
+    .await
+}
+
+fn clean_temp_dir(dir: &str) -> Result<()> {
+    if path::Path::new(&dir).exists() {
+        info!("Begin to clean temp storage directory: {}", dir);
+        fs::remove_dir_all(dir).context(error::RemoveDirSnafu { dir })?;
+        info!("Cleaned temp storage directory: {}", dir);
+    }
+
+    Ok(())
 }
 
 pub(crate) async fn new_fs_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {
@@ -471,24 +481,13 @@ pub(crate) async fn new_fs_object_store(store_config: &ObjectStoreConfig) -> Res
     info!("The file storage directory is: {}", &data_dir);
 
     let atomic_write_dir = format!("{data_dir}/.tmp/");
-    if path::Path::new(&atomic_write_dir).exists() {
-        info!(
-            "Begin to clean temp storage directory: {}",
-            &atomic_write_dir
-        );
-        fs::remove_dir_all(&atomic_write_dir).context(error::RemoveDirSnafu {
-            dir: &atomic_write_dir,
-        })?;
-        info!("Cleaned temp storage directory: {}", &atomic_write_dir);
-    }
+    clean_temp_dir(&atomic_write_dir)?;
 
     let mut builder = FsBuilder::default();
     builder.root(&data_dir).atomic_write_dir(&atomic_write_dir);
 
     let object_store = ObjectStore::new(builder)
-        .context(error::InitBackendSnafu {
-            config: store_config.clone(),
-        })?
+        .context(error::InitBackendSnafu)?
         .finish();
 
     Ok(object_store)

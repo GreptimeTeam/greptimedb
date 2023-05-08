@@ -32,8 +32,8 @@ SHOW CREATE TABLE system_metrics;
 |                | ENGINE=mito                                             |
 |                | WITH(                                                   |
 |                |   regions = 1,                                          |
-|                |   write_buffer_size = '1.0KiB',                         |
-|                |   ttl = '7days'                                         |
+|                |   ttl = '7days',                                        |
+|                |   write_buffer_size = '1.0KiB'                          |
 |                | )                                                       |
 +----------------+---------------------------------------------------------+
 

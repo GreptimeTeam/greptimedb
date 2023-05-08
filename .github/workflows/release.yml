@@ -11,7 +11,7 @@ on:
 name: Release
 
 env:
-  RUST_TOOLCHAIN: nightly-2023-02-26
+  RUST_TOOLCHAIN: nightly-2023-05-03
 
   SCHEDULED_BUILD_VERSION_PREFIX: v0.3.0
 

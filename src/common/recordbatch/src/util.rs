@@ -31,7 +31,6 @@ pub async fn collect_batches(stream: SendableRecordBatchStream) -> Result<Record
 
 #[cfg(test)]
 mod tests {
-    use std::mem;
     use std::pin::Pin;
     use std::sync::Arc;
 
@@ -59,7 +58,7 @@ mod tests {
         type Item = Result<RecordBatch>;
 
         fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            let batch = mem::replace(&mut self.batch, None);
+            let batch = self.batch.take();
 
             if let Some(batch) = batch {
                 Poll::Ready(Some(Ok(batch)))

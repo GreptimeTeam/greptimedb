@@ -21,6 +21,7 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_telemetry::error;
+use metrics::{decrement_gauge, increment_gauge};
 use snafu::{ensure, OptionExt};
 use table::metadata::TableId;
 use table::table::TableIdProvider;
@@ -86,6 +87,11 @@ impl CatalogManager for MemoryCatalogManager {
                 catalog: &request.catalog,
                 schema: &request.schema,
             })?;
+        increment_gauge!(
+            crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
+            1.0,
+            &[crate::metrics::db_label(&request.catalog, &request.schema)],
+        );
         schema
             .register_table(request.table_name, request.table)
             .await
@@ -124,6 +130,11 @@ impl CatalogManager for MemoryCatalogManager {
                 catalog: &request.catalog,
                 schema: &request.schema,
             })?;
+        decrement_gauge!(
+            crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
+            1.0,
+            &[crate::metrics::db_label(&request.catalog, &request.schema)],
+        );
         schema
             .deregister_table(&request.table_name)
             .await
@@ -139,6 +150,7 @@ impl CatalogManager for MemoryCatalogManager {
         catalog
             .register_schema(request.schema, Arc::new(MemorySchemaProvider::new()))
             .await?;
+        increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_SCHEMA_COUNT, 1.0);
         Ok(true)
     }
 
@@ -180,6 +192,7 @@ impl CatalogManager for MemoryCatalogManager {
         name: String,
         catalog: CatalogProviderRef,
     ) -> Result<Option<CatalogProviderRef>> {
+        increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_CATALOG_COUNT, 1.0);
         self.register_catalog_sync(name, catalog)
     }
 
@@ -255,6 +268,7 @@ impl MemoryCatalogProvider {
             !schemas.contains_key(&name),
             error::SchemaExistsSnafu { schema: &name }
         );
+        increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_SCHEMA_COUNT, 1.0);
         Ok(schemas.insert(name, schema))
     }
 

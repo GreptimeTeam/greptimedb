@@ -1234,7 +1234,7 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
 }
 
 #[apply(both_instances_cases)]
-async fn test_information_schema(instance: Arc<dyn MockInstance>) {
+async fn test_information_schema_dot_tables(instance: Arc<dyn MockInstance>) {
     let is_distributed_mode = instance.is_distributed_mode();
     let instance = instance.frontend();
 
@@ -1251,23 +1251,21 @@ async fn test_information_schema(instance: Arc<dyn MockInstance>) {
     let expected = match is_distributed_mode {
         true => {
             "\
-+---------------+--------------------+------------+------------+----------+-------------+
-| table_catalog | table_schema       | table_name | table_type | table_id | engine      |
-+---------------+--------------------+------------+------------+----------+-------------+
-| greptime      | public             | numbers    | BASE TABLE | 1        | test_engine |
-| greptime      | public             | scripts    | BASE TABLE | 1024     | mito        |
-| greptime      | information_schema | tables     | VIEW       |          |             |
-+---------------+--------------------+------------+------------+----------+-------------+"
++---------------+--------------+------------+------------+----------+-------------+
+| table_catalog | table_schema | table_name | table_type | table_id | engine      |
++---------------+--------------+------------+------------+----------+-------------+
+| greptime      | public       | numbers    | BASE TABLE | 1        | test_engine |
+| greptime      | public       | scripts    | BASE TABLE | 1024     | mito        |
++---------------+--------------+------------+------------+----------+-------------+"
         }
         false => {
             "\
-+---------------+--------------------+------------+------------+----------+-------------+
-| table_catalog | table_schema       | table_name | table_type | table_id | engine      |
-+---------------+--------------------+------------+------------+----------+-------------+
-| greptime      | public             | numbers    | BASE TABLE | 1        | test_engine |
-| greptime      | public             | scripts    | BASE TABLE | 1        | mito        |
-| greptime      | information_schema | tables     | VIEW       |          |             |
-+---------------+--------------------+------------+------------+----------+-------------+"
++---------------+--------------+------------+------------+----------+-------------+
+| table_catalog | table_schema | table_name | table_type | table_id | engine      |
++---------------+--------------+------------+------------+----------+-------------+
+| greptime      | public       | numbers    | BASE TABLE | 1        | test_engine |
+| greptime      | public       | scripts    | BASE TABLE | 1        | mito        |
++---------------+--------------+------------+------------+----------+-------------+"
         }
     };
 
@@ -1277,23 +1275,62 @@ async fn test_information_schema(instance: Arc<dyn MockInstance>) {
     let expected = match is_distributed_mode {
         true => {
             "\
-+-----------------+--------------------+---------------+------------+----------+--------+
-| table_catalog   | table_schema       | table_name    | table_type | table_id | engine |
-+-----------------+--------------------+---------------+------------+----------+--------+
-| another_catalog | another_schema     | another_table | BASE TABLE | 1025     | mito   |
-| another_catalog | information_schema | tables        | VIEW       |          |        |
-+-----------------+--------------------+---------------+------------+----------+--------+"
++-----------------+----------------+---------------+------------+----------+--------+
+| table_catalog   | table_schema   | table_name    | table_type | table_id | engine |
++-----------------+----------------+---------------+------------+----------+--------+
+| another_catalog | another_schema | another_table | BASE TABLE | 1025     | mito   |
++-----------------+----------------+---------------+------------+----------+--------+"
         }
         false => {
             "\
-+-----------------+--------------------+---------------+------------+----------+--------+
-| table_catalog   | table_schema       | table_name    | table_type | table_id | engine |
-+-----------------+--------------------+---------------+------------+----------+--------+
-| another_catalog | another_schema     | another_table | BASE TABLE | 1024     | mito   |
-| another_catalog | information_schema | tables        | VIEW       |          |        |
-+-----------------+--------------------+---------------+------------+----------+--------+"
++-----------------+----------------+---------------+------------+----------+--------+
+| table_catalog   | table_schema   | table_name    | table_type | table_id | engine |
++-----------------+----------------+---------------+------------+----------+--------+
+| another_catalog | another_schema | another_table | BASE TABLE | 1024     | mito   |
++-----------------+----------------+---------------+------------+----------+--------+"
         }
     };
+    check_output_stream(output, expected).await;
+}
+
+#[apply(both_instances_cases)]
+async fn test_information_schema_dot_columns(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+
+    let sql = "create table another_table(i bigint time index)";
+    let query_ctx = Arc::new(QueryContext::with("another_catalog", "another_schema"));
+    let output = execute_sql_with(&instance, sql, query_ctx.clone()).await;
+    assert!(matches!(output, Output::AffectedRows(0)));
+
+    // User can only see information schema under current catalog.
+    // A necessary requirement to GreptimeCloud.
+    let sql = "select table_catalog, table_schema, table_name, column_name, data_type, semantic_type from information_schema.columns  order by table_name";
+
+    let output = execute_sql(&instance, sql).await;
+    let expected = "\
++---------------+--------------+------------+--------------+----------------------+---------------+
+| table_catalog | table_schema | table_name | column_name  | data_type            | semantic_type |
++---------------+--------------+------------+--------------+----------------------+---------------+
+| greptime      | public       | numbers    | number       | UInt32               | PRIMARY KEY   |
+| greptime      | public       | scripts    | schema       | String               | PRIMARY KEY   |
+| greptime      | public       | scripts    | name         | String               | PRIMARY KEY   |
+| greptime      | public       | scripts    | script       | String               | FIELD         |
+| greptime      | public       | scripts    | engine       | String               | FIELD         |
+| greptime      | public       | scripts    | timestamp    | TimestampMillisecond | TIME INDEX    |
+| greptime      | public       | scripts    | gmt_created  | TimestampMillisecond | FIELD         |
+| greptime      | public       | scripts    | gmt_modified | TimestampMillisecond | FIELD         |
++---------------+--------------+------------+--------------+----------------------+---------------+";
+
+    check_output_stream(output, expected).await;
+
+    let output = execute_sql_with(&instance, sql, query_ctx).await;
+    let expected = "\
++-----------------+----------------+---------------+-------------+-----------+---------------+
+| table_catalog   | table_schema   | table_name    | column_name | data_type | semantic_type |
++-----------------+----------------+---------------+-------------+-----------+---------------+
+| another_catalog | another_schema | another_table | i           | Int64     | TIME INDEX    |
++-----------------+----------------+---------------+-------------+-----------+---------------+";
+
     check_output_stream(output, expected).await;
 }
 

@@ -21,6 +21,7 @@ use api::v1::{PromqlRequest, PromqlResponse, ResponseHeader};
 use async_trait::async_trait;
 use common_telemetry::timer;
 use common_time::util::current_time_rfc3339;
+use promql_parser::parser::ValueType;
 use query::parser::PromQuery;
 use snafu::OptionExt;
 use tonic::{Request, Response};
@@ -37,16 +38,20 @@ pub struct PrometheusGatewayService {
 #[async_trait]
 impl PrometheusGateway for PrometheusGatewayService {
     async fn handle(&self, req: Request<PromqlRequest>) -> TonicResult<Response<PromqlResponse>> {
+        let mut is_range_query = false;
         let inner = req.into_inner();
         let prom_query = match inner.promql.context(InvalidQuerySnafu {
             reason: "Expecting non-empty PromqlRequest.",
         })? {
-            Promql::RangeQuery(range_query) => PromQuery {
-                query: range_query.query,
-                start: range_query.start,
-                end: range_query.end,
-                step: range_query.step,
-            },
+            Promql::RangeQuery(range_query) => {
+                is_range_query = true;
+                PromQuery {
+                    query: range_query.query,
+                    start: range_query.start,
+                    end: range_query.end,
+                    step: range_query.step,
+                }
+            }
             Promql::InstantQuery(instant_query) => {
                 let time = if instant_query.time.is_empty() {
                     current_time_rfc3339()
@@ -71,8 +76,12 @@ impl PrometheusGateway for PrometheusGatewayService {
             )]
         );
         let result = self.handler.do_query(&prom_query, query_context).await;
-        let (metric_name, result_type) =
+        let (metric_name, mut result_type) =
             retrieve_metric_name_and_result_type(&prom_query.query).unwrap_or_default();
+        // range query only returns matrix
+        if is_range_query {
+            result_type = Some(ValueType::Matrix)
+        };
         let json_response = PromJsonResponse::from_query_result(result, metric_name, result_type)
             .await
             .0;

@@ -12,29 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use sqlparser::ast::Query as SpQuery;
+use common_catalog::build_db_string;
 
-use crate::errors::ParserError;
+pub(crate) const METRIC_DB_LABEL: &str = "db";
 
-/// Query statement instance.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Query {
-    pub inner: SpQuery,
-}
+pub(crate) const METRIC_CATALOG_MANAGER_CATALOG_COUNT: &str = "catalog.catalog_count";
+pub(crate) const METRIC_CATALOG_MANAGER_SCHEMA_COUNT: &str = "catalog.schema_count";
+pub(crate) const METRIC_CATALOG_MANAGER_TABLE_COUNT: &str = "catalog.table_count";
 
-/// Automatically converts from sqlparser Query instance to SqlQuery.
-impl TryFrom<SpQuery> for Query {
-    type Error = ParserError;
-
-    fn try_from(q: SpQuery) -> Result<Self, Self::Error> {
-        Ok(Query { inner: q })
-    }
-}
-
-impl TryFrom<Query> for SpQuery {
-    type Error = ParserError;
-
-    fn try_from(value: Query) -> Result<Self, Self::Error> {
-        Ok(value.inner)
-    }
+#[inline]
+pub(crate) fn db_label(catalog: &str, schema: &str) -> (&'static str, String) {
+    (METRIC_DB_LABEL, build_db_string(catalog, schema))
 }

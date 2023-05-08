@@ -32,6 +32,7 @@ use table::engine::{TableEngineProcedureRef, TableEngineRef};
 ///
 /// # Panics
 /// Panics on error.
+#[allow(clippy::items_after_test_module)]
 pub fn register_procedure_loaders(
     catalog_manager: CatalogManagerRef,
     engine_procedure: TableEngineProcedureRef,

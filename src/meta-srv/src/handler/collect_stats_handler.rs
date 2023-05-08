@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::meta::HeartbeatRequest;
+use api::v1::meta::{HeartbeatRequest, Role};
 use common_telemetry::debug;
 
 use super::node_stat::Stat;
@@ -24,16 +24,16 @@ pub struct CollectStatsHandler;
 
 #[async_trait::async_trait]
 impl HeartbeatHandler for CollectStatsHandler {
+    fn is_acceptable(&self, role: Role) -> bool {
+        role == Role::Datanode
+    }
+
     async fn handle(
         &self,
         req: &HeartbeatRequest,
-        ctx: &mut Context,
+        _ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
     ) -> Result<()> {
-        if ctx.is_skip_all() {
-            return Ok(());
-        }
-
         match Stat::try_from(req.clone()) {
             Ok(stat) => {
                 let _ = acc.stat.insert(stat);

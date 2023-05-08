@@ -10,6 +10,14 @@ Copy demo TO '/tmp/export/demo.parquet';
 
 Affected Rows: 2
 
+Copy demo TO '/tmp/export/demo.csv' with (format='csv');
+
+Affected Rows: 2
+
+Copy demo TO '/tmp/export/demo.json' with (format='json');
+
+Affected Rows: 2
+
 drop table demo;
 
 Affected Rows: 1

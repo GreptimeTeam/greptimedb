@@ -80,11 +80,11 @@ impl Default for JsonFormat {
 
 #[async_trait]
 impl FileFormat for JsonFormat {
-    async fn infer_schema(&self, store: &ObjectStore, path: String) -> Result<Schema> {
+    async fn infer_schema(&self, store: &ObjectStore, path: &str) -> Result<Schema> {
         let reader = store
-            .reader(&path)
+            .reader(path)
             .await
-            .context(error::ReadObjectSnafu { path: &path })?;
+            .context(error::ReadObjectSnafu { path })?;
 
         let decoded = self.compression_type.convert_async_read(reader);
 
@@ -95,8 +95,7 @@ impl FileFormat for JsonFormat {
 
             let iter = ValueIter::new(&mut reader, schema_infer_max_record);
 
-            let schema = infer_json_schema_from_iterator(iter)
-                .context(error::InferSchemaSnafu { path: &path })?;
+            let schema = infer_json_schema_from_iterator(iter).context(error::InferSchemaSnafu)?;
 
             Ok(schema)
         })
@@ -149,7 +148,7 @@ impl FileOpener for JsonOpener {
 pub async fn stream_to_json(
     stream: SendableRecordBatchStream,
     store: ObjectStore,
-    path: String,
+    path: &str,
     threshold: usize,
 ) -> Result<usize> {
     stream_to_file(stream, store, path, threshold, |buffer| {
@@ -179,10 +178,7 @@ mod tests {
     async fn infer_schema_basic() {
         let json = JsonFormat::default();
         let store = test_store(&test_data_root());
-        let schema = json
-            .infer_schema(&store, "simple.json".to_string())
-            .await
-            .unwrap();
+        let schema = json.infer_schema(&store, "simple.json").await.unwrap();
         let formatted: Vec<_> = format_schema(schema);
 
         assert_eq!(
@@ -204,7 +200,7 @@ mod tests {
         };
         let store = test_store(&test_data_root());
         let schema = json
-            .infer_schema(&store, "schema_infer_limit.json".to_string())
+            .infer_schema(&store, "schema_infer_limit.json")
             .await
             .unwrap();
         let formatted: Vec<_> = format_schema(schema);
