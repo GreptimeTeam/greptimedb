@@ -251,9 +251,9 @@ pub struct StatValue {
 }
 
 impl StatValue {
-    /// Get the region number from stat value.
+    /// Get the latest number of regions.
     pub fn region_num(&self) -> Option<u64> {
-        for stat in self.stats.iter() {
+        for stat in self.stats.iter().rev() {
             match stat.region_num {
                 Some(region_num) => return Some(region_num),
                 None => continue,
