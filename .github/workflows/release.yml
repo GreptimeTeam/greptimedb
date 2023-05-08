@@ -23,22 +23,12 @@ env:
   DISABLE_RUN_TESTS: false
 
 jobs:
-  build:
-    name: Build binary
+  build-macos:
+    name: Build macOS binary
     strategy:
       matrix:
         # The file format is greptime-<os>-<arch>
         include:
-          # - arch: x86_64-unknown-linux-gnu
-          #   os: ubuntu-2004-16-cores
-          #   file: greptime-linux-amd64
-          #   continue-on-error: false
-          #   opts: "-F servers/dashboard"
-          # - arch: aarch64-unknown-linux-gnu
-          #   os: ubuntu-2004-16-cores
-          #   file: greptime-linux-arm64
-          #   continue-on-error: false
-          #   opts: "-F servers/dashboard"
           - arch: aarch64-apple-darwin
             os: macos-latest
             file: greptime-darwin-arm64
@@ -49,16 +39,6 @@ jobs:
             file: greptime-darwin-amd64
             continue-on-error: false
             opts: "-F servers/dashboard"
-          # - arch: x86_64-unknown-linux-gnu
-          #   os: ubuntu-2004-16-cores
-          #   file: greptime-linux-amd64-pyo3
-          #   continue-on-error: false
-          #   opts: "-F pyo3_backend,servers/dashboard"
-          # - arch: aarch64-unknown-linux-gnu
-          #   os: ubuntu-2004-16-cores
-          #   file: greptime-linux-arm64-pyo3
-          #   continue-on-error: false
-          #   opts: "-F pyo3_backend,servers/dashboard"
           - arch: aarch64-apple-darwin
             os: macos-latest
             file: greptime-darwin-arm64-pyo3
@@ -88,6 +68,99 @@ jobs:
             target/
           key: ${{ matrix.arch }}-build-cargo-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Install Protoc for macos
+        if: contains(matrix.arch, 'darwin')
+        run: |
+          brew install protobuf
+
+      - name: Install etcd for macos
+        if: contains(matrix.arch, 'darwin')
+        run: |
+          brew install etcd
+          brew services start etcd
+
+      - name: Install rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.arch }}
+
+      - name: Output package versions
+        run: protoc --version ; cargo version ; rustc --version ; gcc --version ; g++ --version
+
+      - name: Run tests
+        if: env.DISABLE_RUN_TESTS == 'false'
+        run: make unit-test integration-test sqlness-test
+
+      - name: Run cargo build
+        if: contains(matrix.arch, 'darwin') || contains(matrix.opts, 'pyo3_backend') == false
+        run: cargo build --profile ${{ env.CARGO_PROFILE }} --locked --target ${{ matrix.arch }} ${{ matrix.opts }}
+
+      - name: Calculate checksum and rename binary
+        shell: bash
+        run: |
+          cd target/${{ matrix.arch }}/${{ env.CARGO_PROFILE }}
+          chmod +x greptime
+          tar -zcvf ${{ matrix.file }}.tgz greptime
+          echo $(shasum -a 256 ${{ matrix.file }}.tgz | cut -f1 -d' ') > ${{ matrix.file }}.sha256sum
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ matrix.file }}
+          path: target/${{ matrix.arch }}/${{ env.CARGO_PROFILE }}/${{ matrix.file }}.tgz
+
+      - name: Upload checksum of artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ matrix.file }}.sha256sum
+          path: target/${{ matrix.arch }}/${{ env.CARGO_PROFILE }}/${{ matrix.file }}.sha256sum
+
+  build-linux:
+    name: Build macOS binary
+    strategy:
+      matrix:
+        # The file format is greptime-<os>-<arch>
+        include:
+          - arch: x86_64-unknown-linux-gnu
+            os: ubuntu-2004-16-cores
+            file: greptime-linux-amd64
+            continue-on-error: false
+            opts: "-F servers/dashboard"
+          - arch: aarch64-unknown-linux-gnu
+            os: ubuntu-2004-16-cores
+            file: greptime-linux-arm64
+            continue-on-error: false
+            opts: "-F servers/dashboard"
+          - arch: x86_64-unknown-linux-gnu
+            os: ubuntu-2004-16-cores
+            file: greptime-linux-amd64-pyo3
+            continue-on-error: false
+            opts: "-F pyo3_backend,servers/dashboard"
+          - arch: aarch64-unknown-linux-gnu
+            os: ubuntu-2004-16-cores
+            file: greptime-linux-arm64-pyo3
+            continue-on-error: false
+            opts: "-F pyo3_backend,servers/dashboard"
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.continue-on-error }}
+    if: github.repository == 'GreptimeTeam/greptimedb'
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v3
+
+      - name: Cache cargo assets
+        id: cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ matrix.arch }}-build-cargo-${{ hashFiles('**/Cargo.lock') }}
+
       - name: Install Protoc for linux
         if: contains(matrix.arch, 'linux') && endsWith(matrix.arch, '-gnu')
         run: | # Make sure the protoc is >= 3.15
@@ -95,11 +168,6 @@ jobs:
           unzip protoc-21.9-linux-x86_64.zip -d protoc
           sudo cp protoc/bin/protoc /usr/local/bin/
           sudo cp -r protoc/include/google /usr/local/include/
-
-      - name: Install Protoc for macos
-        if: contains(matrix.arch, 'darwin')
-        run: |
-          brew install protobuf
 
       - name: Install etcd for linux
         if: contains(matrix.arch, 'linux') && endsWith(matrix.arch, '-gnu')
@@ -113,12 +181,6 @@ jobs:
 
           sudo cp -a /tmp/etcd-download/etcd* /usr/local/bin/
           nohup etcd >/tmp/etcd.log 2>&1 &
-
-      - name: Install etcd for macos
-        if: contains(matrix.arch, 'darwin')
-        run: |
-          brew install etcd
-          brew services start etcd
 
       - name: Install dependencies for linux
         if: contains(matrix.arch, 'linux') && endsWith(matrix.arch, '-gnu')
@@ -189,10 +251,6 @@ jobs:
 
           cargo build --profile ${{ env.CARGO_PROFILE }} --locked --target ${{ matrix.arch }} ${{ matrix.opts }}
 
-      - name: Run cargo build
-        if: contains(matrix.arch, 'darwin') || contains(matrix.opts, 'pyo3_backend') == false
-        run: cargo build --profile ${{ env.CARGO_PROFILE }} --locked --target ${{ matrix.arch }} ${{ matrix.opts }}
-
       - name: Calculate checksum and rename binary
         shell: bash
         run: |
@@ -215,7 +273,7 @@ jobs:
 
   docker:
     name: Build docker image
-    needs: [build]
+    needs: [build-linux, build-macos]
     runs-on: ubuntu-latest
     if: github.repository == 'GreptimeTeam/greptimedb' && github.event_name != 'workflow_dispatch'
     steps:
@@ -301,7 +359,7 @@ jobs:
   release:
     name: Release artifacts
     # Release artifacts only when all the artifacts are built successfully.
-    needs: [build,docker]
+    needs: [build-linux, build-macos, docker]
     runs-on: ubuntu-latest
     if: github.repository == 'GreptimeTeam/greptimedb' && github.event_name != 'workflow_dispatch'
     steps:
