@@ -24,7 +24,7 @@ use snafu::ResultExt;
 use crate::error::{MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu};
 use crate::options::{Options, TopLevelOptions};
 
-const DATANODE_ENV_VAR_PREFIX: &str = "DATANODE";
+const DATANODE_ENV_VARS_PREFIX: &str = "DATANODE";
 
 pub struct Instance {
     datanode: Datanode,
@@ -73,7 +73,7 @@ impl SubCommand {
 
     fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
         match self {
-            SubCommand::Start(cmd) => cmd.load_options(top_level_opts, DATANODE_ENV_VAR_PREFIX),
+            SubCommand::Start(cmd) => cmd.load_options(top_level_opts, DATANODE_ENV_VARS_PREFIX),
         }
     }
 }
@@ -106,10 +106,10 @@ impl StartCommand {
     fn load_options(
         &self,
         top_level_opts: TopLevelOptions,
-        env_var_prefix: &str,
+        env_vars_prefix: &str,
     ) -> Result<Options> {
         let mut opts: DatanodeOptions =
-            Options::load_layered_options(self.config_file.clone(), env_var_prefix)?;
+            Options::load_layered_options(self.config_file.clone(), env_vars_prefix)?;
 
         if let Some(dir) = top_level_opts.log_dir {
             opts.logging.dir = dir;
@@ -247,7 +247,7 @@ mod tests {
         };
 
         let Options::Datanode(options) =
-            cmd.load_options(TopLevelOptions::default(),DATANODE_ENV_VAR_PREFIX).unwrap() else { unreachable!() };
+            cmd.load_options(TopLevelOptions::default(), DATANODE_ENV_VARS_PREFIX).unwrap() else { unreachable!() };
 
         assert_eq!("127.0.0.1:3001".to_string(), options.rpc_addr);
         assert_eq!("127.0.0.1:4406".to_string(), options.mysql_addr);
@@ -304,7 +304,7 @@ mod tests {
     #[test]
     fn test_try_from_cmd() {
         if let Options::Datanode(opt) = StartCommand::default()
-            .load_options(TopLevelOptions::default(), DATANODE_ENV_VAR_PREFIX)
+            .load_options(TopLevelOptions::default(), DATANODE_ENV_VARS_PREFIX)
             .unwrap()
         {
             assert_eq!(Mode::Standalone, opt.mode)
@@ -315,7 +315,7 @@ mod tests {
             metasrv_addr: Some("127.0.0.1:3002".to_string()),
             ..Default::default()
         })
-        .load_options(TopLevelOptions::default(), DATANODE_ENV_VAR_PREFIX)
+        .load_options(TopLevelOptions::default(), DATANODE_ENV_VARS_PREFIX)
         .unwrap()
         {
             assert_eq!(Mode::Distributed, opt.mode)
@@ -325,7 +325,7 @@ mod tests {
             metasrv_addr: Some("127.0.0.1:3002".to_string()),
             ..Default::default()
         })
-        .load_options(TopLevelOptions::default(), DATANODE_ENV_VAR_PREFIX)
+        .load_options(TopLevelOptions::default(), DATANODE_ENV_VARS_PREFIX)
         .is_err());
 
         // Providing node_id but leave metasrv_addr absent is ok since metasrv_addr has default value
@@ -333,7 +333,7 @@ mod tests {
             node_id: Some(42),
             ..Default::default()
         })
-        .load_options(TopLevelOptions::default(), DATANODE_ENV_VAR_PREFIX)
+        .load_options(TopLevelOptions::default(), DATANODE_ENV_VARS_PREFIX)
         .unwrap();
     }
 
@@ -347,7 +347,7 @@ mod tests {
                     log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
                     log_level: Some("debug".to_string()),
                 },
-                DATANODE_ENV_VAR_PREFIX,
+                DATANODE_ENV_VARS_PREFIX,
             )
             .unwrap();
 

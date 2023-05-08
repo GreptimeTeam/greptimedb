@@ -29,7 +29,7 @@ use snafu::ResultExt;
 use crate::error::{self, IllegalAuthConfigSnafu, Result};
 use crate::options::{Options, TopLevelOptions};
 
-const FRONTEND_ENV_VAR_PREFIX: &str = "FRONTEND";
+const FRONTEND_ENV_VARS_PREFIX: &str = "FRONTEND";
 
 pub struct Instance {
     frontend: FeInstance,
@@ -81,7 +81,7 @@ impl SubCommand {
 
     fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
         match self {
-            SubCommand::Start(cmd) => cmd.load_options(top_level_opts, FRONTEND_ENV_VAR_PREFIX),
+            SubCommand::Start(cmd) => cmd.load_options(top_level_opts, FRONTEND_ENV_VARS_PREFIX),
         }
     }
 }
@@ -122,10 +122,10 @@ impl StartCommand {
     fn load_options(
         &self,
         top_level_opts: TopLevelOptions,
-        env_var_prefix: &str,
+        env_vars_prefix: &str,
     ) -> Result<Options> {
         let mut opts: FrontendOptions =
-            Options::load_layered_options(self.config_file.clone(), env_var_prefix)?;
+            Options::load_layered_options(self.config_file.clone(), env_vars_prefix)?;
 
         if let Some(dir) = top_level_opts.log_dir {
             opts.logging.dir = dir;
@@ -257,7 +257,7 @@ mod tests {
         };
 
         let Options::Frontend(opts) =
-            command.load_options(TopLevelOptions::default(), FRONTEND_ENV_VAR_PREFIX).unwrap() else { unreachable!() };
+            command.load_options(TopLevelOptions::default(), FRONTEND_ENV_VARS_PREFIX).unwrap() else { unreachable!() };
 
         assert_eq!(opts.http_options.as_ref().unwrap().addr, "127.0.0.1:1234");
         assert_eq!(opts.mysql_options.as_ref().unwrap().addr, "127.0.0.1:5678");
@@ -326,7 +326,7 @@ mod tests {
         };
 
         let Options::Frontend(fe_opts) =
-            command.load_options(TopLevelOptions::default(),FRONTEND_ENV_VAR_PREFIX).unwrap() else {unreachable!()};
+            command.load_options(TopLevelOptions::default(), FRONTEND_ENV_VARS_PREFIX).unwrap() else {unreachable!()};
         assert_eq!(Mode::Distributed, fe_opts.mode);
         assert_eq!(
             "127.0.0.1:4000".to_string(),
@@ -401,7 +401,7 @@ mod tests {
                     log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
                     log_level: Some("debug".to_string()),
                 },
-                FRONTEND_ENV_VAR_PREFIX,
+                FRONTEND_ENV_VARS_PREFIX,
             )
             .unwrap();
 

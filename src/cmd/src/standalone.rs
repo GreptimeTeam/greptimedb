@@ -42,7 +42,7 @@ use crate::error::{
 use crate::frontend::load_frontend_plugins;
 use crate::options::{MixOptions, Options, TopLevelOptions};
 
-const STANDALONE_ENV_VAR_PREFIX: &str = "STANDALONE";
+const STANDALONE_ENV_VARS_PREFIX: &str = "STANDALONE";
 
 #[derive(Parser)]
 pub struct Command {
@@ -79,7 +79,7 @@ impl SubCommand {
     fn load_options(&self, top_level_options: TopLevelOptions) -> Result<Options> {
         match self {
             SubCommand::Start(cmd) => {
-                cmd.load_options(top_level_options, STANDALONE_ENV_VAR_PREFIX)
+                cmd.load_options(top_level_options, STANDALONE_ENV_VARS_PREFIX)
             }
         }
     }
@@ -221,10 +221,10 @@ impl StartCommand {
     fn load_options(
         &self,
         top_level_options: TopLevelOptions,
-        env_var_prefix: &str,
+        env_vars_prefix: &str,
     ) -> Result<Options> {
         let mut opts: StandaloneOptions =
-            Options::load_layered_options(self.config_file.clone(), env_var_prefix)?;
+            Options::load_layered_options(self.config_file.clone(), env_vars_prefix)?;
 
         opts.enable_memory_catalog = self.enable_memory_catalog;
 
@@ -446,7 +446,7 @@ mod tests {
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
         };
 
-        let Options::Standalone(options) = cmd.load_options(TopLevelOptions::default(), STANDALONE_ENV_VAR_PREFIX).unwrap() else {unreachable!()};
+        let Options::Standalone(options) = cmd.load_options(TopLevelOptions::default(), STANDALONE_ENV_VARS_PREFIX).unwrap() else {unreachable!()};
         let fe_opts = options.fe_opts;
         let dn_opts = options.dn_opts;
         let logging_opts = options.logging;
@@ -513,7 +513,7 @@ mod tests {
             .load_options(TopLevelOptions {
                 log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
-            }, STANDALONE_ENV_VAR_PREFIX)
+            }, STANDALONE_ENV_VARS_PREFIX)
             .unwrap() else {
             unreachable!()
         };
