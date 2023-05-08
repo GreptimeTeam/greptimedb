@@ -355,4 +355,86 @@ mod tests {
         assert_eq!("/tmp/greptimedb/test/logs", logging_opt.dir);
         assert_eq!("debug", logging_opt.level);
     }
+
+    #[test]
+    fn test_config_precedence_order() {
+        let mut file = create_named_temp_file();
+        let toml_str = r#"
+            mode = "distributed"
+            enable_memory_catalog = false
+            node_id = 42
+            rpc_addr = "127.0.0.1:3001"
+            rpc_hostname = "127.0.0.1"
+            rpc_runtime_size = 8
+            mysql_addr = "127.0.0.1:4406"
+            mysql_runtime_size = 2
+
+            [meta_client_options]
+            metasrv_addrs = ["127.0.0.1:3002"]
+            timeout_millis = 3000
+            connect_timeout_millis = 5000
+            tcp_nodelay = true
+
+            [wal]
+            dir = "/tmp/greptimedb/wal"
+            file_size = "1GB"
+            purge_threshold = "50GB"
+            purge_interval = "10m"
+            read_batch_size = 128
+            sync_write = false
+
+            [storage]
+            type = "File"
+            data_dir = "/tmp/greptimedb/data/"
+
+            [storage.compaction]
+            max_inflight_tasks = 3
+            max_files_in_level0 = 7
+            max_purge_tasks = 32
+
+            [storage.manifest]
+            gc_duration = '7s'
+            checkpoint_on_startup = true
+
+            [logging]
+            level = "debug"
+            dir = "/tmp/greptimedb/test/logs"
+        "#;
+        write!(file, "{}", toml_str).unwrap();
+
+        temp_env::with_vars(
+            vec![("DATANODE_UT-STORAGE.MANIFEST.GC_DURATION", Some("9s"))],
+            || {
+                let command = StartCommand {
+                    config_file: Some(file.path().to_str().unwrap().to_string()),
+                    wal_dir: Some("/other/wal/dir".to_string()),
+                    ..Default::default()
+                };
+
+                let Options::Datanode(opts) =
+                    command.load_options(TopLevelOptions::default(), "DATANODE_UT").unwrap() else {unreachable!()};
+
+                // Should be read from config file.
+                assert_eq!(opts.mode, Mode::Distributed);
+
+                // Should be read from cli, cli > env > config file.
+                assert_eq!(opts.wal.dir, "/other/wal/dir");
+
+                // Should be read from env, env > config file.
+                assert_eq!(
+                    opts.storage.manifest.gc_duration,
+                    Some(Duration::from_secs(9))
+                );
+
+                // Should be default value.
+                assert_eq!(
+                    opts.storage.manifest.checkpoint_margin,
+                    DatanodeOptions::default()
+                        .storage
+                        .manifest
+                        .checkpoint_margin
+                );
+            },
+        );
+    }
 }
