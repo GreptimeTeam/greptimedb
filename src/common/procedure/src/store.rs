@@ -166,9 +166,11 @@ impl ProcedureStore {
         Ok(())
     }
 
-    /// Load uncommitted procedures from the storage.
-    pub(crate) async fn load_messages(&self) -> Result<HashMap<ProcedureId, ProcedureMessage>> {
-        let mut messages = HashMap::new();
+    /// Load procedures from the storage. Returns a map of uncommitted procedures and a list
+    /// of finished procedures' ids.
+    pub(crate) async fn load_messages(
+        &self,
+    ) -> Result<(HashMap<ProcedureId, ProcedureMessage>, Vec<ProcedureId>)> {
         // Track the key-value pair by procedure id.
         let mut procedure_key_values: HashMap<_, (ParsedKey, Vec<u8>)> = HashMap::new();
 
@@ -190,6 +192,8 @@ impl ProcedureStore {
             }
         }
 
+        let mut messages = HashMap::with_capacity(procedure_key_values.len());
+        let mut finished_ids = Vec::new();
         for (procedure_id, (parsed_key, value)) in procedure_key_values {
             if parsed_key.key_type == KeyType::Step {
                 let Some(message) = self.load_one_message(&parsed_key, &value) else {
@@ -198,10 +202,12 @@ impl ProcedureStore {
                     continue;
                 };
                 messages.insert(procedure_id, message);
+            } else {
+                finished_ids.push(procedure_id);
             }
         }
 
-        Ok(messages)
+        Ok((messages, finished_ids))
     }
 
     fn load_one_message(&self, key: &ParsedKey, value: &[u8]) -> Option<ProcedureMessage> {
@@ -299,7 +305,6 @@ impl ParsedKey {
 mod tests {
     use async_trait::async_trait;
     use common_test_util::temp_dir::{create_temp_dir, TempDir};
-    use futures_util::StreamExt;
     use object_store::services::Fs as Builder;
 
     use super::*;
@@ -446,8 +451,9 @@ mod tests {
             .await
             .unwrap();
 
-        let messages = store.load_messages().await.unwrap();
+        let (messages, finished) = store.load_messages().await.unwrap();
         assert_eq!(1, messages.len());
+        assert!(finished.is_empty());
         let msg = messages.get(&procedure_id).unwrap();
         let expect = ProcedureMessage {
             type_name: "MockProcedure".to_string(),
@@ -472,8 +478,9 @@ mod tests {
             .unwrap();
         store.commit_procedure(procedure_id, 1).await.unwrap();
 
-        let messages = store.load_messages().await.unwrap();
+        let (messages, finished) = store.load_messages().await.unwrap();
         assert!(messages.is_empty());
+        assert_eq!(&[procedure_id], &finished[..]);
     }
 
     #[tokio::test]
@@ -490,8 +497,9 @@ mod tests {
             .unwrap();
         store.rollback_procedure(procedure_id, 1).await.unwrap();
 
-        let messages = store.load_messages().await.unwrap();
+        let (messages, finished) = store.load_messages().await.unwrap();
         assert!(messages.is_empty());
+        assert_eq!(&[procedure_id], &finished[..]);
     }
 
     #[tokio::test]
@@ -513,8 +521,9 @@ mod tests {
 
         store.delete_procedure(procedure_id).await.unwrap();
 
-        let messages = store.load_messages().await.unwrap();
+        let (messages, finished) = store.load_messages().await.unwrap();
         assert!(messages.is_empty());
+        assert!(finished.is_empty());
     }
 
     #[tokio::test]
@@ -537,14 +546,9 @@ mod tests {
 
         store.delete_procedure(procedure_id).await.unwrap();
 
-        let key_values: Vec<_> = store
-            .0
-            .walk_top_down(PROC_PATH)
-            .await
-            .unwrap()
-            .collect()
-            .await;
-        assert!(key_values.is_empty(), "key_values: {:?}", key_values)
+        let (messages, finished) = store.load_messages().await.unwrap();
+        assert!(messages.is_empty());
+        assert!(finished.is_empty());
     }
 
     #[tokio::test]
@@ -592,8 +596,9 @@ mod tests {
             .await
             .unwrap();
 
-        let messages = store.load_messages().await.unwrap();
+        let (messages, finished) = store.load_messages().await.unwrap();
         assert_eq!(2, messages.len());
+        assert_eq!(1, finished.len());
 
         let msg = messages.get(&id0).unwrap();
         assert_eq!("id0-2", msg.data);

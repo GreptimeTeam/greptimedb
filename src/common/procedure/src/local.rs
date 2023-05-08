@@ -429,7 +429,7 @@ impl ProcedureManager for LocalManager {
         logging::info!("LocalManager start to recover");
 
         let procedure_store = ProcedureStore::new(self.state_store.clone());
-        let messages = procedure_store.load_messages().await?;
+        let (messages, finished_ids) = procedure_store.load_messages().await?;
 
         for (procedure_id, message) in &messages {
             if message.parent_id.is_none() {
@@ -456,6 +456,21 @@ impl ProcedureManager for LocalManager {
                 }
             }
         }
+
+        if !finished_ids.is_empty() {
+            logging::info!(
+                "LocalManager try to clean finished procedures, num: {}",
+                finished_ids.len()
+            );
+
+            for procedure_id in finished_ids {
+                if let Err(e) = procedure_store.delete_procedure(procedure_id).await {
+                    logging::error!(e; "Failed to delete procedure {}", procedure_id);
+                }
+            }
+        }
+
+        logging::info!("LocalManager finish recovery");
 
         Ok(())
     }
