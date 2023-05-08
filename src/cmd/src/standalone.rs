@@ -567,10 +567,10 @@ mod tests {
                 assert_eq!(opts.fe_opts.mode, Mode::Standalone);
 
                 // Should be read from cli, cli > env > config file.
-                assert_eq!(opts.logging.level, "error".to_string());
+                assert_eq!(opts.logging.level, "error");
 
                 // Should be read from env, env > config file.
-                assert_eq!(opts.logging.dir, "/other/log/dir".to_string());
+                assert_eq!(opts.logging.dir, "/other/log/dir");
 
                 // Should be default value.
                 assert_eq!(

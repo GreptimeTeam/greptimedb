@@ -253,4 +253,55 @@ mod tests {
         assert_eq!("/tmp/greptimedb/test/logs", logging_opt.dir);
         assert_eq!("debug", logging_opt.level);
     }
+
+    #[test]
+    fn test_config_precedence_order() {
+        let mut file = create_named_temp_file();
+        let toml_str = r#"
+            bind_addr = "127.0.0.1:3002"
+            server_addr = "127.0.0.1:3002"
+            datanode_lease_secs = 15
+            selector = "LeaseBased"
+            use_memory_store = false
+
+            [logging]
+            level = "debug"
+            dir = "/tmp/greptimedb/test/logs"
+        "#;
+        write!(file, "{}", toml_str).unwrap();
+
+        temp_env::with_vars(
+            vec![
+                ("METASRV_UT-BIND_ADDR", Some("127.0.0.1:14002")),
+                ("METASRV_UT-SERVER_ADDR", Some("127.0.0.1:13002")),
+            ],
+            || {
+                let command = StartCommand {
+                    bind_addr: None,
+                    server_addr: Some("127.0.0.1:23002".to_string()),
+                    store_addr: None,
+                    selector: None,
+                    config_file: Some(file.path().to_str().unwrap().to_string()),
+                    use_memory_store: false,
+                    http_addr: None,
+                    http_timeout: None,
+                };
+
+                let Options::Metasrv(opts) =
+                    command.load_options(TopLevelOptions::default(), "METASRV_UT").unwrap() else {unreachable!()};
+
+                // Should be read from config file.
+                assert_eq!(opts.selector, SelectorType::LeaseBased);
+
+                // Should be read from cli, cli > env > config file.
+                assert_eq!(opts.server_addr, "127.0.0.1:23002");
+
+                // Should be read from env, env > config file.
+                assert_eq!(opts.bind_addr, "127.0.0.1:14002");
+
+                // Should be default value.
+                assert_eq!(opts.store_addr, "127.0.0.1:2379");
+            },
+        );
+    }
 }
