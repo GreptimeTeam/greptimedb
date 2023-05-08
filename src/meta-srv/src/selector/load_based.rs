@@ -25,7 +25,7 @@ use crate::lease;
 use crate::metasrv::Context;
 use crate::selector::{Namespace, Selector};
 
-const LARGEST_REGION_NUMBER: u64 = u64::MAX;
+const MAX_REGION_NUMBER: u64 = u64::MAX;
 
 pub struct LoadBasedSelector {
     pub meta_peer_client: MetaPeerClient,
@@ -64,7 +64,7 @@ impl Selector for LoadBasedSelector {
         let mut tuples: Vec<(LeaseKey, LeaseValue, u64)> = lease_kvs
             .into_iter()
             .map(|(lease_k, lease_v)| {
-                let stat_key: StatKey = to_stat_key(&lease_k);
+                let stat_key: StatKey = (&lease_k).into();
 
                 let region_num = match stat_kvs
                     .get(&stat_key)
@@ -73,7 +73,7 @@ impl Selector for LoadBasedSelector {
                     Some(region_num) => region_num,
                     None => {
                         warn!("Failed to get stat_val by stat_key {:?}", stat_key);
-                        LARGEST_REGION_NUMBER
+                        MAX_REGION_NUMBER
                     }
                 };
 
@@ -91,29 +91,5 @@ impl Selector for LoadBasedSelector {
                 addr: lease_val.node_addr,
             })
             .collect())
-    }
-}
-
-fn to_stat_key(k: &LeaseKey) -> StatKey {
-    StatKey {
-        cluster_id: k.cluster_id,
-        node_id: k.node_id,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::to_stat_key;
-    use crate::keys::LeaseKey;
-
-    #[test]
-    fn test_to_lease_key() {
-        let lease_key = LeaseKey {
-            cluster_id: 1,
-            node_id: 101,
-        };
-        let stat_key = to_stat_key(&lease_key);
-        assert_eq!(1, stat_key.cluster_id);
-        assert_eq!(101, stat_key.node_id);
     }
 }

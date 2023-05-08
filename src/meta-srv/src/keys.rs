@@ -193,6 +193,15 @@ pub struct StatKey {
     pub node_id: u64,
 }
 
+impl From<&LeaseKey> for StatKey {
+    fn from(lease_key: &LeaseKey) -> Self {
+        StatKey {
+            cluster_id: lease_key.cluster_id,
+            node_id: lease_key.node_id,
+        }
+    }
+}
+
 impl From<StatKey> for Vec<u8> {
     fn from(value: StatKey) -> Self {
         format!("{}-{}-{}", DN_STAT_PREFIX, value.cluster_id, value.node_id).into_bytes()
@@ -394,5 +403,18 @@ mod tests {
         };
         let region_num = stat_val.region_num().unwrap();
         assert_eq!(1, region_num);
+    }
+
+    #[test]
+    fn test_lease_key_to_stat_key() {
+        let lease_key = LeaseKey {
+            cluster_id: 1,
+            node_id: 101,
+        };
+
+        let stat_key: StatKey = (&lease_key).into();
+
+        assert_eq!(1, stat_key.cluster_id);
+        assert_eq!(101, stat_key.node_id);
     }
 }
