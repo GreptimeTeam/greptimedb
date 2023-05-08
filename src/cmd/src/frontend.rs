@@ -134,14 +134,16 @@ impl StartCommand {
             opts.logging.level = level;
         }
 
-        let tls_option = TlsOption::new(
+        let tls_opts = TlsOption::new(
             self.tls_mode.clone(),
             self.tls_cert_path.clone(),
             self.tls_key_path.clone(),
         );
 
         if let Some(addr) = self.http_addr.clone() {
-            opts.http_options.get_or_insert_with(Default::default).addr = addr;
+            if let Some(ref mut http_opts) = opts.http_options {
+                http_opts.addr = addr
+            }
         }
 
         if let Some(disable_dashboard) = self.disable_dashboard {
@@ -157,9 +159,9 @@ impl StartCommand {
         }
 
         if let Some(addr) = self.mysql_addr.clone() {
-            if let Some(ref mut mysql_options) = opts.mysql_options {
-                mysql_options.addr = addr;
-                mysql_options.tls = tls_option.clone();
+            if let Some(ref mut mysql_opts) = opts.mysql_options {
+                mysql_opts.addr = addr;
+                mysql_opts.tls = tls_opts.clone();
             }
         }
 
@@ -168,9 +170,9 @@ impl StartCommand {
         }
 
         if let Some(addr) = self.postgres_addr.clone() {
-            if let Some(ref mut postgres_options) = opts.postgres_options {
-                postgres_options.addr = addr;
-                postgres_options.tls = tls_option.clone();
+            if let Some(ref mut postgres_opts) = opts.postgres_options {
+                postgres_opts.addr = addr;
+                postgres_opts.tls = tls_opts.clone();
             }
         }
 

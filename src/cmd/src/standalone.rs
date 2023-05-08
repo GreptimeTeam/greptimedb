@@ -42,6 +42,8 @@ use crate::error::{
 use crate::frontend::load_frontend_plugins;
 use crate::options::{MixOptions, Options, TopLevelOptions};
 
+const STANDALONE_ENV_VAR_PREFIX: &str = "STANDALONE";
+
 #[derive(Parser)]
 pub struct Command {
     #[clap(subcommand)]
@@ -76,7 +78,9 @@ impl SubCommand {
 
     fn load_options(&self, top_level_options: TopLevelOptions) -> Result<Options> {
         match self {
-            SubCommand::Start(cmd) => cmd.load_options(top_level_options),
+            SubCommand::Start(cmd) => {
+                cmd.load_options(top_level_options, STANDALONE_ENV_VAR_PREFIX)
+            }
         }
     }
 }
@@ -214,30 +218,37 @@ struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(&self, top_level_options: TopLevelOptions) -> Result<Options> {
+    fn load_options(
+        &self,
+        top_level_options: TopLevelOptions,
+        env_var_prefix: &str,
+    ) -> Result<Options> {
         let mut opts: StandaloneOptions =
-            Options::load_layered_options(self.config_file.clone(), "STANDALONE")?;
+            Options::load_layered_options(self.config_file.clone(), env_var_prefix)?;
 
         opts.enable_memory_catalog = self.enable_memory_catalog;
-        let mut fe_opts = opts.clone().frontend_options();
-        let mut logging = opts.logging.clone();
-        let dn_opts = opts.datanode_options();
+
+        opts.mode = Mode::Standalone;
 
         if let Some(dir) = top_level_options.log_dir {
-            logging.dir = dir;
+            opts.logging.dir = dir;
         }
         if let Some(level) = top_level_options.log_level {
-            logging.level = level;
+            opts.logging.level = level;
         }
 
-        fe_opts.mode = Mode::Standalone;
+        let tls_opts = TlsOption::new(
+            self.tls_mode.clone(),
+            self.tls_cert_path.clone(),
+            self.tls_key_path.clone(),
+        );
 
         if let Some(addr) = self.http_addr.clone() {
-            fe_opts.http_options = Some(HttpOptions {
-                addr,
-                ..Default::default()
-            });
+            if let Some(ref mut http_opts) = opts.http_options {
+                http_opts.addr = addr
+            }
         }
+
         if let Some(addr) = self.rpc_addr.clone() {
             // frontend grpc addr conflict with datanode default grpc addr
             let datanode_grpc_addr = DatanodeOptions::default().rpc_addr;
@@ -249,56 +260,42 @@ impl StartCommand {
                 }
                 .fail();
             }
-            fe_opts.grpc_options = Some(GrpcOptions {
-                addr,
-                ..Default::default()
-            });
+            if let Some(ref mut grpc_opts) = opts.grpc_options {
+                grpc_opts.addr = addr
+            }
         }
 
         if let Some(addr) = self.mysql_addr.clone() {
-            fe_opts.mysql_options = Some(MysqlOptions {
-                addr,
-                ..Default::default()
-            })
+            if let Some(ref mut mysql_opts) = opts.mysql_options {
+                mysql_opts.addr = addr;
+                mysql_opts.tls = tls_opts.clone();
+            }
         }
 
         if let Some(addr) = self.prom_addr.clone() {
-            fe_opts.prom_options = Some(PromOptions { addr })
+            opts.prom_options = Some(PromOptions { addr })
         }
 
         if let Some(addr) = self.postgres_addr.clone() {
-            fe_opts.postgres_options = Some(PostgresOptions {
-                addr,
-                ..Default::default()
-            })
+            if let Some(ref mut postgres_opts) = opts.postgres_options {
+                postgres_opts.addr = addr;
+                postgres_opts.tls = tls_opts.clone();
+            }
         }
 
         if let Some(addr) = self.opentsdb_addr.clone() {
-            fe_opts.opentsdb_options = Some(OpentsdbOptions {
-                addr,
-                ..Default::default()
-            });
+            if let Some(ref mut opentsdb_addr) = opts.opentsdb_options {
+                opentsdb_addr.addr = addr;
+            }
         }
 
         if self.influxdb_enable {
-            fe_opts.influxdb_options = Some(InfluxdbOptions { enable: true });
+            opts.influxdb_options = Some(InfluxdbOptions { enable: true });
         }
 
-        let tls_option = TlsOption::new(
-            self.tls_mode.clone(),
-            self.tls_cert_path.clone(),
-            self.tls_key_path.clone(),
-        );
-
-        if let Some(mut mysql_options) = fe_opts.mysql_options {
-            mysql_options.tls = tls_option.clone();
-            fe_opts.mysql_options = Some(mysql_options);
-        }
-
-        if let Some(mut postgres_options) = fe_opts.postgres_options {
-            postgres_options.tls = tls_option;
-            fe_opts.postgres_options = Some(postgres_options);
-        }
+        let fe_opts = opts.clone().frontend_options();
+        let logging = opts.logging.clone();
+        let dn_opts = opts.datanode_options();
 
         Ok(Options::Standalone(Box::new(MixOptions {
             fe_opts,
@@ -449,7 +446,7 @@ mod tests {
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
         };
 
-        let Options::Standalone(options) = cmd.load_options(TopLevelOptions::default()).unwrap() else {unreachable!()};
+        let Options::Standalone(options) = cmd.load_options(TopLevelOptions::default(), STANDALONE_ENV_VAR_PREFIX).unwrap() else {unreachable!()};
         let fe_opts = options.fe_opts;
         let dn_opts = options.dn_opts;
         let logging_opts = options.logging;
@@ -516,12 +513,71 @@ mod tests {
             .load_options(TopLevelOptions {
                 log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
-            })
+            }, STANDALONE_ENV_VAR_PREFIX)
             .unwrap() else {
             unreachable!()
         };
 
         assert_eq!("/tmp/greptimedb/test/logs", opts.logging.dir);
         assert_eq!("debug", opts.logging.level);
+    }
+
+    #[test]
+    fn test_config_precedence_order() {
+        let mut file = create_named_temp_file();
+        let toml_str = r#"
+            mode = "standalone"
+
+            [logging]
+            dir = "/tmp/greptimedb/logs"
+            level = "debug"
+        "#;
+        write!(file, "{}", toml_str).unwrap();
+
+        temp_env::with_vars(
+            vec![
+                ("STANDALONE_UT-LOGGING.DIR", Some("/other/log/dir")),
+                ("STANDALONE_UT-LOGGING.LEVEL", Some("info")),
+            ],
+            || {
+                let command = StartCommand {
+                    config_file: Some(file.path().to_str().unwrap().to_string()),
+                    http_addr: None,
+                    rpc_addr: None,
+                    mysql_addr: None,
+                    prom_addr: None,
+                    postgres_addr: None,
+                    opentsdb_addr: None,
+                    influxdb_enable: false,
+                    enable_memory_catalog: false,
+                    tls_mode: None,
+                    tls_cert_path: None,
+                    tls_key_path: None,
+                    user_provider: None,
+                };
+
+                let top_level_opts = TopLevelOptions {
+                    log_dir: None,
+                    log_level: Some("error".to_string()),
+                };
+                let Options::Standalone(opts) =
+                    command.load_options(top_level_opts, "STANDALONE_UT").unwrap() else {unreachable!()};
+
+                // Should be read from config file.
+                assert_eq!(opts.fe_opts.mode, Mode::Standalone);
+
+                // Should be read from cli, cli > env > config file.
+                assert_eq!(opts.logging.level, "error".to_string());
+
+                // Should be read from env, env > config file.
+                assert_eq!(opts.logging.dir, "/other/log/dir".to_string());
+
+                // Should be default value.
+                assert_eq!(
+                    opts.fe_opts.grpc_options.unwrap().addr,
+                    GrpcOptions::default().addr
+                );
+            },
+        );
     }
 }
