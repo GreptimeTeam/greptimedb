@@ -26,6 +26,7 @@ use common_telemetry::{info, warn};
 use dashmap::DashMap;
 pub use failure_handler::RegionFailureHandler;
 pub use keep_lease_handler::KeepLeaseHandler;
+use metrics::{decrement_gauge, increment_gauge};
 pub use on_leader_start::OnLeaderStartHandler;
 pub use persist_stats_handler::PersistStatsHandler;
 pub use response_header_handler::ResponseHeaderHandler;
@@ -37,6 +38,7 @@ use self::instruction::Instruction;
 use self::node_stat::Stat;
 use crate::error::{self, Result};
 use crate::metasrv::Context;
+use crate::metrics::METRIC_META_HEARTBEAT_CONNECTION_NUM;
 use crate::sequence::Sequence;
 use crate::service::mailbox::{Channel, Mailbox, MailboxReceiver, MailboxRef, MessageId};
 
@@ -127,6 +129,7 @@ impl HeartbeatHandlerGroup {
     pub async fn register(&self, key: impl AsRef<str>, pusher: Pusher) {
         let mut pushers = self.pushers.write().await;
         let key = key.as_ref();
+        increment_gauge!(METRIC_META_HEARTBEAT_CONNECTION_NUM, 1.0);
         info!("Pusher register: {}", key);
         pushers.insert(key.into(), pusher);
     }
@@ -134,6 +137,7 @@ impl HeartbeatHandlerGroup {
     pub async fn unregister(&self, key: impl AsRef<str>) -> Option<Pusher> {
         let mut pushers = self.pushers.write().await;
         let key = key.as_ref();
+        decrement_gauge!(METRIC_META_HEARTBEAT_CONNECTION_NUM, 1.0);
         info!("Pusher unregister: {}", key);
         pushers.remove(key)
     }
