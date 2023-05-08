@@ -67,8 +67,28 @@ pub enum Error {
     #[snafu(display("Catalog not found: {}", name))]
     CatalogNotFound { name: String, location: Location },
 
+    #[snafu(display("Failed to access catalog, source: {}", source))]
+    AccessCatalog {
+        #[snafu(backtrace)]
+        source: catalog::error::Error,
+    },
+
     #[snafu(display("Schema not found: {}", name))]
     SchemaNotFound { name: String, location: Location },
+
+    #[snafu(display("Failed to open table: {}, source: {}", table_name, source))]
+    OpenTable {
+        table_name: String,
+        #[snafu(backtrace)]
+        source: TableError,
+    },
+
+    #[snafu(display("Failed to register table: {}, source: {}", table_name, source))]
+    RegisterTable {
+        table_name: String,
+        #[snafu(backtrace)]
+        source: catalog::error::Error,
+    },
 
     #[snafu(display("Failed to create table: {}, source: {}", table_name, source))]
     CreateTable {
@@ -441,6 +461,15 @@ pub enum Error {
         location: Location,
         source: JsonError,
     },
+
+    #[snafu(display("Failed to decode object into json, source: {}", source))]
+    DecodeJson {
+        location: Location,
+        source: JsonError,
+    },
+
+    #[snafu(display("Payload not exist"))]
+    PayloadNotExist { location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -456,11 +485,14 @@ impl ErrorExt for Error {
             | DescribeStatement { source } => source.status_code(),
 
             DecodeLogicalPlan { source } => source.status_code(),
-            NewCatalog { source } | RegisterSchema { source } => source.status_code(),
-            FindTable { source, .. } => source.status_code(),
-            CreateTable { source, .. } | GetTable { source, .. } | AlterTable { source, .. } => {
+            NewCatalog { source } | RegisterSchema { source } | RegisterTable { source, .. } => {
                 source.status_code()
             }
+            FindTable { source, .. } => source.status_code(),
+            CreateTable { source, .. }
+            | GetTable { source, .. }
+            | AlterTable { source, .. }
+            | OpenTable { source, .. } => source.status_code(),
             DropTable { source, .. } => source.status_code(),
             FlushTable { source, .. } => source.status_code(),
 
@@ -483,6 +515,8 @@ impl ErrorExt for Error {
 
             InferSchema { source, .. } => source.status_code(),
 
+            AccessCatalog { source, .. } => source.status_code(),
+
             ColumnValuesNumberMismatch { .. }
             | InvalidSql { .. }
             | NotSupportSql { .. }
@@ -501,7 +535,9 @@ impl ErrorExt for Error {
             | ColumnNoneDefaultValue { .. }
             | PrepareImmutableTable { .. } => StatusCode::InvalidArguments,
 
-            EncodeJson { .. } => StatusCode::Unexpected,
+            EncodeJson { .. } | DecodeJson { .. } | PayloadNotExist { .. } => {
+                StatusCode::Unexpected
+            }
 
             // TODO(yingwen): Further categorize http error.
             StartServer { .. }

@@ -62,6 +62,7 @@ use crate::error::{
     self, CatalogSnafu, MetaClientInitSnafu, MissingMetasrvOptsSnafu, MissingNodeIdSnafu,
     NewCatalogSnafu, OpenLogStoreSnafu, RecoverProcedureSnafu, Result, ShutdownInstanceSnafu,
 };
+use crate::heartbeat::handler::{InstructionHandler, NaiveHandlerExecutor};
 use crate::heartbeat::HeartbeatTask;
 use crate::sql::{SqlHandler, SqlRequest};
 
@@ -204,6 +205,9 @@ impl Instance {
                 opts.rpc_hostname.clone(),
                 meta_client.as_ref().unwrap().clone(),
                 catalog_manager.clone(),
+                Arc::new(NaiveHandlerExecutor::new(Arc::new(
+                    InstructionHandler::new(catalog_manager.clone(), engine_manager.clone()),
+                ))),
             )),
         };
 

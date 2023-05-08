@@ -20,6 +20,7 @@ common-datasource = { path = "../common/datasource" }
 common-function = { path = "../common/function" }
 common-grpc = { path = "../common/grpc" }
 common-grpc-expr = { path = "../common/grpc-expr" }
+common-meta = { path = "../common/meta" }
 common-procedure = { path = "../common/procedure" }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
@@ -33,6 +34,7 @@ datatypes = { path = "../datatypes" }
 file-table-engine = { path = "../file-table-engine" }
 futures = "0.3"
 futures-util.workspace = true
+key-lock = "0.1"
 hyper = { version = "0.14", features = ["full"] }
 humantime-serde = "1.1"
 log = "0.4"

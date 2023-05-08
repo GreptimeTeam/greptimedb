@@ -1731,6 +1731,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-meta"
+version = "0.2.0"
+dependencies = [
+ "common-error",
+ "serde",
+ "serde_json",
+ "snafu",
+]
+
+[[package]]
 name = "common-procedure"
 version = "0.2.0"
 dependencies = [
@@ -2462,6 +2472,7 @@ dependencies = [
  "common-function",
  "common-grpc",
  "common-grpc-expr",
+ "common-meta",
  "common-procedure",
  "common-query",
  "common-recordbatch",
@@ -2478,6 +2489,7 @@ dependencies = [
  "futures-util",
  "humantime-serde",
  "hyper",
+ "key-lock",
  "log",
  "log-store",
  "meta-client",
@@ -4791,6 +4803,7 @@ dependencies = [
  "common-catalog",
  "common-error",
  "common-grpc",
+ "common-meta",
  "common-procedure",
  "common-runtime",
  "common-telemetry",

@@ -178,6 +178,15 @@ pub struct OpenTableRequest {
     pub table_id: TableId,
 }
 
+/// Close table request
+#[derive(Debug, Clone)]
+pub struct CloseTableRequest {
+    pub catalog_name: String,
+    pub schema_name: String,
+    pub table_name: String,
+    pub table_id: TableId,
+}
+
 /// Alter table request
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlterTableRequest {

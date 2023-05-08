@@ -1,0 +1,11 @@
+[package]
+name = "common-meta"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+common-error = { path = "../error" }
+serde.workspace = true
+snafu.workspace = true
+serde_json.workspace = true
