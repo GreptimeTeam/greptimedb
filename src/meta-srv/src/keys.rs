@@ -402,7 +402,7 @@ mod tests {
             ],
         };
         let region_num = stat_val.region_num().unwrap();
-        assert_eq!(1, region_num);
+        assert_eq!(2, region_num);
     }
 
     #[test]
