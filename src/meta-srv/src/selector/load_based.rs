@@ -25,7 +25,7 @@ use crate::lease;
 use crate::metasrv::Context;
 use crate::selector::{Namespace, Selector};
 
-const LARGEST_REGION_COUNT: u64 = 100000;
+const LARGEST_REGION_COUNT: u64 = u64::MAX;
 
 pub struct LoadBasedSelector {
     pub meta_peer_client: MetaPeerClient,
