@@ -21,13 +21,14 @@ use api::v1::meta::{
     RangeRequest, RangeResponse, ResponseHeader,
 };
 use common_error::prelude::*;
-use common_telemetry::warn;
+use common_telemetry::{timer, warn};
 use etcd_client::{
     Client, Compare, CompareOp, DeleteOptions, GetOptions, PutOptions, Txn, TxnOp, TxnOpResponse,
 };
 
 use crate::error;
 use crate::error::Result;
+use crate::metrics::METRIC_META_KV_REQUEST;
 use crate::service::store::kv::{KvStore, KvStoreRef};
 
 pub struct EtcdStore {
@@ -61,6 +62,15 @@ impl KvStore for EtcdStore {
             options,
         } = req.try_into()?;
 
+        let _timer = timer!(
+            METRIC_META_KV_REQUEST,
+            &[
+                ("target", "etcd"),
+                ("op", "range"),
+                ("cluster_id", &cluster_id.to_string())
+            ]
+        );
+
         let res = self
             .client
             .kv_client()
@@ -90,6 +100,15 @@ impl KvStore for EtcdStore {
             options,
         } = req.try_into()?;
 
+        let _timer = timer!(
+            METRIC_META_KV_REQUEST,
+            &[
+                ("target", "etcd"),
+                ("op", "put"),
+                ("cluster_id", &cluster_id.to_string())
+            ]
+        );
+
         let res = self
             .client
             .kv_client()
@@ -109,6 +128,15 @@ impl KvStore for EtcdStore {
             keys,
             options,
         } = req.try_into()?;
+
+        let _timer = timer!(
+            METRIC_META_KV_REQUEST,
+            &[
+                ("target", "etcd"),
+                ("op", "batch_get"),
+                ("cluster_id", &cluster_id.to_string())
+            ]
+        );
 
         let get_ops: Vec<_> = keys
             .into_iter()
@@ -143,6 +171,15 @@ impl KvStore for EtcdStore {
             kvs,
             options,
         } = req.try_into()?;
+
+        let _timer = timer!(
+            METRIC_META_KV_REQUEST,
+            &[
+                ("target", "etcd"),
+                ("op", "batch_put"),
+                ("cluster_id", &cluster_id.to_string())
+            ]
+        );
 
         let put_ops = kvs
             .into_iter()
@@ -179,6 +216,15 @@ impl KvStore for EtcdStore {
             keys,
             options,
         } = req.try_into()?;
+
+        let _timer = timer!(
+            METRIC_META_KV_REQUEST,
+            &[
+                ("target", "etcd"),
+                ("op", "batch_delete"),
+                ("cluster_id", &cluster_id.to_string())
+            ]
+        );
 
         let mut prev_kvs = Vec::with_capacity(keys.len());
 
@@ -219,6 +265,15 @@ impl KvStore for EtcdStore {
             value,
             put_options,
         } = req.try_into()?;
+
+        let _timer = timer!(
+            METRIC_META_KV_REQUEST,
+            &[
+                ("target", "etcd"),
+                ("op", "compare_and_put"),
+                ("cluster_id", &cluster_id.to_string())
+            ]
+        );
 
         let compare = if expect.is_empty() {
             // create if absent
@@ -271,6 +326,15 @@ impl KvStore for EtcdStore {
             options,
         } = req.try_into()?;
 
+        let _timer = timer!(
+            METRIC_META_KV_REQUEST,
+            &[
+                ("target", "etcd"),
+                ("op", "delete_range"),
+                ("cluster_id", &cluster_id.to_string())
+            ]
+        );
+
         let res = self
             .client
             .kv_client()
@@ -299,6 +363,15 @@ impl KvStore for EtcdStore {
             to_key,
             delete_options,
         } = req.try_into()?;
+
+        let _timer = timer!(
+            METRIC_META_KV_REQUEST,
+            &[
+                ("target", "etcd"),
+                ("op", "move_value"),
+                ("cluster_id", &cluster_id.to_string())
+            ]
+        );
 
         let mut client = self.client.kv_client();
 
