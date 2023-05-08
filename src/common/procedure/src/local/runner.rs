@@ -750,6 +750,7 @@ mod tests {
         // Clean outdated meta.
         manager_ctx.remove_outdated_meta(Duration::from_millis(1));
         assert!(manager_ctx.state(procedure_id).is_none());
+        assert!(manager_ctx.finished_procedures.lock().unwrap().is_empty());
         for child_id in children_ids {
             assert!(manager_ctx.state(child_id).is_none());
         }
