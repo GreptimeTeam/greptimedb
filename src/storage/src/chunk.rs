@@ -24,6 +24,7 @@ use table::predicate::{Predicate, TimeRangePredicateBuilder};
 
 use crate::error::{self, Error, Result};
 use crate::memtable::{IterContext, MemtableRef};
+use crate::read::windowed::WindowedReader;
 use crate::read::{Batch, BoxedBatchReader, DedupReader, MergeReaderBuilder};
 use crate::schema::{ProjectedSchema, ProjectedSchemaRef, RegionSchemaRef};
 use crate::sst::{AccessLayerRef, FileHandle, LevelMetas, ReadOptions};
@@ -84,6 +85,7 @@ pub struct ChunkReaderBuilder {
     iter_ctx: IterContext,
     memtables: Vec<MemtableRef>,
     files_to_read: Vec<FileHandle>,
+    time_windows: Option<Vec<TimestampRange>>,
 }
 
 impl ChunkReaderBuilder {
@@ -96,6 +98,7 @@ impl ChunkReaderBuilder {
             iter_ctx: IterContext::default(),
             memtables: Vec::new(),
             files_to_read: Vec::new(),
+            time_windows: None,
         }
     }
 
@@ -151,6 +154,63 @@ impl ChunkReaderBuilder {
         self
     }
 
+    /// Set time windows for scan.
+    pub fn time_windows(mut self, windows: Vec<TimestampRange>) -> Self {
+        self.time_windows = Some(windows);
+        self
+    }
+
+    pub async fn build_windowed(
+        self,
+        schema: &ProjectedSchemaRef,
+        time_range_predicate: &TimestampRange,
+        windows: Vec<TimestampRange>,
+    ) -> Result<BoxedBatchReader> {
+        let mut readers = Vec::with_capacity(windows.len());
+        for window in windows {
+            debug!("Scan time window: {:?}", window);
+            let time_range_predicate = time_range_predicate.and(&window);
+            let reader = self.build_reader(schema, &time_range_predicate).await?;
+            readers.push(reader);
+        }
+        let windowed_reader = WindowedReader::new(schema.clone(), readers);
+        Ok(Box::new(windowed_reader) as Box<_>)
+    }
+
+    async fn build_reader(
+        &self,
+        schema: &ProjectedSchemaRef,
+        time_range: &TimestampRange,
+    ) -> Result<BoxedBatchReader> {
+        let num_sources = self.memtables.len() + self.files_to_read.len();
+        let mut reader_builder = MergeReaderBuilder::with_capacity(schema.clone(), num_sources)
+            .batch_size(self.iter_ctx.batch_size);
+
+        for mem in &self.memtables {
+            let iter = mem.iter(&self.iter_ctx)?;
+            reader_builder = reader_builder.push_batch_iter(iter);
+        }
+
+        let read_opts = ReadOptions {
+            batch_size: self.iter_ctx.batch_size,
+            projected_schema: schema.clone(),
+            predicate: Predicate::new(self.filters.clone()),
+            time_range: *time_range,
+        };
+        for file in &self.files_to_read {
+            if !Self::file_in_range(file, time_range) {
+                debug!("Skip file {:?}, predicate: {:?}", file, time_range);
+                continue;
+            }
+            let reader = self.sst_layer.read_sst(file.clone(), &read_opts).await?;
+            reader_builder = reader_builder.push_batch_reader(reader);
+        }
+
+        let reader = reader_builder.build();
+        let reader = DedupReader::new(schema.clone(), reader);
+        Ok(Box::new(reader) as Box<_>)
+    }
+
     pub async fn build(mut self) -> Result<ChunkReaderImpl> {
         let time_range_predicate = self.build_time_range_predicate();
         debug!(
@@ -159,43 +219,19 @@ impl ChunkReaderBuilder {
         );
 
         let schema = Arc::new(
-            ProjectedSchema::new(self.schema, self.projection)
+            ProjectedSchema::new(self.schema.clone(), self.projection.clone())
                 .context(error::InvalidProjectionSnafu)?,
         );
-
-        let num_sources = self.memtables.len() + self.files_to_read.len();
-        let mut reader_builder = MergeReaderBuilder::with_capacity(schema.clone(), num_sources)
-            .batch_size(self.iter_ctx.batch_size);
-
         self.iter_ctx.projected_schema = Some(schema.clone());
-        for mem in self.memtables {
-            let iter = mem.iter(&self.iter_ctx)?;
-            reader_builder = reader_builder.push_batch_iter(iter);
-        }
 
-        let read_opts = ReadOptions {
-            batch_size: self.iter_ctx.batch_size,
-            projected_schema: schema.clone(),
-            predicate: Predicate::new(self.filters),
-            time_range: time_range_predicate,
+        let reader = if let Some(windows) = self.time_windows.take() {
+            self.build_windowed(&schema, &time_range_predicate, windows)
+                .await?
+        } else {
+            self.build_reader(&schema, &time_range_predicate).await?
         };
-        for file in &self.files_to_read {
-            if !Self::file_in_range(file, time_range_predicate) {
-                debug!(
-                    "Skip file {:?}, predicate: {:?}",
-                    file, time_range_predicate
-                );
-                continue;
-            }
-            let reader = self.sst_layer.read_sst(file.clone(), &read_opts).await?;
 
-            reader_builder = reader_builder.push_batch_reader(reader);
-        }
-
-        let reader = reader_builder.build();
-        let reader = DedupReader::new(schema.clone(), reader);
-
-        Ok(ChunkReaderImpl::new(schema, Box::new(reader)))
+        Ok(ChunkReaderImpl::new(schema, reader))
     }
 
     /// Build time range predicate from schema and filters.
@@ -206,13 +242,13 @@ impl ChunkReaderBuilder {
 
     /// Check if SST file's time range matches predicate.
     #[inline]
-    fn file_in_range(file: &FileHandle, predicate: TimestampRange) -> bool {
-        if predicate == TimestampRange::min_to_max() {
+    fn file_in_range(file: &FileHandle, predicate: &TimestampRange) -> bool {
+        if predicate == &TimestampRange::min_to_max() {
             return true;
         }
         // end_timestamp of sst file is inclusive.
         let Some((start, end)) = *file.time_range() else { return true; };
         let file_ts_range = TimestampRange::new_inclusive(Some(start), Some(end));
-        file_ts_range.intersects(&predicate)
+        file_ts_range.intersects(predicate)
     }
 }

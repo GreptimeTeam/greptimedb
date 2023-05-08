@@ -75,7 +75,9 @@ impl LogStore for NoopLogStore {
         _id: Id,
     ) -> Result<store_api::logstore::entry_stream::SendableEntryStream<'_, Self::Entry, Self::Error>>
     {
-        todo!()
+        Ok(Box::pin(futures::stream::once(futures::future::ready(Ok(
+            vec![],
+        )))))
     }
 
     async fn create_namespace(&mut self, _ns: &Self::Namespace) -> Result<()> {

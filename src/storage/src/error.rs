@@ -499,6 +499,12 @@ pub enum Error {
         #[snafu(backtrace)]
         source: RuntimeError,
     },
+
+    #[snafu(display("Failed to convert columns to rows"))]
+    ConvertColumnsToRows {
+        source: ArrowError,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -596,6 +602,7 @@ impl ErrorExt for Error {
             | StopPickTask { .. } => StatusCode::Unexpected,
 
             TtlCalculation { source, .. } => source.status_code(),
+            ConvertColumnsToRows { .. } => StatusCode::Unexpected,
         }
     }
 
