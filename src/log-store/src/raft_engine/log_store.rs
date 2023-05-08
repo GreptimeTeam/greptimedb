@@ -336,7 +336,6 @@ mod tests {
         })
         .await
         .unwrap();
-        logstore.start().unwrap();
         let namespaces = logstore.list_namespaces().await.unwrap();
         assert_eq!(0, namespaces.len());
     }
@@ -350,7 +349,6 @@ mod tests {
         })
         .await
         .unwrap();
-        logstore.start().unwrap();
         assert!(logstore.list_namespaces().await.unwrap().is_empty());
 
         logstore
@@ -377,7 +375,6 @@ mod tests {
         })
         .await
         .unwrap();
-        logstore.start().unwrap();
 
         let namespace = Namespace::with_id(1);
         let cnt = 1024;
@@ -439,7 +436,6 @@ mod tests {
         })
         .await
         .unwrap();
-        logstore.start().unwrap();
 
         let entries =
             collect_entries(logstore.read(&Namespace::with_id(1), 1).await.unwrap()).await;
@@ -479,7 +475,6 @@ mod tests {
         };
 
         let logstore = RaftEngineLogStore::try_new(config).await.unwrap();
-        logstore.start().unwrap();
         let namespace = Namespace::with_id(42);
         for id in 0..4096 {
             let entry = Entry::create(id, namespace.id(), [b'x'; 4096].to_vec());
@@ -512,7 +507,6 @@ mod tests {
         };
 
         let logstore = RaftEngineLogStore::try_new(config).await.unwrap();
-        logstore.start().unwrap();
         let namespace = Namespace::with_id(42);
         for id in 0..1024 {
             let entry = Entry::create(id, namespace.id(), [b'x'; 4096].to_vec());
