@@ -20,7 +20,7 @@ use api::v1::meta::{
     RouteResponse, Table, TableName, TableRoute, TableRouteValue,
 };
 use catalog::helper::{TableGlobalKey, TableGlobalValue};
-use common_telemetry::warn;
+use common_telemetry::{timer, warn};
 use snafu::{OptionExt, ResultExt};
 use table::metadata::RawTableInfo;
 use tonic::{Request, Response};
@@ -29,6 +29,7 @@ use crate::error;
 use crate::error::Result;
 use crate::keys::TableRouteKey;
 use crate::metasrv::{Context, MetaSrv, SelectorRef};
+use crate::metrics::METRIC_META_ROUTE_REQUEST;
 use crate::sequence::SequenceRef;
 use crate::service::store::ext::KvStoreExt;
 use crate::service::store::kv::KvStoreRef;
@@ -39,7 +40,16 @@ impl router_server::Router for MetaSrv {
     async fn create(&self, req: Request<CreateRequest>) -> GrpcResult<RouteResponse> {
         let req = req.into_inner();
 
-        let CreateRequest { table_name, .. } = &req;
+        let CreateRequest {
+            header, table_name, ..
+        } = &req;
+        let cluster_id = header.as_ref().map_or(0, |h| h.cluster_id);
+
+        let _timer = timer!(
+            METRIC_META_ROUTE_REQUEST,
+            &[("op", "create"), ("cluster_id", &cluster_id.to_string())]
+        );
+
         let table_name = table_name.clone().context(error::EmptyTableNameSnafu)?;
         let ctx = self.create_ctx(table_name);
 
@@ -53,6 +63,13 @@ impl router_server::Router for MetaSrv {
 
     async fn route(&self, req: Request<RouteRequest>) -> GrpcResult<RouteResponse> {
         let req = req.into_inner();
+        let cluster_id = req.header.as_ref().map_or(0, |h| h.cluster_id);
+
+        let _timer = timer!(
+            METRIC_META_ROUTE_REQUEST,
+            &[("op", "route"), ("cluster_id", &cluster_id.to_string())]
+        );
+
         let ctx = self.new_ctx();
         let res = handle_route(req, ctx).await?;
 
@@ -61,6 +78,13 @@ impl router_server::Router for MetaSrv {
 
     async fn delete(&self, req: Request<DeleteRequest>) -> GrpcResult<RouteResponse> {
         let req = req.into_inner();
+        let cluster_id = req.header.as_ref().map_or(0, |h| h.cluster_id);
+
+        let _timer = timer!(
+            METRIC_META_ROUTE_REQUEST,
+            &[("op", "delete"), ("cluster_id", &cluster_id.to_string())]
+        );
+
         let ctx = self.new_ctx();
         let res = handle_delete(req, ctx).await?;
 

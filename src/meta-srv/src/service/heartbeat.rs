@@ -92,7 +92,7 @@ impl heartbeat_server::Heartbeat for MetaSrv {
             }
             info!(
                 "Heartbeat stream broken: {:?}",
-                pusher_key.as_ref().unwrap_or(&"unknow".to_string())
+                pusher_key.as_ref().unwrap_or(&"unknown".to_string())
             );
             if let Some(key) = pusher_key {
                 let _ = handler_group.unregister(&key).await;

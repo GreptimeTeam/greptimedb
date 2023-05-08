@@ -21,13 +21,14 @@ use api::v1::meta::{
     RangeRequest, RangeResponse, ResponseHeader,
 };
 use common_error::prelude::*;
-use common_telemetry::warn;
+use common_telemetry::{timer, warn};
 use etcd_client::{
     Client, Compare, CompareOp, DeleteOptions, GetOptions, PutOptions, Txn, TxnOp, TxnOpResponse,
 };
 
 use crate::error;
 use crate::error::Result;
+use crate::metrics::METRIC_META_KV_REQUEST;
 use crate::service::store::kv::{KvStore, KvStoreRef};
 
 pub struct EtcdStore {
@@ -61,6 +62,15 @@ impl KvStore for EtcdStore {
             options,
         } = req.try_into()?;
 
+        let _timer = timer!(
+            METRIC_META_KV_REQUEST,
+            &[
+                ("target", "etcd"),
+                ("op", "range"),
+                ("cluster_id", &cluster_id.to_string())
+            ]
+        );
+
         let res = self
             .client
             .kv_client()
@@ -68,7 +78,11 @@ impl KvStore for EtcdStore {
             .await
             .context(error::EtcdFailedSnafu)?;
 
-        let kvs = res.kvs().iter().map(KvPair::to_kv).collect::<Vec<_>>();
+        let kvs = res
+            .kvs()
+            .iter()
+            .map(KvPair::from_etcd_kv)
+            .collect::<Vec<_>>();
 
         let header = Some(ResponseHeader::success(cluster_id));
         Ok(RangeResponse {
@@ -86,6 +100,15 @@ impl KvStore for EtcdStore {
             options,
         } = req.try_into()?;
 
+        let _timer = timer!(
+            METRIC_META_KV_REQUEST,
+            &[
+                ("target", "etcd"),
+                ("op", "put"),
+                ("cluster_id", &cluster_id.to_string())
+            ]
+        );
+
         let res = self
             .client
             .kv_client()
@@ -93,7 +116,7 @@ impl KvStore for EtcdStore {
             .await
             .context(error::EtcdFailedSnafu)?;
 
-        let prev_kv = res.prev_key().map(KvPair::to_kv);
+        let prev_kv = res.prev_key().map(KvPair::from_etcd_kv);
 
         let header = Some(ResponseHeader::success(cluster_id));
         Ok(PutResponse { header, prev_kv })
@@ -105,6 +128,15 @@ impl KvStore for EtcdStore {
             keys,
             options,
         } = req.try_into()?;
+
+        let _timer = timer!(
+            METRIC_META_KV_REQUEST,
+            &[
+                ("target", "etcd"),
+                ("op", "batch_get"),
+                ("cluster_id", &cluster_id.to_string())
+            ]
+        );
 
         let get_ops: Vec<_> = keys
             .into_iter()
@@ -126,7 +158,7 @@ impl KvStore for EtcdStore {
                 _ => unreachable!(),
             };
 
-            kvs.extend(get_res.kvs().iter().map(KvPair::to_kv));
+            kvs.extend(get_res.kvs().iter().map(KvPair::from_etcd_kv));
         }
 
         let header = Some(ResponseHeader::success(cluster_id));
@@ -139,6 +171,15 @@ impl KvStore for EtcdStore {
             kvs,
             options,
         } = req.try_into()?;
+
+        let _timer = timer!(
+            METRIC_META_KV_REQUEST,
+            &[
+                ("target", "etcd"),
+                ("op", "batch_put"),
+                ("cluster_id", &cluster_id.to_string())
+            ]
+        );
 
         let put_ops = kvs
             .into_iter()
@@ -158,7 +199,7 @@ impl KvStore for EtcdStore {
             match op_res {
                 TxnOpResponse::Put(put_res) => {
                     if let Some(prev_kv) = put_res.prev_key() {
-                        prev_kvs.push(KvPair::to_kv(prev_kv));
+                        prev_kvs.push(KvPair::from_etcd_kv(prev_kv));
                     }
                 }
                 _ => unreachable!(), // never get here
@@ -175,6 +216,15 @@ impl KvStore for EtcdStore {
             keys,
             options,
         } = req.try_into()?;
+
+        let _timer = timer!(
+            METRIC_META_KV_REQUEST,
+            &[
+                ("target", "etcd"),
+                ("op", "batch_delete"),
+                ("cluster_id", &cluster_id.to_string())
+            ]
+        );
 
         let mut prev_kvs = Vec::with_capacity(keys.len());
 
@@ -195,7 +245,7 @@ impl KvStore for EtcdStore {
             match op_res {
                 TxnOpResponse::Delete(delete_res) => {
                     delete_res.prev_kvs().iter().for_each(|kv| {
-                        prev_kvs.push(KvPair::to_kv(kv));
+                        prev_kvs.push(KvPair::from_etcd_kv(kv));
                     });
                 }
                 _ => unreachable!(), // never get here
@@ -215,6 +265,15 @@ impl KvStore for EtcdStore {
             value,
             put_options,
         } = req.try_into()?;
+
+        let _timer = timer!(
+            METRIC_META_KV_REQUEST,
+            &[
+                ("target", "etcd"),
+                ("op", "compare_and_put"),
+                ("cluster_id", &cluster_id.to_string())
+            ]
+        );
 
         let compare = if expect.is_empty() {
             // create if absent
@@ -247,8 +306,8 @@ impl KvStore for EtcdStore {
             })?;
 
         let prev_kv = match op_res {
-            TxnOpResponse::Put(res) => res.prev_key().map(KvPair::to_kv),
-            TxnOpResponse::Get(res) => res.kvs().first().map(KvPair::to_kv),
+            TxnOpResponse::Put(res) => res.prev_key().map(KvPair::from_etcd_kv),
+            TxnOpResponse::Get(res) => res.kvs().first().map(KvPair::from_etcd_kv),
             _ => unreachable!(), // never get here
         };
 
@@ -267,6 +326,15 @@ impl KvStore for EtcdStore {
             options,
         } = req.try_into()?;
 
+        let _timer = timer!(
+            METRIC_META_KV_REQUEST,
+            &[
+                ("target", "etcd"),
+                ("op", "delete_range"),
+                ("cluster_id", &cluster_id.to_string())
+            ]
+        );
+
         let res = self
             .client
             .kv_client()
@@ -274,7 +342,11 @@ impl KvStore for EtcdStore {
             .await
             .context(error::EtcdFailedSnafu)?;
 
-        let prev_kvs = res.prev_kvs().iter().map(KvPair::to_kv).collect::<Vec<_>>();
+        let prev_kvs = res
+            .prev_kvs()
+            .iter()
+            .map(KvPair::from_etcd_kv)
+            .collect::<Vec<_>>();
 
         let header = Some(ResponseHeader::success(cluster_id));
         Ok(DeleteRangeResponse {
@@ -291,6 +363,15 @@ impl KvStore for EtcdStore {
             to_key,
             delete_options,
         } = req.try_into()?;
+
+        let _timer = timer!(
+            METRIC_META_KV_REQUEST,
+            &[
+                ("target", "etcd"),
+                ("op", "move_value"),
+                ("cluster_id", &cluster_id.to_string())
+            ]
+        );
 
         let mut client = self.client.kv_client();
 
@@ -341,13 +422,13 @@ impl KvStore for EtcdStore {
                     TxnOpResponse::Get(res) => {
                         return Ok(MoveValueResponse {
                             header,
-                            kv: res.kvs().first().map(KvPair::to_kv),
+                            kv: res.kvs().first().map(KvPair::from_etcd_kv),
                         });
                     }
                     TxnOpResponse::Delete(res) => {
                         return Ok(MoveValueResponse {
                             header,
-                            kv: res.prev_kvs().first().map(KvPair::to_kv),
+                            kv: res.prev_kvs().first().map(KvPair::from_etcd_kv),
                         });
                     }
                     _ => {}
@@ -613,7 +694,7 @@ impl<'a> KvPair<'a> {
     }
 
     #[inline]
-    fn to_kv(kv: &etcd_client::KeyValue) -> KeyValue {
+    fn from_etcd_kv(kv: &etcd_client::KeyValue) -> KeyValue {
         KeyValue::from(KvPair::new(kv))
     }
 }
