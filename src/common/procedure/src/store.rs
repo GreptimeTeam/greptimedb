@@ -31,6 +31,14 @@ pub mod state_store;
 /// Key prefix of procedure store.
 pub(crate) const PROC_PATH: &str = "procedure/";
 
+/// Constructs a path for procedure store.
+macro_rules! proc_path {
+    ($fmt:expr) => { format!("{}{}", $crate::store::PROC_PATH, format_args!($fmt)) };
+    ($fmt:expr, $($args:tt)*) => { format!("{}{}", $crate::store::PROC_PATH, format_args!($fmt, $($args)*)) };
+}
+
+pub(crate) use proc_path;
+
 /// Serialized data of a procedure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcedureMessage {
@@ -264,11 +272,6 @@ mod tests {
         let object_store = ObjectStore::new(builder).unwrap().finish();
 
         ProcedureStore::from(object_store)
-    }
-
-    macro_rules! proc_path {
-        ($fmt:expr) => { format!("{}{}", PROC_PATH, format_args!($fmt)) };
-        ($fmt:expr, $($args:tt)*) => { format!("{}{}", PROC_PATH, format_args!($fmt, $($args)*)) };
     }
 
     #[test]

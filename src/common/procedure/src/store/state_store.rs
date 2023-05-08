@@ -92,9 +92,7 @@ impl StateStore for ObjectStateStore {
                     StatusCode::StorageUnavailable,
                 ))
             })
-            .with_context(|_| ListStateSnafu {
-                path: path_string.clone(),
-            })?;
+            .context(ListStateSnafu { path })?;
 
         let store = self.store.clone();
 
