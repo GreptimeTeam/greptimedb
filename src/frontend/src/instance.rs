@@ -155,7 +155,8 @@ impl Instance {
             query_engine.clone(),
             dist_instance.clone(),
         ));
-        plugins.insert::<Option<StatementExecutorRef>>(Some(statement_executor.clone()));
+
+        plugins.insert::<StatementExecutorRef>(statement_executor.clone());
 
         Ok(Instance {
             catalog_manager,

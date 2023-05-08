@@ -181,9 +181,8 @@ impl Services {
             http_server_builder.with_metrics_handler(MetricsHandler);
             http_server_builder.with_script_handler(instance.clone());
 
-            if let Some(configurator) = plugins.get::<Option<ConfiguratorRef>>() {
-                http_server_builder.with_configurator(configurator);
-            }
+            http_server_builder.with_configurator(plugins.get::<ConfiguratorRef>());
+
             let http_server = http_server_builder.build();
             result.push((Box::new(http_server), http_addr));
         }
