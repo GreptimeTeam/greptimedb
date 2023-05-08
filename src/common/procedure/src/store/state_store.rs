@@ -84,8 +84,6 @@ impl StateStore for ObjectStateStore {
     }
 
     async fn walk_top_down(&self, path: &str) -> Result<KeyValueStream> {
-        let path_string = path.to_string();
-
         let mut lister = self
             .store
             .scan(path)
@@ -100,6 +98,7 @@ impl StateStore for ObjectStateStore {
 
         let store = self.store.clone();
 
+        let path_string = path.to_string();
         let stream = try_stream!({
             while let Some(res) = lister.next().await {
                 let entry = res
