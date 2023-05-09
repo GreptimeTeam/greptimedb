@@ -149,8 +149,11 @@ pub enum Error {
         source: substrait::error::Error,
     },
 
-    #[snafu(display("Failed to load config, source: {}", source))]
-    LoadConfig { source: ConfigError },
+    #[snafu(display("Failed to load layered config, source: {}", source))]
+    LoadLayeredConfig {
+        source: ConfigError,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -168,7 +171,7 @@ impl ErrorExt for Error {
             Error::UnsupportedSelectorType { source, .. } => source.status_code(),
             Error::ReadConfig { .. }
             | Error::MissingConfig { .. }
-            | Error::LoadConfig { .. }
+            | Error::LoadLayeredConfig { .. }
             | Error::IllegalConfig { .. }
             | Error::InvalidReplCommand { .. }
             | Error::IllegalAuthConfig { .. } => StatusCode::InvalidArguments,

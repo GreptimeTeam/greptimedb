@@ -20,7 +20,7 @@ use meta_srv::metasrv::MetaSrvOptions;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
-use crate::error::{LoadConfigSnafu, Result};
+use crate::error::{LoadLayeredConfigSnafu, Result};
 
 pub struct MixOptions {
     pub fe_opts: FrontendOptions,
@@ -71,21 +71,21 @@ impl Options {
 
         let opts = if let Some(config_file) = config_file {
             Config::builder()
-                .add_source(Config::try_from(&default_opts).context(LoadConfigSnafu)?)
+                .add_source(Config::try_from(&default_opts).context(LoadLayeredConfigSnafu)?)
                 .add_source(File::new(&config_file, FileFormat::Toml))
                 .add_source(env_source)
                 .build()
-                .context(LoadConfigSnafu)?
+                .context(LoadLayeredConfigSnafu)?
                 .try_deserialize()
-                .context(LoadConfigSnafu)?
+                .context(LoadLayeredConfigSnafu)?
         } else {
             Config::builder()
-                .add_source(Config::try_from(&default_opts).context(LoadConfigSnafu)?)
+                .add_source(Config::try_from(&default_opts).context(LoadLayeredConfigSnafu)?)
                 .add_source(env_source)
                 .build()
-                .context(LoadConfigSnafu)?
+                .context(LoadLayeredConfigSnafu)?
                 .try_deserialize()
-                .context(LoadConfigSnafu)?
+                .context(LoadLayeredConfigSnafu)?
         };
 
         Ok(opts)
