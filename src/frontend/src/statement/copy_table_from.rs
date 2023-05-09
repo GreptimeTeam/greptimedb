@@ -422,7 +422,7 @@ fn generated_schema_projection_and_compatible_file_schema(
             table_projection.push(table_idx);
 
             // Safety: the compatible_fields has same length as file schema
-            *compatible_fields.get_mut(file_idx).unwrap() = table_field.clone();
+            compatible_fields[file_idx] = table_field.clone();
         }
     }
 
