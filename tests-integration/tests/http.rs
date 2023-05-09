@@ -56,6 +56,7 @@ macro_rules! http_tests {
                 test_prometheus_promql_api,
                 test_prom_http_api,
                 test_metrics_api,
+                test_catalog_metrics,
                 test_scripts_api,
                 test_health_api,
                 test_dashboard_path,
@@ -337,7 +338,6 @@ pub async fn test_metrics_api(store_type: StorageType) {
     guard.remove_all().await;
 }
 
-// TODO(ruihang): re-enable this test
 pub async fn test_catalog_metrics(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     common_telemetry::init_default_metrics_recorder();
