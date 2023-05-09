@@ -18,8 +18,6 @@ mod alter;
 mod create;
 mod drop;
 pub mod error;
-#[cfg(test)]
-mod test_util;
 
 pub use alter::AlterTableProcedure;
 use catalog::CatalogManagerRef;
@@ -52,3 +50,6 @@ pub fn register_procedure_loaders(
     );
     DropTableProcedure::register_loader(catalog_manager, engine_procedure, procedure_manager);
 }
+
+#[cfg(test)]
+mod test_util;
