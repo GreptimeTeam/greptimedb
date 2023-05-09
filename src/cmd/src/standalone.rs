@@ -78,9 +78,7 @@ impl SubCommand {
 
     fn load_options(&self, top_level_options: TopLevelOptions) -> Result<Options> {
         match self {
-            SubCommand::Start(cmd) => {
-                cmd.load_options(top_level_options, STANDALONE_ENV_VARS_PREFIX)
-            }
+            SubCommand::Start(cmd) => cmd.load_options(top_level_options),
         }
     }
 }
@@ -215,16 +213,14 @@ struct StartCommand {
     tls_key_path: Option<String>,
     #[clap(long)]
     user_provider: Option<String>,
+    #[clap(long, default_value = "STANDALONE")]
+    env_vars_prefix: String,
 }
 
 impl StartCommand {
-    fn load_options(
-        &self,
-        top_level_options: TopLevelOptions,
-        env_vars_prefix: &str,
-    ) -> Result<Options> {
+    fn load_options(&self, top_level_options: TopLevelOptions) -> Result<Options> {
         let mut opts: StandaloneOptions =
-            Options::load_layered_options(self.config_file.clone(), env_vars_prefix)?;
+            Options::load_layered_options(self.config_file.clone(), self.env_vars_prefix.clone())?;
 
         opts.enable_memory_catalog = self.enable_memory_catalog;
 
@@ -366,6 +362,7 @@ mod tests {
             tls_cert_path: None,
             tls_key_path: None,
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
+            env_vars_prefix: STANDALONE_ENV_VARS_PREFIX.to_string(),
         };
 
         let plugins = load_frontend_plugins(&command.user_provider);
@@ -444,9 +441,10 @@ mod tests {
             tls_cert_path: None,
             tls_key_path: None,
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
+            env_vars_prefix: STANDALONE_ENV_VARS_PREFIX.to_string(),
         };
 
-        let Options::Standalone(options) = cmd.load_options(TopLevelOptions::default(), STANDALONE_ENV_VARS_PREFIX).unwrap() else {unreachable!()};
+        let Options::Standalone(options) = cmd.load_options(TopLevelOptions::default()).unwrap() else {unreachable!()};
         let fe_opts = options.fe_opts;
         let dn_opts = options.dn_opts;
         let logging_opts = options.logging;
@@ -507,13 +505,14 @@ mod tests {
             tls_cert_path: None,
             tls_key_path: None,
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
+            env_vars_prefix: STANDALONE_ENV_VARS_PREFIX.to_string(),
         };
 
         let Options::Standalone(opts) = cmd
             .load_options(TopLevelOptions {
                 log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
-            }, STANDALONE_ENV_VARS_PREFIX)
+            })
             .unwrap() else {
             unreachable!()
         };
@@ -534,10 +533,17 @@ mod tests {
         "#;
         write!(file, "{}", toml_str).unwrap();
 
+        let env_vars_prefix = "STANDALONE_UT".to_string();
         temp_env::with_vars(
             vec![
-                ("STANDALONE_UT-LOGGING.DIR", Some("/other/log/dir")),
-                ("STANDALONE_UT-LOGGING.LEVEL", Some("info")),
+                (
+                    format!("{}-{}", env_vars_prefix, "LOGGING.DIR"),
+                    Some("/other/log/dir"),
+                ),
+                (
+                    format!("{}-{}", env_vars_prefix, "LOGGING.LEVEL"),
+                    Some("info"),
+                ),
             ],
             || {
                 let command = StartCommand {
@@ -554,6 +560,7 @@ mod tests {
                     tls_cert_path: None,
                     tls_key_path: None,
                     user_provider: None,
+                    env_vars_prefix: env_vars_prefix.clone(),
                 };
 
                 let top_level_opts = TopLevelOptions {
@@ -561,7 +568,7 @@ mod tests {
                     log_level: Some("error".to_string()),
                 };
                 let Options::Standalone(opts) =
-                    command.load_options(top_level_opts, "STANDALONE_UT").unwrap() else {unreachable!()};
+                    command.load_options(top_level_opts).unwrap() else {unreachable!()};
 
                 // Should be read from config file.
                 assert_eq!(opts.fe_opts.mode, Mode::Standalone);

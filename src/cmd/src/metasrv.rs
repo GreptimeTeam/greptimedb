@@ -76,7 +76,7 @@ impl SubCommand {
 
     fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
         match self {
-            SubCommand::Start(cmd) => cmd.load_options(top_level_opts, METASRV_ENV_VARS_PREFIX),
+            SubCommand::Start(cmd) => cmd.load_options(top_level_opts),
         }
     }
 }
@@ -99,16 +99,14 @@ struct StartCommand {
     http_addr: Option<String>,
     #[clap(long)]
     http_timeout: Option<u64>,
+    #[clap(long, default_value = "METASRV")]
+    env_vars_prefix: String,
 }
 
 impl StartCommand {
-    fn load_options(
-        &self,
-        top_level_opts: TopLevelOptions,
-        env_vars_prefix: &str,
-    ) -> Result<Options> {
+    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
         let mut opts: MetaSrvOptions =
-            Options::load_layered_options(self.config_file.clone(), env_vars_prefix)?;
+            Options::load_layered_options(self.config_file.clone(), self.env_vars_prefix.clone())?;
 
         if let Some(dir) = top_level_opts.log_dir {
             opts.logging.dir = dir;
@@ -182,10 +180,11 @@ mod tests {
             use_memory_store: false,
             http_addr: None,
             http_timeout: None,
+            env_vars_prefix: METASRV_ENV_VARS_PREFIX.to_string(),
         };
 
         let Options::Metasrv(options) =
-        cmd.load_options(TopLevelOptions::default(), METASRV_ENV_VARS_PREFIX).unwrap() else { unreachable!() };
+        cmd.load_options(TopLevelOptions::default()).unwrap() else { unreachable!() };
         assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
         assert_eq!("127.0.0.1:2380".to_string(), options.store_addr);
         assert_eq!(SelectorType::LoadBased, options.selector);
@@ -217,10 +216,11 @@ mod tests {
             use_memory_store: false,
             http_addr: None,
             http_timeout: None,
+            env_vars_prefix: METASRV_ENV_VARS_PREFIX.to_string(),
         };
 
         let Options::Metasrv(options) =
-            cmd.load_options(TopLevelOptions::default(), METASRV_ENV_VARS_PREFIX).unwrap() else { unreachable!() };
+            cmd.load_options(TopLevelOptions::default()).unwrap() else { unreachable!() };
         assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
         assert_eq!("127.0.0.1:3002".to_string(), options.server_addr);
         assert_eq!("127.0.0.1:2379".to_string(), options.store_addr);
@@ -241,16 +241,14 @@ mod tests {
             use_memory_store: false,
             http_addr: None,
             http_timeout: None,
+            env_vars_prefix: METASRV_ENV_VARS_PREFIX.to_string(),
         };
 
         let options = cmd
-            .load_options(
-                TopLevelOptions {
-                    log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
-                    log_level: Some("debug".to_string()),
-                },
-                METASRV_ENV_VARS_PREFIX,
-            )
+            .load_options(TopLevelOptions {
+                log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
+                log_level: Some("debug".to_string()),
+            })
             .unwrap();
 
         let logging_opt = options.logging_options();
@@ -274,10 +272,17 @@ mod tests {
         "#;
         write!(file, "{}", toml_str).unwrap();
 
+        let env_vars_prefix = "METASRV_UT";
         temp_env::with_vars(
             vec![
-                ("METASRV_UT-BIND_ADDR", Some("127.0.0.1:14002")),
-                ("METASRV_UT-SERVER_ADDR", Some("127.0.0.1:13002")),
+                (
+                    format!("{}-{}", env_vars_prefix, "BIND_ADDR"),
+                    Some("127.0.0.1:14002"),
+                ),
+                (
+                    format!("{}-{}", env_vars_prefix, "SERVER_ADDR"),
+                    Some("127.0.0.1:13002"),
+                ),
             ],
             || {
                 let command = StartCommand {
@@ -289,10 +294,11 @@ mod tests {
                     use_memory_store: false,
                     http_addr: None,
                     http_timeout: None,
+                    env_vars_prefix: env_vars_prefix.to_string(),
                 };
 
                 let Options::Metasrv(opts) =
-                    command.load_options(TopLevelOptions::default(), "METASRV_UT").unwrap() else {unreachable!()};
+                    command.load_options(TopLevelOptions::default()).unwrap() else {unreachable!()};
 
                 // Should be read from config file.
                 assert_eq!(opts.selector, SelectorType::LeaseBased);

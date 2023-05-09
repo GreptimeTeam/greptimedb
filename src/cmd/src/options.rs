@@ -60,14 +60,21 @@ impl Options {
     /// `DATANODE-STORAGE.MANIFEST.CHECKPOINT_MARGIN` will be mapped to `DatanodeOptions.storage.manifest.checkpoint_margin` field in the configuration.
     pub fn load_layered_options<'de, T: Serialize + Deserialize<'de> + Default>(
         config_file: Option<String>,
-        env_vars_prefix: &str,
+        env_vars_prefix: String,
     ) -> Result<T> {
         let default_opts = T::default();
-        let env_source = Environment::with_prefix(env_vars_prefix)
-            .try_parsing(true)
-            .prefix_separator("-")
-            .separator(".")
-            .ignore_empty(true);
+
+        let env_source = {
+            if env_vars_prefix.is_empty() {
+                Environment::default().separator(".").ignore_empty(true)
+            } else {
+                Environment::with_prefix(env_vars_prefix.as_str())
+                    .try_parsing(true)
+                    .prefix_separator("-")
+                    .separator(".")
+                    .ignore_empty(true)
+            }
+        };
 
         let opts = if let Some(config_file) = config_file {
             Config::builder()
@@ -148,22 +155,41 @@ mod tests {
         "#;
         write!(file, "{}", toml_str).unwrap();
 
+        let env_vars_prefix = "DATANODE_UT".to_string();
         temp_env::with_vars(
             // The following environment variables will be used to override the values in the config file.
             vec![
-                ("DATANODE_UT-STORAGE.MANIFEST.CHECKPOINT_MARGIN", Some("99")),
-                ("DATANODE_UT-STORAGE.TYPE", Some("S3")),
-                ("DATANODE_UT-STORAGE.BUCKET", Some("mybucket")),
-                ("DATANODE_UT-STORAGE.MANIFEST.GC_DURATION", Some("42s")),
                 (
-                    "DATANODE_UT-STORAGE.MANIFEST.CHECKPOINT_ON_STARTUP",
+                    format!(
+                        "{}-{}",
+                        env_vars_prefix, "STORAGE.MANIFEST.CHECKPOINT_MARGIN"
+                    ),
+                    Some("99"),
+                ),
+                (
+                    format!("{}-{}", env_vars_prefix, "STORAGE.TYPE"),
+                    Some("S3"),
+                ),
+                (
+                    format!("{}-{}", env_vars_prefix, "STORAGE.BUCKET"),
+                    Some("mybucket"),
+                ),
+                (
+                    format!("{}-{}", env_vars_prefix, "STORAGE.MANIFEST.GC_DURATION"),
+                    Some("42s"),
+                ),
+                (
+                    format!(
+                        "{}-{}",
+                        env_vars_prefix, "STORAGE.MANIFEST.CHECKPOINT_ON_STARTUP"
+                    ),
                     Some("true"),
                 ),
             ],
             || {
                 let opts: DatanodeOptions = Options::load_layered_options(
                     Some(file.path().to_str().unwrap().to_string()),
-                    "DATANODE_UT",
+                    env_vars_prefix.clone(),
                 )
                 .unwrap();
 

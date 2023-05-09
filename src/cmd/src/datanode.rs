@@ -73,7 +73,7 @@ impl SubCommand {
 
     fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
         match self {
-            SubCommand::Start(cmd) => cmd.load_options(top_level_opts, DATANODE_ENV_VARS_PREFIX),
+            SubCommand::Start(cmd) => cmd.load_options(top_level_opts),
         }
     }
 }
@@ -100,16 +100,14 @@ struct StartCommand {
     http_addr: Option<String>,
     #[clap(long)]
     http_timeout: Option<u64>,
+    #[clap(long, default_value = "DATANODE")]
+    env_vars_prefix: String,
 }
 
 impl StartCommand {
-    fn load_options(
-        &self,
-        top_level_opts: TopLevelOptions,
-        env_vars_prefix: &str,
-    ) -> Result<Options> {
+    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
         let mut opts: DatanodeOptions =
-            Options::load_layered_options(self.config_file.clone(), env_vars_prefix)?;
+            Options::load_layered_options(self.config_file.clone(), self.env_vars_prefix.clone())?;
 
         if let Some(dir) = top_level_opts.log_dir {
             opts.logging.dir = dir;
@@ -247,7 +245,7 @@ mod tests {
         };
 
         let Options::Datanode(options) =
-            cmd.load_options(TopLevelOptions::default(), DATANODE_ENV_VARS_PREFIX).unwrap() else { unreachable!() };
+            cmd.load_options(TopLevelOptions::default()).unwrap() else { unreachable!() };
 
         assert_eq!("127.0.0.1:3001".to_string(), options.rpc_addr);
         assert_eq!("127.0.0.1:4406".to_string(), options.mysql_addr);
@@ -304,7 +302,7 @@ mod tests {
     #[test]
     fn test_try_from_cmd() {
         if let Options::Datanode(opt) = StartCommand::default()
-            .load_options(TopLevelOptions::default(), DATANODE_ENV_VARS_PREFIX)
+            .load_options(TopLevelOptions::default())
             .unwrap()
         {
             assert_eq!(Mode::Standalone, opt.mode)
@@ -315,7 +313,7 @@ mod tests {
             metasrv_addr: Some("127.0.0.1:3002".to_string()),
             ..Default::default()
         })
-        .load_options(TopLevelOptions::default(), DATANODE_ENV_VARS_PREFIX)
+        .load_options(TopLevelOptions::default())
         .unwrap()
         {
             assert_eq!(Mode::Distributed, opt.mode)
@@ -325,7 +323,7 @@ mod tests {
             metasrv_addr: Some("127.0.0.1:3002".to_string()),
             ..Default::default()
         })
-        .load_options(TopLevelOptions::default(), DATANODE_ENV_VARS_PREFIX)
+        .load_options(TopLevelOptions::default())
         .is_err());
 
         // Providing node_id but leave metasrv_addr absent is ok since metasrv_addr has default value
@@ -333,7 +331,7 @@ mod tests {
             node_id: Some(42),
             ..Default::default()
         })
-        .load_options(TopLevelOptions::default(), DATANODE_ENV_VARS_PREFIX)
+        .load_options(TopLevelOptions::default())
         .unwrap();
     }
 
@@ -342,13 +340,10 @@ mod tests {
         let cmd = StartCommand::default();
 
         let options = cmd
-            .load_options(
-                TopLevelOptions {
-                    log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
-                    log_level: Some("debug".to_string()),
-                },
-                DATANODE_ENV_VARS_PREFIX,
-            )
+            .load_options(TopLevelOptions {
+                log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
+                log_level: Some("debug".to_string()),
+            })
             .unwrap();
 
         let logging_opt = options.logging_options();
@@ -402,17 +397,23 @@ mod tests {
         "#;
         write!(file, "{}", toml_str).unwrap();
 
+        let env_vars_prefix = "DATANODE_UT";
+        //"DATANODE_UT-STORAGE.MANIFEST.GC_DURATION"
         temp_env::with_vars(
-            vec![("DATANODE_UT-STORAGE.MANIFEST.GC_DURATION", Some("9s"))],
+            vec![(
+                format!("{}-{}", env_vars_prefix, "STORAGE.MANIFEST.GC_DURATION"),
+                Some("9s"),
+            )],
             || {
                 let command = StartCommand {
                     config_file: Some(file.path().to_str().unwrap().to_string()),
                     wal_dir: Some("/other/wal/dir".to_string()),
+                    env_vars_prefix: env_vars_prefix.to_string(),
                     ..Default::default()
                 };
 
                 let Options::Datanode(opts) =
-                    command.load_options(TopLevelOptions::default(), "DATANODE_UT").unwrap() else {unreachable!()};
+                    command.load_options(TopLevelOptions::default()).unwrap() else {unreachable!()};
 
                 // Should be read from config file.
                 assert_eq!(opts.mode, Mode::Distributed);

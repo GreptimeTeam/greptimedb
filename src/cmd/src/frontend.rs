@@ -81,7 +81,7 @@ impl SubCommand {
 
     fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
         match self {
-            SubCommand::Start(cmd) => cmd.load_options(top_level_opts, FRONTEND_ENV_VARS_PREFIX),
+            SubCommand::Start(cmd) => cmd.load_options(top_level_opts),
         }
     }
 }
@@ -116,16 +116,14 @@ pub struct StartCommand {
     user_provider: Option<String>,
     #[clap(long)]
     disable_dashboard: Option<bool>,
+    #[clap(long, default_value = "FRONTEND")]
+    env_vars_prefix: String,
 }
 
 impl StartCommand {
-    fn load_options(
-        &self,
-        top_level_opts: TopLevelOptions,
-        env_vars_prefix: &str,
-    ) -> Result<Options> {
+    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
         let mut opts: FrontendOptions =
-            Options::load_layered_options(self.config_file.clone(), env_vars_prefix)?;
+            Options::load_layered_options(self.config_file.clone(), self.env_vars_prefix.clone())?;
 
         if let Some(dir) = top_level_opts.log_dir {
             opts.logging.dir = dir;
@@ -254,10 +252,11 @@ mod tests {
             tls_key_path: None,
             user_provider: None,
             disable_dashboard: Some(false),
+            env_vars_prefix: FRONTEND_ENV_VARS_PREFIX.to_string(),
         };
 
         let Options::Frontend(opts) =
-            command.load_options(TopLevelOptions::default(), FRONTEND_ENV_VARS_PREFIX).unwrap() else { unreachable!() };
+            command.load_options(TopLevelOptions::default()).unwrap() else { unreachable!() };
 
         assert_eq!(opts.http_options.as_ref().unwrap().addr, "127.0.0.1:1234");
         assert_eq!(opts.mysql_options.as_ref().unwrap().addr, "127.0.0.1:5678");
@@ -323,10 +322,11 @@ mod tests {
             tls_key_path: None,
             user_provider: None,
             disable_dashboard: Some(false),
+            env_vars_prefix: FRONTEND_ENV_VARS_PREFIX.to_string(),
         };
 
         let Options::Frontend(fe_opts) =
-            command.load_options(TopLevelOptions::default(), FRONTEND_ENV_VARS_PREFIX).unwrap() else {unreachable!()};
+            command.load_options(TopLevelOptions::default()).unwrap() else {unreachable!()};
         assert_eq!(Mode::Distributed, fe_opts.mode);
         assert_eq!(
             "127.0.0.1:4000".to_string(),
@@ -358,6 +358,7 @@ mod tests {
             tls_key_path: None,
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
             disable_dashboard: Some(false),
+            env_vars_prefix: FRONTEND_ENV_VARS_PREFIX.to_string(),
         };
 
         let plugins = load_frontend_plugins(&command.user_provider);
@@ -393,16 +394,14 @@ mod tests {
             tls_key_path: None,
             user_provider: None,
             disable_dashboard: Some(false),
+            env_vars_prefix: FRONTEND_ENV_VARS_PREFIX.to_string(),
         };
 
         let options = cmd
-            .load_options(
-                TopLevelOptions {
-                    log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
-                    log_level: Some("debug".to_string()),
-                },
-                FRONTEND_ENV_VARS_PREFIX,
-            )
+            .load_options(TopLevelOptions {
+                log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
+                log_level: Some("debug".to_string()),
+            })
             .unwrap();
 
         let logging_opt = options.logging_options();
@@ -422,10 +421,17 @@ mod tests {
         "#;
         write!(file, "{}", toml_str).unwrap();
 
+        let env_vars_prefix = "FRONTEND_UT".to_string();
         temp_env::with_vars(
             vec![
-                ("FRONTEND_UT-MYSQL_OPTIONS.ADDR", Some("127.0.0.1:14002")),
-                ("FRONTEND_UT-MYSQL_OPTIONS.RUNTIME_SIZE", Some("11")),
+                (
+                    format!("{}-{}", env_vars_prefix, "MYSQL_OPTIONS.ADDR"),
+                    Some("127.0.0.1:14002"),
+                ),
+                (
+                    format!("{}-{}", env_vars_prefix, "MYSQL_OPTIONS.RUNTIME_SIZE"),
+                    Some("11"),
+                ),
             ],
             || {
                 let command = StartCommand {
@@ -443,6 +449,7 @@ mod tests {
                     tls_key_path: None,
                     user_provider: None,
                     disable_dashboard: None,
+                    env_vars_prefix: env_vars_prefix.clone(),
                 };
 
                 let top_level_opts = TopLevelOptions {
@@ -450,7 +457,7 @@ mod tests {
                     log_level: Some("error".to_string()),
                 };
                 let Options::Frontend(fe_opts) =
-                    command.load_options(top_level_opts, "FRONTEND_UT").unwrap() else {unreachable!()};
+                    command.load_options(top_level_opts).unwrap() else {unreachable!()};
 
                 // Should be read from config file.
                 assert_eq!(fe_opts.mode, Mode::Distributed);
