@@ -113,9 +113,9 @@ To write and query data, GreptimeDB is compatible with multiple [protocols and c
 ### Installation
 
 - [Pre-built Binaries](https://greptime.com/download):
-  For Linux and macOS, you can easily download pre-built binaries that are ready to use. In most cases, downloading the version without PyO3 is sufficient. However, if you plan to run scripts in CPython (and use Python packages like NumPy and Pandas), you will need to download the version with PyO3 and install a Python with the same version as the Python in the PyO3 version. We recommend using virtualenv for the installation process to manage multiple Python versions.
-- [Nightly-built Binaries](https://github.com/GreptimeTeam/greptimedb/releases)
-  Built binaries weekly
+  For Linux and macOS, you can easily download pre-built binaries including official releases and nightly builds that are ready to use. 
+  In most cases, downloading the version without PyO3 is sufficient. However, if you plan to run scripts in CPython (and use Python packages like NumPy and Pandas), you will need to download the version with PyO3 and install a Python with the same version as the Python in the PyO3 version.
+  We recommend using virtualenv for the installation process to manage multiple Python versions.
 - [Docker Images](https://hub.docker.com/r/greptime/greptimedb)(**recommended**): pre-built
   Docker images, this is the easiest way to try GreptimeDB. By default it runs CPython script with `pyo3_backend` enabled.
 - [`gtctl`](https://github.com/GreptimeTeam/gtctl): the command-line tool for
