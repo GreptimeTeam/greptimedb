@@ -150,7 +150,19 @@ impl Runner {
         // If this is the root procedure, clean up message cache.
         if self.meta.parent_id.is_none() {
             let procedure_ids = self.manager_ctx.procedures_in_tree(&self.meta);
-            self.manager_ctx.remove_messages(&procedure_ids);
+            // Clean resources.
+            self.manager_ctx.on_procedures_finish(&procedure_ids);
+            for id in procedure_ids {
+                if let Err(e) = self.store.delete_procedure(id).await {
+                    logging::error!(
+                        e;
+                        "Runner {}-{} failed to delete procedure {}",
+                        self.procedure.type_name(),
+                        self.meta.id,
+                        id,
+                    );
+                }
+            }
         }
 
         logging::info!(
@@ -451,7 +463,7 @@ mod tests {
 
     use super::*;
     use crate::local::test_util;
-    use crate::store::PROC_PATH;
+    use crate::store::proc_path;
     use crate::{ContextProvider, Error, LockKey, Procedure};
 
     const ROOT_ID: &str = "9f805a1f-05f7-490c-9f91-bd56e3cc54c1";
@@ -473,7 +485,7 @@ mod tests {
     }
 
     async fn check_files(object_store: &ObjectStore, procedure_id: ProcedureId, files: &[&str]) {
-        let dir = format!("{PROC_PATH}/{procedure_id}/");
+        let dir = proc_path!("{procedure_id}/");
         let lister = object_store.list(&dir).await.unwrap();
         let mut files_in_dir: Vec<_> = lister
             .map_ok(|de| de.name().to_string())
@@ -720,25 +732,28 @@ mod tests {
         // Manually add this procedure to the manager ctx.
         assert!(manager_ctx.try_insert_procedure(meta));
         // Replace the manager ctx.
-        runner.manager_ctx = manager_ctx;
+        runner.manager_ctx = manager_ctx.clone();
 
         runner.run().await;
 
-        // Check files on store.
+        // Check child procedures.
         for child_id in children_ids {
-            check_files(
-                &object_store,
-                child_id,
-                &["0000000000.step", "0000000001.commit"],
-            )
-            .await;
+            let state = manager_ctx.state(child_id).unwrap();
+            assert!(state.is_done(), "{state:?}");
         }
-        check_files(
-            &object_store,
-            procedure_id,
-            &["0000000000.step", "0000000001.commit"],
-        )
-        .await;
+        let state = manager_ctx.state(procedure_id).unwrap();
+        assert!(state.is_done(), "{state:?}");
+        // Files are removed.
+        check_files(&object_store, procedure_id, &[]).await;
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        // Clean outdated meta.
+        manager_ctx.remove_outdated_meta(Duration::from_millis(1));
+        assert!(manager_ctx.state(procedure_id).is_none());
+        assert!(manager_ctx.finished_procedures.lock().unwrap().is_empty());
+        for child_id in children_ids {
+            assert!(manager_ctx.state(child_id).is_none());
+        }
     }
 
     #[tokio::test]

@@ -17,7 +17,7 @@ mod runner;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use backon::ExponentialBuilder;
@@ -35,6 +35,9 @@ use crate::{
     BoxedProcedure, ContextProvider, LockKey, ProcedureId, ProcedureManager, ProcedureState,
     ProcedureWithId, Watcher,
 };
+
+/// The expired time of a procedure's metadata.
+const META_TTL: Duration = Duration::from_secs(60 * 10);
 
 /// Shared metadata of a procedure.
 ///
@@ -126,6 +129,8 @@ pub(crate) struct ManagerContext {
     procedures: RwLock<HashMap<ProcedureId, ProcedureMetaRef>>,
     /// Messages loaded from the procedure store.
     messages: Mutex<HashMap<ProcedureId, ProcedureMessage>>,
+    /// Ids and finished time of finished procedures.
+    finished_procedures: Mutex<VecDeque<(ProcedureId, Instant)>>,
 }
 
 #[async_trait]
@@ -143,6 +148,7 @@ impl ManagerContext {
             lock_map: LockMap::new(),
             procedures: RwLock::new(HashMap::new()),
             messages: Mutex::new(HashMap::new()),
+            finished_procedures: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -285,6 +291,49 @@ impl ManagerContext {
             messages.remove(procedure_id);
         }
     }
+
+    /// Clean resources of finished procedures.
+    fn on_procedures_finish(&self, procedure_ids: &[ProcedureId]) {
+        self.remove_messages(procedure_ids);
+
+        // Since users need to query the procedure state, so we can't remove the
+        // meta of the procedure directly.
+        let now = Instant::now();
+        let mut finished_procedures = self.finished_procedures.lock().unwrap();
+        finished_procedures.extend(procedure_ids.iter().map(|id| (*id, now)));
+    }
+
+    /// Remove metadata of outdated procedures.
+    fn remove_outdated_meta(&self, ttl: Duration) {
+        let ids = {
+            let mut finished_procedures = self.finished_procedures.lock().unwrap();
+            if finished_procedures.is_empty() {
+                return;
+            }
+
+            let mut ids_to_remove = Vec::new();
+            while let Some((id, finish_time)) = finished_procedures.front() {
+                if finish_time.elapsed() > ttl {
+                    ids_to_remove.push(*id);
+                    finished_procedures.pop_front();
+                } else {
+                    // The rest procedures are finished later, so we can break
+                    // the loop.
+                    break;
+                }
+            }
+            ids_to_remove
+        };
+
+        if ids.is_empty() {
+            return;
+        }
+
+        let mut procedures = self.procedures.write().unwrap();
+        for id in ids {
+            procedures.remove(&id);
+        }
+    }
 }
 
 /// Config for [LocalManager].
@@ -377,14 +426,18 @@ impl ProcedureManager for LocalManager {
             DuplicateProcedureSnafu { procedure_id }
         );
 
+        // TODO(yingwen): We can use a repeated task to remove outdated meta.
+        self.manager_ctx.remove_outdated_meta(META_TTL);
+
         self.submit_root(procedure.id, 0, procedure.procedure)
     }
 
     async fn recover(&self) -> Result<()> {
         logging::info!("LocalManager start to recover");
+        let recover_start = Instant::now();
 
         let procedure_store = ProcedureStore::new(self.state_store.clone());
-        let messages = procedure_store.load_messages().await?;
+        let (messages, finished_ids) = procedure_store.load_messages().await?;
 
         for (procedure_id, message) in &messages {
             if message.parent_id.is_none() {
@@ -412,14 +465,36 @@ impl ProcedureManager for LocalManager {
             }
         }
 
+        if !finished_ids.is_empty() {
+            logging::info!(
+                "LocalManager try to clean finished procedures, num: {}",
+                finished_ids.len()
+            );
+
+            for procedure_id in finished_ids {
+                if let Err(e) = procedure_store.delete_procedure(procedure_id).await {
+                    logging::error!(e; "Failed to delete procedure {}", procedure_id);
+                }
+            }
+        }
+
+        logging::info!(
+            "LocalManager finish recovery, cost: {}ms",
+            recover_start.elapsed().as_millis()
+        );
+
         Ok(())
     }
 
     async fn procedure_state(&self, procedure_id: ProcedureId) -> Result<Option<ProcedureState>> {
+        self.manager_ctx.remove_outdated_meta(META_TTL);
+
         Ok(self.manager_ctx.state(procedure_id))
     }
 
     fn procedure_watcher(&self, procedure_id: ProcedureId) -> Option<Watcher> {
+        self.manager_ctx.remove_outdated_meta(META_TTL);
+
         self.manager_ctx.watcher(procedure_id)
     }
 }

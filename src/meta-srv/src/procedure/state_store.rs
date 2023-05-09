@@ -109,7 +109,7 @@ impl StateStore for MetaStateStore {
         Ok(Box::pin(stream))
     }
 
-    async fn delete(&self, keys: &[String]) -> Result<()> {
+    async fn batch_delete(&self, keys: &[String]) -> Result<()> {
         let _ = self
             .kv_store
             .batch_delete(BatchDeleteRequest {
@@ -125,6 +125,10 @@ impl StateStore for MetaStateStore {
                 keys: format!("{:?}", keys.to_vec()),
             })?;
         Ok(())
+    }
+
+    async fn delete(&self, key: &str) -> Result<()> {
+        self.batch_delete(&[key.to_string()]).await
     }
 }
 
@@ -184,7 +188,7 @@ mod tests {
         );
 
         store
-            .delete(&["a/2".to_string(), "b/1".to_string()])
+            .batch_delete(&["a/2".to_string(), "b/1".to_string()])
             .await
             .unwrap();
 

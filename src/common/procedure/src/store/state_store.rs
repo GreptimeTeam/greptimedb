@@ -45,7 +45,11 @@ pub trait StateStore: Send + Sync {
     async fn walk_top_down(&self, path: &str) -> Result<KeyValueStream>;
 
     /// Deletes key-value pairs by `keys`.
-    async fn delete(&self, keys: &[String]) -> Result<()>;
+    async fn batch_delete(&self, keys: &[String]) -> Result<()>;
+
+    /// Deletes one key-value pair by `key`. Return `Ok` if the key
+    /// does not exist.
+    async fn delete(&self, key: &str) -> Result<()>;
 }
 
 /// Reference counted pointer to [StateStore].
@@ -80,8 +84,6 @@ impl StateStore for ObjectStateStore {
     }
 
     async fn walk_top_down(&self, path: &str) -> Result<KeyValueStream> {
-        let path_string = path.to_string();
-
         let mut lister = self
             .store
             .scan(path)
@@ -92,12 +94,11 @@ impl StateStore for ObjectStateStore {
                     StatusCode::StorageUnavailable,
                 ))
             })
-            .with_context(|_| ListStateSnafu {
-                path: path_string.clone(),
-            })?;
+            .context(ListStateSnafu { path })?;
 
         let store = self.store.clone();
 
+        let path_string = path.to_string();
         let stream = try_stream!({
             while let Some(res) = lister.next().await {
                 let entry = res
@@ -138,13 +139,22 @@ impl StateStore for ObjectStateStore {
         Ok(Box::pin(stream))
     }
 
-    async fn delete(&self, keys: &[String]) -> Result<()> {
-        for key in keys {
-            self.store
-                .delete(key)
-                .await
-                .context(DeleteStateSnafu { key })?;
-        }
+    async fn batch_delete(&self, keys: &[String]) -> Result<()> {
+        self.store
+            .remove(keys.to_vec())
+            .await
+            .with_context(|_| DeleteStateSnafu {
+                key: format!("{:?}", keys),
+            })?;
+
+        Ok(())
+    }
+
+    async fn delete(&self, key: &str) -> Result<()> {
+        self.store
+            .delete(key)
+            .await
+            .with_context(|_| DeleteStateSnafu { key })?;
 
         Ok(())
     }
@@ -215,7 +225,7 @@ mod tests {
         );
 
         state_store
-            .delete(&["a/2".to_string(), "b/1".to_string()])
+            .batch_delete(&["a/2".to_string(), "b/1".to_string()])
             .await
             .unwrap();
         let mut data: Vec<_> = state_store
@@ -227,5 +237,41 @@ mod tests {
             .unwrap();
         data.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(vec![("a/1".to_string(), b"v1".to_vec()),], data);
+    }
+
+    #[tokio::test]
+    async fn test_object_state_store_delete() {
+        let dir = create_temp_dir("state_store_list");
+        let store_dir = dir.path().to_str().unwrap();
+        let mut builder = Builder::default();
+        builder.root(store_dir);
+
+        let object_store = ObjectStore::new(builder).unwrap().finish();
+        let state_store = ObjectStateStore::new(object_store);
+
+        state_store.put("a/1", b"v1".to_vec()).await.unwrap();
+        state_store.put("a/2", b"v2".to_vec()).await.unwrap();
+        state_store.put("b/1", b"v3".to_vec()).await.unwrap();
+
+        state_store.delete("b/1").await.unwrap();
+
+        let mut data: Vec<_> = state_store
+            .walk_top_down("a/")
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        data.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            vec![
+                ("a/1".to_string(), b"v1".to_vec()),
+                ("a/2".to_string(), b"v2".to_vec()),
+            ],
+            data
+        );
+
+        // Delete returns Ok even the key doesn't exist.
+        state_store.delete("b/1").await.unwrap();
     }
 }
