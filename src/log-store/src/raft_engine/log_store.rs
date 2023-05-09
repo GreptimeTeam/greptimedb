@@ -51,7 +51,7 @@ impl TaskFunction<Error> for PurgeExpiredFilesFunction {
         "RaftEngineLogStore-gc-task"
     }
 
-    async fn call(&self) -> Result<(), Error> {
+    async fn call(&mut self) -> Result<(), Error> {
         match self.engine.purge_expired_files().context(RaftEngineSnafu) {
             Ok(res) => {
                 // TODO(hl): the retval of purge_expired_files indicates the namespaces need to be compact,
@@ -84,7 +84,7 @@ impl RaftEngineLogStore {
         let engine = Arc::new(Engine::open(raft_engine_config).context(RaftEngineSnafu)?);
         let gc_task = RepeatedTask::new(
             config.purge_interval,
-            Arc::new(PurgeExpiredFilesFunction {
+            Box::new(PurgeExpiredFilesFunction {
                 engine: engine.clone(),
             }),
         );
@@ -94,7 +94,7 @@ impl RaftEngineLogStore {
             engine,
             gc_task,
         };
-        log_store.start().await?;
+        log_store.start()?;
         Ok(log_store)
     }
 
@@ -102,10 +102,9 @@ impl RaftEngineLogStore {
         self.gc_task.started()
     }
 
-    async fn start(&self) -> Result<(), Error> {
+    fn start(&self) -> Result<(), Error> {
         self.gc_task
             .start(common_runtime::bg_runtime())
-            .await
             .context(StartGcTaskSnafu)
     }
 }
@@ -337,7 +336,6 @@ mod tests {
         })
         .await
         .unwrap();
-        logstore.start().await.unwrap();
         let namespaces = logstore.list_namespaces().await.unwrap();
         assert_eq!(0, namespaces.len());
     }
@@ -351,7 +349,6 @@ mod tests {
         })
         .await
         .unwrap();
-        logstore.start().await.unwrap();
         assert!(logstore.list_namespaces().await.unwrap().is_empty());
 
         logstore
@@ -378,7 +375,6 @@ mod tests {
         })
         .await
         .unwrap();
-        logstore.start().await.unwrap();
 
         let namespace = Namespace::with_id(1);
         let cnt = 1024;
@@ -440,7 +436,6 @@ mod tests {
         })
         .await
         .unwrap();
-        logstore.start().await.unwrap();
 
         let entries =
             collect_entries(logstore.read(&Namespace::with_id(1), 1).await.unwrap()).await;
@@ -480,7 +475,6 @@ mod tests {
         };
 
         let logstore = RaftEngineLogStore::try_new(config).await.unwrap();
-        logstore.start().await.unwrap();
         let namespace = Namespace::with_id(42);
         for id in 0..4096 {
             let entry = Entry::create(id, namespace.id(), [b'x'; 4096].to_vec());
@@ -513,7 +507,6 @@ mod tests {
         };
 
         let logstore = RaftEngineLogStore::try_new(config).await.unwrap();
-        logstore.start().await.unwrap();
         let namespace = Namespace::with_id(42);
         for id in 0..1024 {
             let entry = Entry::create(id, namespace.id(), [b'x'; 4096].to_vec());

@@ -61,7 +61,9 @@ impl<S: 'static + Checkpoint<Error = Error>, M: 'static + MetaAction<Error = Err
             // only start gc task when checkpoint is enabled.
             Some(Arc::new(RepeatedTask::new(
                 gc_duration.unwrap_or_else(|| Duration::from_secs(GC_DURATION_SECS)),
-                inner.clone() as _,
+                Box::new(ManifestGcTask {
+                    inner: inner.clone(),
+                }),
             )))
         } else {
             None
@@ -179,7 +181,6 @@ impl<S: 'static + Checkpoint<Error = Error>, M: 'static + MetaAction<Error = Err
     async fn start(&self) -> Result<()> {
         if let Some(task) = &self.gc_task {
             task.start(common_runtime::bg_runtime())
-                .await
                 .context(StartManifestGcTaskSnafu)?;
         }
 
@@ -241,22 +242,30 @@ impl<M: MetaAction<Error = Error>> MetaActionIterator for MetaActionIteratorImpl
     }
 }
 
+struct ManifestGcTask<S: Checkpoint<Error = Error>, M: MetaAction<Error = Error>> {
+    inner: Arc<ManifestImplInner<S, M>>,
+}
+
 #[async_trait::async_trait]
 impl<S: Checkpoint<Error = Error>, M: MetaAction<Error = Error>> TaskFunction<Error>
-    for ManifestImplInner<S, M>
+    for ManifestGcTask<S, M>
 {
     fn name(&self) -> &str {
         "region-manifest-gc"
     }
 
-    async fn call(&self) -> Result<()> {
-        if let Some((last_version, _)) = self.store.load_last_checkpoint().await? {
+    async fn call(&mut self) -> Result<()> {
+        if let Some((last_version, _)) = self.inner.store.load_last_checkpoint().await? {
             // Purge all manifest <= last_version and checkpoint files < last_version.
-            let deleted = self.store.delete_until(last_version + 1, true).await?;
+            let deleted = self
+                .inner
+                .store
+                .delete_until(last_version + 1, true)
+                .await?;
             debug!(
                 "Deleted {} logs from region manifest storage(path={}), last_version: {}.",
                 deleted,
-                self.store.path(),
+                self.inner.store.path(),
                 last_version,
             );
         }

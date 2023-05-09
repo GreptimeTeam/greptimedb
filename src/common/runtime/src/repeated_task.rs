@@ -13,57 +13,78 @@
 // limitations under the License.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use common_error::prelude::ErrorExt;
 use common_telemetry::logging;
-use snafu::{ensure, OptionExt, ResultExt};
-use tokio::sync::Mutex;
+use snafu::{ensure, ResultExt};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{IllegalStateSnafu, Result, WaitGcTaskStopSnafu};
 use crate::Runtime;
 
+/// Task to execute repeatedly.
 #[async_trait::async_trait]
-pub trait TaskFunction<E: ErrorExt> {
-    async fn call(&self) -> std::result::Result<(), E>;
+pub trait TaskFunction<E> {
+    /// Invoke the task.
+    async fn call(&mut self) -> std::result::Result<(), E>;
+
+    /// Name of the task.
     fn name(&self) -> &str;
 }
 
-pub type TaskFunctionRef<E> = Arc<dyn TaskFunction<E> + Send + Sync>;
+pub type BoxedTaskFunction<E> = Box<dyn TaskFunction<E> + Send + Sync + 'static>;
 
-pub struct RepeatedTask<E> {
-    cancel_token: Mutex<Option<CancellationToken>>,
-    task_handle: Mutex<Option<JoinHandle<()>>>,
-    started: AtomicBool,
-    interval: Duration,
-    task_fn: TaskFunctionRef<E>,
+struct TaskInner<E> {
+    /// The repeated task handle. This handle is Some if the task is started.
+    task_handle: Option<JoinHandle<()>>,
+    /// The task_fn to run. This is Some if the task is not started.
+    task_fn: Option<BoxedTaskFunction<E>>,
 }
 
-impl<E: ErrorExt> std::fmt::Display for RepeatedTask<E> {
+pub struct RepeatedTask<E> {
+    name: String,
+    cancel_token: CancellationToken,
+    inner: Mutex<TaskInner<E>>,
+    started: AtomicBool,
+    interval: Duration,
+}
+
+impl<E> std::fmt::Display for RepeatedTask<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "RepeatedTask({})", self.task_fn.name())
+        write!(f, "RepeatedTask({})", self.name)
     }
 }
 
-impl<E: ErrorExt> std::fmt::Debug for RepeatedTask<E> {
+impl<E> std::fmt::Debug for RepeatedTask<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("RepeatedTask")
-            .field(&self.task_fn.name())
-            .finish()
+        f.debug_tuple("RepeatedTask").field(&self.name).finish()
+    }
+}
+
+impl<E> Drop for RepeatedTask<E> {
+    fn drop(&mut self) {
+        let inner = self.inner.get_mut().unwrap();
+        if inner.task_handle.is_some() {
+            // Cancel the background task.
+            self.cancel_token.cancel();
+        }
     }
 }
 
 impl<E: ErrorExt + 'static> RepeatedTask<E> {
-    pub fn new(interval: Duration, task_fn: TaskFunctionRef<E>) -> Self {
+    pub fn new(interval: Duration, task_fn: BoxedTaskFunction<E>) -> Self {
         Self {
-            cancel_token: Mutex::new(None),
-            task_handle: Mutex::new(None),
+            name: task_fn.name().to_string(),
+            cancel_token: CancellationToken::new(),
+            inner: Mutex::new(TaskInner {
+                task_handle: None,
+                task_fn: Some(task_fn),
+            }),
             started: AtomicBool::new(false),
             interval,
-            task_fn,
         }
     }
 
@@ -71,11 +92,17 @@ impl<E: ErrorExt + 'static> RepeatedTask<E> {
         self.started.load(Ordering::Relaxed)
     }
 
-    pub async fn start(&self, runtime: Runtime) -> Result<()> {
-        let token = CancellationToken::new();
+    pub fn start(&self, runtime: Runtime) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        ensure!(
+            inner.task_fn.is_some(),
+            IllegalStateSnafu { name: &self.name }
+        );
+
         let interval = self.interval;
-        let child = token.child_token();
-        let task_fn = self.task_fn.clone();
+        let child = self.cancel_token.child_token();
+        // Safety: The task is not started.
+        let mut task_fn = inner.task_fn.take().unwrap();
         // TODO(hl): Maybe spawn to a blocking runtime.
         let handle = runtime.spawn(async move {
             loop {
@@ -90,13 +117,12 @@ impl<E: ErrorExt + 'static> RepeatedTask<E> {
                 }
             }
         });
-        *self.cancel_token.lock().await = Some(token);
-        *self.task_handle.lock().await = Some(handle);
+        inner.task_handle = Some(handle);
         self.started.store(true, Ordering::Relaxed);
 
         logging::debug!(
             "Repeated task {} started with interval: {:?}",
-            self.task_fn.name(),
+            self.name,
             self.interval
         );
 
@@ -104,30 +130,25 @@ impl<E: ErrorExt + 'static> RepeatedTask<E> {
     }
 
     pub async fn stop(&self) -> Result<()> {
-        let name = self.task_fn.name();
-        ensure!(
-            self.started
-                .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok(),
-            IllegalStateSnafu { name }
-        );
-        let token = self
-            .cancel_token
-            .lock()
-            .await
-            .take()
-            .context(IllegalStateSnafu { name })?;
-        let handle = self
-            .task_handle
-            .lock()
-            .await
-            .take()
-            .context(IllegalStateSnafu { name })?;
+        let handle = {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.task_handle.is_none() {
+                // We allow stop the task multiple times.
+                return Ok(());
+            }
 
-        token.cancel();
-        handle.await.context(WaitGcTaskStopSnafu { name })?;
+            self.cancel_token.cancel();
+            self.started.store(false, Ordering::Relaxed);
+            // Safety: The task is not stopped.
+            inner.task_handle.take().unwrap()
+        };
 
-        logging::debug!("Repeated task {} stopped", name);
+        handle
+            .await
+            .context(WaitGcTaskStopSnafu { name: &self.name })?;
+
+        logging::debug!("Repeated task {} stopped", self.name);
+
         Ok(())
     }
 }
@@ -135,20 +156,22 @@ impl<E: ErrorExt + 'static> RepeatedTask<E> {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::AtomicI32;
+    use std::sync::Arc;
 
     use super::*;
+    use crate::error::Error;
 
     struct TickTask {
-        n: AtomicI32,
+        n: Arc<AtomicI32>,
     }
 
     #[async_trait::async_trait]
-    impl TaskFunction<crate::error::Error> for TickTask {
+    impl TaskFunction<Error> for TickTask {
         fn name(&self) -> &str {
             "test"
         }
 
-        async fn call(&self) -> Result<()> {
+        async fn call(&mut self) -> Result<()> {
             self.n.fetch_add(1, Ordering::Relaxed);
 
             Ok(())
@@ -159,16 +182,15 @@ mod tests {
     async fn test_repeated_task() {
         common_telemetry::init_default_ut_logging();
 
-        let task_fn = Arc::new(TickTask {
-            n: AtomicI32::new(0),
-        });
+        let n = Arc::new(AtomicI32::new(0));
+        let task_fn = TickTask { n: n.clone() };
 
-        let task = RepeatedTask::new(Duration::from_millis(100), task_fn.clone());
+        let task = RepeatedTask::new(Duration::from_millis(100), Box::new(task_fn));
 
-        task.start(crate::bg_runtime()).await.unwrap();
+        task.start(crate::bg_runtime()).unwrap();
         tokio::time::sleep(Duration::from_millis(550)).await;
         task.stop().await.unwrap();
 
-        assert_eq!(task_fn.n.load(Ordering::Relaxed), 5);
+        assert_eq!(n.load(Ordering::Relaxed), 5);
     }
 }

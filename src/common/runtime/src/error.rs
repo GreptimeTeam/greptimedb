@@ -28,7 +28,8 @@ pub enum Error {
         source: std::io::Error,
         location: Location,
     },
-    #[snafu(display("Repeated task {} not started yet", name))]
+
+    #[snafu(display("Repeated task {} is already started", name))]
     IllegalState { name: String, location: Location },
 
     #[snafu(display(
