@@ -25,6 +25,9 @@ use table::error::Error as TableError;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Failed to send message: {err_msg}"))]
+    SendMessage { err_msg: String, location: Location },
+
     #[snafu(display("Failed to execute sql, source: {}", source))]
     ExecuteSql {
         #[snafu(backtrace)]
@@ -553,7 +556,8 @@ impl ErrorExt for Error {
             | IncorrectInternalState { .. }
             | ShutdownServer { .. }
             | ShutdownInstance { .. }
-            | CloseTableEngine { .. } => StatusCode::Internal,
+            | CloseTableEngine { .. }
+            | SendMessage { .. } => StatusCode::Internal,
 
             InitBackend { .. } => StatusCode::StorageUnavailable,
 

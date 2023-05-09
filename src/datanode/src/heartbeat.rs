@@ -16,15 +16,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::v1::meta::{HeartbeatRequest, HeartbeatResponse, MailboxMessage, NodeStat, Peer};
+use api::v1::meta::{HeartbeatRequest, NodeStat, Peer};
 use catalog::{datanode_stat, CatalogManagerRef};
 use common_telemetry::{error, info, trace, warn};
 use meta_client::client::{HeartbeatSender, MetaClient};
 use snafu::ResultExt;
-use tokio::sync::Mutex;
+use tokio::sync::mpsc;
+use tokio::time::Instant;
 
 use self::handler::{
-    HeartbeatMailbox, HeartbeatResponseHandlerContext, HeartbeatResponseHeadlerExecutorRef,
+    HeartbeatMailbox, HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutorRef,
     MailboxRef,
 };
 use self::utils::outgoing_message_to_mailbox_message;
@@ -41,8 +42,7 @@ pub struct HeartbeatTask {
     meta_client: Arc<MetaClient>,
     catalog_manager: CatalogManagerRef,
     interval: u64,
-    mailbox: MailboxRef,
-    heartbeat_response_handler_exector: HeartbeatResponseHeadlerExecutorRef,
+    heartbeat_response_handler_exector: HeartbeatResponseHandlerExecutorRef,
 }
 
 impl Drop for HeartbeatTask {
@@ -59,7 +59,7 @@ impl HeartbeatTask {
         server_hostname: Option<String>,
         meta_client: Arc<MetaClient>,
         catalog_manager: CatalogManagerRef,
-        heartbeat_response_handler_exector: HeartbeatResponseHeadlerExecutorRef,
+        heartbeat_response_handler_exector: HeartbeatResponseHandlerExecutorRef,
     ) -> Self {
         Self {
             node_id,
@@ -69,7 +69,6 @@ impl HeartbeatTask {
             meta_client,
             catalog_manager,
             interval: 5_000, // default interval is set to 5 secs
-            mailbox: Arc::new(Mutex::new(HeartbeatMailbox::default())),
             heartbeat_response_handler_exector,
         }
     }
@@ -77,7 +76,7 @@ impl HeartbeatTask {
     pub async fn create_streams(
         meta_client: &MetaClient,
         running: Arc<AtomicBool>,
-        handler_executor: HeartbeatResponseHeadlerExecutorRef,
+        handler_executor: HeartbeatResponseHandlerExecutorRef,
         mailbox: MailboxRef,
     ) -> Result<HeartbeatSender> {
         let (tx, mut rx) = meta_client.heartbeat().await.context(MetaClientInitSnafu)?;
@@ -89,8 +88,8 @@ impl HeartbeatTask {
                     None
                 }
             } {
-                let ctx = HeartbeatResponseHandlerContext::from(mailbox.clone());
-                if let Err(e) = Self::handle_response(ctx, res, handler_executor.clone()) {
+                let ctx = HeartbeatResponseHandlerContext::new(mailbox.clone(), res);
+                if let Err(e) = Self::handle_response(ctx, handler_executor.clone()) {
                     error!(e;"Error while handling heartbeat response");
                 }
                 if !running.load(Ordering::Acquire) {
@@ -104,11 +103,10 @@ impl HeartbeatTask {
 
     fn handle_response(
         ctx: HeartbeatResponseHandlerContext,
-        resp: HeartbeatResponse,
-        handler_executor: HeartbeatResponseHeadlerExecutorRef,
+        handler_executor: HeartbeatResponseHandlerExecutorRef,
     ) -> Result<()> {
-        trace!("heartbeat response: {:?}", resp);
-        handler_executor.handle(ctx, resp)
+        trace!("heartbeat response: {:?}", ctx.response);
+        handler_executor.handle(ctx)
     }
 
     /// Start heartbeat task, spawn background task.
@@ -125,10 +123,12 @@ impl HeartbeatTask {
         let node_id = self.node_id;
         let addr = resolve_addr(&self.server_addr, &self.server_hostname);
         let meta_client = self.meta_client.clone();
-
         let catalog_manager_clone = self.catalog_manager.clone();
-        let mailbox = self.mailbox.clone();
         let handler_executor = self.heartbeat_response_handler_exector.clone();
+
+        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(16);
+        let mailbox = Arc::new(HeartbeatMailbox::new(outgoing_tx));
+
         let mut tx = Self::create_streams(
             &meta_client,
             running.clone(),
@@ -138,59 +138,83 @@ impl HeartbeatTask {
         .await?;
 
         common_runtime::spawn_bg(async move {
-            while running.load(Ordering::Acquire) {
-                let (region_num, region_stats) = datanode_stat(&catalog_manager_clone).await;
-                let mut mailbox_guard = mailbox.lock().await;
+            let sleep = tokio::time::sleep(Duration::from_millis(0));
+            tokio::pin!(sleep);
 
-                //TODO(weny): add a size-based limiter?
-                let mails = mailbox_guard.replies.drain(..);
-                let mailbox_messages = mails
-                    .into_iter()
-                    .map(outgoing_message_to_mailbox_message)
-                    .collect::<Result<Vec<MailboxMessage>>>();
-
-                if let Err(e) = mailbox_messages {
-                    error!(e;"Failed to encode mailbox messages!");
-                    continue;
+            loop {
+                if !running.load(Ordering::Acquire) {
+                    info!("shutdown heartbeat task");
+                    break;
                 }
-
-                //Safety: Checked
-                let mailbox_messages = mailbox_messages.unwrap();
-
-                let req = HeartbeatRequest {
-                    peer: Some(Peer {
-                        id: node_id,
-                        addr: addr.clone(),
-                    }),
-                    node_stat: Some(NodeStat {
-                        region_num: region_num as _,
-                        ..Default::default()
-                    }),
-                    region_stats,
-                    mailbox_messages,
-                    ..Default::default()
-                };
-
-                if let Err(e) = tx.send(req).await {
-                    error!("Failed to send heartbeat to metasrv, error: {:?}", e);
-                    match Self::create_streams(
-                        &meta_client,
-                        running.clone(),
-                        handler_executor.clone(),
-                        mailbox.clone(),
-                    )
-                    .await
-                    {
-                        Ok(new_tx) => {
-                            info!("Reconnected to metasrv");
-                            tx = new_tx;
+                let req = tokio::select! {
+                    message = outgoing_rx.recv() => {
+                        if let Some(message) = message {
+                            match outgoing_message_to_mailbox_message(message) {
+                                Ok(message) => {
+                                    let (region_num, region_stats) = datanode_stat(&catalog_manager_clone).await;
+                                    let req = HeartbeatRequest {
+                                        peer: Some(Peer {
+                                            id: node_id,
+                                            addr: addr.clone(),
+                                        }),
+                                        node_stat: Some(NodeStat {
+                                            region_num: region_num as _,
+                                            ..Default::default()
+                                        }),
+                                        region_stats,
+                                        mailbox_messages: vec![message],
+                                        ..Default::default()
+                                    };
+                                    Some(req)
+                                }
+                                Err(e) => {
+                                    error!(e;"Failed to encode mailbox messages!");
+                                    None
+                                }
+                            };
                         }
-                        Err(e) => {
-                            error!(e;"Failed to reconnect to metasrv!");
+
+                        None
+                    }
+                    _ = &mut sleep => {
+                        let (region_num, region_stats) = datanode_stat(&catalog_manager_clone).await;
+                        let req = HeartbeatRequest {
+                            peer: Some(Peer {
+                                id: node_id,
+                                addr: addr.clone(),
+                            }),
+                            node_stat: Some(NodeStat {
+                                region_num: region_num as _,
+                                ..Default::default()
+                            }),
+                            region_stats,
+                            ..Default::default()
+                        };
+                        sleep.as_mut().reset(Instant::now() + Duration::from_millis(interval));
+                        Some(req)
+                    }
+                };
+                if let Some(req) = req {
+                    if let Err(e) = tx.send(req).await {
+                        error!("Failed to send heartbeat to metasrv, error: {:?}", e);
+                        match Self::create_streams(
+                            &meta_client,
+                            running.clone(),
+                            handler_executor.clone(),
+                            mailbox.clone(),
+                        )
+                        .await
+                        {
+                            Ok(new_tx) => {
+                                info!("Reconnected to metasrv");
+                                tx = new_tx;
+                            }
+                            Err(e) => {
+                                error!(e;"Failed to reconnect to metasrv!");
+                            }
                         }
                     }
                 }
-                tokio::time::sleep(Duration::from_millis(interval)).await;
             }
         });
 

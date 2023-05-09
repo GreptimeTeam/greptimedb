@@ -15,17 +15,15 @@
 use std::sync::Arc;
 
 use api::v1::meta::HeartbeatResponse;
-use catalog::CatalogManagerRef;
 use common_meta::instruction::{Instruction, InstructionReply};
-use table::engine::manager::TableEngineManagerRef;
-use table::requests::{CloseTableRequest, OpenTableRequest};
-use tokio::sync::Mutex;
+use common_telemetry::error;
+use tokio::sync::mpsc::Sender;
 
-use crate::error::Result;
-use crate::heartbeat::utils::mailbox_message_to_incoming_message;
+use crate::error::{self, Result};
 
-mod close_table;
-mod open_table;
+pub mod close_table;
+pub mod open_table;
+pub mod parse_mailbox_message;
 
 pub type IncomingMessage = (MessageMeta, Instruction);
 pub type OutgoingMessage = (MessageMeta, InstructionReply);
@@ -36,141 +34,70 @@ pub struct MessageMeta {
     pub from: String,
 }
 
-#[derive(Default)]
 pub struct HeartbeatMailbox {
-    pub replies: Vec<OutgoingMessage>,
+    sender: Sender<OutgoingMessage>,
 }
 
-pub type MailboxRef = Arc<Mutex<HeartbeatMailbox>>;
+impl HeartbeatMailbox {
+    pub fn new(sender: Sender<OutgoingMessage>) -> Self {
+        Self { sender }
+    }
 
-pub type HeartbeatResponseHeadlerExecutorRef = Arc<dyn HeartbeatResponseHeadlerExecutor>;
+    pub async fn send(&self, message: OutgoingMessage) -> Result<()> {
+        self.sender.send(message).await.map_err(|e| {
+            error::SendMessageSnafu {
+                err_msg: e.to_string(),
+            }
+            .build()
+        })
+    }
+}
+
+pub type MailboxRef = Arc<HeartbeatMailbox>;
+
+pub type HeartbeatResponseHandlerExecutorRef = Arc<dyn HeartbeatResponseHandlerExecutor>;
 
 pub struct HeartbeatResponseHandlerContext {
     pub mailbox: MailboxRef,
+    pub response: HeartbeatResponse,
+    pub incoming_messages: Vec<IncomingMessage>,
 }
 
-impl From<MailboxRef> for HeartbeatResponseHandlerContext {
-    fn from(mailbox: MailboxRef) -> Self {
-        Self { mailbox }
-    }
-}
-
-pub trait HeartbeatResponseHeadler: Send + Sync {
-    fn handle(
-        &self,
-        ctx: &mut HeartbeatResponseHandlerContext,
-        resp: &HeartbeatResponse,
-    ) -> Result<()>;
-}
-
-pub trait HeartbeatResponseHeadlerExecutor: Send + Sync {
-    fn handle(&self, ctx: HeartbeatResponseHandlerContext, resp: HeartbeatResponse) -> Result<()>;
-}
-
-pub struct NaiveHandlerExecutor {
-    handler: Arc<dyn HeartbeatResponseHeadler>,
-}
-
-impl NaiveHandlerExecutor {
-    pub fn new(handler: Arc<dyn HeartbeatResponseHeadler>) -> Self {
-        Self { handler }
-    }
-}
-
-impl HeartbeatResponseHeadlerExecutor for NaiveHandlerExecutor {
-    fn handle(
-        &self,
-        mut ctx: HeartbeatResponseHandlerContext,
-        resp: HeartbeatResponse,
-    ) -> Result<()> {
-        self.handler.handle(&mut ctx, &resp)
-    }
-}
-
-#[derive(Clone)]
-pub struct InstructionHandler {
-    catalog_manager: CatalogManagerRef,
-    table_engine_manager: TableEngineManagerRef,
-}
-
-impl InstructionHandler {
-    pub fn new(
-        catalog_manager: CatalogManagerRef,
-        table_engine_manager: TableEngineManagerRef,
-    ) -> Self {
+impl HeartbeatResponseHandlerContext {
+    pub fn new(mailbox: MailboxRef, response: HeartbeatResponse) -> Self {
         Self {
-            catalog_manager,
-            table_engine_manager,
+            mailbox,
+            response,
+            incoming_messages: Vec::new(),
         }
-    }
-
-    pub fn execute(
-        &self,
-        ctx: &mut HeartbeatResponseHandlerContext,
-        (meta, instruction): IncomingMessage,
-    ) -> Result<()> {
-        match instruction {
-            Instruction::OpenTable {
-                catalog,
-                schema,
-                table,
-                table_id,
-                engine,
-                ..
-            } => self.handle_open_table(
-                ctx,
-                meta,
-                engine,
-                OpenTableRequest {
-                    catalog_name: catalog,
-                    schema_name: schema,
-                    table_name: table,
-                    table_id,
-                },
-            ),
-            Instruction::CloseTable {
-                catalog,
-                schema,
-                table,
-                table_id,
-                engine,
-                ..
-            } => self.handle_close_table(
-                ctx,
-                meta,
-                engine,
-                CloseTableRequest {
-                    catalog_name: catalog,
-                    schema_name: schema,
-                    table_name: table,
-                    table_id,
-                },
-            ),
-        }
-        Ok(())
     }
 }
 
-impl HeartbeatResponseHeadler for InstructionHandler {
-    fn handle(
-        &self,
-        ctx: &mut HeartbeatResponseHandlerContext,
-        resp: &HeartbeatResponse,
-    ) -> Result<()> {
-        let executable_messages = resp
-            .mailbox_messages
-            .iter()
-            .filter_map(|m| {
-                m.payload
-                    .as_ref()
-                    .map(|_| mailbox_message_to_incoming_message(m.clone()))
-            })
-            .collect::<Result<Vec<IncomingMessage>>>()?;
+pub trait HeartbeatResponseHandler: Send + Sync {
+    fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> Result<()>;
+}
 
-        for msg in executable_messages {
-            self.execute(ctx, msg)?;
+pub trait HeartbeatResponseHandlerExecutor: Send + Sync {
+    fn handle(&self, ctx: HeartbeatResponseHandlerContext) -> Result<()>;
+}
+
+pub struct HandlerGroupExecutor {
+    handlers: Vec<Arc<dyn HeartbeatResponseHandler>>,
+}
+
+impl HandlerGroupExecutor {
+    pub fn new(handlers: Vec<Arc<dyn HeartbeatResponseHandler>>) -> Self {
+        Self { handlers }
+    }
+}
+
+impl HeartbeatResponseHandlerExecutor for HandlerGroupExecutor {
+    fn handle(&self, mut ctx: HeartbeatResponseHandlerContext) -> Result<()> {
+        for handler in &self.handlers {
+            if let Err(e) = handler.handle(&mut ctx) {
+                error!("Error while handling: {:?}, source: {}", ctx.response, e);
+            }
         }
-
         Ok(())
     }
 }

@@ -17,20 +17,22 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Instruction {
-    OpenTable {
+    OpenRegion {
         catalog: String,
         schema: String,
         table: String,
         table_id: u32,
         engine: String,
+        // it will open all regions if region_number is None
         region_number: Option<u32>,
     },
-    CloseTable {
+    CloseRegion {
         catalog: String,
         schema: String,
         table: String,
         table_id: u32,
         engine: String,
+        // it will close all regions if region_number is None
         region_number: Option<u32>,
     },
 }
@@ -38,8 +40,8 @@ pub enum Instruction {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InstructionReply {
-    OpenTable { result: bool, error: Option<String> },
-    CloseTable { result: bool, error: Option<String> },
+    OpenRegion { result: bool, error: Option<String> },
+    CloseRegion { result: bool, error: Option<String> },
 }
 
 #[cfg(test)]
@@ -48,7 +50,7 @@ mod tests {
 
     #[test]
     fn test_serialize_instruction() {
-        let open_table = Instruction::OpenTable {
+        let open_region = Instruction::OpenRegion {
             catalog: "foo".to_string(),
             schema: "bar".to_string(),
             table: "hi".to_string(),
@@ -57,14 +59,14 @@ mod tests {
             region_number: Some(1),
         };
 
-        let serialized = serde_json::to_string(&open_table).unwrap();
+        let serialized = serde_json::to_string(&open_region).unwrap();
 
         assert_eq!(
-            r#"{"type":"open_table","catalog":"foo","schema":"bar","table":"hi","table_id":1024,"engine":"mito","region_number":1}"#,
+            r#"{"type":"open_region","catalog":"foo","schema":"bar","table":"hi","table_id":1024,"engine":"mito","region_number":1}"#,
             serialized
         );
 
-        let close_table = Instruction::CloseTable {
+        let close_region = Instruction::CloseRegion {
             catalog: "foo".to_string(),
             schema: "bar".to_string(),
             table: "hi".to_string(),
@@ -73,10 +75,10 @@ mod tests {
             region_number: Some(1),
         };
 
-        let serialized = serde_json::to_string(&close_table).unwrap();
+        let serialized = serde_json::to_string(&close_region).unwrap();
 
         assert_eq!(
-            r#"{"type":"close_table","catalog":"foo","schema":"bar","table":"hi","table_id":1024,"engine":"mito","region_number":1}"#,
+            r#"{"type":"close_region","catalog":"foo","schema":"bar","table":"hi","table_id":1024,"engine":"mito","region_number":1}"#,
             serialized
         );
     }

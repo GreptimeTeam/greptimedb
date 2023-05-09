@@ -14,19 +14,73 @@
 
 use std::sync::Arc;
 
-use catalog::RegisterTableRequest;
+use catalog::{CatalogManagerRef, RegisterTableRequest};
 use common_catalog::format_full_table_name;
-use common_meta::instruction::InstructionReply;
+use common_meta::instruction::{Instruction, InstructionReply};
+use common_telemetry::error;
 use snafu::ResultExt;
+use table::engine::manager::TableEngineManagerRef;
 use table::engine::EngineContext;
 use table::requests::OpenTableRequest;
 
 use crate::error;
 use crate::error::Result;
-use crate::heartbeat::handler::{InstructionHandler, MessageMeta};
-use crate::heartbeat::HeartbeatResponseHandlerContext;
+use crate::heartbeat::handler::{
+    HeartbeatResponseHandler, HeartbeatResponseHandlerContext, MessageMeta,
+};
 
-impl InstructionHandler {
+#[derive(Clone)]
+pub struct OpenTableHandler {
+    catalog_manager: CatalogManagerRef,
+    table_engine_manager: TableEngineManagerRef,
+}
+
+impl HeartbeatResponseHandler for OpenTableHandler {
+    fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> Result<()> {
+        let messages = ctx
+            .incoming_messages
+            .drain_filter(|(_, instruction)| matches!(instruction, Instruction::OpenRegion { .. }))
+            .collect::<Vec<_>>();
+
+        for (meta, instruction) in messages {
+            if let Instruction::OpenRegion {
+                catalog,
+                schema,
+                table,
+                table_id,
+                engine,
+                ..
+            } = instruction
+            {
+                self.handle_open_table(
+                    ctx,
+                    meta,
+                    engine,
+                    OpenTableRequest {
+                        catalog_name: catalog,
+                        schema_name: schema,
+                        table_name: table,
+                        table_id,
+                    },
+                )
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl OpenTableHandler {
+    pub fn new(
+        catalog_manager: CatalogManagerRef,
+        table_engine_manager: TableEngineManagerRef,
+    ) -> Self {
+        Self {
+            catalog_manager,
+            table_engine_manager,
+        }
+    }
+
     pub(crate) fn handle_open_table(
         &self,
         ctx: &mut HeartbeatResponseHandlerContext,
@@ -35,32 +89,32 @@ impl InstructionHandler {
         request: OpenTableRequest,
     ) {
         let mailbox = ctx.mailbox.clone();
-        let arc = Arc::new(self.clone());
+        let self_ref = Arc::new(self.clone());
         common_runtime::spawn_bg(async move {
-            let result = arc.open_table_inner(engine, request).await;
-            let mut mailbox_guard = mailbox.lock().await;
+            let result = self_ref.open_table_inner(engine, request).await;
 
-            mailbox_guard.replies.push((
-                meta,
-                result.map_or_else(
-                    |error| InstructionReply::OpenTable {
-                        result: false,
-                        error: Some(error.to_string()),
-                    },
-                    |result| InstructionReply::OpenTable {
-                        result,
-                        error: None,
-                    },
-                ),
-            ));
+            if let Err(e) = mailbox
+                .send((
+                    meta,
+                    result.map_or_else(
+                        |error| InstructionReply::OpenRegion {
+                            result: false,
+                            error: Some(error.to_string()),
+                        },
+                        |result| InstructionReply::OpenRegion {
+                            result,
+                            error: None,
+                        },
+                    ),
+                ))
+                .await
+            {
+                error!(e;"Failed to send reply to mailbox");
+            }
         });
     }
 
-    async fn open_table_inner(
-        self: Arc<Self>,
-        engine: String,
-        request: OpenTableRequest,
-    ) -> Result<bool> {
+    async fn open_table_inner(&self, engine: String, request: OpenTableRequest) -> Result<bool> {
         let OpenTableRequest {
             catalog_name,
             schema_name,

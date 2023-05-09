@@ -14,19 +14,72 @@
 
 use std::sync::Arc;
 
+use catalog::CatalogManagerRef;
 use common_catalog::format_full_table_name;
 use common_error::prelude::BoxedError;
-use common_meta::instruction::InstructionReply;
+use common_meta::instruction::{Instruction, InstructionReply};
+use common_telemetry::error;
 use snafu::ResultExt;
+use table::engine::manager::TableEngineManagerRef;
 use table::engine::EngineContext;
 use table::requests::{CloseTableRequest, DropTableRequest};
 
 use crate::error;
 use crate::error::Result;
-use crate::heartbeat::handler::{InstructionHandler, MessageMeta};
+use crate::heartbeat::handler::{HeartbeatResponseHandler, MessageMeta};
 use crate::heartbeat::HeartbeatResponseHandlerContext;
+#[derive(Clone)]
+pub struct CloseTableHandler {
+    catalog_manager: CatalogManagerRef,
+    table_engine_manager: TableEngineManagerRef,
+}
 
-impl InstructionHandler {
+impl HeartbeatResponseHandler for CloseTableHandler {
+    fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> Result<()> {
+        let messages = ctx
+            .incoming_messages
+            .drain_filter(|(_, instruction)| matches!(instruction, Instruction::CloseRegion { .. }))
+            .collect::<Vec<_>>();
+
+        for (meta, instruction) in messages {
+            if let Instruction::CloseRegion {
+                catalog,
+                schema,
+                table,
+                table_id,
+                engine,
+                ..
+            } = instruction
+            {
+                self.handle_close_table(
+                    ctx,
+                    meta,
+                    engine,
+                    CloseTableRequest {
+                        catalog_name: catalog,
+                        schema_name: schema,
+                        table_name: table,
+                        table_id,
+                    },
+                )
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl CloseTableHandler {
+    pub fn new(
+        catalog_manager: CatalogManagerRef,
+        table_engine_manager: TableEngineManagerRef,
+    ) -> Self {
+        Self {
+            catalog_manager,
+            table_engine_manager,
+        }
+    }
+
     pub(crate) fn handle_close_table(
         &self,
         ctx: &mut HeartbeatResponseHandlerContext,
@@ -35,33 +88,33 @@ impl InstructionHandler {
         request: CloseTableRequest,
     ) {
         let mailbox = ctx.mailbox.clone();
-        let arc = Arc::new(self.clone());
+        let self_ref = Arc::new(self.clone());
 
         common_runtime::spawn_bg(async move {
-            let result = arc.close_table_inner(engine, request).await;
-            let mut mailbox_guard = mailbox.lock().await;
+            let result = self_ref.close_table_inner(engine, request).await;
 
-            mailbox_guard.replies.push((
-                meta,
-                result.map_or_else(
-                    |error| InstructionReply::CloseTable {
-                        result: false,
-                        error: Some(error.to_string()),
-                    },
-                    |result| InstructionReply::CloseTable {
-                        result,
-                        error: None,
-                    },
-                ),
-            ));
+            if let Err(e) = mailbox
+                .send((
+                    meta,
+                    result.map_or_else(
+                        |error| InstructionReply::CloseRegion {
+                            result: false,
+                            error: Some(error.to_string()),
+                        },
+                        |result| InstructionReply::CloseRegion {
+                            result,
+                            error: None,
+                        },
+                    ),
+                ))
+                .await
+            {
+                error!(e;"Failed to send reply to mailbox");
+            }
         });
     }
 
-    async fn close_table_inner(
-        self: Arc<Self>,
-        engine: String,
-        request: CloseTableRequest,
-    ) -> Result<bool> {
+    async fn close_table_inner(&self, engine: String, request: CloseTableRequest) -> Result<bool> {
         let CloseTableRequest {
             catalog_name,
             schema_name,
