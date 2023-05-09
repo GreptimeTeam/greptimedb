@@ -350,7 +350,7 @@ impl ManifestLogStorage for ManifestObjectStore {
         self.object_store
             .remove(paths.clone())
             .await
-            .context(DeleteObjectSnafu {
+            .with_context(|_| DeleteObjectSnafu {
                 path: paths.join(","),
             })?;
 
