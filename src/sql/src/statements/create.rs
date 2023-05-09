@@ -198,8 +198,7 @@ pub struct CreateExternalTable {
     pub columns: Vec<ColumnDef>,
     pub constraints: Vec<TableConstraint>,
     /// Table options in `WITH`.
-    /// All keys are uppercase.
-    /// TODO(weny): unify the key's case styling.
+    /// All keys are lowercase.
     pub options: HashMap<String, String>,
     pub if_not_exists: bool,
     pub engine: String,

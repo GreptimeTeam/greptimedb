@@ -15,7 +15,6 @@
 use std::collections::HashMap;
 
 use sqlparser::ast::ObjectName;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CopyTable {
     To(CopyTableArgument),
@@ -33,16 +32,16 @@ pub struct CopyTableArgument {
 
 #[cfg(test)]
 impl CopyTableArgument {
-    const FORMAT: &str = "FORMAT";
-
     pub fn format(&self) -> Option<String> {
         self.with
-            .get(Self::FORMAT)
+            .get(common_datasource::file_format::FORMAT_TYPE)
             .cloned()
             .or_else(|| Some("PARQUET".to_string()))
     }
 
     pub fn pattern(&self) -> Option<String> {
-        self.with.get("PATTERN").cloned()
+        self.with
+            .get(common_datasource::file_format::FILE_PATTERN)
+            .cloned()
     }
 }

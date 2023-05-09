@@ -178,7 +178,9 @@ fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
 
-    let pattern = with.get("PATTERN").cloned();
+    let pattern = with
+        .get(common_datasource::file_format::FILE_PATTERN)
+        .cloned();
 
     Ok(CopyTableRequest {
         catalog_name,
