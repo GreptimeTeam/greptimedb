@@ -138,7 +138,11 @@ pub enum Error {
         source: std::io::Error,
     },
 
-    #[snafu(display("Failed to wait flush, region_id: {}, source: {}", region_id, source))]
+    #[snafu(display(
+        "Failed to wait flushing, region_id: {}, source: {}",
+        region_id,
+        source
+    ))]
     WaitFlush {
         region_id: RegionId,
         source: tokio::sync::oneshot::error::RecvError,
@@ -540,15 +544,15 @@ impl ErrorExt for Error {
             ConvertChunk { source, .. } => source.status_code(),
             MarkWalObsolete { source, .. } => source.status_code(),
             DecodeParquetTimeRange { .. } => StatusCode::Unexpected,
-            RateLimited { .. }
-            | StopScheduler { .. }
-            | CompactTaskCancel { .. }
-            | DuplicateFlush { .. } => StatusCode::Internal,
+            RateLimited { .. } | StopScheduler { .. } | CompactTaskCancel { .. } => {
+                StatusCode::Internal
+            }
             DeleteSst { .. } => StatusCode::StorageUnavailable,
 
             StartManifestGcTask { .. }
             | StopManifestGcTask { .. }
-            | IllegalSchedulerState { .. } => StatusCode::Unexpected,
+            | IllegalSchedulerState { .. }
+            | DuplicateFlush { .. } => StatusCode::Unexpected,
 
             TtlCalculation { source, .. } => source.status_code(),
         }
