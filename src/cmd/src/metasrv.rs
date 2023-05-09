@@ -24,8 +24,6 @@ use crate::error;
 use crate::error::Result;
 use crate::options::{Options, TopLevelOptions};
 
-const METASRV_ENV_VARS_PREFIX: &str = "METASRV";
-
 pub struct Instance {
     instance: MetaSrvInstance,
 }
@@ -81,7 +79,7 @@ impl SubCommand {
     }
 }
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Default, Parser)]
 struct StartCommand {
     #[clap(long)]
     bind_addr: Option<String>,
@@ -176,12 +174,8 @@ mod tests {
             bind_addr: Some("127.0.0.1:3002".to_string()),
             server_addr: Some("127.0.0.1:3002".to_string()),
             store_addr: Some("127.0.0.1:2380".to_string()),
-            config_file: None,
             selector: Some("LoadBased".to_string()),
-            use_memory_store: false,
-            http_addr: None,
-            http_timeout: None,
-            env_vars_prefix: METASRV_ENV_VARS_PREFIX.to_string(),
+            ..Default::default()
         };
 
         let Options::Metasrv(options) =
@@ -209,15 +203,8 @@ mod tests {
         write!(file, "{}", toml_str).unwrap();
 
         let cmd = StartCommand {
-            bind_addr: None,
-            server_addr: None,
-            store_addr: None,
-            selector: None,
             config_file: Some(file.path().to_str().unwrap().to_string()),
-            use_memory_store: false,
-            http_addr: None,
-            http_timeout: None,
-            env_vars_prefix: METASRV_ENV_VARS_PREFIX.to_string(),
+            ..Default::default()
         };
 
         let Options::Metasrv(options) =
@@ -237,12 +224,8 @@ mod tests {
             bind_addr: Some("127.0.0.1:3002".to_string()),
             server_addr: Some("127.0.0.1:3002".to_string()),
             store_addr: Some("127.0.0.1:2380".to_string()),
-            config_file: None,
             selector: Some("LoadBased".to_string()),
-            use_memory_store: false,
-            http_addr: None,
-            http_timeout: None,
-            env_vars_prefix: METASRV_ENV_VARS_PREFIX.to_string(),
+            ..Default::default()
         };
 
         let options = cmd

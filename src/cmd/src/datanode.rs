@@ -24,8 +24,6 @@ use snafu::ResultExt;
 use crate::error::{MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu};
 use crate::options::{Options, TopLevelOptions};
 
-const DATANODE_ENV_VARS_PREFIX: &str = "DATANODE";
-
 pub struct Instance {
     datanode: Datanode,
 }

@@ -42,8 +42,6 @@ use crate::error::{
 use crate::frontend::load_frontend_plugins;
 use crate::options::{MixOptions, Options, TopLevelOptions};
 
-const STANDALONE_ENV_VARS_PREFIX: &str = "STANDALONE";
-
 #[derive(Parser)]
 pub struct Command {
     #[clap(subcommand)]
@@ -185,7 +183,7 @@ impl Instance {
     }
 }
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Default, Parser)]
 struct StartCommand {
     #[clap(long)]
     http_addr: Option<String>,
@@ -337,6 +335,7 @@ async fn build_frontend(
 
 #[cfg(test)]
 mod tests {
+    use std::default::Default;
     use std::io::Write;
     use std::time::Duration;
 
@@ -350,20 +349,8 @@ mod tests {
     #[tokio::test]
     async fn test_try_from_start_command_to_anymap() {
         let command = StartCommand {
-            http_addr: None,
-            rpc_addr: None,
-            prom_addr: None,
-            mysql_addr: None,
-            postgres_addr: None,
-            opentsdb_addr: None,
-            config_file: None,
-            influxdb_enable: false,
-            enable_memory_catalog: false,
-            tls_mode: None,
-            tls_cert_path: None,
-            tls_key_path: None,
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
-            env_vars_prefix: STANDALONE_ENV_VARS_PREFIX.to_string(),
+            ..Default::default()
         };
 
         let plugins = load_frontend_plugins(&command.user_provider);
@@ -429,20 +416,9 @@ mod tests {
         "#;
         write!(file, "{}", toml_str).unwrap();
         let cmd = StartCommand {
-            http_addr: None,
-            rpc_addr: None,
-            prom_addr: None,
-            mysql_addr: None,
-            postgres_addr: None,
-            opentsdb_addr: None,
             config_file: Some(file.path().to_str().unwrap().to_string()),
-            influxdb_enable: false,
-            enable_memory_catalog: false,
-            tls_mode: None,
-            tls_cert_path: None,
-            tls_key_path: None,
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
-            env_vars_prefix: STANDALONE_ENV_VARS_PREFIX.to_string(),
+            ..Default::default()
         };
 
         let Options::Standalone(options) = cmd.load_options(TopLevelOptions::default()).unwrap() else {unreachable!()};
@@ -493,20 +469,8 @@ mod tests {
     #[test]
     fn test_top_level_options() {
         let cmd = StartCommand {
-            http_addr: None,
-            rpc_addr: None,
-            prom_addr: None,
-            mysql_addr: None,
-            postgres_addr: None,
-            opentsdb_addr: None,
-            config_file: None,
-            influxdb_enable: false,
-            enable_memory_catalog: false,
-            tls_mode: None,
-            tls_cert_path: None,
-            tls_key_path: None,
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
-            env_vars_prefix: STANDALONE_ENV_VARS_PREFIX.to_string(),
+            ..Default::default()
         };
 
         let Options::Standalone(opts) = cmd
@@ -561,19 +525,8 @@ mod tests {
             || {
                 let command = StartCommand {
                     config_file: Some(file.path().to_str().unwrap().to_string()),
-                    http_addr: None,
-                    rpc_addr: None,
-                    mysql_addr: None,
-                    prom_addr: None,
-                    postgres_addr: None,
-                    opentsdb_addr: None,
-                    influxdb_enable: false,
-                    enable_memory_catalog: false,
-                    tls_mode: None,
-                    tls_cert_path: None,
-                    tls_key_path: None,
-                    user_provider: None,
                     env_vars_prefix: env_vars_prefix.to_string(),
+                    ..Default::default()
                 };
 
                 let top_level_opts = TopLevelOptions {

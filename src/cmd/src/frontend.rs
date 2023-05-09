@@ -29,8 +29,6 @@ use snafu::ResultExt;
 use crate::error::{self, IllegalAuthConfigSnafu, Result};
 use crate::options::{Options, TopLevelOptions};
 
-const FRONTEND_ENV_VARS_PREFIX: &str = "FRONTEND";
-
 pub struct Instance {
     frontend: FeInstance,
 }
@@ -86,7 +84,7 @@ impl SubCommand {
     }
 }
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Default, Parser)]
 pub struct StartCommand {
     #[clap(long)]
     http_addr: Option<String>,
@@ -240,20 +238,13 @@ mod tests {
     fn test_try_from_start_command() {
         let command = StartCommand {
             http_addr: Some("127.0.0.1:1234".to_string()),
-            grpc_addr: None,
             prom_addr: Some("127.0.0.1:4444".to_string()),
             mysql_addr: Some("127.0.0.1:5678".to_string()),
             postgres_addr: Some("127.0.0.1:5432".to_string()),
             opentsdb_addr: Some("127.0.0.1:4321".to_string()),
             influxdb_enable: Some(false),
-            config_file: None,
-            metasrv_addr: None,
-            tls_mode: None,
-            tls_cert_path: None,
-            tls_key_path: None,
-            user_provider: None,
             disable_dashboard: Some(false),
-            env_vars_prefix: FRONTEND_ENV_VARS_PREFIX.to_string(),
+            ..Default::default()
         };
 
         let Options::Frontend(opts) =
@@ -309,21 +300,9 @@ mod tests {
         write!(file, "{}", toml_str).unwrap();
 
         let command = StartCommand {
-            http_addr: None,
-            grpc_addr: None,
-            mysql_addr: None,
-            prom_addr: None,
-            postgres_addr: None,
-            opentsdb_addr: None,
-            influxdb_enable: None,
             config_file: Some(file.path().to_str().unwrap().to_string()),
-            metasrv_addr: None,
-            tls_mode: None,
-            tls_cert_path: None,
-            tls_key_path: None,
-            user_provider: None,
             disable_dashboard: Some(false),
-            env_vars_prefix: FRONTEND_ENV_VARS_PREFIX.to_string(),
+            ..Default::default()
         };
 
         let Options::Frontend(fe_opts) =
@@ -345,21 +324,9 @@ mod tests {
     #[tokio::test]
     async fn test_try_from_start_command_to_anymap() {
         let command = StartCommand {
-            http_addr: None,
-            grpc_addr: None,
-            mysql_addr: None,
-            prom_addr: None,
-            postgres_addr: None,
-            opentsdb_addr: None,
-            influxdb_enable: None,
-            config_file: None,
-            metasrv_addr: None,
-            tls_mode: None,
-            tls_cert_path: None,
-            tls_key_path: None,
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
             disable_dashboard: Some(false),
-            env_vars_prefix: FRONTEND_ENV_VARS_PREFIX.to_string(),
+            ..Default::default()
         };
 
         let plugins = load_frontend_plugins(&command.user_provider);
@@ -381,21 +348,8 @@ mod tests {
     #[test]
     fn test_top_level_options() {
         let cmd = StartCommand {
-            http_addr: None,
-            grpc_addr: None,
-            mysql_addr: None,
-            prom_addr: None,
-            postgres_addr: None,
-            opentsdb_addr: None,
-            influxdb_enable: None,
-            config_file: None,
-            metasrv_addr: None,
-            tls_mode: None,
-            tls_cert_path: None,
-            tls_key_path: None,
-            user_provider: None,
             disable_dashboard: Some(false),
-            env_vars_prefix: FRONTEND_ENV_VARS_PREFIX.to_string(),
+            ..Default::default()
         };
 
         let options = cmd
@@ -449,20 +403,9 @@ mod tests {
             || {
                 let command = StartCommand {
                     config_file: Some(file.path().to_str().unwrap().to_string()),
-                    http_addr: None,
-                    grpc_addr: None,
                     mysql_addr: Some("127.0.0.1:3306".to_string()),
-                    prom_addr: None,
-                    postgres_addr: None,
-                    opentsdb_addr: None,
-                    influxdb_enable: None,
-                    metasrv_addr: None,
-                    tls_mode: None,
-                    tls_cert_path: None,
-                    tls_key_path: None,
-                    user_provider: None,
-                    disable_dashboard: None,
                     env_vars_prefix: env_vars_prefix.to_string(),
+                    ..Default::default()
                 };
 
                 let top_level_opts = TopLevelOptions {
