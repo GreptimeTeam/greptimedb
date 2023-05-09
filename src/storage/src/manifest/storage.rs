@@ -133,6 +133,7 @@ impl ManifestObjectStore {
     pub fn new(path: &str, object_store: ObjectStore) -> Self {
         Self {
             object_store,
+            //TODO: make it configurable
             compress_type: DEFAULT_COMPRESSION_TYPE,
             path: util::normalize_dir(path),
         }
