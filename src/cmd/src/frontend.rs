@@ -234,6 +234,7 @@ mod tests {
     use servers::auth::{Identity, Password, UserProviderRef};
 
     use super::*;
+    use crate::options::ENV_VAR_SEP;
 
     #[test]
     fn test_try_from_start_command() {
@@ -421,15 +422,27 @@ mod tests {
         "#;
         write!(file, "{}", toml_str).unwrap();
 
-        let env_vars_prefix = "FRONTEND_UT".to_string();
+        let env_vars_prefix = "FRONTEND_UT";
         temp_env::with_vars(
             vec![
                 (
-                    format!("{}-{}", env_vars_prefix, "MYSQL_OPTIONS.ADDR"),
+                    // mysql_options.addr = 127.0.0.1:14002
+                    vec![
+                        env_vars_prefix.to_string(),
+                        "mysql_options".to_uppercase(),
+                        "addr".to_uppercase(),
+                    ]
+                    .join(ENV_VAR_SEP),
                     Some("127.0.0.1:14002"),
                 ),
                 (
-                    format!("{}-{}", env_vars_prefix, "MYSQL_OPTIONS.RUNTIME_SIZE"),
+                    // mysql_options.runtime_size = 11
+                    vec![
+                        env_vars_prefix.to_string(),
+                        "mysql_options".to_uppercase(),
+                        "runtime_size".to_uppercase(),
+                    ]
+                    .join(ENV_VAR_SEP),
                     Some("11"),
                 ),
             ],
@@ -449,7 +462,7 @@ mod tests {
                     tls_key_path: None,
                     user_provider: None,
                     disable_dashboard: None,
-                    env_vars_prefix: env_vars_prefix.clone(),
+                    env_vars_prefix: env_vars_prefix.to_string(),
                 };
 
                 let top_level_opts = TopLevelOptions {

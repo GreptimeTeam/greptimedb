@@ -22,6 +22,8 @@ use snafu::ResultExt;
 
 use crate::error::{LoadLayeredConfigSnafu, Result};
 
+pub const ENV_VAR_SEP: &str = "__";
+
 pub struct MixOptions {
     pub fe_opts: FrontendOptions,
     pub dn_opts: DatanodeOptions,
@@ -56,8 +58,8 @@ impl Options {
     /// Load the configuration from multiple sources and merge them.
     /// The precedence order is: environment variables > config file > default function.
     /// `env_vars_prefix` is the prefix of environment variables, e.g. "FRONTEND-xxx".
-    /// The function will use `.` as the separator for environment variables, for example:
-    /// `DATANODE-STORAGE.MANIFEST.CHECKPOINT_MARGIN` will be mapped to `DatanodeOptions.storage.manifest.checkpoint_margin` field in the configuration.
+    /// The function will use `__` as the separator for environment variables, for example:
+    /// `DATANODE__STORAGE__MANIFEST__CHECKPOINT_MARGIN` will be mapped to `DatanodeOptions.storage.manifest.checkpoint_margin` field in the configuration.
     pub fn load_layered_options<'de, T: Serialize + Deserialize<'de> + Default>(
         config_file: Option<String>,
         env_vars_prefix: String,
@@ -65,37 +67,30 @@ impl Options {
         let default_opts = T::default();
 
         let env_source = {
-            if env_vars_prefix.is_empty() {
-                Environment::default().separator(".").ignore_empty(true)
-            } else {
-                Environment::with_prefix(env_vars_prefix.as_str())
-                    .try_parsing(true)
-                    .prefix_separator("-")
-                    .separator(".")
-                    .ignore_empty(true)
+            let mut env = Environment::default();
+
+            if !env_vars_prefix.is_empty() {
+                env = env.prefix(env_vars_prefix.as_str());
             }
+
+            env.try_parsing(true)
+                .separator(ENV_VAR_SEP)
+                .ignore_empty(true)
         };
 
-        let opts = if let Some(config_file) = config_file {
-            Config::builder()
-                .add_source(Config::try_from(&default_opts).context(LoadLayeredConfigSnafu)?)
-                .add_source(File::new(&config_file, FileFormat::Toml))
-                .add_source(env_source)
-                .build()
-                .context(LoadLayeredConfigSnafu)?
-                .try_deserialize()
-                .context(LoadLayeredConfigSnafu)?
-        } else {
-            Config::builder()
-                .add_source(Config::try_from(&default_opts).context(LoadLayeredConfigSnafu)?)
-                .add_source(env_source)
-                .build()
-                .context(LoadLayeredConfigSnafu)?
-                .try_deserialize()
-                .context(LoadLayeredConfigSnafu)?
-        };
+        let mut layered_config = Config::builder()
+            .add_source(Config::try_from(&default_opts).context(LoadLayeredConfigSnafu)?);
 
-        Ok(opts)
+        if let Some(config_file) = config_file {
+            layered_config = layered_config.add_source(File::new(&config_file, FileFormat::Toml));
+        }
+
+        Ok(layered_config
+            .add_source(env_source)
+            .build()
+            .context(LoadLayeredConfigSnafu)?
+            .try_deserialize()
+            .context(LoadLayeredConfigSnafu)?)
     }
 }
 
@@ -155,41 +150,68 @@ mod tests {
         "#;
         write!(file, "{}", toml_str).unwrap();
 
-        let env_vars_prefix = "DATANODE_UT".to_string();
+        let env_vars_prefix = "DATANODE_UT";
         temp_env::with_vars(
             // The following environment variables will be used to override the values in the config file.
             vec![
                 (
-                    format!(
-                        "{}-{}",
-                        env_vars_prefix, "STORAGE.MANIFEST.CHECKPOINT_MARGIN"
-                    ),
+                    // storage.manifest.checkpoint_margin = 99
+                    vec![
+                        env_vars_prefix.to_string(),
+                        "storage".to_uppercase(),
+                        "manifest".to_uppercase(),
+                        "checkpoint_margin".to_uppercase(),
+                    ]
+                    .join(ENV_VAR_SEP),
                     Some("99"),
                 ),
                 (
-                    format!("{}-{}", env_vars_prefix, "STORAGE.TYPE"),
+                    // storage.type = S3
+                    vec![
+                        env_vars_prefix.to_string(),
+                        "storage".to_uppercase(),
+                        "type".to_uppercase(),
+                    ]
+                    .join(ENV_VAR_SEP),
                     Some("S3"),
                 ),
                 (
-                    format!("{}-{}", env_vars_prefix, "STORAGE.BUCKET"),
+                    // storage.bucket = mybucket
+                    vec![
+                        env_vars_prefix.to_string(),
+                        "storage".to_uppercase(),
+                        "bucket".to_uppercase(),
+                    ]
+                    .join(ENV_VAR_SEP),
                     Some("mybucket"),
                 ),
                 (
-                    format!("{}-{}", env_vars_prefix, "STORAGE.MANIFEST.GC_DURATION"),
+                    // storage.manifest.gc_duration = 42s
+                    vec![
+                        env_vars_prefix.to_string(),
+                        "storage".to_uppercase(),
+                        "manifest".to_uppercase(),
+                        "gc_duration".to_uppercase(),
+                    ]
+                    .join(ENV_VAR_SEP),
                     Some("42s"),
                 ),
                 (
-                    format!(
-                        "{}-{}",
-                        env_vars_prefix, "STORAGE.MANIFEST.CHECKPOINT_ON_STARTUP"
-                    ),
+                    // storage.manifest.checkpoint_on_startup = true
+                    vec![
+                        env_vars_prefix.to_string(),
+                        "storage".to_uppercase(),
+                        "manifest".to_uppercase(),
+                        "checkpoint_on_startup".to_uppercase(),
+                    ]
+                    .join(ENV_VAR_SEP),
                     Some("true"),
                 ),
             ],
             || {
                 let opts: DatanodeOptions = Options::load_layered_options(
                     Some(file.path().to_str().unwrap().to_string()),
-                    env_vars_prefix.clone(),
+                    env_vars_prefix.to_string(),
                 )
                 .unwrap();
 

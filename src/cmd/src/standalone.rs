@@ -345,6 +345,7 @@ mod tests {
     use servers::Mode;
 
     use super::*;
+    use crate::options::ENV_VAR_SEP;
 
     #[tokio::test]
     async fn test_try_from_start_command_to_anymap() {
@@ -533,15 +534,27 @@ mod tests {
         "#;
         write!(file, "{}", toml_str).unwrap();
 
-        let env_vars_prefix = "STANDALONE_UT".to_string();
+        let env_vars_prefix = "STANDALONE_UT";
         temp_env::with_vars(
             vec![
                 (
-                    format!("{}-{}", env_vars_prefix, "LOGGING.DIR"),
+                    // logging.dir = /other/log/dir
+                    vec![
+                        env_vars_prefix.to_string(),
+                        "logging".to_uppercase(),
+                        "dir".to_uppercase(),
+                    ]
+                    .join(ENV_VAR_SEP),
                     Some("/other/log/dir"),
                 ),
                 (
-                    format!("{}-{}", env_vars_prefix, "LOGGING.LEVEL"),
+                    // logging.level = info
+                    vec![
+                        env_vars_prefix.to_string(),
+                        "logging".to_uppercase(),
+                        "level".to_uppercase(),
+                    ]
+                    .join(ENV_VAR_SEP),
                     Some("info"),
                 ),
             ],
@@ -560,7 +573,7 @@ mod tests {
                     tls_cert_path: None,
                     tls_key_path: None,
                     user_provider: None,
-                    env_vars_prefix: env_vars_prefix.clone(),
+                    env_vars_prefix: env_vars_prefix.to_string(),
                 };
 
                 let top_level_opts = TopLevelOptions {

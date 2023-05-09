@@ -168,6 +168,7 @@ mod tests {
     use meta_srv::selector::SelectorType;
 
     use super::*;
+    use crate::options::ENV_VAR_SEP;
 
     #[test]
     fn test_read_from_cmd() {
@@ -276,11 +277,14 @@ mod tests {
         temp_env::with_vars(
             vec![
                 (
-                    format!("{}-{}", env_vars_prefix, "BIND_ADDR"),
+                    // bind_addr = 127.0.0.1:14002
+                    vec![env_vars_prefix.to_string(), "bind_addr".to_uppercase()].join(ENV_VAR_SEP),
                     Some("127.0.0.1:14002"),
                 ),
                 (
-                    format!("{}-{}", env_vars_prefix, "SERVER_ADDR"),
+                    // server_addr = 127.0.0.1:13002
+                    vec![env_vars_prefix.to_string(), "server_addr".to_uppercase()]
+                        .join(ENV_VAR_SEP),
                     Some("127.0.0.1:13002"),
                 ),
             ],

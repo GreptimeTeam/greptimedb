@@ -191,6 +191,7 @@ mod tests {
     use servers::Mode;
 
     use super::*;
+    use crate::options::ENV_VAR_SEP;
 
     #[test]
     fn test_read_from_config_file() {
@@ -401,7 +402,14 @@ mod tests {
         //"DATANODE_UT-STORAGE.MANIFEST.GC_DURATION"
         temp_env::with_vars(
             vec![(
-                format!("{}-{}", env_vars_prefix, "STORAGE.MANIFEST.GC_DURATION"),
+                // storage.manifest.gc_duration = 9s
+                vec![
+                    env_vars_prefix.to_string(),
+                    "storage".to_uppercase(),
+                    "manifest".to_uppercase(),
+                    "gc_duration".to_uppercase(),
+                ]
+                .join(ENV_VAR_SEP),
                 Some("9s"),
             )],
             || {
