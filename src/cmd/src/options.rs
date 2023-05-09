@@ -85,12 +85,14 @@ impl Options {
             layered_config = layered_config.add_source(File::new(&config_file, FileFormat::Toml));
         }
 
-        Ok(layered_config
+        let opts = layered_config
             .add_source(env_source)
             .build()
             .context(LoadLayeredConfigSnafu)?
             .try_deserialize()
-            .context(LoadLayeredConfigSnafu)?)
+            .context(LoadLayeredConfigSnafu)?;
+
+        Ok(opts)
     }
 }
 
