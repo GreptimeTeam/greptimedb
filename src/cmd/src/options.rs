@@ -57,7 +57,7 @@ impl Options {
 
     /// Load the configuration from multiple sources and merge them.
     /// The precedence order is: environment variables > config file > default function.
-    /// `env_vars_prefix` is the prefix of environment variables, e.g. "FRONTEND-xxx".
+    /// `env_vars_prefix` is the prefix of environment variables, e.g. "FRONTEND__xxx".
     /// The function will use `__` as the separator for environment variables, for example:
     /// `DATANODE__STORAGE__MANIFEST__CHECKPOINT_MARGIN` will be mapped to `DatanodeOptions.storage.manifest.checkpoint_margin` field in the configuration.
     pub fn load_layered_options<'de, T: Serialize + Deserialize<'de> + Default>(

@@ -20,8 +20,7 @@ use meta_srv::bootstrap::MetaSrvInstance;
 use meta_srv::metasrv::MetaSrvOptions;
 use snafu::ResultExt;
 
-use crate::error;
-use crate::error::Result;
+use crate::error::{self, Result};
 use crate::options::{Options, TopLevelOptions};
 
 pub struct Instance {

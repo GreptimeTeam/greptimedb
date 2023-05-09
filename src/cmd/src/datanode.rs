@@ -397,7 +397,6 @@ mod tests {
         write!(file, "{}", toml_str).unwrap();
 
         let env_vars_prefix = "DATANODE_UT";
-        //"DATANODE_UT-STORAGE.MANIFEST.GC_DURATION"
         temp_env::with_vars(
             vec![(
                 // storage.manifest.gc_duration = 9s
