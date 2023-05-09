@@ -117,7 +117,6 @@ jobs:
           path: target/${{ matrix.arch }}/${{ env.CARGO_PROFILE }}/${{ matrix.file }}.sha256sum
 
   build-linux:
-    needs: [build-macos]
     name: Build linux binary
     strategy:
       matrix:
