@@ -16,6 +16,7 @@ use std::any::Any;
 
 use common_error::prelude::*;
 use datafusion::parquet;
+use datatypes::arrow::error::ArrowError;
 use datatypes::value::Value;
 use snafu::Location;
 use store_api::storage::RegionId;
@@ -523,6 +524,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to project schema: {}", source))]
+    ProjectSchema {
+        source: ArrowError,
+        location: Location,
+    },
+
     #[snafu(display("Failed to encode object into json, source: {}", source))]
     EncodeJson {
         source: serde_json::error::Error,
@@ -556,7 +563,8 @@ impl ErrorExt for Error {
             | Error::BuildRegex { .. }
             | Error::InvalidSchema { .. }
             | Error::PrepareImmutableTable { .. }
-            | Error::BuildCsvConfig { .. } => StatusCode::InvalidArguments,
+            | Error::BuildCsvConfig { .. }
+            | Error::ProjectSchema { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
 
