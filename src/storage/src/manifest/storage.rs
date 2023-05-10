@@ -39,7 +39,10 @@ lazy_static! {
 }
 
 const LAST_CHECKPOINT_FILE: &str = "_last_checkpoint";
-const DEFAULT_MANIFEST_COMPRESSION_TYPE: CompressionType = CompressionType::UNCOMPRESSED;
+const DEFAULT_MANIFEST_COMPRESSION_TYPE: CompressionType = CompressionType::Uncompressed;
+/// Due to backward compatibility, it is possible that the user's manifest file has not been compressed.
+/// So when we encounter problems, we need to fall back to `FALL_BACK_COMPRESS_TYPE` for processing.
+const FALL_BACK_COMPRESS_TYPE: CompressionType = CompressionType::Uncompressed;
 
 #[inline]
 pub fn delta_file(version: ManifestVersion) -> String {
@@ -53,7 +56,7 @@ pub fn checkpoint_file(version: ManifestVersion) -> String {
 
 #[inline]
 pub fn gen_path(path: &str, file: &str, compress_type: CompressionType) -> String {
-    if compress_type == CompressionType::UNCOMPRESSED {
+    if compress_type == CompressionType::Uncompressed {
         format!("{}{}", path, file)
     } else {
         format!("{}{}.{}", path, file, compress_type.file_extension())
@@ -77,7 +80,7 @@ pub fn file_version(path: &str) -> ManifestVersion {
 #[inline]
 pub fn file_compress_type(path: &str) -> CompressionType {
     let s = path.rsplit('.').next().unwrap_or("");
-    CompressionType::from_str(s).unwrap_or(CompressionType::UNCOMPRESSED)
+    CompressionType::from_str(s).unwrap_or(CompressionType::Uncompressed)
 }
 
 #[inline]
@@ -335,11 +338,11 @@ impl ManifestLogStorage for ManifestObjectStore {
         let mut paths = Vec::with_capacity(((end - start) * 2) as usize);
         for version in start..end {
             paths.push(raw_normalize_path(&self.delta_file_path(version)));
-            if self.compress_type != CompressionType::UNCOMPRESSED {
+            if self.compress_type != FALL_BACK_COMPRESS_TYPE {
                 paths.push(raw_normalize_path(&gen_path(
                     &self.path,
                     &delta_file(version),
-                    CompressionType::UNCOMPRESSED,
+                    FALL_BACK_COMPRESS_TYPE,
                 )));
             }
         }
@@ -409,48 +412,67 @@ impl ManifestLogStorage for ManifestObjectStore {
         let path = self.checkpoint_file_path(version);
         // Due to backward compatibility, it is possible that the user's checkpoint not compressed,
         // so if we don't find file by compressed type. fall back to checkpoint not compressed find again.
-        let checkpoint_data = match self.object_store.read(&path).await {
-            Ok(checkpoint) => {
-                let decompress_data =
-                    self.compress_type
-                        .decode(checkpoint)
-                        .await
-                        .context(DecompressObjectSnafu {
+        let checkpoint_data =
+            match self.object_store.read(&path).await {
+                Ok(checkpoint) => {
+                    let decompress_data = self.compress_type.decode(checkpoint).await.context(
+                        DecompressObjectSnafu {
                             compress_type: self.compress_type,
                             path,
-                        })?;
-                Ok(Some(decompress_data))
-            }
-            Err(e) if e.kind() == ErrorKind::NotFound => {
-                let uncompress_path = gen_path(
-                    &self.path,
-                    &checkpoint_file(version),
-                    CompressionType::UNCOMPRESSED,
-                );
-                logging::debug!("Failed to load checkpoint from path: {}, fall back to previous uncompress path: {}", path, uncompress_path);
-                match self.object_store.read(&uncompress_path).await {
-                    Ok(checkpoint) => Ok(Some(checkpoint)),
-                    Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
-                    Err(e) => Err(e).context(ReadObjectSnafu {
-                        path: &uncompress_path,
-                    }),
+                        },
+                    )?;
+                    Ok(Some(decompress_data))
                 }
-            }
-            Err(e) => Err(e).context(ReadObjectSnafu { path: &path }),
-        }?;
+                Err(e) => {
+                    if e.kind() == ErrorKind::NotFound {
+                        if self.compress_type != FALL_BACK_COMPRESS_TYPE {
+                            let fall_back_path = gen_path(
+                                &self.path,
+                                &checkpoint_file(version),
+                                FALL_BACK_COMPRESS_TYPE,
+                            );
+                            logging::debug!(
+                                "Failed to load checkpoint from path: {}, fall back to path: {}",
+                                path,
+                                fall_back_path
+                            );
+                            match self.object_store.read(&fall_back_path).await {
+                                Ok(checkpoint) => {
+                                    let decompress_data = FALL_BACK_COMPRESS_TYPE
+                                        .decode(checkpoint)
+                                        .await
+                                        .context(DecompressObjectSnafu {
+                                            compress_type: FALL_BACK_COMPRESS_TYPE,
+                                            path,
+                                        })?;
+                                    Ok(Some(decompress_data))
+                                }
+                                Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+                                Err(e) => Err(e).context(ReadObjectSnafu {
+                                    path: &fall_back_path,
+                                }),
+                            }
+                        } else {
+                            Ok(None)
+                        }
+                    } else {
+                        Err(e).context(ReadObjectSnafu { path: &path })
+                    }
+                }
+            }?;
         Ok(checkpoint_data.map(|data| (version, data)))
     }
 
     async fn delete_checkpoint(&self, version: ManifestVersion) -> Result<()> {
         // Due to backward compatibility, it is possible that the user's checkpoint file has not been compressed,
         // so we need to delete the uncompressed checkpoint file corresponding to that version, even if the uncompressed checkpoint file in that version do not exist.
-        let paths = if self.compress_type != CompressionType::UNCOMPRESSED {
+        let paths = if self.compress_type != FALL_BACK_COMPRESS_TYPE {
             vec![
                 raw_normalize_path(&self.checkpoint_file_path(version)),
                 raw_normalize_path(&gen_path(
                     &self.path,
                     &checkpoint_file(version),
-                    CompressionType::UNCOMPRESSED,
+                    FALL_BACK_COMPRESS_TYPE,
                 )),
             ]
         } else {
@@ -500,25 +522,39 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    // Define this test mainly to prevent future unintentional changes may break the backward compatibility.
-    fn test_compress_file_path_generation() {
-        let path = "/foo/bar/";
-        let version: ManifestVersion = 0;
-        let file_path = gen_path(path, &delta_file(version), CompressionType::GZIP);
-        assert_eq!(file_path.as_str(), "/foo/bar/00000000000000000000.json.gz")
-    }
-
-    #[tokio::test]
-    async fn test_manifest_log_store() {
+    fn new_test_manifest_store() -> ManifestObjectStore {
         common_telemetry::init_default_ut_logging();
         let tmp_dir = create_temp_dir("test_manifest_log_store");
         let mut builder = Fs::default();
         builder.root(&tmp_dir.path().to_string_lossy());
         let object_store = ObjectStore::new(builder).unwrap().finish();
+        ManifestObjectStore::new("/", object_store)
+    }
 
-        let log_store = ManifestObjectStore::new("/", object_store);
+    #[test]
+    // Define this test mainly to prevent future unintentional changes may break the backward compatibility.
+    fn test_compress_file_path_generation() {
+        let path = "/foo/bar/";
+        let version: ManifestVersion = 0;
+        let file_path = gen_path(path, &delta_file(version), CompressionType::Gzip);
+        assert_eq!(file_path.as_str(), "/foo/bar/00000000000000000000.json.gz")
+    }
 
+    #[tokio::test]
+    async fn test_manifest_log_store_uncompress() {
+        let mut log_store = new_test_manifest_store();
+        log_store.compress_type = CompressionType::Uncompressed;
+        test_manifest_log_store_case(log_store).await;
+    }
+
+    #[tokio::test]
+    async fn test_manifest_log_store_compress() {
+        let mut log_store = new_test_manifest_store();
+        log_store.compress_type = CompressionType::Gzip;
+        test_manifest_log_store_case(log_store).await;
+    }
+
+    async fn test_manifest_log_store_case(log_store: ManifestObjectStore) {
         for v in 0..5 {
             log_store
                 .save(v, format!("hello, {v}").as_bytes())
@@ -586,15 +622,10 @@ mod tests {
     #[tokio::test]
     // test ManifestObjectStore can read/delete previously uncompressed data correctly
     async fn test_compress_backward_compatible() {
-        common_telemetry::init_default_ut_logging();
-        let tmp_dir = create_temp_dir("test_manifest_log_store");
-        let mut builder = Fs::default();
-        builder.root(&tmp_dir.path().to_string_lossy());
-        let object_store = ObjectStore::new(builder).unwrap().finish();
-        let mut log_store = ManifestObjectStore::new("/", object_store.clone());
+        let mut log_store = new_test_manifest_store();
 
         // write uncompress data to stimulate previously uncompressed data
-        log_store.compress_type = CompressionType::UNCOMPRESSED;
+        log_store.compress_type = CompressionType::Uncompressed;
         for v in 0..5 {
             log_store
                 .save(v, format!("hello, {v}").as_bytes())
@@ -607,7 +638,7 @@ mod tests {
             .unwrap();
 
         // change compress type
-        log_store.compress_type = CompressionType::GZIP;
+        log_store.compress_type = CompressionType::Gzip;
 
         // test load_last_checkpoint work correctly for previously uncompressed data
         let (v, checkpoint) = log_store.load_last_checkpoint().await.unwrap().unwrap();
