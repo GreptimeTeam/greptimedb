@@ -459,12 +459,11 @@ impl<S: LogStore> EngineInner<S> {
     }
 
     async fn close(&self) -> Result<()> {
-        {
-            let regions = self.regions.0.read().unwrap();
-            for (region_id, slot) in &regions {
-                if let Some(region) = slot.get_ready_region() {
-                    region.close().await;
-                }
+        let regions = self.regions.list_regions();
+        for region in regions {
+            // Tolerate failure during closing regions.
+            if let Err(e) = region.close().await {
+                logging::error!(e; "Failed to close region {}", region.id());
             }
         }
 
