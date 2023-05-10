@@ -27,7 +27,7 @@ use crate::error::Result;
 use crate::manifest::action::*;
 use crate::manifest::region::RegionManifest;
 use crate::memtable::{IterContext, MemtableId, MemtableRef};
-use crate::metrics::FLUSH_DURATION;
+use crate::metrics::FLUSH_ELAPSED;
 use crate::region::{RegionWriterRef, SharedDataRef};
 use crate::sst::{AccessLayerRef, FileId, FileMeta, Source, SstInfo, WriteOptions};
 use crate::wal::Wal;
@@ -152,7 +152,7 @@ pub struct FlushJob<S: LogStore> {
 impl<S: LogStore> FlushJob<S> {
     /// Execute the flush job.
     async fn run(&mut self) -> Result<()> {
-        let _timer = timer!(FLUSH_DURATION);
+        let _timer = timer!(FLUSH_ELAPSED);
 
         let file_metas = self.write_memtables_to_layer().await?;
         self.write_manifest_and_apply(&file_metas).await?;
