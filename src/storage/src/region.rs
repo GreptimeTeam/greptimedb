@@ -42,6 +42,7 @@ use crate::manifest::action::{
 use crate::manifest::region::RegionManifest;
 use crate::memtable::MemtableBuilderRef;
 use crate::metadata::{RegionMetaImpl, RegionMetadata, RegionMetadataRef};
+pub(crate) use crate::region::writer::schedule_compaction;
 pub use crate::region::writer::{AlterContext, RegionWriter, RegionWriterRef, WriterContext};
 use crate::schema::compat::CompatWrite;
 use crate::snapshot::SnapshotImpl;
@@ -72,7 +73,6 @@ impl<S: LogStore> fmt::Debug for RegionImpl<S> {
             .field("name", &self.inner.shared.name)
             .field("wal", &self.inner.wal)
             .field("flush_strategy", &self.inner.flush_strategy)
-            .field("flush_scheduler", &self.inner.flush_scheduler)
             .field("compaction_scheduler", &self.inner.compaction_scheduler)
             .field("sst_layer", &self.inner.sst_layer)
             .field("manifest", &self.inner.manifest)
@@ -150,7 +150,7 @@ pub struct StoreConfig<S: LogStore> {
     pub sst_layer: AccessLayerRef,
     pub manifest: RegionManifest,
     pub memtable_builder: MemtableBuilderRef,
-    pub flush_scheduler: FlushSchedulerRef,
+    pub flush_scheduler: FlushSchedulerRef<S>,
     pub flush_strategy: FlushStrategyRef,
     pub compaction_scheduler: CompactionSchedulerRef<S>,
     pub engine_config: Arc<EngineConfig>,
@@ -575,7 +575,7 @@ struct RegionInner<S: LogStore> {
     writer: RegionWriterRef,
     wal: Wal<S>,
     flush_strategy: FlushStrategyRef,
-    flush_scheduler: FlushSchedulerRef,
+    flush_scheduler: FlushSchedulerRef<S>,
     compaction_scheduler: CompactionSchedulerRef<S>,
     sst_layer: AccessLayerRef,
     manifest: RegionManifest,

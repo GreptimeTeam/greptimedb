@@ -26,6 +26,7 @@ datafusion-expr.workspace = true
 futures.workspace = true
 futures-util.workspace = true
 lazy_static = "1.4"
+metrics.workspace = true
 object-store = { path = "../object-store" }
 parquet = { workspace = true, features = ["async"] }
 paste.workspace = true

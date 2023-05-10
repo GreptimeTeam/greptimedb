@@ -16,3 +16,9 @@
 
 /// Elapsed time of updating manifest when creating regions.
 pub const CREATE_REGION_UPDATE_MANIFEST: &str = "storage.create_region.update_manifest";
+/// Counter of scheduled flush requests.
+pub const FLUSH_REQUESTS_TOTAL: &str = "storage.flush.requests_total";
+/// Counter of scheduled failed flush jobs.
+pub const FLUSH_ERRORS_TOTAL: &str = "storage.flush.errors_total";
+/// Elapsed time of a flush job.
+pub const FLUSH_ELAPSED: &str = "storage.flush.elapsed";

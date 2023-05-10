@@ -138,19 +138,15 @@ pub enum Error {
         source: std::io::Error,
     },
 
-    #[snafu(display("Failed to join task, source: {}", source))]
-    JoinTask {
-        source: common_runtime::JoinError,
+    #[snafu(display(
+        "Failed to wait flushing, region_id: {}, source: {}",
+        region_id,
+        source
+    ))]
+    WaitFlush {
+        region_id: RegionId,
+        source: tokio::sync::oneshot::error::RecvError,
         location: Location,
-    },
-
-    #[snafu(display("Task already cancelled"))]
-    Cancelled { location: Location },
-
-    #[snafu(display("Failed to cancel flush, source: {}", source))]
-    CancelFlush {
-        #[snafu(backtrace)]
-        source: BoxedError,
     },
 
     #[snafu(display(
@@ -455,6 +451,17 @@ pub enum Error {
         region_id: RegionId,
         source: tokio::sync::oneshot::error::RecvError,
     },
+
+    #[snafu(display(
+        "The flush request is duplicate, region_id: {}, sequence: {}",
+        region_id,
+        sequence
+    ))]
+    DuplicateFlush {
+        region_id: RegionId,
+        sequence: SequenceNumber,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -492,9 +499,7 @@ impl ErrorExt for Error {
             Utf8 { .. }
             | EncodeJson { .. }
             | DecodeJson { .. }
-            | JoinTask { .. }
-            | Cancelled { .. }
-            | CancelFlush { .. }
+            | WaitFlush { .. }
             | DecodeMetaActionList { .. }
             | Readline { .. }
             | WalDataCorrupted { .. }
@@ -546,7 +551,8 @@ impl ErrorExt for Error {
 
             StartManifestGcTask { .. }
             | StopManifestGcTask { .. }
-            | IllegalSchedulerState { .. } => StatusCode::Unexpected,
+            | IllegalSchedulerState { .. }
+            | DuplicateFlush { .. } => StatusCode::Unexpected,
 
             TtlCalculation { source, .. } => source.status_code(),
         }

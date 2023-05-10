@@ -14,7 +14,6 @@
 
 //! Storage engine implementation.
 
-mod background;
 mod chunk;
 pub mod codec;
 pub mod compaction;

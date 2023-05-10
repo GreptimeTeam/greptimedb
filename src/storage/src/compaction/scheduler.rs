@@ -44,7 +44,8 @@ impl<S: LogStore> Request for CompactionRequestImpl<S> {
 
     fn complete(self, result: Result<()>) {
         if let Some(sender) = self.sender {
-            // We don't care the send result as
+            // We don't care the send result as callers might not
+            // wait the result.
             let _ = sender.send(result);
         }
     }

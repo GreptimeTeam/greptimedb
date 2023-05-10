@@ -110,7 +110,20 @@ where
     R: Request + Send + Sync,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LocalScheduler<...>").finish()
+        f.debug_struct("LocalScheduler")
+            .field("state", &self.state)
+            .finish()
+    }
+}
+
+impl<R> Drop for LocalScheduler<R>
+where
+    R: Request,
+{
+    fn drop(&mut self) {
+        self.state.store(STATE_STOP, Ordering::Relaxed);
+
+        self.cancel_token.cancel();
     }
 }
 
@@ -310,14 +323,14 @@ mod tests {
 
     struct CountdownLatch {
         counter: std::sync::Mutex<usize>,
-        notifies: std::sync::RwLock<Vec<Arc<Notify>>>,
+        notify: Notify,
     }
 
     impl CountdownLatch {
         fn new(size: usize) -> Self {
             Self {
                 counter: std::sync::Mutex::new(size),
-                notifies: std::sync::RwLock::new(vec![]),
+                notify: Notify::new(),
             }
         }
 
@@ -326,22 +339,14 @@ mod tests {
             if *counter >= 1 {
                 *counter -= 1;
                 if *counter == 0 {
-                    let notifies = self.notifies.read().unwrap();
-                    for waiter in notifies.iter() {
-                        waiter.notify_one();
-                    }
+                    self.notify.notify_one();
                 }
             }
         }
 
+        /// Users should only call this once.
         async fn wait(&self) {
-            let notify = Arc::new(Notify::new());
-            {
-                let notify = notify.clone();
-                let mut notifies = self.notifies.write().unwrap();
-                notifies.push(notify);
-            }
-            notify.notified().await
+            self.notify.notified().await
         }
     }
 

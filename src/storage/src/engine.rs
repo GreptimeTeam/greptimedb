@@ -26,12 +26,11 @@ use store_api::storage::{
     CreateOptions, EngineContext, OpenOptions, Region, RegionDescriptor, StorageEngine,
 };
 
-use crate::background::JobPoolImpl;
 use crate::compaction::CompactionSchedulerRef;
 use crate::config::EngineConfig;
 use crate::error::{self, Error, Result};
 use crate::file_purger::{FilePurgeHandler, FilePurgerRef};
-use crate::flush::{FlushSchedulerImpl, FlushSchedulerRef, FlushStrategyRef, SizeBasedStrategy};
+use crate::flush::{FlushScheduler, FlushSchedulerRef, FlushStrategyRef, SizeBasedStrategy};
 use crate::manifest::region::RegionManifest;
 use crate::memtable::{DefaultMemtableBuilder, MemtableBuilderRef};
 use crate::metadata::RegionMetadata;
@@ -132,7 +131,6 @@ enum RegionSlot<S: LogStore> {
     Opening,
     /// The region is ready for access.
     Ready(RegionImpl<S>),
-    // TODO(yingwen): Closing state.
 }
 
 impl<S: LogStore> RegionSlot<S> {
@@ -181,12 +179,12 @@ impl<S: LogStore> Clone for RegionSlot<S> {
 /// Used to update slot or clean the slot on failure.
 struct SlotGuard<'a, S: LogStore> {
     name: &'a str,
-    regions: &'a RwLock<RegionMap<S>>,
+    regions: &'a RegionMap<S>,
     skip_clean: bool,
 }
 
 impl<'a, S: LogStore> SlotGuard<'a, S> {
-    fn new(name: &'a str, regions: &'a RwLock<RegionMap<S>>) -> SlotGuard<'a, S> {
+    fn new(name: &'a str, regions: &'a RegionMap<S>) -> SlotGuard<'a, S> {
         SlotGuard {
             name,
             regions,
@@ -196,13 +194,7 @@ impl<'a, S: LogStore> SlotGuard<'a, S> {
 
     /// Update the slot and skip cleaning on drop.
     fn update(&mut self, slot: RegionSlot<S>) {
-        {
-            let mut regions = self.regions.write().unwrap();
-            if let Some(old) = regions.get_mut(self.name) {
-                *old = slot;
-            }
-        }
-
+        self.regions.update(self.name, slot);
         self.skip_clean = true;
     }
 }
@@ -210,20 +202,70 @@ impl<'a, S: LogStore> SlotGuard<'a, S> {
 impl<'a, S: LogStore> Drop for SlotGuard<'a, S> {
     fn drop(&mut self) {
         if !self.skip_clean {
-            let mut regions = self.regions.write().unwrap();
-            regions.remove(self.name);
+            self.regions.remove(self.name)
         }
     }
 }
 
-type RegionMap<S> = HashMap<String, RegionSlot<S>>;
+/// Region slot map.
+struct RegionMap<S: LogStore>(RwLock<HashMap<String, RegionSlot<S>>>);
+
+impl<S: LogStore> RegionMap<S> {
+    /// Returns a new region map.
+    fn new() -> RegionMap<S> {
+        RegionMap(RwLock::new(HashMap::new()))
+    }
+
+    /// Returns the `Some(slot)` if there is existing slot with given `name`, or insert
+    /// given `slot` and returns `None`.
+    fn get_or_occupy_slot(&self, name: &str, slot: RegionSlot<S>) -> Option<RegionSlot<S>> {
+        {
+            // Try to get the region under read lock.
+            let regions = self.0.read().unwrap();
+            if let Some(slot) = regions.get(name) {
+                return Some(slot.clone());
+            }
+        }
+
+        // Get the region under write lock.
+        let mut regions = self.0.write().unwrap();
+        if let Some(slot) = regions.get(name) {
+            return Some(slot.clone());
+        }
+
+        // No slot in map, we can insert the slot now.
+        regions.insert(name.to_string(), slot);
+
+        None
+    }
+
+    /// Gets the region by the specific name.
+    fn get_region(&self, name: &str) -> Option<RegionImpl<S>> {
+        let slot = self.0.read().unwrap().get(name).cloned()?;
+        slot.get_ready_region()
+    }
+
+    /// Update the slot by name.
+    fn update(&self, name: &str, slot: RegionSlot<S>) {
+        let mut regions = self.0.write().unwrap();
+        if let Some(old) = regions.get_mut(name) {
+            *old = slot;
+        }
+    }
+
+    /// Remove region by name.
+    fn remove(&self, name: &str) {
+        let mut regions = self.0.write().unwrap();
+        regions.remove(name);
+    }
+}
 
 struct EngineInner<S: LogStore> {
     object_store: ObjectStore,
     log_store: Arc<S>,
-    regions: RwLock<RegionMap<S>>,
+    regions: Arc<RegionMap<S>>,
     memtable_builder: MemtableBuilderRef,
-    flush_scheduler: FlushSchedulerRef,
+    flush_scheduler: FlushSchedulerRef<S>,
     flush_strategy: FlushStrategyRef,
     compaction_scheduler: CompactionSchedulerRef<S>,
     file_purger: FilePurgerRef,
@@ -237,8 +279,11 @@ impl<S: LogStore> EngineInner<S> {
         object_store: ObjectStore,
         compaction_scheduler: CompactionSchedulerRef<S>,
     ) -> Self {
-        let job_pool = Arc::new(JobPoolImpl {});
-        let flush_scheduler = Arc::new(FlushSchedulerImpl::new(job_pool));
+        // TODO(yingwen): max inflight flush tasks.
+        let flush_scheduler = Arc::new(FlushScheduler::new(
+            SchedulerConfig::default(),
+            compaction_scheduler.clone(),
+        ));
 
         let file_purger = Arc::new(LocalScheduler::new(
             SchedulerConfig {
@@ -249,7 +294,7 @@ impl<S: LogStore> EngineInner<S> {
         Self {
             object_store,
             log_store,
-            regions: RwLock::new(Default::default()),
+            regions: Arc::new(RegionMap::new()),
             memtable_builder: Arc::new(DefaultMemtableBuilder::default()),
             flush_scheduler,
             flush_strategy: Arc::new(SizeBasedStrategy::default()),
@@ -259,33 +304,10 @@ impl<S: LogStore> EngineInner<S> {
         }
     }
 
-    /// Returns the `Some(slot)` if there is existing slot with given `name`, or insert
-    /// given `slot` and returns `None`.
-    fn get_or_occupy_slot(&self, name: &str, slot: RegionSlot<S>) -> Option<RegionSlot<S>> {
-        {
-            // Try to get the region under read lock.
-            let regions = self.regions.read().unwrap();
-            if let Some(slot) = regions.get(name) {
-                return Some(slot.clone());
-            }
-        }
-
-        // Get the region under write lock.
-        let mut regions = self.regions.write().unwrap();
-        if let Some(slot) = regions.get(name) {
-            return Some(slot.clone());
-        }
-
-        // No slot in map, we can insert the slot now.
-        regions.insert(name.to_string(), slot);
-
-        None
-    }
-
     async fn open_region(&self, name: &str, opts: &OpenOptions) -> Result<Option<RegionImpl<S>>> {
         // We can wait until the state of the slot has been changed to ready, but this will
         // make the code more complicate, so we just return the error here.
-        if let Some(slot) = self.get_or_occupy_slot(name, RegionSlot::Opening) {
+        if let Some(slot) = self.regions.get_or_occupy_slot(name, RegionSlot::Opening) {
             return slot.try_get_ready_region().map(Some);
         }
 
@@ -320,7 +342,10 @@ impl<S: LogStore> EngineInner<S> {
         descriptor: RegionDescriptor,
         opts: &CreateOptions,
     ) -> Result<RegionImpl<S>> {
-        if let Some(slot) = self.get_or_occupy_slot(&descriptor.name, RegionSlot::Creating) {
+        if let Some(slot) = self
+            .regions
+            .get_or_occupy_slot(&descriptor.name, RegionSlot::Creating)
+        {
             return slot.try_get_ready_region();
         }
 
@@ -359,8 +384,7 @@ impl<S: LogStore> EngineInner<S> {
     }
 
     fn get_region(&self, name: &str) -> Option<RegionImpl<S>> {
-        let slot = self.regions.read().unwrap().get(name).cloned()?;
-        slot.get_ready_region()
+        self.regions.get_region(name)
     }
 
     async fn region_store_config(

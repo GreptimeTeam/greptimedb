@@ -8323,6 +8323,7 @@ dependencies = [
  "futures-util",
  "lazy_static",
  "log-store",
+ "metrics",
  "object-store",
  "parquet",
  "paste",

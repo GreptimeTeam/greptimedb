@@ -12,22 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::future::Future;
-use std::pin::Pin;
+mod scheduler;
+
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use common_telemetry::logging;
+use common_telemetry::{logging, timer};
+pub use scheduler::{FlushHandle, FlushRequest, FlushScheduler, FlushSchedulerRef};
 use store_api::logstore::LogStore;
 use store_api::storage::consts::WRITE_ROW_GROUP_SIZE;
 use store_api::storage::SequenceNumber;
 
-use crate::background::{Context, Job, JobHandle, JobPoolRef};
 use crate::config::EngineConfig;
-use crate::error::{CancelledSnafu, Result};
+use crate::error::Result;
 use crate::manifest::action::*;
 use crate::manifest::region::RegionManifest;
 use crate::memtable::{IterContext, MemtableId, MemtableRef};
+use crate::metrics::FLUSH_ELAPSED;
 use crate::region::{RegionWriterRef, SharedDataRef};
 use crate::sst::{AccessLayerRef, FileId, FileMeta, Source, SstInfo, WriteOptions};
 use crate::wal::Wal;
@@ -127,34 +127,6 @@ impl FlushStrategy for SizeBasedStrategy {
     }
 }
 
-#[async_trait]
-pub trait FlushScheduler: Send + Sync + std::fmt::Debug {
-    async fn schedule_flush(&self, flush_job: Box<dyn Job>) -> Result<JobHandle>;
-}
-
-#[derive(Debug)]
-pub struct FlushSchedulerImpl {
-    job_pool: JobPoolRef,
-}
-
-impl FlushSchedulerImpl {
-    pub fn new(job_pool: JobPoolRef) -> FlushSchedulerImpl {
-        FlushSchedulerImpl { job_pool }
-    }
-}
-
-#[async_trait]
-impl FlushScheduler for FlushSchedulerImpl {
-    async fn schedule_flush(&self, flush_job: Box<dyn Job>) -> Result<JobHandle> {
-        // TODO(yingwen): [flush] Implements flush schedule strategy, controls max background flushes.
-        self.job_pool.submit(flush_job).await
-    }
-}
-
-pub type FlushSchedulerRef = Arc<dyn FlushScheduler>;
-
-pub type FlushCallback = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
-
 pub struct FlushJob<S: LogStore> {
     /// Max memtable id in these memtables,
     /// used to remove immutable memtables in current version.
@@ -173,18 +145,22 @@ pub struct FlushJob<S: LogStore> {
     pub wal: Wal<S>,
     /// Region manifest service, used to persist metadata.
     pub manifest: RegionManifest,
-    /// Callbacks that get invoked on flush success.
-    pub on_success: Option<FlushCallback>,
     /// Storage engine config
     pub engine_config: Arc<EngineConfig>,
 }
 
 impl<S: LogStore> FlushJob<S> {
-    async fn write_memtables_to_layer(&mut self, ctx: &Context) -> Result<Vec<FileMeta>> {
-        if ctx.is_cancelled() {
-            return CancelledSnafu {}.fail();
-        }
+    /// Execute the flush job.
+    async fn run(&mut self) -> Result<()> {
+        let _timer = timer!(FLUSH_ELAPSED);
 
+        let file_metas = self.write_memtables_to_layer().await?;
+        self.write_manifest_and_apply(&file_metas).await?;
+
+        Ok(())
+    }
+
+    async fn write_memtables_to_layer(&mut self) -> Result<Vec<FileMeta>> {
         let region_id = self.shared.id();
         let mut futures = Vec::with_capacity(self.memtables.len());
         let iter_ctx = IterContext {
@@ -255,20 +231,6 @@ impl<S: LogStore> FlushJob<S> {
             )
             .await?;
         self.wal.obsolete(self.flush_sequence).await
-    }
-}
-
-#[async_trait]
-impl<S: LogStore> Job for FlushJob<S> {
-    // TODO(yingwen): [flush] Support in-job parallelism (Flush memtables concurrently)
-    async fn run(&mut self, ctx: &Context) -> Result<()> {
-        let file_metas = self.write_memtables_to_layer(ctx).await?;
-        self.write_manifest_and_apply(&file_metas).await?;
-
-        if let Some(cb) = self.on_success.take() {
-            cb.await;
-        }
-        Ok(())
     }
 }
 

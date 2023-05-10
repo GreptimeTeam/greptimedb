@@ -16,9 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
-use common_error::prelude::BoxedError;
-use common_telemetry::tracing::log::{debug, info};
-use common_telemetry::{error, logging};
+use common_telemetry::logging;
 use futures::TryStreamExt;
 use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
@@ -26,11 +24,10 @@ use store_api::manifest::{Manifest, ManifestVersion, MetaAction};
 use store_api::storage::{AlterRequest, FlushContext, SequenceNumber, WriteContext, WriteResponse};
 use tokio::sync::{oneshot, Mutex};
 
-use crate::background::JobHandle;
 use crate::compaction::{CompactionRequestImpl, CompactionSchedulerRef};
 use crate::config::EngineConfig;
 use crate::error::{self, Result};
-use crate::flush::{FlushCallback, FlushJob, FlushSchedulerRef, FlushStrategyRef};
+use crate::flush::{FlushHandle, FlushRequest, FlushSchedulerRef, FlushStrategyRef};
 use crate::manifest::action::{
     RawRegionMetadata, RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList,
 };
@@ -42,7 +39,7 @@ use crate::region::{
 };
 use crate::schema::compat::CompatWrite;
 use crate::sst::AccessLayerRef;
-use crate::version::{VersionControl, VersionControlRef, VersionEdit, VersionRef};
+use crate::version::{VersionControl, VersionControlRef, VersionEdit};
 use crate::wal::Wal;
 use crate::write_batch::WriteBatch;
 
@@ -267,7 +264,7 @@ impl RegionWriter {
         }
         // we release the writer lock once for rejecting any following potential writing requests immediately.
 
-        self.cancel_flush().await?;
+        self.wait_flush().await?;
 
         // TODO: canncel the compaction task
 
@@ -288,7 +285,7 @@ impl RegionWriter {
 
         if ctx.wait {
             if let Some(handle) = inner.flush_handle.take() {
-                handle.join().await?;
+                handle.wait().await?;
             }
         }
 
@@ -310,15 +307,12 @@ impl RegionWriter {
             .await
     }
 
-    /// Cancel flush task if any
-    async fn cancel_flush(&self) -> Result<()> {
+    /// Wait flush task if any
+    async fn wait_flush(&self) -> Result<()> {
         let mut inner = self.inner.lock().await;
 
-        if let Some(task) = inner.flush_handle.take() {
-            task.cancel()
-                .await
-                .map_err(BoxedError::new)
-                .context(error::CancelFlushSnafu)?;
+        if let Some(handle) = inner.flush_handle.take() {
+            handle.wait().await?;
         }
 
         Ok(())
@@ -328,7 +322,7 @@ impl RegionWriter {
 pub struct WriterContext<'a, S: LogStore> {
     pub shared: &'a SharedDataRef,
     pub flush_strategy: &'a FlushStrategyRef,
-    pub flush_scheduler: &'a FlushSchedulerRef,
+    pub flush_scheduler: &'a FlushSchedulerRef<S>,
     pub compaction_scheduler: &'a CompactionSchedulerRef<S>,
     pub sst_layer: &'a AccessLayerRef,
     pub wal: &'a Wal<S>,
@@ -359,7 +353,7 @@ impl<'a, S: LogStore> AlterContext<'a, S> {
 #[derive(Debug)]
 struct WriterInner {
     memtable_builder: MemtableBuilderRef,
-    flush_handle: Option<JobHandle>,
+    flush_handle: Option<FlushHandle>,
 
     /// `WriterInner` will reject any future writing, if the closed flag is set.
     ///
@@ -625,15 +619,13 @@ impl WriterInner {
         version_control.freeze_mutable(new_mutable);
 
         if let Some(flush_handle) = self.flush_handle.take() {
-            // Previous flush job is incomplete, wait util it is finished (write stall).
+            // Previous flush job is incomplete, wait util it is finished.
             // However the last flush job may fail, in which case, we just return error
             // and abort current write request. The flush handle is left empty, so the next
             // time we still have chance to trigger a new flush.
-            logging::info!("Write stall, region: {}", ctx.shared.name);
-
             // TODO(yingwen): We should release the write lock during waiting flush done, which
             // needs something like async condvar.
-            flush_handle.join().await.map_err(|e| {
+            flush_handle.wait().await.map_err(|e| {
                 logging::error!(e; "Previous flush job failed, region: {}", ctx.shared.name);
                 e
             })?;
@@ -647,15 +639,7 @@ impl WriterInner {
             return Ok(());
         }
 
-        let cb = Self::build_flush_callback(
-            &current_version,
-            ctx,
-            &self.engine_config,
-            self.ttl,
-            self.compaction_time_window,
-        );
-
-        let flush_req = FlushJob {
+        let flush_req = FlushRequest {
             max_memtable_id: max_memtable_id.unwrap(),
             memtables: mem_to_flush,
             // In write thread, safe to use current committed sequence.
@@ -665,14 +649,16 @@ impl WriterInner {
             writer: ctx.writer.clone(),
             wal: ctx.wal.clone(),
             manifest: ctx.manifest.clone(),
-            on_success: cb,
             engine_config: self.engine_config.clone(),
+            sender: None,
+            ttl: self.ttl,
+            compaction_time_window: self.compaction_time_window,
         };
 
-        let flush_handle = ctx
-            .flush_scheduler
-            .schedule_flush(Box::new(flush_req))
-            .await?;
+        let flush_handle = ctx.flush_scheduler.schedule_flush(flush_req).map_err(|e| {
+            logging::error!(e; "Failed to schedule flush request");
+            e
+        })?;
         self.flush_handle = Some(flush_handle);
 
         Ok(())
@@ -711,104 +697,26 @@ impl WriterInner {
             let (sender, receiver) = oneshot::channel();
             compaction_request.sender = Some(sender);
 
-            if Self::schedule_compaction(
+            if schedule_compaction(
                 shared_data,
                 compaction_scheduler,
                 compaction_request,
                 compact_ctx.max_files_in_l0,
-            )
-            .await
-            {
+            ) {
                 receiver
                     .await
                     .context(error::CompactTaskCancelSnafu { region_id })??;
             }
         } else {
-            Self::schedule_compaction(
+            schedule_compaction(
                 shared_data,
                 compaction_scheduler,
                 compaction_request,
                 compact_ctx.max_files_in_l0,
-            )
-            .await;
+            );
         }
 
         Ok(())
-    }
-
-    fn build_flush_callback<S: LogStore>(
-        version: &VersionRef,
-        ctx: &WriterContext<S>,
-        config: &Arc<EngineConfig>,
-        ttl: Option<Duration>,
-        compaction_time_window: Option<i64>,
-    ) -> Option<FlushCallback> {
-        let region_id = version.metadata().id();
-        let compaction_request = CompactionRequestImpl {
-            region_id,
-            sst_layer: ctx.sst_layer.clone(),
-            writer: ctx.writer.clone(),
-            shared: ctx.shared.clone(),
-            manifest: ctx.manifest.clone(),
-            wal: ctx.wal.clone(),
-            ttl,
-            compaction_time_window,
-            sender: None,
-            sst_write_buffer_size: config.sst_write_buffer_size,
-        };
-        let compaction_scheduler = ctx.compaction_scheduler.clone();
-        let shared_data = ctx.shared.clone();
-        let max_files_in_l0 = config.max_files_in_l0;
-
-        let schedule_compaction_cb = Box::pin(async move {
-            Self::schedule_compaction(
-                shared_data,
-                compaction_scheduler,
-                compaction_request,
-                max_files_in_l0,
-            )
-            .await;
-        });
-        Some(schedule_compaction_cb)
-    }
-
-    /// Schedule compaction task, returns whether the task is scheduled.
-    async fn schedule_compaction<S: LogStore>(
-        shared_data: SharedDataRef,
-        compaction_scheduler: CompactionSchedulerRef<S>,
-        compaction_request: CompactionRequestImpl<S>,
-        max_files_in_l0: usize,
-    ) -> bool {
-        let region_id = shared_data.id();
-        let level0_file_num = shared_data
-            .version_control
-            .current()
-            .ssts()
-            .level(0)
-            .file_num();
-
-        if level0_file_num <= max_files_in_l0 {
-            debug!(
-                "No enough SST files in level 0 (threshold: {}), skip compaction",
-                max_files_in_l0
-            );
-            return false;
-        }
-        match compaction_scheduler.schedule(compaction_request) {
-            Ok(scheduled) => {
-                info!(
-                    "Schedule region {} compaction request result: {}",
-                    region_id, scheduled
-                );
-
-                scheduled
-            }
-            Err(e) => {
-                error!(e;"Failed to schedule region compaction request {}", region_id);
-
-                false
-            }
-        }
     }
 
     async fn manual_flush<S: LogStore>(&mut self, writer_ctx: WriterContext<'_, S>) -> Result<()> {
@@ -824,5 +732,45 @@ impl WriterInner {
     #[inline]
     fn mark_closed(&mut self) {
         self.closed = true;
+    }
+}
+
+/// Schedule compaction task, returns whether the task is scheduled.
+pub(crate) fn schedule_compaction<S: LogStore>(
+    shared_data: SharedDataRef,
+    compaction_scheduler: CompactionSchedulerRef<S>,
+    compaction_request: CompactionRequestImpl<S>,
+    max_files_in_l0: usize,
+) -> bool {
+    let region_id = shared_data.id();
+    let level0_file_num = shared_data
+        .version_control
+        .current()
+        .ssts()
+        .level(0)
+        .file_num();
+
+    if level0_file_num <= max_files_in_l0 {
+        logging::debug!(
+            "No enough SST files in level 0 (threshold: {}), skip compaction",
+            max_files_in_l0
+        );
+        return false;
+    }
+    match compaction_scheduler.schedule(compaction_request) {
+        Ok(scheduled) => {
+            logging::info!(
+                "Schedule region {} compaction request result: {}",
+                region_id,
+                scheduled
+            );
+
+            scheduled
+        }
+        Err(e) => {
+            logging::error!(e;"Failed to schedule region compaction request {}", region_id);
+
+            false
+        }
     }
 }
