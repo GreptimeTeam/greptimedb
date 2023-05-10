@@ -100,64 +100,22 @@ Or if you built from docker:
 docker run -p 4002:4002 -v "$(pwd):/tmp/greptimedb" greptime/greptimedb standalone start
 ```
 
-For more startup options, greptimedb's **distributed mode** and information
-about Kubernetes deployment, check our [docs](https://docs.greptime.com/).
+Please see [the online document site](https://docs.greptime.com/getting-started/overview#install-greptimedb) for more installation options and [operations info](https://docs.greptime.com/user-guide/operations/overview).
 
-### Connect
+### Get started
 
-1. Connect to GreptimeDB via standard [MySQL
-   client](https://dev.mysql.com/downloads/mysql/):
+Read the [complete getting started guide](https://docs.greptime.com/getting-started/overview#connect) on our [official document site](https://docs.greptime.com/).
 
-   ```
-   # The standalone instance listen on port 4002 by default.
-   mysql -h 127.0.0.1 -P 4002
-   ```
-
-2. Create table:
-
-   ```SQL
-   CREATE TABLE monitor (
-     host STRING,
-     ts TIMESTAMP,
-     cpu DOUBLE DEFAULT 0,
-     memory DOUBLE,
-     TIME INDEX (ts),
-     PRIMARY KEY(host)) ENGINE=mito WITH(regions=1);
-   ```
-
-3. Insert some data:
-
-   ```SQL
-   INSERT INTO monitor(host, cpu, memory, ts) VALUES ('host1', 66.6, 1024, 1660897955000);
-   INSERT INTO monitor(host, cpu, memory, ts) VALUES ('host2', 77.7, 2048, 1660897956000);
-   INSERT INTO monitor(host, cpu, memory, ts) VALUES ('host3', 88.8, 4096, 1660897957000);
-   ```
-
-4. Query the data:
-
-   ```SQL
-   SELECT * FROM monitor;
-   ```
-
-    ```TEXT
-    +-------+--------------------------+------+--------+
-    | host  | ts                       | cpu  | memory |
-    +-------+--------------------------+------+--------+
-    | host1 | 2022-08-19 16:32:35+0800 | 66.6 |   1024 |
-    | host2 | 2022-08-19 16:32:36+0800 | 77.7 |   2048 |
-    | host3 | 2022-08-19 16:32:37+0800 | 88.8 |   4096 |
-    +-------+--------------------------+------+--------+
-    3 rows in set (0.03 sec)
-    ```
-
-You can always cleanup test database by removing `/tmp/greptimedb`.
+To write and query data, GreptimeDB is compatible with multiple [protocols and clients](https://docs.greptime.com/user-guide/clients).
 
 ## Resources
 
 ### Installation
 
-- [Pre-built Binaries](https://github.com/GreptimeTeam/greptimedb/releases):
-  For Linux and macOS, you can easily download pre-built binaries that are ready to use. In most cases, downloading the version without PyO3 is sufficient. However, if you plan to run scripts in CPython (and use Python packages like NumPy and Pandas), you will need to download the version with PyO3 and install a Python with the same version as the Python in the PyO3 version. We recommend using virtualenv for the installation process to manage multiple Python versions.
+- [Pre-built Binaries](https://greptime.com/download):
+  For Linux and macOS, you can easily download pre-built binaries including official releases and nightly builds that are ready to use. 
+  In most cases, downloading the version without PyO3 is sufficient. However, if you plan to run scripts in CPython (and use Python packages like NumPy and Pandas), you will need to download the version with PyO3 and install a Python with the same version as the Python in the PyO3 version.
+  We recommend using virtualenv for the installation process to manage multiple Python versions.
 - [Docker Images](https://hub.docker.com/r/greptime/greptimedb)(**recommended**): pre-built
   Docker images, this is the easiest way to try GreptimeDB. By default it runs CPython script with `pyo3_backend` enabled.
 - [`gtctl`](https://github.com/GreptimeTeam/gtctl): the command-line tool for
