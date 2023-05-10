@@ -56,13 +56,13 @@ impl Options {
     }
 
     /// Load the configuration from multiple sources and merge them.
-    /// The precedence order is: environment variables > config file > default function.
+    /// The precedence order is: environment variables > config file > default values.
     /// `env_prefix` is the prefix of environment variables, e.g. "FRONTEND__xxx".
     /// The function will use `__` as the separator for environment variables, for example:
     /// `DATANODE__STORAGE__MANIFEST__CHECKPOINT_MARGIN` will be mapped to `DatanodeOptions.storage.manifest.checkpoint_margin` field in the configuration.
     pub fn load_layered_options<'de, T: Serialize + Deserialize<'de> + Default>(
-        config_file: Option<String>,
-        env_prefix: String,
+        config_file: Option<&str>,
+        env_prefix: &str,
     ) -> Result<T> {
         let default_opts = T::default();
 
@@ -70,7 +70,7 @@ impl Options {
             let mut env = Environment::default();
 
             if !env_prefix.is_empty() {
-                env = env.prefix(env_prefix.as_str());
+                env = env.prefix(env_prefix);
             }
 
             env.try_parsing(true)
@@ -82,7 +82,7 @@ impl Options {
             .add_source(Config::try_from(&default_opts).context(LoadLayeredConfigSnafu)?);
 
         if let Some(config_file) = config_file {
-            layered_config = layered_config.add_source(File::new(&config_file, FileFormat::Toml));
+            layered_config = layered_config.add_source(File::new(config_file, FileFormat::Toml));
         }
 
         let opts = layered_config
@@ -211,11 +211,9 @@ mod tests {
                 ),
             ],
             || {
-                let opts: DatanodeOptions = Options::load_layered_options(
-                    Some(file.path().to_str().unwrap().to_string()),
-                    env_prefix.to_string(),
-                )
-                .unwrap();
+                let opts: DatanodeOptions =
+                    Options::load_layered_options(Some(file.path().to_str().unwrap()), env_prefix)
+                        .unwrap();
 
                 // Check the values from environment variables.
                 assert_eq!(opts.storage.manifest.checkpoint_margin, Some(99));
