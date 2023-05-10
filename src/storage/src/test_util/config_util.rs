@@ -66,7 +66,11 @@ pub async fn new_store_config_with_object_store(
     let log_store = Arc::new(RaftEngineLogStore::try_new(log_config).await.unwrap());
     let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
     // We use an empty region map so actually the background worker of the picker is disabled.
-    let picker = FlushPicker::new(Arc::new(RegionMap::new()), PickerConfig::default()).unwrap();
+    let picker = FlushPicker::new(
+        Arc::new(RegionMap::<RaftEngineLogStore>::new()),
+        PickerConfig::default(),
+    )
+    .unwrap();
     let flush_scheduler = Arc::new(FlushScheduler::new(
         SchedulerConfig::default(),
         picker,

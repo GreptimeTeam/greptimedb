@@ -60,16 +60,16 @@ impl Default for PickerConfig {
 }
 
 /// Flush task picker.
-pub struct FlushPicker<S: LogStore> {
+pub struct FlushPicker {
     /// Background repeated pick task.
     pick_task: RepeatedTask<Error>,
 }
 
-impl<S: LogStore> FlushPicker<S> {
+impl FlushPicker {
     /// Returns a new FlushPicker.
-    pub fn new(regions: Arc<RegionMap<S>>, config: PickerConfig) -> Result<Self> {
+    pub fn new<S: LogStore>(regions: Arc<RegionMap<S>>, config: PickerConfig) -> Result<Self> {
         let task_fn = PickTaskFunction {
-            regions: regions.clone(),
+            regions,
             auto_flush_interval_millis: config.auto_flush_interval_millis(),
         };
         let pick_task = RepeatedTask::new(config.picker_schedule_interval(), Box::new(task_fn));
@@ -107,8 +107,7 @@ impl<S: LogStore> PickTaskFunction<S> {
                     earliest_flush_millis,
                 );
 
-                Self::flush_region(&region).await;
-                unimplemented!();
+                Self::flush_region(region).await;
             }
         }
     }

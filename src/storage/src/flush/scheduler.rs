@@ -148,7 +148,7 @@ pub struct FlushScheduler<S: LogStore> {
     /// Flush task scheduler.
     scheduler: LocalScheduler<FlushRequest<S>>,
     /// Flush picker.
-    picker: FlushPicker<S>,
+    picker: FlushPicker,
 }
 
 pub type FlushSchedulerRef<S> = Arc<FlushScheduler<S>>;
@@ -157,7 +157,7 @@ impl<S: LogStore> FlushScheduler<S> {
     /// Returns a new [FlushScheduler].
     pub fn new(
         config: SchedulerConfig,
-        picker: FlushPicker<S>,
+        picker: FlushPicker,
         compaction_scheduler: CompactionSchedulerRef<S>,
     ) -> Self {
         let handler = FlushHandler {

@@ -282,6 +282,12 @@ impl<S: LogStore> RegionMap<S> {
     }
 }
 
+impl<S: LogStore> Default for RegionMap<S> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 struct EngineInner<S: LogStore> {
     object_store: ObjectStore,
     log_store: Arc<S>,
@@ -453,6 +459,15 @@ impl<S: LogStore> EngineInner<S> {
     }
 
     async fn close(&self) -> Result<()> {
+        {
+            let regions = self.regions.0.read().unwrap();
+            for (region_id, slot) in &regions {
+                if let Some(region) = slot.get_ready_region() {
+                    region.close().await;
+                }
+            }
+        }
+
         self.compaction_scheduler.stop(true).await?;
         self.flush_scheduler.stop().await?;
         self.file_purger.stop(true).await
