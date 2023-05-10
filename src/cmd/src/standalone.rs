@@ -238,7 +238,7 @@ impl StartCommand {
         );
 
         if let Some(addr) = self.http_addr.clone() {
-            if let Some(ref mut http_opts) = opts.http_options {
+            if let Some(http_opts) = &mut opts.http_options {
                 http_opts.addr = addr
             }
         }
@@ -254,13 +254,13 @@ impl StartCommand {
                 }
                 .fail();
             }
-            if let Some(ref mut grpc_opts) = opts.grpc_options {
+            if let Some(grpc_opts) = &mut opts.grpc_options {
                 grpc_opts.addr = addr
             }
         }
 
         if let Some(addr) = self.mysql_addr.clone() {
-            if let Some(ref mut mysql_opts) = opts.mysql_options {
+            if let Some(mysql_opts) = &mut opts.mysql_options {
                 mysql_opts.addr = addr;
                 mysql_opts.tls = tls_opts.clone();
             }
@@ -271,14 +271,14 @@ impl StartCommand {
         }
 
         if let Some(addr) = self.postgres_addr.clone() {
-            if let Some(ref mut postgres_opts) = opts.postgres_options {
+            if let Some(postgres_opts) = &mut opts.postgres_options {
                 postgres_opts.addr = addr;
                 postgres_opts.tls = tls_opts;
             }
         }
 
         if let Some(addr) = self.opentsdb_addr.clone() {
-            if let Some(ref mut opentsdb_addr) = opts.opentsdb_options {
+            if let Some(opentsdb_addr) = &mut opts.opentsdb_options {
                 opentsdb_addr.addr = addr;
             }
         }

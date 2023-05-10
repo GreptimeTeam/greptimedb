@@ -271,15 +271,10 @@ mod tests {
             ],
             || {
                 let command = StartCommand {
-                    bind_addr: None,
                     server_addr: Some("127.0.0.1:23002".to_string()),
-                    store_addr: None,
-                    selector: None,
                     config_file: Some(file.path().to_str().unwrap().to_string()),
-                    use_memory_store: false,
-                    http_addr: None,
-                    http_timeout: None,
                     env_prefix: env_prefix.to_string(),
+                    ..Default::default()
                 };
 
                 let Options::Metasrv(opts) =
