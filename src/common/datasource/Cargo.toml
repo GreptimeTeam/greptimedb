@@ -29,6 +29,7 @@ snafu.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 url = "2.3"
+paste = "1.0"
 
 [dev-dependencies]
 common-test-util = { path = "../test-util" }

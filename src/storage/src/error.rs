@@ -16,6 +16,7 @@ use std::any::Any;
 use std::io::Error as IoError;
 use std::str::Utf8Error;
 
+use common_datasource::compression::CompressionType;
 use common_error::prelude::*;
 use common_runtime::error::Error as RuntimeError;
 use datatypes::arrow::error::ArrowError;
@@ -81,6 +82,30 @@ pub enum Error {
         path: String,
         location: Location,
         source: object_store::Error,
+    },
+
+    #[snafu(display(
+        "Fail to compress object by {}, path: {}, source: {}",
+        compress_type,
+        path,
+        source
+    ))]
+    CompressObject {
+        compress_type: CompressionType,
+        path: String,
+        source: std::io::Error,
+    },
+
+    #[snafu(display(
+        "Fail to decompress object by {}, path: {}, source: {}",
+        compress_type,
+        path,
+        source
+    ))]
+    DecompressObject {
+        compress_type: CompressionType,
+        path: String,
+        source: std::io::Error,
     },
 
     #[snafu(display("Fail to list objects in path: {}, source: {}", path, source))]
@@ -517,6 +542,8 @@ impl ErrorExt for Error {
             | DecodeArrow { .. }
             | EncodeArrow { .. }
             | ManifestCheckpoint { .. }
+            | CompressObject { .. }
+            | DecompressObject { .. }
             | ParseSchema { .. } => StatusCode::Unexpected,
 
             WriteParquet { .. }

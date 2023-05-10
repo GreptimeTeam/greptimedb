@@ -17,9 +17,10 @@ use std::io;
 use std::str::FromStr;
 
 use async_compression::tokio::bufread::{BzDecoder, GzipDecoder, XzDecoder, ZstdDecoder};
+use async_compression::tokio::write;
 use bytes::Bytes;
 use futures::Stream;
-use tokio::io::{AsyncRead, BufReader};
+use tokio::io::{AsyncRead, AsyncWriteExt, BufReader};
 use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::error::{self, Error, Result};
@@ -73,37 +74,107 @@ impl CompressionType {
         !matches!(self, &Self::Uncompressed)
     }
 
-    pub fn convert_async_read<T: AsyncRead + Unpin + Send + 'static>(
-        &self,
-        s: T,
-    ) -> Box<dyn AsyncRead + Unpin + Send> {
+    pub const fn file_extension(&self) -> &'static str {
         match self {
-            CompressionType::Gzip => Box::new(GzipDecoder::new(BufReader::new(s))),
-            CompressionType::Bzip2 => Box::new(BzDecoder::new(BufReader::new(s))),
-            CompressionType::Xz => Box::new(XzDecoder::new(BufReader::new(s))),
-            CompressionType::Zstd => Box::new(ZstdDecoder::new(BufReader::new(s))),
-            CompressionType::Uncompressed => Box::new(s),
-        }
-    }
-
-    pub fn convert_stream<T: Stream<Item = io::Result<Bytes>> + Unpin + Send + 'static>(
-        &self,
-        s: T,
-    ) -> Box<dyn Stream<Item = io::Result<Bytes>> + Send + Unpin> {
-        match self {
-            CompressionType::Gzip => {
-                Box::new(ReaderStream::new(GzipDecoder::new(StreamReader::new(s))))
-            }
-            CompressionType::Bzip2 => {
-                Box::new(ReaderStream::new(BzDecoder::new(StreamReader::new(s))))
-            }
-            CompressionType::Xz => {
-                Box::new(ReaderStream::new(XzDecoder::new(StreamReader::new(s))))
-            }
-            CompressionType::Zstd => {
-                Box::new(ReaderStream::new(ZstdDecoder::new(StreamReader::new(s))))
-            }
-            CompressionType::Uncompressed => Box::new(s),
+            Self::Gzip => "gz",
+            Self::Bzip2 => "bz2",
+            Self::Xz => "xz",
+            Self::Zstd => "zst",
+            Self::Uncompressed => "",
         }
     }
 }
+
+macro_rules! impl_compression_type {
+    ($(($enum_item:ident, $prefix:ident)),*) => {
+        paste::item! {
+            impl CompressionType {
+                pub async fn encode(&self, content: impl AsRef<[u8]>) -> io::Result<Vec<u8>> {
+                    match self {
+                        $(
+                            CompressionType::$enum_item => {
+                                let mut buffer = Vec::with_capacity(content.as_ref().len());
+                                let mut encoder = write::[<$prefix Encoder>]::new(&mut buffer);
+                                encoder.write_all(content.as_ref()).await?;
+                                encoder.shutdown().await?;
+                                Ok(buffer)
+                            }
+                        )*
+                        CompressionType::Uncompressed => Ok(content.as_ref().to_vec()),
+                    }
+                }
+
+                pub async fn decode(&self, content: impl AsRef<[u8]>) -> io::Result<Vec<u8>> {
+                    match self {
+                        $(
+                            CompressionType::$enum_item => {
+                                let mut buffer = Vec::with_capacity(content.as_ref().len() * 2);
+                                let mut encoder = write::[<$prefix Decoder>]::new(&mut buffer);
+                                encoder.write_all(content.as_ref()).await?;
+                                encoder.shutdown().await?;
+                                Ok(buffer)
+                            }
+                        )*
+                        CompressionType::Uncompressed => Ok(content.as_ref().to_vec()),
+                    }
+                }
+
+                pub fn convert_async_read<T: AsyncRead + Unpin + Send + 'static>(
+                    &self,
+                    s: T,
+                ) -> Box<dyn AsyncRead + Unpin + Send> {
+                    match self {
+                        $(CompressionType::$enum_item => Box::new([<$prefix Decoder>]::new(BufReader::new(s))),)*
+                        CompressionType::Uncompressed => Box::new(s),
+                    }
+                }
+
+                pub fn convert_stream<T: Stream<Item = io::Result<Bytes>> + Unpin + Send + 'static>(
+                    &self,
+                    s: T,
+                ) -> Box<dyn Stream<Item = io::Result<Bytes>> + Send + Unpin> {
+                    match self {
+                        $(CompressionType::$enum_item => Box::new(ReaderStream::new([<$prefix Decoder>]::new(StreamReader::new(s)))),)*
+                        CompressionType::Uncompressed => Box::new(s),
+                    }
+                }
+            }
+
+            #[cfg(test)]
+            mod tests {
+                use super::CompressionType;
+
+                $(
+                #[tokio::test]
+                async fn [<test_ $enum_item:lower _compression>]() {
+                    let string = "foo_bar".as_bytes().to_vec();
+                    let compress = CompressionType::$enum_item
+                        .encode(&string)
+                        .await
+                        .unwrap();
+                    let decompress = CompressionType::$enum_item
+                        .decode(&compress)
+                        .await
+                        .unwrap();
+                    assert_eq!(decompress, string);
+                })*
+
+                #[tokio::test]
+                async fn test_uncompression() {
+                    let string = "foo_bar".as_bytes().to_vec();
+                    let compress = CompressionType::Uncompressed
+                        .encode(&string)
+                        .await
+                        .unwrap();
+                    let decompress = CompressionType::Uncompressed
+                        .decode(&compress)
+                        .await
+                        .unwrap();
+                    assert_eq!(decompress, string);
+                }
+            }
+        }
+    };
+}
+
+impl_compression_type!((Gzip, Gzip), (Bzip2, Bz), (Xz, Xz), (Zstd, Zstd));
