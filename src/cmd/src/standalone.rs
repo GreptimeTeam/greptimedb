@@ -212,13 +212,13 @@ struct StartCommand {
     #[clap(long)]
     user_provider: Option<String>,
     #[clap(long, default_value = "STANDALONE")]
-    env_vars_prefix: String,
+    env_prefix: String,
 }
 
 impl StartCommand {
     fn load_options(&self, top_level_options: TopLevelOptions) -> Result<Options> {
         let mut opts: StandaloneOptions =
-            Options::load_layered_options(self.config_file.clone(), self.env_vars_prefix.clone())?;
+            Options::load_layered_options(self.config_file.clone(), self.env_prefix.clone())?;
 
         opts.enable_memory_catalog = self.enable_memory_catalog;
 
@@ -498,13 +498,13 @@ mod tests {
         "#;
         write!(file, "{}", toml_str).unwrap();
 
-        let env_vars_prefix = "STANDALONE_UT";
+        let env_prefix = "STANDALONE_UT";
         temp_env::with_vars(
             vec![
                 (
                     // logging.dir = /other/log/dir
                     vec![
-                        env_vars_prefix.to_string(),
+                        env_prefix.to_string(),
                         "logging".to_uppercase(),
                         "dir".to_uppercase(),
                     ]
@@ -514,7 +514,7 @@ mod tests {
                 (
                     // logging.level = info
                     vec![
-                        env_vars_prefix.to_string(),
+                        env_prefix.to_string(),
                         "logging".to_uppercase(),
                         "level".to_uppercase(),
                     ]
@@ -525,7 +525,7 @@ mod tests {
             || {
                 let command = StartCommand {
                     config_file: Some(file.path().to_str().unwrap().to_string()),
-                    env_vars_prefix: env_vars_prefix.to_string(),
+                    env_prefix: env_prefix.to_string(),
                     ..Default::default()
                 };
 

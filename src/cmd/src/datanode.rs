@@ -99,13 +99,13 @@ struct StartCommand {
     #[clap(long)]
     http_timeout: Option<u64>,
     #[clap(long, default_value = "DATANODE")]
-    env_vars_prefix: String,
+    env_prefix: String,
 }
 
 impl StartCommand {
     fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
         let mut opts: DatanodeOptions =
-            Options::load_layered_options(self.config_file.clone(), self.env_vars_prefix.clone())?;
+            Options::load_layered_options(self.config_file.clone(), self.env_prefix.clone())?;
 
         if let Some(dir) = top_level_opts.log_dir {
             opts.logging.dir = dir;
@@ -396,12 +396,12 @@ mod tests {
         "#;
         write!(file, "{}", toml_str).unwrap();
 
-        let env_vars_prefix = "DATANODE_UT";
+        let env_prefix = "DATANODE_UT";
         temp_env::with_vars(
             vec![(
                 // storage.manifest.gc_duration = 9s
                 vec![
-                    env_vars_prefix.to_string(),
+                    env_prefix.to_string(),
                     "storage".to_uppercase(),
                     "manifest".to_uppercase(),
                     "gc_duration".to_uppercase(),
@@ -413,7 +413,7 @@ mod tests {
                 let command = StartCommand {
                     config_file: Some(file.path().to_str().unwrap().to_string()),
                     wal_dir: Some("/other/wal/dir".to_string()),
-                    env_vars_prefix: env_vars_prefix.to_string(),
+                    env_prefix: env_prefix.to_string(),
                     ..Default::default()
                 };
 

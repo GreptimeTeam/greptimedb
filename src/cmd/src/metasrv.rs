@@ -97,13 +97,13 @@ struct StartCommand {
     #[clap(long)]
     http_timeout: Option<u64>,
     #[clap(long, default_value = "METASRV")]
-    env_vars_prefix: String,
+    env_prefix: String,
 }
 
 impl StartCommand {
     fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
         let mut opts: MetaSrvOptions =
-            Options::load_layered_options(self.config_file.clone(), self.env_vars_prefix.clone())?;
+            Options::load_layered_options(self.config_file.clone(), self.env_prefix.clone())?;
 
         if let Some(dir) = top_level_opts.log_dir {
             opts.logging.dir = dir;
@@ -255,18 +255,17 @@ mod tests {
         "#;
         write!(file, "{}", toml_str).unwrap();
 
-        let env_vars_prefix = "METASRV_UT";
+        let env_prefix = "METASRV_UT";
         temp_env::with_vars(
             vec![
                 (
                     // bind_addr = 127.0.0.1:14002
-                    vec![env_vars_prefix.to_string(), "bind_addr".to_uppercase()].join(ENV_VAR_SEP),
+                    vec![env_prefix.to_string(), "bind_addr".to_uppercase()].join(ENV_VAR_SEP),
                     Some("127.0.0.1:14002"),
                 ),
                 (
                     // server_addr = 127.0.0.1:13002
-                    vec![env_vars_prefix.to_string(), "server_addr".to_uppercase()]
-                        .join(ENV_VAR_SEP),
+                    vec![env_prefix.to_string(), "server_addr".to_uppercase()].join(ENV_VAR_SEP),
                     Some("127.0.0.1:13002"),
                 ),
             ],
@@ -280,7 +279,7 @@ mod tests {
                     use_memory_store: false,
                     http_addr: None,
                     http_timeout: None,
-                    env_vars_prefix: env_vars_prefix.to_string(),
+                    env_prefix: env_prefix.to_string(),
                 };
 
                 let Options::Metasrv(opts) =

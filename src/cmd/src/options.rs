@@ -57,20 +57,20 @@ impl Options {
 
     /// Load the configuration from multiple sources and merge them.
     /// The precedence order is: environment variables > config file > default function.
-    /// `env_vars_prefix` is the prefix of environment variables, e.g. "FRONTEND__xxx".
+    /// `env_prefix` is the prefix of environment variables, e.g. "FRONTEND__xxx".
     /// The function will use `__` as the separator for environment variables, for example:
     /// `DATANODE__STORAGE__MANIFEST__CHECKPOINT_MARGIN` will be mapped to `DatanodeOptions.storage.manifest.checkpoint_margin` field in the configuration.
     pub fn load_layered_options<'de, T: Serialize + Deserialize<'de> + Default>(
         config_file: Option<String>,
-        env_vars_prefix: String,
+        env_prefix: String,
     ) -> Result<T> {
         let default_opts = T::default();
 
         let env_source = {
             let mut env = Environment::default();
 
-            if !env_vars_prefix.is_empty() {
-                env = env.prefix(env_vars_prefix.as_str());
+            if !env_prefix.is_empty() {
+                env = env.prefix(env_prefix.as_str());
             }
 
             env.try_parsing(true)
@@ -152,14 +152,14 @@ mod tests {
         "#;
         write!(file, "{}", toml_str).unwrap();
 
-        let env_vars_prefix = "DATANODE_UT";
+        let env_prefix = "DATANODE_UT";
         temp_env::with_vars(
             // The following environment variables will be used to override the values in the config file.
             vec![
                 (
                     // storage.manifest.checkpoint_margin = 99
                     vec![
-                        env_vars_prefix.to_string(),
+                        env_prefix.to_string(),
                         "storage".to_uppercase(),
                         "manifest".to_uppercase(),
                         "checkpoint_margin".to_uppercase(),
@@ -170,7 +170,7 @@ mod tests {
                 (
                     // storage.type = S3
                     vec![
-                        env_vars_prefix.to_string(),
+                        env_prefix.to_string(),
                         "storage".to_uppercase(),
                         "type".to_uppercase(),
                     ]
@@ -180,7 +180,7 @@ mod tests {
                 (
                     // storage.bucket = mybucket
                     vec![
-                        env_vars_prefix.to_string(),
+                        env_prefix.to_string(),
                         "storage".to_uppercase(),
                         "bucket".to_uppercase(),
                     ]
@@ -190,7 +190,7 @@ mod tests {
                 (
                     // storage.manifest.gc_duration = 42s
                     vec![
-                        env_vars_prefix.to_string(),
+                        env_prefix.to_string(),
                         "storage".to_uppercase(),
                         "manifest".to_uppercase(),
                         "gc_duration".to_uppercase(),
@@ -201,7 +201,7 @@ mod tests {
                 (
                     // storage.manifest.checkpoint_on_startup = true
                     vec![
-                        env_vars_prefix.to_string(),
+                        env_prefix.to_string(),
                         "storage".to_uppercase(),
                         "manifest".to_uppercase(),
                         "checkpoint_on_startup".to_uppercase(),
@@ -213,7 +213,7 @@ mod tests {
             || {
                 let opts: DatanodeOptions = Options::load_layered_options(
                     Some(file.path().to_str().unwrap().to_string()),
-                    env_vars_prefix.to_string(),
+                    env_prefix.to_string(),
                 )
                 .unwrap();
 
