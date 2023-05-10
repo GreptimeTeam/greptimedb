@@ -90,7 +90,7 @@ pub fn init_default_ut_logging() {
 static GLOBAL_UT_LOG_GUARD: Lazy<Arc<Mutex<Option<Vec<WorkerGuard>>>>> =
     Lazy::new(|| Arc::new(Mutex::new(None)));
 
-#[allow(clippy::print_stdout, clippy::print_stderr)]
+#[allow(clippy::print_stdout)]
 pub fn init_global_logging(
     app_name: &str,
     opts: &LoggingOptions,

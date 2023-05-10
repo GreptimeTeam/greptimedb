@@ -117,6 +117,22 @@ pub fn range_fn(args: TokenStream, input: TokenStream) -> TokenStream {
     process_range_fn(args, input)
 }
 
+/// Attribute macro to print the caller to the annotated function.
+/// The caller is printed as its filename and the call site line number.
+///
+/// This macro works like this: inject the tracking codes as the first statement to the annotated
+/// function body. The tracking codes use [backtrace-rs](https://crates.io/crates/backtrace) to get
+/// the callers. So you must dependent on the `backtrace-rs` crate.
+///
+/// # Arguments
+/// - `depth`: The max depth of call stack to print. Optional, defaults to 1.
+///
+/// # Example
+/// ```rust, ignore
+///
+/// #[print_caller(depth = 3)]
+/// fn foo() {}
+/// ```
 #[proc_macro_attribute]
 pub fn print_caller(args: TokenStream, input: TokenStream) -> TokenStream {
     let mut depth = 1;
