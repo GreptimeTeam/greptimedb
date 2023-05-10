@@ -24,7 +24,7 @@ use store_api::logstore::LogStore;
 use store_api::storage::{FlushContext, Region};
 
 use crate::engine::RegionMap;
-use crate::error::{Error, Result, StartPickTaskSnafu};
+use crate::error::{Error, Result, StartPickTaskSnafu, StopPickTaskSnafu};
 use crate::region::RegionImpl;
 
 /// Default interval to trigger auto flush in millis.
@@ -61,8 +61,6 @@ impl Default for PickerConfig {
 
 /// Flush task picker.
 pub struct FlushPicker<S: LogStore> {
-    /// Regions of the engine.
-    regions: Arc<RegionMap<S>>,
     /// Background repeated pick task.
     pick_task: RepeatedTask<Error>,
 }
@@ -80,7 +78,12 @@ impl<S: LogStore> FlushPicker<S> {
             .start(common_runtime::bg_runtime())
             .context(StartPickTaskSnafu)?;
 
-        Ok(Self { regions, pick_task })
+        Ok(Self { pick_task })
+    }
+
+    /// Stop the picker.
+    pub async fn stop(&self) -> Result<()> {
+        self.pick_task.stop().await.context(StopPickTaskSnafu)
     }
 }
 

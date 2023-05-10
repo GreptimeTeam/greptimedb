@@ -326,4 +326,8 @@ impl StorageEngine for MockEngine {
         let regions = self.regions.lock().unwrap();
         Ok(regions.opened_regions.get(name).cloned())
     }
+
+    async fn close(&self, _ctx: &EngineContext) -> Result<()> {
+        Ok(())
+    }
 }

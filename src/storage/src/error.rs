@@ -493,6 +493,12 @@ pub enum Error {
         #[snafu(backtrace)]
         source: RuntimeError,
     },
+
+    #[snafu(display("Failed to stop pick task for flush: {}", source))]
+    StopPickTask {
+        #[snafu(backtrace)]
+        source: RuntimeError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -586,7 +592,8 @@ impl ErrorExt for Error {
             | StopManifestGcTask { .. }
             | IllegalSchedulerState { .. }
             | DuplicateFlush { .. }
-            | StartPickTask { .. } => StatusCode::Unexpected,
+            | StartPickTask { .. }
+            | StopPickTask { .. } => StatusCode::Unexpected,
 
             TtlCalculation { source, .. } => source.status_code(),
         }

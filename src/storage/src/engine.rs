@@ -17,7 +17,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use common_telemetry::logging::debug;
+use common_telemetry::logging::{self, debug};
 use object_store::{util, ObjectStore};
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
@@ -38,7 +38,7 @@ use crate::manifest::region::RegionManifest;
 use crate::memtable::{DefaultMemtableBuilder, MemtableBuilderRef};
 use crate::metadata::RegionMetadata;
 use crate::region::{RegionImpl, StoreConfig};
-use crate::scheduler::{LocalScheduler, SchedulerConfig};
+use crate::scheduler::{LocalScheduler, Scheduler, SchedulerConfig};
 use crate::sst::FsAccessLayer;
 
 /// [StorageEngine] implementation.
@@ -87,6 +87,16 @@ impl<S: LogStore> StorageEngine for EngineImpl<S> {
 
     fn get_region(&self, _ctx: &EngineContext, name: &str) -> Result<Option<Self::Region>> {
         Ok(self.inner.get_region(name))
+    }
+
+    async fn close(&self, _ctx: &EngineContext) -> Result<()> {
+        logging::info!("Stopping storage engine");
+
+        self.inner.close().await?;
+
+        logging::info!("Storage engine stopped");
+
+        Ok(())
     }
 }
 
@@ -440,6 +450,12 @@ impl<S: LogStore> EngineInner<S> {
             ttl,
             compaction_time_window,
         })
+    }
+
+    async fn close(&self) -> Result<()> {
+        self.compaction_scheduler.stop(true).await?;
+        self.flush_scheduler.stop().await?;
+        self.file_purger.stop(true).await
     }
 }
 

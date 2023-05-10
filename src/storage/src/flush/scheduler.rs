@@ -198,6 +198,14 @@ impl<S: LogStore> FlushScheduler<S> {
             receiver,
         })
     }
+
+    /// Stop the scheduler.
+    pub async fn stop(&self) -> Result<()> {
+        self.picker.stop().await?;
+        self.scheduler.stop(true).await?;
+
+        Ok(())
+    }
 }
 
 struct FlushHandler<S: LogStore> {
