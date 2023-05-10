@@ -40,6 +40,7 @@ impl HeartbeatHandler for ResponseHeaderHandler {
             ..Default::default()
         };
         acc.header = Some(res_header);
+
         Ok(())
     }
 }

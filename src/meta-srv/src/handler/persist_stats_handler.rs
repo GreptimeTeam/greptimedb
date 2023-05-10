@@ -55,7 +55,6 @@ impl HeartbeatHandler for PersistStatsHandler {
         }
 
         let stats = stats.drain(..).collect();
-
         let val = StatValue { stats };
 
         let put = PutRequest {

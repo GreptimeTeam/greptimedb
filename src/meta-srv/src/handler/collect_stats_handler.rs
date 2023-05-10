@@ -34,6 +34,12 @@ impl HeartbeatHandler for CollectStatsHandler {
         _ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
     ) -> Result<()> {
+        if req.mailbox_message.is_some() {
+            // If the heartbeat is a mailbox message, it may have no other valid information,
+            // so we don't need to collect stats.
+            return Ok(());
+        }
+
         match Stat::try_from(req.clone()) {
             Ok(stat) => {
                 let _ = acc.stat.insert(stat);
