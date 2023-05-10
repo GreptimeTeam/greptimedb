@@ -137,7 +137,7 @@ pub fn region_manifest_dir(parent_dir: &str, region_name: &str) -> String {
 /// Also used as a placeholder in the region map when the region isn't ready, e.g. during
 /// creating/opening.
 #[derive(Debug)]
-enum RegionSlot<S: LogStore> {
+pub(crate) enum RegionSlot<S: LogStore> {
     /// The region is during creation.
     Creating,
     /// The region is during opening.
@@ -231,7 +231,11 @@ impl<S: LogStore> RegionMap<S> {
 
     /// Returns the `Some(slot)` if there is existing slot with given `name`, or insert
     /// given `slot` and returns `None`.
-    fn get_or_occupy_slot(&self, name: &str, slot: RegionSlot<S>) -> Option<RegionSlot<S>> {
+    pub(crate) fn get_or_occupy_slot(
+        &self,
+        name: &str,
+        slot: RegionSlot<S>,
+    ) -> Option<RegionSlot<S>> {
         {
             // Try to get the region under read lock.
             let regions = self.0.read().unwrap();

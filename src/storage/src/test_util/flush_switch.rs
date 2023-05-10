@@ -17,6 +17,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::flush::FlushStrategy;
 use crate::region::SharedDataRef;
 
+/// Controls whether to flush a region while writing the region.
+/// Disable flush by default.
 #[derive(Debug, Default)]
 pub struct FlushSwitch {
     should_flush: AtomicBool,
