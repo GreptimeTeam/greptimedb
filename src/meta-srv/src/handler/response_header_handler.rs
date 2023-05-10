@@ -90,7 +90,7 @@ mod tests {
         let header = std::mem::take(&mut acc.header);
         let res = HeartbeatResponse {
             header,
-            mailbox_messages: acc.into_mailbox_messages(),
+            mailbox_message: acc.into_mailbox_message(),
         };
         assert_eq!(1, res.header.unwrap().cluster_id);
     }

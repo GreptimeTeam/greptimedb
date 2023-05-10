@@ -73,9 +73,9 @@ pub struct HeartbeatAccumulator {
 }
 
 impl HeartbeatAccumulator {
-    pub fn into_mailbox_messages(self) -> Vec<MailboxMessage> {
+    pub fn into_mailbox_message(self) -> Option<MailboxMessage> {
         // TODO(jiachun): to HeartbeatResponse payload
-        vec![]
+        None
     }
 }
 
@@ -173,7 +173,7 @@ impl HeartbeatHandlerGroup {
         let header = std::mem::take(&mut acc.header);
         let res = HeartbeatResponse {
             header,
-            mailbox_messages: acc.into_mailbox_messages(),
+            mailbox_message: acc.into_mailbox_message(),
         };
         Ok(res)
     }
@@ -275,7 +275,7 @@ impl Mailbox for HeartbeatMailbox {
         msg.id = message_id;
         let res = HeartbeatResponse {
             header: Some(header),
-            mailbox_messages: vec![msg],
+            mailbox_message: Some(msg),
         };
 
         pusher.push(res).await?;
@@ -376,8 +376,9 @@ mod tests {
             .unwrap();
 
         let recv_obj = pusher_rx.recv().await.unwrap().unwrap();
-        assert_eq!(recv_obj.mailbox_messages[0].timestamp_millis, 123);
-        assert_eq!(recv_obj.mailbox_messages[0].subject, "req-test".to_string());
+        let message = recv_obj.mailbox_message.unwrap();
+        assert_eq!(message.timestamp_millis, 123);
+        assert_eq!(message.subject, "req-test".to_string());
 
         (mailbox, receiver)
     }
