@@ -519,6 +519,11 @@ impl HttpServer {
             if !self.options.disable_dashboard {
                 info!("Enable dashboard service at '/dashboard'");
                 router = router.nest("/dashboard", dashboard::dashboard());
+
+                // "/dashboard" and "/dashboard/" are two different path in Axum.
+                // We cannot nest "/dashboard/", because we already mapping "/dashboard/*x" while nesting "/dashboard".
+                // So we explicitly route "/dashboard/" here.
+                router = router.route("/dashboard/", routing::get(dashboard::static_handler));
             }
         }
         router
