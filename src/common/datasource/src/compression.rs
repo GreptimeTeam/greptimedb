@@ -26,15 +26,15 @@ use crate::error::{self, Error, Result};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CompressionType {
     /// Gzip-ed file
-    GZIP,
+    Gzip,
     /// Bzip2-ed file
-    BZIP2,
+    Bzip2,
     /// Xz-ed file (liblzma)
-    XZ,
+    Xz,
     /// Zstd-ed file,
-    ZSTD,
+    Zstd,
     /// Uncompressed file
-    UNCOMPRESSED,
+    Uncompressed,
 }
 
 impl FromStr for CompressionType {
@@ -43,11 +43,11 @@ impl FromStr for CompressionType {
     fn from_str(s: &str) -> Result<Self> {
         let s = s.to_uppercase();
         match s.as_str() {
-            "GZIP" | "GZ" => Ok(Self::GZIP),
-            "BZIP2" | "BZ2" => Ok(Self::BZIP2),
-            "XZ" => Ok(Self::XZ),
-            "ZST" | "ZSTD" => Ok(Self::ZSTD),
-            "" => Ok(Self::UNCOMPRESSED),
+            "GZIP" | "GZ" => Ok(Self::Gzip),
+            "BZIP2" | "BZ2" => Ok(Self::Bzip2),
+            "XZ" => Ok(Self::Xz),
+            "ZST" | "ZSTD" => Ok(Self::Zstd),
+            "" => Ok(Self::Uncompressed),
             _ => error::UnsupportedCompressionTypeSnafu {
                 compression_type: s,
             }
@@ -59,18 +59,18 @@ impl FromStr for CompressionType {
 impl Display for CompressionType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::GZIP => "GZIP",
-            Self::BZIP2 => "BZIP2",
-            Self::XZ => "XZ",
-            Self::ZSTD => "ZSTD",
-            Self::UNCOMPRESSED => "",
+            Self::Gzip => "GZIP",
+            Self::Bzip2 => "BZIP2",
+            Self::Xz => "XZ",
+            Self::Zstd => "ZSTD",
+            Self::Uncompressed => "",
         })
     }
 }
 
 impl CompressionType {
     pub const fn is_compressed(&self) -> bool {
-        !matches!(self, &Self::UNCOMPRESSED)
+        !matches!(self, &Self::Uncompressed)
     }
 
     pub fn convert_async_read<T: AsyncRead + Unpin + Send + 'static>(
@@ -78,11 +78,11 @@ impl CompressionType {
         s: T,
     ) -> Box<dyn AsyncRead + Unpin + Send> {
         match self {
-            CompressionType::GZIP => Box::new(GzipDecoder::new(BufReader::new(s))),
-            CompressionType::BZIP2 => Box::new(BzDecoder::new(BufReader::new(s))),
-            CompressionType::XZ => Box::new(XzDecoder::new(BufReader::new(s))),
-            CompressionType::ZSTD => Box::new(ZstdDecoder::new(BufReader::new(s))),
-            CompressionType::UNCOMPRESSED => Box::new(s),
+            CompressionType::Gzip => Box::new(GzipDecoder::new(BufReader::new(s))),
+            CompressionType::Bzip2 => Box::new(BzDecoder::new(BufReader::new(s))),
+            CompressionType::Xz => Box::new(XzDecoder::new(BufReader::new(s))),
+            CompressionType::Zstd => Box::new(ZstdDecoder::new(BufReader::new(s))),
+            CompressionType::Uncompressed => Box::new(s),
         }
     }
 
@@ -91,19 +91,19 @@ impl CompressionType {
         s: T,
     ) -> Box<dyn Stream<Item = io::Result<Bytes>> + Send + Unpin> {
         match self {
-            CompressionType::GZIP => {
+            CompressionType::Gzip => {
                 Box::new(ReaderStream::new(GzipDecoder::new(StreamReader::new(s))))
             }
-            CompressionType::BZIP2 => {
+            CompressionType::Bzip2 => {
                 Box::new(ReaderStream::new(BzDecoder::new(StreamReader::new(s))))
             }
-            CompressionType::XZ => {
+            CompressionType::Xz => {
                 Box::new(ReaderStream::new(XzDecoder::new(StreamReader::new(s))))
             }
-            CompressionType::ZSTD => {
+            CompressionType::Zstd => {
                 Box::new(ReaderStream::new(ZstdDecoder::new(StreamReader::new(s))))
             }
-            CompressionType::UNCOMPRESSED => Box::new(s),
+            CompressionType::Uncompressed => Box::new(s),
         }
     }
 }
