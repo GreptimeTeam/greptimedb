@@ -29,7 +29,7 @@ use crate::error::{DuplicateFlushSnafu, Result, WaitFlushSnafu};
 use crate::flush::{FlushJob, FlushPicker};
 use crate::manifest::region::RegionManifest;
 use crate::memtable::{MemtableId, MemtableRef};
-use crate::metrics::{FLUSH_ERRORS_TOTAL, FLUSH_REQUESTS_TOTAL};
+use crate::metrics::FLUSH_ERRORS_TOTAL;
 use crate::region;
 use crate::region::{RegionWriterRef, SharedDataRef};
 use crate::scheduler::rate_limit::BoxedRateLimitToken;
@@ -190,8 +190,6 @@ impl<S: LogStore> FlushScheduler<S> {
                 sequence,
             }
         );
-
-        increment_counter!(FLUSH_REQUESTS_TOTAL);
 
         Ok(FlushHandle {
             region_id,

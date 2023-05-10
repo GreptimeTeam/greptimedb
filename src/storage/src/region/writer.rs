@@ -18,10 +18,13 @@ use std::time::Duration;
 use common_base::readable_size::ReadableSize;
 use common_telemetry::logging;
 use futures::TryStreamExt;
+use metrics::increment_counter;
 use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::manifest::{Manifest, ManifestVersion, MetaAction};
-use store_api::storage::{AlterRequest, FlushContext, SequenceNumber, WriteContext, WriteResponse};
+use store_api::storage::{
+    AlterRequest, FlushContext, FlushReason, SequenceNumber, WriteContext, WriteResponse,
+};
 use tokio::sync::{oneshot, Mutex};
 
 use crate::compaction::{CompactionRequestImpl, CompactionSchedulerRef};
@@ -33,6 +36,7 @@ use crate::manifest::action::{
 };
 use crate::memtable::{Inserter, MemtableBuilderRef, MemtableId, MemtableRef};
 use crate::metadata::RegionMetadataRef;
+use crate::metrics::{FLUSH_REASON, FLUSH_REQUESTS_TOTAL};
 use crate::proto::wal::WalHeader;
 use crate::region::{
     CompactContext, RecoverdMetadata, RecoveredMetadataMap, RegionManifest, SharedDataRef,
@@ -281,7 +285,7 @@ impl RegionWriter {
 
         ensure!(!inner.is_closed(), error::ClosedRegionSnafu);
 
-        inner.manual_flush(writer_ctx).await?;
+        inner.manual_flush(writer_ctx, ctx.reason).await?;
 
         if ctx.wait {
             if let Some(handle) = inner.flush_handle.take() {
@@ -587,7 +591,8 @@ impl WriterInner {
             version_control,
             writer_ctx.flush_strategy,
         ) {
-            self.trigger_flush(writer_ctx).await?;
+            self.trigger_flush(writer_ctx, FlushReason::MemtableFull)
+                .await?;
         }
 
         Ok(())
@@ -612,11 +617,17 @@ impl WriterInner {
         flush_strategy.should_flush(shared, mutable_bytes_allocated, total_bytes_allocated)
     }
 
-    async fn trigger_flush<S: LogStore>(&mut self, ctx: &WriterContext<'_, S>) -> Result<()> {
+    async fn trigger_flush<S: LogStore>(
+        &mut self,
+        ctx: &WriterContext<'_, S>,
+        reason: FlushReason,
+    ) -> Result<()> {
         let version_control = &ctx.shared.version_control;
         let new_mutable = self.alloc_memtable(version_control);
         // Freeze all mutable memtables so we can flush them later.
         version_control.freeze_mutable(new_mutable);
+
+        increment_counter!(FLUSH_REQUESTS_TOTAL, FLUSH_REASON => reason.as_str());
 
         if let Some(flush_handle) = self.flush_handle.take() {
             // Previous flush job is incomplete, wait util it is finished.
@@ -719,8 +730,12 @@ impl WriterInner {
         Ok(())
     }
 
-    async fn manual_flush<S: LogStore>(&mut self, writer_ctx: WriterContext<'_, S>) -> Result<()> {
-        self.trigger_flush(&writer_ctx).await?;
+    async fn manual_flush<S: LogStore>(
+        &mut self,
+        writer_ctx: WriterContext<'_, S>,
+        reason: FlushReason,
+    ) -> Result<()> {
+        self.trigger_flush(&writer_ctx, reason).await?;
         Ok(())
     }
 

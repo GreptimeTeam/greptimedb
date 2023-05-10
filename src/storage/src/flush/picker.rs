@@ -19,14 +19,12 @@ use async_trait::async_trait;
 use common_runtime::{RepeatedTask, TaskFunction};
 use common_telemetry::logging;
 use common_time::util;
-use metrics::counter;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
-use store_api::storage::{FlushContext, Region};
+use store_api::storage::{FlushContext, FlushReason, Region};
 
 use crate::engine::RegionMap;
 use crate::error::{Error, Result, StartPickTaskSnafu, StopPickTaskSnafu};
-use crate::metrics::FLUSH_AUTO_FLUSH_TOTAL;
 use crate::region::RegionImpl;
 
 /// Default interval to trigger auto flush in millis.
@@ -100,7 +98,6 @@ struct PickTaskFunction<S: LogStore> {
 impl<S: LogStore> PickTaskFunction<S> {
     /// Auto flush regions based on last flush time.
     async fn auto_flush_regions(&self, regions: &[RegionImpl<S>], earliest_flush_millis: i64) {
-        let mut count = 0;
         for region in regions {
             if region.last_flush_millis() < earliest_flush_millis {
                 logging::debug!(
@@ -110,17 +107,17 @@ impl<S: LogStore> PickTaskFunction<S> {
                     earliest_flush_millis,
                 );
 
-                count += 1;
                 Self::flush_region(region).await;
             }
         }
-
-        counter!(FLUSH_AUTO_FLUSH_TOTAL, count);
     }
 
     /// Try to flush region.
     async fn flush_region(region: &RegionImpl<S>) {
-        let ctx = FlushContext { wait: false };
+        let ctx = FlushContext {
+            wait: false,
+            reason: FlushReason::Periodically,
+        };
         if let Err(e) = region.flush(&ctx).await {
             logging::error!(e; "Failed to flush region {}", region.id());
         }

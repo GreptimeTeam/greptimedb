@@ -35,8 +35,8 @@ use object_store::ObjectStore;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::manifest::{self, Manifest, ManifestVersion, MetaActionIterator};
 use store_api::storage::{
-    AddColumn, AlterOperation, AlterRequest, ChunkReader, FlushContext, ReadContext, Region,
-    RegionMeta, RegionNumber, ScanRequest, SchemaRef, Snapshot, WriteContext, WriteRequest,
+    AddColumn, AlterOperation, AlterRequest, ChunkReader, FlushContext, FlushReason, ReadContext,
+    Region, RegionMeta, RegionNumber, ScanRequest, SchemaRef, Snapshot, WriteContext, WriteRequest,
 };
 use table::error::{
     InvalidTableSnafu, RegionSchemaMismatchSnafu, Result as TableResult, TableOperationSnafu,
@@ -294,7 +294,12 @@ impl<R: Region> Table for MitoTable<R> {
         region_number: Option<RegionNumber>,
         wait: Option<bool>,
     ) -> TableResult<()> {
-        let flush_ctx = wait.map(|wait| FlushContext { wait }).unwrap_or_default();
+        let flush_ctx = wait
+            .map(|wait| FlushContext {
+                wait,
+                reason: FlushReason::Manually,
+            })
+            .unwrap_or_default();
         if let Some(region_number) = region_number {
             if let Some(region) = self.regions.get(&region_number) {
                 region

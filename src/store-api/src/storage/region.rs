@@ -110,10 +110,40 @@ pub struct FlushContext {
     /// If true, the flush will wait until the flush is done.
     /// Default: true
     pub wait: bool,
+    /// Flush reason.
+    pub reason: FlushReason,
 }
 
 impl Default for FlushContext {
     fn default() -> FlushContext {
-        FlushContext { wait: true }
+        FlushContext {
+            wait: true,
+            reason: FlushReason::Unknown,
+        }
+    }
+}
+
+/// Reason of flush operation.
+#[derive(Debug, Clone, Copy)]
+pub enum FlushReason {
+    /// Unknown reason.
+    Unknown,
+    /// Memtable is full.
+    MemtableFull,
+    /// Flush manually.
+    Manually,
+    /// Auto flush periodically.
+    Periodically,
+}
+
+impl FlushReason {
+    /// Returns reason as `str`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FlushReason::Unknown => "unknown",
+            FlushReason::MemtableFull => "memtable_full",
+            FlushReason::Manually => "manually",
+            FlushReason::Periodically => "periodically",
+        }
     }
 }

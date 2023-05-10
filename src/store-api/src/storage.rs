@@ -34,7 +34,7 @@ pub use self::chunk::{Chunk, ChunkReader};
 pub use self::descriptors::*;
 pub use self::engine::{CreateOptions, EngineContext, OpenOptions, StorageEngine};
 pub use self::metadata::RegionMeta;
-pub use self::region::{FlushContext, Region, RegionStat, WriteContext};
+pub use self::region::{FlushContext, FlushReason, Region, RegionStat, WriteContext};
 pub use self::requests::{
     AddColumn, AlterOperation, AlterRequest, GetRequest, ScanRequest, WriteRequest,
 };
