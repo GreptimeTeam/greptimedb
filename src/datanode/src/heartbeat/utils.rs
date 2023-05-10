@@ -19,7 +19,7 @@ use common_time::util::current_time_millis;
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{self, Result};
-use crate::heartbeat::handler::{IncomingMessage, MessageMeta, OutgoingMessage};
+use crate::heartbeat::mailbox::{IncomingMessage, MessageMeta, OutgoingMessage};
 
 pub fn mailbox_message_to_incoming_message(m: MailboxMessage) -> Result<IncomingMessage> {
     m.payload

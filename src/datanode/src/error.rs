@@ -70,28 +70,8 @@ pub enum Error {
     #[snafu(display("Catalog not found: {}", name))]
     CatalogNotFound { name: String, location: Location },
 
-    #[snafu(display("Failed to access catalog, source: {}", source))]
-    AccessCatalog {
-        #[snafu(backtrace)]
-        source: catalog::error::Error,
-    },
-
     #[snafu(display("Schema not found: {}", name))]
     SchemaNotFound { name: String, location: Location },
-
-    #[snafu(display("Failed to open table: {}, source: {}", table_name, source))]
-    OpenTable {
-        table_name: String,
-        #[snafu(backtrace)]
-        source: TableError,
-    },
-
-    #[snafu(display("Failed to register table: {}, source: {}", table_name, source))]
-    RegisterTable {
-        table_name: String,
-        #[snafu(backtrace)]
-        source: catalog::error::Error,
-    },
 
     #[snafu(display("Failed to create table: {}, source: {}", table_name, source))]
     CreateTable {
@@ -488,14 +468,11 @@ impl ErrorExt for Error {
             | DescribeStatement { source } => source.status_code(),
 
             DecodeLogicalPlan { source } => source.status_code(),
-            NewCatalog { source } | RegisterSchema { source } | RegisterTable { source, .. } => {
+            NewCatalog { source } | RegisterSchema { source } => source.status_code(),
+            FindTable { source, .. } => source.status_code(),
+            CreateTable { source, .. } | GetTable { source, .. } | AlterTable { source, .. } => {
                 source.status_code()
             }
-            FindTable { source, .. } => source.status_code(),
-            CreateTable { source, .. }
-            | GetTable { source, .. }
-            | AlterTable { source, .. }
-            | OpenTable { source, .. } => source.status_code(),
             DropTable { source, .. } => source.status_code(),
             FlushTable { source, .. } => source.status_code(),
 
@@ -517,8 +494,6 @@ impl ErrorExt for Error {
             ConvertSchema { source, .. } | VectorComputation { source } => source.status_code(),
 
             InferSchema { source, .. } => source.status_code(),
-
-            AccessCatalog { source, .. } => source.status_code(),
 
             ColumnValuesNumberMismatch { .. }
             | InvalidSql { .. }

@@ -104,7 +104,7 @@ pub trait TableEngine: Send + Sync {
     /// Drops the given table. Return true if the table is dropped, or false if the table doesn't exist.
     async fn drop_table(&self, ctx: &EngineContext, request: DropTableRequest) -> Result<bool>;
 
-    /// Close the engine.
+    /// Close the table.
     async fn close(&self) -> Result<()>;
 }
 

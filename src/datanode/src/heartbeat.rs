@@ -19,20 +19,22 @@ use std::time::Duration;
 use api::v1::meta::{HeartbeatRequest, NodeStat, Peer};
 use catalog::{datanode_stat, CatalogManagerRef};
 use common_telemetry::{error, info, trace, warn};
+use mailbox::{HeartbeatMailbox, MailboxRef};
 use meta_client::client::{HeartbeatSender, MetaClient};
 use snafu::ResultExt;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-use self::handler::{
-    HeartbeatMailbox, HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutorRef,
-    MailboxRef,
-};
+use self::handler::{HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutorRef};
 use self::utils::outgoing_message_to_mailbox_message;
 use crate::error::{MetaClientInitSnafu, Result};
 
 pub mod handler;
 pub mod utils;
+
+// TODO(weny): remove allow dead_code
+#[allow(dead_code)]
+pub mod mailbox;
 
 pub struct HeartbeatTask {
     node_id: u64,
@@ -151,18 +153,12 @@ impl HeartbeatTask {
                         if let Some(message) = message {
                             match outgoing_message_to_mailbox_message(message) {
                                 Ok(message) => {
-                                    let (region_num, region_stats) = datanode_stat(&catalog_manager_clone).await;
                                     let req = HeartbeatRequest {
                                         peer: Some(Peer {
                                             id: node_id,
                                             addr: addr.clone(),
                                         }),
-                                        node_stat: Some(NodeStat {
-                                            region_num: region_num as _,
-                                            ..Default::default()
-                                        }),
-                                        region_stats,
-                                        mailbox_messages: vec![message],
+                                        mailbox_message: Some(message),
                                         ..Default::default()
                                     };
                                     Some(req)
@@ -171,10 +167,10 @@ impl HeartbeatTask {
                                     error!(e;"Failed to encode mailbox messages!");
                                     None
                                 }
-                            };
+                            }
+                        } else {
+                            None
                         }
-
-                        None
                     }
                     _ = &mut sleep => {
                         let (region_num, region_stats) = datanode_stat(&catalog_manager_clone).await;

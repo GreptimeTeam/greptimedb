@@ -14,7 +14,6 @@
 
 #![feature(assert_matches)]
 #![feature(trait_upcasting)]
-#![feature(drain_filter)]
 
 pub mod datanode;
 pub mod error;

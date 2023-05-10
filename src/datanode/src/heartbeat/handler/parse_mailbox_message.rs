@@ -13,28 +13,24 @@
 // limitations under the License.
 
 use crate::error::Result;
-use crate::heartbeat::handler::{
-    HeartbeatResponseHandler, HeartbeatResponseHandlerContext, IncomingMessage,
-};
+use crate::heartbeat::handler::{HeartbeatResponseHandler, HeartbeatResponseHandlerContext};
 use crate::heartbeat::utils::mailbox_message_to_incoming_message;
 
 #[derive(Default)]
-pub struct ParseMailboxMessageHandler {}
+pub struct ParseMailboxMessageHandler;
 
 impl HeartbeatResponseHandler for ParseMailboxMessageHandler {
-    fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> Result<()> {
-        let executable_messages = ctx
-            .response
-            .mailbox_messages
-            .iter()
-            .filter_map(|m| {
-                m.payload
-                    .as_ref()
-                    .map(|_| mailbox_message_to_incoming_message(m.clone()))
-            })
-            .collect::<Result<Vec<IncomingMessage>>>()?;
+    fn is_acceptable(&self, _ctx: &HeartbeatResponseHandlerContext) -> bool {
+        true
+    }
 
-        ctx.incoming_messages.extend(executable_messages);
+    fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> Result<()> {
+        if let Some(message) = &ctx.response.mailbox_message {
+            if message.payload.is_some() {
+                // mailbox_message_to_incoming_message will raise an error if payload is none
+                ctx.incoming_message = Some(mailbox_message_to_incoming_message(message.clone())?)
+            }
+        }
 
         Ok(())
     }

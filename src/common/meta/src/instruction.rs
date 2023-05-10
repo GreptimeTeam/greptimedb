@@ -23,8 +23,7 @@ pub enum Instruction {
         table: String,
         table_id: u32,
         engine: String,
-        // it will open all regions if region_number is None
-        region_number: Option<u32>,
+        region_number: u32,
     },
     CloseRegion {
         catalog: String,
@@ -32,12 +31,11 @@ pub enum Instruction {
         table: String,
         table_id: u32,
         engine: String,
-        // it will close all regions if region_number is None
-        region_number: Option<u32>,
+        region_number: u32,
     },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InstructionReply {
     OpenRegion { result: bool, error: Option<String> },
@@ -56,7 +54,7 @@ mod tests {
             table: "hi".to_string(),
             table_id: 1024,
             engine: "mito".to_string(),
-            region_number: Some(1),
+            region_number: 1,
         };
 
         let serialized = serde_json::to_string(&open_region).unwrap();
@@ -72,7 +70,7 @@ mod tests {
             table: "hi".to_string(),
             table_id: 1024,
             engine: "mito".to_string(),
-            region_number: Some(1),
+            region_number: 1,
         };
 
         let serialized = serde_json::to_string(&close_region).unwrap();

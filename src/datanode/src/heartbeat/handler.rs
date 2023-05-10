@@ -15,52 +15,23 @@
 use std::sync::Arc;
 
 use api::v1::meta::HeartbeatResponse;
-use common_meta::instruction::{Instruction, InstructionReply};
 use common_telemetry::error;
-use tokio::sync::mpsc::Sender;
 
-use crate::error::{self, Result};
+use crate::error::Result;
+use crate::heartbeat::mailbox::{IncomingMessage, MailboxRef};
 
-pub mod close_table;
-pub mod open_table;
 pub mod parse_mailbox_message;
-
-pub type IncomingMessage = (MessageMeta, Instruction);
-pub type OutgoingMessage = (MessageMeta, InstructionReply);
-pub struct MessageMeta {
-    pub id: u64,
-    pub subject: String,
-    pub to: String,
-    pub from: String,
-}
-
-pub struct HeartbeatMailbox {
-    sender: Sender<OutgoingMessage>,
-}
-
-impl HeartbeatMailbox {
-    pub fn new(sender: Sender<OutgoingMessage>) -> Self {
-        Self { sender }
-    }
-
-    pub async fn send(&self, message: OutgoingMessage) -> Result<()> {
-        self.sender.send(message).await.map_err(|e| {
-            error::SendMessageSnafu {
-                err_msg: e.to_string(),
-            }
-            .build()
-        })
-    }
-}
-
-pub type MailboxRef = Arc<HeartbeatMailbox>;
+#[cfg(test)]
+mod tests;
 
 pub type HeartbeatResponseHandlerExecutorRef = Arc<dyn HeartbeatResponseHandlerExecutor>;
+pub type HeartbeatResponseHandlerRef = Arc<dyn HeartbeatResponseHandler>;
 
 pub struct HeartbeatResponseHandlerContext {
     pub mailbox: MailboxRef,
     pub response: HeartbeatResponse,
-    pub incoming_messages: Vec<IncomingMessage>,
+    pub incoming_message: Option<IncomingMessage>,
+    is_skip_all: bool,
 }
 
 impl HeartbeatResponseHandlerContext {
@@ -68,12 +39,19 @@ impl HeartbeatResponseHandlerContext {
         Self {
             mailbox,
             response,
-            incoming_messages: Vec::new(),
+            incoming_message: None,
+            is_skip_all: false,
         }
+    }
+
+    pub fn is_skip_all(&self) -> bool {
+        self.is_skip_all
     }
 }
 
 pub trait HeartbeatResponseHandler: Send + Sync {
+    fn is_acceptable(&self, ctx: &HeartbeatResponseHandlerContext) -> bool;
+
     fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> Result<()>;
 }
 
@@ -82,11 +60,11 @@ pub trait HeartbeatResponseHandlerExecutor: Send + Sync {
 }
 
 pub struct HandlerGroupExecutor {
-    handlers: Vec<Arc<dyn HeartbeatResponseHandler>>,
+    handlers: Vec<HeartbeatResponseHandlerRef>,
 }
 
 impl HandlerGroupExecutor {
-    pub fn new(handlers: Vec<Arc<dyn HeartbeatResponseHandler>>) -> Self {
+    pub fn new(handlers: Vec<HeartbeatResponseHandlerRef>) -> Self {
         Self { handlers }
     }
 }
@@ -94,8 +72,16 @@ impl HandlerGroupExecutor {
 impl HeartbeatResponseHandlerExecutor for HandlerGroupExecutor {
     fn handle(&self, mut ctx: HeartbeatResponseHandlerContext) -> Result<()> {
         for handler in &self.handlers {
+            if ctx.is_skip_all() {
+                break;
+            }
+
+            if !handler.is_acceptable(&ctx) {
+                continue;
+            }
+
             if let Err(e) = handler.handle(&mut ctx) {
-                error!("Error while handling: {:?}, source: {}", ctx.response, e);
+                error!(e;"Error while handling: {:?}", ctx.response);
             }
         }
         Ok(())
