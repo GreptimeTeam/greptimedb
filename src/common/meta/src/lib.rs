@@ -13,3 +13,8 @@
 // limitations under the License.
 
 pub mod instruction;
+
+pub type ClusterId = u64;
+pub type DatanodeId = u64;
+
+pub use instruction::RegionIdent;

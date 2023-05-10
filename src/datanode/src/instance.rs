@@ -64,6 +64,7 @@ use crate::error::{
     NewCatalogSnafu, OpenLogStoreSnafu, RecoverProcedureSnafu, Result, ShutdownInstanceSnafu,
     StartProcedureManagerSnafu, StopProcedureManagerSnafu,
 };
+use crate::heartbeat::handler::open_region::OpenRegionHandler;
 use crate::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use crate::heartbeat::handler::HandlerGroupExecutor;
 use crate::heartbeat::HeartbeatTask;
@@ -203,9 +204,6 @@ impl Instance {
         let factory = QueryEngineFactory::new(catalog_manager.clone(), false);
         let query_engine = factory.query_engine();
 
-        let handlder_executor =
-            HandlerGroupExecutor::new(vec![Arc::new(ParseMailboxMessageHandler::default())]);
-
         let heartbeat_task = match opts.mode {
             Mode::Standalone => None,
             Mode::Distributed => Some(HeartbeatTask::new(
@@ -214,7 +212,13 @@ impl Instance {
                 opts.rpc_hostname.clone(),
                 meta_client.as_ref().unwrap().clone(),
                 catalog_manager.clone(),
-                Arc::new(handlder_executor),
+                Arc::new(HandlerGroupExecutor::new(vec![
+                    Arc::new(ParseMailboxMessageHandler::default()),
+                    Arc::new(OpenRegionHandler::new(
+                        catalog_manager.clone(),
+                        engine_manager.clone(),
+                    )),
+                ])),
             )),
         };
 
@@ -521,7 +525,7 @@ async fn new_metasrv_client(node_id: u64, meta_config: &MetaClientOptions) -> Re
         .connect_timeout(Duration::from_millis(meta_config.connect_timeout_millis))
         .tcp_nodelay(meta_config.tcp_nodelay);
 
-    let mut channel_manager = ChannelManager::with_config(config);
+    let channel_manager = ChannelManager::with_config(config);
     channel_manager.start_channel_recycle();
 
     let mut meta_client = MetaClientBuilder::new(cluster_id, member_id, Role::Datanode)

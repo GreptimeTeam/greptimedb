@@ -175,7 +175,11 @@ mod tests {
     async fn test_ask_leader() {
         let kv_store = Arc::new(MemStore::new());
 
-        let meta_srv = MetaSrvBuilder::new().kv_store(kv_store).build().await;
+        let meta_srv = MetaSrvBuilder::new()
+            .kv_store(kv_store)
+            .build()
+            .await
+            .unwrap();
 
         let req = AskLeaderRequest {
             header: Some(RequestHeader::new((1, 1), Role::Datanode)),

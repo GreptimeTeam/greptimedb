@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use api::v1::meta::{
     router_server, BatchPutRequest, CreateRequest, DeleteRequest, Error, KeyValue,
     MoveValueRequest, Peer, PeerDict, Region, RegionRoute, ResponseHeader, RouteRequest,
-    RouteResponse, Table, TableName, TableRoute, TableRouteValue,
+    RouteResponse, Table, TableRoute, TableRouteValue,
 };
 use catalog::helper::{TableGlobalKey, TableGlobalValue};
 use common_telemetry::{timer, warn};
@@ -28,12 +28,12 @@ use tonic::{Request, Response};
 use crate::error;
 use crate::error::Result;
 use crate::keys::TableRouteKey;
-use crate::metasrv::{Context, MetaSrv, SelectorRef};
+use crate::metasrv::{Context, MetaSrv, SelectorContext, SelectorRef};
 use crate::metrics::METRIC_META_ROUTE_REQUEST;
 use crate::sequence::SequenceRef;
-use crate::service::store::ext::KvStoreExt;
 use crate::service::store::kv::KvStoreRef;
 use crate::service::GrpcResult;
+use crate::table_routes::{get_table_global_value, get_table_route_value};
 
 #[async_trait::async_trait]
 impl router_server::Router for MetaSrv {
@@ -51,7 +51,13 @@ impl router_server::Router for MetaSrv {
         );
 
         let table_name = table_name.clone().context(error::EmptyTableNameSnafu)?;
-        let ctx = self.create_ctx(table_name);
+        let ctx = SelectorContext {
+            datanode_lease_secs: self.options().datanode_lease_secs,
+            server_addr: self.options().server_addr.clone(),
+            kv_store: self.kv_store(),
+            catalog: Some(table_name.catalog_name),
+            schema: Some(table_name.schema_name),
+        };
 
         let selector = self.selector();
         let table_id_sequence = self.table_id_sequence();
@@ -92,24 +98,9 @@ impl router_server::Router for MetaSrv {
     }
 }
 
-impl MetaSrv {
-    fn create_ctx(&self, table_name: TableName) -> Context {
-        let mut ctx = self.new_ctx();
-        let TableName {
-            catalog_name,
-            schema_name,
-            table_name,
-        } = table_name;
-        ctx.catalog = Some(catalog_name);
-        ctx.schema = Some(schema_name);
-        ctx.table = Some(table_name);
-        ctx
-    }
-}
-
 async fn handle_create(
     req: CreateRequest,
-    ctx: Context,
+    ctx: SelectorContext,
     selector: SelectorRef,
     table_id_sequence: SequenceRef,
 ) -> Result<RouteResponse> {
@@ -370,23 +361,6 @@ async fn fetch_tables(
     Ok(tables)
 }
 
-async fn get_table_route_value(
-    kv_store: &KvStoreRef,
-    key: &TableRouteKey<'_>,
-) -> Result<TableRouteValue> {
-    let trkv = kv_store
-        .get(key.key().into_bytes())
-        .await?
-        .context(error::TableRouteNotFoundSnafu { key: key.key() })?;
-    let trv: TableRouteValue = trkv
-        .value
-        .as_slice()
-        .try_into()
-        .context(error::DecodeTableRouteSnafu)?;
-
-    Ok(trv)
-}
-
 async fn remove_table_route_value(
     kv_store: &KvStoreRef,
     key: &TableRouteKey<'_>,
@@ -416,22 +390,6 @@ async fn remove_table_global_value(
     let value: TableGlobalValue =
         TableGlobalValue::from_bytes(&kv.1).context(error::InvalidCatalogValueSnafu)?;
     Ok((kv.0, value))
-}
-
-async fn get_table_global_value(
-    kv_store: &KvStoreRef,
-    key: &TableGlobalKey,
-) -> Result<Option<TableGlobalValue>> {
-    let tg_key = format!("{key}").into_bytes();
-    let tkv = kv_store.get(tg_key).await?;
-    match tkv {
-        Some(tkv) => {
-            let tv =
-                TableGlobalValue::from_bytes(tkv.value).context(error::InvalidCatalogValueSnafu)?;
-            Ok(Some(tv))
-        }
-        None => Ok(None),
-    }
 }
 
 async fn move_value(

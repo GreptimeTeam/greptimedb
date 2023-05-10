@@ -43,7 +43,7 @@ impl MockInstance for MockStandaloneInstance {
 
 impl MockInstance for MockDistributedInstance {
     fn frontend(&self) -> Arc<Instance> {
-        self.frontend.clone()
+        self.frontend()
     }
 
     fn is_distributed_mode(&self) -> bool {

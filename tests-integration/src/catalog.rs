@@ -14,7 +14,7 @@
 
 #[cfg(test)]
 mod tests {
-    use catalog::{CatalogManager, RegisterSystemTableRequest};
+    use catalog::RegisterSystemTableRequest;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
     use script::table::{build_scripts_schema, SCRIPTS_TABLE_NAME};
     use table::requests::{CreateTableRequest, TableOptions};
@@ -42,7 +42,8 @@ mod tests {
         };
 
         let result = instance
-            .catalog_manager
+            .frontend()
+            .catalog_manager()
             .register_system_table(RegisterSystemTableRequest {
                 create_table_request: request,
                 open_hook: None,
@@ -52,7 +53,8 @@ mod tests {
 
         assert!(
             instance
-                .catalog_manager
+                .frontend()
+                .catalog_manager()
                 .table(catalog_name, schema_name, table_name)
                 .await
                 .unwrap()
@@ -61,7 +63,7 @@ mod tests {
         );
 
         let mut actually_created_table_in_datanode = 0;
-        for datanode in instance.datanodes.values() {
+        for datanode in instance.datanodes().values() {
             if datanode
                 .catalog_manager()
                 .table(catalog_name, schema_name, table_name)

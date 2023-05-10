@@ -77,7 +77,7 @@ mod tests {
     use api::v1::meta::RangeRequest;
 
     use super::*;
-    use crate::handler::HeartbeatMailbox;
+    use crate::handler::{HeartbeatMailbox, Pushers};
     use crate::keys::StatKey;
     use crate::sequence::Sequence;
     use crate::service::store::memory::MemStore;
@@ -87,18 +87,14 @@ mod tests {
         let in_memory = Arc::new(MemStore::new());
         let kv_store = Arc::new(MemStore::new());
         let seq = Sequence::new("test_seq", 0, 10, kv_store.clone());
-        let mailbox = HeartbeatMailbox::create(Arc::new(Default::default()), seq);
+        let mailbox = HeartbeatMailbox::create(Pushers::default(), seq);
         let mut ctx = Context {
-            datanode_lease_secs: 30,
             server_addr: "127.0.0.1:0000".to_string(),
             in_memory,
             kv_store,
             mailbox,
             election: None,
             skip_all: Arc::new(AtomicBool::new(false)),
-            catalog: None,
-            schema: None,
-            table: None,
             is_infancy: false,
         };
 

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod catalog;
+pub mod cluster;
 mod grpc;
 mod influxdb;
 mod instance;
@@ -21,6 +22,7 @@ mod prometheus;
 mod table;
 pub mod test_util;
 
+// TODO(LFC): Refactor: move instance structs out of mod "tests", like the `GreptimeDbCluster`.
 #[cfg(test)]
 mod tests;
 

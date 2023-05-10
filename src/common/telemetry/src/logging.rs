@@ -136,6 +136,7 @@ pub fn init_global_logging(
         .with_target("reqwest", Level::WARN)
         .with_target("sqlparser", Level::WARN)
         .with_target("h2", Level::INFO)
+        .with_target("opendal", Level::INFO)
         .with_default(
             directives
                 .parse::<filter::LevelFilter>()

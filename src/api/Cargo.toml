@@ -10,7 +10,7 @@ common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
 common-time = { path = "../common/time" }
 datatypes = { path = "../datatypes" }
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "6bfb02057c40da0e397c0cb4f6b87bd769669d50" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "f43972af48f8be1cbb1d27640a8aba8b30955028" }
 prost.workspace = true
 snafu = { version = "0.7", features = ["backtraces"] }
 tonic.workspace = true

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use client::Client;
@@ -23,7 +24,7 @@ use moka::future::{Cache, CacheBuilder};
 pub struct DatanodeClients {
     channel_manager: ChannelManager,
     clients: Cache<Peer, Client>,
-    started: bool,
+    started: Arc<Mutex<bool>>,
 }
 
 impl Default for DatanodeClients {
@@ -34,21 +35,22 @@ impl Default for DatanodeClients {
                 .time_to_live(Duration::from_secs(30 * 60))
                 .time_to_idle(Duration::from_secs(5 * 60))
                 .build(),
-            started: false,
+            started: Arc::new(Mutex::new(false)),
         }
     }
 }
 
 impl DatanodeClients {
-    pub(crate) fn start(&mut self) {
-        if self.started {
+    pub(crate) fn start(&self) {
+        let mut started = self.started.lock().unwrap();
+        if *started {
             return;
         }
 
         self.channel_manager.start_channel_recycle();
 
         info!("Datanode clients manager is started!");
-        self.started = true;
+        *started = true;
     }
 
     pub(crate) async fn get_client(&self, datanode: &Peer) -> Client {

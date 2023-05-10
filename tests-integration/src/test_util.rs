@@ -104,10 +104,10 @@ fn s3_test_config() -> S3Config {
     }
 }
 
-fn get_test_store_config(
+pub fn get_test_store_config(
     store_type: &StorageType,
     name: &str,
-) -> (ObjectStoreConfig, Option<TempDirGuard>) {
+) -> (ObjectStoreConfig, TempDirGuard) {
     let _ = dotenv::dotenv();
 
     match store_type {
@@ -133,10 +133,7 @@ fn get_test_store_config(
 
             let store = ObjectStore::new(builder).unwrap().finish();
 
-            (
-                config,
-                Some(TempDirGuard::Oss(TempFolder::new(&store, "/"))),
-            )
+            (config, TempDirGuard::Oss(TempFolder::new(&store, "/")))
         }
         StorageType::S3 | StorageType::S3WithCache => {
             let mut s3_config = s3_test_config();
@@ -163,7 +160,7 @@ fn get_test_store_config(
 
             let store = ObjectStore::new(builder).unwrap().finish();
 
-            (config, Some(TempDirGuard::S3(TempFolder::new(&store, "/"))))
+            (config, TempDirGuard::S3(TempFolder::new(&store, "/")))
         }
         StorageType::File => {
             let data_tmp_dir = create_temp_dir(&format!("gt_data_{name}"));
@@ -172,32 +169,31 @@ fn get_test_store_config(
                 ObjectStoreConfig::File(FileConfig {
                     data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
                 }),
-                Some(TempDirGuard::File(data_tmp_dir)),
+                TempDirGuard::File(data_tmp_dir),
             )
         }
     }
 }
 
-enum TempDirGuard {
+pub enum TempDirGuard {
     File(TempDir),
     S3(TempFolder),
     Oss(TempFolder),
 }
 
-/// Create a tmp dir(will be deleted once it goes out of scope.) and a default `DatanodeOptions`,
-/// Only for test.
 pub struct TestGuard {
-    _wal_tmp_dir: TempDir,
-    data_tmp_dir: Option<TempDirGuard>,
+    pub wal_guard: WalGuard,
+    pub storage_guard: StorageGuard,
 }
+
+pub struct WalGuard(pub TempDir);
+
+pub struct StorageGuard(pub TempDirGuard);
 
 impl TestGuard {
     pub async fn remove_all(&mut self) {
-        if let Some(TempDirGuard::S3(mut guard)) = self.data_tmp_dir.take() {
-            guard.remove_all().await.unwrap();
-        }
-        if let Some(TempDirGuard::Oss(mut guard)) = self.data_tmp_dir.take() {
-            guard.remove_all().await.unwrap();
+        if let TempDirGuard::S3(guard) | TempDirGuard::Oss(guard) = &mut self.storage_guard.0 {
+            guard.remove_all().await.unwrap()
         }
     }
 }
@@ -207,12 +203,24 @@ pub fn create_tmp_dir_and_datanode_opts(
     name: &str,
 ) -> (DatanodeOptions, TestGuard) {
     let wal_tmp_dir = create_temp_dir(&format!("gt_wal_{name}"));
+    let wal_dir = wal_tmp_dir.path().to_str().unwrap().to_string();
 
     let (store, data_tmp_dir) = get_test_store_config(&store_type, name);
+    let opts = create_datanode_opts(store, wal_dir);
 
-    let opts = DatanodeOptions {
+    (
+        opts,
+        TestGuard {
+            wal_guard: WalGuard(wal_tmp_dir),
+            storage_guard: StorageGuard(data_tmp_dir),
+        },
+    )
+}
+
+pub fn create_datanode_opts(store: ObjectStoreConfig, wal_dir: String) -> DatanodeOptions {
+    DatanodeOptions {
         wal: WalConfig {
-            dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
+            dir: wal_dir,
             ..Default::default()
         },
         storage: StorageConfig {
@@ -222,14 +230,7 @@ pub fn create_tmp_dir_and_datanode_opts(
         mode: Mode::Standalone,
         procedure: ProcedureConfig::default(),
         ..Default::default()
-    };
-    (
-        opts,
-        TestGuard {
-            _wal_tmp_dir: wal_tmp_dir,
-            data_tmp_dir,
-        },
-    )
+    }
 }
 
 pub async fn create_test_table(

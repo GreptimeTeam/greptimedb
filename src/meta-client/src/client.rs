@@ -352,7 +352,7 @@ mod tests {
     use chrono::DateTime;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, RawSchema};
-    use meta_srv::metasrv::Context;
+    use meta_srv::metasrv::SelectorContext;
     use meta_srv::selector::{Namespace, Selector};
     use meta_srv::Result as MetaResult;
     use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
@@ -570,7 +570,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Selector for MockSelector {
-        type Context = Context;
+        type Context = SelectorContext;
         type Output = Vec<Peer>;
 
         async fn select(&self, _ns: Namespace, _ctx: &Self::Context) -> MetaResult<Self::Output> {

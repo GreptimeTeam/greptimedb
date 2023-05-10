@@ -97,6 +97,7 @@ impl FrontendCatalogManager {
 #[async_trait::async_trait]
 impl CatalogManager for FrontendCatalogManager {
     async fn start(&self) -> catalog::error::Result<()> {
+        self.datanode_clients.start();
         Ok(())
     }
 

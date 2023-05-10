@@ -12,32 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(async_closure)]
-#![feature(btree_drain_filter)]
+use async_trait::async_trait;
+use common_meta::RegionIdent;
+use common_procedure::Status;
+use serde::{Deserialize, Serialize};
 
-pub mod bootstrap;
-pub mod cluster;
-pub mod election;
-pub mod error;
-mod failure_detector;
-pub mod handler;
-pub mod keys;
-pub mod lease;
-pub mod lock;
-pub mod metadata_service;
-pub mod metasrv;
-mod metrics;
-#[cfg(feature = "mock")]
-pub mod mocks;
-pub mod procedure;
-pub mod selector;
-mod sequence;
-pub mod service;
-pub mod table_routes;
+use super::{RegionFailoverContext, State};
+use crate::error::Result;
 
-#[cfg(test)]
-mod test_util;
+#[derive(Serialize, Deserialize, Debug)]
+pub(super) struct RegionFailoverEnd;
 
-pub mod util;
+#[async_trait]
+#[typetag::serde]
+impl State for RegionFailoverEnd {
+    async fn next(
+        mut self: Box<Self>,
+        _: &RegionFailoverContext,
+        _: &RegionIdent,
+    ) -> Result<Box<dyn State>> {
+        Ok(self)
+    }
 
-pub use crate::error::Result;
+    fn status(&self) -> Status {
+        Status::Done
+    }
+}

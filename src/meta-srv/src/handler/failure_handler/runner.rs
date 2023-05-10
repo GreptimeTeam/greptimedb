@@ -16,6 +16,7 @@ use std::ops::DerefMut;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use common_meta::RegionIdent;
 use common_telemetry::{error, warn};
 use common_time::util::current_time_millis;
 use dashmap::mapref::multiple::RefMulti;
@@ -25,8 +26,9 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::task::JoinHandle;
 
 use crate::failure_detector::PhiAccrualFailureDetector;
-use crate::handler::failure_handler::{DatanodeHeartbeat, RegionIdent};
+use crate::handler::failure_handler::DatanodeHeartbeat;
 use crate::metasrv::ElectionRef;
+use crate::procedure::region_failover::RegionFailoverManager;
 
 pub(crate) enum FailureDetectControl {
     Purge,
@@ -37,6 +39,7 @@ pub(crate) enum FailureDetectControl {
 
 pub(crate) struct FailureDetectRunner {
     election: Option<ElectionRef>,
+    region_failover_manager: Arc<RegionFailoverManager>,
 
     heartbeat_tx: Sender<DatanodeHeartbeat>,
     heartbeat_rx: Option<Receiver<DatanodeHeartbeat>>,
@@ -49,11 +52,15 @@ pub(crate) struct FailureDetectRunner {
 }
 
 impl FailureDetectRunner {
-    pub(crate) fn new(election: Option<ElectionRef>) -> Self {
+    pub(super) fn new(
+        election: Option<ElectionRef>,
+        region_failover_manager: Arc<RegionFailoverManager>,
+    ) -> Self {
         let (heartbeat_tx, heartbeat_rx) = mpsc::channel::<DatanodeHeartbeat>(1024);
         let (control_tx, control_rx) = mpsc::channel::<FailureDetectControl>(1024);
         Self {
             election,
+            region_failover_manager,
             heartbeat_tx,
             heartbeat_rx: Some(heartbeat_rx),
             control_tx,
@@ -121,16 +128,38 @@ impl FailureDetectRunner {
         self.receiver_handle = Some(receiver_handle);
 
         let election = self.election.clone();
+        let region_failover_manager = self.region_failover_manager.clone();
         let runner_handle = common_runtime::spawn_bg(async move {
             loop {
                 let start = Instant::now();
 
                 let is_leader = election.as_ref().map(|x| x.is_leader()).unwrap_or(true);
                 if is_leader {
-                    for e in failure_detectors.iter() {
-                        if e.failure_detector().is_available(current_time_millis()) {
-                            // TODO(LFC): TBC
-                        }
+                    let failed_regions = failure_detectors
+                        .iter()
+                        .filter_map(|e| {
+                            // Intentionally not place `current_time_millis()` out of the iteration.
+                            // The failure detection determination should be happened "just in time",
+                            // i.e., failed or not has to be compared with the most recent "now".
+                            // Besides, it might reduce the false positive of failure detection,
+                            // because during the iteration, heartbeats are coming in as usual,
+                            // and the `phi`s are still updating.
+                            if !e.failure_detector().is_available(current_time_millis()) {
+                                Some(e.region_ident().clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<RegionIdent>>();
+
+                    for r in failed_regions {
+                        // Now that we know the region is failed, remove it from the failure
+                        // detectors, avoiding the failover procedure to be triggered again.
+                        // If the region is back alive (the failover procedure runs successfully),
+                        // it will be added back to the failure detectors again.
+                        failure_detectors.remove(&r);
+
+                        region_failover_manager.fire_region_failover(r).await
                     }
                 }
 
@@ -165,6 +194,10 @@ pub(crate) struct FailureDetectorEntry<'a> {
 }
 
 impl FailureDetectorEntry<'_> {
+    fn region_ident(&self) -> &RegionIdent {
+        self.e.key()
+    }
+
     fn failure_detector(&self) -> &PhiAccrualFailureDetector {
         self.e.value()
     }
@@ -186,6 +219,10 @@ impl FailureDetectorContainer {
         Box::new(self.0.iter().map(move |e| FailureDetectorEntry { e })) as _
     }
 
+    fn remove(&self, ident: &RegionIdent) {
+        let _ = self.0.remove(ident);
+    }
+
     fn clear(&self) {
         self.0.clear()
     }
@@ -200,9 +237,11 @@ impl FailureDetectorContainer {
 
 #[cfg(test)]
 mod tests {
+    use common_catalog::consts::MITO_ENGINE;
     use rand::Rng;
 
     use super::*;
+    use crate::test_util::create_region_failover_manager;
 
     #[test]
     fn test_default_failure_detector_container() {
@@ -211,7 +250,11 @@ mod tests {
             catalog: "a".to_string(),
             schema: "b".to_string(),
             table: "c".to_string(),
-            region_id: 1,
+            cluster_id: 3,
+            datanode_id: 2,
+            table_id: 1,
+            engine: MITO_ENGINE.to_string(),
+            region_number: 1,
         };
         let _ = container.get_failure_detector(ident.clone());
         assert!(container.0.contains_key(&ident));
@@ -234,11 +277,16 @@ mod tests {
             catalog: "a".to_string(),
             schema: "b".to_string(),
             table: "c".to_string(),
-            region_id: 1,
+            cluster_id: 3,
+            datanode_id: 2,
+            table_id: 1,
+            engine: MITO_ENGINE.to_string(),
+            region_number: 1,
         };
         container.get_failure_detector(ident.clone());
 
-        let mut runner = FailureDetectRunner::new(None);
+        let region_failover_manager = create_region_failover_manager();
+        let mut runner = FailureDetectRunner::new(None, region_failover_manager);
         runner.start_with(Arc::new(container)).await;
 
         let dump = runner.dump().await;
@@ -254,24 +302,27 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_heartbeat() {
-        let mut runner = FailureDetectRunner::new(None);
+        let region_failover_manager = create_region_failover_manager();
+        let mut runner = FailureDetectRunner::new(None, region_failover_manager);
         runner.start().await;
 
         // Generate 2000 heartbeats start from now. Heartbeat interval is one second, plus some random millis.
-        fn generate_heartbeats(node_id: u64, region_ids: Vec<u64>) -> Vec<DatanodeHeartbeat> {
+        fn generate_heartbeats(datanode_id: u64, region_ids: Vec<u32>) -> Vec<DatanodeHeartbeat> {
             let mut rng = rand::thread_rng();
             let start = current_time_millis();
             (0..2000)
                 .map(|i| DatanodeHeartbeat {
-                    cluster_id: 1,
-                    node_id,
                     region_idents: region_ids
                         .iter()
-                        .map(|&region_id| RegionIdent {
+                        .map(|&region_number| RegionIdent {
                             catalog: "a".to_string(),
                             schema: "b".to_string(),
                             table: "c".to_string(),
-                            region_id,
+                            cluster_id: 1,
+                            datanode_id,
+                            table_id: 0,
+                            engine: MITO_ENGINE.to_string(),
+                            region_number,
                         })
                         .collect(),
                     heartbeat_time: start + i * 1000 + rng.gen_range(0..100),

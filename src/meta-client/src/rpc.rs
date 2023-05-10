@@ -166,6 +166,15 @@ impl From<PbPeer> for Peer {
     }
 }
 
+impl From<Peer> for PbPeer {
+    fn from(p: Peer) -> Self {
+        Self {
+            id: p.id,
+            addr: p.addr,
+        }
+    }
+}
+
 impl Peer {
     pub fn new(id: u64, addr: impl Into<String>) -> Self {
         Self {

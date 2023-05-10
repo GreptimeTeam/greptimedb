@@ -40,6 +40,7 @@ async fn mock_meta_client(mock_info: MockInfo, node_id: u64) -> MetaClient {
     let MockInfo {
         server_addr,
         channel_manager,
+        ..
     } = mock_info;
 
     let id = (1000u64, 2000u64);
