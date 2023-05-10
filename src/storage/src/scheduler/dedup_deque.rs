@@ -76,6 +76,12 @@ impl<K: Eq + Hash + Clone, V> DedupDeque<K, V> {
     pub fn is_empty(&self) -> bool {
         self.deque.is_empty()
     }
+
+    #[inline]
+    pub fn clear(&mut self) {
+        self.deque.clear();
+        self.existing.clear();
+    }
 }
 
 impl<K, V> Debug for DedupDeque<K, V>
@@ -111,5 +117,8 @@ mod tests {
         assert!(deque.push_back(1, "hello".to_string()));
         assert!(!deque.push_back(1, "world".to_string()));
         assert_eq!((1, "hello".to_string()), deque.pop_front().unwrap());
+
+        deque.clear();
+        assert!(deque.is_empty());
     }
 }

@@ -124,6 +124,9 @@ where
         self.state.store(STATE_STOP, Ordering::Relaxed);
 
         self.cancel_token.cancel();
+
+        // Clear all requests
+        self.request_queue.write().unwrap().clear();
     }
 }
 
