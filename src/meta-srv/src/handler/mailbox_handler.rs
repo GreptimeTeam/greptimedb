@@ -33,13 +33,8 @@ impl HeartbeatHandler for MailboxHandler {
         ctx: &mut Context,
         _acc: &mut HeartbeatAccumulator,
     ) -> Result<()> {
-        if req.mailbox_messages.is_empty() {
-            return Ok(());
-        }
-
-        let mailbox_messages = req.mailbox_messages.clone();
-        for msg in mailbox_messages {
-            ctx.mailbox.on_recv(msg.id, Ok(msg)).await?;
+        if let Some(message) = &req.mailbox_message {
+            ctx.mailbox.on_recv(message.id, Ok(message.clone())).await?;
         }
 
         Ok(())
