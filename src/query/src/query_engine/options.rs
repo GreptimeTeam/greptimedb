@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_catalog::consts::INFORMATION_SCHEMA_NAME;
 use session::context::QueryContextRef;
 use snafu::ensure;
 
@@ -28,6 +29,11 @@ pub fn validate_catalog_and_schema(
     schema: &str,
     query_ctx: &QueryContextRef,
 ) -> Result<()> {
+    // information_schema is an exception
+    if schema.eq_ignore_ascii_case(INFORMATION_SCHEMA_NAME) {
+        return Ok(());
+    }
+
     ensure!(
         catalog == query_ctx.current_catalog() && schema == query_ctx.current_schema(),
         QueryAccessDeniedSnafu {
@@ -59,5 +65,7 @@ mod tests {
         assert!(re.is_err());
         let re = validate_catalog_and_schema("wrong_catalog", "wrong_schema", &context);
         assert!(re.is_err());
+
+        assert!(validate_catalog_and_schema("greptime", "information_schema", &context).is_ok());
     }
 }
