@@ -29,8 +29,8 @@ pub struct Assets;
 
 pub(crate) fn dashboard() -> Router {
     Router::new()
-        .route("/", routing::get(static_handler))
-        .route("/*x", routing::get(static_handler))
+        .route("/", routing::get(static_handler).post(static_handler))
+        .route("/*x", routing::get(static_handler).post(static_handler))
 }
 
 #[axum_macros::debug_handler]
