@@ -381,40 +381,28 @@ fn validate_create_table_request(request: &CreateTableRequest) -> Result<()> {
     Ok(())
 }
 
-fn all_regions_open(table: TableRef) -> TableResult<bool> {
-    let info = table.table_info();
-
-    Ok(info
-        .meta
-        .region_numbers
+fn all_regions_open(table: TableRef, regions: &[RegionNumber]) -> TableResult<bool> {
+    Ok(regions
         .iter()
         .map(|r| table.contain_region(*r))
         .collect::<TableResult<Vec<_>>>()?
-        .iter()
-        .all(|r| *r))
+        .into_iter()
+        .all(|r| r))
 }
 
 impl<S: StorageEngine> MitoEngineInner<S> {
-    /// Returns Some(table) contains all regions if `region` is None.
-    /// Returns Some(table) contains a specific region if the `region` was represented.
-    fn check_region(
+    /// Returns Some(table) contains all specific regions
+    fn check_regions(
         &self,
         table: TableRef,
-        region: Option<RegionNumber>,
+        regions: &[RegionNumber],
     ) -> TableResult<Option<TableRef>> {
-        let table = if let Some(target_region) = &region {
-            if table.contain_region(*target_region)? {
-                Some(table)
-            } else {
-                None
-            }
-        } else if all_regions_open(table.clone())? {
+        if all_regions_open(table.clone(), regions)? {
             // If all regions have been opened
-            Some(table)
+            Ok(Some(table))
         } else {
-            None
-        };
-        Ok(table)
+            Ok(None)
+        }
     }
 
     /// Builds table from scratch.
@@ -458,11 +446,11 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             table_id, table_info
         );
 
-        if let Some(target_region) = request.region_number {
-            if !table_info.meta.region_numbers.contains(&target_region) {
+        for target_region in &request.region_numbers {
+            if !table_info.meta.region_numbers.contains(target_region) {
                 table_error::RegionNotFoundSnafu {
                     table: table_ref.to_string(),
-                    region: target_region,
+                    region: *target_region,
                 }
                 .fail()?
             }
@@ -470,12 +458,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
         let mut regions = HashMap::with_capacity(table_info.meta.region_numbers.len());
 
-        let expected_regions = request
-            .region_number
-            .map(|r| vec![r])
-            .unwrap_or(table_info.meta.region_numbers.clone());
-
-        for region_number in &expected_regions {
+        for region_number in &request.region_numbers {
             let region = self
                 .open_region(&engine_ctx, table_id, *region_number, &table_ref, &opts)
                 .await?;
@@ -520,7 +503,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         &self,
         _ctx: &EngineContext,
         table: TableRef,
-        region_number: Option<RegionNumber>,
+        region_numbers: &[RegionNumber],
     ) -> TableResult<Option<TableRef>> {
         let table_info = table.table_info();
         let catalog = &table_info.catalog_name;
@@ -534,9 +517,6 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             schema,
             table: name,
         };
-        let expected_regions = region_number
-            .map(|r| vec![r])
-            .unwrap_or(table_info.meta.region_numbers.clone());
 
         let opts = OpenOptions {
             parent_dir: table_dir.to_string(),
@@ -555,7 +535,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             .context(table_error::DowncastMitoTableSnafu)?;
 
         // TODO(weny): Returns an error earlier if the target region does not exist in the meta.
-        for region_number in &expected_regions {
+        for region_number in region_numbers {
             if table.contain_region(*region_number)? {
                 continue;
             }
@@ -587,7 +567,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         };
 
         if let Some(table) = self.get_table(&table_ref) {
-            if let Some(table) = self.check_region(table, request.region_number)? {
+            if let Some(table) = self.check_regions(table, &request.region_numbers)? {
                 return Ok(Some(table));
             }
         }
@@ -600,12 +580,12 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             // Checks again, read lock should be enough since we are guarded by the mutex.
             if let Some(table) = self.get_table(&table_ref) {
                 // Contains all regions or target region
-                if let Some(table) = self.check_region(table.clone(), request.region_number)? {
+                if let Some(table) = self.check_regions(table.clone(), &request.region_numbers)? {
                     Some(table)
                 } else {
                     // Loads missing regions
                     // TODO(weny): support to load regions
-                    self.load_regions(ctx, table.clone(), request.region_number)
+                    self.load_regions(ctx, table.clone(), &request.region_numbers)
                         .await?
                 }
             } else {

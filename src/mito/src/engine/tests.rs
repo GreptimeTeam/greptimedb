@@ -416,7 +416,7 @@ async fn test_open_table_with_region_number() {
         table_name: test_util::TABLE_NAME.to_string(),
         // the test table id is 1
         table_id: 1,
-        region_number: Some(0),
+        region_numbers: vec![0],
     };
 
     let invalid_open_req = OpenTableRequest {
@@ -425,7 +425,7 @@ async fn test_open_table_with_region_number() {
         table_name: test_util::TABLE_NAME.to_string(),
         // the test table id is 1
         table_id: 1,
-        region_number: Some(1),
+        region_numbers: vec![1],
     };
 
     let (_engine, storage_engine, table, object_store, _dir) = {

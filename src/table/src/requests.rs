@@ -170,14 +170,26 @@ impl From<&TableOptions> for HashMap<String, String> {
 }
 
 /// Open table request
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct OpenTableRequest {
     pub catalog_name: String,
     pub schema_name: String,
     pub table_name: String,
     pub table_id: TableId,
     // it will open all regions if region_number is None
-    pub region_number: Option<RegionNumber>,
+    pub region_numbers: Vec<RegionNumber>,
+}
+
+impl Default for OpenTableRequest {
+    fn default() -> Self {
+        Self {
+            region_numbers: vec![0],
+            catalog_name: String::new(),
+            schema_name: String::new(),
+            table_name: String::new(),
+            table_id: TableId::default(),
+        }
+    }
 }
 
 /// Alter table request

@@ -68,7 +68,7 @@ impl HeartbeatResponseHandler for OpenTableHandler {
                                 schema_name: schema,
                                 table_name: table,
                                 table_id,
-                                region_number: Some(region_number),
+                                region_numbers: vec![region_number],
                             },
                         )
                         .await;
