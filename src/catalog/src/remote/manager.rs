@@ -273,11 +273,7 @@ async fn initiate_schemas(
             "Fetch schema from metasrv: {}.{}",
             &catalog_name, &schema_name
         );
-        increment_gauge!(
-            crate::metrics::METRIC_CATALOG_MANAGER_SCHEMA_COUNT,
-            1.0,
-            &[crate::metrics::db_label(&catalog_name, &schema_name)],
-        );
+        increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_SCHEMA_COUNT, 1.0);
 
         let backend = backend.clone();
         let engine_manager = engine_manager.clone();
@@ -390,7 +386,7 @@ async fn initiate_tables(
 
     increment_gauge!(
         crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
-        1.0,
+        table_num as f64,
         &[crate::metrics::db_label(catalog_name, schema_name)],
     );
     info!(
