@@ -14,12 +14,12 @@
 
 use arrow::compute::SortOptions;
 use arrow::row::{RowConverter, SortField};
+use arrow_array::{Array, ArrayRef};
 use datatypes::data_type::DataType;
-use datatypes::prelude::VectorRef;
-use datatypes::vectors::{Helper, MutableVector};
+use datatypes::vectors::Helper;
 use snafu::ResultExt;
 
-use crate::error;
+use crate::error::{self, Result};
 use crate::read::{Batch, BatchReader};
 use crate::schema::ProjectedSchemaRef;
 
@@ -43,38 +43,47 @@ impl<R> BatchReader for WindowedReader<R>
 where
     R: BatchReader,
 {
-    async fn next_batch(&mut self) -> error::Result<Option<Batch>> {
+    async fn next_batch(&mut self) -> Result<Option<Batch>> {
         let Some(mut reader) = self.readers.pop() else { return Ok(None); };
-        let mut existing = self
-            .schema
-            .schema_to_read()
-            .columns()
-            .iter()
-            .map(|c| c.desc.data_type.create_mutable_vector(32))
-            .collect::<Vec<Box<dyn MutableVector>>>();
 
+        let store_schema = self.schema.schema_to_read();
+        let mut batches = vec![];
         while let Some(batch) = reader.next_batch().await? {
-            for (builder, arr) in existing.iter_mut().zip(batch.columns.iter()) {
-                builder
-                    .extend_slice_of(&**arr, 0, arr.len())
-                    .context(error::PushBatchSnafu)?;
-            }
+            batches.push(
+                batch
+                    .columns
+                    .into_iter()
+                    .map(|v| v.to_arrow_array())
+                    .collect::<Vec<_>>(),
+            );
         }
 
-        let vectors_in_batch = existing.into_iter().map(|mut b| b.to_vector()).collect();
-        let res = sort_by_rows(&self.schema, vectors_in_batch)?;
-        Ok(Some(Batch::new(res)))
+        let num_columns = batches.get(0).map(|b| b.len()).unwrap_or(0);
+        let mut vectors_in_batch = Vec::with_capacity(num_columns);
+
+        for idx in 0..num_columns {
+            let columns: Vec<&dyn Array> =
+                batches.iter().map(|b| b[idx].as_ref()).collect::<Vec<_>>();
+            vectors_in_batch
+                .push(arrow::compute::concat(&columns).context(error::ConvertColumnsToRowsSnafu)?);
+        }
+        let sorted = sort_by_rows(&self.schema, vectors_in_batch)?;
+        let vectors = sorted
+            .iter()
+            .zip(store_schema.columns().iter().map(|c| &c.desc.name))
+            .map(|(arr, name)| {
+                Helper::try_into_vector(arr).context(error::ConvertChunkSnafu { name })
+            })
+            .collect::<Result<_>>()?;
+        Ok(Some(Batch::new(vectors)))
     }
 }
 
-fn sort_by_rows(
-    schema: &ProjectedSchemaRef,
-    vectors: Vec<VectorRef>,
-) -> crate::error::Result<Vec<VectorRef>> {
+fn sort_by_rows(schema: &ProjectedSchemaRef, arrays: Vec<ArrayRef>) -> Result<Vec<ArrayRef>> {
     let sort_columns = build_sort_columns(schema);
-
     let store_schema = schema.schema_to_read();
     // Convert columns to rows to speed lexicographic sort
+    // TODO(hl): maybe optimize to lexsort_to_index when only timestamp column is involved.
     let mut row_converter = RowConverter::new(
         sort_columns
             .iter()
@@ -89,14 +98,16 @@ fn sort_by_rows(
             })
             .collect(),
     )
-    .context(crate::error::ConvertColumnsToRowsSnafu)?;
+    .context(error::ConvertColumnsToRowsSnafu)?;
 
     let columns_to_sort = sort_columns
-        .iter()
-        .map(|(idx, _)| vectors[*idx].to_arrow_array())
+        .into_iter()
+        .map(|(idx, _)| arrays[idx].clone())
         .collect::<Vec<_>>();
 
-    let rows_to_sort = row_converter.convert_columns(&columns_to_sort).unwrap();
+    let rows_to_sort = row_converter
+        .convert_columns(&columns_to_sort)
+        .context(error::ConvertColumnsToRowsSnafu)?;
 
     let mut sort_pairs = rows_to_sort.iter().enumerate().collect::<Vec<_>>();
     sort_pairs.sort_unstable_by(|(_, a), (_, b)| a.cmp(b));
@@ -104,24 +115,19 @@ fn sort_by_rows(
     let idx =
         arrow::array::UInt32Array::from_iter_values(sort_pairs.iter().map(|(i, _)| *i as u32));
 
-    let sorted = vectors
+    let sorted = arrays
         .iter()
-        .map(|arr| arrow::compute::take(&arr.to_arrow_array(), &idx, None))
+        .map(|arr| arrow::compute::take(arr, &idx, None))
         .collect::<arrow::error::Result<Vec<_>>>()
-        .unwrap();
+        .context(error::SortArraysSnafu)?;
 
     debug_assert_eq!(sorted.len(), store_schema.num_columns());
 
-    let vectors = sorted
-        .iter()
-        .zip(store_schema.columns().iter().map(|c| &c.desc.name))
-        .map(|(arr, name)| Helper::try_into_vector(arr).context(error::ConvertChunkSnafu { name }))
-        .collect::<crate::error::Result<_>>()?;
-
-    Ok(vectors)
+    Ok(sorted)
 }
 
-/// [<PK_1>, <PK_2>, TS] to [TS, <PK_1>, <PK_2>]
+/// [<PK_1>, <PK_2>, TS] to [TS, <PK_1>, <PK_2>].
+/// Returns a vector of sort column indices and sort orders (true means descending order).
 fn build_sort_columns(schema: &ProjectedSchemaRef) -> Vec<(usize, bool)> {
     let row_key_end = schema.schema_to_read().row_key_end();
     let ts_col_index = row_key_end - 1;

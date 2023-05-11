@@ -160,7 +160,7 @@ impl ChunkReaderBuilder {
         self
     }
 
-    pub async fn build_windowed(
+    async fn build_windowed(
         self,
         schema: &ProjectedSchemaRef,
         time_range_predicate: &TimestampRange,
@@ -168,7 +168,6 @@ impl ChunkReaderBuilder {
     ) -> Result<BoxedBatchReader> {
         let mut readers = Vec::with_capacity(windows.len());
         for window in windows {
-            debug!("Scan time window: {:?}", window);
             let time_range_predicate = time_range_predicate.and(&window);
             let reader = self.build_reader(schema, &time_range_predicate).await?;
             readers.push(reader);
@@ -213,11 +212,6 @@ impl ChunkReaderBuilder {
 
     pub async fn build(mut self) -> Result<ChunkReaderImpl> {
         let time_range_predicate = self.build_time_range_predicate();
-        debug!(
-            "Time range predicate for chunk reader: {:?}",
-            time_range_predicate
-        );
-
         let schema = Arc::new(
             ProjectedSchema::new(self.schema.clone(), self.projection.clone())
                 .context(error::InvalidProjectionSnafu)?,
@@ -241,7 +235,6 @@ impl ChunkReaderBuilder {
     }
 
     /// Check if SST file's time range matches predicate.
-    #[inline]
     fn file_in_range(file: &FileHandle, predicate: &TimestampRange) -> bool {
         if predicate == &TimestampRange::min_to_max() {
             return true;

@@ -505,6 +505,12 @@ pub enum Error {
         source: ArrowError,
         location: Location,
     },
+
+    #[snafu(display("Failed to sort arrays"))]
+    SortArrays {
+        source: ArrowError,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -602,7 +608,7 @@ impl ErrorExt for Error {
             | StopPickTask { .. } => StatusCode::Unexpected,
 
             TtlCalculation { source, .. } => source.status_code(),
-            ConvertColumnsToRows { .. } => StatusCode::Unexpected,
+            ConvertColumnsToRows { .. } | SortArrays { .. } => StatusCode::Unexpected,
         }
     }
 
