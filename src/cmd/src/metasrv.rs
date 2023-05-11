@@ -96,7 +96,7 @@ struct StartCommand {
     http_addr: Option<String>,
     #[clap(long)]
     http_timeout: Option<u64>,
-    #[clap(long, default_value = "METASRV")]
+    #[clap(long, default_value = "GREPTIMEDB_METASRV")]
     env_prefix: String,
 }
 

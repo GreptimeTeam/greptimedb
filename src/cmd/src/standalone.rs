@@ -211,7 +211,7 @@ struct StartCommand {
     tls_key_path: Option<String>,
     #[clap(long)]
     user_provider: Option<String>,
-    #[clap(long, default_value = "STANDALONE")]
+    #[clap(long, default_value = "GREPTIMEDB_STANDALONE")]
     env_prefix: String,
 }
 

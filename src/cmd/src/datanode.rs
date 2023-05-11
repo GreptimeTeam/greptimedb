@@ -98,7 +98,7 @@ struct StartCommand {
     http_addr: Option<String>,
     #[clap(long)]
     http_timeout: Option<u64>,
-    #[clap(long, default_value = "DATANODE")]
+    #[clap(long, default_value = "GREPTIMEDB_DATANODE")]
     env_prefix: String,
 }
 

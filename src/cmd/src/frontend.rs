@@ -114,7 +114,7 @@ pub struct StartCommand {
     user_provider: Option<String>,
     #[clap(long)]
     disable_dashboard: Option<bool>,
-    #[clap(long, default_value = "FRONTEND")]
+    #[clap(long, default_value = "GREPTIMEDB_FRONTEND")]
     env_prefix: String,
 }
 
