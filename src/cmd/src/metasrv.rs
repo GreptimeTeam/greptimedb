@@ -112,15 +112,18 @@ impl StartCommand {
             opts.logging.level = level;
         }
 
-        if let Some(addr) = self.bind_addr.clone() {
-            opts.bind_addr = addr;
+        if let Some(addr) = &self.bind_addr {
+            opts.bind_addr = addr.clone();
         }
-        if let Some(addr) = self.server_addr.clone() {
-            opts.server_addr = addr;
+
+        if let Some(addr) = &self.server_addr {
+            opts.server_addr = addr.clone();
         }
-        if let Some(addr) = self.store_addr.clone() {
-            opts.store_addr = addr;
+
+        if let Some(addr) = &self.store_addr {
+            opts.store_addr = addr.clone();
         }
+
         if let Some(selector_type) = &self.selector {
             opts.selector = selector_type[..]
                 .try_into()
@@ -131,9 +134,10 @@ impl StartCommand {
             opts.use_memory_store = true;
         }
 
-        if let Some(http_addr) = self.http_addr.clone() {
-            opts.http_opts.addr = http_addr;
+        if let Some(http_addr) = &self.http_addr {
+            opts.http_opts.addr = http_addr.clone();
         }
+
         if let Some(http_timeout) = self.http_timeout {
             opts.http_opts.timeout = Duration::from_secs(http_timeout);
         }

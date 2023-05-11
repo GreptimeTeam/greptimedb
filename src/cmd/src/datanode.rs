@@ -114,26 +114,27 @@ impl StartCommand {
             opts.logging.level = level;
         }
 
-        if let Some(addr) = self.rpc_addr.clone() {
-            opts.rpc_addr = addr;
+        if let Some(addr) = &self.rpc_addr {
+            opts.rpc_addr = addr.clone();
         }
 
         if self.rpc_hostname.is_some() {
             opts.rpc_hostname = self.rpc_hostname.clone();
         }
 
-        if let Some(addr) = self.mysql_addr.clone() {
-            opts.mysql_addr = addr;
+        if let Some(addr) = &self.mysql_addr {
+            opts.mysql_addr = addr.clone();
         }
 
         if let Some(node_id) = self.node_id {
             opts.node_id = Some(node_id);
         }
 
-        if let Some(meta_addr) = self.metasrv_addr.clone() {
+        if let Some(meta_addr) = &self.metasrv_addr {
             opts.meta_client_options
                 .get_or_insert_with(MetaClientOptions::default)
                 .metasrv_addrs = meta_addr
+                .clone()
                 .split(',')
                 .map(&str::trim)
                 .map(&str::to_string)
@@ -148,16 +149,20 @@ impl StartCommand {
             .fail();
         }
 
-        if let Some(data_dir) = self.data_dir.clone() {
-            opts.storage.store = ObjectStoreConfig::File(FileConfig { data_dir });
+        if let Some(data_dir) = &self.data_dir {
+            opts.storage.store = ObjectStoreConfig::File(FileConfig {
+                data_dir: data_dir.clone(),
+            });
         }
 
-        if let Some(wal_dir) = self.wal_dir.clone() {
-            opts.wal.dir = wal_dir;
+        if let Some(wal_dir) = &self.wal_dir {
+            opts.wal.dir = wal_dir.clone();
         }
-        if let Some(http_addr) = self.http_addr.clone() {
-            opts.http_opts.addr = http_addr
+
+        if let Some(http_addr) = &self.http_addr {
+            opts.http_opts.addr = http_addr.clone();
         }
+
         if let Some(http_timeout) = self.http_timeout {
             opts.http_opts.timeout = Duration::from_secs(http_timeout)
         }

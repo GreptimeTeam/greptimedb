@@ -136,9 +136,9 @@ impl StartCommand {
             self.tls_key_path.clone(),
         );
 
-        if let Some(addr) = self.http_addr.clone() {
+        if let Some(addr) = &self.http_addr {
             if let Some(http_opts) = &mut opts.http_options {
-                http_opts.addr = addr
+                http_opts.addr = addr.clone()
             }
         }
 
@@ -148,33 +148,33 @@ impl StartCommand {
                 .disable_dashboard = disable_dashboard;
         }
 
-        if let Some(addr) = self.grpc_addr.clone() {
+        if let Some(addr) = &self.grpc_addr {
             if let Some(grpc_opts) = &mut opts.grpc_options {
-                grpc_opts.addr = addr
+                grpc_opts.addr = addr.clone()
             }
         }
 
-        if let Some(addr) = self.mysql_addr.clone() {
+        if let Some(addr) = &self.mysql_addr {
             if let Some(mysql_opts) = &mut opts.mysql_options {
-                mysql_opts.addr = addr;
+                mysql_opts.addr = addr.clone();
                 mysql_opts.tls = tls_opts.clone();
             }
         }
 
-        if let Some(addr) = self.prom_addr.clone() {
-            opts.prom_options = Some(PromOptions { addr });
+        if let Some(addr) = &self.prom_addr {
+            opts.prom_options = Some(PromOptions { addr: addr.clone() });
         }
 
-        if let Some(addr) = self.postgres_addr.clone() {
+        if let Some(addr) = &self.postgres_addr {
             if let Some(postgres_opts) = &mut opts.postgres_options {
-                postgres_opts.addr = addr;
+                postgres_opts.addr = addr.clone();
                 postgres_opts.tls = tls_opts;
             }
         }
 
-        if let Some(addr) = self.opentsdb_addr.clone() {
+        if let Some(addr) = &self.opentsdb_addr {
             if let Some(opentsdb_addr) = &mut opts.opentsdb_options {
-                opentsdb_addr.addr = addr;
+                opentsdb_addr.addr = addr.clone();
             }
         }
 
@@ -182,10 +182,11 @@ impl StartCommand {
             opts.influxdb_options = Some(InfluxdbOptions { enable });
         }
 
-        if let Some(metasrv_addr) = self.metasrv_addr.clone() {
+        if let Some(metasrv_addr) = &self.metasrv_addr {
             opts.meta_client_options
                 .get_or_insert_with(MetaClientOptions::default)
                 .metasrv_addrs = metasrv_addr
+                .clone()
                 .split(',')
                 .map(&str::trim)
                 .map(&str::to_string)
