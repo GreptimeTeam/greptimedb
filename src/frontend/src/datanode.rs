@@ -16,12 +16,14 @@ use std::time::Duration;
 
 use client::Client;
 use common_grpc::channel_manager::ChannelManager;
+use common_telemetry::info;
 use meta_client::rpc::Peer;
 use moka::future::{Cache, CacheBuilder};
 
 pub struct DatanodeClients {
     channel_manager: ChannelManager,
     clients: Cache<Peer, Client>,
+    started: bool,
 }
 
 impl Default for DatanodeClients {
@@ -32,11 +34,23 @@ impl Default for DatanodeClients {
                 .time_to_live(Duration::from_secs(30 * 60))
                 .time_to_idle(Duration::from_secs(5 * 60))
                 .build(),
+            started: false,
         }
     }
 }
 
 impl DatanodeClients {
+    pub(crate) fn start(&mut self) {
+        if self.started {
+            return;
+        }
+
+        self.channel_manager.start_channel_recycle();
+
+        info!("Datanode clients manager is started!");
+        self.started = true;
+    }
+
     pub(crate) async fn get_client(&self, datanode: &Peer) -> Client {
         self.clients
             .get_with_by_ref(datanode, async move {
