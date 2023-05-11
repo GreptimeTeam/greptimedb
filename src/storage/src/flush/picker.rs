@@ -23,12 +23,10 @@ use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::storage::{FlushContext, FlushReason, Region};
 
+use crate::config::DEFAULT_AUTO_FLUSH_INTERVAL;
 use crate::engine::RegionMap;
 use crate::error::{Error, Result, StartPickTaskSnafu, StopPickTaskSnafu};
 use crate::region::RegionImpl;
-
-/// Default interval to trigger auto flush in millis.
-const DEFAULT_AUTO_FLUSH_INTERVAL: u32 = 60 * 60 * 1000;
 
 /// Config for [FlushPicker].
 pub struct PickerConfig {

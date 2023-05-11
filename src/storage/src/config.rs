@@ -18,6 +18,13 @@ use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
 
+/// Default max flush tasks.
+pub const DEFAULT_MAX_FLUSH_TASKS: usize = 8;
+/// Default region write buffer size.
+pub const DEFAULT_REGION_WRITE_BUFFER_SIZE: ReadableSize = ReadableSize::mb(32);
+/// Default interval to trigger auto flush in millis.
+pub const DEFAULT_AUTO_FLUSH_INTERVAL: u32 = 60 * 60 * 1000;
+
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     pub manifest_checkpoint_on_startup: bool,
@@ -26,6 +33,12 @@ pub struct EngineConfig {
     pub max_files_in_l0: usize,
     pub max_purge_tasks: usize,
     pub sst_write_buffer_size: ReadableSize,
+    /// Max inflight flush tasks.
+    pub max_flush_tasks: usize,
+    /// Default write buffer size for a region.
+    pub region_write_buffer_size: ReadableSize,
+    /// Interval to auto flush a region if it has not flushed yet.
+    pub auto_flush_interval: Duration,
 }
 
 impl Default for EngineConfig {
@@ -37,6 +50,9 @@ impl Default for EngineConfig {
             max_files_in_l0: 8,
             max_purge_tasks: 32,
             sst_write_buffer_size: ReadableSize::mb(8),
+            max_flush_tasks: DEFAULT_MAX_FLUSH_TASKS,
+            region_write_buffer_size: DEFAULT_REGION_WRITE_BUFFER_SIZE,
+            auto_flush_interval: Duration::from_millis(DEFAULT_AUTO_FLUSH_INTERVAL.into()),
         }
     }
 }

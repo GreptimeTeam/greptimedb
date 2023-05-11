@@ -24,7 +24,7 @@ use store_api::logstore::LogStore;
 use store_api::storage::consts::WRITE_ROW_GROUP_SIZE;
 use store_api::storage::SequenceNumber;
 
-use crate::config::EngineConfig;
+use crate::config::{EngineConfig, DEFAULT_REGION_WRITE_BUFFER_SIZE};
 use crate::error::Result;
 use crate::manifest::action::*;
 use crate::manifest::region::RegionManifest;
@@ -33,9 +33,6 @@ use crate::metrics::FLUSH_ELAPSED;
 use crate::region::{RegionWriterRef, SharedDataRef};
 use crate::sst::{AccessLayerRef, FileId, FileMeta, Source, SstInfo, WriteOptions};
 use crate::wal::Wal;
-
-/// Default write buffer size (32M).
-const DEFAULT_WRITE_BUFFER_SIZE: usize = 32 * 1024 * 1024;
 
 pub trait FlushStrategy: Send + Sync + std::fmt::Debug {
     fn should_flush(
@@ -74,7 +71,7 @@ fn get_mutable_limitation(max_write_buffer_size: usize) -> usize {
 
 impl Default for SizeBasedStrategy {
     fn default() -> Self {
-        let max_write_buffer_size = DEFAULT_WRITE_BUFFER_SIZE;
+        let max_write_buffer_size = DEFAULT_REGION_WRITE_BUFFER_SIZE.as_bytes() as usize;
         Self {
             max_write_buffer_size,
             mutable_limitation: get_mutable_limitation(max_write_buffer_size),

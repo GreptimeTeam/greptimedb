@@ -312,10 +312,16 @@ impl<S: LogStore> EngineInner<S> {
         compaction_scheduler: CompactionSchedulerRef<S>,
     ) -> Result<Self> {
         let regions = Arc::new(RegionMap::new());
-        // TODO(yingwen): max inflight flush tasks.
         let flush_scheduler = Arc::new(FlushScheduler::new(
-            SchedulerConfig::default(),
-            FlushPicker::new(regions.clone(), PickerConfig::default())?,
+            SchedulerConfig {
+                max_inflight_tasks: config.max_flush_tasks,
+            },
+            FlushPicker::new(
+                regions.clone(),
+                PickerConfig {
+                    auto_flush_interval: config.auto_flush_interval,
+                },
+            )?,
             compaction_scheduler.clone(),
         ));
 
@@ -331,7 +337,9 @@ impl<S: LogStore> EngineInner<S> {
             regions,
             memtable_builder: Arc::new(DefaultMemtableBuilder::default()),
             flush_scheduler,
-            flush_strategy: Arc::new(SizeBasedStrategy::default()),
+            flush_strategy: Arc::new(SizeBasedStrategy::new(
+                config.region_write_buffer_size.as_bytes() as usize,
+            )),
             compaction_scheduler,
             file_purger,
             config: Arc::new(config),
