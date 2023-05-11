@@ -62,7 +62,8 @@ impl DfTableSourceProvider {
                 TableReference::Bare { .. } => (),
                 TableReference::Partial { schema, .. } => {
                     ensure!(
-                        schema.as_ref() == self.default_schema,
+                        schema.as_ref() == self.default_schema
+                            || schema.as_ref() == INFORMATION_SCHEMA_NAME,
                         QueryAccessDeniedSnafu {
                             catalog: &self.default_catalog,
                             schema: schema.as_ref(),
@@ -74,7 +75,8 @@ impl DfTableSourceProvider {
                 } => {
                     ensure!(
                         catalog.as_ref() == self.default_catalog
-                            && schema.as_ref() == self.default_schema,
+                            && (schema.as_ref() == self.default_schema
+                                || schema.as_ref() == INFORMATION_SCHEMA_NAME),
                         QueryAccessDeniedSnafu {
                             catalog: catalog.as_ref(),
                             schema: schema.as_ref()
@@ -191,5 +193,25 @@ mod tests {
         };
         let result = table_provider.resolve_table_ref(table_ref);
         assert!(result.is_err());
+
+        let table_ref = TableReference::Partial {
+            schema: Cow::Borrowed("information_schema"),
+            table: Cow::Borrowed("columns"),
+        };
+        assert!(table_provider.resolve_table_ref(table_ref).is_ok());
+
+        let table_ref = TableReference::Full {
+            catalog: Cow::Borrowed("greptime"),
+            schema: Cow::Borrowed("information_schema"),
+            table: Cow::Borrowed("columns"),
+        };
+        assert!(table_provider.resolve_table_ref(table_ref).is_ok());
+
+        let table_ref = TableReference::Full {
+            catalog: Cow::Borrowed("dummy"),
+            schema: Cow::Borrowed("information_schema"),
+            table: Cow::Borrowed("columns"),
+        };
+        assert!(table_provider.resolve_table_ref(table_ref).is_err());
     }
 }
