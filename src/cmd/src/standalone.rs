@@ -217,10 +217,8 @@ struct StartCommand {
 
 impl StartCommand {
     fn load_options(&self, top_level_options: TopLevelOptions) -> Result<Options> {
-        let mut opts: StandaloneOptions = Options::load_layered_options(
-            self.config_file.as_ref().map(|s| s.as_ref()),
-            self.env_prefix.as_ref(),
-        )?;
+        let mut opts: StandaloneOptions =
+            Options::load_layered_options(self.config_file.as_deref(), self.env_prefix.as_ref())?;
 
         opts.enable_memory_catalog = self.enable_memory_catalog;
 

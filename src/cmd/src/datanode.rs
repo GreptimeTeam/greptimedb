@@ -104,10 +104,8 @@ struct StartCommand {
 
 impl StartCommand {
     fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
-        let mut opts: DatanodeOptions = Options::load_layered_options(
-            self.config_file.as_ref().map(|s| s.as_ref()),
-            self.env_prefix.as_ref(),
-        )?;
+        let mut opts: DatanodeOptions =
+            Options::load_layered_options(self.config_file.as_deref(), self.env_prefix.as_ref())?;
 
         if let Some(dir) = top_level_opts.log_dir {
             opts.logging.dir = dir;
