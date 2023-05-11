@@ -14,7 +14,8 @@
 
 use axum::body::{boxed, Full};
 use axum::http::{header, StatusCode, Uri};
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
+use axum::routing;
 use axum::routing::Router;
 use common_telemetry::debug;
 use rust_embed::RustEmbed;
@@ -27,11 +28,13 @@ use crate::error::{BuildHttpResponseSnafu, Result};
 pub struct Assets;
 
 pub(crate) fn dashboard() -> Router {
-    Router::new().fallback(static_handler)
+    Router::new()
+        .route("/", routing::get(static_handler).post(static_handler))
+        .route("/*x", routing::get(static_handler).post(static_handler))
 }
 
 #[axum_macros::debug_handler]
-async fn static_handler(uri: Uri) -> Result<impl IntoResponse> {
+pub async fn static_handler(uri: Uri) -> Result<Response> {
     debug!("[dashboard] requesting: {}", uri.path());
 
     let mut path = uri.path().trim_start_matches('/');
@@ -39,6 +42,18 @@ async fn static_handler(uri: Uri) -> Result<impl IntoResponse> {
         path = "index.html";
     }
 
+    match get_assets(path) {
+        Ok(response) if response.status() == StatusCode::NOT_FOUND => index_page(),
+        Ok(response) => Ok(response),
+        Err(e) => Err(e),
+    }
+}
+
+fn index_page() -> Result<Response> {
+    get_assets("index.html")
+}
+
+fn get_assets(path: &str) -> Result<Response> {
     match Assets::get(path) {
         Some(content) => {
             let body = boxed(Full::from(content.data));
