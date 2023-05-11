@@ -23,6 +23,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use common_telemetry::logging;
+use metrics::decrement_gauge;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::manifest::{self, Manifest, ManifestVersion, MetaActionIterator};
@@ -123,6 +124,7 @@ impl<S: LogStore> Region for RegionImpl<S> {
     }
 
     async fn close(&self) -> Result<()> {
+        decrement_gauge!(crate::metrics::REGION_COUNT, 1.0);
         self.inner.close().await
     }
 

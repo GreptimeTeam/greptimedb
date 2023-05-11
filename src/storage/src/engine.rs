@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use common_telemetry::logging::debug;
+use metrics::increment_gauge;
 use object_store::{util, ObjectStore};
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
@@ -334,6 +335,7 @@ impl<S: LogStore> EngineInner<S> {
             region.name(),
             region.id()
         );
+        increment_gauge!(crate::metrics::REGION_COUNT, 1.0);
         Ok(Some(region))
     }
 
@@ -379,6 +381,7 @@ impl<S: LogStore> EngineInner<S> {
             region.name(),
             region.id()
         );
+        increment_gauge!(crate::metrics::REGION_COUNT, 1.0);
 
         Ok(region)
     }
