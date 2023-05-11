@@ -25,6 +25,9 @@ use table::error::Error as TableError;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Failed to send message: {err_msg}"))]
+    SendMessage { err_msg: String, location: Location },
+
     #[snafu(display("Failed to execute sql, source: {}", source))]
     ExecuteSql {
         #[snafu(backtrace)]
@@ -441,6 +444,15 @@ pub enum Error {
         location: Location,
         source: JsonError,
     },
+
+    #[snafu(display("Failed to decode object into json, source: {}", source))]
+    DecodeJson {
+        location: Location,
+        source: JsonError,
+    },
+
+    #[snafu(display("Payload not exist"))]
+    PayloadNotExist { location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -501,7 +513,9 @@ impl ErrorExt for Error {
             | ColumnNoneDefaultValue { .. }
             | PrepareImmutableTable { .. } => StatusCode::InvalidArguments,
 
-            EncodeJson { .. } => StatusCode::Unexpected,
+            EncodeJson { .. } | DecodeJson { .. } | PayloadNotExist { .. } => {
+                StatusCode::Unexpected
+            }
 
             // TODO(yingwen): Further categorize http error.
             StartServer { .. }
@@ -517,7 +531,8 @@ impl ErrorExt for Error {
             | IncorrectInternalState { .. }
             | ShutdownServer { .. }
             | ShutdownInstance { .. }
-            | CloseTableEngine { .. } => StatusCode::Internal,
+            | CloseTableEngine { .. }
+            | SendMessage { .. } => StatusCode::Internal,
 
             InitBackend { .. } => StatusCode::StorageUnavailable,
 

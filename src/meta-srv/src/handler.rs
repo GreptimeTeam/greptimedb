@@ -22,6 +22,7 @@ use api::v1::meta::{
 };
 pub use check_leader_handler::CheckLeaderHandler;
 pub use collect_stats_handler::CollectStatsHandler;
+use common_meta::instruction::Instruction;
 use common_telemetry::{info, warn};
 use dashmap::DashMap;
 pub use failure_handler::RegionFailureHandler;
@@ -34,18 +35,15 @@ use snafu::OptionExt;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::{oneshot, Notify, RwLock};
 
-use self::instruction::Instruction;
 use self::node_stat::Stat;
 use crate::error::{self, Result};
 use crate::metasrv::Context;
 use crate::metrics::METRIC_META_HEARTBEAT_CONNECTION_NUM;
 use crate::sequence::Sequence;
 use crate::service::mailbox::{Channel, Mailbox, MailboxReceiver, MailboxRef, MessageId};
-
 mod check_leader_handler;
 mod collect_stats_handler;
 mod failure_handler;
-mod instruction;
 mod keep_lease_handler;
 pub mod mailbox_handler;
 pub mod node_stat;

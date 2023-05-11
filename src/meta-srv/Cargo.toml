@@ -17,6 +17,7 @@ common-base = { path = "../common/base" }
 common-catalog = { path = "../common/catalog" }
 common-error = { path = "../common/error" }
 common-grpc = { path = "../common/grpc" }
+common-meta = { path = "../common/meta" }
 common-procedure = { path = "../common/procedure" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
