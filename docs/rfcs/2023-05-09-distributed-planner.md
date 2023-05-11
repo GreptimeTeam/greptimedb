@@ -60,7 +60,7 @@ As we know projection and filter are commutative (todo: latex), it can be transl
 
 ## Merge Operation
 
-This RFC proposes to add a new expression node `MergeScan` to merge result from several regions in the frontend. It warp the abstraction of remote data and execution, and expose a `TableScan` interface to upper level.
+This RFC proposes to add a new expression node `MergeScan` to merge result from several regions in the frontend. It wrap the abstraction of remote data and execution, and expose a `TableScan` interface to upper level.
 
 ``` text
         ▲
