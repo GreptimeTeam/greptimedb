@@ -266,6 +266,7 @@ impl LocalCatalogManager {
             schema_name: t.schema_name.clone(),
             table_name: t.table_name.clone(),
             table_id: t.table_id,
+            ..Default::default()
         };
         let engine = self
             .engine_manager

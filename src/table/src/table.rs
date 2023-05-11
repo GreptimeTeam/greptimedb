@@ -120,6 +120,14 @@ pub trait Table: Send + Sync {
         .fail()?
     }
 
+    /// Return true if contains the region
+    fn contain_region(&self, _region: RegionNumber) -> Result<bool> {
+        UnsupportedSnafu {
+            operation: "contain_region",
+        }
+        .fail()?
+    }
+
     /// Get statistics for this table, if available
     fn statistics(&self) -> Option<TableStatistics> {
         None

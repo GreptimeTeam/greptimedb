@@ -170,12 +170,14 @@ impl From<&TableOptions> for HashMap<String, String> {
 }
 
 /// Open table request
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct OpenTableRequest {
     pub catalog_name: String,
     pub schema_name: String,
     pub table_name: String,
     pub table_id: TableId,
+    // it will open all regions if region_number is None
+    pub region_number: Option<RegionNumber>,
 }
 
 /// Alter table request

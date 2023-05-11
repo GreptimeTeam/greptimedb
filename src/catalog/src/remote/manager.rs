@@ -431,6 +431,7 @@ async fn open_or_create_table(
         schema_name: schema_name.clone(),
         table_name: table_name.clone(),
         table_id,
+        ..Default::default()
     };
     let engine =
         engine_manager

@@ -20,6 +20,7 @@ use common_telemetry::error;
 use crate::error::Result;
 use crate::heartbeat::mailbox::{IncomingMessage, MailboxRef};
 
+pub mod open_region;
 pub mod parse_mailbox_message;
 #[cfg(test)]
 mod tests;
@@ -46,6 +47,10 @@ impl HeartbeatResponseHandlerContext {
 
     pub fn is_skip_all(&self) -> bool {
         self.is_skip_all
+    }
+
+    pub fn finish(&mut self) {
+        self.is_skip_all = true
     }
 }
 

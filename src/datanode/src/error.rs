@@ -25,6 +25,20 @@ use table::error::Error as TableError;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Failed to open table: {}, source: {}", table_name, source))]
+    OpenTable {
+        table_name: String,
+        #[snafu(backtrace)]
+        source: TableError,
+    },
+
+    #[snafu(display("Failed to register table: {}, source: {}", table_name, source))]
+    RegisterTable {
+        table_name: String,
+        #[snafu(backtrace)]
+        source: catalog::error::Error,
+    },
+
     #[snafu(display("Failed to send message: {err_msg}"))]
     SendMessage { err_msg: String, location: Location },
 
@@ -466,6 +480,9 @@ impl ErrorExt for Error {
             | ExecuteStatement { source }
             | ExecuteLogicalPlan { source }
             | DescribeStatement { source } => source.status_code(),
+
+            OpenTable { source, .. } => source.status_code(),
+            RegisterTable { source, .. } => source.status_code(),
 
             DecodeLogicalPlan { source } => source.status_code(),
             NewCatalog { source } | RegisterSchema { source } => source.status_code(),

@@ -59,6 +59,7 @@ async fn test_open_table() {
         table_name: test_util::TEST_TABLE_NAME.to_string(),
         // the test table id is 1
         table_id: 1,
+        ..Default::default()
     };
 
     let table_ref = TableReference {

@@ -406,6 +406,70 @@ async fn test_create_if_not_exists() {
 }
 
 #[tokio::test]
+async fn test_open_table_with_region_number() {
+    common_telemetry::init_default_ut_logging();
+
+    let ctx = EngineContext::default();
+    let open_req = OpenTableRequest {
+        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+        schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+        table_name: test_util::TABLE_NAME.to_string(),
+        // the test table id is 1
+        table_id: 1,
+        region_number: Some(0),
+    };
+
+    let invalid_open_req = OpenTableRequest {
+        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+        schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+        table_name: test_util::TABLE_NAME.to_string(),
+        // the test table id is 1
+        table_id: 1,
+        region_number: Some(1),
+    };
+
+    let (_engine, storage_engine, table, object_store, _dir) = {
+        let TestEngineComponents {
+            table_engine,
+            storage_engine,
+            table_ref: table,
+            object_store,
+            dir,
+            ..
+        } = test_util::setup_test_engine_and_table().await;
+
+        assert_eq!(MITO_ENGINE, table_engine.name());
+        // Now try to open the table again.
+        let reopened = table_engine
+            .open_table(&ctx, open_req.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(table.schema(), reopened.schema());
+
+        (table_engine, storage_engine, table, object_store, dir)
+    };
+
+    // Construct a new table engine, and try to open the table.
+    let table_engine = MitoEngine::new(EngineConfig::default(), storage_engine, object_store);
+
+    let region_not_found = table_engine
+        .open_table(&ctx, invalid_open_req.clone())
+        .await
+        .err()
+        .unwrap();
+
+    assert_eq!(region_not_found.to_string(), "Failed to operate table, source: Cannot find region, table: greptime.public.demo, region: 1");
+
+    let reopened = table_engine
+        .open_table(&ctx, open_req.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(table.schema(), reopened.schema());
+}
+
+#[tokio::test]
 async fn test_open_table() {
     common_telemetry::init_default_ut_logging();
 
@@ -416,6 +480,7 @@ async fn test_open_table() {
         table_name: test_util::TABLE_NAME.to_string(),
         // the test table id is 1
         table_id: 1,
+        ..Default::default()
     };
 
     let (_engine, storage_engine, table, object_store, _dir) = {
@@ -648,6 +713,7 @@ async fn test_alter_rename_table() {
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: new_table_name.to_string(),
         table_id: 1,
+        ..Default::default()
     };
 
     // test reopen table
