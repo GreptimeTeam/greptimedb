@@ -267,10 +267,24 @@ impl Drop for AllocTracker {
     }
 }
 
+/// Default memtable builder that builds [BTreeMemtable].
 #[derive(Debug, Default)]
 pub struct DefaultMemtableBuilder {
     memtable_id: AtomicU32,
     flush_strategy: Option<FlushStrategyRef>,
+}
+
+impl DefaultMemtableBuilder {
+    /// Returns a new [DefaultMemtableBuilder] with specific `flush_strategy`.
+    ///
+    /// If `flush_strategy` is `Some`, the memtable will report its memory usage
+    /// to the `flush_strategy`.
+    pub fn with_flush_strategy(flush_strategy: Option<FlushStrategyRef>) -> Self {
+        Self {
+            memtable_id: AtomicU32::new(0),
+            flush_strategy,
+        }
+    }
 }
 
 impl MemtableBuilder for DefaultMemtableBuilder {

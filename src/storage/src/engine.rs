@@ -337,16 +337,25 @@ impl<S: LogStore> EngineInner<S> {
             },
             FilePurgeHandler,
         ));
+        let flush_strategy = Arc::new(SizeBasedStrategy::new(
+            config
+                .global_write_buffer_size
+                .map(|size| size.as_bytes() as usize),
+        ));
+        let memtable_builder = if config.global_write_buffer_size.is_some() {
+            // If global write buffer size is provided, we set the flush strategy
+            // to the memtable to track global memtable usage.
+            DefaultMemtableBuilder::with_flush_strategy(Some(flush_strategy.clone()))
+        } else {
+            DefaultMemtableBuilder::default()
+        };
         Ok(Self {
             object_store,
             log_store,
             regions,
-            memtable_builder: Arc::new(DefaultMemtableBuilder::default()),
+            memtable_builder: Arc::new(memtable_builder),
             flush_scheduler,
-            // fixme(yingwen): Add a global write buffer size config.
-            flush_strategy: Arc::new(SizeBasedStrategy::new(
-                config.region_write_buffer_size.as_bytes() as usize,
-            )),
+            flush_strategy,
             compaction_scheduler,
             file_purger,
             config: Arc::new(config),

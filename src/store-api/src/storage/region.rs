@@ -136,6 +136,8 @@ pub enum FlushReason {
     Manually,
     /// Auto flush periodically.
     Periodically,
+    /// Global write buffer is full.
+    GlobalBufferFull,
 }
 
 impl FlushReason {
@@ -146,6 +148,7 @@ impl FlushReason {
             FlushReason::MemtableFull => "memtable_full",
             FlushReason::Manually => "manually",
             FlushReason::Periodically => "periodically",
+            FlushReason::GlobalBufferFull => "global_buffer_full",
         }
     }
 }

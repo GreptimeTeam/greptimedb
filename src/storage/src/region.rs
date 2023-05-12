@@ -379,8 +379,13 @@ impl<S: LogStore> RegionImpl<S> {
     }
 
     /// Returns last flush timestamp in millis.
-    pub fn last_flush_millis(&self) -> i64 {
+    pub(crate) fn last_flush_millis(&self) -> i64 {
         self.inner.shared.last_flush_millis()
+    }
+
+    /// Returns the [VersionControl] of the region.
+    pub(crate) fn version_control(&self) -> &VersionControl {
+        self.inner.version_control()
     }
 
     fn create_version_with_checkpoint(

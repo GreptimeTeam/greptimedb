@@ -52,6 +52,7 @@ impl Default for PickerConfig {
 }
 
 /// Flush task picker.
+#[derive(Debug, Clone)]
 pub struct FlushPicker {
     /// Interval to flush a region automatically.
     auto_flush_interval_millis: i64,
@@ -65,7 +66,7 @@ impl FlushPicker {
         }
     }
 
-    /// Pick regions and flush them by interval.
+    /// Picks regions and flushes them by interval.
     ///
     /// Returns the number of flushed regions.
     pub async fn pick_by_interval<T: FlushItem>(&self, regions: &[T]) -> usize {
@@ -75,6 +76,20 @@ impl FlushPicker {
             flush_regions_by_interval(regions, earliest_flush_millis).await
         } else {
             0
+        }
+    }
+
+    /// Picks and flushes regions when the write buffer is full.
+    pub async fn pick_by_write_buffer_full<T: FlushItem>(&self, regions: &[T]) {
+        // In such case, we pick the oldest region to flush. If this is not enough,
+        // the next time the region writer will trigger the picker again. Then we
+        // can pick another region to flush. The total memory will go down eventually.
+        let target = regions
+            .iter()
+            .filter(|region| region.mutable_memtable_usage() > 0)
+            .min_by_key(|region| region.last_flush_time());
+        if let Some(region) = target {
+            region.request_flush(FlushReason::GlobalBufferFull).await;
         }
     }
 }
@@ -87,6 +102,9 @@ pub trait FlushItem {
 
     /// Last flush time in millis.
     fn last_flush_time(&self) -> i64;
+
+    /// Mutable memtable usage.
+    fn mutable_memtable_usage(&self) -> usize;
 
     /// Requests the item to schedule a flush for specific `reason`.
     ///
@@ -102,6 +120,12 @@ impl<S: LogStore> FlushItem for RegionImpl<S> {
 
     fn last_flush_time(&self) -> i64 {
         self.last_flush_millis()
+    }
+
+    fn mutable_memtable_usage(&self) -> usize {
+        let current = self.version_control().current();
+        let memtables = current.memtables();
+        memtables.mutable_bytes_allocated()
     }
 
     async fn request_flush(&self, reason: FlushReason) {
@@ -174,6 +198,10 @@ mod tests {
 
         fn last_flush_time(&self) -> i64 {
             self.last_flush_time
+        }
+
+        fn mutable_memtable_usage(&self) -> usize {
+            1
         }
 
         async fn request_flush(&self, reason: FlushReason) {

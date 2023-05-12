@@ -736,6 +736,9 @@ impl WriterInner {
         let (max_memtable_id, mem_to_flush) = current_version.memtables().memtables_to_flush();
 
         if max_memtable_id.is_none() {
+            // We still update the flush time to avoid the picker picks this region again.
+            ctx.shared.update_flush_millis();
+
             logging::info!("No memtables to flush in region: {}", ctx.shared.name);
             return Ok(());
         }

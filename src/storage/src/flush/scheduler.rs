@@ -185,16 +185,23 @@ impl<S: LogStore> FlushScheduler<S> {
         regions: Arc<RegionMap<S>>,
         picker_config: PickerConfig,
     ) -> Result<Self> {
-        let handler = FlushHandler {
-            compaction_scheduler,
-        };
         let task_interval = picker_config.schedule_interval;
         let picker = FlushPicker::new(picker_config);
-        let task_fn = AutoFlushFunction { regions, picker };
+        // Now we just clone the picker since we don't need to share states and
+        // the clone of picker is cheap.
+        let task_fn = AutoFlushFunction {
+            regions: regions.clone(),
+            picker: picker.clone(),
+        };
         let auto_flush_task = RepeatedTask::new(task_interval, Box::new(task_fn));
         auto_flush_task
             .start(common_runtime::bg_runtime())
             .context(StartPickTaskSnafu)?;
+        let handler = FlushHandler {
+            compaction_scheduler,
+            regions,
+            picker,
+        };
 
         Ok(Self {
             scheduler: LocalScheduler::new(config, handler),
@@ -246,6 +253,8 @@ impl<S: LogStore> FlushScheduler<S> {
 
 struct FlushHandler<S: LogStore> {
     compaction_scheduler: CompactionSchedulerRef<S>,
+    regions: Arc<RegionMap<S>>,
+    picker: FlushPicker,
 }
 
 #[async_trait::async_trait]
@@ -259,8 +268,18 @@ impl<S: LogStore> Handler for FlushHandler<S> {
         finish_notifier: Arc<Notify>,
     ) -> Result<()> {
         let compaction_scheduler = self.compaction_scheduler.clone();
+        let region_map = self.regions.clone();
+        let picker = self.picker.clone();
         common_runtime::spawn_bg(async move {
-            execute_flush(req, compaction_scheduler).await;
+            match req {
+                FlushRequest::Engine => {
+                    let regions = region_map.list_regions();
+                    picker.pick_by_write_buffer_full(&regions).await;
+                }
+                FlushRequest::Region { req, sender } => {
+                    execute_flush_region(req, sender, compaction_scheduler).await;
+                }
+            }
 
             // releases rate limit token
             token.try_release();
@@ -269,18 +288,6 @@ impl<S: LogStore> Handler for FlushHandler<S> {
         });
 
         Ok(())
-    }
-}
-
-async fn execute_flush<S: LogStore>(
-    req: FlushRequest<S>,
-    compaction_scheduler: CompactionSchedulerRef<S>,
-) {
-    match req {
-        FlushRequest::Engine => todo!(),
-        FlushRequest::Region { req, sender } => {
-            execute_flush_region(req, sender, compaction_scheduler).await
-        }
     }
 }
 

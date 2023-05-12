@@ -27,7 +27,7 @@ use store_api::logstore::LogStore;
 use store_api::storage::consts::WRITE_ROW_GROUP_SIZE;
 use store_api::storage::{RegionId, SequenceNumber};
 
-use crate::config::{EngineConfig, DEFAULT_REGION_WRITE_BUFFER_SIZE};
+use crate::config::EngineConfig;
 use crate::error::Result;
 use crate::manifest::action::*;
 use crate::manifest::region::RegionManifest;
@@ -79,9 +79,10 @@ pub type FlushStrategyRef = Arc<dyn FlushStrategy>;
 /// Flush strategy based on memory usage.
 #[derive(Debug)]
 pub struct SizeBasedStrategy {
-    /// Write buffer size of memtable.
-    max_write_buffer_size: usize,
-    /// Mutable memtable memory size limitation
+    /// Write buffer size for all memtables.
+    global_write_buffer_size: Option<usize>,
+    /// Mutable memtable memory size limitation, only valid when `global_write_buffer_size`
+    /// is `Some`.
     mutable_limitation: usize,
     /// Memory in used (e.g. used by mutable and immutable memtables).
     memory_used: AtomicUsize,
@@ -90,11 +91,11 @@ pub struct SizeBasedStrategy {
 }
 
 impl SizeBasedStrategy {
-    /// Returns a new [SizeBasedStrategy] with specific `max_write_buffer_size`.
-    pub fn new(max_write_buffer_size: usize) -> Self {
+    /// Returns a new [SizeBasedStrategy] with specific `global_write_buffer_size`.
+    pub fn new(global_write_buffer_size: Option<usize>) -> Self {
         Self {
-            max_write_buffer_size,
-            mutable_limitation: get_mutable_limitation(max_write_buffer_size),
+            global_write_buffer_size,
+            mutable_limitation: get_mutable_limitation(global_write_buffer_size),
             memory_used: AtomicUsize::new(0),
             memory_active: AtomicUsize::new(0),
         }
@@ -115,18 +116,22 @@ impl SizeBasedStrategy {
             return true;
         }
 
+        // We only check global limit when it is Some.
+        let Some(global_write_buffer_size) = self.global_write_buffer_size else {
+            return false;
+        };
         let memory_usage = self.memory_used.load(Ordering::Relaxed);
         // If the memory exceeds the buffer size, we trigger more aggressive
         // flush. But if already more than half memory is being flushed,
         // triggering more flush may not help. We will hold it instead.
-        if memory_usage >= self.max_write_buffer_size
-            && mutable_memtable_memory_usage >= self.max_write_buffer_size / 2
+        if memory_usage >= global_write_buffer_size
+            && mutable_memtable_memory_usage >= global_write_buffer_size / 2
         {
             logging::info!(
-                "Engine should flush (over total limit), memory_usage: {}, max_write_buffer_size: {}, \
+                "Engine should flush (over total limit), memory_usage: {}, global_write_buffer_size: {}, \
                  mutable_usage: {}.",
                 memory_usage,
-                self.max_write_buffer_size,
+                global_write_buffer_size,
                 mutable_memtable_memory_usage,
             );
             return true;
@@ -137,19 +142,19 @@ impl SizeBasedStrategy {
 }
 
 #[inline]
-fn get_mutable_limitation(max_write_buffer_size: usize) -> usize {
+fn get_mutable_limitation(global_write_buffer_size: Option<usize>) -> usize {
     // Inspired by RocksDB.
     // https://github.com/facebook/rocksdb/blob/main/include/rocksdb/write_buffer_manager.h#L86
-    max_write_buffer_size * 7 / 8
+    global_write_buffer_size
+        .map(|size| size * 7 / 8)
+        .unwrap_or(0)
 }
 
 impl Default for SizeBasedStrategy {
     fn default() -> Self {
-        // TODO(yingwen): Use a larger value for global size.
-        let max_write_buffer_size = DEFAULT_REGION_WRITE_BUFFER_SIZE.as_bytes() as usize;
         Self {
-            max_write_buffer_size,
-            mutable_limitation: get_mutable_limitation(max_write_buffer_size),
+            global_write_buffer_size: None,
+            mutable_limitation: 0,
             memory_used: AtomicUsize::new(0),
             memory_active: AtomicUsize::new(0),
         }
@@ -305,8 +310,9 @@ mod tests {
 
     #[test]
     fn test_get_mutable_limitation() {
-        assert_eq!(7, get_mutable_limitation(8));
-        assert_eq!(8, get_mutable_limitation(10));
-        assert_eq!(56, get_mutable_limitation(64));
+        assert_eq!(7, get_mutable_limitation(Some(8)));
+        assert_eq!(8, get_mutable_limitation(Some(10)));
+        assert_eq!(56, get_mutable_limitation(Some(64)));
+        assert_eq!(0, get_mutable_limitation(None));
     }
 }

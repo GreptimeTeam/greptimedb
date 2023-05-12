@@ -125,6 +125,7 @@ max_flush_tasks = 8
 region_write_buffer_size = "32MB"
 # Interval to auto flush a region if it has not flushed yet.
 auto_flush_interval = "1h"
+# TODO schedule_interval/buffer_size
 
 # Procedure storage options.
 [procedure]
