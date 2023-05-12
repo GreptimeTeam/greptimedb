@@ -31,8 +31,7 @@ use crate::config::EngineConfig;
 use crate::error::{self, Error, Result};
 use crate::file_purger::{FilePurgeHandler, FilePurgerRef};
 use crate::flush::{
-    FlushPicker, FlushScheduler, FlushSchedulerRef, FlushStrategyRef, PickerConfig,
-    SizeBasedStrategy,
+    FlushScheduler, FlushSchedulerRef, FlushStrategyRef, PickerConfig, SizeBasedStrategy,
 };
 use crate::manifest::region::RegionManifest;
 use crate::memtable::{DefaultMemtableBuilder, MemtableBuilderRef};
@@ -284,6 +283,11 @@ impl<S: LogStore> RegionMap<S> {
             .filter_map(|slot| slot.get_ready_region())
             .collect()
     }
+
+    /// Clear the region map.
+    fn clear(&self) {
+        self.0.write().unwrap().clear();
+    }
 }
 
 impl<S: LogStore> Default for RegionMap<S> {
@@ -316,14 +320,12 @@ impl<S: LogStore> EngineInner<S> {
             SchedulerConfig {
                 max_inflight_tasks: config.max_flush_tasks,
             },
-            FlushPicker::new(
-                regions.clone(),
-                PickerConfig {
-                    auto_flush_interval: config.auto_flush_interval,
-                },
-            )?,
             compaction_scheduler.clone(),
-        ));
+            regions.clone(),
+            PickerConfig {
+                auto_flush_interval: config.auto_flush_interval,
+            },
+        )?);
 
         let file_purger = Arc::new(LocalScheduler::new(
             SchedulerConfig {
@@ -478,6 +480,8 @@ impl<S: LogStore> EngineInner<S> {
                 logging::error!(e; "Failed to close region {}", region.id());
             }
         }
+        // Clear regions to release references to regions in the region map.
+        self.regions.clear();
 
         self.compaction_scheduler.stop(true).await?;
         self.flush_scheduler.stop().await?;

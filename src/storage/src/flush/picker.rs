@@ -12,20 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
-use common_runtime::{RepeatedTask, TaskFunction};
 use common_telemetry::logging;
 use common_time::util;
-use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::storage::{FlushContext, FlushReason, Region};
 
 use crate::config::DEFAULT_AUTO_FLUSH_INTERVAL;
-use crate::engine::RegionMap;
-use crate::error::{Error, Result, StartPickTaskSnafu, StopPickTaskSnafu};
 use crate::region::RegionImpl;
 
 /// Config for [FlushPicker].
@@ -36,12 +30,12 @@ pub struct PickerConfig {
 
 impl PickerConfig {
     /// Returns the interval to pick regions.
-    fn picker_schedule_interval(&self) -> Duration {
+    pub(crate) fn picker_schedule_interval(&self) -> Duration {
         self.auto_flush_interval / 2
     }
 
     /// Returns the auto flush interval in millis.
-    fn auto_flush_interval_millis(&self) -> i64 {
+    pub(crate) fn auto_flush_interval_millis(&self) -> i64 {
         self.auto_flush_interval
             .as_millis()
             .try_into()
@@ -59,85 +53,64 @@ impl Default for PickerConfig {
 
 /// Flush task picker.
 pub struct FlushPicker {
-    /// Background repeated pick task.
-    pick_task: RepeatedTask<Error>,
-}
-
-impl FlushPicker {
-    /// Returns a new FlushPicker.
-    pub fn new<S: LogStore>(regions: Arc<RegionMap<S>>, config: PickerConfig) -> Result<Self> {
-        let task_fn = PickTaskFunction {
-            regions,
-            auto_flush_interval_millis: config.auto_flush_interval_millis(),
-        };
-        let pick_task = RepeatedTask::new(config.picker_schedule_interval(), Box::new(task_fn));
-        // Start the background task.
-        pick_task
-            .start(common_runtime::bg_runtime())
-            .context(StartPickTaskSnafu)?;
-
-        Ok(Self { pick_task })
-    }
-
-    /// Stop the picker.
-    pub async fn stop(&self) -> Result<()> {
-        self.pick_task.stop().await.context(StopPickTaskSnafu)
-    }
-}
-
-/// Task function to pick regions to flush.
-struct PickTaskFunction<S: LogStore> {
-    /// Regions of the engine.
-    regions: Arc<RegionMap<S>>,
     /// Interval to flush a region automatically.
     auto_flush_interval_millis: i64,
 }
 
-impl<S: LogStore> PickTaskFunction<S> {
-    /// Auto flush regions based on last flush time.
-    async fn auto_flush_regions(&self, regions: &[RegionImpl<S>], earliest_flush_millis: i64) {
-        for region in regions {
-            if region.last_flush_millis() < earliest_flush_millis {
-                logging::debug!(
-                    "Auto flush region {} due to last flush time ({} < {})",
-                    region.id(),
-                    region.last_flush_millis(),
-                    earliest_flush_millis,
-                );
-
-                Self::flush_region(region).await;
-            }
+impl FlushPicker {
+    /// Returns a new FlushPicker.
+    pub fn new(config: PickerConfig) -> FlushPicker {
+        FlushPicker {
+            auto_flush_interval_millis: config.auto_flush_interval_millis(),
         }
     }
 
-    /// Try to flush region.
-    async fn flush_region(region: &RegionImpl<S>) {
-        let ctx = FlushContext {
-            wait: false,
-            reason: FlushReason::Periodically,
-        };
-        if let Err(e) = region.flush(&ctx).await {
-            logging::error!(e; "Failed to flush region {}", region.id());
+    /// Pick regions and flush them by interval.
+    ///
+    /// Returns the number of flushed regions.
+    pub async fn pick_by_interval<S: LogStore>(&self, regions: &[RegionImpl<S>]) -> usize {
+        let now = util::current_time_millis();
+        // Flush regions by interval.
+        if let Some(earliest_flush_millis) = now.checked_sub(self.auto_flush_interval_millis) {
+            flush_regions_by_interval(regions, earliest_flush_millis).await
+        } else {
+            0
         }
     }
 }
 
-#[async_trait]
-impl<S: LogStore> TaskFunction<Error> for PickTaskFunction<S> {
-    async fn call(&mut self) -> Result<()> {
-        // Get all regions.
-        let regions = self.regions.list_regions();
-        let now = util::current_time_millis();
-        // Flush regions by interval.
-        if let Some(earliest_flush_millis) = now.checked_sub(self.auto_flush_interval_millis) {
-            self.auto_flush_regions(&regions, earliest_flush_millis)
-                .await;
-        }
+/// Auto flush regions based on last flush time.
+///
+/// Returns the number of flushed regions.
+async fn flush_regions_by_interval<S: LogStore>(
+    regions: &[RegionImpl<S>],
+    earliest_flush_millis: i64,
+) -> usize {
+    let mut flushed = 0;
+    for region in regions {
+        if region.last_flush_millis() < earliest_flush_millis {
+            logging::debug!(
+                "Auto flush region {} due to last flush time ({} < {})",
+                region.id(),
+                region.last_flush_millis(),
+                earliest_flush_millis,
+            );
 
-        Ok(())
+            flushed += 1;
+            flush_region(region).await;
+        }
     }
 
-    fn name(&self) -> &str {
-        "FlushPicker-pick-task"
+    flushed
+}
+
+/// Try to flush region.
+async fn flush_region<S: LogStore>(region: &RegionImpl<S>) {
+    let ctx = FlushContext {
+        wait: false,
+        reason: FlushReason::Periodically,
+    };
+    if let Err(e) = region.flush(&ctx).await {
+        logging::error!(e; "Failed to flush region {}", region.id());
     }
 }

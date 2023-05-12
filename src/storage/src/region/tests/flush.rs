@@ -20,9 +20,8 @@ use std::time::Duration;
 use common_test_util::temp_dir::create_temp_dir;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use store_api::storage::{FlushContext, FlushReason, OpenOptions, Region, WriteResponse};
-use tokio::time;
 
-use crate::engine::{self, RegionMap, RegionSlot};
+use crate::engine;
 use crate::flush::{FlushPicker, FlushStrategyRef, PickerConfig};
 use crate::region::tests::{self, FileTesterBase};
 use crate::region::RegionImpl;
@@ -259,8 +258,8 @@ async fn test_merge_read_after_flush() {
 }
 
 #[tokio::test]
-async fn test_picker_auto_flush() {
-    let dir = create_temp_dir("auto-flush");
+async fn test_picker() {
+    let dir = create_temp_dir("picker");
     let store_dir = dir.path().to_str().unwrap();
 
     let flush_switch = Arc::new(FlushSwitch::default());
@@ -274,20 +273,11 @@ async fn test_picker_auto_flush() {
     let sst_dir = format!("{}/{}", store_dir, engine::region_sst_dir("", REGION_NAME));
     assert!(!has_parquet_file(&sst_dir));
 
-    let regions = Arc::new(RegionMap::new());
-    regions.get_or_occupy_slot(REGION_NAME, RegionSlot::Ready(tester.base().region.clone()));
-    // Create and start the picker.
-    let picker = FlushPicker::new(
-        regions,
-        PickerConfig {
-            auto_flush_interval: Duration::from_millis(50),
-        },
-    )
-    .unwrap();
-
-    // Auto-flushed.
-    time::sleep(Duration::from_millis(80)).await;
-    assert!(has_parquet_file(&sst_dir));
-
-    picker.stop().await.unwrap();
+    let regions = [tester.base().region.clone()];
+    // Create a picker.
+    let picker = FlushPicker::new(PickerConfig {
+        auto_flush_interval: Duration::from_millis(50),
+    });
+    let flushed = picker.pick_by_interval(&regions).await;
+    assert_eq!(1, flushed);
 }

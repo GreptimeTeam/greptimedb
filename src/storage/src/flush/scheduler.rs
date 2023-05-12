@@ -15,6 +15,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
+use common_runtime::{RepeatedTask, TaskFunction};
 use common_telemetry::logging;
 use metrics::increment_counter;
 use snafu::{ensure, ResultExt};
@@ -25,8 +27,11 @@ use tokio::sync::{oneshot, Notify};
 
 use crate::compaction::{CompactionRequestImpl, CompactionSchedulerRef};
 use crate::config::EngineConfig;
-use crate::error::{DuplicateFlushSnafu, Result, WaitFlushSnafu};
-use crate::flush::{FlushJob, FlushPicker};
+use crate::engine::RegionMap;
+use crate::error::{
+    DuplicateFlushSnafu, Error, Result, StartPickTaskSnafu, StopPickTaskSnafu, WaitFlushSnafu,
+};
+use crate::flush::{FlushJob, FlushPicker, PickerConfig};
 use crate::manifest::region::RegionManifest;
 use crate::memtable::{MemtableId, MemtableRef};
 use crate::metrics::FLUSH_ERRORS_TOTAL;
@@ -147,8 +152,8 @@ impl FlushHandle {
 pub struct FlushScheduler<S: LogStore> {
     /// Flush task scheduler.
     scheduler: LocalScheduler<FlushRequest<S>>,
-    /// Flush picker.
-    picker: FlushPicker,
+    /// Auto flush task.
+    auto_flush_task: RepeatedTask<Error>,
 }
 
 pub type FlushSchedulerRef<S> = Arc<FlushScheduler<S>>;
@@ -157,16 +162,25 @@ impl<S: LogStore> FlushScheduler<S> {
     /// Returns a new [FlushScheduler].
     pub fn new(
         config: SchedulerConfig,
-        picker: FlushPicker,
         compaction_scheduler: CompactionSchedulerRef<S>,
-    ) -> Self {
+        regions: Arc<RegionMap<S>>,
+        picker_config: PickerConfig,
+    ) -> Result<Self> {
         let handler = FlushHandler {
             compaction_scheduler,
         };
-        Self {
+        let task_interval = picker_config.picker_schedule_interval();
+        let picker = FlushPicker::new(picker_config);
+        let task_fn = AutoFlushFunction { regions, picker };
+        let auto_flush_task = RepeatedTask::new(task_interval, Box::new(task_fn));
+        auto_flush_task
+            .start(common_runtime::bg_runtime())
+            .context(StartPickTaskSnafu)?;
+
+        Ok(Self {
             scheduler: LocalScheduler::new(config, handler),
-            picker,
-        }
+            auto_flush_task,
+        })
     }
 
     /// Schedules a flush request and return the handle to the flush task.
@@ -199,7 +213,10 @@ impl<S: LogStore> FlushScheduler<S> {
 
     /// Stop the scheduler.
     pub async fn stop(&self) -> Result<()> {
-        self.picker.stop().await?;
+        self.auto_flush_task
+            .stop()
+            .await
+            .context(StopPickTaskSnafu)?;
         self.scheduler.stop(true).await?;
 
         Ok(())
@@ -266,5 +283,27 @@ async fn execute_flush<S: LogStore>(
 
         // Complete the request.
         req.complete(Ok(()));
+    }
+}
+
+/// Task function to pick regions to flush.
+struct AutoFlushFunction<S: LogStore> {
+    /// Regions of the engine.
+    regions: Arc<RegionMap<S>>,
+    picker: FlushPicker,
+}
+
+#[async_trait]
+impl<S: LogStore> TaskFunction<Error> for AutoFlushFunction<S> {
+    async fn call(&mut self) -> Result<()> {
+        // Get all regions.
+        let regions = self.regions.list_regions();
+        self.picker.pick_by_interval(&regions).await;
+
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        "FlushPicker-pick-task"
     }
 }
