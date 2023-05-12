@@ -247,12 +247,14 @@ mod tests {
     fn test_config_precedence_order() {
         let mut file = create_named_temp_file();
         let toml_str = r#"
-            bind_addr = "127.0.0.1:3002"
             server_addr = "127.0.0.1:3002"
             datanode_lease_secs = 15
             selector = "LeaseBased"
             use_memory_store = false
 
+            [http_options]
+            addr = "127.0.0.1:4000"
+            
             [logging]
             level = "debug"
             dir = "/tmp/greptimedb/test/logs"
@@ -272,10 +274,20 @@ mod tests {
                     vec![env_prefix.to_string(), "server_addr".to_uppercase()].join(ENV_VAR_SEP),
                     Some("127.0.0.1:13002"),
                 ),
+                (
+                    // http_options.addr = 127.0.0.1:24000
+                    vec![
+                        env_prefix.to_string(),
+                        "http_options".to_uppercase(),
+                        "addr".to_uppercase(),
+                    ]
+                    .join(ENV_VAR_SEP),
+                    Some("127.0.0.1:24000"),
+                ),
             ],
             || {
                 let command = StartCommand {
-                    server_addr: Some("127.0.0.1:23002".to_string()),
+                    http_addr: Some("127.0.0.1:14000".to_string()),
                     config_file: Some(file.path().to_str().unwrap().to_string()),
                     env_prefix: env_prefix.to_string(),
                     ..Default::default()
@@ -284,14 +296,14 @@ mod tests {
                 let Options::Metasrv(opts) =
                     command.load_options(TopLevelOptions::default()).unwrap() else {unreachable!()};
 
-                // Should be read from config file.
-                assert_eq!(opts.selector, SelectorType::LeaseBased);
-
-                // Should be read from cli, cli > env > config file.
-                assert_eq!(opts.server_addr, "127.0.0.1:23002");
-
-                // Should be read from env, env > config file.
+                // Should be read from env, env > default values.
                 assert_eq!(opts.bind_addr, "127.0.0.1:14002");
+
+                // Should be read from config file, config file > env > default values.
+                assert_eq!(opts.server_addr, "127.0.0.1:3002");
+
+                // Should be read from cli, cli > config file > env > default values.
+                assert_eq!(opts.http_opts.addr, "127.0.0.1:14000");
 
                 // Should be default value.
                 assert_eq!(opts.store_addr, "127.0.0.1:2379");

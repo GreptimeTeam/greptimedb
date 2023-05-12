@@ -56,7 +56,7 @@ impl Options {
     }
 
     /// Load the configuration from multiple sources and merge them.
-    /// The precedence order is: environment variables > config file > default values.
+    /// The precedence order is: config file > environment variables > default values.
     /// `env_prefix` is the prefix of environment variables, e.g. "FRONTEND__xxx".
     /// The function will use dunder(double underscore) `__` as the separator for environment variables, for example:
     /// `DATANODE__STORAGE__MANIFEST__CHECKPOINT_MARGIN` will be mapped to `DatanodeOptions.storage.manifest.checkpoint_margin` field in the configuration.
@@ -78,15 +78,17 @@ impl Options {
                 .ignore_empty(true)
         };
 
+        // Add default values and environment variables as the sources of the configuration.
         let mut layered_config = Config::builder()
-            .add_source(Config::try_from(&default_opts).context(LoadLayeredConfigSnafu)?);
+            .add_source(Config::try_from(&default_opts).context(LoadLayeredConfigSnafu)?)
+            .add_source(env_source);
 
+        // Add config file as the source of the configuration if it is specified.
         if let Some(config_file) = config_file {
             layered_config = layered_config.add_source(File::new(config_file, FileFormat::Toml));
         }
 
         let opts = layered_config
-            .add_source(env_source)
             .build()
             .context(LoadLayeredConfigSnafu)?
             .try_deserialize()
@@ -132,19 +134,10 @@ mod tests {
             read_batch_size = 128
             sync_write = false
 
-            [storage]
-            type = "File"
-            data_dir = "/tmp/greptimedb/data/"
-
             [storage.compaction]
             max_inflight_tasks = 3
             max_files_in_level0 = 7
             max_purge_tasks = 32
-
-            [storage.manifest]
-            checkpoint_margin = 9
-            gc_duration = '7s'
-            checkpoint_on_startup = true
 
             [logging]
             level = "debug"
@@ -209,13 +202,23 @@ mod tests {
                     .join(ENV_VAR_SEP),
                     Some("true"),
                 ),
+                (
+                    // wal.dir = /other/wal/dir
+                    vec![
+                        env_prefix.to_string(),
+                        "wal".to_uppercase(),
+                        "dir".to_uppercase(),
+                    ]
+                    .join(ENV_VAR_SEP),
+                    Some("/other/wal/dir"),
+                ),
             ],
             || {
                 let opts: DatanodeOptions =
                     Options::load_layered_options(Some(file.path().to_str().unwrap()), env_prefix)
                         .unwrap();
 
-                // Check the values from environment variables.
+                // Check the configs from environment variables.
                 assert_eq!(opts.storage.manifest.checkpoint_margin, Some(99));
                 match opts.storage.store {
                     ObjectStoreConfig::S3(s3_config) => {
@@ -229,7 +232,7 @@ mod tests {
                 );
                 assert!(opts.storage.manifest.checkpoint_on_startup);
 
-                // Should be the values from config file.
+                // Should be the values from config file, not environment variables.
                 assert_eq!(opts.wal.dir, "/tmp/greptimedb/wal".to_string());
 
                 // Should be default values.

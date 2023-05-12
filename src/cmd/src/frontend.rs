@@ -370,10 +370,12 @@ mod tests {
         let mut file = create_named_temp_file();
         let toml_str = r#"
             mode = "distributed"
-    
+
+            [http_options]
+            addr = "127.0.0.1:4000"
+            
             [mysql_options]
             addr = "127.0.0.1:4002"
-            runtime_size = 2
         "#;
         write!(file, "{}", toml_str).unwrap();
 
@@ -400,11 +402,21 @@ mod tests {
                     .join(ENV_VAR_SEP),
                     Some("11"),
                 ),
+                (
+                    // http_options.addr = 127.0.0.1:24000
+                    vec![
+                        env_prefix.to_string(),
+                        "http_options".to_uppercase(),
+                        "addr".to_uppercase(),
+                    ]
+                    .join(ENV_VAR_SEP),
+                    Some("127.0.0.1:24000"),
+                ),
             ],
             || {
                 let command = StartCommand {
                     config_file: Some(file.path().to_str().unwrap().to_string()),
-                    mysql_addr: Some("127.0.0.1:3306".to_string()),
+                    http_addr: Some("127.0.0.1:14000".to_string()),
                     env_prefix: env_prefix.to_string(),
                     ..Default::default()
                 };
@@ -416,21 +428,24 @@ mod tests {
                 let Options::Frontend(fe_opts) =
                     command.load_options(top_level_opts).unwrap() else {unreachable!()};
 
-                // Should be read from config file.
-                assert_eq!(fe_opts.mode, Mode::Distributed);
+                // Should be read from env, env > default values.
+                assert_eq!(fe_opts.mysql_options.as_ref().unwrap().runtime_size, 11);
 
-                // Should be read from cli, cli > env > config file.
+                // Should be read from config file, config file > env > default values.
                 assert_eq!(
                     fe_opts.mysql_options.as_ref().unwrap().addr,
-                    "127.0.0.1:3306"
+                    "127.0.0.1:4002"
                 );
 
-                // Should be read from env, env > config file.
-                assert_eq!(fe_opts.mysql_options.unwrap().runtime_size, 11);
+                // Should be read from cli, cli > config file > env > default values.
+                assert_eq!(
+                    fe_opts.http_options.as_ref().unwrap().addr,
+                    "127.0.0.1:14000"
+                );
 
                 // Should be default value.
                 assert_eq!(
-                    fe_opts.grpc_options.unwrap().addr,
+                    fe_opts.grpc_options.as_ref().unwrap().addr,
                     GrpcOptions::default().addr
                 );
             },

@@ -392,7 +392,6 @@ mod tests {
             max_purge_tasks = 32
 
             [storage.manifest]
-            gc_duration = '7s'
             checkpoint_on_startup = true
 
             [logging]
@@ -403,17 +402,30 @@ mod tests {
 
         let env_prefix = "DATANODE_UT";
         temp_env::with_vars(
-            vec![(
-                // storage.manifest.gc_duration = 9s
-                vec![
-                    env_prefix.to_string(),
-                    "storage".to_uppercase(),
-                    "manifest".to_uppercase(),
-                    "gc_duration".to_uppercase(),
-                ]
-                .join(ENV_VAR_SEP),
-                Some("9s"),
-            )],
+            vec![
+                (
+                    // storage.manifest.gc_duration = 9s
+                    vec![
+                        env_prefix.to_string(),
+                        "storage".to_uppercase(),
+                        "manifest".to_uppercase(),
+                        "gc_duration".to_uppercase(),
+                    ]
+                    .join(ENV_VAR_SEP),
+                    Some("9s"),
+                ),
+                (
+                    // storage.compaction.max_purge_tasks = 99
+                    vec![
+                        env_prefix.to_string(),
+                        "storage".to_uppercase(),
+                        "compaction".to_uppercase(),
+                        "max_purge_tasks".to_uppercase(),
+                    ]
+                    .join(ENV_VAR_SEP),
+                    Some("99"),
+                ),
+            ],
             || {
                 let command = StartCommand {
                     config_file: Some(file.path().to_str().unwrap().to_string()),
@@ -425,17 +437,17 @@ mod tests {
                 let Options::Datanode(opts) =
                     command.load_options(TopLevelOptions::default()).unwrap() else {unreachable!()};
 
-                // Should be read from config file.
-                assert_eq!(opts.mode, Mode::Distributed);
-
-                // Should be read from cli, cli > env > config file.
-                assert_eq!(opts.wal.dir, "/other/wal/dir");
-
-                // Should be read from env, env > config file.
+                // Should be read from env, env > default values.
                 assert_eq!(
                     opts.storage.manifest.gc_duration,
                     Some(Duration::from_secs(9))
                 );
+
+                // Should be read from config file, config file > env > default values.
+                assert_eq!(opts.storage.compaction.max_purge_tasks, 32);
+
+                // Should be read from cli, cli > config file > env > default values.
+                assert_eq!(opts.wal.dir, "/other/wal/dir");
 
                 // Should be default value.
                 assert_eq!(

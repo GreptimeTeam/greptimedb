@@ -492,8 +492,10 @@ mod tests {
         let toml_str = r#"
             mode = "standalone"
 
+            [http_options]
+            addr = "127.0.0.1:4000"
+
             [logging]
-            dir = "/tmp/greptimedb/logs"
             level = "debug"
         "#;
         write!(file, "{}", toml_str).unwrap();
@@ -521,29 +523,43 @@ mod tests {
                     .join(ENV_VAR_SEP),
                     Some("info"),
                 ),
+                (
+                    // http_options.addr = 127.0.0.1:24000
+                    vec![
+                        env_prefix.to_string(),
+                        "http_options".to_uppercase(),
+                        "addr".to_uppercase(),
+                    ]
+                    .join(ENV_VAR_SEP),
+                    Some("127.0.0.1:24000"),
+                ),
             ],
             || {
                 let command = StartCommand {
                     config_file: Some(file.path().to_str().unwrap().to_string()),
+                    http_addr: Some("127.0.0.1:14000".to_string()),
                     env_prefix: env_prefix.to_string(),
                     ..Default::default()
                 };
 
                 let top_level_opts = TopLevelOptions {
                     log_dir: None,
-                    log_level: Some("error".to_string()),
+                    log_level: None,
                 };
                 let Options::Standalone(opts) =
                     command.load_options(top_level_opts).unwrap() else {unreachable!()};
 
-                // Should be read from config file.
-                assert_eq!(opts.fe_opts.mode, Mode::Standalone);
-
-                // Should be read from cli, cli > env > config file.
-                assert_eq!(opts.logging.level, "error");
-
-                // Should be read from env, env > config file.
+                // Should be read from env, env > default values.
                 assert_eq!(opts.logging.dir, "/other/log/dir");
+
+                // Should be read from config file, config file > env > default values.
+                assert_eq!(opts.logging.level, "debug");
+
+                // Should be read from cli, cli > config file > env > default values.
+                assert_eq!(
+                    opts.fe_opts.http_options.as_ref().unwrap().addr,
+                    "127.0.0.1:14000"
+                );
 
                 // Should be default value.
                 assert_eq!(
