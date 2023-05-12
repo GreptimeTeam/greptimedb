@@ -14,6 +14,7 @@
 
 use std::time::Duration;
 
+use async_trait::async_trait;
 use common_telemetry::logging;
 use common_time::util;
 use store_api::logstore::LogStore;
@@ -68,7 +69,7 @@ impl FlushPicker {
     /// Pick regions and flush them by interval.
     ///
     /// Returns the number of flushed regions.
-    pub async fn pick_by_interval<S: LogStore>(&self, regions: &[RegionImpl<S>]) -> usize {
+    pub async fn pick_by_interval<T: FlushItem>(&self, regions: &[T]) -> usize {
         let now = util::current_time_millis();
         // Flush regions by interval.
         if let Some(earliest_flush_millis) = now.checked_sub(self.auto_flush_interval_millis) {
@@ -79,38 +80,121 @@ impl FlushPicker {
     }
 }
 
+/// Item for picker to flush.
+#[async_trait]
+pub trait FlushItem {
+    /// Id of the item.
+    fn item_id(&self) -> u64;
+
+    /// Last flush time in millis.
+    fn last_flush_time(&self) -> i64;
+
+    /// Requests the item to schedule a flush for specific `reason`.
+    ///
+    /// The flush job itself should run in background.
+    async fn request_flush(&self, reason: FlushReason);
+}
+
+#[async_trait]
+impl<S: LogStore> FlushItem for RegionImpl<S> {
+    fn item_id(&self) -> u64 {
+        self.id()
+    }
+
+    fn last_flush_time(&self) -> i64 {
+        self.last_flush_millis()
+    }
+
+    async fn request_flush(&self, reason: FlushReason) {
+        let ctx = FlushContext {
+            wait: false,
+            reason,
+        };
+        if let Err(e) = self.flush(&ctx).await {
+            logging::error!(e; "Failed to flush region {}", self.id());
+        }
+    }
+}
+
 /// Auto flush regions based on last flush time.
 ///
 /// Returns the number of flushed regions.
-async fn flush_regions_by_interval<S: LogStore>(
-    regions: &[RegionImpl<S>],
+async fn flush_regions_by_interval<T: FlushItem>(
+    regions: &[T],
     earliest_flush_millis: i64,
 ) -> usize {
     let mut flushed = 0;
     for region in regions {
-        if region.last_flush_millis() < earliest_flush_millis {
+        if region.last_flush_time() < earliest_flush_millis {
             logging::debug!(
                 "Auto flush region {} due to last flush time ({} < {})",
-                region.id(),
-                region.last_flush_millis(),
+                region.item_id(),
+                region.last_flush_time(),
                 earliest_flush_millis,
             );
 
             flushed += 1;
-            flush_region(region).await;
+            region.request_flush(FlushReason::Periodically).await;
         }
     }
 
     flushed
 }
 
-/// Try to flush region.
-async fn flush_region<S: LogStore>(region: &RegionImpl<S>) {
-    let ctx = FlushContext {
-        wait: false,
-        reason: FlushReason::Periodically,
-    };
-    if let Err(e) = region.flush(&ctx).await {
-        logging::error!(e; "Failed to flush region {}", region.id());
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    struct MockItem {
+        id: u64,
+        last_flush_time: i64,
+        flush_reason: Mutex<Option<FlushReason>>,
+    }
+
+    impl MockItem {
+        fn new(id: u64, last_flush_time: i64) -> MockItem {
+            MockItem {
+                id,
+                last_flush_time,
+                flush_reason: Mutex::new(None),
+            }
+        }
+
+        fn flush_reason(&self) -> Option<FlushReason> {
+            *self.flush_reason.lock().unwrap()
+        }
+    }
+
+    #[async_trait]
+    impl FlushItem for MockItem {
+        fn item_id(&self) -> u64 {
+            self.id
+        }
+
+        fn last_flush_time(&self) -> i64 {
+            self.last_flush_time
+        }
+
+        async fn request_flush(&self, reason: FlushReason) {
+            let mut flush_reason = self.flush_reason.lock().unwrap();
+            *flush_reason = Some(reason);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pick_by_interval() {
+        let regions = [
+            MockItem::new(0, util::current_time_millis()),
+            MockItem::new(1, util::current_time_millis() - 60 * 1000),
+        ];
+        let picker = FlushPicker::new(PickerConfig {
+            auto_flush_interval: Duration::from_millis(30 * 1000),
+        });
+        let flushed = picker.pick_by_interval(&regions).await;
+        assert_eq!(1, flushed);
+        assert!(regions[0].flush_reason().is_none());
+        assert_eq!(Some(FlushReason::Periodically), regions[1].flush_reason());
     }
 }

@@ -15,14 +15,13 @@
 //! Region flush tests.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use common_test_util::temp_dir::create_temp_dir;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use store_api::storage::{FlushContext, FlushReason, OpenOptions, Region, WriteResponse};
 
 use crate::engine;
-use crate::flush::{FlushPicker, FlushStrategyRef, PickerConfig};
+use crate::flush::FlushStrategyRef;
 use crate::region::tests::{self, FileTesterBase};
 use crate::region::RegionImpl;
 use crate::test_util::config_util;
@@ -255,29 +254,4 @@ async fn test_merge_read_after_flush() {
     // Scan after reopen.
     let output = tester.full_scan().await;
     assert_eq!(expect, output);
-}
-
-#[tokio::test]
-async fn test_picker() {
-    let dir = create_temp_dir("picker");
-    let store_dir = dir.path().to_str().unwrap();
-
-    let flush_switch = Arc::new(FlushSwitch::default());
-    let tester = FlushTester::new(store_dir, flush_switch.clone()).await;
-
-    // Put elements so we have content to flush.
-    tester.put(&[(1000, Some(100))]).await;
-    tester.put(&[(2000, Some(200))]).await;
-
-    // No parquet file should be flushed.
-    let sst_dir = format!("{}/{}", store_dir, engine::region_sst_dir("", REGION_NAME));
-    assert!(!has_parquet_file(&sst_dir));
-
-    let regions = [tester.base().region.clone()];
-    // Create a picker.
-    let picker = FlushPicker::new(PickerConfig {
-        auto_flush_interval: Duration::from_millis(50),
-    });
-    let flushed = picker.pick_by_interval(&regions).await;
-    assert_eq!(1, flushed);
 }

@@ -124,7 +124,7 @@ impl Default for FlushContext {
 }
 
 /// Reason of flush operation.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlushReason {
     /// Unknown reason.
     Unknown,
