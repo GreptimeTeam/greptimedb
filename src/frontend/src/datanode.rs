@@ -62,7 +62,7 @@ impl DatanodeClients {
             .await
     }
 
-    // Should be used only in tests.
+    #[cfg(feature = "testing")]
     pub async fn insert_client(&self, datanode: Peer, client: Client) {
         self.clients.insert(datanode, client).await
     }
