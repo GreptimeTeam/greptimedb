@@ -80,8 +80,8 @@ impl<S: LogStore> StorageEngine for EngineImpl<S> {
         self.inner.create_region(descriptor, opts).await
     }
 
-    async fn drop_region(&self, _ctx: &EngineContext, _region: Self::Region) -> Result<()> {
-        unimplemented!()
+    async fn drop_region(&self, _ctx: &EngineContext, region: Self::Region) -> Result<()> {
+        region.drop_region().await
     }
 
     fn get_region(&self, _ctx: &EngineContext, name: &str) -> Result<Option<Self::Region>> {

@@ -112,6 +112,11 @@ pub trait Table: Send + Sync {
         Ok(())
     }
 
+    /// Drop regions
+    async fn drop_regions(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Get region stats in this table.
     fn region_stats(&self) -> Result<Vec<RegionStat>> {
         UnsupportedSnafu {

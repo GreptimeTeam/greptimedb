@@ -33,6 +33,7 @@ use crate::error::{self, Result};
 use crate::flush::{FlushHandle, FlushRequest, FlushSchedulerRef, FlushStrategyRef};
 use crate::manifest::action::{
     RawRegionMetadata, RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList,
+    RegionRemove,
 };
 use crate::memtable::{Inserter, MemtableBuilderRef, MemtableId, MemtableRef};
 use crate::metadata::RegionMetadataRef;
@@ -270,7 +271,70 @@ impl RegionWriter {
 
         self.wait_flush().await?;
 
-        // TODO: canncel the compaction task
+        // TODO: cancel the compaction task
+
+        Ok(())
+    }
+
+    pub async fn on_drop<S: LogStore>(&self, drop_ctx: DropContext<'_, S>) -> Result<()> {
+        // 1. Acquires the write lock.
+        // 2. Close writer reject any potential writing.
+        // 3. Waits or cancels the flush job.
+        // 4. TODO: Waits or cancels the Compaction Task
+        // 5. Mark all data obsolete in the WAL.
+        // 6. Add `RegionMetaAction::Remove` to recover from manifest in case of failure.
+        //    The main task is to restore the cleaning of sst files. If there is a failure
+        //    in the previous stops, it can be restored through the `Procedure` framework.
+        // 7. Delete the namespace of the region from the WAL.
+        // 8. Get all sst files for current version.
+        // 9. Trigger sst files purger task through `LevelMetas::merge()`
+        let mut inner = self.inner.lock().await;
+        inner.mark_closed();
+
+        if let Some(handle) = inner.flush_handle.take() {
+            handle.wait().await?;
+        }
+
+        let version_control = drop_ctx.version_control();
+
+        let _lock = self.version_mutex.lock().await;
+        let committed_sequence = version_control.committed_sequence();
+
+        let current_version = version_control.current();
+
+        drop_ctx.wal.obsolete(committed_sequence).await?;
+
+        let mut action_list =
+            RegionMetaActionList::with_action(RegionMetaAction::Remove(RegionRemove {
+                region_id: drop_ctx.shared.id,
+            }));
+
+        // Persist the meta action.
+        let prev_version = version_control.current_manifest_version();
+        action_list.set_prev_version(prev_version);
+
+        logging::debug!(
+            "Try to remove region {}, action_list: {:?}",
+            drop_ctx.shared.name(),
+            action_list
+        );
+
+        drop_ctx.manifest.update(action_list).await?;
+
+        drop_ctx.wal.delete_namespace().await?;
+
+        let mut files_to_remove = vec![];
+        current_version
+            .ssts()
+            .levels()
+            .iter()
+            .for_each(|level| level.files().for_each(|f| files_to_remove.push(f.meta())));
+
+        logging::debug!("Try to remove sst files {:?}", files_to_remove);
+
+        current_version
+            .ssts()
+            .merge(vec![].into_iter(), files_to_remove.into_iter());
 
         Ok(())
     }
@@ -348,6 +412,22 @@ pub struct AlterContext<'a, S: LogStore> {
 }
 
 impl<'a, S: LogStore> AlterContext<'a, S> {
+    #[inline]
+    fn version_control(&self) -> &VersionControlRef {
+        &self.shared.version_control
+    }
+}
+
+pub struct DropContext<'a, S: LogStore> {
+    pub shared: &'a SharedDataRef,
+    pub wal: &'a Wal<S>,
+    pub manifest: &'a RegionManifest,
+    pub flush_scheduler: &'a FlushSchedulerRef<S>,
+    pub compaction_scheduler: &'a CompactionSchedulerRef<S>,
+    pub sst_layer: &'a AccessLayerRef,
+}
+
+impl<'a, S: LogStore> DropContext<'a, S> {
     #[inline]
     fn version_control(&self) -> &VersionControlRef {
         &self.shared.version_control

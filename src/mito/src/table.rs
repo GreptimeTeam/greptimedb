@@ -329,6 +329,14 @@ impl<R: Region> Table for MitoTable<R> {
         Ok(())
     }
 
+    async fn drop_regions(&self) -> TableResult<()> {
+        futures::future::try_join_all(self.regions.values().map(|region| region.drop_region()))
+            .await
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)?;
+        Ok(())
+    }
+
     fn region_stats(&self) -> TableResult<Vec<RegionStat>> {
         Ok(self
             .regions

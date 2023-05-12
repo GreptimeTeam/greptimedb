@@ -78,11 +78,11 @@ impl LogStore for NoopLogStore {
         todo!()
     }
 
-    async fn create_namespace(&mut self, _ns: &Self::Namespace) -> Result<()> {
+    async fn create_namespace(&self, _ns: &Self::Namespace) -> Result<()> {
         Ok(())
     }
 
-    async fn delete_namespace(&mut self, _ns: &Self::Namespace) -> Result<()> {
+    async fn delete_namespace(&self, _ns: &Self::Namespace) -> Result<()> {
         Ok(())
     }
 

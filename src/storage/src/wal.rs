@@ -26,8 +26,8 @@ use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::codec::{Decoder, Encoder};
 use crate::error::{
-    DecodeWalHeaderSnafu, EncodeWalHeaderSnafu, Error, MarkWalObsoleteSnafu, ReadWalSnafu, Result,
-    WalDataCorruptedSnafu, WriteWalSnafu,
+    DecodeWalHeaderSnafu, DeleteWalNamespaceSnafu, EncodeWalHeaderSnafu, Error,
+    MarkWalObsoleteSnafu, ReadWalSnafu, Result, WalDataCorruptedSnafu, WriteWalSnafu,
 };
 use crate::proto::wal::{self, WalHeader};
 use crate::write_batch::codec::{PayloadDecoder, PayloadEncoder};
@@ -70,6 +70,16 @@ impl<S: LogStore> Wal<S> {
             .await
             .map_err(BoxedError::new)
             .context(MarkWalObsoleteSnafu {
+                region_id: self.region_id,
+            })
+    }
+
+    pub async fn delete_namespace(&self) -> Result<()> {
+        self.store
+            .delete_namespace(&self.namespace)
+            .await
+            .map_err(BoxedError::new)
+            .context(DeleteWalNamespaceSnafu {
                 region_id: self.region_id,
             })
     }
