@@ -351,8 +351,10 @@ impl PromJsonResponse {
 
                 // retrieve value
                 if let Some(v) = field_column.get_data(row_index) {
-                    let value = Into::<f64>::into(v).to_string();
-                    buffer.entry(tags).or_default().push((timestamp, value));
+                    buffer
+                        .entry(tags)
+                        .or_default()
+                        .push((timestamp, Into::<f64>::into(v).to_string()));
                 };
             }
         }
