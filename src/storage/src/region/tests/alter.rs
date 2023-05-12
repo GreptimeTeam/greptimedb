@@ -36,7 +36,7 @@ const REGION_NAME: &str = "region-alter-0";
 
 async fn create_region_for_alter(store_dir: &str) -> RegionImpl<RaftEngineLogStore> {
     // Always disable version column in this test.
-    let metadata = tests::new_metadata(REGION_NAME, false);
+    let metadata = tests::new_metadata(REGION_NAME);
 
     let store_config = config_util::new_store_config(REGION_NAME, store_dir).await;
 

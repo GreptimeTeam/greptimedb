@@ -65,11 +65,6 @@ impl RegionDescBuilder {
         self
     }
 
-    pub fn enable_version_column(mut self, enable: bool) -> Self {
-        self.key_builder = self.key_builder.enable_version_column(enable);
-        self
-    }
-
     pub fn push_key_column(mut self, column_def: ColumnDef) -> Self {
         let column = self.new_column(column_def);
         self.key_builder = self.key_builder.push_column(column);

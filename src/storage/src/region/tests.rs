@@ -35,7 +35,7 @@ use object_store::services::Fs;
 use object_store::ObjectStore;
 use store_api::manifest::MAX_VERSION;
 use store_api::storage::{
-    consts, Chunk, ChunkReader, RegionMeta, ScanRequest, SequenceNumber, Snapshot, WriteRequest,
+    Chunk, ChunkReader, RegionMeta, ScanRequest, SequenceNumber, Snapshot, WriteRequest,
 };
 
 use super::*;
@@ -50,9 +50,8 @@ use crate::test_util::descriptor_util::RegionDescBuilder;
 use crate::test_util::{self, config_util, schema_util, write_batch_util};
 
 /// Create metadata of a region with schema: (timestamp, v0).
-pub fn new_metadata(region_name: &str, enable_version_column: bool) -> RegionMetadata {
+pub fn new_metadata(region_name: &str) -> RegionMetadata {
     let desc = RegionDescBuilder::new(region_name)
-        .enable_version_column(enable_version_column)
         .push_field_column(("v0", LogicalTypeId::Int64, true))
         .build();
     desc.try_into().unwrap()
@@ -195,7 +194,6 @@ fn new_write_batch_for_test(enable_version_column: bool) -> WriteBatch {
                     LogicalTypeId::TimestampMillisecond,
                     false,
                 ),
-                (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
                 ("v0", LogicalTypeId::Int64, true),
             ],
             Some(0),
@@ -267,7 +265,6 @@ fn append_chunk_to(chunk: &Chunk, dst: &mut Vec<(i64, Option<i64>)>) {
 async fn test_new_region() {
     let region_name = "region-0";
     let desc = RegionDescBuilder::new(region_name)
-        .enable_version_column(true)
         .push_key_column(("k1", LogicalTypeId::Int32, false))
         .push_field_column(("v0", LogicalTypeId::Float32, true))
         .build();
@@ -294,7 +291,6 @@ async fn test_new_region() {
                 LogicalTypeId::TimestampMillisecond,
                 false,
             ),
-            (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
             ("v0", LogicalTypeId::Float32, true),
         ],
         Some(1),

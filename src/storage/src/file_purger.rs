@@ -139,7 +139,7 @@ mod tests {
             &*memtable,
             10,
             OpType::Put,
-            &[(1, 1), (2, 2)],
+            &[1, 2],
             &[(Some(1), Some(1)), (Some(2), Some(2))],
         );
 

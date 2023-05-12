@@ -25,13 +25,12 @@ use datatypes::vectors::{
 use rand::Rng;
 use storage::proto;
 use storage::write_batch::WriteBatch;
-use store_api::storage::{consts, WriteRequest};
+use store_api::storage::WriteRequest;
 
 pub fn new_test_batch() -> WriteBatch {
     write_batch_util::new_write_batch(
         &[
             ("k1", LogicalTypeId::UInt64, false),
-            (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
             ("ts", LogicalTypeId::TimestampMillisecond, false),
             ("v1", LogicalTypeId::Boolean, true),
             ("4", LogicalTypeId::Float64, false),
@@ -78,7 +77,6 @@ pub fn gen_new_batch_and_types(putdate_nums: usize) -> (WriteBatch, Vec<i32>) {
         let svs = Arc::new(StringVector::from_slice(&svs)) as VectorRef;
         let mut put_data = HashMap::with_capacity(11);
         put_data.insert("k1".to_string(), intv.clone());
-        put_data.insert(consts::VERSION_COLUMN_NAME.to_string(), intv);
         put_data.insert("v1".to_string(), boolv);
         put_data.insert("ts".to_string(), tsv.clone());
         put_data.insert("4".to_string(), fvs.clone());

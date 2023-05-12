@@ -355,7 +355,9 @@ impl<'a> Iterator for IterRow<'a> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct InnerKey {
+    /// User defined primary keys
     row_key: Vec<Value>,
+    /// Sequence number of row
     sequence: SequenceNumber,
     index_in_batch: usize,
     op_type: OpType,

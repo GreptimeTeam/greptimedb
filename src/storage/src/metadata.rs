@@ -477,9 +477,6 @@ pub struct ColumnsMetadata {
     row_key_end: usize,
     /// Index of timestamp key column.
     timestamp_key_index: usize,
-    /// If version column is enabled, then the last column of key columns is a
-    /// version column.
-    enable_version_column: bool,
     /// Exclusive end index of user columns.
     ///
     /// Columns in `[user_column_end..)` are internal columns.
@@ -540,8 +537,7 @@ impl ColumnsMetadata {
     }
 
     fn to_row_key_descriptor(&self) -> RowKeyDescriptor {
-        let mut builder =
-            RowKeyDescriptorBuilder::default().enable_version_column(self.enable_version_column);
+        let mut builder = RowKeyDescriptorBuilder::default();
         for (idx, column) in self.iter_row_key_columns().enumerate() {
             // Not a timestamp column.
             if idx != self.timestamp_key_index {
@@ -562,7 +558,6 @@ impl From<&ColumnsMetadata> for RawColumnsMetadata {
             columns: data.columns.clone(),
             row_key_end: data.row_key_end,
             timestamp_key_index: data.timestamp_key_index,
-            enable_version_column: data.enable_version_column,
             user_column_end: data.user_column_end,
         }
     }
@@ -582,7 +577,6 @@ impl From<RawColumnsMetadata> for ColumnsMetadata {
             name_to_col_index,
             row_key_end: raw.row_key_end,
             timestamp_key_index: raw.timestamp_key_index,
-            enable_version_column: raw.enable_version_column,
             user_column_end: raw.user_column_end,
         }
     }
@@ -669,7 +663,6 @@ struct ColumnsMetadataBuilder {
     // Row key metadata:
     row_key_end: usize,
     timestamp_key_index: Option<usize>,
-    enable_version_column: bool,
 }
 
 impl ColumnsMetadataBuilder {
@@ -681,15 +674,7 @@ impl ColumnsMetadataBuilder {
         // TODO(yingwen): Validate this is a timestamp column.
         self.timestamp_key_index = Some(self.columns.len());
         self.push_row_key_column(key.timestamp)?;
-
-        if key.enable_version_column {
-            // TODO(yingwen): Validate that version column must be uint64 column.
-            let version_col = version_column_desc();
-            self.push_row_key_column(version_col)?;
-        }
-
         self.row_key_end = self.columns.len();
-        self.enable_version_column = key.enable_version_column;
 
         Ok(self)
     }
@@ -751,7 +736,6 @@ impl ColumnsMetadataBuilder {
             name_to_col_index: self.name_to_col_index,
             row_key_end: self.row_key_end,
             timestamp_key_index,
-            enable_version_column: self.enable_version_column,
             user_column_end,
         })
     }
@@ -876,17 +860,6 @@ impl RegionMetadataBuilder {
     }
 }
 
-fn version_column_desc() -> ColumnDescriptor {
-    ColumnDescriptorBuilder::new(
-        ReservedColumnId::version(),
-        consts::VERSION_COLUMN_NAME.to_string(),
-        ConcreteDataType::uint64_datatype(),
-    )
-    .is_nullable(false)
-    .build()
-    .unwrap()
-}
-
 fn internal_column_descs() -> [ColumnDescriptor; 2] {
     [
         ColumnDescriptorBuilder::new(
@@ -938,7 +911,6 @@ mod tests {
         let region_name = "region-0";
         let desc = RegionDescBuilder::new(region_name)
             .timestamp(("ts", LogicalTypeId::TimestampMillisecond, false))
-            .enable_version_column(false)
             .push_key_column(("k1", LogicalTypeId::Int32, false))
             .push_field_column(("v1", LogicalTypeId::Float32, true))
             .build();
@@ -1046,7 +1018,7 @@ mod tests {
         assert!(matches!(err, Error::ColIdExists { .. }));
     }
 
-    fn new_metadata(enable_version_column: bool) -> RegionMetadata {
+    fn new_metadata() -> RegionMetadata {
         let timestamp = ColumnDescriptorBuilder::new(
             2,
             "ts",
@@ -1063,7 +1035,6 @@ mod tests {
                     .build()
                     .unwrap(),
             )
-            .enable_version_column(enable_version_column)
             .build()
             .unwrap();
         let cf = ColumnFamilyDescriptorBuilder::default()
@@ -1087,7 +1058,7 @@ mod tests {
 
     #[test]
     fn test_build_metedata_disable_version() {
-        let metadata = new_metadata(false);
+        let metadata = new_metadata();
         assert_eq!(TEST_REGION, metadata.name);
 
         let expect_schema = schema_util::new_schema_ref(
@@ -1121,8 +1092,6 @@ mod tests {
         assert_eq!(["v1"], &value_names[..]);
         // Check timestamp index.
         assert_eq!(1, metadata.columns.timestamp_key_index);
-        // Check version column.
-        assert!(!metadata.columns.enable_version_column);
 
         assert!(metadata
             .column_families
@@ -1133,52 +1102,8 @@ mod tests {
     }
 
     #[test]
-    fn test_build_metedata_enable_version() {
-        let metadata = new_metadata(true);
-        assert_eq!(TEST_REGION, metadata.name);
-
-        let expect_schema = schema_util::new_schema_ref(
-            &[
-                ("k1", LogicalTypeId::Int64, false),
-                ("ts", LogicalTypeId::TimestampMillisecond, false),
-                (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
-                ("v1", LogicalTypeId::Int64, true),
-            ],
-            Some(1),
-        );
-
-        assert_eq!(expect_schema, *metadata.user_schema());
-
-        // 4 user columns and 2 internal columns.
-        assert_eq!(6, metadata.columns.columns.len());
-        // 3 row key columns
-        assert_eq!(3, metadata.columns.num_row_key_columns());
-        let row_key_names: Vec<_> = metadata
-            .columns
-            .iter_row_key_columns()
-            .map(|column| &column.desc.name)
-            .collect();
-        assert_eq!(
-            ["k1", "ts", consts::VERSION_COLUMN_NAME],
-            &row_key_names[..]
-        );
-        // 1 value column
-        assert_eq!(1, metadata.columns.num_field_columns());
-        let value_names: Vec<_> = metadata
-            .columns
-            .iter_field_columns()
-            .map(|column| &column.desc.name)
-            .collect();
-        assert_eq!(["v1"], &value_names[..]);
-        // Check timestamp index.
-        assert_eq!(1, metadata.columns.timestamp_key_index);
-        // Check version column.
-        assert!(metadata.columns.enable_version_column);
-    }
-
-    #[test]
     fn test_convert_between_raw() {
-        let metadata = new_metadata(true);
+        let metadata = new_metadata();
         let raw = RawRegionMetadata::from(&metadata);
 
         let converted = RegionMetadata::try_from(raw).unwrap();
@@ -1189,7 +1114,6 @@ mod tests {
     fn test_alter_metadata_add_columns() {
         let region_name = "region-0";
         let builder = RegionDescBuilder::new(region_name)
-            .enable_version_column(false)
             .push_key_column(("k1", LogicalTypeId::Int32, false))
             .push_field_column(("v1", LogicalTypeId::Float32, true));
         let last_column_id = builder.last_column_id();
@@ -1226,7 +1150,6 @@ mod tests {
         let metadata = metadata.alter(&req).unwrap();
 
         let builder: RegionMetadataBuilder = RegionDescBuilder::new(region_name)
-            .enable_version_column(false)
             .push_key_column(("k1", LogicalTypeId::Int32, false))
             .push_field_column(("v1", LogicalTypeId::Float32, true))
             .push_key_column(("k2", LogicalTypeId::Int32, true))
@@ -1242,7 +1165,6 @@ mod tests {
     fn test_alter_metadata_drop_columns() {
         let region_name = "region-0";
         let metadata: RegionMetadata = RegionDescBuilder::new(region_name)
-            .enable_version_column(false)
             .push_key_column(("k1", LogicalTypeId::Int32, false))
             .push_key_column(("k2", LogicalTypeId::Int32, false))
             .push_field_column(("v1", LogicalTypeId::Float32, true))
@@ -1263,7 +1185,6 @@ mod tests {
         let metadata = metadata.alter(&req).unwrap();
 
         let builder = RegionDescBuilder::new(region_name)
-            .enable_version_column(false)
             .push_key_column(("k1", LogicalTypeId::Int32, false))
             .push_key_column(("k2", LogicalTypeId::Int32, false));
         let last_column_id = builder.last_column_id() + 1;
@@ -1280,7 +1201,6 @@ mod tests {
     #[test]
     fn test_validate_alter_request() {
         let builder = RegionDescBuilder::new("region-alter")
-            .enable_version_column(false)
             .timestamp(("ts", LogicalTypeId::TimestampMillisecond, false))
             .push_key_column(("k0", LogicalTypeId::Int32, false))
             .push_field_column(("v0", LogicalTypeId::Float32, true))

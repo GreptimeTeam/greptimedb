@@ -30,7 +30,6 @@ use crate::test_util::descriptor_util::RegionDescBuilder;
 /// Create a new region schema (timestamp, v0).
 fn new_region_schema() -> RegionSchemaRef {
     let desc = RegionDescBuilder::new("read-util")
-        .enable_version_column(false)
         .push_field_column(("v0", LogicalTypeId::Int64, true))
         .build();
     let metadata: RegionMetadata = desc.try_into().unwrap();

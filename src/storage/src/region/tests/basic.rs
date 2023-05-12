@@ -30,12 +30,9 @@ const REGION_NAME: &str = "region-basic-0";
 async fn create_region_for_basic(
     region_name: &str,
     store_dir: &str,
-    enable_version_column: bool,
 ) -> RegionImpl<RaftEngineLogStore> {
-    let metadata = tests::new_metadata(region_name, enable_version_column);
-
+    let metadata = tests::new_metadata(region_name);
     let store_config = config_util::new_store_config(region_name, store_dir).await;
-
     RegionImpl::create(metadata, store_config).await.unwrap()
 }
 
@@ -48,7 +45,7 @@ struct Tester {
 
 impl Tester {
     async fn new(region_name: &str, store_dir: &str) -> Tester {
-        let region = create_region_for_basic(region_name, store_dir, false).await;
+        let region = create_region_for_basic(region_name, store_dir).await;
 
         Tester {
             region_name: region_name.to_string(),
