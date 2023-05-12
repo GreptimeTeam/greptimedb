@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
-use common_telemetry::logging;
+use common_telemetry::{logging, timer};
 use futures::TryStreamExt;
 use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
@@ -392,6 +392,7 @@ impl WriterInner {
         mut request: WriteBatch,
         writer_ctx: WriterContext<'_, S>,
     ) -> Result<WriteResponse> {
+        let _timer = timer!(crate::metrics::LOG_STORE_WRITE_ELAPSED);
         self.preprocess_write(&writer_ctx).await?;
         let version_control = writer_ctx.version_control();
 
