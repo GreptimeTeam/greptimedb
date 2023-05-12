@@ -22,6 +22,7 @@ use object_store::ObjectStore;
 use store_api::manifest::Manifest;
 
 use crate::compaction::noop::NoopCompactionScheduler;
+use crate::config::DEFAULT_REGION_WRITE_BUFFER_SIZE;
 use crate::engine::{self, RegionMap};
 use crate::file_purger::noop::NoopFilePurgeHandler;
 use crate::flush::{FlushScheduler, PickerConfig, SizeBasedStrategy};
@@ -98,5 +99,6 @@ pub async fn new_store_config_with_object_store(
         file_purger,
         ttl: None,
         compaction_time_window: None,
+        write_buffer_size: DEFAULT_REGION_WRITE_BUFFER_SIZE.as_bytes() as usize,
     }
 }

@@ -20,10 +20,12 @@ use std::sync::Arc;
 
 use common_telemetry::{logging, timer};
 pub use picker::{FlushPicker, PickerConfig};
-pub use scheduler::{FlushHandle, FlushRequest, FlushScheduler, FlushSchedulerRef};
+pub use scheduler::{
+    FlushHandle, FlushRegionRequest, FlushRequest, FlushScheduler, FlushSchedulerRef,
+};
 use store_api::logstore::LogStore;
 use store_api::storage::consts::WRITE_ROW_GROUP_SIZE;
-use store_api::storage::SequenceNumber;
+use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::config::{EngineConfig, DEFAULT_REGION_WRITE_BUFFER_SIZE};
 use crate::error::Result;
@@ -35,15 +37,29 @@ use crate::region::{RegionWriterRef, SharedDataRef};
 use crate::sst::{AccessLayerRef, FileId, FileMeta, Source, SstInfo, WriteOptions};
 use crate::wal::Wal;
 
+/// Current flush-related status of a region.
+#[derive(Debug)]
+pub struct RegionStatus {
+    /// Id of the region this status belongs to.
+    pub region_id: RegionId,
+    /// Size of the mutable memtable.
+    pub bytes_mutable: usize,
+    /// Write buffer size of the region.
+    pub write_buffer_size: usize,
+}
+
+/// Type of flush request to send.
+pub enum FlushType {
+    /// Flush current region.
+    Region,
+    /// Engine level flush. Find regions to flush globally.
+    Engine,
+}
+
 /// Strategy to control whether to flush a region before writing to the region.
 pub trait FlushStrategy: Send + Sync + std::fmt::Debug {
-    /// Returns `true` if we need to flush the region.
-    fn should_flush(
-        &self,
-        shared: &SharedDataRef,
-        bytes_mutable: usize,
-        bytes_total: usize,
-    ) -> bool;
+    /// Returns whether to trigger a flush operation.
+    fn should_flush(&self, status: RegionStatus) -> Option<FlushType>;
 
     /// Reserves `mem` bytes.
     fn reserve_mem(&self, mem: usize);
@@ -83,11 +99,46 @@ impl SizeBasedStrategy {
             memory_active: AtomicUsize::new(0),
         }
     }
+
+    /// Returns whether to trigger an engine level flush.
+    ///
+    /// Insipired by RocksDB's WriteBufferManager.
+    /// https://github.com/facebook/rocksdb/blob/main/include/rocksdb/write_buffer_manager.h#L94
+    fn should_flush_engine(&self) -> bool {
+        let mutable_memtable_memory_usage = self.memory_active.load(Ordering::Relaxed);
+        if mutable_memtable_memory_usage > self.mutable_limitation {
+            logging::info!(
+                "Engine should flush (over mutable limit), mutable_usage: {}, mutable_limitation: {}.",
+                mutable_memtable_memory_usage,
+                self.mutable_limitation,
+            );
+            return true;
+        }
+
+        let memory_usage = self.memory_used.load(Ordering::Relaxed);
+        // If the memory exceeds the buffer size, we trigger more aggressive
+        // flush. But if already more than half memory is being flushed,
+        // triggering more flush may not help. We will hold it instead.
+        if memory_usage >= self.max_write_buffer_size
+            && mutable_memtable_memory_usage >= self.max_write_buffer_size / 2
+        {
+            logging::info!(
+                "Engine should flush (over total limit), memory_usage: {}, max_write_buffer_size: {}, \
+                 mutable_usage: {}.",
+                memory_usage,
+                self.max_write_buffer_size,
+                mutable_memtable_memory_usage,
+            );
+            return true;
+        }
+
+        false
+    }
 }
 
 #[inline]
 fn get_mutable_limitation(max_write_buffer_size: usize) -> usize {
-    // Inspired by RocksDB
+    // Inspired by RocksDB.
     // https://github.com/facebook/rocksdb/blob/main/include/rocksdb/write_buffer_manager.h#L86
     max_write_buffer_size * 7 / 8
 }
@@ -106,49 +157,25 @@ impl Default for SizeBasedStrategy {
 }
 
 impl FlushStrategy for SizeBasedStrategy {
-    fn should_flush(
-        &self,
-        shared: &SharedDataRef,
-        bytes_mutable: usize,
-        bytes_total: usize,
-    ) -> bool {
-        // Insipired by RocksDB flush strategy
-        // https://github.com/facebook/rocksdb/blob/main/include/rocksdb/write_buffer_manager.h#L94
-
-        if bytes_mutable > self.mutable_limitation {
-            logging::info!(
-                "Region should flush, region: {}, bytes_mutable: {}, mutable_limitation: {}, \
-                 bytes_total: {}, max_write_buffer_size: {} .",
-                shared.name(),
-                bytes_mutable,
-                self.mutable_limitation,
-                bytes_total,
-                self.max_write_buffer_size
+    fn should_flush(&self, status: RegionStatus) -> Option<FlushType> {
+        if status.bytes_mutable >= status.write_buffer_size {
+            // If the mutable memtable is full, we should freeze it and flush it.
+            logging::debug!(
+                "Region should flush as mutable memtable is full, region: {}, bytes_mutable: {}, \
+                write_buffer_size: {}.",
+                status.region_id,
+                status.bytes_mutable,
+                status.write_buffer_size,
             );
 
-            return true;
+            return Some(FlushType::Region);
         }
 
-        let buffer_size = self.max_write_buffer_size;
-
-        // If the memory exceeds the buffer size, we trigger more aggressive
-        // flush. But if already more than half memory is being flushed,
-        // triggering more flush may not help. We will hold it instead.
-        let should_flush = bytes_total >= buffer_size && bytes_mutable >= buffer_size / 2;
-
-        if should_flush {
-            logging::info!(
-                "Region should flush, region: {}, bytes_mutable: {}, mutable_limitation: {}, \
-                 bytes_total: {}, max_write_buffer_size: {} .",
-                shared.name(),
-                bytes_mutable,
-                self.mutable_limitation,
-                bytes_total,
-                buffer_size
-            );
+        if self.should_flush_engine() {
+            return Some(FlushType::Engine);
         }
 
-        should_flush
+        None
     }
 
     fn reserve_mem(&self, mem: usize) {

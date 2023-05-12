@@ -27,7 +27,7 @@ use store_api::storage::{
 };
 
 use crate::compaction::CompactionSchedulerRef;
-use crate::config::EngineConfig;
+use crate::config::{EngineConfig, DEFAULT_REGION_WRITE_BUFFER_SIZE};
 use crate::error::{self, Error, Result};
 use crate::file_purger::{FilePurgeHandler, FilePurgerRef};
 use crate::flush::{
@@ -343,6 +343,7 @@ impl<S: LogStore> EngineInner<S> {
             regions,
             memtable_builder: Arc::new(DefaultMemtableBuilder::default()),
             flush_scheduler,
+            // fixme(yingwen): Add a global write buffer size config.
             flush_strategy: Arc::new(SizeBasedStrategy::new(
                 config.region_write_buffer_size.as_bytes() as usize,
             )),
@@ -461,11 +462,7 @@ impl<S: LogStore> EngineInner<S> {
             config.manifest_gc_duration,
         );
         manifest.start().await?;
-
-        // FIXME(yingwen): Always use the global flush strategy.
-        let flush_strategy = write_buffer_size
-            .map(|size| Arc::new(SizeBasedStrategy::new(size)) as Arc<_>)
-            .unwrap_or_else(|| self.flush_strategy.clone());
+        let flush_strategy = self.flush_strategy.clone();
 
         Ok(StoreConfig {
             log_store: self.log_store.clone(),
@@ -479,6 +476,8 @@ impl<S: LogStore> EngineInner<S> {
             file_purger: self.file_purger.clone(),
             ttl,
             compaction_time_window,
+            write_buffer_size: write_buffer_size
+                .unwrap_or(DEFAULT_REGION_WRITE_BUFFER_SIZE.as_bytes() as usize),
         })
     }
 

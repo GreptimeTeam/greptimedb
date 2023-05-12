@@ -166,6 +166,7 @@ pub struct StoreConfig<S: LogStore> {
     pub file_purger: FilePurgerRef,
     pub ttl: Option<Duration>,
     pub compaction_time_window: Option<i64>,
+    pub write_buffer_size: usize,
 }
 
 pub type RecoverdMetadata = (SequenceNumber, (ManifestVersion, RawRegionMetadata));
@@ -249,6 +250,7 @@ impl<S: LogStore> RegionImpl<S> {
                 store_config.engine_config.clone(),
                 store_config.ttl,
                 store_config.compaction_time_window,
+                store_config.write_buffer_size,
             )),
             wal,
             flush_strategy: store_config.flush_strategy,
@@ -333,6 +335,7 @@ impl<S: LogStore> RegionImpl<S> {
             store_config.engine_config.clone(),
             store_config.ttl,
             compaction_time_window,
+            store_config.write_buffer_size,
         ));
         let writer_ctx = WriterContext {
             shared: &shared,

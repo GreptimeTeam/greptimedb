@@ -14,8 +14,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::flush::FlushStrategy;
-use crate::region::SharedDataRef;
+use crate::flush::{FlushStrategy, FlushType, RegionStatus};
 
 /// Controls whether to flush a region while writing the region.
 /// Disable flush by default.
@@ -31,13 +30,12 @@ impl FlushSwitch {
 }
 
 impl FlushStrategy for FlushSwitch {
-    fn should_flush(
-        &self,
-        _shared: &SharedDataRef,
-        _bytes_mutable: usize,
-        _bytes_total: usize,
-    ) -> bool {
-        self.should_flush.load(Ordering::Relaxed)
+    fn should_flush(&self, _status: RegionStatus) -> Option<FlushType> {
+        if self.should_flush.load(Ordering::Relaxed) {
+            Some(FlushType::Region)
+        } else {
+            None
+        }
     }
 
     fn reserve_mem(&self, _mem: usize) {}
