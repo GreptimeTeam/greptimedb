@@ -126,7 +126,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_noop_logstore() {
-        let mut store = NoopLogStore::default();
+        let store = NoopLogStore::default();
         let e = store.entry("".as_bytes(), 1, NamespaceImpl::default());
         store.append(e.clone()).await.unwrap();
         store

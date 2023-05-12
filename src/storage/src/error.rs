@@ -241,7 +241,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to delete WAL namepsace, region id: {}, source: {}",
+        "Failed to delete WAL namespace, region id: {}, source: {}",
         region_id,
         source
     ))]
