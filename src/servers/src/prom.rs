@@ -350,8 +350,10 @@ impl PromJsonResponse {
                 let timestamp = timestamp_millis as f64 / 1000.0;
 
                 // retrieve value
-                let value =
-                    Into::<f64>::into(field_column.get_data(row_index).unwrap()).to_string();
+                let value = match field_column.get_data(row_index) {
+                    Some(v) => Into::<f64>::into(v).to_string(),
+                    None => "NULL".to_string(),
+                };
 
                 buffer.entry(tags).or_default().push((timestamp, value));
             }
