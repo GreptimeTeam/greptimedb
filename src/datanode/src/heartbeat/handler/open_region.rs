@@ -16,9 +16,10 @@ use std::sync::Arc;
 
 use catalog::{CatalogManagerRef, RegisterTableRequest};
 use common_catalog::format_full_table_name;
-use common_meta::instruction::{Instruction, InstructionReply};
+use common_meta::instruction::{Instruction, InstructionReply, RegionIdent, SimpleReply};
 use common_telemetry::{error, warn};
 use snafu::ResultExt;
+use store_api::storage::RegionNumber;
 use table::engine::manager::TableEngineManagerRef;
 use table::engine::EngineContext;
 use table::requests::OpenTableRequest;
@@ -28,84 +29,127 @@ use crate::heartbeat::handler::HeartbeatResponseHandler;
 use crate::heartbeat::HeartbeatResponseHandlerContext;
 
 #[derive(Clone)]
-pub struct OpenTableHandler {
+pub struct OpenRegionHandler {
     catalog_manager: CatalogManagerRef,
     table_engine_manager: TableEngineManagerRef,
 }
 
-impl HeartbeatResponseHandler for OpenTableHandler {
+impl HeartbeatResponseHandler for OpenRegionHandler {
     fn is_acceptable(&self, ctx: &HeartbeatResponseHandlerContext) -> bool {
         matches!(
-            ctx.incoming_message.as_ref(),
+            ctx.incoming_message,
             Some((_, Instruction::OpenRegion { .. }))
         )
     }
 
     fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> Result<()> {
-        match ctx.incoming_message.take() {
-            Some((
-                meta,
-                Instruction::OpenRegion {
-                    catalog,
-                    schema,
-                    table,
-                    table_id,
-                    engine,
-                    region_number,
-                },
-            )) => {
-                ctx.finish();
+        let Some((meta, Instruction::OpenRegion(region_ident))) = ctx.incoming_message.take() else {
+            unreachable!("OpenRegionHandler: should be guarded by 'is_acceptable'");
+        };
 
-                let mailbox = ctx.mailbox.clone();
-                let self_ref = Arc::new(self.clone());
+        ctx.finish();
+        let mailbox = ctx.mailbox.clone();
+        let self_ref = Arc::new(self.clone());
 
-                common_runtime::spawn_bg(async move {
-                    let result = self_ref
-                        .open_region_inner(
-                            engine,
-                            OpenTableRequest {
-                                catalog_name: catalog,
-                                schema_name: schema,
-                                table_name: table,
-                                table_id,
-                                region_numbers: vec![region_number],
-                            },
-                        )
-                        .await;
-
-                    if let Err(e) = mailbox
-                        .send((
-                            meta,
-                            result.map_or_else(
-                                |error| InstructionReply::OpenRegion {
-                                    result: false,
-                                    error: Some(error.to_string()),
-                                },
-                                |result| InstructionReply::OpenRegion {
-                                    result,
-                                    error: None,
-                                },
-                            ),
-                        ))
-                        .await
-                    {
-                        error!(e;"Failed to send reply to mailbox");
-                    }
-                });
+        common_runtime::spawn_bg(async move {
+            let (engine, request) = OpenRegionHandler::prepare_request(region_ident);
+            let result = self_ref.open_region_inner(engine, request).await;
+            if let Err(e) = mailbox
+                .send((meta, OpenRegionHandler::map_result(result)))
+                .await
+            {
+                error!(e; "Failed to send reply to mailbox");
             }
-            _ => warn!("Missing match in OpenTableHandler"),
-        }
-
+        });
         Ok(())
     }
 }
 
-impl OpenTableHandler {
+impl OpenRegionHandler {
+    fn map_result(result: Result<bool>) -> InstructionReply {
+        result.map_or_else(
+            |error| {
+                InstructionReply::OpenRegion(SimpleReply {
+                    result: false,
+                    error: Some(error.to_string()),
+                })
+            },
+            |result| {
+                InstructionReply::OpenRegion(SimpleReply {
+                    result,
+                    error: None,
+                })
+            },
+        )
+    }
+
+    fn prepare_request(ident: RegionIdent) -> (String, OpenTableRequest) {
+        let RegionIdent {
+            catalog,
+            schema,
+            table,
+            table_id,
+            region_number,
+            engine,
+        } = ident;
+
+        (
+            engine,
+            OpenTableRequest {
+                catalog_name: catalog,
+                schema_name: schema,
+                table_name: table,
+                table_id,
+                region_numbers: vec![region_number],
+            },
+        )
+    }
+
+    /// Returns true if table has been opened.
+    async fn check_table(
+        &self,
+        catalog_name: &str,
+        schema_name: &str,
+        table_name: &str,
+        region_numbers: &[RegionNumber],
+    ) -> Result<bool> {
+        if let Some(table) = self
+            .catalog_manager
+            .table(catalog_name, schema_name, table_name)
+            .await
+            .context(error::AccessCatalogSnafu)?
+        {
+            for r in region_numbers {
+                let region_exist =
+                    table
+                        .contain_regions(*r)
+                        .with_context(|_| error::CheckRegionSnafu {
+                            table_name: format_full_table_name(
+                                catalog_name,
+                                schema_name,
+                                table_name,
+                            ),
+                            region_number: *r,
+                        })?;
+                if !region_exist {
+                    warn!(
+                        "Failed to check table: {}, region: {} does not exist",
+                        format_full_table_name(catalog_name, schema_name, table_name,),
+                        r
+                    );
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
     async fn open_region_inner(&self, engine: String, request: OpenTableRequest) -> Result<bool> {
         let OpenTableRequest {
             catalog_name,
             schema_name,
             table_name,
+            region_numbers,
             ..
         } = &request;
         let engine =
@@ -115,6 +159,13 @@ impl OpenTableHandler {
                     engine_name: &engine,
                 })?;
         let ctx = EngineContext::default();
+
+        if self
+            .check_table(catalog_name, schema_name, table_name, region_numbers)
+            .await?
+        {
+            return Ok(true);
+        }
 
         if let Some(table) = engine
             .open_table(&ctx, request.clone())

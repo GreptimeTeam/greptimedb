@@ -480,7 +480,7 @@ async fn test_open_table() {
         table_name: test_util::TABLE_NAME.to_string(),
         // the test table id is 1
         table_id: 1,
-        ..Default::default()
+        region_numbers: vec![0],
     };
 
     let (_engine, storage_engine, table, object_store, _dir) = {
@@ -713,7 +713,7 @@ async fn test_alter_rename_table() {
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: new_table_name.to_string(),
         table_id: 1,
-        ..Default::default()
+        region_numbers: vec![0],
     };
 
     // test reopen table

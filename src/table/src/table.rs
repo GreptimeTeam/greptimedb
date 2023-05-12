@@ -121,7 +121,7 @@ pub trait Table: Send + Sync {
     }
 
     /// Return true if contains the region
-    fn contain_region(&self, _region: RegionNumber) -> Result<bool> {
+    fn contain_regions(&self, _region: RegionNumber) -> Result<bool> {
         UnsupportedSnafu {
             operation: "contain_region",
         }

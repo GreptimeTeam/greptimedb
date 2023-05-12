@@ -382,12 +382,13 @@ fn validate_create_table_request(request: &CreateTableRequest) -> Result<()> {
 }
 
 fn all_regions_open(table: TableRef, regions: &[RegionNumber]) -> TableResult<bool> {
-    Ok(regions
-        .iter()
-        .map(|r| table.contain_region(*r))
-        .collect::<TableResult<Vec<_>>>()?
-        .into_iter()
-        .all(|r| r))
+    for r in regions {
+        let region_exist = table.contain_regions(*r)?;
+        if !region_exist {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 impl<S: StorageEngine> MitoEngineInner<S> {
@@ -407,7 +408,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
     /// Builds table from scratch.
     /// Returns None if failed to recover manifest.
-    async fn build_table(
+    async fn recover_table(
         &self,
         _ctx: &EngineContext,
         request: OpenTableRequest,
@@ -499,12 +500,12 @@ impl<S: StorageEngine> MitoEngineInner<S> {
     }
 
     /// Loads regions
-    async fn load_regions(
+    async fn load_missing_regions(
         &self,
         _ctx: &EngineContext,
-        table: TableRef,
+        table: Arc<MitoTable<S::Region>>,
         region_numbers: &[RegionNumber],
-    ) -> TableResult<Option<TableRef>> {
+    ) -> TableResult<()> {
         let table_info = table.table_info();
         let catalog = &table_info.catalog_name;
         let schema = &table_info.schema_name;
@@ -529,14 +530,9 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             compaction_time_window: table_info.meta.options.compaction_time_window,
         };
 
-        let mito_table = table
-            .as_any()
-            .downcast_ref::<MitoTable<<S as StorageEngine>::Region>>()
-            .context(table_error::DowncastMitoTableSnafu)?;
-
         // TODO(weny): Returns an error earlier if the target region does not exist in the meta.
         for region_number in region_numbers {
-            if table.contain_region(*region_number)? {
+            if table.contain_regions(*region_number)? {
                 continue;
             }
 
@@ -546,10 +542,10 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 .open_region(&engine_ctx, table_id, *region_number, &table_ref, &opts)
                 .await?;
 
-            mito_table.load_region(*region_number, region).await?;
+            table.load_region(*region_number, region).await?;
         }
 
-        Ok(Some(table))
+        Ok(())
     }
 
     async fn open_table(
@@ -578,19 +574,21 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             let _lock = self.table_mutex.lock(table_name_key.clone()).await;
 
             // Checks again, read lock should be enough since we are guarded by the mutex.
-            if let Some(table) = self.get_table(&table_ref) {
+            if let Some(table) = self.get_mito_table(&table_ref) {
                 // Contains all regions or target region
                 if let Some(table) = self.check_regions(table.clone(), &request.region_numbers)? {
                     Some(table)
                 } else {
                     // Loads missing regions
-                    // TODO(weny): support to load regions
-                    self.load_regions(ctx, table.clone(), &request.region_numbers)
-                        .await?
+                    // TODO(weny): Supports to load regions
+                    self.load_missing_regions(ctx, table.clone(), &request.region_numbers)
+                        .await?;
+
+                    Some(table as _)
                 }
             } else {
                 // Builds table from scratch
-                let table = self.build_table(ctx, request.clone()).await?;
+                let table = self.recover_table(ctx, request.clone()).await?;
                 if let Some(table) = table {
                     // already locked
                     self.tables.insert(table_ref.to_string(), table.clone());

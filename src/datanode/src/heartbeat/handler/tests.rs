@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_meta::instruction::InstructionReply;
+use common_meta::instruction::{InstructionReply, SimpleReply};
 use tokio::sync::mpsc;
 
 use crate::heartbeat::mailbox::{HeartbeatMailbox, MessageMeta};
@@ -24,10 +24,10 @@ async fn test_heartbeat_mailbox() {
     let mailbox = HeartbeatMailbox::new(tx);
 
     let meta = MessageMeta::new_test(1, "test", "foo", "bar");
-    let reply = InstructionReply::OpenRegion {
+    let reply = InstructionReply::OpenRegion(SimpleReply {
         result: true,
         error: None,
-    };
+    });
     mailbox.send((meta.clone(), reply.clone())).await.unwrap();
 
     let message = rx.recv().await.unwrap();

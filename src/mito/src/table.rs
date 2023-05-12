@@ -335,7 +335,7 @@ impl<R: Region> Table for MitoTable<R> {
             .collect())
     }
 
-    fn contain_region(&self, region: RegionNumber) -> TableResult<bool> {
+    fn contain_regions(&self, region: RegionNumber) -> TableResult<bool> {
         Ok(self.regions.contains_key(&region))
     }
 }
@@ -567,7 +567,7 @@ impl<R: Region> MitoTable<R> {
     pub async fn load_region(&self, region_number: RegionNumber, _region: R) -> TableResult<()> {
         let info = self.table_info.load_full();
 
-        // TODO(weny): support to load the region
+        // TODO(weny): Supports to load the region
         warn!(
             "MitoTable try to load region: {} in table: {}",
             region_number,
