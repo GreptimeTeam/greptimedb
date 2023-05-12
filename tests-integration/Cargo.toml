@@ -40,4 +40,22 @@ tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+common-base = { path = "../src/common/base" }
+common-recordbatch = { path = "../src/common/recordbatch" }
+datafusion.workspace = true
+datafusion-expr.workspace = true
+futures.workspace = true
+itertools = "0.10"
+meta-client = { path = "../src/meta-client" }
+meta-srv = { path = "../src/meta-srv" }
+partition = { path = "../src/partition" }
 paste.workspace = true
+prost.workspace = true
+query = { path = "../src/query" }
+script = { path = "../src/script" }
+session = { path = "../src/session" }
+store-api = { path = "../src/store-api" }
+tonic.workspace = true
+tower = "0.4"
+rstest = "0.17"
+rstest_reuse = "0.5"

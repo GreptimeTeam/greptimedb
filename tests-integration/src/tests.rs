@@ -30,6 +30,10 @@ use datanode::datanode::{
     DatanodeOptions, FileConfig, ObjectStoreConfig, ProcedureConfig, StorageConfig, WalConfig,
 };
 use datanode::instance::Instance as DatanodeInstance;
+use frontend::catalog::FrontendCatalogManager;
+use frontend::datanode::DatanodeClients;
+use frontend::instance::distributed::DistInstance;
+use frontend::instance::Instance;
 use meta_client::client::MetaClientBuilder;
 use meta_client::rpc::Peer;
 use meta_srv::metasrv::MetaSrvOptions;
@@ -44,11 +48,6 @@ use servers::Mode;
 use table::engine::{region_name, table_dir};
 use tonic::transport::Server;
 use tower::service_fn;
-
-use crate::catalog::FrontendCatalogManager;
-use crate::datanode::DatanodeClients;
-use crate::instance::distributed::DistInstance;
-use crate::instance::Instance;
 
 /// Guard against the `TempDir`s that used in unit tests.
 /// (The `TempDir` will be deleted once it goes out of scope.)

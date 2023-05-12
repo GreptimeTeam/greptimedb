@@ -73,14 +73,14 @@ use crate::table::DistTable;
 const MAX_VALUE: &str = "MAXVALUE";
 
 #[derive(Clone)]
-pub(crate) struct DistInstance {
+pub struct DistInstance {
     meta_client: Arc<MetaClient>,
     catalog_manager: Arc<FrontendCatalogManager>,
     datanode_clients: Arc<DatanodeClients>,
 }
 
 impl DistInstance {
-    pub(crate) fn new(
+    pub fn new(
         meta_client: Arc<MetaClient>,
         catalog_manager: Arc<FrontendCatalogManager>,
         datanode_clients: Arc<DatanodeClients>,
@@ -92,7 +92,7 @@ impl DistInstance {
         }
     }
 
-    pub(crate) async fn create_table(
+    pub async fn create_table(
         &self,
         create_table: &mut CreateTableExpr,
         partitions: Option<Partitions>,
@@ -579,8 +579,7 @@ impl DistInstance {
         Ok(Output::AffectedRows(affected_rows))
     }
 
-    #[cfg(test)]
-    pub(crate) fn catalog_manager(&self) -> Arc<FrontendCatalogManager> {
+    pub fn catalog_manager(&self) -> Arc<FrontendCatalogManager> {
         self.catalog_manager.clone()
     }
 }

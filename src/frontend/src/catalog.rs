@@ -75,19 +75,19 @@ impl FrontendCatalogManager {
         }
     }
 
-    pub(crate) fn set_dist_instance(&mut self, dist_instance: Arc<DistInstance>) {
+    pub fn set_dist_instance(&mut self, dist_instance: Arc<DistInstance>) {
         self.dist_instance = Some(dist_instance)
     }
 
-    pub(crate) fn backend(&self) -> KvBackendRef {
+    pub fn backend(&self) -> KvBackendRef {
         self.backend.clone()
     }
 
-    pub(crate) fn partition_manager(&self) -> PartitionRuleManagerRef {
+    pub fn partition_manager(&self) -> PartitionRuleManagerRef {
         self.partition_manager.clone()
     }
 
-    pub(crate) fn datanode_clients(&self) -> Arc<DatanodeClients> {
+    pub fn datanode_clients(&self) -> Arc<DatanodeClients> {
         self.datanode_clients.clone()
     }
 }
@@ -404,73 +404,5 @@ impl SchemaProvider for FrontendSchemaProvider {
 
     async fn table_exist(&self, name: &str) -> catalog::error::Result<bool> {
         Ok(self.table_names().await?.contains(&name.to_string()))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
-    use script::table::{build_scripts_schema, SCRIPTS_TABLE_NAME};
-    use table::requests::{CreateTableRequest, TableOptions};
-
-    use super::*;
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_register_system_table() {
-        let instance =
-            crate::tests::create_distributed_instance("test_register_system_table").await;
-
-        let catalog_name = DEFAULT_CATALOG_NAME;
-        let schema_name = DEFAULT_SCHEMA_NAME;
-        let table_name = SCRIPTS_TABLE_NAME;
-        let request = CreateTableRequest {
-            id: 1,
-            catalog_name: catalog_name.to_string(),
-            schema_name: schema_name.to_string(),
-            table_name: table_name.to_string(),
-            desc: Some("Scripts table".to_string()),
-            schema: build_scripts_schema(),
-            region_numbers: vec![0],
-            primary_key_indices: vec![0, 1],
-            create_if_not_exists: true,
-            table_options: TableOptions::default(),
-            engine: MITO_ENGINE.to_string(),
-        };
-
-        let result = instance
-            .catalog_manager
-            .register_system_table(RegisterSystemTableRequest {
-                create_table_request: request,
-                open_hook: None,
-            })
-            .await;
-        assert!(result.is_ok());
-
-        assert!(
-            instance
-                .catalog_manager
-                .table(catalog_name, schema_name, table_name)
-                .await
-                .unwrap()
-                .is_some(),
-            "the registered system table cannot be found in catalog"
-        );
-
-        let mut actually_created_table_in_datanode = 0;
-        for datanode in instance.datanodes.values() {
-            if datanode
-                .catalog_manager()
-                .table(catalog_name, schema_name, table_name)
-                .await
-                .unwrap()
-                .is_some()
-            {
-                actually_created_table_in_datanode += 1;
-            }
-        }
-        assert_eq!(
-            actually_created_table_in_datanode, 1,
-            "system table should be actually created at one and only one datanode"
-        )
     }
 }

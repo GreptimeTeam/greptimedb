@@ -15,6 +15,7 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use frontend::instance::Instance;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use rstest::rstest;
 use rstest_reuse::apply;
@@ -22,7 +23,6 @@ use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContext;
 
 use super::test_util::{check_unordered_output_stream, standalone, standalone_instance_case};
-use crate::instance::Instance;
 use crate::tests::test_util::MockInstance;
 
 #[allow(clippy::too_many_arguments)]
