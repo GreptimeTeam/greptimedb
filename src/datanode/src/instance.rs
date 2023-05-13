@@ -61,6 +61,7 @@ use crate::datanode::{
 use crate::error::{
     self, CatalogSnafu, MetaClientInitSnafu, MissingMetasrvOptsSnafu, MissingNodeIdSnafu,
     NewCatalogSnafu, OpenLogStoreSnafu, RecoverProcedureSnafu, Result, ShutdownInstanceSnafu,
+    StartProcedureManagerSnafu, StopProcedureManagerSnafu,
 };
 use crate::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use crate::heartbeat::handler::HandlerGroupExecutor;
@@ -256,10 +257,17 @@ impl Instance {
             .recover()
             .await
             .context(RecoverProcedureSnafu)?;
+        self.procedure_manager
+            .start()
+            .context(StartProcedureManagerSnafu)?;
         Ok(())
     }
 
     pub async fn shutdown(&self) -> Result<()> {
+        self.procedure_manager
+            .stop()
+            .await
+            .context(StopProcedureManagerSnafu)?;
         if let Some(heartbeat_task) = &self.heartbeat_task {
             heartbeat_task
                 .close()
@@ -566,6 +574,7 @@ pub(crate) async fn create_procedure_manager(
     let manager_config = ManagerConfig {
         max_retry_times: procedure_config.max_retry_times,
         retry_delay: procedure_config.retry_delay,
+        ..Default::default()
     };
 
     Ok(Arc::new(LocalManager::new(manager_config, state_store)))

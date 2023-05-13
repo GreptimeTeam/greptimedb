@@ -453,6 +453,16 @@ pub enum Error {
 
     #[snafu(display("Payload not exist"))]
     PayloadNotExist { location: Location },
+
+    #[snafu(display("Failed to start the procedure manager"))]
+    StartProcedureManager {
+        source: common_procedure::error::Error,
+    },
+
+    #[snafu(display("Failed to stop the procedure manager"))]
+    StopProcedureManager {
+        source: common_procedure::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -548,6 +558,9 @@ impl ErrorExt for Error {
                 source.status_code()
             }
             WaitProcedure { source, .. } => source.status_code(),
+            StartProcedureManager { source } | StopProcedureManager { source } => {
+                source.status_code()
+            }
         }
     }
 

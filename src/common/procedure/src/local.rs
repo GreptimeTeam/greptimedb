@@ -21,12 +21,16 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use backon::ExponentialBuilder;
+use common_runtime::RepeatedTask;
 use common_telemetry::logging;
-use snafu::ensure;
+use snafu::{ensure, ResultExt};
 use tokio::sync::watch::{self, Receiver, Sender};
 use tokio::sync::Notify;
 
-use crate::error::{DuplicateProcedureSnafu, LoaderConflictSnafu, Result};
+use crate::error::{
+    DuplicateProcedureSnafu, LoaderConflictSnafu, Result, StartRemoveOutdatedMetaTaskSnafu,
+    StopRemoveOutdatedMetaTaskSnafu,
+};
 use crate::local::lock::LockMap;
 use crate::local::runner::Runner;
 use crate::procedure::BoxedProcedureLoader;
@@ -341,6 +345,8 @@ impl ManagerContext {
 pub struct ManagerConfig {
     pub max_retry_times: usize,
     pub retry_delay: Duration,
+    pub remove_outdated_meta_task_interval: Duration,
+    pub remove_outdated_meta_ttl: Duration,
 }
 
 impl Default for ManagerConfig {
@@ -348,6 +354,8 @@ impl Default for ManagerConfig {
         Self {
             max_retry_times: 3,
             retry_delay: Duration::from_millis(500),
+            remove_outdated_meta_task_interval: Duration::from_secs(60 * 10),
+            remove_outdated_meta_ttl: META_TTL,
         }
     }
 }
@@ -358,16 +366,26 @@ pub struct LocalManager {
     state_store: StateStoreRef,
     max_retry_times: usize,
     retry_delay: Duration,
+    remove_outdated_meta_task: RepeatedTask<Error>,
 }
 
 impl LocalManager {
     /// Create a new [LocalManager] with specific `config`.
     pub fn new(config: ManagerConfig, state_store: StateStoreRef) -> LocalManager {
+        let manager_ctx = Arc::new(ManagerContext::new());
+        let remove_outdated_meta_task = RepeatedTask::new(
+            config.remove_outdated_meta_task_interval,
+            Box::new(RemoveOutdatedMetaFunction {
+                manager_ctx: manager_ctx.clone(),
+                ttl: config.remove_outdated_meta_ttl,
+            }),
+        );
         LocalManager {
-            manager_ctx: Arc::new(ManagerContext::new()),
+            manager_ctx,
             state_store,
             max_retry_times: config.max_retry_times,
             retry_delay: config.retry_delay,
+            remove_outdated_meta_task,
         }
     }
 
@@ -419,15 +437,27 @@ impl ProcedureManager for LocalManager {
         Ok(())
     }
 
+    fn start(&self) -> Result<()> {
+        self.remove_outdated_meta_task
+            .start(common_runtime::bg_runtime())
+            .context(StartRemoveOutdatedMetaTaskSnafu)?;
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        self.remove_outdated_meta_task
+            .stop()
+            .await
+            .context(StopRemoveOutdatedMetaTaskSnafu)?;
+        Ok(())
+    }
+
     async fn submit(&self, procedure: ProcedureWithId) -> Result<Watcher> {
         let procedure_id = procedure.id;
         ensure!(
             !self.manager_ctx.contains_procedure(procedure_id),
             DuplicateProcedureSnafu { procedure_id }
         );
-
-        // TODO(yingwen): We can use a repeated task to remove outdated meta.
-        self.manager_ctx.remove_outdated_meta(META_TTL);
 
         self.submit_root(procedure.id, 0, procedure.procedure)
     }
@@ -487,15 +517,32 @@ impl ProcedureManager for LocalManager {
     }
 
     async fn procedure_state(&self, procedure_id: ProcedureId) -> Result<Option<ProcedureState>> {
-        self.manager_ctx.remove_outdated_meta(META_TTL);
-
         Ok(self.manager_ctx.state(procedure_id))
     }
 
     fn procedure_watcher(&self, procedure_id: ProcedureId) -> Option<Watcher> {
-        self.manager_ctx.remove_outdated_meta(META_TTL);
-
         self.manager_ctx.watcher(procedure_id)
+    }
+}
+
+struct RemoveOutdatedMetaFunction {
+    manager_ctx: Arc<ManagerContext>,
+    ttl: Duration,
+}
+
+use common_runtime::TaskFunction;
+
+use crate::error::Error;
+
+#[async_trait::async_trait]
+impl TaskFunction<Error> for RemoveOutdatedMetaFunction {
+    fn name(&self) -> &str {
+        "ProcedureManager-remove-outdated-meta-task"
+    }
+
+    async fn call(&mut self) -> Result<()> {
+        self.manager_ctx.remove_outdated_meta(self.ttl);
+        Ok(())
     }
 }
 
@@ -639,6 +686,7 @@ mod tests {
         let config = ManagerConfig {
             max_retry_times: 3,
             retry_delay: Duration::from_millis(500),
+            ..Default::default()
         };
         let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
         let manager = LocalManager::new(config, state_store);
@@ -660,6 +708,7 @@ mod tests {
         let config = ManagerConfig {
             max_retry_times: 3,
             retry_delay: Duration::from_millis(500),
+            ..Default::default()
         };
         let state_store = Arc::new(ObjectStateStore::new(object_store.clone()));
         let manager = LocalManager::new(config, state_store);
@@ -706,6 +755,7 @@ mod tests {
         let config = ManagerConfig {
             max_retry_times: 3,
             retry_delay: Duration::from_millis(500),
+            ..Default::default()
         };
         let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
         let manager = LocalManager::new(config, state_store);
@@ -754,6 +804,7 @@ mod tests {
         let config = ManagerConfig {
             max_retry_times: 3,
             retry_delay: Duration::from_millis(500),
+            ..Default::default()
         };
         let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
         let manager = LocalManager::new(config, state_store);
@@ -806,5 +857,60 @@ mod tests {
 
         check_procedure(MockProcedure { panic: false }).await;
         check_procedure(MockProcedure { panic: true }).await;
+    }
+
+    #[tokio::test]
+    async fn test_remove_outdated_meta_task() {
+        let dir = create_temp_dir("remove_outdated_meta_task");
+        let object_store = test_util::new_object_store(&dir);
+        let config = ManagerConfig {
+            max_retry_times: 3,
+            retry_delay: Duration::from_millis(500),
+            remove_outdated_meta_task_interval: Duration::from_millis(1),
+            remove_outdated_meta_ttl: Duration::from_millis(1),
+        };
+        let state_store = Arc::new(ObjectStateStore::new(object_store.clone()));
+        let manager = LocalManager::new(config, state_store);
+
+        let mut procedure = ProcedureToLoad::new("submit");
+        procedure.lock_key = LockKey::single("test.submit");
+        let procedure_id = ProcedureId::random();
+        manager
+            .submit(ProcedureWithId {
+                id: procedure_id,
+                procedure: Box::new(procedure),
+            })
+            .await
+            .unwrap();
+        let mut watcher = manager.procedure_watcher(procedure_id).unwrap();
+        watcher.changed().await.unwrap();
+        manager.start().unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(manager
+            .procedure_state(procedure_id)
+            .await
+            .unwrap()
+            .is_none());
+
+        //The remove_outdated_meta method has been stopped, so any procedure meta-data will not be automatically removed.
+        manager.stop().await.unwrap();
+        let mut procedure = ProcedureToLoad::new("submit");
+        procedure.lock_key = LockKey::single("test.submit");
+        let procedure_id = ProcedureId::random();
+        manager
+            .submit(ProcedureWithId {
+                id: procedure_id,
+                procedure: Box::new(procedure),
+            })
+            .await
+            .unwrap();
+        let mut watcher = manager.procedure_watcher(procedure_id).unwrap();
+        watcher.changed().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(manager
+            .procedure_state(procedure_id)
+            .await
+            .unwrap()
+            .is_some());
     }
 }
