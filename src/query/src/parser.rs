@@ -31,6 +31,7 @@ use crate::error::{
 use crate::metrics::{METRIC_PARSE_PROMQL_ELAPSED, METRIC_PARSE_SQL_ELAPSED};
 
 const DEFAULT_LOOKBACK: u64 = 5 * 60; // 5m
+pub const DEFAULT_LOOKBACK_STRING: &str = "5m";
 
 #[derive(Debug, Clone)]
 pub enum QueryStatement {

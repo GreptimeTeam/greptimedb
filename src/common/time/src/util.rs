@@ -22,6 +22,13 @@ pub fn current_time_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
+/// Returns the day before the current time in rfc3339 format.
+pub fn day_before_current_time_rfc3339() -> String {
+    let now = chrono::Utc::now();
+    let day_before = now - chrono::Duration::days(1);
+    day_before.to_rfc3339()
+}
+
 /// Port of rust unstable features `int_roundings`.
 pub(crate) fn div_ceil(this: i64, rhs: i64) -> i64 {
     let d = this / rhs;

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! prom supply the prometheus HTTP API Server compliance
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -27,7 +27,7 @@ use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::info;
-use common_time::util::current_time_rfc3339;
+use common_time::util::{current_time_rfc3339, day_before_current_time_rfc3339};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVector;
 use datatypes::vectors::{Float64Vector, StringVector, TimestampMillisecondVector};
@@ -37,8 +37,9 @@ use promql_parser::parser::{
     AggregateExpr, BinaryExpr, Call, Expr as PromqlExpr, MatrixSelector, ParenExpr, SubqueryExpr,
     UnaryExpr, ValueType, VectorSelector,
 };
-use query::parser::PromQuery;
+use query::parser::{PromQuery, DEFAULT_LOOKBACK_STRING};
 use schemars::JsonSchema;
+use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use session::context::{QueryContext, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -51,7 +52,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::auth::UserProviderRef;
 use crate::error::{
-    AlreadyStartedSnafu, CollectRecordbatchSnafu, InternalSnafu, NotSupportedSnafu, Result,
+    AlreadyStartedSnafu, CollectRecordbatchSnafu, Error, InternalSnafu, NotSupportedSnafu, Result,
     StartHttpSnafu,
 };
 use crate::http::authorize::HttpAuth;
@@ -88,11 +89,12 @@ impl PromServer {
     }
 
     pub fn make_app(&self) -> Router {
-        // TODO(ruihang): implement format_query, series, labels, values, query_examplars and targets methods
+        // TODO(ruihang): implement format_query, series, values, query_examplars and targets methods
 
         let router = Router::new()
             .route("/query", routing::post(instant_query).get(instant_query))
             .route("/query_range", routing::post(range_query).get(range_query))
+            .route("/labels", routing::post(labels_query).get(labels_query))
             .with_state(self.query_handler.clone());
 
         Router::new()
@@ -169,10 +171,23 @@ pub struct PromSeries {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
-pub struct PromData {
+pub struct NormalPromData {
     #[serde(rename = "resultType")]
     pub result_type: String,
     pub result: Vec<PromSeries>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(untagged)]
+pub enum PromData {
+    NormalPromData(NormalPromData),
+    LabelsPromData(Vec<String>),
+}
+
+impl Default for PromData {
+    fn default() -> Self {
+        PromData::NormalPromData(Default::default())
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -236,10 +251,9 @@ impl PromJsonResponse {
                         result_type,
                     )?)
                 }
-                Output::AffectedRows(_) => Self::error(
-                    "unexpected result",
-                    "expected data result, but got affected rows",
-                ),
+                Output::AffectedRows(_) => {
+                    Self::error("Unexpected", "expected data result, but got affected rows")
+                }
             };
 
             json
@@ -254,10 +268,10 @@ impl PromJsonResponse {
                 if err.status_code() == StatusCode::TableNotFound
                     || err.status_code() == StatusCode::TableColumnNotFound
                 {
-                    Self::success(PromData {
+                    Self::success(PromData::NormalPromData(NormalPromData {
                         result_type: result_type_string,
                         ..Default::default()
-                    })
+                    }))
                 } else {
                     Self::error(err.status_code().to_string(), err.to_string())
                 }
@@ -383,10 +397,10 @@ impl PromJsonResponse {
             .collect::<Result<Vec<_>>>()?;
 
         let result_type_string = result_type.map(|t| t.to_string()).unwrap_or_default();
-        let data = PromData {
+        let data = PromData::NormalPromData(NormalPromData {
             result_type: result_type_string,
             result,
-        };
+        });
 
         Ok(data)
     }
@@ -461,6 +475,206 @@ pub async fn range_query(
     let (metric_name, _) =
         retrieve_metric_name_and_result_type(&prom_query.query).unwrap_or_default();
     PromJsonResponse::from_query_result(result, metric_name, Some(ValueType::Matrix)).await
+}
+
+#[derive(Debug, Default, Serialize, JsonSchema)]
+struct Matchs(Option<String>);
+
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct RawLabelsQuery {
+    start: Option<String>,
+    end: Option<String>,
+    #[serde(rename = "match[]", flatten)]
+    matchs: Matchs,
+    db: Option<String>,
+}
+
+// Custom Deserialize method to support parsing repeated match[]
+impl<'de> Deserialize<'de> for Matchs {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Matchs, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        struct MatchsVisitor;
+
+        impl<'d> Visitor<'d> for MatchsVisitor {
+            type Value = Option<String>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a string")
+            }
+
+            fn visit_map<M>(self, mut access: M) -> std::result::Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'d>,
+            {
+                let mut matchs = String::new();
+                while let Some((_, value)) = access.next_entry::<String, String>()? {
+                    matchs.push_str(&value);
+                    // use $ as separator, because promethues don't use $.
+                    matchs.push('$');
+                }
+                if matchs.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(matchs))
+                }
+            }
+        }
+        Ok(Matchs(deserializer.deserialize_map(MatchsVisitor)?))
+    }
+}
+
+#[axum_macros::debug_handler]
+pub async fn labels_query(
+    State(handler): State<PromHandlerRef>,
+    Query(params): Query<RawLabelsQuery>,
+    Form(form_params): Form<RawLabelsQuery>,
+) -> Json<PromJsonResponse> {
+    let matchs: Option<Vec<String>> = params.matchs.0.map(|s| {
+        s.split('$')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_owned())
+            .collect()
+    });
+    let form_matchs: Option<Vec<String>> = form_params.matchs.0.map(|s| {
+        s.split('$')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_owned())
+            .collect()
+    });
+
+    if matchs.is_none() && form_matchs.is_none() {
+        return PromJsonResponse::error("Unsupported", "match[] parameter is required");
+    }
+
+    let querys = matchs.or(form_matchs).unwrap();
+
+    let start = params
+        .start
+        .or(form_params.start)
+        .unwrap_or_else(day_before_current_time_rfc3339);
+    let end = params
+        .end
+        .or(form_params.end)
+        .unwrap_or_else(current_time_rfc3339);
+
+    let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
+    let (catalog, schema) = super::parse_catalog_and_schema_from_client_database_name(db);
+
+    let mut labels: HashSet<String> = HashSet::new();
+    labels.insert(METRIC_NAME.to_string());
+
+    for query in querys {
+        let prom_query = PromQuery {
+            query,
+            start: start.clone(),
+            end: end.clone(),
+            step: DEFAULT_LOOKBACK_STRING.to_string(),
+        };
+
+        let query_ctx = QueryContext::with(catalog, schema);
+        let result = handler.do_query(&prom_query, Arc::new(query_ctx)).await;
+
+        let response = retrieve_labels_name_from_query_result(result, &mut labels).await;
+
+        if let Err(err) = response {
+            // Prometheus won't report error if querying nonexist label and metric
+            if err.status_code() != StatusCode::TableNotFound
+                && err.status_code() != StatusCode::TableColumnNotFound
+            {
+                return PromJsonResponse::error(err.status_code().to_string(), err.to_string());
+            }
+        }
+    }
+
+    let mut sorted_labels: Vec<String> = labels.into_iter().collect();
+    sorted_labels.sort();
+    PromJsonResponse::success(PromData::LabelsPromData(sorted_labels))
+}
+
+/// Retrieve labels name from query result
+async fn retrieve_labels_name_from_query_result(
+    result: Result<Output>,
+    labels: &mut HashSet<String>,
+) -> Result<()> {
+    match result? {
+        Output::RecordBatches(batches) => {
+            record_batches_to_labels_name(batches, labels)?;
+            Ok(())
+        }
+        Output::Stream(stream) => {
+            let batches = RecordBatches::try_collect(stream)
+                .await
+                .context(CollectRecordbatchSnafu)?;
+            record_batches_to_labels_name(batches, labels)?;
+            Ok(())
+        }
+        Output::AffectedRows(_) => Err(Error::UnexpectedResult {
+            reason: "expected data result, but got affected rows".to_string(),
+        }),
+    }
+}
+
+/// Retrieve labels name from record batches
+fn record_batches_to_labels_name(
+    batches: RecordBatches,
+    labels: &mut HashSet<String>,
+) -> Result<()> {
+    let mut tag_column_indices = Vec::new();
+    let mut field_column_indices = Vec::new();
+    for (i, column) in batches.schema().column_schemas().iter().enumerate() {
+        match column.data_type {
+            ConcreteDataType::Float64(_) => {
+                field_column_indices.push(i);
+            }
+            ConcreteDataType::String(_) => {
+                tag_column_indices.push(i);
+            }
+            _ => {}
+        }
+    }
+
+    if field_column_indices.is_empty() {
+        return Err(Error::Internal {
+            err_msg: "no value column found".to_string(),
+        });
+    }
+
+    for batch in batches.iter() {
+        let tag_names = tag_column_indices
+            .iter()
+            .map(|c| batches.schema().column_name_by_index(*c).to_string())
+            .collect::<Vec<_>>();
+
+        let field_columns = field_column_indices
+            .iter()
+            .map(|i| {
+                batch
+                    .column(*i)
+                    .as_any()
+                    .downcast_ref::<Float64Vector>()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        for row_index in 0..batch.num_rows() {
+            // if all field columns are null, skip this row
+            if field_columns
+                .iter()
+                .all(|c| c.get_data(row_index).is_none())
+            {
+                continue;
+            }
+
+            // if a field is not null, record the tag name and return
+            tag_names.iter().for_each(|tag_name| {
+                labels.insert(tag_name.to_string());
+            });
+            return Ok(());
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn retrieve_metric_name_and_result_type(
