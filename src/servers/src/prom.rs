@@ -478,26 +478,26 @@ pub async fn range_query(
 }
 
 #[derive(Debug, Default, Serialize, JsonSchema)]
-struct Matchs(Option<String>);
+struct Matches(Option<String>);
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct RawLabelsQuery {
     start: Option<String>,
     end: Option<String>,
     #[serde(rename = "match[]", flatten)]
-    matchs: Matchs,
+    matches: Matches,
     db: Option<String>,
 }
 
 // Custom Deserialize method to support parsing repeated match[]
-impl<'de> Deserialize<'de> for Matchs {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Matchs, D::Error>
+impl<'de> Deserialize<'de> for Matches {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Matches, D::Error>
     where
         D: de::Deserializer<'de>,
     {
-        struct MatchsVisitor;
+        struct MatchesVisitor;
 
-        impl<'d> Visitor<'d> for MatchsVisitor {
+        impl<'d> Visitor<'d> for MatchesVisitor {
             type Value = Option<String>;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -508,22 +508,22 @@ impl<'de> Deserialize<'de> for Matchs {
             where
                 M: MapAccess<'d>,
             {
-                let mut matchs = String::new();
+                let mut matches = String::new();
                 while let Some((key, value)) = access.next_entry::<String, String>()? {
                     if key == "match[]" {
-                        matchs.push_str(&value);
+                        matches.push_str(&value);
                         // use $ as separator, because promethues don't use $.
-                        matchs.push('$');
+                        matches.push('$');
                     }
                 }
-                if matchs.is_empty() {
+                if matches.is_empty() {
                     Ok(None)
                 } else {
-                    Ok(Some(matchs))
+                    Ok(Some(matches))
                 }
             }
         }
-        Ok(Matchs(deserializer.deserialize_map(MatchsVisitor)?))
+        Ok(Matches(deserializer.deserialize_map(MatchesVisitor)?))
     }
 }
 
@@ -533,24 +533,24 @@ pub async fn labels_query(
     Query(params): Query<RawLabelsQuery>,
     Form(form_params): Form<RawLabelsQuery>,
 ) -> Json<PromJsonResponse> {
-    let matchs: Option<Vec<String>> = params.matchs.0.map(|s| {
+    let matches: Option<Vec<String>> = params.matches.0.map(|s| {
         s.split('$')
             .filter(|s| !s.is_empty())
             .map(|s| s.to_owned())
             .collect()
     });
-    let form_matchs: Option<Vec<String>> = form_params.matchs.0.map(|s| {
+    let form_matches: Option<Vec<String>> = form_params.matches.0.map(|s| {
         s.split('$')
             .filter(|s| !s.is_empty())
             .map(|s| s.to_owned())
             .collect()
     });
 
-    if matchs.is_none() && form_matchs.is_none() {
+    if matches.is_none() && form_matches.is_none() {
         return PromJsonResponse::error("Unsupported", "match[] parameter is required");
     }
 
-    let querys = matchs.or(form_matchs).unwrap();
+    let querys = matches.or(form_matches).unwrap();
 
     let start = params
         .start
