@@ -481,7 +481,7 @@ pub async fn range_query(
 struct Matches(Option<String>);
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
-pub struct RawLabelsQuery {
+pub struct LabelsQuery {
     start: Option<String>,
     end: Option<String>,
     #[serde(rename = "match[]", flatten)]
@@ -530,8 +530,8 @@ impl<'de> Deserialize<'de> for Matches {
 #[axum_macros::debug_handler]
 pub async fn labels_query(
     State(handler): State<PromHandlerRef>,
-    Query(params): Query<RawLabelsQuery>,
-    Form(form_params): Form<RawLabelsQuery>,
+    Query(params): Query<LabelsQuery>,
+    Form(form_params): Form<LabelsQuery>,
 ) -> Json<PromJsonResponse> {
     let matches: Option<Vec<String>> = params.matches.0.map(|s| {
         s.split('$')
