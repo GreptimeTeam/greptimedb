@@ -500,13 +500,13 @@ pub enum Error {
         source: RuntimeError,
     },
 
-    #[snafu(display("Failed to convert columns to rows"))]
+    #[snafu(display("Failed to convert columns to rows, source: {}", source))]
     ConvertColumnsToRows {
         source: ArrowError,
         location: Location,
     },
 
-    #[snafu(display("Failed to sort arrays"))]
+    #[snafu(display("Failed to sort arrays, source: {}", source))]
     SortArrays {
         source: ArrowError,
         location: Location,
