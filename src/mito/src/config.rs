@@ -15,4 +15,6 @@
 //! Table Engine config
 
 #[derive(Debug, Clone, Default)]
-pub struct EngineConfig {}
+pub struct EngineConfig {
+    pub manifest_use_compress: bool,
+}

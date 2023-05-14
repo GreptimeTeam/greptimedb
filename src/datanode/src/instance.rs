@@ -114,7 +114,9 @@ impl Instance {
         let log_store = Arc::new(create_log_store(&opts.wal).await?);
 
         let mito_engine = Arc::new(DefaultEngine::new(
-            TableEngineConfig::default(),
+            TableEngineConfig {
+                manifest_use_compress: opts.storage.manifest.use_compress,
+            },
             EngineImpl::new(
                 StorageEngineConfig::from(opts),
                 log_store.clone(),

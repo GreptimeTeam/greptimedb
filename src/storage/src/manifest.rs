@@ -23,3 +23,4 @@ pub(crate) mod storage;
 pub mod test_utils;
 
 pub use self::impl_::*;
+pub use self::storage::manifest_compress_type;

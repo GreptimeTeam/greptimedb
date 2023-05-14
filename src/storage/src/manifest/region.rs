@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use common_datasource::compression::CompressionType;
 use common_telemetry::{info, warn};
 use object_store::ObjectStore;
 use store_api::manifest::action::ProtocolAction;
@@ -148,12 +149,14 @@ impl RegionManifest {
     pub fn with_checkpointer(
         manifest_dir: &str,
         object_store: ObjectStore,
+        compress_type: CompressionType,
         checkpoint_actions_margin: Option<u16>,
         gc_duration: Option<Duration>,
     ) -> Self {
         Self::new(
             manifest_dir,
             object_store,
+            compress_type,
             checkpoint_actions_margin,
             gc_duration,
             Some(Arc::new(RegionManifestCheckpointer {
@@ -198,7 +201,13 @@ mod tests {
         builder.root(&tmp_dir.path().to_string_lossy());
         let object_store = ObjectStore::new(builder).unwrap().finish();
 
-        let manifest = RegionManifest::with_checkpointer("/manifest/", object_store, None, None);
+        let manifest = RegionManifest::with_checkpointer(
+            "/manifest/",
+            object_store,
+            CompressionType::Uncompressed,
+            None,
+            None,
+        );
         manifest.start().await.unwrap();
 
         let region_meta = Arc::new(build_region_meta());
@@ -316,6 +325,7 @@ mod tests {
         let manifest = RegionManifest::with_checkpointer(
             "/manifest/",
             object_store,
+            CompressionType::Uncompressed,
             None,
             Some(Duration::from_millis(50)),
         );

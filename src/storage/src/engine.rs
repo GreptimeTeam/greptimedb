@@ -32,6 +32,7 @@ use crate::error::{self, Error, Result};
 use crate::file_purger::{FilePurgeHandler, FilePurgerRef};
 use crate::flush::{FlushScheduler, FlushSchedulerRef, FlushStrategyRef, SizeBasedStrategy};
 use crate::manifest::region::RegionManifest;
+use crate::manifest::storage::manifest_compress_type;
 use crate::memtable::{DefaultMemtableBuilder, MemtableBuilderRef};
 use crate::metadata::RegionMetadata;
 use crate::region::{RegionImpl, StoreConfig};
@@ -404,6 +405,7 @@ impl<S: LogStore> EngineInner<S> {
         let manifest = RegionManifest::with_checkpointer(
             &manifest_dir,
             self.object_store.clone(),
+            manifest_compress_type(config.manifest_use_compress),
             config.manifest_checkpoint_margin,
             config.manifest_gc_duration,
         );

@@ -19,6 +19,7 @@ common-error = { path = "../common/error" }
 common-procedure = { path = "../common/procedure" }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
+common-datasource = { path = "../common/datasource" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
 dashmap = "5.4"

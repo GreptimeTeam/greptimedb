@@ -236,6 +236,7 @@ mod tests {
             checkpoint_margin = 9
             gc_duration = '7s'
             checkpoint_on_startup = true
+            use_compress = true
 
             [logging]
             level = "debug"
@@ -295,6 +296,7 @@ mod tests {
                 checkpoint_margin: Some(9),
                 gc_duration: Some(Duration::from_secs(7)),
                 checkpoint_on_startup: true,
+                use_compress: true
             },
             options.storage.manifest,
         );

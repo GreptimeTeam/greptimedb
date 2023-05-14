@@ -5003,6 +5003,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "common-catalog",
+ "common-datasource",
  "common-error",
  "common-procedure",
  "common-procedure-test",

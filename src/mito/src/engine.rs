@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 pub use common_catalog::consts::MITO_ENGINE;
+use common_datasource::compression::CompressionType;
 use common_error::ext::BoxedError;
 use common_procedure::{BoxedProcedure, ProcedureManager};
 use common_telemetry::{debug, logging};
@@ -29,6 +30,7 @@ use datatypes::schema::Schema;
 use key_lock::KeyLock;
 use object_store::ObjectStore;
 use snafu::{ensure, OptionExt, ResultExt};
+use storage::manifest::manifest_compress_type;
 use store_api::storage::{
     ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyDescriptorBuilder, ColumnId,
     EngineContext as StorageEngineContext, OpenOptions, RowKeyDescriptor, RowKeyDescriptorBuilder,
@@ -247,6 +249,7 @@ pub(crate) struct MitoEngineInner<S: StorageEngine> {
     /// Writing to `tables` should also hold the `table_mutex`.
     tables: DashMap<String, Arc<MitoTable<S::Region>>>,
     object_store: ObjectStore,
+    compress_type: CompressionType,
     storage_engine: S,
     /// Table mutex is used to protect the operations such as creating/opening/closing
     /// a table, to avoid things like opening the same table simultaneously.
@@ -502,6 +505,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         let manifest = MitoTable::<<S as StorageEngine>::Region>::build_manifest(
             table_dir,
             self.object_store.clone(),
+            self.compress_type,
         );
         let  Some(table_info) =
             MitoTable::<<S as StorageEngine>::Region>::recover_table_info(table_name, &manifest)
@@ -549,11 +553,12 @@ async fn close_table(lock: Arc<KeyLock<String>>, table: TableRef) -> TableResult
 }
 
 impl<S: StorageEngine> MitoEngineInner<S> {
-    fn new(_config: EngineConfig, storage_engine: S, object_store: ObjectStore) -> Self {
+    fn new(config: EngineConfig, storage_engine: S, object_store: ObjectStore) -> Self {
         Self {
             tables: DashMap::new(),
             storage_engine,
             object_store,
+            compress_type: manifest_compress_type(config.manifest_use_compress),
             table_mutex: Arc::new(KeyLock::new()),
         }
     }

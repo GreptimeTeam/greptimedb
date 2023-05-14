@@ -23,6 +23,7 @@ mod projection;
 
 use std::collections::{HashMap, HashSet};
 
+use common_datasource::compression::CompressionType;
 use common_telemetry::logging;
 use common_test_util::temp_dir::create_temp_dir;
 use datatypes::prelude::{ScalarVector, WrapperType};
@@ -314,8 +315,13 @@ async fn test_recover_region_manifets() {
     builder.root(&tmp_dir.path().to_string_lossy());
     let object_store = ObjectStore::new(builder).unwrap().finish();
 
-    let manifest =
-        RegionManifest::with_checkpointer("/manifest/", object_store.clone(), None, None);
+    let manifest = RegionManifest::with_checkpointer(
+        "/manifest/",
+        object_store.clone(),
+        CompressionType::Uncompressed,
+        None,
+        None,
+    );
     let region_meta = Arc::new(build_region_meta());
 
     let sst_layer = Arc::new(FsAccessLayer::new("sst", object_store)) as _;
