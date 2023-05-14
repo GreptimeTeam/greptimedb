@@ -509,10 +509,12 @@ impl<'de> Deserialize<'de> for Matchs {
                 M: MapAccess<'d>,
             {
                 let mut matchs = String::new();
-                while let Some((_, value)) = access.next_entry::<String, String>()? {
-                    matchs.push_str(&value);
-                    // use $ as separator, because promethues don't use $.
-                    matchs.push('$');
+                while let Some((key, value)) = access.next_entry::<String, String>()? {
+                    if key == "match[]" {
+                        matchs.push_str(&value);
+                        // use $ as separator, because promethues don't use $.
+                        matchs.push('$');
+                    }
                 }
                 if matchs.is_empty() {
                     Ok(None)
