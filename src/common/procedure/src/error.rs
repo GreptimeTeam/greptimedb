@@ -128,7 +128,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Faield to stop the remove_outdated_meta method"))]
+    #[snafu(display("Failed to stop the remove_outdated_meta method"))]
     StopRemoveOutdatedMetaTask {
         source: common_runtime::error::Error,
         location: Location,
