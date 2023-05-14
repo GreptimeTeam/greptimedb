@@ -512,7 +512,7 @@ impl<'de> Deserialize<'de> for Matches {
                 while let Some((key, value)) = access.next_entry::<String, String>()? {
                     if key == "match[]" {
                         matches.push_str(&value);
-                        // use $ as separator, because promethues don't use $.
+                        // use $ as separator, because prometheus don't use $.
                         matches.push('$');
                     }
                 }
@@ -550,7 +550,7 @@ pub async fn labels_query(
         return PromJsonResponse::error("Unsupported", "match[] parameter is required");
     }
 
-    let querys = matches.or(form_matches).unwrap();
+    let queries = matches.or(form_matches).unwrap();
 
     let start = params
         .start
@@ -567,7 +567,7 @@ pub async fn labels_query(
     let mut labels: HashSet<String> = HashSet::new();
     labels.insert(METRIC_NAME.to_string());
 
-    for query in querys {
+    for query in queries {
         let prom_query = PromQuery {
             query,
             start: start.clone(),
