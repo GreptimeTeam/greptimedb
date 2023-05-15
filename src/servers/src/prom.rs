@@ -27,7 +27,7 @@ use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::info;
-use common_time::util::{current_time_rfc3339, day_before_current_time_rfc3339};
+use common_time::util::{current_time_rfc3339, yesterday_rfc3339};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVector;
 use datatypes::vectors::{Float64Vector, StringVector, TimestampMillisecondVector};
@@ -56,6 +56,7 @@ use crate::error::{
     StartHttpSnafu,
 };
 use crate::http::authorize::HttpAuth;
+use crate::prometheus::{FIELD_COLUMN_NAME, TIMESTAMP_COLUMN_NAME};
 use crate::server::Server;
 
 pub const PROM_API_VERSION: &str = "v1";
@@ -171,7 +172,7 @@ pub struct PromSeries {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
-pub struct NormalPromData {
+pub struct PromData {
     #[serde(rename = "resultType")]
     pub result_type: String,
     pub result: Vec<PromSeries>,
@@ -179,21 +180,21 @@ pub struct NormalPromData {
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(untagged)]
-pub enum PromData {
-    NormalPromData(NormalPromData),
-    LabelsPromData(Vec<String>),
+pub enum PromResponse {
+    PromData(PromData),
+    Labels(Vec<String>),
 }
 
-impl Default for PromData {
+impl Default for PromResponse {
     fn default() -> Self {
-        PromData::NormalPromData(Default::default())
+        PromResponse::PromData(Default::default())
     }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct PromJsonResponse {
     pub status: String,
-    pub data: PromData,
+    pub data: PromResponse,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -211,14 +212,14 @@ impl PromJsonResponse {
     {
         Json(PromJsonResponse {
             status: "error".to_string(),
-            data: PromData::default(),
+            data: PromResponse::default(),
             error: Some(reason.into()),
             error_type: Some(error_type.into()),
             warnings: None,
         })
     }
 
-    pub fn success(data: PromData) -> Json<Self> {
+    pub fn success(data: PromResponse) -> Json<Self> {
         Json(PromJsonResponse {
             status: "success".to_string(),
             data,
@@ -268,7 +269,7 @@ impl PromJsonResponse {
                 if err.status_code() == StatusCode::TableNotFound
                     || err.status_code() == StatusCode::TableColumnNotFound
                 {
-                    Self::success(PromData::NormalPromData(NormalPromData {
+                    Self::success(PromResponse::PromData(PromData {
                         result_type: result_type_string,
                         ..Default::default()
                     }))
@@ -284,7 +285,7 @@ impl PromJsonResponse {
         batches: RecordBatches,
         metric_name: String,
         result_type: Option<ValueType>,
-    ) -> Result<PromData> {
+    ) -> Result<PromResponse> {
         // infer semantic type of each column from schema.
         // TODO(ruihang): wish there is a better way to do this.
         let mut timestamp_column_index = None;
@@ -397,7 +398,7 @@ impl PromJsonResponse {
             .collect::<Result<Vec<_>>>()?;
 
         let result_type_string = result_type.map(|t| t.to_string()).unwrap_or_default();
-        let data = PromData::NormalPromData(NormalPromData {
+        let data = PromResponse::PromData(PromData {
             result_type: result_type_string,
             result,
         });
@@ -478,13 +479,13 @@ pub async fn range_query(
 }
 
 #[derive(Debug, Default, Serialize, JsonSchema)]
-struct Matches(Option<String>);
+struct Matches(Vec<String>);
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct LabelsQuery {
     start: Option<String>,
     end: Option<String>,
-    #[serde(rename = "match[]", flatten)]
+    #[serde(flatten)]
     matches: Matches,
     db: Option<String>,
 }
@@ -498,7 +499,7 @@ impl<'de> Deserialize<'de> for Matches {
         struct MatchesVisitor;
 
         impl<'d> Visitor<'d> for MatchesVisitor {
-            type Value = Option<String>;
+            type Value = Vec<String>;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
                 formatter.write_str("a string")
@@ -508,19 +509,13 @@ impl<'de> Deserialize<'de> for Matches {
             where
                 M: MapAccess<'d>,
             {
-                let mut matches = String::new();
+                let mut matches = Vec::new();
                 while let Some((key, value)) = access.next_entry::<String, String>()? {
                     if key == "match[]" {
-                        matches.push_str(&value);
-                        // use $ as separator, because prometheus don't use $.
-                        matches.push('$');
+                        matches.push(value);
                     }
                 }
-                if matches.is_empty() {
-                    Ok(None)
-                } else {
-                    Ok(Some(matches))
-                }
+                Ok(matches)
             }
         }
         Ok(Matches(deserializer.deserialize_map(MatchesVisitor)?))
@@ -533,25 +528,18 @@ pub async fn labels_query(
     Query(params): Query<LabelsQuery>,
     Form(form_params): Form<LabelsQuery>,
 ) -> Json<PromJsonResponse> {
-    let matches: Option<Vec<String>> = params.matches.0.map(|s| {
-        s.split('$')
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_owned())
-            .collect()
-    });
-    let Some(queries) = matches.or_else(|| {
-        form_params.matches.0.map(|s| {
-            s.split('$')
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_owned())
-                .collect::<Vec<String>>()
-        })}
-    ) else { return PromJsonResponse::error("Unsupported", "match[] parameter is required"); };
+    let mut queries: Vec<String> = params.matches.0;
+    if queries.is_empty() {
+        queries = form_params.matches.0;
+    }
+    if queries.is_empty() {
+        return PromJsonResponse::error("Unsupported", "match[] parameter is required");
+    }
 
     let start = params
         .start
         .or(form_params.start)
-        .unwrap_or_else(day_before_current_time_rfc3339);
+        .unwrap_or_else(yesterday_rfc3339);
     let end = params
         .end
         .or(form_params.end)
@@ -569,6 +557,7 @@ pub async fn labels_query(
             query,
             start: start.clone(),
             end: end.clone(),
+            // TODO: find a better value for step
             step: DEFAULT_LOOKBACK_STRING.to_string(),
         };
 
@@ -586,9 +575,12 @@ pub async fn labels_query(
         }
     }
 
+    labels.remove(TIMESTAMP_COLUMN_NAME);
+    labels.remove(FIELD_COLUMN_NAME);
+
     let mut sorted_labels: Vec<String> = labels.into_iter().collect();
     sorted_labels.sort();
-    PromJsonResponse::success(PromData::LabelsPromData(sorted_labels))
+    PromJsonResponse::success(PromResponse::Labels(sorted_labels))
 }
 
 /// Retrieve labels name from query result
@@ -623,15 +615,10 @@ fn record_batches_to_labels_name(
     let mut tag_column_indices = Vec::new();
     let mut field_column_indices = Vec::new();
     for (i, column) in batches.schema().column_schemas().iter().enumerate() {
-        match column.data_type {
-            ConcreteDataType::Float64(_) => {
-                field_column_indices.push(i);
-            }
-            ConcreteDataType::String(_) => {
-                tag_column_indices.push(i);
-            }
-            _ => {}
+        if let ConcreteDataType::Float64(_) = column.data_type {
+            field_column_indices.push(i);
         }
+        tag_column_indices.push(i);
     }
 
     if field_column_indices.is_empty() {

@@ -314,6 +314,19 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
+    // labels
+    let res = client
+        .get("/api/v1/labels?match[]=up&start=0&end=100")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = client
+        .post("/api/v1/labels?match[]=up&start=0&end=100")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
     guard.remove_all().await;
 }
 
