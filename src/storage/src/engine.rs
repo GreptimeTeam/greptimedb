@@ -553,4 +553,101 @@ mod tests {
 
         assert!(engine.get_region(&ctx, "no such region").unwrap().is_none());
     }
+
+    #[tokio::test]
+    async fn test_drop_region() {
+        common_telemetry::init_default_ut_logging();
+        let log_file_dir = create_temp_dir("test_engine_wal");
+        let log_file_dir_path = log_file_dir.path().to_str().unwrap();
+        let log_store = log_store_util::create_tmp_local_file_log_store(log_file_dir_path).await;
+        let dir = create_temp_dir("test_drop_new_region");
+        let store_dir = dir.path().to_string_lossy();
+
+        let mut builder = Fs::default();
+        builder.root(&store_dir);
+        let object_store = ObjectStore::new(builder).unwrap().finish();
+
+        let config = EngineConfig::default();
+
+        let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
+        let region_name = "test_region";
+        let region_id = 123456;
+
+        let engine = EngineImpl::new(
+            config,
+            Arc::new(log_store),
+            object_store,
+            compaction_scheduler,
+        );
+
+        let desc = RegionDescBuilder::new(region_name)
+            .id(region_id)
+            .push_key_column(("k1", LogicalTypeId::Int32, false))
+            .push_field_column(("v1", LogicalTypeId::Float32, true))
+            .timestamp(("ts", LogicalTypeId::TimestampMillisecond, false))
+            .build();
+        let ctx = EngineContext::default();
+        let region = engine
+            .create_region(&ctx, desc, &CreateOptions::default())
+            .await
+            .unwrap();
+
+        assert_eq!(region_name, region.name());
+
+        let mut wb = region.write_request();
+        let k1 = Arc::new(Int32Vector::from_slice([1, 2, 3])) as VectorRef;
+        let v1 = Arc::new(Float32Vector::from_slice([0.1, 0.2, 0.3])) as VectorRef;
+        let tsv = Arc::new(TimestampMillisecondVector::from_slice([0, 0, 0])) as VectorRef;
+
+        let mut put_data = HashMap::with_capacity(4);
+        put_data.insert("k1".to_string(), k1);
+        put_data.insert("v1".to_string(), v1);
+        put_data.insert("ts".to_string(), tsv);
+
+        wb.put(put_data).unwrap();
+        region.write(&WriteContext::default(), wb).await.unwrap();
+
+        // Flush memtable to sst.
+        region.flush(&FlushContext::default()).await.unwrap();
+        engine.close_region(&ctx, region).await.unwrap();
+
+        let dir_path = dir.path().join(region_name);
+
+        let files = dir_path
+            .read_dir()
+            .unwrap()
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().extension() == Some(OsStr::new("parquet")))
+            .map(|entry| entry.file_name())
+            .collect::<Vec<_>>();
+
+        assert_eq!(1, files.len());
+
+        {
+            let region = engine
+                .open_region(&ctx, region_name, &OpenOptions::default())
+                .await
+                .unwrap()
+                .unwrap();
+
+            engine.drop_region(&ctx, region).await.unwrap();
+            assert!(engine.get_region(&ctx, region_name).unwrap().is_none());
+        }
+
+        // Wait for gc
+        tokio::time::sleep(Duration::from_millis(60)).await;
+
+        let files = dir_path
+            .read_dir()
+            .unwrap()
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().extension() == Some(OsStr::new("parquet")))
+            .map(|entry| entry.file_name())
+            .collect::<Vec<_>>();
+
+        assert_eq!(0, files.len());
+
+    }
 }
