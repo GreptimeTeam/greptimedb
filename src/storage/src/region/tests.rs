@@ -23,7 +23,6 @@ mod projection;
 
 use std::collections::{HashMap, HashSet};
 
-use common_datasource::compression::CompressionType;
 use common_telemetry::logging;
 use common_test_util::temp_dir::create_temp_dir;
 use datatypes::prelude::{ScalarVector, WrapperType};
@@ -43,6 +42,7 @@ use super::*;
 use crate::chunk::ChunkReaderImpl;
 use crate::file_purger::noop::NoopFilePurgeHandler;
 use crate::manifest::action::{RegionChange, RegionMetaActionList};
+use crate::manifest::manifest_compress_type;
 use crate::manifest::test_utils::*;
 use crate::memtable::DefaultMemtableBuilder;
 use crate::scheduler::{LocalScheduler, SchedulerConfig};
@@ -306,7 +306,16 @@ async fn test_new_region() {
 }
 
 #[tokio::test]
-async fn test_recover_region_manifets() {
+async fn test_recover_region_manifets_compress() {
+    test_recover_region_manifets(true).await;
+}
+
+#[tokio::test]
+async fn test_recover_region_manifets_uncompress() {
+    test_recover_region_manifets(false).await;
+}
+
+async fn test_recover_region_manifets(compress: bool) {
     common_telemetry::init_default_ut_logging();
     let tmp_dir = create_temp_dir("test_recover_region_manifets");
     let memtable_builder = Arc::new(DefaultMemtableBuilder::default()) as _;
@@ -318,7 +327,7 @@ async fn test_recover_region_manifets() {
     let manifest = RegionManifest::with_checkpointer(
         "/manifest/",
         object_store.clone(),
-        CompressionType::Uncompressed,
+        manifest_compress_type(compress),
         None,
         None,
     );

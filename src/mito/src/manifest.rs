@@ -46,8 +46,7 @@ pub type TableManifest = ManifestImpl<NoopCheckpoint, TableMetaActionList>;
 
 #[cfg(test)]
 mod tests {
-    use common_datasource::compression::CompressionType;
-    use storage::manifest::MetaActionIteratorImpl;
+    use storage::manifest::{manifest_compress_type, MetaActionIteratorImpl};
     use store_api::manifest::action::ProtocolAction;
     use store_api::manifest::{Manifest, MetaActionIterator};
     use table::metadata::{RawTableInfo, TableInfo};
@@ -78,11 +77,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_table_manifest() {
+    async fn test_table_manifest_compress() {
+        test_table_manifest(true).await
+    }
+
+    #[tokio::test]
+    async fn test_table_manifest_uncompress() {
+        test_table_manifest(false).await
+    }
+
+    async fn test_table_manifest(compress: bool) {
         let (_dir, object_store) = test_util::new_test_object_store("test_table_manifest").await;
 
         let manifest =
-            TableManifest::create("manifest/", object_store, CompressionType::Uncompressed);
+            TableManifest::create("manifest/", object_store, manifest_compress_type(compress));
 
         let mut iter = manifest.scan(0, 100).await.unwrap();
         assert!(iter.next_action().await.unwrap().is_none());

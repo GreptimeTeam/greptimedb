@@ -189,12 +189,22 @@ mod tests {
     use store_api::manifest::{Manifest, MetaActionIterator, MAX_VERSION};
 
     use super::*;
+    use crate::manifest::manifest_compress_type;
     use crate::manifest::test_utils::*;
     use crate::metadata::RegionMetadata;
     use crate::sst::FileId;
 
     #[tokio::test]
-    async fn test_region_manifest() {
+    async fn test_region_manifest_compress() {
+        test_region_manifest(true).await
+    }
+
+    #[tokio::test]
+    async fn test_region_manifest_uncompress() {
+        test_region_manifest(false).await
+    }
+
+    async fn test_region_manifest(compress: bool) {
         common_telemetry::init_default_ut_logging();
         let tmp_dir = create_temp_dir("test_region_manifest");
         let mut builder = Fs::default();
@@ -204,7 +214,7 @@ mod tests {
         let manifest = RegionManifest::with_checkpointer(
             "/manifest/",
             object_store,
-            CompressionType::Uncompressed,
+            manifest_compress_type(compress),
             None,
             None,
         );
@@ -315,7 +325,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_region_manifest_checkpoint() {
+    async fn test_region_manifest_checkpoint_compress() {
+        test_region_manifest_checkpoint(true).await
+    }
+
+    #[tokio::test]
+    async fn test_region_manifest_checkpoint_uncompress() {
+        test_region_manifest_checkpoint(false).await
+    }
+
+    async fn test_region_manifest_checkpoint(compress: bool) {
         common_telemetry::init_default_ut_logging();
         let tmp_dir = create_temp_dir("test_region_manifest_checkpoint");
         let mut builder = Fs::default();
@@ -325,7 +344,7 @@ mod tests {
         let manifest = RegionManifest::with_checkpointer(
             "/manifest/",
             object_store,
-            CompressionType::Uncompressed,
+            manifest_compress_type(compress),
             None,
             Some(Duration::from_millis(50)),
         );
