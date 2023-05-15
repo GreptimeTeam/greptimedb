@@ -17,9 +17,9 @@ use std::sync::Arc;
 
 use common_query::Output;
 use common_recordbatch::util;
+use frontend::instance::Instance;
 use rstest_reuse::{self, template};
 
-use crate::instance::Instance;
 use crate::tests::{
     create_distributed_instance, create_standalone_instance, MockDistributedInstance,
     MockStandaloneInstance,

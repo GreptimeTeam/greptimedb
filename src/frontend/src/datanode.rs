@@ -62,8 +62,8 @@ impl DatanodeClients {
             .await
     }
 
-    #[cfg(test)]
-    pub(crate) async fn insert_client(&self, datanode: Peer, client: Client) {
+    #[cfg(feature = "testing")]
+    pub async fn insert_client(&self, datanode: Peer, client: Client) {
         self.clients.insert(datanode, client).await
     }
 }

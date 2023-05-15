@@ -59,7 +59,7 @@ impl StatementExecutor {
         }
     }
 
-    pub(crate) async fn execute_stmt(
+    pub async fn execute_stmt(
         &self,
         stmt: QueryStatement,
         query_ctx: QueryContextRef,
