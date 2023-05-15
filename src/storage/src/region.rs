@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use common_telemetry::logging;
-use metrics::decrement_gauge;
+use metrics::{decrement_gauge, increment_gauge};
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::manifest::{self, Manifest, ManifestVersion, MetaActionIterator};
@@ -217,6 +217,7 @@ impl<S: LogStore> RegionImpl<S> {
             store_config.file_purger.clone(),
         );
         let region = RegionImpl::new(version, store_config);
+        increment_gauge!(crate::metrics::REGION_COUNT, 1.0);
 
         Ok(region)
     }
@@ -356,6 +357,7 @@ impl<S: LogStore> RegionImpl<S> {
             manifest: store_config.manifest,
         });
 
+        increment_gauge!(crate::metrics::REGION_COUNT, 1.0);
         Ok(Some(RegionImpl { inner }))
     }
 
