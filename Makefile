@@ -33,13 +33,12 @@ docker-image: ## Build docker image.
 
 ##@ Test
 
-.PHONY: unit-test
-unit-test: ## Run unit test.
-	cargo test --workspace
+test: nextest ## Run unit and integration tests.
+	cargo nextest run
 
-.PHONY: integration-test
-integration-test: ## Run integation test.
-	cargo test integration
+.PHONY: nextest ## Install nextest tools.
+nextest:
+	cargo --list | grep nextest || cargo install cargo-nextest --locked
 
 .PHONY: sqlness-test
 sqlness-test: ## Run sqlness test.
