@@ -22,8 +22,8 @@ use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, VectorRef};
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use store_api::storage::{
     AddColumn, AlterOperation, AlterRequest, Chunk, ChunkReader, ColumnDescriptor,
-    ColumnDescriptorBuilder, ColumnId, FlushContext, Region, RegionMeta, ScanRequest, SchemaRef,
-    Snapshot, WriteRequest, WriteResponse,
+    ColumnDescriptorBuilder, ColumnId, FlushContext, FlushReason, Region, RegionMeta, ScanRequest,
+    SchemaRef, Snapshot, WriteRequest, WriteResponse,
 };
 
 use crate::region::tests::{self, FileTesterBase};
@@ -118,7 +118,12 @@ impl AlterTester {
     }
 
     async fn flush(&self, wait: Option<bool>) {
-        let ctx = wait.map(|wait| FlushContext { wait }).unwrap_or_default();
+        let ctx = wait
+            .map(|wait| FlushContext {
+                wait,
+                reason: FlushReason::Manually,
+            })
+            .unwrap_or_default();
         self.base().region.flush(&ctx).await.unwrap();
     }
 

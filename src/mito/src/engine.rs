@@ -669,6 +669,12 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         .map_err(BoxedError::new)
         .context(table_error::TableOperationSnafu)?;
 
+        self.storage_engine
+            .close(&StorageEngineContext::default())
+            .await
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)?;
+
         Ok(())
     }
 }

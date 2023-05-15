@@ -23,7 +23,7 @@ use common_test_util::temp_dir::create_temp_dir;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use object_store::services::{Fs, S3};
 use object_store::ObjectStore;
-use store_api::storage::{FlushContext, Region, WriteResponse};
+use store_api::storage::{FlushContext, FlushReason, Region, WriteResponse};
 use tokio::sync::Notify;
 
 use crate::compaction::{CompactionHandler, SimplePicker};
@@ -191,7 +191,12 @@ impl CompactionTester {
     }
 
     async fn flush(&self, wait: Option<bool>) {
-        let ctx = wait.map(|wait| FlushContext { wait }).unwrap_or_default();
+        let ctx = wait
+            .map(|wait| FlushContext {
+                wait,
+                reason: FlushReason::Manually,
+            })
+            .unwrap_or_default();
         self.base().region.flush(&ctx).await.unwrap();
     }
 

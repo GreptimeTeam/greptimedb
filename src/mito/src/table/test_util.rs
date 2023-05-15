@@ -155,7 +155,8 @@ pub async fn setup_test_engine_and_table() -> TestEngineComponents {
         Arc::new(NoopLogStore::default()),
         object_store.clone(),
         compaction_scheduler,
-    );
+    )
+    .unwrap();
     let table_engine = MitoEngine::new(
         EngineConfig::default(),
         storage_engine.clone(),

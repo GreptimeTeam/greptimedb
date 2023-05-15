@@ -18,11 +18,13 @@ mod writer;
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use common_telemetry::logging;
+use common_time::util;
 use metrics::{decrement_gauge, increment_gauge};
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
@@ -235,6 +237,7 @@ impl<S: LogStore> RegionImpl<S> {
                 id,
                 name,
                 version_control: Arc::new(version_control),
+                last_flush_millis: AtomicI64::new(0),
             }),
             writer: Arc::new(RegionWriter::new(
                 store_config.memtable_builder,
@@ -315,6 +318,7 @@ impl<S: LogStore> RegionImpl<S> {
             id: metadata.id(),
             name,
             version_control,
+            last_flush_millis: AtomicI64::new(0),
         });
         let compaction_time_window = store_config
             .compaction_time_window
@@ -364,6 +368,11 @@ impl<S: LogStore> RegionImpl<S> {
     /// Get ID of this region.
     pub fn id(&self) -> RegionId {
         self.inner.shared.id()
+    }
+
+    /// Returns last flush timestamp in millis.
+    pub fn last_flush_millis(&self) -> i64 {
+        self.inner.shared.last_flush_millis()
     }
 
     fn create_version_with_checkpoint(
@@ -558,6 +567,9 @@ pub struct SharedData {
     name: String,
     // TODO(yingwen): Maybe no need to use Arc for version control.
     pub version_control: VersionControlRef,
+
+    /// Last flush time in millis.
+    last_flush_millis: AtomicI64,
 }
 
 impl SharedData {
@@ -569,6 +581,17 @@ impl SharedData {
     #[inline]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Update flush time to current time.
+    pub(crate) fn update_flush_millis(&self) {
+        let now = util::current_time_millis();
+        self.last_flush_millis.store(now, Ordering::Relaxed);
+    }
+
+    /// Returns last flush timestamp in millis.
+    fn last_flush_millis(&self) -> i64 {
+        self.last_flush_millis.load(Ordering::Relaxed)
     }
 }
 

@@ -22,6 +22,8 @@ pub const FLUSH_REQUESTS_TOTAL: &str = "storage.flush.requests_total";
 pub const FLUSH_ERRORS_TOTAL: &str = "storage.flush.errors_total";
 /// Elapsed time of a flush job.
 pub const FLUSH_ELAPSED: &str = "storage.flush.elapsed";
+/// Reason to flush.
+pub const FLUSH_REASON: &str = "reason";
 /// Gauge for open regions
 pub const REGION_COUNT: &str = "storage.region_count";
 /// Timer for logstore write

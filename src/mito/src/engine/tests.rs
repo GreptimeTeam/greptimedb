@@ -83,7 +83,8 @@ async fn setup_table_with_column_default_constraint() -> (TempDir, String, Table
             Arc::new(NoopLogStore::default()),
             object_store.clone(),
             compaction_scheduler,
-        ),
+        )
+        .unwrap(),
         object_store,
     );
 

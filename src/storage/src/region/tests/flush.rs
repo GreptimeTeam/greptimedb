@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use common_test_util::temp_dir::create_temp_dir;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
-use store_api::storage::{FlushContext, OpenOptions, Region, WriteResponse};
+use store_api::storage::{FlushContext, FlushReason, OpenOptions, Region, WriteResponse};
 
 use crate::engine;
 use crate::flush::FlushStrategyRef;
@@ -91,7 +91,12 @@ impl FlushTester {
     }
 
     async fn flush(&self, wait: Option<bool>) {
-        let ctx = wait.map(|wait| FlushContext { wait }).unwrap_or_default();
+        let ctx = wait
+            .map(|wait| FlushContext {
+                wait,
+                reason: FlushReason::Manually,
+            })
+            .unwrap_or_default();
         self.base().region.flush(&ctx).await.unwrap();
     }
 }

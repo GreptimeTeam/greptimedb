@@ -120,7 +120,8 @@ impl Instance {
                 log_store.clone(),
                 object_store.clone(),
                 compaction_scheduler,
-            ),
+            )
+            .unwrap(),
             object_store.clone(),
         ));
 

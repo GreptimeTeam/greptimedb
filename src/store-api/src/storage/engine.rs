@@ -73,6 +73,9 @@ pub trait StorageEngine: Send + Sync + Clone + 'static {
         ctx: &EngineContext,
         name: &str,
     ) -> Result<Option<Self::Region>, Self::Error>;
+
+    /// Close the engine.
+    async fn close(&self, ctx: &EngineContext) -> Result<(), Self::Error>;
 }
 
 /// Storage engine context.
