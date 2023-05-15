@@ -20,23 +20,21 @@ use common_time::util;
 use store_api::logstore::LogStore;
 use store_api::storage::{FlushContext, FlushReason, Region};
 
-use crate::config::DEFAULT_AUTO_FLUSH_INTERVAL;
+use crate::config::{DEFAULT_AUTO_FLUSH_INTERVAL, DEFAULT_PICKER_SCHEDULE_INTERVAL};
 use crate::region::RegionImpl;
 
 /// Config for [FlushPicker].
 pub struct PickerConfig {
+    /// Interval to schedule the picker.
+    pub schedule_interval: Duration,
     /// Interval to auto flush a region if it has not flushed yet.
     pub auto_flush_interval: Duration,
 }
 
 impl PickerConfig {
-    /// Returns the interval to pick regions.
-    pub(crate) fn picker_schedule_interval(&self) -> Duration {
-        self.auto_flush_interval / 2
-    }
-
-    /// Returns the auto flush interval in millis.
-    pub(crate) fn auto_flush_interval_millis(&self) -> i64 {
+    /// Returns the auto flush interval in millis or a default value
+    /// if overflow occurs.
+    fn auto_flush_interval_millis(&self) -> i64 {
         self.auto_flush_interval
             .as_millis()
             .try_into()
@@ -47,6 +45,7 @@ impl PickerConfig {
 impl Default for PickerConfig {
     fn default() -> Self {
         PickerConfig {
+            schedule_interval: Duration::from_millis(DEFAULT_PICKER_SCHEDULE_INTERVAL.into()),
             auto_flush_interval: Duration::from_millis(DEFAULT_AUTO_FLUSH_INTERVAL.into()),
         }
     }
@@ -190,6 +189,8 @@ mod tests {
             MockItem::new(1, util::current_time_millis() - 60 * 1000),
         ];
         let picker = FlushPicker::new(PickerConfig {
+            // schedule_interval is unused in this test.
+            schedule_interval: Duration::from_millis(10),
             auto_flush_interval: Duration::from_millis(30 * 1000),
         });
         let flushed = picker.pick_by_interval(&regions).await;

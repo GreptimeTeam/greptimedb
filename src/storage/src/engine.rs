@@ -323,6 +323,7 @@ impl<S: LogStore> EngineInner<S> {
             compaction_scheduler.clone(),
             regions.clone(),
             PickerConfig {
+                schedule_interval: config.picker_schedule_interval,
                 auto_flush_interval: config.auto_flush_interval,
             },
         )?);

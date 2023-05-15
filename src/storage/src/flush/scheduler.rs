@@ -169,7 +169,7 @@ impl<S: LogStore> FlushScheduler<S> {
         let handler = FlushHandler {
             compaction_scheduler,
         };
-        let task_interval = picker_config.picker_schedule_interval();
+        let task_interval = picker_config.schedule_interval;
         let picker = FlushPicker::new(picker_config);
         let task_fn = AutoFlushFunction { regions, picker };
         let auto_flush_task = RepeatedTask::new(task_interval, Box::new(task_fn));

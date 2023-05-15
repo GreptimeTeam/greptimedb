@@ -488,13 +488,13 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to start pick task for flush: {}", source))]
+    #[snafu(display("Failed to start picking task for flush: {}", source))]
     StartPickTask {
         #[snafu(backtrace)]
         source: RuntimeError,
     },
 
-    #[snafu(display("Failed to stop pick task for flush: {}", source))]
+    #[snafu(display("Failed to stop picking task for flush: {}", source))]
     StopPickTask {
         #[snafu(backtrace)]
         source: RuntimeError,

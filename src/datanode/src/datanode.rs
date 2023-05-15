@@ -25,7 +25,7 @@ use servers::http::HttpOptions;
 use servers::Mode;
 use storage::config::{
     EngineConfig as StorageEngineConfig, DEFAULT_AUTO_FLUSH_INTERVAL, DEFAULT_MAX_FLUSH_TASKS,
-    DEFAULT_REGION_WRITE_BUFFER_SIZE,
+    DEFAULT_PICKER_SCHEDULE_INTERVAL, DEFAULT_REGION_WRITE_BUFFER_SIZE,
 };
 use storage::scheduler::SchedulerConfig;
 
@@ -214,6 +214,9 @@ pub struct FlushConfig {
     pub max_flush_tasks: usize,
     /// Default write buffer size for a region.
     pub region_write_buffer_size: ReadableSize,
+    /// Interval to schedule auto flush picker to find region to flush.
+    #[serde(with = "humantime_serde")]
+    pub picker_schedule_interval: Duration,
     /// Interval to auto flush a region if it has not flushed yet.
     #[serde(with = "humantime_serde")]
     pub auto_flush_interval: Duration,
@@ -224,6 +227,9 @@ impl Default for FlushConfig {
         Self {
             max_flush_tasks: DEFAULT_MAX_FLUSH_TASKS,
             region_write_buffer_size: DEFAULT_REGION_WRITE_BUFFER_SIZE,
+            picker_schedule_interval: Duration::from_millis(
+                DEFAULT_PICKER_SCHEDULE_INTERVAL.into(),
+            ),
             auto_flush_interval: Duration::from_millis(DEFAULT_AUTO_FLUSH_INTERVAL.into()),
         }
     }
@@ -248,6 +254,7 @@ impl From<&DatanodeOptions> for StorageEngineConfig {
             sst_write_buffer_size: value.storage.compaction.sst_write_buffer_size,
             max_flush_tasks: value.storage.flush.max_flush_tasks,
             region_write_buffer_size: value.storage.flush.region_write_buffer_size,
+            picker_schedule_interval: value.storage.flush.picker_schedule_interval,
             auto_flush_interval: value.storage.flush.auto_flush_interval,
         }
     }
