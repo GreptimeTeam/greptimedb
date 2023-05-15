@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 
 use common_base::readable_size::ReadableSize;
-use common_telemetry::{debug, error};
+use common_telemetry::{debug, error, timer};
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
@@ -140,6 +140,7 @@ impl<S: LogStore> CompactionTaskImpl<S> {
 #[async_trait::async_trait]
 impl<S: LogStore> CompactionTask for CompactionTaskImpl<S> {
     async fn run(mut self) -> Result<()> {
+        let _timer = timer!(crate::metrics::COMPACT_ELAPSED);
         self.mark_files_compacting(true);
 
         let (output, mut compacted) = self.merge_ssts().await.map_err(|e| {

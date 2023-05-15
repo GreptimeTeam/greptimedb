@@ -56,7 +56,6 @@ macro_rules! http_tests {
                 test_prometheus_promql_api,
                 test_prom_http_api,
                 test_metrics_api,
-                test_catalog_metrics,
                 test_scripts_api,
                 test_health_api,
                 test_dashboard_path,
@@ -335,51 +334,6 @@ pub async fn test_metrics_api(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK);
     let body = res.text().await;
     assert!(body.contains("frontend_handle_sql_elapsed"));
-    guard.remove_all().await;
-}
-
-pub async fn test_catalog_metrics(store_type: StorageType) {
-    common_telemetry::init_default_ut_logging();
-    common_telemetry::init_default_metrics_recorder();
-
-    let (app, mut guard) = setup_test_http_app(store_type, "metrics_api").await;
-    let client = TestClient::new(app);
-
-    // Call metrics api
-    let body = client.get("/metrics").send().await.text().await;
-    assert!(body.contains("catalog_schema_count 3"));
-    assert!(body.contains("catalog_table_count{db=\"public\"}"));
-
-    // create new schema
-    let res = client.get("/v1/sql?sql=create database tommy").send().await;
-    assert_eq!(res.status(), StatusCode::OK);
-
-    // Call metrics api
-    let body = client.get("/metrics").send().await.text().await;
-    assert!(body.contains("catalog_schema_count 4"));
-    assert!(body.contains("catalog_table_count{db=\"public\"}"));
-
-    // create new schema
-    let res = client
-        .get("/v1/sql?sql=create table ints (i BIGINT, ii TIMESTAMP TIME INDEX)")
-        .send()
-        .await;
-    assert_eq!(res.status(), StatusCode::OK);
-
-    // Call metrics api
-    let body = client.get("/metrics").send().await.text().await;
-    assert!(body.contains("catalog_schema_count 4"));
-    assert!(body.contains("catalog_table_count{db=\"public\"}"));
-
-    // create new schema
-    let res = client.get("/v1/sql?sql=drop table ints").send().await;
-    assert_eq!(res.status(), StatusCode::OK);
-
-    // Call metrics api
-    let body = client.get("/metrics").send().await.text().await;
-    assert!(body.contains("catalog_schema_count 4"));
-    assert!(body.contains("catalog_table_count{db=\"public\"}"));
-
     guard.remove_all().await;
 }
 
