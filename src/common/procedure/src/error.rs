@@ -122,13 +122,13 @@ pub enum Error {
     #[snafu(display("Corrupted data, error: {source}"))]
     CorruptedData { source: FromUtf8Error },
 
-    #[snafu(display("Failed to start the remove_outdated_meta method"))]
+    #[snafu(display("Failed to start the remove_outdated_meta method, error: {}", source))]
     StartRemoveOutdatedMetaTask {
         source: common_runtime::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to stop the remove_outdated_meta method"))]
+    #[snafu(display("Failed to stop the remove_outdated_meta method, error: {}", source))]
     StopRemoveOutdatedMetaTask {
         source: common_runtime::error::Error,
         location: Location,

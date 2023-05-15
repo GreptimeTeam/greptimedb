@@ -21,14 +21,14 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use backon::ExponentialBuilder;
-use common_runtime::RepeatedTask;
+use common_runtime::{RepeatedTask, TaskFunction};
 use common_telemetry::logging;
 use snafu::{ensure, ResultExt};
 use tokio::sync::watch::{self, Receiver, Sender};
 use tokio::sync::Notify;
 
 use crate::error::{
-    DuplicateProcedureSnafu, LoaderConflictSnafu, Result, StartRemoveOutdatedMetaTaskSnafu,
+    DuplicateProcedureSnafu, Error, LoaderConflictSnafu, Result, StartRemoveOutdatedMetaTaskSnafu,
     StopRemoveOutdatedMetaTaskSnafu,
 };
 use crate::local::lock::LockMap;
@@ -530,10 +530,6 @@ struct RemoveOutdatedMetaFunction {
     ttl: Duration,
 }
 
-use common_runtime::TaskFunction;
-
-use crate::error::Error;
-
 #[async_trait::async_trait]
 impl TaskFunction<Error> for RemoveOutdatedMetaFunction {
     fn name(&self) -> &str {
@@ -892,7 +888,7 @@ mod tests {
             .unwrap()
             .is_none());
 
-        //The remove_outdated_meta method has been stopped, so any procedure meta-data will not be automatically removed.
+        // The remove_outdated_meta method has been stopped, so any procedure meta-data will not be automatically removed.
         manager.stop().await.unwrap();
         let mut procedure = ProcedureToLoad::new("submit");
         procedure.lock_key = LockKey::single("test.submit");
