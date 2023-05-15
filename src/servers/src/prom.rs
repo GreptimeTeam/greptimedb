@@ -612,13 +612,13 @@ fn record_batches_to_labels_name(
     batches: RecordBatches,
     labels: &mut HashSet<String>,
 ) -> Result<()> {
-    let mut tag_column_indices = Vec::new();
+    let mut column_indices = Vec::new();
     let mut field_column_indices = Vec::new();
     for (i, column) in batches.schema().column_schemas().iter().enumerate() {
         if let ConcreteDataType::Float64(_) = column.data_type {
             field_column_indices.push(i);
         }
-        tag_column_indices.push(i);
+        column_indices.push(i);
     }
 
     if field_column_indices.is_empty() {
@@ -628,7 +628,7 @@ fn record_batches_to_labels_name(
     }
 
     for batch in batches.iter() {
-        let tag_names = tag_column_indices
+        let names = column_indices
             .iter()
             .map(|c| batches.schema().column_name_by_index(*c).to_string())
             .collect::<Vec<_>>();
@@ -654,8 +654,8 @@ fn record_batches_to_labels_name(
             }
 
             // if a field is not null, record the tag name and return
-            tag_names.iter().for_each(|tag_name| {
-                labels.insert(tag_name.to_string());
+            names.iter().for_each(|name| {
+                labels.insert(name.to_string());
             });
             return Ok(());
         }
