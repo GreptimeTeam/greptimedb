@@ -42,7 +42,7 @@ use schemars::JsonSchema;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use session::context::{QueryContext, QueryContextRef};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{ensure, Location, OptionExt, ResultExt};
 use tokio::sync::oneshot::Sender;
 use tokio::sync::{oneshot, Mutex};
 use tower::ServiceBuilder;
@@ -539,18 +539,14 @@ pub async fn labels_query(
             .map(|s| s.to_owned())
             .collect()
     });
-    let form_matches: Option<Vec<String>> = form_params.matches.0.map(|s| {
-        s.split('$')
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_owned())
-            .collect()
-    });
-
-    if matches.is_none() && form_matches.is_none() {
-        return PromJsonResponse::error("Unsupported", "match[] parameter is required");
-    }
-
-    let queries = matches.or(form_matches).unwrap();
+    let Some(queries) = matches.or_else(|| {
+        form_params.matches.0.map(|s| {
+            s.split('$')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_owned())
+                .collect::<Vec<String>>()
+        })}
+    ) else { return PromJsonResponse::error("Unsupported", "match[] parameter is required"); };
 
     let start = params
         .start
@@ -563,6 +559,7 @@ pub async fn labels_query(
 
     let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
     let (catalog, schema) = super::parse_catalog_and_schema_from_client_database_name(db);
+    let query_ctx = Arc::new(QueryContext::with(catalog, schema));
 
     let mut labels: HashSet<String> = HashSet::new();
     labels.insert(METRIC_NAME.to_string());
@@ -575,8 +572,7 @@ pub async fn labels_query(
             step: DEFAULT_LOOKBACK_STRING.to_string(),
         };
 
-        let query_ctx = QueryContext::with(catalog, schema);
-        let result = handler.do_query(&prom_query, Arc::new(query_ctx)).await;
+        let result = handler.do_query(&prom_query, query_ctx.clone()).await;
 
         let response = retrieve_labels_name_from_query_result(result, &mut labels).await;
 
@@ -614,6 +610,7 @@ async fn retrieve_labels_name_from_query_result(
         }
         Output::AffectedRows(_) => Err(Error::UnexpectedResult {
             reason: "expected data result, but got affected rows".to_string(),
+            location: Location::default(),
         }),
     }
 }

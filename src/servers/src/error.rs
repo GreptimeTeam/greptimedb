@@ -283,7 +283,7 @@ pub enum Error {
     },
 
     #[snafu(display("{}", reason))]
-    UnexpectedResult { reason: String },
+    UnexpectedResult { reason: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
