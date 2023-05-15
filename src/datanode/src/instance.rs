@@ -115,7 +115,7 @@ impl Instance {
 
         let mito_engine = Arc::new(DefaultEngine::new(
             TableEngineConfig {
-                manifest_use_compress: opts.storage.manifest.use_compress,
+                compress_manifest: opts.storage.manifest.compress,
             },
             EngineImpl::new(
                 StorageEngineConfig::from(opts),

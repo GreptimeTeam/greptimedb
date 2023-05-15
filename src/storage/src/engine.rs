@@ -405,7 +405,7 @@ impl<S: LogStore> EngineInner<S> {
         let manifest = RegionManifest::with_checkpointer(
             &manifest_dir,
             self.object_store.clone(),
-            manifest_compress_type(config.manifest_use_compress),
+            manifest_compress_type(config.compress_manifest),
             config.manifest_checkpoint_margin,
             config.manifest_gc_duration,
         );

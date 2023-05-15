@@ -16,5 +16,5 @@
 
 #[derive(Debug, Clone, Default)]
 pub struct EngineConfig {
-    pub manifest_use_compress: bool,
+    pub compress_manifest: bool,
 }

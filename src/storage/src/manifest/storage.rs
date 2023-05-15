@@ -45,8 +45,8 @@ const DEFAULT_MANIFEST_COMPRESSION_TYPE: CompressionType = CompressionType::Gzip
 const FALL_BACK_COMPRESS_TYPE: CompressionType = CompressionType::Uncompressed;
 
 #[inline]
-pub const fn manifest_compress_type(use_compress: bool) -> CompressionType {
-    if use_compress {
+pub const fn manifest_compress_type(compress: bool) -> CompressionType {
+    if compress {
         DEFAULT_MANIFEST_COMPRESSION_TYPE
     } else {
         FALL_BACK_COMPRESS_TYPE

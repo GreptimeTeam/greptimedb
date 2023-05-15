@@ -558,7 +558,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             tables: DashMap::new(),
             storage_engine,
             object_store,
-            compress_type: manifest_compress_type(config.manifest_use_compress),
+            compress_type: manifest_compress_type(config.compress_manifest),
             table_mutex: Arc::new(KeyLock::new()),
         }
     }
