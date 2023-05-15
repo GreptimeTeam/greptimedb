@@ -18,12 +18,11 @@ use std::sync::Arc;
 
 use api::v1::meta::{
     heartbeat_server, AskLeaderRequest, AskLeaderResponse, HeartbeatRequest, HeartbeatResponse,
-    Peer, ResponseHeader, Role,
+    Peer, RequestHeader, ResponseHeader, Role,
 };
 use common_telemetry::{error, info, warn};
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
-use snafu::OptionExt;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Streaming};
@@ -62,19 +61,12 @@ impl heartbeat_server::Heartbeat for MetaSrv {
                         };
 
                         if pusher_key.is_none() {
-                            match get_node_id(&req) {
-                                Ok(node_id) => {
-                                    let role = header.role() as i32;
-                                    let key = format!("{}-{}", role, node_id,);
-                                    let pusher = Pusher::new(tx.clone(), &req.header);
-                                    handler_group.register(&key, pusher).await;
-                                    pusher_key = Some(key);
-                                }
-                                Err(e) => {
-                                    tx.send(Err(e.into())).await.expect("working rx");
-                                    break;
-                                }
-                            }
+                            let node_id = get_node_id(header);
+                            let role = header.role() as i32;
+                            let key = format!("{}-{}", role, node_id);
+                            let pusher = Pusher::new(tx.clone(), header);
+                            handler_group.register(&key, pusher).await;
+                            pusher_key = Some(key);
                         }
 
                         let res = handler_group
@@ -155,7 +147,7 @@ async fn handle_ask_leader(req: AskLeaderRequest, ctx: Context) -> Result<AskLea
     Ok(AskLeaderResponse { header, leader })
 }
 
-fn get_node_id(req: &HeartbeatRequest) -> Result<u64> {
+fn get_node_id(header: &RequestHeader) -> u64 {
     static ID: OnceCell<Arc<AtomicU64>> = OnceCell::new();
 
     fn next_id() -> u64 {
@@ -163,17 +155,10 @@ fn get_node_id(req: &HeartbeatRequest) -> Result<u64> {
         id.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
-    let header = req
-        .header
-        .as_ref()
-        .context(error::MissingRequestHeaderSnafu)?;
-
-    let node_id = match header.role() {
+    match header.role() {
         Role::Frontend => next_id(),
         Role::Datanode => header.member_id,
-    };
-
-    Ok(node_id)
+    }
 }
 
 #[cfg(test)]
@@ -206,43 +191,28 @@ mod tests {
 
     #[test]
     fn test_get_node_id() {
-        let req = HeartbeatRequest::default();
-        assert!(get_node_id(&req).is_err());
-
-        let req = HeartbeatRequest::default();
-        assert!(get_node_id(&req).is_err());
-
-        let req = HeartbeatRequest {
-            header: Some(RequestHeader {
-                role: Role::Datanode.into(),
-                member_id: 11,
-                ..Default::default()
-            }),
+        let header = RequestHeader {
+            role: Role::Datanode.into(),
+            member_id: 11,
             ..Default::default()
         };
-        assert_eq!(11, get_node_id(&req).unwrap());
+        assert_eq!(11, get_node_id(&header));
 
-        let req = HeartbeatRequest {
-            header: Some(RequestHeader {
-                role: Role::Datanode.into(),
-                member_id: 12,
-                ..Default::default()
-            }),
+        let header = RequestHeader {
+            role: Role::Frontend.into(),
             ..Default::default()
         };
-        assert_eq!(12, get_node_id(&req).unwrap());
+        for i in 0..10 {
+            assert_eq!(i, get_node_id(&header));
+        }
 
-        let req = HeartbeatRequest {
-            header: Some(RequestHeader {
-                role: Role::Frontend.into(),
-                member_id: 11,
-                ..Default::default()
-            }),
+        let header = RequestHeader {
+            role: Role::Frontend.into(),
+            member_id: 11,
             ..Default::default()
         };
-
-        for i in 0..100 {
-            assert_eq!(i, get_node_id(&req).unwrap());
+        for i in 10..20 {
+            assert_eq!(i, get_node_id(&header));
         }
     }
 }
