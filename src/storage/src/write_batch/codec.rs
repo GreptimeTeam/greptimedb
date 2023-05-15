@@ -133,7 +133,7 @@ mod tests {
     use std::sync::Arc;
 
     use datatypes::vectors::{BooleanVector, TimestampMillisecondVector, UInt64Vector, VectorRef};
-    use store_api::storage::{consts, WriteRequest};
+    use store_api::storage::WriteRequest;
 
     use super::*;
     use crate::write_batch::WriteBatch;
@@ -149,7 +149,6 @@ mod tests {
 
             let mut put_data = HashMap::new();
             put_data.insert("k1".to_string(), intv.clone());
-            put_data.insert(consts::VERSION_COLUMN_NAME.to_string(), intv);
             put_data.insert("v1".to_string(), boolv);
             put_data.insert("ts".to_string(), tsv);
 
@@ -186,7 +185,6 @@ mod tests {
 
             let mut put_data = HashMap::with_capacity(3);
             put_data.insert("k1".to_string(), intv.clone());
-            put_data.insert(consts::VERSION_COLUMN_NAME.to_string(), intv);
             put_data.insert("ts".to_string(), tsv);
 
             batch.put(put_data).unwrap();

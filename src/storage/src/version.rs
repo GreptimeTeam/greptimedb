@@ -313,9 +313,7 @@ mod tests {
     use crate::test_util::descriptor_util::RegionDescBuilder;
 
     fn new_version_control() -> VersionControl {
-        let desc = RegionDescBuilder::new("version-test")
-            .enable_version_column(false)
-            .build();
+        let desc = RegionDescBuilder::new("version-test").build();
         let metadata: RegionMetadataRef = Arc::new(desc.try_into().unwrap());
         let memtable = DefaultMemtableBuilder::default().build(metadata.schema().clone());
 

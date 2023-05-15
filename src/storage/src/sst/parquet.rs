@@ -534,7 +534,7 @@ mod tests {
     use std::sync::Arc;
 
     use common_test_util::temp_dir::create_temp_dir;
-    use datatypes::arrow::array::{Array, ArrayRef, UInt64Array, UInt8Array};
+    use datatypes::arrow::array::{Array, UInt64Array, UInt8Array};
     use datatypes::prelude::{ScalarVector, Vector};
     use datatypes::types::{TimestampMillisecondType, TimestampType};
     use datatypes::vectors::TimestampMillisecondVector;
@@ -565,14 +565,7 @@ mod tests {
             &*memtable,
             10, // sequence
             OpType::Put,
-            &[
-                (1000, 1),
-                (1000, 2),
-                (2002, 1),
-                (2003, 1),
-                (2003, 5),
-                (1001, 1),
-            ], // keys
+            &[1000, 1002, 2002, 2003, 2003, 1001], // keys
             &[
                 (Some(1), Some(1234)),
                 (Some(2), Some(1234)),
@@ -602,52 +595,45 @@ mod tests {
         let builder = ParquetRecordBatchStreamBuilder::new(reader).await.unwrap();
 
         let mut stream = builder.build().unwrap();
-        // chunk schema: timestamp, __version, v1, __sequence, __op_type
+        // chunk schema: timestamp, v1, __sequence, __op_type
         let chunk = stream.next().await.unwrap().unwrap();
-        assert_eq!(6, chunk.columns().len());
+        assert_eq!(5, chunk.columns().len());
 
         // timestamp
         assert_eq!(
             &TimestampMillisecondVector::from_slice([
                 1000.into(),
-                1000.into(),
                 1001.into(),
+                1002.into(),
                 2002.into(),
                 2003.into(),
-                2003.into()
             ])
             .to_arrow_array(),
             chunk.column(0)
         );
 
-        // version
-        assert_eq!(
-            &(Arc::new(UInt64Array::from(vec![1, 2, 1, 1, 1, 5])) as ArrayRef),
-            chunk.column(1)
-        );
-
         // v0
         assert_eq!(
-            &(Arc::new(UInt64Array::from(vec![1, 2, 3, 7, 8, 9])) as Arc<dyn Array>),
-            chunk.column(2)
+            &(Arc::new(UInt64Array::from(vec![1, 3, 2, 7, 9])) as Arc<dyn Array>),
+            chunk.column(1)
         );
 
         // v1
         assert_eq!(
-            &(Arc::new(UInt64Array::from(vec![1234; 6])) as Arc<dyn Array>),
-            chunk.column(3)
+            &(Arc::new(UInt64Array::from(vec![1234; 5])) as Arc<dyn Array>),
+            chunk.column(2)
         );
 
         // sequence
         assert_eq!(
-            &(Arc::new(UInt64Array::from(vec![10; 6])) as Arc<dyn Array>),
-            chunk.column(4)
+            &(Arc::new(UInt64Array::from(vec![10; 5])) as Arc<dyn Array>),
+            chunk.column(3)
         );
 
         // op_type
         assert_eq!(
-            &(Arc::new(UInt8Array::from(vec![1; 6])) as Arc<dyn Array>),
-            chunk.column(5)
+            &(Arc::new(UInt8Array::from(vec![1; 5])) as Arc<dyn Array>),
+            chunk.column(4)
         );
     }
 
@@ -662,7 +648,7 @@ mod tests {
         let mut values_vec = Vec::with_capacity(rows_total);
 
         for i in 0..rows_total {
-            keys_vec.push((i as i64, i as u64));
+            keys_vec.push(i as i64);
             values_vec.push((Some(i as u64), Some(i as u64)));
         }
 
@@ -748,14 +734,7 @@ mod tests {
             &*memtable,
             10, // sequence
             OpType::Put,
-            &[
-                (1000, 1),
-                (1000, 2),
-                (2002, 1),
-                (2003, 1),
-                (2003, 5),
-                (1001, 1),
-            ], // keys
+            &[1000, 1002, 2002, 2003, 2003, 1001], // keys
             &[
                 (Some(1), Some(1234)),
                 (Some(2), Some(1234)),
@@ -806,7 +785,7 @@ mod tests {
 
         let mut stream = reader.chunk_stream().await.unwrap();
         assert_eq!(
-            6,
+            5,
             stream
                 .next_batch()
                 .await
@@ -861,15 +840,7 @@ mod tests {
             &*memtable,
             10, // sequence
             OpType::Put,
-            &[
-                (1000, 1),
-                (1000, 2),
-                (2002, 1),
-                (2003, 1),
-                (2003, 5),
-                (1001, 1),
-                (3001, 1),
-            ], // keys
+            &[1000, 1002, 2002, 2003, 2003, 1001, 3001], // keys
             &[
                 (Some(1), Some(1234)),
                 (Some(2), Some(1234)),
@@ -908,15 +879,14 @@ mod tests {
         );
         assert_ne!(file_size, 0);
 
-        let projected_schema =
-            Arc::new(ProjectedSchema::new(schema, Some(vec![1, 0, 3, 2])).unwrap());
+        let projected_schema = Arc::new(ProjectedSchema::new(schema, Some(vec![1, 0, 2])).unwrap());
 
         check_range_read(
             sst_file_handle.clone(),
             object_store.clone(),
             projected_schema.clone(),
             TimestampRange::with_unit(1000, 2003, TimeUnit::Millisecond).unwrap(),
-            vec![1000, 1000, 1001, 2002],
+            vec![1000, 1001, 1002, 2002],
         )
         .await;
 
@@ -925,7 +895,7 @@ mod tests {
             object_store.clone(),
             projected_schema.clone(),
             TimestampRange::with_unit(2002, 3001, TimeUnit::Millisecond).unwrap(),
-            vec![2002, 2003, 2003],
+            vec![2002, 2003],
         )
         .await;
 
@@ -945,7 +915,7 @@ mod tests {
             object_store.clone(),
             projected_schema.clone(),
             TimestampRange::with_unit(1000, 3000, TimeUnit::Millisecond).unwrap(),
-            vec![1000, 1000, 1001, 2002, 2003, 2003],
+            vec![1000, 1001, 1002, 2002, 2003],
         )
         .await;
 
@@ -955,7 +925,7 @@ mod tests {
             object_store,
             projected_schema,
             TimestampRange::min_to_max(),
-            vec![1000, 1000, 1001, 2002, 2003, 2003, 3001],
+            vec![1000, 1001, 1002, 2002, 2003, 3001],
         )
         .await;
     }

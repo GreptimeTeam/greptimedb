@@ -48,7 +48,6 @@ pub struct RawColumnsMetadata {
     pub columns: Vec<ColumnMetadata>,
     pub row_key_end: usize,
     pub timestamp_key_index: usize,
-    pub enable_version_column: bool,
     pub user_column_end: usize,
 }
 
@@ -365,7 +364,6 @@ mod tests {
     #[test]
     fn test_region_manifest_builder() {
         let desc = RegionDescBuilder::new("test_region_manifest_builder")
-            .enable_version_column(true)
             .push_field_column(("v0", LogicalTypeId::Int64, true))
             .build();
         let region_metadata: RegionMetadata = desc.try_into().unwrap();
