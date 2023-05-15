@@ -616,7 +616,6 @@ mod tests {
         let files = dir_path
             .read_dir()
             .unwrap()
-            .into_iter()
             .filter_map(|entry| entry.ok())
             .filter(|entry| entry.path().extension() == Some(OsStr::new("parquet")))
             .map(|entry| entry.file_name())
@@ -641,13 +640,11 @@ mod tests {
         let files = dir_path
             .read_dir()
             .unwrap()
-            .into_iter()
             .filter_map(|entry| entry.ok())
             .filter(|entry| entry.path().extension() == Some(OsStr::new("parquet")))
             .map(|entry| entry.file_name())
             .collect::<Vec<_>>();
 
         assert_eq!(0, files.len());
-
     }
 }
