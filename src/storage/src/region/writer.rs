@@ -280,14 +280,12 @@ impl RegionWriter {
         // 1. Acquires the write lock.
         // 2. Close writer reject any potential writing.
         // 3. Waits or cancels the flush job.
-        // 4. TODO: Waits or cancels the Compaction Task
-        // 5. Mark all data obsolete in the WAL.
-        // 6. Add `RegionMetaAction::Remove` to recover from manifest in case of failure.
+        // 4. Add `RegionMetaAction::Remove` to recover from manifest in case of failure.
         //    The main task is to restore the cleaning of sst files. If there is a failure
         //    in the previous stops, it can be restored through the `Procedure` framework.
-        // 7. Delete the namespace of the region from the WAL.
-        // 8. Get all sst files for current version.
-        // 9. Trigger sst files purger task through `LevelMetas::merge()`
+        // 5. Mark all data obsolete in the WAL.
+        // 6. Delete the namespace of the region from the WAL.
+        // 7. Mark all SSTs deleted.
         let mut inner = self.inner.lock().await;
         inner.mark_closed();
 
@@ -299,10 +297,7 @@ impl RegionWriter {
 
         let _lock = self.version_mutex.lock().await;
         let committed_sequence = version_control.committed_sequence();
-
         let current_version = version_control.current();
-
-        drop_ctx.wal.obsolete(committed_sequence).await?;
 
         let mut action_list =
             RegionMetaActionList::with_action(RegionMetaAction::Remove(RegionRemove {
@@ -321,20 +316,13 @@ impl RegionWriter {
 
         drop_ctx.manifest.update(action_list).await?;
 
+        // Mark all data obsolete and delete the namespace in the WAL
+        drop_ctx.wal.obsolete(committed_sequence).await?;
         drop_ctx.wal.delete_namespace().await?;
 
-        let mut files_to_remove = vec![];
-        current_version
-            .ssts()
-            .levels()
-            .iter()
-            .for_each(|level| level.files().for_each(|f| files_to_remove.push(f.meta())));
-
-        logging::debug!("Try to remove sst files {:?}", files_to_remove);
-
-        current_version
-            .ssts()
-            .merge(vec![].into_iter(), files_to_remove.into_iter());
+        // Mark all SSTs delete
+        let files = current_version.ssts().mark_deleted_all_files();
+        logging::debug!("Try to remove all SSTs {:?}", files);
 
         Ok(())
     }

@@ -81,7 +81,9 @@ impl<S: LogStore> StorageEngine for EngineImpl<S> {
     }
 
     async fn drop_region(&self, _ctx: &EngineContext, region: Self::Region) -> Result<()> {
-        region.drop_region().await
+        region.drop_region().await?;
+        self.inner.remove_reigon(region.name());
+        Ok(())
     }
 
     fn get_region(&self, _ctx: &EngineContext, name: &str) -> Result<Option<Self::Region>> {
@@ -432,6 +434,10 @@ impl<S: LogStore> EngineInner<S> {
         self.regions.get_region(name)
     }
 
+    fn remove_reigon(&self, name: &str) {
+        self.regions.remove(name)
+    }
+
     async fn region_store_config(
         &self,
         parent_dir: &str,
@@ -492,11 +498,14 @@ impl<S: LogStore> EngineInner<S> {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsStr;
+
     use common_test_util::temp_dir::create_temp_dir;
     use datatypes::type_id::LogicalTypeId;
+    use datatypes::vectors::{Float32Vector, Int32Vector, TimestampMillisecondVector, VectorRef};
     use log_store::test_util::log_store_util;
     use object_store::services::Fs;
-    use store_api::storage::Region;
+    use store_api::storage::{FlushContext, Region, WriteContext, WriteRequest};
 
     use super::*;
     use crate::compaction::noop::NoopCompactionScheduler;
