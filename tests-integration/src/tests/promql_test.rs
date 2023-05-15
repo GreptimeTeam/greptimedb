@@ -42,9 +42,7 @@ async fn create_insert_query_assert(
 
     let query = PromQuery {
         query: promql.to_string(),
-        start: "0".to_string(),
-        end: "0".to_string(),
-        step: "5m".to_string(),
+        ..PromQuery::default()
     };
     let QueryStatement::Promql(mut eval_stmt) = QueryLanguageParser::parse_promql(&query).unwrap() else { unreachable!() };
     eval_stmt.start = start;

@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use chrono::DateTime;
@@ -19,7 +22,9 @@ use common_error::ext::PlainError;
 use common_error::prelude::BoxedError;
 use common_error::status_code::StatusCode;
 use common_telemetry::timer;
-use promql_parser::parser::EvalStmt;
+use promql_parser::parser::ast::{Extension as NodeExtension, ExtensionExpr};
+use promql_parser::parser::Expr::Extension;
+use promql_parser::parser::{EvalStmt, Expr, ValueType};
 use snafu::ResultExt;
 use sql::dialect::GenericDialect;
 use sql::parser::ParserContext;
@@ -27,15 +32,55 @@ use sql::statements::statement::Statement;
 
 use crate::error::{
     MultipleStatementsSnafu, ParseFloatSnafu, ParseTimestampSnafu, QueryParseSnafu, Result,
+    UnimplementedSnafu,
 };
 use crate::metrics::{METRIC_PARSE_PROMQL_ELAPSED, METRIC_PARSE_SQL_ELAPSED};
 
 const DEFAULT_LOOKBACK: u64 = 5 * 60; // 5m
+pub const EXPLAIN_NODE_NAME: &str = "EXPLAIN";
+pub const ANALYZE_NODE_NAME: &str = "ANALYZE";
 
 #[derive(Debug, Clone)]
 pub enum QueryStatement {
     Sql(Statement),
     Promql(EvalStmt),
+}
+
+impl QueryStatement {
+    pub fn post_process(&self, params: HashMap<String, String>) -> Result<QueryStatement> {
+        match self {
+            QueryStatement::Sql(_) => UnimplementedSnafu {
+                operation: "sql post process",
+            }
+            .fail(),
+            QueryStatement::Promql(eval_stmt) => {
+                let node_name = match params.get("name") {
+                    Some(name) => name.as_str(),
+                    None => "",
+                };
+                let extension_node = Self::create_extension_node(node_name, &eval_stmt.expr);
+                Ok(QueryStatement::Promql(EvalStmt {
+                    expr: Extension(extension_node.unwrap()),
+                    start: eval_stmt.start,
+                    end: eval_stmt.end,
+                    interval: eval_stmt.interval,
+                    lookback_delta: eval_stmt.lookback_delta,
+                }))
+            }
+        }
+    }
+
+    fn create_extension_node(node_name: &str, expr: &Expr) -> Option<NodeExtension> {
+        match node_name {
+            ANALYZE_NODE_NAME => Some(NodeExtension {
+                expr: Arc::new(AnalyzeExpr { expr: expr.clone() }),
+            }),
+            EXPLAIN_NODE_NAME => Some(NodeExtension {
+                expr: Arc::new(ExplainExpr { expr: expr.clone() }),
+            }),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +89,17 @@ pub struct PromQuery {
     pub start: String,
     pub end: String,
     pub step: String,
+}
+
+impl Default for PromQuery {
+    fn default() -> Self {
+        PromQuery {
+            query: String::new(),
+            start: String::from("0"),
+            end: String::from("0"),
+            step: String::from("5m"),
+        }
+    }
 }
 
 pub struct QueryLanguageParser {}
@@ -66,7 +122,6 @@ impl QueryLanguageParser {
         }
     }
 
-    // TODO(ruihang): implement this method when parser is ready.
     pub fn parse_promql(query: &PromQuery) -> Result<QueryStatement> {
         let _timer = timer!(METRIC_PARSE_PROMQL_ELAPSED);
 
@@ -141,6 +196,51 @@ fn max_system_timestamp() -> SystemTime {
         .checked_add(Duration::from_secs(std::i64::MAX as u64))
         .unwrap()
 }
+
+macro_rules! define_node_ast_extension {
+    ($name:ident, $name_expr:ident, $expr_type:ty, $extension_name:expr) => {
+        /// The implementation of the `$name_expr` extension AST node
+        #[derive(Debug, Clone)]
+        pub struct $name_expr {
+            pub expr: $expr_type,
+        }
+
+        impl ExtensionExpr for $name_expr {
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn name(&self) -> &str {
+                $extension_name
+            }
+
+            fn value_type(&self) -> ValueType {
+                self.expr.value_type()
+            }
+
+            fn children(&self) -> &[Expr] {
+                std::slice::from_ref(&self.expr)
+            }
+        }
+
+        #[allow(rustdoc::broken_intra_doc_links)]
+        #[derive(Debug, Clone)]
+        pub struct $name {
+            pub expr: Arc<$name_expr>,
+        }
+
+        impl $name {
+            pub fn new(expr: $expr_type) -> Self {
+                Self {
+                    expr: Arc::new($name_expr { expr }),
+                }
+            }
+        }
+    };
+}
+
+define_node_ast_extension!(Analyze, AnalyzeExpr, Expr, ANALYZE_NODE_NAME);
+define_node_ast_extension!(Explain, ExplainExpr, Expr, EXPLAIN_NODE_NAME);
 
 #[cfg(test)]
 mod test {
