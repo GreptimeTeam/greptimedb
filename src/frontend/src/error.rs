@@ -170,7 +170,13 @@ pub enum Error {
         source: meta_client::error::Error,
     },
 
-    #[snafu(display("Failed to request Meta, source: {}", source))]
+    #[snafu(display("Failed to create heartbeat stream to Metasrv, source: {}", source))]
+    CreateMetaHeartbeatStream {
+        source: meta_client::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to request Metasrv, source: {}", source))]
     RequestMeta {
         #[snafu(backtrace)]
         source: meta_client::error::Error,
@@ -620,9 +626,10 @@ impl ErrorExt for Error {
             Error::Catalog { source, .. } => source.status_code(),
             Error::CatalogEntrySerde { source, .. } => source.status_code(),
 
-            Error::StartMetaClient { source } | Error::RequestMeta { source } => {
-                source.status_code()
-            }
+            Error::StartMetaClient { source }
+            | Error::RequestMeta { source }
+            | Error::CreateMetaHeartbeatStream { source, .. } => source.status_code(),
+
             Error::BuildCreateExprOnInsertion { source }
             | Error::ToTableInsertRequest { source }
             | Error::ToTableDeleteRequest { source }

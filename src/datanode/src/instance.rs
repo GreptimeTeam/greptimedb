@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{fs, path};
 
+use api::v1::meta::Role;
 use catalog::remote::MetaKvBackend;
 use catalog::{CatalogManager, CatalogManagerRef, RegisterTableRequest};
 use common_base::readable_size::ReadableSize;
@@ -513,7 +514,7 @@ async fn new_metasrv_client(node_id: u64, meta_config: &MetaClientOptions) -> Re
     let mut channel_manager = ChannelManager::with_config(config);
     channel_manager.start_channel_recycle();
 
-    let mut meta_client = MetaClientBuilder::new(cluster_id, member_id)
+    let mut meta_client = MetaClientBuilder::new(cluster_id, member_id, Role::Datanode)
         .enable_heartbeat()
         .enable_router()
         .enable_store()

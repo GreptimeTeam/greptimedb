@@ -30,6 +30,7 @@ h2 = "0.3"
 http-body = "0.4"
 lazy_static = "1.4"
 metrics.workspace = true
+once_cell = "1.17"
 parking_lot = "0.12"
 prost.workspace = true
 rand.workspace = true

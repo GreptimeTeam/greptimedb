@@ -78,7 +78,7 @@ mod tests {
         };
 
         let req = HeartbeatRequest {
-            header: Some(RequestHeader::new((1, 2))),
+            header: Some(RequestHeader::new((1, 2), Role::Datanode)),
             ..Default::default()
         };
         let mut acc = HeartbeatAccumulator::default();

@@ -18,6 +18,7 @@ mod lock;
 mod router;
 mod store;
 
+use api::v1::meta::Role;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_telemetry::info;
 use heartbeat::Client as HeartbeatClient;
@@ -43,6 +44,7 @@ pub type Id = (u64, u64);
 #[derive(Clone, Debug, Default)]
 pub struct MetaClientBuilder {
     id: Id,
+    role: Role,
     enable_heartbeat: bool,
     enable_router: bool,
     enable_store: bool,
@@ -51,9 +53,10 @@ pub struct MetaClientBuilder {
 }
 
 impl MetaClientBuilder {
-    pub fn new(cluster_id: u64, member_id: u64) -> Self {
+    pub fn new(cluster_id: u64, member_id: u64, role: Role) -> Self {
         Self {
             id: (cluster_id, member_id),
+            role,
             ..Default::default()
         }
     }
@@ -107,16 +110,16 @@ impl MetaClientBuilder {
         let mgr = client.channel_manager.clone();
 
         if self.enable_heartbeat {
-            client.heartbeat = Some(HeartbeatClient::new(self.id, mgr.clone()));
+            client.heartbeat = Some(HeartbeatClient::new(self.id, self.role, mgr.clone()));
         }
         if self.enable_router {
-            client.router = Some(RouterClient::new(self.id, mgr.clone()));
+            client.router = Some(RouterClient::new(self.id, self.role, mgr.clone()));
         }
         if self.enable_store {
-            client.store = Some(StoreClient::new(self.id, mgr.clone()));
+            client.store = Some(StoreClient::new(self.id, self.role, mgr.clone()));
         }
         if self.enable_lock {
-            client.lock = Some(LockClient::new(self.id, mgr));
+            client.lock = Some(LockClient::new(self.id, self.role, mgr));
         }
 
         client
@@ -409,28 +412,34 @@ mod tests {
     async fn test_meta_client_builder() {
         let urls = &["127.0.0.1:3001", "127.0.0.1:3002"];
 
-        let mut meta_client = MetaClientBuilder::new(0, 0).enable_heartbeat().build();
+        let mut meta_client = MetaClientBuilder::new(0, 0, Role::Datanode)
+            .enable_heartbeat()
+            .build();
         assert!(meta_client.heartbeat_client().is_ok());
         assert!(meta_client.router_client().is_err());
         assert!(meta_client.store_client().is_err());
         meta_client.start(urls).await.unwrap();
         assert!(meta_client.heartbeat_client().unwrap().is_started().await);
 
-        let mut meta_client = MetaClientBuilder::new(0, 0).enable_router().build();
+        let mut meta_client = MetaClientBuilder::new(0, 0, Role::Datanode)
+            .enable_router()
+            .build();
         assert!(meta_client.heartbeat_client().is_err());
         assert!(meta_client.router_client().is_ok());
         assert!(meta_client.store_client().is_err());
         meta_client.start(urls).await.unwrap();
         assert!(meta_client.router_client().unwrap().is_started().await);
 
-        let mut meta_client = MetaClientBuilder::new(0, 0).enable_store().build();
+        let mut meta_client = MetaClientBuilder::new(0, 0, Role::Datanode)
+            .enable_store()
+            .build();
         assert!(meta_client.heartbeat_client().is_err());
         assert!(meta_client.router_client().is_err());
         assert!(meta_client.store_client().is_ok());
         meta_client.start(urls).await.unwrap();
         assert!(meta_client.store_client().unwrap().is_started().await);
 
-        let mut meta_client = MetaClientBuilder::new(1, 2)
+        let mut meta_client = MetaClientBuilder::new(1, 2, Role::Datanode)
             .enable_heartbeat()
             .enable_router()
             .enable_store()
@@ -449,7 +458,7 @@ mod tests {
     #[tokio::test]
     async fn test_not_start_heartbeat_client() {
         let urls = &["127.0.0.1:3001", "127.0.0.1:3002"];
-        let mut meta_client = MetaClientBuilder::new(0, 0)
+        let mut meta_client = MetaClientBuilder::new(0, 0, Role::Datanode)
             .enable_router()
             .enable_store()
             .build();
@@ -494,7 +503,7 @@ mod tests {
     #[tokio::test]
     async fn test_not_start_router_client() {
         let urls = &["127.0.0.1:3001", "127.0.0.1:3002"];
-        let mut meta_client = MetaClientBuilder::new(0, 0)
+        let mut meta_client = MetaClientBuilder::new(0, 0, Role::Datanode)
             .enable_heartbeat()
             .enable_store()
             .build();
@@ -509,7 +518,7 @@ mod tests {
     #[tokio::test]
     async fn test_not_start_store_client() {
         let urls = &["127.0.0.1:3001", "127.0.0.1:3002"];
-        let mut meta_client = MetaClientBuilder::new(0, 0)
+        let mut meta_client = MetaClientBuilder::new(0, 0, Role::Datanode)
             .enable_heartbeat()
             .enable_router()
             .build();
@@ -522,7 +531,7 @@ mod tests {
     #[should_panic]
     #[test]
     fn test_failed_when_start_nothing() {
-        let _ = MetaClientBuilder::new(0, 0).build();
+        let _ = MetaClientBuilder::new(0, 0, Role::Datanode).build();
     }
 
     #[tokio::test]
