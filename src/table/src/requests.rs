@@ -176,6 +176,7 @@ pub struct OpenTableRequest {
     pub schema_name: String,
     pub table_name: String,
     pub table_id: TableId,
+    pub region_numbers: Vec<RegionNumber>,
 }
 
 /// Alter table request

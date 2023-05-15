@@ -27,7 +27,7 @@ use common_query::logical_plan::Expr;
 use common_query::physical_plan::PhysicalPlanRef;
 use common_recordbatch::error::{ExternalSnafu, Result as RecordBatchResult};
 use common_recordbatch::{RecordBatch, RecordBatchStream};
-use common_telemetry::logging;
+use common_telemetry::{logging, warn};
 use datatypes::schema::Schema;
 use futures::task::{Context, Poll};
 use futures::Stream;
@@ -334,6 +334,10 @@ impl<R: Region> Table for MitoTable<R> {
             })
             .collect())
     }
+
+    fn contain_regions(&self, region: RegionNumber) -> TableResult<bool> {
+        Ok(self.regions.contains_key(&region))
+    }
 }
 
 struct ChunkStream {
@@ -557,6 +561,18 @@ impl<R: Region> MitoTable<R> {
                 .context(TableOperationSnafu)?;
         }
 
+        Ok(())
+    }
+
+    pub async fn load_region(&self, region_number: RegionNumber, _region: R) -> TableResult<()> {
+        let info = self.table_info.load_full();
+
+        // TODO(weny): Supports to load the region
+        warn!(
+            "MitoTable try to load region: {} in table: {}",
+            region_number,
+            format!("{}.{}.{}", info.catalog_name, info.schema_name, info.name)
+        );
         Ok(())
     }
 

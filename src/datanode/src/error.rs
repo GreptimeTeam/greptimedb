@@ -19,12 +19,41 @@ use common_procedure::ProcedureId;
 use serde_json::error::Error as JsonError;
 use snafu::Location;
 use storage::error::Error as StorageError;
+use store_api::storage::RegionNumber;
 use table::error::Error as TableError;
 
 /// Business error of datanode.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Failed to check region in table: {}, source: {}", table_name, source))]
+    CheckRegion {
+        table_name: String,
+        #[snafu(backtrace)]
+        source: TableError,
+        region_number: RegionNumber,
+    },
+
+    #[snafu(display("Failed to access catalog, source: {}", source))]
+    AccessCatalog {
+        #[snafu(backtrace)]
+        source: catalog::error::Error,
+    },
+
+    #[snafu(display("Failed to open table: {}, source: {}", table_name, source))]
+    OpenTable {
+        table_name: String,
+        #[snafu(backtrace)]
+        source: TableError,
+    },
+
+    #[snafu(display("Failed to register table: {}, source: {}", table_name, source))]
+    RegisterTable {
+        table_name: String,
+        #[snafu(backtrace)]
+        source: catalog::error::Error,
+    },
+
     #[snafu(display("Failed to send message: {err_msg}"))]
     SendMessage { err_msg: String, location: Location },
 
@@ -467,12 +496,16 @@ impl ErrorExt for Error {
             | ExecuteLogicalPlan { source }
             | DescribeStatement { source } => source.status_code(),
 
+            OpenTable { source, .. } => source.status_code(),
+            RegisterTable { source, .. } | AccessCatalog { source, .. } => source.status_code(),
+
             DecodeLogicalPlan { source } => source.status_code(),
             NewCatalog { source } | RegisterSchema { source } => source.status_code(),
             FindTable { source, .. } => source.status_code(),
-            CreateTable { source, .. } | GetTable { source, .. } | AlterTable { source, .. } => {
-                source.status_code()
-            }
+            CreateTable { source, .. }
+            | GetTable { source, .. }
+            | AlterTable { source, .. }
+            | CheckRegion { source, .. } => source.status_code(),
             DropTable { source, .. } => source.status_code(),
             FlushTable { source, .. } => source.status_code(),
 

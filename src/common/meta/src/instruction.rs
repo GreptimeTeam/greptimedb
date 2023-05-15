@@ -15,31 +15,33 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct RegionIdent {
+    pub catalog: String,
+    pub schema: String,
+    pub table: String,
+    pub table_id: u32,
+    pub engine: String,
+    pub region_number: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct SimpleReply {
+    pub result: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Instruction {
-    OpenRegion {
-        catalog: String,
-        schema: String,
-        table: String,
-        table_id: u32,
-        engine: String,
-        region_number: u32,
-    },
-    CloseRegion {
-        catalog: String,
-        schema: String,
-        table: String,
-        table_id: u32,
-        engine: String,
-        region_number: u32,
-    },
+    OpenRegion(RegionIdent),
+    CloseRegion(RegionIdent),
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InstructionReply {
-    OpenRegion { result: bool, error: Option<String> },
-    CloseRegion { result: bool, error: Option<String> },
+    OpenRegion(SimpleReply),
+    CloseRegion(SimpleReply),
 }
 
 #[cfg(test)]
@@ -48,14 +50,14 @@ mod tests {
 
     #[test]
     fn test_serialize_instruction() {
-        let open_region = Instruction::OpenRegion {
+        let open_region = Instruction::OpenRegion(RegionIdent {
             catalog: "foo".to_string(),
             schema: "bar".to_string(),
             table: "hi".to_string(),
             table_id: 1024,
             engine: "mito".to_string(),
             region_number: 1,
-        };
+        });
 
         let serialized = serde_json::to_string(&open_region).unwrap();
 
@@ -64,14 +66,14 @@ mod tests {
             serialized
         );
 
-        let close_region = Instruction::CloseRegion {
+        let close_region = Instruction::CloseRegion(RegionIdent {
             catalog: "foo".to_string(),
             schema: "bar".to_string(),
             table: "hi".to_string(),
             table_id: 1024,
             engine: "mito".to_string(),
             region_number: 1,
-        };
+        });
 
         let serialized = serde_json::to_string(&close_region).unwrap();
 

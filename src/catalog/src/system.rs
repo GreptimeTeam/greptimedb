@@ -93,6 +93,7 @@ impl SystemCatalogTable {
             schema_name: INFORMATION_SCHEMA_NAME.to_string(),
             table_name: SYSTEM_CATALOG_TABLE_NAME.to_string(),
             table_id: SYSTEM_CATALOG_TABLE_ID,
+            region_numbers: vec![0],
         };
         let schema = build_system_catalog_schema();
         let ctx = EngineContext::default();

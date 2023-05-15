@@ -31,13 +31,13 @@ use object_store::ObjectStore;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{
     ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyDescriptorBuilder, ColumnId,
-    EngineContext as StorageEngineContext, OpenOptions, RowKeyDescriptor, RowKeyDescriptorBuilder,
-    StorageEngine,
+    EngineContext as StorageEngineContext, OpenOptions, RegionNumber, RowKeyDescriptor,
+    RowKeyDescriptorBuilder, StorageEngine,
 };
 use table::engine::{
     region_name, table_dir, EngineContext, TableEngine, TableEngineProcedure, TableReference,
 };
-use table::metadata::{TableInfo, TableVersion};
+use table::metadata::{TableId, TableInfo, TableVersion};
 use table::requests::{
     AlterKind, AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest,
 };
@@ -381,10 +381,176 @@ fn validate_create_table_request(request: &CreateTableRequest) -> Result<()> {
     Ok(())
 }
 
+fn all_regions_open(table: TableRef, regions: &[RegionNumber]) -> TableResult<bool> {
+    for r in regions {
+        let region_exist = table.contain_regions(*r)?;
+        if !region_exist {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 impl<S: StorageEngine> MitoEngineInner<S> {
-    async fn open_table(
+    /// Returns Some(table) contains all specific regions
+    fn check_regions(
+        &self,
+        table: TableRef,
+        regions: &[RegionNumber],
+    ) -> TableResult<Option<TableRef>> {
+        if all_regions_open(table.clone(), regions)? {
+            // If all regions have been opened
+            Ok(Some(table))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Builds table from scratch.
+    /// Returns None if failed to recover manifest.
+    async fn recover_table(
         &self,
         _ctx: &EngineContext,
+        request: OpenTableRequest,
+    ) -> TableResult<Option<Arc<MitoTable<S::Region>>>> {
+        let catalog_name = &request.catalog_name;
+        let schema_name = &request.schema_name;
+        let table_name = &request.table_name;
+        let table_ref = TableReference {
+            catalog: catalog_name,
+            schema: schema_name,
+            table: table_name,
+        };
+
+        let table_id = request.table_id;
+        let engine_ctx = StorageEngineContext::default();
+        let table_dir = table_dir(catalog_name, schema_name, table_id);
+
+        let Some((manifest, table_info)) = self
+                            .recover_table_manifest_and_info(table_name, &table_dir)
+                            .await.map_err(BoxedError::new)
+                            .context(table_error::TableOperationSnafu)? else { return Ok(None) };
+
+        let opts = OpenOptions {
+            parent_dir: table_dir.to_string(),
+            write_buffer_size: table_info
+                .meta
+                .options
+                .write_buffer_size
+                .map(|s| s.0 as usize),
+            ttl: table_info.meta.options.ttl,
+            compaction_time_window: table_info.meta.options.compaction_time_window,
+        };
+
+        debug!(
+            "Opening table {}, table info recovered: {:?}",
+            table_id, table_info
+        );
+
+        for target_region in &request.region_numbers {
+            if !table_info.meta.region_numbers.contains(target_region) {
+                table_error::RegionNotFoundSnafu {
+                    table: table_ref.to_string(),
+                    region: *target_region,
+                }
+                .fail()?
+            }
+        }
+
+        let mut regions = HashMap::with_capacity(table_info.meta.region_numbers.len());
+
+        for region_number in &request.region_numbers {
+            let region = self
+                .open_region(&engine_ctx, table_id, *region_number, &table_ref, &opts)
+                .await?;
+            regions.insert(*region_number, region);
+        }
+
+        let table = Arc::new(MitoTable::new(table_info, regions, manifest));
+
+        Ok(Some(table))
+    }
+
+    async fn open_region(
+        &self,
+        engine_ctx: &StorageEngineContext,
+        table_id: TableId,
+        region_number: RegionNumber,
+        table_ref: &TableReference<'_>,
+        opts: &OpenOptions,
+    ) -> TableResult<S::Region> {
+        let region_name = region_name(table_id, region_number);
+        let region = self
+            .storage_engine
+            .open_region(engine_ctx, &region_name, opts)
+            .await
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)?
+            .with_context(|| RegionNotFoundSnafu {
+                table: format!(
+                    "{}.{}.{}",
+                    table_ref.catalog, table_ref.schema, table_ref.table
+                ),
+                region: region_number,
+            })
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)?;
+
+        Ok(region)
+    }
+
+    /// Loads regions
+    async fn load_missing_regions(
+        &self,
+        _ctx: &EngineContext,
+        table: Arc<MitoTable<S::Region>>,
+        region_numbers: &[RegionNumber],
+    ) -> TableResult<()> {
+        let table_info = table.table_info();
+        let catalog = &table_info.catalog_name;
+        let schema = &table_info.schema_name;
+        let name = &table_info.name;
+        let table_id = table_info.ident.table_id;
+
+        let table_dir = table_dir(catalog, schema, table_id);
+        let table_ref = TableReference {
+            catalog,
+            schema,
+            table: name,
+        };
+
+        let opts = OpenOptions {
+            parent_dir: table_dir.to_string(),
+            write_buffer_size: table_info
+                .meta
+                .options
+                .write_buffer_size
+                .map(|s| s.0 as usize),
+            ttl: table_info.meta.options.ttl,
+            compaction_time_window: table_info.meta.options.compaction_time_window,
+        };
+
+        // TODO(weny): Returns an error earlier if the target region does not exist in the meta.
+        for region_number in region_numbers {
+            if table.contain_regions(*region_number)? {
+                continue;
+            }
+
+            let engine_ctx = StorageEngineContext::default();
+
+            let region = self
+                .open_region(&engine_ctx, table_id, *region_number, &table_ref, &opts)
+                .await?;
+
+            table.load_region(*region_number, region).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn open_table(
+        &self,
+        ctx: &EngineContext,
         request: OpenTableRequest,
     ) -> TableResult<Option<TableRef>> {
         let catalog_name = &request.catalog_name;
@@ -397,8 +563,9 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         };
 
         if let Some(table) = self.get_table(&table_ref) {
-            // Table has already been opened.
-            return Ok(Some(table));
+            if let Some(table) = self.check_regions(table, &request.region_numbers)? {
+                return Ok(Some(table));
+            }
         }
 
         // Acquires the mutex before opening a new table.
@@ -407,61 +574,30 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             let _lock = self.table_mutex.lock(table_name_key.clone()).await;
 
             // Checks again, read lock should be enough since we are guarded by the mutex.
-            if let Some(table) = self.get_table(&table_ref) {
-                return Ok(Some(table));
+            if let Some(table) = self.get_mito_table(&table_ref) {
+                // Contains all regions or target region
+                if let Some(table) = self.check_regions(table.clone(), &request.region_numbers)? {
+                    Some(table)
+                } else {
+                    // Loads missing regions
+                    // TODO(weny): Supports to load regions
+                    self.load_missing_regions(ctx, table.clone(), &request.region_numbers)
+                        .await?;
+
+                    Some(table as _)
+                }
+            } else {
+                // Builds table from scratch
+                let table = self.recover_table(ctx, request.clone()).await?;
+                if let Some(table) = table {
+                    // already locked
+                    self.tables.insert(table_ref.to_string(), table.clone());
+
+                    Some(table as _)
+                } else {
+                    None
+                }
             }
-
-            let table_id = request.table_id;
-            let engine_ctx = StorageEngineContext::default();
-            let table_dir = table_dir(catalog_name, schema_name, table_id);
-
-            let Some((manifest, table_info)) = self
-                .recover_table_manifest_and_info(table_name, &table_dir)
-                .await.map_err(BoxedError::new)
-                .context(table_error::TableOperationSnafu)? else { return Ok(None) };
-
-            let opts = OpenOptions {
-                parent_dir: table_dir.to_string(),
-                write_buffer_size: table_info
-                    .meta
-                    .options
-                    .write_buffer_size
-                    .map(|s| s.0 as usize),
-                ttl: table_info.meta.options.ttl,
-                compaction_time_window: table_info.meta.options.compaction_time_window,
-            };
-
-            debug!(
-                "Opening table {}, table info recovered: {:?}",
-                table_id, table_info
-            );
-
-            let mut regions = HashMap::with_capacity(table_info.meta.region_numbers.len());
-            for region_number in &table_info.meta.region_numbers {
-                let region_name = region_name(table_id, *region_number);
-                let region = self
-                    .storage_engine
-                    .open_region(&engine_ctx, &region_name, &opts)
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(table_error::TableOperationSnafu)?
-                    .with_context(|| RegionNotFoundSnafu {
-                        table: format!(
-                            "{}.{}.{}",
-                            request.catalog_name, request.schema_name, request.table_name
-                        ),
-                        region: *region_number,
-                    })
-                    .map_err(BoxedError::new)
-                    .context(table_error::TableOperationSnafu)?;
-                regions.insert(*region_number, region);
-            }
-
-            let table = Arc::new(MitoTable::new(table_info, regions, manifest));
-
-            // already locked
-            self.tables.insert(table_ref.to_string(), table.clone());
-            Some(table as _)
         };
 
         logging::info!(
