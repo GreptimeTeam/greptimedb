@@ -58,7 +58,9 @@ where
             );
         }
 
-        let num_columns = batches.get(0).map(|b| b.len()).unwrap_or(0);
+        let Some(num_columns) = batches.get(0).map(|b| b.len()) else {
+            return Ok(Some(Batch::new(vec![])));
+        };
         let mut vectors_in_batch = Vec::with_capacity(num_columns);
 
         for idx in 0..num_columns {
@@ -129,9 +131,8 @@ fn sort_by_rows(schema: &ProjectedSchemaRef, arrays: Vec<ArrayRef>) -> Result<Ve
 /// [<PK_1>, <PK_2>, TS] to [TS, <PK_1>, <PK_2>].
 /// Returns a vector of sort column indices and sort orders (true means descending order).
 fn build_sort_columns(schema: &ProjectedSchemaRef) -> Vec<(usize, bool)> {
-    let row_key_end = schema.schema_to_read().row_key_end();
-    let ts_col_index = row_key_end - 1;
-    let mut res = (0..(row_key_end - 1))
+    let ts_col_index = schema.schema_to_read().timestamp_index();
+    let mut res = (0..(ts_col_index))
         .map(|idx| (idx, false))
         .collect::<Vec<_>>();
     res.insert(0, (ts_col_index, true));
