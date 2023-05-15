@@ -84,7 +84,8 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.arch }}
-
+      - name: Install latest nextest release
+        uses: taiki-e/install-action@nextest
       - name: Output package versions
         run: protoc --version ; cargo version ; rustc --version ; gcc --version ; g++ --version
 
@@ -200,7 +201,8 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.arch }}
-
+      - name: Install latest nextest release
+        uses: taiki-e/install-action@nextest
       - name: Output package versions
         run: protoc --version ; cargo version ; rustc --version ; gcc --version ; g++ --version
 
