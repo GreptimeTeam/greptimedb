@@ -12,18 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod date;
-pub mod datetime;
-pub mod error;
-pub mod range;
-pub mod timestamp;
-pub mod timestamp_millis;
-pub mod timezone;
-pub mod util;
+use chrono::{FixedOffset, Offset};
 
-pub use date::Date;
-pub use datetime::DateTime;
-pub use range::RangeMillis;
-pub use timestamp::Timestamp;
-pub use timestamp_millis::TimestampMillis;
-pub use timezone::TimeZone;
+#[derive(Debug, Clone)]
+pub struct TimeZone {
+    offset_secs: i32,
+}
+
+impl TimeZone {
+    pub fn new(offset_hours: i32, offset_mins: u32) -> Self {
+        let offset_secs = if offset_hours > 0 {
+            offset_hours * 3600 + offset_mins as i32 * 60
+        } else {
+            offset_hours * 3600 - offset_mins as i32 * 60
+        };
+        Self { offset_secs }
+    }
+}
+
+impl Offset for TimeZone {
+    fn fix(&self) -> FixedOffset {
+        FixedOffset::east_opt(self.offset_secs).unwrap()
+    }
+}

@@ -7994,6 +7994,7 @@ dependencies = [
  "arc-swap",
  "common-catalog",
  "common-telemetry",
+ "common-time",
 ]
 
 [[package]]
