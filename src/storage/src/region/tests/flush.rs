@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use common_test_util::temp_dir::create_temp_dir;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
-use store_api::storage::{FlushContext, OpenOptions, Region, WriteResponse};
+use store_api::storage::{FlushContext, FlushReason, OpenOptions, Region, WriteResponse};
 
 use crate::engine;
 use crate::flush::FlushStrategyRef;
@@ -32,10 +32,9 @@ const REGION_NAME: &str = "region-flush-0";
 /// Create a new region for flush test
 async fn create_region_for_flush(
     store_dir: &str,
-    enable_version_column: bool,
     flush_strategy: FlushStrategyRef,
 ) -> RegionImpl<RaftEngineLogStore> {
-    let metadata = tests::new_metadata(REGION_NAME, enable_version_column);
+    let metadata = tests::new_metadata(REGION_NAME);
 
     let mut store_config = config_util::new_store_config(REGION_NAME, store_dir).await;
     store_config.flush_strategy = flush_strategy;
@@ -52,7 +51,7 @@ struct FlushTester {
 
 impl FlushTester {
     async fn new(store_dir: &str, flush_strategy: FlushStrategyRef) -> FlushTester {
-        let region = create_region_for_flush(store_dir, false, flush_strategy.clone()).await;
+        let region = create_region_for_flush(store_dir, flush_strategy.clone()).await;
 
         FlushTester {
             base: Some(FileTesterBase::with_region(region)),
@@ -92,7 +91,12 @@ impl FlushTester {
     }
 
     async fn flush(&self, wait: Option<bool>) {
-        let ctx = wait.map(|wait| FlushContext { wait }).unwrap_or_default();
+        let ctx = wait
+            .map(|wait| FlushContext {
+                wait,
+                reason: FlushReason::Manually,
+            })
+            .unwrap_or_default();
         self.base().region.flush(&ctx).await.unwrap();
     }
 }

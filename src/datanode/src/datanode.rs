@@ -23,7 +23,10 @@ use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
 use servers::Mode;
-use storage::config::EngineConfig as StorageEngineConfig;
+use storage::config::{
+    EngineConfig as StorageEngineConfig, DEFAULT_AUTO_FLUSH_INTERVAL, DEFAULT_MAX_FLUSH_TASKS,
+    DEFAULT_PICKER_SCHEDULE_INTERVAL, DEFAULT_REGION_WRITE_BUFFER_SIZE,
+};
 use storage::scheduler::SchedulerConfig;
 
 use crate::error::Result;
@@ -49,6 +52,7 @@ pub struct StorageConfig {
     pub store: ObjectStoreConfig,
     pub compaction: CompactionConfig,
     pub manifest: RegionManifestConfig,
+    pub flush: FlushConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Default, Deserialize)]
@@ -166,6 +170,8 @@ pub struct RegionManifestConfig {
     pub gc_duration: Option<Duration>,
     /// Whether to try creating a manifest checkpoint on region opening
     pub checkpoint_on_startup: bool,
+    /// Whether to compress manifest and checkpoint file by gzip
+    pub compress: bool,
 }
 
 impl Default for RegionManifestConfig {
@@ -174,6 +180,7 @@ impl Default for RegionManifestConfig {
             checkpoint_margin: Some(10u16),
             gc_duration: Some(Duration::from_secs(30)),
             checkpoint_on_startup: false,
+            compress: false,
         }
     }
 }
@@ -203,6 +210,34 @@ impl Default for CompactionConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(default)]
+pub struct FlushConfig {
+    /// Max inflight flush tasks.
+    pub max_flush_tasks: usize,
+    /// Default write buffer size for a region.
+    pub region_write_buffer_size: ReadableSize,
+    /// Interval to schedule auto flush picker to find region to flush.
+    #[serde(with = "humantime_serde")]
+    pub picker_schedule_interval: Duration,
+    /// Interval to auto flush a region if it has not flushed yet.
+    #[serde(with = "humantime_serde")]
+    pub auto_flush_interval: Duration,
+}
+
+impl Default for FlushConfig {
+    fn default() -> Self {
+        Self {
+            max_flush_tasks: DEFAULT_MAX_FLUSH_TASKS,
+            region_write_buffer_size: DEFAULT_REGION_WRITE_BUFFER_SIZE,
+            picker_schedule_interval: Duration::from_millis(
+                DEFAULT_PICKER_SCHEDULE_INTERVAL.into(),
+            ),
+            auto_flush_interval: Duration::from_millis(DEFAULT_AUTO_FLUSH_INTERVAL.into()),
+        }
+    }
+}
+
 impl From<&DatanodeOptions> for SchedulerConfig {
     fn from(value: &DatanodeOptions) -> Self {
         Self {
@@ -214,12 +249,17 @@ impl From<&DatanodeOptions> for SchedulerConfig {
 impl From<&DatanodeOptions> for StorageEngineConfig {
     fn from(value: &DatanodeOptions) -> Self {
         Self {
+            compress_manifest: value.storage.manifest.compress,
             manifest_checkpoint_on_startup: value.storage.manifest.checkpoint_on_startup,
             manifest_checkpoint_margin: value.storage.manifest.checkpoint_margin,
             manifest_gc_duration: value.storage.manifest.gc_duration,
             max_files_in_l0: value.storage.compaction.max_files_in_level0,
             max_purge_tasks: value.storage.compaction.max_purge_tasks,
             sst_write_buffer_size: value.storage.compaction.sst_write_buffer_size,
+            max_flush_tasks: value.storage.flush.max_flush_tasks,
+            region_write_buffer_size: value.storage.flush.region_write_buffer_size,
+            picker_schedule_interval: value.storage.flush.picker_schedule_interval,
+            auto_flush_interval: value.storage.flush.auto_flush_interval,
         }
     }
 }

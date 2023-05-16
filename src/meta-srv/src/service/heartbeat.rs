@@ -13,13 +13,16 @@
 // limitations under the License.
 
 use std::io::ErrorKind;
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 
 use api::v1::meta::{
     heartbeat_server, AskLeaderRequest, AskLeaderResponse, HeartbeatRequest, HeartbeatResponse,
-    Peer, ResponseHeader,
+    Peer, RequestHeader, ResponseHeader, Role,
 };
 use common_telemetry::{error, info, warn};
 use futures::StreamExt;
+use once_cell::sync::OnceCell;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Streaming};
@@ -48,14 +51,22 @@ impl heartbeat_server::Heartbeat for MetaSrv {
                 let mut quit = false;
                 match msg {
                     Ok(req) => {
-                        let role = req.header.as_ref().map_or(0, |h| h.role);
-                        if pusher_key.is_none() {
-                            if let Some(peer) = &req.peer {
-                                let key = format!("{}-{}", role, peer.id,);
-                                let pusher = Pusher::new(tx.clone(), &req.header);
-                                handler_group.register(&key, pusher).await;
-                                pusher_key = Some(key);
+                        let header = match req.header.as_ref() {
+                            Some(header) => header,
+                            None => {
+                                let err = error::MissingRequestHeaderSnafu {}.build();
+                                tx.send(Err(err.into())).await.expect("working rx");
+                                break;
                             }
+                        };
+
+                        if pusher_key.is_none() {
+                            let node_id = get_node_id(header);
+                            let role = header.role() as i32;
+                            let key = format!("{}-{}", role, node_id);
+                            let pusher = Pusher::new(tx.clone(), header);
+                            handler_group.register(&key, pusher).await;
+                            pusher_key = Some(key);
                         }
 
                         let res = handler_group
@@ -136,6 +147,20 @@ async fn handle_ask_leader(req: AskLeaderRequest, ctx: Context) -> Result<AskLea
     Ok(AskLeaderResponse { header, leader })
 }
 
+fn get_node_id(header: &RequestHeader) -> u64 {
+    static ID: OnceCell<Arc<AtomicU64>> = OnceCell::new();
+
+    fn next_id() -> u64 {
+        let id = ID.get_or_init(|| Arc::new(AtomicU64::new(0))).clone();
+        id.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    match header.role() {
+        Role::Frontend => next_id(),
+        Role::Datanode => header.member_id,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -144,6 +169,7 @@ mod tests {
     use api::v1::meta::*;
     use tonic::IntoRequest;
 
+    use super::get_node_id;
     use crate::metasrv::builder::MetaSrvBuilder;
     use crate::service::store::memory::MemStore;
 
@@ -154,12 +180,39 @@ mod tests {
         let meta_srv = MetaSrvBuilder::new().kv_store(kv_store).build().await;
 
         let req = AskLeaderRequest {
-            header: Some(RequestHeader::new((1, 1))),
+            header: Some(RequestHeader::new((1, 1), Role::Datanode)),
         };
 
         let res = meta_srv.ask_leader(req.into_request()).await.unwrap();
         let res = res.into_inner();
         assert_eq!(1, res.header.unwrap().cluster_id);
         assert_eq!(meta_srv.options().bind_addr, res.leader.unwrap().addr);
+    }
+
+    #[test]
+    fn test_get_node_id() {
+        let header = RequestHeader {
+            role: Role::Datanode.into(),
+            member_id: 11,
+            ..Default::default()
+        };
+        assert_eq!(11, get_node_id(&header));
+
+        let header = RequestHeader {
+            role: Role::Frontend.into(),
+            ..Default::default()
+        };
+        for i in 0..10 {
+            assert_eq!(i, get_node_id(&header));
+        }
+
+        let header = RequestHeader {
+            role: Role::Frontend.into(),
+            member_id: 11,
+            ..Default::default()
+        };
+        for i in 10..20 {
+            assert_eq!(i, get_node_id(&header));
+        }
     }
 }

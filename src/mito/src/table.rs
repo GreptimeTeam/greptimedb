@@ -22,12 +22,13 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
+use common_datasource::compression::CompressionType;
 use common_error::ext::BoxedError;
 use common_query::logical_plan::Expr;
 use common_query::physical_plan::PhysicalPlanRef;
 use common_recordbatch::error::{ExternalSnafu, Result as RecordBatchResult};
 use common_recordbatch::{RecordBatch, RecordBatchStream};
-use common_telemetry::logging;
+use common_telemetry::{logging, warn};
 use datatypes::schema::Schema;
 use futures::task::{Context, Poll};
 use futures::Stream;
@@ -35,8 +36,8 @@ use object_store::ObjectStore;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::manifest::{self, Manifest, ManifestVersion, MetaActionIterator};
 use store_api::storage::{
-    AddColumn, AlterOperation, AlterRequest, ChunkReader, FlushContext, ReadContext, Region,
-    RegionMeta, RegionNumber, ScanRequest, SchemaRef, Snapshot, WriteContext, WriteRequest,
+    AddColumn, AlterOperation, AlterRequest, ChunkReader, FlushContext, FlushReason, ReadContext,
+    Region, RegionMeta, RegionNumber, ScanRequest, SchemaRef, Snapshot, WriteContext, WriteRequest,
 };
 use table::error::{
     InvalidTableSnafu, RegionSchemaMismatchSnafu, Result as TableResult, TableOperationSnafu,
@@ -294,7 +295,12 @@ impl<R: Region> Table for MitoTable<R> {
         region_number: Option<RegionNumber>,
         wait: Option<bool>,
     ) -> TableResult<()> {
-        let flush_ctx = wait.map(|wait| FlushContext { wait }).unwrap_or_default();
+        let flush_ctx = wait
+            .map(|wait| FlushContext {
+                wait,
+                reason: FlushReason::Manually,
+            })
+            .unwrap_or_default();
         if let Some(region_number) = region_number {
             if let Some(region) = self.regions.get(&region_number) {
                 region
@@ -333,6 +339,10 @@ impl<R: Region> Table for MitoTable<R> {
                 disk_usage_bytes: region.disk_usage_bytes(),
             })
             .collect())
+    }
+
+    fn contain_regions(&self, region: RegionNumber) -> TableResult<bool> {
+        Ok(self.regions.contains_key(&region))
     }
 }
 
@@ -436,8 +446,10 @@ impl<R: Region> MitoTable<R> {
         table_info: TableInfo,
         regions: HashMap<RegionNumber, R>,
         object_store: ObjectStore,
+        compress_type: CompressionType,
     ) -> Result<MitoTable<R>> {
-        let manifest = TableManifest::create(&table_manifest_dir(table_dir), object_store);
+        let manifest =
+            TableManifest::create(&table_manifest_dir(table_dir), object_store, compress_type);
 
         let _timer =
             common_telemetry::timer!(crate::metrics::MITO_CREATE_TABLE_UPDATE_MANIFEST_ELAPSED);
@@ -454,8 +466,12 @@ impl<R: Region> MitoTable<R> {
         Ok(MitoTable::new(table_info, regions, manifest))
     }
 
-    pub(crate) fn build_manifest(table_dir: &str, object_store: ObjectStore) -> TableManifest {
-        TableManifest::create(&table_manifest_dir(table_dir), object_store)
+    pub(crate) fn build_manifest(
+        table_dir: &str,
+        object_store: ObjectStore,
+        compress_type: CompressionType,
+    ) -> TableManifest {
+        TableManifest::create(&table_manifest_dir(table_dir), object_store, compress_type)
     }
 
     pub(crate) async fn recover_table_info(
@@ -557,6 +573,18 @@ impl<R: Region> MitoTable<R> {
                 .context(TableOperationSnafu)?;
         }
 
+        Ok(())
+    }
+
+    pub async fn load_region(&self, region_number: RegionNumber, _region: R) -> TableResult<()> {
+        let info = self.table_info.load_full();
+
+        // TODO(weny): Supports to load the region
+        warn!(
+            "MitoTable try to load region: {} in table: {}",
+            region_number,
+            format!("{}.{}.{}", info.catalog_name, info.schema_name, info.name)
+        );
         Ok(())
     }
 

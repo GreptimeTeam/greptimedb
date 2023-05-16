@@ -23,7 +23,6 @@ use snafu::ResultExt;
 
 use crate::error::{MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu};
 use crate::options::{Options, TopLevelOptions};
-use crate::toml_loader;
 
 pub struct Instance {
     datanode: Datanode,
@@ -99,15 +98,14 @@ struct StartCommand {
     http_addr: Option<String>,
     #[clap(long)]
     http_timeout: Option<u64>,
+    #[clap(long, default_value = "GREPTIMEDB_DATANODE")]
+    env_prefix: String,
 }
 
 impl StartCommand {
     fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
-        let mut opts: DatanodeOptions = if let Some(path) = &self.config_file {
-            toml_loader::from_file!(path)?
-        } else {
-            DatanodeOptions::default()
-        };
+        let mut opts: DatanodeOptions =
+            Options::load_layered_options(self.config_file.as_deref(), self.env_prefix.as_ref())?;
 
         if let Some(dir) = top_level_opts.log_dir {
             opts.logging.dir = dir;
@@ -116,26 +114,27 @@ impl StartCommand {
             opts.logging.level = level;
         }
 
-        if let Some(addr) = self.rpc_addr.clone() {
-            opts.rpc_addr = addr;
+        if let Some(addr) = &self.rpc_addr {
+            opts.rpc_addr = addr.clone();
         }
 
         if self.rpc_hostname.is_some() {
             opts.rpc_hostname = self.rpc_hostname.clone();
         }
 
-        if let Some(addr) = self.mysql_addr.clone() {
-            opts.mysql_addr = addr;
+        if let Some(addr) = &self.mysql_addr {
+            opts.mysql_addr = addr.clone();
         }
 
         if let Some(node_id) = self.node_id {
             opts.node_id = Some(node_id);
         }
 
-        if let Some(meta_addr) = self.metasrv_addr.clone() {
+        if let Some(meta_addr) = &self.metasrv_addr {
             opts.meta_client_options
                 .get_or_insert_with(MetaClientOptions::default)
                 .metasrv_addrs = meta_addr
+                .clone()
                 .split(',')
                 .map(&str::trim)
                 .map(&str::to_string)
@@ -150,16 +149,20 @@ impl StartCommand {
             .fail();
         }
 
-        if let Some(data_dir) = self.data_dir.clone() {
-            opts.storage.store = ObjectStoreConfig::File(FileConfig { data_dir });
+        if let Some(data_dir) = &self.data_dir {
+            opts.storage.store = ObjectStoreConfig::File(FileConfig {
+                data_dir: data_dir.clone(),
+            });
         }
 
-        if let Some(wal_dir) = self.wal_dir.clone() {
-            opts.wal.dir = wal_dir;
+        if let Some(wal_dir) = &self.wal_dir {
+            opts.wal.dir = wal_dir.clone();
         }
-        if let Some(http_addr) = self.http_addr.clone() {
-            opts.http_opts.addr = http_addr
+
+        if let Some(http_addr) = &self.http_addr {
+            opts.http_opts.addr = http_addr.clone();
         }
+
         if let Some(http_timeout) = self.http_timeout {
             opts.http_opts.timeout = Duration::from_secs(http_timeout)
         }
@@ -191,6 +194,7 @@ mod tests {
     use servers::Mode;
 
     use super::*;
+    use crate::options::ENV_VAR_SEP;
 
     #[test]
     fn test_read_from_config_file() {
@@ -232,6 +236,7 @@ mod tests {
             checkpoint_margin = 9
             gc_duration = '7s'
             checkpoint_on_startup = true
+            compress = true
 
             [logging]
             level = "debug"
@@ -291,6 +296,7 @@ mod tests {
                 checkpoint_margin: Some(9),
                 gc_duration: Some(Duration::from_secs(7)),
                 checkpoint_on_startup: true,
+                compress: true
             },
             options.storage.manifest,
         );
@@ -349,5 +355,111 @@ mod tests {
         let logging_opt = options.logging_options();
         assert_eq!("/tmp/greptimedb/test/logs", logging_opt.dir);
         assert_eq!("debug", logging_opt.level);
+    }
+
+    #[test]
+    fn test_config_precedence_order() {
+        let mut file = create_named_temp_file();
+        let toml_str = r#"
+            mode = "distributed"
+            enable_memory_catalog = false
+            node_id = 42
+            rpc_addr = "127.0.0.1:3001"
+            rpc_hostname = "127.0.0.1"
+            rpc_runtime_size = 8
+            mysql_addr = "127.0.0.1:4406"
+            mysql_runtime_size = 2
+
+            [meta_client_options]
+            metasrv_addrs = ["127.0.0.1:3002"]
+            timeout_millis = 3000
+            connect_timeout_millis = 5000
+            tcp_nodelay = true
+
+            [wal]
+            dir = "/tmp/greptimedb/wal"
+            file_size = "1GB"
+            purge_threshold = "50GB"
+            purge_interval = "10m"
+            read_batch_size = 128
+            sync_write = false
+
+            [storage]
+            type = "File"
+            data_dir = "/tmp/greptimedb/data/"
+
+            [storage.compaction]
+            max_inflight_tasks = 3
+            max_files_in_level0 = 7
+            max_purge_tasks = 32
+
+            [storage.manifest]
+            checkpoint_on_startup = true
+
+            [logging]
+            level = "debug"
+            dir = "/tmp/greptimedb/test/logs"
+        "#;
+        write!(file, "{}", toml_str).unwrap();
+
+        let env_prefix = "DATANODE_UT";
+        temp_env::with_vars(
+            vec![
+                (
+                    // storage.manifest.gc_duration = 9s
+                    vec![
+                        env_prefix.to_string(),
+                        "storage".to_uppercase(),
+                        "manifest".to_uppercase(),
+                        "gc_duration".to_uppercase(),
+                    ]
+                    .join(ENV_VAR_SEP),
+                    Some("9s"),
+                ),
+                (
+                    // storage.compaction.max_purge_tasks = 99
+                    vec![
+                        env_prefix.to_string(),
+                        "storage".to_uppercase(),
+                        "compaction".to_uppercase(),
+                        "max_purge_tasks".to_uppercase(),
+                    ]
+                    .join(ENV_VAR_SEP),
+                    Some("99"),
+                ),
+            ],
+            || {
+                let command = StartCommand {
+                    config_file: Some(file.path().to_str().unwrap().to_string()),
+                    wal_dir: Some("/other/wal/dir".to_string()),
+                    env_prefix: env_prefix.to_string(),
+                    ..Default::default()
+                };
+
+                let Options::Datanode(opts) =
+                    command.load_options(TopLevelOptions::default()).unwrap() else {unreachable!()};
+
+                // Should be read from env, env > default values.
+                assert_eq!(
+                    opts.storage.manifest.gc_duration,
+                    Some(Duration::from_secs(9))
+                );
+
+                // Should be read from config file, config file > env > default values.
+                assert_eq!(opts.storage.compaction.max_purge_tasks, 32);
+
+                // Should be read from cli, cli > config file > env > default values.
+                assert_eq!(opts.wal.dir, "/other/wal/dir");
+
+                // Should be default value.
+                assert_eq!(
+                    opts.storage.manifest.checkpoint_margin,
+                    DatanodeOptions::default()
+                        .storage
+                        .manifest
+                        .checkpoint_margin
+                );
+            },
+        );
     }
 }

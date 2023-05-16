@@ -35,13 +35,14 @@ use object_store::services::Fs;
 use object_store::ObjectStore;
 use store_api::manifest::MAX_VERSION;
 use store_api::storage::{
-    consts, Chunk, ChunkReader, RegionMeta, ScanRequest, SequenceNumber, Snapshot, WriteRequest,
+    Chunk, ChunkReader, RegionMeta, ScanRequest, SequenceNumber, Snapshot, WriteRequest,
 };
 
 use super::*;
 use crate::chunk::ChunkReaderImpl;
 use crate::file_purger::noop::NoopFilePurgeHandler;
 use crate::manifest::action::{RegionChange, RegionMetaActionList};
+use crate::manifest::manifest_compress_type;
 use crate::manifest::test_utils::*;
 use crate::memtable::DefaultMemtableBuilder;
 use crate::scheduler::{LocalScheduler, SchedulerConfig};
@@ -50,9 +51,8 @@ use crate::test_util::descriptor_util::RegionDescBuilder;
 use crate::test_util::{self, config_util, schema_util, write_batch_util};
 
 /// Create metadata of a region with schema: (timestamp, v0).
-pub fn new_metadata(region_name: &str, enable_version_column: bool) -> RegionMetadata {
+pub fn new_metadata(region_name: &str) -> RegionMetadata {
     let desc = RegionDescBuilder::new(region_name)
-        .enable_version_column(enable_version_column)
         .push_field_column(("v0", LogicalTypeId::Int64, true))
         .build();
     desc.try_into().unwrap()
@@ -195,7 +195,6 @@ fn new_write_batch_for_test(enable_version_column: bool) -> WriteBatch {
                     LogicalTypeId::TimestampMillisecond,
                     false,
                 ),
-                (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
                 ("v0", LogicalTypeId::Int64, true),
             ],
             Some(0),
@@ -267,7 +266,6 @@ fn append_chunk_to(chunk: &Chunk, dst: &mut Vec<(i64, Option<i64>)>) {
 async fn test_new_region() {
     let region_name = "region-0";
     let desc = RegionDescBuilder::new(region_name)
-        .enable_version_column(true)
         .push_key_column(("k1", LogicalTypeId::Int32, false))
         .push_field_column(("v0", LogicalTypeId::Float32, true))
         .build();
@@ -294,7 +292,6 @@ async fn test_new_region() {
                 LogicalTypeId::TimestampMillisecond,
                 false,
             ),
-            (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
             ("v0", LogicalTypeId::Float32, true),
         ],
         Some(1),
@@ -305,7 +302,16 @@ async fn test_new_region() {
 }
 
 #[tokio::test]
-async fn test_recover_region_manifets() {
+async fn test_recover_region_manifets_compress() {
+    test_recover_region_manifets(true).await;
+}
+
+#[tokio::test]
+async fn test_recover_region_manifets_uncompress() {
+    test_recover_region_manifets(false).await;
+}
+
+async fn test_recover_region_manifets(compress: bool) {
     common_telemetry::init_default_ut_logging();
     let tmp_dir = create_temp_dir("test_recover_region_manifets");
     let memtable_builder = Arc::new(DefaultMemtableBuilder::default()) as _;
@@ -314,8 +320,13 @@ async fn test_recover_region_manifets() {
     builder.root(&tmp_dir.path().to_string_lossy());
     let object_store = ObjectStore::new(builder).unwrap().finish();
 
-    let manifest =
-        RegionManifest::with_checkpointer("/manifest/", object_store.clone(), None, None);
+    let manifest = RegionManifest::with_checkpointer(
+        "/manifest/",
+        object_store.clone(),
+        manifest_compress_type(compress),
+        None,
+        None,
+    );
     let region_meta = Arc::new(build_region_meta());
 
     let sst_layer = Arc::new(FsAccessLayer::new("sst", object_store)) as _;

@@ -38,10 +38,9 @@ struct CloseTester {
 /// Create a new region for flush test
 async fn create_region_for_close(
     store_dir: &str,
-    enable_version_column: bool,
     flush_strategy: FlushStrategyRef,
 ) -> RegionImpl<RaftEngineLogStore> {
-    let metadata = tests::new_metadata(REGION_NAME, enable_version_column);
+    let metadata = tests::new_metadata(REGION_NAME);
 
     let mut store_config = config_util::new_store_config(REGION_NAME, store_dir).await;
     store_config.flush_strategy = flush_strategy;
@@ -51,7 +50,7 @@ async fn create_region_for_close(
 
 impl CloseTester {
     async fn new(store_dir: &str, flush_strategy: FlushStrategyRef) -> CloseTester {
-        let region = create_region_for_close(store_dir, false, flush_strategy.clone()).await;
+        let region = create_region_for_close(store_dir, flush_strategy.clone()).await;
 
         CloseTester {
             base: Some(FileTesterBase::with_region(region)),

@@ -20,9 +20,8 @@ use meta_srv::bootstrap::MetaSrvInstance;
 use meta_srv::metasrv::MetaSrvOptions;
 use snafu::ResultExt;
 
-use crate::error::Result;
+use crate::error::{self, Result};
 use crate::options::{Options, TopLevelOptions};
-use crate::{error, toml_loader};
 
 pub struct Instance {
     instance: MetaSrvInstance,
@@ -79,7 +78,7 @@ impl SubCommand {
     }
 }
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Default, Parser)]
 struct StartCommand {
     #[clap(long)]
     bind_addr: Option<String>,
@@ -97,15 +96,14 @@ struct StartCommand {
     http_addr: Option<String>,
     #[clap(long)]
     http_timeout: Option<u64>,
+    #[clap(long, default_value = "GREPTIMEDB_METASRV")]
+    env_prefix: String,
 }
 
 impl StartCommand {
     fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
-        let mut opts: MetaSrvOptions = if let Some(path) = &self.config_file {
-            toml_loader::from_file!(path)?
-        } else {
-            MetaSrvOptions::default()
-        };
+        let mut opts: MetaSrvOptions =
+            Options::load_layered_options(self.config_file.as_deref(), self.env_prefix.as_ref())?;
 
         if let Some(dir) = top_level_opts.log_dir {
             opts.logging.dir = dir;
@@ -114,15 +112,18 @@ impl StartCommand {
             opts.logging.level = level;
         }
 
-        if let Some(addr) = self.bind_addr.clone() {
-            opts.bind_addr = addr;
+        if let Some(addr) = &self.bind_addr {
+            opts.bind_addr = addr.clone();
         }
-        if let Some(addr) = self.server_addr.clone() {
-            opts.server_addr = addr;
+
+        if let Some(addr) = &self.server_addr {
+            opts.server_addr = addr.clone();
         }
-        if let Some(addr) = self.store_addr.clone() {
-            opts.store_addr = addr;
+
+        if let Some(addr) = &self.store_addr {
+            opts.store_addr = addr.clone();
         }
+
         if let Some(selector_type) = &self.selector {
             opts.selector = selector_type[..]
                 .try_into()
@@ -133,9 +134,10 @@ impl StartCommand {
             opts.use_memory_store = true;
         }
 
-        if let Some(http_addr) = self.http_addr.clone() {
-            opts.http_opts.addr = http_addr;
+        if let Some(http_addr) = &self.http_addr {
+            opts.http_opts.addr = http_addr.clone();
         }
+
         if let Some(http_timeout) = self.http_timeout {
             opts.http_opts.timeout = Duration::from_secs(http_timeout);
         }
@@ -167,6 +169,7 @@ mod tests {
     use meta_srv::selector::SelectorType;
 
     use super::*;
+    use crate::options::ENV_VAR_SEP;
 
     #[test]
     fn test_read_from_cmd() {
@@ -174,11 +177,8 @@ mod tests {
             bind_addr: Some("127.0.0.1:3002".to_string()),
             server_addr: Some("127.0.0.1:3002".to_string()),
             store_addr: Some("127.0.0.1:2380".to_string()),
-            config_file: None,
             selector: Some("LoadBased".to_string()),
-            use_memory_store: false,
-            http_addr: None,
-            http_timeout: None,
+            ..Default::default()
         };
 
         let Options::Metasrv(options) =
@@ -206,14 +206,8 @@ mod tests {
         write!(file, "{}", toml_str).unwrap();
 
         let cmd = StartCommand {
-            bind_addr: None,
-            server_addr: None,
-            store_addr: None,
-            selector: None,
             config_file: Some(file.path().to_str().unwrap().to_string()),
-            use_memory_store: false,
-            http_addr: None,
-            http_timeout: None,
+            ..Default::default()
         };
 
         let Options::Metasrv(options) =
@@ -233,11 +227,8 @@ mod tests {
             bind_addr: Some("127.0.0.1:3002".to_string()),
             server_addr: Some("127.0.0.1:3002".to_string()),
             store_addr: Some("127.0.0.1:2380".to_string()),
-            config_file: None,
             selector: Some("LoadBased".to_string()),
-            use_memory_store: false,
-            http_addr: None,
-            http_timeout: None,
+            ..Default::default()
         };
 
         let options = cmd
@@ -250,5 +241,73 @@ mod tests {
         let logging_opt = options.logging_options();
         assert_eq!("/tmp/greptimedb/test/logs", logging_opt.dir);
         assert_eq!("debug", logging_opt.level);
+    }
+
+    #[test]
+    fn test_config_precedence_order() {
+        let mut file = create_named_temp_file();
+        let toml_str = r#"
+            server_addr = "127.0.0.1:3002"
+            datanode_lease_secs = 15
+            selector = "LeaseBased"
+            use_memory_store = false
+
+            [http_options]
+            addr = "127.0.0.1:4000"
+            
+            [logging]
+            level = "debug"
+            dir = "/tmp/greptimedb/test/logs"
+        "#;
+        write!(file, "{}", toml_str).unwrap();
+
+        let env_prefix = "METASRV_UT";
+        temp_env::with_vars(
+            vec![
+                (
+                    // bind_addr = 127.0.0.1:14002
+                    vec![env_prefix.to_string(), "bind_addr".to_uppercase()].join(ENV_VAR_SEP),
+                    Some("127.0.0.1:14002"),
+                ),
+                (
+                    // server_addr = 127.0.0.1:13002
+                    vec![env_prefix.to_string(), "server_addr".to_uppercase()].join(ENV_VAR_SEP),
+                    Some("127.0.0.1:13002"),
+                ),
+                (
+                    // http_options.addr = 127.0.0.1:24000
+                    vec![
+                        env_prefix.to_string(),
+                        "http_options".to_uppercase(),
+                        "addr".to_uppercase(),
+                    ]
+                    .join(ENV_VAR_SEP),
+                    Some("127.0.0.1:24000"),
+                ),
+            ],
+            || {
+                let command = StartCommand {
+                    http_addr: Some("127.0.0.1:14000".to_string()),
+                    config_file: Some(file.path().to_str().unwrap().to_string()),
+                    env_prefix: env_prefix.to_string(),
+                    ..Default::default()
+                };
+
+                let Options::Metasrv(opts) =
+                    command.load_options(TopLevelOptions::default()).unwrap() else {unreachable!()};
+
+                // Should be read from env, env > default values.
+                assert_eq!(opts.bind_addr, "127.0.0.1:14002");
+
+                // Should be read from config file, config file > env > default values.
+                assert_eq!(opts.server_addr, "127.0.0.1:3002");
+
+                // Should be read from cli, cli > config file > env > default values.
+                assert_eq!(opts.http_opts.addr, "127.0.0.1:14000");
+
+                // Should be default value.
+                assert_eq!(opts.store_addr, "127.0.0.1:2379");
+            },
+        );
     }
 }

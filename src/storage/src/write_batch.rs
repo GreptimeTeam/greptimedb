@@ -330,19 +330,17 @@ impl NameToVector {
 #[cfg(test)]
 pub(crate) fn new_test_batch() -> WriteBatch {
     use datatypes::type_id::LogicalTypeId;
-    use store_api::storage::consts;
 
     use crate::test_util::write_batch_util;
 
     write_batch_util::new_write_batch(
         &[
             ("k1", LogicalTypeId::UInt64, false),
-            (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
             ("ts", LogicalTypeId::TimestampMillisecond, false),
             ("v1", LogicalTypeId::Boolean, true),
         ],
-        Some(2),
-        3,
+        Some(1),
+        2,
     )
 }
 
@@ -357,7 +355,6 @@ mod tests {
     use datatypes::vectors::{
         BooleanVector, Int32Vector, Int64Vector, TimestampMillisecondVector, UInt64Vector,
     };
-    use store_api::storage::consts;
 
     use super::*;
     use crate::test_util::write_batch_util;
@@ -368,11 +365,9 @@ mod tests {
         assert!(columns.is_empty());
 
         let vector1 = Arc::new(Int32Vector::from_slice([1, 2, 3, 4, 5])) as VectorRef;
-        let vector2 = Arc::new(UInt64Vector::from_slice([0, 2, 4, 6, 8])) as VectorRef;
 
         let mut put_data = HashMap::with_capacity(3);
         put_data.insert("k1".to_string(), vector1.clone());
-        put_data.insert(consts::VERSION_COLUMN_NAME.to_string(), vector2);
         put_data.insert("v1".to_string(), vector1);
 
         let columns = NameToVector::new(put_data).unwrap();
@@ -399,7 +394,6 @@ mod tests {
 
         let mut put_data = HashMap::with_capacity(4);
         put_data.insert("k1".to_string(), intv.clone());
-        put_data.insert(consts::VERSION_COLUMN_NAME.to_string(), intv);
         put_data.insert("v1".to_string(), boolv);
         put_data.insert("ts".to_string(), tsv);
 
@@ -442,7 +436,6 @@ mod tests {
 
         let mut put_data = HashMap::new();
         put_data.insert("k1".to_string(), intv.clone());
-        put_data.insert(consts::VERSION_COLUMN_NAME.to_string(), intv);
         put_data.insert("v1".to_string(), boolv.clone());
         put_data.insert("ts".to_string(), tsv);
 
@@ -482,7 +475,7 @@ mod tests {
     #[test]
     fn test_put_missing_column() {
         let boolv = Arc::new(BooleanVector::from(vec![true, false, true])) as VectorRef;
-        let tsv = Arc::new(Int64Vector::from_slice([0, 0, 0])) as VectorRef;
+        let tsv = Arc::new(TimestampMillisecondVector::from_slice([0, 0, 0])) as VectorRef;
 
         let mut put_data = HashMap::new();
         put_data.insert("v1".to_string(), boolv);
@@ -501,7 +494,6 @@ mod tests {
 
         let mut put_data = HashMap::new();
         put_data.insert("k1".to_string(), intv.clone());
-        put_data.insert(consts::VERSION_COLUMN_NAME.to_string(), intv);
         put_data.insert("v1".to_string(), boolv.clone());
         put_data.insert("ts".to_string(), tsv);
         put_data.insert("v2".to_string(), boolv);
@@ -532,7 +524,6 @@ mod tests {
 
         let mut keys = HashMap::with_capacity(3);
         keys.insert("k1".to_string(), intv.clone());
-        keys.insert(consts::VERSION_COLUMN_NAME.to_string(), intv);
         keys.insert("ts".to_string(), tsv);
 
         let mut batch = new_test_batch();
@@ -540,7 +531,7 @@ mod tests {
 
         let record_batch = &batch.payload().mutations[0].record_batch;
         assert_eq!(3, record_batch.num_rows());
-        assert_eq!(4, record_batch.num_columns());
+        assert_eq!(3, record_batch.num_columns());
         let v1 = record_batch.column_by_name("v1").unwrap();
         assert!(v1.only_null());
     }
@@ -551,7 +542,6 @@ mod tests {
 
         let mut keys = HashMap::with_capacity(3);
         keys.insert("k1".to_string(), intv.clone());
-        keys.insert(consts::VERSION_COLUMN_NAME.to_string(), intv);
 
         let mut batch = new_test_batch();
         let err = batch.delete(keys).unwrap_err();
@@ -565,7 +555,6 @@ mod tests {
 
         let mut keys = HashMap::with_capacity(3);
         keys.insert("k1".to_string(), intv.clone());
-        keys.insert(consts::VERSION_COLUMN_NAME.to_string(), intv.clone());
         keys.insert("ts".to_string(), tsv);
         keys.insert("v2".to_string(), intv);
 
@@ -581,7 +570,6 @@ mod tests {
 
         let mut keys = HashMap::with_capacity(3);
         keys.insert("k1".to_string(), intv.clone());
-        keys.insert(consts::VERSION_COLUMN_NAME.to_string(), intv);
         keys.insert("ts".to_string(), boolv);
 
         let mut batch = new_test_batch();

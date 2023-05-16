@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use common_datasource::compression::CompressionType;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::LogConfig;
 use object_store::services::Fs;
@@ -21,9 +22,9 @@ use object_store::ObjectStore;
 use store_api::manifest::Manifest;
 
 use crate::compaction::noop::NoopCompactionScheduler;
-use crate::engine;
+use crate::engine::{self, RegionMap};
 use crate::file_purger::noop::NoopFilePurgeHandler;
-use crate::flush::{FlushScheduler, SizeBasedStrategy};
+use crate::flush::{FlushScheduler, PickerConfig, SizeBasedStrategy};
 use crate::manifest::region::RegionManifest;
 use crate::memtable::DefaultMemtableBuilder;
 use crate::region::StoreConfig;
@@ -57,7 +58,13 @@ pub async fn new_store_config_with_object_store(
     let manifest_dir = engine::region_manifest_dir(parent_dir, region_name);
 
     let sst_layer = Arc::new(FsAccessLayer::new(&sst_dir, object_store.clone()));
-    let manifest = RegionManifest::with_checkpointer(&manifest_dir, object_store, None, None);
+    let manifest = RegionManifest::with_checkpointer(
+        &manifest_dir,
+        object_store,
+        CompressionType::Uncompressed,
+        None,
+        None,
+    );
     manifest.start().await.unwrap();
     let log_config = LogConfig {
         log_file_dir: log_store_dir(store_dir),
@@ -65,10 +72,16 @@ pub async fn new_store_config_with_object_store(
     };
     let log_store = Arc::new(RaftEngineLogStore::try_new(log_config).await.unwrap());
     let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
-    let flush_scheduler = Arc::new(FlushScheduler::new(
-        SchedulerConfig::default(),
-        compaction_scheduler.clone(),
-    ));
+    // We use an empty region map so actually the background worker of the picker is disabled.
+    let flush_scheduler = Arc::new(
+        FlushScheduler::new(
+            SchedulerConfig::default(),
+            compaction_scheduler.clone(),
+            Arc::new(RegionMap::new()),
+            PickerConfig::default(),
+        )
+        .unwrap(),
+    );
     let file_purger = Arc::new(LocalScheduler::new(
         SchedulerConfig::default(),
         NoopFilePurgeHandler,

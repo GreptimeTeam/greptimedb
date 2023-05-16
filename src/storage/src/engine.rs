@@ -17,7 +17,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use common_telemetry::logging::debug;
+use common_telemetry::logging::{self, debug};
 use object_store::{util, ObjectStore};
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
@@ -30,12 +30,15 @@ use crate::compaction::CompactionSchedulerRef;
 use crate::config::EngineConfig;
 use crate::error::{self, Error, Result};
 use crate::file_purger::{FilePurgeHandler, FilePurgerRef};
-use crate::flush::{FlushScheduler, FlushSchedulerRef, FlushStrategyRef, SizeBasedStrategy};
+use crate::flush::{
+    FlushScheduler, FlushSchedulerRef, FlushStrategyRef, PickerConfig, SizeBasedStrategy,
+};
 use crate::manifest::region::RegionManifest;
+use crate::manifest::storage::manifest_compress_type;
 use crate::memtable::{DefaultMemtableBuilder, MemtableBuilderRef};
 use crate::metadata::RegionMetadata;
 use crate::region::{RegionImpl, StoreConfig};
-use crate::scheduler::{LocalScheduler, SchedulerConfig};
+use crate::scheduler::{LocalScheduler, Scheduler, SchedulerConfig};
 use crate::sst::FsAccessLayer;
 
 /// [StorageEngine] implementation.
@@ -85,6 +88,16 @@ impl<S: LogStore> StorageEngine for EngineImpl<S> {
     fn get_region(&self, _ctx: &EngineContext, name: &str) -> Result<Option<Self::Region>> {
         Ok(self.inner.get_region(name))
     }
+
+    async fn close(&self, _ctx: &EngineContext) -> Result<()> {
+        logging::info!("Stopping storage engine");
+
+        self.inner.close().await?;
+
+        logging::info!("Storage engine stopped");
+
+        Ok(())
+    }
 }
 
 impl<S: LogStore> EngineImpl<S> {
@@ -93,15 +106,15 @@ impl<S: LogStore> EngineImpl<S> {
         log_store: Arc<S>,
         object_store: ObjectStore,
         compaction_scheduler: CompactionSchedulerRef<S>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        Ok(Self {
             inner: Arc::new(EngineInner::new(
                 config,
                 log_store,
                 object_store,
                 compaction_scheduler,
-            )),
-        }
+            )?),
+        })
     }
 }
 
@@ -124,7 +137,7 @@ pub fn region_manifest_dir(parent_dir: &str, region_name: &str) -> String {
 /// Also used as a placeholder in the region map when the region isn't ready, e.g. during
 /// creating/opening.
 #[derive(Debug)]
-enum RegionSlot<S: LogStore> {
+pub(crate) enum RegionSlot<S: LogStore> {
     /// The region is during creation.
     Creating,
     /// The region is during opening.
@@ -208,17 +221,21 @@ impl<'a, S: LogStore> Drop for SlotGuard<'a, S> {
 }
 
 /// Region slot map.
-struct RegionMap<S: LogStore>(RwLock<HashMap<String, RegionSlot<S>>>);
+pub struct RegionMap<S: LogStore>(RwLock<HashMap<String, RegionSlot<S>>>);
 
 impl<S: LogStore> RegionMap<S> {
     /// Returns a new region map.
-    fn new() -> RegionMap<S> {
+    pub fn new() -> RegionMap<S> {
         RegionMap(RwLock::new(HashMap::new()))
     }
 
     /// Returns the `Some(slot)` if there is existing slot with given `name`, or insert
     /// given `slot` and returns `None`.
-    fn get_or_occupy_slot(&self, name: &str, slot: RegionSlot<S>) -> Option<RegionSlot<S>> {
+    pub(crate) fn get_or_occupy_slot(
+        &self,
+        name: &str,
+        slot: RegionSlot<S>,
+    ) -> Option<RegionSlot<S>> {
         {
             // Try to get the region under read lock.
             let regions = self.0.read().unwrap();
@@ -258,6 +275,26 @@ impl<S: LogStore> RegionMap<S> {
         let mut regions = self.0.write().unwrap();
         regions.remove(name);
     }
+
+    /// Collects regions.
+    pub(crate) fn list_regions(&self) -> Vec<RegionImpl<S>> {
+        let regions = self.0.read().unwrap();
+        regions
+            .values()
+            .filter_map(|slot| slot.get_ready_region())
+            .collect()
+    }
+
+    /// Clear the region map.
+    fn clear(&self) {
+        self.0.write().unwrap().clear();
+    }
+}
+
+impl<S: LogStore> Default for RegionMap<S> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 struct EngineInner<S: LogStore> {
@@ -278,12 +315,19 @@ impl<S: LogStore> EngineInner<S> {
         log_store: Arc<S>,
         object_store: ObjectStore,
         compaction_scheduler: CompactionSchedulerRef<S>,
-    ) -> Self {
-        // TODO(yingwen): max inflight flush tasks.
+    ) -> Result<Self> {
+        let regions = Arc::new(RegionMap::new());
         let flush_scheduler = Arc::new(FlushScheduler::new(
-            SchedulerConfig::default(),
+            SchedulerConfig {
+                max_inflight_tasks: config.max_flush_tasks,
+            },
             compaction_scheduler.clone(),
-        ));
+            regions.clone(),
+            PickerConfig {
+                schedule_interval: config.picker_schedule_interval,
+                auto_flush_interval: config.auto_flush_interval,
+            },
+        )?);
 
         let file_purger = Arc::new(LocalScheduler::new(
             SchedulerConfig {
@@ -291,17 +335,19 @@ impl<S: LogStore> EngineInner<S> {
             },
             FilePurgeHandler,
         ));
-        Self {
+        Ok(Self {
             object_store,
             log_store,
-            regions: Arc::new(RegionMap::new()),
+            regions,
             memtable_builder: Arc::new(DefaultMemtableBuilder::default()),
             flush_scheduler,
-            flush_strategy: Arc::new(SizeBasedStrategy::default()),
+            flush_strategy: Arc::new(SizeBasedStrategy::new(
+                config.region_write_buffer_size.as_bytes() as usize,
+            )),
             compaction_scheduler,
             file_purger,
             config: Arc::new(config),
-        }
+        })
     }
 
     async fn open_region(&self, name: &str, opts: &OpenOptions) -> Result<Option<RegionImpl<S>>> {
@@ -404,6 +450,7 @@ impl<S: LogStore> EngineInner<S> {
         let manifest = RegionManifest::with_checkpointer(
             &manifest_dir,
             self.object_store.clone(),
+            manifest_compress_type(config.compress_manifest),
             config.manifest_checkpoint_margin,
             config.manifest_gc_duration,
         );
@@ -426,6 +473,22 @@ impl<S: LogStore> EngineInner<S> {
             ttl,
             compaction_time_window,
         })
+    }
+
+    async fn close(&self) -> Result<()> {
+        let regions = self.regions.list_regions();
+        for region in regions {
+            // Tolerate failure during closing regions.
+            if let Err(e) = region.close().await {
+                logging::error!(e; "Failed to close region {}", region.id());
+            }
+        }
+        // Clear regions to release references to regions in the region map.
+        self.regions.clear();
+
+        self.compaction_scheduler.stop(true).await?;
+        self.flush_scheduler.stop().await?;
+        self.file_purger.stop(true).await
     }
 }
 
@@ -462,7 +525,8 @@ mod tests {
             Arc::new(log_store),
             object_store,
             compaction_scheduler,
-        );
+        )
+        .unwrap();
 
         let region_name = "region-0";
         let desc = RegionDescBuilder::new(region_name)

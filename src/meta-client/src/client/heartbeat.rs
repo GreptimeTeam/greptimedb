@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::v1::meta::heartbeat_client::HeartbeatClient;
-use api::v1::meta::{AskLeaderRequest, HeartbeatRequest, HeartbeatResponse, RequestHeader};
+use api::v1::meta::{AskLeaderRequest, HeartbeatRequest, HeartbeatResponse, RequestHeader, Role};
 use common_grpc::channel_manager::ChannelManager;
 use common_telemetry::{debug, info};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -32,13 +32,14 @@ use crate::rpc::util;
 
 pub struct HeartbeatSender {
     id: Id,
+    role: Role,
     sender: mpsc::Sender<HeartbeatRequest>,
 }
 
 impl HeartbeatSender {
     #[inline]
-    fn new(id: Id, sender: mpsc::Sender<HeartbeatRequest>) -> Self {
-        Self { id, sender }
+    fn new(id: Id, role: Role, sender: mpsc::Sender<HeartbeatRequest>) -> Self {
+        Self { id, role, sender }
     }
 
     #[inline]
@@ -48,7 +49,7 @@ impl HeartbeatSender {
 
     #[inline]
     pub async fn send(&self, mut req: HeartbeatRequest) -> Result<()> {
-        req.set_header(self.id);
+        req.set_header(self.id, self.role);
         self.sender.send(req).await.map_err(|e| {
             error::SendHeartbeatSnafu {
                 err_msg: e.to_string(),
@@ -92,9 +93,10 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(id: Id, channel_manager: ChannelManager) -> Self {
+    pub fn new(id: Id, role: Role, channel_manager: ChannelManager) -> Self {
         let inner = Arc::new(RwLock::new(Inner {
             id,
+            role,
             channel_manager,
             peers: HashSet::default(),
             leader: None,
@@ -132,6 +134,7 @@ impl Client {
 #[derive(Debug)]
 struct Inner {
     id: Id,
+    role: Role,
     channel_manager: ChannelManager,
     peers: HashSet<String>,
     leader: Option<String>,
@@ -167,7 +170,7 @@ impl Inner {
             }
         );
 
-        let header = RequestHeader::new(self.id);
+        let header = RequestHeader::new(self.id, self.role);
         let mut leader = None;
         for addr in &self.peers {
             let req = AskLeaderRequest {
@@ -195,8 +198,10 @@ impl Inner {
         let mut leader = self.make_client(leader)?;
 
         let (sender, receiver) = mpsc::channel::<HeartbeatRequest>(128);
+
+        let header = RequestHeader::new(self.id, self.role);
         let handshake = HeartbeatRequest {
-            header: Some(RequestHeader::new(self.id)),
+            header: Some(header),
             ..Default::default()
         };
         sender.send(handshake).await.map_err(|e| {
@@ -221,7 +226,7 @@ impl Inner {
         info!("Success to create heartbeat stream to server: {:#?}", res);
 
         Ok((
-            HeartbeatSender::new(self.id, sender),
+            HeartbeatSender::new(self.id, self.role, sender),
             HeartbeatStream::new(self.id, stream),
         ))
     }
@@ -247,7 +252,7 @@ mod test {
 
     #[tokio::test]
     async fn test_start_client() {
-        let mut client = Client::new((0, 0), ChannelManager::default());
+        let mut client = Client::new((0, 0), Role::Datanode, ChannelManager::default());
         assert!(!client.is_started().await);
         client
             .start(&["127.0.0.1:1000", "127.0.0.1:1001"])
@@ -258,7 +263,7 @@ mod test {
 
     #[tokio::test]
     async fn test_already_start() {
-        let mut client = Client::new((0, 0), ChannelManager::default());
+        let mut client = Client::new((0, 0), Role::Datanode, ChannelManager::default());
         client
             .start(&["127.0.0.1:1000", "127.0.0.1:1001"])
             .await
@@ -274,7 +279,7 @@ mod test {
 
     #[tokio::test]
     async fn test_start_with_duplicate_peers() {
-        let mut client = Client::new((0, 0), ChannelManager::default());
+        let mut client = Client::new((0, 0), Role::Datanode, ChannelManager::default());
         client
             .start(&["127.0.0.1:1000", "127.0.0.1:1000", "127.0.0.1:1000"])
             .await
@@ -285,7 +290,7 @@ mod test {
     #[tokio::test]
     async fn test_heartbeat_stream() {
         let (sender, mut receiver) = mpsc::channel::<HeartbeatRequest>(100);
-        let sender = HeartbeatSender::new((8, 8), sender);
+        let sender = HeartbeatSender::new((8, 8), Role::Datanode, sender);
         tokio::spawn(async move {
             for _ in 0..10 {
                 sender.send(HeartbeatRequest::default()).await.unwrap();

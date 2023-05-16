@@ -114,11 +114,6 @@ pub struct RowKeyDescriptor {
     pub columns: Vec<ColumnDescriptor>,
     /// Timestamp key column.
     pub timestamp: ColumnDescriptor,
-    /// Enable version column in row key if this field is true.
-    ///
-    /// The default value is false.
-    #[builder(default = "false")]
-    pub enable_version_column: bool,
 }
 
 /// A [ColumnFamilyDescriptor] contains information to create a column family.
@@ -263,7 +258,6 @@ mod tests {
             .build()
             .unwrap();
         assert!(desc.columns.is_empty());
-        assert!(!desc.enable_version_column);
 
         let desc = RowKeyDescriptorBuilder::new(timestamp.clone())
             .columns_capacity(1)
@@ -280,14 +274,9 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(2, desc.columns.len());
-        assert!(!desc.enable_version_column);
 
-        let desc = RowKeyDescriptorBuilder::new(timestamp)
-            .enable_version_column(false)
-            .build()
-            .unwrap();
+        let desc = RowKeyDescriptorBuilder::new(timestamp).build().unwrap();
         assert!(desc.columns.is_empty());
-        assert!(!desc.enable_version_column);
     }
 
     #[test]

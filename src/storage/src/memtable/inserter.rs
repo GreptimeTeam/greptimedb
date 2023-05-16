@@ -151,7 +151,6 @@ mod tests {
         let desc = RegionDescBuilder::new("test")
             .timestamp(("ts", LogicalTypeId::TimestampMillisecond, false))
             .push_field_column(("value", LogicalTypeId::Int64, true))
-            .enable_version_column(false)
             .build();
         let metadata: RegionMetadata = desc.try_into().unwrap();
 

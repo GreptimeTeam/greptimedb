@@ -23,7 +23,7 @@ use common_test_util::temp_dir::create_temp_dir;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use object_store::services::{Fs, S3};
 use object_store::ObjectStore;
-use store_api::storage::{FlushContext, Region, WriteResponse};
+use store_api::storage::{FlushContext, FlushReason, Region, WriteResponse};
 use tokio::sync::Notify;
 
 use crate::compaction::{CompactionHandler, SimplePicker};
@@ -70,13 +70,12 @@ async fn create_region_for_compaction<
     H: Handler<Request = FilePurgeRequest> + Send + Sync + 'static,
 >(
     store_dir: &str,
-    enable_version_column: bool,
     engine_config: EngineConfig,
     purge_handler: H,
     flush_strategy: FlushStrategyRef,
     s3_bucket: Option<String>,
 ) -> (RegionImpl<RaftEngineLogStore>, ObjectStore) {
-    let metadata = tests::new_metadata(REGION_NAME, enable_version_column);
+    let metadata = tests::new_metadata(REGION_NAME);
 
     let object_store = new_object_store(store_dir, s3_bucket);
 
@@ -163,7 +162,6 @@ impl CompactionTester {
         let purge_handler = MockFilePurgeHandler::default();
         let (region, object_store) = create_region_for_compaction(
             store_dir,
-            false,
             engine_config.clone(),
             purge_handler.clone(),
             flush_strategy,
@@ -193,7 +191,12 @@ impl CompactionTester {
     }
 
     async fn flush(&self, wait: Option<bool>) {
-        let ctx = wait.map(|wait| FlushContext { wait }).unwrap_or_default();
+        let ctx = wait
+            .map(|wait| FlushContext {
+                wait,
+                reason: FlushReason::Manually,
+            })
+            .unwrap_or_default();
         self.base().region.flush(&ctx).await.unwrap();
     }
 

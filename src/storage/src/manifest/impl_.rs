@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
+use common_datasource::compression::CompressionType;
 use common_runtime::{RepeatedTask, TaskFunction};
 use common_telemetry::{debug, logging, warn};
 use object_store::ObjectStore;
@@ -52,11 +53,16 @@ impl<S: 'static + Checkpoint<Error = Error>, M: 'static + MetaAction<Error = Err
     pub fn new(
         manifest_dir: &str,
         object_store: ObjectStore,
+        compress_type: CompressionType,
         checkpoint_actions_margin: Option<u16>,
         gc_duration: Option<Duration>,
         checkpointer: Option<Arc<dyn Checkpointer<Checkpoint = S, MetaAction = M>>>,
     ) -> Self {
-        let inner = Arc::new(ManifestImplInner::new(manifest_dir, object_store));
+        let inner = Arc::new(ManifestImplInner::new(
+            manifest_dir,
+            object_store,
+            compress_type,
+        ));
         let gc_task = if checkpointer.is_some() {
             // only start gc task when checkpoint is enabled.
             Some(Arc::new(RepeatedTask::new(
@@ -79,8 +85,12 @@ impl<S: 'static + Checkpoint<Error = Error>, M: 'static + MetaAction<Error = Err
         }
     }
 
-    pub fn create(manifest_dir: &str, object_store: ObjectStore) -> Self {
-        Self::new(manifest_dir, object_store, None, None, None)
+    pub fn create(
+        manifest_dir: &str,
+        object_store: ObjectStore,
+        compress_type: CompressionType,
+    ) -> Self {
+        Self::new(manifest_dir, object_store, compress_type, None, None, None)
     }
 
     #[inline]
@@ -275,11 +285,15 @@ impl<S: Checkpoint<Error = Error>, M: MetaAction<Error = Error>> TaskFunction<Er
 }
 
 impl<S: Checkpoint<Error = Error>, M: MetaAction<Error = Error>> ManifestImplInner<S, M> {
-    fn new(manifest_dir: &str, object_store: ObjectStore) -> Self {
+    fn new(manifest_dir: &str, object_store: ObjectStore, compress_type: CompressionType) -> Self {
         let (reader_version, writer_version) = action::supported_protocol_version();
 
         Self {
-            store: Arc::new(ManifestObjectStore::new(manifest_dir, object_store)),
+            store: Arc::new(ManifestObjectStore::new(
+                manifest_dir,
+                object_store,
+                compress_type,
+            )),
             version: AtomicU64::new(0),
             protocol: ArcSwap::new(Arc::new(ProtocolAction::new())),
             supported_reader_version: reader_version,

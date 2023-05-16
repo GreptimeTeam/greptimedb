@@ -21,4 +21,3 @@ pub mod frontend;
 pub mod metasrv;
 pub mod options;
 pub mod standalone;
-mod toml_loader;

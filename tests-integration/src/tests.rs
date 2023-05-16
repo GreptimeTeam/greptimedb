@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use api::v1::meta::Role;
 use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
 use catalog::remote::{MetaKvBackend, RemoteCatalogManager};
 use client::Client;
@@ -30,6 +31,10 @@ use datanode::datanode::{
     DatanodeOptions, FileConfig, ObjectStoreConfig, ProcedureConfig, StorageConfig, WalConfig,
 };
 use datanode::instance::Instance as DatanodeInstance;
+use frontend::catalog::FrontendCatalogManager;
+use frontend::datanode::DatanodeClients;
+use frontend::instance::distributed::DistInstance;
+use frontend::instance::Instance;
 use meta_client::client::MetaClientBuilder;
 use meta_client::rpc::Peer;
 use meta_srv::metasrv::MetaSrvOptions;
@@ -44,11 +49,6 @@ use servers::Mode;
 use table::engine::{region_name, table_dir};
 use tonic::transport::Server;
 use tower::service_fn;
-
-use crate::catalog::FrontendCatalogManager;
-use crate::datanode::DatanodeClients;
-use crate::instance::distributed::DistInstance;
-use crate::instance::Instance;
 
 /// Guard against the `TempDir`s that used in unit tests.
 /// (The `TempDir` will be deleted once it goes out of scope.)
@@ -287,7 +287,7 @@ pub(crate) async fn create_distributed_instance(test_name: &str) -> MockDistribu
         server_addr,
         channel_manager,
     } = meta_srv.clone();
-    let mut meta_client = MetaClientBuilder::new(1000, 0)
+    let mut meta_client = MetaClientBuilder::new(1000, 0, Role::Frontend)
         .enable_router()
         .enable_store()
         .channel_manager(channel_manager)

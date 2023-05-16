@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use api::v1::meta::{HeartbeatRequest, Peer};
+use api::v1::meta::{HeartbeatRequest, Peer, Role};
 use chrono::DateTime;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use datatypes::prelude::ConcreteDataType;
@@ -43,7 +43,7 @@ async fn run() {
         .connect_timeout(Duration::from_secs(5))
         .tcp_nodelay(true);
     let channel_manager = ChannelManager::with_config(config);
-    let mut meta_client = MetaClientBuilder::new(id.0, id.1)
+    let mut meta_client = MetaClientBuilder::new(id.0, id.1, Role::Datanode)
         .enable_heartbeat()
         .enable_router()
         .enable_store()

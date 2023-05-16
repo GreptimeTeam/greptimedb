@@ -12,20 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use common_query::Output;
-use query::parser::{PromQuery, QueryLanguageParser};
+use query::parser::{PromQuery, QueryLanguageParser, ANALYZE_NODE_NAME, EXPLAIN_NODE_NAME};
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 use sql::statements::tql::Tql;
 
-use crate::error::{
-    ExecLogicalPlanSnafu, NotSupportedSnafu, ParseQuerySnafu, PlanStatementSnafu, Result,
-};
+use crate::error::{ExecLogicalPlanSnafu, ParseQuerySnafu, PlanStatementSnafu, Result};
 use crate::statement::StatementExecutor;
 
 impl StatementExecutor {
     pub(super) async fn execute_tql(&self, tql: Tql, query_ctx: QueryContextRef) -> Result<Output> {
-        let plan = match tql {
+        let stmt = match tql {
             Tql::Eval(eval) => {
                 let promql = PromQuery {
                     start: eval.start,
@@ -33,20 +33,39 @@ impl StatementExecutor {
                     step: eval.step,
                     query: eval.query,
                 };
-                let stmt = QueryLanguageParser::parse_promql(&promql).context(ParseQuerySnafu)?;
-                self.query_engine
-                    .planner()
-                    .plan(stmt, query_ctx.clone())
-                    .await
-                    .context(PlanStatementSnafu)?
+                QueryLanguageParser::parse_promql(&promql).context(ParseQuerySnafu)?
             }
-            Tql::Explain(_) => {
-                return NotSupportedSnafu {
-                    feat: "TQL EXPLAIN",
-                }
-                .fail()
+            Tql::Explain(explain) => {
+                let promql = PromQuery {
+                    query: explain.query,
+                    ..PromQuery::default()
+                };
+                let params = HashMap::from([("name".to_string(), EXPLAIN_NODE_NAME.to_string())]);
+                QueryLanguageParser::parse_promql(&promql)
+                    .context(ParseQuerySnafu)?
+                    .post_process(params)
+                    .unwrap()
+            }
+            Tql::Analyze(tql_analyze) => {
+                let promql = PromQuery {
+                    start: tql_analyze.start,
+                    end: tql_analyze.end,
+                    step: tql_analyze.step,
+                    query: tql_analyze.query,
+                };
+                let params = HashMap::from([("name".to_string(), ANALYZE_NODE_NAME.to_string())]);
+                QueryLanguageParser::parse_promql(&promql)
+                    .context(ParseQuerySnafu)?
+                    .post_process(params)
+                    .unwrap()
             }
         };
+        let plan = self
+            .query_engine
+            .planner()
+            .plan(stmt, query_ctx.clone())
+            .await
+            .context(PlanStatementSnafu)?;
         self.query_engine
             .execute(plan, query_ctx)
             .await

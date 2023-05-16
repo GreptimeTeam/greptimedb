@@ -85,11 +85,11 @@ pub struct Pusher {
 impl Pusher {
     pub fn new(
         sender: Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
-        req_header: &Option<RequestHeader>,
+        req_header: &RequestHeader,
     ) -> Self {
         let res_header = ResponseHeader {
             protocol_version: PROTOCOL_VERSION,
-            cluster_id: req_header.as_ref().map_or(0, |h| h.cluster_id),
+            cluster_id: req_header.cluster_id,
             ..Default::default()
         };
 
@@ -350,7 +350,7 @@ mod tests {
             protocol_version: PROTOCOL_VERSION,
             ..Default::default()
         };
-        let pusher: Pusher = Pusher::new(pusher_tx, &Option::from(res_header));
+        let pusher: Pusher = Pusher::new(pusher_tx, &res_header);
         let handler_group = HeartbeatHandlerGroup::default();
         handler_group
             .register(format!("{}-{}", Role::Datanode as i32, datanode_id), pusher)

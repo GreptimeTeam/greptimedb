@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use api::v1::meta::Role;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_srv::mocks::MockInfo;
 use storage::compaction::noop::NoopCompactionScheduler;
@@ -42,7 +43,7 @@ async fn mock_meta_client(mock_info: MockInfo, node_id: u64) -> MetaClient {
     } = mock_info;
 
     let id = (1000u64, 2000u64);
-    let mut meta_client = MetaClientBuilder::new(id.0, node_id)
+    let mut meta_client = MetaClientBuilder::new(id.0, node_id, Role::Datanode)
         .enable_heartbeat()
         .enable_router()
         .enable_store()

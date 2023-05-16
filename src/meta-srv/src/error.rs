@@ -313,6 +313,9 @@ pub enum Error {
         err_msg: String,
         location: Location,
     },
+
+    #[snafu(display("Missing request header"))]
+    MissingRequestHeader { location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -362,6 +365,7 @@ impl ErrorExt for Error {
             | Error::StartGrpc { .. } => StatusCode::Internal,
             Error::EmptyKey { .. }
             | Error::MissingRequiredParameter { .. }
+            | Error::MissingRequestHeader { .. }
             | Error::EmptyTableName { .. }
             | Error::InvalidLeaseKey { .. }
             | Error::InvalidStatKey { .. }

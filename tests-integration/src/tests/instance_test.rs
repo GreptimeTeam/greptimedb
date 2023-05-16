@@ -20,13 +20,13 @@ use common_query::Output;
 use common_recordbatch::util;
 use common_telemetry::logging;
 use datatypes::vectors::{Int64Vector, StringVector, UInt64Vector, VectorRef};
+use frontend::error::{Error, Result};
+use frontend::instance::Instance;
 use rstest::rstest;
 use rstest_reuse::apply;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
 
-use crate::error::{Error, Result};
-use crate::instance::Instance;
 use crate::tests::test_util::{
     both_instances_cases, check_output_stream, check_unordered_output_stream, distributed,
     get_data_dir, standalone, standalone_instance_case, MockInstance,
@@ -516,7 +516,7 @@ async fn test_execute_external_create_without_ts_type(instance: Arc<dyn MockInst
 async fn test_execute_query_external_table_parquet(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
     let format = "parquet";
-    let location = get_data_dir("../../tests/data/parquet/various_type.parquet")
+    let location = get_data_dir("../tests/data/parquet/various_type.parquet")
         .canonicalize()
         .unwrap()
         .display()
@@ -586,7 +586,7 @@ async fn test_execute_query_external_table_parquet(instance: Arc<dyn MockInstanc
 async fn test_execute_query_external_table_csv(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
     let format = "csv";
-    let location = get_data_dir("../../tests/data/csv/various_type.csv")
+    let location = get_data_dir("../tests/data/csv/various_type.csv")
         .canonicalize()
         .unwrap()
         .display()
@@ -637,7 +637,7 @@ async fn test_execute_query_external_table_csv(instance: Arc<dyn MockInstance>) 
 async fn test_execute_query_external_table_json(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
     let format = "json";
-    let location = get_data_dir("../../tests/data/json/various_type.json")
+    let location = get_data_dir("../tests/data/json/various_type.json")
         .canonicalize()
         .unwrap()
         .display()
@@ -694,7 +694,7 @@ async fn test_execute_query_external_table_json(instance: Arc<dyn MockInstance>)
 async fn test_execute_query_external_table_json_with_schame(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
     let format = "json";
-    let location = get_data_dir("../../tests/data/json/various_type.json")
+    let location = get_data_dir("../tests/data/json/various_type.json")
         .canonicalize()
         .unwrap()
         .display()
