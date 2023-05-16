@@ -50,7 +50,7 @@ use table::requests::{
 use table::table::scan::SimpleTableScan;
 use table::table::{AlterContext, Table};
 use table::{error as table_error, RegionStat};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 
 use crate::error;
 use crate::error::{
@@ -59,7 +59,6 @@ use crate::error::{
 };
 use crate::manifest::action::*;
 use crate::manifest::TableManifest;
-
 #[inline]
 fn table_manifest_dir(table_dir: &str) -> String {
     format!("{table_dir}/manifest/")
@@ -70,7 +69,7 @@ pub struct MitoTable<R: Region> {
     manifest: TableManifest,
     // guarded by `self.alter_lock`
     table_info: ArcSwap<TableInfo>,
-    regions: Arc<RwLock<HashMap<RegionNumber, R>>>,
+    regions: ArcSwap<HashMap<RegionNumber, R>>,
     alter_lock: Mutex<()>,
 }
 
@@ -88,7 +87,7 @@ impl<R: Region> Table for MitoTable<R> {
         if request.columns_values.is_empty() {
             return Ok(0);
         }
-        let regions_guard = self.regions.read().await;
+        let regions_guard = self.regions.load();
         let region = regions_guard
             .get(&request.region_number)
             .with_context(|| RegionNotFoundSnafu {
@@ -143,7 +142,7 @@ impl<R: Region> Table for MitoTable<R> {
         _limit: Option<usize>,
     ) -> TableResult<PhysicalPlanRef> {
         let read_ctx = ReadContext::default();
-        let region_guard = self.regions.read().await;
+        let region_guard = self.regions.load();
 
         let mut readers = Vec::with_capacity(region_guard.len());
         let mut first_schema: Option<Arc<Schema>> = None;
@@ -261,7 +260,7 @@ impl<R: Region> Table for MitoTable<R> {
         if request.key_column_values.is_empty() {
             return Ok(0);
         }
-        let regions_guard = self.regions.read().await;
+        let regions_guard = self.regions.load();
         let mut rows_deleted = 0;
         // TODO(hl): Should be tracked by procedure.
         // TODO(hl): Parse delete request into region->keys instead of delete in each region
@@ -302,7 +301,7 @@ impl<R: Region> Table for MitoTable<R> {
                 reason: FlushReason::Manually,
             })
             .unwrap_or_default();
-        let regions_guard = self.regions.read().await;
+        let regions_guard = self.regions.load();
 
         if let Some(region_number) = region_number {
             if let Some(region) = regions_guard.get(&region_number) {
@@ -326,12 +325,8 @@ impl<R: Region> Table for MitoTable<R> {
         Ok(())
     }
 
-    async fn close(&self, region_numbers: &[RegionNumber]) -> TableResult<()> {
-        self.close_regions(region_numbers).await
-    }
-
-    async fn region_stats(&self) -> TableResult<Vec<RegionStat>> {
-        let regions_guard = self.regions.read().await;
+    fn region_stats(&self) -> TableResult<Vec<RegionStat>> {
+        let regions_guard = self.regions.load();
 
         Ok(regions_guard
             .values()
@@ -342,8 +337,8 @@ impl<R: Region> Table for MitoTable<R> {
             .collect())
     }
 
-    async fn contains_region(&self, region: RegionNumber) -> TableResult<bool> {
-        let regions_guard = self.regions.read().await;
+    fn contains_region(&self, region: RegionNumber) -> TableResult<bool> {
+        let regions_guard = self.regions.load();
 
         Ok(regions_guard.contains_key(&region))
     }
@@ -381,7 +376,7 @@ impl<R: Region> MitoTable<R> {
     ) -> Self {
         Self {
             table_info: ArcSwap::new(Arc::new(table_info)),
-            regions: Arc::new(RwLock::new(regions)),
+            regions: ArcSwap::new(Arc::new(regions)),
             manifest,
             alter_lock: Mutex::new(()),
         }
@@ -521,7 +516,7 @@ impl<R: Region> MitoTable<R> {
     /// Closes regions
     /// Notes: Please release regions in StorageEngine.
     pub async fn close_regions(&self, region_numbers: &[RegionNumber]) -> TableResult<()> {
-        let mut regions_guard = self.regions.write().await;
+        let regions_guard = self.regions.load_full();
 
         let regions = region_numbers
             .iter()
@@ -532,22 +527,28 @@ impl<R: Region> MitoTable<R> {
             .await
             .map_err(BoxedError::new)
             .context(table_error::TableOperationSnafu)?;
-        for region in region_numbers {
-            regions_guard.remove(region);
-        }
+
+        self.regions.rcu(|regions| {
+            let mut regions = HashMap::clone(regions);
+            for region in region_numbers {
+                regions.remove(region);
+            }
+
+            Arc::new(regions)
+        });
 
         Ok(())
     }
 
     pub async fn is_releasable(&self) -> bool {
-        let regions_guard = self.regions.read().await;
+        let regions_guard = self.regions.load();
 
         regions_guard.is_empty()
     }
 
     #[inline]
     pub async fn region_ids(&self) -> Vec<RegionNumber> {
-        let regions_guard = self.regions.read().await;
+        let regions_guard = self.regions.load();
         regions_guard.iter().map(|(k, _)| *k).collect()
     }
 
@@ -572,7 +573,7 @@ impl<R: Region> MitoTable<R> {
         table_version: TableVersion,
         alter_op: &AlterOperation,
     ) -> TableResult<()> {
-        let regions_guard = self.regions.read().await;
+        let regions_guard = self.regions.load();
         for region in regions_guard.values() {
             let region_meta = region.in_memory_metadata();
             if u64::from(region_meta.version()) > table_version {
@@ -602,7 +603,7 @@ impl<R: Region> MitoTable<R> {
     }
 
     pub async fn load_region(&self, region_number: RegionNumber, _region: R) -> TableResult<()> {
-        let info = self.table_info.load_full();
+        let info = self.table_info.load();
 
         // TODO(weny): Supports to load the region
         warn!(

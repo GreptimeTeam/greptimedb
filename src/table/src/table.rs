@@ -113,7 +113,7 @@ pub trait Table: Send + Sync {
     }
 
     /// Get region stats in this table.
-    async fn region_stats(&self) -> Result<Vec<RegionStat>> {
+    fn region_stats(&self) -> Result<Vec<RegionStat>> {
         UnsupportedSnafu {
             operation: "REGION_STATS",
         }
@@ -121,7 +121,7 @@ pub trait Table: Send + Sync {
     }
 
     /// Return true if contains the region
-    async fn contains_region(&self, _region: RegionNumber) -> Result<bool> {
+    fn contains_region(&self, _region: RegionNumber) -> Result<bool> {
         UnsupportedSnafu {
             operation: "contain_region",
         }

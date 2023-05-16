@@ -240,7 +240,6 @@ pub struct CloseTableRequest {
     pub catalog_name: String,
     pub schema_name: String,
     pub table_name: String,
-    /// Donothing if region_numbers is empty
     pub region_numbers: Vec<RegionNumber>,
 }
 

@@ -244,7 +244,7 @@ pub async fn datanode_stat(catalog_manager: &CatalogManagerRef) -> (u64, Vec<Reg
                 let region_numbers = &table.table_info().meta.region_numbers;
                 region_number += region_numbers.len() as u64;
 
-                match table.region_stats().await {
+                match table.region_stats() {
                     Ok(stats) => {
                         let stats = stats.into_iter().map(|stat| RegionStat {
                             region_id: stat.region_id,

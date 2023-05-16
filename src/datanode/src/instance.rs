@@ -202,7 +202,7 @@ impl Instance {
         let factory = QueryEngineFactory::new(catalog_manager.clone());
         let query_engine = factory.query_engine();
 
-        let handlder_executor = HandlerGroupExecutor::new(vec![
+        let handlers_executor = HandlerGroupExecutor::new(vec![
             Arc::new(ParseMailboxMessageHandler::default()),
             Arc::new(OpenRegionHandler::new(
                 catalog_manager.clone(),
@@ -222,7 +222,7 @@ impl Instance {
                 opts.rpc_hostname.clone(),
                 meta_client.as_ref().unwrap().clone(),
                 catalog_manager.clone(),
-                Arc::new(handlder_executor),
+                Arc::new(handlers_executor),
             )),
         };
 

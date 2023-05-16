@@ -133,7 +133,6 @@ impl OpenRegionHandler {
                 let region_exist =
                     table
                         .contains_region(*r)
-                        .await
                         .with_context(|_| error::CheckRegionSnafu {
                             table_name: format_full_table_name(
                                 catalog_name,

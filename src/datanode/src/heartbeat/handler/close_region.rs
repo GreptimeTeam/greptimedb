@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use catalog::{CatalogManagerRef, DeregisterTableRequest, RegisterTableRequest};
+use catalog::{CatalogManagerRef, DeregisterTableRequest};
 use common_catalog::format_full_table_name;
 use common_meta::instruction::{Instruction, InstructionReply, RegionIdent, SimpleReply};
 use common_telemetry::error;
@@ -23,7 +23,6 @@ use store_api::storage::RegionNumber;
 use table::engine::manager::TableEngineManagerRef;
 use table::engine::{EngineContext, TableReference};
 use table::requests::CloseTableRequest;
-use table::TableRef;
 
 use crate::error::{self, Result};
 use crate::heartbeat::handler::HeartbeatResponseHandler;
@@ -53,18 +52,17 @@ impl HeartbeatResponseHandler for CloseRegionHandler {
 
         let RegionIdent {
             engine,
-            table_id,
             catalog,
             schema,
             table,
             region_number,
+            ..
         } = region_ident;
 
         common_runtime::spawn_bg(async move {
             let result = self_ref
                 .close_region_inner(
                     engine,
-                    table_id,
                     &TableReference::full(&catalog, &schema, &table),
                     vec![region_number],
                 )
@@ -128,7 +126,6 @@ impl CloseRegionHandler {
                 let region_exist =
                     table
                         .contains_region(*r)
-                        .await
                         .with_context(|_| error::CheckRegionSnafu {
                             table_name: format_full_table_name(
                                 catalog_name,
@@ -149,7 +146,6 @@ impl CloseRegionHandler {
     async fn close_region_inner(
         &self,
         engine: String,
-        table_id: u32,
         table_ref: &TableReference<'_>,
         region_numbers: Vec<RegionNumber>,
     ) -> Result<bool> {
@@ -173,12 +169,12 @@ impl CloseRegionHandler {
             return Ok(true);
         }
 
-        if let Some(table) =
-            engine
-                .get_table(&ctx, table_ref)
-                .with_context(|_| error::GetTableSnafu {
-                    table_name: table_ref.to_string(),
-                })?
+        if engine
+            .get_table(&ctx, table_ref)
+            .with_context(|_| error::GetTableSnafu {
+                table_name: table_ref.to_string(),
+            })?
+            .is_some()
         {
             return if engine
                 .close_table(
@@ -198,8 +194,8 @@ impl CloseRegionHandler {
                 // Deregister table if The table released.
                 self.deregister_table(table_ref).await
             } else {
-                // Registers table (update)
-                self.register_table(table_ref, table_id, table).await
+                // Requires caller to update the region_numbers
+                Ok(true)
             };
         }
 
@@ -213,27 +209,6 @@ impl CloseRegionHandler {
                 catalog: table_ref.catalog.to_string(),
                 schema: table_ref.schema.to_string(),
                 table_name: table_ref.table.to_string(),
-            })
-            .await
-            .with_context(|_| error::DeregisterTableSnafu {
-                table_name: table_ref.to_string(),
-            })
-    }
-
-    async fn register_table(
-        &self,
-
-        table_ref: &TableReference<'_>,
-        table_id: u32,
-        table: TableRef,
-    ) -> Result<bool> {
-        self.catalog_manager
-            .register_table(RegisterTableRequest {
-                catalog: table_ref.catalog.to_string(),
-                schema: table_ref.schema.to_string(),
-                table_name: table_ref.table.to_string(),
-                table,
-                table_id,
             })
             .await
             .with_context(|_| error::DeregisterTableSnafu {
