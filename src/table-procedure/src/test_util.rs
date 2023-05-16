@@ -73,6 +73,7 @@ impl TestEnv {
         let config = ManagerConfig {
             max_retry_times: 3,
             retry_delay: Duration::from_secs(500),
+            ..Default::default()
         };
         let state_store = Arc::new(ObjectStateStore::new(object_store));
         let procedure_manager = Arc::new(LocalManager::new(config, state_store));
