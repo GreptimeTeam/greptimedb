@@ -19,7 +19,9 @@ use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeVisitor, Visit
 use datafusion_expr::{Extension, LogicalPlan};
 use datafusion_optimizer::analyzer::AnalyzerRule;
 
-use crate::dist_plan::commutativity::{Categorizer, Commutativity};
+use crate::dist_plan::commutativity::{
+    partial_commutative_transformer, Categorizer, Commutativity,
+};
 use crate::dist_plan::merge_scan::MergeScanLogicalPlan;
 use crate::dist_plan::utils;
 
@@ -41,8 +43,8 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         // (2) transform up merge scan
         let mut visitor = CommutativeVisitor::new();
         plan.visit(&mut visitor)?;
-        let transformed = Mutex::new(false);
-        let plan = plan.transform_down(&|plan| Self::expand(plan, &visitor, &transformed))?;
+        let state = ExpandState::new();
+        let plan = plan.transform_down(&|plan| Self::expand(plan, &visitor, &state))?;
 
         Ok(plan)
     }
@@ -55,7 +57,7 @@ impl DistPlannerAnalyzer {
             LogicalPlan::TableScan(table_scan) => {
                 let ext_plan = LogicalPlan::Extension(Extension {
                     node: Arc::new(MergeScanLogicalPlan::new(
-                        LogicalPlan::TableScan(table_scan.clone()),
+                        LogicalPlan::TableScan(table_scan),
                         true,
                     )),
                 });
@@ -69,11 +71,9 @@ impl DistPlannerAnalyzer {
     fn expand(
         mut plan: LogicalPlan,
         visitor: &CommutativeVisitor,
-        transformed: &Mutex<bool>,
+        state: &ExpandState,
     ) -> datafusion_common::Result<Transformed<LogicalPlan>> {
-        println!("transforming: {}", plan.display());
-
-        if *transformed.lock().unwrap() {
+        if state.is_transformed() {
             // only transform once
             return Ok(Transformed::No(plan));
         }
@@ -90,8 +90,29 @@ impl DistPlannerAnalyzer {
             plan = new_stage.with_new_inputs(&[plan])?
         }
 
-        *transformed.lock().unwrap() = true;
+        state.set_transformed();
         Ok(Transformed::Yes(plan))
+    }
+}
+
+struct ExpandState {
+    transformed: Mutex<bool>,
+}
+
+impl ExpandState {
+    pub fn new() -> Self {
+        Self {
+            transformed: Mutex::new(false),
+        }
+    }
+
+    pub fn is_transformed(&self) -> bool {
+        *self.transformed.lock().unwrap()
+    }
+
+    /// Set the state to transformed
+    pub fn set_transformed(&self) {
+        *self.transformed.lock().unwrap() = true;
     }
 }
 
@@ -120,13 +141,25 @@ impl TreeNodeVisitor for CommutativeVisitor {
     }
 
     fn post_visit(&mut self, plan: &LogicalPlan) -> datafusion_common::Result<VisitRecursion> {
-        println!("post_visit: {}", plan.display());
-
         match Categorizer::check_plan(plan) {
             Commutativity::Commutative => {}
-            Commutativity::PartialCommutative => self.next_stage.push(plan.clone()),
-            Commutativity::ConditionalCommutative(_) => todo!(),
-            Commutativity::TransformedCommutative(_) => todo!(),
+            Commutativity::PartialCommutative => {
+                if let Some(plan) = partial_commutative_transformer(plan) {
+                    self.next_stage.push(plan)
+                }
+            }
+            Commutativity::ConditionalCommutative(transformer) => {
+                if let Some(transformer) = transformer
+                    && let Some(plan) = transformer(plan) {
+                    self.next_stage.push(plan)
+                }
+            },
+            Commutativity::TransformedCommutative(transformer) => {
+                if let Some(transformer) = transformer
+                    && let Some(plan) = transformer(plan) {
+                    self.next_stage.push(plan)
+                }
+            },
             Commutativity::NonCommutative
             | Commutativity::Unimplemented
             | Commutativity::Unsupported => {
@@ -168,15 +201,24 @@ mod test {
             .unwrap()
             .filter(col("number").lt(lit(10)))
             .unwrap()
-            // .aggregate(vec![col("number")], vec![col("number").count(true)])
             .project(vec![col("number")])
+            .unwrap()
+            .distinct()
             .unwrap()
             .build()
             .unwrap();
 
-        println!("before: {:?}", plan);
         let config = ConfigOptions::default();
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
-        println!("after: {:?}", result);
+        let expected = String::from(
+            "Distinct:\
+            \n  MergeScan [is_placeholder=false]\
+            \n    Distinct:\
+            \n      Projection: t.number\
+            \n        Filter: t.number < Int32(10)\
+            \n          MergeScan [is_placeholder=true]\
+            \n            TableScan: t",
+        );
+        assert_eq!(expected, format!("{:?}", result));
     }
 }
