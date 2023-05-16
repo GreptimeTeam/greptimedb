@@ -30,12 +30,12 @@ use crate::heartbeat::handler::HeartbeatResponseHandler;
 use crate::heartbeat::HeartbeatResponseHandlerContext;
 
 #[derive(Clone)]
-pub struct CloseTableHandler {
+pub struct CloseRegionHandler {
     catalog_manager: CatalogManagerRef,
     table_engine_manager: TableEngineManagerRef,
 }
 
-impl HeartbeatResponseHandler for CloseTableHandler {
+impl HeartbeatResponseHandler for CloseRegionHandler {
     fn is_acceptable(&self, ctx: &HeartbeatResponseHandlerContext) -> bool {
         matches!(
             ctx.incoming_message.as_ref(),
@@ -71,7 +71,7 @@ impl HeartbeatResponseHandler for CloseTableHandler {
                 .await;
 
             if let Err(e) = mailbox
-                .send((meta, CloseTableHandler::map_result(result)))
+                .send((meta, CloseRegionHandler::map_result(result)))
                 .await
             {
                 error!(e;"Failed to send reply to mailbox");
@@ -82,7 +82,17 @@ impl HeartbeatResponseHandler for CloseTableHandler {
     }
 }
 
-impl CloseTableHandler {
+impl CloseRegionHandler {
+    pub fn new(
+        catalog_manager: CatalogManagerRef,
+        table_engine_manager: TableEngineManagerRef,
+    ) -> Self {
+        Self {
+            catalog_manager,
+            table_engine_manager,
+        }
+    }
+
     fn map_result(result: Result<bool>) -> InstructionReply {
         result.map_or_else(
             |error| {
@@ -132,6 +142,7 @@ impl CloseTableHandler {
                 }
             }
         }
+        // Returns true if table not exist
         Ok(true)
     }
 

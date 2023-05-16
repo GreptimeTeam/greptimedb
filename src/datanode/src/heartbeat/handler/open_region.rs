@@ -66,6 +66,16 @@ impl HeartbeatResponseHandler for OpenRegionHandler {
 }
 
 impl OpenRegionHandler {
+    pub fn new(
+        catalog_manager: CatalogManagerRef,
+        table_engine_manager: TableEngineManagerRef,
+    ) -> Self {
+        Self {
+            catalog_manager,
+            table_engine_manager,
+        }
+    }
+
     fn map_result(result: Result<bool>) -> InstructionReply {
         result.map_or_else(
             |error| {
@@ -141,8 +151,9 @@ impl OpenRegionHandler {
                     return Ok(false);
                 }
             }
+            return Ok(true);
         }
-        Ok(true)
+        Ok(false)
     }
 
     async fn open_region_inner(&self, engine: String, request: OpenTableRequest) -> Result<bool> {
@@ -196,6 +207,8 @@ impl OpenRegionHandler {
             // Therefore, we won't meet this case, in theory.
 
             // Case 2: The target region was not found in table meta
+
+            // Case 3: The table not exist
             Ok(false)
         }
     }

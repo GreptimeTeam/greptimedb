@@ -63,6 +63,8 @@ use crate::error::{
     self, CatalogSnafu, MetaClientInitSnafu, MissingMetasrvOptsSnafu, MissingNodeIdSnafu,
     NewCatalogSnafu, OpenLogStoreSnafu, RecoverProcedureSnafu, Result, ShutdownInstanceSnafu,
 };
+use crate::heartbeat::handler::close_region::CloseRegionHandler;
+use crate::heartbeat::handler::open_region::OpenRegionHandler;
 use crate::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use crate::heartbeat::handler::HandlerGroupExecutor;
 use crate::heartbeat::HeartbeatTask;
@@ -200,8 +202,17 @@ impl Instance {
         let factory = QueryEngineFactory::new(catalog_manager.clone());
         let query_engine = factory.query_engine();
 
-        let handlder_executor =
-            HandlerGroupExecutor::new(vec![Arc::new(ParseMailboxMessageHandler::default())]);
+        let handlder_executor = HandlerGroupExecutor::new(vec![
+            Arc::new(ParseMailboxMessageHandler::default()),
+            Arc::new(OpenRegionHandler::new(
+                catalog_manager.clone(),
+                engine_manager.clone(),
+            )),
+            Arc::new(CloseRegionHandler::new(
+                catalog_manager.clone(),
+                engine_manager.clone(),
+            )),
+        ]);
 
         let heartbeat_task = match opts.mode {
             Mode::Standalone => None,
