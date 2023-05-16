@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt;
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
@@ -60,6 +61,32 @@ pub enum ConcreteDataType {
     // Compound types:
     List(ListType),
     Dictionary(DictionaryType),
+}
+
+impl fmt::Display for ConcreteDataType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConcreteDataType::Null(_) => write!(f, "Null"),
+            ConcreteDataType::Boolean(_) => write!(f, "Boolean"),
+            ConcreteDataType::Int8(_) => write!(f, "Int8"),
+            ConcreteDataType::Int16(_) => write!(f, "Int16"),
+            ConcreteDataType::Int32(_) => write!(f, "Int32"),
+            ConcreteDataType::Int64(_) => write!(f, "Int64"),
+            ConcreteDataType::UInt8(_) => write!(f, "UInt8"),
+            ConcreteDataType::UInt16(_) => write!(f, "UInt16"),
+            ConcreteDataType::UInt32(_) => write!(f, "UInt32"),
+            ConcreteDataType::UInt64(_) => write!(f, "UInt64"),
+            ConcreteDataType::Float32(_) => write!(f, "Float32"),
+            ConcreteDataType::Float64(_) => write!(f, "Float64"),
+            ConcreteDataType::Binary(_) => write!(f, "Binary"),
+            ConcreteDataType::String(_) => write!(f, "String"),
+            ConcreteDataType::Date(_) => write!(f, "Date"),
+            ConcreteDataType::DateTime(_) => write!(f, "DateTime"),
+            ConcreteDataType::Timestamp(_) => write!(f, "Timestamp"),
+            ConcreteDataType::List(_) => write!(f, "List"),
+            ConcreteDataType::Dictionary(_) => write!(f, "Dictionary"),
+        }
+    }
 }
 
 // TODO(yingwen): Refactor these `is_xxx()` methods, such as adding a `properties()` method

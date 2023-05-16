@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt;
+
 use datatypes::prelude::ConcreteDataType;
 use sqlparser::ast::Query as SpQuery;
 
@@ -51,5 +53,20 @@ impl Query {
 
     pub fn param_types_mut(&mut self) -> &mut Vec<ConcreteDataType> {
         &mut self.param_types
+    }
+}
+
+impl fmt::Display for Query {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} ", self.inner)?;
+        write!(f, "[")?;
+        for i in 0..self.param_types.len() {
+            write!(f, "{}", self.param_types[i])?;
+            if i != self.param_types.len() - 1 {
+                write!(f, ",")?;
+            }
+        }
+        write!(f, "]")?;
+        Ok(())
     }
 }
