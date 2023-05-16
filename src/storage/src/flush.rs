@@ -321,6 +321,7 @@ impl<S: LogStore> FlushJob<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memtable::AllocTracker;
 
     #[test]
     fn test_get_mutable_limitation() {
@@ -427,5 +428,57 @@ mod tests {
         assert_eq!(Some(FlushType::Engine), strategy.should_flush(status));
         strategy.reserve_mem(100);
         assert_eq!(Some(FlushType::Engine), strategy.should_flush(status));
+    }
+
+    #[test]
+    fn test_alloc_tracker_without_strategy() {
+        let tracker = AllocTracker::new(None);
+        assert_eq!(0, tracker.bytes_allocated());
+        tracker.on_allocate(100);
+        assert_eq!(100, tracker.bytes_allocated());
+        tracker.on_allocate(200);
+        assert_eq!(300, tracker.bytes_allocated());
+
+        tracker.done_allocating();
+        assert_eq!(300, tracker.bytes_allocated());
+    }
+
+    #[test]
+    fn test_alloc_tracker_with_strategy() {
+        let strategy = Arc::new(SizeBasedStrategy::new(Some(1000)));
+        {
+            let tracker = AllocTracker::new(Some(strategy.clone() as FlushStrategyRef));
+
+            tracker.on_allocate(100);
+            assert_eq!(100, tracker.bytes_allocated());
+            assert_eq!(100, strategy.memory_used.load(Ordering::Relaxed));
+            assert_eq!(100, strategy.memory_active.load(Ordering::Relaxed));
+
+            for _ in 0..2 {
+                // Done allocating won't free the same memory multiple times.
+                tracker.done_allocating();
+                assert_eq!(100, strategy.memory_used.load(Ordering::Relaxed));
+                assert_eq!(0, strategy.memory_active.load(Ordering::Relaxed));
+            }
+        }
+
+        assert_eq!(0, strategy.memory_used.load(Ordering::Relaxed));
+        assert_eq!(0, strategy.memory_active.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_alloc_tracker_without_done_allocating() {
+        let strategy = Arc::new(SizeBasedStrategy::new(Some(1000)));
+        {
+            let tracker = AllocTracker::new(Some(strategy.clone() as FlushStrategyRef));
+
+            tracker.on_allocate(100);
+            assert_eq!(100, tracker.bytes_allocated());
+            assert_eq!(100, strategy.memory_used.load(Ordering::Relaxed));
+            assert_eq!(100, strategy.memory_active.load(Ordering::Relaxed));
+        }
+
+        assert_eq!(0, strategy.memory_used.load(Ordering::Relaxed));
+        assert_eq!(0, strategy.memory_active.load(Ordering::Relaxed));
     }
 }

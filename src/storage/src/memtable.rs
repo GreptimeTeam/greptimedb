@@ -216,7 +216,7 @@ impl fmt::Debug for AllocTracker {
 
 impl AllocTracker {
     /// Returns a new [AllocTracker].
-    fn new(flush_strategy: Option<FlushStrategyRef>) -> AllocTracker {
+    pub fn new(flush_strategy: Option<FlushStrategyRef>) -> AllocTracker {
         AllocTracker {
             flush_strategy,
             bytes_allocated: AtomicUsize::new(0),
@@ -225,7 +225,7 @@ impl AllocTracker {
     }
 
     /// Tracks `bytes` memory is allocated.
-    fn on_allocate(&self, bytes: usize) {
+    pub(crate) fn on_allocate(&self, bytes: usize) {
         self.bytes_allocated.fetch_add(bytes, Ordering::Relaxed);
         if let Some(flush_strategy) = &self.flush_strategy {
             flush_strategy.reserve_mem(bytes);
@@ -236,7 +236,7 @@ impl AllocTracker {
     /// the write buffer's limit.
     ///
     /// The region MUST ensure that it calls this method inside the region writer's write lock.
-    fn done_allocating(&self) {
+    pub(crate) fn done_allocating(&self) {
         if let Some(flush_strategy) = &self.flush_strategy {
             if self
                 .is_done_allocating
@@ -249,7 +249,7 @@ impl AllocTracker {
     }
 
     /// Returns bytes allocated.
-    fn bytes_allocated(&self) -> usize {
+    pub(crate) fn bytes_allocated(&self) -> usize {
         self.bytes_allocated.load(Ordering::Relaxed)
     }
 }
