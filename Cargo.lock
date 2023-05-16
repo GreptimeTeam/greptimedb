@@ -6445,6 +6445,7 @@ dependencies = [
 name = "query"
 version = "0.2.0"
 dependencies = [
+ "ahash 0.8.3",
  "approx_eq",
  "arc-swap",
  "arrow-schema",
