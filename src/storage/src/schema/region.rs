@@ -131,6 +131,11 @@ impl RegionSchema {
     }
 
     #[inline]
+    pub(crate) fn timestamp_index(&self) -> usize {
+        self.store_schema.timestamp_index()
+    }
+
+    #[inline]
     pub(crate) fn value_indices(&self) -> impl Iterator<Item = usize> {
         self.store_schema.value_indices()
     }

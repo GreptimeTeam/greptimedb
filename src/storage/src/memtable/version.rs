@@ -64,15 +64,15 @@ impl MemtableVersion {
     }
 
     pub fn mutable_bytes_allocated(&self) -> usize {
-        self.mutable.bytes_allocated()
+        self.mutable.stats().bytes_allocated()
     }
 
     pub fn total_bytes_allocated(&self) -> usize {
         self.immutables
             .iter()
-            .map(|m| m.bytes_allocated())
+            .map(|m| m.stats().bytes_allocated())
             .sum::<usize>()
-            + self.mutable.bytes_allocated()
+            + self.mutable.stats().bytes_allocated()
     }
 
     /// Creates a new `MemtableVersion` that removes immutable memtables

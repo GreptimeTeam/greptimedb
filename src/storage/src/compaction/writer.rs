@@ -140,8 +140,7 @@ mod tests {
         for key in ts {
             key_builders.push(Some(*key));
         }
-        let row_keys = vec![Arc::new(key_builders.finish()) as _];
-
+        let ts_col = Arc::new(key_builders.finish()) as _;
         let mut value_builders = UInt64VectorBuilder::with_capacity(values.len());
 
         for value in values {
@@ -153,8 +152,9 @@ mod tests {
             sequence,
             op_type,
             start_index_in_batch,
-            keys: row_keys,
+            keys: vec![],
             values: row_values,
+            timestamp: Some(ts_col),
         };
 
         assert_eq!(ts.len(), kvs.len());

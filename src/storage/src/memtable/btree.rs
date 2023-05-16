@@ -16,7 +16,7 @@ use std::cmp::Ordering;
 use std::collections::{btree_map, BTreeMap};
 use std::fmt;
 use std::ops::Bound;
-use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::{Arc, RwLock};
 
 use datatypes::data_type::DataType;
@@ -27,7 +27,8 @@ use store_api::storage::{OpType, SequenceNumber};
 
 use crate::error::Result;
 use crate::memtable::{
-    BatchIterator, BoxedBatchIterator, IterContext, KeyValues, Memtable, MemtableId, RowOrdering,
+    BatchIterator, BoxedBatchIterator, IterContext, KeyValues, Memtable, MemtableId, MemtableStats,
+    RowOrdering,
 };
 use crate::read::Batch;
 use crate::schema::compat::ReadAdapter;
@@ -42,7 +43,7 @@ pub struct BTreeMemtable {
     id: MemtableId,
     schema: RegionSchemaRef,
     map: Arc<RwLockMap>,
-    estimated_bytes: AtomicUsize,
+    stats: MemtableStats,
 }
 
 impl BTreeMemtable {
@@ -51,7 +52,39 @@ impl BTreeMemtable {
             id,
             schema,
             map: Arc::new(RwLock::new(BTreeMap::new())),
-            estimated_bytes: AtomicUsize::new(0),
+            stats: Default::default(),
+        }
+    }
+
+    /// Updates memtable stats.
+    /// This function is guarded by `BTreeMemtable::map` so that store-after-load is safe.
+    fn update_stats(&self, min: Option<Value>, max: Option<Value>) {
+        if let Some(min) = min {
+            let min_val = match min {
+                Value::Int64(v) => v,
+                Value::Timestamp(t) => t.value(),
+                _ => unreachable!(),
+            };
+            let cur_min = self.stats.min_timestamp.load(AtomicOrdering::Relaxed);
+            if min_val < cur_min {
+                self.stats
+                    .min_timestamp
+                    .store(min_val, AtomicOrdering::Relaxed);
+            }
+        }
+
+        if let Some(max) = max {
+            let cur_max = self.stats.max_timestamp.load(AtomicOrdering::Relaxed);
+            let max_val = match max {
+                Value::Int64(v) => v,
+                Value::Timestamp(t) => t.value(),
+                _ => unreachable!(),
+            };
+            if max_val > cur_max {
+                self.stats
+                    .max_timestamp
+                    .store(max_val, AtomicOrdering::Relaxed);
+            }
         }
     }
 }
@@ -65,7 +98,7 @@ impl fmt::Debug for BTreeMemtable {
             // Only show StoreSchema
             .field("schema", &self.schema)
             .field("rows", &len)
-            .field("estimated_bytes", &self.estimated_bytes)
+            .field("stats", &self.stats)
             .finish()
     }
 }
@@ -80,15 +113,30 @@ impl Memtable for BTreeMemtable {
     }
 
     fn write(&self, kvs: &KeyValues) -> Result<()> {
-        self.estimated_bytes
+        debug_assert!(kvs.timestamp.is_some());
+        self.stats
+            .estimated_bytes
             .fetch_add(kvs.estimated_memory_size(), AtomicOrdering::Relaxed);
 
-        let mut map = self.map.write().unwrap();
         let iter_row = IterRow::new(kvs);
+        let mut map = self.map.write().unwrap();
+
+        let mut min_ts = None;
+        let mut max_ts = None;
         for (inner_key, row_value) in iter_row {
+            let ts = inner_key.timestamp();
+            let min_ts = min_ts.get_or_insert_with(|| ts.clone());
+            let max_ts = max_ts.get_or_insert_with(|| ts.clone());
+            if ts < min_ts {
+                *min_ts = ts.clone();
+            }
+            if ts > max_ts {
+                *max_ts = ts.clone();
+            }
             map.insert(inner_key, row_value);
         }
 
+        self.update_stats(min_ts, max_ts);
         Ok(())
     }
 
@@ -100,12 +148,12 @@ impl Memtable for BTreeMemtable {
         Ok(Box::new(iter))
     }
 
-    fn bytes_allocated(&self) -> usize {
-        self.estimated_bytes.load(AtomicOrdering::Relaxed)
-    }
-
     fn num_rows(&self) -> usize {
         self.map.read().unwrap().len()
+    }
+
+    fn stats(&self) -> &MemtableStats {
+        &self.stats
     }
 }
 
@@ -309,12 +357,15 @@ impl<'a> IterRow<'a> {
     }
 
     fn fetch_row(&mut self) -> (InnerKey, RowValue) {
-        let row_key = self
+        let mut row_key: Vec<_> = self
             .kvs
             .keys
             .iter()
             .map(|vector| vector.get(self.index))
             .collect();
+
+        // unwrap safety: KeyValues always contains a timestamp as guaranteed in [Inserter::write_one_mutation]
+        row_key.push(self.kvs.timestamp.as_ref().unwrap().get(self.index));
         let inner_key = InnerKey {
             row_key,
             sequence: self.kvs.sequence,
@@ -382,6 +433,12 @@ impl PartialOrd for InnerKey {
 }
 
 impl InnerKey {
+    #[inline]
+    fn timestamp(&self) -> &Value {
+        // safety: row key shall at least contain a timestamp column
+        self.row_key.last().unwrap()
+    }
+
     #[inline]
     fn is_row_key_equal(&self, other: &InnerKey) -> bool {
         self.row_key == other.row_key

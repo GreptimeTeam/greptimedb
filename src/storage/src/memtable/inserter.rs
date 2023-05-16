@@ -56,6 +56,7 @@ impl Inserter {
             start_index_in_batch: self.index_in_batch,
             keys: Vec::with_capacity(total_column_num),
             values: Vec::with_capacity(total_column_num),
+            timestamp: None,
         };
 
         for mutation in &payload.mutations {
@@ -76,10 +77,11 @@ impl Inserter {
 
         kvs.reset(mutation.op_type, self.index_in_batch);
 
-        for key_idx in schema.row_key_indices() {
+        let ts_idx = schema.timestamp_index();
+        kvs.timestamp = Some(mutation.record_batch.column(ts_idx).clone());
+        for key_idx in 0..ts_idx {
             kvs.keys.push(mutation.record_batch.column(key_idx).clone());
         }
-
         for value_idx in schema.value_indices() {
             kvs.values
                 .push(mutation.record_batch.column(value_idx).clone());
@@ -120,6 +122,7 @@ struct SliceIndex {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::atomic::Ordering;
     use std::sync::Arc;
 
     use common_time::timestamp::Timestamp;
@@ -171,8 +174,12 @@ mod tests {
         mem: &MemtableRef,
         sequence: SequenceNumber,
         data: &[(i64, Option<i64>)],
+        max_ts: i64,
+        min_ts: i64,
     ) {
         let iter = mem.iter(&IterContext::default()).unwrap();
+        assert_eq!(min_ts, mem.stats().min_timestamp.load(Ordering::Relaxed));
+        assert_eq!(max_ts, mem.stats().max_timestamp.load(Ordering::Relaxed));
 
         let mut index = 0;
         for batch in iter {
@@ -233,6 +240,8 @@ mod tests {
                 (102, None),
                 (201, Some(201)),
             ],
+            201,
+            1,
         );
     }
 }

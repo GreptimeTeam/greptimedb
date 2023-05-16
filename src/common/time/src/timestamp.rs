@@ -48,7 +48,7 @@ impl Timestamp {
     /// The result time unit remains unchanged even if `duration` has a different unit with `self`.
     /// For example, a timestamp with value 1 and time unit second, subtracted by 1 millisecond
     /// and the result is still 1 second.
-    pub fn sub(&self, duration: Duration) -> error::Result<Self> {
+    pub fn sub_duration(&self, duration: Duration) -> error::Result<Self> {
         let duration: i64 = match self.unit {
             TimeUnit::Second => {
                 i64::try_from(duration.as_secs()).context(TimestampOverflowSnafu)?
@@ -77,6 +77,13 @@ impl Timestamp {
             value,
             unit: self.unit,
         })
+    }
+
+    /// Subtracts current timestamp with another timestamp, yielding a duration.
+    pub fn sub(&self, rhs: Self) -> Option<chrono::Duration> {
+        let lhs = self.to_chrono_datetime()?;
+        let rhs = rhs.to_chrono_datetime()?;
+        Some(lhs - rhs)
     }
 
     pub fn new(value: i64, unit: TimeUnit) -> Self {
@@ -863,19 +870,19 @@ mod tests {
     #[test]
     fn test_timestamp_sub() {
         let res = Timestamp::new(1, TimeUnit::Second)
-            .sub(Duration::from_secs(1))
+            .sub_duration(Duration::from_secs(1))
             .unwrap();
         assert_eq!(0, res.value);
         assert_eq!(TimeUnit::Second, res.unit);
 
         let res = Timestamp::new(0, TimeUnit::Second)
-            .sub(Duration::from_secs(1))
+            .sub_duration(Duration::from_secs(1))
             .unwrap();
         assert_eq!(-1, res.value);
         assert_eq!(TimeUnit::Second, res.unit);
 
         let res = Timestamp::new(1, TimeUnit::Second)
-            .sub(Duration::from_millis(1))
+            .sub_duration(Duration::from_millis(1))
             .unwrap();
         assert_eq!(1, res.value);
         assert_eq!(TimeUnit::Second, res.unit);

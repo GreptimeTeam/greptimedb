@@ -82,7 +82,7 @@ impl<S> SimplePicker<S> {
         let Some(ttl) = ttl else { return Ok(vec![]); };
 
         let expire_time = Timestamp::current_millis()
-            .sub(ttl)
+            .sub_duration(ttl)
             .context(TtlCalculationSnafu)?;
 
         let mut expired_ssts = vec![];
