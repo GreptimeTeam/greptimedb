@@ -630,12 +630,24 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         // Close the table to close all regions. Closing a region is idempotent.
         if let Some((_, table)) = &removed_table {
             let regions = table.region_ids().await;
+            let table_id = table.table_info().ident.table_id;
 
             table
                 .close(&regions)
                 .await
                 .map_err(BoxedError::new)
                 .context(table_error::TableOperationSnafu)?;
+
+            let ctx = StorageEngineContext::default();
+
+            // Releases regions in storage engine
+            for region_number in regions {
+                self.storage_engine
+                    .close_region(&ctx, &region_name(table_id, region_number))
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(table_error::TableOperationSnafu)?;
+            }
 
             Ok(true)
         } else {
