@@ -450,7 +450,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             table_id, table_info
         );
 
-        // Fixme: We cannot trust the region numbers in the manifest because other datanodes might overwrite the manifest.
+        // FIXME: We cannot trust the region numbers in the manifest because other datanodes might overwrite the manifest.
 
         let mut regions = HashMap::with_capacity(table_info.meta.region_numbers.len());
 
