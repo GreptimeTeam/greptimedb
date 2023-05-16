@@ -578,7 +578,8 @@ mod tests {
             Arc::new(log_store),
             object_store,
             compaction_scheduler,
-        );
+        )
+        .unwrap();
 
         let desc = RegionDescBuilder::new(region_name)
             .id(region_id)
