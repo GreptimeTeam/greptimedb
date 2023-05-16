@@ -86,8 +86,8 @@ struct StartCommand {
     rpc_hostname: Option<String>,
     #[clap(long)]
     mysql_addr: Option<String>,
-    #[clap(long)]
-    metasrv_addr: Option<String>,
+    #[clap(long, multiple = true, value_delimiter = ',')]
+    metasrv_addr: Option<Vec<String>>,
     #[clap(short, long)]
     config_file: Option<String>,
     #[clap(long)]
@@ -133,15 +133,10 @@ impl StartCommand {
             opts.node_id = Some(node_id);
         }
 
-        if let Some(meta_addr) = &self.metasrv_addr {
+        if let Some(metasrv_addrs) = &self.metasrv_addr {
             opts.meta_client_options
                 .get_or_insert_with(MetaClientOptions::default)
-                .metasrv_addrs = meta_addr
-                .clone()
-                .split(',')
-                .map(&str::trim)
-                .map(&str::to_string)
-                .collect::<_>();
+                .metasrv_addrs = metasrv_addrs.clone();
             opts.mode = Mode::Distributed;
         }
 
@@ -317,7 +312,7 @@ mod tests {
 
         if let Options::Datanode(opt) = (StartCommand {
             node_id: Some(42),
-            metasrv_addr: Some("127.0.0.1:3002".to_string()),
+            metasrv_addr: Some(vec!["127.0.0.1:3002".to_string()]),
             ..Default::default()
         })
         .load_options(TopLevelOptions::default())
@@ -327,7 +322,7 @@ mod tests {
         }
 
         assert!((StartCommand {
-            metasrv_addr: Some("127.0.0.1:3002".to_string()),
+            metasrv_addr: Some(vec!["127.0.0.1:3002".to_string()]),
             ..Default::default()
         })
         .load_options(TopLevelOptions::default())
