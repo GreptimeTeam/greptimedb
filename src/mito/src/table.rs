@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
+use common_datasource::compression::CompressionType;
 use common_error::ext::BoxedError;
 use common_query::logical_plan::Expr;
 use common_query::physical_plan::PhysicalPlanRef;
@@ -445,8 +446,10 @@ impl<R: Region> MitoTable<R> {
         table_info: TableInfo,
         regions: HashMap<RegionNumber, R>,
         object_store: ObjectStore,
+        compress_type: CompressionType,
     ) -> Result<MitoTable<R>> {
-        let manifest = TableManifest::create(&table_manifest_dir(table_dir), object_store);
+        let manifest =
+            TableManifest::create(&table_manifest_dir(table_dir), object_store, compress_type);
 
         let _timer =
             common_telemetry::timer!(crate::metrics::MITO_CREATE_TABLE_UPDATE_MANIFEST_ELAPSED);
@@ -463,8 +466,12 @@ impl<R: Region> MitoTable<R> {
         Ok(MitoTable::new(table_info, regions, manifest))
     }
 
-    pub(crate) fn build_manifest(table_dir: &str, object_store: ObjectStore) -> TableManifest {
-        TableManifest::create(&table_manifest_dir(table_dir), object_store)
+    pub(crate) fn build_manifest(
+        table_dir: &str,
+        object_store: ObjectStore,
+        compress_type: CompressionType,
+    ) -> TableManifest {
+        TableManifest::create(&table_manifest_dir(table_dir), object_store, compress_type)
     }
 
     pub(crate) async fn recover_table_info(

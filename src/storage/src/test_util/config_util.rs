@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use common_datasource::compression::CompressionType;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::LogConfig;
 use object_store::services::Fs;
@@ -57,7 +58,13 @@ pub async fn new_store_config_with_object_store(
     let manifest_dir = engine::region_manifest_dir(parent_dir, region_name);
 
     let sst_layer = Arc::new(FsAccessLayer::new(&sst_dir, object_store.clone()));
-    let manifest = RegionManifest::with_checkpointer(&manifest_dir, object_store, None, None);
+    let manifest = RegionManifest::with_checkpointer(
+        &manifest_dir,
+        object_store,
+        CompressionType::Uncompressed,
+        None,
+        None,
+    );
     manifest.start().await.unwrap();
     let log_config = LogConfig {
         log_file_dir: log_store_dir(store_dir),

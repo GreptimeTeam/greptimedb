@@ -39,10 +39,19 @@ lazy_static! {
 }
 
 const LAST_CHECKPOINT_FILE: &str = "_last_checkpoint";
-const DEFAULT_MANIFEST_COMPRESSION_TYPE: CompressionType = CompressionType::Uncompressed;
+const DEFAULT_MANIFEST_COMPRESSION_TYPE: CompressionType = CompressionType::Gzip;
 /// Due to backward compatibility, it is possible that the user's manifest file has not been compressed.
 /// So when we encounter problems, we need to fall back to `FALL_BACK_COMPRESS_TYPE` for processing.
 const FALL_BACK_COMPRESS_TYPE: CompressionType = CompressionType::Uncompressed;
+
+#[inline]
+pub const fn manifest_compress_type(compress: bool) -> CompressionType {
+    if compress {
+        DEFAULT_MANIFEST_COMPRESSION_TYPE
+    } else {
+        FALL_BACK_COMPRESS_TYPE
+    }
+}
 
 #[inline]
 pub fn delta_file(version: ManifestVersion) -> String {
@@ -133,11 +142,10 @@ pub struct ManifestObjectStore {
 }
 
 impl ManifestObjectStore {
-    pub fn new(path: &str, object_store: ObjectStore) -> Self {
+    pub fn new(path: &str, object_store: ObjectStore, compress_type: CompressionType) -> Self {
         Self {
             object_store,
-            //TODO: make it configurable
-            compress_type: DEFAULT_MANIFEST_COMPRESSION_TYPE,
+            compress_type,
             path: util::normalize_dir(path),
         }
     }
@@ -528,7 +536,7 @@ mod tests {
         let mut builder = Fs::default();
         builder.root(&tmp_dir.path().to_string_lossy());
         let object_store = ObjectStore::new(builder).unwrap().finish();
-        ManifestObjectStore::new("/", object_store)
+        ManifestObjectStore::new("/", object_store, CompressionType::Uncompressed)
     }
 
     #[test]

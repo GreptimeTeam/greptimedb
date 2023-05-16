@@ -367,6 +367,7 @@ impl<S: StorageEngine> TableCreator<S> {
             table_info,
             self.regions.clone(),
             self.engine_inner.object_store.clone(),
+            self.engine_inner.compress_type,
         )
         .await?;
 
