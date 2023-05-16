@@ -921,4 +921,17 @@ mod tests {
             Timestamp::new(1, TimeUnit::Second).to_local_string()
         );
     }
+
+    #[test]
+    fn test_subtract_timestamp() {
+        assert_eq!(
+            Some(chrono::Duration::milliseconds(42)),
+            Timestamp::new_millisecond(100).sub(Timestamp::new_millisecond(58))
+        );
+
+        assert_eq!(
+            Some(chrono::Duration::milliseconds(-42)),
+            Timestamp::new_millisecond(58).sub(Timestamp::new_millisecond(100))
+        );
+    }
 }
