@@ -38,7 +38,7 @@ use crate::sst::{AccessLayerRef, FileId, FileMeta, Source, SstInfo, WriteOptions
 use crate::wal::Wal;
 
 /// Current flush-related status of a region.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct RegionStatus {
     /// Id of the region this status belongs to.
     pub region_id: RegionId,
@@ -49,6 +49,7 @@ pub struct RegionStatus {
 }
 
 /// Type of flush request to send.
+#[derive(Debug, PartialEq, Eq)]
 pub enum FlushType {
     /// Flush current region.
     Region,
@@ -106,6 +107,11 @@ impl SizeBasedStrategy {
     /// Insipired by RocksDB's WriteBufferManager.
     /// https://github.com/facebook/rocksdb/blob/main/include/rocksdb/write_buffer_manager.h#L94
     fn should_flush_engine(&self) -> bool {
+        // We only check global limit when it is Some.
+        let Some(global_write_buffer_size) = self.global_write_buffer_size else {
+            return false;
+        };
+
         let mutable_memtable_memory_usage = self.memory_active.load(Ordering::Relaxed);
         if mutable_memtable_memory_usage > self.mutable_limitation {
             logging::info!(
@@ -116,10 +122,6 @@ impl SizeBasedStrategy {
             return true;
         }
 
-        // We only check global limit when it is Some.
-        let Some(global_write_buffer_size) = self.global_write_buffer_size else {
-            return false;
-        };
         let memory_usage = self.memory_used.load(Ordering::Relaxed);
         // If the memory exceeds the buffer size, we trigger more aggressive
         // flush. But if already more than half memory is being flushed,
@@ -138,6 +140,12 @@ impl SizeBasedStrategy {
         }
 
         false
+    }
+
+    /// Returns true if the global memory limitation is enabled.
+    #[inline]
+    fn is_global_limit_enabled(&self) -> bool {
+        self.global_write_buffer_size.is_some()
     }
 }
 
@@ -184,16 +192,22 @@ impl FlushStrategy for SizeBasedStrategy {
     }
 
     fn reserve_mem(&self, mem: usize) {
-        self.memory_used.fetch_add(mem, Ordering::Relaxed);
-        self.memory_active.fetch_add(mem, Ordering::Relaxed);
+        if self.is_global_limit_enabled() {
+            self.memory_used.fetch_add(mem, Ordering::Relaxed);
+            self.memory_active.fetch_add(mem, Ordering::Relaxed);
+        }
     }
 
     fn schedule_free_mem(&self, mem: usize) {
-        self.memory_active.fetch_sub(mem, Ordering::Relaxed);
+        if self.is_global_limit_enabled() {
+            self.memory_active.fetch_sub(mem, Ordering::Relaxed);
+        }
     }
 
     fn free_mem(&self, mem: usize) {
-        self.memory_used.fetch_sub(mem, Ordering::Relaxed);
+        if self.is_global_limit_enabled() {
+            self.memory_used.fetch_sub(mem, Ordering::Relaxed);
+        }
     }
 }
 
@@ -314,5 +328,104 @@ mod tests {
         assert_eq!(8, get_mutable_limitation(Some(10)));
         assert_eq!(56, get_mutable_limitation(Some(64)));
         assert_eq!(0, get_mutable_limitation(None));
+    }
+
+    #[test]
+    fn test_strategy_global_disabled() {
+        let strategy = SizeBasedStrategy::new(None);
+        strategy.reserve_mem(1000);
+        assert_eq!(0, strategy.memory_used.load(Ordering::Relaxed));
+        assert_eq!(0, strategy.memory_active.load(Ordering::Relaxed));
+        strategy.schedule_free_mem(1000);
+        assert_eq!(0, strategy.memory_used.load(Ordering::Relaxed));
+        assert_eq!(0, strategy.memory_active.load(Ordering::Relaxed));
+        strategy.free_mem(1000);
+        assert_eq!(0, strategy.memory_used.load(Ordering::Relaxed));
+        assert_eq!(0, strategy.memory_active.load(Ordering::Relaxed));
+
+        let status = RegionStatus {
+            region_id: 1,
+            bytes_mutable: 400,
+            write_buffer_size: 300,
+        };
+        assert_eq!(Some(FlushType::Region), strategy.should_flush(status));
+        let status = RegionStatus {
+            region_id: 1,
+            bytes_mutable: 100,
+            write_buffer_size: 300,
+        };
+        assert_eq!(None, strategy.should_flush(status));
+    }
+
+    #[test]
+    fn test_strategy_over_mutable_limit() {
+        let strategy = SizeBasedStrategy::new(Some(1000));
+        strategy.reserve_mem(500);
+        let status = RegionStatus {
+            region_id: 1,
+            bytes_mutable: 300,
+            write_buffer_size: 500,
+        };
+        assert_eq!(None, strategy.should_flush(status));
+        strategy.reserve_mem(400);
+
+        // Flush region.
+        let status = RegionStatus {
+            region_id: 1,
+            bytes_mutable: 400,
+            write_buffer_size: 300,
+        };
+        assert_eq!(Some(FlushType::Region), strategy.should_flush(status));
+
+        // More than mutable limitation, Flush global.
+        let status = RegionStatus {
+            region_id: 1,
+            bytes_mutable: 100,
+            write_buffer_size: 300,
+        };
+        assert_eq!(Some(FlushType::Engine), strategy.should_flush(status));
+
+        strategy.schedule_free_mem(500);
+        assert_eq!(None, strategy.should_flush(status));
+        assert_eq!(900, strategy.memory_used.load(Ordering::Relaxed));
+        assert_eq!(400, strategy.memory_active.load(Ordering::Relaxed));
+
+        strategy.free_mem(500);
+        assert_eq!(400, strategy.memory_used.load(Ordering::Relaxed));
+        assert_eq!(400, strategy.memory_active.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_strategy_over_global() {
+        common_telemetry::init_default_ut_logging();
+
+        let strategy = SizeBasedStrategy::new(Some(1000));
+        strategy.reserve_mem(1100);
+        strategy.schedule_free_mem(200);
+        // More than global limit.
+        let status = RegionStatus {
+            region_id: 1,
+            bytes_mutable: 100,
+            write_buffer_size: 300,
+        };
+        assert_eq!(Some(FlushType::Engine), strategy.should_flush(status));
+
+        // More than global limit, but mutable not enough (< 500).
+        strategy.schedule_free_mem(450);
+        let status = RegionStatus {
+            region_id: 1,
+            bytes_mutable: 100,
+            write_buffer_size: 300,
+        };
+        assert_eq!(None, strategy.should_flush(status));
+        strategy.schedule_free_mem(100);
+        assert_eq!(None, strategy.should_flush(status));
+
+        // Now mutable is enough.
+        strategy.reserve_mem(150);
+        // We can flush again.
+        assert_eq!(Some(FlushType::Engine), strategy.should_flush(status));
+        strategy.reserve_mem(100);
+        assert_eq!(Some(FlushType::Engine), strategy.should_flush(status));
     }
 }
