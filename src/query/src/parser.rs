@@ -41,7 +41,6 @@ pub const DEFAULT_LOOKBACK_STRING: &str = "5m";
 pub const EXPLAIN_NODE_NAME: &str = "EXPLAIN";
 pub const ANALYZE_NODE_NAME: &str = "ANALYZE";
 
-
 #[derive(Debug, Clone)]
 pub enum QueryStatement {
     Sql(Statement),
