@@ -20,6 +20,7 @@ use common_telemetry::error;
 use crate::error::Result;
 use crate::heartbeat::mailbox::{IncomingMessage, MailboxRef};
 
+pub mod close_region;
 pub mod open_region;
 pub mod parse_mailbox_message;
 #[cfg(test)]

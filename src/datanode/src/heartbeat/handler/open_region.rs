@@ -122,7 +122,8 @@ impl OpenRegionHandler {
             for r in region_numbers {
                 let region_exist =
                     table
-                        .contain_regions(*r)
+                        .contains_region(*r)
+                        .await
                         .with_context(|_| error::CheckRegionSnafu {
                             table_name: format_full_table_name(
                                 catalog_name,

@@ -41,11 +41,7 @@ pub trait StorageEngine: Send + Sync + Clone + 'static {
     ) -> Result<Option<Self::Region>, Self::Error>;
 
     /// Closes given region.
-    async fn close_region(
-        &self,
-        ctx: &EngineContext,
-        region: Self::Region,
-    ) -> Result<(), Self::Error>;
+    async fn close_region(&self, ctx: &EngineContext, name: &str) -> Result<(), Self::Error>;
 
     /// Creates and returns the created region.
     ///

@@ -104,10 +104,6 @@ impl Table for ImmutableFileTable {
         // nothing to flush
         Ok(())
     }
-
-    async fn close(&self) -> TableResult<()> {
-        Ok(())
-    }
 }
 
 impl ImmutableFileTable {

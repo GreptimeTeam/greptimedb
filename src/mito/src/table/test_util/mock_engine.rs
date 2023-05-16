@@ -291,8 +291,8 @@ impl StorageEngine for MockEngine {
         return Ok(None);
     }
 
-    async fn close_region(&self, _ctx: &EngineContext, region: MockRegion) -> Result<()> {
-        region.close().await
+    async fn close_region(&self, _ctx: &EngineContext, _name: &str) -> Result<()> {
+        unimplemented!()
     }
 
     async fn create_region(
