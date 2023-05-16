@@ -173,14 +173,16 @@ mod tests {
     struct MockItem {
         id: u64,
         last_flush_time: i64,
+        usage: usize,
         flush_reason: Mutex<Option<FlushReason>>,
     }
 
     impl MockItem {
-        fn new(id: u64, last_flush_time: i64) -> MockItem {
+        fn new(id: u64, last_flush_time: i64, usage: usize) -> MockItem {
             MockItem {
                 id,
                 last_flush_time,
+                usage,
                 flush_reason: Mutex::new(None),
             }
         }
@@ -201,7 +203,7 @@ mod tests {
         }
 
         fn mutable_memtable_usage(&self) -> usize {
-            1
+            self.usage
         }
 
         async fn request_flush(&self, reason: FlushReason) {
@@ -213,8 +215,8 @@ mod tests {
     #[tokio::test]
     async fn test_pick_by_interval() {
         let regions = [
-            MockItem::new(0, util::current_time_millis()),
-            MockItem::new(1, util::current_time_millis() - 60 * 1000),
+            MockItem::new(0, util::current_time_millis(), 1),
+            MockItem::new(1, util::current_time_millis() - 60 * 1000, 1),
         ];
         let picker = FlushPicker::new(PickerConfig {
             // schedule_interval is unused in this test.
@@ -225,5 +227,30 @@ mod tests {
         assert_eq!(1, flushed);
         assert!(regions[0].flush_reason().is_none());
         assert_eq!(Some(FlushReason::Periodically), regions[1].flush_reason());
+    }
+
+    #[tokio::test]
+    async fn test_pick_by_buffer_full() {
+        let regions = [
+            MockItem::new(0, util::current_time_millis(), 10),
+            MockItem::new(1, util::current_time_millis() - 60 * 1000, 0),
+            MockItem::new(1, util::current_time_millis() - 60 * 1000, 10),
+        ];
+        let picker = FlushPicker::new(PickerConfig {
+            schedule_interval: Duration::from_millis(10),
+            auto_flush_interval: Duration::from_millis(30 * 1000),
+        });
+        picker.pick_by_write_buffer_full(&regions).await;
+        assert!(regions[0].flush_reason().is_none());
+        assert!(regions[1].flush_reason().is_none());
+        assert_eq!(
+            Some(FlushReason::GlobalBufferFull),
+            regions[2].flush_reason()
+        );
+
+        // No target.
+        let regions = [MockItem::new(1, util::current_time_millis(), 0)];
+        picker.pick_by_write_buffer_full(&regions).await;
+        assert!(regions[0].flush_reason().is_none());
     }
 }
