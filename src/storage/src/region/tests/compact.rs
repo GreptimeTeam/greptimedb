@@ -79,7 +79,7 @@ async fn create_region_for_compaction<
 
     let object_store = new_object_store(store_dir, s3_bucket);
 
-    let mut store_config = config_util::new_store_config_with_object_store(
+    let (mut store_config, _) = config_util::new_store_config_with_object_store(
         REGION_NAME,
         store_dir,
         object_store.clone(),

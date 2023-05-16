@@ -49,7 +49,7 @@ pub struct RegionStatus {
 }
 
 /// Type of flush request to send.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlushType {
     /// Flush current region.
     Region,

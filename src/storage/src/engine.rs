@@ -288,7 +288,7 @@ impl<S: LogStore> RegionMap<S> {
     }
 
     /// Clear the region map.
-    fn clear(&self) {
+    pub(crate) fn clear(&self) {
         self.0.write().unwrap().clear();
     }
 }

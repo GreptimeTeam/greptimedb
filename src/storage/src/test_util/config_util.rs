@@ -45,6 +45,23 @@ pub async fn new_store_config(
     builder.root(store_dir);
     let object_store = ObjectStore::new(builder).unwrap().finish();
 
+    new_store_config_with_object_store(region_name, store_dir, object_store)
+        .await
+        .0
+}
+
+/// Create a new StoreConfig and region map for test.
+pub async fn new_store_config_and_region_map(
+    region_name: &str,
+    store_dir: &str,
+) -> (
+    StoreConfig<RaftEngineLogStore>,
+    Arc<RegionMap<RaftEngineLogStore>>,
+) {
+    let mut builder = Fs::default();
+    builder.root(store_dir);
+    let object_store = ObjectStore::new(builder).unwrap().finish();
+
     new_store_config_with_object_store(region_name, store_dir, object_store).await
 }
 
@@ -53,7 +70,10 @@ pub async fn new_store_config_with_object_store(
     region_name: &str,
     store_dir: &str,
     object_store: ObjectStore,
-) -> StoreConfig<RaftEngineLogStore> {
+) -> (
+    StoreConfig<RaftEngineLogStore>,
+    Arc<RegionMap<RaftEngineLogStore>>,
+) {
     let parent_dir = "";
     let sst_dir = engine::region_sst_dir(parent_dir, region_name);
     let manifest_dir = engine::region_manifest_dir(parent_dir, region_name);
@@ -74,11 +94,12 @@ pub async fn new_store_config_with_object_store(
     let log_store = Arc::new(RaftEngineLogStore::try_new(log_config).await.unwrap());
     let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
     // We use an empty region map so actually the background worker of the picker is disabled.
+    let regions = Arc::new(RegionMap::new());
     let flush_scheduler = Arc::new(
         FlushScheduler::new(
             SchedulerConfig::default(),
             compaction_scheduler.clone(),
-            Arc::new(RegionMap::new()),
+            regions.clone(),
             PickerConfig::default(),
         )
         .unwrap(),
@@ -87,18 +108,21 @@ pub async fn new_store_config_with_object_store(
         SchedulerConfig::default(),
         NoopFilePurgeHandler,
     ));
-    StoreConfig {
-        log_store,
-        sst_layer,
-        manifest,
-        memtable_builder: Arc::new(DefaultMemtableBuilder::default()),
-        flush_scheduler,
-        flush_strategy: Arc::new(SizeBasedStrategy::default()),
-        compaction_scheduler,
-        engine_config: Default::default(),
-        file_purger,
-        ttl: None,
-        compaction_time_window: None,
-        write_buffer_size: DEFAULT_REGION_WRITE_BUFFER_SIZE.as_bytes() as usize,
-    }
+    (
+        StoreConfig {
+            log_store,
+            sst_layer,
+            manifest,
+            memtable_builder: Arc::new(DefaultMemtableBuilder::default()),
+            flush_scheduler,
+            flush_strategy: Arc::new(SizeBasedStrategy::default()),
+            compaction_scheduler,
+            engine_config: Default::default(),
+            file_purger,
+            ttl: None,
+            compaction_time_window: None,
+            write_buffer_size: DEFAULT_REGION_WRITE_BUFFER_SIZE.as_bytes() as usize,
+        },
+        regions,
+    )
 }
