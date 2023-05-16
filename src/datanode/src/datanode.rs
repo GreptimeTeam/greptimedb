@@ -283,6 +283,12 @@ impl Default for DatanodeOptions {
     }
 }
 
+impl DatanodeOptions {
+    pub fn env_list_keys() -> Option<&'static [&'static str]> {
+        Some(&["meta_client_options.metasrv_addrs"])
+    }
+}
+
 /// Datanode service.
 pub struct Datanode {
     opts: DatanodeOptions,

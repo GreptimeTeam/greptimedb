@@ -23,6 +23,7 @@ use snafu::ResultExt;
 use crate::error::{LoadLayeredConfigSnafu, Result};
 
 pub const ENV_VAR_SEP: &str = "__";
+pub const ENV_LIST_SEP: &str = ",";
 
 pub struct MixOptions {
     pub fe_opts: FrontendOptions,
@@ -60,9 +61,12 @@ impl Options {
     /// `env_prefix` is the prefix of environment variables, e.g. "FRONTEND__xxx".
     /// The function will use dunder(double underscore) `__` as the separator for environment variables, for example:
     /// `DATANODE__STORAGE__MANIFEST__CHECKPOINT_MARGIN` will be mapped to `DatanodeOptions.storage.manifest.checkpoint_margin` field in the configuration.
+    /// `list_keys` is the list of keys that should be parsed as a list, for example, you can pass `Some(&["meta_client_options.metasrv_addrs"]` to parse `GREPTIMEDB_METASRV__META_CLIENT_OPTIONS__METASRV_ADDRS` as a list.
+    /// The function will use comma `,` as the separator for list values, for example: `127.0.0.1:3001,127.0.0.1:3002,127.0.0.1:3003`.
     pub fn load_layered_options<'de, T: Serialize + Deserialize<'de> + Default>(
         config_file: Option<&str>,
         env_prefix: &str,
+        list_keys: Option<&[&str]>,
     ) -> Result<T> {
         let default_opts = T::default();
 
@@ -71,6 +75,13 @@ impl Options {
 
             if !env_prefix.is_empty() {
                 env = env.prefix(env_prefix);
+            }
+
+            if let Some(list_keys) = list_keys {
+                env = env.list_separator(ENV_LIST_SEP);
+                for key in list_keys {
+                    env = env.with_list_parse_key(key);
+                }
             }
 
             env.try_parsing(true)
@@ -121,7 +132,6 @@ mod tests {
             mysql_runtime_size = 2
 
             [meta_client_options]
-            metasrv_addrs = ["127.0.0.1:3002"]
             timeout_millis = 3000
             connect_timeout_millis = 5000
             tcp_nodelay = true
@@ -212,11 +222,24 @@ mod tests {
                     .join(ENV_VAR_SEP),
                     Some("/other/wal/dir"),
                 ),
+                (
+                    // meta_client_options.metasrv_addrs = 127.0.0.1:3001,127.0.0.1:3002,127.0.0.1:3003
+                    vec![
+                        env_prefix.to_string(),
+                        "meta_client_options".to_uppercase(),
+                        "metasrv_addrs".to_uppercase(),
+                    ]
+                    .join(ENV_VAR_SEP),
+                    Some("127.0.0.1:3001,127.0.0.1:3002,127.0.0.1:3003"),
+                ),
             ],
             || {
-                let opts: DatanodeOptions =
-                    Options::load_layered_options(Some(file.path().to_str().unwrap()), env_prefix)
-                        .unwrap();
+                let opts: DatanodeOptions = Options::load_layered_options(
+                    Some(file.path().to_str().unwrap()),
+                    env_prefix,
+                    DatanodeOptions::env_list_keys(),
+                )
+                .unwrap();
 
                 // Check the configs from environment variables.
                 assert_eq!(opts.storage.manifest.checkpoint_margin, Some(99));
@@ -231,6 +254,14 @@ mod tests {
                     Some(Duration::from_secs(42))
                 );
                 assert!(opts.storage.manifest.checkpoint_on_startup);
+                assert_eq!(
+                    opts.meta_client_options.unwrap().metasrv_addrs,
+                    vec![
+                        "127.0.0.1:3001".to_string(),
+                        "127.0.0.1:3002".to_string(),
+                        "127.0.0.1:3003".to_string()
+                    ]
+                );
 
                 // Should be the values from config file, not environment variables.
                 assert_eq!(opts.wal.dir, "/tmp/greptimedb/wal".to_string());

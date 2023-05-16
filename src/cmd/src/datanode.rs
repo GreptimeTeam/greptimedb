@@ -104,8 +104,11 @@ struct StartCommand {
 
 impl StartCommand {
     fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
-        let mut opts: DatanodeOptions =
-            Options::load_layered_options(self.config_file.as_deref(), self.env_prefix.as_ref())?;
+        let mut opts: DatanodeOptions = Options::load_layered_options(
+            self.config_file.as_deref(),
+            self.env_prefix.as_ref(),
+            DatanodeOptions::env_list_keys(),
+        )?;
 
         if let Some(dir) = top_level_opts.log_dir {
             opts.logging.dir = dir;
@@ -369,7 +372,6 @@ mod tests {
             mysql_runtime_size = 2
 
             [meta_client_options]
-            metasrv_addrs = ["127.0.0.1:3002"]
             timeout_millis = 3000
             connect_timeout_millis = 5000
             tcp_nodelay = true
@@ -425,6 +427,16 @@ mod tests {
                     .join(ENV_VAR_SEP),
                     Some("99"),
                 ),
+                (
+                    // meta_client_options.metasrv_addrs = 127.0.0.1:3001,127.0.0.1:3002,127.0.0.1:3003
+                    vec![
+                        env_prefix.to_string(),
+                        "meta_client_options".to_uppercase(),
+                        "metasrv_addrs".to_uppercase(),
+                    ]
+                    .join(ENV_VAR_SEP),
+                    Some("127.0.0.1:3001,127.0.0.1:3002,127.0.0.1:3003"),
+                ),
             ],
             || {
                 let command = StartCommand {
@@ -441,6 +453,14 @@ mod tests {
                 assert_eq!(
                     opts.storage.manifest.gc_duration,
                     Some(Duration::from_secs(9))
+                );
+                assert_eq!(
+                    opts.meta_client_options.unwrap().metasrv_addrs,
+                    vec![
+                        "127.0.0.1:3001".to_string(),
+                        "127.0.0.1:3002".to_string(),
+                        "127.0.0.1:3003".to_string()
+                    ]
                 );
 
                 // Should be read from config file, config file > env > default values.
