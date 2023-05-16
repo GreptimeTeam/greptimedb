@@ -106,6 +106,10 @@ impl SqlHandler {
         self.table_engine_manager.clone()
     }
 
+    pub fn catalog_manager(&self) -> CatalogManagerRef {
+        self.catalog_manager.clone()
+    }
+
     pub fn table_engine(&self, table: TableRef) -> Result<TableEngineRef> {
         let engine_name = &table.table_info().meta.engine;
         let engine = self
