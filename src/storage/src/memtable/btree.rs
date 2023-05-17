@@ -19,18 +19,13 @@ use std::ops::Bound;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::{Arc, RwLock};
 
-use arrow_array::UInt32Array;
 use common_time::range::TimestampRange;
 use datatypes::data_type::DataType;
 use datatypes::prelude::*;
 use datatypes::value::Value;
-use datatypes::vectors::{
-    Helper, UInt64Vector, UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder,
-};
-use snafu::ResultExt;
+use datatypes::vectors::{UInt64Vector, UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder};
 use store_api::storage::{OpType, SequenceNumber};
 
-use crate::error;
 use crate::error::Result;
 use crate::memtable::{
     BatchIterator, BoxedBatchIterator, IterContext, KeyValues, Memtable, MemtableId, MemtableStats,
@@ -223,7 +218,8 @@ impl BTreeIterator {
         let (keys, sequences, op_types, values) = if self.ctx.for_flush {
             collect_iter(iter, self.ctx.batch_size)
         } else {
-            let iter = MapIterWrapper::new(iter, self.ctx.visible_sequence);
+            let iter =
+                MapIterWrapper::new(iter, self.ctx.visible_sequence, self.ctx.time_range.clone());
             collect_iter(iter, self.ctx.batch_size)
         };
 
@@ -235,8 +231,6 @@ impl BTreeIterator {
             last_key.reset_for_seek();
             last_key
         });
-
-        let row_selection = filter_keys(&keys, self.ctx.time_range.as_ref());
 
         let key_data_types = self
             .schema
@@ -250,51 +244,23 @@ impl BTreeIterator {
         let key_columns = rows_to_vectors(
             key_data_types,
             self.adapter.source_key_needed(),
-            &row_selection,
             keys.as_slice(),
         );
         let field_columns = rows_to_vectors(
             value_data_types,
             self.adapter.source_value_needed(),
-            &row_selection,
             values.as_slice(),
         );
-
-        let sequences = arrow::compute::take(&sequences.to_arrow_array(), &row_selection, None)
-            .context(error::SortArraysSnafu)?;
-        let op_type = arrow::compute::take(&op_types.to_arrow_array(), &row_selection, None)
-            .context(error::SortArraysSnafu)?;
 
         let batch = self.adapter.batch_from_parts(
             key_columns,
             field_columns,
-            Helper::try_into_vector(sequences)
-                .context(error::ConvertChunkSnafu { name: "sequence" })?,
-            Helper::try_into_vector(op_type)
-                .context(error::ConvertChunkSnafu { name: "op_type" })?,
+            Arc::new(sequences),
+            Arc::new(op_types),
         )?;
 
         Ok(Some(batch))
     }
-}
-
-fn filter_keys(keys: &[&InnerKey], range: Option<&TimestampRange>) -> UInt32Array {
-    let Some(range) = range else {
-        return UInt32Array::from_iter(0..(keys.len() as u32));
-    };
-    let map = keys.iter().enumerate().filter_map(|(idx, key)| {
-        // we assume the last field of row key is always timestamp, though it
-        // 's not formally defined.
-        let Some(t) = key.row_key.last().and_then(|v| {
-            v.as_timestamp()
-        }) else { return Some(idx as u32); };
-        if range.contains(&t) {
-            Some(idx as u32)
-        } else {
-            None
-        }
-    });
-    UInt32Array::from_iter(map)
 }
 
 fn collect_iter<'a, I: Iterator<Item = (&'a InnerKey, &'a RowValue)>>(
@@ -325,23 +291,26 @@ struct MapIterWrapper<'a, InnerKey, RowValue> {
     iter: btree_map::Range<'a, InnerKey, RowValue>,
     prev_key: Option<InnerKey>,
     visible_sequence: SequenceNumber,
+    time_range: Option<TimestampRange>,
 }
 
 impl<'a> MapIterWrapper<'a, InnerKey, RowValue> {
     fn new(
         iter: btree_map::Range<'a, InnerKey, RowValue>,
         visible_sequence: SequenceNumber,
+        time_range: Option<TimestampRange>,
     ) -> MapIterWrapper<'a, InnerKey, RowValue> {
         MapIterWrapper {
             iter,
             prev_key: None,
             visible_sequence,
+            time_range,
         }
     }
 
     fn next_visible_entry(&mut self) -> Option<(&'a InnerKey, &'a RowValue)> {
         for (k, v) in self.iter.by_ref() {
-            if k.is_visible(self.visible_sequence) {
+            if k.is_visible(self.visible_sequence) && k.is_in_time_range(&self.time_range) {
                 return Some((k, v));
             }
         }
@@ -483,6 +452,17 @@ impl InnerKey {
         self.sequence <= sequence
     }
 
+    #[inline]
+    fn is_in_time_range(&self, range: &Option<TimestampRange>) -> bool {
+        let Some(range) = range else { return true; };
+        range.contains(
+            &self
+                .timestamp()
+                .as_timestamp()
+                .expect("Timestamp field must be a valid timestamp value"),
+        )
+    }
+
     /// Reset the `InnerKey` so that we can use it to seek next key that
     /// has different row key.
     fn reset_for_seek(&mut self) {
@@ -537,7 +517,6 @@ impl<'a> RowsProvider for &'a [&RowValue] {
 fn rows_to_vectors<I: Iterator<Item = ConcreteDataType>, T: RowsProvider>(
     data_types: I,
     column_needed: &[bool],
-    row_selection: &UInt32Array,
     provider: T,
 ) -> Vec<VectorRef> {
     if provider.is_empty() {
@@ -557,82 +536,14 @@ fn rows_to_vectors<I: Iterator<Item = ConcreteDataType>, T: RowsProvider>(
             continue;
         }
 
-        row_selection.iter().for_each(|idx| {
-            let Some(row_idx) = idx else { return; };
-            let row = provider.row_by_index(row_idx as usize);
+        for row_idx in 0..row_num {
+            let row = provider.row_by_index(row_idx);
             let value = &row[col_idx];
             builder.as_mut().push_value_ref(value.as_value_ref());
-        });
+        }
+
         vectors.push(builder.to_vector());
     }
+
     vectors
-}
-
-#[cfg(test)]
-mod tests {
-    use std::ops::Range;
-
-    use common_base::bytes::StringBytes;
-    use common_time::Timestamp;
-
-    use super::*;
-
-    fn gen_row_keys(range: Range<i32>, ts_gen: fn(i32) -> Value) -> Vec<InnerKey> {
-        range
-            .map(|idx| InnerKey {
-                row_key: vec![
-                    Value::Int64(idx as i64),
-                    Value::String(StringBytes::from(idx.to_string())),
-                    ts_gen(idx),
-                ],
-                sequence: idx as SequenceNumber,
-                index_in_batch: idx as usize,
-                op_type: OpType::Put,
-            })
-            .collect()
-    }
-
-    #[test]
-    fn test_filter_row_key() {
-        assert_eq!(
-            UInt32Array::from_iter(0..100),
-            filter_keys(
-                &gen_row_keys(0..100, |ts| Value::Int64(ts as i64))
-                    .iter()
-                    .collect::<Vec<_>>(),
-                None
-            )
-        );
-
-        assert_eq!(
-            UInt32Array::from_iter(10..20),
-            filter_keys(
-                &gen_row_keys(0..100, |ts| Value::Int64(ts as i64))
-                    .iter()
-                    .collect::<Vec<_>>(),
-                Some(
-                    &TimestampRange::new(
-                        Timestamp::new_millisecond(10),
-                        Timestamp::new_millisecond(20)
-                    )
-                    .unwrap()
-                )
-            )
-        );
-
-        assert_eq!(
-            UInt32Array::from_iter(0..1),
-            filter_keys(
-                &gen_row_keys(1..2, |ts| {
-                    Value::Timestamp(Timestamp::new_second(ts as i64))
-                })
-                .iter()
-                .collect::<Vec<_>>(),
-                Some(
-                    &TimestampRange::new(Timestamp::new_second(0), Timestamp::new_second(20))
-                        .unwrap()
-                )
-            )
-        );
-    }
 }

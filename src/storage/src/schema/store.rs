@@ -163,11 +163,6 @@ impl StoreSchema {
     }
 
     #[inline]
-    pub(crate) fn timestamp_index(&self) -> usize {
-        self.row_key_end - 1
-    }
-
-    #[inline]
     pub(crate) fn row_key_indices(&self) -> impl Iterator<Item = usize> {
         0..self.row_key_end
     }
