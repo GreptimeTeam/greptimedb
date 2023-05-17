@@ -121,7 +121,7 @@ impl LevelMetas {
         merged
     }
 
-    pub fn mark_deleted_all_files(&self) -> Vec<String> {
+    pub fn mark_all_files_deleted(&self) -> Vec<String> {
         self.levels().iter().fold(vec![], |mut files, level| {
             files.extend(level.files().map(|f| {
                 f.mark_deleted();

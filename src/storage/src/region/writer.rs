@@ -320,8 +320,8 @@ impl RegionWriter {
         drop_ctx.wal.obsolete(committed_sequence).await?;
         drop_ctx.wal.delete_namespace().await?;
 
-        // Mark all SSTs delete
-        let files = current_version.ssts().mark_deleted_all_files();
+        // Mark all SSTs deleted
+        let files = current_version.ssts().mark_all_files_deleted();
         logging::debug!("Try to remove all SSTs {:?}", files);
 
         Ok(())

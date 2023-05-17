@@ -690,8 +690,9 @@ impl<S: LogStore> RegionInner<S> {
             compaction_scheduler: &self.compaction_scheduler,
             sst_layer: &self.sst_layer,
         };
-        self.writer.on_drop(drop_ctx).await?;
-        self.manifest.stop().await
+
+        self.manifest.stop().await?;
+        self.writer.on_drop(drop_ctx).await
     }
 
     async fn flush(&self, ctx: &FlushContext) -> Result<()> {

@@ -247,7 +247,7 @@ pub enum Error {
     ))]
     DeleteWalNamespace {
         region_id: RegionId,
-        #[snafu(backtrace)]
+        location: Location,
         source: BoxedError,
     },
 
