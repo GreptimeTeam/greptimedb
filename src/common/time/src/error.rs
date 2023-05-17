@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::num::TryFromIntError;
+use std::num::{ParseIntError, TryFromIntError};
 
 use chrono::ParseError;
 use common_error::ext::ErrorExt;
@@ -40,14 +40,25 @@ pub enum Error {
 
     #[snafu(display("Timestamp arithmetic overflow, msg: {}", msg))]
     ArithmeticOverflow { msg: String, location: Location },
+
+    #[snafu(display("Invalid time zone offset: {hours}:{minutes}"))]
+    InvalidTimeZoneOffset { hours: i32, minutes: u32 },
+
+    #[snafu(display("Invalid offset string {raw}: {source}"))]
+    ParseOffsetStr { raw: String, source: ParseIntError },
+
+    #[snafu(display("Invalid time zone string {raw}"))]
+    ParseTimeZoneName { raw: String },
 }
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::ParseDateStr { .. } | Error::ParseTimestamp { .. } => {
-                StatusCode::InvalidArguments
-            }
+            Error::ParseDateStr { .. }
+            | Error::ParseTimestamp { .. }
+            | Error::InvalidTimeZoneOffset { .. }
+            | Error::ParseOffsetStr { .. }
+            | Error::ParseTimeZoneName { .. } => StatusCode::InvalidArguments,
             Error::TimestampOverflow { .. } => StatusCode::Internal,
             Error::InvalidDateStr { .. } | Error::ArithmeticOverflow { .. } => {
                 StatusCode::InvalidArguments
@@ -64,7 +75,10 @@ impl ErrorExt for Error {
             Error::ParseTimestamp { location, .. }
             | Error::TimestampOverflow { location, .. }
             | Error::ArithmeticOverflow { location, .. } => Some(*location),
-            Error::ParseDateStr { .. } => None,
+            Error::ParseDateStr { .. }
+            | Error::InvalidTimeZoneOffset { .. }
+            | Error::ParseOffsetStr { .. }
+            | Error::ParseTimeZoneName { .. } => None,
             Error::InvalidDateStr { location, .. } => Some(*location),
         }
     }

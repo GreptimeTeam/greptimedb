@@ -1874,6 +1874,7 @@ name = "common-time"
 version = "0.2.0"
 dependencies = [
  "chrono",
+ "chrono-tz 0.8.2",
  "common-error",
  "rand",
  "serde",
