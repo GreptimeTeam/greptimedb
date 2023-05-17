@@ -281,6 +281,9 @@ pub enum Error {
         #[snafu(backtrace)]
         source: query::error::Error,
     },
+
+    #[snafu(display("{}", reason))]
+    UnexpectedResult { reason: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -348,6 +351,8 @@ impl ErrorExt for Error {
             InvalidFlushArgument { .. } => StatusCode::InvalidArguments,
 
             ParsePromQL { source, .. } => source.status_code(),
+
+            UnexpectedResult { .. } => StatusCode::Unexpected,
         }
     }
 
