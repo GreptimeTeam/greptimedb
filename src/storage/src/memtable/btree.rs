@@ -218,8 +218,7 @@ impl BTreeIterator {
         let (keys, sequences, op_types, values) = if self.ctx.for_flush {
             collect_iter(iter, self.ctx.batch_size)
         } else {
-            let iter =
-                MapIterWrapper::new(iter, self.ctx.visible_sequence, self.ctx.time_range.clone());
+            let iter = MapIterWrapper::new(iter, self.ctx.visible_sequence, self.ctx.time_range);
             collect_iter(iter, self.ctx.batch_size)
         };
 

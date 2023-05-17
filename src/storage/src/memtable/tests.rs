@@ -531,7 +531,7 @@ fn test_filter_memtable() {
             time_range: Some(
                 TimestampRange::new(
                     Timestamp::new_millisecond(0),
-                    Timestamp::new_millisecond(1002),
+                    Timestamp::new_millisecond(1001),
                 )
                 .unwrap(),
             ),
@@ -542,7 +542,7 @@ fn test_filter_memtable() {
         let batch = iter.next().unwrap().unwrap();
         assert_eq!(5, batch.columns.len());
         assert_eq!(
-            Arc::new(TimestampMillisecondVector::from_slice([1000, 1001])) as Arc<_>,
+            Arc::new(TimestampMillisecondVector::from_slice([1000])) as Arc<_>,
             batch.columns[0]
         );
     });
