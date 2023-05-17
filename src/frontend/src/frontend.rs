@@ -60,6 +60,12 @@ impl Default for FrontendOptions {
     }
 }
 
+impl FrontendOptions {
+    pub fn env_list_keys() -> Option<&'static [&'static str]> {
+        Some(&["meta_client_options.metasrv_addrs"])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

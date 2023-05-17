@@ -102,8 +102,11 @@ struct StartCommand {
 
 impl StartCommand {
     fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
-        let mut opts: MetaSrvOptions =
-            Options::load_layered_options(self.config_file.as_deref(), self.env_prefix.as_ref())?;
+        let mut opts: MetaSrvOptions = Options::load_layered_options(
+            self.config_file.as_deref(),
+            self.env_prefix.as_ref(),
+            None,
+        )?;
 
         if let Some(dir) = top_level_opts.log_dir {
             opts.logging.dir = dir;
