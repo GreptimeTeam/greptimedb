@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Datanode configurations
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,6 +36,17 @@ use crate::instance::{Instance, InstanceRef};
 use crate::server::Services;
 
 pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize(1024);
+
+const DEFAULT_DATA_HOME: &str = "/tmp/greptimedb";
+
+#[inline]
+fn default_wal_dir() -> String {
+    format!("{DEFAULT_DATA_HOME}/wal")
+}
+#[inline]
+fn default_data_dir() -> String {
+    format!("{DEFAULT_DATA_HOME}/data")
+}
 
 /// Object storage config
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,7 +135,7 @@ impl Default for OssConfig {
 impl Default for ObjectStoreConfig {
     fn default() -> Self {
         ObjectStoreConfig::File(FileConfig {
-            data_dir: "/tmp/greptimedb/data/".to_string(),
+            data_dir: default_data_dir(),
         })
     }
 }
@@ -148,7 +161,7 @@ pub struct WalConfig {
 impl Default for WalConfig {
     fn default() -> Self {
         Self {
-            dir: "/tmp/greptimedb/wal".to_string(),
+            dir: default_wal_dir(),
             file_size: ReadableSize::gb(1),        // log file size 1G
             purge_threshold: ReadableSize::gb(50), // purge threshold 50G
             purge_interval: Duration::from_secs(600),
@@ -291,6 +304,7 @@ impl Default for ProcedureConfig {
 #[serde(default)]
 pub struct DatanodeOptions {
     pub mode: Mode,
+    pub data_home: String,
     pub enable_memory_catalog: bool,
     pub node_id: Option<u64>,
     pub rpc_addr: String,
@@ -310,6 +324,7 @@ impl Default for DatanodeOptions {
     fn default() -> Self {
         Self {
             mode: Mode::Standalone,
+            data_home: DEFAULT_DATA_HOME.to_string(),
             enable_memory_catalog: false,
             node_id: None,
             rpc_addr: "127.0.0.1:3001".to_string(),
