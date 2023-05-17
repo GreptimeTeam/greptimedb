@@ -630,7 +630,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             let table_id = table.table_info().ident.table_id;
 
             table
-                .close_regions(&regions)
+                .remove_regions(&regions)
                 .await
                 .map_err(BoxedError::new)
                 .context(table_error::TableOperationSnafu)?;
@@ -727,7 +727,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
         let all_regions = table.region_ids().await;
         let regions = regions.unwrap_or(&all_regions);
-        table.close_regions(regions).await?;
+        table.remove_regions(regions).await?;
         let ctx = StorageEngineContext::default();
 
         // Releases regions in storage engine

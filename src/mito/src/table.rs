@@ -509,21 +509,9 @@ impl<R: Region> MitoTable<R> {
         Ok(table_info)
     }
 
-    /// Closes regions
+    /// Remove regions
     /// Notes: Please release regions in StorageEngine.
-    pub async fn close_regions(&self, region_numbers: &[RegionNumber]) -> TableResult<()> {
-        let regions = self.regions.load_full();
-
-        let regions = region_numbers
-            .iter()
-            .flat_map(|r| regions.get(r))
-            .collect::<Vec<_>>();
-
-        futures::future::try_join_all(regions.iter().map(|region| region.close()))
-            .await
-            .map_err(BoxedError::new)
-            .context(table_error::TableOperationSnafu)?;
-
+    pub async fn remove_regions(&self, region_numbers: &[RegionNumber]) -> TableResult<()> {
         self.regions.rcu(|regions| {
             let mut regions = HashMap::clone(regions);
             for region in region_numbers {
