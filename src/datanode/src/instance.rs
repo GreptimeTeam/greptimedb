@@ -193,7 +193,7 @@ impl Instance {
             }
         };
 
-        let factory = QueryEngineFactory::new(catalog_manager.clone());
+        let factory = QueryEngineFactory::new(catalog_manager.clone(), false);
         let query_engine = factory.query_engine();
 
         let heartbeat_task = match opts.mode {

@@ -25,7 +25,7 @@ use crate::dist_plan::commutativity::{
 use crate::dist_plan::merge_scan::MergeScanLogicalPlan;
 use crate::dist_plan::utils;
 
-pub struct DistPlannerAnalyzer {}
+pub struct DistPlannerAnalyzer;
 
 impl AnalyzerRule for DistPlannerAnalyzer {
     fn name(&self) -> &str {

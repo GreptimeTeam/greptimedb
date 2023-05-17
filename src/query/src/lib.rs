@@ -15,7 +15,7 @@
 #![feature(let_chains)]
 
 pub mod datafusion;
-mod dist_plan;
+pub mod dist_plan;
 pub mod error;
 pub mod executor;
 pub mod logical_optimizer;

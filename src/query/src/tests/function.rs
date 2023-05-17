@@ -66,7 +66,7 @@ pub fn create_query_engine() -> Arc<dyn QueryEngine> {
         .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string(), catalog_provider)
         .unwrap();
 
-    QueryEngineFactory::new(catalog_list).query_engine()
+    QueryEngineFactory::new(catalog_list, false).query_engine()
 }
 
 pub async fn get_numbers_from_table<'s, T>(

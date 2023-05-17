@@ -65,12 +65,20 @@ pub struct QueryEngineFactory {
 }
 
 impl QueryEngineFactory {
-    pub fn new(catalog_manager: CatalogManagerRef) -> Self {
-        Self::new_with_plugins(catalog_manager, Default::default())
+    pub fn new(catalog_manager: CatalogManagerRef, with_dist_planner: bool) -> Self {
+        Self::new_with_plugins(catalog_manager, with_dist_planner, Default::default())
     }
 
-    pub fn new_with_plugins(catalog_manager: CatalogManagerRef, plugins: Arc<Plugins>) -> Self {
-        let state = Arc::new(QueryEngineState::new(catalog_manager, plugins));
+    pub fn new_with_plugins(
+        catalog_manager: CatalogManagerRef,
+        with_dist_planner: bool,
+        plugins: Arc<Plugins>,
+    ) -> Self {
+        let state = Arc::new(QueryEngineState::new(
+            catalog_manager,
+            with_dist_planner,
+            plugins,
+        ));
         let query_engine = Arc::new(DatafusionQueryEngine::new(state));
         register_functions(&query_engine);
         Self { query_engine }
@@ -100,7 +108,7 @@ mod tests {
     #[test]
     fn test_query_engine_factory() {
         let catalog_list = catalog::local::new_memory_catalog_list().unwrap();
-        let factory = QueryEngineFactory::new(catalog_list);
+        let factory = QueryEngineFactory::new(catalog_list, false);
 
         let engine = factory.query_engine();
 

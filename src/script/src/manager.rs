@@ -170,7 +170,7 @@ mod tests {
                 .unwrap(),
         );
 
-        let factory = QueryEngineFactory::new(catalog_manager.clone());
+        let factory = QueryEngineFactory::new(catalog_manager.clone(), false);
         let query_engine = factory.query_engine();
         let mgr = ScriptManager::new(catalog_manager.clone(), query_engine)
             .await

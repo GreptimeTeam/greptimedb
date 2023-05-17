@@ -144,7 +144,7 @@ impl Instance {
         let catalog_manager = Arc::new(catalog_manager);
 
         let query_engine =
-            QueryEngineFactory::new_with_plugins(catalog_manager.clone(), plugins.clone())
+            QueryEngineFactory::new_with_plugins(catalog_manager.clone(), true, plugins.clone())
                 .query_engine();
 
         let script_executor =
@@ -236,7 +236,7 @@ impl Instance {
         catalog_manager: CatalogManagerRef,
         dist_instance: Arc<DistInstance>,
     ) -> Self {
-        let query_engine = QueryEngineFactory::new(catalog_manager.clone()).query_engine();
+        let query_engine = QueryEngineFactory::new(catalog_manager.clone(), false).query_engine();
         let script_executor = Arc::new(
             ScriptExecutor::new(catalog_manager.clone(), query_engine.clone())
                 .await
