@@ -24,6 +24,7 @@ use std::sync::Arc;
 
 use common_time::range::TimestampRange;
 use datatypes::vectors::VectorRef;
+use metrics::{decrement_gauge, increment_gauge};
 use store_api::storage::{consts, OpType, SequenceNumber};
 
 use crate::error::Result;
@@ -31,6 +32,7 @@ use crate::flush::FlushStrategyRef;
 use crate::memtable::btree::BTreeMemtable;
 pub use crate::memtable::inserter::Inserter;
 pub use crate::memtable::version::MemtableVersion;
+use crate::metrics::WRITE_BUFFER_BYTES;
 use crate::read::Batch;
 use crate::schema::{ProjectedSchemaRef, RegionSchemaRef};
 
@@ -227,6 +229,7 @@ impl AllocTracker {
     /// Tracks `bytes` memory is allocated.
     pub(crate) fn on_allocate(&self, bytes: usize) {
         self.bytes_allocated.fetch_add(bytes, Ordering::Relaxed);
+        increment_gauge!(WRITE_BUFFER_BYTES, bytes as f64);
         if let Some(flush_strategy) = &self.flush_strategy {
             flush_strategy.reserve_mem(bytes);
         }
@@ -260,9 +263,12 @@ impl Drop for AllocTracker {
             self.done_allocating();
         }
 
+        let bytes_allocated = self.bytes_allocated.load(Ordering::Relaxed);
+        decrement_gauge!(WRITE_BUFFER_BYTES, bytes_allocated as f64);
+
         // Memory tracked by this tracker is freed.
         if let Some(flush_strategy) = &self.flush_strategy {
-            flush_strategy.free_mem(self.bytes_allocated.load(Ordering::Relaxed));
+            flush_strategy.free_mem(bytes_allocated);
         }
     }
 }
