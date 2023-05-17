@@ -564,7 +564,6 @@ mod tests {
             .unwrap()
             .filter_map(|entry| entry.ok())
             .filter(|entry| entry.path().extension() == Some(OsStr::new("parquet")))
-            .map(|entry| entry.file_name())
             .count()
     }
 
