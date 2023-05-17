@@ -60,11 +60,10 @@ impl BTreeMemtable {
     /// This function is guarded by `BTreeMemtable::map` so that store-after-load is safe.
     fn update_stats(&self, min: Option<Value>, max: Option<Value>) {
         if let Some(min) = min {
-            let min_val = match min {
-                Value::Int64(v) => v,
-                Value::Timestamp(t) => t.value(),
-                _ => unreachable!(),
-            };
+            let min_val = min
+                .as_timestamp()
+                .expect("Min timestamp must be a valid timestamp value")
+                .value();
             let cur_min = self.stats.min_timestamp.load(AtomicOrdering::Relaxed);
             if min_val < cur_min {
                 self.stats
@@ -75,11 +74,10 @@ impl BTreeMemtable {
 
         if let Some(max) = max {
             let cur_max = self.stats.max_timestamp.load(AtomicOrdering::Relaxed);
-            let max_val = match max {
-                Value::Int64(v) => v,
-                Value::Timestamp(t) => t.value(),
-                _ => unreachable!(),
-            };
+            let max_val = max
+                .as_timestamp()
+                .expect("Max timestamp must be a valid timestamp value")
+                .value();
             if max_val > cur_max {
                 self.stats
                     .max_timestamp

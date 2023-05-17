@@ -250,6 +250,15 @@ impl Value {
 
         Ok(scalar_value)
     }
+
+    /// Casts Value to [Timestamp]. Returns None if it's not a valid timestamp value.
+    pub fn as_timestamp(&self) -> Option<Timestamp> {
+        match self {
+            Value::Int64(v) => Some(Timestamp::new_millisecond(*v)),
+            Value::Timestamp(t) => Some(*t),
+            _ => None,
+        }
+    }
 }
 
 fn to_null_value(output_type: &ConcreteDataType) -> ScalarValue {
