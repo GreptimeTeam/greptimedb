@@ -67,8 +67,8 @@ impl DatanodeInstance {
             .logical_plan(substrait_plan.to_vec())
             .await
             .context(error::RequestDatanodeSnafu)?;
-        let Output::RecordBatches(recordbatches) = result else { unreachable!() };
-        Ok(recordbatches)
+        let Output::RecordBatches(record_batches) = result else { unreachable!() };
+        Ok(record_batches)
     }
 
     fn build_logical_plan(&self, table_scan: &TableScanPlan) -> Result<LogicalPlan> {

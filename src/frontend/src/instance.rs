@@ -144,7 +144,7 @@ impl Instance {
         let catalog_manager = Arc::new(catalog_manager);
 
         let query_engine =
-            QueryEngineFactory::new_with_plugins(catalog_manager.clone(), true, plugins.clone())
+            QueryEngineFactory::new_with_plugins(catalog_manager.clone(), false, plugins.clone())
                 .query_engine();
 
         let script_executor =
