@@ -32,8 +32,8 @@ pub trait Selector: Send + Sync {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SelectorType {
-    LoadBased,
     #[default]
+    LoadBased,
     LeaseBased,
 }
 
