@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::body::BoxBody;
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::{routing, Form, Json, Router};
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_error::prelude::ErrorExt;
@@ -37,12 +37,12 @@ use promql_parser::parser::{
     AggregateExpr, BinaryExpr, Call, Expr as PromqlExpr, MatrixSelector, ParenExpr, SubqueryExpr,
     UnaryExpr, ValueType, VectorSelector,
 };
-use query::parser::{PromQuery, DEFAULT_LOOKBACK_STRING};
+use query::parser::PromQuery;
 use schemars::JsonSchema;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use session::context::{QueryContext, QueryContextRef};
-use snafu::{ensure, Location, OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::oneshot::Sender;
 use tokio::sync::{oneshot, Mutex};
 use tower::ServiceBuilder;
@@ -53,13 +53,14 @@ use tower_http::trace::TraceLayer;
 use crate::auth::UserProviderRef;
 use crate::error::{
     AlreadyStartedSnafu, CollectRecordbatchSnafu, Error, InternalSnafu, NotSupportedSnafu, Result,
-    StartHttpSnafu,
+    StartHttpSnafu, UnexpectedResultSnafu,
 };
 use crate::http::authorize::HttpAuth;
 use crate::prometheus::{FIELD_COLUMN_NAME, TIMESTAMP_COLUMN_NAME};
 use crate::server::Server;
 
 pub const PROM_API_VERSION: &str = "v1";
+const DEFAULT_STEP: &str = "1s";
 
 pub type PromHandlerRef = Arc<dyn PromHandler + Send + Sync>;
 
@@ -96,6 +97,10 @@ impl PromServer {
             .route("/query", routing::post(instant_query).get(instant_query))
             .route("/query_range", routing::post(range_query).get(range_query))
             .route("/labels", routing::post(labels_query).get(labels_query))
+            .route(
+                "/label/:label_name/values",
+                routing::get(label_values_query),
+            )
             .with_state(self.query_handler.clone());
 
         Router::new()
@@ -183,6 +188,7 @@ pub struct PromData {
 pub enum PromResponse {
     PromData(PromData),
     Labels(Vec<String>),
+    LabelValues(Vec<String>),
 }
 
 impl Default for PromResponse {
@@ -528,7 +534,7 @@ pub async fn labels_query(
     Query(params): Query<LabelsQuery>,
     Form(form_params): Form<LabelsQuery>,
 ) -> Json<PromJsonResponse> {
-    let mut queries: Vec<String> = params.matches.0;
+    let mut queries = params.matches.0;
     if queries.is_empty() {
         queries = form_params.matches.0;
     }
@@ -549,7 +555,7 @@ pub async fn labels_query(
     let (catalog, schema) = super::parse_catalog_and_schema_from_client_database_name(db);
     let query_ctx = Arc::new(QueryContext::with(catalog, schema));
 
-    let mut labels: HashSet<String> = HashSet::new();
+    let mut labels = HashSet::new();
     labels.insert(METRIC_NAME.to_string());
 
     for query in queries {
@@ -558,7 +564,7 @@ pub async fn labels_query(
             start: start.clone(),
             end: end.clone(),
             // TODO: find a better value for step
-            step: DEFAULT_LOOKBACK_STRING.to_string(),
+            step: DEFAULT_STEP.to_string(),
         };
 
         let result = handler.do_query(&prom_query, query_ctx.clone()).await;
@@ -600,10 +606,10 @@ async fn retrieve_labels_name_from_query_result(
             record_batches_to_labels_name(batches, labels)?;
             Ok(())
         }
-        Output::AffectedRows(_) => Err(Error::UnexpectedResult {
+        Output::AffectedRows(_) => UnexpectedResultSnafu {
             reason: "expected data result, but got affected rows".to_string(),
-            location: Location::default(),
-        }),
+        }
+        .fail(),
     }
 }
 
@@ -698,4 +704,116 @@ fn promql_expr_to_metric_name(expr: &PromqlExpr) -> Option<String> {
             args.args.iter().find_map(|e| promql_expr_to_metric_name(e))
         }
     }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct LabelValueQuery {
+    start: Option<String>,
+    end: Option<String>,
+    #[serde(flatten)]
+    matches: Matches,
+    db: Option<String>,
+}
+
+#[axum_macros::debug_handler]
+pub async fn label_values_query(
+    State(handler): State<PromHandlerRef>,
+    Path(label_name): Path<String>,
+    Query(params): Query<LabelValueQuery>,
+) -> Json<PromJsonResponse> {
+    let queries = params.matches.0;
+    if queries.is_empty() {
+        return PromJsonResponse::error("Invalid argument", "match[] parameter is required");
+    }
+
+    let start = params.start.unwrap_or_else(yesterday_rfc3339);
+    let end = params.end.unwrap_or_else(current_time_rfc3339);
+    let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
+    let (catalog, schema) = super::parse_catalog_and_schema_from_client_database_name(db);
+    let query_ctx = Arc::new(QueryContext::with(catalog, schema));
+
+    let mut label_values = HashSet::new();
+
+    for query in queries {
+        let prom_query = PromQuery {
+            query,
+            start: start.clone(),
+            end: end.clone(),
+            // TODO(ccl): find a better value for step
+            step: DEFAULT_STEP.to_string(),
+        };
+        let result = handler.do_query(&prom_query, query_ctx.clone()).await;
+        let result = retrieve_label_values(result, &label_name, &mut label_values).await;
+        if let Err(err) = result {
+            // Prometheus won't report error if querying nonexist label and metric
+            if err.status_code() != StatusCode::TableNotFound
+                && err.status_code() != StatusCode::TableColumnNotFound
+            {
+                return PromJsonResponse::error(err.status_code().to_string(), err.to_string());
+            }
+        }
+    }
+
+    let mut label_values: Vec<_> = label_values.into_iter().collect();
+    label_values.sort();
+    PromJsonResponse::success(PromResponse::LabelValues(label_values))
+}
+
+async fn retrieve_label_values(
+    result: Result<Output>,
+    label_name: &str,
+    labels_values: &mut HashSet<String>,
+) -> Result<()> {
+    match result? {
+        Output::RecordBatches(batches) => {
+            retrieve_label_values_from_record_batch(batches, label_name, labels_values).await
+        }
+        Output::Stream(stream) => {
+            let batches = RecordBatches::try_collect(stream)
+                .await
+                .context(CollectRecordbatchSnafu)?;
+            retrieve_label_values_from_record_batch(batches, label_name, labels_values).await
+        }
+        Output::AffectedRows(_) => UnexpectedResultSnafu {
+            reason: "expected data result, but got affected rows".to_string(),
+        }
+        .fail(),
+    }
+}
+
+async fn retrieve_label_values_from_record_batch(
+    batches: RecordBatches,
+    label_name: &str,
+    labels_values: &mut HashSet<String>,
+) -> Result<()> {
+    let Some(label_col_idx) = batches.schema().column_index_by_name(label_name) else {
+        return Ok(());
+    };
+
+    // check whether label_name belongs to tag column
+    match batches
+        .schema()
+        .column_schema_by_name(label_name)
+        .unwrap()
+        .data_type
+    {
+        ConcreteDataType::String(_) => {}
+        _ => return Ok(()),
+    }
+
+    for batch in batches.iter() {
+        let label_column = batch
+            .column(label_col_idx)
+            .as_any()
+            .downcast_ref::<StringVector>()
+            .unwrap();
+
+        for row_index in 0..batch.num_rows() {
+            if let Some(label_value) = label_column.get_data(row_index) {
+                labels_values.insert(label_value.to_string());
+            }
+        }
+    }
+
+    Ok(())
 }
