@@ -52,7 +52,7 @@ fn kvs_for_test_with_index(
     for key in keys {
         key_builders.push(Some(*key));
     }
-    let row_keys = vec![Arc::new(key_builders.finish()) as _];
+    let ts_col = Arc::new(key_builders.finish()) as _;
 
     let mut value_builders = (
         UInt64VectorBuilder::with_capacity(values.len()),
@@ -71,8 +71,9 @@ fn kvs_for_test_with_index(
         sequence,
         op_type,
         start_index_in_batch,
-        keys: row_keys,
+        keys: vec![],
         values: row_values,
+        timestamp: Some(ts_col),
     };
 
     assert_eq!(keys.len(), kvs.len());
@@ -198,7 +199,7 @@ fn write_iter_memtable_case(ctx: &TestContext) {
     assert!(iter.next().is_none());
     // Poll the empty iterator again.
     assert!(iter.next().is_none());
-    assert_eq!(0, ctx.memtable.bytes_allocated());
+    assert_eq!(0, ctx.memtable.stats().bytes_allocated());
 
     // Init test data.
     write_kvs(
@@ -224,7 +225,7 @@ fn write_iter_memtable_case(ctx: &TestContext) {
     );
 
     // 9 key value pairs (6 + 3).
-    assert_eq!(576, ctx.memtable.bytes_allocated());
+    assert_eq!(576, ctx.memtable.stats().bytes_allocated());
 
     let batch_sizes = [1, 4, 8, consts::READ_BATCH_SIZE];
     for batch_size in batch_sizes {
