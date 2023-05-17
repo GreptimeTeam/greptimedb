@@ -241,6 +241,18 @@ impl HeartbeatMailbox {
             }
         }
     }
+
+    #[inline]
+    async fn next_message_id(&self) -> Result<u64> {
+        // In this implementation, we pre-occupy the message_id of 0,
+        // and we use `message_id = 0` to mark a Message as a one-way call.
+        loop {
+            let next = self.sequence.next().await?;
+            if next > 0 {
+                return Ok(next);
+            }
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -251,7 +263,7 @@ impl Mailbox for HeartbeatMailbox {
         mut msg: MailboxMessage,
         timeout: Duration,
     ) -> Result<MailboxReceiver> {
-        let message_id = self.sequence.next().await?;
+        let message_id = self.next_message_id().await?;
 
         let pusher_id = match ch {
             Channel::Datanode(id) => format!("{}-{}", Role::Datanode as i32, id),
@@ -288,15 +300,7 @@ impl Mailbox for HeartbeatMailbox {
             tx.send(maybe_msg)
                 .map_err(|_| error::MailboxClosedSnafu { id }.build())?;
         } else if let Ok(finally_msg) = maybe_msg {
-            let MailboxMessage {
-                id,
-                subject,
-                from,
-                to,
-                timestamp_millis,
-                ..
-            } = finally_msg;
-            warn!("The response arrived too late, id={id}, subject={subject}, from={from}, to={to}, timestamp={timestamp_millis}");
+            warn!("The response arrived too late: {finally_msg:?}");
         }
 
         Ok(())

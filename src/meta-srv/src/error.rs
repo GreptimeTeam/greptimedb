@@ -154,6 +154,14 @@ pub enum Error {
     #[snafu(display("Failed to get sequence: {}", err_msg))]
     NextSequence { err_msg: String, location: Location },
 
+    #[snafu(display("Sequence out of range: {}, start={}, step={}", name, start, step))]
+    SequenceOutOfRange {
+        name: String,
+        start: u64,
+        step: u64,
+        location: Location,
+    },
+
     #[snafu(display("MetaSrv has no leader at this moment"))]
     NoLeader { location: Location },
 
@@ -379,6 +387,7 @@ impl ErrorExt for Error {
             | Error::UnexceptedSequenceValue { .. }
             | Error::TableRouteNotFound { .. }
             | Error::NextSequence { .. }
+            | Error::SequenceOutOfRange { .. }
             | Error::MoveValue { .. }
             | Error::InvalidKvsLength { .. }
             | Error::InvalidTxnResult { .. }
