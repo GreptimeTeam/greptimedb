@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use metrics::histogram;
 use metrics_exporter_prometheus::PrometheusBuilder;
 pub use metrics_exporter_prometheus::PrometheusHandle;
+use metrics_util::layers::{Layer, PrefixLayer};
 use once_cell::sync::Lazy;
 
 static PROMETHEUS_HANDLE: Lazy<Arc<RwLock<Option<PrometheusHandle>>>> =
@@ -32,9 +33,7 @@ pub fn init_default_metrics_recorder() {
 
 /// Init prometheus recorder.
 fn init_prometheus_recorder() {
-    let recorder = PrometheusBuilder::new()
-        .add_global_prefix("greptime".to_string())
-        .build_recorder();
+    let recorder = PrometheusBuilder::new().build_recorder();
     let mut h = PROMETHEUS_HANDLE.as_ref().write().unwrap();
     *h = Some(recorder.handle());
     // TODO(LFC): separate metrics for testing and metrics for production
@@ -47,7 +46,9 @@ fn init_prometheus_recorder() {
     unsafe {
         metrics::clear_recorder();
     }
-    match metrics::set_boxed_recorder(Box::new(recorder)) {
+    let layer = PrefixLayer::new("greptime");
+    let layered = layer.layer(recorder);
+    match metrics::set_boxed_recorder(Box::new(layered)) {
         Ok(_) => (),
         Err(err) => crate::warn!("Install prometheus recorder failed, cause: {}", err),
     };
