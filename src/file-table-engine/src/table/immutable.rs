@@ -105,7 +105,7 @@ impl Table for ImmutableFileTable {
         Ok(())
     }
 
-    async fn close(&self) -> TableResult<()> {
+    async fn close(&self, _region_number: &[RegionNumber]) -> TableResult<()> {
         Ok(())
     }
 }

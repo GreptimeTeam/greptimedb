@@ -41,7 +41,8 @@ use table::engine::{
 };
 use table::metadata::{TableId, TableInfo, TableVersion};
 use table::requests::{
-    AlterKind, AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest,
+    AlterKind, AlterTableRequest, CloseTableRequest, CreateTableRequest, DropTableRequest,
+    OpenTableRequest,
 };
 use table::{error as table_error, Result as TableResult, Table, TableRef};
 
@@ -191,6 +192,14 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
         request: DropTableRequest,
     ) -> TableResult<bool> {
         self.inner.drop_table(request).await
+    }
+
+    async fn close_table(
+        &self,
+        _ctx: &EngineContext,
+        request: CloseTableRequest,
+    ) -> TableResult<bool> {
+        self.inner.close_table(request).await
     }
 
     async fn close(&self) -> TableResult<()> {
@@ -386,7 +395,7 @@ fn validate_create_table_request(request: &CreateTableRequest) -> Result<()> {
 
 fn all_regions_open(table: TableRef, regions: &[RegionNumber]) -> TableResult<bool> {
     for r in regions {
-        let region_exist = table.contain_regions(*r)?;
+        let region_exist = table.contains_region(*r)?;
         if !region_exist {
             return Ok(false);
         }
@@ -527,7 +536,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
         // TODO(weny): Returns an error earlier if the target region does not exist in the meta.
         for region_number in region_numbers {
-            if table.contain_regions(*region_number)? {
+            if table.contains_region(*region_number)? {
                 continue;
             }
 
@@ -610,14 +619,27 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
         let _lock = self.table_mutex.lock(table_ref.to_string()).await;
         let removed_table = self.tables.remove(&table_ref.to_string());
-
         // Close the table to close all regions. Closing a region is idempotent.
         if let Some((_, table)) = &removed_table {
+            let regions = table.region_ids().await;
+            let table_id = table.table_info().ident.table_id;
+
             table
-                .close()
+                .close_regions(&regions)
                 .await
                 .map_err(BoxedError::new)
                 .context(table_error::TableOperationSnafu)?;
+
+            let ctx = StorageEngineContext::default();
+
+            // Releases regions in storage engine
+            for region_number in regions {
+                self.storage_engine
+                    .close_region(&ctx, &region_name(table_id, region_number))
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(table_error::TableOperationSnafu)?;
+            }
 
             Ok(true)
         } else {
@@ -659,7 +681,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         futures::future::try_join_all(
             self.tables
                 .iter()
-                .map(|item| close_table(self.table_mutex.clone(), item.value().clone())),
+                .map(|item| self.close_table_inner(item.value().clone(), None)),
         )
         .await
         .map_err(BoxedError::new)
@@ -673,17 +695,54 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
         Ok(())
     }
-}
 
-async fn close_table(lock: Arc<KeyLock<String>>, table: TableRef) -> TableResult<()> {
-    let info = table.table_info();
-    let table_ref = TableReference {
-        catalog: &info.catalog_name,
-        schema: &info.schema_name,
-        table: &info.name,
-    };
-    let _lock = lock.lock(table_ref.to_string()).await;
-    table.close().await
+    async fn close_table(&self, request: CloseTableRequest) -> TableResult<bool> {
+        let table_ref = request.table_ref();
+        if let Some(table) = self.get_mito_table(&table_ref) {
+            return self
+                .close_table_inner(table, Some(&request.region_numbers))
+                .await;
+        }
+        // table doesn't exist
+        Ok(true)
+    }
+
+    async fn close_table_inner(
+        &self,
+        table: Arc<MitoTable<S::Region>>,
+        regions: Option<&[RegionNumber]>,
+    ) -> TableResult<bool> {
+        let info = table.table_info();
+        let table_ref = TableReference {
+            catalog: &info.catalog_name,
+            schema: &info.schema_name,
+            table: &info.name,
+        };
+        let table_id = info.ident.table_id;
+        let _lock = self.table_mutex.lock(table_ref.to_string()).await;
+
+        let all_regions = table.region_ids().await;
+        let regions = regions.unwrap_or(&all_regions);
+        table.close_regions(regions).await?;
+        let ctx = StorageEngineContext::default();
+
+        // Releases regions in storage engine
+        for region_number in regions {
+            self.storage_engine
+                .close_region(&ctx, &region_name(table_id, *region_number))
+                .await
+                .map_err(BoxedError::new)
+                .context(table_error::TableOperationSnafu)?;
+        }
+
+        if table.is_releasable().await {
+            self.tables.remove(&table_ref.to_string());
+            return Ok(true);
+        }
+
+        // Partial closed
+        Ok(false)
+    }
 }
 
 impl<S: StorageEngine> MitoEngineInner<S> {

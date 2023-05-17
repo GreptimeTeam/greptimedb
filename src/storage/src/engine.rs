@@ -68,8 +68,8 @@ impl<S: LogStore> StorageEngine for EngineImpl<S> {
         self.inner.open_region(name, opts).await
     }
 
-    async fn close_region(&self, _ctx: &EngineContext, region: Self::Region) -> Result<()> {
-        region.close().await
+    async fn close_region(&self, _ctx: &EngineContext, name: &str) -> Result<()> {
+        self.inner.close_region(name).await
     }
 
     async fn create_region(
@@ -348,6 +348,13 @@ impl<S: LogStore> EngineInner<S> {
             file_purger,
             config: Arc::new(config),
         })
+    }
+
+    async fn close_region(&self, name: &str) -> Result<()> {
+        let mut regions_guard = self.regions.0.write().unwrap();
+        regions_guard.remove(name);
+
+        Ok(())
     }
 
     async fn open_region(&self, name: &str, opts: &OpenOptions) -> Result<Option<RegionImpl<S>>> {
