@@ -402,8 +402,7 @@ impl EngineInner {
 
         let tables = self.tables.read().unwrap().clone();
 
-        let regions = Vec::new();
-        futures::future::try_join_all(tables.values().map(|t| t.close(&regions)))
+        futures::future::try_join_all(tables.values().map(|t| t.close(&[])))
             .await
             .map_err(BoxedError::new)
             .context(table_error::TableOperationSnafu)?;
