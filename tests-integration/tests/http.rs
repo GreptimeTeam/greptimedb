@@ -314,13 +314,22 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK);
 
     // labels
+    let res = client.get("/api/v1/labels?match[]=up").send().await;
+    assert_eq!(res.status(), StatusCode::OK);
     let res = client
-        .get("/api/v1/labels?match[]=up&start=0&end=100")
+        .post("/api/v1/labels?match[]=up")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    // labels query with multiple match[] params
+    let res = client
+        .get("/api/v1/labels?match[]=up&match[]=down")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
     let res = client
-        .post("/api/v1/labels?match[]=up&start=0&end=100")
+        .post("/api/v1/labels?match[]=up&match[]=down")
         .header("Content-Type", "application/x-www-form-urlencoded")
         .send()
         .await;
