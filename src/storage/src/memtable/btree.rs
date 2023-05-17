@@ -19,6 +19,7 @@ use std::ops::Bound;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::{Arc, RwLock};
 
+use common_time::range::TimestampRange;
 use datatypes::data_type::DataType;
 use datatypes::prelude::*;
 use datatypes::value::Value;
@@ -217,7 +218,7 @@ impl BTreeIterator {
         let (keys, sequences, op_types, values) = if self.ctx.for_flush {
             collect_iter(iter, self.ctx.batch_size)
         } else {
-            let iter = MapIterWrapper::new(iter, self.ctx.visible_sequence);
+            let iter = MapIterWrapper::new(iter, self.ctx.visible_sequence, self.ctx.time_range);
             collect_iter(iter, self.ctx.batch_size)
         };
 
@@ -289,23 +290,26 @@ struct MapIterWrapper<'a, InnerKey, RowValue> {
     iter: btree_map::Range<'a, InnerKey, RowValue>,
     prev_key: Option<InnerKey>,
     visible_sequence: SequenceNumber,
+    time_range: Option<TimestampRange>,
 }
 
 impl<'a> MapIterWrapper<'a, InnerKey, RowValue> {
     fn new(
         iter: btree_map::Range<'a, InnerKey, RowValue>,
         visible_sequence: SequenceNumber,
+        time_range: Option<TimestampRange>,
     ) -> MapIterWrapper<'a, InnerKey, RowValue> {
         MapIterWrapper {
             iter,
             prev_key: None,
             visible_sequence,
+            time_range,
         }
     }
 
     fn next_visible_entry(&mut self) -> Option<(&'a InnerKey, &'a RowValue)> {
         for (k, v) in self.iter.by_ref() {
-            if k.is_visible(self.visible_sequence) {
+            if k.is_visible(self.visible_sequence) && k.is_in_time_range(&self.time_range) {
                 return Some((k, v));
             }
         }
@@ -445,6 +449,17 @@ impl InnerKey {
     #[inline]
     fn is_visible(&self, sequence: SequenceNumber) -> bool {
         self.sequence <= sequence
+    }
+
+    #[inline]
+    fn is_in_time_range(&self, range: &Option<TimestampRange>) -> bool {
+        let Some(range) = range else { return true; };
+        range.contains(
+            &self
+                .timestamp()
+                .as_timestamp()
+                .expect("Timestamp field must be a valid timestamp value"),
+        )
     }
 
     /// Reset the `InnerKey` so that we can use it to seek next key that
