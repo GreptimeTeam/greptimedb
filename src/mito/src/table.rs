@@ -87,8 +87,8 @@ impl<R: Region> Table for MitoTable<R> {
         if request.columns_values.is_empty() {
             return Ok(0);
         }
-        let regions_guard = self.regions.load();
-        let region = regions_guard
+        let regions = self.regions.load();
+        let region = regions
             .get(&request.region_number)
             .with_context(|| RegionNotFoundSnafu {
                 table: common_catalog::format_full_table_name(
@@ -260,11 +260,11 @@ impl<R: Region> Table for MitoTable<R> {
         if request.key_column_values.is_empty() {
             return Ok(0);
         }
-        let regions_guard = self.regions.load();
+        let regions = self.regions.load();
         let mut rows_deleted = 0;
         // TODO(hl): Should be tracked by procedure.
         // TODO(hl): Parse delete request into region->keys instead of delete in each region
-        for region in regions_guard.values() {
+        for region in regions.values() {
             let mut write_request = region.write_request();
             let key_column_values = request.key_column_values.clone();
             // Safety: key_column_values isn't empty.
@@ -301,10 +301,10 @@ impl<R: Region> Table for MitoTable<R> {
                 reason: FlushReason::Manually,
             })
             .unwrap_or_default();
-        let regions_guard = self.regions.load();
+        let regions = self.regions.load();
 
         if let Some(region_number) = region_number {
-            if let Some(region) = regions_guard.get(&region_number) {
+            if let Some(region) = regions.get(&region_number) {
                 region
                     .flush(&flush_ctx)
                     .await
@@ -312,23 +312,19 @@ impl<R: Region> Table for MitoTable<R> {
                     .context(table_error::TableOperationSnafu)?;
             }
         } else {
-            futures::future::try_join_all(
-                regions_guard
-                    .values()
-                    .map(|region| region.flush(&flush_ctx)),
-            )
-            .await
-            .map_err(BoxedError::new)
-            .context(table_error::TableOperationSnafu)?;
+            futures::future::try_join_all(regions.values().map(|region| region.flush(&flush_ctx)))
+                .await
+                .map_err(BoxedError::new)
+                .context(table_error::TableOperationSnafu)?;
         }
 
         Ok(())
     }
 
     fn region_stats(&self) -> TableResult<Vec<RegionStat>> {
-        let regions_guard = self.regions.load();
+        let regions = self.regions.load();
 
-        Ok(regions_guard
+        Ok(regions
             .values()
             .map(|region| RegionStat {
                 region_id: region.id(),
@@ -338,9 +334,9 @@ impl<R: Region> Table for MitoTable<R> {
     }
 
     fn contains_region(&self, region: RegionNumber) -> TableResult<bool> {
-        let regions_guard = self.regions.load();
+        let regions = self.regions.load();
 
-        Ok(regions_guard.contains_key(&region))
+        Ok(regions.contains_key(&region))
     }
 }
 
@@ -516,11 +512,11 @@ impl<R: Region> MitoTable<R> {
     /// Closes regions
     /// Notes: Please release regions in StorageEngine.
     pub async fn close_regions(&self, region_numbers: &[RegionNumber]) -> TableResult<()> {
-        let regions_guard = self.regions.load_full();
+        let regions = self.regions.load_full();
 
         let regions = region_numbers
             .iter()
-            .flat_map(|r| regions_guard.get(r))
+            .flat_map(|r| regions.get(r))
             .collect::<Vec<_>>();
 
         futures::future::try_join_all(regions.iter().map(|region| region.close()))
@@ -541,15 +537,15 @@ impl<R: Region> MitoTable<R> {
     }
 
     pub async fn is_releasable(&self) -> bool {
-        let regions_guard = self.regions.load();
+        let regions = self.regions.load();
 
-        regions_guard.is_empty()
+        regions.is_empty()
     }
 
     #[inline]
     pub async fn region_ids(&self) -> Vec<RegionNumber> {
-        let regions_guard = self.regions.load();
-        regions_guard.iter().map(|(k, _)| *k).collect()
+        let regions = self.regions.load();
+        regions.iter().map(|(k, _)| *k).collect()
     }
 
     pub fn set_table_info(&self, table_info: TableInfo) {
@@ -573,8 +569,8 @@ impl<R: Region> MitoTable<R> {
         table_version: TableVersion,
         alter_op: &AlterOperation,
     ) -> TableResult<()> {
-        let regions_guard = self.regions.load();
-        for region in regions_guard.values() {
+        let regions = self.regions.load();
+        for region in regions.values() {
             let region_meta = region.in_memory_metadata();
             if u64::from(region_meta.version()) > table_version {
                 // Region is already altered.

@@ -291,7 +291,13 @@ impl StorageEngine for MockEngine {
         return Ok(None);
     }
 
-    async fn close_region(&self, _ctx: &EngineContext, _name: &str) -> Result<()> {
+    async fn close_region(&self, _ctx: &EngineContext, name: &str) -> Result<()> {
+        let mut regions = self.regions.lock().unwrap();
+
+        if let Some(region) = regions.opened_regions.remove(name) {
+            regions.closed_regions.insert(name.to_string(), region);
+        }
+
         Ok(())
     }
 

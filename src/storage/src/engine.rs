@@ -350,8 +350,8 @@ impl<S: LogStore> EngineInner<S> {
     }
 
     async fn close_region(&self, name: &str) -> Result<()> {
-        let mut regions_guard = self.regions.0.write().unwrap();
-        regions_guard.remove(name);
+        let mut regions = self.regions.0.write().unwrap();
+        regions.remove(name);
 
         Ok(())
     }
