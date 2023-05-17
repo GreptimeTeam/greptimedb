@@ -450,15 +450,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             table_id, table_info
         );
 
-        for target_region in &request.region_numbers {
-            if !table_info.meta.region_numbers.contains(target_region) {
-                table_error::RegionNotFoundSnafu {
-                    table: table_ref.to_string(),
-                    region: *target_region,
-                }
-                .fail()?
-            }
-        }
+        // FIXME: We cannot trust the region numbers in the manifest because other datanodes might overwrite the manifest.
 
         let mut regions = HashMap::with_capacity(table_info.meta.region_numbers.len());
 
