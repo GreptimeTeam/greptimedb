@@ -351,8 +351,13 @@ impl<S: LogStore> EngineInner<S> {
     }
 
     async fn close_region(&self, name: &str) -> Result<()> {
-        let mut regions = self.regions.0.write().unwrap();
-        regions.remove(name);
+        if let Some(RegionSlot::Ready(region)) =
+            self.regions.get_or_occupy_slot(name, RegionSlot::Opening)
+        {
+            region.close().await?;
+        }
+
+        self.regions.remove(name);
 
         Ok(())
     }
