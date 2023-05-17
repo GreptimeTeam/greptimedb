@@ -32,7 +32,7 @@ use datafusion_expr::LogicalPlan as DfLogicalPlan;
 use datafusion_optimizer::analyzer::Analyzer;
 use promql::extension_plan::PromExtensionPlanner;
 
-use crate::dist_plan::DistPlannerAnalyzer;
+use crate::dist_plan::{DistExtensionPlanner, DistPlannerAnalyzer};
 use crate::optimizer::TypeConversionRule;
 use crate::query_engine::options::QueryOptions;
 
@@ -147,9 +147,10 @@ impl QueryPlanner for DfQueryPlanner {
 impl DfQueryPlanner {
     fn new() -> Self {
         Self {
-            physical_planner: DefaultPhysicalPlanner::with_extension_planners(vec![Arc::new(
-                PromExtensionPlanner {},
-            )]),
+            physical_planner: DefaultPhysicalPlanner::with_extension_planners(vec![
+                Arc::new(PromExtensionPlanner),
+                Arc::new(DistExtensionPlanner),
+            ]),
         }
     }
 }

@@ -15,6 +15,8 @@
 mod analyzer;
 mod commutativity;
 mod merge_scan;
+mod planner;
 mod utils;
 
 pub use analyzer::DistPlannerAnalyzer;
+pub use planner::DistExtensionPlanner;

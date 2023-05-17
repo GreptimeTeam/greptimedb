@@ -73,4 +73,12 @@ impl MergeScanLogicalPlan {
             node: Arc::new(self),
         })
     }
+
+    pub fn is_placeholder(&self) -> bool {
+        self.is_placeholder
+    }
+
+    pub fn input(&self) -> &LogicalPlan {
+        &self.input
+    }
 }
