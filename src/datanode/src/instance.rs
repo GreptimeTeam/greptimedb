@@ -20,7 +20,6 @@ use std::{fs, path};
 use api::v1::meta::Role;
 use catalog::remote::MetaKvBackend;
 use catalog::{CatalogManager, CatalogManagerRef, RegisterTableRequest};
-use common_base::readable_size::ReadableSize;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use common_error::prelude::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
@@ -35,12 +34,8 @@ use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOptions;
 use mito::config::EngineConfig as TableEngineConfig;
 use mito::engine::MitoEngine;
-use object_store::cache_policy::LruCacheLayer;
-use object_store::layers::{LoggingLayer, MetricsLayer, RetryLayer, TracingLayer};
-use object_store::services::{Fs as FsBuilder, Oss as OSSBuilder, S3 as S3Builder};
-use object_store::{util, ObjectStore, ObjectStoreBuilder};
+use object_store::ObjectStore;
 use query::query_engine::{QueryEngineFactory, QueryEngineRef};
-use secrecy::ExposeSecret;
 use servers::Mode;
 use session::context::QueryContext;
 use snafu::prelude::*;
@@ -56,9 +51,7 @@ use table::table::numbers::NumbersTable;
 use table::table::TableIdProviderRef;
 use table::Table;
 
-use crate::datanode::{
-    DatanodeOptions, ObjectStoreConfig, ProcedureConfig, WalConfig, DEFAULT_OBJECT_STORE_CACHE_SIZE,
-};
+use crate::datanode::{DatanodeOptions, ProcedureConfig, WalConfig};
 use crate::error::{
     self, CatalogSnafu, MetaClientInitSnafu, MissingMetasrvOptsSnafu, MissingNodeIdSnafu,
     NewCatalogSnafu, OpenLogStoreSnafu, RecoverProcedureSnafu, Result, ShutdownInstanceSnafu,
@@ -69,6 +62,7 @@ use crate::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler
 use crate::heartbeat::handler::HandlerGroupExecutor;
 use crate::heartbeat::HeartbeatTask;
 use crate::sql::{SqlHandler, SqlRequest};
+use crate::store;
 
 mod grpc;
 pub mod sql;
@@ -113,7 +107,7 @@ impl Instance {
         meta_client: Option<Arc<MetaClient>>,
         compaction_scheduler: CompactionSchedulerRef<RaftEngineLogStore>,
     ) -> Result<Self> {
-        let object_store = new_object_store(&opts.storage.store).await?;
+        let object_store = store::new_object_store(&opts.storage.store).await?;
         let log_store = Arc::new(create_log_store(&opts.wal).await?);
 
         let mito_engine = Arc::new(DefaultEngine::new(
@@ -351,168 +345,6 @@ fn create_compaction_scheduler<S: LogStore>(opts: &DatanodeOptions) -> Compactio
     let handler = CompactionHandler::new(picker);
     let scheduler = LocalScheduler::new(config, handler);
     Arc::new(scheduler)
-}
-
-pub(crate) async fn new_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {
-    let object_store = match store_config {
-        ObjectStoreConfig::File { .. } => new_fs_object_store(store_config).await,
-        ObjectStoreConfig::S3 { .. } => new_s3_object_store(store_config).await,
-        ObjectStoreConfig::Oss { .. } => new_oss_object_store(store_config).await,
-    };
-
-    // Don't enable retry layer when using local file backend.
-    let object_store = if !matches!(store_config, ObjectStoreConfig::File(..)) {
-        object_store.map(|object_store| object_store.layer(RetryLayer::new().with_jitter()))
-    } else {
-        object_store
-    };
-
-    object_store.map(|object_store| {
-        object_store
-            .layer(MetricsLayer)
-            .layer(
-                LoggingLayer::default()
-                    // Print the expected error only in DEBUG level.
-                    // See https://docs.rs/opendal/latest/opendal/layers/struct.LoggingLayer.html#method.with_error_level
-                    .with_error_level(Some(log::Level::Debug)),
-            )
-            .layer(TracingLayer)
-    })
-}
-
-pub(crate) async fn new_oss_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {
-    let oss_config = match store_config {
-        ObjectStoreConfig::Oss(config) => config,
-        _ => unreachable!(),
-    };
-
-    let root = util::normalize_dir(&oss_config.root);
-    info!(
-        "The oss storage bucket is: {}, root is: {}",
-        oss_config.bucket, &root
-    );
-
-    let mut builder = OSSBuilder::default();
-    builder
-        .root(&root)
-        .bucket(&oss_config.bucket)
-        .endpoint(&oss_config.endpoint)
-        .access_key_id(oss_config.access_key_id.expose_secret())
-        .access_key_secret(oss_config.access_key_secret.expose_secret());
-
-    let object_store = ObjectStore::new(builder)
-        .context(error::InitBackendSnafu)?
-        .finish();
-
-    create_object_store_with_cache(object_store, store_config).await
-}
-
-async fn create_object_store_with_cache(
-    object_store: ObjectStore,
-    store_config: &ObjectStoreConfig,
-) -> Result<ObjectStore> {
-    let (cache_path, cache_capacity) = match store_config {
-        ObjectStoreConfig::S3(s3_config) => {
-            let path = s3_config.cache_path.as_ref();
-            let capacity = s3_config
-                .cache_capacity
-                .unwrap_or(DEFAULT_OBJECT_STORE_CACHE_SIZE);
-            (path, capacity)
-        }
-        ObjectStoreConfig::Oss(oss_config) => {
-            let path = oss_config.cache_path.as_ref();
-            let capacity = oss_config
-                .cache_capacity
-                .unwrap_or(DEFAULT_OBJECT_STORE_CACHE_SIZE);
-            (path, capacity)
-        }
-        _ => (None, ReadableSize(0)),
-    };
-
-    if let Some(path) = cache_path {
-        let atomic_temp_dir = format!("{path}/.tmp/");
-        clean_temp_dir(&atomic_temp_dir)?;
-        let cache_store = FsBuilder::default()
-            .root(path)
-            .atomic_write_dir(&atomic_temp_dir)
-            .build()
-            .context(error::InitBackendSnafu)?;
-
-        let cache_layer = LruCacheLayer::new(Arc::new(cache_store), cache_capacity.0 as usize)
-            .await
-            .context(error::InitBackendSnafu)?;
-        Ok(object_store.layer(cache_layer))
-    } else {
-        Ok(object_store)
-    }
-}
-
-pub(crate) async fn new_s3_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {
-    let s3_config = match store_config {
-        ObjectStoreConfig::S3(config) => config,
-        _ => unreachable!(),
-    };
-
-    let root = util::normalize_dir(&s3_config.root);
-    info!(
-        "The s3 storage bucket is: {}, root is: {}",
-        s3_config.bucket, &root
-    );
-
-    let mut builder = S3Builder::default();
-    builder
-        .root(&root)
-        .bucket(&s3_config.bucket)
-        .access_key_id(s3_config.access_key_id.expose_secret())
-        .secret_access_key(s3_config.secret_access_key.expose_secret());
-
-    if s3_config.endpoint.is_some() {
-        builder.endpoint(s3_config.endpoint.as_ref().unwrap());
-    }
-    if s3_config.region.is_some() {
-        builder.region(s3_config.region.as_ref().unwrap());
-    }
-
-    create_object_store_with_cache(
-        ObjectStore::new(builder)
-            .context(error::InitBackendSnafu)?
-            .finish(),
-        store_config,
-    )
-    .await
-}
-
-fn clean_temp_dir(dir: &str) -> Result<()> {
-    if path::Path::new(&dir).exists() {
-        info!("Begin to clean temp storage directory: {}", dir);
-        fs::remove_dir_all(dir).context(error::RemoveDirSnafu { dir })?;
-        info!("Cleaned temp storage directory: {}", dir);
-    }
-
-    Ok(())
-}
-
-pub(crate) async fn new_fs_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {
-    let file_config = match store_config {
-        ObjectStoreConfig::File(config) => config,
-        _ => unreachable!(),
-    };
-    let data_dir = util::normalize_dir(&file_config.data_dir);
-    fs::create_dir_all(path::Path::new(&data_dir))
-        .context(error::CreateDirSnafu { dir: &data_dir })?;
-    info!("The file storage directory is: {}", &data_dir);
-
-    let atomic_write_dir = format!("{data_dir}/.tmp/");
-    clean_temp_dir(&atomic_write_dir)?;
-
-    let mut builder = FsBuilder::default();
-    builder.root(&data_dir).atomic_write_dir(&atomic_write_dir);
-
-    let object_store = ObjectStore::new(builder)
-        .context(error::InitBackendSnafu)?
-        .finish();
-
-    Ok(object_store)
 }
 
 /// Create metasrv client instance and spawn heartbeat loop.
