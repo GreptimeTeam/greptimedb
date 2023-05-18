@@ -18,8 +18,7 @@ use std::{fs, path};
 
 use common_base::readable_size::ReadableSize;
 use common_telemetry::logging::info;
-use object_store::cache_policy::LruCacheLayer;
-use object_store::layers::{LoggingLayer, MetricsLayer, RetryLayer, TracingLayer};
+use object_store::layers::{LoggingLayer, LruCacheLayer, MetricsLayer, RetryLayer, TracingLayer};
 use object_store::services::{Fs as FsBuilder, Oss as OSSBuilder, S3 as S3Builder};
 use object_store::{util, ObjectStore, ObjectStoreBuilder};
 use secrecy::ExposeSecret;

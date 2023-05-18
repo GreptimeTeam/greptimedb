@@ -73,7 +73,7 @@ impl<I: Accessor, C: Accessor> Layer<I> for LruCacheLayer<C> {
 
     fn layer(&self, inner: I) -> Self::LayeredAccessor {
         LruCacheAccessor {
-            inner: Arc::new(inner),
+            inner,
             cache: self.cache.clone(),
             lru_cache: self.lru_cache.clone(),
         }
@@ -82,7 +82,7 @@ impl<I: Accessor, C: Accessor> Layer<I> for LruCacheLayer<C> {
 
 #[derive(Debug)]
 pub struct LruCacheAccessor<I, C> {
-    inner: Arc<I>,
+    inner: I,
     cache: Arc<C>,
     lru_cache: Arc<Mutex<LruCache<String, ()>>>,
 }
