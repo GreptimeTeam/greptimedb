@@ -62,6 +62,7 @@ use crate::datanode::{
 use crate::error::{
     self, CatalogSnafu, MetaClientInitSnafu, MissingMetasrvOptsSnafu, MissingNodeIdSnafu,
     NewCatalogSnafu, OpenLogStoreSnafu, RecoverProcedureSnafu, Result, ShutdownInstanceSnafu,
+    StartProcedureManagerSnafu, StopProcedureManagerSnafu,
 };
 use crate::heartbeat::handler::close_region::CloseRegionHandler;
 use crate::heartbeat::handler::open_region::OpenRegionHandler;
@@ -117,7 +118,9 @@ impl Instance {
         let log_store = Arc::new(create_log_store(&opts.wal).await?);
 
         let mito_engine = Arc::new(DefaultEngine::new(
-            TableEngineConfig::default(),
+            TableEngineConfig {
+                compress_manifest: opts.storage.manifest.compress,
+            },
             EngineImpl::new(
                 StorageEngineConfig::from(opts),
                 log_store.clone(),
@@ -269,10 +272,17 @@ impl Instance {
             .recover()
             .await
             .context(RecoverProcedureSnafu)?;
+        self.procedure_manager
+            .start()
+            .context(StartProcedureManagerSnafu)?;
         Ok(())
     }
 
     pub async fn shutdown(&self) -> Result<()> {
+        self.procedure_manager
+            .stop()
+            .await
+            .context(StopProcedureManagerSnafu)?;
         if let Some(heartbeat_task) = &self.heartbeat_task {
             heartbeat_task
                 .close()
@@ -579,6 +589,7 @@ pub(crate) async fn create_procedure_manager(
     let manager_config = ManagerConfig {
         max_retry_times: procedure_config.max_retry_times,
         retry_delay: procedure_config.retry_delay,
+        ..Default::default()
     };
 
     Ok(Arc::new(LocalManager::new(manager_config, state_store)))

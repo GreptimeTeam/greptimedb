@@ -260,6 +260,10 @@ pub trait ProcedureManager: Send + Sync + 'static {
     /// Registers loader for specific procedure type `name`.
     fn register_loader(&self, name: &str, loader: BoxedProcedureLoader) -> Result<()>;
 
+    fn start(&self) -> Result<()>;
+
+    async fn stop(&self) -> Result<()>;
+
     /// Submits a procedure to execute.
     ///
     /// Returns a [Watcher] to watch the created procedure.

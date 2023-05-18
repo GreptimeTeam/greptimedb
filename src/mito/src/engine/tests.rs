@@ -460,7 +460,7 @@ async fn test_open_table_with_region_number() {
         .err()
         .unwrap();
 
-    assert_eq!(region_not_found.to_string(), "Failed to operate table, source: Cannot find region, table: greptime.public.demo, region: 1");
+    assert_eq!(region_not_found.to_string(), "Failed to operate table, source: Failed to operate table, source: Cannot find region, table: greptime.public.demo, region: 1");
 
     let reopened = table_engine
         .open_table(&ctx, open_req.clone())

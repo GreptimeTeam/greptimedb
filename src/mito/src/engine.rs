@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 pub use common_catalog::consts::MITO_ENGINE;
+use common_datasource::compression::CompressionType;
 use common_error::ext::BoxedError;
 use common_procedure::{BoxedProcedure, ProcedureManager};
 use common_telemetry::{debug, logging};
@@ -29,6 +30,7 @@ use datatypes::schema::Schema;
 use key_lock::KeyLock;
 use object_store::ObjectStore;
 use snafu::{ensure, OptionExt, ResultExt};
+use storage::manifest::manifest_compress_type;
 use store_api::storage::{
     ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyDescriptorBuilder, ColumnId,
     EngineContext as StorageEngineContext, OpenOptions, RegionNumber, RowKeyDescriptor,
@@ -256,6 +258,7 @@ pub(crate) struct MitoEngineInner<S: StorageEngine> {
     /// Writing to `tables` should also hold the `table_mutex`.
     tables: DashMap<String, Arc<MitoTable<S::Region>>>,
     object_store: ObjectStore,
+    compress_type: CompressionType,
     storage_engine: S,
     /// Table mutex is used to protect the operations such as creating/opening/closing
     /// a table, to avoid things like opening the same table simultaneously.
@@ -456,15 +459,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             table_id, table_info
         );
 
-        for target_region in &request.region_numbers {
-            if !table_info.meta.region_numbers.contains(target_region) {
-                table_error::RegionNotFoundSnafu {
-                    table: table_ref.to_string(),
-                    region: *target_region,
-                }
-                .fail()?
-            }
-        }
+        // FIXME: We cannot trust the region numbers in the manifest because other datanodes might overwrite the manifest.
 
         let mut regions = HashMap::with_capacity(table_info.meta.region_numbers.len());
 
@@ -630,7 +625,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             let table_id = table.table_info().ident.table_id;
 
             table
-                .remove_regions(&regions)
+                .drop_regions()
                 .await
                 .map_err(BoxedError::new)
                 .context(table_error::TableOperationSnafu)?;
@@ -660,6 +655,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         let manifest = MitoTable::<<S as StorageEngine>::Region>::build_manifest(
             table_dir,
             self.object_store.clone(),
+            self.compress_type,
         );
         let  Some(table_info) =
             MitoTable::<<S as StorageEngine>::Region>::recover_table_info(table_name, &manifest)
@@ -750,11 +746,12 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 }
 
 impl<S: StorageEngine> MitoEngineInner<S> {
-    fn new(_config: EngineConfig, storage_engine: S, object_store: ObjectStore) -> Self {
+    fn new(config: EngineConfig, storage_engine: S, object_store: ObjectStore) -> Self {
         Self {
             tables: DashMap::new(),
             storage_engine,
             object_store,
+            compress_type: manifest_compress_type(config.compress_manifest),
             table_mutex: Arc::new(KeyLock::new()),
         }
     }

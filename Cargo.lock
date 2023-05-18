@@ -55,6 +55,15 @@ dependencies = [
 
 [[package]]
 name = "aho-corasick"
+version = "0.7.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc936419f96fa211c1b9166887b38e5e40b19958e5b895be7c1f93adec7071ac"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
+name = "aho-corasick"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67fc08ce920c31afb70f013dcce1bfc3a3195de6a228474e45e1f145b36f8d04"
@@ -1837,6 +1846,7 @@ dependencies = [
  "console-subscriber",
  "metrics",
  "metrics-exporter-prometheus",
+ "metrics-util",
  "once_cell",
  "opentelemetry",
  "opentelemetry-jaeger",
@@ -4909,8 +4919,9 @@ dependencies = [
 
 [[package]]
 name = "metrics-exporter-prometheus"
-version = "0.11.1"
-source = "git+https://github.com/GreptimeTeam/metrics.git?rev=174de287e9f7f9f57c0272be56c95df156489476#174de287e9f7f9f57c0272be56c95df156489476"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8603921e1f54ef386189335f288441af761e0fc61bcb552168d9cedfe63ebc70"
 dependencies = [
  "indexmap",
  "metrics",
@@ -4938,14 +4949,18 @@ version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f7d24dc2dbae22bff6f1f9326ffce828c9f07ef9cc1e8002e5279f845432a30a"
 dependencies = [
+ "aho-corasick 0.7.20",
  "crossbeam-epoch",
  "crossbeam-utils",
  "hashbrown 0.12.3",
+ "indexmap",
  "metrics",
  "num_cpus",
+ "ordered-float 2.10.0",
  "parking_lot",
  "portable-atomic",
  "quanta",
+ "radix_trie",
  "sketches-ddsketch",
 ]
 
@@ -5002,6 +5017,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "common-catalog",
+ "common-datasource",
  "common-error",
  "common-procedure",
  "common-procedure-test",
@@ -6750,7 +6766,7 @@ version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af83e617f331cc6ae2da5443c602dfa5af81e517212d9d611a5b3ba1777b5370"
 dependencies = [
- "aho-corasick",
+ "aho-corasick 1.0.1",
  "memchr",
  "regex-syntax 0.7.1",
 ]

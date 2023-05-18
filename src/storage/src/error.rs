@@ -241,6 +241,17 @@ pub enum Error {
     },
 
     #[snafu(display(
+        "Failed to delete WAL namespace, region id: {}, source: {}",
+        region_id,
+        source
+    ))]
+    DeleteWalNamespace {
+        region_id: RegionId,
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display(
         "Sequence of region should increase monotonically (should be {} < {})",
         prev,
         given
@@ -499,6 +510,24 @@ pub enum Error {
         #[snafu(backtrace)]
         source: RuntimeError,
     },
+
+    #[snafu(display("Failed to convert columns to rows, source: {}", source))]
+    ConvertColumnsToRows {
+        source: ArrowError,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to sort arrays, source: {}", source))]
+    SortArrays {
+        source: ArrowError,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to sort arrays, source: {}", source))]
+    SelectRows {
+        source: ArrowError,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -582,6 +611,7 @@ impl ErrorExt for Error {
             CreateDefault { source, .. } => source.status_code(),
             ConvertChunk { source, .. } => source.status_code(),
             MarkWalObsolete { source, .. } => source.status_code(),
+            DeleteWalNamespace { source, .. } => source.status_code(),
             DecodeParquetTimeRange { .. } => StatusCode::Unexpected,
             RateLimited { .. } | StopScheduler { .. } | CompactTaskCancel { .. } => {
                 StatusCode::Internal
@@ -596,6 +626,8 @@ impl ErrorExt for Error {
             | StopPickTask { .. } => StatusCode::Unexpected,
 
             TtlCalculation { source, .. } => source.status_code(),
+            ConvertColumnsToRows { .. } | SortArrays { .. } => StatusCode::Unexpected,
+            SelectRows { .. } => StatusCode::Unexpected,
         }
     }
 

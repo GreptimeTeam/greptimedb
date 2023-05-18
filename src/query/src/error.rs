@@ -26,6 +26,12 @@ pub enum Error {
     #[snafu(display("Unsupported expr type: {}", name))]
     UnsupportedExpr { name: String, location: Location },
 
+    #[snafu(display("Operation {} not implemented yet", operation))]
+    Unimplemented {
+        operation: String,
+        location: Location,
+    },
+
     #[snafu(display("General catalog error: {}", source))]
     Catalog {
         #[snafu(backtrace)]
@@ -183,6 +189,7 @@ impl ErrorExt for Error {
         match self {
             QueryParse { .. } | MultipleStatements { .. } => StatusCode::InvalidSyntax,
             UnsupportedExpr { .. }
+            | Unimplemented { .. }
             | CatalogNotFound { .. }
             | SchemaNotFound { .. }
             | TableNotFound { .. }

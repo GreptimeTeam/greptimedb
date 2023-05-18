@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_time::Timestamp;
 use datatypes::prelude::*;
 use datatypes::timestamp::TimestampMillisecond;
 use datatypes::type_id::LogicalTypeId;
@@ -52,7 +53,7 @@ fn kvs_for_test_with_index(
     for key in keys {
         key_builders.push(Some(*key));
     }
-    let row_keys = vec![Arc::new(key_builders.finish()) as _];
+    let ts_col = Arc::new(key_builders.finish()) as _;
 
     let mut value_builders = (
         UInt64VectorBuilder::with_capacity(values.len()),
@@ -71,8 +72,9 @@ fn kvs_for_test_with_index(
         sequence,
         op_type,
         start_index_in_batch,
-        keys: row_keys,
+        keys: vec![],
         values: row_values,
+        timestamp: Some(ts_col),
     };
 
     assert_eq!(keys.len(), kvs.len());
@@ -198,7 +200,7 @@ fn write_iter_memtable_case(ctx: &TestContext) {
     assert!(iter.next().is_none());
     // Poll the empty iterator again.
     assert!(iter.next().is_none());
-    assert_eq!(0, ctx.memtable.bytes_allocated());
+    assert_eq!(0, ctx.memtable.stats().bytes_allocated());
 
     // Init test data.
     write_kvs(
@@ -224,7 +226,7 @@ fn write_iter_memtable_case(ctx: &TestContext) {
     );
 
     // 9 key value pairs (6 + 3).
-    assert_eq!(576, ctx.memtable.bytes_allocated());
+    assert_eq!(576, ctx.memtable.stats().bytes_allocated());
 
     let batch_sizes = [1, 4, 8, consts::READ_BATCH_SIZE];
     for batch_size in batch_sizes {
@@ -435,6 +437,7 @@ fn test_sequence_visibility() {
                 visible_sequence: 9,
                 for_flush: false,
                 projected_schema: None,
+                time_range: None,
             };
 
             let mut iter = ctx.memtable.iter(&iter_ctx).unwrap();
@@ -453,6 +456,7 @@ fn test_sequence_visibility() {
                 visible_sequence: 10,
                 for_flush: false,
                 projected_schema: None,
+                time_range: None,
             };
 
             let mut iter = ctx.memtable.iter(&iter_ctx).unwrap();
@@ -471,6 +475,7 @@ fn test_sequence_visibility() {
                 visible_sequence: 11,
                 for_flush: false,
                 projected_schema: None,
+                time_range: None,
             };
 
             let mut iter = ctx.memtable.iter(&iter_ctx).unwrap();
@@ -506,6 +511,40 @@ fn test_iter_after_none() {
         assert!(iter.next().is_some());
         assert!(iter.next().is_none());
         assert!(iter.next().is_none());
+    });
+}
+
+#[test]
+fn test_filter_memtable() {
+    let tester = MemtableTester::default();
+    tester.run_testcase(|ctx| {
+        write_kvs(
+            &*ctx.memtable,
+            10, // sequence
+            OpType::Put,
+            &[1000, 1001, 1002],                                  // keys
+            &[(Some(0), None), (Some(1), None), (Some(2), None)], // values
+        );
+
+        let iter_ctx = IterContext {
+            batch_size: 4,
+            time_range: Some(
+                TimestampRange::new(
+                    Timestamp::new_millisecond(0),
+                    Timestamp::new_millisecond(1001),
+                )
+                .unwrap(),
+            ),
+            ..Default::default()
+        };
+
+        let mut iter = ctx.memtable.iter(&iter_ctx).unwrap();
+        let batch = iter.next().unwrap().unwrap();
+        assert_eq!(5, batch.columns.len());
+        assert_eq!(
+            Arc::new(TimestampMillisecondVector::from_slice([1000])) as Arc<_>,
+            batch.columns[0]
+        );
     });
 }
 

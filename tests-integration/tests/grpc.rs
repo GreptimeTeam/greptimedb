@@ -22,7 +22,7 @@ use api::v1::{
 use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::consts::{MIN_USER_TABLE_ID, MITO_ENGINE};
 use common_query::Output;
-use servers::prom::{PromData, PromJsonResponse, PromSeries};
+use servers::prom::{PromData, PromJsonResponse, PromResponse, PromSeries};
 use servers::server::Server;
 use tests_integration::test_util::{setup_grpc_server, StorageType};
 
@@ -366,7 +366,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
     let instant_query_result = serde_json::from_slice::<PromJsonResponse>(&json_bytes).unwrap();
     let expected = PromJsonResponse {
         status: "success".to_string(),
-        data: PromData {
+        data: PromResponse::PromData(PromData {
             result_type: "vector".to_string(),
             result: vec![
                 PromSeries {
@@ -390,7 +390,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                     ..Default::default()
                 },
             ],
-        },
+        }),
         error: None,
         error_type: None,
         warnings: None,
@@ -417,7 +417,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
     let range_query_result = serde_json::from_slice::<PromJsonResponse>(&json_bytes).unwrap();
     let expected = PromJsonResponse {
         status: "success".to_string(),
-        data: PromData {
+        data: PromResponse::PromData(PromData {
             result_type: "matrix".to_string(),
             result: vec![
                 PromSeries {
@@ -441,7 +441,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                     ..Default::default()
                 },
             ],
-        },
+        }),
         error: None,
         error_type: None,
         warnings: None,

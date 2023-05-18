@@ -180,6 +180,15 @@ impl Value {
         }
     }
 
+    /// Cast Value to timestamp. Return None if value is not a valid timestamp data type.
+    pub fn as_timestamp(&self) -> Option<Timestamp> {
+        match self {
+            Value::Int64(v) => Some(Timestamp::new_millisecond(*v)),
+            Value::Timestamp(t) => Some(*t),
+            _ => None,
+        }
+    }
+
     /// Returns the logical type of the value.
     pub fn logical_type_id(&self) -> LogicalTypeId {
         match self {

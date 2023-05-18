@@ -12,7 +12,8 @@ deadlock_detection = ["parking_lot"]
 backtrace = "0.3"
 common-error = { path = "../error" }
 console-subscriber = { version = "0.1", optional = true }
-metrics-exporter-prometheus = { git = "https://github.com/GreptimeTeam/metrics.git", rev = "174de287e9f7f9f57c0272be56c95df156489476", default-features = false }
+metrics-exporter-prometheus = { version = "0.11", default-features = false }
+metrics-util = "0.14.0"
 metrics.workspace = true
 once_cell = "1.10"
 opentelemetry = { version = "0.17", default-features = false, features = [

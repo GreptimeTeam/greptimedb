@@ -32,8 +32,8 @@ pub trait Selector: Send + Sync {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SelectorType {
-    LoadBased,
     #[default]
+    LoadBased,
     LeaseBased,
 }
 
@@ -59,7 +59,7 @@ mod tests {
 
     #[test]
     fn test_default_selector_type() {
-        assert_eq!(SelectorType::LeaseBased, SelectorType::default());
+        assert_eq!(SelectorType::LoadBased, SelectorType::default());
     }
 
     #[test]

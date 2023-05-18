@@ -121,6 +121,18 @@ pub enum Error {
 
     #[snafu(display("Corrupted data, error: {source}"))]
     CorruptedData { source: FromUtf8Error },
+
+    #[snafu(display("Failed to start the remove_outdated_meta method, error: {}", source))]
+    StartRemoveOutdatedMetaTask {
+        source: common_runtime::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to stop the remove_outdated_meta method, error: {}", source))]
+    StopRemoveOutdatedMetaTask {
+        source: common_runtime::error::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -145,6 +157,8 @@ impl ErrorExt for Error {
             }
             Error::ProcedurePanic { .. } | Error::CorruptedData { .. } => StatusCode::Unexpected,
             Error::ProcedureExec { source, .. } => source.status_code(),
+            Error::StartRemoveOutdatedMetaTask { source, .. }
+            | Error::StopRemoveOutdatedMetaTask { source, .. } => source.status_code(),
         }
     }
 

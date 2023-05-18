@@ -84,13 +84,14 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.arch }}
-
+      - name: Install latest nextest release
+        uses: taiki-e/install-action@nextest
       - name: Output package versions
         run: protoc --version ; cargo version ; rustc --version ; gcc --version ; g++ --version
 
-      # - name: Run tests
-      #   if: env.DISABLE_RUN_TESTS == 'false'
-      #   run: make unit-test integration-test sqlness-test
+      - name: Run tests
+        if: env.DISABLE_RUN_TESTS == 'false'
+        run: make test sqlness-test
 
       - name: Run cargo build
         if: contains(matrix.arch, 'darwin') || contains(matrix.opts, 'pyo3_backend') == false
@@ -200,13 +201,14 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.arch }}
-
+      - name: Install latest nextest release
+        uses: taiki-e/install-action@nextest
       - name: Output package versions
         run: protoc --version ; cargo version ; rustc --version ; gcc --version ; g++ --version
 
       - name: Run tests
         if: env.DISABLE_RUN_TESTS == 'false'
-        run: make unit-test integration-test sqlness-test
+        run: make test sqlness-test
 
       - name: Run cargo build
         if: contains(matrix.arch, 'darwin') || contains(matrix.opts, 'pyo3_backend') == false

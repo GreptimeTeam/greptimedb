@@ -18,9 +18,10 @@ mod inserter;
 pub mod tests;
 mod version;
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use common_time::range::TimestampRange;
 use datatypes::vectors::VectorRef;
 use store_api::storage::{consts, OpType, SequenceNumber};
 
@@ -33,6 +34,35 @@ use crate::schema::{ProjectedSchemaRef, RegionSchemaRef};
 
 /// Unique id for memtables under same region.
 pub type MemtableId = u32;
+
+#[derive(Debug)]
+pub struct MemtableStats {
+    /// The  estimated bytes allocated by this memtable from heap. Result
+    /// of this method may be larger than the estimated based on [`num_rows`] because
+    /// of the implementor's pre-alloc behavior.
+    estimated_bytes: AtomicUsize,
+    /// The max timestamp that this memtable contains.
+    max_timestamp: AtomicI64,
+    /// The min timestamp that this memtable contains.
+    min_timestamp: AtomicI64,
+}
+
+impl MemtableStats {
+    pub fn bytes_allocated(&self) -> usize {
+        self.estimated_bytes
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl Default for MemtableStats {
+    fn default() -> Self {
+        Self {
+            estimated_bytes: AtomicUsize::default(),
+            max_timestamp: AtomicI64::new(i64::MIN),
+            min_timestamp: AtomicI64::new(i64::MAX),
+        }
+    }
+}
 
 /// In memory storage.
 pub trait Memtable: Send + Sync + std::fmt::Debug {
@@ -54,10 +84,10 @@ pub trait Memtable: Send + Sync + std::fmt::Debug {
     /// Returns the estimated bytes allocated by this memtable from heap. Result
     /// of this method may be larger than the estimated based on [`num_rows`] because
     /// of the implementor's pre-alloc behavior.
-    fn bytes_allocated(&self) -> usize;
-
-    /// Return the number of rows contained in this memtable.
     fn num_rows(&self) -> usize;
+
+    /// Returns stats of this memtable.
+    fn stats(&self) -> &MemtableStats;
 }
 
 pub type MemtableRef = Arc<dyn Memtable>;
@@ -81,6 +111,9 @@ pub struct IterContext {
     ///
     /// Set to `None` to read all columns.
     pub projected_schema: Option<ProjectedSchemaRef>,
+
+    /// Timestamp range
+    pub time_range: Option<TimestampRange>,
 }
 
 impl Default for IterContext {
@@ -91,6 +124,7 @@ impl Default for IterContext {
             visible_sequence: SequenceNumber::MAX,
             for_flush: false,
             projected_schema: None,
+            time_range: None,
         }
     }
 }
@@ -125,7 +159,6 @@ pub trait MemtableBuilder: Send + Sync + std::fmt::Debug {
 
 pub type MemtableBuilderRef = Arc<dyn MemtableBuilder>;
 
-// TODO(yingwen): Maybe use individual vector for timestamp and version.
 /// Key-value pairs in columnar format.
 pub struct KeyValues {
     pub sequence: SequenceNumber,
@@ -135,6 +168,7 @@ pub struct KeyValues {
     pub start_index_in_batch: usize,
     pub keys: Vec<VectorRef>,
     pub values: Vec<VectorRef>,
+    pub timestamp: Option<VectorRef>,
 }
 
 impl KeyValues {
@@ -144,10 +178,11 @@ impl KeyValues {
         self.start_index_in_batch = index_in_batch;
         self.keys.clear();
         self.values.clear();
+        self.timestamp = None;
     }
 
     pub fn len(&self) -> usize {
-        self.keys.first().map(|v| v.len()).unwrap_or_default()
+        self.timestamp.as_ref().map(|v| v.len()).unwrap_or_default()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -157,6 +192,11 @@ impl KeyValues {
     pub fn estimated_memory_size(&self) -> usize {
         self.keys.iter().fold(0, |acc, v| acc + v.memory_size())
             + self.values.iter().fold(0, |acc, v| acc + v.memory_size())
+            + self
+                .timestamp
+                .as_ref()
+                .map(|t| t.memory_size())
+                .unwrap_or_default()
     }
 }
 

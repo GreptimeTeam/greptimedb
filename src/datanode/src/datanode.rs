@@ -170,6 +170,8 @@ pub struct RegionManifestConfig {
     pub gc_duration: Option<Duration>,
     /// Whether to try creating a manifest checkpoint on region opening
     pub checkpoint_on_startup: bool,
+    /// Whether to compress manifest and checkpoint file by gzip
+    pub compress: bool,
 }
 
 impl Default for RegionManifestConfig {
@@ -178,6 +180,7 @@ impl Default for RegionManifestConfig {
             checkpoint_margin: Some(10u16),
             gc_duration: Some(Duration::from_secs(30)),
             checkpoint_on_startup: false,
+            compress: false,
         }
     }
 }
@@ -246,6 +249,7 @@ impl From<&DatanodeOptions> for SchedulerConfig {
 impl From<&DatanodeOptions> for StorageEngineConfig {
     fn from(value: &DatanodeOptions) -> Self {
         Self {
+            compress_manifest: value.storage.manifest.compress,
             manifest_checkpoint_on_startup: value.storage.manifest.checkpoint_on_startup,
             manifest_checkpoint_margin: value.storage.manifest.checkpoint_margin,
             manifest_gc_duration: value.storage.manifest.gc_duration,
@@ -316,6 +320,12 @@ impl Default for DatanodeOptions {
             procedure: ProcedureConfig::default(),
             logging: LoggingOptions::default(),
         }
+    }
+}
+
+impl DatanodeOptions {
+    pub fn env_list_keys() -> Option<&'static [&'static str]> {
+        Some(&["meta_client_options.metasrv_addrs"])
     }
 }
 

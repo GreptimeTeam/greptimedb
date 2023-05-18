@@ -161,7 +161,7 @@ impl MetaSrvBuilder {
         let metadata_service = metadata_service
             .unwrap_or_else(|| Arc::new(DefaultMetadataService::new(kv_store.clone())));
 
-        let mailbox_sequence = Sequence::new("heartbeat_mailbox", 0, 100, kv_store.clone());
+        let mailbox_sequence = Sequence::new("heartbeat_mailbox", 1, 100, kv_store.clone());
         let mailbox = HeartbeatMailbox::create(handler_group.pushers(), mailbox_sequence);
 
         MetaSrv {
