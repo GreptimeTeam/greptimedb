@@ -42,6 +42,7 @@ impl StatementExecutor {
         let threshold = ReadableSize::mb(4).as_bytes() as usize;
 
         match format {
+            Format::Avro(_) => todo!(),
             Format::Csv(_) => stream_to_csv(
                 Box::pin(DfRecordBatchStreamAdapter::new(stream)),
                 object_store,

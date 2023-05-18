@@ -113,6 +113,12 @@ pub enum Error {
         source: datafusion::parquet::errors::ParquetError,
     },
 
+    #[snafu(display("Failed to convert avro to schema: {}", source))]
+    AvroToSchema {
+        location: Location,
+        source: arrow_schema::ArrowError, // TODO use an Arrow specific error here
+    },
+
     #[snafu(display("Failed to infer schema from file, source: {}", source))]
     InferSchema {
         location: Location,
