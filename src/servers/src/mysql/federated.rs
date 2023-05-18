@@ -20,6 +20,8 @@ use std::sync::Arc;
 
 use common_query::Output;
 use common_recordbatch::RecordBatches;
+use common_time::timezone::system_time_zone_name;
+use common_time::TimeZone;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::StringVector;
@@ -53,6 +55,10 @@ static SELECT_TIME_DIFF_FUNC_PATTERN: Lazy<Regex> =
 // sqlalchemy < 1.4.30
 static SHOW_SQL_MODE_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)^(SHOW VARIABLES LIKE 'sql_mode'(.*))").unwrap());
+
+// Time zone settings
+static SET_TIME_ZONE_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)^SET TIME_ZONE\s*=\s*'(\S+)'").unwrap());
 
 static OTHER_NOT_SUPPORTED_STMT: Lazy<RegexSet> = Lazy::new(|| {
     RegexSet::new([
@@ -124,8 +130,6 @@ static VAR_VALUES: Lazy<HashMap<&str, &str>> = Lazy::new(|| {
         ("transaction_isolation", "REPEATABLE-READ"),
         ("session.transaction_isolation", "REPEATABLE-READ"),
         ("session.transaction_read_only", "0"),
-        ("time_zone", "UTC"),
-        ("system_time_zone", "UTC"),
         ("max_allowed_packet", "134217728"),
         ("interactive_timeout", "31536000"),
         ("wait_timeout", "31536000"),
@@ -168,7 +172,7 @@ fn show_variables(name: &str, value: &str) -> RecordBatches {
         .unwrap()
 }
 
-fn select_variable(query: &str) -> Option<Output> {
+fn select_variable(query: &str, query_context: QueryContextRef) -> Option<Output> {
     let mut fields = vec![];
     let mut values = vec![];
 
@@ -191,12 +195,24 @@ fn select_variable(query: &str) -> Option<Output> {
                     .unwrap_or("")
             })
             .collect();
+
+        // get value of variables from known sources or fallback to defaults
+        let value = match var_as[0] {
+            "time_zone" => query_context
+                .time_zone()
+                .map(|tz| tz.to_string())
+                .unwrap_or_else(|| "".to_owned()),
+            "system_time_zone" => system_time_zone_name(),
+            _ => VAR_VALUES
+                .get(var_as[0])
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "0".to_owned()),
+        };
+
+        values.push(Arc::new(StringVector::from(vec![value])) as _);
         match var_as.len() {
             1 => {
                 // @@aa
-                let value = VAR_VALUES.get(var_as[0]).unwrap_or(&"0");
-                values.push(Arc::new(StringVector::from(vec![*value])) as _);
-
                 // field is '@@aa'
                 fields.push(ColumnSchema::new(
                     &format!("@@{}", var_as[0]),
@@ -207,9 +223,6 @@ fn select_variable(query: &str) -> Option<Output> {
             2 => {
                 // @@bb as cc:
                 // var is 'bb'.
-                let value = VAR_VALUES.get(var_as[0]).unwrap_or(&"0");
-                values.push(Arc::new(StringVector::from(vec![*value])) as _);
-
                 // field is 'cc'.
                 fields.push(ColumnSchema::new(
                     var_as[1],
@@ -227,12 +240,12 @@ fn select_variable(query: &str) -> Option<Output> {
     Some(Output::RecordBatches(batches))
 }
 
-fn check_select_variable(query: &str) -> Option<Output> {
+fn check_select_variable(query: &str, query_context: QueryContextRef) -> Option<Output> {
     if vec![&SELECT_VAR_PATTERN, &MYSQL_CONN_JAVA_PATTERN]
         .iter()
         .any(|r| r.is_match(query))
     {
-        select_variable(query)
+        select_variable(query, query_context)
     } else {
         None
     }
@@ -249,6 +262,20 @@ fn check_show_variables(query: &str) -> Option<Output> {
         None
     };
     recordbatches.map(Output::RecordBatches)
+}
+
+// TODO(sunng87): extract this to use sqlparser for more variables
+fn check_set_variables(query: &str, query_ctx: QueryContextRef) -> Option<Output> {
+    if let Some(captures) = SET_TIME_ZONE_PATTERN.captures(query) {
+        // get the capture
+        let tz = captures.get(1).unwrap();
+        if let Ok(timezone) = TimeZone::from_tz_string(tz.as_str()) {
+            query_ctx.set_time_zone(timezone);
+            return Some(Output::AffectedRows(0));
+        }
+    }
+
+    None
 }
 
 // Check for SET or others query, this is the final check of the federated query.
@@ -283,19 +310,12 @@ pub(crate) fn check(query: &str, query_ctx: QueryContextRef) -> Option<Output> {
     }
 
     // First to check the query is like "select @@variables".
-    let output = check_select_variable(query);
-    if output.is_some() {
-        return output;
-    }
-
-    // Then to check "show variables like ...".
-    let output = check_show_variables(query);
-    if output.is_some() {
-        return output;
-    }
-
-    // Last check.
-    check_others(query, query_ctx)
+    check_select_variable(query, query_ctx.clone())
+        // Then to check "show variables like ...".
+        .or_else(|| check_show_variables(query))
+        .or_else(|| check_set_variables(query, query_ctx.clone()))
+        // Last check
+        .or_else(|| check_others(query, query_ctx))
 }
 
 #[cfg(test)]

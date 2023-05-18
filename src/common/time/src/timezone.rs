@@ -14,7 +14,7 @@
 
 use std::str::FromStr;
 
-use chrono::FixedOffset;
+use chrono::{FixedOffset, Local};
 use chrono_tz::Tz;
 use snafu::{OptionExt, ResultExt};
 
@@ -73,6 +73,19 @@ impl TimeZone {
             ParseTimeZoneNameSnafu { raw: tz_string }.fail()
         }
     }
+}
+
+impl ToString for TimeZone {
+    fn to_string(&self) -> String {
+        match self {
+            Self::Named(tz) => tz.name().to_owned(),
+            Self::Offset(offset) => offset.to_string(),
+        }
+    }
+}
+
+pub fn system_time_zone_name() -> String {
+    Local::now().offset().to_string()
 }
 
 #[cfg(test)]

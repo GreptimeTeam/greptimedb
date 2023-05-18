@@ -108,8 +108,8 @@ impl QueryContext {
         self.time_zone.load().as_ref().clone()
     }
 
-    pub fn set_time_zone(&self, tz: TimeZone) {
-        self.time_zone.swap(Arc::new(Some(tz)));
+    pub fn set_time_zone(&self, tz: Option<TimeZone>) {
+        self.time_zone.swap(Arc::new(tz));
     }
 }
 
