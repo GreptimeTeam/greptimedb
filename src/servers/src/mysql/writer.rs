@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::ops::Deref;
-use std::sync::Arc;
 
 use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
@@ -23,7 +22,7 @@ use datatypes::schema::{ColumnSchema, SchemaRef};
 use opensrv_mysql::{
     Column, ColumnFlags, ColumnType, ErrorKind, OkResponse, QueryResultWriter, RowWriter,
 };
-use session::context::QueryContext;
+use session::context::QueryContextRef;
 use snafu::prelude::*;
 use tokio::io::AsyncWrite;
 
@@ -33,7 +32,7 @@ use crate::error::{self, Error, Result};
 pub async fn write_output<'a, W: AsyncWrite + Send + Sync + Unpin>(
     w: QueryResultWriter<'a, W>,
     query: &str,
-    query_context: Arc<QueryContext>,
+    query_context: QueryContextRef,
     outputs: Vec<Result<Output>>,
 ) -> Result<()> {
     let mut writer = Some(MysqlResultWriter::new(w, query_context.clone()));
@@ -57,13 +56,13 @@ struct QueryResult {
 
 pub struct MysqlResultWriter<'a, W: AsyncWrite + Unpin> {
     writer: QueryResultWriter<'a, W>,
-    query_context: Arc<QueryContext>,
+    query_context: QueryContextRef,
 }
 
 impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
     pub fn new(
         writer: QueryResultWriter<'a, W>,
-        query_context: Arc<QueryContext>,
+        query_context: QueryContextRef,
     ) -> MysqlResultWriter<'a, W> {
         MysqlResultWriter::<'a, W> {
             writer,
@@ -137,7 +136,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
         query: &str,
         query_result: QueryResult,
         writer: QueryResultWriter<'a, W>,
-        query_context: Arc<QueryContext>,
+        query_context: QueryContextRef,
     ) -> Result<()> {
         match create_mysql_column_def(&query_result.schema) {
             Ok(column_def) => {
@@ -158,7 +157,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
     async fn write_recordbatch(
         row_writer: &mut RowWriter<'_, W>,
         recordbatch: &RecordBatch,
-        query_context: Arc<QueryContext>,
+        query_context: QueryContextRef,
     ) -> Result<()> {
         for row in recordbatch.rows() {
             for value in row.into_iter() {
