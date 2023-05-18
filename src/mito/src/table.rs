@@ -143,16 +143,16 @@ impl<R: Region> Table for MitoTable<R> {
         _limit: Option<usize>,
     ) -> TableResult<PhysicalPlanRef> {
         let read_ctx = ReadContext::default();
-        let region_guard = self.regions.load();
+        let regions = self.regions.load();
 
-        let mut readers = Vec::with_capacity(region_guard.len());
+        let mut readers = Vec::with_capacity(regions.len());
         let mut first_schema: Option<Arc<Schema>> = None;
 
         let table_info = self.table_info.load();
         // TODO(hl): Currently the API between frontend and datanode is under refactoring in
         // https://github.com/GreptimeTeam/greptimedb/issues/597 . Once it's finished, query plan
         // can carry filtered region info to avoid scanning all regions on datanode.
-        for region in region_guard.values() {
+        for region in regions.values() {
             let snapshot = region
                 .snapshot(&read_ctx)
                 .map_err(BoxedError::new)
