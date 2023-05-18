@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use api::v1::meta::{Error, HeartbeatRequest, Role};
+use common_telemetry::warn;
 
 use crate::error::Result;
 use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
@@ -29,7 +30,7 @@ impl HeartbeatHandler for CheckLeaderHandler {
 
     async fn handle(
         &self,
-        _req: &HeartbeatRequest,
+        req: &HeartbeatRequest,
         ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
     ) -> Result<()> {
@@ -40,6 +41,7 @@ impl HeartbeatHandler for CheckLeaderHandler {
             if let Some(header) = &mut acc.header {
                 header.error = Some(Error::is_not_leader());
                 ctx.set_skip_all();
+                warn!("Received a heartbeat {:?}, but the current node is not the leader, so the heartbeat will be ignored.", req.header);
             }
         }
         Ok(())

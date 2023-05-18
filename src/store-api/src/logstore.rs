@@ -54,10 +54,10 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     ) -> Result<SendableEntryStream<Self::Entry, Self::Error>, Self::Error>;
 
     /// Create a new `Namespace`.
-    async fn create_namespace(&mut self, ns: &Self::Namespace) -> Result<(), Self::Error>;
+    async fn create_namespace(&self, ns: &Self::Namespace) -> Result<(), Self::Error>;
 
     /// Delete an existing `Namespace` with given ref.
-    async fn delete_namespace(&mut self, ns: &Self::Namespace) -> Result<(), Self::Error>;
+    async fn delete_namespace(&self, ns: &Self::Namespace) -> Result<(), Self::Error>;
 
     /// List all existing namespaces.
     async fn list_namespaces(&self) -> Result<Vec<Self::Namespace>, Self::Error>;

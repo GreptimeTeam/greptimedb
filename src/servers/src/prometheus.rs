@@ -31,8 +31,8 @@ use snap::raw::{Decoder, Encoder};
 
 use crate::error::{self, Result};
 
-const TIMESTAMP_COLUMN_NAME: &str = "greptime_timestamp";
-const FIELD_COLUMN_NAME: &str = "greptime_value";
+pub const TIMESTAMP_COLUMN_NAME: &str = "greptime_timestamp";
+pub const FIELD_COLUMN_NAME: &str = "greptime_value";
 pub const METRIC_NAME_LABEL: &str = "__name__";
 
 /// Metrics for push gateway protocol

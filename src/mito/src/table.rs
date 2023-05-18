@@ -531,6 +531,19 @@ impl<R: Region> MitoTable<R> {
         Ok(())
     }
 
+    pub async fn drop_regions(&self) -> TableResult<()> {
+        let regions = self.regions.load();
+        futures::future::try_join_all(regions.values().map(|region| region.drop_region()))
+            .await
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)?;
+
+        let regions = regions.iter().map(|(k, _)| *k).collect::<Vec<_>>();
+
+        self.remove_regions(&regions).await?;
+        Ok(())
+    }
+
     pub async fn is_releasable(&self) -> bool {
         let regions = self.regions.load();
 

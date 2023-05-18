@@ -79,6 +79,13 @@ impl StoreSchema {
         self.row_key_end
     }
 
+    /// Returns the index of timestamp column.
+    /// We always assume that timestamp is the last column in [StoreSchema].
+    #[inline]
+    pub fn timestamp_index(&self) -> usize {
+        self.row_key_end - 1
+    }
+
     pub(crate) fn contains_column(&self, name: &str) -> bool {
         self.schema.column_schema_by_name(name).is_some()
     }
@@ -153,11 +160,6 @@ impl StoreSchema {
     #[inline]
     pub(crate) fn op_type_index(&self) -> usize {
         self.user_column_end + 1
-    }
-
-    #[inline]
-    pub(crate) fn timestamp_index(&self) -> usize {
-        self.row_key_end - 1
     }
 
     #[inline]

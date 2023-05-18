@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! prom supply the prometheus HTTP API Server compliance
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -27,7 +27,7 @@ use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::info;
-use common_time::util::current_time_rfc3339;
+use common_time::util::{current_time_rfc3339, yesterday_rfc3339};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVector;
 use datatypes::vectors::{Float64Vector, StringVector, TimestampMillisecondVector};
@@ -37,11 +37,12 @@ use promql_parser::parser::{
     AggregateExpr, BinaryExpr, Call, Expr as PromqlExpr, MatrixSelector, ParenExpr, SubqueryExpr,
     UnaryExpr, ValueType, VectorSelector,
 };
-use query::parser::PromQuery;
+use query::parser::{PromQuery, DEFAULT_LOOKBACK_STRING};
 use schemars::JsonSchema;
+use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use session::context::{QueryContext, QueryContextRef};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{ensure, Location, OptionExt, ResultExt};
 use tokio::sync::oneshot::Sender;
 use tokio::sync::{oneshot, Mutex};
 use tower::ServiceBuilder;
@@ -51,10 +52,11 @@ use tower_http::trace::TraceLayer;
 
 use crate::auth::UserProviderRef;
 use crate::error::{
-    AlreadyStartedSnafu, CollectRecordbatchSnafu, InternalSnafu, NotSupportedSnafu, Result,
+    AlreadyStartedSnafu, CollectRecordbatchSnafu, Error, InternalSnafu, NotSupportedSnafu, Result,
     StartHttpSnafu,
 };
 use crate::http::authorize::HttpAuth;
+use crate::prometheus::{FIELD_COLUMN_NAME, TIMESTAMP_COLUMN_NAME};
 use crate::server::Server;
 
 pub const PROM_API_VERSION: &str = "v1";
@@ -88,11 +90,12 @@ impl PromServer {
     }
 
     pub fn make_app(&self) -> Router {
-        // TODO(ruihang): implement format_query, series, labels, values, query_examplars and targets methods
+        // TODO(ruihang): implement format_query, series, values, query_examplars and targets methods
 
         let router = Router::new()
             .route("/query", routing::post(instant_query).get(instant_query))
             .route("/query_range", routing::post(range_query).get(range_query))
+            .route("/labels", routing::post(labels_query).get(labels_query))
             .with_state(self.query_handler.clone());
 
         Router::new()
@@ -175,10 +178,23 @@ pub struct PromData {
     pub result: Vec<PromSeries>,
 }
 
+#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(untagged)]
+pub enum PromResponse {
+    PromData(PromData),
+    Labels(Vec<String>),
+}
+
+impl Default for PromResponse {
+    fn default() -> Self {
+        PromResponse::PromData(Default::default())
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct PromJsonResponse {
     pub status: String,
-    pub data: PromData,
+    pub data: PromResponse,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -196,14 +212,14 @@ impl PromJsonResponse {
     {
         Json(PromJsonResponse {
             status: "error".to_string(),
-            data: PromData::default(),
+            data: PromResponse::default(),
             error: Some(reason.into()),
             error_type: Some(error_type.into()),
             warnings: None,
         })
     }
 
-    pub fn success(data: PromData) -> Json<Self> {
+    pub fn success(data: PromResponse) -> Json<Self> {
         Json(PromJsonResponse {
             status: "success".to_string(),
             data,
@@ -236,10 +252,9 @@ impl PromJsonResponse {
                         result_type,
                     )?)
                 }
-                Output::AffectedRows(_) => Self::error(
-                    "unexpected result",
-                    "expected data result, but got affected rows",
-                ),
+                Output::AffectedRows(_) => {
+                    Self::error("Unexpected", "expected data result, but got affected rows")
+                }
             };
 
             json
@@ -254,10 +269,10 @@ impl PromJsonResponse {
                 if err.status_code() == StatusCode::TableNotFound
                     || err.status_code() == StatusCode::TableColumnNotFound
                 {
-                    Self::success(PromData {
+                    Self::success(PromResponse::PromData(PromData {
                         result_type: result_type_string,
                         ..Default::default()
-                    })
+                    }))
                 } else {
                     Self::error(err.status_code().to_string(), err.to_string())
                 }
@@ -270,7 +285,7 @@ impl PromJsonResponse {
         batches: RecordBatches,
         metric_name: String,
         result_type: Option<ValueType>,
-    ) -> Result<PromData> {
+    ) -> Result<PromResponse> {
         // infer semantic type of each column from schema.
         // TODO(ruihang): wish there is a better way to do this.
         let mut timestamp_column_index = None;
@@ -383,10 +398,10 @@ impl PromJsonResponse {
             .collect::<Result<Vec<_>>>()?;
 
         let result_type_string = result_type.map(|t| t.to_string()).unwrap_or_default();
-        let data = PromData {
+        let data = PromResponse::PromData(PromData {
             result_type: result_type_string,
             result,
-        };
+        });
 
         Ok(data)
     }
@@ -461,6 +476,191 @@ pub async fn range_query(
     let (metric_name, _) =
         retrieve_metric_name_and_result_type(&prom_query.query).unwrap_or_default();
     PromJsonResponse::from_query_result(result, metric_name, Some(ValueType::Matrix)).await
+}
+
+#[derive(Debug, Default, Serialize, JsonSchema)]
+struct Matches(Vec<String>);
+
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct LabelsQuery {
+    start: Option<String>,
+    end: Option<String>,
+    #[serde(flatten)]
+    matches: Matches,
+    db: Option<String>,
+}
+
+// Custom Deserialize method to support parsing repeated match[]
+impl<'de> Deserialize<'de> for Matches {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Matches, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        struct MatchesVisitor;
+
+        impl<'d> Visitor<'d> for MatchesVisitor {
+            type Value = Vec<String>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a string")
+            }
+
+            fn visit_map<M>(self, mut access: M) -> std::result::Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'d>,
+            {
+                let mut matches = Vec::new();
+                while let Some((key, value)) = access.next_entry::<String, String>()? {
+                    if key == "match[]" {
+                        matches.push(value);
+                    }
+                }
+                Ok(matches)
+            }
+        }
+        Ok(Matches(deserializer.deserialize_map(MatchesVisitor)?))
+    }
+}
+
+#[axum_macros::debug_handler]
+pub async fn labels_query(
+    State(handler): State<PromHandlerRef>,
+    Query(params): Query<LabelsQuery>,
+    Form(form_params): Form<LabelsQuery>,
+) -> Json<PromJsonResponse> {
+    let mut queries: Vec<String> = params.matches.0;
+    if queries.is_empty() {
+        queries = form_params.matches.0;
+    }
+    if queries.is_empty() {
+        return PromJsonResponse::error("Unsupported", "match[] parameter is required");
+    }
+
+    let start = params
+        .start
+        .or(form_params.start)
+        .unwrap_or_else(yesterday_rfc3339);
+    let end = params
+        .end
+        .or(form_params.end)
+        .unwrap_or_else(current_time_rfc3339);
+
+    let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
+    let (catalog, schema) = super::parse_catalog_and_schema_from_client_database_name(db);
+    let query_ctx = Arc::new(QueryContext::with(catalog, schema));
+
+    let mut labels: HashSet<String> = HashSet::new();
+    labels.insert(METRIC_NAME.to_string());
+
+    for query in queries {
+        let prom_query = PromQuery {
+            query,
+            start: start.clone(),
+            end: end.clone(),
+            // TODO: find a better value for step
+            step: DEFAULT_LOOKBACK_STRING.to_string(),
+        };
+
+        let result = handler.do_query(&prom_query, query_ctx.clone()).await;
+
+        let response = retrieve_labels_name_from_query_result(result, &mut labels).await;
+
+        if let Err(err) = response {
+            // Prometheus won't report error if querying nonexist label and metric
+            if err.status_code() != StatusCode::TableNotFound
+                && err.status_code() != StatusCode::TableColumnNotFound
+            {
+                return PromJsonResponse::error(err.status_code().to_string(), err.to_string());
+            }
+        }
+    }
+
+    labels.remove(TIMESTAMP_COLUMN_NAME);
+    labels.remove(FIELD_COLUMN_NAME);
+
+    let mut sorted_labels: Vec<String> = labels.into_iter().collect();
+    sorted_labels.sort();
+    PromJsonResponse::success(PromResponse::Labels(sorted_labels))
+}
+
+/// Retrieve labels name from query result
+async fn retrieve_labels_name_from_query_result(
+    result: Result<Output>,
+    labels: &mut HashSet<String>,
+) -> Result<()> {
+    match result? {
+        Output::RecordBatches(batches) => {
+            record_batches_to_labels_name(batches, labels)?;
+            Ok(())
+        }
+        Output::Stream(stream) => {
+            let batches = RecordBatches::try_collect(stream)
+                .await
+                .context(CollectRecordbatchSnafu)?;
+            record_batches_to_labels_name(batches, labels)?;
+            Ok(())
+        }
+        Output::AffectedRows(_) => Err(Error::UnexpectedResult {
+            reason: "expected data result, but got affected rows".to_string(),
+            location: Location::default(),
+        }),
+    }
+}
+
+/// Retrieve labels name from record batches
+fn record_batches_to_labels_name(
+    batches: RecordBatches,
+    labels: &mut HashSet<String>,
+) -> Result<()> {
+    let mut column_indices = Vec::new();
+    let mut field_column_indices = Vec::new();
+    for (i, column) in batches.schema().column_schemas().iter().enumerate() {
+        if let ConcreteDataType::Float64(_) = column.data_type {
+            field_column_indices.push(i);
+        }
+        column_indices.push(i);
+    }
+
+    if field_column_indices.is_empty() {
+        return Err(Error::Internal {
+            err_msg: "no value column found".to_string(),
+        });
+    }
+
+    for batch in batches.iter() {
+        let names = column_indices
+            .iter()
+            .map(|c| batches.schema().column_name_by_index(*c).to_string())
+            .collect::<Vec<_>>();
+
+        let field_columns = field_column_indices
+            .iter()
+            .map(|i| {
+                batch
+                    .column(*i)
+                    .as_any()
+                    .downcast_ref::<Float64Vector>()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        for row_index in 0..batch.num_rows() {
+            // if all field columns are null, skip this row
+            if field_columns
+                .iter()
+                .all(|c| c.get_data(row_index).is_none())
+            {
+                continue;
+            }
+
+            // if a field is not null, record the tag name and return
+            names.iter().for_each(|name| {
+                labels.insert(name.to_string());
+            });
+            return Ok(());
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn retrieve_metric_name_and_result_type(

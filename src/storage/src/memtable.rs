@@ -21,6 +21,7 @@ mod version;
 use std::sync::atomic::{AtomicI64, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use common_time::range::TimestampRange;
 use datatypes::vectors::VectorRef;
 use store_api::storage::{consts, OpType, SequenceNumber};
 
@@ -110,6 +111,9 @@ pub struct IterContext {
     ///
     /// Set to `None` to read all columns.
     pub projected_schema: Option<ProjectedSchemaRef>,
+
+    /// Timestamp range
+    pub time_range: Option<TimestampRange>,
 }
 
 impl Default for IterContext {
@@ -120,6 +124,7 @@ impl Default for IterContext {
             visible_sequence: SequenceNumber::MAX,
             for_flush: false,
             projected_schema: None,
+            time_range: None,
         }
     }
 }

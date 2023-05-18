@@ -388,7 +388,7 @@ impl<S: Checkpoint<Error = Error>, M: MetaAction<Error = Error>> ManifestImplInn
                 // It happens when saving checkpoint successfully, but failed at saving checkpoint metadata(the "__last_checkpoint" file).
                 // Then we try to use the old checkpoint and do the checkpoint next time.
                 // If the old checkpoint was deleted, it's fine that we return the latest checkpoint.
-                // the only side effect is leaving some unused checkpoint checkpoint files,
+                // The only side effect is leaving some unused checkpoint files,
                 // and they will be purged by gc task.
                 warn!("The checkpoint manifest version {} in {} is greater than checkpoint metadata version {}.", self.store.path(), checkpoint.last_version(), version);
 

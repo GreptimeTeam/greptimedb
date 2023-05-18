@@ -15,7 +15,9 @@
 use std::collections::HashMap;
 
 use api::v1::meta::{RangeRequest, RangeResponse};
-use catalog::helper::{CATALOG_KEY_PREFIX, SCHEMA_KEY_PREFIX, TABLE_GLOBAL_KEY_PREFIX};
+use catalog::helper::{
+    build_catalog_prefix, build_schema_prefix, build_table_global_prefix, TABLE_GLOBAL_KEY_PREFIX,
+};
 use snafu::{OptionExt, ResultExt};
 use tonic::codegen::http;
 
@@ -44,7 +46,7 @@ pub struct TableHandler {
 #[async_trait::async_trait]
 impl HttpHandler for CatalogsHandler {
     async fn handle(&self, _: &str, _: &HashMap<String, String>) -> Result<http::Response<String>> {
-        get_http_response_by_prefix(String::from(CATALOG_KEY_PREFIX), &self.kv_store).await
+        get_http_response_by_prefix(build_catalog_prefix(), &self.kv_store).await
     }
 }
 
@@ -60,8 +62,7 @@ impl HttpHandler for SchemasHandler {
             .context(error::MissingRequiredParameterSnafu {
                 param: "catalog_name",
             })?;
-        let prefix = format!("{SCHEMA_KEY_PREFIX}-{catalog}",);
-        get_http_response_by_prefix(prefix, &self.kv_store).await
+        get_http_response_by_prefix(build_schema_prefix(catalog), &self.kv_store).await
     }
 }
 
@@ -83,8 +84,8 @@ impl HttpHandler for TablesHandler {
             .context(error::MissingRequiredParameterSnafu {
                 param: "schema_name",
             })?;
-        let prefix = format!("{TABLE_GLOBAL_KEY_PREFIX}-{catalog}-{schema}",);
-        get_http_response_by_prefix(prefix, &self.kv_store).await
+        get_http_response_by_prefix(build_table_global_prefix(catalog, schema), &self.kv_store)
+            .await
     }
 }
 
@@ -138,6 +139,7 @@ async fn get_keys_by_prefix(key_prefix: String, kv_store: &KvStoreRef) -> Result
     let req = RangeRequest {
         key: key_prefix_u8,
         range_end,
+        keys_only: true,
         ..Default::default()
     };
 
@@ -160,6 +162,10 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::meta::PutRequest;
+    use catalog::helper::{
+        build_catalog_prefix, build_schema_prefix, build_table_global_prefix, CatalogKey,
+        SchemaKey, TableGlobalKey,
+    };
 
     use crate::service::admin::meta::get_keys_by_prefix;
     use crate::service::store::kv::KvStoreRef;
@@ -168,30 +174,77 @@ mod tests {
     #[tokio::test]
     async fn test_get_list_by_prefix() {
         let in_mem = Arc::new(MemStore::new()) as KvStoreRef;
-
+        let catalog_name = "test_catalog";
+        let schema_name = "test_schema";
+        let table_name = "test_table";
+        let catalog = CatalogKey {
+            catalog_name: catalog_name.to_string(),
+        };
         in_mem
             .put(PutRequest {
-                key: "test_key1".as_bytes().to_vec(),
-                value: "test_val1".as_bytes().to_vec(),
+                key: catalog.to_string().as_bytes().to_vec(),
+                value: "".as_bytes().to_vec(),
                 ..Default::default()
             })
             .await
             .unwrap();
 
+        let schema = SchemaKey {
+            catalog_name: catalog_name.to_string(),
+            schema_name: schema_name.to_string(),
+        };
         in_mem
             .put(PutRequest {
-                key: "test_key2".as_bytes().to_vec(),
-                value: "test_val2".as_bytes().to_vec(),
+                key: schema.to_string().as_bytes().to_vec(),
+                value: "".as_bytes().to_vec(),
                 ..Default::default()
             })
             .await
             .unwrap();
 
-        let keys = get_keys_by_prefix(String::from("test_key"), &in_mem)
+        let table1 = TableGlobalKey {
+            catalog_name: catalog_name.to_string(),
+            schema_name: schema_name.to_string(),
+            table_name: table_name.to_string(),
+        };
+        let table2 = TableGlobalKey {
+            catalog_name: catalog_name.to_string(),
+            schema_name: schema_name.to_string(),
+            table_name: "test_table1".to_string(),
+        };
+        in_mem
+            .put(PutRequest {
+                key: table1.to_string().as_bytes().to_vec(),
+                value: "".as_bytes().to_vec(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        in_mem
+            .put(PutRequest {
+                key: table2.to_string().as_bytes().to_vec(),
+                value: "".as_bytes().to_vec(),
+                ..Default::default()
+            })
             .await
             .unwrap();
 
-        assert_eq!("1", keys[0]);
-        assert_eq!("2", keys[1]);
+        let catalog_key = get_keys_by_prefix(build_catalog_prefix(), &in_mem)
+            .await
+            .unwrap();
+        let schema_key = get_keys_by_prefix(build_schema_prefix(schema.catalog_name), &in_mem)
+            .await
+            .unwrap();
+        let table_key = get_keys_by_prefix(
+            build_table_global_prefix(table1.catalog_name, table1.schema_name),
+            &in_mem,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(catalog_name, catalog_key[0]);
+        assert_eq!(schema_name, schema_key[0]);
+        assert_eq!(table_name, table_key[0]);
+        assert_eq!("test_table1", table_key[1]);
     }
 }

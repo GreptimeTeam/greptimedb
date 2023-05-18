@@ -625,7 +625,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             let table_id = table.table_info().ident.table_id;
 
             table
-                .remove_regions(&regions)
+                .drop_regions()
                 .await
                 .map_err(BoxedError::new)
                 .context(table_error::TableOperationSnafu)?;

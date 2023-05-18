@@ -220,7 +220,7 @@ impl LogStore for RaftEngineLogStore {
         Ok(Box::pin(s))
     }
 
-    async fn create_namespace(&mut self, ns: &Self::Namespace) -> Result<(), Self::Error> {
+    async fn create_namespace(&self, ns: &Self::Namespace) -> Result<(), Self::Error> {
         ensure!(
             ns.id != SYSTEM_NAMESPACE,
             IllegalNamespaceSnafu { ns: ns.id }
@@ -237,7 +237,7 @@ impl LogStore for RaftEngineLogStore {
         Ok(())
     }
 
-    async fn delete_namespace(&mut self, ns: &Self::Namespace) -> Result<(), Self::Error> {
+    async fn delete_namespace(&self, ns: &Self::Namespace) -> Result<(), Self::Error> {
         ensure!(
             ns.id != SYSTEM_NAMESPACE,
             IllegalNamespaceSnafu { ns: ns.id }
@@ -343,7 +343,7 @@ mod tests {
     #[tokio::test]
     async fn test_manage_namespace() {
         let dir = create_temp_dir("raft-engine-logstore-test");
-        let mut logstore = RaftEngineLogStore::try_new(LogConfig {
+        let logstore = RaftEngineLogStore::try_new(LogConfig {
             log_file_dir: dir.path().to_str().unwrap().to_string(),
             ..Default::default()
         })

@@ -48,7 +48,7 @@ impl heartbeat_server::Heartbeat for MetaSrv {
         common_runtime::spawn_bg(async move {
             let mut pusher_key = None;
             while let Some(msg) = in_stream.next().await {
-                let mut quit = false;
+                let mut is_not_leader = false;
                 match msg {
                     Ok(req) => {
                         let header = match req.header.as_ref() {
@@ -74,9 +74,7 @@ impl heartbeat_server::Heartbeat for MetaSrv {
                             .await
                             .map_err(|e| e.into());
 
-                        if let Ok(res) = &res {
-                            quit = res.is_not_leader();
-                        }
+                        is_not_leader = res.as_ref().map_or(false, |r| r.is_not_leader());
 
                         tx.send(res).await.expect("working rx");
                     }
@@ -96,7 +94,7 @@ impl heartbeat_server::Heartbeat for MetaSrv {
                     }
                 }
 
-                if quit {
+                if is_not_leader {
                     warn!("Quit because it is no longer the leader");
                     break;
                 }
