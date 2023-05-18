@@ -46,6 +46,7 @@ use crate::manifest::region::RegionManifest;
 use crate::memtable::MemtableBuilderRef;
 use crate::metadata::{RegionMetaImpl, RegionMetadata, RegionMetadataRef};
 pub(crate) use crate::region::writer::schedule_compaction;
+use crate::region::writer::DropContext;
 pub use crate::region::writer::{AlterContext, RegionWriter, RegionWriterRef, WriterContext};
 use crate::schema::compat::CompatWrite;
 use crate::snapshot::SnapshotImpl;
@@ -128,6 +129,10 @@ impl<S: LogStore> Region for RegionImpl<S> {
     async fn close(&self) -> Result<()> {
         decrement_gauge!(crate::metrics::REGION_COUNT, 1.0);
         self.inner.close().await
+    }
+
+    async fn drop_region(&self) -> Result<()> {
+        self.inner.drop_region().await
     }
 
     fn disk_usage_bytes(&self) -> u64 {
@@ -673,6 +678,21 @@ impl<S: LogStore> RegionInner<S> {
     async fn close(&self) -> Result<()> {
         self.writer.close().await?;
         self.manifest.stop().await
+    }
+
+    async fn drop_region(&self) -> Result<()> {
+        logging::info!("Drop region {}, name: {}", self.shared.id, self.shared.name);
+        let drop_ctx = DropContext {
+            shared: &self.shared,
+            wal: &self.wal,
+            manifest: &self.manifest,
+            flush_scheduler: &self.flush_scheduler,
+            compaction_scheduler: &self.compaction_scheduler,
+            sst_layer: &self.sst_layer,
+        };
+
+        self.manifest.stop().await?;
+        self.writer.on_drop(drop_ctx).await
     }
 
     async fn flush(&self, ctx: &FlushContext) -> Result<()> {

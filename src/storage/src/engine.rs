@@ -81,8 +81,10 @@ impl<S: LogStore> StorageEngine for EngineImpl<S> {
         self.inner.create_region(descriptor, opts).await
     }
 
-    async fn drop_region(&self, _ctx: &EngineContext, _region: Self::Region) -> Result<()> {
-        unimplemented!()
+    async fn drop_region(&self, _ctx: &EngineContext, region: Self::Region) -> Result<()> {
+        region.drop_region().await?;
+        self.inner.remove_reigon(region.name());
+        Ok(())
     }
 
     fn get_region(&self, _ctx: &EngineContext, name: &str) -> Result<Option<Self::Region>> {
@@ -433,6 +435,10 @@ impl<S: LogStore> EngineInner<S> {
         self.regions.get_region(name)
     }
 
+    fn remove_reigon(&self, name: &str) {
+        self.regions.remove(name)
+    }
+
     async fn region_store_config(
         &self,
         parent_dir: &str,
@@ -494,23 +500,35 @@ impl<S: LogStore> EngineInner<S> {
 
 #[cfg(test)]
 mod tests {
-    use common_test_util::temp_dir::create_temp_dir;
+    use std::ffi::OsStr;
+    use std::path::Path;
+
+    use common_test_util::temp_dir::{create_temp_dir, TempDir};
     use datatypes::type_id::LogicalTypeId;
+    use datatypes::vectors::{Float32Vector, Int32Vector, TimestampMillisecondVector, VectorRef};
+    use log_store::raft_engine::log_store::RaftEngineLogStore;
     use log_store::test_util::log_store_util;
     use object_store::services::Fs;
-    use store_api::storage::Region;
+    use store_api::storage::{FlushContext, Region, WriteContext, WriteRequest};
 
     use super::*;
     use crate::compaction::noop::NoopCompactionScheduler;
     use crate::test_util::descriptor_util::RegionDescBuilder;
 
-    #[tokio::test]
-    async fn test_create_new_region() {
-        let log_file_dir = create_temp_dir("test_engine_wal");
+    type TestEngine = EngineImpl<RaftEngineLogStore>;
+    type TestRegion = RegionImpl<RaftEngineLogStore>;
+
+    async fn create_engine_and_region(
+        tmp_dir: &TempDir,
+        log_file_dir: &TempDir,
+        region_name: &str,
+        region_id: u64,
+        ctx: &EngineContext,
+    ) -> (TestEngine, TestRegion) {
         let log_file_dir_path = log_file_dir.path().to_str().unwrap();
         let log_store = log_store_util::create_tmp_local_file_log_store(log_file_dir_path).await;
-        let dir = create_temp_dir("test_create_new_region");
-        let store_dir = dir.path().to_string_lossy();
+
+        let store_dir = tmp_dir.path().to_string_lossy();
 
         let mut builder = Fs::default();
         builder.root(&store_dir);
@@ -528,22 +546,97 @@ mod tests {
         )
         .unwrap();
 
-        let region_name = "region-0";
         let desc = RegionDescBuilder::new(region_name)
+            .id(region_id)
             .push_key_column(("k1", LogicalTypeId::Int32, false))
             .push_field_column(("v1", LogicalTypeId::Float32, true))
+            .timestamp(("ts", LogicalTypeId::TimestampMillisecond, false))
             .build();
-        let ctx = EngineContext::default();
+
         let region = engine
-            .create_region(&ctx, desc, &CreateOptions::default())
+            .create_region(ctx, desc, &CreateOptions::default())
             .await
             .unwrap();
 
+        (engine, region)
+    }
+
+    fn parquet_file_num(path: &Path) -> usize {
+        path.read_dir()
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().extension() == Some(OsStr::new("parquet")))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn test_create_new_region() {
+        let dir = create_temp_dir("test_create_region");
+        let log_file_dir = create_temp_dir("test_engine_wal");
+
+        let region_name = "region-0";
+        let region_id = 123456;
+        let ctx = EngineContext::default();
+
+        let (engine, region) =
+            create_engine_and_region(&dir, &log_file_dir, region_name, region_id, &ctx).await;
         assert_eq!(region_name, region.name());
 
         let region2 = engine.get_region(&ctx, region_name).unwrap().unwrap();
         assert_eq!(region_name, region2.name());
 
         assert!(engine.get_region(&ctx, "no such region").unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_drop_region() {
+        common_telemetry::init_default_ut_logging();
+        let dir = create_temp_dir("test_drop_region");
+        let log_file_dir = create_temp_dir("test_engine_wal");
+
+        let region_name = "test_region";
+        let region_id = 123456;
+        let ctx = EngineContext::default();
+
+        let (engine, region) =
+            create_engine_and_region(&dir, &log_file_dir, region_name, region_id, &ctx).await;
+
+        assert_eq!(region_name, region.name());
+
+        let mut wb = region.write_request();
+        let k1 = Arc::new(Int32Vector::from_slice([1, 2, 3])) as VectorRef;
+        let v1 = Arc::new(Float32Vector::from_slice([0.1, 0.2, 0.3])) as VectorRef;
+        let tsv = Arc::new(TimestampMillisecondVector::from_slice([0, 0, 0])) as VectorRef;
+
+        let mut put_data = HashMap::with_capacity(4);
+        put_data.insert("k1".to_string(), k1);
+        put_data.insert("v1".to_string(), v1);
+        put_data.insert("ts".to_string(), tsv);
+
+        wb.put(put_data).unwrap();
+        region.write(&WriteContext::default(), wb).await.unwrap();
+
+        // Flush memtable to sst.
+        region.flush(&FlushContext::default()).await.unwrap();
+        engine.close_region(&ctx, region).await.unwrap();
+
+        let dir_path = dir.path().join(region_name);
+
+        assert_eq!(1, parquet_file_num(&dir_path));
+
+        {
+            let region = engine
+                .open_region(&ctx, region_name, &OpenOptions::default())
+                .await
+                .unwrap()
+                .unwrap();
+
+            engine.drop_region(&ctx, region).await.unwrap();
+            assert!(engine.get_region(&ctx, region_name).unwrap().is_none());
+        }
+
+        // Wait for gc
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(0, parquet_file_num(&dir_path));
     }
 }

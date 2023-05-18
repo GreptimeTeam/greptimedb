@@ -241,6 +241,17 @@ pub enum Error {
     },
 
     #[snafu(display(
+        "Failed to delete WAL namespace, region id: {}, source: {}",
+        region_id,
+        source
+    ))]
+    DeleteWalNamespace {
+        region_id: RegionId,
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display(
         "Sequence of region should increase monotonically (should be {} < {})",
         prev,
         given
@@ -600,6 +611,7 @@ impl ErrorExt for Error {
             CreateDefault { source, .. } => source.status_code(),
             ConvertChunk { source, .. } => source.status_code(),
             MarkWalObsolete { source, .. } => source.status_code(),
+            DeleteWalNamespace { source, .. } => source.status_code(),
             DecodeParquetTimeRange { .. } => StatusCode::Unexpected,
             RateLimited { .. } | StopScheduler { .. } | CompactTaskCancel { .. } => {
                 StatusCode::Internal

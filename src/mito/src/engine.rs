@@ -614,7 +614,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         // Close the table to close all regions. Closing a region is idempotent.
         if let Some((_, table)) = &removed_table {
             table
-                .close()
+                .drop_regions()
                 .await
                 .map_err(BoxedError::new)
                 .context(table_error::TableOperationSnafu)?;

@@ -80,11 +80,11 @@ impl LogStore for NoopLogStore {
         )))))
     }
 
-    async fn create_namespace(&mut self, _ns: &Self::Namespace) -> Result<()> {
+    async fn create_namespace(&self, _ns: &Self::Namespace) -> Result<()> {
         Ok(())
     }
 
-    async fn delete_namespace(&mut self, _ns: &Self::Namespace) -> Result<()> {
+    async fn delete_namespace(&self, _ns: &Self::Namespace) -> Result<()> {
         Ok(())
     }
 
@@ -128,7 +128,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_noop_logstore() {
-        let mut store = NoopLogStore::default();
+        let store = NoopLogStore::default();
         let e = store.entry("".as_bytes(), 1, NamespaceImpl::default());
         store.append(e.clone()).await.unwrap();
         store
