@@ -30,7 +30,7 @@ use api::v1::greptime_request::Request;
 use api::v1::meta::Role;
 use api::v1::{AddColumns, AlterExpr, Column, DdlRequest, InsertRequest};
 use async_trait::async_trait;
-use catalog::remote::MetaKvBackend;
+use catalog::remote::CachedMetaKvBackend;
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
 use common_catalog::consts::MITO_ENGINE;
@@ -137,14 +137,16 @@ impl Instance {
         datanode_clients: Arc<DatanodeClients>,
         plugins: Arc<Plugins>,
     ) -> Result<Self> {
-        let meta_backend = Arc::new(MetaKvBackend {
-            client: meta_client.clone(),
-        });
+        let meta_backend = Arc::new(CachedMetaKvBackend::new(meta_client.clone()));
         let table_routes = Arc::new(TableRoutes::new(meta_client.clone()));
         let partition_manager = Arc::new(PartitionRuleManager::new(table_routes));
 
-        let mut catalog_manager =
-            FrontendCatalogManager::new(meta_backend, partition_manager, datanode_clients.clone());
+        let mut catalog_manager = FrontendCatalogManager::new(
+            meta_backend.clone(),
+            meta_backend,
+            partition_manager,
+            datanode_clients.clone(),
+        );
 
         let dist_instance = DistInstance::new(
             meta_client.clone(),

@@ -1204,6 +1204,7 @@ dependencies = [
  "meta-client",
  "metrics",
  "mito",
+ "moka 0.11.0",
  "object-store",
  "parking_lot",
  "regex",
@@ -3113,7 +3114,7 @@ dependencies = [
  "meter-core",
  "meter-macros",
  "mito",
- "moka",
+ "moka 0.9.7",
  "object-store",
  "openmetrics-parser",
  "partition",
@@ -4776,6 +4777,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mach2"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d0d1830bcd151a6fc4aea1369af235b36c1528fe976b8ff678683c9995eade8"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "maplit"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4985,7 +4995,7 @@ dependencies = [
  "metrics-util",
  "parking_lot",
  "portable-atomic",
- "quanta",
+ "quanta 0.10.1",
  "thiserror",
 ]
 
@@ -5016,7 +5026,7 @@ dependencies = [
  "ordered-float 2.10.0",
  "parking_lot",
  "portable-atomic",
- "quanta",
+ "quanta 0.10.1",
  "radix_trie",
  "sketches-ddsketch",
 ]
@@ -5115,7 +5125,33 @@ dependencies = [
  "num_cpus",
  "once_cell",
  "parking_lot",
- "quanta",
+ "quanta 0.10.1",
+ "rustc_version 0.4.0",
+ "scheduled-thread-pool",
+ "skeptic",
+ "smallvec",
+ "tagptr",
+ "thiserror",
+ "triomphe",
+ "uuid",
+]
+
+[[package]]
+name = "moka"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "934030d03f6191edbb4ba16835ccdb80d560788ac686570a8e2986a0fb59ded8"
+dependencies = [
+ "async-io",
+ "async-lock",
+ "crossbeam-channel",
+ "crossbeam-epoch",
+ "crossbeam-utils",
+ "futures-util",
+ "num_cpus",
+ "once_cell",
+ "parking_lot",
+ "quanta 0.11.0",
  "rustc_version 0.4.0",
  "scheduled-thread-pool",
  "skeptic",
@@ -5847,7 +5883,7 @@ dependencies = [
  "datafusion-expr",
  "datatypes",
  "meta-client",
- "moka",
+ "moka 0.9.7",
  "serde",
  "serde_json",
  "snafu",
@@ -6574,6 +6610,22 @@ dependencies = [
  "once_cell",
  "raw-cpuid",
  "wasi 0.10.0+wasi-snapshot-preview1",
+ "web-sys",
+ "winapi",
+]
+
+[[package]]
+name = "quanta"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8cc73c42f9314c4bdce450c77e6f09ecbddefbeddb1b5979ded332a3913ded33"
+dependencies = [
+ "crossbeam-utils",
+ "libc",
+ "mach2",
+ "once_cell",
+ "raw-cpuid",
+ "wasi 0.11.0+wasi-snapshot-preview1",
  "web-sys",
  "winapi",
 ]

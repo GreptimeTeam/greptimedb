@@ -233,6 +233,9 @@ pub enum Error {
         #[snafu(backtrace)]
         source: table::error::Error,
     },
+
+    #[snafu(display("A generic error has occurred, msg: {}", msg))]
+    Generic { msg: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -253,7 +256,7 @@ impl ErrorExt for Error {
             | Error::EmptyValue { .. }
             | Error::ValueDeserialize { .. } => StatusCode::StorageUnavailable,
 
-            Error::SystemCatalogTypeMismatch { .. } => StatusCode::Internal,
+            Error::Generic { .. } | Error::SystemCatalogTypeMismatch { .. } => StatusCode::Internal,
 
             Error::ReadSystemCatalog { source, .. } | Error::CreateRecordBatch { source } => {
                 source.status_code()

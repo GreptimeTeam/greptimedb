@@ -26,7 +26,7 @@ use catalog::helper::{
     build_catalog_prefix, build_schema_prefix, build_table_global_prefix, CatalogKey, SchemaKey,
     TableGlobalKey, TableGlobalValue,
 };
-use catalog::remote::{Kv, KvBackendRef};
+use catalog::remote::{Kv, KvBackendRef, KvCacheInvalidatorRef};
 use catalog::{
     CatalogManager, CatalogProvider, CatalogProviderRef, DeregisterTableRequest,
     RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest,
@@ -51,6 +51,7 @@ use crate::table::DistTable;
 #[derive(Clone)]
 pub struct FrontendCatalogManager {
     backend: KvBackendRef,
+    backend_cache_invalidtor: KvCacheInvalidatorRef,
     partition_manager: PartitionRuleManagerRef,
     datanode_clients: Arc<DatanodeClients>,
 
@@ -64,11 +65,13 @@ pub struct FrontendCatalogManager {
 impl FrontendCatalogManager {
     pub fn new(
         backend: KvBackendRef,
+        backend_cache_invalidtor: KvCacheInvalidatorRef,
         partition_manager: PartitionRuleManagerRef,
         datanode_clients: Arc<DatanodeClients>,
     ) -> Self {
         Self {
             backend,
+            backend_cache_invalidtor,
             partition_manager,
             datanode_clients,
             dist_instance: None,
@@ -89,6 +92,19 @@ impl FrontendCatalogManager {
 
     pub fn datanode_clients(&self) -> Arc<DatanodeClients> {
         self.datanode_clients.clone()
+    }
+
+    pub async fn invalidate_table(&self, catalog: &str, schema: &str, table: &str) {
+        let tg_key = TableGlobalKey {
+            catalog_name: catalog.into(),
+            schema_name: schema.into(),
+            table_name: table.into(),
+        }
+        .to_string();
+
+        let tg_key = tg_key.as_bytes();
+
+        self.backend_cache_invalidtor.invalidate_key(tg_key).await;
     }
 }
 
