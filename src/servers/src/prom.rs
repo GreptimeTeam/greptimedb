@@ -37,7 +37,7 @@ use promql_parser::parser::{
     AggregateExpr, BinaryExpr, Call, Expr as PromqlExpr, MatrixSelector, ParenExpr, SubqueryExpr,
     UnaryExpr, ValueType, VectorSelector,
 };
-use query::parser::PromQuery;
+use query::parser::{PromQuery, DEFAULT_LOOKBACK_STRING};
 use schemars::JsonSchema;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
@@ -60,7 +60,6 @@ use crate::prometheus::{FIELD_COLUMN_NAME, TIMESTAMP_COLUMN_NAME};
 use crate::server::Server;
 
 pub const PROM_API_VERSION: &str = "v1";
-const DEFAULT_STEP: &str = "1s";
 
 pub type PromHandlerRef = Arc<dyn PromHandler + Send + Sync>;
 
@@ -440,7 +439,7 @@ pub async fn instant_query(
     };
 
     let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
-    let (catalog, schema) = super::parse_catalog_and_schema_from_client_database_name(db);
+    let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
 
     let query_ctx = QueryContext::with(catalog, schema);
 
@@ -474,7 +473,7 @@ pub async fn range_query(
     };
 
     let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
-    let (catalog, schema) = super::parse_catalog_and_schema_from_client_database_name(db);
+    let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
 
     let query_ctx = QueryContext::with(catalog, schema);
 
@@ -552,7 +551,7 @@ pub async fn labels_query(
         .unwrap_or_else(current_time_rfc3339);
 
     let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
-    let (catalog, schema) = super::parse_catalog_and_schema_from_client_database_name(db);
+    let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
     let query_ctx = Arc::new(QueryContext::with(catalog, schema));
 
     let mut labels = HashSet::new();
@@ -564,7 +563,7 @@ pub async fn labels_query(
             start: start.clone(),
             end: end.clone(),
             // TODO: find a better value for step
-            step: DEFAULT_STEP.to_string(),
+            step: DEFAULT_LOOKBACK_STRING.to_string(),
         };
 
         let result = handler.do_query(&prom_query, query_ctx.clone()).await;
@@ -729,7 +728,7 @@ pub async fn label_values_query(
     let start = params.start.unwrap_or_else(yesterday_rfc3339);
     let end = params.end.unwrap_or_else(current_time_rfc3339);
     let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
-    let (catalog, schema) = super::parse_catalog_and_schema_from_client_database_name(db);
+    let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
     let query_ctx = Arc::new(QueryContext::with(catalog, schema));
 
     let mut label_values = HashSet::new();
@@ -740,7 +739,7 @@ pub async fn label_values_query(
             start: start.clone(),
             end: end.clone(),
             // TODO(ccl): find a better value for step
-            step: DEFAULT_STEP.to_string(),
+            step: DEFAULT_LOOKBACK_STRING.to_string(),
         };
         let result = handler.do_query(&prom_query, query_ctx.clone()).await;
         let result = retrieve_label_values(result, &label_name, &mut label_values).await;
