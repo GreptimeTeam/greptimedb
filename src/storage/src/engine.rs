@@ -518,11 +518,11 @@ mod tests {
 
     async fn create_engine_and_region(
         tmp_dir: &TempDir,
+        log_file_dir: &TempDir,
         region_name: &str,
         region_id: u64,
         ctx: &EngineContext,
     ) -> (TestEngine, TestRegion) {
-        let log_file_dir = create_temp_dir("test_engine_wal");
         let log_file_dir_path = log_file_dir.path().to_str().unwrap();
         let log_store = log_store_util::create_tmp_local_file_log_store(log_file_dir_path).await;
 
@@ -570,11 +570,14 @@ mod tests {
     #[tokio::test]
     async fn test_create_new_region() {
         let dir = create_temp_dir("test_create_region");
+        let log_file_dir = create_temp_dir("test_engine_wal");
+
         let region_name = "region-0";
         let region_id = 123456;
         let ctx = EngineContext::default();
 
-        let (engine, region) = create_engine_and_region(&dir, region_name, region_id, &ctx).await;
+        let (engine, region) =
+            create_engine_and_region(&dir, &log_file_dir, region_name, region_id, &ctx).await;
         assert_eq!(region_name, region.name());
 
         let region2 = engine.get_region(&ctx, region_name).unwrap().unwrap();
@@ -587,12 +590,14 @@ mod tests {
     async fn test_drop_region() {
         common_telemetry::init_default_ut_logging();
         let dir = create_temp_dir("test_drop_region");
+        let log_file_dir = create_temp_dir("test_engine_wal");
 
         let region_name = "test_region";
         let region_id = 123456;
         let ctx = EngineContext::default();
 
-        let (engine, region) = create_engine_and_region(&dir, region_name, region_id, &ctx).await;
+        let (engine, region) =
+            create_engine_and_region(&dir, &log_file_dir, region_name, region_id, &ctx).await;
 
         assert_eq!(region_name, region.name());
 
