@@ -20,6 +20,7 @@ use std::{fs, path};
 use api::v1::meta::Role;
 use catalog::remote::MetaKvBackend;
 use catalog::{CatalogManager, CatalogManagerRef, RegisterTableRequest};
+use common_base::paths::CLUSTER_DIR;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use common_error::prelude::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
@@ -82,7 +83,7 @@ pub struct Instance {
 pub type InstanceRef = Arc<Instance>;
 
 impl Instance {
-    pub async fn new(opts: &DatanodeOptions) -> Result<Self> {
+    pub async fn with_opts(opts: &DatanodeOptions) -> Result<Self> {
         let meta_client = match opts.mode {
             Mode::Standalone => None,
             Mode::Distributed => {
@@ -99,10 +100,10 @@ impl Instance {
 
         let compaction_scheduler = create_compaction_scheduler(opts);
 
-        Self::new_with(opts, meta_client, compaction_scheduler).await
+        Self::new(opts, meta_client, compaction_scheduler).await
     }
 
-    pub(crate) async fn new_with(
+    pub(crate) async fn new(
         opts: &DatanodeOptions,
         meta_client: Option<Arc<MetaClient>>,
         compaction_scheduler: CompactionSchedulerRef<RaftEngineLogStore>,
@@ -216,7 +217,9 @@ impl Instance {
             )),
         };
 
-        let procedure_manager = create_procedure_manager(&opts.procedure, object_store).await?;
+        let procedure_manager =
+            create_procedure_manager(opts.node_id.unwrap_or(0), &opts.procedure, object_store)
+                .await?;
         // Register all procedures.
         // Register procedures of the mito engine.
         mito_engine.register_procedure_loaders(&*procedure_manager);
@@ -401,6 +404,7 @@ pub(crate) async fn create_log_store(wal_config: &WalConfig) -> Result<RaftEngin
 }
 
 pub(crate) async fn create_procedure_manager(
+    datanode_id: u64,
     procedure_config: &ProcedureConfig,
     object_store: ObjectStore,
 ) -> Result<ProcedureManagerRef> {
@@ -411,7 +415,12 @@ pub(crate) async fn create_procedure_manager(
 
     let state_store = Arc::new(ObjectStateStore::new(object_store));
 
+    let dn_store_path = format!("{CLUSTER_DIR}dn-{datanode_id}/");
+
+    info!("The datanode internal storage path is: {}", dn_store_path);
+
     let manager_config = ManagerConfig {
+        parent_path: dn_store_path,
         max_retry_times: procedure_config.max_retry_times,
         retry_delay: procedure_config.retry_delay,
         ..Default::default()

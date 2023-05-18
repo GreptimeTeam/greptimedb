@@ -17,6 +17,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use common_base::paths::WAL_DIR;
 use common_base::readable_size::ReadableSize;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
@@ -43,7 +44,7 @@ const DEFAULT_DATA_HOME: &str = "/tmp/greptimedb";
 /// Returns the default wal dir in file storage
 #[inline]
 fn default_wal_dir() -> String {
-    format!("{DEFAULT_DATA_HOME}/wal")
+    format!("{DEFAULT_DATA_HOME}/{WAL_DIR}")
 }
 
 /// Object storage config
@@ -353,7 +354,7 @@ pub struct Datanode {
 
 impl Datanode {
     pub async fn new(opts: DatanodeOptions) -> Result<Datanode> {
-        let instance = Arc::new(Instance::new(&opts).await?);
+        let instance = Arc::new(Instance::with_opts(&opts).await?);
         let services = match opts.mode {
             Mode::Distributed => Some(Services::try_new(instance.clone(), &opts).await?),
             Mode::Standalone => None,

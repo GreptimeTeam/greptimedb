@@ -24,7 +24,6 @@ tcp_nodelay = true
 
 # WAL options, see `standalone.example.toml`.
 [wal]
-dir = "/tmp/greptimedb/wal"
 file_size = "1GB"
 purge_threshold = "50GB"
 purge_interval = "10m"
@@ -34,7 +33,7 @@ sync_write = false
 # Storage options, see `standalone.example.toml`.
 [storage]
 type = "File"
-data_dir = "/tmp/greptimedb/data/"
+data_home = "/tmp/greptimedb/"
 
 # Compaction options, see `standalone.example.toml`.
 [storage.compaction]

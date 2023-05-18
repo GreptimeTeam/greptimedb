@@ -174,7 +174,7 @@ pub(crate) async fn new_fs_object_store(store_config: &ObjectStoreConfig) -> Res
     let data_home = util::normalize_dir(&file_config.data_home);
     fs::create_dir_all(path::Path::new(&data_home))
         .context(error::CreateDirSnafu { dir: &data_home })?;
-    info!("The file storage directory is: {}", &data_home);
+    info!("The file storage home is: {}", &data_home);
 
     let atomic_write_dir = format!("{data_home}/.tmp/");
     clean_temp_dir(&atomic_write_dir)?;

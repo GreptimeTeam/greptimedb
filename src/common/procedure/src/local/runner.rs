@@ -463,7 +463,6 @@ mod tests {
 
     use super::*;
     use crate::local::test_util;
-    use crate::store::proc_path;
     use crate::{ContextProvider, Error, LockKey, Procedure};
 
     const ROOT_ID: &str = "9f805a1f-05f7-490c-9f91-bd56e3cc54c1";
@@ -484,8 +483,13 @@ mod tests {
         }
     }
 
-    async fn check_files(object_store: &ObjectStore, procedure_id: ProcedureId, files: &[&str]) {
-        let dir = proc_path!("{procedure_id}/");
+    async fn check_files(
+        object_store: &ObjectStore,
+        procedure_store: &ProcedureStore,
+        procedure_id: ProcedureId,
+        files: &[&str],
+    ) {
+        let dir = procedure_store.proc_path_with(&format!("{procedure_id}/"));
         let lister = object_store.list(&dir).await.unwrap();
         let mut files_in_dir: Vec<_> = lister
             .map_ok(|de| de.name().to_string())
@@ -578,16 +582,28 @@ mod tests {
         let meta = normal.new_meta(ROOT_ID);
         let ctx = context_without_provider(meta.id);
         let object_store = test_util::new_object_store(&dir);
-        let procedure_store = ProcedureStore::from(object_store.clone());
-        let mut runner = new_runner(meta, Box::new(normal), procedure_store);
+        let procedure_store = ProcedureStore::from_object_store(object_store.clone());
+        let mut runner = new_runner(meta, Box::new(normal), procedure_store.clone());
 
         let res = runner.execute_once(&ctx).await;
         assert!(res.is_continue(), "{res:?}");
-        check_files(&object_store, ctx.procedure_id, first_files).await;
+        check_files(
+            &object_store,
+            &procedure_store,
+            ctx.procedure_id,
+            first_files,
+        )
+        .await;
 
         let res = runner.execute_once(&ctx).await;
         assert!(res.is_done(), "{res:?}");
-        check_files(&object_store, ctx.procedure_id, second_files).await;
+        check_files(
+            &object_store,
+            &procedure_store,
+            ctx.procedure_id,
+            second_files,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -626,7 +642,7 @@ mod tests {
         let meta = suspend.new_meta(ROOT_ID);
         let ctx = context_without_provider(meta.id);
         let object_store = test_util::new_object_store(&dir);
-        let procedure_store = ProcedureStore::from(object_store.clone());
+        let procedure_store = ProcedureStore::from_object_store(object_store.clone());
         let mut runner = new_runner(meta, Box::new(suspend), procedure_store);
 
         let res = runner.execute_once(&ctx).await;
@@ -726,8 +742,8 @@ mod tests {
         let procedure_id = meta.id;
 
         let object_store = test_util::new_object_store(&dir);
-        let procedure_store = ProcedureStore::from(object_store.clone());
-        let mut runner = new_runner(meta.clone(), Box::new(parent), procedure_store);
+        let procedure_store = ProcedureStore::from_object_store(object_store.clone());
+        let mut runner = new_runner(meta.clone(), Box::new(parent), procedure_store.clone());
         let manager_ctx = Arc::new(ManagerContext::new());
         // Manually add this procedure to the manager ctx.
         assert!(manager_ctx.try_insert_procedure(meta));
@@ -744,7 +760,7 @@ mod tests {
         let state = manager_ctx.state(procedure_id).unwrap();
         assert!(state.is_done(), "{state:?}");
         // Files are removed.
-        check_files(&object_store, procedure_id, &[]).await;
+        check_files(&object_store, &procedure_store, procedure_id, &[]).await;
 
         tokio::time::sleep(Duration::from_millis(5)).await;
         // Clean outdated meta.
@@ -770,13 +786,19 @@ mod tests {
         let meta = fail.new_meta(ROOT_ID);
         let ctx = context_without_provider(meta.id);
         let object_store = test_util::new_object_store(&dir);
-        let procedure_store = ProcedureStore::from(object_store.clone());
-        let mut runner = new_runner(meta.clone(), Box::new(fail), procedure_store);
+        let procedure_store = ProcedureStore::from_object_store(object_store.clone());
+        let mut runner = new_runner(meta.clone(), Box::new(fail), procedure_store.clone());
 
         let res = runner.execute_once(&ctx).await;
         assert!(res.is_failed(), "{res:?}");
         assert!(meta.state().is_failed());
-        check_files(&object_store, ctx.procedure_id, &["0000000000.rollback"]).await;
+        check_files(
+            &object_store,
+            &procedure_store,
+            ctx.procedure_id,
+            &["0000000000.rollback"],
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -805,8 +827,8 @@ mod tests {
         let meta = retry_later.new_meta(ROOT_ID);
         let ctx = context_without_provider(meta.id);
         let object_store = test_util::new_object_store(&dir);
-        let procedure_store = ProcedureStore::from(object_store.clone());
-        let mut runner = new_runner(meta.clone(), Box::new(retry_later), procedure_store);
+        let procedure_store = ProcedureStore::from_object_store(object_store.clone());
+        let mut runner = new_runner(meta.clone(), Box::new(retry_later), procedure_store.clone());
 
         let res = runner.execute_once(&ctx).await;
         assert!(res.is_retry_later(), "{res:?}");
@@ -815,7 +837,13 @@ mod tests {
         let res = runner.execute_once(&ctx).await;
         assert!(res.is_done(), "{res:?}");
         assert!(meta.state().is_done());
-        check_files(&object_store, ctx.procedure_id, &["0000000000.commit"]).await;
+        check_files(
+            &object_store,
+            &procedure_store,
+            ctx.procedure_id,
+            &["0000000000.commit"],
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -832,7 +860,7 @@ mod tests {
         let dir = create_temp_dir("exceed_max_retry_later");
         let meta = exceed_max_retry_later.new_meta(ROOT_ID);
         let object_store = test_util::new_object_store(&dir);
-        let procedure_store = ProcedureStore::from(object_store.clone());
+        let procedure_store = ProcedureStore::from_object_store(object_store.clone());
         let mut runner = new_runner(
             meta.clone(),
             Box::new(exceed_max_retry_later),
@@ -906,7 +934,7 @@ mod tests {
         let meta = parent.new_meta(ROOT_ID);
 
         let object_store = test_util::new_object_store(&dir);
-        let procedure_store = ProcedureStore::from(object_store.clone());
+        let procedure_store = ProcedureStore::from_object_store(object_store.clone());
         let mut runner = new_runner(meta.clone(), Box::new(parent), procedure_store);
 
         let manager_ctx = Arc::new(ManagerContext::new());

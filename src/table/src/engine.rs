@@ -15,6 +15,7 @@
 use std::fmt::{self, Display};
 use std::sync::Arc;
 
+use common_base::paths::DATA_DIR;
 use common_procedure::BoxedProcedure;
 use store_api::storage::RegionId;
 
@@ -153,7 +154,7 @@ pub fn region_id(table_id: TableId, n: u32) -> RegionId {
 
 #[inline]
 pub fn table_dir(catalog_name: &str, schema_name: &str, table_id: TableId) -> String {
-    format!("{catalog_name}/{schema_name}/{table_id}/")
+    format!("{DATA_DIR}{catalog_name}/{schema_name}/{table_id}/")
 }
 
 #[cfg(test)]
