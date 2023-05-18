@@ -167,7 +167,7 @@ pub fn get_test_store_config(
 
             (
                 ObjectStoreConfig::File(FileConfig {
-                    data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
+                    data_home: data_tmp_dir.path().to_str().unwrap().to_string(),
                 }),
                 TempDirGuard::File(data_tmp_dir),
             )

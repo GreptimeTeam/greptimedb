@@ -1,3 +1,18 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! object storage utilities
 use std::sync::Arc;
 use std::{fs, path};
 
@@ -157,16 +172,16 @@ pub(crate) async fn new_fs_object_store(store_config: &ObjectStoreConfig) -> Res
         ObjectStoreConfig::File(config) => config,
         _ => unreachable!(),
     };
-    let data_dir = util::normalize_dir(&file_config.data_dir);
-    fs::create_dir_all(path::Path::new(&data_dir))
-        .context(error::CreateDirSnafu { dir: &data_dir })?;
-    info!("The file storage directory is: {}", &data_dir);
+    let data_home = util::normalize_dir(&file_config.data_home);
+    fs::create_dir_all(path::Path::new(&data_home))
+        .context(error::CreateDirSnafu { dir: &data_home })?;
+    info!("The file storage directory is: {}", &data_home);
 
-    let atomic_write_dir = format!("{data_dir}/.tmp/");
+    let atomic_write_dir = format!("{data_home}/.tmp/");
     clean_temp_dir(&atomic_write_dir)?;
 
     let mut builder = FsBuilder::default();
-    builder.root(&data_dir).atomic_write_dir(&atomic_write_dir);
+    builder.root(&data_home).atomic_write_dir(&atomic_write_dir);
 
     let object_store = ObjectStore::new(builder)
         .context(error::InitBackendSnafu)?

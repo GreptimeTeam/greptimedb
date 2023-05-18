@@ -91,7 +91,7 @@ struct StartCommand {
     #[clap(short, long)]
     config_file: Option<String>,
     #[clap(long)]
-    data_dir: Option<String>,
+    data_home: Option<String>,
     #[clap(long)]
     wal_dir: Option<String>,
     #[clap(long)]
@@ -147,9 +147,9 @@ impl StartCommand {
             .fail();
         }
 
-        if let Some(data_dir) = &self.data_dir {
+        if let Some(data_home) = &self.data_home {
             opts.storage.store = ObjectStoreConfig::File(FileConfig {
-                data_dir: data_dir.clone(),
+                data_home: data_home.clone(),
             });
         }
 
@@ -223,7 +223,7 @@ mod tests {
 
             [storage]
             type = "File"
-            data_dir = "/tmp/greptimedb/data/"
+            data_home = "/tmp/greptimedb/data/"
 
             [storage.compaction]
             max_inflight_tasks = 3
@@ -273,8 +273,8 @@ mod tests {
         assert!(tcp_nodelay);
 
         match &options.storage.store {
-            ObjectStoreConfig::File(FileConfig { data_dir, .. }) => {
-                assert_eq!("/tmp/greptimedb/data/", data_dir)
+            ObjectStoreConfig::File(FileConfig { data_home, .. }) => {
+                assert_eq!("/tmp/greptimedb/data/", data_home)
             }
             ObjectStoreConfig::S3 { .. } => unreachable!(),
             ObjectStoreConfig::Oss { .. } => unreachable!(),
@@ -383,7 +383,7 @@ mod tests {
 
             [storage]
             type = "File"
-            data_dir = "/tmp/greptimedb/data/"
+            data_home = "/tmp/greptimedb/data/"
 
             [storage.compaction]
             max_inflight_tasks = 3

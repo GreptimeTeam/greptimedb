@@ -37,15 +37,13 @@ use crate::server::Services;
 
 pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize(1024);
 
+/// Default data home in file storage
 const DEFAULT_DATA_HOME: &str = "/tmp/greptimedb";
 
+/// Returns the default wal dir in file storage
 #[inline]
 fn default_wal_dir() -> String {
     format!("{DEFAULT_DATA_HOME}/wal")
-}
-#[inline]
-fn default_data_dir() -> String {
-    format!("{DEFAULT_DATA_HOME}/data")
 }
 
 /// Object storage config
@@ -71,7 +69,7 @@ pub struct StorageConfig {
 #[derive(Debug, Clone, Serialize, Default, Deserialize)]
 #[serde(default)]
 pub struct FileConfig {
-    pub data_dir: String,
+    pub data_home: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,7 +133,7 @@ impl Default for OssConfig {
 impl Default for ObjectStoreConfig {
     fn default() -> Self {
         ObjectStoreConfig::File(FileConfig {
-            data_dir: default_data_dir(),
+            data_home: DEFAULT_DATA_HOME.to_string(),
         })
     }
 }
@@ -304,7 +302,6 @@ impl Default for ProcedureConfig {
 #[serde(default)]
 pub struct DatanodeOptions {
     pub mode: Mode,
-    pub data_home: String,
     pub enable_memory_catalog: bool,
     pub node_id: Option<u64>,
     pub rpc_addr: String,
@@ -324,7 +321,6 @@ impl Default for DatanodeOptions {
     fn default() -> Self {
         Self {
             mode: Mode::Standalone,
-            data_home: DEFAULT_DATA_HOME.to_string(),
             enable_memory_catalog: false,
             node_id: None,
             rpc_addr: "127.0.0.1:3001".to_string(),
