@@ -24,7 +24,7 @@ use common_telemetry::logging;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use table::engine::{EngineContext, TableEngineProcedureRef, TableEngineRef, TableReference};
-use table::requests::CreateTableRequest;
+use table::requests::{CreateTableRequest, OpenTableRequest};
 
 use crate::error::{
     AccessCatalogSnafu, CatalogNotFoundSnafu, DeserializeProcedureSnafu, SchemaNotFoundSnafu,
@@ -248,12 +248,21 @@ impl CreateTableProcedure {
             return Ok(Status::Done);
         }
 
+        // If we recover the procedure from json, then the table engine hasn't open this table yet,
+        // so we need to use `open_table()` instead of `get_table()`.
         let engine_ctx = EngineContext::default();
-        let table_ref = self.data.table_ref();
-        // Safety: The procedure owns the lock so the table should exist.
+        let open_req = OpenTableRequest {
+            catalog_name: self.data.request.catalog_name.clone(),
+            schema_name: self.data.request.schema_name.clone(),
+            table_name: self.data.request.table_name.clone(),
+            table_id: self.data.request.id,
+            region_numbers: self.data.request.region_numbers.clone(),
+        };
+        // Safety: The table is already created.
         let table = self
             .table_engine
-            .get_table(&engine_ctx, &table_ref)
+            .open_table(&engine_ctx, open_req)
+            .await
             .map_err(Error::from_error_ext)?
             .unwrap();
 
