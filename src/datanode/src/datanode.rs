@@ -17,7 +17,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use common_base::paths::WAL_DIR;
 use common_base::readable_size::ReadableSize;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
@@ -40,12 +39,6 @@ pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize(1024);
 
 /// Default data home in file storage
 const DEFAULT_DATA_HOME: &str = "/tmp/greptimedb";
-
-/// Returns the default wal dir in file storage
-#[inline]
-fn default_wal_dir() -> String {
-    format!("{DEFAULT_DATA_HOME}/{WAL_DIR}")
-}
 
 /// Object storage config
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,7 +136,7 @@ impl Default for ObjectStoreConfig {
 #[serde(default)]
 pub struct WalConfig {
     // wal directory
-    pub dir: String,
+    pub dir: Option<String>,
     // wal file size in bytes
     pub file_size: ReadableSize,
     // wal purge threshold in bytes
@@ -160,7 +153,7 @@ pub struct WalConfig {
 impl Default for WalConfig {
     fn default() -> Self {
         Self {
-            dir: default_wal_dir(),
+            dir: None,
             file_size: ReadableSize::gb(1),        // log file size 1G
             purge_threshold: ReadableSize::gb(50), // purge threshold 50G
             purge_interval: Duration::from_secs(600),

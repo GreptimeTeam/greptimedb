@@ -449,7 +449,7 @@ mod tests {
         );
         assert!(fe_opts.influxdb_options.as_ref().unwrap().enable);
 
-        assert_eq!("/tmp/greptimedb/test/wal", dn_opts.wal.dir);
+        assert_eq!("/tmp/greptimedb/test/wal", dn_opts.wal.dir.unwrap());
         match &dn_opts.storage.store {
             datanode::datanode::ObjectStoreConfig::S3(s3_config) => {
                 assert_eq!(

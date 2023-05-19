@@ -14,7 +14,6 @@
 
 use std::env;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,6 +23,7 @@ use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID, MITO_ENGINE,
 };
 use common_runtime::Builder as RuntimeBuilder;
+use common_test_util::ports;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datanode::datanode::{
     DatanodeOptions, FileConfig, ObjectStoreConfig, OssConfig, ProcedureConfig, S3Config,
@@ -38,8 +38,6 @@ use frontend::instance::Instance as FeInstance;
 use object_store::services::{Oss, S3};
 use object_store::test_util::TempFolder;
 use object_store::ObjectStore;
-use once_cell::sync::OnceCell;
-use rand::Rng;
 use secrecy::ExposeSecret;
 use servers::grpc::GrpcServer;
 use servers::http::{HttpOptions, HttpServerBuilder};
@@ -52,14 +50,6 @@ use servers::Mode;
 use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineRef};
 use table::requests::{CreateTableRequest, TableOptions};
-
-static PORTS: OnceCell<AtomicUsize> = OnceCell::new();
-
-fn get_port() -> usize {
-    PORTS
-        .get_or_init(|| AtomicUsize::new(rand::thread_rng().gen_range(3500..3900)))
-        .fetch_add(1, Ordering::Relaxed)
-}
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum StorageType {
@@ -220,7 +210,7 @@ pub fn create_tmp_dir_and_datanode_opts(
 pub fn create_datanode_opts(store: ObjectStoreConfig, wal_dir: String) -> DatanodeOptions {
     DatanodeOptions {
         wal: WalConfig {
-            dir: wal_dir,
+            dir: Some(wal_tmp_dir.path().to_str().unwrap().to_string()),
             ..Default::default()
         },
         storage: StorageConfig {
@@ -300,7 +290,12 @@ pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router
         .await
         .unwrap();
     instance.start().await.unwrap();
-    let http_server = HttpServerBuilder::new(HttpOptions::default())
+
+    let http_opts = HttpOptions {
+        addr: format!("127.0.0.1:{}", ports::get_port()),
+        ..Default::default()
+    };
+    let http_server = HttpServerBuilder::new(http_opts)
         .with_sql_handler(ServerSqlQueryHandlerAdaptor::arc(Arc::new(
             frontend_instance,
         )))
@@ -327,8 +322,14 @@ pub async fn setup_test_http_app_with_frontend(
     )
     .await
     .unwrap();
+
+    let http_opts = HttpOptions {
+        addr: format!("127.0.0.1:{}", ports::get_port()),
+        ..Default::default()
+    };
+
     let frontend_ref = Arc::new(frontend);
-    let http_server = HttpServerBuilder::new(HttpOptions::default())
+    let http_server = HttpServerBuilder::new(http_opts)
         .with_sql_handler(ServerSqlQueryHandlerAdaptor::arc(frontend_ref.clone()))
         .with_grpc_handler(ServerGrpcQueryHandlerAdaptor::arc(frontend_ref.clone()))
         .with_script_handler(frontend_ref)
@@ -376,7 +377,7 @@ pub async fn setup_grpc_server(
             .unwrap(),
     );
 
-    let fe_grpc_addr = format!("127.0.0.1:{}", get_port());
+    let fe_grpc_addr = format!("127.0.0.1:{}", ports::get_port());
 
     let fe_instance = FeInstance::try_new_standalone(instance.clone())
         .await

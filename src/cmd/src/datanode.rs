@@ -154,7 +154,7 @@ impl StartCommand {
         }
 
         if let Some(wal_dir) = &self.wal_dir {
-            opts.wal.dir = wal_dir.clone();
+            opts.wal.dir = Some(wal_dir.clone());
         }
 
         if let Some(http_addr) = &self.http_addr {
@@ -255,7 +255,7 @@ mod tests {
         assert_eq!(2, options.mysql_runtime_size);
         assert_eq!(Some(42), options.node_id);
 
-        assert_eq!("/other/wal", options.wal.dir);
+        assert_eq!("/other/wal", options.wal.dir.unwrap());
         assert_eq!(Duration::from_secs(600), options.wal.purge_interval);
         assert_eq!(1024 * 1024 * 1024, options.wal.file_size.0);
         assert_eq!(1024 * 1024 * 1024 * 50, options.wal.purge_threshold.0);
@@ -465,7 +465,7 @@ mod tests {
                 assert_eq!(opts.storage.compaction.max_purge_tasks, 32);
 
                 // Should be read from cli, cli > config file > env > default values.
-                assert_eq!(opts.wal.dir, "/other/wal/dir");
+                assert_eq!(opts.wal.dir.unwrap(), "/other/wal/dir");
 
                 // Should be default value.
                 assert_eq!(

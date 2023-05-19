@@ -20,7 +20,7 @@ use std::{fs, path};
 use api::v1::meta::Role;
 use catalog::remote::MetaKvBackend;
 use catalog::{CatalogManager, CatalogManagerRef, RegisterTableRequest};
-use common_base::paths::CLUSTER_DIR;
+use common_base::paths::{CLUSTER_DIR, WAL_DIR};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use common_error::prelude::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
@@ -35,7 +35,7 @@ use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOptions;
 use mito::config::EngineConfig as TableEngineConfig;
 use mito::engine::MitoEngine;
-use object_store::ObjectStore;
+use object_store::{util, ObjectStore};
 use query::query_engine::{QueryEngineFactory, QueryEngineRef};
 use servers::Mode;
 use session::context::QueryContext;
@@ -52,7 +52,7 @@ use table::table::numbers::NumbersTable;
 use table::table::TableIdProviderRef;
 use table::Table;
 
-use crate::datanode::{DatanodeOptions, ProcedureConfig, WalConfig};
+use crate::datanode::{DatanodeOptions, ObjectStoreConfig, ProcedureConfig, WalConfig};
 use crate::error::{
     self, CatalogSnafu, MetaClientInitSnafu, MissingMetasrvOptsSnafu, MissingNodeIdSnafu,
     NewCatalogSnafu, OpenLogStoreSnafu, RecoverProcedureSnafu, Result, ShutdownInstanceSnafu,
@@ -109,7 +109,7 @@ impl Instance {
         compaction_scheduler: CompactionSchedulerRef<RaftEngineLogStore>,
     ) -> Result<Self> {
         let object_store = store::new_object_store(&opts.storage.store).await?;
-        let log_store = Arc::new(create_log_store(&opts.wal).await?);
+        let log_store = Arc::new(create_log_store(&opts.storage.store, &opts.wal).await?);
 
         let mito_engine = Arc::new(DefaultEngine::new(
             TableEngineConfig {
@@ -382,15 +382,28 @@ async fn new_metasrv_client(node_id: u64, meta_config: &MetaClientOptions) -> Re
     Ok(meta_client)
 }
 
-pub(crate) async fn create_log_store(wal_config: &WalConfig) -> Result<RaftEngineLogStore> {
+pub(crate) async fn create_log_store(
+    store_config: &ObjectStoreConfig,
+    wal_config: &WalConfig,
+) -> Result<RaftEngineLogStore> {
+    let wal_dir = match (&wal_config.dir, store_config) {
+        (Some(dir), _) => dir.to_string(),
+        (None, ObjectStoreConfig::File(file_config)) => {
+            format!("{}{WAL_DIR}", util::normalize_dir(&file_config.data_home))
+        }
+        _ => return error::MissingWalDirConfigSnafu {}.fail(),
+    };
+
     // create WAL directory
-    fs::create_dir_all(path::Path::new(&wal_config.dir)).context(error::CreateDirSnafu {
-        dir: &wal_config.dir,
-    })?;
-    info!("Creating logstore with config: {:?}", wal_config);
+    fs::create_dir_all(path::Path::new(&wal_dir))
+        .context(error::CreateDirSnafu { dir: &wal_dir })?;
+    info!(
+        "Creating logstore with config: {:?} and storage path: {}",
+        wal_config, &wal_dir
+    );
     let log_config = LogConfig {
         file_size: wal_config.file_size.0,
-        log_file_dir: wal_config.dir.clone(),
+        log_file_dir: wal_dir,
         purge_interval: wal_config.purge_interval,
         purge_threshold: wal_config.purge_threshold.0,
         read_batch_size: wal_config.read_batch_size,
