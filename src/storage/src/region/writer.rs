@@ -308,9 +308,9 @@ impl RegionWriter {
         let prev_version = version_control.current_manifest_version();
         action_list.set_prev_version(prev_version);
 
-        logging::debug!(
+        logging::info!(
             "Try to remove region {}, action_list: {:?}",
-            drop_ctx.shared.name(),
+            drop_ctx.shared.id(),
             action_list
         );
 
@@ -319,10 +319,19 @@ impl RegionWriter {
         // Mark all data obsolete and delete the namespace in the WAL
         drop_ctx.wal.obsolete(committed_sequence).await?;
         drop_ctx.wal.delete_namespace().await?;
+        logging::info!(
+            "Remove WAL entries in region: {}, committed sequence: {}",
+            drop_ctx.shared.id(),
+            committed_sequence
+        );
 
         // Mark all SSTs deleted
         let files = current_version.ssts().mark_all_files_deleted();
-        logging::debug!("Try to remove all SSTs {:?}", files);
+        logging::info!(
+            "Try to remove all SSTs, region: {}, files: {:?}",
+            drop_ctx.shared.id(),
+            files
+        );
 
         Ok(())
     }
@@ -539,15 +548,10 @@ impl WriterInner {
                     }
                 }
 
-                if let Some(payload) = payload {
-                    num_requests += 1;
-                    // Note that memtables of `Version` may be updated during replay.
-                    let version = version_control.current();
-
-                    if req_sequence > last_sequence {
-                        last_sequence = req_sequence;
-                    } else {
-                        logging::error!(
+                if req_sequence > last_sequence {
+                    last_sequence = req_sequence;
+                } else {
+                    logging::error!(
                             "Sequence should not decrease during replay, found {} <= {}, \
                              region_id: {}, region_name: {}, flushed_sequence: {}, num_requests: {}",
                             req_sequence,
@@ -558,12 +562,17 @@ impl WriterInner {
                             num_requests,
                         );
 
-                        error::SequenceNotMonotonicSnafu {
-                            prev: last_sequence,
-                            given: req_sequence,
-                        }
-                        .fail()?;
+                    error::SequenceNotMonotonicSnafu {
+                        prev: last_sequence,
+                        given: req_sequence,
                     }
+                    .fail()?;
+                }
+
+                if let Some(payload) = payload {
+                    num_requests += 1;
+                    // Note that memtables of `Version` may be updated during replay.
+                    let version = version_control.current();
                     // TODO(yingwen): Trigger flush if the size of memtables reach the flush threshold to avoid
                     // out of memory during replay, but we need to do it carefully to avoid dead lock.
                     let mut inserter = Inserter::new(last_sequence);

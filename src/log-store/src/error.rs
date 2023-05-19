@@ -67,6 +67,19 @@ pub enum Error {
         source: raft_engine::Error,
         location: Location,
     },
+
+    #[snafu(display(
+        "Cannot override compacted entry, namespace: {}, first index: {}, attempt index: {}",
+        namespace,
+        first_index,
+        attempt_index
+    ))]
+    OverrideCompactedEntry {
+        namespace: u64,
+        first_index: u64,
+        attempt_index: u64,
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
