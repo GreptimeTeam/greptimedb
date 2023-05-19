@@ -15,6 +15,7 @@
 #![feature(assert_matches)]
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
@@ -244,6 +245,8 @@ pub async fn datanode_stat(catalog_manager: &CatalogManagerRef) -> (u64, Vec<Reg
                 let region_numbers = &table.table_info().meta.region_numbers;
                 region_number += region_numbers.len() as u64;
 
+                let engine = &table.table_info().meta.engine;
+
                 match table.region_stats() {
                     Ok(stats) => {
                         let stats = stats.into_iter().map(|stat| RegionStat {
@@ -254,6 +257,7 @@ pub async fn datanode_stat(catalog_manager: &CatalogManagerRef) -> (u64, Vec<Reg
                                 table_name: table_name.clone(),
                             }),
                             approximate_bytes: stat.disk_usage_bytes as i64,
+                            attrs: HashMap::from([("engine_name".to_owned(), engine.clone())]),
                             ..Default::default()
                         });
 
