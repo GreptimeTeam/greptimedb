@@ -21,14 +21,11 @@ use common_telemetry::logging::LoggingOptions;
 use datanode::datanode::{Datanode, DatanodeOptions, ProcedureConfig, StorageConfig, WalConfig};
 use datanode::instance::InstanceRef;
 use frontend::frontend::FrontendOptions;
-use frontend::grpc::GrpcOptions;
-use frontend::influxdb::InfluxdbOptions;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
-use frontend::mysql::MysqlOptions;
-use frontend::opentsdb::OpentsdbOptions;
-use frontend::postgres::PostgresOptions;
-use frontend::prom::PromOptions;
-use frontend::prometheus::PrometheusOptions;
+use frontend::service_config::{
+    GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PromOptions,
+    PrometheusOptions,
+};
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};

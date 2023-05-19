@@ -18,13 +18,10 @@ use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
 use servers::Mode;
 
-use crate::grpc::GrpcOptions;
-use crate::influxdb::InfluxdbOptions;
-use crate::mysql::MysqlOptions;
-use crate::opentsdb::OpentsdbOptions;
-use crate::postgres::PostgresOptions;
-use crate::prom::PromOptions;
-use crate::prometheus::PrometheusOptions;
+use crate::service_config::{
+    GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PromOptions,
+    PrometheusOptions,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]

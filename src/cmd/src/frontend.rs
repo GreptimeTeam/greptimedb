@@ -17,9 +17,8 @@ use std::sync::Arc;
 use clap::Parser;
 use common_base::Plugins;
 use frontend::frontend::FrontendOptions;
-use frontend::influxdb::InfluxdbOptions;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
-use frontend::prom::PromOptions;
+use frontend::service_config::{InfluxdbOptions, PromOptions};
 use meta_client::MetaClientOptions;
 use servers::auth::UserProviderRef;
 use servers::tls::{TlsMode, TlsOption};
@@ -227,7 +226,7 @@ mod tests {
     use std::time::Duration;
 
     use common_test_util::temp_dir::create_named_temp_file;
-    use frontend::grpc::GrpcOptions;
+    use frontend::service_config::GrpcOptions;
     use servers::auth::{Identity, Password, UserProviderRef};
 
     use super::*;
