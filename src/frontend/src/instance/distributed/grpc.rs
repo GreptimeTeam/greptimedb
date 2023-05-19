@@ -12,22 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use alter_expr::Kind;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
-use api::v1::{alter_expr, AddColumn, AddColumns, AlterExpr, DropColumn, DropColumns, RenameTable};
 use async_trait::async_trait;
-use common_error::prelude::BoxedError;
 use common_query::Output;
-use datanode::instance::sql::table_idents_to_full_name;
 use meta_client::rpc::TableName;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ResultExt};
-use sql::statements::alter::{AlterTable, AlterTableOperation};
-use sql::statements::sql_column_def_to_grpc_column_def;
+use snafu::OptionExt;
 
-use crate::error::{self, ExternalSnafu, Result};
+use crate::error::{self, Result};
 use crate::instance::distributed::DistInstance;
 
 #[async_trait]
@@ -68,48 +62,4 @@ impl GrpcQueryHandler for DistInstance {
             }
         }
     }
-}
-
-pub(crate) fn to_alter_expr(
-    alter_table: AlterTable,
-    query_ctx: QueryContextRef,
-) -> Result<AlterExpr> {
-    let (catalog_name, schema_name, table_name) =
-        table_idents_to_full_name(alter_table.table_name(), query_ctx)
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)?;
-
-    let kind = match alter_table.alter_operation() {
-        AlterTableOperation::AddConstraint(_) => {
-            return error::NotSupportedSnafu {
-                feat: "ADD CONSTRAINT",
-            }
-            .fail();
-        }
-        AlterTableOperation::AddColumn { column_def } => Kind::AddColumns(AddColumns {
-            add_columns: vec![AddColumn {
-                column_def: Some(
-                    sql_column_def_to_grpc_column_def(column_def)
-                        .map_err(BoxedError::new)
-                        .context(ExternalSnafu)?,
-                ),
-                is_key: false,
-            }],
-        }),
-        AlterTableOperation::DropColumn { name } => Kind::DropColumns(DropColumns {
-            drop_columns: vec![DropColumn {
-                name: name.value.to_string(),
-            }],
-        }),
-        AlterTableOperation::RenameTable { new_table_name } => Kind::RenameTable(RenameTable {
-            new_table_name: new_table_name.to_string(),
-        }),
-    };
-
-    Ok(AlterExpr {
-        catalog_name,
-        schema_name,
-        table_name,
-        kind: Some(kind),
-    })
 }

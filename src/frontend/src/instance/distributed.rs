@@ -340,7 +340,7 @@ impl DistInstance {
                 Ok(Output::AffectedRows(0))
             }
             Statement::Alter(alter_table) => {
-                let expr = grpc::to_alter_expr(alter_table, query_ctx)?;
+                let expr = expr_factory::to_alter_expr(alter_table, query_ctx)?;
                 self.handle_alter_table(expr).await
             }
             Statement::DropTable(stmt) => {
