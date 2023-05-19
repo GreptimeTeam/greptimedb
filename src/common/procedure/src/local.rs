@@ -684,7 +684,7 @@ mod tests {
     fn test_register_loader() {
         let dir = create_temp_dir("register");
         let config = ManagerConfig {
-            parent_path: "".to_string(),
+            parent_path: "data/".to_string(),
             max_retry_times: 3,
             retry_delay: Duration::from_millis(500),
             ..Default::default()
@@ -755,7 +755,7 @@ mod tests {
     async fn test_submit_procedure() {
         let dir = create_temp_dir("submit");
         let config = ManagerConfig {
-            parent_path: "".to_string(),
+            parent_path: "data/".to_string(),
             max_retry_times: 3,
             retry_delay: Duration::from_millis(500),
             ..Default::default()
@@ -805,7 +805,7 @@ mod tests {
     async fn test_state_changed_on_err() {
         let dir = create_temp_dir("on_err");
         let config = ManagerConfig {
-            parent_path: "".to_string(),
+            parent_path: "data/".to_string(),
             max_retry_times: 3,
             retry_delay: Duration::from_millis(500),
             ..Default::default()
@@ -868,7 +868,7 @@ mod tests {
         let dir = create_temp_dir("remove_outdated_meta_task");
         let object_store = test_util::new_object_store(&dir);
         let config = ManagerConfig {
-            parent_path: "".to_string(),
+            parent_path: "data/".to_string(),
             max_retry_times: 3,
             retry_delay: Duration::from_millis(500),
             remove_outdated_meta_task_interval: Duration::from_millis(1),

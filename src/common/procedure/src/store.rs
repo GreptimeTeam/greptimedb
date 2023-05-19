@@ -27,7 +27,7 @@ use crate::{BoxedProcedure, ProcedureId};
 pub mod state_store;
 
 /// Key prefix of procedure store.
-pub(crate) const PROC_PATH: &str = "procedure/";
+const PROC_PATH: &str = "procedure/";
 
 /// Serialized data of a procedure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,7 +81,7 @@ impl ProcedureStore {
             step,
         };
         let key = ParsedKey {
-            parent_path: self.proc_path.to_string(),
+            prefix: self.proc_path.to_string(),
             procedure_id,
             step,
             key_type: KeyType::Step,
@@ -101,7 +101,7 @@ impl ProcedureStore {
         step: u32,
     ) -> Result<()> {
         let key = ParsedKey {
-            parent_path: self.proc_path.to_string(),
+            prefix: self.proc_path.to_string(),
             procedure_id,
             step,
             key_type: KeyType::Commit,
@@ -119,7 +119,7 @@ impl ProcedureStore {
         step: u32,
     ) -> Result<()> {
         let key = ParsedKey {
-            parent_path: self.proc_path.to_string(),
+            prefix: self.proc_path.to_string(),
             procedure_id,
             step,
             key_type: KeyType::Rollback,
@@ -254,7 +254,7 @@ impl KeyType {
 /// Key to refer the procedure in the [ProcedureStore].
 #[derive(Debug, PartialEq, Eq)]
 struct ParsedKey {
-    parent_path: String,
+    prefix: String,
     procedure_id: ProcedureId,
     step: u32,
     key_type: KeyType,
@@ -265,7 +265,7 @@ impl fmt::Display for ParsedKey {
         write!(
             f,
             "{}{}/{:010}.{}",
-            self.parent_path,
+            self.prefix,
             self.procedure_id,
             self.step,
             self.key_type.as_str(),
@@ -275,8 +275,8 @@ impl fmt::Display for ParsedKey {
 
 impl ParsedKey {
     /// Try to parse the key from specific `input`.
-    fn parse_str(parent_path: &str, input: &str) -> Option<ParsedKey> {
-        let input = input.strip_prefix(parent_path)?;
+    fn parse_str(prefix: &str, input: &str) -> Option<ParsedKey> {
+        let input = input.strip_prefix(prefix)?;
         let mut iter = input.rsplit('/');
         let name = iter.next()?;
         let id_str = iter.next()?;
@@ -290,7 +290,7 @@ impl ParsedKey {
         let step = step_str.parse().ok()?;
 
         Some(ParsedKey {
-            parent_path: parent_path.to_string(),
+            prefix: prefix.to_string(),
             procedure_id,
             step,
             key_type,
@@ -337,7 +337,7 @@ mod tests {
 
         let procedure_id = ProcedureId::random();
         let key = ParsedKey {
-            parent_path: store.proc_path.to_string(),
+            prefix: store.proc_path.to_string(),
             procedure_id,
             step: 2,
             key_type: KeyType::Step,
@@ -352,7 +352,7 @@ mod tests {
         );
 
         let key = ParsedKey {
-            parent_path: store.proc_path.to_string(),
+            prefix: store.proc_path.to_string(),
             procedure_id,
             step: 2,
             key_type: KeyType::Commit,
@@ -367,7 +367,7 @@ mod tests {
         );
 
         let key = ParsedKey {
-            parent_path: store.proc_path.to_string(),
+            prefix: store.proc_path.to_string(),
             procedure_id,
             step: 2,
             key_type: KeyType::Rollback,

@@ -214,7 +214,7 @@ mod tests {
             tcp_nodelay = true
 
             [wal]
-            dir = "/tmp/greptimedb/wal"
+            dir = "/other/wal"
             file_size = "1GB"
             purge_threshold = "50GB"
             purge_interval = "10m"
@@ -255,6 +255,7 @@ mod tests {
         assert_eq!(2, options.mysql_runtime_size);
         assert_eq!(Some(42), options.node_id);
 
+        assert_eq!("/other/wal", options.wal.dir);
         assert_eq!(Duration::from_secs(600), options.wal.purge_interval);
         assert_eq!(1024 * 1024 * 1024, options.wal.file_size.0);
         assert_eq!(1024 * 1024 * 1024 * 50, options.wal.purge_threshold.0);
