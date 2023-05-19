@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use common_telemetry::logging;
+use common_telemetry::{info, logging};
 use common_time::util;
 use metrics::{decrement_gauge, increment_gauge};
 use snafu::ResultExt;
@@ -319,6 +319,12 @@ impl<S: LogStore> RegionImpl<S> {
 
         let wal = Wal::new(metadata.id(), store_config.log_store);
         wal.obsolete(flushed_sequence).await?;
+        info!(
+            "Obsolete WAL entries on startup, region: {}, flushed sequence: {}",
+            metadata.id(),
+            flushed_sequence
+        );
+
         let shared = Arc::new(SharedData {
             id: metadata.id(),
             name,

@@ -153,6 +153,30 @@ async fn test_manual_flush() {
 }
 
 #[tokio::test]
+async fn test_flush_and_reopen() {
+    common_telemetry::init_default_ut_logging();
+    let dir = create_temp_dir("manual_flush");
+    let store_dir = dir.path().to_str().unwrap();
+    let flush_switch = Arc::new(FlushSwitch::default());
+    let mut tester = FlushTester::new(store_dir, flush_switch.clone()).await;
+
+    tester.put(&[(1000, Some(100))]).await;
+    tester.flush(Some(true)).await;
+    tester.reopen().await;
+    let i = tester
+        .base()
+        .region
+        .inner
+        .shared
+        .version_control
+        .committed_sequence();
+
+    // we wrote a request and flushed the region (involving writing a manifest), thus
+    // committed_sequence should be 2.
+    assert_eq!(2, i);
+}
+
+#[tokio::test]
 async fn test_flush_empty() {
     let dir = create_temp_dir("flush-empty");
     let store_dir = dir.path().to_str().unwrap();
