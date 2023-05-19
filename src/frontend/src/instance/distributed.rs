@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod grpc;
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
+use api::v1::ddl_request::Expr as DdlExpr;
+use api::v1::greptime_request::Request;
 use api::v1::{
     column_def, AlterExpr, CreateDatabaseExpr, CreateTableExpr, DeleteRequest, DropTableExpr,
     FlushTableExpr, InsertRequest, TableId,
@@ -46,6 +46,7 @@ use partition::manager::PartitionInfo;
 use partition::partition::{PartitionBound, PartitionDef};
 use query::error::QueryExecutionSnafu;
 use query::query_engine::SqlStatementExecutor;
+use servers::query_handler::grpc::GrpcQueryHandler;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::{Ident, Value as SqlValue};
@@ -340,7 +341,7 @@ impl DistInstance {
                 Ok(Output::AffectedRows(0))
             }
             Statement::Alter(alter_table) => {
-                let expr = grpc::to_alter_expr(alter_table, query_ctx)?;
+                let expr = expr_factory::to_alter_expr(alter_table, query_ctx)?;
                 self.handle_alter_table(expr).await
             }
             Statement::DropTable(stmt) => {
@@ -595,6 +596,46 @@ impl SqlStatementExecutor for DistInstance {
             .await
             .map_err(BoxedError::new)
             .context(QueryExecutionSnafu)
+    }
+}
+
+#[async_trait]
+impl GrpcQueryHandler for DistInstance {
+    type Error = error::Error;
+
+    async fn do_query(&self, request: Request, ctx: QueryContextRef) -> Result<Output> {
+        match request {
+            Request::Insert(request) => self.handle_dist_insert(request, ctx).await,
+            Request::Delete(request) => self.handle_dist_delete(request, ctx).await,
+            Request::Query(_) => {
+                unreachable!("Query should have been handled directly in Frontend Instance!")
+            }
+            Request::Ddl(request) => {
+                let expr = request.expr.context(error::IncompleteGrpcResultSnafu {
+                    err_msg: "Missing 'expr' in DDL request",
+                })?;
+                match expr {
+                    DdlExpr::CreateDatabase(expr) => self.handle_create_database(expr, ctx).await,
+                    DdlExpr::CreateTable(mut expr) => {
+                        // TODO(LFC): Support creating distributed table through GRPC interface.
+                        // Currently only SQL supports it; how to design the fields in CreateTableExpr?
+                        let _ = self.create_table(&mut expr, None).await;
+                        Ok(Output::AffectedRows(0))
+                    }
+                    DdlExpr::Alter(expr) => self.handle_alter_table(expr).await,
+                    DdlExpr::DropTable(expr) => {
+                        let table_name =
+                            TableName::new(&expr.catalog_name, &expr.schema_name, &expr.table_name);
+                        self.drop_table(table_name).await
+                    }
+                    DdlExpr::FlushTable(expr) => {
+                        let table_name =
+                            TableName::new(&expr.catalog_name, &expr.schema_name, &expr.table_name);
+                        self.flush_table(table_name, expr.region_id).await
+                    }
+                }
+            }
+        }
     }
 }
 

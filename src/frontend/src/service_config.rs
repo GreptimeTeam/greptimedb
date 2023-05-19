@@ -12,19 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
-#![feature(trait_upcasting)]
+pub mod grpc;
+pub mod influxdb;
+pub mod mysql;
+pub mod opentsdb;
+pub mod postgres;
+pub mod prom;
+pub mod prometheus;
 
-pub mod catalog;
-pub mod datanode;
-pub mod error;
-pub mod expr_factory;
-pub mod frontend;
-pub mod heartbeat;
-pub mod instance;
-pub(crate) mod metrics;
-mod script;
-mod server;
-pub mod service_config;
-pub mod statement;
-pub mod table;
+pub use grpc::GrpcOptions;
+pub use influxdb::InfluxdbOptions;
+pub use mysql::MysqlOptions;
+pub use opentsdb::OpentsdbOptions;
+pub use postgres::PostgresOptions;
+pub use prom::PromOptions;
+pub use prometheus::PrometheusOptions;
