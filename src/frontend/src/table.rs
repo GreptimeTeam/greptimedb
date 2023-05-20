@@ -36,6 +36,7 @@ use datafusion::physical_plan::{
 use datafusion_common::DataFusionError;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use meta_client::rpc::TableName;
+use metrics::counter;
 use partition::manager::PartitionRuleManagerRef;
 use partition::splitter::WriteSplitter;
 use snafu::prelude::*;
@@ -82,6 +83,10 @@ impl Table for DistTable {
 
     async fn insert(&self, request: InsertRequest) -> table::Result<usize> {
         meter_insert_request!(request);
+        counter!(
+            crate::metrics::METRIC_INSERT_ROWS_COUNTER,
+            request.rows() as u64
+        );
 
         let splits = self
             .partition_manager

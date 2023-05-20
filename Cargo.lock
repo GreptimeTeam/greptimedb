@@ -3083,6 +3083,7 @@ dependencies = [
  "meta-srv",
  "meter-core",
  "meter-macros",
+ "metrics",
  "mito",
  "moka",
  "object-store",

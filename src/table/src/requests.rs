@@ -243,6 +243,17 @@ pub struct InsertRequest {
     pub region_number: RegionNumber,
 }
 
+impl InsertRequest {
+    /// Returns rows that the insert request contains
+    pub fn rows(&self) -> usize {
+        if let Some(vector) = self.columns_values.values().next() {
+            vector.len()
+        } else {
+            0
+        }
+    }
+}
+
 /// Delete (by primary key) request
 #[derive(Debug)]
 pub struct DeleteRequest {
