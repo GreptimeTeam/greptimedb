@@ -130,17 +130,21 @@ async fn handle_create(
         })?;
 
     let cluster_id = header.as_ref().map_or(0, |h| h.cluster_id);
-    let peers = selector.select(cluster_id, &ctx).await?;
+    let mut peers = selector.select(cluster_id, &ctx).await?;
     if peers.is_empty() {
-        let header = Some(ResponseHeader::failed(
-            cluster_id,
-            Error::no_active_datanodes(),
-        ));
+        warn!("Create table failed due to no active datanodes, table: {table_name:?}");
         return Ok(RouteResponse {
-            header,
+            header: Some(ResponseHeader::failed(
+                cluster_id,
+                Error::no_active_datanodes(),
+            )),
             ..Default::default()
         });
     }
+    // We don't need to keep all peers, just truncate it to the number of partitions.
+    // If the peers are not enough, some peers will be used for multiple partitions.
+    peers.truncate(partitions.len());
+
     let id = table_id_sequence.next().await?;
     table_info.ident.table_id = id as u32;
 
