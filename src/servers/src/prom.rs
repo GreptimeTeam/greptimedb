@@ -96,6 +96,7 @@ impl PromServer {
             .route("/query", routing::post(instant_query).get(instant_query))
             .route("/query_range", routing::post(range_query).get(range_query))
             .route("/labels", routing::post(labels_query).get(labels_query))
+            .route("/series", routing::post(series_query).get(series_query))
             .with_state(self.query_handler.clone());
 
         Router::new()
@@ -183,6 +184,7 @@ pub struct PromData {
 pub enum PromResponse {
     PromData(PromData),
     Labels(Vec<String>),
+    Series(Vec<HashMap<String, String>>),
 }
 
 impl Default for PromResponse {
@@ -583,6 +585,29 @@ pub async fn labels_query(
     PromJsonResponse::success(PromResponse::Labels(sorted_labels))
 }
 
+async fn retrieve_series_from_query_result(
+    result: Result<Output>,
+    series: &mut Vec<HashMap<String, String>>,
+) -> Result<()> {
+    match result? {
+        Output::RecordBatches(batches) => {
+            record_batches_to_series(batches, series)?;
+            Ok(())
+        }
+        Output::Stream(stream) => {
+            let batches = RecordBatches::try_collect(stream)
+                .await
+                .context(CollectRecordbatchSnafu)?;
+            record_batches_to_series(batches, series)?;
+            Ok(())
+        }
+        Output::AffectedRows(_) => Err(Error::UnexpectedResult {
+            reason: "expected data result, but got affected rows".to_string(),
+            location: Location::default(),
+        }),
+    }
+}
+
 /// Retrieve labels name from query result
 async fn retrieve_labels_name_from_query_result(
     result: Result<Output>,
@@ -605,6 +630,23 @@ async fn retrieve_labels_name_from_query_result(
             location: Location::default(),
         }),
     }
+}
+
+fn record_batches_to_series(
+    batches: RecordBatches,
+    series: &mut Vec<HashMap<String, String>>,
+) -> Result<()> {
+    for batch in batches.iter() {
+        for row in batch.rows() {
+            let mut element = HashMap::new();
+            for (idx, column) in row.iter().enumerate() {
+                let column_name = batch.schema.column_name_by_index(idx);
+                element.insert(column_name.to_string(), column.to_string());
+            }
+            series.push(element);
+        }
+    }
+    Ok(())
 }
 
 /// Retrieve labels name from record batches
@@ -698,4 +740,58 @@ fn promql_expr_to_metric_name(expr: &PromqlExpr) -> Option<String> {
             args.args.iter().find_map(|e| promql_expr_to_metric_name(e))
         }
     }
+}
+
+#[axum_macros::debug_handler]
+pub async fn series_query(
+    State(handler): State<PromHandlerRef>,
+    Query(params): Query<LabelsQuery>,
+    Form(form_params): Form<LabelsQuery>,
+) -> Json<PromJsonResponse> {
+    let mut queries: Vec<String> = params.matches.0;
+    if queries.is_empty() {
+        queries = form_params.matches.0;
+    }
+    if queries.is_empty() {
+        return PromJsonResponse::error("Unsupported", "match[] parameter is required");
+    }
+
+    let start = params
+        .start
+        .or(form_params.start)
+        .unwrap_or_else(yesterday_rfc3339);
+    let end = params
+        .end
+        .or(form_params.end)
+        .unwrap_or_else(current_time_rfc3339);
+
+    let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
+    let (catalog, schema) = super::parse_catalog_and_schema_from_client_database_name(db);
+    let query_ctx = Arc::new(QueryContext::with(catalog, schema));
+
+    let mut series = Vec::new();
+    for query in queries {
+        let prom_query = PromQuery {
+            query,
+            start: start.clone(),
+            end: end.clone(),
+            // TODO: find a better value for step
+            step: DEFAULT_LOOKBACK_STRING.to_string(),
+        };
+
+        let result = handler.do_query(&prom_query, query_ctx.clone()).await;
+
+        let response = retrieve_series_from_query_result(result, &mut series).await;
+
+        if let Err(err) = response {
+            // Prometheus won't report error if querying nonexist label and metric
+            if err.status_code() != StatusCode::TableNotFound
+                && err.status_code() != StatusCode::TableColumnNotFound
+            {
+                return PromJsonResponse::error(err.status_code().to_string(), err.to_string());
+            }
+        }
+    }
+
+    PromJsonResponse::success(PromResponse::Series(series))
 }
