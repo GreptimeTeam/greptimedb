@@ -20,7 +20,7 @@ mod update_metadata;
 
 use std::collections::HashSet;
 use std::fmt::Debug;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use common_meta::RegionIdent;
@@ -35,7 +35,6 @@ use common_telemetry::{error, info, warn};
 use failover_start::RegionFailoverStart;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
-use tokio::sync::Mutex;
 
 use crate::error::{Error, RegisterProcedureLoaderSnafu, Result};
 use crate::metasrv::{SelectorContext, SelectorRef};
@@ -47,6 +46,20 @@ pub(crate) struct RegionFailoverManager {
     selector: SelectorRef,
     selector_ctx: SelectorContext,
     running_procedures: Arc<Mutex<HashSet<RegionIdent>>>,
+}
+
+struct FailoverProcedureGuard<'a> {
+    running_procedures: Arc<Mutex<HashSet<RegionIdent>>>,
+    failed_region: &'a RegionIdent,
+}
+
+impl Drop for FailoverProcedureGuard<'_> {
+    fn drop(&mut self) {
+        self.running_procedures
+            .lock()
+            .unwrap()
+            .remove(self.failed_region);
+    }
 }
 
 impl RegionFailoverManager {
@@ -89,16 +102,16 @@ impl RegionFailoverManager {
             })
     }
 
-    async fn insert_running_procedures(&self, failed_region: &RegionIdent) -> bool {
-        let mut procedures = self.running_procedures.lock().await;
+    fn insert_running_procedures(&self, failed_region: &RegionIdent) -> bool {
+        let mut procedures = self.running_procedures.lock().unwrap();
         if procedures.contains(failed_region) {
             return false;
         }
         procedures.insert(failed_region.clone())
     }
 
-    pub(crate) async fn fire_region_failover(&self, failed_region: RegionIdent) {
-        if !self.insert_running_procedures(&failed_region).await {
+    pub(crate) fn fire_region_failover(&self, failed_region: RegionIdent) {
+        if !self.insert_running_procedures(&failed_region) {
             warn!("Region failover procedure for region {failed_region} is already running!");
             return;
         }
@@ -118,23 +131,25 @@ impl RegionFailoverManager {
         let procedure_manager = self.procedure_manager.clone();
         let running_procedures = self.running_procedures.clone();
         common_runtime::spawn_bg(async move {
+            let _guard = FailoverProcedureGuard {
+                running_procedures,
+                failed_region: &failed_region,
+            };
+
             let watcher = &mut match procedure_manager.submit(procedure_with_id).await {
                 Ok(watcher) => watcher,
                 Err(e) => {
-                    error!(e; "Failed to submit region failover procedure {procedure_id} for region {failed_region:?}");
-                    running_procedures.lock().await.remove(&failed_region);
+                    error!(e; "Failed to submit region failover procedure {procedure_id} for region {failed_region}");
                     return;
                 }
             };
 
             if let Err(e) = watcher::wait(watcher).await {
-                error!(e; "Failed to wait region failover procedure {procedure_id} for region {failed_region:?}");
-                running_procedures.lock().await.remove(&failed_region);
+                error!(e; "Failed to wait region failover procedure {procedure_id} for region {failed_region}");
                 return;
             }
 
-            running_procedures.lock().await.remove(&failed_region);
-            info!("Region failover procedure {procedure_id} for region {failed_region:?} is finished!")
+            info!("Region failover procedure {procedure_id} for region {failed_region} is finished successfully!");
         });
     }
 }

@@ -159,7 +159,7 @@ impl FailureDetectRunner {
                         // it will be added back to the failure detectors again.
                         failure_detectors.remove(&r);
 
-                        region_failover_manager.fire_region_failover(r).await
+                        region_failover_manager.fire_region_failover(r)
                     }
                 }
 
