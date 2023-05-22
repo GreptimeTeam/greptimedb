@@ -16,7 +16,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_query::physical_plan::PhysicalPlanRef;
-use common_recordbatch::EmptyRecordBatchStream;
+use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
+use store_api::storage::ScanRequest;
 
 use crate::metadata::{TableInfo, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType};
 use crate::requests::{CreateTableRequest, InsertRequest};
@@ -84,5 +85,9 @@ impl Table for EmptyTable {
     ) -> Result<PhysicalPlanRef> {
         let scan = SimpleTableScan::new(Box::pin(EmptyRecordBatchStream::new(self.schema())));
         Ok(Arc::new(scan))
+    }
+
+    async fn scan_to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
+        Ok(Box::pin(EmptyRecordBatchStream::new(self.schema())))
     }
 }

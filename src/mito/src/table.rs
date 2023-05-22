@@ -27,7 +27,7 @@ use common_error::ext::BoxedError;
 use common_query::logical_plan::Expr;
 use common_query::physical_plan::PhysicalPlanRef;
 use common_recordbatch::error::{ExternalSnafu, Result as RecordBatchResult};
-use common_recordbatch::{RecordBatch, RecordBatchStream};
+use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::{logging, warn};
 use datatypes::schema::Schema;
 use futures::task::{Context, Poll};
@@ -212,6 +212,10 @@ impl<R: Region> Table for MitoTable<R> {
 
         let stream = Box::pin(ChunkStream { schema, stream });
         Ok(Arc::new(SimpleTableScan::new(stream)))
+    }
+
+    async fn scan_to_stream(&self, request: ScanRequest) -> TableResult<SendableRecordBatchStream> {
+        todo!()
     }
 
     fn supports_filters_pushdown(&self, filters: &[&Expr]) -> TableResult<Vec<FilterPushDownType>> {

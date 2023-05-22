@@ -20,7 +20,9 @@ use common_datasource::file_format::parquet::{DefaultParquetFileReaderFactory, P
 use common_datasource::file_format::Format;
 use common_query::physical_plan::{PhysicalPlanAdapter, PhysicalPlanRef};
 use common_query::prelude::Expr;
+use common_query::DfPhysicalPlan;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
+use common_recordbatch::{DfSendableRecordBatchStream, SendableRecordBatchStream};
 use datafusion::common::ToDFSchema;
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::object_store::ObjectStoreUrl;
@@ -116,6 +118,38 @@ fn build_scan_plan<T: FileOpener + Send + 'static>(
     Ok(Arc::new(SimpleTableScan::new(Box::pin(adapter))))
 }
 
+fn build_record_batch_stream<T: FileOpener + Send + 'static>(
+    opener: T,
+    file_schema: Arc<ArrowSchema>,
+    files: &[String],
+    projection: Option<&Vec<usize>>,
+    limit: Option<usize>,
+) -> Result<SendableRecordBatchStream> {
+    let stream = FileStream::new(
+        &FileScanConfig {
+            object_store_url: ObjectStoreUrl::parse("empty://").unwrap(), // won't be used
+            file_schema,
+            file_groups: vec![files
+                .iter()
+                .map(|filename| PartitionedFile::new(filename.to_string(), 0))
+                .collect::<Vec<_>>()],
+            statistics: Default::default(),
+            projection: projection.cloned(),
+            limit,
+            table_partition_cols: vec![],
+            output_ordering: None,
+            infinite_source: false,
+        },
+        0, // partition: hard-code
+        opener,
+        &ExecutionPlanMetricsSet::new(),
+    )
+    .context(error::BuildStreamSnafu)?;
+    let adapter = RecordBatchStreamAdapter::try_new(Box::pin(stream))
+        .context(error::BuildStreamAdapterSnafu)?;
+    Ok(Box::pin(adapter))
+}
+
 fn new_csv_scan_plan(
     _ctx: &CreateScanPlanContext,
     config: &ScanPlanConfig,
@@ -132,6 +166,22 @@ fn new_csv_scan_plan(
     )
 }
 
+fn new_csv_stream(
+    _ctx: &CreateScanPlanContext,
+    config: &ScanPlanConfig,
+    format: &CsvFormat,
+) -> Result<SendableRecordBatchStream> {
+    let file_schema = config.file_schema.arrow_schema().clone();
+    let opener = build_csv_opener(file_schema.clone(), config, format)?;
+    build_record_batch_stream(
+        opener,
+        file_schema,
+        config.files,
+        config.projection,
+        config.limit,
+    )
+}
+
 fn new_json_scan_plan(
     _ctx: &CreateScanPlanContext,
     config: &ScanPlanConfig,
@@ -140,6 +190,22 @@ fn new_json_scan_plan(
     let file_schema = config.file_schema.arrow_schema().clone();
     let opener = build_json_opener(file_schema.clone(), config, format)?;
     build_scan_plan(
+        opener,
+        file_schema,
+        config.files,
+        config.projection,
+        config.limit,
+    )
+}
+
+fn new_json_stream(
+    _ctx: &CreateScanPlanContext,
+    config: &ScanPlanConfig,
+    format: &JsonFormat,
+) -> Result<SendableRecordBatchStream> {
+    let file_schema = config.file_schema.arrow_schema().clone();
+    let opener = build_json_opener(file_schema.clone(), config, format)?;
+    build_record_batch_stream(
         opener,
         file_schema,
         config.files,
@@ -216,6 +282,76 @@ fn new_parquet_scan_plan(
         Arc::new(schema),
         Arc::new(exec),
     )))
+}
+
+fn new_parquet_stream(
+    _ctx: &CreateScanPlanContext,
+    config: &ScanPlanConfig,
+    _format: &ParquetFormat,
+) -> Result<SendableRecordBatchStream> {
+    let file_schema = config.file_schema.arrow_schema().clone();
+    let ScanPlanConfig {
+        files,
+        projection,
+        limit,
+        filters,
+        store,
+        ..
+    } = config;
+
+    let scan_config = FileScanConfig {
+        object_store_url: ObjectStoreUrl::parse("empty://").unwrap(), // won't be used
+        file_schema: file_schema.clone(),
+        file_groups: vec![files
+            .iter()
+            .map(|filename| PartitionedFile::new(filename.to_string(), 0))
+            .collect::<Vec<_>>()],
+        statistics: Default::default(),
+        projection: projection.cloned(),
+        limit: *limit,
+        table_partition_cols: vec![],
+        output_ordering: None,
+        infinite_source: false,
+    };
+
+    let filters = filters
+        .iter()
+        .map(|f| f.df_expr().clone())
+        .collect::<Vec<_>>();
+
+    let filters = if let Some(expr) = conjunction(filters) {
+        let df_schema = file_schema
+            .clone()
+            .to_dfschema_ref()
+            .context(error::ParquetScanPlanSnafu)?;
+
+        let filters = create_physical_expr(&expr, &df_schema, &file_schema, &ExecutionProps::new())
+            .context(error::ParquetScanPlanSnafu)?;
+        Some(filters)
+    } else {
+        None
+    };
+
+    let exec = ParquetExec::new(scan_config, filters, None).with_parquet_file_reader_factory(
+        Arc::new(DefaultParquetFileReaderFactory::new(store.clone())),
+    );
+
+    let projected_schema = if let Some(projection) = config.projection {
+        Arc::new(
+            file_schema
+                .project(projection)
+                .context(error::ProjectSchemaSnafu)?,
+        )
+    } else {
+        file_schema
+    };
+
+    // let schema = Schema::try_from(projected_schema).context(error::ConvertSchemaSnafu)?;
+    // let stream = exec.execute(partition, context)
+    // let adapter = RecordBatchStreamAdapter::try_new(Box::pin(stream))
+    //     .context(error::BuildStreamAdapterSnafu)?;
+    // Ok(Box::pin(adapter))
+    todo!()
 }
 
 #[derive(Debug, Clone)]

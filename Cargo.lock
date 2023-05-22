@@ -1212,6 +1212,7 @@ dependencies = [
  "session",
  "snafu",
  "storage",
+ "store-api",
  "table",
  "tokio",
 ]
@@ -6627,6 +6628,7 @@ dependencies = [
  "sql",
  "statrs",
  "stats-cli",
+ "store-api",
  "streaming-stats",
  "table",
  "tokio",

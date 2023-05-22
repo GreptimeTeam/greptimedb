@@ -16,13 +16,18 @@ mod columns;
 mod tables;
 
 use std::any::Any;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use common_query::physical_plan::PhysicalPlanRef;
+use common_query::prelude::Expr;
+use common_recordbatch::{DfSendableRecordBatchStream, SendableRecordBatchStream};
 use datafusion::datasource::streaming::{PartitionStream, StreamingTable};
+use datatypes::schema::SchemaRef;
 use snafu::ResultExt;
+use store_api::storage::ScanRequest;
 use table::table::adapter::TableAdapter;
-use table::TableRef;
+use table::{Result as TableResult, Table, TableRef};
 
 use self::columns::InformationSchemaColumns;
 use crate::error::{DatafusionSnafu, Result, TableSchemaMismatchSnafu};
@@ -59,44 +64,80 @@ impl SchemaProvider for InformationSchemaProvider {
     }
 
     async fn table(&self, name: &str) -> Result<Option<TableRef>> {
-        let table = match name.to_ascii_lowercase().as_ref() {
-            TABLES => {
-                let inner = Arc::new(InformationSchemaTables::new(
-                    self.catalog_name.clone(),
-                    self.catalog_provider.clone(),
-                ));
-                Arc::new(
-                    StreamingTable::try_new(inner.schema().clone(), vec![inner]).with_context(
-                        |_| DatafusionSnafu {
-                            msg: format!("Failed to get InformationSchema table '{name}'"),
-                        },
-                    )?,
-                )
-            }
-            COLUMNS => {
-                let inner = Arc::new(InformationSchemaColumns::new(
-                    self.catalog_name.clone(),
-                    self.catalog_provider.clone(),
-                ));
-                Arc::new(
-                    StreamingTable::try_new(inner.schema().clone(), vec![inner]).with_context(
-                        |_| DatafusionSnafu {
-                            msg: format!("Failed to get InformationSchema table '{name}'"),
-                        },
-                    )?,
-                )
-            }
+        let stream = match name.to_ascii_lowercase().as_ref() {
+            TABLES => InformationSchemaTables::new(
+                self.catalog_name.clone(),
+                self.catalog_provider.clone(),
+            )
+            .to_stream()?,
+            COLUMNS => InformationSchemaColumns::new(
+                self.catalog_name.clone(),
+                self.catalog_provider.clone(),
+            )
+            .to_stream()?,
             _ => {
                 return Ok(None);
             }
         };
 
-        let table = TableAdapter::new(table).context(TableSchemaMismatchSnafu)?;
-        Ok(Some(Arc::new(table)))
+        Ok(Some(Arc::new(InformationTable::new(stream))))
     }
 
     async fn table_exist(&self, name: &str) -> Result<bool> {
         let normalized_name = name.to_ascii_lowercase();
         Ok(self.tables.contains(&normalized_name))
+    }
+}
+
+pub struct InformationTable {
+    schema: SchemaRef,
+    stream: Arc<Mutex<Option<SendableRecordBatchStream>>>,
+}
+
+impl InformationTable {
+    pub fn new(stream: SendableRecordBatchStream) -> Self {
+        let schema = stream.schema();
+        Self {
+            schema,
+            stream: Arc::new(Mutex::new(Some(stream))),
+        }
+    }
+}
+
+#[async_trait]
+impl Table for InformationTable {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
+    fn table_info(&self) -> table::metadata::TableInfoRef {
+        unreachable!("Should not call table_info() of InformationTable directly")
+    }
+
+    /// Scan the table and returns a SendableRecordBatchStream.
+    async fn scan(
+        &self,
+        projection: Option<&Vec<usize>>,
+        filters: &[Expr],
+        // limit can be used to reduce the amount scanned
+        // from the datasource as a performance optimization.
+        // If set, it contains the amount of rows needed by the `LogicalPlan`,
+        // The datasource should return *at least* this number of rows if available.
+        limit: Option<usize>,
+    ) -> TableResult<PhysicalPlanRef> {
+        unimplemented!()
+    }
+
+    async fn scan_to_stream(
+        &self,
+        _request: ScanRequest,
+    ) -> TableResult<SendableRecordBatchStream> {
+        // TODO(ruihang): remove the second unwrap
+        let stream = self.stream.lock().unwrap().take().unwrap();
+        Ok(stream)
     }
 }

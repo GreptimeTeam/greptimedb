@@ -21,11 +21,12 @@ use common_datasource::object_store::build_backend;
 use common_error::prelude::BoxedError;
 use common_query::physical_plan::PhysicalPlanRef;
 use common_query::prelude::Expr;
+use common_recordbatch::SendableRecordBatchStream;
 use datatypes::schema::SchemaRef;
 use object_store::ObjectStore;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::RegionNumber;
+use store_api::storage::{RegionNumber, ScanRequest};
 use table::error::{self as table_error, Result as TableResult};
 use table::metadata::{RawTableInfo, TableInfo, TableInfoRef, TableType};
 use table::{requests, Table};
@@ -94,6 +95,10 @@ impl Table for ImmutableFileTable {
         )
         .map_err(BoxedError::new)
         .context(table_error::TableOperationSnafu)
+    }
+
+    async fn scan_to_stream(&self, request: ScanRequest) -> TableResult<SendableRecordBatchStream> {
+        todo!()
     }
 
     async fn flush(

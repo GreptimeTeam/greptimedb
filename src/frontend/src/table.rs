@@ -39,7 +39,7 @@ use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use partition::manager::PartitionRuleManagerRef;
 use partition::splitter::WriteSplitter;
 use snafu::prelude::*;
-use store_api::storage::RegionNumber;
+use store_api::storage::{RegionNumber, ScanRequest};
 use table::error::TableOperationSnafu;
 use table::metadata::{FilterPushDownType, TableInfo, TableInfoRef};
 use table::requests::{AlterKind, AlterTableRequest, DeleteRequest, InsertRequest};
@@ -153,6 +153,14 @@ impl Table for DistTable {
             partition_execs,
         };
         Ok(Arc::new(dist_scan))
+    }
+
+    // TODO(ruihang): DistTable should not call this method directly
+    async fn scan_to_stream(
+        &self,
+        request: ScanRequest,
+    ) -> table::Result<SendableRecordBatchStream> {
+        unimplemented!()
     }
 
     fn supports_filters_pushdown(

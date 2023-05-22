@@ -113,58 +113,57 @@ impl TableAdapter {
     }
 }
 
-#[async_trait::async_trait]
-impl Table for TableAdapter {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
+// #[async_trait::async_trait]
+// impl Table for TableAdapter {
+//     fn as_any(&self) -> &dyn Any {
+//         self
+//     }
 
-    fn schema(&self) -> TableSchemaRef {
-        self.schema.clone()
-    }
+//     fn schema(&self) -> TableSchemaRef {
+//         self.schema.clone()
+//     }
 
-    fn table_info(&self) -> TableInfoRef {
-        unreachable!("Should not call table_info of TableAdaptor directly")
-    }
+//     fn table_info(&self) -> TableInfoRef {
+//         unreachable!("Should not call table_info of TableAdaptor directly")
+//     }
 
-    fn table_type(&self) -> TableType {
-        match self.table_provider.table_type() {
-            DfTableType::Base => TableType::Base,
-            DfTableType::View => TableType::View,
-            DfTableType::Temporary => TableType::Temporary,
-        }
-    }
+//     fn table_type(&self) -> TableType {
+//         match self.table_provider.table_type() {
+//             DfTableType::Base => TableType::Base,
+//             DfTableType::View => TableType::View,
+//             DfTableType::Temporary => TableType::Temporary,
+//         }
+//     }
 
-    async fn scan(
-        &self,
-        projection: Option<&Vec<usize>>,
-        filters: &[Expr],
-        limit: Option<usize>,
-    ) -> Result<PhysicalPlanRef> {
-        let ctx = SessionContext::new();
-        let filters: Vec<DfExpr> = filters.iter().map(|e| e.df_expr().clone()).collect();
-        debug!("TableScan filter size: {}", filters.len());
-        let execution_plan = self
-            .table_provider
-            .scan(&ctx.state(), projection, &filters, limit)
-            .await
-            .context(error::DatafusionSnafu)?;
-        let schema: SchemaRef = Arc::new(
-            execution_plan
-                .schema()
-                .try_into()
-                .context(error::SchemaConversionSnafu)?,
-        );
-        Ok(Arc::new(PhysicalPlanAdapter::new(schema, execution_plan)))
-    }
+//     async fn scan(
+//         &self,
+//         projection: Option<&Vec<usize>>,
+//         filters: &[Expr],
+//         limit: Option<usize>,
+//     ) -> Result<PhysicalPlanRef> {
+//         let ctx = SessionContext::new();
+//         let filters: Vec<DfExpr> = filters.iter().map(|e| e.df_expr().clone()).collect();
+//         let execution_plan = self
+//             .table_provider
+//             .scan(&ctx.state(), projection, &filters, limit)
+//             .await
+//             .context(error::DatafusionSnafu)?;
+//         let schema: SchemaRef = Arc::new(
+//             execution_plan
+//                 .schema()
+//                 .try_into()
+//                 .context(error::SchemaConversionSnafu)?,
+//         );
+//         Ok(Arc::new(PhysicalPlanAdapter::new(schema, execution_plan)))
+//     }
 
-    fn supports_filters_pushdown(&self, filters: &[&Expr]) -> Result<Vec<FilterPushDownType>> {
-        self.table_provider
-            .supports_filters_pushdown(&filters.iter().map(|x| x.df_expr()).collect::<Vec<_>>())
-            .context(error::DatafusionSnafu)
-            .map(|v| v.into_iter().map(Into::into).collect::<Vec<_>>())
-    }
-}
+//     fn supports_filters_pushdown(&self, filters: &[&Expr]) -> Result<Vec<FilterPushDownType>> {
+//         self.table_provider
+//             .supports_filters_pushdown(&filters.iter().map(|x| x.df_expr()).collect::<Vec<_>>())
+//             .context(error::DatafusionSnafu)
+//             .map(|v| v.into_iter().map(Into::into).collect::<Vec<_>>())
+//     }
+// }
 
 #[cfg(test)]
 mod tests {
@@ -174,18 +173,18 @@ mod tests {
     use super::*;
     use crate::metadata::TableType::Base;
 
-    #[test]
-    #[should_panic]
-    fn test_table_adaptor_info() {
-        let df_table = Arc::new(EmptyTable::new(Arc::new(arrow::datatypes::Schema::empty())));
-        let table_adapter = TableAdapter::new(df_table).unwrap();
-        let _ = table_adapter.table_info();
-    }
+    // #[test]
+    // #[should_panic]
+    // fn test_table_adaptor_info() {
+    //     let df_table = Arc::new(EmptyTable::new(Arc::new(arrow::datatypes::Schema::empty())));
+    //     let table_adapter = TableAdapter::new(df_table).unwrap();
+    //     let _ = table_adapter.table_info();
+    // }
 
-    #[test]
-    fn test_table_adaptor_type() {
-        let df_table = Arc::new(EmptyTable::new(Arc::new(arrow::datatypes::Schema::empty())));
-        let table_adapter = TableAdapter::new(df_table).unwrap();
-        assert_eq!(Base, table_adapter.table_type());
-    }
+    // #[test]
+    // fn test_table_adaptor_type() {
+    //     let df_table = Arc::new(EmptyTable::new(Arc::new(arrow::datatypes::Schema::empty())));
+    //     let table_adapter = TableAdapter::new(df_table).unwrap();
+    //     assert_eq!(Base, table_adapter.table_type());
+    // }
 }

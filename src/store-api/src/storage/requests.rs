@@ -49,6 +49,13 @@ pub struct ScanRequest {
     pub projection: Option<Vec<usize>>,
     /// Filters pushed down
     pub filters: Vec<Expr>,
+    /// Expected output ordering. This is only a hint and isn't guaranteed.
+    pub output_ordering: Option<Vec<usize>>,
+    /// limit can be used to reduce the amount scanned
+    /// from the datasource as a performance optimization.
+    /// If set, it contains the amount of rows needed by the caller,
+    /// The data source should return *at least* this number of rows if available.
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug)]
