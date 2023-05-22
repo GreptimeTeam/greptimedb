@@ -8688,6 +8688,7 @@ dependencies = [
  "common-catalog",
  "common-error",
  "common-procedure",
+ "common-procedure-test",
  "common-telemetry",
  "common-test-util",
  "datatypes",
