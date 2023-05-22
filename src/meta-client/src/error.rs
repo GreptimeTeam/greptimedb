@@ -18,13 +18,6 @@ use snafu::Location;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Failed to connect to {}, source: {}", url, source))]
-    ConnectFailed {
-        url: String,
-        source: tonic::transport::Error,
-        location: Location,
-    },
-
     #[snafu(display("Illegal GRPC client state: {}", err_msg))]
     IllegalGrpcClientState { err_msg: String, location: Location },
 
@@ -82,8 +75,7 @@ impl ErrorExt for Error {
 
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::ConnectFailed { .. }
-            | Error::IllegalGrpcClientState { .. }
+            Error::IllegalGrpcClientState { .. }
             | Error::TonicStatus { .. }
             | Error::AskLeader { .. }
             | Error::NoLeader { .. }

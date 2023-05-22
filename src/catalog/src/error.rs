@@ -186,12 +186,6 @@ pub enum Error {
         source: table::error::Error,
     },
 
-    #[snafu(display("Failure during SchemaProvider operation, source: {}", source))]
-    SchemaProviderOperation {
-        #[snafu(backtrace)]
-        source: BoxedError,
-    },
-
     #[snafu(display("{source}"))]
     Internal {
         #[snafu(backtrace)]
@@ -221,29 +215,8 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
-    #[snafu(display("Failed to serialize or deserialize catalog entry: {}", source))]
-    CatalogEntrySerde {
-        #[snafu(backtrace)]
-        source: common_catalog::error::Error,
-    },
-
     #[snafu(display("Illegal access to catalog: {} and schema: {}", catalog, schema))]
     QueryAccessDenied { catalog: String, schema: String },
-
-    #[snafu(display(
-        "Failed to get region stats, catalog: {}, schema: {}, table: {}, source: {}",
-        catalog,
-        schema,
-        table,
-        source
-    ))]
-    RegionStats {
-        catalog: String,
-        schema: String,
-        table: String,
-        #[snafu(backtrace)]
-        source: table::error::Error,
-    },
 
     #[snafu(display("Invalid system table definition: {err_msg}"))]
     InvalidSystemTableDef { err_msg: String, location: Location },
@@ -285,9 +258,7 @@ impl ErrorExt for Error {
             Error::ReadSystemCatalog { source, .. } | Error::CreateRecordBatch { source } => {
                 source.status_code()
             }
-            Error::InvalidCatalogValue { source, .. } | Error::CatalogEntrySerde { source } => {
-                source.status_code()
-            }
+            Error::InvalidCatalogValue { source, .. } => source.status_code(),
 
             Error::TableExists { .. } => StatusCode::TableAlreadyExists,
             Error::TableNotExist { .. } => StatusCode::TableNotFound,
@@ -301,7 +272,6 @@ impl ErrorExt for Error {
             | Error::OpenTable { source, .. }
             | Error::CreateTable { source, .. }
             | Error::DeregisterTable { source, .. }
-            | Error::RegionStats { source, .. }
             | Error::TableSchemaMismatch { source } => source.status_code(),
 
             Error::MetaSrv { source, .. } => source.status_code(),
@@ -309,9 +279,9 @@ impl ErrorExt for Error {
             Error::SystemCatalogTableScanExec { source } => source.status_code(),
             Error::InvalidTableInfoInCatalog { source } => source.status_code(),
 
-            Error::CompileScriptInternal { source }
-            | Error::SchemaProviderOperation { source }
-            | Error::Internal { source } => source.status_code(),
+            Error::CompileScriptInternal { source } | Error::Internal { source } => {
+                source.status_code()
+            }
 
             Error::Unimplemented { .. } | Error::NotSupported { .. } => StatusCode::Unsupported,
             Error::QueryAccessDenied { .. } => StatusCode::AccessDenied,

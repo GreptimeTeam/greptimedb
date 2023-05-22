@@ -78,9 +78,6 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Table querying not found: {}", name))]
-    TableNotFound { name: String, location: Location },
-
     #[snafu(display("Cannot convert plan doesn't belong to GreptimeDB"))]
     UnknownPlan { location: Location },
 
@@ -139,7 +136,6 @@ impl ErrorExt for Error {
             | Error::EmptyExpr { .. }
             | Error::MissingField { .. }
             | Error::InvalidParameters { .. }
-            | Error::TableNotFound { .. }
             | Error::SchemaNotMatch { .. } => StatusCode::InvalidArguments,
             Error::DFInternal { .. }
             | Error::Internal { .. }

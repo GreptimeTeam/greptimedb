@@ -19,7 +19,6 @@ use common_recordbatch::error::Error as RecordBatchError;
 use datafusion::error::DataFusionError;
 use datatypes::arrow::error::ArrowError;
 use snafu::Location;
-use store_api::storage::RegionNumber;
 
 use crate::metadata::TableId;
 
@@ -29,18 +28,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Failed to downcast mito table"))]
-    DowncastMitoTable { location: Location },
-
     #[snafu(display("Datafusion error: {}", source))]
     Datafusion {
         source: DataFusionError,
-        location: Location,
-    },
-
-    #[snafu(display("Poll stream failed, source: {}", source))]
-    PollStream {
-        source: ArrowError,
         location: Location,
     },
 
@@ -119,13 +109,6 @@ pub enum Error {
     #[snafu(display("Failed to operate table, source: {}", source))]
     TableOperation { source: BoxedError },
 
-    #[snafu(display("Cannot find region, table: {}, region: {}", table, region))]
-    RegionNotFound {
-        table: String,
-        region: RegionNumber,
-        location: Location,
-    },
-
     #[snafu(display("Unsupported operation: {}", operation))]
     Unsupported { operation: String },
 
@@ -153,7 +136,6 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::Datafusion { .. }
-            | Error::PollStream { .. }
             | Error::SchemaConversion { .. }
             | Error::TableProjection { .. } => StatusCode::EngineExecuteQuery,
             Error::RemoveColumnInIndex { .. } | Error::BuildColumnDescriptor { .. } => {
@@ -170,10 +152,9 @@ impl ErrorExt for Error {
             | Error::EngineNotFound { .. }
             | Error::EngineExist { .. } => StatusCode::InvalidArguments,
 
-            Error::InvalidTable { .. }
-            | Error::MissingTimeIndexColumn { .. }
-            | Error::RegionNotFound { .. }
-            | Error::DowncastMitoTable { .. } => StatusCode::Internal,
+            Error::InvalidTable { .. } | Error::MissingTimeIndexColumn { .. } => {
+                StatusCode::Internal
+            }
         }
     }
 

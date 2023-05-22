@@ -32,9 +32,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Missing required field in protobuf, field: {}", field))]
-    MissingField { field: String, location: Location },
-
     #[snafu(display(
         "Write type mismatch, column name: {}, expected: {}, actual: {}",
         column_name,
@@ -63,12 +60,6 @@ pub enum Error {
     #[snafu(display("Failed to convert Arrow type: {}", from))]
     Conversion { from: String, location: Location },
 
-    #[snafu(display("Column datatype error, source: {}", source))]
-    ColumnDataType {
-        #[snafu(backtrace)]
-        source: api::error::Error,
-    },
-
     #[snafu(display("Failed to decode FlightData, source: {}", source))]
     DecodeFlightData {
         source: api::DecodeError,
@@ -90,7 +81,6 @@ impl ErrorExt for Error {
         match self {
             Error::InvalidTlsConfig { .. }
             | Error::InvalidConfigFilePath { .. }
-            | Error::MissingField { .. }
             | Error::TypeMismatch { .. }
             | Error::InvalidFlightData { .. } => StatusCode::InvalidArguments,
 
@@ -99,7 +89,6 @@ impl ErrorExt for Error {
             | Error::DecodeFlightData { .. } => StatusCode::Internal,
 
             Error::CreateRecordBatch { source } => source.status_code(),
-            Error::ColumnDataType { source } => source.status_code(),
             Error::ConvertArrowSchema { source } => source.status_code(),
         }
     }

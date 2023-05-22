@@ -103,9 +103,6 @@ pub enum Error {
         location: SnafuLocation,
     },
 
-    #[snafu(display("Missing sql in coprocessor"))]
-    MissingSql { location: SnafuLocation },
-
     #[snafu(display("Failed to retrieve record batches, source: {}", source))]
     RecordBatch {
         #[snafu(backtrace)]
@@ -145,8 +142,7 @@ impl ErrorExt for Error {
             Error::PyParse { .. }
             | Error::PyCompile { .. }
             | Error::CoprParse { .. }
-            | Error::UnsupportedSql { .. }
-            | Error::MissingSql { .. } => StatusCode::InvalidArguments,
+            | Error::UnsupportedSql { .. } => StatusCode::InvalidArguments,
         }
     }
 
