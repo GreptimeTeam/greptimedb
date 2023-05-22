@@ -24,8 +24,7 @@ use serde::{Deserialize, Serialize, Serializer};
 use snafu::{OptionExt, ResultExt};
 use table::metadata::RawTableInfo;
 
-use crate::error;
-use crate::error::{Result, RouteInfoCorruptedSnafu};
+use crate::error::{self, Result};
 use crate::rpc::{util, Peer, TableName};
 
 #[derive(Debug, Clone)]
@@ -126,11 +125,11 @@ impl TryFrom<PbRouteResponse> for RouteResponse {
     fn try_from(pb: PbRouteResponse) -> Result<Self> {
         util::check_response_header(pb.header.as_ref())?;
 
-        let peers = &pb.peers;
-        let mut table_routes = Vec::with_capacity(pb.table_routes.len());
-        for table_route in pb.table_routes.into_iter() {
-            table_routes.push(TableRoute::try_from_raw(peers, table_route)?);
-        }
+        let table_routes = pb
+            .table_routes
+            .into_iter()
+            .map(|x| TableRoute::try_from_raw(&pb.peers, x))
+            .collect::<Result<Vec<_>>>()?;
         Ok(Self { table_routes })
     }
 }
@@ -145,7 +144,7 @@ impl TableRoute {
     pub fn try_from_raw(peers: &[PbPeer], table_route: PbTableRoute) -> Result<Self> {
         let table = table_route
             .table
-            .context(RouteInfoCorruptedSnafu {
+            .context(error::RouteInfoCorruptedSnafu {
                 err_msg: "'table' is empty in table route",
             })?
             .try_into()?;
@@ -154,7 +153,7 @@ impl TableRoute {
         for region_route in table_route.region_routes.into_iter() {
             let region = region_route
                 .region
-                .context(RouteInfoCorruptedSnafu {
+                .context(error::RouteInfoCorruptedSnafu {
                     err_msg: "'region' is empty in region route",
                 })?
                 .into();
@@ -219,7 +218,7 @@ impl TableRoute {
         let mut region_routes = Vec::with_capacity(self.region_routes.len());
         for region_route in self.region_routes.into_iter() {
             let leader_peer_index = region_route.leader_peer.map(|x| find_peer(x.id)).context(
-                RouteInfoCorruptedSnafu {
+                error::RouteInfoCorruptedSnafu {
                     err_msg: "'leader_peer' is empty in region route",
                 },
             )?;
