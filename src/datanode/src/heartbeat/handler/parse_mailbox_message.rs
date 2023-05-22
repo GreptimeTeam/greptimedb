@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use crate::error::Result;
-use crate::heartbeat::handler::{HeartbeatResponseHandler, HeartbeatResponseHandlerContext};
+use crate::heartbeat::handler::{
+    HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
+};
 use crate::heartbeat::utils::mailbox_message_to_incoming_message;
 
 #[derive(Default)]
@@ -24,7 +26,7 @@ impl HeartbeatResponseHandler for ParseMailboxMessageHandler {
         true
     }
 
-    fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> Result<()> {
+    fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> Result<HandleControl> {
         if let Some(message) = &ctx.response.mailbox_message {
             if message.payload.is_some() {
                 // mailbox_message_to_incoming_message will raise an error if payload is none
@@ -32,6 +34,6 @@ impl HeartbeatResponseHandler for ParseMailboxMessageHandler {
             }
         }
 
-        Ok(())
+        Ok(HandleControl::Continue)
     }
 }

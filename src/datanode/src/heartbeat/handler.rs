@@ -33,7 +33,12 @@ pub struct HeartbeatResponseHandlerContext {
     pub mailbox: MailboxRef,
     pub response: HeartbeatResponse,
     pub incoming_message: Option<IncomingMessage>,
-    is_skip_all: bool,
+}
+
+#[derive(PartialEq)]
+pub enum HandleControl {
+    Continue,
+    Done,
 }
 
 impl HeartbeatResponseHandlerContext {
@@ -42,23 +47,14 @@ impl HeartbeatResponseHandlerContext {
             mailbox,
             response,
             incoming_message: None,
-            is_skip_all: false,
         }
-    }
-
-    pub fn is_skip_all(&self) -> bool {
-        self.is_skip_all
-    }
-
-    pub fn finish(&mut self) {
-        self.is_skip_all = true
     }
 }
 
 pub trait HeartbeatResponseHandler: Send + Sync {
     fn is_acceptable(&self, ctx: &HeartbeatResponseHandlerContext) -> bool;
 
-    fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> Result<()>;
+    fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> Result<HandleControl>;
 }
 
 pub trait HeartbeatResponseHandlerExecutor: Send + Sync {
@@ -78,16 +74,14 @@ impl HandlerGroupExecutor {
 impl HeartbeatResponseHandlerExecutor for HandlerGroupExecutor {
     fn handle(&self, mut ctx: HeartbeatResponseHandlerContext) -> Result<()> {
         for handler in &self.handlers {
-            if ctx.is_skip_all() {
-                break;
-            }
-
             if !handler.is_acceptable(&ctx) {
                 continue;
             }
 
-            if let Err(e) = handler.handle(&mut ctx) {
-                error!(e;"Error while handling: {:?}", ctx.response);
+            match handler.handle(&mut ctx) {
+                Ok(HandleControl::Done) => break,
+                Err(e) => error!(e;"Error while handling: {:?}", ctx.response),
+                _ => {} // continues
             }
         }
         Ok(())

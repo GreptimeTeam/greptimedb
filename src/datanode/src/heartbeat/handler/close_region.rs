@@ -17,7 +17,7 @@ use std::sync::Arc;
 use catalog::{CatalogManagerRef, DeregisterTableRequest};
 use common_catalog::format_full_table_name;
 use common_meta::instruction::{Instruction, InstructionReply, RegionIdent, SimpleReply};
-use common_telemetry::{error, warn};
+use common_telemetry::error;
 use log::info;
 use snafu::ResultExt;
 use store_api::storage::RegionNumber;
@@ -26,7 +26,7 @@ use table::engine::{EngineContext, TableReference};
 use table::requests::CloseTableRequest;
 
 use crate::error::{self, Result};
-use crate::heartbeat::handler::HeartbeatResponseHandler;
+use crate::heartbeat::handler::{HandleControl, HeartbeatResponseHandler};
 use crate::heartbeat::HeartbeatResponseHandlerContext;
 
 #[derive(Clone)]
@@ -43,11 +43,11 @@ impl HeartbeatResponseHandler for CloseRegionHandler {
         )
     }
 
-    fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> Result<()> {
+    fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> Result<HandleControl> {
         let Some((meta, Instruction::CloseRegion(region_ident))) = ctx.incoming_message.take() else {
             unreachable!("CloseRegionHandler: should be guarded by 'is_acceptable'");
         };
-        ctx.finish();
+
         let mailbox = ctx.mailbox.clone();
         let self_ref = Arc::new(self.clone());
 
@@ -77,7 +77,7 @@ impl HeartbeatResponseHandler for CloseRegionHandler {
             }
         });
 
-        Ok(())
+        Ok(HandleControl::Done)
     }
 }
 

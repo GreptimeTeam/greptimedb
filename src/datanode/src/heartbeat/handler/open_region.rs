@@ -25,7 +25,7 @@ use table::engine::EngineContext;
 use table::requests::OpenTableRequest;
 
 use crate::error::{self, Result};
-use crate::heartbeat::handler::HeartbeatResponseHandler;
+use crate::heartbeat::handler::{HandleControl, HeartbeatResponseHandler};
 use crate::heartbeat::HeartbeatResponseHandlerContext;
 
 #[derive(Clone)]
@@ -42,12 +42,11 @@ impl HeartbeatResponseHandler for OpenRegionHandler {
         )
     }
 
-    fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> Result<()> {
+    fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> Result<HandleControl> {
         let Some((meta, Instruction::OpenRegion(region_ident))) = ctx.incoming_message.take() else {
             unreachable!("OpenRegionHandler: should be guarded by 'is_acceptable'");
         };
 
-        ctx.finish();
         let mailbox = ctx.mailbox.clone();
         let self_ref = Arc::new(self.clone());
 
@@ -61,7 +60,7 @@ impl HeartbeatResponseHandler for OpenRegionHandler {
                 error!(e; "Failed to send reply to mailbox");
             }
         });
-        Ok(())
+        Ok(HandleControl::Done)
     }
 }
 
