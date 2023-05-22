@@ -20,23 +20,23 @@ mod store;
 
 use api::v1::meta::Role;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::router::{CreateRequest, DeleteRequest, RouteRequest, RouteResponse};
 use common_telemetry::info;
 use heartbeat::Client as HeartbeatClient;
 use lock::Client as LockClient;
 use router::Client as RouterClient;
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 use store::Client as StoreClient;
 
 pub use self::heartbeat::{HeartbeatSender, HeartbeatStream};
 use crate::error;
-use crate::error::Result;
+use crate::error::{ConvertMetaRequestSnafu, ConvertMetaResponseSnafu, Result};
 use crate::rpc::lock::{LockRequest, LockResponse, UnlockRequest};
-use crate::rpc::router::DeleteRequest;
 use crate::rpc::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
-    BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, CreateRequest,
-    DeleteRangeRequest, DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest,
-    PutResponse, RangeRequest, RangeResponse, RouteRequest, RouteResponse,
+    BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
+    DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest, PutResponse,
+    RangeRequest, RangeResponse,
 };
 
 pub type Id = (u64, u64);
@@ -203,10 +203,12 @@ impl MetaClient {
     /// information contained in the request and using some intelligent policies,
     /// such as load-based.
     pub async fn create_route(&self, req: CreateRequest<'_>) -> Result<RouteResponse> {
+        let req = req.try_into().context(ConvertMetaRequestSnafu)?;
         self.router_client()?
-            .create(req.try_into()?)
+            .create(req)
             .await?
             .try_into()
+            .context(ConvertMetaResponseSnafu)
     }
 
     /// Fetch routing information for tables. The smallest unit is the complete
@@ -229,14 +231,22 @@ impl MetaClient {
     /// ```
     ///
     pub async fn route(&self, req: RouteRequest) -> Result<RouteResponse> {
-        self.router_client()?.route(req.into()).await?.try_into()
+        self.router_client()?
+            .route(req.into())
+            .await?
+            .try_into()
+            .context(ConvertMetaResponseSnafu)
     }
 
     /// Can be called repeatedly, the first call will delete and return the
     /// table of routing information, the nth call can still return the
     /// deleted route information.
     pub async fn delete_route(&self, req: DeleteRequest) -> Result<RouteResponse> {
-        self.router_client()?.delete(req.into()).await?.try_into()
+        self.router_client()?
+            .delete(req.into())
+            .await?
+            .try_into()
+            .context(ConvertMetaResponseSnafu)
     }
 
     /// Range gets the keys in the range from the key-value store.
@@ -350,6 +360,8 @@ mod tests {
 
     use api::v1::meta::{HeartbeatRequest, Peer};
     use chrono::DateTime;
+    use common_meta::router::Partition;
+    use common_meta::table_name::TableName;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, RawSchema};
     use meta_srv::metasrv::SelectorContext;
@@ -360,7 +372,6 @@ mod tests {
 
     use super::*;
     use crate::mocks;
-    use crate::rpc::{Partition, TableName};
 
     const TEST_KEY_PREFIX: &str = "__unit_test__meta__";
 

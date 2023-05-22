@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use client::Client;
 use common_grpc::channel_manager::ChannelManager;
+use common_meta::peer::Peer;
 use common_telemetry::info;
-use meta_client::rpc::Peer;
 use moka::future::{Cache, CacheBuilder};
 
 pub struct DatanodeClients {

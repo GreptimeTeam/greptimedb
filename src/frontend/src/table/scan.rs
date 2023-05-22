@@ -17,12 +17,12 @@ use std::sync::Arc;
 
 use api::v1::{DeleteRequest, InsertRequest};
 use client::Database;
+use common_meta::table_name::TableName;
 use common_query::prelude::Expr;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use datafusion::datasource::DefaultTableSource;
 use datafusion_expr::{LogicalPlan, LogicalPlanBuilder};
-use meta_client::rpc::TableName;
 use snafu::ResultExt;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::table::adapter::DfTableProviderAdapter;

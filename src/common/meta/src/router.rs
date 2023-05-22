@@ -25,7 +25,9 @@ use snafu::{OptionExt, ResultExt};
 use table::metadata::RawTableInfo;
 
 use crate::error::{self, Result};
-use crate::rpc::{util, Peer, TableName};
+use crate::peer::Peer;
+use crate::table_name::TableName;
+use crate::util;
 
 #[derive(Debug, Clone)]
 pub struct CreateRequest<'a> {

@@ -15,9 +15,10 @@
 use api::v1::meta::{TableName, TableRouteValue};
 use async_trait::async_trait;
 use catalog::helper::TableGlobalKey;
+use common_meta::peer::Peer;
+use common_meta::router::TableRoute;
 use common_meta::RegionIdent;
 use common_telemetry::info;
-use meta_client::rpc::{Peer, TableRoute};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 

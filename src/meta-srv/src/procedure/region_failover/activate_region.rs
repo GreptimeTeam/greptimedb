@@ -17,9 +17,9 @@ use std::time::Duration;
 use api::v1::meta::MailboxMessage;
 use async_trait::async_trait;
 use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
+use common_meta::peer::Peer;
 use common_meta::RegionIdent;
 use common_telemetry::debug;
-use meta_client::rpc::Peer;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 

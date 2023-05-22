@@ -29,7 +29,6 @@ futures.workspace = true
 h2 = "0.3"
 http-body = "0.4"
 lazy_static = "1.4"
-meta-client = { path = "../meta-client" }
 metrics.workspace = true
 once_cell = "1.17"
 parking_lot = "0.12"

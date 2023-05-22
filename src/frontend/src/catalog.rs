@@ -34,10 +34,10 @@ use catalog::{
 };
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::BoxedError;
+use common_meta::table_name::TableName;
 use common_telemetry::warn;
 use futures::StreamExt;
 use futures_util::TryStreamExt;
-use meta_client::rpc::TableName;
 use partition::manager::PartitionRuleManagerRef;
 use snafu::prelude::*;
 use table::table::numbers::NumbersTable;

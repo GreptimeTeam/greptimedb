@@ -366,7 +366,7 @@ pub enum Error {
     #[snafu(display("Failed to convert table route, source: {}", source))]
     TableRouteConversion {
         #[snafu(backtrace)]
-        source: meta_client::error::Error,
+        source: common_meta::error::Error,
     },
 }
 

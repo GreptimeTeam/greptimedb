@@ -14,9 +14,9 @@
 
 use async_trait::async_trait;
 use common_error::prelude::{ErrorExt, StatusCode};
+use common_meta::peer::Peer;
 use common_meta::RegionIdent;
 use common_telemetry::info;
-use meta_client::rpc::Peer;
 use serde::{Deserialize, Serialize};
 use snafu::ensure;
 

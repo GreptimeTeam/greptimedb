@@ -19,6 +19,7 @@ mod test {
 
     use api::v1::column::SemanticType;
     use api::v1::{column, Column, ColumnDataType, InsertRequest as GrpcInsertRequest};
+    use common_meta::table_name::TableName;
     use common_query::logical_plan::Expr;
     use common_query::physical_plan::DfPhysicalPlanAdapter;
     use common_query::DfPhysicalPlan;
@@ -37,7 +38,6 @@ mod test {
     use frontend::catalog::FrontendCatalogManager;
     use frontend::table::DistTable;
     use itertools::Itertools;
-    use meta_client::rpc::TableName;
     use servers::query_handler::sql::SqlQueryHandler;
     use session::context::QueryContext;
     use store_api::storage::RegionNumber;

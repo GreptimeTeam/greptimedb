@@ -1751,10 +1751,15 @@ dependencies = [
 name = "common-meta"
 version = "0.2.0"
 dependencies = [
+ "api",
+ "chrono",
+ "common-catalog",
  "common-error",
+ "datatypes",
  "serde",
  "serde_json",
  "snafu",
+ "table",
 ]
 
 [[package]]
@@ -3084,6 +3089,7 @@ dependencies = [
  "common-function",
  "common-grpc",
  "common-grpc-expr",
+ "common-meta",
  "common-query",
  "common-recordbatch",
  "common-runtime",
@@ -4867,6 +4873,7 @@ dependencies = [
  "chrono",
  "common-error",
  "common-grpc",
+ "common-meta",
  "common-telemetry",
  "datatypes",
  "etcd-client",
@@ -4913,7 +4920,6 @@ dependencies = [
  "h2",
  "http-body",
  "lazy_static",
- "meta-client",
  "metrics",
  "once_cell",
  "parking_lot",
@@ -5830,6 +5836,7 @@ version = "0.2.0"
 dependencies = [
  "common-catalog",
  "common-error",
+ "common-meta",
  "common-query",
  "datafusion",
  "datafusion-common",

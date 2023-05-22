@@ -13,20 +13,9 @@
 // limitations under the License.
 
 pub mod lock;
-pub mod router;
 mod store;
-pub mod util;
 
-use std::fmt::{Display, Formatter};
-
-use api::v1::meta::{
-    KeyValue as PbKeyValue, Peer as PbPeer, ResponseHeader as PbResponseHeader,
-    TableName as PbTableName,
-};
-pub use router::{
-    CreateRequest, Partition, Region, RouteRequest, RouteResponse, Table, TableRoute,
-};
-use serde::{Deserialize, Serialize};
+use api::v1::meta::{KeyValue as PbKeyValue, ResponseHeader as PbResponseHeader};
 pub use store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
@@ -97,90 +86,6 @@ impl KeyValue {
     #[inline]
     pub fn take_value(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.0.value)
-    }
-}
-
-#[derive(Debug, Clone, Hash, Eq, PartialEq, Deserialize, Serialize)]
-pub struct TableName {
-    pub catalog_name: String,
-    pub schema_name: String,
-    pub table_name: String,
-}
-
-impl Display for TableName {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}.{}.{}",
-            self.catalog_name, self.schema_name, self.table_name
-        )
-    }
-}
-
-impl TableName {
-    pub fn new(
-        catalog_name: impl Into<String>,
-        schema_name: impl Into<String>,
-        table_name: impl Into<String>,
-    ) -> Self {
-        Self {
-            catalog_name: catalog_name.into(),
-            schema_name: schema_name.into(),
-            table_name: table_name.into(),
-        }
-    }
-}
-
-impl From<TableName> for PbTableName {
-    fn from(tb: TableName) -> Self {
-        Self {
-            catalog_name: tb.catalog_name,
-            schema_name: tb.schema_name,
-            table_name: tb.table_name,
-        }
-    }
-}
-
-impl From<PbTableName> for TableName {
-    fn from(tb: PbTableName) -> Self {
-        Self {
-            catalog_name: tb.catalog_name,
-            schema_name: tb.schema_name,
-            table_name: tb.table_name,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Hash, Eq, PartialEq, Deserialize, Serialize)]
-pub struct Peer {
-    pub id: u64,
-    pub addr: String,
-}
-
-impl From<PbPeer> for Peer {
-    fn from(p: PbPeer) -> Self {
-        Self {
-            id: p.id,
-            addr: p.addr,
-        }
-    }
-}
-
-impl From<Peer> for PbPeer {
-    fn from(p: Peer) -> Self {
-        Self {
-            id: p.id,
-            addr: p.addr,
-        }
-    }
-}
-
-impl Peer {
-    pub fn new(id: u64, addr: impl Into<String>) -> Self {
-        Self {
-            id,
-            addr: addr.into(),
-        }
     }
 }
 
