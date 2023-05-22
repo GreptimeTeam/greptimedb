@@ -218,7 +218,7 @@ impl Env {
         let greptimedb_dir = format!("/tmp/greptimedb-{subcommand}-{}", db_ctx.time);
         let ctx = Context {
             wal_dir: format!("{greptimedb_dir}/wal/"),
-            data_home: format!("{greptimedb_dir}/data/"),
+            data_home: format!("{greptimedb_dir}/"),
             procedure_dir: format!("{greptimedb_dir}/procedure/"),
         };
         let rendered = tt.render(subcommand, &ctx).unwrap();
