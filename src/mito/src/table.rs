@@ -518,40 +518,44 @@ impl<R: Region> MitoTable<R> {
 
     /// Remove regions
     /// Notes: Please release regions in StorageEngine.
-    pub async fn remove_regions(&self, region_numbers: &[RegionNumber]) -> TableResult<()> {
+    pub async fn remove_regions(
+        &self,
+        region_numbers: &[RegionNumber],
+    ) -> TableResult<HashMap<RegionNumber, R>> {
+        let mut removed = HashMap::with_capacity(region_numbers.len());
         self.regions.rcu(|regions| {
+            removed.clear();
             let mut regions = HashMap::clone(regions);
-            for region in region_numbers {
-                regions.remove(region);
+            for region_number in region_numbers {
+                if let Some(region) = regions.remove(region_number) {
+                    removed.insert(*region_number, region);
+                }
             }
 
             Arc::new(regions)
         });
 
-        Ok(())
+        Ok(removed)
     }
 
-    pub async fn drop_regions(&self) -> TableResult<()> {
-        let regions = self.regions.load();
+    pub async fn drop_regions(&self, region_number: &[RegionNumber]) -> TableResult<()> {
+        let regions = self.remove_regions(region_number).await?;
+
         futures::future::try_join_all(regions.values().map(|region| region.drop_region()))
             .await
             .map_err(BoxedError::new)
             .context(table_error::TableOperationSnafu)?;
-
-        let regions = regions.iter().map(|(k, _)| *k).collect::<Vec<_>>();
-
-        self.remove_regions(&regions).await?;
         Ok(())
     }
 
-    pub async fn is_releasable(&self) -> bool {
+    pub fn is_releasable(&self) -> bool {
         let regions = self.regions.load();
 
         regions.is_empty()
     }
 
     #[inline]
-    pub async fn region_ids(&self) -> Vec<RegionNumber> {
+    pub fn region_ids(&self) -> Vec<RegionNumber> {
         let regions = self.regions.load();
         regions.iter().map(|(k, _)| *k).collect()
     }

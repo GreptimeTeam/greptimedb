@@ -353,9 +353,7 @@ impl<S: LogStore> EngineInner<S> {
     }
 
     async fn close_region(&self, name: &str) -> Result<()> {
-        if let Some(RegionSlot::Ready(region)) =
-            self.regions.get_or_occupy_slot(name, RegionSlot::Opening)
-        {
+        if let Some(region) = self.get_region(name) {
             region.close().await?;
         }
 
