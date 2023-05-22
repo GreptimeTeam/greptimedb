@@ -562,7 +562,6 @@ pub async fn labels_query(
             query,
             start: start.clone(),
             end: end.clone(),
-            // TODO: find a better value for step
             step: DEFAULT_LOOKBACK_STRING.to_string(),
         };
 
@@ -738,7 +737,6 @@ pub async fn label_values_query(
             query,
             start: start.clone(),
             end: end.clone(),
-            // TODO(ccl): find a better value for step
             step: DEFAULT_LOOKBACK_STRING.to_string(),
         };
         let result = handler.do_query(&prom_query, query_ctx.clone()).await;
