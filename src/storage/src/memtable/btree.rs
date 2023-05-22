@@ -68,7 +68,9 @@ impl BTreeMemtable {
 
     /// Updates memtable stats.
     /// This function is guarded by `BTreeMemtable::map` so that store-after-load is safe.
-    fn update_stats(&self, min: Option<Value>, max: Option<Value>) {
+    fn update_stats(&self, request_size: usize, min: Option<Value>, max: Option<Value>) {
+        self.alloc_tracker.on_allocate(request_size);
+
         if let Some(min) = min {
             let min_val = min
                 .as_timestamp()
@@ -120,8 +122,6 @@ impl Memtable for BTreeMemtable {
 
     fn write(&self, kvs: &KeyValues) -> Result<()> {
         debug_assert!(kvs.timestamp.is_some());
-        self.alloc_tracker.on_allocate(kvs.estimated_memory_size());
-
         let iter_row = IterRow::new(kvs);
         let mut map = self.map.write().unwrap();
 
@@ -140,7 +140,7 @@ impl Memtable for BTreeMemtable {
             map.insert(inner_key, row_value);
         }
 
-        self.update_stats(min_ts, max_ts);
+        self.update_stats(kvs.estimated_memory_size(), min_ts, max_ts);
 
         Ok(())
     }
