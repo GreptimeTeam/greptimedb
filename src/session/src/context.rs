@@ -20,6 +20,7 @@ use arc_swap::ArcSwap;
 use common_catalog::build_db_string;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_telemetry::debug;
+use common_time::TimeZone;
 
 pub type QueryContextRef = Arc<QueryContext>;
 pub type ConnInfoRef = Arc<ConnInfo>;
@@ -28,6 +29,7 @@ pub type ConnInfoRef = Arc<ConnInfo>;
 pub struct QueryContext {
     current_catalog: ArcSwap<String>,
     current_schema: ArcSwap<String>,
+    time_zone: ArcSwap<Option<TimeZone>>,
 }
 
 impl Default for QueryContext {
@@ -56,6 +58,7 @@ impl QueryContext {
         Self {
             current_catalog: ArcSwap::new(Arc::new(DEFAULT_CATALOG_NAME.to_string())),
             current_schema: ArcSwap::new(Arc::new(DEFAULT_SCHEMA_NAME.to_string())),
+            time_zone: ArcSwap::new(Arc::new(None)),
         }
     }
 
@@ -63,6 +66,7 @@ impl QueryContext {
         Self {
             current_catalog: ArcSwap::new(Arc::new(catalog.to_string())),
             current_schema: ArcSwap::new(Arc::new(schema.to_string())),
+            time_zone: ArcSwap::new(Arc::new(None)),
         }
     }
 
@@ -98,6 +102,16 @@ impl QueryContext {
         let catalog = self.current_catalog();
         let schema = self.current_schema();
         build_db_string(&catalog, &schema)
+    }
+
+    #[inline]
+    pub fn time_zone(&self) -> Option<TimeZone> {
+        self.time_zone.load().as_ref().clone()
+    }
+
+    #[inline]
+    pub fn set_time_zone(&self, tz: Option<TimeZone>) {
+        self.time_zone.swap(Arc::new(tz));
     }
 }
 
