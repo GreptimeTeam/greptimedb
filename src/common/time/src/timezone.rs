@@ -84,6 +84,7 @@ impl ToString for TimeZone {
     }
 }
 
+#[inline]
 pub fn system_time_zone_name() -> String {
     Local::now().offset().to_string()
 }

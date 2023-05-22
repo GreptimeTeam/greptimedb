@@ -104,6 +104,7 @@ impl QueryContext {
         build_db_string(&catalog, &schema)
     }
 
+    #[inline]
     pub fn time_zone(&self) -> Option<TimeZone> {
         self.time_zone.load().as_ref().clone()
     }
