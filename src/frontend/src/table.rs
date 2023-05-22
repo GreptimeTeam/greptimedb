@@ -498,7 +498,7 @@ mod test {
 
     use catalog::error::Result;
     use catalog::remote::{KvBackend, ValueIter};
-    use common_meta::router::{Region, RegionRoute, Table, TableRoute};
+    use common_meta::rpc::router::{Region, RegionRoute, Table, TableRoute};
     use datafusion_expr::expr_fn::{and, binary_expr, col, or};
     use datafusion_expr::{lit, Operator};
     use meta_client::client::MetaClient;

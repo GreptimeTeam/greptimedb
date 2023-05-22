@@ -16,7 +16,7 @@ use std::any::Any;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use common_meta::router::Partition as MetaPartition;
+use common_meta::rpc::router::Partition as MetaPartition;
 use datafusion_expr::Operator;
 use datatypes::prelude::Value;
 use serde::{Deserialize, Serialize};

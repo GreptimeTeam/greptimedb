@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use common_meta::peer::Peer;
-use common_meta::router::TableRoute;
+use common_meta::rpc::router::TableRoute;
 use common_meta::table_name::TableName;
 use common_query::prelude::Expr;
 use datafusion_expr::{BinaryExpr, Expr as DfExpr, Operator};

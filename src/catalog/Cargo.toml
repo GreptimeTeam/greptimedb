@@ -14,6 +14,7 @@ backoff = { version = "0.4", features = ["tokio"] }
 common-catalog = { path = "../common/catalog" }
 common-error = { path = "../common/error" }
 common-grpc = { path = "../common/grpc" }
+common-meta = { path = "../common/meta" }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-runtime = { path = "../common/runtime" }
