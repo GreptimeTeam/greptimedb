@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use async_trait::async_trait;
+use common_error::prelude::{ErrorExt, StatusCode};
 use common_meta::RegionIdent;
 use common_telemetry::info;
 use meta_client::rpc::Peer;
@@ -21,7 +22,7 @@ use snafu::ensure;
 
 use super::deactivate_region::DeactivateRegion;
 use super::{RegionFailoverContext, State};
-use crate::error::{RegionFailoverCandidatesNotFoundSnafu, Result};
+use crate::error::{RegionFailoverCandidatesNotFoundSnafu, Result, RetryLaterSnafu};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub(super) struct RegionFailoverStart {
@@ -81,8 +82,20 @@ impl State for RegionFailoverStart {
         ctx: &RegionFailoverContext,
         failed_region: &RegionIdent,
     ) -> Result<Box<dyn State>> {
-        let candidate = self.choose_candidate(ctx, failed_region).await?;
-        Ok(Box::new(DeactivateRegion::new(candidate)))
+        let candidate = self
+            .choose_candidate(ctx, failed_region)
+            .await
+            .map_err(|e| {
+                if e.status_code() == StatusCode::RuntimeResourcesExhausted {
+                    RetryLaterSnafu {
+                        reason: format!("{e}"),
+                    }
+                    .build()
+                } else {
+                    e
+                }
+            })?;
+        return Ok(Box::new(DeactivateRegion::new(candidate)));
     }
 }
 
