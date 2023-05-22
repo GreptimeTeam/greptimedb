@@ -20,7 +20,6 @@ use common_time::Timestamp;
 use datatypes::prelude::{ConcreteDataType, Value};
 use snafu::Location;
 use sqlparser::parser::ParserError;
-use sqlparser::tokenizer::TokenizerError;
 
 use crate::ast::{Expr, Value as SqlValue};
 
@@ -59,9 +58,6 @@ pub enum Error {
     // Syntax error from sql parser.
     #[snafu(display("Syntax error, sql: {}, source: {}", sql, source))]
     Syntax { sql: String, source: ParserError },
-
-    #[snafu(display("Tokenizer error, sql: {}, source: {}", sql, source))]
-    Tokenizer { sql: String, source: TokenizerError },
 
     #[snafu(display("Missing time index constraint"))]
     MissingTimeIndex {},
@@ -105,9 +101,6 @@ pub enum Error {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
-
-    #[snafu(display("Unsupported ALTER TABLE statement: {}", msg))]
-    UnsupportedAlterTableStatement { msg: String },
 
     #[snafu(display("Failed to serialize column default constraint, source: {}", source))]
     SerializeColumnDefaultConstraint {
@@ -164,7 +157,6 @@ impl ErrorExt for Error {
             | Syntax { .. }
             | MissingTimeIndex { .. }
             | InvalidTimeIndex { .. }
-            | Tokenizer { .. }
             | InvalidSql { .. }
             | ParseSqlValue { .. }
             | SqlTypeNotSupported { .. }
@@ -177,7 +169,6 @@ impl ErrorExt for Error {
             | InvalidSqlValue { .. }
             | TimestampOverflow { .. } => StatusCode::InvalidArguments,
 
-            UnsupportedAlterTableStatement { .. } => StatusCode::InvalidSyntax,
             SerializeColumnDefaultConstraint { source, .. } => source.status_code(),
             ConvertToGrpcDataType { source, .. } => source.status_code(),
             ConvertToDfStatement { .. } => StatusCode::Internal,

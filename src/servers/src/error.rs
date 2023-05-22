@@ -80,12 +80,6 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to execute sql statement, source: {}", source))]
-    ExecuteStatement {
-        #[snafu(backtrace)]
-        source: BoxedError,
-    },
-
     #[snafu(display("Failed to check database validity, source: {}", source))]
     CheckDatabaseValidity {
         #[snafu(backtrace)]
@@ -94,13 +88,6 @@ pub enum Error {
 
     #[snafu(display("Failed to describe statement, source: {}", source))]
     DescribeStatement { source: BoxedError },
-
-    #[snafu(display("Failed to execute alter: {}, source: {}", query, source))]
-    ExecuteAlter {
-        query: String,
-        #[snafu(backtrace)]
-        source: BoxedError,
-    },
 
     #[snafu(display("Failed to insert script with name: {}, source: {}", name, source))]
     InsertScript {
@@ -283,9 +270,7 @@ impl ErrorExt for Error {
             | ExecuteScript { source, .. }
             | ExecuteQuery { source, .. }
             | ExecuteGrpcQuery { source, .. }
-            | ExecuteStatement { source, .. }
-            | CheckDatabaseValidity { source, .. }
-            | ExecuteAlter { source, .. } => source.status_code(),
+            | CheckDatabaseValidity { source, .. } => source.status_code(),
 
             NotSupported { .. }
             | InvalidQuery { .. }
