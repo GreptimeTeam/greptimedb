@@ -151,6 +151,13 @@ pub enum Error {
     #[snafu(display("Table route not found: {}", key))]
     TableRouteNotFound { key: String, location: Location },
 
+    #[snafu(display("Table route corrupted, key: {}, reason: {}", key, reason))]
+    CorruptedTableRoute {
+        key: String,
+        reason: String,
+        location: Location,
+    },
+
     #[snafu(display("Failed to get sequence: {}", err_msg))]
     NextSequence { err_msg: String, location: Location },
 
@@ -324,6 +331,43 @@ pub enum Error {
 
     #[snafu(display("Missing request header"))]
     MissingRequestHeader { location: Location },
+
+    #[snafu(display(
+        "Failed to register procedure loader, type name: {}, source: {}",
+        type_name,
+        source
+    ))]
+    RegisterProcedureLoader {
+        type_name: String,
+        #[snafu(backtrace)]
+        source: common_procedure::error::Error,
+    },
+
+    #[snafu(display("Failed to find failover candidates for region: {}", failed_region))]
+    RegionFailoverCandidatesNotFound {
+        failed_region: String,
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Received unexpected instruction reply, mailbox message: {}, reason: {}",
+        mailbox_message,
+        reason
+    ))]
+    UnexpectedInstructionReply {
+        mailbox_message: String,
+        reason: String,
+        location: Location,
+    },
+
+    #[snafu(display("Expected to retry later, reason: {}", reason))]
+    RetryLater { reason: String, location: Location },
+
+    #[snafu(display("Failed to convert table route, source: {}", source))]
+    TableRouteConversion {
+        #[snafu(backtrace)]
+        source: common_meta::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -370,6 +414,7 @@ impl ErrorExt for Error {
             | Error::MailboxClosed { .. }
             | Error::MailboxTimeout { .. }
             | Error::MailboxReceiver { .. }
+            | Error::RetryLater { .. }
             | Error::StartGrpc { .. } => StatusCode::Internal,
             Error::EmptyKey { .. }
             | Error::MissingRequiredParameter { .. }
@@ -386,12 +431,14 @@ impl ErrorExt for Error {
             | Error::StatValueFromUtf8 { .. }
             | Error::UnexceptedSequenceValue { .. }
             | Error::TableRouteNotFound { .. }
+            | Error::CorruptedTableRoute { .. }
             | Error::NextSequence { .. }
             | Error::SequenceOutOfRange { .. }
             | Error::MoveValue { .. }
             | Error::InvalidKvsLength { .. }
             | Error::InvalidTxnResult { .. }
             | Error::InvalidUtf8Value { .. }
+            | Error::UnexpectedInstructionReply { .. }
             | Error::Unexpected { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::InvalidCatalogValue { source, .. } => source.status_code(),
@@ -400,6 +447,12 @@ impl ErrorExt for Error {
             Error::ShutdownServer { source, .. } | Error::StartHttp { source } => {
                 source.status_code()
             }
+
+            Error::RegionFailoverCandidatesNotFound { .. } => StatusCode::RuntimeResourcesExhausted,
+
+            Error::RegisterProcedureLoader { source, .. } => source.status_code(),
+
+            Error::TableRouteConversion { source } => source.status_code(),
         }
     }
 }

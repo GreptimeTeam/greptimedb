@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common_telemetry::info;
@@ -34,7 +34,7 @@ pub struct ChannelManager {
     config: ChannelConfig,
     client_tls_config: Option<ClientTlsConfig>,
     pool: Arc<Pool>,
-    channel_recycle_started: bool,
+    channel_recycle_started: Arc<Mutex<bool>>,
 }
 
 impl Default for ChannelManager {
@@ -54,12 +54,13 @@ impl ChannelManager {
             config,
             client_tls_config: None,
             pool,
-            channel_recycle_started: false,
+            channel_recycle_started: Arc::new(Mutex::new(false)),
         }
     }
 
-    pub fn start_channel_recycle(&mut self) {
-        if self.channel_recycle_started {
+    pub fn start_channel_recycle(&self) {
+        let mut started = self.channel_recycle_started.lock().unwrap();
+        if *started {
             return;
         }
 
@@ -69,7 +70,7 @@ impl ChannelManager {
         });
         info!("Channel recycle is started, running in the background!");
 
-        self.channel_recycle_started = true;
+        *started = true;
     }
 
     pub fn with_tls_config(config: ChannelConfig) -> Result<Self> {

@@ -70,16 +70,12 @@ impl Default for MetaSrvOptions {
 
 #[derive(Clone)]
 pub struct Context {
-    pub datanode_lease_secs: i64,
     pub server_addr: String,
     pub in_memory: ResettableKvStoreRef,
     pub kv_store: KvStoreRef,
     pub mailbox: MailboxRef,
     pub election: Option<ElectionRef>,
     pub skip_all: Arc<AtomicBool>,
-    pub catalog: Option<String>,
-    pub schema: Option<String>,
-    pub table: Option<String>,
     pub is_infancy: bool,
 }
 
@@ -99,7 +95,16 @@ impl Context {
 
 pub struct LeaderValue(pub String);
 
-pub type SelectorRef = Arc<dyn Selector<Context = Context, Output = Vec<Peer>>>;
+#[derive(Clone)]
+pub struct SelectorContext {
+    pub datanode_lease_secs: i64,
+    pub server_addr: String,
+    pub kv_store: KvStoreRef,
+    pub catalog: Option<String>,
+    pub schema: Option<String>,
+}
+
+pub type SelectorRef = Arc<dyn Selector<Context = SelectorContext, Output = Vec<Peer>>>;
 pub type ElectionRef = Arc<dyn Election<Leader = LeaderValue>>;
 
 #[derive(Clone)]
@@ -248,9 +253,12 @@ impl MetaSrv {
         self.mailbox.clone()
     }
 
+    pub fn procedure_manager(&self) -> &ProcedureManagerRef {
+        &self.procedure_manager
+    }
+
     #[inline]
     pub fn new_ctx(&self) -> Context {
-        let datanode_lease_secs = self.options().datanode_lease_secs;
         let server_addr = self.options().server_addr.clone();
         let in_memory = self.in_memory();
         let kv_store = self.kv_store();
@@ -258,16 +266,12 @@ impl MetaSrv {
         let election = self.election();
         let skip_all = Arc::new(AtomicBool::new(false));
         Context {
-            datanode_lease_secs,
             server_addr,
             in_memory,
             kv_store,
             mailbox,
             election,
             skip_all,
-            catalog: None,
-            schema: None,
-            table: None,
             is_infancy: false,
         }
     }

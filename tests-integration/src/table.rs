@@ -19,6 +19,7 @@ mod test {
 
     use api::v1::column::SemanticType;
     use api::v1::{column, Column, ColumnDataType, InsertRequest as GrpcInsertRequest};
+    use common_meta::table_name::TableName;
     use common_query::logical_plan::Expr;
     use common_query::physical_plan::DfPhysicalPlanAdapter;
     use common_query::DfPhysicalPlan;
@@ -28,20 +29,17 @@ mod test {
     use datafusion::physical_plan::expressions::{col as physical_col, PhysicalSortExpr};
     use datafusion::physical_plan::sorts::sort::SortExec;
     use datafusion::prelude::SessionContext;
-    use datafusion::sql::sqlparser;
     use datafusion_expr::expr_fn::{and, binary_expr, col};
     use datafusion_expr::{lit, Operator};
     use datanode::instance::Instance;
     use datatypes::arrow::compute::SortOptions;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
-    use frontend::expr_factory;
+    use frontend::catalog::FrontendCatalogManager;
     use frontend::table::DistTable;
     use itertools::Itertools;
-    use meta_client::rpc::TableName;
+    use servers::query_handler::sql::SqlQueryHandler;
     use session::context::QueryContext;
-    use sql::parser::ParserContext;
-    use sql::statements::statement::Statement;
     use store_api::storage::RegionNumber;
     use table::metadata::{TableInfoBuilder, TableMetaBuilder};
     use table::TableRef;
@@ -215,10 +213,12 @@ mod test {
         let schema = Arc::new(Schema::new(column_schemas.clone()));
 
         let instance = crate::tests::create_distributed_instance(test_name).await;
-        let dist_instance = &instance.dist_instance;
-        let datanode_instances = instance.datanodes;
-
-        let catalog_manager = dist_instance.catalog_manager();
+        let frontend = instance.frontend();
+        let catalog_manager = frontend
+            .catalog_manager()
+            .as_any()
+            .downcast_ref::<FrontendCatalogManager>()
+            .unwrap();
         let partition_manager = catalog_manager.partition_manager();
         let datanode_clients = catalog_manager.datanode_clients();
 
@@ -239,20 +239,10 @@ mod test {
             )
             ENGINE=mito";
 
-        let create_table =
-            match ParserContext::create_with_dialect(sql, &sqlparser::dialect::GenericDialect {})
-                .unwrap()
-                .pop()
-                .unwrap()
-            {
-                Statement::CreateTable(c) => c,
-                _ => unreachable!(),
-            };
-
-        let mut expr = expr_factory::create_to_expr(&create_table, QueryContext::arc()).unwrap();
-        let _result = dist_instance
-            .create_table(&mut expr, create_table.partitions)
+        let _result = frontend
+            .do_query(sql, QueryContext::arc())
             .await
+            .remove(0)
             .unwrap();
 
         let table_route = partition_manager
@@ -276,7 +266,7 @@ mod test {
         ];
         for (region_number, numbers) in regional_numbers {
             let datanode_id = *region_to_datanode_mapping.get(&region_number).unwrap();
-            let instance = datanode_instances.get(&datanode_id).unwrap().clone();
+            let instance = instance.datanodes().get(&datanode_id).unwrap().clone();
 
             let start_ts = global_start_ts;
             global_start_ts += numbers.len() as i64;

@@ -30,6 +30,11 @@ use client::Database;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::format_full_table_name;
 use common_error::prelude::BoxedError;
+use common_meta::router::{
+    CreateRequest as MetaCreateRequest, DeleteRequest as MetaDeleteRequest,
+    Partition as MetaPartition, RouteRequest, RouteResponse,
+};
+use common_meta::table_name::TableName;
 use common_query::Output;
 use common_telemetry::debug;
 use datanode::instance::sql::table_idents_to_full_name;
@@ -37,11 +42,7 @@ use datanode::sql::SqlHandler;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::RawSchema;
 use meta_client::client::MetaClient;
-use meta_client::rpc::router::DeleteRequest as MetaDeleteRequest;
-use meta_client::rpc::{
-    CompareAndPutRequest, CreateRequest as MetaCreateRequest, Partition as MetaPartition,
-    RouteRequest, RouteResponse, TableName,
-};
+use meta_client::rpc::CompareAndPutRequest;
 use partition::manager::PartitionInfo;
 use partition::partition::{PartitionBound, PartitionDef};
 use query::error::QueryExecutionSnafu;

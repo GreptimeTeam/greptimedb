@@ -154,6 +154,12 @@ pub enum Error {
         source: ConfigError,
         location: Location,
     },
+
+    #[snafu(display("Failed to start catalog manager, source: {}", source))]
+    StartCatalogManager {
+        #[snafu(backtrace)]
+        source: catalog::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -185,6 +191,7 @@ impl ErrorExt for Error {
                 source.status_code()
             }
             Error::SubstraitEncodeLogicalPlan { source } => source.status_code(),
+            Error::StartCatalogManager { source } => source.status_code(),
         }
     }
 

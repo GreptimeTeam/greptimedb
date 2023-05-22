@@ -16,9 +16,9 @@ use std::any::Any;
 use std::fmt::Debug;
 use std::sync::Arc;
 
+use common_meta::router::Partition as MetaPartition;
 use datafusion_expr::Operator;
 use datatypes::prelude::Value;
-use meta_client::rpc::Partition as MetaPartition;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::storage::RegionNumber;

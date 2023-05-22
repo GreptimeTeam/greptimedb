@@ -43,9 +43,7 @@ mod tests {
     async fn test_distributed_prometheus_remote_rw() {
         let distributed =
             tests::create_distributed_instance("test_distributed_prometheus_remote_rw").await;
-        let instance = &distributed.frontend;
-
-        test_prometheus_remote_rw(instance).await;
+        test_prometheus_remote_rw(&distributed.frontend()).await;
     }
 
     async fn test_prometheus_remote_rw(instance: &Arc<Instance>) {

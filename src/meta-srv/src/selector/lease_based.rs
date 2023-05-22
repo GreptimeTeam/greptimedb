@@ -18,14 +18,14 @@ use common_time::util as time_util;
 use crate::error::Result;
 use crate::keys::{LeaseKey, LeaseValue};
 use crate::lease;
-use crate::metasrv::Context;
+use crate::metasrv::SelectorContext;
 use crate::selector::{Namespace, Selector};
 
 pub struct LeaseBasedSelector;
 
 #[async_trait::async_trait]
 impl Selector for LeaseBasedSelector {
-    type Context = Context;
+    type Context = SelectorContext;
     type Output = Vec<Peer>;
 
     async fn select(&self, ns: Namespace, ctx: &Self::Context) -> Result<Self::Output> {
