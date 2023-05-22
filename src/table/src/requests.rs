@@ -244,13 +244,13 @@ pub struct InsertRequest {
 }
 
 impl InsertRequest {
-    /// Returns rows that the insert request contains
+    /// Returns row count that the insert request contains
     pub fn rows(&self) -> usize {
-        if let Some(vector) = self.columns_values.values().next() {
-            vector.len()
-        } else {
-            0
-        }
+        self.columns_values
+            .values()
+            .next()
+            .map(|v| v.len())
+            .unwrap_or(0)
     }
 }
 
