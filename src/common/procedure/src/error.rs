@@ -76,12 +76,6 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to read {}, source: {}", key, source))]
-    ReadState {
-        key: String,
-        source: object_store::Error,
-    },
-
     #[snafu(display("Failed to deserialize from json, source: {}", source))]
     FromJson {
         source: serde_json::Error,
@@ -147,7 +141,6 @@ impl ErrorExt for Error {
 
             Error::ToJson { .. }
             | Error::DeleteState { .. }
-            | Error::ReadState { .. }
             | Error::FromJson { .. }
             | Error::RetryTimesExceeded { .. }
             | Error::RetryLater { .. }

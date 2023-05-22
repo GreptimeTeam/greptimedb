@@ -115,12 +115,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to execute DataFusion ExecutionPlan, source: {}", source))]
-    DataFusionExecutionPlan {
-        source: DataFusionError,
-        location: Location,
-    },
-
     #[snafu(display(
         "Failed to convert DataFusion's recordbatch stream, source: {}",
         source
@@ -198,9 +192,9 @@ impl ErrorExt for Error {
             | Error::ConvertArrowSchema { source }
             | Error::FromArrowArray { source } => source.status_code(),
 
-            Error::ExecuteRepeatedly { .. }
-            | Error::GeneralDataFusion { .. }
-            | Error::DataFusionExecutionPlan { .. } => StatusCode::Unexpected,
+            Error::ExecuteRepeatedly { .. } | Error::GeneralDataFusion { .. } => {
+                StatusCode::Unexpected
+            }
 
             Error::UnsupportedInputDataType { .. }
             | Error::TypeCast { .. }

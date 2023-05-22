@@ -41,19 +41,10 @@ pub enum Error {
     #[snafu(display("empty host: {}", url))]
     EmptyHostPath { url: String, location: Location },
 
-    #[snafu(display("Invalid path: {}", path))]
-    InvalidPath { path: String, location: Location },
-
     #[snafu(display("Invalid url: {}, error :{}", url, source))]
     InvalidUrl {
         url: String,
         source: ParseError,
-        location: Location,
-    },
-
-    #[snafu(display("Failed to decompression, source: {}", source))]
-    Decompression {
-        source: object_store::Error,
         location: Location,
     },
 
@@ -148,9 +139,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Missing required field: {}", name))]
-    MissingRequiredField { name: String, location: Location },
-
     #[snafu(display("Buffered writer closed"))]
     BufferedWriterClosed { location: Location },
 }
@@ -173,16 +161,13 @@ impl ErrorExt for Error {
             | InvalidConnection { .. }
             | InvalidUrl { .. }
             | EmptyHostPath { .. }
-            | InvalidPath { .. }
             | InferSchema { .. }
             | ReadParquetSnafu { .. }
             | ParquetToSchema { .. }
             | ParseFormat { .. }
-            | MergeSchema { .. }
-            | MissingRequiredField { .. } => StatusCode::InvalidArguments,
+            | MergeSchema { .. } => StatusCode::InvalidArguments,
 
-            Decompression { .. }
-            | JoinHandle { .. }
+            JoinHandle { .. }
             | ReadRecordBatch { .. }
             | WriteRecordBatch { .. }
             | EncodeRecordBatch { .. }
@@ -203,11 +188,9 @@ impl ErrorExt for Error {
             InferSchema { location, .. } => Some(*location),
             ReadParquetSnafu { location, .. } => Some(*location),
             ParquetToSchema { location, .. } => Some(*location),
-            Decompression { location, .. } => Some(*location),
             JoinHandle { location, .. } => Some(*location),
             ParseFormat { location, .. } => Some(*location),
             MergeSchema { location, .. } => Some(*location),
-            MissingRequiredField { location, .. } => Some(*location),
             WriteObject { location, .. } => Some(*location),
             ReadRecordBatch { location, .. } => Some(*location),
             WriteRecordBatch { location, .. } => Some(*location),
@@ -217,7 +200,6 @@ impl ErrorExt for Error {
 
             UnsupportedBackendProtocol { location, .. } => Some(*location),
             EmptyHostPath { location, .. } => Some(*location),
-            InvalidPath { location, .. } => Some(*location),
             InvalidUrl { location, .. } => Some(*location),
             InvalidConnection { location, .. } => Some(*location),
             UnsupportedCompressionType { location, .. } => Some(*location),
