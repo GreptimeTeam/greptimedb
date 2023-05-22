@@ -115,8 +115,8 @@ impl OpenRegionHandler {
         )
     }
 
-    /// Returns true if table has been opened.
-    async fn check_table(
+    /// Returns true if a table or target regions have been opened.
+    async fn table_opened(
         &self,
         catalog_name: &str,
         schema_name: &str,
@@ -172,7 +172,7 @@ impl OpenRegionHandler {
         let ctx = EngineContext::default();
 
         if self
-            .check_table(catalog_name, schema_name, table_name, region_numbers)
+            .table_opened(catalog_name, schema_name, table_name, region_numbers)
             .await?
         {
             return Ok(true);

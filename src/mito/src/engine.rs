@@ -737,6 +737,12 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
         if table.is_releasable().await {
             self.tables.remove(&table_ref.to_string());
+
+            logging::info!(
+                "Mito engine closed table: {} in schema: {}",
+                table_ref.table,
+                table_ref.schema,
+            );
             return Ok(true);
         }
 
