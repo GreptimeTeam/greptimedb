@@ -62,13 +62,13 @@ async-stream = "0.3"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 # TODO(ruihang): use arrow-datafusion when it contains https://github.com/apache/arrow-datafusion/pull/6032
-datafusion = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "b14f7a9ffe91257fc3d2a5d654f2a1a14a8fc793" }
-datafusion-common = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "b14f7a9ffe91257fc3d2a5d654f2a1a14a8fc793" }
-datafusion-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "b14f7a9ffe91257fc3d2a5d654f2a1a14a8fc793" }
-datafusion-optimizer = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "b14f7a9ffe91257fc3d2a5d654f2a1a14a8fc793" }
-datafusion-physical-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "b14f7a9ffe91257fc3d2a5d654f2a1a14a8fc793" }
-datafusion-sql = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "b14f7a9ffe91257fc3d2a5d654f2a1a14a8fc793" }
-datafusion-substrait = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "b14f7a9ffe91257fc3d2a5d654f2a1a14a8fc793" }
+datafusion = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "5337c86120de8193406b59be7612484796a46294" }
+datafusion-common = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "5337c86120de8193406b59be7612484796a46294" }
+datafusion-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "5337c86120de8193406b59be7612484796a46294" }
+datafusion-optimizer = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "5337c86120de8193406b59be7612484796a46294" }
+datafusion-physical-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "5337c86120de8193406b59be7612484796a46294" }
+datafusion-sql = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "5337c86120de8193406b59be7612484796a46294" }
+datafusion-substrait = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "5337c86120de8193406b59be7612484796a46294" }
 futures = "0.3"
 futures-util = "0.3"
 parquet = "37.0"

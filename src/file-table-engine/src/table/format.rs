@@ -29,7 +29,9 @@ use datafusion::datasource::object_store::ObjectStoreUrl;
 use datafusion::optimizer::utils::conjunction;
 use datafusion::physical_expr::create_physical_expr;
 use datafusion::physical_expr::execution_props::ExecutionProps;
-use datafusion::physical_plan::file_format::{FileOpener, FileScanConfig, FileStream, ParquetExec};
+use datafusion::physical_plan::file_format::{
+    FileOpener, FileScanConfig, FileStream, ParquetExec, ParquetOpener,
+};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datatypes::arrow::datatypes::Schema as ArrowSchema;
 use datatypes::schema::{Schema, SchemaRef};
@@ -37,7 +39,7 @@ use object_store::ObjectStore;
 use snafu::ResultExt;
 use table::table::scan::SimpleTableScan;
 
-use crate::error::{self, Result};
+use crate::error::{self, BuildStreamSnafu, Result};
 
 const DEFAULT_BATCH_SIZE: usize = 8192;
 
@@ -332,26 +334,34 @@ fn new_parquet_stream(
         None
     };
 
-    let exec = ParquetExec::new(scan_config, filters, None).with_parquet_file_reader_factory(
-        Arc::new(DefaultParquetFileReaderFactory::new(store.clone())),
-    );
-
-    let projected_schema = if let Some(projection) = config.projection {
-        Arc::new(
-            file_schema
-                .project(projection)
-                .context(error::ProjectSchemaSnafu)?,
-        )
-    } else {
-        file_schema
+    let parquet_opener = ParquetOpener {
+        partition_index: 0, // partition: hard-code. This is only for statistics purpose
+        projection: Arc::from(projection.cloned().unwrap_or_default()),
+        batch_size: DEFAULT_BATCH_SIZE,
+        limit: *limit,
+        predicate: filters,
+        pruning_predicate: None,
+        page_pruning_predicate: None,
+        table_schema: file_schema.clone(),
+        metadata_size_hint: None,
+        metrics: ExecutionPlanMetricsSet::new(),
+        parquet_file_reader_factory: Arc::new(DefaultParquetFileReaderFactory::new(store.clone())),
+        pushdown_filters: true,
+        reorder_filters: true,
+        enable_page_index: true,
     };
 
-    // let schema = Schema::try_from(projected_schema).context(error::ConvertSchemaSnafu)?;
-    // let stream = exec.execute(partition, context)
-    // let adapter = RecordBatchStreamAdapter::try_new(Box::pin(stream))
-    //     .context(error::BuildStreamAdapterSnafu)?;
-    // Ok(Box::pin(adapter))
-    todo!()
+    let stream = FileStream::new(
+        &scan_config,
+        0,
+        parquet_opener,
+        &ExecutionPlanMetricsSet::new(),
+    )
+    .context(BuildStreamSnafu)?;
+
+    let adapter = RecordBatchStreamAdapter::try_new(Box::pin(stream))
+        .context(error::BuildStreamAdapterSnafu)?;
+    Ok(Box::pin(adapter))
 }
 
 #[derive(Debug, Clone)]
@@ -373,5 +383,17 @@ pub fn create_physical_plan(
         Format::Csv(format) => new_csv_scan_plan(ctx, config, format),
         Format::Json(format) => new_json_scan_plan(ctx, config, format),
         Format::Parquet(format) => new_parquet_scan_plan(ctx, config, format),
+    }
+}
+
+pub fn create_stream(
+    format: &Format,
+    ctx: &CreateScanPlanContext,
+    config: &ScanPlanConfig,
+) -> Result<SendableRecordBatchStream> {
+    match format {
+        Format::Csv(format) => new_csv_stream(ctx, config, format),
+        Format::Json(format) => new_json_stream(ctx, config, format),
+        Format::Parquet(format) => new_parquet_stream(ctx, config, format),
     }
 }

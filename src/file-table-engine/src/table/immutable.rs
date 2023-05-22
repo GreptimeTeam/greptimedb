@@ -31,6 +31,7 @@ use table::error::{self as table_error, Result as TableResult};
 use table::metadata::{RawTableInfo, TableInfo, TableInfoRef, TableType};
 use table::{requests, Table};
 
+use super::format::create_stream;
 use crate::error::{self, ConvertRawSnafu, Result};
 use crate::manifest::immutable::{
     read_table_manifest, write_table_manifest, ImmutableMetadata, INIT_META_VERSION,
@@ -98,7 +99,20 @@ impl Table for ImmutableFileTable {
     }
 
     async fn scan_to_stream(&self, request: ScanRequest) -> TableResult<SendableRecordBatchStream> {
-        todo!()
+        create_stream(
+            &self.format,
+            &CreateScanPlanContext::default(),
+            &ScanPlanConfig {
+                file_schema: self.schema(),
+                files: &self.files,
+                projection: request.projection.as_ref(),
+                filters: &request.filters,
+                limit: request.limit,
+                store: self.object_store.clone(),
+            },
+        )
+        .map_err(BoxedError::new)
+        .context(table_error::TableOperationSnafu)
     }
 
     async fn flush(
