@@ -193,10 +193,6 @@ impl Region for MockRegion {
         Ok(())
     }
 
-    async fn close(&self) -> Result<()> {
-        Ok(())
-    }
-
     async fn drop_region(&self) -> Result<()> {
         Ok(())
     }

@@ -126,11 +126,6 @@ impl<S: LogStore> Region for RegionImpl<S> {
         self.inner.alter(request).await
     }
 
-    async fn close(&self) -> Result<()> {
-        decrement_gauge!(crate::metrics::REGION_COUNT, 1.0);
-        self.inner.close().await
-    }
-
     async fn drop_region(&self) -> Result<()> {
         self.inner.drop_region().await
     }
@@ -525,6 +520,11 @@ impl<S: LogStore> RegionImpl<S> {
     /// Compact the region manually.
     pub async fn compact(&self, ctx: CompactContext) -> Result<()> {
         self.inner.compact(ctx).await
+    }
+
+    pub async fn close(&self) -> Result<()> {
+        decrement_gauge!(crate::metrics::REGION_COUNT, 1.0);
+        self.inner.close().await
     }
 }
 
