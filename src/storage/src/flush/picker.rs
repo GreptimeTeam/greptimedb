@@ -89,6 +89,11 @@ impl FlushPicker {
             .filter(|region| region.mutable_memtable_usage() > 0)
             .min_by_key(|region| region.last_flush_time());
         if let Some(region) = target {
+            logging::debug!(
+                "Request flush for region {} due to global buffer is full",
+                region.item_id()
+            );
+
             region.request_flush(FlushReason::GlobalBufferFull).await;
         }
     }
@@ -133,6 +138,7 @@ impl<S: LogStore> FlushItem for RegionImpl<S> {
             wait: false,
             reason,
         };
+
         if let Err(e) = self.flush(&ctx).await {
             logging::error!(e; "Failed to flush region {}", self.id());
         }
