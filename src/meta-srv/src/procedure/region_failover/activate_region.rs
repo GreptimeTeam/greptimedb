@@ -29,6 +29,7 @@ use crate::error::{
     Error, Result, RetryLaterSnafu, SerializeToJsonSnafu, UnexpectedInstructionReplySnafu,
 };
 use crate::handler::HeartbeatMailbox;
+use crate::procedure::region_failover::OPEN_REGION_MESSAGE_TIMEOUT;
 use crate::service::mailbox::{Channel, MailboxReceiver};
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -117,9 +118,8 @@ impl State for ActivateRegion {
         ctx: &RegionFailoverContext,
         failed_region: &RegionIdent,
     ) -> Result<Box<dyn State>> {
-        let timeout = Duration::from_secs(30);
         let mailbox_receiver = self
-            .send_open_region_message(ctx, failed_region, timeout)
+            .send_open_region_message(ctx, failed_region, OPEN_REGION_MESSAGE_TIMEOUT)
             .await?;
 
         self.handle_response(mailbox_receiver, failed_region).await

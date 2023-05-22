@@ -21,6 +21,7 @@ mod update_metadata;
 use std::collections::HashSet;
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use common_meta::RegionIdent;
@@ -39,6 +40,9 @@ use snafu::ResultExt;
 use crate::error::{Error, RegisterProcedureLoaderSnafu, Result};
 use crate::metasrv::{SelectorContext, SelectorRef};
 use crate::service::mailbox::MailboxRef;
+
+const OPEN_REGION_MESSAGE_TIMEOUT: Duration = Duration::from_secs(30);
+const CLOSE_REGION_MESSAGE_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub(crate) struct RegionFailoverManager {
     mailbox: MailboxRef,
