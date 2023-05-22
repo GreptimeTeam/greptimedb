@@ -223,6 +223,8 @@ pub struct FlushConfig {
     /// Interval to auto flush a region if it has not flushed yet.
     #[serde(with = "humantime_serde")]
     pub auto_flush_interval: Duration,
+    /// Global write buffer size for all regions.
+    pub global_write_buffer_size: Option<ReadableSize>,
 }
 
 impl Default for FlushConfig {
@@ -234,6 +236,7 @@ impl Default for FlushConfig {
                 DEFAULT_PICKER_SCHEDULE_INTERVAL.into(),
             ),
             auto_flush_interval: Duration::from_millis(DEFAULT_AUTO_FLUSH_INTERVAL.into()),
+            global_write_buffer_size: None,
         }
     }
 }
@@ -260,6 +263,7 @@ impl From<&DatanodeOptions> for StorageEngineConfig {
             region_write_buffer_size: value.storage.flush.region_write_buffer_size,
             picker_schedule_interval: value.storage.flush.picker_schedule_interval,
             auto_flush_interval: value.storage.flush.auto_flush_interval,
+            global_write_buffer_size: value.storage.flush.global_write_buffer_size,
         }
     }
 }

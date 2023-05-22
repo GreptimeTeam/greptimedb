@@ -27,7 +27,7 @@ use store_api::storage::{
 };
 
 use crate::compaction::CompactionSchedulerRef;
-use crate::config::EngineConfig;
+use crate::config::{EngineConfig, DEFAULT_REGION_WRITE_BUFFER_SIZE};
 use crate::error::{self, Error, Result};
 use crate::file_purger::{FilePurgeHandler, FilePurgerRef};
 use crate::flush::{
@@ -288,7 +288,7 @@ impl<S: LogStore> RegionMap<S> {
     }
 
     /// Clear the region map.
-    fn clear(&self) {
+    pub(crate) fn clear(&self) {
         self.0.write().unwrap().clear();
     }
 }
@@ -337,15 +337,25 @@ impl<S: LogStore> EngineInner<S> {
             },
             FilePurgeHandler,
         ));
+        let flush_strategy = Arc::new(SizeBasedStrategy::new(
+            config
+                .global_write_buffer_size
+                .map(|size| size.as_bytes() as usize),
+        ));
+        let memtable_builder = if config.global_write_buffer_size.is_some() {
+            // If global write buffer size is provided, we set the flush strategy
+            // to the memtable to track global memtable usage.
+            DefaultMemtableBuilder::with_flush_strategy(Some(flush_strategy.clone()))
+        } else {
+            DefaultMemtableBuilder::default()
+        };
         Ok(Self {
             object_store,
             log_store,
             regions,
-            memtable_builder: Arc::new(DefaultMemtableBuilder::default()),
+            memtable_builder: Arc::new(memtable_builder),
             flush_scheduler,
-            flush_strategy: Arc::new(SizeBasedStrategy::new(
-                config.region_write_buffer_size.as_bytes() as usize,
-            )),
+            flush_strategy,
             compaction_scheduler,
             file_purger,
             config: Arc::new(config),
@@ -461,10 +471,7 @@ impl<S: LogStore> EngineInner<S> {
             config.manifest_gc_duration,
         );
         manifest.start().await?;
-
-        let flush_strategy = write_buffer_size
-            .map(|size| Arc::new(SizeBasedStrategy::new(size)) as Arc<_>)
-            .unwrap_or_else(|| self.flush_strategy.clone());
+        let flush_strategy = self.flush_strategy.clone();
 
         Ok(StoreConfig {
             log_store: self.log_store.clone(),
@@ -478,6 +485,8 @@ impl<S: LogStore> EngineInner<S> {
             file_purger: self.file_purger.clone(),
             ttl,
             compaction_time_window,
+            write_buffer_size: write_buffer_size
+                .unwrap_or(DEFAULT_REGION_WRITE_BUFFER_SIZE.as_bytes() as usize),
         })
     }
 

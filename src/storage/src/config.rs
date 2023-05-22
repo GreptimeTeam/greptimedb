@@ -44,6 +44,8 @@ pub struct EngineConfig {
     pub picker_schedule_interval: Duration,
     /// Interval to auto flush a region if it has not flushed yet.
     pub auto_flush_interval: Duration,
+    /// Limit for global write buffer size. Disabled by default.
+    pub global_write_buffer_size: Option<ReadableSize>,
 }
 
 impl Default for EngineConfig {
@@ -62,6 +64,7 @@ impl Default for EngineConfig {
                 DEFAULT_PICKER_SCHEDULE_INTERVAL.into(),
             ),
             auto_flush_interval: Duration::from_millis(DEFAULT_AUTO_FLUSH_INTERVAL.into()),
+            global_write_buffer_size: None,
         }
     }
 }

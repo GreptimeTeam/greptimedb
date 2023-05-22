@@ -122,7 +122,6 @@ struct SliceIndex {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::atomic::Ordering;
     use std::sync::Arc;
 
     use common_time::timestamp::Timestamp;
@@ -178,8 +177,8 @@ mod tests {
         min_ts: i64,
     ) {
         let iter = mem.iter(&IterContext::default()).unwrap();
-        assert_eq!(min_ts, mem.stats().min_timestamp.load(Ordering::Relaxed));
-        assert_eq!(max_ts, mem.stats().max_timestamp.load(Ordering::Relaxed));
+        assert_eq!(min_ts, mem.stats().min_timestamp);
+        assert_eq!(max_ts, mem.stats().max_timestamp);
 
         let mut index = 0;
         for batch in iter {
