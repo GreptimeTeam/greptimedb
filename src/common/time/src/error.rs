@@ -42,13 +42,21 @@ pub enum Error {
     ArithmeticOverflow { msg: String, location: Location },
 
     #[snafu(display("Invalid time zone offset: {hours}:{minutes}"))]
-    InvalidTimeZoneOffset { hours: i32, minutes: u32 },
+    InvalidTimeZoneOffset {
+        hours: i32,
+        minutes: u32,
+        location: Location,
+    },
 
     #[snafu(display("Invalid offset string {raw}: {source}"))]
-    ParseOffsetStr { raw: String, source: ParseIntError },
+    ParseOffsetStr {
+        raw: String,
+        source: ParseIntError,
+        location: Location,
+    },
 
     #[snafu(display("Invalid time zone string {raw}"))]
-    ParseTimeZoneName { raw: String },
+    ParseTimeZoneName { raw: String, location: Location },
 }
 
 impl ErrorExt for Error {

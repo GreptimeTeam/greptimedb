@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Display;
 use std::str::FromStr;
 
 use chrono::{FixedOffset, Local};
@@ -75,11 +76,11 @@ impl TimeZone {
     }
 }
 
-impl ToString for TimeZone {
-    fn to_string(&self) -> String {
+impl Display for TimeZone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Named(tz) => tz.name().to_owned(),
-            Self::Offset(offset) => offset.to_string(),
+            Self::Named(tz) => write!(f, "{}", tz.name()),
+            Self::Offset(offset) => write!(f, "{}", offset),
         }
     }
 }
@@ -134,5 +135,24 @@ mod tests {
         assert!(TimeZone::from_tz_string(":::::").is_err());
         assert!(TimeZone::from_tz_string("Asia/London").is_err());
         assert!(TimeZone::from_tz_string("Unknown").is_err());
+    }
+
+    #[test]
+    fn test_timezone_to_string() {
+        assert_eq!("UTC", TimeZone::Named(Tz::UTC).to_string());
+        assert_eq!(
+            "+01:00",
+            TimeZone::from_tz_string("01:00")
+                .unwrap()
+                .unwrap()
+                .to_string()
+        );
+        assert_eq!(
+            "Asia/Shanghai",
+            TimeZone::from_tz_string("Asia/Shanghai")
+                .unwrap()
+                .unwrap()
+                .to_string()
+        );
     }
 }
