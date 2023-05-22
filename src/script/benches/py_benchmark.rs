@@ -64,7 +64,7 @@ pub(crate) fn sample_script_engine() -> PyEngine {
         .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
         .unwrap();
 
-    let factory = QueryEngineFactory::new(catalog_list);
+    let factory = QueryEngineFactory::new(catalog_list, false);
     let query_engine = factory.query_engine();
 
     PyEngine::new(query_engine.clone())

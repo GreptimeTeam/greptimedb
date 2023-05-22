@@ -39,6 +39,7 @@ pub async fn mock_client_by(mock_info: MockInfo) -> MetaClient {
     let MockInfo {
         server_addr,
         channel_manager,
+        ..
     } = mock_info;
 
     let id = (1000u64, 2000u64);

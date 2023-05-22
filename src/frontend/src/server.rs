@@ -37,9 +37,8 @@ use snafu::ResultExt;
 use crate::error::Error::StartServer;
 use crate::error::{self, Result};
 use crate::frontend::FrontendOptions;
-use crate::influxdb::InfluxdbOptions;
 use crate::instance::FrontendInstance;
-use crate::prometheus::PrometheusOptions;
+use crate::service_config::{InfluxdbOptions, PrometheusOptions};
 
 pub(crate) struct Services;
 

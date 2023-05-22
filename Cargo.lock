@@ -1751,10 +1751,15 @@ dependencies = [
 name = "common-meta"
 version = "0.2.0"
 dependencies = [
+ "api",
+ "chrono",
+ "common-catalog",
  "common-error",
+ "datatypes",
  "serde",
  "serde_json",
  "snafu",
+ "table",
 ]
 
 [[package]]
@@ -1874,6 +1879,7 @@ name = "common-time"
 version = "0.2.0"
 dependencies = [
  "chrono",
+ "chrono-tz 0.8.2",
  "common-error",
  "rand",
  "serde",
@@ -2217,6 +2223,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b2466559f260f48ad25fe6317b3c8dac77b5bdb5763ac7d9d6103530663bc90"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "ctor"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd4056f63fce3b82d852c3da92b08ea59959890813a7f4ce9c0ff85b10cf301b"
+dependencies = [
+ "quote",
+ "syn 2.0.15",
 ]
 
 [[package]]
@@ -2846,6 +2862,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "erased-serde"
+version = "0.3.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f2b0c2380453a92ea8b6c8e5f64ecaafccddde8ceab55ff7a8ac1029f894569"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "errno"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3065,6 +3090,7 @@ dependencies = [
  "common-function",
  "common-grpc",
  "common-grpc-expr",
+ "common-meta",
  "common-query",
  "common-recordbatch",
  "common-runtime",
@@ -3352,6 +3378,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "ghost"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e77ac7b51b8e6313251737fcef4b1c01a2ea102bde68415b62c0ee9268fec357"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.15",
 ]
 
 [[package]]
@@ -3870,9 +3907,11 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=6bfb02057c40da0e397c0cb4f6b87bd769669d50#6bfb02057c40da0e397c0cb4f6b87bd769669d50"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=f43972af48f8be1cbb1d27640a8aba8b30955028#f43972af48f8be1cbb1d27640a8aba8b30955028"
 dependencies = [
  "prost",
+ "serde",
+ "serde_json",
  "tonic 0.9.2",
  "tonic-build 0.9.2",
 ]
@@ -4221,6 +4260,16 @@ checksum = "8bb03732005da905c88227371639bf1ad885cc712789c011c31c5fb3ab3ccf02"
 dependencies = [
  "async-trait",
  "futures-util",
+]
+
+[[package]]
+name = "inventory"
+version = "0.3.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7741301a6d6a9b28ce77c0fb77a4eb116b6bc8f3bef09923f7743d059c4157d3"
+dependencies = [
+ "ctor",
+ "ghost",
 ]
 
 [[package]]
@@ -4825,6 +4874,7 @@ dependencies = [
  "chrono",
  "common-error",
  "common-grpc",
+ "common-meta",
  "common-telemetry",
  "datatypes",
  "etcd-client",
@@ -4852,16 +4902,19 @@ dependencies = [
  "async-stream",
  "async-trait",
  "catalog",
+ "chrono",
  "common-base",
  "common-catalog",
  "common-error",
  "common-grpc",
  "common-meta",
  "common-procedure",
+ "common-procedure-test",
  "common-runtime",
  "common-telemetry",
  "common-time",
  "dashmap",
+ "datatypes",
  "derive_builder 0.12.0",
  "etcd-client",
  "futures",
@@ -4885,6 +4938,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "typetag",
  "url",
 ]
 
@@ -5783,6 +5837,7 @@ version = "0.2.0"
 dependencies = [
  "common-catalog",
  "common-error",
+ "common-meta",
  "common-query",
  "datafusion",
  "datafusion-common",
@@ -6524,6 +6579,7 @@ dependencies = [
 name = "query"
 version = "0.2.0"
 dependencies = [
+ "ahash 0.8.3",
  "approx_eq",
  "arc-swap",
  "arrow-schema",
@@ -7994,6 +8050,7 @@ dependencies = [
  "arc-swap",
  "common-catalog",
  "common-telemetry",
+ "common-time",
 ]
 
 [[package]]
@@ -8687,6 +8744,7 @@ dependencies = [
  "common-catalog",
  "common-error",
  "common-procedure",
+ "common-procedure-test",
  "common-telemetry",
  "common-test-util",
  "datatypes",
@@ -8783,6 +8841,8 @@ dependencies = [
  "common-catalog",
  "common-error",
  "common-grpc",
+ "common-meta",
+ "common-procedure",
  "common-query",
  "common-recordbatch",
  "common-runtime",
@@ -9033,9 +9093,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.28.0"
+version = "1.28.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3c786bf8134e5a3a166db9b29ab8f48134739014a3eca7bc6bfa95d673b136f"
+checksum = "0aa32867d44e6f2ce3385e89dceb990188b8bb0fb25b0cf576647a6f98ac5105"
 dependencies = [
  "autocfg",
  "bytes",
@@ -9516,6 +9576,30 @@ name = "typenum"
 version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "497961ef93d974e23eb6f433eb5fe1b7930b659f06d12dec6fc44a8f554c0bba"
+
+[[package]]
+name = "typetag"
+version = "0.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a6898cc6f6a32698cc3e14d5632a14d2b23ed9f7b11e6b8e05ce685990acc22"
+dependencies = [
+ "erased-serde",
+ "inventory",
+ "once_cell",
+ "serde",
+ "typetag-impl",
+]
+
+[[package]]
+name = "typetag-impl"
+version = "0.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c3e1c30cedd24fc597f7d37a721efdbdc2b1acae012c1ef1218f4c7c2c0f3e7"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.15",
+]
 
 [[package]]
 name = "typify"

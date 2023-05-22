@@ -15,11 +15,13 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use common_meta::peer::Peer;
+use common_meta::router::TableRoute;
+use common_meta::table_name::TableName;
 use common_query::prelude::Expr;
 use datafusion_expr::{BinaryExpr, Expr as DfExpr, Operator};
 use datatypes::prelude::Value;
 use datatypes::schema::Schema;
-use meta_client::rpc::{Peer, TableName, TableRoute};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{RegionId, RegionNumber};
 use table::requests::InsertRequest;

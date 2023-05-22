@@ -119,7 +119,7 @@ fn create_test_engine() -> TimeRangeTester {
         .register_catalog_sync("greptime".to_string(), default_catalog)
         .unwrap();
 
-    let engine = QueryEngineFactory::new(catalog_list).query_engine();
+    let engine = QueryEngineFactory::new(catalog_list, false).query_engine();
     TimeRangeTester { engine, table }
 }
 

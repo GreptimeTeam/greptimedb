@@ -22,7 +22,7 @@ use crate::cluster::MetaPeerClient;
 use crate::error::Result;
 use crate::keys::{LeaseKey, LeaseValue, StatKey};
 use crate::lease;
-use crate::metasrv::Context;
+use crate::metasrv::SelectorContext;
 use crate::selector::{Namespace, Selector};
 
 const MAX_REGION_NUMBER: u64 = u64::MAX;
@@ -33,7 +33,7 @@ pub struct LoadBasedSelector {
 
 #[async_trait::async_trait]
 impl Selector for LoadBasedSelector {
-    type Context = Context;
+    type Context = SelectorContext;
     type Output = Vec<Peer>;
 
     async fn select(&self, ns: Namespace, ctx: &Self::Context) -> Result<Self::Output> {

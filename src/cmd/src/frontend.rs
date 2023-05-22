@@ -17,16 +17,15 @@ use std::sync::Arc;
 use clap::Parser;
 use common_base::Plugins;
 use frontend::frontend::FrontendOptions;
-use frontend::influxdb::InfluxdbOptions;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
-use frontend::prom::PromOptions;
+use frontend::service_config::{InfluxdbOptions, PromOptions};
 use meta_client::MetaClientOptions;
 use servers::auth::UserProviderRef;
 use servers::tls::{TlsMode, TlsOption};
 use servers::{auth, Mode};
 use snafu::ResultExt;
 
-use crate::error::{self, IllegalAuthConfigSnafu, Result};
+use crate::error::{self, IllegalAuthConfigSnafu, Result, StartCatalogManagerSnafu};
 use crate::options::{Options, TopLevelOptions};
 
 pub struct Instance {
@@ -35,6 +34,12 @@ pub struct Instance {
 
 impl Instance {
     pub async fn run(&mut self) -> Result<()> {
+        self.frontend
+            .catalog_manager()
+            .start()
+            .await
+            .context(StartCatalogManagerSnafu)?;
+
         self.frontend
             .start()
             .await
@@ -227,7 +232,7 @@ mod tests {
     use std::time::Duration;
 
     use common_test_util::temp_dir::create_named_temp_file;
-    use frontend::grpc::GrpcOptions;
+    use frontend::service_config::GrpcOptions;
     use servers::auth::{Identity, Password, UserProviderRef};
 
     use super::*;

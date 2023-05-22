@@ -101,6 +101,8 @@ async fn test_close_region_handler() {
             table_id: 1025,
             engine: "mito".to_string(),
             region_number: 0,
+            cluster_id: 1,
+            datanode_id: 2,
         }),
     );
     let (_, reply) = rx.recv().await.unwrap();
@@ -153,6 +155,8 @@ async fn test_open_region_handler() {
             table_id: 2024,
             engine: "mito".to_string(),
             region_number: 0,
+            cluster_id: 1,
+            datanode_id: 2,
         }),
     );
     let (_, reply) = rx.recv().await.unwrap();
@@ -221,6 +225,8 @@ fn close_region_instruction() -> Instruction {
         table_id: 1024,
         engine: "mito".to_string(),
         region_number: 0,
+        cluster_id: 1,
+        datanode_id: 2,
     })
 }
 
@@ -232,6 +238,8 @@ fn open_region_instruction() -> Instruction {
         table_id: 1024,
         engine: "mito".to_string(),
         region_number: 0,
+        cluster_id: 1,
+        datanode_id: 2,
     })
 }
 

@@ -18,6 +18,7 @@ table = { path = "../table" }
 
 [dev-dependencies]
 common-catalog = { path = "../common/catalog" }
+common-procedure-test = { path = "../common/procedure-test" }
 common-test-util = { path = "../common/test-util" }
 log-store = { path = "../log-store" }
 mito = { path = "../mito" }

@@ -43,9 +43,8 @@ mod test {
     async fn test_distributed_handle_ddl_request() {
         let instance =
             tests::create_distributed_instance("test_distributed_handle_ddl_request").await;
-        let frontend = &instance.frontend;
 
-        test_handle_ddl_request(frontend.as_ref()).await;
+        test_handle_ddl_request(instance.frontend().as_ref()).await;
 
         verify_table_is_dropped(&instance).await;
     }
@@ -158,7 +157,7 @@ mod test {
     }
 
     async fn verify_table_is_dropped(instance: &MockDistributedInstance) {
-        for (_, dn) in instance.datanodes.iter() {
+        for (_, dn) in instance.datanodes().iter() {
             assert!(dn
                 .catalog_manager()
                 .table(
@@ -178,7 +177,8 @@ mod test {
 
         let instance =
             tests::create_distributed_instance("test_distributed_insert_delete_and_query").await;
-        let frontend = instance.frontend.as_ref();
+        let frontend = instance.frontend();
+        let frontend = frontend.as_ref();
 
         let table_name = "my_dist_table";
         let sql = format!(
@@ -296,7 +296,8 @@ CREATE TABLE {table_name} (
 
         let instance = tests::create_distributed_instance("test_distributed_flush_table").await;
         let data_tmp_dirs = instance.data_tmp_dirs();
-        let frontend = instance.frontend.as_ref();
+        let frontend = instance.frontend();
+        let frontend = frontend.as_ref();
 
         let table_name = "my_dist_table";
         let sql = format!(
@@ -320,8 +321,7 @@ CREATE TABLE {table_name} (
         // Wait for previous task finished
         flush_table(frontend, "greptime", "public", table_name, None).await;
 
-        let table = instance
-            .frontend
+        let table = frontend
             .catalog_manager()
             .table("greptime", "public", table_name)
             .await
@@ -593,7 +593,7 @@ CREATE TABLE {table_name} (
         expected_distribution: HashMap<u32, &str>,
     ) {
         let table = instance
-            .frontend
+            .frontend()
             .catalog_manager()
             .table("greptime", "public", table_name)
             .await
@@ -621,7 +621,7 @@ CREATE TABLE {table_name} (
                 "SELECT ts, a, b FROM {table_name} ORDER BY ts"
             ))
             .unwrap();
-            let dn = instance.datanodes.get(dn).unwrap();
+            let dn = instance.datanodes().get(dn).unwrap();
             let engine = dn.query_engine();
             let plan = engine
                 .planner()

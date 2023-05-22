@@ -18,7 +18,7 @@ use crate::error;
 use crate::error::Result;
 
 #[inline]
-pub(crate) fn check_response_header(header: Option<&ResponseHeader>) -> Result<()> {
+pub fn check_response_header(header: Option<&ResponseHeader>) -> Result<()> {
     if let Some(header) = header {
         if let Some(error) = &header.error {
             let code = error.code;

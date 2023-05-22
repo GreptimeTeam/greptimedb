@@ -34,10 +34,10 @@ use catalog::{
 };
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::BoxedError;
+use common_meta::table_name::TableName;
 use common_telemetry::warn;
 use futures::StreamExt;
 use futures_util::TryStreamExt;
-use meta_client::rpc::TableName;
 use partition::manager::PartitionRuleManagerRef;
 use snafu::prelude::*;
 use table::table::numbers::NumbersTable;
@@ -97,6 +97,7 @@ impl FrontendCatalogManager {
 #[async_trait::async_trait]
 impl CatalogManager for FrontendCatalogManager {
     async fn start(&self) -> catalog::error::Result<()> {
+        self.datanode_clients.start();
         Ok(())
     }
 

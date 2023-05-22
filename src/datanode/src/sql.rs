@@ -67,10 +67,6 @@ impl SqlHandler {
         }
     }
 
-    // TODO(LFC): Refactor consideration: a context awareness "Planner".
-    // Now we have some query related state (like current using database in session context), maybe
-    // we could create a new struct called `Planner` that stores context and handle these queries
-    // there, instead of executing here in a "static" fashion.
     pub async fn execute(&self, request: SqlRequest, query_ctx: QueryContextRef) -> Result<Output> {
         let result = match request {
             SqlRequest::CreateTable(req) => self.create_table(req).await,

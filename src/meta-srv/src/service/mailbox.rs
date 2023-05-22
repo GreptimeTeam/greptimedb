@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use api::v1::meta::MailboxMessage;
+use api::v1::meta::{MailboxMessage, Role};
 use futures::Future;
 use tokio::sync::oneshot;
 
@@ -30,6 +30,15 @@ pub type MessageId = u64;
 pub enum Channel {
     Datanode(u64),
     Frontend(u64),
+}
+
+impl Channel {
+    pub(crate) fn pusher_id(&self) -> String {
+        match self {
+            Channel::Datanode(id) => format!("{}-{}", Role::Datanode as i32, id),
+            Channel::Frontend(id) => format!("{}-{}", Role::Frontend as i32, id),
+        }
+    }
 }
 
 pub struct MailboxReceiver {
@@ -73,4 +82,15 @@ pub trait Mailbox: Send + Sync {
     ) -> Result<MailboxReceiver>;
 
     async fn on_recv(&self, id: MessageId, maybe_msg: Result<MailboxMessage>) -> Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_channel_pusher_id() {
+        assert_eq!(Channel::Datanode(42).pusher_id(), "0-42");
+        assert_eq!(Channel::Frontend(42).pusher_id(), "1-42");
+    }
 }

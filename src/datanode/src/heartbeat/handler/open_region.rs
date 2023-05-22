@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use catalog::error::Error as CatalogError;
 use catalog::{CatalogManagerRef, RegisterTableRequest};
 use common_catalog::format_full_table_name;
 use common_meta::instruction::{Instruction, InstructionReply, RegionIdent, SimpleReply};
@@ -100,6 +101,7 @@ impl OpenRegionHandler {
             table_id,
             region_number,
             engine,
+            ..
         } = ident;
 
         (
@@ -191,13 +193,13 @@ impl OpenRegionHandler {
                 table_id: request.table_id,
                 table,
             };
-            self.catalog_manager
-                .register_table(request)
-                .await
-                .with_context(|_| error::RegisterTableSnafu {
+            let result = self.catalog_manager.register_table(request).await;
+            match result {
+                Ok(_) | Err(CatalogError::TableExists { .. }) => Ok(true),
+                e => e.with_context(|_| error::RegisterTableSnafu {
                     table_name: format_full_table_name(catalog_name, schema_name, table_name),
-                })?;
-            Ok(true)
+                }),
+            }
         } else {
             // Case 1:
             // TODO(weny): Fix/Cleanup the broken table manifest
