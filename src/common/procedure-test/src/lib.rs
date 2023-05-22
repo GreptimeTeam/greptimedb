@@ -94,7 +94,7 @@ pub async fn execute_procedure_once(
 /// Executes a procedure until it returns [Status::Suspended] or [Status::Done].
 ///
 /// Returns `Some` if it returns [Status::Suspended] or `None` if it returns [Status::Done].
-pub async fn execute_parent_procedure(
+pub async fn execute_until_suspended_or_done(
     procedure_id: ProcedureId,
     provider: MockContextProvider,
     procedure: &mut dyn Procedure,

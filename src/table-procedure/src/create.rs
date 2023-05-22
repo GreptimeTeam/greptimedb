@@ -322,7 +322,7 @@ mod tests {
     use std::collections::HashMap;
 
     use common_procedure_test::{
-        execute_parent_procedure, execute_procedure_once, execute_procedure_until_done,
+        execute_procedure_once, execute_procedure_until_done, execute_until_suspended_or_done,
         MockContextProvider,
     };
     use table::engine::{EngineContext, TableEngine};
@@ -404,10 +404,13 @@ mod tests {
         let mut procedure = Box::new(procedure);
         // Execute until suspended. We use an empty provider so the parent can submit
         // a new subprocedure as the it can't find the subprocedure.
-        let mut subprocedures =
-            execute_parent_procedure(procedure_id, MockContextProvider::default(), &mut procedure)
-                .await
-                .unwrap();
+        let mut subprocedures = execute_until_suspended_or_done(
+            procedure_id,
+            MockContextProvider::default(),
+            &mut procedure,
+        )
+        .await
+        .unwrap();
         assert_eq!(1, subprocedures.len());
         // Execute the subprocedure.
         let mut subprocedure = subprocedures.pop().unwrap();
