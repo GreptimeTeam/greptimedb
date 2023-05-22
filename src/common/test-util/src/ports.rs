@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 use std::sync::atomic::{AtomicUsize, Ordering};
-static PORTS: OnceCell<AtomicUsize> = OnceCell::new();
 use once_cell::sync::OnceCell;
 use rand::Rng;
+
+static PORTS: OnceCell<AtomicUsize> = OnceCell::new();
 
 /// Return a unique port(in runtime) for test
 pub fn get_port() -> usize {
