@@ -267,7 +267,11 @@ async fn create_query_engine(meta_addr: &str) -> Result<DatafusionQueryEngine> {
         partition_manager,
         datanode_clients,
     ));
-    let state = Arc::new(QueryEngineState::new(catalog_list, Default::default()));
+    let state = Arc::new(QueryEngineState::new(
+        catalog_list,
+        false,
+        Default::default(),
+    ));
 
     Ok(DatafusionQueryEngine::new(state))
 }

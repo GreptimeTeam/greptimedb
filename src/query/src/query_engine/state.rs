@@ -32,6 +32,7 @@ use datafusion_expr::LogicalPlan as DfLogicalPlan;
 use datafusion_optimizer::analyzer::Analyzer;
 use promql::extension_plan::PromExtensionPlanner;
 
+use crate::dist_plan::{DistExtensionPlanner, DistPlannerAnalyzer};
 use crate::optimizer::TypeConversionRule;
 use crate::query_engine::options::QueryOptions;
 
@@ -55,11 +56,18 @@ impl fmt::Debug for QueryEngineState {
 }
 
 impl QueryEngineState {
-    pub fn new(catalog_list: CatalogManagerRef, plugins: Arc<Plugins>) -> Self {
+    pub fn new(
+        catalog_list: CatalogManagerRef,
+        with_dist_planner: bool,
+        plugins: Arc<Plugins>,
+    ) -> Self {
         let runtime_env = Arc::new(RuntimeEnv::default());
         let session_config = SessionConfig::new().with_create_default_catalog_and_schema(false);
         // Apply the type conversion rule first.
         let mut analyzer = Analyzer::new();
+        if with_dist_planner {
+            analyzer.rules.insert(0, Arc::new(DistPlannerAnalyzer));
+        }
         analyzer.rules.insert(0, Arc::new(TypeConversionRule));
 
         let session_state = SessionState::with_config_rt_and_catalog_list(
@@ -139,9 +147,10 @@ impl QueryPlanner for DfQueryPlanner {
 impl DfQueryPlanner {
     fn new() -> Self {
         Self {
-            physical_planner: DefaultPhysicalPlanner::with_extension_planners(vec![Arc::new(
-                PromExtensionPlanner {},
-            )]),
+            physical_planner: DefaultPhysicalPlanner::with_extension_planners(vec![
+                Arc::new(PromExtensionPlanner),
+                Arc::new(DistExtensionPlanner),
+            ]),
         }
     }
 }

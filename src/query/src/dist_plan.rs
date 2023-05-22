@@ -12,27 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(let_chains)]
+mod analyzer;
+mod commutativity;
+mod merge_scan;
+mod planner;
+mod utils;
 
-pub mod datafusion;
-pub mod dist_plan;
-pub mod error;
-pub mod executor;
-pub mod logical_optimizer;
-mod metrics;
-mod optimizer;
-pub mod parser;
-pub mod physical_optimizer;
-pub mod physical_planner;
-pub mod plan;
-pub mod planner;
-pub mod query_engine;
-pub mod sql;
-
-pub use crate::datafusion::DfContextProviderAdapter;
-pub use crate::query_engine::{
-    QueryEngine, QueryEngineContext, QueryEngineFactory, QueryEngineRef,
-};
-
-#[cfg(test)]
-mod tests;
+pub use analyzer::DistPlannerAnalyzer;
+pub use planner::DistExtensionPlanner;
