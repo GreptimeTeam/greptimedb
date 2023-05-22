@@ -319,8 +319,11 @@ impl CreateTableData {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use common_procedure_test::{
         execute_parent_procedure, execute_procedure_once, execute_procedure_until_done,
+        MockContextProvider,
     };
     use table::engine::{EngineContext, TableEngine};
 
@@ -368,6 +371,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_recover_register_catalog() {
+        common_telemetry::init_default_ut_logging();
+
         let TestEnv {
             dir,
             table_engine,
@@ -397,16 +402,25 @@ mod tests {
 
         let procedure_id = ProcedureId::random();
         let mut procedure = Box::new(procedure);
-        // Execute until suspended.
-        let mut subprocedures = execute_parent_procedure(procedure_id, &mut procedure)
-            .await
-            .unwrap();
+        // Execute until suspended. We use an empty provider so the parent can submit
+        // a new subprocedure as the it can't find the subprocedure.
+        let mut subprocedures =
+            execute_parent_procedure(procedure_id, MockContextProvider::default(), &mut procedure)
+                .await
+                .unwrap();
         assert_eq!(1, subprocedures.len());
         // Execute the subprocedure.
         let mut subprocedure = subprocedures.pop().unwrap();
         execute_procedure_until_done(&mut subprocedure.procedure).await;
+        let mut states = HashMap::new();
+        states.insert(subprocedure.id, ProcedureState::Done);
         // Execute the parent procedure once.
-        execute_procedure_once(procedure_id, &mut procedure).await;
+        execute_procedure_once(
+            procedure_id,
+            MockContextProvider::new(states),
+            &mut procedure,
+        )
+        .await;
         assert_eq!(CreateTableState::RegisterCatalog, procedure.data.state);
 
         // Close the table engine and reopen the TestEnv.

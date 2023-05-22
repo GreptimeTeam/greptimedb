@@ -18,6 +18,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{Context, Error, LockKey, Procedure, ProcedureManager, Result, Status};
+use common_telemetry::logging;
 use common_telemetry::metric::Timer;
 use datatypes::schema::{Schema, SchemaRef};
 use serde::{Deserialize, Serialize};
@@ -128,6 +129,8 @@ impl<S: StorageEngine> CreateMitoTable<S> {
     /// Checks whether the table exists.
     fn on_prepare(&mut self) -> Result<Status> {
         let table_ref = self.creator.data.table_ref();
+        logging::debug!("on prepare create table {}", table_ref);
+
         if self.creator.engine_inner.get_table(&table_ref).is_some() {
             // If the table already exists.
             ensure!(
@@ -149,6 +152,7 @@ impl<S: StorageEngine> CreateMitoTable<S> {
     async fn on_engine_create_table(&mut self) -> Result<Status> {
         // In this state, we can ensure we are able to create a new table.
         let table_ref = self.creator.data.table_ref();
+        logging::info!("on engine create table {}", table_ref);
 
         let _lock = self
             .creator
@@ -211,6 +215,8 @@ impl<S: StorageEngine> TableCreator<S> {
         if let Some(table) = self.engine_inner.get_table(&table_ref) {
             return Ok(table.clone());
         }
+
+        logging::info!("Creator create table {}", table_ref);
 
         self.create_regions(&table_dir).await?;
 
@@ -294,6 +300,13 @@ impl<S: StorageEngine> TableCreator<S> {
                     .await
                     .map_err(Error::from_error_ext)?
             };
+
+            logging::info!(
+                "Create region {} for table {}, region_id: {}",
+                number,
+                self.data.request.table_ref(),
+                region_id
+            );
 
             self.regions.insert(*number, region);
         }

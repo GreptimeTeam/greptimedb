@@ -456,8 +456,13 @@ impl<R: Region> MitoTable<R> {
         object_store: ObjectStore,
         compress_type: CompressionType,
     ) -> Result<MitoTable<R>> {
-        let manifest =
-            TableManifest::create(&table_manifest_dir(table_dir), object_store, compress_type);
+        let manifest_dir = table_manifest_dir(table_dir);
+        let manifest = TableManifest::create(&manifest_dir, object_store, compress_type);
+        logging::info!(
+            "Create table manifest at {}, table_name: {}",
+            manifest_dir,
+            table_name
+        );
 
         let _timer =
             common_telemetry::timer!(crate::metrics::MITO_CREATE_TABLE_UPDATE_MANIFEST_ELAPSED);
