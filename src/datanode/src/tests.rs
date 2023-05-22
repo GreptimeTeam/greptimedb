@@ -187,8 +187,8 @@ async fn test_open_region_handler() {
 async fn parepare_handler_test(name: &str) -> HandlerTestGuard {
     let mock_instance = MockInstance::new(name).await;
     let instance = mock_instance.inner();
-    let engine_manager = instance.sql_handler().table_engine_manager();
-    let catalog_manager = instance.sql_handler().catalog_manager();
+    let engine_manager = instance.sql_handler().table_engine_manager().clone();
+    let catalog_manager = instance.sql_handler().catalog_manager().clone();
     let (tx, rx) = mpsc::channel(8);
     let mailbox = Arc::new(HeartbeatMailbox::new(tx));
 

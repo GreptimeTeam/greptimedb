@@ -35,6 +35,9 @@ pub struct HeartbeatResponseHandlerContext {
     pub incoming_message: Option<IncomingMessage>,
 }
 
+/// HandleControl
+///
+/// Controls process of handling heartbeat response.
 #[derive(PartialEq)]
 pub enum HandleControl {
     Continue,
@@ -51,6 +54,11 @@ impl HeartbeatResponseHandlerContext {
     }
 }
 
+/// HeartbeatResponseHandler
+///
+/// [`HeartbeatResponseHandler::is_acceptable`] returns true if handler can handle incoming [`HeartbeatResponseHandlerContext`].
+///
+/// [`HeartbeatResponseHandler::handle`] handles all or part of incoming [`HeartbeatResponseHandlerContext`].
 pub trait HeartbeatResponseHandler: Send + Sync {
     fn is_acceptable(&self, ctx: &HeartbeatResponseHandlerContext) -> bool;
 
@@ -80,8 +88,8 @@ impl HeartbeatResponseHandlerExecutor for HandlerGroupExecutor {
 
             match handler.handle(&mut ctx) {
                 Ok(HandleControl::Done) => break,
+                Ok(HandleControl::Continue) => {}
                 Err(e) => error!(e;"Error while handling: {:?}", ctx.response),
-                _ => {} // continues
             }
         }
         Ok(())
