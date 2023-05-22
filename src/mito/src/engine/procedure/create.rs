@@ -152,7 +152,7 @@ impl<S: StorageEngine> CreateMitoTable<S> {
     async fn on_engine_create_table(&mut self) -> Result<Status> {
         // In this state, we can ensure we are able to create a new table.
         let table_ref = self.creator.data.table_ref();
-        logging::info!("on engine create table {}", table_ref);
+        logging::debug!("on engine create table {}", table_ref);
 
         let _lock = self
             .creator
@@ -216,7 +216,7 @@ impl<S: StorageEngine> TableCreator<S> {
             return Ok(table.clone());
         }
 
-        logging::info!("Creator create table {}", table_ref);
+        logging::debug!("Creator create table {}", table_ref);
 
         self.create_regions(&table_dir).await?;
 
@@ -301,7 +301,7 @@ impl<S: StorageEngine> TableCreator<S> {
                     .map_err(Error::from_error_ext)?
             };
 
-            logging::info!(
+            logging::debug!(
                 "Create region {} for table {}, region_id: {}",
                 number,
                 self.data.request.table_ref(),
