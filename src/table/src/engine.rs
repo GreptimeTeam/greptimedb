@@ -67,7 +67,7 @@ impl<'a> Display for TableReference<'a> {
 /// from the engine.
 /// Returns [`CloseTableResult::PartialClosed`] and closed region numbers if only partial
 /// regions were closed.
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub enum CloseTableResult {
     Released(Vec<RegionNumber>),
     PartialClosed(Vec<RegionNumber>),
