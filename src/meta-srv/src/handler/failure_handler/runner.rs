@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common_meta::RegionIdent;
-use common_telemetry::{error, warn};
+use common_telemetry::{error, info, warn};
 use common_time::util::current_time_millis;
 use dashmap::mapref::multiple::RefMulti;
 use dashmap::DashMap;
@@ -173,19 +173,24 @@ impl FailureDetectRunner {
     }
 
     #[cfg(test)]
-    fn abort(&mut self) {
-        let Some(handle) = self.receiver_handle.take() else { return };
-        handle.abort();
-
-        let Some(handle) = self.runner_handle.take() else { return };
-        handle.abort();
-    }
-
-    #[cfg(test)]
     pub(crate) async fn dump(&self) -> FailureDetectorContainer {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.send_control(FailureDetectControl::Dump(tx)).await;
         rx.await.unwrap()
+    }
+}
+
+impl Drop for FailureDetectRunner {
+    fn drop(&mut self) {
+        if let Some(handle) = self.receiver_handle.take() {
+            handle.abort();
+            info!("Heartbeat receiver in FailureDetectRunner is stopped.");
+        }
+
+        if let Some(handle) = self.runner_handle.take() {
+            handle.abort();
+            info!("Failure detector in FailureDetectRunner is stopped.");
+        }
     }
 }
 
@@ -296,8 +301,6 @@ mod tests {
 
         let dump = runner.dump().await;
         assert_eq!(dump.iter().collect::<Vec<_>>().len(), 0);
-
-        runner.abort();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -358,7 +361,5 @@ mod tests {
             let now = start + acceptable_heartbeat_pause_millis + 2000;
             assert!(fd.phi(now) > fd.threshold() as _);
         });
-
-        runner.abort();
     }
 }

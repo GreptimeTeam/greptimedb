@@ -156,9 +156,9 @@ impl MetaSrvBuilder {
                     },
                 ));
 
-                let mut region_failure_handler =
-                    RegionFailureHandler::new(election.clone(), region_failover_manager);
-                region_failure_handler.try_start().await?;
+                let region_failure_handler =
+                    RegionFailureHandler::try_new(election.clone(), region_failover_manager)
+                        .await?;
 
                 let group = HeartbeatHandlerGroup::new(pushers);
                 let keep_lease_handler = KeepLeaseHandler::new(kv_store.clone());

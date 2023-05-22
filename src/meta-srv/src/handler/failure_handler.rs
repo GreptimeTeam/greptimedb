@@ -34,27 +34,21 @@ pub(crate) struct DatanodeHeartbeat {
 
 pub struct RegionFailureHandler {
     failure_detect_runner: FailureDetectRunner,
-    region_failover_manager: Arc<RegionFailoverManager>,
 }
 
 impl RegionFailureHandler {
-    pub(crate) fn new(
+    pub(crate) async fn try_new(
         election: Option<ElectionRef>,
         region_failover_manager: Arc<RegionFailoverManager>,
-    ) -> Self {
-        Self {
-            failure_detect_runner: FailureDetectRunner::new(
-                election,
-                region_failover_manager.clone(),
-            ),
-            region_failover_manager,
-        }
-    }
+    ) -> Result<Self> {
+        region_failover_manager.try_start()?;
 
-    pub(crate) async fn try_start(&mut self) -> Result<()> {
-        self.region_failover_manager.try_start()?;
-        self.failure_detect_runner.start().await;
-        Ok(())
+        let mut failure_detect_runner = FailureDetectRunner::new(election, region_failover_manager);
+        failure_detect_runner.start().await;
+
+        Ok(Self {
+            failure_detect_runner,
+        })
     }
 }
 
@@ -119,9 +113,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_handle_heartbeat() {
         let region_failover_manager = create_region_failover_manager();
-
-        let mut handler = RegionFailureHandler::new(None, region_failover_manager);
-        handler.try_start().await.unwrap();
+        let handler = RegionFailureHandler::try_new(None, region_failover_manager)
+            .await
+            .unwrap();
 
         let req = &HeartbeatRequest::default();
 
