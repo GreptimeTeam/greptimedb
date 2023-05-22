@@ -283,7 +283,7 @@ impl CreateTableProcedure {
 }
 
 /// Represents each step while creating a table in the datanode.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 enum CreateTableState {
     /// Validate request and prepare to create table.
     Prepare,
@@ -319,6 +319,9 @@ impl CreateTableData {
 
 #[cfg(test)]
 mod tests {
+    use common_procedure_test::{
+        execute_parent_procedure, execute_procedure_once, execute_procedure_until_done,
+    };
     use table::engine::{EngineContext, TableEngine};
 
     use super::*;
@@ -357,6 +360,79 @@ mod tests {
         let mut watcher = procedure_manager.submit(procedure_with_id).await.unwrap();
         watcher.changed().await.unwrap();
 
+        assert!(table_engine
+            .get_table(&engine_ctx, &table_ref)
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn test_recover_register_catalog() {
+        let TestEnv {
+            dir,
+            table_engine,
+            procedure_manager: _,
+            catalog_manager,
+        } = TestEnv::new("create");
+
+        let table_name = "test_create";
+        let request = test_util::new_create_request(table_name);
+        let procedure = CreateTableProcedure::new(
+            request.clone(),
+            catalog_manager,
+            table_engine.clone(),
+            table_engine.clone(),
+        );
+
+        let table_ref = TableReference {
+            catalog: &request.catalog_name,
+            schema: &request.schema_name,
+            table: &request.table_name,
+        };
+        let engine_ctx = EngineContext::default();
+        assert!(table_engine
+            .get_table(&engine_ctx, &table_ref)
+            .unwrap()
+            .is_none());
+
+        let procedure_id = ProcedureId::random();
+        let mut procedure = Box::new(procedure);
+        // Execute until suspended.
+        let mut subprocedures = execute_parent_procedure(procedure_id, &mut procedure)
+            .await
+            .unwrap();
+        assert_eq!(1, subprocedures.len());
+        // Execute the subprocedure.
+        let mut subprocedure = subprocedures.pop().unwrap();
+        execute_procedure_until_done(&mut subprocedure.procedure).await;
+        // Execute the parent procedure once.
+        execute_procedure_once(procedure_id, &mut procedure).await;
+        assert_eq!(CreateTableState::RegisterCatalog, procedure.data.state);
+
+        // Close the table engine and reopen the TestEnv.
+        table_engine.close().await.unwrap();
+        let TestEnv {
+            dir: _dir,
+            table_engine,
+            procedure_manager: _,
+            catalog_manager,
+        } = TestEnv::from_temp_dir(dir);
+
+        // Recover the procedure
+        let json = procedure.dump().unwrap();
+        let procedure = CreateTableProcedure::from_json(
+            &json,
+            catalog_manager,
+            table_engine.clone(),
+            table_engine.clone(),
+        )
+        .unwrap();
+        let mut procedure = Box::new(procedure);
+        assert_eq!(CreateTableState::RegisterCatalog, procedure.data.state);
+        // Execute until done.
+        execute_procedure_until_done(&mut procedure).await;
+
+        // The table is created.
         assert!(table_engine
             .get_table(&engine_ctx, &table_ref)
             .unwrap()

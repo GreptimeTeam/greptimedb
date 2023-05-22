@@ -18,7 +18,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_procedure::{
-    BoxedProcedure, Context, ContextProvider, ProcedureId, ProcedureState, Result, Status,
+    Context, ContextProvider, Procedure, ProcedureId, ProcedureState, ProcedureWithId, Result,
+    Status,
 };
 
 /// A Mock [ContextProvider] that always return [ProcedureState::Done].
@@ -35,7 +36,7 @@ impl ContextProvider for MockContextProvider {
 ///
 /// # Panics
 /// Panics if the `procedure` has subprocedure to execute.
-pub async fn execute_procedure_until_done(procedure: &mut BoxedProcedure) {
+pub async fn execute_procedure_until_done(procedure: &mut dyn Procedure) {
     let ctx = Context {
         procedure_id: ProcedureId::random(),
         provider: Arc::new(MockContextProvider {}),
@@ -51,4 +52,52 @@ pub async fn execute_procedure_until_done(procedure: &mut BoxedProcedure) {
             Status::Done => break,
         }
     }
+}
+
+/// Executes a procedure once.
+///
+/// Returns whether the procedure is done.
+pub async fn execute_procedure_once(
+    procedure_id: ProcedureId,
+    procedure: &mut dyn Procedure,
+) -> bool {
+    let ctx = Context {
+        procedure_id,
+        provider: Arc::new(MockContextProvider {}),
+    };
+
+    match procedure.execute(&ctx).await.unwrap() {
+        Status::Executing { .. } => false,
+        Status::Suspended { subprocedures, .. } => {
+            assert!(
+                subprocedures.is_empty(),
+                "Executing subprocedure is unsupported"
+            );
+            false
+        }
+        Status::Done => true,
+    }
+}
+
+/// Executes a procedure until it returns [Status::Suspended] or [Status::Done].
+///
+/// Returns `Some` if it returns [Status::Suspended] or `None` if it returns [Status::Done].
+pub async fn execute_parent_procedure(
+    procedure_id: ProcedureId,
+    procedure: &mut dyn Procedure,
+) -> Option<Vec<ProcedureWithId>> {
+    let ctx = Context {
+        procedure_id,
+        provider: Arc::new(MockContextProvider {}),
+    };
+
+    loop {
+        match procedure.execute(&ctx).await.unwrap() {
+            Status::Executing { .. } => (),
+            Status::Suspended { subprocedures, .. } => return Some(subprocedures),
+            Status::Done => break,
+        }
+    }
+
+    None
 }
