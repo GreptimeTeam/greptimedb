@@ -638,11 +638,14 @@ fn record_batches_to_series(
 ) -> Result<()> {
     for batch in batches.iter() {
         for row in batch.rows() {
-            let mut element = HashMap::new();
-            for (idx, column) in row.iter().enumerate() {
-                let column_name = batch.schema.column_name_by_index(idx);
-                element.insert(column_name.to_string(), column.to_string());
-            }
+            let element = row
+                .iter()
+                .enumerate()
+                .map(|(idx, column)| {
+                    let column_name = batch.schema.column_name_by_index(idx);
+                    (column_name.to_string(), column.to_string())
+                })
+                .collect();
             series.push(element);
         }
     }
@@ -781,15 +784,8 @@ pub async fn series_query(
 
         let result = handler.do_query(&prom_query, query_ctx.clone()).await;
 
-        let response = retrieve_series_from_query_result(result, &mut series).await;
-
-        if let Err(err) = response {
-            // Prometheus won't report error if querying nonexist label and metric
-            if err.status_code() != StatusCode::TableNotFound
-                && err.status_code() != StatusCode::TableColumnNotFound
-            {
-                return PromJsonResponse::error(err.status_code().to_string(), err.to_string());
-            }
+        if let Err(err) = retrieve_series_from_query_result(result, &mut series).await {
+            return PromJsonResponse::error(err.status_code().to_string(), err.to_string());
         }
     }
 
