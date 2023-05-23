@@ -20,9 +20,8 @@ use common_datasource::file_format::parquet::{DefaultParquetFileReaderFactory, P
 use common_datasource::file_format::Format;
 use common_query::physical_plan::{PhysicalPlanAdapter, PhysicalPlanRef};
 use common_query::prelude::Expr;
-use common_query::DfPhysicalPlan;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
-use common_recordbatch::{DfSendableRecordBatchStream, SendableRecordBatchStream};
+use common_recordbatch::SendableRecordBatchStream;
 use datafusion::common::ToDFSchema;
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::object_store::ObjectStoreUrl;

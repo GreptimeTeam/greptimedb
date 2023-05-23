@@ -29,7 +29,7 @@ use store_api::storage::{OrderOption, ScanRequest};
 use super::scan::StreamScanAdapter;
 use crate::table::{TableRef, TableType};
 
-/// Adapt greptime's [Table] to DataFusion's [TableProvider].
+/// Adapt greptime's [TableRef] to DataFusion's [TableProvider].
 pub struct DfTableProviderAdapter {
     table: TableRef,
     scan_req: Arc<Mutex<ScanRequest>>,

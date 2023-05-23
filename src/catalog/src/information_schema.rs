@@ -22,13 +22,12 @@ use async_trait::async_trait;
 use common_query::physical_plan::PhysicalPlanRef;
 use common_query::prelude::Expr;
 use common_recordbatch::SendableRecordBatchStream;
-use datafusion::datasource::streaming::PartitionStream;
 use datatypes::schema::SchemaRef;
 use store_api::storage::ScanRequest;
 use table::{Result as TableResult, Table, TableRef};
 
 use self::columns::InformationSchemaColumns;
-use crate::error::{DatafusionSnafu, Result, TableSchemaMismatchSnafu};
+use crate::error::Result;
 use crate::information_schema::tables::InformationSchemaTables;
 use crate::{CatalogProviderRef, SchemaProvider};
 
@@ -119,13 +118,13 @@ impl Table for InformationTable {
     /// Scan the table and returns a SendableRecordBatchStream.
     async fn scan(
         &self,
-        projection: Option<&Vec<usize>>,
-        filters: &[Expr],
+        _projection: Option<&Vec<usize>>,
+        _filters: &[Expr],
         // limit can be used to reduce the amount scanned
         // from the datasource as a performance optimization.
         // If set, it contains the amount of rows needed by the `LogicalPlan`,
         // The datasource should return *at least* this number of rows if available.
-        limit: Option<usize>,
+        _limit: Option<usize>,
     ) -> TableResult<PhysicalPlanRef> {
         unimplemented!()
     }

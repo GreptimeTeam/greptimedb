@@ -158,7 +158,7 @@ impl Table for DistTable {
     // TODO(ruihang): DistTable should not call this method directly
     async fn scan_to_stream(
         &self,
-        request: ScanRequest,
+        _request: ScanRequest,
     ) -> table::Result<SendableRecordBatchStream> {
         unimplemented!()
     }
