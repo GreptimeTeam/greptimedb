@@ -227,8 +227,9 @@ impl StartCommand {
         if let Some(dir) = top_level_options.log_dir {
             opts.logging.dir = dir;
         }
-        if let Some(level) = top_level_options.log_level {
-            opts.logging.level = level;
+
+        if top_level_options.log_level.is_some() {
+            opts.logging.level = top_level_options.log_level;
         }
 
         let tls_opts = TlsOption::new(
@@ -462,7 +463,7 @@ mod tests {
             }
         }
 
-        assert_eq!("debug".to_string(), logging_opts.level);
+        assert_eq!("debug", logging_opts.level.as_ref().unwrap());
         assert_eq!("/tmp/greptimedb/test/logs".to_string(), logging_opts.dir);
     }
 
@@ -483,7 +484,7 @@ mod tests {
         };
 
         assert_eq!("/tmp/greptimedb/test/logs", opts.logging.dir);
-        assert_eq!("debug", opts.logging.level);
+        assert_eq!("debug", opts.logging.level.unwrap());
     }
 
     #[test]
@@ -553,7 +554,7 @@ mod tests {
                 assert_eq!(opts.logging.dir, "/other/log/dir");
 
                 // Should be read from config file, config file > env > default values.
-                assert_eq!(opts.logging.level, "debug");
+                assert_eq!(opts.logging.level.as_ref().unwrap(), "debug");
 
                 // Should be read from cli, cli > config file > env > default values.
                 assert_eq!(

@@ -111,8 +111,9 @@ impl StartCommand {
         if let Some(dir) = top_level_opts.log_dir {
             opts.logging.dir = dir;
         }
-        if let Some(level) = top_level_opts.log_level {
-            opts.logging.level = level;
+
+        if top_level_opts.log_level.is_some() {
+            opts.logging.level = top_level_opts.log_level;
         }
 
         if let Some(addr) = &self.bind_addr {
@@ -220,7 +221,7 @@ mod tests {
         assert_eq!("127.0.0.1:2379".to_string(), options.store_addr);
         assert_eq!(15, options.datanode_lease_secs);
         assert_eq!(SelectorType::LeaseBased, options.selector);
-        assert_eq!("debug".to_string(), options.logging.level);
+        assert_eq!("debug", options.logging.level.as_ref().unwrap());
         assert_eq!("/tmp/greptimedb/test/logs".to_string(), options.logging.dir);
     }
 
@@ -243,7 +244,7 @@ mod tests {
 
         let logging_opt = options.logging_options();
         assert_eq!("/tmp/greptimedb/test/logs", logging_opt.dir);
-        assert_eq!("debug", logging_opt.level);
+        assert_eq!("debug", logging_opt.level.as_ref().unwrap());
     }
 
     #[test]
@@ -257,7 +258,7 @@ mod tests {
 
             [http_options]
             addr = "127.0.0.1:4000"
-            
+
             [logging]
             level = "debug"
             dir = "/tmp/greptimedb/test/logs"
