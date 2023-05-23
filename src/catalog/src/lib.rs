@@ -243,15 +243,10 @@ pub async fn datanode_stat(catalog_manager: &CatalogManagerRef) -> (u64, Vec<Reg
             let Ok(table_names) = schema.table_names().await else { continue };
             for table_name in table_names {
                 let Ok(Some(table)) = schema.table(&table_name).await else { continue };
-              
-                for table_id in table.table_ids()? {
-                    let id =
-                        table
-                            .table(&table_id)
-                            .await?
-                            .context(error::TableIdNotFoundSnafu {
-                                table_info: &table_id,
-                            })?;
+
+                let Ok(table_ids) = schema.table_ids().await else { continue };
+                for table_id in table_ids {
+                     let Ok(Some(table)) = schema.table(&table_id).await else { continue };
 
                     let region_numbers = &table.table_info().meta.region_numbers;
                     region_number += region_numbers.len() as u64;
@@ -277,6 +272,8 @@ pub async fn datanode_stat(catalog_manager: &CatalogManagerRef) -> (u64, Vec<Reg
                         }
                     };
                 }
+
+            }
         }
     }
     (region_number, region_stats)
