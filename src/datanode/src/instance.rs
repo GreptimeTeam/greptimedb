@@ -58,6 +58,7 @@ use crate::error::{
     NewCatalogSnafu, OpenLogStoreSnafu, RecoverProcedureSnafu, Result, ShutdownInstanceSnafu,
     StartProcedureManagerSnafu, StopProcedureManagerSnafu,
 };
+use crate::heartbeat::handler::close_region::CloseRegionHandler;
 use crate::heartbeat::handler::open_region::OpenRegionHandler;
 use crate::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use crate::heartbeat::handler::HandlerGroupExecutor;
@@ -199,6 +200,18 @@ impl Instance {
         let factory = QueryEngineFactory::new(catalog_manager.clone(), false);
         let query_engine = factory.query_engine();
 
+        let handlers_executor = HandlerGroupExecutor::new(vec![
+            Arc::new(ParseMailboxMessageHandler::default()),
+            Arc::new(OpenRegionHandler::new(
+                catalog_manager.clone(),
+                engine_manager.clone(),
+            )),
+            Arc::new(CloseRegionHandler::new(
+                catalog_manager.clone(),
+                engine_manager.clone(),
+            )),
+        ]);
+
         let heartbeat_task = match opts.mode {
             Mode::Standalone => None,
             Mode::Distributed => Some(HeartbeatTask::new(
@@ -207,13 +220,7 @@ impl Instance {
                 opts.rpc_hostname.clone(),
                 meta_client.as_ref().unwrap().clone(),
                 catalog_manager.clone(),
-                Arc::new(HandlerGroupExecutor::new(vec![
-                    Arc::new(ParseMailboxMessageHandler::default()),
-                    Arc::new(OpenRegionHandler::new(
-                        catalog_manager.clone(),
-                        engine_manager.clone(),
-                    )),
-                ])),
+                Arc::new(handlers_executor),
             )),
         };
 

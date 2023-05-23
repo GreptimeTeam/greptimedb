@@ -104,10 +104,6 @@ impl Table for ImmutableFileTable {
         // nothing to flush
         Ok(())
     }
-
-    async fn close(&self, _region_number: &[RegionNumber]) -> TableResult<()> {
-        Ok(())
-    }
 }
 
 impl ImmutableFileTable {

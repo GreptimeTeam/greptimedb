@@ -98,8 +98,12 @@ impl SqlHandler {
         Ok(table)
     }
 
-    pub fn table_engine_manager(&self) -> TableEngineManagerRef {
-        self.table_engine_manager.clone()
+    pub fn table_engine_manager(&self) -> &TableEngineManagerRef {
+        &self.table_engine_manager
+    }
+
+    pub fn catalog_manager(&self) -> &CatalogManagerRef {
+        &self.catalog_manager
     }
 
     pub fn table_engine(&self, table: TableRef) -> Result<TableEngineRef> {

@@ -39,6 +39,13 @@ pub enum Error {
         source: catalog::error::Error,
     },
 
+    #[snafu(display("Failed to deregister table: {}, source: {}", table_name, source))]
+    DeregisterTable {
+        table_name: String,
+        #[snafu(backtrace)]
+        source: catalog::error::Error,
+    },
+
     #[snafu(display("Failed to open table: {}, source: {}", table_name, source))]
     OpenTable {
         table_name: String,
@@ -51,6 +58,19 @@ pub enum Error {
         table_name: String,
         #[snafu(backtrace)]
         source: catalog::error::Error,
+    },
+
+    #[snafu(display(
+        "Failed to close regions {:?} in table {}, source: {}",
+        region_numbers,
+        table_name,
+        source
+    ))]
+    CloseTable {
+        table_name: String,
+        region_numbers: Vec<RegionNumber>,
+        #[snafu(backtrace)]
+        source: TableError,
     },
 
     #[snafu(display("Failed to send message: {err_msg}"))]
@@ -103,6 +123,13 @@ pub enum Error {
 
     #[snafu(display("Failed to create table: {}, source: {}", table_name, source))]
     CreateTable {
+        table_name: String,
+        #[snafu(backtrace)]
+        source: TableError,
+    },
+
+    #[snafu(display("Failed to get table: {}, source: {}", table_name, source))]
+    GetTable {
         table_name: String,
         #[snafu(backtrace)]
         source: TableError,
@@ -446,7 +473,9 @@ impl ErrorExt for Error {
             | ExecuteLogicalPlan { source } => source.status_code(),
 
             OpenTable { source, .. } => source.status_code(),
-            RegisterTable { source, .. } | AccessCatalog { source, .. } => source.status_code(),
+            RegisterTable { source, .. }
+            | DeregisterTable { source, .. }
+            | AccessCatalog { source, .. } => source.status_code(),
 
             DecodeLogicalPlan { source } => source.status_code(),
             NewCatalog { source } | RegisterSchema { source } => source.status_code(),
@@ -454,6 +483,8 @@ impl ErrorExt for Error {
             CreateTable { source, .. } | CheckRegion { source, .. } => source.status_code(),
             DropTable { source, .. } => source.status_code(),
             FlushTable { source, .. } => source.status_code(),
+            GetTable { source, .. } => source.status_code(),
+            CloseTable { source, .. } => source.status_code(),
 
             Insert { source, .. } => source.status_code(),
             Delete { source, .. } => source.status_code(),

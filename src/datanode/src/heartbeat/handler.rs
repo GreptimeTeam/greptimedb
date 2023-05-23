@@ -20,6 +20,7 @@ use common_telemetry::error;
 use crate::error::Result;
 use crate::heartbeat::mailbox::{IncomingMessage, MailboxRef};
 
+pub mod close_region;
 pub mod open_region;
 pub mod parse_mailbox_message;
 #[cfg(test)]
@@ -32,7 +33,15 @@ pub struct HeartbeatResponseHandlerContext {
     pub mailbox: MailboxRef,
     pub response: HeartbeatResponse,
     pub incoming_message: Option<IncomingMessage>,
-    is_skip_all: bool,
+}
+
+/// HandleControl
+///
+/// Controls process of handling heartbeat response.
+#[derive(PartialEq)]
+pub enum HandleControl {
+    Continue,
+    Done,
 }
 
 impl HeartbeatResponseHandlerContext {
@@ -41,23 +50,19 @@ impl HeartbeatResponseHandlerContext {
             mailbox,
             response,
             incoming_message: None,
-            is_skip_all: false,
         }
-    }
-
-    pub fn is_skip_all(&self) -> bool {
-        self.is_skip_all
-    }
-
-    pub fn finish(&mut self) {
-        self.is_skip_all = true
     }
 }
 
+/// HeartbeatResponseHandler
+///
+/// [`HeartbeatResponseHandler::is_acceptable`] returns true if handler can handle incoming [`HeartbeatResponseHandlerContext`].
+///
+/// [`HeartbeatResponseHandler::handle`] handles all or part of incoming [`HeartbeatResponseHandlerContext`].
 pub trait HeartbeatResponseHandler: Send + Sync {
     fn is_acceptable(&self, ctx: &HeartbeatResponseHandlerContext) -> bool;
 
-    fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> Result<()>;
+    fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> Result<HandleControl>;
 }
 
 pub trait HeartbeatResponseHandlerExecutor: Send + Sync {
@@ -77,16 +82,17 @@ impl HandlerGroupExecutor {
 impl HeartbeatResponseHandlerExecutor for HandlerGroupExecutor {
     fn handle(&self, mut ctx: HeartbeatResponseHandlerContext) -> Result<()> {
         for handler in &self.handlers {
-            if ctx.is_skip_all() {
-                break;
-            }
-
             if !handler.is_acceptable(&ctx) {
                 continue;
             }
 
-            if let Err(e) = handler.handle(&mut ctx) {
-                error!(e;"Error while handling: {:?}", ctx.response);
+            match handler.handle(&mut ctx) {
+                Ok(HandleControl::Done) => break,
+                Ok(HandleControl::Continue) => {}
+                Err(e) => {
+                    error!(e;"Error while handling: {:?}", ctx.response);
+                    break;
+                }
             }
         }
         Ok(())
