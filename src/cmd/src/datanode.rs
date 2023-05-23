@@ -223,7 +223,7 @@ mod tests {
 
             [storage]
             type = "File"
-            data_home = "/tmp/greptimedb/data/"
+            data_home = "/tmp/greptimedb/"
 
             [storage.compaction]
             max_inflight_tasks = 3
@@ -275,7 +275,7 @@ mod tests {
 
         match &options.storage.store {
             ObjectStoreConfig::File(FileConfig { data_home, .. }) => {
-                assert_eq!("/tmp/greptimedb/data/", data_home)
+                assert_eq!("/tmp/greptimedb/", data_home)
             }
             ObjectStoreConfig::S3 { .. } => unreachable!(),
             ObjectStoreConfig::Oss { .. } => unreachable!(),
@@ -375,7 +375,6 @@ mod tests {
             tcp_nodelay = true
 
             [wal]
-            dir = "/tmp/greptimedb/wal"
             file_size = "1GB"
             purge_threshold = "50GB"
             purge_interval = "10m"
@@ -384,7 +383,7 @@ mod tests {
 
             [storage]
             type = "File"
-            data_home = "/tmp/greptimedb/data/"
+            data_home = "/tmp/greptimedb/"
 
             [storage.compaction]
             max_inflight_tasks = 3
