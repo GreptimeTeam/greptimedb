@@ -91,7 +91,7 @@ static GLOBAL_UT_LOG_GUARD: Lazy<Arc<Mutex<Option<Vec<WorkerGuard>>>>> =
     Lazy::new(|| Arc::new(Mutex::new(None)));
 
 const DEFAULT_LOG_TARGETS: &str =
-    "info,hyper=warn,tower=warn,datafusion=warn,reqwest=warn,sqlparser=warn,h2=warn,opendal=info";
+    "info,hyper=warn,tower=warn,datafusion=warn,reqwest=warn,sqlparser=warn,h2=info,opendal=info";
 
 #[allow(clippy::print_stdout)]
 pub fn init_global_logging(
