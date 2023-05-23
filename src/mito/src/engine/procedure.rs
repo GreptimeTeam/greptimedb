@@ -12,12 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod alter;
 mod create;
+mod drop;
 
 use std::sync::Arc;
 
+pub(crate) use alter::AlterMitoTable;
 use common_procedure::ProcedureManager;
-pub(crate) use create::CreateMitoTable;
+pub(crate) use create::{CreateMitoTable, TableCreator};
+pub(crate) use drop::DropMitoTable;
 use store_api::storage::StorageEngine;
 
 use crate::engine::MitoEngineInner;
@@ -31,15 +35,14 @@ pub(crate) fn register_procedure_loaders<S: StorageEngine>(
     procedure_manager: &dyn ProcedureManager,
 ) {
     // The procedure names are expected to be unique, so we just panic on error.
-    CreateMitoTable::register_loader(engine_inner, procedure_manager);
+    CreateMitoTable::register_loader(engine_inner.clone(), procedure_manager);
+    AlterMitoTable::register_loader(engine_inner.clone(), procedure_manager);
+    DropMitoTable::register_loader(engine_inner, procedure_manager);
 }
 
 #[cfg(test)]
 mod procedure_test_util {
-    use async_trait::async_trait;
-    use common_procedure::{
-        BoxedProcedure, Context, ContextProvider, ProcedureId, ProcedureState, Result, Status,
-    };
+    pub use common_procedure_test::execute_procedure_until_done;
     use common_test_util::temp_dir::TempDir;
     use log_store::NoopLogStore;
     use storage::compaction::noop::NoopCompactionScheduler;
@@ -49,18 +52,6 @@ mod procedure_test_util {
     use super::*;
     use crate::engine::{EngineConfig, MitoEngine};
     use crate::table::test_util;
-
-    struct MockContextProvider {}
-
-    #[async_trait]
-    impl ContextProvider for MockContextProvider {
-        async fn procedure_state(
-            &self,
-            _procedure_id: ProcedureId,
-        ) -> Result<Option<ProcedureState>> {
-            Ok(Some(ProcedureState::Done))
-        }
-    }
 
     pub struct TestEnv {
         pub table_engine: MitoEngine<EngineImpl<NoopLogStore>>,
@@ -75,22 +66,10 @@ mod procedure_test_util {
             Arc::new(NoopLogStore::default()),
             object_store.clone(),
             compaction_scheduler,
-        );
+        )
+        .unwrap();
         let table_engine = MitoEngine::new(EngineConfig::default(), storage_engine, object_store);
 
         TestEnv { table_engine, dir }
-    }
-
-    pub async fn execute_procedure_until_done(procedure: &mut BoxedProcedure) {
-        let ctx = Context {
-            procedure_id: ProcedureId::random(),
-            provider: Arc::new(MockContextProvider {}),
-        };
-
-        loop {
-            if let Status::Done = procedure.execute(&ctx).await.unwrap() {
-                break;
-            }
-        }
     }
 }

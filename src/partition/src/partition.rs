@@ -16,14 +16,14 @@ use std::any::Any;
 use std::fmt::Debug;
 use std::sync::Arc;
 
+use common_meta::rpc::router::Partition as MetaPartition;
 use datafusion_expr::Operator;
 use datatypes::prelude::Value;
-use meta_client::rpc::Partition as MetaPartition;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::storage::RegionNumber;
 
-use crate::error::{self, Error};
+use crate::error::{self, Error, Result};
 
 pub type PartitionRuleRef = Arc<dyn PartitionRule>;
 
@@ -32,11 +32,15 @@ pub trait PartitionRule: Sync + Send {
 
     fn partition_columns(&self) -> Vec<String>;
 
-    // TODO(LFC): Unify `find_region` and `find_regions` methods when distributed read and write features are both merged into develop.
-    // Or find better names since one is mainly for writes and the other is for reads.
-    fn find_region(&self, values: &[Value]) -> Result<RegionNumber, Error>;
+    /// Finds the target region by the partition values.
+    ///
+    /// Note that the `values` should have the same length as the `partition_columns`.
+    fn find_region(&self, values: &[Value]) -> Result<RegionNumber>;
 
-    fn find_regions(&self, exprs: &[PartitionExpr]) -> Result<Vec<RegionNumber>, Error>;
+    /// Finds the target regions by the partition expressions.
+    ///
+    /// Note that the `exprs` should have the same length as the `partition_columns`.
+    fn find_regions_by_exprs(&self, exprs: &[PartitionExpr]) -> Result<Vec<RegionNumber>>;
 }
 
 /// The right bound(exclusive) of partition range.
@@ -72,7 +76,7 @@ impl PartitionDef {
 impl TryFrom<MetaPartition> for PartitionDef {
     type Error = Error;
 
-    fn try_from(partition: MetaPartition) -> Result<Self, Self::Error> {
+    fn try_from(partition: MetaPartition) -> Result<Self> {
         let MetaPartition {
             column_list,
             value_list,
@@ -86,7 +90,7 @@ impl TryFrom<MetaPartition> for PartitionDef {
         let partition_bounds = value_list
             .into_iter()
             .map(|x| serde_json::from_str(&String::from_utf8_lossy(&x)))
-            .collect::<Result<Vec<PartitionBound>, serde_json::Error>>()
+            .collect::<std::result::Result<Vec<PartitionBound>, serde_json::Error>>()
             .context(error::DeserializeJsonSnafu)?;
 
         Ok(PartitionDef {
@@ -99,7 +103,7 @@ impl TryFrom<MetaPartition> for PartitionDef {
 impl TryFrom<PartitionDef> for MetaPartition {
     type Error = Error;
 
-    fn try_from(partition: PartitionDef) -> Result<Self, Self::Error> {
+    fn try_from(partition: PartitionDef) -> Result<Self> {
         let PartitionDef {
             partition_columns: columns,
             partition_bounds: bounds,
@@ -113,7 +117,7 @@ impl TryFrom<PartitionDef> for MetaPartition {
         let value_list = bounds
             .into_iter()
             .map(|x| serde_json::to_string(&x).map(|s| s.into_bytes()))
-            .collect::<Result<Vec<Vec<u8>>, serde_json::Error>>()
+            .collect::<std::result::Result<Vec<Vec<u8>>, serde_json::Error>>()
             .context(error::SerializeJsonSnafu)?;
 
         Ok(MetaPartition {

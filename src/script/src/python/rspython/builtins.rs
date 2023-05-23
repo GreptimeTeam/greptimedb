@@ -17,6 +17,8 @@
 #[cfg(test)]
 mod test;
 
+use std::sync::Arc;
+
 use datafusion_common::{DataFusionError, ScalarValue};
 use datafusion_expr::ColumnarValue as DFColValue;
 use datafusion_physical_expr::AggregateExpr;
@@ -28,7 +30,7 @@ use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyList
 use rustpython_vm::{pymodule, AsObject, PyObjectRef, PyPayload, PyResult, VirtualMachine};
 
 use crate::python::ffi_types::PyVector;
-use crate::python::utils::is_instance;
+use crate::python::rspython::utils::is_instance;
 
 pub fn init_greptime_builtins(module_name: &str, vm: &mut VirtualMachine) {
     vm.add_native_module(
@@ -118,7 +120,7 @@ pub fn try_into_columnar_value(obj: PyObjectRef, vm: &VirtualMachine) -> PyResul
             // TODO(dennis): empty list, we set type as null.
             return Ok(DFColValue::Scalar(ScalarValue::List(
                 None,
-                Box::new(new_item_field(ArrowDataType::Null)),
+                Arc::new(new_item_field(ArrowDataType::Null)),
             )));
         }
 
@@ -131,7 +133,7 @@ pub fn try_into_columnar_value(obj: PyObjectRef, vm: &VirtualMachine) -> PyResul
         }
         Ok(DFColValue::Scalar(ScalarValue::List(
             Some(ret),
-            Box::new(new_item_field(ty)),
+            Arc::new(new_item_field(ty)),
         )))
     } else {
         Err(vm.new_type_error(format!(
@@ -290,6 +292,7 @@ pub(crate) mod greptime_builtin {
     use common_function::scalars::math::PowFunction;
     use common_function::scalars::{Function, FunctionRef, FUNCTION_REGISTRY};
     use datafusion::arrow::datatypes::DataType as ArrowDataType;
+    use datafusion::dataframe::DataFrame as DfDataFrame;
     use datafusion::physical_plan::expressions;
     use datafusion_expr::{ColumnarValue as DFColValue, Expr as DfExpr};
     use datafusion_physical_expr::math_expressions;
@@ -300,19 +303,26 @@ pub(crate) mod greptime_builtin {
     use paste::paste;
     use rustpython_vm::builtins::{PyFloat, PyFunction, PyInt, PyStr};
     use rustpython_vm::function::{FuncArgs, KwArgs, OptionalArg};
-    use rustpython_vm::{AsObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine};
+    use rustpython_vm::{
+        pyclass, AsObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
+    };
 
-    use super::{
+    use crate::python::ffi_types::copr::PyQueryEngine;
+    use crate::python::ffi_types::vector::val_to_pyobj;
+    use crate::python::ffi_types::{PyVector, PyVectorRef};
+    use crate::python::rspython::builtins::{
         all_to_f64, eval_aggr_fn, from_df_err, try_into_columnar_value, try_into_py_obj,
         type_cast_error,
     };
-    use crate::python::ffi_types::copr::PyQueryEngine;
-    use crate::python::ffi_types::vector::val_to_pyobj;
-    use crate::python::ffi_types::PyVector;
-    use crate::python::rspython::dataframe_impl::data_frame::{PyDataFrame, PyExpr, PyExprRef};
-    use crate::python::rspython::utils::{
-        is_instance, py_obj_to_value, py_obj_to_vec, PyVectorRef,
-    };
+    use crate::python::rspython::dataframe_impl::data_frame::{PyExpr, PyExprRef};
+    use crate::python::rspython::utils::{is_instance, py_obj_to_value, py_obj_to_vec};
+
+    #[pyattr]
+    #[pyclass(module = "greptime_builtin", name = "PyDataFrame")]
+    #[derive(PyPayload, Debug, Clone)]
+    pub struct PyDataFrame {
+        pub inner: DfDataFrame,
+    }
 
     /// get `__dataframe__` from globals and return it
     /// TODO(discord9): this is a terrible hack, we should find a better way to get `__dataframe__`
@@ -327,9 +337,9 @@ pub(crate) mod greptime_builtin {
     }
 
     /// get `__query__` from globals and return it
-    /// TODO(discord9): this is a terrible hack, we should find a better way to get `__dataframe__`
+    /// TODO(discord9): this is a terrible hack, we should find a better way to get `__query__`
     #[pyfunction]
-    fn query(vm: &VirtualMachine) -> PyResult<PyQueryEngine> {
+    pub(crate) fn query(vm: &VirtualMachine) -> PyResult<PyQueryEngine> {
         let query_engine = vm.current_globals().get_item("__query__", vm)?;
         let query_engine = query_engine.payload::<PyQueryEngine>().ok_or_else(|| {
             vm.new_type_error(format!("object {:?} is not a QueryEngine", query_engine))
@@ -346,7 +356,7 @@ pub(crate) mod greptime_builtin {
     #[pyfunction]
     fn col(name: String, vm: &VirtualMachine) -> PyExprRef {
         let expr: PyExpr = DfExpr::Column(datafusion_common::Column::from_name(name)).into();
-        expr.into_ref(vm)
+        expr.into_ref(&vm.ctx)
     }
 
     #[pyfunction]
@@ -356,7 +366,7 @@ pub(crate) mod greptime_builtin {
             .try_to_scalar_value(&val.data_type())
             .map_err(|e| vm.new_runtime_error(format!("{e}")))?;
         let expr: PyExpr = DfExpr::Literal(scalar_val).into();
-        Ok(expr.into_ref(vm))
+        Ok(expr.into_ref(&vm.ctx))
     }
 
     // the main binding code, due to proc macro things, can't directly use a simpler macro
@@ -537,7 +547,10 @@ pub(crate) mod greptime_builtin {
     /// simple math function, the backing implement is datafusion's `round` math function
     #[pyfunction]
     fn round(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
-        bind_call_unary_math_function!(round, vm, val);
+        let value = try_into_columnar_value(val, vm)?;
+        let array = value.into_array(1);
+        let result = math_expressions::round(&[array]).map_err(|e| from_df_err(e, vm))?;
+        try_into_py_obj(DFColValue::Array(result), vm)
     }
 
     /// simple math function, the backing implement is datafusion's `trunc` math function
@@ -602,7 +615,7 @@ pub(crate) mod greptime_builtin {
             ApproxDistinct,
             vm,
             &[values.to_arrow_array()],
-            values.to_arrow_array().data_type(),
+            values.arrow_data_type(),
             expr0
         );
     }
@@ -613,7 +626,7 @@ pub(crate) mod greptime_builtin {
             Median,
             vm,
             &[values.to_arrow_array()],
-            values.to_arrow_array().data_type(),
+            values.arrow_data_type(),
             expr0
         );
     }
@@ -627,7 +640,7 @@ pub(crate) mod greptime_builtin {
         ApproxMedian,
         vm,
         &[values.to_arrow_array()],
-        values.to_arrow_array().data_type(),
+        values.arrow_data_type(),
         expr0
     );
     }
@@ -648,7 +661,7 @@ pub(crate) mod greptime_builtin {
                     Arc::new(percent) as _,
                 ],
                 "ApproxPercentileCont",
-                (values.to_arrow_array().data_type()).clone(),
+                values.arrow_data_type(),
             )
             .map_err(|err| from_df_err(err, vm))?,
             &[values.to_arrow_array()],
@@ -663,7 +676,7 @@ pub(crate) mod greptime_builtin {
             ArrayAgg,
             vm,
             &[values.to_arrow_array()],
-            values.to_arrow_array().data_type(),
+            values.arrow_data_type(),
             expr0
         );
     }
@@ -675,7 +688,7 @@ pub(crate) mod greptime_builtin {
             Avg,
             vm,
             &[values.to_arrow_array()],
-            values.to_arrow_array().data_type(),
+            values.arrow_data_type(),
             expr0
         );
     }
@@ -690,7 +703,7 @@ pub(crate) mod greptime_builtin {
             Correlation,
             vm,
             &[arg0.to_arrow_array(), arg1.to_arrow_array()],
-            arg0.to_arrow_array().data_type(),
+            arg0.arrow_data_type(),
             expr0,
             expr1
         );
@@ -702,7 +715,7 @@ pub(crate) mod greptime_builtin {
             Count,
             vm,
             &[values.to_arrow_array()],
-            values.to_arrow_array().data_type(),
+            values.arrow_data_type(),
             expr0
         );
     }
@@ -717,7 +730,7 @@ pub(crate) mod greptime_builtin {
             Covariance,
             vm,
             &[arg0.to_arrow_array(), arg1.to_arrow_array()],
-            arg0.to_arrow_array().data_type(),
+            arg0.arrow_data_type(),
             expr0,
             expr1
         );
@@ -733,7 +746,7 @@ pub(crate) mod greptime_builtin {
             CovariancePop,
             vm,
             &[arg0.to_arrow_array(), arg1.to_arrow_array()],
-            arg0.to_arrow_array().data_type(),
+            arg0.arrow_data_type(),
             expr0,
             expr1
         );
@@ -745,7 +758,7 @@ pub(crate) mod greptime_builtin {
             Max,
             vm,
             &[values.to_arrow_array()],
-            values.to_arrow_array().data_type(),
+            values.arrow_data_type(),
             expr0
         );
     }
@@ -756,7 +769,7 @@ pub(crate) mod greptime_builtin {
             Min,
             vm,
             &[values.to_arrow_array()],
-            values.to_arrow_array().data_type(),
+            values.arrow_data_type(),
             expr0
         );
     }
@@ -767,7 +780,7 @@ pub(crate) mod greptime_builtin {
             Stddev,
             vm,
             &[values.to_arrow_array()],
-            values.to_arrow_array().data_type(),
+            values.arrow_data_type(),
             expr0
         );
     }
@@ -778,7 +791,7 @@ pub(crate) mod greptime_builtin {
             StddevPop,
             vm,
             &[values.to_arrow_array()],
-            values.to_arrow_array().data_type(),
+            values.arrow_data_type(),
             expr0
         );
     }
@@ -789,7 +802,7 @@ pub(crate) mod greptime_builtin {
             Sum,
             vm,
             &[values.to_arrow_array()],
-            values.to_arrow_array().data_type(),
+            values.arrow_data_type(),
             expr0
         );
     }
@@ -800,7 +813,7 @@ pub(crate) mod greptime_builtin {
             Variance,
             vm,
             &[values.to_arrow_array()],
-            values.to_arrow_array().data_type(),
+            values.arrow_data_type(),
             expr0
         );
     }
@@ -811,7 +824,7 @@ pub(crate) mod greptime_builtin {
             VariancePop,
             vm,
             &[values.to_arrow_array()],
-            values.to_arrow_array().data_type(),
+            values.arrow_data_type(),
             expr0
         );
     }

@@ -14,7 +14,7 @@
 
 use api::v1::{ColumnDataType, ColumnDef, CreateTableExpr, TableId};
 use client::{Client, Database};
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
 use prost::Message;
 use substrait_proto::proto::plan_rel::RelType as PlanRelType;
 use substrait_proto::proto::read_rel::{NamedTable, ReadType};
@@ -64,6 +64,7 @@ async fn run() {
         table_options: Default::default(),
         table_id: Some(TableId { id: 1024 }),
         region_ids: vec![0],
+        engine: MITO_ENGINE.to_string(),
     };
 
     let db = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);

@@ -14,10 +14,10 @@
 
 //! Planner, QueryEngine implementations based on DataFusion.
 
-mod catalog_adapter;
 mod error;
 mod planner;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -35,18 +35,19 @@ use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::ResolvedTableReference;
 use datafusion_expr::{DmlStatement, LogicalPlan as DfLogicalPlan, WriteOp};
+use datatypes::prelude::VectorRef;
 use datatypes::schema::Schema;
 use futures_util::StreamExt;
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ResultExt};
-use table::requests::InsertRequest;
+use snafu::{ensure, OptionExt, ResultExt};
+use table::requests::{DeleteRequest, InsertRequest};
 use table::TableRef;
 
-pub use crate::datafusion::catalog_adapter::DfCatalogListAdapter;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::error::{
     CatalogNotFoundSnafu, CatalogSnafu, CreateRecordBatchSnafu, DataFusionSnafu,
-    QueryExecutionSnafu, Result, SchemaNotFoundSnafu, TableNotFoundSnafu, UnsupportedExprSnafu,
+    MissingTimestampColumnSnafu, QueryExecutionSnafu, Result, SchemaNotFoundSnafu,
+    TableNotFoundSnafu, UnsupportedExprSnafu,
 };
 use crate::executor::QueryExecutor;
 use crate::logical_optimizer::LogicalOptimizer;
@@ -55,7 +56,7 @@ use crate::physical_planner::PhysicalPlanner;
 use crate::plan::LogicalPlan;
 use crate::planner::{DfLogicalPlanner, LogicalPlanner};
 use crate::query_engine::{QueryEngineContext, QueryEngineState};
-use crate::{metric, QueryEngine};
+use crate::{metrics, QueryEngine};
 
 pub struct DatafusionQueryEngine {
     state: Arc<QueryEngineState>,
@@ -76,17 +77,21 @@ impl DatafusionQueryEngine {
         Ok(Output::Stream(self.execute_stream(&ctx, &physical_plan)?))
     }
 
-    async fn exec_insert_plan(
+    async fn exec_dml_statement(
         &self,
-        dml: &DmlStatement,
+        dml: DmlStatement,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
+        ensure!(
+            matches!(dml.op, WriteOp::Insert | WriteOp::Delete),
+            UnsupportedExprSnafu {
+                name: format!("DML op {}", dml.op),
+            }
+        );
+
         let default_catalog = query_ctx.current_catalog();
         let default_schema = query_ctx.current_schema();
-        let table_name = dml
-            .table_name
-            .as_table_reference()
-            .resolve(&default_catalog, &default_schema);
+        let table_name = dml.table_name.resolve(&default_catalog, &default_schema);
         let table = self.find_table(&table_name).await?;
 
         let output = self
@@ -101,18 +106,73 @@ impl DatafusionQueryEngine {
         let mut affected_rows = 0;
         while let Some(batch) = stream.next().await {
             let batch = batch.context(CreateRecordBatchSnafu)?;
-            let request = InsertRequest::try_from_recordbatch(&table_name, table.schema(), batch)
+            let column_vectors = batch
+                .column_vectors(&table_name.to_string(), table.schema())
                 .map_err(BoxedError::new)
                 .context(QueryExecutionSnafu)?;
 
-            let rows = table
-                .insert(request)
-                .await
-                .map_err(BoxedError::new)
-                .context(QueryExecutionSnafu)?;
+            let rows = match dml.op {
+                WriteOp::Insert => Self::insert(&table_name, &table, column_vectors).await?,
+                WriteOp::Delete => Self::delete(&table_name, &table, column_vectors).await?,
+                _ => unreachable!("guarded by the 'ensure!' at the beginning"),
+            };
             affected_rows += rows;
         }
         Ok(Output::AffectedRows(affected_rows))
+    }
+
+    async fn delete<'a>(
+        table_name: &ResolvedTableReference<'a>,
+        table: &TableRef,
+        column_vectors: HashMap<String, VectorRef>,
+    ) -> Result<usize> {
+        let table_schema = table.schema();
+        let ts_column = table_schema
+            .timestamp_column()
+            .map(|x| &x.name)
+            .with_context(|| MissingTimestampColumnSnafu {
+                table_name: table_name.to_string(),
+            })?;
+
+        let table_info = table.table_info();
+        let rowkey_columns = table_info
+            .meta
+            .row_key_column_names()
+            .collect::<Vec<&String>>();
+        let column_vectors = column_vectors
+            .into_iter()
+            .filter(|x| &x.0 == ts_column || rowkey_columns.contains(&&x.0))
+            .collect::<HashMap<_, _>>();
+
+        let request = DeleteRequest {
+            key_column_values: column_vectors,
+        };
+
+        table
+            .delete(request)
+            .await
+            .map_err(BoxedError::new)
+            .context(QueryExecutionSnafu)
+    }
+
+    async fn insert<'a>(
+        table_name: &ResolvedTableReference<'a>,
+        table: &TableRef,
+        column_vectors: HashMap<String, VectorRef>,
+    ) -> Result<usize> {
+        let request = InsertRequest {
+            catalog_name: table_name.catalog.to_string(),
+            schema_name: table_name.schema.to_string(),
+            table_name: table_name.table.to_string(),
+            columns_values: column_vectors,
+            region_number: 0,
+        };
+
+        table
+            .insert(request)
+            .await
+            .map_err(BoxedError::new)
+            .context(QueryExecutionSnafu)
     }
 
     async fn find_table(&self, table_name: &ResolvedTableReference<'_>) -> Result<TableRef> {
@@ -122,19 +182,20 @@ impl DatafusionQueryEngine {
 
         let catalog = self
             .state
-            .catalog_list()
+            .catalog_manager()
             .catalog(catalog_name)
+            .await
             .context(CatalogSnafu)?
             .context(CatalogNotFoundSnafu {
                 catalog: catalog_name,
             })?;
-        let schema =
-            catalog
-                .schema(schema_name)
-                .context(CatalogSnafu)?
-                .context(SchemaNotFoundSnafu {
-                    schema: schema_name,
-                })?;
+        let schema = catalog
+            .schema(schema_name)
+            .await
+            .context(CatalogSnafu)?
+            .context(SchemaNotFoundSnafu {
+                schema: schema_name,
+            })?;
         let table = schema
             .table(table_name)
             .await
@@ -163,13 +224,9 @@ impl QueryEngine for DatafusionQueryEngine {
 
     async fn execute(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
         match plan {
-            LogicalPlan::DfPlan(DfLogicalPlan::Dml(dml)) => match dml.op {
-                WriteOp::Insert => self.exec_insert_plan(&dml, query_ctx).await,
-                _ => UnsupportedExprSnafu {
-                    name: format!("DML op {}", dml.op),
-                }
-                .fail(),
-            },
+            LogicalPlan::DfPlan(DfLogicalPlan::Dml(dml)) => {
+                self.exec_dml_statement(dml, query_ctx).await
+            }
             _ => self.exec_query_plan(plan).await,
         }
     }
@@ -196,7 +253,7 @@ impl QueryEngine for DatafusionQueryEngine {
 
 impl LogicalOptimizer for DatafusionQueryEngine {
     fn optimize(&self, plan: &LogicalPlan) -> Result<LogicalPlan> {
-        let _timer = timer!(metric::METRIC_OPTIMIZE_LOGICAL_ELAPSED);
+        let _timer = timer!(metrics::METRIC_OPTIMIZE_LOGICAL_ELAPSED);
         match plan {
             LogicalPlan::DfPlan(df_plan) => {
                 let optimized_plan = self
@@ -222,7 +279,7 @@ impl PhysicalPlanner for DatafusionQueryEngine {
         ctx: &mut QueryEngineContext,
         logical_plan: &LogicalPlan,
     ) -> Result<Arc<dyn PhysicalPlan>> {
-        let _timer = timer!(metric::METRIC_CREATE_PHYSICAL_ELAPSED);
+        let _timer = timer!(metrics::METRIC_CREATE_PHYSICAL_ELAPSED);
         match logical_plan {
             LogicalPlan::DfPlan(df_plan) => {
                 let state = ctx.state();
@@ -257,7 +314,7 @@ impl PhysicalOptimizer for DatafusionQueryEngine {
         ctx: &mut QueryEngineContext,
         plan: Arc<dyn PhysicalPlan>,
     ) -> Result<Arc<dyn PhysicalPlan>> {
-        let _timer = timer!(metric::METRIC_OPTIMIZE_PHYSICAL_ELAPSED);
+        let _timer = timer!(metrics::METRIC_OPTIMIZE_PHYSICAL_ELAPSED);
 
         let mut new_plan = plan
             .as_any()
@@ -284,7 +341,7 @@ impl QueryExecutor for DatafusionQueryEngine {
         ctx: &QueryEngineContext,
         plan: &Arc<dyn PhysicalPlan>,
     ) -> Result<SendableRecordBatchStream> {
-        let _timer = timer!(metric::METRIC_EXEC_PLAN_ELAPSED);
+        let _timer = timer!(metrics::METRIC_EXEC_PLAN_ELAPSED);
         match plan.output_partitioning().partition_count() {
             0 => Ok(Box::pin(EmptyRecordBatchStream::new(plan.schema()))),
             1 => Ok(plan
@@ -320,7 +377,7 @@ mod tests {
     use std::sync::Arc;
 
     use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
-    use catalog::{CatalogList, CatalogProvider, SchemaProvider};
+    use catalog::{CatalogProvider, SchemaProvider};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_query::Output;
     use common_recordbatch::util;
@@ -333,27 +390,29 @@ mod tests {
     use crate::parser::QueryLanguageParser;
     use crate::query_engine::{QueryEngineFactory, QueryEngineRef};
 
-    fn create_test_engine() -> QueryEngineRef {
+    async fn create_test_engine() -> QueryEngineRef {
         let catalog_list = catalog::local::new_memory_catalog_list().unwrap();
 
         let default_schema = Arc::new(MemorySchemaProvider::new());
         default_schema
             .register_table("numbers".to_string(), Arc::new(NumbersTable::default()))
+            .await
             .unwrap();
         let default_catalog = Arc::new(MemoryCatalogProvider::new());
         default_catalog
             .register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema)
+            .await
             .unwrap();
         catalog_list
-            .register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
+            .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
             .unwrap();
 
-        QueryEngineFactory::new(catalog_list).query_engine()
+        QueryEngineFactory::new(catalog_list, false).query_engine()
     }
 
     #[tokio::test]
     async fn test_sql_to_plan() {
-        let engine = create_test_engine();
+        let engine = create_test_engine().await;
         let sql = "select sum(number) from numbers limit 20";
 
         let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
@@ -375,7 +434,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute() {
-        let engine = create_test_engine();
+        let engine = create_test_engine().await;
         let sql = "select sum(number) from numbers limit 20";
 
         let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
@@ -413,7 +472,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_describe() {
-        let engine = create_test_engine();
+        let engine = create_test_engine().await;
         let sql = "select sum(number) from numbers limit 20";
 
         let stmt = QueryLanguageParser::parse_sql(sql).unwrap();

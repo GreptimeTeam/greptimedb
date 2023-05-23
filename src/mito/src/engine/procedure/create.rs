@@ -18,6 +18,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{Context, Error, LockKey, Procedure, ProcedureManager, Result, Status};
+use common_telemetry::logging;
+use common_telemetry::metric::Timer;
 use datatypes::schema::{Schema, SchemaRef};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
@@ -28,22 +30,20 @@ use store_api::storage::{
 use table::engine::{region_id, table_dir};
 use table::metadata::{TableInfoBuilder, TableMetaBuilder, TableType};
 use table::requests::CreateTableRequest;
+use table::TableRef;
 
 use crate::engine::{self, MitoEngineInner, TableReference};
 use crate::error::{
     BuildRegionDescriptorSnafu, BuildTableInfoSnafu, BuildTableMetaSnafu, InvalidRawSchemaSnafu,
     TableExistsSnafu,
 };
+use crate::metrics;
 use crate::table::MitoTable;
 
 /// Procedure to create a [MitoTable].
 pub(crate) struct CreateMitoTable<S: StorageEngine> {
-    data: CreateTableData,
-    engine_inner: Arc<MitoEngineInner<S>>,
-    /// Created regions of the table.
-    regions: HashMap<RegionNumber, S::Region>,
-    /// Schema of the table.
-    table_schema: Option<SchemaRef>,
+    creator: TableCreator<S>,
+    _timer: Timer,
 }
 
 #[async_trait]
@@ -53,21 +53,21 @@ impl<S: StorageEngine> Procedure for CreateMitoTable<S> {
     }
 
     async fn execute(&mut self, _ctx: &Context) -> Result<Status> {
-        match self.data.state {
+        match self.creator.data.state {
             CreateTableState::Prepare => self.on_prepare(),
-            CreateTableState::CreateRegions => self.on_create_regions().await,
-            CreateTableState::WriteTableManifest => self.on_write_table_manifest().await,
+            CreateTableState::EngineCreateTable => self.on_engine_create_table().await,
         }
     }
 
     fn dump(&self) -> Result<String> {
-        let json = serde_json::to_string(&self.data).context(ToJsonSnafu)?;
+        let json = serde_json::to_string(&self.creator.data).context(ToJsonSnafu)?;
         Ok(json)
     }
 
     fn lock_key(&self) -> LockKey {
-        let table_ref = self.data.table_ref();
+        let table_ref = self.creator.data.table_ref();
         let keys = self
+            .creator
             .data
             .request
             .region_numbers
@@ -81,17 +81,14 @@ impl<S: StorageEngine> CreateMitoTable<S> {
     const TYPE_NAME: &str = "mito::CreateMitoTable";
 
     /// Returns a new [CreateMitoTable].
-    pub(crate) fn new(request: CreateTableRequest, engine_inner: Arc<MitoEngineInner<S>>) -> Self {
-        CreateMitoTable {
-            data: CreateTableData {
-                state: CreateTableState::Prepare,
-                request,
-                next_column_id: None,
-            },
-            engine_inner,
-            regions: HashMap::new(),
-            table_schema: None,
-        }
+    pub(crate) fn new(
+        request: CreateTableRequest,
+        engine_inner: Arc<MitoEngineInner<S>>,
+    ) -> Result<Self> {
+        Ok(CreateMitoTable {
+            creator: TableCreator::new(request, engine_inner)?,
+            _timer: common_telemetry::timer!(metrics::MITO_CREATE_TABLE_ELAPSED),
+        })
     }
 
     /// Register the loader of this procedure to the `procedure_manager`.
@@ -115,22 +112,29 @@ impl<S: StorageEngine> CreateMitoTable<S> {
     /// Recover the procedure from json.
     fn from_json(json: &str, engine_inner: Arc<MitoEngineInner<S>>) -> Result<Self> {
         let data: CreateTableData = serde_json::from_str(json).context(FromJsonSnafu)?;
+        let table_schema =
+            Schema::try_from(data.request.schema.clone()).context(InvalidRawSchemaSnafu)?;
 
         Ok(CreateMitoTable {
-            data,
-            engine_inner,
-            regions: HashMap::new(),
-            table_schema: None,
+            creator: TableCreator {
+                data,
+                engine_inner,
+                regions: HashMap::new(),
+                table_schema: Arc::new(table_schema),
+            },
+            _timer: common_telemetry::timer!(metrics::MITO_CREATE_TABLE_ELAPSED),
         })
     }
 
     /// Checks whether the table exists.
     fn on_prepare(&mut self) -> Result<Status> {
-        let table_ref = self.data.table_ref();
-        if self.engine_inner.get_table(&table_ref).is_some() {
+        let table_ref = self.creator.data.table_ref();
+        logging::debug!("on prepare create table {}", table_ref);
+
+        if self.creator.engine_inner.get_table(&table_ref).is_some() {
             // If the table already exists.
             ensure!(
-                self.data.request.create_if_not_exists,
+                self.creator.data.request.create_if_not_exists,
                 TableExistsSnafu {
                     table_name: table_ref.to_string(),
                 }
@@ -139,51 +143,122 @@ impl<S: StorageEngine> CreateMitoTable<S> {
             return Ok(Status::Done);
         }
 
-        self.data.state = CreateTableState::CreateRegions;
+        self.creator.data.state = CreateTableState::EngineCreateTable;
 
         Ok(Status::executing(true))
     }
 
-    /// Creates regions for the table.
-    async fn on_create_regions(&mut self) -> Result<Status> {
-        let engine_ctx = EngineContext::default();
+    /// Creates the table.
+    async fn on_engine_create_table(&mut self) -> Result<Status> {
+        // In this state, we can ensure we are able to create a new table.
+        let table_ref = self.creator.data.table_ref();
+        logging::debug!("on engine create table {}", table_ref);
+
+        let _lock = self
+            .creator
+            .engine_inner
+            .table_mutex
+            .lock(table_ref.to_string())
+            .await;
+        self.creator.create_table().await?;
+
+        Ok(Status::Done)
+    }
+}
+
+/// Mito table creator.
+pub(crate) struct TableCreator<S: StorageEngine> {
+    data: CreateTableData,
+    engine_inner: Arc<MitoEngineInner<S>>,
+    /// Created regions of the table.
+    regions: HashMap<RegionNumber, S::Region>,
+    /// Schema of the table.
+    table_schema: SchemaRef,
+}
+
+impl<S: StorageEngine> TableCreator<S> {
+    /// Returns a new [TableCreator].
+    pub(crate) fn new(
+        request: CreateTableRequest,
+        engine_inner: Arc<MitoEngineInner<S>>,
+    ) -> Result<Self> {
+        let table_schema =
+            Schema::try_from(request.schema.clone()).context(InvalidRawSchemaSnafu)?;
+
+        Ok(TableCreator {
+            data: CreateTableData {
+                state: CreateTableState::Prepare,
+                request,
+                next_column_id: None,
+            },
+            engine_inner,
+            regions: HashMap::new(),
+            table_schema: Arc::new(table_schema),
+        })
+    }
+
+    /// Creates a new mito table or returns the table if it already exists.
+    ///
+    /// # Note
+    /// - Callers MUST acquire the table lock first.
+    /// - The procedure may call this method multiple times.
+    pub(crate) async fn create_table(&mut self) -> Result<TableRef> {
         let table_dir = table_dir(
             &self.data.request.catalog_name,
             &self.data.request.schema_name,
             self.data.request.id,
         );
+
+        let table_ref = self.data.table_ref();
+        // It is possible that the procedure retries `CREATE TABLE` many times, so we
+        // return the table if it exists.
+        if let Some(table) = self.engine_inner.get_table(&table_ref) {
+            return Ok(table.clone());
+        }
+
+        logging::debug!("Creator create table {}", table_ref);
+
+        self.create_regions(&table_dir).await?;
+
+        self.write_table_manifest(&table_dir).await
+    }
+
+    /// Creates regions for the table.
+    async fn create_regions(&mut self, table_dir: &str) -> Result<()> {
         let table_options = &self.data.request.table_options;
         let write_buffer_size = table_options.write_buffer_size.map(|size| size.0 as usize);
         let ttl = table_options.ttl;
+        let compaction_time_window = table_options.compaction_time_window;
         let open_opts = OpenOptions {
-            parent_dir: table_dir.clone(),
+            parent_dir: table_dir.to_string(),
             write_buffer_size,
             ttl,
+            compaction_time_window,
         };
         let create_opts = CreateOptions {
-            parent_dir: table_dir,
+            parent_dir: table_dir.to_string(),
             write_buffer_size,
             ttl,
+            compaction_time_window,
         };
 
-        let table_schema =
-            Schema::try_from(self.data.request.schema.clone()).context(InvalidRawSchemaSnafu)?;
         let primary_key_indices = &self.data.request.primary_key_indices;
         let (next_column_id, default_cf) = engine::build_column_family(
             engine::INIT_COLUMN_ID,
             &self.data.request.table_name,
-            &table_schema,
+            &self.table_schema,
             primary_key_indices,
         )?;
         let (next_column_id, row_key) = engine::build_row_key_desc(
             next_column_id,
             &self.data.request.table_name,
-            &table_schema,
+            &self.table_schema,
             primary_key_indices,
         )?;
         self.data.next_column_id = Some(next_column_id);
 
         // Try to open all regions and collect the regions not exist.
+        let engine_ctx = EngineContext::default();
         for number in &self.data.request.region_numbers {
             if self.regions.contains_key(number) {
                 // Region is opened.
@@ -210,63 +285,61 @@ impl<S: StorageEngine> CreateMitoTable<S> {
                 .name(region_name.clone())
                 .row_key(row_key.clone())
                 .default_cf(default_cf.clone())
+                .compaction_time_window(compaction_time_window)
                 .build()
                 .context(BuildRegionDescriptorSnafu {
                     table_name: &self.data.request.table_name,
                     region_name,
                 })?;
 
-            let region = self
-                .engine_inner
-                .storage_engine
-                .create_region(&engine_ctx, region_desc, &create_opts)
-                .await
-                .map_err(Error::from_error_ext)?;
+            let region = {
+                let _timer = common_telemetry::timer!(crate::metrics::MITO_CREATE_REGION_ELAPSED);
+                self.engine_inner
+                    .storage_engine
+                    .create_region(&engine_ctx, region_desc, &create_opts)
+                    .await
+                    .map_err(Error::from_error_ext)?
+            };
+
+            logging::debug!(
+                "Create region {} for table {}, region_id: {}",
+                number,
+                self.data.request.table_ref(),
+                region_id
+            );
 
             self.regions.insert(*number, region);
         }
 
-        // All regions are created, moves to the next step.
-        self.data.state = CreateTableState::WriteTableManifest;
-        self.table_schema = Some(Arc::new(table_schema));
-
-        Ok(Status::executing(true))
+        Ok(())
     }
 
     /// Writes metadata to the table manifest.
-    async fn on_write_table_manifest(&mut self) -> Result<Status> {
-        let table_dir = table_dir(
-            &self.data.request.catalog_name,
-            &self.data.request.schema_name,
-            self.data.request.id,
-        );
+    async fn write_table_manifest(&mut self, table_dir: &str) -> Result<TableRef> {
         // Try to open the table first, as the table manifest might already exist.
         let table_ref = self.data.table_ref();
         if let Some((manifest, table_info)) = self
             .engine_inner
-            .recover_table_manifest_and_info(&self.data.request.table_name, &table_dir)
+            .recover_table_manifest_and_info(&self.data.request.table_name, table_dir)
             .await?
         {
             let table = Arc::new(MitoTable::new(table_info, self.regions.clone(), manifest));
 
             self.engine_inner
                 .tables
-                .write()
-                .unwrap()
-                .insert(table_ref.to_string(), table);
-            return Ok(Status::Done);
+                .insert(table_ref.to_string(), table.clone());
+            return Ok(table);
         }
 
         // We need to persist the table manifest and create the table.
-        let table = self.write_manifest_and_create_table(&table_dir).await?;
+        let table = self.write_manifest_and_create_table(table_dir).await?;
         let table = Arc::new(table);
+
         self.engine_inner
             .tables
-            .write()
-            .unwrap()
-            .insert(table_ref.to_string(), table);
+            .insert(table_ref.to_string(), table.clone());
 
-        Ok(Status::Done)
+        Ok(table)
     }
 
     /// Write metadata to the table manifest and return the created table.
@@ -274,15 +347,15 @@ impl<S: StorageEngine> CreateMitoTable<S> {
         &self,
         table_dir: &str,
     ) -> Result<MitoTable<S::Region>> {
-        // Safety: We are in `WriteTableManifest` state.
+        // Safety: next_column_id is always Some when calling this method.
         let next_column_id = self.data.next_column_id.unwrap();
-        let table_schema = self.table_schema.clone().unwrap();
 
         let table_meta = TableMetaBuilder::default()
-            .schema(table_schema)
+            .schema(self.table_schema.clone())
             .engine(engine::MITO_ENGINE)
             .next_column_id(next_column_id)
             .primary_key_indices(self.data.request.primary_key_indices.clone())
+            .options(self.data.request.table_options.clone())
             .region_numbers(self.data.request.region_numbers.clone())
             .build()
             .context(BuildTableMetaSnafu {
@@ -307,6 +380,7 @@ impl<S: StorageEngine> CreateMitoTable<S> {
             table_info,
             self.regions.clone(),
             self.engine_inner.object_store.clone(),
+            self.engine_inner.compress_type,
         )
         .await?;
 
@@ -317,12 +391,10 @@ impl<S: StorageEngine> CreateMitoTable<S> {
 /// Represents each step while creating table in the mito engine.
 #[derive(Debug, Serialize, Deserialize)]
 enum CreateTableState {
-    /// Prepare to create region.
+    /// Prepare to create the table.
     Prepare,
-    /// Create regions.
-    CreateRegions,
-    /// Write metadata to table manifest.
-    WriteTableManifest,
+    /// Engine creates the table.
+    EngineCreateTable,
 }
 
 /// Serializable data of [CreateMitoTable].
@@ -332,17 +404,13 @@ struct CreateTableData {
     request: CreateTableRequest,
     /// Next id for column.
     ///
-    /// Available in [CreateTableState::WriteTableManifest] state.
+    /// Set by [TableCreator::create_regions].
     next_column_id: Option<ColumnId>,
 }
 
 impl CreateTableData {
     fn table_ref(&self) -> TableReference {
-        TableReference {
-            catalog: &self.request.catalog_name,
-            schema: &self.request.schema_name,
-            table: &self.request.table_name,
-        }
+        self.request.table_ref()
     }
 }
 

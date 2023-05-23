@@ -73,12 +73,25 @@ pub trait Region: Send + Sync + Clone + std::fmt::Debug + 'static {
 
     async fn alter(&self, request: AlterRequest) -> Result<(), Self::Error>;
 
-    async fn close(&self) -> Result<(), Self::Error>;
+    async fn drop_region(&self) -> Result<(), Self::Error>;
 
     fn disk_usage_bytes(&self) -> u64;
 
+    fn region_stat(&self) -> RegionStat {
+        RegionStat {
+            region_id: self.id(),
+            disk_usage_bytes: self.disk_usage_bytes(),
+        }
+    }
+
     /// Flush memtable of the region to disk.
     async fn flush(&self, ctx: &FlushContext) -> Result<(), Self::Error>;
+}
+
+#[derive(Default, Debug)]
+pub struct RegionStat {
+    pub region_id: u64,
+    pub disk_usage_bytes: u64,
 }
 
 /// Context for write operations.
@@ -97,10 +110,43 @@ pub struct FlushContext {
     /// If true, the flush will wait until the flush is done.
     /// Default: true
     pub wait: bool,
+    /// Flush reason.
+    pub reason: FlushReason,
 }
 
 impl Default for FlushContext {
     fn default() -> FlushContext {
-        FlushContext { wait: true }
+        FlushContext {
+            wait: true,
+            reason: FlushReason::Others,
+        }
+    }
+}
+
+/// Reason of flush operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlushReason {
+    /// Other reasons.
+    Others,
+    /// Memtable is full.
+    MemtableFull,
+    /// Flush manually.
+    Manually,
+    /// Auto flush periodically.
+    Periodically,
+    /// Global write buffer is full.
+    GlobalBufferFull,
+}
+
+impl FlushReason {
+    /// Returns reason as `str`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FlushReason::Others => "others",
+            FlushReason::MemtableFull => "memtable_full",
+            FlushReason::Manually => "manually",
+            FlushReason::Periodically => "periodically",
+            FlushReason::GlobalBufferFull => "global_buffer_full",
+        }
     }
 }

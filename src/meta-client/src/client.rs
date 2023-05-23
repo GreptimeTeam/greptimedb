@@ -18,31 +18,33 @@ mod lock;
 mod router;
 mod store;
 
+use api::v1::meta::Role;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::rpc::lock::{LockRequest, LockResponse, UnlockRequest};
+use common_meta::rpc::router::{CreateRequest, DeleteRequest, RouteRequest, RouteResponse};
+use common_meta::rpc::store::{
+    BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
+    BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
+    DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest, PutResponse,
+    RangeRequest, RangeResponse,
+};
 use common_telemetry::info;
 use heartbeat::Client as HeartbeatClient;
 use lock::Client as LockClient;
 use router::Client as RouterClient;
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 use store::Client as StoreClient;
 
 pub use self::heartbeat::{HeartbeatSender, HeartbeatStream};
 use crate::error;
-use crate::error::Result;
-use crate::rpc::lock::{LockRequest, LockResponse, UnlockRequest};
-use crate::rpc::router::DeleteRequest;
-use crate::rpc::{
-    BatchGetRequest, BatchGetResponse, BatchPutRequest, BatchPutResponse, CompareAndPutRequest,
-    CompareAndPutResponse, CreateRequest, DeleteRangeRequest, DeleteRangeResponse,
-    MoveValueRequest, MoveValueResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
-    RouteRequest, RouteResponse,
-};
+use crate::error::{ConvertMetaRequestSnafu, ConvertMetaResponseSnafu, Result};
 
 pub type Id = (u64, u64);
 
 #[derive(Clone, Debug, Default)]
 pub struct MetaClientBuilder {
     id: Id,
+    role: Role,
     enable_heartbeat: bool,
     enable_router: bool,
     enable_store: bool,
@@ -51,9 +53,10 @@ pub struct MetaClientBuilder {
 }
 
 impl MetaClientBuilder {
-    pub fn new(cluster_id: u64, member_id: u64) -> Self {
+    pub fn new(cluster_id: u64, member_id: u64, role: Role) -> Self {
         Self {
             id: (cluster_id, member_id),
+            role,
             ..Default::default()
         }
     }
@@ -107,16 +110,16 @@ impl MetaClientBuilder {
         let mgr = client.channel_manager.clone();
 
         if self.enable_heartbeat {
-            client.heartbeat = Some(HeartbeatClient::new(self.id, mgr.clone()));
+            client.heartbeat = Some(HeartbeatClient::new(self.id, self.role, mgr.clone()));
         }
         if self.enable_router {
-            client.router = Some(RouterClient::new(self.id, mgr.clone()));
+            client.router = Some(RouterClient::new(self.id, self.role, mgr.clone()));
         }
         if self.enable_store {
-            client.store = Some(StoreClient::new(self.id, mgr.clone()));
+            client.store = Some(StoreClient::new(self.id, self.role, mgr.clone()));
         }
         if self.enable_lock {
-            client.lock = Some(LockClient::new(self.id, mgr));
+            client.lock = Some(LockClient::new(self.id, self.role, mgr));
         }
 
         client
@@ -200,10 +203,12 @@ impl MetaClient {
     /// information contained in the request and using some intelligent policies,
     /// such as load-based.
     pub async fn create_route(&self, req: CreateRequest<'_>) -> Result<RouteResponse> {
+        let req = req.try_into().context(ConvertMetaRequestSnafu)?;
         self.router_client()?
-            .create(req.try_into()?)
+            .create(req)
             .await?
             .try_into()
+            .context(ConvertMetaResponseSnafu)
     }
 
     /// Fetch routing information for tables. The smallest unit is the complete
@@ -226,34 +231,67 @@ impl MetaClient {
     /// ```
     ///
     pub async fn route(&self, req: RouteRequest) -> Result<RouteResponse> {
-        self.router_client()?.route(req.into()).await?.try_into()
+        self.router_client()?
+            .route(req.into())
+            .await?
+            .try_into()
+            .context(ConvertMetaResponseSnafu)
     }
 
     /// Can be called repeatedly, the first call will delete and return the
     /// table of routing information, the nth call can still return the
     /// deleted route information.
     pub async fn delete_route(&self, req: DeleteRequest) -> Result<RouteResponse> {
-        self.router_client()?.delete(req.into()).await?.try_into()
+        self.router_client()?
+            .delete(req.into())
+            .await?
+            .try_into()
+            .context(ConvertMetaResponseSnafu)
     }
 
     /// Range gets the keys in the range from the key-value store.
     pub async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
-        self.store_client()?.range(req.into()).await?.try_into()
+        self.store_client()?
+            .range(req.into())
+            .await?
+            .try_into()
+            .context(ConvertMetaResponseSnafu)
     }
 
     /// Put puts the given key into the key-value store.
     pub async fn put(&self, req: PutRequest) -> Result<PutResponse> {
-        self.store_client()?.put(req.into()).await?.try_into()
+        self.store_client()?
+            .put(req.into())
+            .await?
+            .try_into()
+            .context(ConvertMetaResponseSnafu)
     }
 
     /// BatchGet atomically get values by the given keys from the key-value store.
     pub async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse> {
-        self.store_client()?.batch_get(req.into()).await?.try_into()
+        self.store_client()?
+            .batch_get(req.into())
+            .await?
+            .try_into()
+            .context(ConvertMetaResponseSnafu)
     }
 
     /// BatchPut atomically puts the given keys into the key-value store.
     pub async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
-        self.store_client()?.batch_put(req.into()).await?.try_into()
+        self.store_client()?
+            .batch_put(req.into())
+            .await?
+            .try_into()
+            .context(ConvertMetaResponseSnafu)
+    }
+
+    /// BatchDelete atomically deletes the given keys from the key-value store.
+    pub async fn batch_delete(&self, req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
+        self.store_client()?
+            .batch_delete(req.into())
+            .await?
+            .try_into()
+            .context(ConvertMetaResponseSnafu)
     }
 
     /// CompareAndPut atomically puts the value to the given updated
@@ -266,6 +304,7 @@ impl MetaClient {
             .compare_and_put(req.into())
             .await?
             .try_into()
+            .context(ConvertMetaResponseSnafu)
     }
 
     /// DeleteRange deletes the given range from the key-value store.
@@ -274,6 +313,7 @@ impl MetaClient {
             .delete_range(req.into())
             .await?
             .try_into()
+            .context(ConvertMetaResponseSnafu)
     }
 
     /// MoveValue atomically renames the key to the given updated key.
@@ -282,6 +322,7 @@ impl MetaClient {
             .move_value(req.into())
             .await?
             .try_into()
+            .context(ConvertMetaResponseSnafu)
     }
 
     pub async fn lock(&self, req: LockRequest) -> Result<LockResponse> {
@@ -339,9 +380,11 @@ mod tests {
 
     use api::v1::meta::{HeartbeatRequest, Peer};
     use chrono::DateTime;
+    use common_meta::rpc::router::Partition;
+    use common_meta::table_name::TableName;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, RawSchema};
-    use meta_srv::metasrv::Context;
+    use meta_srv::metasrv::SelectorContext;
     use meta_srv::selector::{Namespace, Selector};
     use meta_srv::Result as MetaResult;
     use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
@@ -349,7 +392,6 @@ mod tests {
 
     use super::*;
     use crate::mocks;
-    use crate::rpc::{Partition, TableName};
 
     const TEST_KEY_PREFIX: &str = "__unit_test__meta__";
 
@@ -401,28 +443,34 @@ mod tests {
     async fn test_meta_client_builder() {
         let urls = &["127.0.0.1:3001", "127.0.0.1:3002"];
 
-        let mut meta_client = MetaClientBuilder::new(0, 0).enable_heartbeat().build();
+        let mut meta_client = MetaClientBuilder::new(0, 0, Role::Datanode)
+            .enable_heartbeat()
+            .build();
         assert!(meta_client.heartbeat_client().is_ok());
         assert!(meta_client.router_client().is_err());
         assert!(meta_client.store_client().is_err());
         meta_client.start(urls).await.unwrap();
         assert!(meta_client.heartbeat_client().unwrap().is_started().await);
 
-        let mut meta_client = MetaClientBuilder::new(0, 0).enable_router().build();
+        let mut meta_client = MetaClientBuilder::new(0, 0, Role::Datanode)
+            .enable_router()
+            .build();
         assert!(meta_client.heartbeat_client().is_err());
         assert!(meta_client.router_client().is_ok());
         assert!(meta_client.store_client().is_err());
         meta_client.start(urls).await.unwrap();
         assert!(meta_client.router_client().unwrap().is_started().await);
 
-        let mut meta_client = MetaClientBuilder::new(0, 0).enable_store().build();
+        let mut meta_client = MetaClientBuilder::new(0, 0, Role::Datanode)
+            .enable_store()
+            .build();
         assert!(meta_client.heartbeat_client().is_err());
         assert!(meta_client.router_client().is_err());
         assert!(meta_client.store_client().is_ok());
         meta_client.start(urls).await.unwrap();
         assert!(meta_client.store_client().unwrap().is_started().await);
 
-        let mut meta_client = MetaClientBuilder::new(1, 2)
+        let mut meta_client = MetaClientBuilder::new(1, 2, Role::Datanode)
             .enable_heartbeat()
             .enable_router()
             .enable_store()
@@ -441,7 +489,7 @@ mod tests {
     #[tokio::test]
     async fn test_not_start_heartbeat_client() {
         let urls = &["127.0.0.1:3001", "127.0.0.1:3002"];
-        let mut meta_client = MetaClientBuilder::new(0, 0)
+        let mut meta_client = MetaClientBuilder::new(0, 0, Role::Datanode)
             .enable_router()
             .enable_store()
             .build();
@@ -486,7 +534,7 @@ mod tests {
     #[tokio::test]
     async fn test_not_start_router_client() {
         let urls = &["127.0.0.1:3001", "127.0.0.1:3002"];
-        let mut meta_client = MetaClientBuilder::new(0, 0)
+        let mut meta_client = MetaClientBuilder::new(0, 0, Role::Datanode)
             .enable_heartbeat()
             .enable_store()
             .build();
@@ -501,7 +549,7 @@ mod tests {
     #[tokio::test]
     async fn test_not_start_store_client() {
         let urls = &["127.0.0.1:3001", "127.0.0.1:3002"];
-        let mut meta_client = MetaClientBuilder::new(0, 0)
+        let mut meta_client = MetaClientBuilder::new(0, 0, Role::Datanode)
             .enable_heartbeat()
             .enable_router()
             .build();
@@ -514,7 +562,7 @@ mod tests {
     #[should_panic]
     #[test]
     fn test_failed_when_start_nothing() {
-        let _ = MetaClientBuilder::new(0, 0).build();
+        let _ = MetaClientBuilder::new(0, 0, Role::Datanode).build();
     }
 
     #[tokio::test]
@@ -553,7 +601,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Selector for MockSelector {
-        type Context = Context;
+        type Context = SelectorContext;
         type Output = Vec<Peer>;
 
         async fn select(&self, _ns: Namespace, _ctx: &Self::Context) -> MetaResult<Self::Output> {

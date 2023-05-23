@@ -15,7 +15,6 @@
 use std::sync::Arc;
 
 use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
-use catalog::{CatalogList, CatalogProvider, SchemaProvider};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_recordbatch::RecordBatch;
 use datatypes::for_all_primitive_types;
@@ -57,17 +56,17 @@ pub fn create_query_engine() -> Arc<dyn QueryEngine> {
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
     let number_table = Arc::new(MemTable::new("numbers", recordbatch));
     schema_provider
-        .register_table(number_table.table_name().to_string(), number_table)
+        .register_table_sync(number_table.table_name().to_string(), number_table)
         .unwrap();
 
     catalog_provider
-        .register_schema(DEFAULT_SCHEMA_NAME.to_string(), schema_provider)
+        .register_schema_sync(DEFAULT_SCHEMA_NAME.to_string(), schema_provider)
         .unwrap();
     catalog_list
-        .register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider)
+        .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string(), catalog_provider)
         .unwrap();
 
-    QueryEngineFactory::new(catalog_list).query_engine()
+    QueryEngineFactory::new(catalog_list, false).query_engine()
 }
 
 pub async fn get_numbers_from_table<'s, T>(

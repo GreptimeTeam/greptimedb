@@ -22,35 +22,45 @@ use datatypes::vectors::{
     BooleanVector, Float64Vector, Helper, Int64Vector, NullVector, StringVector, VectorRef,
 };
 use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyList, PyStr};
+use rustpython_vm::object::PyObjectPayload;
 use rustpython_vm::{PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine};
-use snafu::{Backtrace, GenerateImplicitData, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt};
 
 use crate::python::error;
 use crate::python::error::ret_other_error_with;
 use crate::python::ffi_types::PyVector;
 use crate::python::rspython::builtins::try_into_columnar_value;
 
-pub(crate) type PyVectorRef = PyRef<PyVector>;
-
 /// use `rustpython`'s `is_instance` method to check if a PyObject is a instance of class.
 /// if `PyResult` is Err, then this function return `false`
 pub fn is_instance<T: PyPayload>(obj: &PyObjectRef, vm: &VirtualMachine) -> bool {
-    obj.is_instance(T::class(vm).into(), vm).unwrap_or(false)
+    obj.is_instance(T::class(&vm.ctx).into(), vm)
+        .unwrap_or(false)
+}
+
+pub fn obj_cast_to<T: PyObjectPayload>(
+    obj: PyObjectRef,
+    vm: &VirtualMachine,
+) -> PyResult<PyRef<T>> {
+    obj.downcast::<T>().map_err(|e| {
+        vm.new_type_error(format!(
+            "Can't cast object into {}, actual type: {}",
+            std::any::type_name::<T>(),
+            e.class().name()
+        ))
+    })
 }
 
 pub fn format_py_error(excep: PyBaseExceptionRef, vm: &VirtualMachine) -> error::Error {
     let mut msg = String::new();
     if let Err(e) = vm.write_exception(&mut msg, &excep) {
-        return error::Error::PyRuntime {
+        return error::PyRuntimeSnafu {
             msg: format!("Failed to write exception msg, err: {e}"),
-            backtrace: Backtrace::generate(),
-        };
+        }
+        .build();
     }
 
-    error::Error::PyRuntime {
-        msg,
-        backtrace: Backtrace::generate(),
-    }
+    error::PyRuntimeSnafu { msg }.build()
 }
 
 pub(crate) fn py_obj_to_value(obj: &PyObjectRef, vm: &VirtualMachine) -> PyResult<Value> {
@@ -91,21 +101,21 @@ pub fn py_obj_to_vec(
         Ok(pyv.as_vector_ref())
     } else if is_instance::<PyInt>(obj, vm) {
         let val = obj
-            .to_owned()
+            .clone()
             .try_into_value::<i64>(vm)
             .map_err(|e| format_py_error(e, vm))?;
         let ret = Int64Vector::from_iterator(std::iter::repeat(val).take(col_len));
         Ok(Arc::new(ret) as _)
     } else if is_instance::<PyFloat>(obj, vm) {
         let val = obj
-            .to_owned()
+            .clone()
             .try_into_value::<f64>(vm)
             .map_err(|e| format_py_error(e, vm))?;
         let ret = Float64Vector::from_iterator(std::iter::repeat(val).take(col_len));
         Ok(Arc::new(ret) as _)
     } else if is_instance::<PyBool>(obj, vm) {
         let val = obj
-            .to_owned()
+            .clone()
             .try_into_value::<bool>(vm)
             .map_err(|e| format_py_error(e, vm))?;
 
@@ -113,7 +123,7 @@ pub fn py_obj_to_vec(
         Ok(Arc::new(ret) as _)
     } else if is_instance::<PyStr>(obj, vm) {
         let val = obj
-            .to_owned()
+            .clone()
             .try_into_value::<String>(vm)
             .map_err(|e| format_py_error(e, vm))?;
 

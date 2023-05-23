@@ -14,31 +14,34 @@
 
 use std::env;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
 use catalog::CatalogManagerRef;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
+use common_catalog::consts::{
+    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID, MITO_ENGINE,
+};
 use common_runtime::Builder as RuntimeBuilder;
+use common_test_util::ports;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datanode::datanode::{
-    DatanodeOptions, FileConfig, ObjectStoreConfig, OssConfig, S3Config, WalConfig,
+    DatanodeOptions, FileConfig, ObjectStoreConfig, OssConfig, ProcedureConfig, S3Config,
+    StorageConfig, WalConfig,
 };
 use datanode::error::{CreateTableSnafu, Result};
-use datanode::instance::{Instance, InstanceRef};
+use datanode::instance::Instance;
 use datanode::sql::SqlHandler;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema};
 use frontend::instance::Instance as FeInstance;
 use object_store::services::{Oss, S3};
 use object_store::test_util::TempFolder;
-use object_store::{ObjectStore, ObjectStoreBuilder};
-use once_cell::sync::OnceCell;
-use rand::Rng;
+use object_store::ObjectStore;
+use secrecy::ExposeSecret;
 use servers::grpc::GrpcServer;
-use servers::http::{HttpOptions, HttpServer};
+use servers::http::{HttpOptions, HttpServerBuilder};
+use servers::metrics_handler::MetricsHandler;
 use servers::prom::PromServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
 use servers::query_handler::sql::ServerSqlQueryHandlerAdaptor;
@@ -48,16 +51,10 @@ use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineRef};
 use table::requests::{CreateTableRequest, TableOptions};
 
-static PORTS: OnceCell<AtomicUsize> = OnceCell::new();
-
-fn get_port() -> usize {
-    PORTS
-        .get_or_init(|| AtomicUsize::new(rand::thread_rng().gen_range(3500..3900)))
-        .fetch_add(1, Ordering::Relaxed)
-}
-
+#[derive(Debug, Eq, PartialEq)]
 pub enum StorageType {
     S3,
+    S3WithCache,
     File,
     Oss,
 }
@@ -68,7 +65,7 @@ impl StorageType {
 
         match self {
             StorageType::File => true, // always test file
-            StorageType::S3 => {
+            StorageType::S3 | StorageType::S3WithCache => {
                 if let Ok(b) = env::var("GT_S3_BUCKET") {
                     !b.is_empty()
                 } else {
@@ -86,101 +83,107 @@ impl StorageType {
     }
 }
 
-fn get_test_store_config(
+fn s3_test_config() -> S3Config {
+    S3Config {
+        root: uuid::Uuid::new_v4().to_string(),
+        access_key_id: env::var("GT_S3_ACCESS_KEY_ID").unwrap().into(),
+        secret_access_key: env::var("GT_S3_ACCESS_KEY").unwrap().into(),
+        bucket: env::var("GT_S3_BUCKET").unwrap(),
+        region: Some(env::var("GT_S3_REGION").unwrap()),
+        ..Default::default()
+    }
+}
+
+pub fn get_test_store_config(
     store_type: &StorageType,
     name: &str,
-) -> (ObjectStoreConfig, Option<TempDirGuard>) {
+) -> (ObjectStoreConfig, TempDirGuard) {
     let _ = dotenv::dotenv();
 
     match store_type {
         StorageType::Oss => {
             let oss_config = OssConfig {
                 root: uuid::Uuid::new_v4().to_string(),
-                access_key_id: env::var("GT_OSS_ACCESS_KEY_ID").unwrap(),
-                access_key_secret: env::var("GT_OSS_ACCESS_KEY").unwrap(),
+                access_key_id: env::var("GT_OSS_ACCESS_KEY_ID").unwrap().into(),
+                access_key_secret: env::var("GT_OSS_ACCESS_KEY").unwrap().into(),
                 bucket: env::var("GT_OSS_BUCKET").unwrap(),
                 endpoint: env::var("GT_OSS_ENDPOINT").unwrap(),
-                cache_path: None,
-                cache_capacity: None,
+                ..Default::default()
             };
 
-            let accessor = Oss::default()
+            let mut builder = Oss::default();
+            builder
                 .root(&oss_config.root)
                 .endpoint(&oss_config.endpoint)
-                .access_key_id(&oss_config.access_key_id)
-                .access_key_secret(&oss_config.access_key_secret)
-                .bucket(&oss_config.bucket)
-                .build()
-                .unwrap();
+                .access_key_id(oss_config.access_key_id.expose_secret())
+                .access_key_secret(oss_config.access_key_secret.expose_secret())
+                .bucket(&oss_config.bucket);
 
             let config = ObjectStoreConfig::Oss(oss_config);
 
-            let store = ObjectStore::new(accessor).finish();
+            let store = ObjectStore::new(builder).unwrap().finish();
 
-            (
-                config,
-                Some(TempDirGuard::Oss(TempFolder::new(&store, "/"))),
-            )
+            (config, TempDirGuard::Oss(TempFolder::new(&store, "/")))
         }
-        StorageType::S3 => {
-            let s3_config = S3Config {
-                root: uuid::Uuid::new_v4().to_string(),
-                access_key_id: env::var("GT_S3_ACCESS_KEY_ID").unwrap(),
-                secret_access_key: env::var("GT_S3_ACCESS_KEY").unwrap(),
-                bucket: env::var("GT_S3_BUCKET").unwrap(),
-                endpoint: None,
-                region: None,
-                cache_path: None,
-                cache_capacity: None,
-            };
+        StorageType::S3 | StorageType::S3WithCache => {
+            let mut s3_config = s3_test_config();
 
-            let accessor = S3::default()
+            if *store_type == StorageType::S3WithCache {
+                s3_config.cache_path = Some("/tmp/greptimedb_cache".to_string());
+            }
+
+            let mut builder = S3::default();
+            builder
                 .root(&s3_config.root)
-                .access_key_id(&s3_config.access_key_id)
-                .secret_access_key(&s3_config.secret_access_key)
-                .bucket(&s3_config.bucket)
-                .build()
-                .unwrap();
+                .access_key_id(s3_config.access_key_id.expose_secret())
+                .secret_access_key(s3_config.secret_access_key.expose_secret())
+                .bucket(&s3_config.bucket);
+
+            if s3_config.endpoint.is_some() {
+                builder.endpoint(s3_config.endpoint.as_ref().unwrap());
+            }
+            if s3_config.region.is_some() {
+                builder.region(s3_config.region.as_ref().unwrap());
+            }
 
             let config = ObjectStoreConfig::S3(s3_config);
 
-            let store = ObjectStore::new(accessor).finish();
+            let store = ObjectStore::new(builder).unwrap().finish();
 
-            (config, Some(TempDirGuard::S3(TempFolder::new(&store, "/"))))
+            (config, TempDirGuard::S3(TempFolder::new(&store, "/")))
         }
         StorageType::File => {
             let data_tmp_dir = create_temp_dir(&format!("gt_data_{name}"));
 
             (
                 ObjectStoreConfig::File(FileConfig {
-                    data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
+                    data_home: data_tmp_dir.path().to_str().unwrap().to_string(),
                 }),
-                Some(TempDirGuard::File(data_tmp_dir)),
+                TempDirGuard::File(data_tmp_dir),
             )
         }
     }
 }
 
-enum TempDirGuard {
+pub enum TempDirGuard {
     File(TempDir),
     S3(TempFolder),
     Oss(TempFolder),
 }
 
-/// Create a tmp dir(will be deleted once it goes out of scope.) and a default `DatanodeOptions`,
-/// Only for test.
 pub struct TestGuard {
-    _wal_tmp_dir: TempDir,
-    data_tmp_dir: Option<TempDirGuard>,
+    pub wal_guard: WalGuard,
+    pub storage_guard: StorageGuard,
 }
+
+pub struct WalGuard(pub TempDir);
+
+pub struct StorageGuard(pub TempDirGuard);
 
 impl TestGuard {
     pub async fn remove_all(&mut self) {
-        if let Some(TempDirGuard::S3(mut guard)) = self.data_tmp_dir.take() {
-            guard.remove_all().await.unwrap();
-        }
-        if let Some(TempDirGuard::Oss(mut guard)) = self.data_tmp_dir.take() {
-            guard.remove_all().await.unwrap();
+        if let TempDirGuard::S3(guard) | TempDirGuard::Oss(guard) = &mut self.storage_guard.0 {
+            guard.remove_all().await.unwrap()
         }
     }
 }
@@ -190,25 +193,34 @@ pub fn create_tmp_dir_and_datanode_opts(
     name: &str,
 ) -> (DatanodeOptions, TestGuard) {
     let wal_tmp_dir = create_temp_dir(&format!("gt_wal_{name}"));
+    let wal_dir = wal_tmp_dir.path().to_str().unwrap().to_string();
 
-    let (storage, data_tmp_dir) = get_test_store_config(&store_type, name);
+    let (store, data_tmp_dir) = get_test_store_config(&store_type, name);
+    let opts = create_datanode_opts(store, wal_dir);
 
-    let opts = DatanodeOptions {
-        wal: WalConfig {
-            dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
-            ..Default::default()
-        },
-        storage,
-        mode: Mode::Standalone,
-        ..Default::default()
-    };
     (
         opts,
         TestGuard {
-            _wal_tmp_dir: wal_tmp_dir,
-            data_tmp_dir,
+            wal_guard: WalGuard(wal_tmp_dir),
+            storage_guard: StorageGuard(data_tmp_dir),
         },
     )
+}
+
+pub fn create_datanode_opts(store: ObjectStoreConfig, wal_dir: String) -> DatanodeOptions {
+    DatanodeOptions {
+        wal: WalConfig {
+            dir: Some(wal_dir),
+            ..Default::default()
+        },
+        storage: StorageConfig {
+            store,
+            ..Default::default()
+        },
+        mode: Mode::Standalone,
+        procedure: ProcedureConfig::default(),
+        ..Default::default()
+    }
 }
 
 pub async fn create_test_table(
@@ -224,7 +236,10 @@ pub async fn create_test_table(
     ];
 
     let table_name = "demo";
-    let table_engine: TableEngineRef = sql_handler.table_engine();
+    let table_engine: TableEngineRef = sql_handler
+        .table_engine_manager()
+        .engine(MITO_ENGINE)
+        .unwrap();
     let table = table_engine
         .create_table(
             &EngineContext::default(),
@@ -239,6 +254,7 @@ pub async fn create_test_table(
                 primary_key_indices: vec![0], // "host" is in primary keys
                 table_options: TableOptions::default(),
                 region_numbers: vec![0],
+                engine: MITO_ENGINE.to_string(),
             },
         )
         .await
@@ -246,27 +262,23 @@ pub async fn create_test_table(
 
     let schema_provider = catalog_manager
         .catalog(DEFAULT_CATALOG_NAME)
+        .await
         .unwrap()
         .unwrap()
         .schema(DEFAULT_SCHEMA_NAME)
+        .await
         .unwrap()
         .unwrap();
     schema_provider
         .register_table(table_name.to_string(), table)
+        .await
         .unwrap();
     Ok(())
-}
-
-fn build_frontend_instance(datanode_instance: InstanceRef) -> FeInstance {
-    let mut frontend_instance = FeInstance::new_standalone(datanode_instance.clone());
-    frontend_instance.set_script_handler(datanode_instance);
-    frontend_instance
 }
 
 pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router, TestGuard) {
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
     let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
-    instance.start().await.unwrap();
     create_test_table(
         instance.catalog_manager(),
         instance.sql_handler(),
@@ -274,12 +286,23 @@ pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router
     )
     .await
     .unwrap();
-    let http_server = HttpServer::new(
-        ServerSqlQueryHandlerAdaptor::arc(Arc::new(build_frontend_instance(instance.clone()))),
-        ServerGrpcQueryHandlerAdaptor::arc(instance.clone()),
-        HttpOptions::default(),
-    );
-    (http_server.make_app(), guard)
+    let frontend_instance = FeInstance::try_new_standalone(instance.clone())
+        .await
+        .unwrap();
+    instance.start().await.unwrap();
+
+    let http_opts = HttpOptions {
+        addr: format!("127.0.0.1:{}", ports::get_port()),
+        ..Default::default()
+    };
+    let http_server = HttpServerBuilder::new(http_opts)
+        .with_sql_handler(ServerSqlQueryHandlerAdaptor::arc(Arc::new(
+            frontend_instance,
+        )))
+        .with_grpc_handler(ServerGrpcQueryHandlerAdaptor::arc(instance.clone()))
+        .with_metrics_handler(MetricsHandler)
+        .build();
+    (http_server.build(http_server.make_app()), guard)
 }
 
 pub async fn setup_test_http_app_with_frontend(
@@ -288,7 +311,9 @@ pub async fn setup_test_http_app_with_frontend(
 ) -> (Router, TestGuard) {
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
     let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
-    let frontend = build_frontend_instance(instance.clone());
+    let frontend = FeInstance::try_new_standalone(instance.clone())
+        .await
+        .unwrap();
     instance.start().await.unwrap();
     create_test_table(
         frontend.catalog_manager(),
@@ -297,14 +322,19 @@ pub async fn setup_test_http_app_with_frontend(
     )
     .await
     .unwrap();
+
+    let http_opts = HttpOptions {
+        addr: format!("127.0.0.1:{}", ports::get_port()),
+        ..Default::default()
+    };
+
     let frontend_ref = Arc::new(frontend);
-    let mut http_server = HttpServer::new(
-        ServerSqlQueryHandlerAdaptor::arc(frontend_ref.clone()),
-        ServerGrpcQueryHandlerAdaptor::arc(frontend_ref),
-        HttpOptions::default(),
-    );
-    http_server.set_script_handler(instance.clone());
-    let app = http_server.make_app();
+    let http_server = HttpServerBuilder::new(http_opts)
+        .with_sql_handler(ServerSqlQueryHandlerAdaptor::arc(frontend_ref.clone()))
+        .with_grpc_handler(ServerGrpcQueryHandlerAdaptor::arc(frontend_ref.clone()))
+        .with_script_handler(frontend_ref)
+        .build();
+    let app = http_server.build(http_server.make_app());
     (app, guard)
 }
 
@@ -314,7 +344,9 @@ pub async fn setup_test_prom_app_with_frontend(
 ) -> (Router, TestGuard) {
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
     let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
-    let frontend = build_frontend_instance(instance.clone());
+    let frontend = FeInstance::try_new_standalone(instance.clone())
+        .await
+        .unwrap();
     instance.start().await.unwrap();
     create_test_table(
         frontend.catalog_manager(),
@@ -336,7 +368,6 @@ pub async fn setup_grpc_server(
 
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
     let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
-    instance.start().await.unwrap();
 
     let runtime = Arc::new(
         RuntimeBuilder::default()
@@ -346,12 +377,16 @@ pub async fn setup_grpc_server(
             .unwrap(),
     );
 
-    let fe_grpc_addr = format!("127.0.0.1:{}", get_port());
+    let fe_grpc_addr = format!("127.0.0.1:{}", ports::get_port());
 
-    let fe_instance = frontend::instance::Instance::new_standalone(instance.clone());
+    let fe_instance = FeInstance::try_new_standalone(instance.clone())
+        .await
+        .unwrap();
+    instance.start().await.unwrap();
     let fe_instance_ref = Arc::new(fe_instance);
     let fe_grpc_server = Arc::new(GrpcServer::new(
-        ServerGrpcQueryHandlerAdaptor::arc(fe_instance_ref),
+        ServerGrpcQueryHandlerAdaptor::arc(fe_instance_ref.clone()),
+        Some(fe_instance_ref.clone()),
         None,
         runtime,
     ));

@@ -20,7 +20,7 @@ use sqlparser::tokenizer::Token;
 use crate::error::{self, Result};
 use crate::parser::ParserContext;
 use crate::statements::statement::Statement;
-use crate::statements::tql::{Tql, TqlEval, TqlExplain};
+use crate::statements::tql::{Tql, TqlAnalyze, TqlEval, TqlExplain};
 
 pub const TQL: &str = "TQL";
 const EVAL: &str = "EVAL";
@@ -31,6 +31,7 @@ use sqlparser::parser::Parser;
 /// TQL extension parser, including:
 /// - TQL EVAL <query>
 /// - TQL EXPLAIN <query>
+/// - TQL ANALYZE <query>
 impl<'a> ParserContext<'a> {
     pub(crate) fn parse_tql(&mut self) -> Result<Statement> {
         self.parser.next_token();
@@ -53,6 +54,11 @@ impl<'a> ParserContext<'a> {
                         self.parse_tql_explain()
                     }
 
+                    Keyword::ANALYZE => {
+                        self.parser.next_token();
+                        self.parse_tql_analyze()
+                            .context(error::SyntaxSnafu { sql: self.sql })
+                    }
                     _ => self.unsupported(self.peek_token_as_string()),
                 }
             }
@@ -114,17 +120,47 @@ impl<'a> ParserContext<'a> {
                 // TODO(dennis): supports multi TQL statements separated by ';'?
             }
 
-            Ok(query.trim().to_string())
+            // remove the last ';' or tailing space if exists
+            Ok(query.trim().trim_end_matches(';').to_string())
         } else {
             Err(ParserError::ParserError(format!("{delimiter} not found",)))
         }
     }
 
     fn parse_tql_explain(&mut self) -> Result<Statement> {
-        let query = Self::parse_tql_query(&mut self.parser, self.sql, EXPLAIN)
+        let parser = &mut self.parser;
+        let delimiter = match parser.expect_token(&Token::LParen) {
+            Ok(_) => ")",
+            Err(_) => EXPLAIN,
+        };
+        let start = Self::parse_string_or_number(parser, Token::Comma).unwrap_or("0".to_string());
+        let end = Self::parse_string_or_number(parser, Token::Comma).unwrap_or("0".to_string());
+        let step = Self::parse_string_or_number(parser, Token::RParen).unwrap_or("5m".to_string());
+        let query = Self::parse_tql_query(parser, self.sql, delimiter)
             .context(error::SyntaxSnafu { sql: self.sql })?;
 
-        Ok(Statement::Tql(Tql::Explain(TqlExplain { query })))
+        Ok(Statement::Tql(Tql::Explain(TqlExplain {
+            query,
+            start,
+            end,
+            step,
+        })))
+    }
+
+    // TODO code reuse from `parse_tql_eval`
+    fn parse_tql_analyze(&mut self) -> std::result::Result<Statement, ParserError> {
+        let parser = &mut self.parser;
+        parser.expect_token(&Token::LParen)?;
+        let start = Self::parse_string_or_number(parser, Token::Comma)?;
+        let end = Self::parse_string_or_number(parser, Token::Comma)?;
+        let step = Self::parse_string_or_number(parser, Token::RParen)?;
+        let query = Self::parse_tql_query(parser, self.sql, ")")?;
+        Ok(Statement::Tql(Tql::Analyze(TqlAnalyze {
+            start,
+            end,
+            step,
+            query,
+        })))
     }
 }
 
@@ -134,7 +170,7 @@ mod tests {
 
     use super::*;
     #[test]
-    fn test_parse_tql() {
+    fn test_parse_tql_eval() {
         let sql = "TQL EVAL (1676887657, 1676887659, '1m') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
 
         let mut result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
@@ -190,7 +226,10 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
 
+    #[test]
+    fn test_parse_tql_explain() {
         let sql = "TQL EXPLAIN http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
 
         let mut result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
@@ -200,6 +239,42 @@ mod tests {
         match statement {
             Statement::Tql(Tql::Explain(explain)) => {
                 assert_eq!(explain.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(explain.start, "0");
+                assert_eq!(explain.end, "0");
+                assert_eq!(explain.step, "5m");
+            }
+            _ => unreachable!(),
+        }
+
+        let sql = "TQL EXPLAIN (20,100,10) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
+
+        let mut result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
+        assert_eq!(1, result.len());
+
+        let statement = result.remove(0);
+        match statement {
+            Statement::Tql(Tql::Explain(explain)) => {
+                assert_eq!(explain.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(explain.start, "20");
+                assert_eq!(explain.end, "100");
+                assert_eq!(explain.step, "10");
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_parse_tql_analyze() {
+        let sql = "TQL ANALYZE (1676887657.1, 1676887659.5, 30.3) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
+        let mut result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
+        assert_eq!(1, result.len());
+        let statement = result.remove(0);
+        match statement {
+            Statement::Tql(Tql::Analyze(analyze)) => {
+                assert_eq!(analyze.start, "1676887657.1");
+                assert_eq!(analyze.end, "1676887659.5");
+                assert_eq!(analyze.step, "30.3");
+                assert_eq!(analyze.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
             }
             _ => unreachable!(),
         }

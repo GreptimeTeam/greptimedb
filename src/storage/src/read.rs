@@ -16,6 +16,7 @@
 
 mod dedup;
 mod merge;
+pub(crate) mod windowed;
 
 use std::cmp::Ordering;
 
@@ -258,3 +259,10 @@ pub trait BatchReader: Send {
 
 /// Pointer to [BatchReader].
 pub type BoxedBatchReader = Box<dyn BatchReader>;
+
+#[async_trait::async_trait]
+impl<T: BatchReader + ?Sized> BatchReader for Box<T> {
+    async fn next_batch(&mut self) -> Result<Option<Batch>> {
+        (**self).next_batch().await
+    }
+}

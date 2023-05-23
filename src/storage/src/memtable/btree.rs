@@ -16,9 +16,10 @@ use std::cmp::Ordering;
 use std::collections::{btree_map, BTreeMap};
 use std::fmt;
 use std::ops::Bound;
-use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
 use std::sync::{Arc, RwLock};
 
+use common_time::range::TimestampRange;
 use datatypes::data_type::DataType;
 use datatypes::prelude::*;
 use datatypes::value::Value;
@@ -26,8 +27,10 @@ use datatypes::vectors::{UInt64Vector, UInt64VectorBuilder, UInt8Vector, UInt8Ve
 use store_api::storage::{OpType, SequenceNumber};
 
 use crate::error::Result;
+use crate::flush::FlushStrategyRef;
 use crate::memtable::{
-    BatchIterator, BoxedBatchIterator, IterContext, KeyValues, Memtable, MemtableId, RowOrdering,
+    AllocTracker, BatchIterator, BoxedBatchIterator, IterContext, KeyValues, Memtable, MemtableId,
+    MemtableStats, RowOrdering,
 };
 use crate::read::Batch;
 use crate::schema::compat::ReadAdapter;
@@ -42,16 +45,52 @@ pub struct BTreeMemtable {
     id: MemtableId,
     schema: RegionSchemaRef,
     map: Arc<RwLockMap>,
-    estimated_bytes: AtomicUsize,
+    alloc_tracker: AllocTracker,
+    max_timestamp: AtomicI64,
+    min_timestamp: AtomicI64,
 }
 
 impl BTreeMemtable {
-    pub fn new(id: MemtableId, schema: RegionSchemaRef) -> BTreeMemtable {
+    pub fn new(
+        id: MemtableId,
+        schema: RegionSchemaRef,
+        flush_strategy: Option<FlushStrategyRef>,
+    ) -> BTreeMemtable {
         BTreeMemtable {
             id,
             schema,
             map: Arc::new(RwLock::new(BTreeMap::new())),
-            estimated_bytes: AtomicUsize::new(0),
+            alloc_tracker: AllocTracker::new(flush_strategy),
+            max_timestamp: AtomicI64::new(i64::MIN),
+            min_timestamp: AtomicI64::new(i64::MAX),
+        }
+    }
+
+    /// Updates memtable stats.
+    /// This function is guarded by `BTreeMemtable::map` so that store-after-load is safe.
+    fn update_stats(&self, request_size: usize, min: Option<Value>, max: Option<Value>) {
+        self.alloc_tracker.on_allocate(request_size);
+
+        if let Some(min) = min {
+            let min_val = min
+                .as_timestamp()
+                .expect("Min timestamp must be a valid timestamp value")
+                .value();
+            let cur_min = self.min_timestamp.load(AtomicOrdering::Relaxed);
+            if min_val < cur_min {
+                self.min_timestamp.store(min_val, AtomicOrdering::Relaxed);
+            }
+        }
+
+        if let Some(max) = max {
+            let cur_max = self.max_timestamp.load(AtomicOrdering::Relaxed);
+            let max_val = max
+                .as_timestamp()
+                .expect("Max timestamp must be a valid timestamp value")
+                .value();
+            if max_val > cur_max {
+                self.max_timestamp.store(max_val, AtomicOrdering::Relaxed);
+            }
         }
     }
 }
@@ -65,7 +104,9 @@ impl fmt::Debug for BTreeMemtable {
             // Only show StoreSchema
             .field("schema", &self.schema)
             .field("rows", &len)
-            .field("estimated_bytes", &self.estimated_bytes)
+            .field("alloc_tracker", &self.alloc_tracker)
+            .field("max_timestamp", &self.max_timestamp)
+            .field("min_timestamp", &self.min_timestamp)
             .finish()
     }
 }
@@ -80,14 +121,26 @@ impl Memtable for BTreeMemtable {
     }
 
     fn write(&self, kvs: &KeyValues) -> Result<()> {
-        self.estimated_bytes
-            .fetch_add(kvs.estimated_memory_size(), AtomicOrdering::Relaxed);
-
-        let mut map = self.map.write().unwrap();
+        debug_assert!(kvs.timestamp.is_some());
         let iter_row = IterRow::new(kvs);
+        let mut map = self.map.write().unwrap();
+
+        let mut min_ts = None;
+        let mut max_ts = None;
         for (inner_key, row_value) in iter_row {
+            let ts = inner_key.timestamp();
+            let min_ts = min_ts.get_or_insert_with(|| ts.clone());
+            let max_ts = max_ts.get_or_insert_with(|| ts.clone());
+            if ts < min_ts {
+                *min_ts = ts.clone();
+            }
+            if ts > max_ts {
+                *max_ts = ts.clone();
+            }
             map.insert(inner_key, row_value);
         }
+
+        self.update_stats(kvs.estimated_memory_size(), min_ts, max_ts);
 
         Ok(())
     }
@@ -100,12 +153,20 @@ impl Memtable for BTreeMemtable {
         Ok(Box::new(iter))
     }
 
-    fn bytes_allocated(&self) -> usize {
-        self.estimated_bytes.load(AtomicOrdering::Relaxed)
-    }
-
     fn num_rows(&self) -> usize {
         self.map.read().unwrap().len()
+    }
+
+    fn stats(&self) -> MemtableStats {
+        MemtableStats {
+            estimated_bytes: self.alloc_tracker.bytes_allocated(),
+            max_timestamp: self.max_timestamp.load(AtomicOrdering::Relaxed),
+            min_timestamp: self.min_timestamp.load(AtomicOrdering::Relaxed),
+        }
+    }
+
+    fn mark_immutable(&self) {
+        self.alloc_tracker.done_allocating();
     }
 }
 
@@ -171,7 +232,7 @@ impl BTreeIterator {
         let (keys, sequences, op_types, values) = if self.ctx.for_flush {
             collect_iter(iter, self.ctx.batch_size)
         } else {
-            let iter = MapIterWrapper::new(iter, self.ctx.visible_sequence);
+            let iter = MapIterWrapper::new(iter, self.ctx.visible_sequence, self.ctx.time_range);
             collect_iter(iter, self.ctx.batch_size)
         };
 
@@ -190,7 +251,7 @@ impl BTreeIterator {
             .map(|column_meta| column_meta.desc.data_type.clone());
         let value_data_types = self
             .schema
-            .value_columns()
+            .field_columns()
             .map(|column_meta| column_meta.desc.data_type.clone());
 
         let key_columns = rows_to_vectors(
@@ -198,7 +259,7 @@ impl BTreeIterator {
             self.adapter.source_key_needed(),
             keys.as_slice(),
         );
-        let value_columns = rows_to_vectors(
+        let field_columns = rows_to_vectors(
             value_data_types,
             self.adapter.source_value_needed(),
             values.as_slice(),
@@ -206,7 +267,7 @@ impl BTreeIterator {
 
         let batch = self.adapter.batch_from_parts(
             key_columns,
-            value_columns,
+            field_columns,
             Arc::new(sequences),
             Arc::new(op_types),
         )?;
@@ -243,23 +304,26 @@ struct MapIterWrapper<'a, InnerKey, RowValue> {
     iter: btree_map::Range<'a, InnerKey, RowValue>,
     prev_key: Option<InnerKey>,
     visible_sequence: SequenceNumber,
+    time_range: Option<TimestampRange>,
 }
 
 impl<'a> MapIterWrapper<'a, InnerKey, RowValue> {
     fn new(
         iter: btree_map::Range<'a, InnerKey, RowValue>,
         visible_sequence: SequenceNumber,
+        time_range: Option<TimestampRange>,
     ) -> MapIterWrapper<'a, InnerKey, RowValue> {
         MapIterWrapper {
             iter,
             prev_key: None,
             visible_sequence,
+            time_range,
         }
     }
 
     fn next_visible_entry(&mut self) -> Option<(&'a InnerKey, &'a RowValue)> {
         for (k, v) in self.iter.by_ref() {
-            if k.is_visible(self.visible_sequence) {
+            if k.is_visible(self.visible_sequence) && k.is_in_time_range(&self.time_range) {
                 return Some((k, v));
             }
         }
@@ -309,12 +373,15 @@ impl<'a> IterRow<'a> {
     }
 
     fn fetch_row(&mut self) -> (InnerKey, RowValue) {
-        let row_key = self
+        let mut row_key: Vec<_> = self
             .kvs
             .keys
             .iter()
             .map(|vector| vector.get(self.index))
             .collect();
+
+        // unwrap safety: KeyValues always contains a timestamp as guaranteed in [Inserter::write_one_mutation]
+        row_key.push(self.kvs.timestamp.as_ref().unwrap().get(self.index));
         let inner_key = InnerKey {
             row_key,
             sequence: self.kvs.sequence,
@@ -355,7 +422,9 @@ impl<'a> Iterator for IterRow<'a> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct InnerKey {
+    /// User defined primary keys
     row_key: Vec<Value>,
+    /// Sequence number of row
     sequence: SequenceNumber,
     index_in_batch: usize,
     op_type: OpType,
@@ -381,6 +450,12 @@ impl PartialOrd for InnerKey {
 
 impl InnerKey {
     #[inline]
+    fn timestamp(&self) -> &Value {
+        // safety: row key shall at least contain a timestamp column
+        self.row_key.last().unwrap()
+    }
+
+    #[inline]
     fn is_row_key_equal(&self, other: &InnerKey) -> bool {
         self.row_key == other.row_key
     }
@@ -388,6 +463,17 @@ impl InnerKey {
     #[inline]
     fn is_visible(&self, sequence: SequenceNumber) -> bool {
         self.sequence <= sequence
+    }
+
+    #[inline]
+    fn is_in_time_range(&self, range: &Option<TimestampRange>) -> bool {
+        let Some(range) = range else { return true; };
+        range.contains(
+            &self
+                .timestamp()
+                .as_timestamp()
+                .expect("Timestamp field must be a valid timestamp value"),
+        )
     }
 
     /// Reset the `InnerKey` so that we can use it to seek next key that

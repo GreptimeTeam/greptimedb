@@ -18,9 +18,12 @@ use std::sync::Arc;
 
 use common_runtime::Builder as RuntimeBuilder;
 use servers::grpc::GrpcServer;
+use servers::http::{HttpServer, HttpServerBuilder};
+use servers::metrics_handler::MetricsHandler;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
 use servers::server::Server;
 use snafu::ResultExt;
+use tokio::select;
 
 use crate::datanode::DatanodeOptions;
 use crate::error::{
@@ -33,6 +36,7 @@ pub mod grpc;
 /// All rpc services.
 pub struct Services {
     grpc_server: GrpcServer,
+    http_server: HttpServer,
 }
 
 impl Services {
@@ -49,8 +53,12 @@ impl Services {
             grpc_server: GrpcServer::new(
                 ServerGrpcQueryHandlerAdaptor::arc(instance),
                 None,
+                None,
                 grpc_runtime,
             ),
+            http_server: HttpServerBuilder::new(opts.http_opts.clone())
+                .with_metrics_handler(MetricsHandler)
+                .build(),
         })
     }
 
@@ -58,10 +66,15 @@ impl Services {
         let grpc_addr: SocketAddr = opts.rpc_addr.parse().context(ParseAddrSnafu {
             addr: &opts.rpc_addr,
         })?;
-        self.grpc_server
-            .start(grpc_addr)
-            .await
-            .context(StartServerSnafu)?;
+        let http_addr = opts.http_opts.addr.parse().context(ParseAddrSnafu {
+            addr: &opts.http_opts.addr,
+        })?;
+        let grpc = self.grpc_server.start(grpc_addr);
+        let http = self.http_server.start(http_addr);
+        select!(
+            v = grpc => v.context(StartServerSnafu)?,
+            v = http => v.context(StartServerSnafu)?,
+        );
         Ok(())
     }
 
@@ -69,6 +82,11 @@ impl Services {
         self.grpc_server
             .shutdown()
             .await
-            .context(ShutdownServerSnafu)
+            .context(ShutdownServerSnafu)?;
+        self.http_server
+            .shutdown()
+            .await
+            .context(ShutdownServerSnafu)?;
+        Ok(())
     }
 }

@@ -8,7 +8,7 @@
 
 
 <h3 align="center">
-    The next-generation hybrid timeseries/analytics processing database in the cloud
+    The next-generation hybrid time-series/analytics processing database in the cloud
 </h3>
 
 <p align="center">
@@ -23,6 +23,8 @@
     <a href="https://twitter.com/greptime"><img src="https://img.shields.io/badge/twitter-follow_us-1d9bf0.svg"></a>
     &nbsp;
     <a href="https://www.linkedin.com/company/greptime/"><img src="https://img.shields.io/badge/linkedin-connect_with_us-0a66c2.svg"></a>
+    &nbsp;
+    <a href="https://greptime.com/slack"><img src="https://img.shields.io/badge/slack-GreptimeDB-0abd59?logo=slack" alt="slack" /></a>
 </p>
 
 ## What is GreptimeDB
@@ -36,14 +38,22 @@ Our core developers have been building time-series data platform
 for years. Based on their best-practices, GreptimeDB is born to give you:
 
 - A standalone binary that scales to highly-available distributed cluster, providing a transparent experience for cluster users
-- Optimized columnar layout for handling time-series data; compacted, compressed, stored on various storage backends
-- Flexible index options, tackling high cardinality issues down
+- Optimized columnar layout for handling time-series data; compacted, compressed, and stored on various storage backends
+- Flexible indexes, tackling high cardinality issues down
 - Distributed, parallel query execution, leveraging elastic computing resource
 - Native SQL, and Python scripting for advanced analytical scenarios
-- Widely adopted database protocols and APIs
+- Widely adopted database protocols and APIs, native PromQL supports
 - Extensible table engine architecture for extensive workloads
 
 ## Quick Start
+
+### GreptimePlay
+
+Try out the features of GreptimeDB right from your browser.
+
+<a href="https://greptime.com/playground" target="_blank"><img
+src="https://www.greptime.com/assets/greptime_play_button_colorful.1bbe2746.png"
+alt="GreptimePlay" width="200px" /></a>
 
 ### Build
 
@@ -90,64 +100,22 @@ Or if you built from docker:
 docker run -p 4002:4002 -v "$(pwd):/tmp/greptimedb" greptime/greptimedb standalone start
 ```
 
-For more startup options, greptimedb's **distributed mode** and information
-about Kubernetes deployment, check our [docs](https://docs.greptime.com/).
+Please see [the online document site](https://docs.greptime.com/getting-started/overview#install-greptimedb) for more installation options and [operations info](https://docs.greptime.com/user-guide/operations/overview).
 
-### Connect
+### Get started
 
-1. Connect to GreptimeDB via standard [MySQL
-   client](https://dev.mysql.com/downloads/mysql/):
+Read the [complete getting started guide](https://docs.greptime.com/getting-started/overview#connect) on our [official document site](https://docs.greptime.com/).
 
-   ```
-   # The standalone instance listen on port 4002 by default.
-   mysql -h 127.0.0.1 -P 4002
-   ```
-
-2. Create table:
-
-   ```SQL
-   CREATE TABLE monitor (
-     host STRING,
-     ts TIMESTAMP,
-     cpu DOUBLE DEFAULT 0,
-     memory DOUBLE,
-     TIME INDEX (ts),
-     PRIMARY KEY(host)) ENGINE=mito WITH(regions=1);
-   ```
-
-3. Insert some data:
-
-   ```SQL
-   INSERT INTO monitor(host, cpu, memory, ts) VALUES ('host1', 66.6, 1024, 1660897955000);
-   INSERT INTO monitor(host, cpu, memory, ts) VALUES ('host2', 77.7, 2048, 1660897956000);
-   INSERT INTO monitor(host, cpu, memory, ts) VALUES ('host3', 88.8, 4096, 1660897957000);
-   ```
-
-4. Query the data:
-
-   ```SQL
-   SELECT * FROM monitor;
-   ```
-
-   ```TEXT
-   +-------+---------------------+------+--------+
-   | host  | ts                  | cpu  | memory |
-   +-------+---------------------+------+--------+
-   | host1 | 2022-08-19 08:32:35 | 66.6 |   1024 |
-   | host2 | 2022-08-19 08:32:36 | 77.7 |   2048 |
-   | host3 | 2022-08-19 08:32:37 | 88.8 |   4096 |
-   +-------+---------------------+------+--------+
-   3 rows in set (0.01 sec)
-   ```
-
-You can always cleanup test database by removing `/tmp/greptimedb`.
+To write and query data, GreptimeDB is compatible with multiple [protocols and clients](https://docs.greptime.com/user-guide/clients).
 
 ## Resources
 
 ### Installation
 
-- [Pre-built Binaries](https://github.com/GreptimeTeam/greptimedb/releases):
-  For Linux and macOS, you can easily download pre-built binaries that are ready to use. In most cases, downloading the version without PyO3 is sufficient. However, if you plan to run scripts in CPython (and use Python packages like NumPy and Pandas), you will need to download the version with PyO3 and install a Python with the same version as the Python in the PyO3 version. We recommend using virtualenv for the installation process to manage multiple Python versions.
+- [Pre-built Binaries](https://greptime.com/download):
+  For Linux and macOS, you can easily download pre-built binaries including official releases and nightly builds that are ready to use. 
+  In most cases, downloading the version without PyO3 is sufficient. However, if you plan to run scripts in CPython (and use Python packages like NumPy and Pandas), you will need to download the version with PyO3 and install a Python with the same version as the Python in the PyO3 version.
+  We recommend using virtualenv for the installation process to manage multiple Python versions.
 - [Docker Images](https://hub.docker.com/r/greptime/greptimedb)(**recommended**): pre-built
   Docker images, this is the easiest way to try GreptimeDB. By default it runs CPython script with `pyo3_backend` enabled.
 - [`gtctl`](https://github.com/GreptimeTeam/gtctl): the command-line tool for

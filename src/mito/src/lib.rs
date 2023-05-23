@@ -16,4 +16,5 @@ pub mod config;
 pub mod engine;
 pub mod error;
 mod manifest;
+mod metrics;
 pub mod table;

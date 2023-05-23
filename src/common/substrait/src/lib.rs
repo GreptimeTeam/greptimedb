@@ -17,16 +17,20 @@
 
 mod context;
 mod df_expr;
+#[allow(unused)]
 mod df_logical;
+mod df_substrait;
 pub mod error;
 mod schema;
 mod types;
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use bytes::{Buf, Bytes};
-use catalog::CatalogManagerRef;
+use datafusion::catalog::catalog::CatalogList;
 
-pub use crate::df_logical::DFLogicalSubstraitConvertor;
+pub use crate::df_substrait::DFLogicalSubstraitConvertor;
 
 #[async_trait]
 pub trait SubstraitPlan {
@@ -37,7 +41,7 @@ pub trait SubstraitPlan {
     async fn decode<B: Buf + Send>(
         &self,
         message: B,
-        catalog_manager: CatalogManagerRef,
+        catalog_list: Arc<dyn CatalogList>,
     ) -> Result<Self::Plan, Self::Error>;
 
     fn encode(&self, plan: Self::Plan) -> Result<Bytes, Self::Error>;

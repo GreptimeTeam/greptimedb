@@ -12,24 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Duration;
+
 use clap::Parser;
 use common_telemetry::logging;
-use datanode::datanode::{
-    Datanode, DatanodeOptions, FileConfig, ObjectStoreConfig, ProcedureConfig,
-};
+use datanode::datanode::{Datanode, DatanodeOptions, FileConfig, ObjectStoreConfig};
 use meta_client::MetaClientOptions;
 use servers::Mode;
 use snafu::ResultExt;
 
-use crate::error::{Error, MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu};
-use crate::toml_loader;
+use crate::error::{MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu};
+use crate::options::{Options, TopLevelOptions};
 
 pub struct Instance {
     datanode: Datanode,
 }
 
 impl Instance {
-    pub async fn run(&mut self) -> Result<()> {
+    pub async fn start(&mut self) -> Result<()> {
         self.datanode.start().await.context(StartDatanodeSnafu)
     }
 
@@ -48,8 +48,12 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(self) -> Result<Instance> {
-        self.subcmd.build().await
+    pub async fn build(self, opts: DatanodeOptions) -> Result<Instance> {
+        self.subcmd.build(opts).await
+    }
+
+    pub fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
+        self.subcmd.load_options(top_level_opts)
     }
 }
 
@@ -59,9 +63,15 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(self) -> Result<Instance> {
+    async fn build(self, opts: DatanodeOptions) -> Result<Instance> {
         match self {
-            SubCommand::Start(cmd) => cmd.build().await,
+            SubCommand::Start(cmd) => cmd.build(opts).await,
+        }
+    }
+
+    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
+        match self {
+            SubCommand::Start(cmd) => cmd.load_options(top_level_opts),
         }
     }
 }
@@ -76,65 +86,57 @@ struct StartCommand {
     rpc_hostname: Option<String>,
     #[clap(long)]
     mysql_addr: Option<String>,
-    #[clap(long)]
-    metasrv_addr: Option<String>,
+    #[clap(long, multiple = true, value_delimiter = ',')]
+    metasrv_addr: Option<Vec<String>>,
     #[clap(short, long)]
     config_file: Option<String>,
     #[clap(long)]
-    data_dir: Option<String>,
+    data_home: Option<String>,
     #[clap(long)]
     wal_dir: Option<String>,
     #[clap(long)]
-    procedure_dir: Option<String>,
+    http_addr: Option<String>,
+    #[clap(long)]
+    http_timeout: Option<u64>,
+    #[clap(long, default_value = "GREPTIMEDB_DATANODE")]
+    env_prefix: String,
 }
 
 impl StartCommand {
-    async fn build(self) -> Result<Instance> {
-        logging::info!("Datanode start command: {:#?}", self);
+    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
+        let mut opts: DatanodeOptions = Options::load_layered_options(
+            self.config_file.as_deref(),
+            self.env_prefix.as_ref(),
+            DatanodeOptions::env_list_keys(),
+        )?;
 
-        let opts: DatanodeOptions = self.try_into()?;
-
-        logging::info!("Datanode options: {:#?}", opts);
-
-        let datanode = Datanode::new(opts).await.context(StartDatanodeSnafu)?;
-
-        Ok(Instance { datanode })
-    }
-}
-
-impl TryFrom<StartCommand> for DatanodeOptions {
-    type Error = Error;
-    fn try_from(cmd: StartCommand) -> Result<Self> {
-        let mut opts: DatanodeOptions = if let Some(path) = cmd.config_file {
-            toml_loader::from_file!(&path)?
-        } else {
-            DatanodeOptions::default()
-        };
-
-        if let Some(addr) = cmd.rpc_addr {
-            opts.rpc_addr = addr;
+        if let Some(dir) = top_level_opts.log_dir {
+            opts.logging.dir = dir;
+        }
+        if let Some(level) = top_level_opts.log_level {
+            opts.logging.level = level;
         }
 
-        if cmd.rpc_hostname.is_some() {
-            opts.rpc_hostname = cmd.rpc_hostname;
+        if let Some(addr) = &self.rpc_addr {
+            opts.rpc_addr = addr.clone();
         }
 
-        if let Some(addr) = cmd.mysql_addr {
-            opts.mysql_addr = addr;
+        if self.rpc_hostname.is_some() {
+            opts.rpc_hostname = self.rpc_hostname.clone();
         }
 
-        if let Some(node_id) = cmd.node_id {
+        if let Some(addr) = &self.mysql_addr {
+            opts.mysql_addr = addr.clone();
+        }
+
+        if let Some(node_id) = self.node_id {
             opts.node_id = Some(node_id);
         }
 
-        if let Some(meta_addr) = cmd.metasrv_addr {
+        if let Some(metasrv_addrs) = &self.metasrv_addr {
             opts.meta_client_options
                 .get_or_insert_with(MetaClientOptions::default)
-                .metasrv_addrs = meta_addr
-                .split(',')
-                .map(&str::trim)
-                .map(&str::to_string)
-                .collect::<_>();
+                .metasrv_addrs = metasrv_addrs.clone();
             opts.mode = Mode::Distributed;
         }
 
@@ -145,32 +147,52 @@ impl TryFrom<StartCommand> for DatanodeOptions {
             .fail();
         }
 
-        if let Some(data_dir) = cmd.data_dir {
-            opts.storage = ObjectStoreConfig::File(FileConfig { data_dir });
+        if let Some(data_home) = &self.data_home {
+            opts.storage.store = ObjectStoreConfig::File(FileConfig {
+                data_home: data_home.clone(),
+            });
         }
 
-        if let Some(wal_dir) = cmd.wal_dir {
-            opts.wal.dir = wal_dir;
-        }
-        if let Some(procedure_dir) = cmd.procedure_dir {
-            opts.procedure = Some(ProcedureConfig::from_file_path(procedure_dir));
+        if let Some(wal_dir) = &self.wal_dir {
+            opts.wal.dir = Some(wal_dir.clone());
         }
 
-        Ok(opts)
+        if let Some(http_addr) = &self.http_addr {
+            opts.http_opts.addr = http_addr.clone();
+        }
+
+        if let Some(http_timeout) = self.http_timeout {
+            opts.http_opts.timeout = Duration::from_secs(http_timeout)
+        }
+
+        // Disable dashboard in datanode.
+        opts.http_opts.disable_dashboard = true;
+
+        Ok(Options::Datanode(Box::new(opts)))
+    }
+
+    async fn build(self, opts: DatanodeOptions) -> Result<Instance> {
+        logging::info!("Datanode start command: {:#?}", self);
+        logging::info!("Datanode options: {:#?}", opts);
+
+        let datanode = Datanode::new(opts).await.context(StartDatanodeSnafu)?;
+
+        Ok(Instance { datanode })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
     use std::io::Write;
     use std::time::Duration;
 
+    use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_named_temp_file;
-    use datanode::datanode::{CompactionConfig, ObjectStoreConfig};
+    use datanode::datanode::{CompactionConfig, ObjectStoreConfig, RegionManifestConfig};
     use servers::Mode;
 
     use super::*;
+    use crate::options::ENV_VAR_SEP;
 
     #[test]
     fn test_read_from_config_file() {
@@ -192,7 +214,7 @@ mod tests {
             tcp_nodelay = true
 
             [wal]
-            dir = "/tmp/greptimedb/wal"
+            dir = "/other/wal"
             file_size = "1GB"
             purge_threshold = "50GB"
             purge_interval = "10m"
@@ -201,12 +223,22 @@ mod tests {
 
             [storage]
             type = "File"
-            data_dir = "/tmp/greptimedb/data/"
+            data_home = "/tmp/greptimedb/"
 
-            [compaction]
-            max_inflight_tasks = 4
-            max_files_in_level0 = 8
+            [storage.compaction]
+            max_inflight_tasks = 3
+            max_files_in_level0 = 7
             max_purge_tasks = 32
+
+            [storage.manifest]
+            checkpoint_margin = 9
+            gc_duration = '7s'
+            checkpoint_on_startup = true
+            compress = true
+
+            [logging]
+            level = "debug"
+            dir = "/tmp/greptimedb/test/logs"
         "#;
         write!(file, "{}", toml_str).unwrap();
 
@@ -214,12 +246,16 @@ mod tests {
             config_file: Some(file.path().to_str().unwrap().to_string()),
             ..Default::default()
         };
-        let options: DatanodeOptions = cmd.try_into().unwrap();
+
+        let Options::Datanode(options) =
+            cmd.load_options(TopLevelOptions::default()).unwrap() else { unreachable!() };
+
         assert_eq!("127.0.0.1:3001".to_string(), options.rpc_addr);
         assert_eq!("127.0.0.1:4406".to_string(), options.mysql_addr);
         assert_eq!(2, options.mysql_runtime_size);
         assert_eq!(Some(42), options.node_id);
 
+        assert_eq!("/other/wal", options.wal.dir.unwrap());
         assert_eq!(Duration::from_secs(600), options.wal.purge_interval);
         assert_eq!(1024 * 1024 * 1024, options.wal.file_size.0);
         assert_eq!(1024 * 1024 * 1024 * 50, options.wal.purge_threshold.0);
@@ -237,9 +273,9 @@ mod tests {
         assert_eq!(3000, timeout_millis);
         assert!(tcp_nodelay);
 
-        match options.storage {
-            ObjectStoreConfig::File(FileConfig { data_dir }) => {
-                assert_eq!("/tmp/greptimedb/data/".to_string(), data_dir)
+        match &options.storage.store {
+            ObjectStoreConfig::File(FileConfig { data_home, .. }) => {
+                assert_eq!("/tmp/greptimedb/", data_home)
             }
             ObjectStoreConfig::S3 { .. } => unreachable!(),
             ObjectStoreConfig::Oss { .. } => unreachable!(),
@@ -247,43 +283,198 @@ mod tests {
 
         assert_eq!(
             CompactionConfig {
-                max_inflight_tasks: 4,
-                max_files_in_level0: 8,
+                max_inflight_tasks: 3,
+                max_files_in_level0: 7,
                 max_purge_tasks: 32,
+                sst_write_buffer_size: ReadableSize::mb(8),
             },
-            options.compaction
+            options.storage.compaction,
         );
+        assert_eq!(
+            RegionManifestConfig {
+                checkpoint_margin: Some(9),
+                gc_duration: Some(Duration::from_secs(7)),
+                checkpoint_on_startup: true,
+                compress: true
+            },
+            options.storage.manifest,
+        );
+
+        assert_eq!("debug".to_string(), options.logging.level);
+        assert_eq!("/tmp/greptimedb/test/logs".to_string(), options.logging.dir);
     }
 
     #[test]
     fn test_try_from_cmd() {
-        assert_eq!(
-            Mode::Standalone,
-            DatanodeOptions::try_from(StartCommand::default())
-                .unwrap()
-                .mode
-        );
+        if let Options::Datanode(opt) = StartCommand::default()
+            .load_options(TopLevelOptions::default())
+            .unwrap()
+        {
+            assert_eq!(Mode::Standalone, opt.mode)
+        }
 
-        let mode = DatanodeOptions::try_from(StartCommand {
+        if let Options::Datanode(opt) = (StartCommand {
             node_id: Some(42),
-            metasrv_addr: Some("127.0.0.1:3002".to_string()),
+            metasrv_addr: Some(vec!["127.0.0.1:3002".to_string()]),
             ..Default::default()
         })
+        .load_options(TopLevelOptions::default())
         .unwrap()
-        .mode;
-        assert_matches!(mode, Mode::Distributed);
+        {
+            assert_eq!(Mode::Distributed, opt.mode)
+        }
 
-        assert!(DatanodeOptions::try_from(StartCommand {
-            metasrv_addr: Some("127.0.0.1:3002".to_string()),
+        assert!((StartCommand {
+            metasrv_addr: Some(vec!["127.0.0.1:3002".to_string()]),
             ..Default::default()
         })
+        .load_options(TopLevelOptions::default())
         .is_err());
 
         // Providing node_id but leave metasrv_addr absent is ok since metasrv_addr has default value
-        DatanodeOptions::try_from(StartCommand {
+        (StartCommand {
             node_id: Some(42),
             ..Default::default()
         })
+        .load_options(TopLevelOptions::default())
         .unwrap();
+    }
+
+    #[test]
+    fn test_top_level_options() {
+        let cmd = StartCommand::default();
+
+        let options = cmd
+            .load_options(TopLevelOptions {
+                log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
+                log_level: Some("debug".to_string()),
+            })
+            .unwrap();
+
+        let logging_opt = options.logging_options();
+        assert_eq!("/tmp/greptimedb/test/logs", logging_opt.dir);
+        assert_eq!("debug", logging_opt.level);
+    }
+
+    #[test]
+    fn test_config_precedence_order() {
+        let mut file = create_named_temp_file();
+        let toml_str = r#"
+            mode = "distributed"
+            enable_memory_catalog = false
+            node_id = 42
+            rpc_addr = "127.0.0.1:3001"
+            rpc_hostname = "127.0.0.1"
+            rpc_runtime_size = 8
+            mysql_addr = "127.0.0.1:4406"
+            mysql_runtime_size = 2
+
+            [meta_client_options]
+            timeout_millis = 3000
+            connect_timeout_millis = 5000
+            tcp_nodelay = true
+
+            [wal]
+            file_size = "1GB"
+            purge_threshold = "50GB"
+            purge_interval = "10m"
+            read_batch_size = 128
+            sync_write = false
+
+            [storage]
+            type = "File"
+            data_home = "/tmp/greptimedb/"
+
+            [storage.compaction]
+            max_inflight_tasks = 3
+            max_files_in_level0 = 7
+            max_purge_tasks = 32
+
+            [storage.manifest]
+            checkpoint_on_startup = true
+
+            [logging]
+            level = "debug"
+            dir = "/tmp/greptimedb/test/logs"
+        "#;
+        write!(file, "{}", toml_str).unwrap();
+
+        let env_prefix = "DATANODE_UT";
+        temp_env::with_vars(
+            vec![
+                (
+                    // storage.manifest.gc_duration = 9s
+                    vec![
+                        env_prefix.to_string(),
+                        "storage".to_uppercase(),
+                        "manifest".to_uppercase(),
+                        "gc_duration".to_uppercase(),
+                    ]
+                    .join(ENV_VAR_SEP),
+                    Some("9s"),
+                ),
+                (
+                    // storage.compaction.max_purge_tasks = 99
+                    vec![
+                        env_prefix.to_string(),
+                        "storage".to_uppercase(),
+                        "compaction".to_uppercase(),
+                        "max_purge_tasks".to_uppercase(),
+                    ]
+                    .join(ENV_VAR_SEP),
+                    Some("99"),
+                ),
+                (
+                    // meta_client_options.metasrv_addrs = 127.0.0.1:3001,127.0.0.1:3002,127.0.0.1:3003
+                    vec![
+                        env_prefix.to_string(),
+                        "meta_client_options".to_uppercase(),
+                        "metasrv_addrs".to_uppercase(),
+                    ]
+                    .join(ENV_VAR_SEP),
+                    Some("127.0.0.1:3001,127.0.0.1:3002,127.0.0.1:3003"),
+                ),
+            ],
+            || {
+                let command = StartCommand {
+                    config_file: Some(file.path().to_str().unwrap().to_string()),
+                    wal_dir: Some("/other/wal/dir".to_string()),
+                    env_prefix: env_prefix.to_string(),
+                    ..Default::default()
+                };
+
+                let Options::Datanode(opts) =
+                    command.load_options(TopLevelOptions::default()).unwrap() else {unreachable!()};
+
+                // Should be read from env, env > default values.
+                assert_eq!(
+                    opts.storage.manifest.gc_duration,
+                    Some(Duration::from_secs(9))
+                );
+                assert_eq!(
+                    opts.meta_client_options.unwrap().metasrv_addrs,
+                    vec![
+                        "127.0.0.1:3001".to_string(),
+                        "127.0.0.1:3002".to_string(),
+                        "127.0.0.1:3003".to_string()
+                    ]
+                );
+
+                // Should be read from config file, config file > env > default values.
+                assert_eq!(opts.storage.compaction.max_purge_tasks, 32);
+
+                // Should be read from cli, cli > config file > env > default values.
+                assert_eq!(opts.wal.dir.unwrap(), "/other/wal/dir");
+
+                // Should be default value.
+                assert_eq!(
+                    opts.storage.manifest.checkpoint_margin,
+                    DatanodeOptions::default()
+                        .storage
+                        .manifest
+                        .checkpoint_margin
+                );
+            },
+        );
     }
 }

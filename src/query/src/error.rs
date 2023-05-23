@@ -16,13 +16,21 @@ use std::any::Any;
 
 use common_error::prelude::*;
 use datafusion::error::DataFusionError;
-use snafu::{Backtrace, ErrorCompat, Snafu};
+use datatypes::prelude::ConcreteDataType;
+use datatypes::value::Value;
+use snafu::{Location, Snafu};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
     #[snafu(display("Unsupported expr type: {}", name))]
-    UnsupportedExpr { name: String, backtrace: Backtrace },
+    UnsupportedExpr { name: String, location: Location },
+
+    #[snafu(display("Operation {} not implemented yet", operation))]
+    Unimplemented {
+        operation: String,
+        location: Location,
+    },
 
     #[snafu(display("General catalog error: {}", source))]
     Catalog {
@@ -31,19 +39,13 @@ pub enum Error {
     },
 
     #[snafu(display("Catalog not found: {}", catalog))]
-    CatalogNotFound {
-        catalog: String,
-        backtrace: Backtrace,
-    },
+    CatalogNotFound { catalog: String, location: Location },
 
     #[snafu(display("Schema not found: {}", schema))]
-    SchemaNotFound {
-        schema: String,
-        backtrace: Backtrace,
-    },
+    SchemaNotFound { schema: String, location: Location },
 
     #[snafu(display("Table not found: {}", table))]
-    TableNotFound { table: String, backtrace: Backtrace },
+    TableNotFound { table: String, location: Location },
 
     #[snafu(display("Failed to do vector computation, source: {}", source))]
     VectorComputation {
@@ -70,7 +72,7 @@ pub enum Error {
     QueryAccessDenied { catalog: String, schema: String },
 
     #[snafu(display("The SQL string has multiple statements, query: {}", query))]
-    MultipleStatements { query: String, backtrace: Backtrace },
+    MultipleStatements { query: String, location: Location },
 
     #[snafu(display("Failed to convert Datafusion schema: {}", source))]
     ConvertDatafusionSchema {
@@ -82,20 +84,20 @@ pub enum Error {
     ParseTimestamp {
         raw: String,
         source: chrono::ParseError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to parse float number `{}`: {}", raw, source))]
     ParseFloat {
         raw: String,
         source: std::num::ParseFloatError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("DataFusion error: {}", source))]
     DataFusion {
         source: DataFusionError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("General SQL error: {}", source))]
@@ -108,7 +110,72 @@ pub enum Error {
     PlanSql {
         sql: String,
         source: DataFusionError,
-        backtrace: Backtrace,
+        location: Location,
+    },
+
+    #[snafu(display("Timestamp column for table '{table_name}' is missing!"))]
+    MissingTimestampColumn {
+        table_name: String,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to convert value to sql value: {}", value))]
+    ConvertSqlValue {
+        value: Value,
+        #[snafu(backtrace)]
+        source: sql::error::Error,
+    },
+
+    #[snafu(display("Failed to convert concrete type to sql type: {:?}", datatype))]
+    ConvertSqlType {
+        datatype: ConcreteDataType,
+        #[snafu(backtrace)]
+        source: sql::error::Error,
+    },
+
+    #[snafu(display("Failed to parse SQL, source: {}", source))]
+    ParseSql {
+        #[snafu(backtrace)]
+        source: sql::error::Error,
+    },
+
+    #[snafu(display("Missing required field: {}", name))]
+    MissingRequiredField { name: String, location: Location },
+
+    #[snafu(display("Failed to regex, source: {}", source))]
+    BuildRegex {
+        location: Location,
+        source: regex::Error,
+    },
+
+    #[snafu(display("Failed to build data source backend, source: {}", source))]
+    BuildBackend {
+        #[snafu(backtrace)]
+        source: common_datasource::error::Error,
+    },
+
+    #[snafu(display("Failed to list objects, source: {}", source))]
+    ListObjects {
+        #[snafu(backtrace)]
+        source: common_datasource::error::Error,
+    },
+
+    #[snafu(display("Failed to parse file format: {}", source))]
+    ParseFileFormat {
+        #[snafu(backtrace)]
+        source: common_datasource::error::Error,
+    },
+
+    #[snafu(display("Failed to infer schema: {}", source))]
+    InferSchema {
+        #[snafu(backtrace)]
+        source: common_datasource::error::Error,
+    },
+
+    #[snafu(display("Failed to convert datafusion schema, source: {}", source))]
+    ConvertSchema {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
     },
 }
 
@@ -119,26 +186,33 @@ impl ErrorExt for Error {
         match self {
             QueryParse { .. } | MultipleStatements { .. } => StatusCode::InvalidSyntax,
             UnsupportedExpr { .. }
+            | Unimplemented { .. }
             | CatalogNotFound { .. }
             | SchemaNotFound { .. }
             | TableNotFound { .. }
             | ParseTimestamp { .. }
-            | ParseFloat { .. } => StatusCode::InvalidArguments,
+            | ParseFloat { .. }
+            | MissingRequiredField { .. }
+            | BuildRegex { .. }
+            | ConvertSchema { .. } => StatusCode::InvalidArguments,
+
+            BuildBackend { .. } | ListObjects { .. } => StatusCode::StorageUnavailable,
+
+            ParseFileFormat { source, .. } | InferSchema { source, .. } => source.status_code(),
+
             QueryAccessDenied { .. } => StatusCode::AccessDenied,
             Catalog { source } => source.status_code(),
             VectorComputation { source } | ConvertDatafusionSchema { source } => {
                 source.status_code()
             }
+            ParseSql { source } => source.status_code(),
             CreateRecordBatch { source } => source.status_code(),
             QueryExecution { source } | QueryPlan { source } => source.status_code(),
-            DataFusion { .. } => StatusCode::Internal,
+            DataFusion { .. } | MissingTimestampColumn { .. } => StatusCode::Internal,
             Sql { source } => source.status_code(),
             PlanSql { .. } => StatusCode::PlanQuery,
+            ConvertSqlType { source, .. } | ConvertSqlValue { source, .. } => source.status_code(),
         }
-    }
-
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        ErrorCompat::backtrace(self)
     }
 
     fn as_any(&self) -> &dyn Any {

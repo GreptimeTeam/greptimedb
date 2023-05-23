@@ -40,8 +40,9 @@ use snafu::{ensure, ResultExt};
 use sql::statements::statement::Statement;
 
 use crate::engine::{CompileContext, EvalContext, Script, ScriptEngine};
-use crate::python::error::{self, PyRuntimeSnafu, Result};
+use crate::python::error::{self, PyRuntimeSnafu, Result, TokioJoinSnafu};
 use crate::python::ffi_types::copr::{exec_parsed, parse, AnnotationInfo, CoprocessorRef};
+use crate::python::utils::spawn_blocking_script;
 const PY_ENGINE: &str = "python";
 
 #[derive(Debug)]
@@ -179,9 +180,17 @@ pub struct PyScript {
 }
 
 impl PyScript {
+    pub fn from_script(script: &str, query_engine: QueryEngineRef) -> Result<Self> {
+        let copr = Arc::new(parse::parse_and_compile_copr(
+            script,
+            Some(query_engine.clone()),
+        )?);
+
+        Ok(PyScript { copr, query_engine })
+    }
     /// Register Current Script as UDF, register name is same as script name
     /// FIXME(discord9): possible inject attack?
-    pub fn register_udf(&self) {
+    pub async fn register_udf(&self) {
         let udf = PyUDF::from_copr(self.copr.clone());
         PyUDF::register_as_udf(udf.clone());
         PyUDF::register_to_query_engine(udf, self.query_engine.clone());
@@ -203,19 +212,19 @@ impl CoprStream {
     ) -> Result<Self> {
         let mut schema = vec![];
         for (ty, name) in copr.return_types.iter().zip(&copr.deco_args.ret_names) {
-            let ty = ty.clone().ok_or(
+            let ty = ty.clone().ok_or_else(|| {
                 PyRuntimeSnafu {
                     msg: "return type not annotated, can't generate schema",
                 }
-                .build(),
-            )?;
+                .build()
+            })?;
             let is_nullable = ty.is_nullable;
-            let ty = ty.datatype.ok_or(
+            let ty = ty.datatype.ok_or_else(|| {
                 PyRuntimeSnafu {
                     msg: "return type not annotated, can't generate schema",
                 }
-                .build(),
-            )?;
+                .build()
+            })?;
             let col_schema = ColumnSchema::new(name, ty, is_nullable);
             schema.push(col_schema);
         }
@@ -291,7 +300,11 @@ impl Script for PyScript {
                 _ => unreachable!(),
             }
         } else {
-            let batch = exec_parsed(&self.copr, &None, &params)?;
+            let copr = self.copr.clone();
+            let params = params.clone();
+            let batch = spawn_blocking_script(move || exec_parsed(&copr, &None, &params))
+                .await
+                .context(TokioJoinSnafu)??;
             let batches = RecordBatches::try_new(batch.schema.clone(), vec![batch]).unwrap();
             Ok(Output::RecordBatches(batches))
         }
@@ -335,10 +348,10 @@ impl ScriptEngine for PyEngine {
 }
 #[cfg(test)]
 pub(crate) use tests::sample_script_engine;
+
 #[cfg(test)]
 mod tests {
     use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
-    use catalog::{CatalogList, CatalogProvider, SchemaProvider};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_recordbatch::util;
     use datatypes::prelude::ScalarVector;
@@ -354,17 +367,17 @@ mod tests {
 
         let default_schema = Arc::new(MemorySchemaProvider::new());
         default_schema
-            .register_table("numbers".to_string(), Arc::new(NumbersTable::default()))
+            .register_table_sync("numbers".to_string(), Arc::new(NumbersTable::default()))
             .unwrap();
         let default_catalog = Arc::new(MemoryCatalogProvider::new());
         default_catalog
-            .register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema)
+            .register_schema_sync(DEFAULT_SCHEMA_NAME.to_string(), default_schema)
             .unwrap();
         catalog_list
-            .register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
+            .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
             .unwrap();
 
-        let factory = QueryEngineFactory::new(catalog_list);
+        let factory = QueryEngineFactory::new(catalog_list, false);
         let query_engine = factory.query_engine();
 
         PyEngine::new(query_engine.clone())
@@ -380,7 +393,7 @@ import greptime as gt
 @copr(args=["number"], returns = ["number"], sql = "select * from numbers")
 def test(number) -> vector[u32]:
     from greptime import query
-    return query().sql("select * from numbers")[0][0]
+    return query().sql("select * from numbers")[0]
 "#;
         let script = script_engine
             .compile(script, CompileContext::default())
@@ -439,8 +452,8 @@ from greptime import col
 
 @copr(args=["number"], returns = ["number"], sql = "select * from numbers")
 def test(number) -> vector[u32]:
-    from greptime import dataframe
-    return dataframe().filter(col("number")==col("number")).collect()[0][0]
+    from greptime import PyDataFrame
+    return PyDataFrame.from_sql("select * from numbers").filter(col("number")==col("number")).collect()[0][0]
 "#;
         let script = script_engine
             .compile(script, CompileContext::default())

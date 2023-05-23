@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-///! Common actions for manifest
+//! Common actions for manifest
 use serde::{Deserialize, Serialize};
 
 use crate::manifest::ManifestVersion;
@@ -37,6 +37,16 @@ pub fn supported_protocol_version() -> (ProtocolVersion, ProtocolVersion) {
 pub struct ProtocolAction {
     pub min_reader_version: ProtocolVersion,
     pub min_writer_version: ProtocolVersion,
+}
+
+impl std::fmt::Display for ProtocolAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Protocol({}, {})",
+            &self.min_reader_version, &self.min_writer_version,
+        )
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]

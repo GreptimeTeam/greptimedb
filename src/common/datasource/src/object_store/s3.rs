@@ -15,22 +15,22 @@
 use std::collections::HashMap;
 
 use object_store::services::S3;
-use object_store::{ObjectStore, ObjectStoreBuilder};
+use object_store::ObjectStore;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
 
-const ENDPOINT_URL: &str = "ENDPOINT_URL";
-const ACCESS_KEY_ID: &str = "ACCESS_KEY_ID";
-const SECRET_ACCESS_KEY: &str = "SECRET_ACCESS_KEY";
-const SESSION_TOKEN: &str = "SESSION_TOKEN";
-const REGION: &str = "REGION";
-const ENABLE_VIRTUAL_HOST_STYLE: &str = "ENABLE_VIRTUAL_HOST_STYLE";
+const ENDPOINT_URL: &str = "endpoint_url";
+const ACCESS_KEY_ID: &str = "access_key_id";
+const SECRET_ACCESS_KEY: &str = "secret_access_key";
+const SESSION_TOKEN: &str = "session_token";
+const REGION: &str = "region";
+const ENABLE_VIRTUAL_HOST_STYLE: &str = "enable_virtual_host_style";
 
 pub fn build_s3_backend(
     host: &str,
     path: &str,
-    connection: HashMap<String, String>,
+    connection: &HashMap<String, String>,
 ) -> Result<ObjectStore> {
     let mut builder = S3::default();
 
@@ -73,7 +73,7 @@ pub fn build_s3_backend(
         }
     }
 
-    let accessor = builder.build().context(error::BuildBackendSnafu)?;
-
-    Ok(ObjectStore::new(accessor).finish())
+    Ok(ObjectStore::new(builder)
+        .context(error::BuildBackendSnafu)?
+        .finish())
 }

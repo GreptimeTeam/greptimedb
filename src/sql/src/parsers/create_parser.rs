@@ -15,11 +15,11 @@
 use std::cmp::Ordering;
 
 use itertools::Itertools;
-use mito::engine;
 use once_cell::sync::Lazy;
 use snafu::{ensure, OptionExt, ResultExt};
 use sqlparser::ast::{ColumnOption, ColumnOptionDef, DataType, Value};
 use sqlparser::dialect::keywords::Keyword;
+use sqlparser::keywords::ALL_KEYWORDS;
 use sqlparser::parser::IsOptional::Mandatory;
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, TokenWithLocation, Word};
@@ -31,10 +31,11 @@ use crate::error::{
 };
 use crate::parser::ParserContext;
 use crate::statements::create::{
-    CreateDatabase, CreateTable, PartitionEntry, Partitions, TIME_INDEX,
+    CreateDatabase, CreateExternalTable, CreateTable, PartitionEntry, Partitions, TIME_INDEX,
 };
 use crate::statements::statement::Statement;
 use crate::statements::{sql_data_type_to_concrete_data_type, sql_value_to_value};
+use crate::util::parse_option_string;
 
 const ENGINE: &str = "ENGINE";
 const MAXVALUE: &str = "MAXVALUE";
@@ -51,10 +52,54 @@ impl<'a> ParserContext<'a> {
 
                 Keyword::SCHEMA | Keyword::DATABASE => self.parse_create_database(),
 
+                Keyword::EXTERNAL => self.parse_create_external_table(),
+
                 _ => self.unsupported(w.to_string()),
             },
             unexpected => self.unsupported(unexpected.to_string()),
         }
+    }
+
+    fn parse_create_external_table(&mut self) -> Result<Statement> {
+        self.parser.next_token();
+        self.parser
+            .expect_keyword(Keyword::TABLE)
+            .context(error::SyntaxSnafu { sql: self.sql })?;
+        let if_not_exists =
+            self.parser
+                .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
+        let table_name = self
+            .parser
+            .parse_object_name()
+            .context(error::UnexpectedSnafu {
+                sql: self.sql,
+                expected: "a table name",
+                actual: self.peek_token_as_string(),
+            })?;
+        let (columns, constraints) = self.parse_columns()?;
+        let engine = self.parse_table_engine(common_catalog::consts::IMMUTABLE_FILE_ENGINE)?;
+        let options = self
+            .parser
+            .parse_options(Keyword::WITH)
+            .context(error::SyntaxSnafu { sql: self.sql })?
+            .into_iter()
+            .filter_map(|option| {
+                if let Some(v) = parse_option_string(option.value) {
+                    Some((option.name.value.to_lowercase(), v))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        Ok(Statement::CreateExternalTable(CreateExternalTable {
+            name: table_name,
+            columns,
+            constraints,
+            options,
+            if_not_exists,
+            engine,
+        }))
     }
 
     fn parse_create_database(&mut self) -> Result<Statement> {
@@ -98,7 +143,7 @@ impl<'a> ParserContext<'a> {
 
         let partitions = self.parse_partitions()?;
 
-        let engine = self.parse_table_engine()?;
+        let engine = self.parse_table_engine(common_catalog::consts::MITO_ENGINE)?;
         let options = self
             .parser
             .parse_options(Keyword::WITH)
@@ -344,6 +389,16 @@ impl<'a> ParserContext<'a> {
         let parser = &mut self.parser;
 
         let name = parser.parse_identifier()?;
+        if name.quote_style.is_none() &&
+            // "ALL_KEYWORDS" are sorted.
+            ALL_KEYWORDS.binary_search(&name.value.to_uppercase().as_str()).is_ok()
+        {
+            return Err(ParserError::ParserError(format!(
+                "Cannot use keyword '{}' as column name. Hint: add quotes to the name.",
+                &name.value
+            )));
+        }
+
         let data_type = parser.parse_data_type()?;
         let collation = if parser.parse_keyword(Keyword::COLLATE) {
             Some(parser.parse_object_name()?)
@@ -499,9 +554,9 @@ impl<'a> ParserContext<'a> {
     }
 
     /// Parses the set of valid formats
-    fn parse_table_engine(&mut self) -> Result<String> {
+    fn parse_table_engine(&mut self, default: &str) -> Result<String> {
         if !self.consume_token(ENGINE) {
-            return Ok(engine::MITO_ENGINE.to_string());
+            return Ok(default.to_string());
         }
 
         self.parser
@@ -725,11 +780,110 @@ fn ensure_partition_names_no_duplicate(partitions: &Partitions) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
+    use std::collections::HashMap;
 
+    use common_catalog::consts::IMMUTABLE_FILE_ENGINE;
     use sqlparser::ast::ColumnOption::NotNull;
     use sqlparser::dialect::GenericDialect;
 
     use super::*;
+
+    #[test]
+    fn test_parse_create_external_table() {
+        struct Test<'a> {
+            sql: &'a str,
+            expected_table_name: &'a str,
+            expected_options: HashMap<String, String>,
+            expected_engine: &'a str,
+            expected_if_not_exist: bool,
+        }
+
+        let tests = [
+            Test {
+                sql: "CREATE EXTERNAL TABLE city with(location='/var/data/city.csv',format='csv');",
+                expected_table_name: "city",
+                expected_options: HashMap::from([
+                    ("location".to_string(), "/var/data/city.csv".to_string()),
+                    ("format".to_string(), "csv".to_string()),
+                ]),
+                expected_engine: IMMUTABLE_FILE_ENGINE,
+                expected_if_not_exist: false,
+            },
+            Test {
+                sql: "CREATE EXTERNAL TABLE IF NOT EXISTS city ENGINE=foo with(location='/var/data/city.csv',format='csv');",
+                expected_table_name: "city",
+                expected_options: HashMap::from([
+                    ("location".to_string(), "/var/data/city.csv".to_string()),
+                    ("format".to_string(), "csv".to_string()),
+                ]),
+                expected_engine: "foo",
+                expected_if_not_exist: true,
+            },
+        ];
+
+        for test in tests {
+            let stmts = ParserContext::create_with_dialect(test.sql, &GenericDialect {}).unwrap();
+            assert_eq!(1, stmts.len());
+            match &stmts[0] {
+                Statement::CreateExternalTable(c) => {
+                    assert_eq!(c.name.to_string(), test.expected_table_name.to_string());
+                    assert_eq!(c.options, test.expected_options);
+                    assert_eq!(c.if_not_exists, test.expected_if_not_exist);
+                    assert_eq!(c.engine, test.expected_engine);
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_create_external_table_with_schema() {
+        let sql = "CREATE EXTERNAL TABLE city (
+            host string,
+            ts int64,
+            cpu float64 default 0,
+            memory float64,
+            TIME INDEX (ts),
+            PRIMARY KEY(ts, host)
+        ) with(location='/var/data/city.csv',format='csv');";
+
+        let options = HashMap::from([
+            ("location".to_string(), "/var/data/city.csv".to_string()),
+            ("format".to_string(), "csv".to_string()),
+        ]);
+
+        let stmts = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
+        assert_eq!(1, stmts.len());
+        match &stmts[0] {
+            Statement::CreateExternalTable(c) => {
+                assert_eq!(c.name.to_string(), "city");
+                assert_eq!(c.options, options);
+
+                let columns = &c.columns;
+                assert_column_def(&columns[0], "host", "STRING");
+                assert_column_def(&columns[1], "ts", "int64");
+                assert_column_def(&columns[2], "cpu", "float64");
+                assert_column_def(&columns[3], "memory", "float64");
+
+                let constraints = &c.constraints;
+                assert_matches!(
+                    &constraints[0],
+                    TableConstraint::Unique {
+                        is_primary: false,
+                        ..
+                    }
+                );
+                assert_matches!(
+                    &constraints[1],
+                    TableConstraint::Unique {
+                        is_primary: true,
+                        ..
+                    }
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
 
     #[test]
     fn test_parse_create_database() {
@@ -1318,5 +1472,22 @@ ENGINE=mito";
         let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
         assert!(result.is_err());
         assert_matches!(result, Err(crate::error::Error::InvalidTimeIndex { .. }));
+    }
+
+    #[test]
+    fn test_invalid_column_name() {
+        let sql = "create table foo(user string, i bigint time index)";
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Cannot use keyword 'user' as column name"));
+
+        // If column name is quoted, it's valid even same with keyword.
+        let sql = r#"
+            create table foo("user" string, i bigint time index)
+        "#;
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        assert!(result.is_ok());
     }
 }

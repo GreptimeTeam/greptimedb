@@ -15,31 +15,38 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use common_error::prelude::BoxedError;
-use common_telemetry::tracing::log::info;
-use common_telemetry::{error, logging};
+use common_base::readable_size::ReadableSize;
+use common_telemetry::logging;
 use futures::TryStreamExt;
+use metrics::increment_counter;
 use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::manifest::{Manifest, ManifestVersion, MetaAction};
-use store_api::storage::{AlterRequest, FlushContext, SequenceNumber, WriteContext, WriteResponse};
-use tokio::sync::Mutex;
+use store_api::storage::{
+    AlterRequest, FlushContext, FlushReason, SequenceNumber, WriteContext, WriteResponse,
+};
+use tokio::sync::{oneshot, Mutex};
 
-use crate::background::JobHandle;
 use crate::compaction::{CompactionRequestImpl, CompactionSchedulerRef};
 use crate::config::EngineConfig;
 use crate::error::{self, Result};
-use crate::flush::{FlushCallback, FlushJob, FlushSchedulerRef, FlushStrategyRef};
+use crate::flush::{
+    FlushHandle, FlushRegionRequest, FlushSchedulerRef, FlushStrategyRef, FlushType, RegionStatus,
+};
 use crate::manifest::action::{
     RawRegionMetadata, RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList,
+    RegionRemove,
 };
 use crate::memtable::{Inserter, MemtableBuilderRef, MemtableId, MemtableRef};
 use crate::metadata::RegionMetadataRef;
+use crate::metrics::{FLUSH_REASON, FLUSH_REQUESTS_TOTAL};
 use crate::proto::wal::WalHeader;
-use crate::region::{RecoverdMetadata, RecoveredMetadataMap, RegionManifest, SharedDataRef};
+use crate::region::{
+    CompactContext, RecoverdMetadata, RecoveredMetadataMap, RegionManifest, SharedDataRef,
+};
 use crate::schema::compat::CompatWrite;
 use crate::sst::AccessLayerRef;
-use crate::version::{VersionControl, VersionControlRef, VersionEdit, VersionRef};
+use crate::version::{VersionControl, VersionControlRef, VersionEdit};
 use crate::wal::Wal;
 use crate::write_batch::WriteBatch;
 
@@ -65,9 +72,17 @@ impl RegionWriter {
         memtable_builder: MemtableBuilderRef,
         config: Arc<EngineConfig>,
         ttl: Option<Duration>,
+        compaction_time_window: Option<i64>,
+        write_buffer_size: usize,
     ) -> RegionWriter {
         RegionWriter {
-            inner: Mutex::new(WriterInner::new(memtable_builder, config, ttl)),
+            inner: Mutex::new(WriterInner::new(
+                memtable_builder,
+                config,
+                ttl,
+                compaction_time_window,
+                write_buffer_size,
+            )),
             version_mutex: Mutex::new(()),
         }
     }
@@ -131,6 +146,11 @@ impl RegionWriter {
         let mut action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
         action_list.set_prev_version(prev_version);
         let manifest_version = manifest.update(action_list).await?;
+
+        // Notify checkpointer the flushed manifest version after flushing memtable
+        if flushed_sequence.is_some() {
+            manifest.set_flushed_manifest_version(manifest_version);
+        }
 
         let version_edit = VersionEdit {
             files_to_add,
@@ -253,14 +273,74 @@ impl RegionWriter {
         }
         // we release the writer lock once for rejecting any following potential writing requests immediately.
 
-        self.cancel_flush().await?;
+        self.wait_flush().await?;
 
-        // TODO: canncel the compaction task
+        // TODO: cancel the compaction task
 
         Ok(())
     }
 
-    /// Flush task manually  
+    pub async fn on_drop<S: LogStore>(&self, drop_ctx: DropContext<'_, S>) -> Result<()> {
+        // 1. Acquires the write lock.
+        // 2. Close writer reject any potential writing.
+        // 3. Waits or cancels the flush job.
+        // 4. Add `RegionMetaAction::Remove` to recover from manifest in case of failure.
+        //    The main task is to restore the cleaning of sst files. If there is a failure
+        //    in the previous stops, it can be restored through the `Procedure` framework.
+        // 5. Mark all data obsolete in the WAL.
+        // 6. Delete the namespace of the region from the WAL.
+        // 7. Mark all SSTs deleted.
+        let mut inner = self.inner.lock().await;
+        inner.mark_closed();
+
+        if let Some(handle) = inner.flush_handle.take() {
+            handle.wait().await?;
+        }
+
+        let version_control = drop_ctx.version_control();
+
+        let _lock = self.version_mutex.lock().await;
+        let committed_sequence = version_control.committed_sequence();
+        let current_version = version_control.current();
+
+        let mut action_list =
+            RegionMetaActionList::with_action(RegionMetaAction::Remove(RegionRemove {
+                region_id: drop_ctx.shared.id,
+            }));
+
+        // Persist the meta action.
+        let prev_version = version_control.current_manifest_version();
+        action_list.set_prev_version(prev_version);
+
+        logging::info!(
+            "Try to remove region {}, action_list: {:?}",
+            drop_ctx.shared.id(),
+            action_list
+        );
+
+        drop_ctx.manifest.update(action_list).await?;
+
+        // Mark all data obsolete and delete the namespace in the WAL
+        drop_ctx.wal.obsolete(committed_sequence).await?;
+        drop_ctx.wal.delete_namespace().await?;
+        logging::info!(
+            "Remove WAL entries in region: {}, committed sequence: {}",
+            drop_ctx.shared.id(),
+            committed_sequence
+        );
+
+        // Mark all SSTs deleted
+        let files = current_version.ssts().mark_all_files_deleted();
+        logging::info!(
+            "Try to remove all SSTs, region: {}, files: {:?}",
+            drop_ctx.shared.id(),
+            files
+        );
+
+        Ok(())
+    }
+
+    /// Flush task manually
     pub async fn flush<S: LogStore>(
         &self,
         writer_ctx: WriterContext<'_, S>,
@@ -270,26 +350,38 @@ impl RegionWriter {
 
         ensure!(!inner.is_closed(), error::ClosedRegionSnafu);
 
-        inner.manual_flush(writer_ctx).await?;
+        inner.manual_flush(writer_ctx, ctx.reason).await?;
 
         if ctx.wait {
             if let Some(handle) = inner.flush_handle.take() {
-                handle.join().await?;
+                handle.wait().await?;
             }
         }
 
         Ok(())
     }
 
-    /// Cancel flush task if any
-    async fn cancel_flush(&self) -> Result<()> {
+    /// Compact manually.
+    pub async fn compact<S: LogStore>(
+        &self,
+        writer_ctx: WriterContext<'_, S>,
+        ctx: CompactContext,
+    ) -> Result<()> {
         let mut inner = self.inner.lock().await;
 
-        if let Some(task) = inner.flush_handle.take() {
-            task.cancel()
-                .await
-                .map_err(BoxedError::new)
-                .context(error::CancelFlushSnafu)?;
+        ensure!(!inner.is_closed(), error::ClosedRegionSnafu);
+        let sst_write_buffer_size = inner.engine_config.sst_write_buffer_size;
+        inner
+            .manual_compact(writer_ctx, ctx, sst_write_buffer_size)
+            .await
+    }
+
+    /// Wait flush task if any
+    async fn wait_flush(&self) -> Result<()> {
+        let mut inner = self.inner.lock().await;
+
+        if let Some(handle) = inner.flush_handle.take() {
+            handle.wait().await?;
         }
 
         Ok(())
@@ -299,7 +391,7 @@ impl RegionWriter {
 pub struct WriterContext<'a, S: LogStore> {
     pub shared: &'a SharedDataRef,
     pub flush_strategy: &'a FlushStrategyRef,
-    pub flush_scheduler: &'a FlushSchedulerRef,
+    pub flush_scheduler: &'a FlushSchedulerRef<S>,
     pub compaction_scheduler: &'a CompactionSchedulerRef<S>,
     pub sst_layer: &'a AccessLayerRef,
     pub wal: &'a Wal<S>,
@@ -327,10 +419,26 @@ impl<'a, S: LogStore> AlterContext<'a, S> {
     }
 }
 
+pub struct DropContext<'a, S: LogStore> {
+    pub shared: &'a SharedDataRef,
+    pub wal: &'a Wal<S>,
+    pub manifest: &'a RegionManifest,
+    pub flush_scheduler: &'a FlushSchedulerRef<S>,
+    pub compaction_scheduler: &'a CompactionSchedulerRef<S>,
+    pub sst_layer: &'a AccessLayerRef,
+}
+
+impl<'a, S: LogStore> DropContext<'a, S> {
+    #[inline]
+    fn version_control(&self) -> &VersionControlRef {
+        &self.shared.version_control
+    }
+}
+
 #[derive(Debug)]
 struct WriterInner {
     memtable_builder: MemtableBuilderRef,
-    flush_handle: Option<JobHandle>,
+    flush_handle: Option<FlushHandle>,
 
     /// `WriterInner` will reject any future writing, if the closed flag is set.
     ///
@@ -338,6 +446,9 @@ struct WriterInner {
     closed: bool,
     engine_config: Arc<EngineConfig>,
     ttl: Option<Duration>,
+    compaction_time_window: Option<i64>,
+    /// Size in bytes to freeze the mutable memtable.
+    write_buffer_size: usize,
 }
 
 impl WriterInner {
@@ -345,6 +456,8 @@ impl WriterInner {
         memtable_builder: MemtableBuilderRef,
         engine_config: Arc<EngineConfig>,
         ttl: Option<Duration>,
+        compaction_time_window: Option<i64>,
+        write_buffer_size: usize,
     ) -> WriterInner {
         WriterInner {
             memtable_builder,
@@ -352,6 +465,8 @@ impl WriterInner {
             engine_config,
             closed: false,
             ttl,
+            compaction_time_window,
+            write_buffer_size,
         }
     }
 
@@ -441,15 +556,10 @@ impl WriterInner {
                     }
                 }
 
-                if let Some(payload) = payload {
-                    num_requests += 1;
-                    // Note that memtables of `Version` may be updated during replay.
-                    let version = version_control.current();
-
-                    if req_sequence > last_sequence {
-                        last_sequence = req_sequence;
-                    } else {
-                        logging::error!(
+                if req_sequence > last_sequence {
+                    last_sequence = req_sequence;
+                } else {
+                    logging::error!(
                             "Sequence should not decrease during replay, found {} <= {}, \
                              region_id: {}, region_name: {}, flushed_sequence: {}, num_requests: {}",
                             req_sequence,
@@ -460,12 +570,17 @@ impl WriterInner {
                             num_requests,
                         );
 
-                        error::SequenceNotMonotonicSnafu {
-                            prev: last_sequence,
-                            given: req_sequence,
-                        }
-                        .fail()?;
+                    error::SequenceNotMonotonicSnafu {
+                        prev: last_sequence,
+                        given: req_sequence,
                     }
+                    .fail()?;
+                }
+
+                if let Some(payload) = payload {
+                    num_requests += 1;
+                    // Note that memtables of `Version` may be updated during replay.
+                    let version = version_control.current();
                     // TODO(yingwen): Trigger flush if the size of memtables reach the flush threshold to avoid
                     // out of memory during replay, but we need to do it carefully to avoid dead lock.
                     let mut inserter = Inserter::new(last_sequence);
@@ -556,12 +671,24 @@ impl WriterInner {
         let version_control = writer_ctx.version_control();
         // Check whether memtable is full or flush should be triggered. We need to do this first since
         // switching memtables will clear all mutable memtables.
-        if self.should_flush(
+        if let Some(flush_type) = self.should_flush(
             writer_ctx.shared,
             version_control,
             writer_ctx.flush_strategy,
         ) {
-            self.trigger_flush(writer_ctx).await?;
+            // Trigger flush according to the flush type.
+            match flush_type {
+                FlushType::Region => {
+                    // Trigger flush for current region.
+                    self.trigger_flush(writer_ctx, FlushReason::MemtableFull)
+                        .await?;
+                }
+                FlushType::Engine => {
+                    // Trigger engine level flush. This wakeup the flush handler
+                    // to pick region to flush.
+                    writer_ctx.flush_scheduler.schedule_engine_flush()?;
+                }
+            }
         }
 
         Ok(())
@@ -578,30 +705,37 @@ impl WriterInner {
         shared: &SharedDataRef,
         version_control: &VersionControlRef,
         flush_strategy: &FlushStrategyRef,
-    ) -> bool {
+    ) -> Option<FlushType> {
         let current = version_control.current();
         let memtables = current.memtables();
-        let mutable_bytes_allocated = memtables.mutable_bytes_allocated();
-        let total_bytes_allocated = memtables.total_bytes_allocated();
-        flush_strategy.should_flush(shared, mutable_bytes_allocated, total_bytes_allocated)
+        let status = RegionStatus {
+            region_id: shared.id(),
+            bytes_mutable: memtables.mutable_bytes_allocated(),
+            write_buffer_size: self.write_buffer_size,
+        };
+        flush_strategy.should_flush(status)
     }
 
-    async fn trigger_flush<S: LogStore>(&mut self, ctx: &WriterContext<'_, S>) -> Result<()> {
+    async fn trigger_flush<S: LogStore>(
+        &mut self,
+        ctx: &WriterContext<'_, S>,
+        reason: FlushReason,
+    ) -> Result<()> {
         let version_control = &ctx.shared.version_control;
         let new_mutable = self.alloc_memtable(version_control);
         // Freeze all mutable memtables so we can flush them later.
         version_control.freeze_mutable(new_mutable);
 
+        increment_counter!(FLUSH_REQUESTS_TOTAL, FLUSH_REASON => reason.as_str());
+
         if let Some(flush_handle) = self.flush_handle.take() {
-            // Previous flush job is incomplete, wait util it is finished (write stall).
+            // Previous flush job is incomplete, wait util it is finished.
             // However the last flush job may fail, in which case, we just return error
             // and abort current write request. The flush handle is left empty, so the next
             // time we still have chance to trigger a new flush.
-            logging::info!("Write stall, region: {}", ctx.shared.name);
-
             // TODO(yingwen): We should release the write lock during waiting flush done, which
             // needs something like async condvar.
-            flush_handle.join().await.map_err(|e| {
+            flush_handle.wait().await.map_err(|e| {
                 logging::error!(e; "Previous flush job failed, region: {}", ctx.shared.name);
                 e
             })?;
@@ -611,13 +745,14 @@ impl WriterInner {
         let (max_memtable_id, mem_to_flush) = current_version.memtables().memtables_to_flush();
 
         if max_memtable_id.is_none() {
+            // We still update the flush time to avoid the picker picks this region again.
+            ctx.shared.update_flush_millis();
+
             logging::info!("No memtables to flush in region: {}", ctx.shared.name);
             return Ok(());
         }
 
-        let cb = Self::build_flush_callback(&current_version, ctx, &self.engine_config, self.ttl);
-
-        let flush_req = FlushJob {
+        let flush_req = FlushRegionRequest {
             max_memtable_id: max_memtable_id.unwrap(),
             memtables: mem_to_flush,
             // In write thread, safe to use current committed sequence.
@@ -627,69 +762,84 @@ impl WriterInner {
             writer: ctx.writer.clone(),
             wal: ctx.wal.clone(),
             manifest: ctx.manifest.clone(),
-            on_success: cb,
+            engine_config: self.engine_config.clone(),
+            ttl: self.ttl,
+            compaction_time_window: self.compaction_time_window,
         };
 
         let flush_handle = ctx
             .flush_scheduler
-            .schedule_flush(Box::new(flush_req))
-            .await?;
+            .schedule_region_flush(flush_req)
+            .map_err(|e| {
+                logging::error!(e; "Failed to schedule flush request");
+                e
+            })?;
         self.flush_handle = Some(flush_handle);
 
         Ok(())
     }
 
-    fn build_flush_callback<S: LogStore>(
-        version: &VersionRef,
-        ctx: &WriterContext<S>,
-        config: &Arc<EngineConfig>,
-        ttl: Option<Duration>,
-    ) -> Option<FlushCallback> {
-        let region_id = version.metadata().id();
-        let compaction_request = CompactionRequestImpl {
+    async fn manual_compact<S: LogStore>(
+        &mut self,
+        writer_ctx: WriterContext<'_, S>,
+        compact_ctx: CompactContext,
+        sst_write_buffer_size: ReadableSize,
+    ) -> Result<()> {
+        let region_id = writer_ctx.shared.id();
+        let mut compaction_request = CompactionRequestImpl {
             region_id,
-            sst_layer: ctx.sst_layer.clone(),
-            writer: ctx.writer.clone(),
-            shared: ctx.shared.clone(),
-            manifest: ctx.manifest.clone(),
-            wal: ctx.wal.clone(),
-            ttl,
+            sst_layer: writer_ctx.sst_layer.clone(),
+            writer: writer_ctx.writer.clone(),
+            shared: writer_ctx.shared.clone(),
+            manifest: writer_ctx.manifest.clone(),
+            wal: writer_ctx.wal.clone(),
+            ttl: self.ttl,
+            compaction_time_window: self.compaction_time_window,
+            sender: None,
+            sst_write_buffer_size,
         };
-        let compaction_scheduler = ctx.compaction_scheduler.clone();
-        let shared_data = ctx.shared.clone();
-        let max_files_in_l0 = config.max_files_in_l0;
-        let schedule_compaction_cb = Box::pin(async move {
-            let level0_file_num = shared_data
-                .version_control
-                .current()
-                .ssts()
-                .level(0)
-                .file_num();
 
-            if level0_file_num <= max_files_in_l0 {
-                info!(
-                    "No enough SST files in level 0 (threshold: {}), skip compaction",
-                    max_files_in_l0
-                );
-                return;
+        let compaction_scheduler = writer_ctx.compaction_scheduler.clone();
+        let shared_data = writer_ctx.shared.clone();
+
+        logging::info!(
+            "Manual compact, region_id: {}, compact_ctx: {:?}",
+            region_id,
+            compact_ctx
+        );
+
+        if compact_ctx.wait {
+            let (sender, receiver) = oneshot::channel();
+            compaction_request.sender = Some(sender);
+
+            if schedule_compaction(
+                shared_data,
+                compaction_scheduler,
+                compaction_request,
+                compact_ctx.max_files_in_l0,
+            ) {
+                receiver
+                    .await
+                    .context(error::CompactTaskCancelSnafu { region_id })??;
             }
-            match compaction_scheduler.schedule(compaction_request) {
-                Ok(scheduled) => {
-                    info!(
-                        "Schedule region {} compaction request result: {}",
-                        region_id, scheduled
-                    )
-                }
-                Err(e) => {
-                    error!(e;"Failed to schedule region compaction request {}", region_id);
-                }
-            }
-        });
-        Some(schedule_compaction_cb)
+        } else {
+            schedule_compaction(
+                shared_data,
+                compaction_scheduler,
+                compaction_request,
+                compact_ctx.max_files_in_l0,
+            );
+        }
+
+        Ok(())
     }
 
-    async fn manual_flush<S: LogStore>(&mut self, writer_ctx: WriterContext<'_, S>) -> Result<()> {
-        self.trigger_flush(&writer_ctx).await?;
+    async fn manual_flush<S: LogStore>(
+        &mut self,
+        writer_ctx: WriterContext<'_, S>,
+        reason: FlushReason,
+    ) -> Result<()> {
+        self.trigger_flush(&writer_ctx, reason).await?;
         Ok(())
     }
 
@@ -701,5 +851,45 @@ impl WriterInner {
     #[inline]
     fn mark_closed(&mut self) {
         self.closed = true;
+    }
+}
+
+/// Schedule compaction task, returns whether the task is scheduled.
+pub(crate) fn schedule_compaction<S: LogStore>(
+    shared_data: SharedDataRef,
+    compaction_scheduler: CompactionSchedulerRef<S>,
+    compaction_request: CompactionRequestImpl<S>,
+    max_files_in_l0: usize,
+) -> bool {
+    let region_id = shared_data.id();
+    let level0_file_num = shared_data
+        .version_control
+        .current()
+        .ssts()
+        .level(0)
+        .file_num();
+
+    if level0_file_num <= max_files_in_l0 {
+        logging::debug!(
+            "No enough SST files in level 0 (threshold: {}), skip compaction",
+            max_files_in_l0
+        );
+        return false;
+    }
+    match compaction_scheduler.schedule(compaction_request) {
+        Ok(scheduled) => {
+            logging::info!(
+                "Schedule region {} compaction request result: {}",
+                region_id,
+                scheduled
+            );
+
+            scheduled
+        }
+        Err(e) => {
+            logging::error!(e;"Failed to schedule region compaction request {}", region_id);
+
+            false
+        }
     }
 }

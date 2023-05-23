@@ -32,30 +32,27 @@ use std::collections::VecDeque;
 ///
 /// where F is the cumulative distribution function of a normal distribution with mean
 /// and standard deviation estimated from historical heartbeat inter-arrival times.
+#[cfg_attr(test, derive(Clone))]
 pub(crate) struct PhiAccrualFailureDetector {
     /// A low threshold is prone to generate many wrong suspicions but ensures a quick detection
     /// in the event of a real crash. Conversely, a high threshold generates fewer mistakes but
     /// needs more time to detect actual crashes.
-    threshold: f64,
-
-    /// Number of samples to use for calculation of mean and standard deviation of inter-arrival
-    /// times.
-    max_sample_size: u32,
+    threshold: f32,
 
     /// Minimum standard deviation to use for the normal distribution used when calculating phi.
     /// Too low standard deviation might result in too much sensitivity for sudden, but normal,
     /// deviations in heartbeat inter arrival times.
-    min_std_deviation_millis: f64,
+    min_std_deviation_millis: f32,
 
     /// Duration corresponding to number of potentially lost/delayed heartbeats that will be
     /// accepted before considering it to be an anomaly.
     /// This margin is important to be able to survive sudden, occasional, pauses in heartbeat
     /// arrivals, due to for example network drop.
-    acceptable_heartbeat_pause_millis: i64,
+    acceptable_heartbeat_pause_millis: u32,
 
     /// Bootstrap the stats with heartbeats that corresponds to this duration, with a rather high
     /// standard deviation (since environment is unknown in the beginning).
-    first_heartbeat_estimate_millis: i64,
+    first_heartbeat_estimate_millis: u32,
 
     heartbeat_history: HeartbeatHistory,
     last_heartbeat_millis: Option<i64>,
@@ -65,14 +62,12 @@ impl Default for PhiAccrualFailureDetector {
     fn default() -> Self {
         // default configuration is the same as of Akka:
         // https://github.com/akka/akka/blob/main/akka-cluster/src/main/resources/reference.conf#L181
-        let max_sample_size = 1000;
         Self {
-            threshold: 8_f64,
-            max_sample_size,
-            min_std_deviation_millis: 100_f64,
+            threshold: 8_f32,
+            min_std_deviation_millis: 100_f32,
             acceptable_heartbeat_pause_millis: 3000,
             first_heartbeat_estimate_millis: 1000,
-            heartbeat_history: HeartbeatHistory::new(max_sample_size),
+            heartbeat_history: HeartbeatHistory::new(1000),
             last_heartbeat_millis: None,
         }
     }
@@ -95,28 +90,28 @@ impl PhiAccrualFailureDetector {
             // bootstrap with 2 entries with rather high standard deviation
             let std_deviation = self.first_heartbeat_estimate_millis / 4;
             self.heartbeat_history
-                .add(self.first_heartbeat_estimate_millis - std_deviation);
+                .add((self.first_heartbeat_estimate_millis - std_deviation) as _);
             self.heartbeat_history
-                .add(self.first_heartbeat_estimate_millis + std_deviation);
+                .add((self.first_heartbeat_estimate_millis + std_deviation) as _);
         }
         let _ = self.last_heartbeat_millis.insert(ts_millis);
     }
 
     pub(crate) fn is_available(&self, ts_millis: i64) -> bool {
-        self.phi(ts_millis) < self.threshold
+        self.phi(ts_millis) < self.threshold as _
     }
 
     /// The suspicion level of the accrual failure detector.
     ///
     /// If a connection does not have any records in failure detector then it is considered healthy.
-    fn phi(&self, ts_millis: i64) -> f64 {
+    pub(crate) fn phi(&self, ts_millis: i64) -> f64 {
         if let Some(last_heartbeat_millis) = self.last_heartbeat_millis {
             let time_diff = ts_millis - last_heartbeat_millis;
             let mean = self.heartbeat_history.mean();
             let std_deviation = self
                 .heartbeat_history
                 .std_deviation()
-                .max(self.min_std_deviation_millis);
+                .max(self.min_std_deviation_millis as _);
 
             phi(
                 time_diff,
@@ -127,6 +122,16 @@ impl PhiAccrualFailureDetector {
             // treat unmanaged connections, e.g. with zero heartbeats, as healthy connections
             0.0
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn threshold(&self) -> f32 {
+        self.threshold
+    }
+
+    #[cfg(test)]
+    pub(crate) fn acceptable_heartbeat_pause_millis(&self) -> u32 {
+        self.acceptable_heartbeat_pause_millis
     }
 }
 
@@ -141,6 +146,8 @@ impl PhiAccrualFailureDetector {
 /// Usually phi = 1 means likeliness that we will make a mistake is about 10%.
 /// The likeliness is about 1% with phi = 2, 0.1% with phi = 3 and so on.
 fn phi(time_diff: i64, mean: f64, std_deviation: f64) -> f64 {
+    assert_ne!(std_deviation, 0.0);
+
     let time_diff = time_diff as f64;
     let y = (time_diff - mean) / std_deviation;
     let e = (-y * (1.5976 + 0.070566 * y * y)).exp();
@@ -155,8 +162,12 @@ fn phi(time_diff: i64, mean: f64, std_deviation: f64) -> f64 {
 /// It is capped by the number of samples specified in `max_sample_size`.
 ///
 /// The stats (mean, variance, std_deviation) are not defined for empty HeartbeatHistory.
+#[derive(Clone)]
 struct HeartbeatHistory {
+    /// Number of samples to use for calculation of mean and standard deviation of inter-arrival
+    /// times.
     max_sample_size: u32,
+
     intervals: VecDeque<i64>,
     interval_sum: i64,
     squared_interval_sum: i64,
@@ -198,7 +209,7 @@ impl HeartbeatHistory {
         let oldest = self
             .intervals
             .pop_front()
-            .expect("intervals must not empty here");
+            .expect("intervals must not be empty here");
         self.interval_sum -= oldest;
         self.squared_interval_sum -= oldest * oldest;
     }
@@ -207,41 +218,8 @@ impl HeartbeatHistory {
 #[cfg(test)]
 mod tests {
     use common_time::util::current_time_millis;
-    use rand::Rng;
 
     use super::*;
-
-    #[test]
-    fn test_heartbeat() {
-        // Generate 2000 heartbeats start from now. Heartbeat interval is one second, plus some
-        // random millis.
-        fn generate_heartbeats() -> Vec<i64> {
-            let mut rng = rand::thread_rng();
-            let start = current_time_millis();
-            (0..2000)
-                .map(|i| start + i * 1000 + rng.gen_range(0..100))
-                .collect::<Vec<i64>>()
-        }
-        let heartbeats = generate_heartbeats();
-
-        let mut fd = PhiAccrualFailureDetector::default();
-        // feed the failure detector with these heartbeats
-        heartbeats.iter().for_each(|x| fd.heartbeat(*x));
-
-        let start = *heartbeats.last().unwrap();
-        // Within the "acceptable_heartbeat_pause_millis" period, phi is zero ...
-        for i in 1..=fd.acceptable_heartbeat_pause_millis / 1000 {
-            let now = start + i * 1000;
-            assert_eq!(fd.phi(now), 0.0);
-        }
-
-        // ... then in less than two seconds, phi is above the threshold.
-        // The same effect can be seen in the diagrams in Akka's document.
-        let now = start + fd.acceptable_heartbeat_pause_millis + 1000;
-        assert!(fd.phi(now) < fd.threshold);
-        let now = start + fd.acceptable_heartbeat_pause_millis + 2000;
-        assert!(fd.phi(now) > fd.threshold);
-    }
 
     #[test]
     fn test_is_available() {
@@ -254,12 +232,13 @@ mod tests {
 
         fd.heartbeat(ts_millis);
 
+        let acceptable_heartbeat_pause_millis = fd.acceptable_heartbeat_pause_millis as i64;
         // is available when heartbeat
         assert!(fd.is_available(ts_millis));
         // is available before heartbeat timeout
-        assert!(fd.is_available(ts_millis + fd.acceptable_heartbeat_pause_millis / 2));
+        assert!(fd.is_available(ts_millis + acceptable_heartbeat_pause_millis / 2));
         // is not available after heartbeat timeout
-        assert!(!fd.is_available(ts_millis + fd.acceptable_heartbeat_pause_millis * 2));
+        assert!(!fd.is_available(ts_millis + acceptable_heartbeat_pause_millis * 2));
     }
 
     #[test]
@@ -286,14 +265,15 @@ mod tests {
 
         fd.heartbeat(ts_millis);
 
+        let acceptable_heartbeat_pause_millis = fd.acceptable_heartbeat_pause_millis as i64;
         // phi == 0 when heartbeat
         assert_eq!(fd.phi(ts_millis), 0.0);
         // phi < threshold before heartbeat timeout
-        let now = ts_millis + fd.acceptable_heartbeat_pause_millis / 2;
-        assert!(fd.phi(now) < fd.threshold);
+        let now = ts_millis + acceptable_heartbeat_pause_millis / 2;
+        assert!(fd.phi(now) < fd.threshold as _);
         // phi >= threshold after heartbeat timeout
-        let now = ts_millis + fd.acceptable_heartbeat_pause_millis * 2;
-        assert!(fd.phi(now) >= fd.threshold);
+        let now = ts_millis + acceptable_heartbeat_pause_millis * 2;
+        assert!(fd.phi(now) >= fd.threshold as _);
     }
 
     // The following test cases are port from Akka's test:
@@ -349,7 +329,6 @@ mod tests {
     fn test_return_phi_of_0_on_startup_when_no_heartbeats() {
         let fd = PhiAccrualFailureDetector {
             threshold: 8.0,
-            max_sample_size: 1000,
             min_std_deviation_millis: 100.0,
             acceptable_heartbeat_pause_millis: 0,
             first_heartbeat_estimate_millis: 1000,
@@ -364,7 +343,6 @@ mod tests {
     fn test_return_phi_based_on_guess_when_only_one_heartbeat() {
         let mut fd = PhiAccrualFailureDetector {
             threshold: 8.0,
-            max_sample_size: 1000,
             min_std_deviation_millis: 100.0,
             acceptable_heartbeat_pause_millis: 0,
             first_heartbeat_estimate_millis: 1000,
@@ -381,7 +359,6 @@ mod tests {
     fn test_return_phi_using_first_interval_after_second_heartbeat() {
         let mut fd = PhiAccrualFailureDetector {
             threshold: 8.0,
-            max_sample_size: 1000,
             min_std_deviation_millis: 100.0,
             acceptable_heartbeat_pause_millis: 0,
             first_heartbeat_estimate_millis: 1000,
@@ -398,7 +375,6 @@ mod tests {
     fn test_is_available_after_a_series_of_successful_heartbeats() {
         let mut fd = PhiAccrualFailureDetector {
             threshold: 8.0,
-            max_sample_size: 1000,
             min_std_deviation_millis: 100.0,
             acceptable_heartbeat_pause_millis: 0,
             first_heartbeat_estimate_millis: 1000,
@@ -417,7 +393,6 @@ mod tests {
     fn test_is_not_available_if_heartbeat_are_missed() {
         let mut fd = PhiAccrualFailureDetector {
             threshold: 3.0,
-            max_sample_size: 1000,
             min_std_deviation_millis: 100.0,
             acceptable_heartbeat_pause_millis: 0,
             first_heartbeat_estimate_millis: 1000,
@@ -436,7 +411,6 @@ mod tests {
     ) {
         let mut fd = PhiAccrualFailureDetector {
             threshold: 8.0,
-            max_sample_size: 1000,
             min_std_deviation_millis: 100.0,
             acceptable_heartbeat_pause_millis: 3000,
             first_heartbeat_estimate_millis: 1000,
@@ -476,7 +450,6 @@ mod tests {
     fn test_accept_some_configured_missing_heartbeats() {
         let mut fd = PhiAccrualFailureDetector {
             threshold: 8.0,
-            max_sample_size: 1000,
             min_std_deviation_millis: 100.0,
             acceptable_heartbeat_pause_millis: 3000,
             first_heartbeat_estimate_millis: 1000,
@@ -496,7 +469,6 @@ mod tests {
     fn test_fail_after_configured_acceptable_missing_heartbeats() {
         let mut fd = PhiAccrualFailureDetector {
             threshold: 8.0,
-            max_sample_size: 1000,
             min_std_deviation_millis: 100.0,
             acceptable_heartbeat_pause_millis: 3000,
             first_heartbeat_estimate_millis: 1000,
@@ -518,7 +490,6 @@ mod tests {
     fn test_use_max_sample_size_heartbeats() {
         let mut fd = PhiAccrualFailureDetector {
             threshold: 8.0,
-            max_sample_size: 3,
             min_std_deviation_millis: 100.0,
             acceptable_heartbeat_pause_millis: 0,
             first_heartbeat_estimate_millis: 1000,

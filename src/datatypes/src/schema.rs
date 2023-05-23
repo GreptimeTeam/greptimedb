@@ -20,13 +20,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow::datatypes::{Field, Schema as ArrowSchema};
-pub use column_schema::TIME_INDEX_KEY;
 use datafusion_common::DFSchemaRef;
 use snafu::{ensure, ResultExt};
 
 use crate::data_type::DataType;
 use crate::error::{self, Error, Result};
-pub use crate::schema::column_schema::{ColumnSchema, Metadata};
+pub use crate::schema::column_schema::{ColumnSchema, Metadata, COMMENT_KEY, TIME_INDEX_KEY};
 pub use crate::schema::constraint::ColumnDefaultConstraint;
 pub use crate::schema::raw::RawSchema;
 
@@ -272,7 +271,7 @@ impl TryFrom<Arc<ArrowSchema>> for Schema {
         let mut column_schemas = Vec::with_capacity(arrow_schema.fields.len());
         let mut name_to_index = HashMap::with_capacity(arrow_schema.fields.len());
         for field in &arrow_schema.fields {
-            let column_schema = ColumnSchema::try_from(field)?;
+            let column_schema = ColumnSchema::try_from(field.as_ref())?;
             name_to_index.insert(field.name().to_string(), column_schemas.len());
             column_schemas.push(column_schema);
         }

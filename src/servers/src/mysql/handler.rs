@@ -20,9 +20,11 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveDateTime};
+use common_error::prelude::ErrorExt;
 use common_query::Output;
 use common_telemetry::tracing::log;
-use common_telemetry::{error, trace};
+use common_telemetry::{error, timer, trace, warn};
+use metrics::increment_counter;
 use opensrv_mysql::{
     AsyncMysqlShim, Column, ColumnFlags, ColumnType, ErrorKind, InitWriter, ParamParser,
     ParamValue, QueryResultWriter, StatementMetaWriter, ValueInner,
@@ -39,7 +41,7 @@ use tokio::io::AsyncWrite;
 
 use crate::auth::{Identity, Password, UserProviderRef};
 use crate::error::{self, InvalidPrepareStatementSnafu, Result};
-use crate::mysql::writer::MysqlResultWriter;
+use crate::mysql::writer;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
 // An intermediate shim for executing MySQL queries.
@@ -115,7 +117,7 @@ impl MysqlInstanceShim {
 
     fn query(&self, stmt_id: u32) -> Option<String> {
         let guard = self.prepared_stmts.read();
-        guard.get(&stmt_id).map(|s| s.to_owned())
+        guard.get(&stmt_id).cloned()
     }
 }
 
@@ -154,7 +156,8 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                     user_info = Some(userinfo);
                 }
                 Err(e) => {
-                    error!("Failed to auth, err: {:?}", e);
+                    increment_counter!(crate::metrics::METRIC_AUTH_FAILURE);
+                    warn!("Failed to auth, err: {:?}", e);
                     return false;
                 }
             };
@@ -182,6 +185,13 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         let params = dummy_params(param_num);
 
         w.reply(stmt_id, &params, &[]).await?;
+        increment_counter!(
+            crate::metrics::METRIC_MYSQL_PREPARED_COUNT,
+            &[(
+                crate::metrics::METRIC_DB_LABEL,
+                self.session.context().get_db_string()
+            )]
+        );
         return Ok(());
     }
 
@@ -191,6 +201,19 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         p: ParamParser<'a>,
         w: QueryResultWriter<'a, W>,
     ) -> Result<()> {
+        let _timer = timer!(
+            crate::metrics::METRIC_MYSQL_QUERY_TIMER,
+            &[
+                (
+                    crate::metrics::METRIC_MYSQL_SUBPROTOCOL_LABEL,
+                    crate::metrics::METRIC_MYSQL_BINQUERY
+                ),
+                (
+                    crate::metrics::METRIC_DB_LABEL,
+                    &self.session.context().get_db_string()
+                )
+            ]
+        );
         let params: Vec<ParamValue> = p.into_iter().collect();
         let query = match self.query(stmt_id) {
             None => {
@@ -208,7 +231,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         log::debug!("execute replaced query: {}", query);
 
         let outputs = self.do_query(&query).await;
-        write_output(w, &query, outputs).await?;
+        writer::write_output(w, &query, self.session.context(), outputs).await?;
 
         Ok(())
     }
@@ -226,18 +249,28 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         query: &'a str,
         writer: QueryResultWriter<'a, W>,
     ) -> Result<()> {
+        let _timer = timer!(
+            crate::metrics::METRIC_MYSQL_QUERY_TIMER,
+            &[
+                (
+                    crate::metrics::METRIC_MYSQL_SUBPROTOCOL_LABEL,
+                    crate::metrics::METRIC_MYSQL_TEXTQUERY
+                ),
+                (
+                    crate::metrics::METRIC_DB_LABEL,
+                    &self.session.context().get_db_string()
+                )
+            ]
+        );
         let outputs = self.do_query(query).await;
-        let mut writer = MysqlResultWriter::new(writer);
-        for output in outputs {
-            writer.write(query, output).await?;
-        }
+        writer::write_output(writer, query, self.session.context(), outputs).await?;
         Ok(())
     }
 
     async fn on_init<'a>(&'a mut self, database: &'a str, w: InitWriter<'a, W>) -> Result<()> {
         let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(database);
         ensure!(
-            self.query_handler.is_valid_schema(catalog, schema)?,
+            self.query_handler.is_valid_schema(catalog, schema).await?,
             error::DatabaseNotFoundSnafu { catalog, schema }
         );
 
@@ -245,6 +278,13 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
 
         if let Some(schema_validator) = &self.user_provider {
             if let Err(e) = schema_validator.authorize(catalog, schema, user_info).await {
+                increment_counter!(
+                    crate::metrics::METRIC_AUTH_FAILURE,
+                    &[(
+                        crate::metrics::METRIC_CODE_LABEL,
+                        format!("{}", e.status_code())
+                    )]
+                );
                 return w
                     .error(
                         ErrorKind::ER_DBACCESS_DENIED_ERROR,
@@ -316,18 +356,6 @@ async fn validate_query(query: &str) -> Result<Statement> {
     );
 
     Ok(statement)
-}
-
-async fn write_output<'a, W: AsyncWrite + Send + Sync + Unpin>(
-    w: QueryResultWriter<'a, W>,
-    query: &str,
-    outputs: Vec<Result<Output>>,
-) -> Result<()> {
-    let mut writer = MysqlResultWriter::new(w);
-    for output in outputs {
-        writer.write(query, output).await?;
-    }
-    Ok(())
 }
 
 // dummy columns to satisfy opensrv_mysql, just the number of params is useful

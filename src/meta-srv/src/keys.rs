@@ -178,10 +178,28 @@ pub(crate) fn to_removed_key(key: &str) -> String {
     format!("{REMOVED_PREFIX}-{key}")
 }
 
-#[derive(Eq, PartialEq, Debug, Clone, Hash)]
+pub fn build_table_route_prefix(catalog: impl AsRef<str>, schema: impl AsRef<str>) -> String {
+    format!(
+        "{}-{}-{}-",
+        TABLE_ROUTE_PREFIX,
+        catalog.as_ref(),
+        schema.as_ref()
+    )
+}
+
+#[derive(Eq, PartialEq, Debug, Clone, Hash, Copy)]
 pub struct StatKey {
     pub cluster_id: u64,
     pub node_id: u64,
+}
+
+impl From<&LeaseKey> for StatKey {
+    fn from(lease_key: &LeaseKey) -> Self {
+        StatKey {
+            cluster_id: lease_key.cluster_id,
+            node_id: lease_key.node_id,
+        }
+    }
 }
 
 impl From<StatKey> for Vec<u8> {
@@ -233,9 +251,9 @@ pub struct StatValue {
 }
 
 impl StatValue {
-    /// Get the region number from stat value.
+    /// Get the latest number of regions.
     pub fn region_num(&self) -> Option<u64> {
-        for stat in self.stats.iter() {
+        for stat in self.stats.iter().rev() {
             match stat.region_num {
                 Some(region_num) => return Some(region_num),
                 None => continue,
@@ -278,6 +296,14 @@ impl TryFrom<Vec<u8>> for StatValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_build_prefix() {
+        assert_eq!(
+            "__meta_table_route-CATALOG-SCHEMA-",
+            build_table_route_prefix("CATALOG", "SCHEMA")
+        )
+    }
 
     #[test]
     fn test_stat_key_round_trip() {
@@ -376,6 +402,19 @@ mod tests {
             ],
         };
         let region_num = stat_val.region_num().unwrap();
-        assert_eq!(1, region_num);
+        assert_eq!(2, region_num);
+    }
+
+    #[test]
+    fn test_lease_key_to_stat_key() {
+        let lease_key = LeaseKey {
+            cluster_id: 1,
+            node_id: 101,
+        };
+
+        let stat_key: StatKey = (&lease_key).into();
+
+        assert_eq!(1, stat_key.cluster_id);
+        assert_eq!(101, stat_key.node_id);
     }
 }

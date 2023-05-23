@@ -12,19 +12,34 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod show;
+
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
-use common_catalog::consts::DEFAULT_CATALOG_NAME;
+use common_catalog::consts::{
+    DEFAULT_CATALOG_NAME, SEMANTIC_TYPE_FIELD, SEMANTIC_TYPE_PRIMARY_KEY, SEMANTIC_TYPE_TIME_INDEX,
+};
+use common_datasource::file_format::{infer_schemas, FileFormat, Format};
+use common_datasource::lister::{Lister, Source};
+use common_datasource::object_store::build_backend;
+use common_datasource::util::find_dir_and_filename;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use datatypes::prelude::*;
-use datatypes::schema::{ColumnSchema, Schema};
+use datatypes::schema::{ColumnSchema, RawSchema, Schema};
 use datatypes::vectors::{Helper, StringVector};
+use object_store::ObjectStore;
 use once_cell::sync::Lazy;
+use regex::Regex;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
+use sql::ast::ColumnDef;
+use sql::statements::column_def_to_schema;
+use sql::statements::create::Partitions;
 use sql::statements::show::{ShowDatabases, ShowKind, ShowTables};
+use table::requests::{IMMUTABLE_TABLE_LOCATION_KEY, IMMUTABLE_TABLE_PATTERN_KEY};
 use table::TableRef;
 
 use crate::error::{self, Result};
@@ -36,10 +51,6 @@ const COLUMN_TYPE_COLUMN: &str = "Type";
 const COLUMN_NULLABLE_COLUMN: &str = "Null";
 const COLUMN_DEFAULT_COLUMN: &str = "Default";
 const COLUMN_SEMANTIC_TYPE_COLUMN: &str = "Semantic Type";
-
-const SEMANTIC_TYPE_PRIMARY_KEY: &str = "PRIMARY KEY";
-const SEMANTIC_TYPE_VALUE: &str = "VALUE";
-const SEMANTIC_TYPE_TIME_INDEX: &str = "TIME INDEX";
 
 const NULLABLE_YES: &str = "YES";
 const NULLABLE_NO: &str = "NO";
@@ -74,7 +85,17 @@ static DESCRIBE_TABLE_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
     ]))
 });
 
-pub fn show_databases(stmt: ShowDatabases, catalog_manager: CatalogManagerRef) -> Result<Output> {
+static SHOW_CREATE_TABLE_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
+    Arc::new(Schema::new(vec![
+        ColumnSchema::new("Table", ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new("Create Table", ConcreteDataType::string_datatype(), false),
+    ]))
+});
+
+pub async fn show_databases(
+    stmt: ShowDatabases,
+    catalog_manager: CatalogManagerRef,
+) -> Result<Output> {
     // TODO(LFC): supports WHERE
     ensure!(
         matches!(stmt.kind, ShowKind::All | ShowKind::Like(_)),
@@ -85,11 +106,12 @@ pub fn show_databases(stmt: ShowDatabases, catalog_manager: CatalogManagerRef) -
 
     let catalog = catalog_manager
         .catalog(DEFAULT_CATALOG_NAME)
+        .await
         .context(error::CatalogSnafu)?
         .context(error::CatalogNotFoundSnafu {
             catalog: DEFAULT_CATALOG_NAME,
         })?;
-    let mut databases = catalog.schema_names().context(error::CatalogSnafu)?;
+    let mut databases = catalog.schema_names().await.context(error::CatalogSnafu)?;
     // TODO(dennis): Specify the order of the results in catalog manager API
     databases.sort();
 
@@ -109,7 +131,7 @@ pub fn show_databases(stmt: ShowDatabases, catalog_manager: CatalogManagerRef) -
     Ok(Output::RecordBatches(records))
 }
 
-pub fn show_tables(
+pub async fn show_tables(
     stmt: ShowTables,
     catalog_manager: CatalogManagerRef,
     query_ctx: QueryContextRef,
@@ -130,9 +152,10 @@ pub fn show_tables(
     // TODO(sunng87): move this function into query_ctx
     let schema = catalog_manager
         .schema(&query_ctx.current_catalog(), &schema)
+        .await
         .context(error::CatalogSnafu)?
         .context(error::SchemaNotFoundSnafu { schema })?;
-    let mut tables = schema.table_names().context(error::CatalogSnafu)?;
+    let mut tables = schema.table_names().await.context(error::CatalogSnafu)?;
     // TODO(dennis): Specify the order of the results in schema provider API
     tables.sort();
 
@@ -149,6 +172,22 @@ pub fn show_tables(
     )]));
     let records = RecordBatches::try_from_columns(schema, vec![tables])
         .context(error::CreateRecordBatchSnafu)?;
+    Ok(Output::RecordBatches(records))
+}
+
+pub fn show_create_table(table: TableRef, partitions: Option<Partitions>) -> Result<Output> {
+    let table_info = table.table_info();
+    let table_name = &table_info.name;
+    let mut stmt = show::create_table_stmt(&table_info)?;
+    stmt.partitions = partitions;
+    let sql = format!("{}", stmt);
+    let columns = vec![
+        Arc::new(StringVector::from(vec![table_name.clone()])) as _,
+        Arc::new(StringVector::from(vec![sql])) as _,
+    ];
+    let records = RecordBatches::try_from_columns(SHOW_CREATE_TABLE_OUTPUT_SCHEMA.clone(), columns)
+        .context(error::CreateRecordBatchSnafu)?;
+
     Ok(Output::RecordBatches(records))
 }
 
@@ -217,10 +256,98 @@ fn describe_column_semantic_types(
                 } else if cs.is_time_index() {
                     String::from(SEMANTIC_TYPE_TIME_INDEX)
                 } else {
-                    String::from(SEMANTIC_TYPE_VALUE)
+                    String::from(SEMANTIC_TYPE_FIELD)
                 }
             })
             .collect::<Vec<String>>(),
+    ))
+}
+
+pub async fn prepare_immutable_file_table_files_and_schema(
+    options: &HashMap<String, String>,
+    columns: &Vec<ColumnDef>,
+) -> Result<(Vec<String>, RawSchema)> {
+    let (object_store, files) = prepare_immutable_file_table(options).await?;
+    let schema = if !columns.is_empty() {
+        let columns_schemas: Vec<_> = columns
+            .iter()
+            .map(|column| column_def_to_schema(column, false).context(error::ParseSqlSnafu))
+            .collect::<Result<Vec<_>>>()?;
+        RawSchema::new(columns_schemas)
+    } else {
+        let format = parse_immutable_file_table_format(options)?;
+        infer_immutable_file_table_schema(&object_store, &*format, &files).await?
+    };
+
+    Ok((files, schema))
+}
+
+// lists files in the frontend to reduce unnecessary scan requests repeated in each datanode.
+async fn prepare_immutable_file_table(
+    options: &HashMap<String, String>,
+) -> Result<(ObjectStore, Vec<String>)> {
+    let url =
+        options
+            .get(IMMUTABLE_TABLE_LOCATION_KEY)
+            .context(error::MissingRequiredFieldSnafu {
+                name: IMMUTABLE_TABLE_LOCATION_KEY,
+            })?;
+
+    let (dir, filename) = find_dir_and_filename(url);
+    let source = if let Some(filename) = filename {
+        Source::Filename(filename)
+    } else {
+        Source::Dir
+    };
+    let regex = options
+        .get(IMMUTABLE_TABLE_PATTERN_KEY)
+        .map(|x| Regex::new(x))
+        .transpose()
+        .context(error::BuildRegexSnafu)?;
+    let object_store = build_backend(url, options).context(error::BuildBackendSnafu)?;
+    let lister = Lister::new(object_store.clone(), source, dir, regex);
+    // If we scan files in a directory every time the database restarts,
+    // then it might lead to a potential undefined behavior:
+    // If a user adds a file with an incompatible schema to that directory,
+    // it will make the external table unavailable.
+    let files = lister
+        .list()
+        .await
+        .context(error::ListObjectsSnafu)?
+        .into_iter()
+        .filter_map(|entry| {
+            if entry.path().ends_with('/') {
+                None
+            } else {
+                Some(entry.path().to_string())
+            }
+        })
+        .collect::<Vec<_>>();
+    Ok((object_store, files))
+}
+
+fn parse_immutable_file_table_format(
+    options: &HashMap<String, String>,
+) -> Result<Box<dyn FileFormat>> {
+    Ok(
+        match Format::try_from(options).context(error::ParseFileFormatSnafu)? {
+            Format::Csv(format) => Box::new(format),
+            Format::Json(format) => Box::new(format),
+            Format::Parquet(format) => Box::new(format),
+        },
+    )
+}
+
+async fn infer_immutable_file_table_schema(
+    object_store: &ObjectStore,
+    file_format: &dyn FileFormat,
+    files: &[String],
+) -> Result<RawSchema> {
+    let merged = infer_schemas(object_store, files, file_format)
+        .await
+        .context(error::InferSchemaSnafu)?;
+    Ok(RawSchema::from(
+        &Schema::try_from(merged).context(error::ConvertSchemaSnafu)?,
     ))
 }
 
@@ -242,7 +369,7 @@ mod test {
     use crate::error::Result;
     use crate::sql::{
         describe_table, DESCRIBE_TABLE_OUTPUT_SCHEMA, NULLABLE_NO, NULLABLE_YES,
-        SEMANTIC_TYPE_TIME_INDEX, SEMANTIC_TYPE_VALUE,
+        SEMANTIC_TYPE_FIELD, SEMANTIC_TYPE_TIME_INDEX,
     };
 
     #[test]
@@ -271,7 +398,7 @@ mod test {
             Arc::new(StringVector::from(vec![NULLABLE_YES, NULLABLE_NO])) as _,
             Arc::new(StringVector::from(vec!["", "current_timestamp()"])) as _,
             Arc::new(StringVector::from(vec![
-                SEMANTIC_TYPE_VALUE,
+                SEMANTIC_TYPE_FIELD,
                 SEMANTIC_TYPE_TIME_INDEX,
             ])) as _,
         ];

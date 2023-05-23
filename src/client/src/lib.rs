@@ -16,6 +16,7 @@ mod client;
 mod database;
 mod error;
 pub mod load_balance;
+mod metrics;
 
 pub use api;
 pub use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};

@@ -13,12 +13,12 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::num::TryFromIntError;
+use std::num::{ParseIntError, TryFromIntError};
 
 use chrono::ParseError;
 use common_error::ext::ErrorExt;
 use common_error::prelude::StatusCode;
-use snafu::{Backtrace, ErrorCompat, Snafu};
+use snafu::{Location, Snafu};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -26,57 +26,70 @@ pub enum Error {
     #[snafu(display("Failed to parse string to date, raw: {}, source: {}", raw, source))]
     ParseDateStr { raw: String, source: ParseError },
 
+    #[snafu(display("Invalid date string, raw: {}", raw))]
+    InvalidDateStr { raw: String, location: Location },
+
     #[snafu(display("Failed to parse a string into Timestamp, raw string: {}", raw))]
-    ParseTimestamp { raw: String, backtrace: Backtrace },
+    ParseTimestamp { raw: String, location: Location },
 
     #[snafu(display("Current timestamp overflow, source: {}", source))]
     TimestampOverflow {
         source: TryFromIntError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Timestamp arithmetic overflow, msg: {}", msg))]
-    ArithmeticOverflow { msg: String, backtrace: Backtrace },
+    ArithmeticOverflow { msg: String, location: Location },
+
+    #[snafu(display("Invalid time zone offset: {hours}:{minutes}"))]
+    InvalidTimeZoneOffset {
+        hours: i32,
+        minutes: u32,
+        location: Location,
+    },
+
+    #[snafu(display("Invalid offset string {raw}: {source}"))]
+    ParseOffsetStr {
+        raw: String,
+        source: ParseIntError,
+        location: Location,
+    },
+
+    #[snafu(display("Invalid time zone string {raw}"))]
+    ParseTimeZoneName { raw: String, location: Location },
 }
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::ParseDateStr { .. } | Error::ParseTimestamp { .. } => {
+            Error::ParseDateStr { .. }
+            | Error::ParseTimestamp { .. }
+            | Error::InvalidTimeZoneOffset { .. }
+            | Error::ParseOffsetStr { .. }
+            | Error::ParseTimeZoneName { .. } => StatusCode::InvalidArguments,
+            Error::TimestampOverflow { .. } => StatusCode::Internal,
+            Error::InvalidDateStr { .. } | Error::ArithmeticOverflow { .. } => {
                 StatusCode::InvalidArguments
             }
-            Error::TimestampOverflow { .. } => StatusCode::Internal,
-            Error::ArithmeticOverflow { .. } => StatusCode::InvalidArguments,
         }
-    }
-
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        ErrorCompat::backtrace(self)
     }
 
     fn as_any(&self) -> &dyn Any {
         self
     }
+
+    fn location_opt(&self) -> Option<common_error::snafu::Location> {
+        match self {
+            Error::ParseTimestamp { location, .. }
+            | Error::TimestampOverflow { location, .. }
+            | Error::ArithmeticOverflow { location, .. } => Some(*location),
+            Error::ParseDateStr { .. }
+            | Error::InvalidTimeZoneOffset { .. }
+            | Error::ParseOffsetStr { .. }
+            | Error::ParseTimeZoneName { .. } => None,
+            Error::InvalidDateStr { location, .. } => Some(*location),
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
-
-#[cfg(test)]
-mod tests {
-    use chrono::NaiveDateTime;
-    use snafu::ResultExt;
-
-    use super::*;
-
-    #[test]
-    fn test_errors() {
-        let raw = "2020-09-08T13:42:29.190855Z";
-        let result = NaiveDateTime::parse_from_str(raw, "%F").context(ParseDateStrSnafu { raw });
-        assert!(matches!(result.err().unwrap(), Error::ParseDateStr { .. }));
-
-        assert_eq!(
-            "Failed to parse a string into Timestamp, raw string: 2020-09-08T13:42:29.190855Z",
-            ParseTimestampSnafu { raw }.build().to_string()
-        );
-    }
-}

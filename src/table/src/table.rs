@@ -28,6 +28,8 @@ use store_api::storage::RegionNumber;
 use crate::error::{Result, UnsupportedSnafu};
 use crate::metadata::{FilterPushDownType, TableId, TableInfoRef, TableType};
 use crate::requests::{AlterTableRequest, DeleteRequest, InsertRequest};
+use crate::stats::TableStatistics;
+use crate::RegionStat;
 
 pub type AlterContext = anymap::Map<dyn Any + Send + Sync>;
 
@@ -106,7 +108,7 @@ pub trait Table: Send + Sync {
     }
 
     /// Close the table.
-    async fn close(&self) -> Result<()> {
+    async fn close(&self, _regions: &[RegionNumber]) -> Result<()> {
         Ok(())
     }
 
@@ -116,6 +118,19 @@ pub trait Table: Send + Sync {
             operation: "REGION_STATS",
         }
         .fail()?
+    }
+
+    /// Return true if contains the region
+    fn contains_region(&self, _region: RegionNumber) -> Result<bool> {
+        UnsupportedSnafu {
+            operation: "contain_region",
+        }
+        .fail()?
+    }
+
+    /// Get statistics for this table, if available
+    fn statistics(&self) -> Option<TableStatistics> {
+        None
     }
 }
 
@@ -127,9 +142,3 @@ pub trait TableIdProvider {
 }
 
 pub type TableIdProviderRef = Arc<dyn TableIdProvider + Send + Sync>;
-
-#[derive(Default, Debug)]
-pub struct RegionStat {
-    pub region_id: u64,
-    pub disk_usage_bytes: u64,
-}

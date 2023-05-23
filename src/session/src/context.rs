@@ -17,8 +17,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use common_catalog::build_db_string;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_telemetry::debug;
+use common_time::TimeZone;
 
 pub type QueryContextRef = Arc<QueryContext>;
 pub type ConnInfoRef = Arc<ConnInfo>;
@@ -27,6 +29,7 @@ pub type ConnInfoRef = Arc<ConnInfo>;
 pub struct QueryContext {
     current_catalog: ArcSwap<String>,
     current_schema: ArcSwap<String>,
+    time_zone: ArcSwap<Option<TimeZone>>,
 }
 
 impl Default for QueryContext {
@@ -55,6 +58,7 @@ impl QueryContext {
         Self {
             current_catalog: ArcSwap::new(Arc::new(DEFAULT_CATALOG_NAME.to_string())),
             current_schema: ArcSwap::new(Arc::new(DEFAULT_SCHEMA_NAME.to_string())),
+            time_zone: ArcSwap::new(Arc::new(None)),
         }
     }
 
@@ -62,6 +66,7 @@ impl QueryContext {
         Self {
             current_catalog: ArcSwap::new(Arc::new(catalog.to_string())),
             current_schema: ArcSwap::new(Arc::new(schema.to_string())),
+            time_zone: ArcSwap::new(Arc::new(None)),
         }
     }
 
@@ -75,18 +80,38 @@ impl QueryContext {
 
     pub fn set_current_schema(&self, schema: &str) {
         let last = self.current_schema.swap(Arc::new(schema.to_string()));
-        debug!(
-            "set new session default schema: {:?}, swap old: {:?}",
-            schema, last
-        )
+        if schema != last.as_str() {
+            debug!(
+                "set new session default schema: {:?}, swap old: {:?}",
+                schema, last
+            )
+        }
     }
 
     pub fn set_current_catalog(&self, catalog: &str) {
         let last = self.current_catalog.swap(Arc::new(catalog.to_string()));
-        debug!(
-            "set new session default catalog: {:?}, swap old: {:?}",
-            catalog, last
-        )
+        if catalog != last.as_str() {
+            debug!(
+                "set new session default catalog: {:?}, swap old: {:?}",
+                catalog, last
+            )
+        }
+    }
+
+    pub fn get_db_string(&self) -> String {
+        let catalog = self.current_catalog();
+        let schema = self.current_schema();
+        build_db_string(&catalog, &schema)
+    }
+
+    #[inline]
+    pub fn time_zone(&self) -> Option<TimeZone> {
+        self.time_zone.load().as_ref().clone()
+    }
+
+    #[inline]
+    pub fn set_time_zone(&self, tz: Option<TimeZone>) {
+        self.time_zone.swap(Arc::new(tz));
     }
 }
 
@@ -144,6 +169,7 @@ pub enum Channel {
 
 #[cfg(test)]
 mod test {
+    use super::*;
     use crate::context::{Channel, UserInfo};
     use crate::Session;
 
@@ -162,5 +188,20 @@ mod test {
             "127.0.0.1"
         );
         assert_eq!(session.conn_info().client_host.port(), 9000);
+    }
+
+    #[test]
+    fn test_context_db_string() {
+        let context = QueryContext::new();
+
+        context.set_current_catalog("a0b1c2d3");
+        context.set_current_schema("test");
+
+        assert_eq!("a0b1c2d3-test", context.get_db_string());
+
+        context.set_current_catalog(DEFAULT_CATALOG_NAME);
+        context.set_current_schema("test");
+
+        assert_eq!("test", context.get_db_string());
     }
 }

@@ -19,12 +19,15 @@ use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use serde::{Deserialize, Serialize};
 
 pub mod auth;
+pub mod configurator;
 pub mod error;
 pub mod grpc;
 pub mod http;
 pub mod influxdb;
 pub mod interceptor;
 pub mod line_writer;
+mod metrics;
+pub mod metrics_handler;
 pub mod mysql;
 pub mod opentsdb;
 pub mod postgres;
@@ -50,6 +53,8 @@ pub enum Mode {
 /// and switch database using `USE` command
 /// - Postgres `database` parameter in Postgres wire protocol, required
 /// - HTTP RESTful API: the database parameter, optional
+/// - gRPC: the dbname field in header, optional but has a higher priority than
+/// original catalog/schema
 ///
 /// When database name is provided, we attempt to parse catalog and schema from
 /// it. We assume the format `[<catalog>-]<schema>`:
@@ -58,7 +63,7 @@ pub enum Mode {
 /// schema name
 /// - if `[<catalog>-]` is provided, we split database name with `-` and use
 /// `<catalog>` and `<schema>`.
-pub(crate) fn parse_catalog_and_schema_from_client_database_name(db: &str) -> (&str, &str) {
+pub fn parse_catalog_and_schema_from_client_database_name(db: &str) -> (&str, &str) {
     let parts = db.splitn(2, '-').collect::<Vec<&str>>();
     if parts.len() == 2 {
         (parts[0], parts[1])

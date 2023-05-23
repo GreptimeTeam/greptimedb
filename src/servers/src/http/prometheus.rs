@@ -19,6 +19,7 @@ use axum::extract::{Query, RawBody, State};
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
+use common_telemetry::timer;
 use hyper::Body;
 use prost::Message;
 use schemars::JsonSchema;
@@ -52,6 +53,13 @@ pub async fn remote_write(
 ) -> Result<(StatusCode, ())> {
     let request = decode_remote_write_request(body).await?;
 
+    let _timer = timer!(
+        crate::metrics::METRIC_HTTP_PROMETHEUS_WRITE_ELAPSED,
+        &[(
+            crate::metrics::METRIC_DB_LABEL,
+            params.db.as_deref().unwrap_or("")
+        )]
+    );
     let ctx = if let Some(db) = params.db {
         let (catalog, schema) = parse_catalog_and_schema_from_client_database_name(&db);
         Arc::new(QueryContext::with(catalog, schema))
@@ -85,6 +93,13 @@ pub async fn remote_read(
 ) -> Result<PrometheusResponse> {
     let request = decode_remote_read_request(body).await?;
 
+    let _timer = timer!(
+        crate::metrics::METRIC_HTTP_PROMETHEUS_READ_ELAPSED,
+        &[(
+            crate::metrics::METRIC_DB_LABEL,
+            params.db.as_deref().unwrap_or("")
+        )]
+    );
     let ctx = if let Some(db) = params.db {
         let (catalog, schema) = parse_catalog_and_schema_from_client_database_name(&db);
         Arc::new(QueryContext::with(catalog, schema))

@@ -15,8 +15,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use common_catalog::consts::INFORMATION_SCHEMA_NAME;
 use common_catalog::format_full_table_name;
-use datafusion::common::{OwnedTableReference, ResolvedTableReference, TableReference};
+use datafusion::common::{ResolvedTableReference, TableReference};
 use datafusion::datasource::provider_as_source;
 use datafusion::logical_expr::TableSource;
 use session::context::QueryContext;
@@ -26,10 +27,11 @@ use table::table::adapter::DfTableProviderAdapter;
 use crate::error::{
     CatalogNotFoundSnafu, QueryAccessDeniedSnafu, Result, SchemaNotFoundSnafu, TableNotExistSnafu,
 };
-use crate::CatalogListRef;
+use crate::information_schema::InformationSchemaProvider;
+use crate::CatalogManagerRef;
 
 pub struct DfTableSourceProvider {
-    catalog_list: CatalogListRef,
+    catalog_manager: CatalogManagerRef,
     resolved_tables: HashMap<String, Arc<dyn TableSource>>,
     disallow_cross_schema_query: bool,
     default_catalog: String,
@@ -38,12 +40,12 @@ pub struct DfTableSourceProvider {
 
 impl DfTableSourceProvider {
     pub fn new(
-        catalog_list: CatalogListRef,
+        catalog_manager: CatalogManagerRef,
         disallow_cross_schema_query: bool,
         query_ctx: &QueryContext,
     ) -> Self {
         Self {
-            catalog_list,
+            catalog_manager,
             disallow_cross_schema_query,
             resolved_tables: HashMap::new(),
             default_catalog: query_ctx.current_catalog(),
@@ -60,7 +62,8 @@ impl DfTableSourceProvider {
                 TableReference::Bare { .. } => (),
                 TableReference::Partial { schema, .. } => {
                     ensure!(
-                        schema.as_ref() == self.default_schema,
+                        schema.as_ref() == self.default_schema
+                            || schema.as_ref() == INFORMATION_SCHEMA_NAME,
                         QueryAccessDeniedSnafu {
                             catalog: &self.default_catalog,
                             schema: schema.as_ref(),
@@ -72,7 +75,8 @@ impl DfTableSourceProvider {
                 } => {
                     ensure!(
                         catalog.as_ref() == self.default_catalog
-                            && schema.as_ref() == self.default_schema,
+                            && (schema.as_ref() == self.default_schema
+                                || schema.as_ref() == INFORMATION_SCHEMA_NAME),
                         QueryAccessDeniedSnafu {
                             catalog: catalog.as_ref(),
                             schema: schema.as_ref()
@@ -87,9 +91,8 @@ impl DfTableSourceProvider {
 
     pub async fn resolve_table(
         &mut self,
-        table_ref: OwnedTableReference,
+        table_ref: TableReference<'_>,
     ) -> Result<Arc<dyn TableSource>> {
-        let table_ref = table_ref.as_table_reference();
         let table_ref = self.resolve_table_ref(table_ref)?;
 
         let resolved_name = table_ref.to_string();
@@ -101,14 +104,30 @@ impl DfTableSourceProvider {
         let schema_name = table_ref.schema.as_ref();
         let table_name = table_ref.table.as_ref();
 
-        let catalog = self
-            .catalog_list
-            .catalog(catalog_name)?
-            .context(CatalogNotFoundSnafu { catalog_name })?;
-        let schema = catalog.schema(schema_name)?.context(SchemaNotFoundSnafu {
-            catalog: catalog_name,
-            schema: schema_name,
-        })?;
+        let schema = if schema_name != INFORMATION_SCHEMA_NAME {
+            let catalog = self
+                .catalog_manager
+                .catalog(catalog_name)
+                .await?
+                .context(CatalogNotFoundSnafu { catalog_name })?;
+            catalog
+                .schema(schema_name)
+                .await?
+                .context(SchemaNotFoundSnafu {
+                    catalog: catalog_name,
+                    schema: schema_name,
+                })?
+        } else {
+            let catalog_provider = self
+                .catalog_manager
+                .catalog(catalog_name)
+                .await?
+                .context(CatalogNotFoundSnafu { catalog_name })?;
+            Arc::new(InformationSchemaProvider::new(
+                catalog_name.to_string(),
+                catalog_provider,
+            ))
+        };
         let table = schema
             .table(table_name)
             .await?
@@ -174,5 +193,25 @@ mod tests {
         };
         let result = table_provider.resolve_table_ref(table_ref);
         assert!(result.is_err());
+
+        let table_ref = TableReference::Partial {
+            schema: Cow::Borrowed("information_schema"),
+            table: Cow::Borrowed("columns"),
+        };
+        assert!(table_provider.resolve_table_ref(table_ref).is_ok());
+
+        let table_ref = TableReference::Full {
+            catalog: Cow::Borrowed("greptime"),
+            schema: Cow::Borrowed("information_schema"),
+            table: Cow::Borrowed("columns"),
+        };
+        assert!(table_provider.resolve_table_ref(table_ref).is_ok());
+
+        let table_ref = TableReference::Full {
+            catalog: Cow::Borrowed("dummy"),
+            schema: Cow::Borrowed("information_schema"),
+            table: Cow::Borrowed("columns"),
+        };
+        assert!(table_provider.resolve_table_ref(table_ref).is_err());
     }
 }

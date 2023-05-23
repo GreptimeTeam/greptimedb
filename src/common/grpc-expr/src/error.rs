@@ -14,10 +14,9 @@
 
 use std::any::Any;
 
-use api::DecodeError;
 use common_error::ext::ErrorExt;
 use common_error::prelude::{Snafu, StatusCode};
-use snafu::{Backtrace, ErrorCompat};
+use snafu::Location;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -28,11 +27,8 @@ pub enum Error {
         table_name: String,
     },
 
-    #[snafu(display("Failed to convert bytes to insert batch, source: {}", source))]
-    DecodeInsert { source: DecodeError },
-
-    #[snafu(display("Illegal insert data"))]
-    IllegalInsertData { backtrace: Backtrace },
+    #[snafu(display("Illegal delete request, reason: {reason}"))]
+    IllegalDeleteRequest { reason: String, location: Location },
 
     #[snafu(display("Column datatype error, source: {}", source))]
     ColumnDataType {
@@ -48,17 +44,14 @@ pub enum Error {
     DuplicatedTimestampColumn {
         exists: String,
         duplicated: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Missing timestamp column, msg: {}", msg))]
-    MissingTimestampColumn { msg: String, backtrace: Backtrace },
+    MissingTimestampColumn { msg: String, location: Location },
 
     #[snafu(display("Invalid column proto: {}", err_msg))]
-    InvalidColumnProto {
-        err_msg: String,
-        backtrace: Backtrace,
-    },
+    InvalidColumnProto { err_msg: String, location: Location },
     #[snafu(display("Failed to create vector, source: {}", source))]
     CreateVector {
         #[snafu(backtrace)]
@@ -66,13 +59,7 @@ pub enum Error {
     },
 
     #[snafu(display("Missing required field in protobuf, field: {}", field))]
-    MissingField { field: String, backtrace: Backtrace },
-
-    #[snafu(display("Invalid column default constraint, source: {}", source))]
-    ColumnDefaultConstraint {
-        #[snafu(backtrace)]
-        source: datatypes::error::Error,
-    },
+    MissingField { field: String, location: Location },
 
     #[snafu(display(
         "Invalid column proto definition, column: {}, source: {}",
@@ -90,6 +77,12 @@ pub enum Error {
         #[snafu(backtrace)]
         source: table::error::Error,
     },
+
+    #[snafu(display("Unexpected values length, reason: {}", reason))]
+    UnexpectedValuesLength { reason: String, location: Location },
+
+    #[snafu(display("The column name already exists, column: {}", column))]
+    ColumnAlreadyExists { column: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -98,9 +91,9 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
-            Error::DecodeInsert { .. } | Error::IllegalInsertData { .. } => {
-                StatusCode::InvalidArguments
-            }
+
+            Error::IllegalDeleteRequest { .. } => StatusCode::InvalidArguments,
+
             Error::ColumnDataType { .. } => StatusCode::Internal,
             Error::DuplicatedTimestampColumn { .. } | Error::MissingTimestampColumn { .. } => {
                 StatusCode::InvalidArguments
@@ -108,13 +101,12 @@ impl ErrorExt for Error {
             Error::InvalidColumnProto { .. } => StatusCode::InvalidArguments,
             Error::CreateVector { .. } => StatusCode::InvalidArguments,
             Error::MissingField { .. } => StatusCode::InvalidArguments,
-            Error::ColumnDefaultConstraint { source, .. } => source.status_code(),
             Error::InvalidColumnDef { source, .. } => source.status_code(),
             Error::UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
+            Error::UnexpectedValuesLength { .. } | Error::ColumnAlreadyExists { .. } => {
+                StatusCode::InvalidArguments
+            }
         }
-    }
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        ErrorCompat::backtrace(self)
     }
 
     fn as_any(&self) -> &dyn Any {

@@ -20,6 +20,8 @@ pub mod prometheus;
 pub mod script;
 
 mod admin;
+#[cfg(feature = "dashboard")]
+mod dashboard;
 #[cfg(feature = "mem-prof")]
 pub mod mem_prof;
 
@@ -56,8 +58,10 @@ use tower_http::trace::TraceLayer;
 use self::authorize::HttpAuth;
 use self::influxdb::{influxdb_health, influxdb_ping, influxdb_write};
 use crate::auth::UserProviderRef;
+use crate::configurator::ConfiguratorRef;
 use crate::error::{AlreadyStartedSnafu, Result, StartHttpSnafu};
 use crate::http::admin::flush;
+use crate::metrics_handler::MetricsHandler;
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::query_handler::{
@@ -68,14 +72,14 @@ use crate::server::Server;
 
 /// create query context from database name information, catalog and schema are
 /// resolved from the name
-pub(crate) fn query_context_from_db(
+pub(crate) async fn query_context_from_db(
     query_handler: ServerSqlQueryHandlerRef,
     db: Option<String>,
 ) -> std::result::Result<Arc<QueryContext>, JsonResponse> {
     if let Some(db) = &db {
         let (catalog, schema) = super::parse_catalog_and_schema_from_client_database_name(db);
 
-        match query_handler.is_valid_schema(catalog, schema) {
+        match query_handler.is_valid_schema(catalog, schema).await {
             Ok(true) => Ok(Arc::new(QueryContext::with(catalog, schema))),
             Ok(false) => Err(JsonResponse::with_error(
                 format!("Database not found: {db}"),
@@ -97,9 +101,10 @@ pub const HTTP_API_PREFIX: &str = "/v1/";
 // TODO(fys): This is a temporary workaround, it will be improved later
 pub static PUBLIC_APIS: [&str; 2] = ["/v1/influxdb/ping", "/v1/influxdb/health"];
 
+#[derive(Default)]
 pub struct HttpServer {
-    sql_handler: ServerSqlQueryHandlerRef,
-    grpc_handler: ServerGrpcQueryHandlerRef,
+    sql_handler: Option<ServerSqlQueryHandlerRef>,
+    grpc_handler: Option<ServerGrpcQueryHandlerRef>,
     options: HttpOptions,
     influxdb_handler: Option<InfluxdbLineProtocolHandlerRef>,
     opentsdb_handler: Option<OpentsdbProtocolHandlerRef>,
@@ -107,13 +112,20 @@ pub struct HttpServer {
     script_handler: Option<ScriptHandlerRef>,
     shutdown_tx: Mutex<Option<Sender<()>>>,
     user_provider: Option<UserProviderRef>,
+    metrics_handler: Option<MetricsHandler>,
+    configurator: Option<ConfiguratorRef>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct HttpOptions {
     pub addr: String,
+
     #[serde(with = "humantime_serde")]
     pub timeout: Duration,
+
+    #[serde(skip)]
+    pub disable_dashboard: bool,
 }
 
 impl Default for HttpOptions {
@@ -121,6 +133,7 @@ impl Default for HttpOptions {
         Self {
             addr: "127.0.0.1:4000".to_string(),
             timeout: Duration::from_secs(30),
+            disable_dashboard: false,
         }
     }
 }
@@ -245,7 +258,7 @@ pub struct JsonResponse {
 }
 
 impl JsonResponse {
-    fn with_error(error: String, error_code: StatusCode) -> Self {
+    pub fn with_error(error: String, error_code: StatusCode) -> Self {
         JsonResponse {
             error: Some(error),
             code: error_code as u32,
@@ -269,7 +282,7 @@ impl JsonResponse {
     }
 
     /// Create a json response from query result
-    async fn from_output(outputs: Vec<Result<Output>>) -> Self {
+    pub async fn from_output(outputs: Vec<Result<Output>>) -> Self {
         // TODO(sunng87): this api response structure cannot represent error
         // well. It hides successful execution results from error response
         let mut results = Vec::with_capacity(outputs.len());
@@ -352,65 +365,81 @@ pub struct ApiState {
     pub script_handler: Option<ScriptHandlerRef>,
 }
 
-impl HttpServer {
-    pub fn new(
-        sql_handler: ServerSqlQueryHandlerRef,
-        grpc_handler: ServerGrpcQueryHandlerRef,
-        options: HttpOptions,
-    ) -> Self {
+#[derive(Default)]
+pub struct HttpServerBuilder {
+    inner: HttpServer,
+}
+
+impl HttpServerBuilder {
+    pub fn new(options: HttpOptions) -> Self {
         Self {
-            sql_handler,
-            grpc_handler,
-            options,
-            opentsdb_handler: None,
-            influxdb_handler: None,
-            prom_handler: None,
-            user_provider: None,
-            script_handler: None,
-            shutdown_tx: Mutex::new(None),
+            inner: HttpServer {
+                sql_handler: None,
+                grpc_handler: None,
+                options,
+                opentsdb_handler: None,
+                influxdb_handler: None,
+                prom_handler: None,
+                user_provider: None,
+                script_handler: None,
+                metrics_handler: None,
+                shutdown_tx: Mutex::new(None),
+                configurator: None,
+            },
         }
     }
 
-    pub fn set_opentsdb_handler(&mut self, handler: OpentsdbProtocolHandlerRef) {
-        debug_assert!(
-            self.opentsdb_handler.is_none(),
-            "OpenTSDB handler can be set only once!"
-        );
-        self.opentsdb_handler.get_or_insert(handler);
+    pub fn with_sql_handler(&mut self, handler: ServerSqlQueryHandlerRef) -> &mut Self {
+        self.inner.sql_handler.get_or_insert(handler);
+        self
     }
 
-    pub fn set_script_handler(&mut self, handler: ScriptHandlerRef) {
-        debug_assert!(
-            self.script_handler.is_none(),
-            "Script handler can be set only once!"
-        );
-        self.script_handler.get_or_insert(handler);
+    pub fn with_grpc_handler(&mut self, handler: ServerGrpcQueryHandlerRef) -> &mut Self {
+        self.inner.grpc_handler.get_or_insert(handler);
+        self
     }
 
-    pub fn set_influxdb_handler(&mut self, handler: InfluxdbLineProtocolHandlerRef) {
-        debug_assert!(
-            self.influxdb_handler.is_none(),
-            "Influxdb line protocol handler can be set only once!"
-        );
-        self.influxdb_handler.get_or_insert(handler);
+    pub fn with_opentsdb_handler(&mut self, handler: OpentsdbProtocolHandlerRef) -> &mut Self {
+        self.inner.opentsdb_handler.get_or_insert(handler);
+        self
     }
 
-    pub fn set_prom_handler(&mut self, handler: PrometheusProtocolHandlerRef) {
-        debug_assert!(
-            self.prom_handler.is_none(),
-            "Prometheus protocol handler can be set only once!"
-        );
-        self.prom_handler.get_or_insert(handler);
+    pub fn with_script_handler(&mut self, handler: ScriptHandlerRef) -> &mut Self {
+        self.inner.script_handler.get_or_insert(handler);
+        self
     }
 
-    pub fn set_user_provider(&mut self, user_provider: UserProviderRef) {
-        debug_assert!(
-            self.user_provider.is_none(),
-            "User provider can be set only once!"
-        );
-        self.user_provider.get_or_insert(user_provider);
+    pub fn with_influxdb_handler(&mut self, handler: InfluxdbLineProtocolHandlerRef) -> &mut Self {
+        self.inner.influxdb_handler.get_or_insert(handler);
+        self
     }
 
+    pub fn with_prom_handler(&mut self, handler: PrometheusProtocolHandlerRef) -> &mut Self {
+        self.inner.prom_handler.get_or_insert(handler);
+        self
+    }
+
+    pub fn with_user_provider(&mut self, user_provider: UserProviderRef) -> &mut Self {
+        self.inner.user_provider.get_or_insert(user_provider);
+        self
+    }
+
+    pub fn with_metrics_handler(&mut self, handler: MetricsHandler) -> &mut Self {
+        self.inner.metrics_handler.get_or_insert(handler);
+        self
+    }
+
+    pub fn with_configurator(&mut self, configurator: Option<ConfiguratorRef>) -> &mut Self {
+        self.inner.configurator = configurator;
+        self
+    }
+
+    pub fn build(&mut self) -> HttpServer {
+        std::mem::take(self).inner
+    }
+}
+
+impl HttpServer {
     pub fn make_app(&self) -> Router {
         let mut api = OpenApi {
             info: Info {
@@ -426,19 +455,25 @@ impl HttpServer {
             ..OpenApi::default()
         };
 
-        let sql_router = self
-            .route_sql(ApiState {
-                sql_handler: self.sql_handler.clone(),
-                script_handler: self.script_handler.clone(),
-            })
-            .finish_api(&mut api)
-            .layer(Extension(api));
+        let mut router = Router::new();
 
-        let mut router = Router::new().nest(&format!("/{HTTP_API_VERSION}"), sql_router);
-        router = router.nest(
-            &format!("/{HTTP_API_VERSION}/admin"),
-            self.route_admin(self.grpc_handler.clone()),
-        );
+        if let Some(sql_handler) = self.sql_handler.clone() {
+            let sql_router = self
+                .route_sql(ApiState {
+                    sql_handler,
+                    script_handler: self.script_handler.clone(),
+                })
+                .finish_api(&mut api)
+                .layer(Extension(api));
+            router = router.nest(&format!("/{HTTP_API_VERSION}"), sql_router);
+        }
+
+        if let Some(grpc_handler) = self.grpc_handler.clone() {
+            router = router.nest(
+                &format!("/{HTTP_API_VERSION}/admin"),
+                self.route_admin(grpc_handler.clone()),
+            );
+        }
 
         if let Some(opentsdb_handler) = self.opentsdb_handler.clone() {
             router = router.nest(
@@ -470,13 +505,34 @@ impl HttpServer {
             );
         }
 
-        router = router.route("/metrics", routing::get(handler::metrics));
+        if let Some(metrics_handler) = self.metrics_handler {
+            router = router.nest("", self.route_metrics(metrics_handler));
+        }
 
         router = router.route(
             "/health",
             routing::get(handler::health).post(handler::health),
         );
 
+        #[cfg(feature = "dashboard")]
+        {
+            if !self.options.disable_dashboard {
+                info!("Enable dashboard service at '/dashboard'");
+                router = router.nest("/dashboard", dashboard::dashboard());
+
+                // "/dashboard" and "/dashboard/" are two different paths in Axum.
+                // We cannot nest "/dashboard/", because we already mapping "/dashboard/*x" while nesting "/dashboard".
+                // So we explicitly route "/dashboard/" here.
+                router = router.route(
+                    "/dashboard/",
+                    routing::get(dashboard::static_handler).post(dashboard::static_handler),
+                );
+            }
+        }
+        router
+    }
+
+    pub fn build(&self, router: Router) -> Router {
         router
             // middlewares
             .layer(
@@ -489,6 +545,12 @@ impl HttpServer {
                         HttpAuth::<BoxBody>::new(self.user_provider.clone()),
                     )),
             )
+    }
+
+    fn route_metrics<S>(&self, metrics_handler: MetricsHandler) -> Router<S> {
+        Router::new()
+            .route("/metrics", routing::get(handler::metrics))
+            .with_state(metrics_handler)
     }
 
     fn route_sql<S>(&self, api_state: ApiState) -> ApiRouter<S> {
@@ -563,7 +625,11 @@ impl Server for HttpServer {
                 AlreadyStartedSnafu { server: "HTTP" }
             );
 
-            let app = self.make_app();
+            let mut app = self.make_app();
+            if let Some(configurator) = self.configurator.as_ref() {
+                app = configurator.config_http(app);
+            }
+            let app = self.build(app);
             let server = axum::Server::bind(&listening).serve(app.into_make_service());
 
             *shutdown_tx = Some(tx);
@@ -656,7 +722,7 @@ mod test {
             unimplemented!()
         }
 
-        fn is_valid_schema(&self, _catalog: &str, _schema: &str) -> Result<bool> {
+        async fn is_valid_schema(&self, _catalog: &str, _schema: &str) -> Result<bool> {
             Ok(true)
         }
     }
@@ -673,9 +739,11 @@ mod test {
         let instance = Arc::new(DummyInstance { _tx: tx });
         let sql_instance = ServerSqlQueryHandlerAdaptor::arc(instance.clone());
         let grpc_instance = ServerGrpcQueryHandlerAdaptor::arc(instance);
-
-        let server = HttpServer::new(sql_instance, grpc_instance, HttpOptions::default());
-        server.make_app().route(
+        let server = HttpServerBuilder::new(HttpOptions::default())
+            .with_sql_handler(sql_instance)
+            .with_grpc_handler(grpc_instance)
+            .build();
+        server.build(server.make_app()).route(
             "/test/timeout",
             get(forever.layer(
                 ServiceBuilder::new()

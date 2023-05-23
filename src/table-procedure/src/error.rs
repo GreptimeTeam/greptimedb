@@ -13,9 +13,11 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::sync::Arc;
 
 use common_error::prelude::*;
 use common_procedure::ProcedureId;
+use snafu::Location;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
@@ -23,13 +25,13 @@ pub enum Error {
     #[snafu(display("Failed to serialize procedure to json, source: {}", source))]
     SerializeProcedure {
         source: serde_json::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to deserialize procedure from json, source: {}", source))]
     DeserializeProcedure {
         source: serde_json::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Invalid raw schema, source: {}", source))]
@@ -50,11 +52,18 @@ pub enum Error {
     #[snafu(display("Schema {} not found", name))]
     SchemaNotFound { name: String },
 
+    #[snafu(display("Table {} not found", name))]
+    TableNotFound { name: String },
+
     #[snafu(display("Subprocedure {} failed", subprocedure_id))]
     SubprocedureFailed {
         subprocedure_id: ProcedureId,
-        backtrace: Backtrace,
+        source: Arc<common_procedure::Error>,
+        location: Location,
     },
+
+    #[snafu(display("Table already exists: {}", name))]
+    TableExists { name: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -64,17 +73,15 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            SerializeProcedure { .. } | DeserializeProcedure { .. } | SubprocedureFailed { .. } => {
-                StatusCode::Internal
-            }
+            SerializeProcedure { .. } | DeserializeProcedure { .. } => StatusCode::Internal,
+            SubprocedureFailed { source, .. } => source.status_code(),
             InvalidRawSchema { source, .. } => source.status_code(),
             AccessCatalog { source } => source.status_code(),
-            CatalogNotFound { .. } | SchemaNotFound { .. } => StatusCode::InvalidArguments,
+            CatalogNotFound { .. } | SchemaNotFound { .. } | TableExists { .. } => {
+                StatusCode::InvalidArguments
+            }
+            TableNotFound { .. } => StatusCode::TableNotFound,
         }
-    }
-
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        ErrorCompat::backtrace(self)
     }
 
     fn as_any(&self) -> &dyn Any {

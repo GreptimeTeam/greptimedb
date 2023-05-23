@@ -24,8 +24,7 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::error;
-use crate::error::{IllegalSchedulerStateSnafu, StopSchedulerSnafu};
+use crate::error::{IllegalSchedulerStateSnafu, Result, StopSchedulerSnafu};
 use crate::scheduler::dedup_deque::DedupDeque;
 use crate::scheduler::rate_limit::{
     BoxedRateLimitToken, CascadeRateLimiter, MaxInflightTaskLimiter, RateLimiter,
@@ -40,7 +39,11 @@ pub trait Request: Send + Sync + 'static {
     /// Type of request key.
     type Key: Eq + Hash + Clone + Debug + Send + Sync;
 
+    /// Returns the request key.
     fn key(&self) -> Self::Key;
+
+    /// Notify the request result.
+    fn complete(self, result: Result<()>);
 }
 
 #[async_trait::async_trait]
@@ -52,7 +55,7 @@ pub trait Handler {
         req: Self::Request,
         token: BoxedRateLimitToken,
         finish_notifier: Arc<Notify>,
-    ) -> error::Result<()>;
+    ) -> Result<()>;
 }
 
 /// [Scheduler] defines a set of API to schedule requests.
@@ -63,11 +66,11 @@ pub trait Scheduler: Debug {
     /// Schedules a request.
     /// Returns true if request is scheduled. Returns false if task queue already
     /// contains the request with same key.
-    fn schedule(&self, request: Self::Request) -> error::Result<bool>;
+    fn schedule(&self, request: Self::Request) -> Result<bool>;
 
     /// Stops scheduler. If `await_termination` is set to true, the scheduler will
     /// wait until all queued requests are processed.
-    async fn stop(&self, await_termination: bool) -> error::Result<()>;
+    async fn stop(&self, await_termination: bool) -> Result<()>;
 }
 
 /// Scheduler config.
@@ -107,7 +110,23 @@ where
     R: Request + Send + Sync,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LocalScheduler<...>").finish()
+        f.debug_struct("LocalScheduler")
+            .field("state", &self.state)
+            .finish()
+    }
+}
+
+impl<R> Drop for LocalScheduler<R>
+where
+    R: Request,
+{
+    fn drop(&mut self) {
+        self.state.store(STATE_STOP, Ordering::Relaxed);
+
+        self.cancel_token.cancel();
+
+        // Clear all requests
+        self.request_queue.write().unwrap().clear();
     }
 }
 
@@ -118,7 +137,7 @@ where
 {
     type Request = R;
 
-    fn schedule(&self, request: Self::Request) -> error::Result<bool> {
+    fn schedule(&self, request: Self::Request) -> Result<bool> {
         ensure!(self.running(), IllegalSchedulerStateSnafu);
         debug!(
             "Schedule request: {:?}, queue size: {}",
@@ -131,7 +150,7 @@ where
         Ok(res)
     }
 
-    async fn stop(&self, await_termination: bool) -> error::Result<()> {
+    async fn stop(&self, await_termination: bool) -> Result<()> {
         let state = if await_termination {
             STATE_AWAIT_TERMINATION
         } else {
@@ -279,7 +298,7 @@ where
         req: R,
         token: BoxedRateLimitToken,
         finish_notifier: Arc<Notify>,
-    ) -> error::Result<()> {
+    ) -> Result<()> {
         self.request_handler
             .handle_request(req, token, finish_notifier)
             .await
@@ -307,14 +326,14 @@ mod tests {
 
     struct CountdownLatch {
         counter: std::sync::Mutex<usize>,
-        notifies: std::sync::RwLock<Vec<Arc<Notify>>>,
+        notify: Notify,
     }
 
     impl CountdownLatch {
         fn new(size: usize) -> Self {
             Self {
                 counter: std::sync::Mutex::new(size),
-                notifies: std::sync::RwLock::new(vec![]),
+                notify: Notify::new(),
             }
         }
 
@@ -323,22 +342,14 @@ mod tests {
             if *counter >= 1 {
                 *counter -= 1;
                 if *counter == 0 {
-                    let notifies = self.notifies.read().unwrap();
-                    for waiter in notifies.iter() {
-                        waiter.notify_one();
-                    }
+                    self.notify.notify_one();
                 }
             }
         }
 
+        /// Users should only call this once.
         async fn wait(&self) {
-            let notify = Arc::new(Notify::new());
-            {
-                let notify = notify.clone();
-                let mut notifies = self.notifies.write().unwrap();
-                notifies.push(notify);
-            }
-            notify.notified().await
+            self.notify.notified().await
         }
     }
 
@@ -397,7 +408,7 @@ mod tests {
             _req: Self::Request,
             token: BoxedRateLimitToken,
             finish_notifier: Arc<Notify>,
-        ) -> error::Result<()> {
+        ) -> Result<()> {
             (self.cb)();
             token.try_release();
             finish_notifier.notify_one();
@@ -411,6 +422,8 @@ mod tests {
         fn key(&self) -> Self::Key {
             self.region_id
         }
+
+        fn complete(self, _result: Result<()>) {}
     }
 
     #[tokio::test]

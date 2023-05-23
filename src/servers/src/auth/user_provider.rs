@@ -21,13 +21,15 @@ use std::path::Path;
 use async_trait::async_trait;
 use digest;
 use digest::Digest;
+use secrecy::ExposeSecret;
 use session::context::UserInfo;
 use sha1::Sha1;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::auth::{
-    Error, HashedPassword, Identity, InvalidConfigSnafu, IoSnafu, Password, Result, Salt,
-    UnsupportedPasswordTypeSnafu, UserNotFoundSnafu, UserPasswordMismatchSnafu, UserProvider,
+    Error, HashedPassword, Identity, IllegalParamSnafu, InvalidConfigSnafu, IoSnafu, Password,
+    Result, Salt, UnsupportedPasswordTypeSnafu, UserNotFoundSnafu, UserPasswordMismatchSnafu,
+    UserProvider,
 };
 
 pub const STATIC_USER_PROVIDER: &str = "static_user_provider";
@@ -52,7 +54,7 @@ impl TryFrom<&str> for StaticUserProvider {
                 let file = File::open(path).context(IoSnafu)?;
                 let credential = io::BufReader::new(file)
                     .lines()
-                    .filter_map(|line| line.ok())
+                    .map_while(std::result::Result::ok)
                     .filter_map(|line| {
                         if let Some((k, v)) = line.split_once('=') {
                             Some((k.to_string(), v.as_bytes().to_vec()))
@@ -106,22 +108,40 @@ impl UserProvider for StaticUserProvider {
     ) -> Result<UserInfo> {
         match input_id {
             Identity::UserId(username, _) => {
+                ensure!(
+                    !username.is_empty(),
+                    IllegalParamSnafu {
+                        msg: "blank username"
+                    }
+                );
                 let save_pwd = self.users.get(username).context(UserNotFoundSnafu {
                     username: username.to_string(),
                 })?;
 
                 match input_pwd {
                     Password::PlainText(pwd) => {
-                        return if save_pwd == pwd.as_bytes() {
+                        ensure!(
+                            !pwd.expose_secret().is_empty(),
+                            IllegalParamSnafu {
+                                msg: "blank password"
+                            }
+                        );
+                        return if save_pwd == pwd.expose_secret().as_bytes() {
                             Ok(UserInfo::new(username))
                         } else {
                             UserPasswordMismatchSnafu {
                                 username: username.to_string(),
                             }
                             .fail()
-                        }
+                        };
                     }
                     Password::MysqlNativePassword(auth_data, salt) => {
+                        ensure!(
+                            auth_data.len() == 20,
+                            IllegalParamSnafu {
+                                msg: "Illegal MySQL native password format, length != 20"
+                            }
+                        );
                         auth_mysql(auth_data, salt, username, save_pwd)
                             .map(|_| UserInfo::new(username))
                     }
@@ -221,7 +241,7 @@ pub mod test {
         let re = provider
             .authenticate(
                 Identity::UserId(username, None),
-                Password::PlainText(password),
+                Password::PlainText(password.to_string().into()),
             )
             .await;
         assert!(re.is_ok());

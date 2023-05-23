@@ -78,10 +78,8 @@ fn kvs_with_index(
         key_builders.0.push(Some(TimestampMillisecond::from(key.0)));
         key_builders.1.push(Some(key.1));
     }
-    let row_keys = vec![
-        Arc::new(key_builders.0.finish()) as _,
-        Arc::new(key_builders.1.finish()) as _,
-    ];
+    let row_keys = vec![Arc::new(key_builders.1.finish()) as _];
+
     let mut value_builders = (
         UInt64VectorBuilder::with_capacity(values.len()),
         StringVectorBuilder::with_capacity(values.len()),
@@ -100,6 +98,7 @@ fn kvs_with_index(
         start_index_in_batch,
         keys: row_keys,
         values: row_values,
+        timestamp: Some(Arc::new(key_builders.0.finish()) as _),
     }
 }
 

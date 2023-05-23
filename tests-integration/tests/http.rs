@@ -18,6 +18,7 @@ use common_error::status_code::StatusCode as ErrorCode;
 use serde_json::json;
 use servers::http::handler::HealthResponse;
 use servers::http::{JsonOutput, JsonResponse};
+use servers::prom::PromJsonResponse;
 use tests_integration::test_util::{
     setup_test_http_app, setup_test_http_app_with_frontend, setup_test_prom_app_with_frontend,
     StorageType,
@@ -58,6 +59,7 @@ macro_rules! http_tests {
                 test_metrics_api,
                 test_scripts_api,
                 test_health_api,
+                test_dashboard_path,
             );
         )*
     };
@@ -196,7 +198,7 @@ pub async fn test_sql_api(store_type: StorageType) {
     let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
     assert!(!body.success());
     assert!(body.execution_time_ms().is_some());
-    assert!(body.error().unwrap().contains("not exist"));
+    assert!(body.error().unwrap().contains("Table not found"));
 
     // test database given
     let res = client
@@ -290,11 +292,16 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     let client = TestClient::new(app);
 
     // instant query
-    let res = client.get("/api/v1/query?query=up").send().await;
+    let res = client.get("/api/v1/query?query=up&time=1").send().await;
     assert_eq!(res.status(), StatusCode::OK);
-    let res = client.post("/api/v1/query?query=up").send().await;
+    let res = client
+        .post("/api/v1/query?query=up&time=1")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send()
+        .await;
     assert_eq!(res.status(), StatusCode::OK);
 
+    // range query
     let res = client
         .get("/api/v1/query_range?query=up&start=1&end=100&step=5")
         .send()
@@ -306,6 +313,59 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
+
+    // labels
+    let res = client.get("/api/v1/labels?match[]=up").send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = client
+        .post("/api/v1/labels?match[]=up")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    // labels query with multiple match[] params
+    let res = client
+        .get("/api/v1/labels?match[]=up&match[]=down")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = client
+        .post("/api/v1/labels?match[]=up&match[]=down")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // label values
+    // should return error if there is no match[]
+    let res = client.get("/api/v1/label/instance/values").send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let prom_resp = res.json::<PromJsonResponse>().await;
+    assert_eq!(prom_resp.status, "error");
+    assert!(prom_resp.error.is_some_and(|err| !err.is_empty()));
+    assert!(prom_resp.error_type.is_some_and(|err| !err.is_empty()));
+
+    // single match[]
+    let res = client
+        .get("/api/v1/label/instance/values?match[]=up")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let prom_resp = res.json::<PromJsonResponse>().await;
+    assert_eq!(prom_resp.status, "success");
+    assert!(prom_resp.error.is_none());
+    assert!(prom_resp.error_type.is_none());
+
+    // multiple match[]
+    let res = client
+        .get("/api/v1/label/instance/values?match[]=up&match[]=system_metrics")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let prom_resp = res.json::<PromJsonResponse>().await;
+    assert_eq!(prom_resp.status, "success");
+    assert!(prom_resp.error.is_none());
+    assert!(prom_resp.error_type.is_none());
 
     guard.remove_all().await;
 }
@@ -327,7 +387,7 @@ pub async fn test_metrics_api(store_type: StorageType) {
     let res = client.get("/metrics").send().await;
     assert_eq!(res.status(), StatusCode::OK);
     let body = res.text().await;
-    assert!(body.contains("datanode_handle_sql_elapsed"));
+    assert!(body.contains("frontend_handle_sql_elapsed"));
     guard.remove_all().await;
 }
 
@@ -396,3 +456,22 @@ pub async fn test_health_api(store_type: StorageType) {
     let body = serde_json::from_str::<HealthResponse>(&body_text).unwrap();
     assert_eq!(body, HealthResponse {});
 }
+
+#[cfg(feature = "dashboard")]
+pub async fn test_dashboard_path(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, _guard) = setup_test_http_app_with_frontend(store_type, "dashboard_path").await;
+    let client = TestClient::new(app);
+
+    let res_post = client.post("/dashboard").send().await;
+    assert_eq!(res_post.status(), StatusCode::OK);
+    let res_get = client.get("/dashboard").send().await;
+    assert_eq!(res_get.status(), StatusCode::OK);
+
+    // both `GET` and `POST` method return same result
+    let body_text = res_post.text().await;
+    assert_eq!(body_text, res_get.text().await);
+}
+
+#[cfg(not(feature = "dashboard"))]
+pub async fn test_dashboard_path(_: StorageType) {}

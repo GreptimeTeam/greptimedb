@@ -35,14 +35,24 @@ pub trait Picker: Send + 'static {
     type Request: Request;
     type Task: CompactionTask;
 
-    fn pick(
-        &self,
-        ctx: &PickerContext,
-        req: &Self::Request,
-    ) -> crate::error::Result<Option<Self::Task>>;
+    fn pick(&self, req: &Self::Request) -> crate::error::Result<Option<Self::Task>>;
 }
 
-pub struct PickerContext {}
+pub struct PickerContext {
+    compaction_time_window: Option<i64>,
+}
+
+impl PickerContext {
+    pub fn with(compaction_time_window: Option<i64>) -> Self {
+        Self {
+            compaction_time_window,
+        }
+    }
+
+    pub fn compaction_time_window(&self) -> Option<i64> {
+        self.compaction_time_window
+    }
+}
 
 /// L0 -> L1 compaction based on time windows.
 pub struct SimplePicker<S> {
@@ -72,7 +82,7 @@ impl<S> SimplePicker<S> {
         let Some(ttl) = ttl else { return Ok(vec![]); };
 
         let expire_time = Timestamp::current_millis()
-            .sub(ttl)
+            .sub_duration(ttl)
             .context(TtlCalculationSnafu)?;
 
         let mut expired_ssts = vec![];
@@ -89,7 +99,6 @@ impl<S: LogStore> Picker for SimplePicker<S> {
 
     fn pick(
         &self,
-        ctx: &PickerContext,
         req: &CompactionRequestImpl<S>,
     ) -> crate::error::Result<Option<CompactionTaskImpl<S>>> {
         let levels = &req.levels();
@@ -110,9 +119,10 @@ impl<S: LogStore> Picker for SimplePicker<S> {
             expired_ssts.iter().for_each(|f| f.mark_compacting(true));
         }
 
+        let ctx = &PickerContext::with(req.compaction_time_window);
         for level_num in 0..levels.level_num() {
             let level = levels.level(level_num as u8);
-            let outputs = self.strategy.pick(ctx, level);
+            let (compaction_time_window, outputs) = self.strategy.pick(ctx, level);
 
             if outputs.is_empty() {
                 debug!("No SST file can be compacted at level {}", level_num);
@@ -132,6 +142,8 @@ impl<S: LogStore> Picker for SimplePicker<S> {
                 wal: req.wal.clone(),
                 manifest: req.manifest.clone(),
                 expired_ssts,
+                sst_write_buffer_size: req.sst_write_buffer_size,
+                compaction_time_window,
             }));
         }
 

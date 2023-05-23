@@ -24,7 +24,7 @@ use common_telemetry::logging;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use table::engine::{EngineContext, TableEngineProcedureRef, TableEngineRef, TableReference};
-use table::requests::CreateTableRequest;
+use table::requests::{CreateTableRequest, OpenTableRequest};
 
 use crate::error::{
     AccessCatalogSnafu, CatalogNotFoundSnafu, DeserializeProcedureSnafu, SchemaNotFoundSnafu,
@@ -47,7 +47,7 @@ impl Procedure for CreateTableProcedure {
 
     async fn execute(&mut self, ctx: &Context) -> Result<Status> {
         match self.data.state {
-            CreateTableState::Prepare => self.on_prepare(),
+            CreateTableState::Prepare => self.on_prepare().await,
             CreateTableState::EngineCreateTable => self.on_engine_create_table(ctx).await,
             CreateTableState::RegisterCatalog => self.on_register_catalog().await,
         }
@@ -66,7 +66,7 @@ impl Procedure for CreateTableProcedure {
 }
 
 impl CreateTableProcedure {
-    const TYPE_NAME: &str = "table-procedures::CreateTableProcedure";
+    const TYPE_NAME: &str = "table-procedure::CreateTableProcedure";
 
     /// Returns a new [CreateTableProcedure].
     pub fn new(
@@ -131,11 +131,12 @@ impl CreateTableProcedure {
         })
     }
 
-    fn on_prepare(&mut self) -> Result<Status> {
+    async fn on_prepare(&mut self) -> Result<Status> {
         // Check whether catalog and schema exist.
         let catalog = self
             .catalog_manager
             .catalog(&self.data.request.catalog_name)
+            .await
             .context(AccessCatalogSnafu)?
             .with_context(|| {
                 logging::error!(
@@ -148,6 +149,7 @@ impl CreateTableProcedure {
             })?;
         catalog
             .schema(&self.data.request.schema_name)
+            .await
             .context(AccessCatalogSnafu)?
             .with_context(|| {
                 logging::error!(
@@ -176,7 +178,7 @@ impl CreateTableProcedure {
             // do this check as we might not submitted the subprocedure yet when the manager
             // recover this procedure from procedure store.
             logging::info!(
-                "On engine create table {}, not found, sub_id: {}",
+                "On engine create table {}, subprocedure not found, sub_id: {}",
                 self.data.request.table_name,
                 sub_id
             );
@@ -186,7 +188,7 @@ impl CreateTableProcedure {
             let procedure = self
                 .engine_procedure
                 .create_table_procedure(&engine_ctx, self.data.request.clone())
-                .map_err(Error::external)?;
+                .map_err(Error::from_error_ext)?;
             return Ok(Status::Suspended {
                 subprocedures: vec![ProcedureWithId {
                     id: sub_id,
@@ -211,12 +213,11 @@ impl CreateTableProcedure {
                 self.data.state = CreateTableState::RegisterCatalog;
                 Ok(Status::executing(true))
             }
-            ProcedureState::Failed { .. } => {
+            ProcedureState::Failed { error } => {
                 // Return error if the subprocedure is failed.
-                SubprocedureFailedSnafu {
+                Err(error).context(SubprocedureFailedSnafu {
                     subprocedure_id: sub_id,
-                }
-                .fail()?
+                })?
             }
         }
     }
@@ -225,12 +226,14 @@ impl CreateTableProcedure {
         let catalog = self
             .catalog_manager
             .catalog(&self.data.request.catalog_name)
+            .await
             .context(AccessCatalogSnafu)?
             .context(CatalogNotFoundSnafu {
                 name: &self.data.request.catalog_name,
             })?;
         let schema = catalog
             .schema(&self.data.request.schema_name)
+            .await
             .context(AccessCatalogSnafu)?
             .context(SchemaNotFoundSnafu {
                 name: &self.data.request.schema_name,
@@ -238,20 +241,29 @@ impl CreateTableProcedure {
         let table_exists = schema
             .table(&self.data.request.table_name)
             .await
-            .map_err(Error::external)?
+            .map_err(Error::from_error_ext)?
             .is_some();
         if table_exists {
             // Table already exists.
             return Ok(Status::Done);
         }
 
+        // If we recover the procedure from json, then the table engine hasn't open this table yet,
+        // so we need to use `open_table()` instead of `get_table()`.
         let engine_ctx = EngineContext::default();
-        let table_ref = self.data.table_ref();
-        // Safety: The procedure owns the lock so the table should exist.
+        let open_req = OpenTableRequest {
+            catalog_name: self.data.request.catalog_name.clone(),
+            schema_name: self.data.request.schema_name.clone(),
+            table_name: self.data.request.table_name.clone(),
+            table_id: self.data.request.id,
+            region_numbers: self.data.request.region_numbers.clone(),
+        };
+        // Safety: The table is already created.
         let table = self
             .table_engine
-            .get_table(&engine_ctx, &table_ref)
-            .map_err(Error::external)?
+            .open_table(&engine_ctx, open_req)
+            .await
+            .map_err(Error::from_error_ext)?
             .unwrap();
 
         let register_req = RegisterTableRequest {
@@ -264,14 +276,14 @@ impl CreateTableProcedure {
         self.catalog_manager
             .register_table(register_req)
             .await
-            .map_err(Error::external)?;
+            .map_err(Error::from_error_ext)?;
 
         Ok(Status::Done)
     }
 }
 
 /// Represents each step while creating a table in the datanode.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 enum CreateTableState {
     /// Validate request and prepare to create table.
     Prepare,
@@ -307,46 +319,16 @@ impl CreateTableData {
 
 #[cfg(test)]
 mod tests {
-    use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, RawSchema};
+    use std::collections::HashMap;
+
+    use common_procedure_test::{
+        execute_procedure_once, execute_procedure_until_done, execute_until_suspended_or_done,
+        MockContextProvider,
+    };
     use table::engine::{EngineContext, TableEngine};
 
     use super::*;
-    use crate::test_util::TestEnv;
-
-    fn schema_for_test() -> RawSchema {
-        let column_schemas = vec![
-            // Key
-            ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
-            // Nullable value column: cpu
-            ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
-            // Non-null value column: memory
-            ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), false),
-            ColumnSchema::new(
-                "ts",
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                true,
-            )
-            .with_time_index(true),
-        ];
-
-        RawSchema::new(column_schemas)
-    }
-
-    fn new_create_request(table_name: &str) -> CreateTableRequest {
-        CreateTableRequest {
-            id: 1,
-            catalog_name: "greptime".to_string(),
-            schema_name: "public".to_string(),
-            table_name: table_name.to_string(),
-            desc: Some("a test table".to_string()),
-            schema: schema_for_test(),
-            region_numbers: vec![0, 1],
-            create_if_not_exists: true,
-            primary_key_indices: vec![0],
-            table_options: Default::default(),
-        }
-    }
+    use crate::test_util::{self, TestEnv};
 
     #[tokio::test]
     async fn test_create_table_procedure() {
@@ -358,7 +340,7 @@ mod tests {
         } = TestEnv::new("create");
 
         let table_name = "test_create";
-        let request = new_create_request(table_name);
+        let request = test_util::new_create_request(table_name);
         let procedure = CreateTableProcedure::new(
             request.clone(),
             catalog_manager,
@@ -381,6 +363,93 @@ mod tests {
         let mut watcher = procedure_manager.submit(procedure_with_id).await.unwrap();
         watcher.changed().await.unwrap();
 
+        assert!(table_engine
+            .get_table(&engine_ctx, &table_ref)
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn test_recover_register_catalog() {
+        common_telemetry::init_default_ut_logging();
+
+        let TestEnv {
+            dir,
+            table_engine,
+            procedure_manager: _,
+            catalog_manager,
+        } = TestEnv::new("create");
+
+        let table_name = "test_create";
+        let request = test_util::new_create_request(table_name);
+        let procedure = CreateTableProcedure::new(
+            request.clone(),
+            catalog_manager,
+            table_engine.clone(),
+            table_engine.clone(),
+        );
+
+        let table_ref = TableReference {
+            catalog: &request.catalog_name,
+            schema: &request.schema_name,
+            table: &request.table_name,
+        };
+        let engine_ctx = EngineContext::default();
+        assert!(table_engine
+            .get_table(&engine_ctx, &table_ref)
+            .unwrap()
+            .is_none());
+
+        let procedure_id = ProcedureId::random();
+        let mut procedure = Box::new(procedure);
+        // Execute until suspended. We use an empty provider so the parent can submit
+        // a new subprocedure as the it can't find the subprocedure.
+        let mut subprocedures = execute_until_suspended_or_done(
+            procedure_id,
+            MockContextProvider::default(),
+            &mut procedure,
+        )
+        .await
+        .unwrap();
+        assert_eq!(1, subprocedures.len());
+        // Execute the subprocedure.
+        let mut subprocedure = subprocedures.pop().unwrap();
+        execute_procedure_until_done(&mut subprocedure.procedure).await;
+        let mut states = HashMap::new();
+        states.insert(subprocedure.id, ProcedureState::Done);
+        // Execute the parent procedure once.
+        execute_procedure_once(
+            procedure_id,
+            MockContextProvider::new(states),
+            &mut procedure,
+        )
+        .await;
+        assert_eq!(CreateTableState::RegisterCatalog, procedure.data.state);
+
+        // Close the table engine and reopen the TestEnv.
+        table_engine.close().await.unwrap();
+        let TestEnv {
+            dir: _dir,
+            table_engine,
+            procedure_manager: _,
+            catalog_manager,
+        } = TestEnv::from_temp_dir(dir);
+
+        // Recover the procedure
+        let json = procedure.dump().unwrap();
+        let procedure = CreateTableProcedure::from_json(
+            &json,
+            catalog_manager,
+            table_engine.clone(),
+            table_engine.clone(),
+        )
+        .unwrap();
+        let mut procedure = Box::new(procedure);
+        assert_eq!(CreateTableState::RegisterCatalog, procedure.data.state);
+        // Execute until done.
+        execute_procedure_until_done(&mut procedure).await;
+
+        // The table is created.
         assert!(table_engine
             .get_table(&engine_ctx, &table_ref)
             .unwrap()

@@ -12,37 +12,49 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::meta::{HeartbeatRequest, PutRequest};
+use api::v1::meta::{HeartbeatRequest, PutRequest, Role};
+use dashmap::DashMap;
 
 use crate::error::Result;
+use crate::handler::node_stat::Stat;
 use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
-use crate::keys::StatValue;
+use crate::keys::{StatKey, StatValue};
 use crate::metasrv::Context;
 
+const MAX_CACHED_STATS_PER_KEY: usize = 10;
+
 #[derive(Default)]
-pub struct PersistStatsHandler;
+pub struct PersistStatsHandler {
+    stats_cache: DashMap<StatKey, Vec<Stat>>,
+}
 
 #[async_trait::async_trait]
 impl HeartbeatHandler for PersistStatsHandler {
+    fn is_acceptable(&self, role: Role) -> bool {
+        role == Role::Datanode
+    }
+
     async fn handle(
         &self,
         _req: &HeartbeatRequest,
         ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
     ) -> Result<()> {
-        if ctx.is_skip_all() || acc.stats.is_empty() {
+        let Some(stat) = acc.stat.take() else { return Ok(()) };
+
+        let key = stat.stat_key();
+        let mut entry = self
+            .stats_cache
+            .entry(key)
+            .or_insert_with(|| Vec::with_capacity(MAX_CACHED_STATS_PER_KEY));
+        let stats = entry.value_mut();
+        stats.push(stat);
+
+        if stats.len() < MAX_CACHED_STATS_PER_KEY {
             return Ok(());
         }
 
-        let stats = &mut acc.stats;
-        let key = match stats.get(0) {
-            Some(stat) => stat.stat_key(),
-            None => return Ok(()),
-        };
-
-        // take stats from &mut acc.stats, avoid clone of vec
-        let stats = std::mem::take(stats);
-
+        let stats = stats.drain(..).collect();
         let val = StatValue { stats };
 
         let put = PutRequest {
@@ -65,42 +77,41 @@ mod tests {
     use api::v1::meta::RangeRequest;
 
     use super::*;
-    use crate::handler::node_stat::Stat;
+    use crate::handler::{HeartbeatMailbox, Pushers};
     use crate::keys::StatKey;
+    use crate::sequence::Sequence;
     use crate::service::store::memory::MemStore;
 
     #[tokio::test]
     async fn test_handle_datanode_stats() {
         let in_memory = Arc::new(MemStore::new());
         let kv_store = Arc::new(MemStore::new());
+        let seq = Sequence::new("test_seq", 0, 10, kv_store.clone());
+        let mailbox = HeartbeatMailbox::create(Pushers::default(), seq);
         let mut ctx = Context {
-            datanode_lease_secs: 30,
             server_addr: "127.0.0.1:0000".to_string(),
             in_memory,
             kv_store,
+            mailbox,
             election: None,
             skip_all: Arc::new(AtomicBool::new(false)),
-            catalog: None,
-            schema: None,
-            table: None,
+            is_infancy: false,
         };
 
         let req = HeartbeatRequest::default();
-        let mut acc = HeartbeatAccumulator {
-            stats: vec![Stat {
-                cluster_id: 3,
-                id: 101,
-                region_num: Some(100),
+        let handler = PersistStatsHandler::default();
+        for i in 1..=MAX_CACHED_STATS_PER_KEY {
+            let mut acc = HeartbeatAccumulator {
+                stat: Some(Stat {
+                    cluster_id: 3,
+                    id: 101,
+                    region_num: Some(i as _),
+                    ..Default::default()
+                }),
                 ..Default::default()
-            }],
-            ..Default::default()
-        };
-
-        let stats_handler = PersistStatsHandler;
-        stats_handler
-            .handle(&req, &mut ctx, &mut acc)
-            .await
-            .unwrap();
+            };
+            handler.handle(&req, &mut ctx, &mut acc).await.unwrap();
+        }
 
         let key = StatKey {
             cluster_id: 3,
@@ -124,7 +135,7 @@ mod tests {
 
         let val: StatValue = kv.value.clone().try_into().unwrap();
 
-        assert_eq!(1, val.stats.len());
-        assert_eq!(Some(100), val.stats[0].region_num);
+        assert_eq!(10, val.stats.len());
+        assert_eq!(Some(1), val.stats[0].region_num);
     }
 }

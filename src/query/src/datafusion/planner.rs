@@ -55,7 +55,7 @@ impl DfContextProviderAdapter {
             .context(DataFusionSnafu)?;
 
         let mut table_provider = DfTableSourceProvider::new(
-            engine_state.catalog_list().clone(),
+            engine_state.catalog_manager().clone(),
             engine_state.disallow_cross_schema_query(),
             query_ctx.as_ref(),
         );
@@ -79,7 +79,7 @@ async fn resolve_tables(
 
     for table_name in table_names {
         let resolved_name = table_provider
-            .resolve_table_ref(table_name.as_table_reference())
+            .resolve_table_ref(table_name.clone())
             .context(CatalogSnafu)?;
 
         if let Entry::Vacant(v) = tables.entry(resolved_name.to_string()) {

@@ -20,9 +20,11 @@ use common_base::Plugins;
 use common_runtime::Builder as RuntimeBuilder;
 use common_telemetry::info;
 use servers::auth::UserProviderRef;
+use servers::configurator::ConfiguratorRef;
 use servers::error::Error::InternalIo;
 use servers::grpc::GrpcServer;
-use servers::http::HttpServer;
+use servers::http::HttpServerBuilder;
+use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::opentsdb::OpentsdbServer;
 use servers::postgres::PostgresServer;
@@ -35,9 +37,8 @@ use snafu::ResultExt;
 use crate::error::Error::StartServer;
 use crate::error::{self, Result};
 use crate::frontend::FrontendOptions;
-use crate::influxdb::InfluxdbOptions;
 use crate::instance::FrontendInstance;
-use crate::prometheus::PrometheusOptions;
+use crate::service_config::{InfluxdbOptions, PrometheusOptions};
 
 pub(crate) struct Services;
 
@@ -55,7 +56,7 @@ impl Services {
         T: FrontendInstance,
     {
         let mut result = Vec::<ServerHandler>::with_capacity(plugins.len());
-        let user_provider = plugins.get::<UserProviderRef>().cloned();
+        let user_provider = plugins.get::<UserProviderRef>();
 
         if let Some(opts) = &opts.grpc_options {
             let grpc_addr = parse_addr(&opts.addr)?;
@@ -70,6 +71,7 @@ impl Services {
 
             let grpc_server = GrpcServer::new(
                 ServerGrpcQueryHandlerAdaptor::arc(instance.clone()),
+                Some(instance.clone()),
                 user_provider.clone(),
                 grpc_runtime,
             );
@@ -150,33 +152,37 @@ impl Services {
         if let Some(http_options) = &opts.http_options {
             let http_addr = parse_addr(&http_options.addr)?;
 
-            let mut http_server = HttpServer::new(
-                ServerSqlQueryHandlerAdaptor::arc(instance.clone()),
-                ServerGrpcQueryHandlerAdaptor::arc(instance.clone()),
-                http_options.clone(),
-            );
+            let mut http_server_builder = HttpServerBuilder::new(http_options.clone());
+            http_server_builder
+                .with_sql_handler(ServerSqlQueryHandlerAdaptor::arc(instance.clone()))
+                .with_grpc_handler(ServerGrpcQueryHandlerAdaptor::arc(instance.clone()));
+
             if let Some(user_provider) = user_provider.clone() {
-                http_server.set_user_provider(user_provider);
+                http_server_builder.with_user_provider(user_provider);
             }
 
             if set_opentsdb_handler {
-                http_server.set_opentsdb_handler(instance.clone());
+                http_server_builder.with_opentsdb_handler(instance.clone());
             }
             if matches!(
                 opts.influxdb_options,
                 Some(InfluxdbOptions { enable: true })
             ) {
-                http_server.set_influxdb_handler(instance.clone());
+                http_server_builder.with_influxdb_handler(instance.clone());
             }
 
             if matches!(
                 opts.prometheus_options,
                 Some(PrometheusOptions { enable: true })
             ) {
-                http_server.set_prom_handler(instance.clone());
+                http_server_builder.with_prom_handler(instance.clone());
             }
-            http_server.set_script_handler(instance.clone());
+            http_server_builder.with_metrics_handler(MetricsHandler);
+            http_server_builder.with_script_handler(instance.clone());
 
+            http_server_builder.with_configurator(plugins.get::<ConfiguratorRef>());
+
+            let http_server = http_server_builder.build();
             result.push((Box::new(http_server), http_addr));
         }
 

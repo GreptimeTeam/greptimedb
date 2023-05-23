@@ -61,7 +61,7 @@ impl DfLogicalPlanner {
         )
         .await?;
 
-        let config_options = self.session_state.config().config_options();
+        let config_options = self.session_state.config().options();
         let parser_options = ParserOptions {
             enable_ident_normalization: config_options.sql_parser.enable_ident_normalization,
             parse_float_as_decimal: config_options.sql_parser.parse_float_as_decimal,
@@ -82,7 +82,7 @@ impl DfLogicalPlanner {
 
     async fn plan_pql(&self, stmt: EvalStmt, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
         let table_provider = DfTableSourceProvider::new(
-            self.engine_state.catalog_list().clone(),
+            self.engine_state.catalog_manager().clone(),
             self.engine_state.disallow_cross_schema_query(),
             query_ctx.as_ref(),
         );

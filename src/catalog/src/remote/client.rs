@@ -16,9 +16,9 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use async_stream::stream;
+use common_meta::rpc::store::{CompareAndPutRequest, DeleteRangeRequest, PutRequest, RangeRequest};
 use common_telemetry::info;
 use meta_client::client::MetaClient;
-use meta_client::rpc::{CompareAndPutRequest, DeleteRangeRequest, PutRequest, RangeRequest};
 use snafu::ResultExt;
 
 use crate::error::{Error, MetaSrvSnafu};

@@ -15,6 +15,7 @@
 use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
+use std::sync::Arc;
 
 use arrow::datatypes::{DataType as ArrowDataType, Field};
 use common_base::bytes::{Bytes, StringBytes};
@@ -179,6 +180,15 @@ impl Value {
         }
     }
 
+    /// Cast Value to timestamp. Return None if value is not a valid timestamp data type.
+    pub fn as_timestamp(&self) -> Option<Timestamp> {
+        match self {
+            Value::Int64(v) => Some(Timestamp::new_millisecond(*v)),
+            Value::Timestamp(t) => Some(*t),
+            _ => None,
+        }
+    }
+
     /// Returns the logical type of the value.
     pub fn logical_type_id(&self) -> LogicalTypeId {
         match self {
@@ -271,7 +281,7 @@ fn to_null_value(output_type: &ConcreteDataType) -> ScalarValue {
         ConcreteDataType::DateTime(_) => ScalarValue::Date64(None),
         ConcreteDataType::Timestamp(t) => timestamp_to_scalar_value(t.unit(), None),
         ConcreteDataType::List(_) => {
-            ScalarValue::List(None, Box::new(new_item_field(output_type.as_arrow_type())))
+            ScalarValue::List(None, Arc::new(new_item_field(output_type.as_arrow_type())))
         }
         ConcreteDataType::Dictionary(dict) => ScalarValue::Dictionary(
             Box::new(dict.key_type().as_arrow_type()),
@@ -490,7 +500,7 @@ impl ListValue {
 
         Ok(ScalarValue::List(
             vs,
-            Box::new(new_item_field(output_type.item_type().as_arrow_type())),
+            Arc::new(new_item_field(output_type.item_type().as_arrow_type())),
         ))
     }
 }
@@ -1345,6 +1355,7 @@ mod tests {
 
     #[test]
     fn test_display() {
+        std::env::set_var("TZ", "Asia/Shanghai");
         assert_eq!(Value::Null.to_string(), "Null");
         assert_eq!(Value::UInt8(8).to_string(), "8");
         assert_eq!(Value::UInt16(16).to_string(), "16");
@@ -1366,11 +1377,11 @@ mod tests {
         assert_eq!(Value::Date(Date::new(0)).to_string(), "1970-01-01");
         assert_eq!(
             Value::DateTime(DateTime::new(0)).to_string(),
-            "1970-01-01 00:00:00"
+            "1970-01-01 08:00:00+0800"
         );
         assert_eq!(
             Value::Timestamp(Timestamp::new(1000, TimeUnit::Millisecond)).to_string(),
-            "1970-01-01 00:00:01+0000"
+            "1970-01-01 08:00:01+0800"
         );
         assert_eq!(
             Value::List(ListValue::new(

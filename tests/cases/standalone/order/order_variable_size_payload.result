@@ -352,8 +352,8 @@ CREATE TABLE DirectReports
     Name varchar NOT NULL,
     Title varchar NOT NULL,
     EmployeeLevel int NOT NULL,
-    Sort varchar NOT NULL,
-    Timestamp BIGINT TIME INDEX,
+    "Sort" varchar NOT NULL,
+    "Timestamp" BIGINT TIME INDEX,
 );
 
 Affected Rows: 0
@@ -406,6 +406,10 @@ DROP TABLE test4;
 Affected Rows: 1
 
 DROP TABLE tpch_q1_agg;
+
+Affected Rows: 1
+
+DROP TABLE test5;
 
 Affected Rows: 1
 

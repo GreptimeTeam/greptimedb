@@ -35,7 +35,7 @@ use crate::metadata::{
     TableId, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType, TableVersion,
 };
 use crate::table::scan::SimpleTableScan;
-use crate::Table;
+use crate::{ColumnStatistics, Table, TableStatistics};
 
 #[derive(Debug, Clone)]
 pub struct MemTable {
@@ -171,6 +171,30 @@ impl Table for MemTable {
             schema: recordbatch.schema.clone(),
             recordbatch: Some(recordbatch),
         }))))
+    }
+
+    fn statistics(&self) -> Option<TableStatistics> {
+        let df_recordbatch = self.recordbatch.df_record_batch();
+        let num_rows = df_recordbatch.num_rows();
+        let total_byte_size = df_recordbatch.get_array_memory_size();
+        let column_statistics: Vec<_> = df_recordbatch
+            .columns()
+            .iter()
+            .map(|col| {
+                let null_count = col.null_count();
+                ColumnStatistics {
+                    null_count: Some(null_count),
+                    // TODO(discord9): implement more statistics
+                    ..Default::default()
+                }
+            })
+            .collect();
+        Some(TableStatistics {
+            num_rows: Some(num_rows),
+            total_byte_size: Some(total_byte_size),
+            column_statistics: Some(column_statistics),
+            is_exact: true,
+        })
     }
 }
 

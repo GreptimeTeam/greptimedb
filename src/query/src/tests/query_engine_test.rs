@@ -15,7 +15,6 @@
 use std::sync::Arc;
 
 use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
-use catalog::{CatalogList, CatalogProvider, SchemaProvider};
 use common_base::Plugins;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::BoxedError;
@@ -47,7 +46,7 @@ async fn test_datafusion_query_engine() -> Result<()> {
     let catalog_list = catalog::local::new_memory_catalog_list()
         .map_err(BoxedError::new)
         .context(QueryExecutionSnafu)?;
-    let factory = QueryEngineFactory::new(catalog_list);
+    let factory = QueryEngineFactory::new(catalog_list, false);
     let engine = factory.query_engine();
 
     let column_schemas = vec![ColumnSchema::new(
@@ -110,14 +109,14 @@ fn catalog_list() -> Result<Arc<MemoryCatalogManager>> {
 
     let default_schema = Arc::new(MemorySchemaProvider::new());
     default_schema
-        .register_table("numbers".to_string(), Arc::new(NumbersTable::default()))
+        .register_table_sync("numbers".to_string(), Arc::new(NumbersTable::default()))
         .unwrap();
     let default_catalog = Arc::new(MemoryCatalogProvider::new());
     default_catalog
-        .register_schema(DEFAULT_SCHEMA_NAME.to_string(), default_schema)
+        .register_schema_sync(DEFAULT_SCHEMA_NAME.to_string(), default_schema)
         .unwrap();
     catalog_list
-        .register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
+        .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
         .unwrap();
     Ok(catalog_list)
 }
@@ -128,13 +127,13 @@ async fn test_query_validate() -> Result<()> {
     let catalog_list = catalog_list()?;
 
     // set plugins
-    let mut plugins = Plugins::new();
+    let plugins = Plugins::new();
     plugins.insert(QueryOptions {
         disallow_cross_schema_query: true,
     });
     let plugins = Arc::new(plugins);
 
-    let factory = QueryEngineFactory::new_with_plugins(catalog_list, plugins);
+    let factory = QueryEngineFactory::new_with_plugins(catalog_list, false, plugins);
     let engine = factory.query_engine();
 
     let stmt = QueryLanguageParser::parse_sql("select number from public.numbers").unwrap();
@@ -158,7 +157,7 @@ async fn test_udf() -> Result<()> {
     common_telemetry::init_default_ut_logging();
     let catalog_list = catalog_list()?;
 
-    let factory = QueryEngineFactory::new(catalog_list);
+    let factory = QueryEngineFactory::new(catalog_list, false);
     let engine = factory.query_engine();
 
     let pow = make_scalar_function(pow);

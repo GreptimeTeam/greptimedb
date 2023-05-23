@@ -11,6 +11,7 @@ path = "src/bin/greptime.rs"
 
 [features]
 mem-prof = ["tikv-jemallocator", "tikv-jemalloc-ctl"]
+tokio-console = ["common-telemetry/tokio-console"]
 
 [dependencies]
 anymap = "1.0.0-beta.2"
@@ -24,6 +25,7 @@ common-recordbatch = { path = "../common/recordbatch" }
 common-telemetry = { path = "../common/telemetry", features = [
     "deadlock_detection",
 ] }
+config = "0.13"
 datanode = { path = "../datanode" }
 either = "1.8"
 frontend = { path = "../frontend" }
@@ -42,13 +44,13 @@ substrait = { path = "../common/substrait" }
 tikv-jemalloc-ctl = { version = "0.5", optional = true }
 tikv-jemallocator = { version = "0.5", optional = true }
 tokio.workspace = true
-toml = "0.5"
-
 
 [dev-dependencies]
 common-test-util = { path = "../common/test-util" }
 rexpect = "0.5"
+temp-env = "0.3"
 serde.workspace = true
+toml = "0.5"
 
 [build-dependencies]
 build-data = "0.1.3"

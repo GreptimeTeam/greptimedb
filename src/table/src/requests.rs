@@ -13,7 +13,6 @@
 // limitations under the License.
 
 //! Table and TableEngine requests
-mod insert;
 
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -22,13 +21,18 @@ use std::time::Duration;
 use common_base::readable_size::ReadableSize;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::{ColumnSchema, RawSchema};
-pub use insert::InsertRequest;
 use serde::{Deserialize, Serialize};
 use store_api::storage::RegionNumber;
 
+use crate::engine::TableReference;
 use crate::error;
 use crate::error::ParseTableOptionSnafu;
 use crate::metadata::TableId;
+
+pub const IMMUTABLE_TABLE_META_KEY: &str = "__private.immutable_table_meta";
+pub const IMMUTABLE_TABLE_LOCATION_KEY: &str = "location";
+pub const IMMUTABLE_TABLE_PATTERN_KEY: &str = "pattern";
+pub const IMMUTABLE_TABLE_FORMAT_KEY: &str = "format";
 
 #[derive(Debug, Clone)]
 pub struct CreateDatabaseRequest {
@@ -49,6 +53,17 @@ pub struct CreateTableRequest {
     pub primary_key_indices: Vec<usize>,
     pub create_if_not_exists: bool,
     pub table_options: TableOptions,
+    pub engine: String,
+}
+
+impl CreateTableRequest {
+    pub fn table_ref(&self) -> TableReference {
+        TableReference {
+            catalog: &self.catalog_name,
+            schema: &self.schema_name,
+            table: &self.table_name,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -61,10 +76,14 @@ pub struct TableOptions {
     pub ttl: Option<Duration>,
     /// Extra options that may not applicable to all table engines.
     pub extra_options: HashMap<String, String>,
+    /// Time window for compaction
+    pub compaction_time_window: Option<i64>,
 }
 
 pub const WRITE_BUFFER_SIZE_KEY: &str = "write_buffer_size";
 pub const TTL_KEY: &str = "ttl";
+pub const REGIONS_KEY: &str = "regions";
+pub const COMPACTION_TIME_WINDOW_KEY: &str = "compaction_time_window";
 
 impl TryFrom<&HashMap<String, String>> for TableOptions {
     type Error = error::Error;
@@ -95,8 +114,24 @@ impl TryFrom<&HashMap<String, String>> for TableOptions {
                 .into();
             options.ttl = Some(ttl_value);
         }
+        if let Some(compaction_time_window) = value.get(COMPACTION_TIME_WINDOW_KEY) {
+            options.compaction_time_window = match compaction_time_window.parse::<i64>() {
+                Ok(t) => Some(t),
+                Err(_) => {
+                    return ParseTableOptionSnafu {
+                        key: COMPACTION_TIME_WINDOW_KEY,
+                        value: compaction_time_window,
+                    }
+                    .fail()
+                }
+            };
+        }
         options.extra_options = HashMap::from_iter(value.iter().filter_map(|(k, v)| {
-            if k != WRITE_BUFFER_SIZE_KEY && k != TTL_KEY {
+            if k != WRITE_BUFFER_SIZE_KEY
+                && k != REGIONS_KEY
+                && k != TTL_KEY
+                && k != COMPACTION_TIME_WINDOW_KEY
+            {
                 Some((k.clone(), v.clone()))
             } else {
                 None
@@ -119,6 +154,12 @@ impl From<&TableOptions> for HashMap<String, String> {
             let ttl_str = humantime::format_duration(ttl).to_string();
             res.insert(TTL_KEY.to_string(), ttl_str);
         }
+        if let Some(compaction_time_window) = opts.compaction_time_window {
+            res.insert(
+                COMPACTION_TIME_WINDOW_KEY.to_string(),
+                compaction_time_window.to_string(),
+            );
+        }
         res.extend(
             opts.extra_options
                 .iter()
@@ -135,10 +176,11 @@ pub struct OpenTableRequest {
     pub schema_name: String,
     pub table_name: String,
     pub table_id: TableId,
+    pub region_numbers: Vec<RegionNumber>,
 }
 
 /// Alter table request
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlterTableRequest {
     pub catalog_name: String,
     pub schema_name: String,
@@ -147,19 +189,27 @@ pub struct AlterTableRequest {
 }
 
 impl AlterTableRequest {
+    pub fn table_ref(&self) -> TableReference {
+        TableReference {
+            catalog: &self.catalog_name,
+            schema: &self.schema_name,
+            table: &self.table_name,
+        }
+    }
+
     pub fn is_rename_table(&self) -> bool {
         matches!(self.alter_kind, AlterKind::RenameTable { .. })
     }
 }
 
 /// Add column request
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddColumnRequest {
     pub column_schema: ColumnSchema,
     pub is_key: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AlterKind {
     AddColumns { columns: Vec<AddColumnRequest> },
     DropColumns { names: Vec<String> },
@@ -167,11 +217,50 @@ pub enum AlterKind {
 }
 
 /// Drop table request
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DropTableRequest {
     pub catalog_name: String,
     pub schema_name: String,
     pub table_name: String,
+}
+
+impl DropTableRequest {
+    pub fn table_ref(&self) -> TableReference {
+        TableReference {
+            catalog: &self.catalog_name,
+            schema: &self.schema_name,
+            table: &self.table_name,
+        }
+    }
+}
+
+/// Drop table request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CloseTableRequest {
+    pub catalog_name: String,
+    pub schema_name: String,
+    pub table_name: String,
+    /// Do nothing if region_numbers is empty
+    pub region_numbers: Vec<RegionNumber>,
+}
+
+impl CloseTableRequest {
+    pub fn table_ref(&self) -> TableReference {
+        TableReference {
+            catalog: &self.catalog_name,
+            schema: &self.schema_name,
+            table: &self.table_name,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct InsertRequest {
+    pub catalog_name: String,
+    pub schema_name: String,
+    pub table_name: String,
+    pub columns_values: HashMap<String, VectorRef>,
+    pub region_number: RegionNumber,
 }
 
 /// Delete (by primary key) request
@@ -196,6 +285,7 @@ pub struct CopyTableRequest {
     pub schema_name: String,
     pub table_name: String,
     pub location: String,
+    pub with: HashMap<String, String>,
     pub connection: HashMap<String, String>,
     pub pattern: Option<String>,
     pub direction: CopyDirection,
@@ -211,6 +301,19 @@ pub struct FlushTableRequest {
     pub wait: Option<bool>,
 }
 
+#[macro_export]
+macro_rules! meter_insert_request {
+    ($req: expr) => {
+        meter_macros::write_meter!(
+            $req.catalog_name.to_string(),
+            $req.schema_name.to_string(),
+            $req.table_name.to_string(),
+            $req.region_number,
+            $req
+        );
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,6 +324,7 @@ mod tests {
             write_buffer_size: None,
             ttl: Some(Duration::from_secs(1000)),
             extra_options: HashMap::new(),
+            compaction_time_window: Some(1677652502),
         };
         let serialized = serde_json::to_string(&options).unwrap();
         let deserialized: TableOptions = serde_json::from_str(&serialized).unwrap();
@@ -233,6 +337,7 @@ mod tests {
             write_buffer_size: Some(ReadableSize::mb(128)),
             ttl: Some(Duration::from_secs(1000)),
             extra_options: HashMap::new(),
+            compaction_time_window: Some(1677652502),
         };
         let serialized_map = HashMap::from(&options);
         let serialized = TableOptions::try_from(&serialized_map).unwrap();
@@ -242,6 +347,7 @@ mod tests {
             write_buffer_size: None,
             ttl: None,
             extra_options: HashMap::new(),
+            compaction_time_window: None,
         };
         let serialized_map = HashMap::from(&options);
         let serialized = TableOptions::try_from(&serialized_map).unwrap();
@@ -251,6 +357,7 @@ mod tests {
             write_buffer_size: Some(ReadableSize::mb(128)),
             ttl: Some(Duration::from_secs(1000)),
             extra_options: HashMap::from([("a".to_string(), "A".to_string())]),
+            compaction_time_window: Some(1677652502),
         };
         let serialized_map = HashMap::from(&options);
         let serialized = TableOptions::try_from(&serialized_map).unwrap();

@@ -18,11 +18,14 @@ mod writer;
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use common_telemetry::logging;
+use common_telemetry::{info, logging};
+use common_time::util;
+use metrics::{decrement_gauge, increment_gauge};
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::manifest::{self, Manifest, ManifestVersion, MetaActionIterator};
@@ -37,11 +40,13 @@ use crate::error::{self, Error, Result};
 use crate::file_purger::FilePurgerRef;
 use crate::flush::{FlushSchedulerRef, FlushStrategyRef};
 use crate::manifest::action::{
-    RawRegionMetadata, RegionChange, RegionMetaAction, RegionMetaActionList,
+    RawRegionMetadata, RegionChange, RegionCheckpoint, RegionMetaAction, RegionMetaActionList,
 };
 use crate::manifest::region::RegionManifest;
 use crate::memtable::MemtableBuilderRef;
 use crate::metadata::{RegionMetaImpl, RegionMetadata, RegionMetadataRef};
+pub(crate) use crate::region::writer::schedule_compaction;
+use crate::region::writer::DropContext;
 pub use crate::region::writer::{AlterContext, RegionWriter, RegionWriterRef, WriterContext};
 use crate::schema::compat::CompatWrite;
 use crate::snapshot::SnapshotImpl;
@@ -72,7 +77,6 @@ impl<S: LogStore> fmt::Debug for RegionImpl<S> {
             .field("name", &self.inner.shared.name)
             .field("wal", &self.inner.wal)
             .field("flush_strategy", &self.inner.flush_strategy)
-            .field("flush_scheduler", &self.inner.flush_scheduler)
             .field("compaction_scheduler", &self.inner.compaction_scheduler)
             .field("sst_layer", &self.inner.sst_layer)
             .field("manifest", &self.inner.manifest)
@@ -122,8 +126,8 @@ impl<S: LogStore> Region for RegionImpl<S> {
         self.inner.alter(request).await
     }
 
-    async fn close(&self) -> Result<()> {
-        self.inner.close().await
+    async fn drop_region(&self) -> Result<()> {
+        self.inner.drop_region().await
     }
 
     fn disk_usage_bytes(&self) -> u64 {
@@ -150,16 +154,35 @@ pub struct StoreConfig<S: LogStore> {
     pub sst_layer: AccessLayerRef,
     pub manifest: RegionManifest,
     pub memtable_builder: MemtableBuilderRef,
-    pub flush_scheduler: FlushSchedulerRef,
+    pub flush_scheduler: FlushSchedulerRef<S>,
     pub flush_strategy: FlushStrategyRef,
     pub compaction_scheduler: CompactionSchedulerRef<S>,
     pub engine_config: Arc<EngineConfig>,
     pub file_purger: FilePurgerRef,
     pub ttl: Option<Duration>,
+    pub compaction_time_window: Option<i64>,
+    pub write_buffer_size: usize,
 }
 
 pub type RecoverdMetadata = (SequenceNumber, (ManifestVersion, RawRegionMetadata));
 pub type RecoveredMetadataMap = BTreeMap<SequenceNumber, (ManifestVersion, RawRegionMetadata)>;
+
+#[derive(Debug)]
+pub struct CompactContext {
+    /// Whether to wait the compaction result.
+    pub wait: bool,
+    /// Max file number in level 0.
+    pub max_files_in_l0: usize,
+}
+
+impl Default for CompactContext {
+    fn default() -> CompactContext {
+        CompactContext {
+            wait: true,
+            max_files_in_l0: 1,
+        }
+    }
+}
 
 impl<S: LogStore> RegionImpl<S> {
     /// Create a new region and also persist the region metadata to manifest.
@@ -170,17 +193,21 @@ impl<S: LogStore> RegionImpl<S> {
         store_config: StoreConfig<S>,
     ) -> Result<RegionImpl<S>> {
         let metadata = Arc::new(metadata);
+
         // Try to persist region data to manifest, ensure the new region could be recovered from
         // the manifest.
-        let manifest_version = store_config
-            .manifest
-            .update(RegionMetaActionList::with_action(RegionMetaAction::Change(
-                RegionChange {
-                    metadata: metadata.as_ref().into(),
-                    committed_sequence: INIT_COMMITTED_SEQUENCE,
-                },
-            )))
-            .await?;
+        let manifest_version = {
+            let _timer = common_telemetry::timer!(crate::metrics::CREATE_REGION_UPDATE_MANIFEST);
+            store_config
+                .manifest
+                .update(RegionMetaActionList::with_action(RegionMetaAction::Change(
+                    RegionChange {
+                        metadata: metadata.as_ref().into(),
+                        committed_sequence: INIT_COMMITTED_SEQUENCE,
+                    },
+                )))
+                .await?
+        };
 
         let mutable_memtable = store_config
             .memtable_builder
@@ -193,6 +220,7 @@ impl<S: LogStore> RegionImpl<S> {
             store_config.file_purger.clone(),
         );
         let region = RegionImpl::new(version, store_config);
+        increment_gauge!(crate::metrics::REGION_COUNT, 1.0);
 
         Ok(region)
     }
@@ -210,11 +238,14 @@ impl<S: LogStore> RegionImpl<S> {
                 id,
                 name,
                 version_control: Arc::new(version_control),
+                last_flush_millis: AtomicI64::new(0),
             }),
             writer: Arc::new(RegionWriter::new(
                 store_config.memtable_builder,
                 store_config.engine_config.clone(),
                 store_config.ttl,
+                store_config.compaction_time_window,
+                store_config.write_buffer_size,
             )),
             wal,
             flush_strategy: store_config.flush_strategy,
@@ -233,7 +264,7 @@ impl<S: LogStore> RegionImpl<S> {
     pub async fn open(
         name: String,
         store_config: StoreConfig<S>,
-        _opts: &OpenOptions,
+        opts: &OpenOptions,
     ) -> Result<Option<RegionImpl<S>>> {
         // Load version meta data from manifest.
         let (version, mut recovered_metadata) = match Self::recover_from_manifest(
@@ -285,16 +316,27 @@ impl<S: LogStore> RegionImpl<S> {
 
         let wal = Wal::new(metadata.id(), store_config.log_store);
         wal.obsolete(flushed_sequence).await?;
+        info!(
+            "Obsolete WAL entries on startup, region: {}, flushed sequence: {}",
+            metadata.id(),
+            flushed_sequence
+        );
+
         let shared = Arc::new(SharedData {
             id: metadata.id(),
             name,
             version_control,
+            last_flush_millis: AtomicI64::new(0),
         });
-
+        let compaction_time_window = store_config
+            .compaction_time_window
+            .or(opts.compaction_time_window);
         let writer = Arc::new(RegionWriter::new(
             store_config.memtable_builder,
             store_config.engine_config.clone(),
             store_config.ttl,
+            compaction_time_window,
+            store_config.write_buffer_size,
         ));
         let writer_ctx = WriterContext {
             shared: &shared,
@@ -311,6 +353,12 @@ impl<S: LogStore> RegionImpl<S> {
             .replay(recovered_metadata_after_flushed, writer_ctx)
             .await?;
 
+        // Try to do a manifest checkpoint on opening
+        if store_config.engine_config.manifest_checkpoint_on_startup {
+            let manifest = &store_config.manifest;
+            manifest.may_do_checkpoint(manifest.last_version()).await?;
+        }
+
         let inner = Arc::new(RegionInner {
             shared,
             writer,
@@ -322,6 +370,7 @@ impl<S: LogStore> RegionImpl<S> {
             manifest: store_config.manifest,
         });
 
+        increment_gauge!(crate::metrics::REGION_COUNT, 1.0);
         Ok(Some(RegionImpl { inner }))
     }
 
@@ -330,16 +379,79 @@ impl<S: LogStore> RegionImpl<S> {
         self.inner.shared.id()
     }
 
+    /// Returns last flush timestamp in millis.
+    pub(crate) fn last_flush_millis(&self) -> i64 {
+        self.inner.shared.last_flush_millis()
+    }
+
+    /// Returns the [VersionControl] of the region.
+    pub(crate) fn version_control(&self) -> &VersionControl {
+        self.inner.version_control()
+    }
+
+    fn create_version_with_checkpoint(
+        checkpoint: RegionCheckpoint,
+        memtable_builder: &MemtableBuilderRef,
+        sst_layer: &AccessLayerRef,
+        file_purger: &FilePurgerRef,
+    ) -> Result<Option<Version>> {
+        if checkpoint.checkpoint.is_none() {
+            return Ok(None);
+        }
+        // Safety: it's safe to unwrap here, checking it above.
+        let s = checkpoint.checkpoint.unwrap();
+
+        let region = s.metadata.name.clone();
+        let region_metadata: RegionMetadata = s
+            .metadata
+            .try_into()
+            .context(error::InvalidRawRegionSnafu { region })?;
+
+        let memtable = memtable_builder.build(region_metadata.schema().clone());
+        let mut version = Version::with_manifest_version(
+            Arc::new(region_metadata),
+            checkpoint.last_version,
+            memtable,
+            sst_layer.clone(),
+            file_purger.clone(),
+        );
+
+        if let Some(v) = s.version {
+            version.apply_checkpoint(
+                v.flushed_sequence,
+                v.manifest_version,
+                v.files.into_values(),
+            );
+        }
+
+        Ok(Some(version))
+    }
+
     async fn recover_from_manifest(
         manifest: &RegionManifest,
         memtable_builder: &MemtableBuilderRef,
         sst_layer: &AccessLayerRef,
         file_purger: &FilePurgerRef,
     ) -> Result<(Option<Version>, RecoveredMetadataMap)> {
-        let (start, end) = Self::manifest_scan_range();
+        let checkpoint = manifest.last_checkpoint().await?;
+
+        let (start, end, mut version) = if let Some(checkpoint) = checkpoint {
+            (
+                checkpoint.last_version + 1,
+                manifest::MAX_VERSION,
+                Self::create_version_with_checkpoint(
+                    checkpoint,
+                    memtable_builder,
+                    sst_layer,
+                    file_purger,
+                )?,
+            )
+        } else {
+            (manifest::MIN_VERSION, manifest::MAX_VERSION, None)
+        };
+
         let mut iter = manifest.scan(start, end).await?;
 
-        let mut version = None;
         let mut actions = Vec::new();
         let mut last_manifest_version = manifest::MIN_VERSION;
         let mut recovered_metadata = BTreeMap::new();
@@ -387,18 +499,14 @@ impl<S: LogStore> RegionImpl<S> {
 
         assert!(actions.is_empty() || version.is_none());
 
-        if version.is_some() {
+        if let Some(version) = &version {
             // update manifest state after recovering
             let protocol = iter.last_protocol();
             manifest.update_state(last_manifest_version + 1, protocol.clone());
+            manifest.set_flushed_manifest_version(version.manifest_version());
         }
 
         Ok((version, recovered_metadata))
-    }
-
-    fn manifest_scan_range() -> (ManifestVersion, ManifestVersion) {
-        // TODO(dennis): use manifest version in WAL
-        (manifest::MIN_VERSION, manifest::MAX_VERSION)
     }
 
     fn replay_edit(
@@ -421,6 +529,16 @@ impl<S: LogStore> RegionImpl<S> {
         } else {
             version
         }
+    }
+
+    /// Compact the region manually.
+    pub async fn compact(&self, ctx: CompactContext) -> Result<()> {
+        self.inner.compact(ctx).await
+    }
+
+    pub async fn close(&self) -> Result<()> {
+        decrement_gauge!(crate::metrics::REGION_COUNT, 1.0);
+        self.inner.close().await
     }
 }
 
@@ -468,6 +586,9 @@ pub struct SharedData {
     name: String,
     // TODO(yingwen): Maybe no need to use Arc for version control.
     pub version_control: VersionControlRef,
+
+    /// Last flush time in millis.
+    last_flush_millis: AtomicI64,
 }
 
 impl SharedData {
@@ -480,6 +601,17 @@ impl SharedData {
     pub fn name(&self) -> &str {
         &self.name
     }
+
+    /// Update flush time to current time.
+    pub(crate) fn update_flush_millis(&self) {
+        let now = util::current_time_millis();
+        self.last_flush_millis.store(now, Ordering::Relaxed);
+    }
+
+    /// Returns last flush timestamp in millis.
+    fn last_flush_millis(&self) -> i64 {
+        self.last_flush_millis.load(Ordering::Relaxed)
+    }
 }
 
 pub type SharedDataRef = Arc<SharedData>;
@@ -489,7 +621,7 @@ struct RegionInner<S: LogStore> {
     writer: RegionWriterRef,
     wal: Wal<S>,
     flush_strategy: FlushStrategyRef,
-    flush_scheduler: FlushSchedulerRef,
+    flush_scheduler: FlushSchedulerRef<S>,
     compaction_scheduler: CompactionSchedulerRef<S>,
     sst_layer: AccessLayerRef,
     manifest: RegionManifest,
@@ -558,7 +690,23 @@ impl<S: LogStore> RegionInner<S> {
     }
 
     async fn close(&self) -> Result<()> {
-        self.writer.close().await
+        self.writer.close().await?;
+        self.manifest.stop().await
+    }
+
+    async fn drop_region(&self) -> Result<()> {
+        logging::info!("Drop region {}, name: {}", self.shared.id, self.shared.name);
+        let drop_ctx = DropContext {
+            shared: &self.shared,
+            wal: &self.wal,
+            manifest: &self.manifest,
+            flush_scheduler: &self.flush_scheduler,
+            compaction_scheduler: &self.compaction_scheduler,
+            sst_layer: &self.sst_layer,
+        };
+
+        self.manifest.stop().await?;
+        self.writer.on_drop(drop_ctx).await
     }
 
     async fn flush(&self, ctx: &FlushContext) -> Result<()> {
@@ -573,5 +721,20 @@ impl<S: LogStore> RegionInner<S> {
             manifest: &self.manifest,
         };
         self.writer.flush(writer_ctx, ctx).await
+    }
+
+    /// Compact the region manually.
+    async fn compact(&self, ctx: CompactContext) -> Result<()> {
+        let writer_ctx = WriterContext {
+            shared: &self.shared,
+            flush_strategy: &self.flush_strategy,
+            flush_scheduler: &self.flush_scheduler,
+            compaction_scheduler: &self.compaction_scheduler,
+            sst_layer: &self.sst_layer,
+            wal: &self.wal,
+            writer: &self.writer,
+            manifest: &self.manifest,
+        };
+        self.writer.compact(writer_ctx, ctx).await
     }
 }

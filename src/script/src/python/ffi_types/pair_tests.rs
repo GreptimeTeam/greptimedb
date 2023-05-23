@@ -99,7 +99,9 @@ async fn integrated_py_copr_test() {
                 actual_result.insert(col_sch.name.clone(), col.clone());
             }
             for (name, col) in expect_result {
-                let actual_col = actual_result.get(&name).expect("Column with this name");
+                let actual_col = actual_result.get(&name).unwrap_or_else(|| {
+                    panic!("Expect column with name: {name} in {actual_result:?}")
+                });
                 if !check_equal(col.clone(), actual_col.clone()) {
                     panic!("Column {name} doesn't match, expect {col:?}, found {actual_col:?}")
                 }
@@ -109,10 +111,12 @@ async fn integrated_py_copr_test() {
     }
 }
 
+#[allow(clippy::print_stdout)]
 #[test]
 fn pyo3_rspy_test_in_pairs() {
     let testcases = sample_test_case();
     for case in testcases {
+        println!("Testcase: {}", case.script);
         eval_rspy(case.clone());
         #[cfg(feature = "pyo3_backend")]
         eval_pyo3(case);
@@ -122,6 +126,9 @@ fn pyo3_rspy_test_in_pairs() {
 fn check_equal(v0: VectorRef, v1: VectorRef) -> bool {
     let v0 = v0.to_arrow_array();
     let v1 = v1.to_arrow_array();
+    if v0.len() != v1.len() {
+        return false;
+    }
     fn is_float(ty: &ArrowDataType) -> bool {
         use ArrowDataType::*;
         matches!(ty, Float16 | Float32 | Float64)

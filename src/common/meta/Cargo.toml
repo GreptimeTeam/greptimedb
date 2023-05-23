@@ -1,0 +1,18 @@
+[package]
+name = "common-meta"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+api = { path = "../../api" }
+common-catalog = { path = "../catalog" }
+common-error = { path = "../error" }
+serde.workspace = true
+snafu.workspace = true
+serde_json.workspace = true
+table = { path = "../../table" }
+
+[dev-dependencies]
+chrono.workspace = true
+datatypes = { path = "../../datatypes" }

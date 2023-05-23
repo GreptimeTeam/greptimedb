@@ -13,15 +13,18 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::v1::meta::heartbeat_server::HeartbeatServer;
 use api::v1::meta::router_server::RouterServer;
 use api::v1::meta::store_server::StoreServer;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use tower::service_fn;
 
+use crate::metadata_service::{DefaultMetadataService, MetadataService};
 use crate::metasrv::builder::MetaSrvBuilder;
-use crate::metasrv::{MetaSrvOptions, SelectorRef};
+use crate::metasrv::{MetaSrv, MetaSrvOptions, SelectorRef};
 use crate::service::store::etcd::EtcdStore;
 use crate::service::store::kv::KvStoreRef;
 use crate::service::store::memory::MemStore;
@@ -30,6 +33,7 @@ use crate::service::store::memory::MemStore;
 pub struct MockInfo {
     pub server_addr: String,
     pub channel_manager: ChannelManager,
+    pub meta_srv: MetaSrv,
 }
 
 pub async fn mock_with_memstore() -> MockInfo {
@@ -54,6 +58,13 @@ pub async fn mock(
 ) -> MockInfo {
     let server_addr = opts.server_addr.clone();
 
+    let metadata_service = DefaultMetadataService::new(kv_store.clone());
+
+    metadata_service
+        .create_schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, true)
+        .await
+        .unwrap();
+
     let builder = MetaSrvBuilder::new().options(opts).kv_store(kv_store);
 
     let builder = match selector {
@@ -61,19 +72,24 @@ pub async fn mock(
         None => builder,
     };
 
-    let meta_srv = builder.build().await;
+    let meta_srv = builder.build().await.unwrap();
+    meta_srv.try_start().await.unwrap();
 
     let (client, server) = tokio::io::duplex(1024);
+    let service = meta_srv.clone();
     tokio::spawn(async move {
         tonic::transport::Server::builder()
-            .add_service(HeartbeatServer::new(meta_srv.clone()))
-            .add_service(RouterServer::new(meta_srv.clone()))
-            .add_service(StoreServer::new(meta_srv.clone()))
+            .add_service(HeartbeatServer::new(service.clone()))
+            .add_service(RouterServer::new(service.clone()))
+            .add_service(StoreServer::new(service.clone()))
             .serve_with_incoming(futures::stream::iter(vec![Ok::<_, std::io::Error>(server)]))
             .await
     });
 
-    let config = ChannelConfig::new();
+    let config = ChannelConfig::new()
+        .timeout(Duration::from_secs(1))
+        .connect_timeout(Duration::from_secs(1))
+        .tcp_nodelay(true);
     let channel_manager = ChannelManager::with_config(config);
 
     // Move client to an option so we can _move_ the inner value
@@ -101,5 +117,6 @@ pub async fn mock(
     MockInfo {
         server_addr,
         channel_manager,
+        meta_srv,
     }
 }

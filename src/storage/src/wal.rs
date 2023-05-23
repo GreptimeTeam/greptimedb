@@ -16,6 +16,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use common_error::prelude::BoxedError;
+use common_telemetry::timer;
 use futures::{stream, Stream, TryStreamExt};
 use prost::Message;
 use snafu::{ensure, ResultExt};
@@ -25,8 +26,8 @@ use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::codec::{Decoder, Encoder};
 use crate::error::{
-    DecodeWalHeaderSnafu, EncodeWalHeaderSnafu, Error, MarkWalObsoleteSnafu, ReadWalSnafu, Result,
-    WalDataCorruptedSnafu, WriteWalSnafu,
+    DecodeWalHeaderSnafu, DeleteWalNamespaceSnafu, EncodeWalHeaderSnafu, Error,
+    MarkWalObsoleteSnafu, ReadWalSnafu, Result, WalDataCorruptedSnafu, WriteWalSnafu,
 };
 use crate::proto::wal::{self, WalHeader};
 use crate::write_batch::codec::{PayloadDecoder, PayloadEncoder};
@@ -73,6 +74,16 @@ impl<S: LogStore> Wal<S> {
             })
     }
 
+    pub async fn delete_namespace(&self) -> Result<()> {
+        self.store
+            .delete_namespace(&self.namespace)
+            .await
+            .map_err(BoxedError::new)
+            .context(DeleteWalNamespaceSnafu {
+                region_id: self.region_id,
+            })
+    }
+
     #[inline]
     pub fn region_id(&self) -> RegionId {
         self.region_id
@@ -106,6 +117,7 @@ impl<S: LogStore> Wal<S> {
         mut header: WalHeader,
         payload: Option<&Payload>,
     ) -> Result<Id> {
+        let _timer = timer!(crate::metrics::LOG_STORE_WRITE_ELAPSED);
         if let Some(p) = payload {
             header.mutation_types = wal::gen_mutation_types(p);
         }

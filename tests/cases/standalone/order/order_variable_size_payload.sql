@@ -87,8 +87,8 @@ CREATE TABLE DirectReports
     Name varchar NOT NULL,
     Title varchar NOT NULL,
     EmployeeLevel int NOT NULL,
-    Sort varchar NOT NULL,
-    Timestamp BIGINT TIME INDEX,
+    "Sort" varchar NOT NULL,
+    "Timestamp" BIGINT TIME INDEX,
 );
 
 INSERT INTO DirectReports VALUES
@@ -115,6 +115,8 @@ DROP TABLE test1;
 DROP TABLE test4;
 
 DROP TABLE tpch_q1_agg;
+
+DROP TABLE test5;
 
 DROP TABLE test6;
 

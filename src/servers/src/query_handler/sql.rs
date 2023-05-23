@@ -50,7 +50,7 @@ pub trait SqlQueryHandler {
         query_ctx: QueryContextRef,
     ) -> std::result::Result<Option<Schema>, Self::Error>;
 
-    fn is_valid_schema(
+    async fn is_valid_schema(
         &self,
         catalog: &str,
         schema: &str,
@@ -116,9 +116,10 @@ where
             .context(error::DescribeStatementSnafu)
     }
 
-    fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
+    async fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
         self.0
             .is_valid_schema(catalog, schema)
+            .await
             .map_err(BoxedError::new)
             .context(error::CheckDatabaseValiditySnafu)
     }

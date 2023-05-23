@@ -31,17 +31,19 @@ use api::helper::ColumnDataTypeWrapper;
 use common_base::bytes::Bytes;
 use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
+use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, COMMENT_KEY};
+use datatypes::types::TimestampType;
 use datatypes::value::Value;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::ast::{
-    ColumnDef, ColumnOption, ColumnOptionDef, DataType as SqlDataType, Expr, Value as SqlValue,
+    ColumnDef, ColumnOption, ColumnOptionDef, DataType as SqlDataType, Expr, TimezoneInfo,
+    Value as SqlValue,
 };
 use crate::error::{
-    self, ColumnTypeMismatchSnafu, ConvertToGrpcDataTypeSnafu, InvalidSqlValueSnafu,
-    ParseSqlValueSnafu, Result, SerializeColumnDefaultConstraintSnafu, TimestampOverflowSnafu,
-    UnsupportedDefaultValueSnafu,
+    self, ColumnTypeMismatchSnafu, ConvertSqlValueSnafu, ConvertToGrpcDataTypeSnafu,
+    ConvertValueSnafu, InvalidSqlValueSnafu, ParseSqlValueSnafu, Result,
+    SerializeColumnDefaultConstraintSnafu, TimestampOverflowSnafu, UnsupportedDefaultValueSnafu,
 };
 
 fn parse_string_to_value(
@@ -192,11 +194,42 @@ pub fn sql_value_to_value(
             (*b).into()
         }
         SqlValue::DoubleQuotedString(s) | SqlValue::SingleQuotedString(s) => {
-            parse_string_to_value(column_name, s.to_owned(), data_type)?
+            parse_string_to_value(column_name, s.clone(), data_type)?
         }
         SqlValue::HexStringLiteral(s) => parse_hex_string(s)?,
         SqlValue::Placeholder(s) => return InvalidSqlValueSnafu { value: s }.fail(),
-        _ => todo!("Other sql value"),
+
+        // TODO(dennis): supports binary string
+        _ => {
+            return ConvertSqlValueSnafu {
+                value: sql_val.clone(),
+                datatype: data_type.clone(),
+            }
+            .fail()
+        }
+    })
+}
+
+pub fn value_to_sql_value(val: &Value) -> Result<SqlValue> {
+    Ok(match val {
+        Value::Int8(v) => SqlValue::Number(v.to_string(), false),
+        Value::UInt8(v) => SqlValue::Number(v.to_string(), false),
+        Value::Int16(v) => SqlValue::Number(v.to_string(), false),
+        Value::UInt16(v) => SqlValue::Number(v.to_string(), false),
+        Value::Int32(v) => SqlValue::Number(v.to_string(), false),
+        Value::UInt32(v) => SqlValue::Number(v.to_string(), false),
+        Value::Int64(v) => SqlValue::Number(v.to_string(), false),
+        Value::UInt64(v) => SqlValue::Number(v.to_string(), false),
+        Value::Float32(v) => SqlValue::Number(v.to_string(), false),
+        Value::Float64(v) => SqlValue::Number(v.to_string(), false),
+        Value::Boolean(b) => SqlValue::Boolean(*b),
+        Value::Date(d) => SqlValue::SingleQuotedString(d.to_string()),
+        Value::DateTime(d) => SqlValue::SingleQuotedString(d.to_string()),
+        Value::Timestamp(ts) => SqlValue::SingleQuotedString(ts.to_iso8601_string()),
+        Value::String(s) => SqlValue::SingleQuotedString(s.as_utf8().to_string()),
+        Value::Null => SqlValue::Null,
+        // TODO(dennis): supports binary
+        _ => return ConvertValueSnafu { value: val.clone() }.fail(),
     })
 }
 
@@ -248,12 +281,26 @@ pub fn column_def_to_schema(column_def: &ColumnDef, is_time_index: bool) -> Resu
     let default_constraint =
         parse_column_default_constraint(&name, &data_type, &column_def.options)?;
 
-    ColumnSchema::new(name, data_type, is_nullable)
+    let mut column_schema = ColumnSchema::new(name, data_type, is_nullable)
         .with_time_index(is_time_index)
         .with_default_constraint(default_constraint)
         .context(error::InvalidDefaultSnafu {
             column: &column_def.name.value,
-        })
+        })?;
+
+    if let Some(ColumnOption::Comment(c)) = column_def.options.iter().find_map(|o| {
+        if matches!(o.option, ColumnOption::Comment(_)) {
+            Some(&o.option)
+        } else {
+            None
+        }
+    }) {
+        column_schema
+            .mut_metadata()
+            .insert(COMMENT_KEY.to_string(), c.to_string());
+    }
+
+    Ok(column_schema)
 }
 
 /// Convert `ColumnDef` in sqlparser to `ColumnDef` in gRPC proto.
@@ -304,11 +351,49 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
         SqlDataType::Date => Ok(ConcreteDataType::date_datatype()),
         SqlDataType::Varbinary(_) => Ok(ConcreteDataType::binary_datatype()),
         SqlDataType::Datetime(_) => Ok(ConcreteDataType::datetime_datatype()),
-        SqlDataType::Timestamp(_, _) => Ok(ConcreteDataType::timestamp_millisecond_datatype()),
+        SqlDataType::Timestamp(precision, _) => Ok(precision
+            .as_ref()
+            .map(|v| TimestampType::try_from(*v))
+            .transpose()
+            .map_err(|_| {
+                error::SqlTypeNotSupportedSnafu {
+                    t: data_type.clone(),
+                }
+                .build()
+            })?
+            .map(|t| ConcreteDataType::timestamp_datatype(t.unit()))
+            .unwrap_or(ConcreteDataType::timestamp_millisecond_datatype())),
         _ => error::SqlTypeNotSupportedSnafu {
             t: data_type.clone(),
         }
         .fail(),
+    }
+}
+
+pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Result<SqlDataType> {
+    match data_type {
+        ConcreteDataType::Int64(_) => Ok(SqlDataType::BigInt(None)),
+        ConcreteDataType::UInt64(_) => Ok(SqlDataType::UnsignedBigInt(None)),
+        ConcreteDataType::Int32(_) => Ok(SqlDataType::Int(None)),
+        ConcreteDataType::UInt32(_) => Ok(SqlDataType::UnsignedInt(None)),
+        ConcreteDataType::Int16(_) => Ok(SqlDataType::SmallInt(None)),
+        ConcreteDataType::UInt16(_) => Ok(SqlDataType::UnsignedSmallInt(None)),
+        ConcreteDataType::Int8(_) => Ok(SqlDataType::TinyInt(None)),
+        ConcreteDataType::UInt8(_) => Ok(SqlDataType::UnsignedTinyInt(None)),
+        ConcreteDataType::String(_) => Ok(SqlDataType::String),
+        ConcreteDataType::Float32(_) => Ok(SqlDataType::Float(None)),
+        ConcreteDataType::Float64(_) => Ok(SqlDataType::Double),
+        ConcreteDataType::Boolean(_) => Ok(SqlDataType::Boolean),
+        ConcreteDataType::Date(_) => Ok(SqlDataType::Date),
+        ConcreteDataType::DateTime(_) => Ok(SqlDataType::Datetime(None)),
+        ConcreteDataType::Timestamp(ts_type) => Ok(SqlDataType::Timestamp(
+            Some(ts_type.precision()),
+            TimezoneInfo::None,
+        )),
+        ConcreteDataType::Binary(_) => Ok(SqlDataType::Varbinary(None)),
+        ConcreteDataType::Null(_) | ConcreteDataType::List(_) | ConcreteDataType::Dictionary(_) => {
+            unreachable!()
+        }
     }
 }
 
@@ -475,15 +560,16 @@ mod tests {
 
     #[test]
     pub fn test_parse_datetime_literal() {
+        std::env::set_var("TZ", "Asia/Shanghai");
         let value = sql_value_to_value(
             "datetime_col",
             &ConcreteDataType::datetime_datatype(),
-            &SqlValue::DoubleQuotedString("2022-02-22 00:01:03".to_string()),
+            &SqlValue::DoubleQuotedString("2022-02-22 00:01:03+0800".to_string()),
         )
         .unwrap();
         assert_eq!(ConcreteDataType::datetime_datatype(), value.data_type());
         if let Value::DateTime(d) = value {
-            assert_eq!("2022-02-22 00:01:03", d.to_string());
+            assert_eq!("2022-02-22 00:01:03+0800", d.to_string());
         } else {
             unreachable!()
         }
@@ -663,10 +749,16 @@ mod tests {
             name: "col2".into(),
             data_type: SqlDataType::String,
             collation: None,
-            options: vec![ColumnOptionDef {
-                name: None,
-                option: ColumnOption::NotNull,
-            }],
+            options: vec![
+                ColumnOptionDef {
+                    name: None,
+                    option: ColumnOption::NotNull,
+                },
+                ColumnOptionDef {
+                    name: None,
+                    option: ColumnOption::Comment("test comment".to_string()),
+                },
+            ],
         };
 
         let column_schema = column_def_to_schema(&column_def, false).unwrap();
@@ -675,6 +767,10 @@ mod tests {
         assert_eq!(ConcreteDataType::string_datatype(), column_schema.data_type);
         assert!(!column_schema.is_nullable());
         assert!(!column_schema.is_time_index());
+        assert_eq!(
+            column_schema.metadata().get(COMMENT_KEY),
+            Some(&"test comment".to_string())
+        );
     }
 
     #[test]

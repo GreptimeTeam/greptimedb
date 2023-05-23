@@ -18,6 +18,7 @@ use common_telemetry::{debug, error};
 use store_api::storage::RegionId;
 use tokio::sync::Notify;
 
+use crate::error::Result;
 use crate::scheduler::rate_limit::{BoxedRateLimitToken, RateLimitToken};
 use crate::scheduler::{Handler, LocalScheduler, Request};
 use crate::sst::{AccessLayerRef, FileId};
@@ -34,6 +35,8 @@ impl Request for FilePurgeRequest {
     fn key(&self) -> Self::Key {
         format!("{}/{}", self.region_id, self.file_id)
     }
+
+    fn complete(self, _result: Result<()>) {}
 }
 
 pub struct FilePurgeHandler;
@@ -47,7 +50,7 @@ impl Handler for FilePurgeHandler {
         req: Self::Request,
         token: BoxedRateLimitToken,
         finish_notifier: Arc<Notify>,
-    ) -> crate::error::Result<()> {
+    ) -> Result<()> {
         req.sst_layer.delete_sst(req.file_id).await.map_err(|e| {
             error!(e; "Failed to delete SST file, file: {}, region: {}", 
                 req.file_id.as_parquet(), req.region_id);
@@ -72,6 +75,7 @@ pub mod noop {
 
     use tokio::sync::Notify;
 
+    use crate::error::Result;
     use crate::file_purger::{FilePurgeRequest, FilePurgerRef};
     use crate::scheduler::rate_limit::{BoxedRateLimitToken, RateLimitToken};
     use crate::scheduler::{Handler, LocalScheduler, SchedulerConfig};
@@ -95,7 +99,7 @@ pub mod noop {
             _req: Self::Request,
             token: BoxedRateLimitToken,
             finish_notifier: Arc<Notify>,
-        ) -> crate::error::Result<()> {
+        ) -> Result<()> {
             token.try_release();
             finish_notifier.notify_one();
             Ok(())
@@ -107,7 +111,7 @@ pub mod noop {
 mod tests {
     use common_test_util::temp_dir::create_temp_dir;
     use object_store::services::Fs;
-    use object_store::{ObjectStore, ObjectStoreBuilder};
+    use object_store::ObjectStore;
     use store_api::storage::OpType;
 
     use super::*;
@@ -135,7 +139,7 @@ mod tests {
             &*memtable,
             10,
             OpType::Put,
-            &[(1, 1), (2, 2)],
+            &[1, 2],
             &[(Some(1), Some(1)), (Some(2), Some(2))],
         );
 
@@ -143,8 +147,9 @@ mod tests {
         let sst_path = "table1";
         let layer = Arc::new(FsAccessLayer::new(sst_path, os.clone()));
         let sst_info = layer
-            .write_sst(sst_file_id, Source::Iter(iter), &WriteOptions {})
+            .write_sst(sst_file_id, Source::Iter(iter), &WriteOptions::default())
             .await
+            .unwrap()
             .unwrap();
 
         (
@@ -167,13 +172,9 @@ mod tests {
     #[tokio::test]
     async fn test_file_purger_handler() {
         let dir = create_temp_dir("file-purge");
-        let object_store = ObjectStore::new(
-            Fs::default()
-                .root(dir.path().to_str().unwrap())
-                .build()
-                .unwrap(),
-        )
-        .finish();
+        let mut builder = Fs::default();
+        builder.root(dir.path().to_str().unwrap());
+        let object_store = ObjectStore::new(builder).unwrap().finish();
 
         let sst_file_id = FileId::random();
 
@@ -197,22 +198,20 @@ mod tests {
             .unwrap();
 
         notify.notified().await;
-
-        let object = object_store.object(&format!("{}/{}", path, sst_file_id.as_parquet()));
-        assert!(!object.is_exist().await.unwrap());
+        let exists = object_store
+            .is_exist(&format!("{}/{}", path, sst_file_id.as_parquet()))
+            .await
+            .unwrap();
+        assert!(!exists);
     }
 
     #[tokio::test]
     async fn test_file_purge_loop() {
         common_telemetry::init_default_ut_logging();
         let dir = create_temp_dir("file-purge");
-        let object_store = ObjectStore::new(
-            Fs::default()
-                .root(dir.path().to_str().unwrap())
-                .build()
-                .unwrap(),
-        )
-        .finish();
+        let mut builder = Fs::default();
+        builder.root(dir.path().to_str().unwrap());
+        let object_store = ObjectStore::new(builder).unwrap().finish();
         let sst_file_id = FileId::random();
         let scheduler = Arc::new(LocalScheduler::new(
             SchedulerConfig::default(),
@@ -227,9 +226,9 @@ mod tests {
             drop(handle);
         }
         scheduler.stop(true).await.unwrap();
+
         assert!(!object_store
-            .object(&format!("{}/{}", path, sst_file_id.as_parquet()))
-            .is_exist()
+            .is_exist(&format!("{}/{}", path, sst_file_id.as_parquet()))
             .await
             .unwrap());
     }

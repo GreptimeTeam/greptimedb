@@ -31,8 +31,8 @@ use snap::raw::{Decoder, Encoder};
 
 use crate::error::{self, Result};
 
-const TIMESTAMP_COLUMN_NAME: &str = "greptime_timestamp";
-const VALUE_COLUMN_NAME: &str = "greptime_value";
+pub const TIMESTAMP_COLUMN_NAME: &str = "greptime_timestamp";
+pub const FIELD_COLUMN_NAME: &str = "greptime_value";
 pub const METRIC_NAME_LABEL: &str = "__name__";
 
 /// Metrics for push gateway protocol
@@ -185,7 +185,7 @@ fn collect_timeseries_ids(table_name: &str, recordbatch: &RecordBatch) -> Vec<Ti
         ));
 
         for (i, column_schema) in recordbatch.schema.column_schemas().iter().enumerate() {
-            if column_schema.name == VALUE_COLUMN_NAME
+            if column_schema.name == FIELD_COLUMN_NAME
                 || column_schema.name == TIMESTAMP_COLUMN_NAME
             {
                 continue;
@@ -235,17 +235,17 @@ fn recordbatch_to_timeseries(table: &str, recordbatch: RecordBatch) -> Result<Ve
         }
     );
 
-    let value_column = recordbatch.column_by_name(VALUE_COLUMN_NAME).context(
+    let field_column = recordbatch.column_by_name(FIELD_COLUMN_NAME).context(
         error::InvalidPromRemoteReadQueryResultSnafu {
             msg: "missing greptime_value column in query result",
         },
     )?;
     ensure!(
-        value_column.data_type() == ConcreteDataType::float64_datatype(),
+        field_column.data_type() == ConcreteDataType::float64_datatype(),
         error::InvalidPromRemoteReadQueryResultSnafu {
             msg: format!(
                 "Expect value column of datatype Float64, actual {:?}",
-                value_column.data_type()
+                field_column.data_type()
             )
         }
     );
@@ -263,11 +263,11 @@ fn recordbatch_to_timeseries(table: &str, recordbatch: RecordBatch) -> Result<Ve
                 ..Default::default()
             });
 
-        if ts_column.is_null(row) || value_column.is_null(row) {
+        if ts_column.is_null(row) || field_column.is_null(row) {
             continue;
         }
 
-        let value: f64 = match value_column.get(row) {
+        let value: f64 = match field_column.get(row) {
             Value::Float64(value) => value.into(),
             _ => unreachable!("checked by the \"ensure\" above"),
         };
@@ -308,8 +308,8 @@ fn to_grpc_insert_request(mut timeseries: TimeSeries) -> Result<GrpcInsertReques
     };
     columns.push(ts_column);
 
-    let value_column = Column {
-        column_name: VALUE_COLUMN_NAME.to_string(),
+    let field_column = Column {
+        column_name: FIELD_COLUMN_NAME.to_string(),
         values: Some(column::Values {
             f64_values: samples.iter().map(|x| x.value).collect(),
             ..Default::default()
@@ -318,7 +318,7 @@ fn to_grpc_insert_request(mut timeseries: TimeSeries) -> Result<GrpcInsertReques
         datatype: ColumnDataType::Float64 as i32,
         ..Default::default()
     };
-    columns.push(value_column);
+    columns.push(field_column);
 
     let mut table_name = None;
 
@@ -527,7 +527,7 @@ mod tests {
             vec![1000, 2000]
         );
 
-        assert_eq!(columns[1].column_name, VALUE_COLUMN_NAME);
+        assert_eq!(columns[1].column_name, FIELD_COLUMN_NAME);
         assert_eq!(
             columns[1].values.as_ref().unwrap().f64_values,
             vec![1.0, 2.0]
@@ -553,7 +553,7 @@ mod tests {
             vec![1000, 2000]
         );
 
-        assert_eq!(columns[1].column_name, VALUE_COLUMN_NAME);
+        assert_eq!(columns[1].column_name, FIELD_COLUMN_NAME);
         assert_eq!(
             columns[1].values.as_ref().unwrap().f64_values,
             vec![3.0, 4.0]
@@ -584,7 +584,7 @@ mod tests {
             vec![1000, 2000, 3000]
         );
 
-        assert_eq!(columns[1].column_name, VALUE_COLUMN_NAME);
+        assert_eq!(columns[1].column_name, FIELD_COLUMN_NAME);
         assert_eq!(
             columns[1].values.as_ref().unwrap().f64_values,
             vec![5.0, 6.0, 7.0]
@@ -611,7 +611,7 @@ mod tests {
                 true,
             ),
             ColumnSchema::new(
-                VALUE_COLUMN_NAME,
+                FIELD_COLUMN_NAME,
                 ConcreteDataType::float64_datatype(),
                 true,
             ),

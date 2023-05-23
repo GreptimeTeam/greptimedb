@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use api::v1::meta::Role;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_srv::mocks::MockInfo;
 use storage::compaction::noop::NoopCompactionScheduler;
@@ -31,7 +32,7 @@ impl Instance {
     pub async fn with_mock_meta_server(opts: &DatanodeOptions, meta_srv: MockInfo) -> Result<Self> {
         let meta_client = Arc::new(mock_meta_client(meta_srv, opts.node_id.unwrap_or(42)).await);
         let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
-        Instance::new_with(opts, Some(meta_client), compaction_scheduler).await
+        Instance::new(opts, Some(meta_client), compaction_scheduler).await
     }
 }
 
@@ -39,10 +40,11 @@ async fn mock_meta_client(mock_info: MockInfo, node_id: u64) -> MetaClient {
     let MockInfo {
         server_addr,
         channel_manager,
+        ..
     } = mock_info;
 
     let id = (1000u64, 2000u64);
-    let mut meta_client = MetaClientBuilder::new(id.0, node_id)
+    let mut meta_client = MetaClientBuilder::new(id.0, node_id, Role::Datanode)
         .enable_heartbeat()
         .enable_router()
         .enable_store()

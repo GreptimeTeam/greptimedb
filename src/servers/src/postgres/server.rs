@@ -21,6 +21,7 @@ use common_runtime::Runtime;
 use common_telemetry::logging::error;
 use common_telemetry::{debug, warn};
 use futures::StreamExt;
+use metrics::{decrement_gauge, increment_gauge};
 use pgwire::api::MakeHandler;
 use pgwire::tokio::process_socket;
 use tokio;
@@ -83,13 +84,19 @@ impl PostgresServer {
                             Err(e) => warn!("Failed to get PostgreSQL client addr, err: {}", e),
                         }
 
-                        io_runtime.spawn(process_socket(
-                            io_stream,
-                            tls_acceptor.clone(),
-                            handler.clone(),
-                            handler.clone(),
-                            handler,
-                        ));
+                        io_runtime.spawn(async move {
+                            increment_gauge!(crate::metrics::METRIC_POSTGRES_CONNECTIONS, 1.0);
+                            let r = process_socket(
+                                io_stream,
+                                tls_acceptor.clone(),
+                                handler.clone(),
+                                handler.clone(),
+                                handler,
+                            )
+                            .await;
+                            decrement_gauge!(crate::metrics::METRIC_POSTGRES_CONNECTIONS, 1.0);
+                            r
+                        });
                     }
                 };
             }

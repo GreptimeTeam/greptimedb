@@ -11,15 +11,18 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 use api::v1::alter_expr::Kind;
 use api::v1::column::SemanticType;
+use api::v1::promql_request::Promql;
 use api::v1::{
     column, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef, CreateTableExpr,
-    InsertRequest, TableId,
+    InsertRequest, PromInstantQuery, PromRangeQuery, PromqlRequest, RequestHeader, TableId,
 };
 use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_catalog::consts::MIN_USER_TABLE_ID;
+use common_catalog::consts::{MIN_USER_TABLE_ID, MITO_ENGINE};
 use common_query::Output;
+use servers::prom::{PromData, PromJsonResponse, PromResponse, PromSeries};
 use servers::server::Server;
 use tests_integration::test_util::{setup_grpc_server, StorageType};
 
@@ -53,11 +56,55 @@ macro_rules! grpc_tests {
             grpc_test!(
                 $service,
 
+                test_invalid_dbname,
                 test_auto_create_table,
                 test_insert_and_select,
+                test_dbname,
+                test_health_check,
+                test_prom_gateway_query,
             );
         )*
     };
+}
+
+pub async fn test_invalid_dbname(store_type: StorageType) {
+    let (addr, mut guard, fe_grpc_server) =
+        setup_grpc_server(store_type, "auto_create_table").await;
+
+    let grpc_client = Client::with_urls(vec![addr]);
+    let db = Database::new_with_dbname("tom", grpc_client);
+
+    let (expected_host_col, expected_cpu_col, expected_mem_col, expected_ts_col) = expect_data();
+    let request = InsertRequest {
+        table_name: "demo".to_string(),
+        region_number: 0,
+        columns: vec![
+            expected_host_col.clone(),
+            expected_cpu_col.clone(),
+            expected_mem_col.clone(),
+            expected_ts_col.clone(),
+        ],
+        row_count: 4,
+    };
+    let result = db.insert(request).await;
+    assert!(result.is_err());
+
+    let _ = fe_grpc_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_dbname(store_type: StorageType) {
+    let (addr, mut guard, fe_grpc_server) =
+        setup_grpc_server(store_type, "auto_create_table").await;
+
+    let grpc_client = Client::with_urls(vec![addr]);
+    let db = Database::new_with_dbname(
+        format!("{}-{}", DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
+        grpc_client,
+    );
+    insert_and_assert(&db).await;
+    let _ = fe_grpc_server.shutdown().await;
+    guard.remove_all().await;
 }
 
 pub async fn test_auto_create_table(store_type: StorageType) {
@@ -262,5 +309,146 @@ fn testing_create_expr() -> CreateTableExpr {
             id: MIN_USER_TABLE_ID,
         }),
         region_ids: vec![0],
+        engine: MITO_ENGINE.to_string(),
     }
+}
+
+pub async fn test_health_check(store_type: StorageType) {
+    let (addr, mut guard, fe_grpc_server) =
+        setup_grpc_server(store_type, "auto_create_table").await;
+
+    let grpc_client = Client::with_urls(vec![addr]);
+    let r = grpc_client.health_check().await;
+    assert!(r.is_ok());
+
+    let _ = fe_grpc_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_prom_gateway_query(store_type: StorageType) {
+    // prepare connection
+    let (addr, mut guard, fe_grpc_server) = setup_grpc_server(store_type, "prom_gateway").await;
+    let grpc_client = Client::with_urls(vec![addr]);
+    let db = Database::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        grpc_client.clone(),
+    );
+    let mut gateway_client = grpc_client.make_prometheus_gateway_client().unwrap();
+
+    // create table and insert data
+    db.sql("CREATE TABLE test(i DOUBLE, j TIMESTAMP TIME INDEX, k STRING PRIMARY KEY);")
+        .await
+        .unwrap();
+    db.sql(r#"INSERT INTO test VALUES (1, 1, "a"), (1, 1, "b"), (2, 2, "a");"#)
+        .await
+        .unwrap();
+
+    // Instant query using prometheus gateway service
+    let header = RequestHeader {
+        dbname: "public".to_string(),
+        ..Default::default()
+    };
+    let instant_query = PromInstantQuery {
+        query: "test".to_string(),
+        time: "5".to_string(),
+    };
+    let instant_query_request = PromqlRequest {
+        header: Some(header.clone()),
+        promql: Some(Promql::InstantQuery(instant_query)),
+    };
+    let json_bytes = gateway_client
+        .handle(instant_query_request)
+        .await
+        .unwrap()
+        .into_inner()
+        .body;
+    let instant_query_result = serde_json::from_slice::<PromJsonResponse>(&json_bytes).unwrap();
+    let expected = PromJsonResponse {
+        status: "success".to_string(),
+        data: PromResponse::PromData(PromData {
+            result_type: "vector".to_string(),
+            result: vec![
+                PromSeries {
+                    metric: [
+                        ("k".to_string(), "a".to_string()),
+                        ("__name__".to_string(), "test".to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    value: Some((5.0, "2".to_string())),
+                    ..Default::default()
+                },
+                PromSeries {
+                    metric: [
+                        ("__name__".to_string(), "test".to_string()),
+                        ("k".to_string(), "b".to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    value: Some((5.0, "1".to_string())),
+                    ..Default::default()
+                },
+            ],
+        }),
+        error: None,
+        error_type: None,
+        warnings: None,
+    };
+    assert_eq!(instant_query_result, expected);
+
+    // Range query using prometheus gateway service
+    let range_query = PromRangeQuery {
+        query: "test".to_string(),
+        start: "0".to_string(),
+        end: "10".to_string(),
+        step: "5s".to_string(),
+    };
+    let range_query_request: PromqlRequest = PromqlRequest {
+        header: Some(header),
+        promql: Some(Promql::RangeQuery(range_query)),
+    };
+    let json_bytes = gateway_client
+        .handle(range_query_request)
+        .await
+        .unwrap()
+        .into_inner()
+        .body;
+    let range_query_result = serde_json::from_slice::<PromJsonResponse>(&json_bytes).unwrap();
+    let expected = PromJsonResponse {
+        status: "success".to_string(),
+        data: PromResponse::PromData(PromData {
+            result_type: "matrix".to_string(),
+            result: vec![
+                PromSeries {
+                    metric: [
+                        ("__name__".to_string(), "test".to_string()),
+                        ("k".to_string(), "a".to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    values: vec![(5.0, "2".to_string()), (10.0, "2".to_string())],
+                    ..Default::default()
+                },
+                PromSeries {
+                    metric: [
+                        ("__name__".to_string(), "test".to_string()),
+                        ("k".to_string(), "b".to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    values: vec![(5.0, "1".to_string()), (10.0, "1".to_string())],
+                    ..Default::default()
+                },
+            ],
+        }),
+        error: None,
+        error_type: None,
+        warnings: None,
+    };
+    assert_eq!(range_query_result, expected);
+
+    // clean up
+    let _ = fe_grpc_server.shutdown().await;
+    guard.remove_all().await;
 }

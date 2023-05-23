@@ -24,7 +24,7 @@ use datatypes::vectors::Helper;
 use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::pyclass::CompareOp;
-use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyString, PyType};
+use pyo3::types::{PyBool, PyFloat, PyInt, PySequence, PySlice, PyString, PyType};
 
 use super::utils::val_to_py_any;
 use crate::python::ffi_types::vector::{arrow_rtruediv, wrap_bool_result, wrap_result, PyVector};
@@ -93,12 +93,28 @@ impl PyVector {
 
 #[pymethods]
 impl PyVector {
+    /// convert from numpy array to [`PyVector`]
+    #[classmethod]
+    fn from_numpy(cls: &PyType, py: Python<'_>, obj: PyObject) -> PyResult<PyObject> {
+        let pa = py.import("pyarrow")?;
+        let obj = pa.call_method1("array", (obj,))?;
+        let zelf = Self::from_pyarrow(cls, py, obj.into())?;
+        Ok(zelf.into_py(py))
+    }
+
+    fn numpy(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let pa_arrow = self.to_arrow_array().to_data().to_pyarrow(py)?;
+        let ndarray = pa_arrow.call_method0(py, "to_numpy")?;
+        Ok(ndarray)
+    }
+
     /// create a `PyVector` with a `PyList` that contains only elements of same type
     #[new]
-    pub(crate) fn py_new(iterable: &PyList) -> PyResult<Self> {
+    pub(crate) fn py_new(iterable: PyObject, py: Python<'_>) -> PyResult<Self> {
+        let iterable = iterable.downcast::<PySequence>(py)?;
         let dtype = get_py_type(iterable.get_item(0)?)?;
-        let mut buf = dtype.create_mutable_vector(iterable.len());
-        for i in 0..iterable.len() {
+        let mut buf = dtype.create_mutable_vector(iterable.len()?);
+        for i in 0..iterable.len()? {
             let element = iterable.get_item(i)?;
             let val = pyo3_obj_try_to_typed_val(element, Some(dtype.clone()))?;
             buf.push_value_ref(val.as_value_ref());
@@ -236,6 +252,24 @@ impl PyVector {
     fn __invert__(&self) -> PyResult<Self> {
         Self::vector_invert(self).map_err(PyValueError::new_err)
     }
+
+    #[pyo3(name = "concat")]
+    fn pyo3_concat(&self, py: Python<'_>, other: &Self) -> PyResult<Self> {
+        py.allow_threads(|| {
+            let left = self.to_arrow_array();
+            let right = other.to_arrow_array();
+
+            let res = compute::concat(&[left.as_ref(), right.as_ref()]);
+            let res = res.map_err(|err| PyValueError::new_err(format!("Arrow Error: {err:#?}")))?;
+            let ret = Helper::try_into_vector(res.clone()).map_err(|e| {
+                PyValueError::new_err(format!(
+                    "Can't cast result into vector, result: {res:?}, err: {e:?}",
+                ))
+            })?;
+            Ok(ret.into())
+        })
+    }
+
     /// take a boolean array and filters the Array, returning elements matching the filter (i.e. where the values are true).
     #[pyo3(name = "filter")]
     fn pyo3_filter(&self, py: Python<'_>, other: &Self) -> PyResult<Self> {
@@ -270,7 +304,7 @@ impl PyVector {
     }
     /// Convert to `pyarrow` 's array
     pub(crate) fn to_pyarrow(&self, py: Python) -> PyResult<PyObject> {
-        self.to_arrow_array().data().to_pyarrow(py)
+        self.to_arrow_array().to_data().to_pyarrow(py)
     }
     /// Convert from `pyarrow`'s array
     #[classmethod]
@@ -299,6 +333,49 @@ impl PyVector {
             })?;
             let ret = Self::from(ret).into_py(py);
             Ok(ret)
+        } else if let Ok(slice) = needle.downcast::<PySlice>(py) {
+            let indices = slice.indices(self.len() as i64)?;
+            let (start, stop, step, _slicelength) = (
+                indices.start,
+                indices.stop,
+                indices.step,
+                indices.slicelength,
+            );
+            if start < 0 {
+                return Err(PyValueError::new_err(format!(
+                    "Negative start is not supported, found {start} in {indices:?}"
+                )));
+            } // Negative stop is supported, means from "indices.start" to the actual start of the vector
+            let vector = self.as_vector_ref();
+
+            let mut buf = vector
+                .data_type()
+                .create_mutable_vector(indices.slicelength as usize);
+            let v = if indices.slicelength == 0 {
+                buf.to_vector()
+            } else {
+                if indices.step > 0 {
+                    let range = if stop == -1 {
+                        start as usize..start as usize
+                    } else {
+                        start as usize..stop as usize
+                    };
+                    for i in range.step_by(step.unsigned_abs()) {
+                        buf.push_value_ref(vector.get_ref(i));
+                    }
+                } else {
+                    // if no-empty, then stop < start
+                    // note: start..stop is empty is start >= stop
+                    // stop>=-1
+                    let range = { (stop + 1) as usize..=start as usize };
+                    for i in range.rev().step_by(step.unsigned_abs()) {
+                        buf.push_value_ref(vector.get_ref(i));
+                    }
+                }
+                buf.to_vector()
+            };
+            let v: PyVector = v.into();
+            Ok(v.into_py(py))
         } else if let Ok(index) = needle.extract::<isize>(py) {
             // deal with negative index
             let len = self.len() as isize;

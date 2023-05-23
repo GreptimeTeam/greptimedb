@@ -26,7 +26,7 @@ use crate::sst::{FileHandle, LevelMeta};
 
 /// Compaction strategy that defines which SSTs need to be compacted at given level.
 pub trait Strategy {
-    fn pick(&self, ctx: &PickerContext, level: &LevelMeta) -> Vec<CompactionOutput>;
+    fn pick(&self, ctx: &PickerContext, level: &LevelMeta) -> (Option<i64>, Vec<CompactionOutput>);
 }
 
 pub type StrategyRef = Arc<dyn Strategy + Send + Sync>;
@@ -37,29 +37,33 @@ pub type StrategyRef = Arc<dyn Strategy + Send + Sync>;
 pub struct SimpleTimeWindowStrategy {}
 
 impl Strategy for SimpleTimeWindowStrategy {
-    fn pick(&self, _ctx: &PickerContext, level: &LevelMeta) -> Vec<CompactionOutput> {
+    fn pick(&self, ctx: &PickerContext, level: &LevelMeta) -> (Option<i64>, Vec<CompactionOutput>) {
         // SimpleTimeWindowStrategy only handles level 0 to level 1 compaction.
         if level.level() != 0 {
-            return vec![];
+            return (None, vec![]);
         }
         let files = find_compactable_files(level);
         debug!("Compactable files found: {:?}", files);
         if files.is_empty() {
-            return vec![];
+            return (None, vec![]);
         }
-
-        let time_bucket = infer_time_bucket(&files);
+        let time_bucket = ctx
+            .compaction_time_window()
+            .unwrap_or_else(|| infer_time_bucket(&files));
         let buckets = calculate_time_buckets(time_bucket, &files);
         debug!("File bucket:{}, file groups: {:?}", time_bucket, buckets);
-        buckets
-            .into_iter()
-            .map(|(bound, files)| CompactionOutput {
-                output_level: 1,
-                bucket_bound: bound,
-                bucket: time_bucket,
-                inputs: files,
-            })
-            .collect()
+        (
+            Some(time_bucket),
+            buckets
+                .into_iter()
+                .map(|(bound, files)| CompactionOutput {
+                    output_level: 1,
+                    bucket_bound: bound,
+                    bucket: time_bucket,
+                    inputs: files,
+                })
+                .collect(),
+        )
     }
 }
 
@@ -143,12 +147,14 @@ fn infer_time_bucket(files: &[FileHandle]) -> i64 {
 }
 
 /// A set of predefined time buckets.
-const TIME_BUCKETS: [i64; 5] = [
-    60 * 60,          // one hour
-    2 * 60 * 60,      // two hours
-    12 * 60 * 60,     // twelve hours
-    24 * 60 * 60,     // one day
-    7 * 24 * 60 * 60, // one week
+const TIME_BUCKETS: [i64; 7] = [
+    60 * 60,                 // one hour
+    2 * 60 * 60,             // two hours
+    12 * 60 * 60,            // twelve hours
+    24 * 60 * 60,            // one day
+    7 * 24 * 60 * 60,        // one week
+    365 * 24 * 60 * 60,      // one year
+    10 * 365 * 24 * 60 * 60, // ten years
 ];
 
 /// Fits a given time span into time bucket by find the minimum bucket that can cover the span.
@@ -213,7 +219,7 @@ mod tests {
         assert_eq!(TIME_BUCKETS[2], fit_time_bucket(TIME_BUCKETS[2] - 1));
         assert_eq!(TIME_BUCKETS[2], fit_time_bucket(TIME_BUCKETS[2]));
         assert_eq!(TIME_BUCKETS[3], fit_time_bucket(TIME_BUCKETS[3] - 1));
-        assert_eq!(TIME_BUCKETS[4], fit_time_bucket(i64::MAX));
+        assert_eq!(TIME_BUCKETS[6], fit_time_bucket(i64::MAX));
     }
 
     #[test]

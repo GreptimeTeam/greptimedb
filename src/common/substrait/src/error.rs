@@ -18,61 +18,58 @@ use common_error::prelude::{BoxedError, ErrorExt, StatusCode};
 use datafusion::error::DataFusionError;
 use datatypes::prelude::ConcreteDataType;
 use prost::{DecodeError, EncodeError};
-use snafu::{Backtrace, ErrorCompat, Snafu};
+use snafu::{Location, Snafu};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
     #[snafu(display("Unsupported physical plan: {}", name))]
-    UnsupportedPlan { name: String, backtrace: Backtrace },
+    UnsupportedPlan { name: String, location: Location },
 
     #[snafu(display("Unsupported expr: {}", name))]
-    UnsupportedExpr { name: String, backtrace: Backtrace },
+    UnsupportedExpr { name: String, location: Location },
 
     #[snafu(display("Unsupported concrete type: {:?}", ty))]
     UnsupportedConcreteType {
         ty: ConcreteDataType,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Unsupported substrait type: {}", ty))]
-    UnsupportedSubstraitType { ty: String, backtrace: Backtrace },
+    UnsupportedSubstraitType { ty: String, location: Location },
 
     #[snafu(display("Failed to decode substrait relation, source: {}", source))]
     DecodeRel {
         source: DecodeError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to encode substrait relation, source: {}", source))]
     EncodeRel {
         source: EncodeError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Input plan is empty"))]
-    EmptyPlan { backtrace: Backtrace },
+    EmptyPlan { location: Location },
 
     #[snafu(display("Input expression is empty"))]
-    EmptyExpr { backtrace: Backtrace },
+    EmptyExpr { location: Location },
 
     #[snafu(display("Missing required field in protobuf, field: {}, plan: {}", field, plan))]
     MissingField {
         field: String,
         plan: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Invalid parameters: {}", reason))]
-    InvalidParameters {
-        reason: String,
-        backtrace: Backtrace,
-    },
+    InvalidParameters { reason: String, location: Location },
 
     #[snafu(display("Internal error from DataFusion: {}", source))]
     DFInternal {
         source: DataFusionError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Internal error: {}", source))]
@@ -81,11 +78,8 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Table querying not found: {}", name))]
-    TableNotFound { name: String, backtrace: Backtrace },
-
     #[snafu(display("Cannot convert plan doesn't belong to GreptimeDB"))]
-    UnknownPlan { backtrace: Backtrace },
+    UnknownPlan { location: Location },
 
     #[snafu(display(
         "Schema from Substrait proto doesn't match with the schema in storage.
@@ -97,7 +91,7 @@ pub enum Error {
     SchemaNotMatch {
         substrait_schema: datafusion::arrow::datatypes::SchemaRef,
         storage_schema: datafusion::arrow::datatypes::SchemaRef,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to convert DataFusion schema, source: {}", source))]
@@ -111,6 +105,18 @@ pub enum Error {
         table_name: String,
         #[snafu(backtrace)]
         source: catalog::error::Error,
+    },
+
+    #[snafu(display("Failed to encode DataFusion plan, source: {}", source))]
+    EncodeDfPlan {
+        source: datafusion::error::DataFusionError,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to decode DataFusion plan, source: {}", source))]
+    DecodeDfPlan {
+        source: datafusion::error::DataFusionError,
+        location: Location,
     },
 }
 
@@ -130,16 +136,14 @@ impl ErrorExt for Error {
             | Error::EmptyExpr { .. }
             | Error::MissingField { .. }
             | Error::InvalidParameters { .. }
-            | Error::TableNotFound { .. }
             | Error::SchemaNotMatch { .. } => StatusCode::InvalidArguments,
-            Error::DFInternal { .. } | Error::Internal { .. } => StatusCode::Internal,
+            Error::DFInternal { .. }
+            | Error::Internal { .. }
+            | Error::EncodeDfPlan { .. }
+            | Error::DecodeDfPlan { .. } => StatusCode::Internal,
             Error::ConvertDfSchema { source } => source.status_code(),
             Error::ResolveTable { source, .. } => source.status_code(),
         }
-    }
-
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        ErrorCompat::backtrace(self)
     }
 
     fn as_any(&self) -> &dyn Any {

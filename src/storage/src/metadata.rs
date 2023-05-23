@@ -19,9 +19,9 @@ use std::sync::Arc;
 
 use common_error::prelude::*;
 use datatypes::data_type::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, Metadata};
+use datatypes::schema::{ColumnSchema, Metadata, COMMENT_KEY};
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt};
+use snafu::{ensure, Location, OptionExt};
 use store_api::storage::consts::{self, ReservedColumnId};
 use store_api::storage::{
     AddColumn, AlterOperation, AlterRequest, ColumnDescriptor, ColumnDescriptorBuilder,
@@ -38,16 +38,16 @@ use crate::schema::{RegionSchema, RegionSchemaRef};
 #[snafu(visibility(pub(crate)))]
 pub enum Error {
     #[snafu(display("Column name {} already exists", name))]
-    ColNameExists { name: String, backtrace: Backtrace },
+    ColNameExists { name: String, location: Location },
 
     #[snafu(display("Column family name {} already exists", name))]
-    CfNameExists { name: String, backtrace: Backtrace },
+    CfNameExists { name: String, location: Location },
 
     #[snafu(display("Column family id {} already exists", id))]
-    CfIdExists { id: ColumnId, backtrace: Backtrace },
+    CfIdExists { id: ColumnId, location: Location },
 
     #[snafu(display("Column id {} already exists", id))]
-    ColIdExists { id: ColumnId, backtrace: Backtrace },
+    ColIdExists { id: ColumnId, location: Location },
 
     #[snafu(display("Failed to build schema, source: {}", source))]
     InvalidSchema {
@@ -56,10 +56,10 @@ pub enum Error {
     },
 
     #[snafu(display("Column name {} is reserved by the system", name))]
-    ReservedColumn { name: String, backtrace: Backtrace },
+    ReservedColumn { name: String, location: Location },
 
     #[snafu(display("Missing timestamp key column"))]
-    MissingTimestamp { backtrace: Backtrace },
+    MissingTimestamp { location: Location },
 
     // Variants for validating `AlterRequest`, which won't have a backtrace.
     #[snafu(display("Expect altering metadata with version {}, given {}", expect, given))]
@@ -99,16 +99,16 @@ pub enum Error {
         // Store key and value in one string to reduce the enum size.
         key_value: String,
         source: std::num::ParseIntError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Metadata of {} not found", key))]
-    MetaNotFound { key: String, backtrace: Backtrace },
+    MetaNotFound { key: String, location: Location },
 
     #[snafu(display("Failed to build column descriptor, source: {}", source))]
     BuildColumnDescriptor {
         source: ColumnDescriptorBuilderError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Failed to convert from arrow schema, source: {}", source))]
@@ -118,7 +118,7 @@ pub enum Error {
     },
 
     #[snafu(display("Invalid internal column index in arrow schema"))]
-    InvalidIndex { backtrace: Backtrace },
+    InvalidIndex { location: Location },
 
     #[snafu(display(
         "Failed to convert arrow chunk to batch, name: {}, source: {}",
@@ -138,7 +138,7 @@ pub enum Error {
     },
 
     #[snafu(display("Invalid projection, {}", msg))]
-    InvalidProjection { msg: String, backtrace: Backtrace },
+    InvalidProjection { msg: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -146,10 +146,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         StatusCode::InvalidArguments
-    }
-
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        ErrorCompat::backtrace(self)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -198,6 +194,8 @@ pub struct RegionMetadata {
     pub columns: ColumnsMetadataRef,
     column_families: ColumnFamiliesMetadata,
     version: VersionNumber,
+    /// Time window for compaction
+    compaction_time_window: Option<i64>,
 }
 
 impl RegionMetadata {
@@ -214,6 +212,11 @@ impl RegionMetadata {
     #[inline]
     pub fn schema(&self) -> &RegionSchemaRef {
         &self.schema
+    }
+
+    #[inline]
+    pub fn compaction_time_window(&self) -> Option<i64> {
+        self.compaction_time_window
     }
 
     #[inline]
@@ -317,7 +320,8 @@ impl RegionMetadata {
         let mut builder = RegionDescriptorBuilder::default()
             .id(self.id)
             .name(&self.name)
-            .row_key(row_key);
+            .row_key(row_key)
+            .compaction_time_window(self.compaction_time_window);
 
         for (cf_id, cf) in &self.column_families.id_to_cfs {
             let mut cf_builder = ColumnFamilyDescriptorBuilder::default()
@@ -350,6 +354,7 @@ impl From<&RegionMetadata> for RawRegionMetadata {
             columns: RawColumnsMetadata::from(&*data.columns),
             column_families: RawColumnFamiliesMetadata::from(&data.column_families),
             version: data.version,
+            compaction_time_window: data.compaction_time_window,
         }
     }
 }
@@ -368,13 +373,13 @@ impl TryFrom<RawRegionMetadata> for RegionMetadata {
             columns,
             column_families: raw.column_families.into(),
             version: raw.version,
+            compaction_time_window: raw.compaction_time_window,
         })
     }
 }
 
 const METADATA_CF_ID_KEY: &str = "greptime:storage:cf_id";
 const METADATA_COLUMN_ID_KEY: &str = "greptime:storage:column_id";
-const METADATA_COMMENT_KEY: &str = "greptime:storage:comment";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ColumnMetadata {
@@ -410,10 +415,7 @@ impl ColumnMetadata {
         let metadata = column_schema.metadata();
         let cf_id = try_parse_int(metadata, METADATA_CF_ID_KEY, Some(consts::DEFAULT_CF_ID))?;
         let column_id = try_parse_int(metadata, METADATA_COLUMN_ID_KEY, None)?;
-        let comment = metadata
-            .get(METADATA_COMMENT_KEY)
-            .cloned()
-            .unwrap_or_default();
+        let comment = metadata.get(COMMENT_KEY).cloned().unwrap_or_default();
 
         let desc = ColumnDescriptorBuilder::new(
             column_id,
@@ -437,7 +439,7 @@ impl ColumnMetadata {
         }
         metadata.insert(METADATA_COLUMN_ID_KEY.to_string(), self.desc.id.to_string());
         if !self.desc.comment.is_empty() {
-            metadata.insert(METADATA_COMMENT_KEY.to_string(), self.desc.comment.clone());
+            metadata.insert(COMMENT_KEY.to_string(), self.desc.comment.clone());
         }
 
         metadata
@@ -475,9 +477,6 @@ pub struct ColumnsMetadata {
     row_key_end: usize,
     /// Index of timestamp key column.
     timestamp_key_index: usize,
-    /// If version column is enabled, then the last column of key columns is a
-    /// version column.
-    enable_version_column: bool,
     /// Exclusive end index of user columns.
     ///
     /// Columns in `[user_column_end..)` are internal columns.
@@ -494,7 +493,7 @@ impl ColumnsMetadata {
     }
 
     /// Returns an iterator to all value columns (internal columns are excluded).
-    pub fn iter_value_columns(&self) -> impl Iterator<Item = &ColumnMetadata> {
+    pub fn iter_field_columns(&self) -> impl Iterator<Item = &ColumnMetadata> {
         self.columns[self.row_key_end..self.user_column_end].iter()
     }
 
@@ -513,7 +512,7 @@ impl ColumnsMetadata {
     }
 
     #[inline]
-    pub fn num_value_columns(&self) -> usize {
+    pub fn num_field_columns(&self) -> usize {
         self.user_column_end - self.row_key_end
     }
 
@@ -538,8 +537,7 @@ impl ColumnsMetadata {
     }
 
     fn to_row_key_descriptor(&self) -> RowKeyDescriptor {
-        let mut builder =
-            RowKeyDescriptorBuilder::default().enable_version_column(self.enable_version_column);
+        let mut builder = RowKeyDescriptorBuilder::default();
         for (idx, column) in self.iter_row_key_columns().enumerate() {
             // Not a timestamp column.
             if idx != self.timestamp_key_index {
@@ -560,7 +558,6 @@ impl From<&ColumnsMetadata> for RawColumnsMetadata {
             columns: data.columns.clone(),
             row_key_end: data.row_key_end,
             timestamp_key_index: data.timestamp_key_index,
-            enable_version_column: data.enable_version_column,
             user_column_end: data.user_column_end,
         }
     }
@@ -580,7 +577,6 @@ impl From<RawColumnsMetadata> for ColumnsMetadata {
             name_to_col_index,
             row_key_end: raw.row_key_end,
             timestamp_key_index: raw.timestamp_key_index,
-            enable_version_column: raw.enable_version_column,
             user_column_end: raw.user_column_end,
         }
     }
@@ -635,6 +631,7 @@ impl TryFrom<RegionDescriptor> for RegionMetadataBuilder {
             .name(desc.name)
             .id(desc.id)
             .row_key(desc.row_key)?
+            .compaction_time_window(desc.compaction_time_window)
             .add_column_family(desc.default_cf)?;
         for cf in desc.extra_cfs {
             builder = builder.add_column_family(cf)?;
@@ -666,7 +663,6 @@ struct ColumnsMetadataBuilder {
     // Row key metadata:
     row_key_end: usize,
     timestamp_key_index: Option<usize>,
-    enable_version_column: bool,
 }
 
 impl ColumnsMetadataBuilder {
@@ -678,30 +674,22 @@ impl ColumnsMetadataBuilder {
         // TODO(yingwen): Validate this is a timestamp column.
         self.timestamp_key_index = Some(self.columns.len());
         self.push_row_key_column(key.timestamp)?;
-
-        if key.enable_version_column {
-            // TODO(yingwen): Validate that version column must be uint64 column.
-            let version_col = version_column_desc();
-            self.push_row_key_column(version_col)?;
-        }
-
         self.row_key_end = self.columns.len();
-        self.enable_version_column = key.enable_version_column;
 
         Ok(self)
     }
 
     fn push_row_key_column(&mut self, desc: ColumnDescriptor) -> Result<&mut Self> {
-        self.push_value_column(consts::KEY_CF_ID, desc)
+        self.push_field_column(consts::KEY_CF_ID, desc)
     }
 
-    fn push_value_column(
+    fn push_field_column(
         &mut self,
         cf_id: ColumnFamilyId,
         desc: ColumnDescriptor,
     ) -> Result<&mut Self> {
         ensure!(
-            !is_internal_value_column(&desc.name),
+            !is_internal_field_column(&desc.name),
             ReservedColumnSnafu { name: &desc.name }
         );
 
@@ -748,7 +736,6 @@ impl ColumnsMetadataBuilder {
             name_to_col_index: self.name_to_col_index,
             row_key_end: self.row_key_end,
             timestamp_key_index,
-            enable_version_column: self.enable_version_column,
             user_column_end,
         })
     }
@@ -791,6 +778,7 @@ struct RegionMetadataBuilder {
     columns_meta_builder: ColumnsMetadataBuilder,
     cfs_meta_builder: ColumnFamiliesMetadataBuilder,
     version: VersionNumber,
+    compaction_time_window: Option<i64>,
 }
 
 impl Default for RegionMetadataBuilder {
@@ -807,6 +795,7 @@ impl RegionMetadataBuilder {
             columns_meta_builder: ColumnsMetadataBuilder::default(),
             cfs_meta_builder: ColumnFamiliesMetadataBuilder::default(),
             version: Schema::INITIAL_VERSION,
+            compaction_time_window: None,
         }
     }
 
@@ -831,6 +820,11 @@ impl RegionMetadataBuilder {
         Ok(self)
     }
 
+    fn compaction_time_window(mut self, compaction_time_window: Option<i64>) -> Self {
+        self.compaction_time_window = compaction_time_window;
+        self
+    }
+
     fn add_column_family(mut self, cf: ColumnFamilyDescriptor) -> Result<Self> {
         let column_index_start = self.columns_meta_builder.columns.len();
         let column_index_end = column_index_start + cf.columns.len();
@@ -844,7 +838,7 @@ impl RegionMetadataBuilder {
         self.cfs_meta_builder.add_column_family(cf_meta)?;
 
         for col in cf.columns {
-            self.columns_meta_builder.push_value_column(cf.cf_id, col)?;
+            self.columns_meta_builder.push_field_column(cf.cf_id, col)?;
         }
 
         Ok(self)
@@ -861,19 +855,9 @@ impl RegionMetadataBuilder {
             columns,
             column_families: self.cfs_meta_builder.build(),
             version: self.version,
+            compaction_time_window: self.compaction_time_window,
         })
     }
-}
-
-fn version_column_desc() -> ColumnDescriptor {
-    ColumnDescriptorBuilder::new(
-        ReservedColumnId::version(),
-        consts::VERSION_COLUMN_NAME.to_string(),
-        ConcreteDataType::uint64_datatype(),
-    )
-    .is_nullable(false)
-    .build()
-    .unwrap()
 }
 
 fn internal_column_descs() -> [ColumnDescriptor; 2] {
@@ -899,7 +883,7 @@ fn internal_column_descs() -> [ColumnDescriptor; 2] {
 
 /// Returns true if this is an internal column for value column.
 #[inline]
-fn is_internal_value_column(column_name: &str) -> bool {
+fn is_internal_field_column(column_name: &str) -> bool {
     matches!(
         column_name,
         consts::SEQUENCE_COLUMN_NAME | consts::OP_TYPE_COLUMN_NAME
@@ -927,9 +911,8 @@ mod tests {
         let region_name = "region-0";
         let desc = RegionDescBuilder::new(region_name)
             .timestamp(("ts", LogicalTypeId::TimestampMillisecond, false))
-            .enable_version_column(false)
             .push_key_column(("k1", LogicalTypeId::Int32, false))
-            .push_value_column(("v1", LogicalTypeId::Float32, true))
+            .push_field_column(("v1", LogicalTypeId::Float32, true))
             .build();
 
         let expect_schema = schema_util::new_schema_ref(
@@ -945,7 +928,7 @@ mod tests {
         assert_eq!(region_name, metadata.name);
         assert_eq!(expect_schema, *metadata.user_schema());
         assert_eq!(2, metadata.columns.num_row_key_columns());
-        assert_eq!(1, metadata.columns.num_value_columns());
+        assert_eq!(1, metadata.columns.num_field_columns());
     }
 
     #[test]
@@ -1035,7 +1018,7 @@ mod tests {
         assert!(matches!(err, Error::ColIdExists { .. }));
     }
 
-    fn new_metadata(enable_version_column: bool) -> RegionMetadata {
+    fn new_metadata() -> RegionMetadata {
         let timestamp = ColumnDescriptorBuilder::new(
             2,
             "ts",
@@ -1052,7 +1035,6 @@ mod tests {
                     .build()
                     .unwrap(),
             )
-            .enable_version_column(enable_version_column)
             .build()
             .unwrap();
         let cf = ColumnFamilyDescriptorBuilder::default()
@@ -1065,6 +1047,7 @@ mod tests {
             .unwrap();
         RegionMetadataBuilder::new()
             .name(TEST_REGION)
+            .compaction_time_window(None)
             .row_key(row_key)
             .unwrap()
             .add_column_family(cf)
@@ -1075,7 +1058,7 @@ mod tests {
 
     #[test]
     fn test_build_metedata_disable_version() {
-        let metadata = new_metadata(false);
+        let metadata = new_metadata();
         assert_eq!(TEST_REGION, metadata.name);
 
         let expect_schema = schema_util::new_schema_ref(
@@ -1100,17 +1083,15 @@ mod tests {
             .collect();
         assert_eq!(["k1", "ts"], &row_key_names[..]);
         // 1 value column
-        assert_eq!(1, metadata.columns.num_value_columns());
+        assert_eq!(1, metadata.columns.num_field_columns());
         let value_names: Vec<_> = metadata
             .columns
-            .iter_value_columns()
+            .iter_field_columns()
             .map(|column| &column.desc.name)
             .collect();
         assert_eq!(["v1"], &value_names[..]);
         // Check timestamp index.
         assert_eq!(1, metadata.columns.timestamp_key_index);
-        // Check version column.
-        assert!(!metadata.columns.enable_version_column);
 
         assert!(metadata
             .column_families
@@ -1121,52 +1102,8 @@ mod tests {
     }
 
     #[test]
-    fn test_build_metedata_enable_version() {
-        let metadata = new_metadata(true);
-        assert_eq!(TEST_REGION, metadata.name);
-
-        let expect_schema = schema_util::new_schema_ref(
-            &[
-                ("k1", LogicalTypeId::Int64, false),
-                ("ts", LogicalTypeId::TimestampMillisecond, false),
-                (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
-                ("v1", LogicalTypeId::Int64, true),
-            ],
-            Some(1),
-        );
-
-        assert_eq!(expect_schema, *metadata.user_schema());
-
-        // 4 user columns and 2 internal columns.
-        assert_eq!(6, metadata.columns.columns.len());
-        // 3 row key columns
-        assert_eq!(3, metadata.columns.num_row_key_columns());
-        let row_key_names: Vec<_> = metadata
-            .columns
-            .iter_row_key_columns()
-            .map(|column| &column.desc.name)
-            .collect();
-        assert_eq!(
-            ["k1", "ts", consts::VERSION_COLUMN_NAME],
-            &row_key_names[..]
-        );
-        // 1 value column
-        assert_eq!(1, metadata.columns.num_value_columns());
-        let value_names: Vec<_> = metadata
-            .columns
-            .iter_value_columns()
-            .map(|column| &column.desc.name)
-            .collect();
-        assert_eq!(["v1"], &value_names[..]);
-        // Check timestamp index.
-        assert_eq!(1, metadata.columns.timestamp_key_index);
-        // Check version column.
-        assert!(metadata.columns.enable_version_column);
-    }
-
-    #[test]
     fn test_convert_between_raw() {
-        let metadata = new_metadata(true);
+        let metadata = new_metadata();
         let raw = RawRegionMetadata::from(&metadata);
 
         let converted = RegionMetadata::try_from(raw).unwrap();
@@ -1177,9 +1114,8 @@ mod tests {
     fn test_alter_metadata_add_columns() {
         let region_name = "region-0";
         let builder = RegionDescBuilder::new(region_name)
-            .enable_version_column(false)
             .push_key_column(("k1", LogicalTypeId::Int32, false))
-            .push_value_column(("v1", LogicalTypeId::Float32, true));
+            .push_field_column(("v1", LogicalTypeId::Float32, true));
         let last_column_id = builder.last_column_id();
         let metadata: RegionMetadata = builder.build().try_into().unwrap();
 
@@ -1214,11 +1150,10 @@ mod tests {
         let metadata = metadata.alter(&req).unwrap();
 
         let builder: RegionMetadataBuilder = RegionDescBuilder::new(region_name)
-            .enable_version_column(false)
             .push_key_column(("k1", LogicalTypeId::Int32, false))
-            .push_value_column(("v1", LogicalTypeId::Float32, true))
+            .push_field_column(("v1", LogicalTypeId::Float32, true))
             .push_key_column(("k2", LogicalTypeId::Int32, true))
-            .push_value_column(("v2", LogicalTypeId::Float32, true))
+            .push_field_column(("v2", LogicalTypeId::Float32, true))
             .build()
             .try_into()
             .unwrap();
@@ -1230,11 +1165,10 @@ mod tests {
     fn test_alter_metadata_drop_columns() {
         let region_name = "region-0";
         let metadata: RegionMetadata = RegionDescBuilder::new(region_name)
-            .enable_version_column(false)
             .push_key_column(("k1", LogicalTypeId::Int32, false))
             .push_key_column(("k2", LogicalTypeId::Int32, false))
-            .push_value_column(("v1", LogicalTypeId::Float32, true))
-            .push_value_column(("v2", LogicalTypeId::Float32, true))
+            .push_field_column(("v1", LogicalTypeId::Float32, true))
+            .push_field_column(("v2", LogicalTypeId::Float32, true))
             .build()
             .try_into()
             .unwrap();
@@ -1251,13 +1185,12 @@ mod tests {
         let metadata = metadata.alter(&req).unwrap();
 
         let builder = RegionDescBuilder::new(region_name)
-            .enable_version_column(false)
             .push_key_column(("k1", LogicalTypeId::Int32, false))
             .push_key_column(("k2", LogicalTypeId::Int32, false));
         let last_column_id = builder.last_column_id() + 1;
         let builder: RegionMetadataBuilder = builder
             .set_last_column_id(last_column_id) // This id is reserved for v1
-            .push_value_column(("v2", LogicalTypeId::Float32, true))
+            .push_field_column(("v2", LogicalTypeId::Float32, true))
             .build()
             .try_into()
             .unwrap();
@@ -1268,11 +1201,10 @@ mod tests {
     #[test]
     fn test_validate_alter_request() {
         let builder = RegionDescBuilder::new("region-alter")
-            .enable_version_column(false)
             .timestamp(("ts", LogicalTypeId::TimestampMillisecond, false))
             .push_key_column(("k0", LogicalTypeId::Int32, false))
-            .push_value_column(("v0", LogicalTypeId::Float32, true))
-            .push_value_column(("v1", LogicalTypeId::Float32, true));
+            .push_field_column(("v0", LogicalTypeId::Float32, true))
+            .push_field_column(("v1", LogicalTypeId::Float32, true));
         let last_column_id = builder.last_column_id();
         let metadata: RegionMetadata = builder.build().try_into().unwrap();
 

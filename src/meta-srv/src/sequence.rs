@@ -16,7 +16,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use api::v1::meta::CompareAndPutRequest;
-use snafu::ensure;
+use snafu::{ensure, OptionExt};
 use tokio::sync::Mutex;
 
 use crate::error::{self, Result};
@@ -106,7 +106,15 @@ impl Inner {
             } else {
                 u64::to_le_bytes(start).to_vec()
             };
-            let value = u64::to_le_bytes(start + self.step);
+
+            let value = start
+                .checked_add(self.step)
+                .context(error::SequenceOutOfRangeSnafu {
+                    name: &self.name,
+                    start,
+                    step: self.step,
+                })?;
+            let value = u64::to_le_bytes(value);
 
             let req = CompareAndPutRequest {
                 key: key.to_vec(),
@@ -150,7 +158,9 @@ impl Inner {
 mod tests {
     use std::sync::Arc;
 
-    use api::v1::meta::{BatchGetRequest, BatchGetResponse};
+    use api::v1::meta::{
+        BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse,
+    };
 
     use super::*;
     use crate::service::store::kv::KvStore;
@@ -168,7 +178,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sequence_fouce_quit() {
+    async fn test_sequence_out_of_rage() {
+        let kv_store = Arc::new(MemStore::new());
+        let initial = u64::MAX - 10;
+        let seq = Sequence::new("test_seq", initial, 10, kv_store);
+
+        for _ in 0..10 {
+            let _ = seq.next().await.unwrap();
+        }
+
+        let res = seq.next().await;
+        assert!(res.is_err());
+        assert!(matches!(
+            res.unwrap_err(),
+            error::Error::SequenceOutOfRange { .. }
+        ))
+    }
+
+    #[tokio::test]
+    async fn test_sequence_force_quit() {
         struct Noop;
 
         #[async_trait::async_trait]
@@ -216,6 +244,10 @@ mod tests {
                 &self,
                 _: api::v1::meta::MoveValueRequest,
             ) -> Result<api::v1::meta::MoveValueResponse> {
+                unreachable!()
+            }
+
+            async fn batch_delete(&self, _: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
                 unreachable!()
             }
         }

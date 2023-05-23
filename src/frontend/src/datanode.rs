@@ -12,16 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use client::Client;
 use common_grpc::channel_manager::ChannelManager;
-use meta_client::rpc::Peer;
+use common_meta::peer::Peer;
+use common_telemetry::info;
 use moka::future::{Cache, CacheBuilder};
 
 pub struct DatanodeClients {
     channel_manager: ChannelManager,
     clients: Cache<Peer, Client>,
+    started: Arc<Mutex<bool>>,
 }
 
 impl Default for DatanodeClients {
@@ -32,11 +35,24 @@ impl Default for DatanodeClients {
                 .time_to_live(Duration::from_secs(30 * 60))
                 .time_to_idle(Duration::from_secs(5 * 60))
                 .build(),
+            started: Arc::new(Mutex::new(false)),
         }
     }
 }
 
 impl DatanodeClients {
+    pub(crate) fn start(&self) {
+        let mut started = self.started.lock().unwrap();
+        if *started {
+            return;
+        }
+
+        self.channel_manager.start_channel_recycle();
+
+        info!("Datanode clients manager is started!");
+        *started = true;
+    }
+
     pub(crate) async fn get_client(&self, datanode: &Peer) -> Client {
         self.clients
             .get_with_by_ref(datanode, async move {
@@ -48,8 +64,8 @@ impl DatanodeClients {
             .await
     }
 
-    #[cfg(test)]
-    pub(crate) async fn insert_client(&self, datanode: Peer, client: Client) {
+    #[cfg(feature = "testing")]
+    pub async fn insert_client(&self, datanode: Peer, client: Client) {
         self.clients.insert(datanode, client).await
     }
 }

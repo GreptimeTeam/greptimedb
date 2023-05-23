@@ -261,7 +261,7 @@ mod tests {
         let stat_val = StatValue { stats: vec![stat] }.try_into().unwrap();
 
         let kv = KeyValue {
-            key: stat_key.clone().into(),
+            key: stat_key.into(),
             value: stat_val,
         };
 

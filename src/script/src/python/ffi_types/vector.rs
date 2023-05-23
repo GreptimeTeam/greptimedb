@@ -25,7 +25,7 @@ use datatypes::arrow::compute::kernels::{arithmetic, comparison};
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::arrow::error::Result as ArrowResult;
 use datatypes::data_type::DataType;
-use datatypes::prelude::Value;
+use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::value::{self, OrderedFloat};
 use datatypes::vectors::{Helper, NullVector, VectorRef};
 #[cfg(feature = "pyo3_backend")]
@@ -38,7 +38,7 @@ use rustpython_vm::{
     VirtualMachine,
 };
 
-use crate::python::utils::is_instance;
+use crate::python::rspython::utils::is_instance;
 
 /// The Main FFI type `PyVector` that is used both in RustPython and PyO3
 #[cfg_attr(feature = "pyo3_backend", pyo3class(name = "vector"))]
@@ -48,6 +48,8 @@ use crate::python::utils::is_instance;
 pub struct PyVector {
     pub(crate) vector: VectorRef,
 }
+
+pub(crate) type PyVectorRef = PyRef<PyVector>;
 
 impl From<VectorRef> for PyVector {
     fn from(vector: VectorRef) -> Self {
@@ -134,6 +136,16 @@ impl AsRef<PyVector> for PyVector {
 }
 
 impl PyVector {
+    #[inline]
+    pub(crate) fn data_type(&self) -> ConcreteDataType {
+        self.vector.data_type()
+    }
+
+    #[inline]
+    pub(crate) fn arrow_data_type(&self) -> ArrowDataType {
+        self.vector.data_type().as_arrow_type()
+    }
+
     pub(crate) fn vector_and(left: &Self, right: &Self) -> Result<Self, String> {
         let left = left.to_arrow_array();
         let right = right.to_arrow_array();
@@ -381,7 +393,6 @@ impl PyVector {
         // adjust_indices so negative number is transform to usize
         let (mut range, step, slice_len) = slice.adjust_indices(self.len());
         let vector = self.as_vector_ref();
-
         let mut buf = vector.data_type().create_mutable_vector(slice_len);
         if slice_len == 0 {
             let v: PyVector = buf.to_vector().into();
@@ -391,6 +402,7 @@ impl PyVector {
             Ok(v.into_pyobject(vm))
         } else if step.is_negative() {
             // Negative step require special treatment
+            // range.start > range.stop if slice can found no-empty
             for i in range.rev().step_by(step.unsigned_abs()) {
                 // Safety: This mutable vector is created from the vector's data type.
                 buf.push_value_ref(vector.get_ref(i));

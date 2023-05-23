@@ -14,8 +14,10 @@
 
 use rustpython_vm::class::PyClassImpl;
 use rustpython_vm::{pymodule as rspymodule, VirtualMachine};
+
+use crate::python::rspython::builtins::greptime_builtin::PyDataFrame;
 pub(crate) fn init_data_frame(module_name: &str, vm: &mut VirtualMachine) {
-    data_frame::PyDataFrame::make_class(&vm.ctx);
+    PyDataFrame::make_class(&vm.ctx);
     data_frame::PyExpr::make_class(&vm.ctx);
     vm.add_native_module(module_name.to_owned(), Box::new(data_frame::make_module));
 }
@@ -24,24 +26,24 @@ pub(crate) fn init_data_frame(module_name: &str, vm: &mut VirtualMachine) {
 pub(crate) mod data_frame {
     use common_recordbatch::{DfRecordBatch, RecordBatch};
     use datafusion::dataframe::DataFrame as DfDataFrame;
+    use datafusion::execution::context::SessionContext;
     use datafusion_expr::Expr as DfExpr;
-    use rustpython_vm::builtins::{PyList, PyListRef};
+    use rustpython_vm::convert::ToPyResult;
     use rustpython_vm::function::PyComparisonValue;
-    use rustpython_vm::types::{Comparable, PyComparisonOp};
+    use rustpython_vm::protocol::PyNumberMethods;
+    use rustpython_vm::types::{AsNumber, Comparable, PyComparisonOp};
     use rustpython_vm::{
         pyclass as rspyclass, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
     };
     use snafu::ResultExt;
 
     use crate::python::error::DataFusionSnafu;
-    use crate::python::ffi_types::PyVector;
-    use crate::python::rspython::builtins::greptime_builtin::lit;
+    use crate::python::ffi_types::py_recordbatch::PyRecordBatch;
+    use crate::python::rspython::builtins::greptime_builtin::{
+        lit, query as get_query_engine, PyDataFrame,
+    };
+    use crate::python::rspython::utils::obj_cast_to;
     use crate::python::utils::block_on_async;
-    #[rspyclass(module = "data_frame", name = "DataFrame")]
-    #[derive(PyPayload, Debug, Clone)]
-    pub struct PyDataFrame {
-        pub inner: DfDataFrame,
-    }
 
     impl From<DfDataFrame> for PyDataFrame {
         fn from(inner: DfDataFrame) -> Self {
@@ -63,9 +65,20 @@ pub(crate) mod data_frame {
     }
     #[rspyclass]
     impl PyDataFrame {
+        #[pymethod]
+        fn from_sql(sql: String, vm: &VirtualMachine) -> PyResult<Self> {
+            let query_engine = get_query_engine(vm)?;
+            let rb = query_engine.sql_to_rb(sql.clone()).map_err(|e| {
+                vm.new_runtime_error(format!("failed to execute sql: {:?}, error: {:?}", sql, e))
+            })?;
+            let ctx = SessionContext::new();
+            ctx.read_batch(rb.df_record_batch().clone())
+                .map_err(|e| vm.new_runtime_error(format!("{e:?}")))
+                .map(|df| df.into())
+        }
         /// TODO(discord9): error handling
         fn from_record_batch(rb: &DfRecordBatch) -> crate::python::error::Result<Self> {
-            let ctx = datafusion::execution::context::SessionContext::new();
+            let ctx = SessionContext::new();
             let inner = ctx.read_batch(rb.clone()).context(DataFusionSnafu)?;
             Ok(Self { inner })
         }
@@ -224,31 +237,38 @@ pub(crate) mod data_frame {
         }
 
         #[pymethod]
-        /// collect `DataFrame` results into `List[List[Vector]]`
-        fn collect(&self, vm: &VirtualMachine) -> PyResult<PyListRef> {
+        /// collect `DataFrame` results into `PyRecordBatch` that impl Mapping Protocol
+        fn collect(&self, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
             let inner = self.inner.clone();
             let res = block_on_async(async { inner.collect().await });
             let res = res
                 .map_err(|e| vm.new_runtime_error(format!("{e:?}")))?
                 .map_err(|e| vm.new_runtime_error(e.to_string()))?;
-            let outer_list: Vec<_> = res
-                .iter()
-                .map(|elem| -> PyResult<_> {
-                    let inner_list: Vec<_> = elem
-                        .columns()
-                        .iter()
-                        .map(|arr| -> PyResult<_> {
-                            datatypes::vectors::Helper::try_into_vector(arr)
-                                .map(PyVector::from)
-                                .map(|v| vm.new_pyobj(v))
-                                .map_err(|e| vm.new_runtime_error(e.to_string()))
-                        })
-                        .collect::<Result<_, _>>()?;
-                    let inner_list = PyList::new_ref(inner_list, vm.as_ref());
-                    Ok(inner_list.into())
-                })
-                .collect::<Result<_, _>>()?;
-            Ok(PyList::new_ref(outer_list, vm.as_ref()))
+            if res.is_empty() {
+                return Ok(vm.ctx.new_dict().into());
+            }
+            let concat_rb =
+                arrow::compute::concat_batches(&res[0].schema(), res.iter()).map_err(|e| {
+                    vm.new_runtime_error(format!(
+                        "Concat batches failed for dataframe {self:?}: {e}"
+                    ))
+                })?;
+
+            // we are inside a macro, so using full path
+            let schema = datatypes::schema::Schema::try_from(concat_rb.schema()).map_err(|e| {
+                vm.new_runtime_error(format!(
+                    "Convert to Schema failed for dataframe {self:?}: {e}"
+                ))
+            })?;
+            let rb =
+                RecordBatch::try_from_df_record_batch(schema.into(), concat_rb).map_err(|e| {
+                    vm.new_runtime_error(format!(
+                        "Convert to RecordBatch failed for dataframe {self:?}: {e}"
+                    ))
+                })?;
+
+            let rb = PyRecordBatch::new(rb);
+            Ok(rb.into_pyobject(vm))
         }
     }
 
@@ -296,7 +316,20 @@ pub(crate) mod data_frame {
         }
     }
 
-    #[rspyclass(with(Comparable))]
+    impl AsNumber for PyExpr {
+        fn as_number() -> &'static PyNumberMethods {
+            static AS_NUMBER: PyNumberMethods = PyNumberMethods {
+                and: Some(|a, b, vm| PyExpr::and(a.to_owned(), b.to_owned(), vm).to_pyresult(vm)),
+                or: Some(|a, b, vm| PyExpr::or(a.to_owned(), b.to_owned(), vm).to_pyresult(vm)),
+                invert: Some(|a, vm| PyExpr::invert((*a).to_owned(), vm).to_pyresult(vm)),
+
+                ..PyNumberMethods::NOT_IMPLEMENTED
+            };
+            &AS_NUMBER
+        }
+    }
+
+    #[rspyclass(with(Comparable, AsNumber))]
     impl PyExpr {
         fn richcompare(
             &self,
@@ -325,18 +358,23 @@ pub(crate) mod data_frame {
         }
 
         #[pymethod(magic)]
-        fn and(&self, other: PyExprRef) -> PyResult<PyExpr> {
-            Ok(self.inner.clone().and(other.inner.clone()).into())
+        fn and(zelf: PyObjectRef, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyExpr> {
+            let zelf = obj_cast_to::<Self>(zelf, vm)?;
+            let other = obj_cast_to::<Self>(other, vm)?;
+            Ok(zelf.inner.clone().and(other.inner.clone()).into())
         }
         #[pymethod(magic)]
-        fn or(&self, other: PyExprRef) -> PyResult<PyExpr> {
-            Ok(self.inner.clone().or(other.inner.clone()).into())
+        fn or(zelf: PyObjectRef, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyExpr> {
+            let zelf = obj_cast_to::<Self>(zelf, vm)?;
+            let other = obj_cast_to::<Self>(other, vm)?;
+            Ok(zelf.inner.clone().or(other.inner.clone()).into())
         }
 
         /// `~` operator, return `!self`
         #[pymethod(magic)]
-        fn invert(&self) -> PyResult<PyExpr> {
-            Ok(self.inner.clone().not().into())
+        fn invert(zelf: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyExpr> {
+            let zelf = obj_cast_to::<Self>(zelf, vm)?;
+            Ok(zelf.inner.clone().not().into())
         }
 
         /// sort ascending&nulls_first

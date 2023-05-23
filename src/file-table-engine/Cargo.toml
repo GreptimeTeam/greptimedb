@@ -1,0 +1,36 @@
+[package]
+name = "file-table-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+test = ["common-test-util"]
+
+[dependencies]
+async-trait = "0.1"
+common-catalog = { path = "../common/catalog" }
+common-datasource = { path = "../common/datasource" }
+common-error = { path = "../common/error" }
+common-procedure = { path = "../common/procedure" }
+common-procedure-test = { path = "../common/procedure-test" }
+common-query = { path = "../common/query" }
+common-recordbatch = { path = "../common/recordbatch" }
+common-telemetry = { path = "../common/telemetry" }
+common-time = { path = "../common/time" }
+datafusion.workspace = true
+datatypes = { path = "../datatypes" }
+futures.workspace = true
+object-store = { path = "../object-store" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+snafu.workspace = true
+storage = { path = "../storage" }
+store-api = { path = "../store-api" }
+table = { path = "../table" }
+common-test-util = { path = "../common/test-util", optional = true }
+tokio.workspace = true
+
+[dev-dependencies]
+common-test-util = { path = "../common/test-util" }

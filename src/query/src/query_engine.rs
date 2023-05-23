@@ -19,7 +19,7 @@ mod state;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use catalog::CatalogListRef;
+use catalog::CatalogManagerRef;
 use common_base::Plugins;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::{FunctionRef, FUNCTION_REGISTRY};
@@ -27,25 +27,20 @@ use common_query::prelude::ScalarUdf;
 use common_query::Output;
 use datatypes::schema::Schema;
 use session::context::QueryContextRef;
+use sql::statements::statement::Statement;
 
 use crate::datafusion::DatafusionQueryEngine;
 use crate::error::Result;
-use crate::parser::QueryStatement;
 use crate::plan::LogicalPlan;
 use crate::planner::LogicalPlanner;
 pub use crate::query_engine::context::QueryEngineContext;
 pub use crate::query_engine::state::QueryEngineState;
 
-pub type StatementHandlerRef = Arc<dyn StatementHandler>;
+pub type SqlStatementExecutorRef = Arc<dyn SqlStatementExecutor>;
 
-// TODO(LFC): Gradually make more statements executed in the form of logical plan, and remove this trait. Tracked in #1010.
 #[async_trait]
-pub trait StatementHandler: Send + Sync {
-    async fn handle_statement(
-        &self,
-        stmt: QueryStatement,
-        query_ctx: QueryContextRef,
-    ) -> Result<Output>;
+pub trait SqlStatementExecutor: Send + Sync {
+    async fn execute_sql(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output>;
 }
 
 #[async_trait]
@@ -70,12 +65,20 @@ pub struct QueryEngineFactory {
 }
 
 impl QueryEngineFactory {
-    pub fn new(catalog_list: CatalogListRef) -> Self {
-        Self::new_with_plugins(catalog_list, Default::default())
+    pub fn new(catalog_manager: CatalogManagerRef, with_dist_planner: bool) -> Self {
+        Self::new_with_plugins(catalog_manager, with_dist_planner, Default::default())
     }
 
-    pub fn new_with_plugins(catalog_list: CatalogListRef, plugins: Arc<Plugins>) -> Self {
-        let state = Arc::new(QueryEngineState::new(catalog_list, plugins));
+    pub fn new_with_plugins(
+        catalog_manager: CatalogManagerRef,
+        with_dist_planner: bool,
+        plugins: Arc<Plugins>,
+    ) -> Self {
+        let state = Arc::new(QueryEngineState::new(
+            catalog_manager,
+            with_dist_planner,
+            plugins,
+        ));
         let query_engine = Arc::new(DatafusionQueryEngine::new(state));
         register_functions(&query_engine);
         Self { query_engine }
@@ -105,7 +108,7 @@ mod tests {
     #[test]
     fn test_query_engine_factory() {
         let catalog_list = catalog::local::new_memory_catalog_list().unwrap();
-        let factory = QueryEngineFactory::new(catalog_list);
+        let factory = QueryEngineFactory::new(catalog_list, false);
 
         let engine = factory.query_engine();
 

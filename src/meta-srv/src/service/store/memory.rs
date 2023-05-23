@@ -17,14 +17,17 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 
 use api::v1::meta::{
-    BatchGetRequest, BatchGetResponse, BatchPutRequest, BatchPutResponse, CompareAndPutRequest,
-    CompareAndPutResponse, DeleteRangeRequest, DeleteRangeResponse, KeyValue, MoveValueRequest,
-    MoveValueResponse, PutRequest, PutResponse, RangeRequest, RangeResponse, ResponseHeader,
+    BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
+    BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
+    DeleteRangeResponse, KeyValue, MoveValueRequest, MoveValueResponse, PutRequest, PutResponse,
+    RangeRequest, RangeResponse, ResponseHeader,
 };
+use common_telemetry::timer;
 use parking_lot::RwLock;
 
 use super::ext::KvStoreExt;
 use crate::error::Result;
+use crate::metrics::METRIC_META_KV_REQUEST;
 use crate::service::store::kv::{KvStore, ResettableKvStore};
 
 pub struct MemStore {
@@ -54,6 +57,11 @@ impl ResettableKvStore for MemStore {
 #[async_trait::async_trait]
 impl KvStore for MemStore {
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
+        let _timer = timer!(
+            METRIC_META_KV_REQUEST,
+            &[("target", "memory"), ("op", "range"),]
+        );
+
         let RangeRequest {
             header,
             key,
@@ -98,6 +106,11 @@ impl KvStore for MemStore {
     }
 
     async fn put(&self, req: PutRequest) -> Result<PutResponse> {
+        let _timer = timer!(
+            METRIC_META_KV_REQUEST,
+            &[("target", "memory"), ("op", "put"),]
+        );
+
         let PutRequest {
             header,
             key,
@@ -119,7 +132,12 @@ impl KvStore for MemStore {
     }
 
     async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse> {
-        let keys = req.keys;
+        let _timer = timer!(
+            METRIC_META_KV_REQUEST,
+            &[("target", "memory"), ("op", "batch_get"),]
+        );
+
+        let BatchGetRequest { header, keys } = req;
 
         let mut kvs = Vec::with_capacity(keys.len());
         for key in keys {
@@ -128,13 +146,17 @@ impl KvStore for MemStore {
             }
         }
 
-        Ok(BatchGetResponse {
-            kvs,
-            ..Default::default()
-        })
+        let cluster_id = header.map_or(0, |h| h.cluster_id);
+        let header = Some(ResponseHeader::success(cluster_id));
+        Ok(BatchGetResponse { header, kvs })
     }
 
     async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
+        let _timer = timer!(
+            METRIC_META_KV_REQUEST,
+            &[("target", "memory"), ("op", "batch_put"),]
+        );
+
         let BatchPutRequest {
             header,
             kvs,
@@ -163,7 +185,40 @@ impl KvStore for MemStore {
         Ok(BatchPutResponse { header, prev_kvs })
     }
 
+    async fn batch_delete(&self, req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
+        let _timer = timer!(
+            METRIC_META_KV_REQUEST,
+            &[("target", "memory"), ("op", "batch_delete"),]
+        );
+
+        let BatchDeleteRequest {
+            header,
+            keys,
+            prev_kv,
+        } = req;
+
+        let mut memory = self.inner.write();
+        let prev_kvs = if prev_kv {
+            keys.into_iter()
+                .filter_map(|key| memory.remove(&key).map(|value| KeyValue { key, value }))
+                .collect()
+        } else {
+            for key in keys.into_iter() {
+                memory.remove(&key);
+            }
+            vec![]
+        };
+        let cluster_id = header.map_or(0, |h| h.cluster_id);
+        let header = Some(ResponseHeader::success(cluster_id));
+        Ok(BatchDeleteResponse { header, prev_kvs })
+    }
+
     async fn compare_and_put(&self, req: CompareAndPutRequest) -> Result<CompareAndPutResponse> {
+        let _timer = timer!(
+            METRIC_META_KV_REQUEST,
+            &[("target", "memory"), ("op", "compare_and_put"),]
+        );
+
         let CompareAndPutRequest {
             header,
             key,
@@ -204,6 +259,11 @@ impl KvStore for MemStore {
     }
 
     async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
+        let _timer = timer!(
+            METRIC_META_KV_REQUEST,
+            &[("target", "memory"), ("op", "deleteL_range"),]
+        );
+
         let DeleteRangeRequest {
             header,
             key,
@@ -241,6 +301,11 @@ impl KvStore for MemStore {
     }
 
     async fn move_value(&self, req: MoveValueRequest) -> Result<MoveValueResponse> {
+        let _timer = timer!(
+            METRIC_META_KV_REQUEST,
+            &[("target", "memory"), ("op", "move_value"),]
+        );
+
         let MoveValueRequest {
             header,
             from_key,

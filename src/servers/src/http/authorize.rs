@@ -16,16 +16,19 @@ use std::marker::PhantomData;
 
 use axum::http::{self, Request, StatusCode};
 use axum::response::Response;
-use common_telemetry::error;
+use common_error::prelude::ErrorExt;
+use common_telemetry::warn;
 use futures::future::BoxFuture;
 use http_body::Body;
+use metrics::increment_counter;
+use secrecy::SecretString;
 use session::context::UserInfo;
 use snafu::{ensure, OptionExt, ResultExt};
 use tower_http::auth::AsyncAuthorizeRequest;
 
 use super::PUBLIC_APIS;
 use crate::auth::Error::IllegalParam;
-use crate::auth::{Identity, IllegalParamSnafu, InternalStateSnafu, UserProviderRef};
+use crate::auth::{Identity, IllegalParamSnafu, UserProviderRef};
 use crate::error::Error::Auth;
 use crate::error::{
     self, InvalidAuthorizationHeaderSnafu, InvisibleASCIISnafu, NotFoundInfluxAuthSnafu, Result,
@@ -77,21 +80,58 @@ where
                 return Ok(request);
             };
 
-            // do authenticate
-            match authenticate(&user_provider, &request).await {
-                Ok(user_info) => {
-                    request.extensions_mut().insert(user_info);
-                }
+            let (username, password) = match extract_username_and_password(&request) {
+                Ok((username, password)) => (username, password),
                 Err(e) => {
-                    error!("authenticate failed: {}", e);
+                    warn!("extract username and password failed: {}", e);
+                    increment_counter!(
+                        crate::metrics::METRIC_AUTH_FAILURE,
+                        &[(
+                            crate::metrics::METRIC_CODE_LABEL,
+                            format!("{}", e.status_code())
+                        )]
+                    );
                     return Err(unauthorized_resp());
                 }
-            }
+            };
 
-            match authorize(&user_provider, &request).await {
-                Ok(_) => Ok(request),
+            let (catalog, schema) = match extract_catalog_and_schema(&request) {
+                Ok((catalog, schema)) => (catalog, schema),
                 Err(e) => {
-                    error!("authorize failed: {}", e);
+                    warn!("extract catalog and schema failed: {}", e);
+                    increment_counter!(
+                        crate::metrics::METRIC_AUTH_FAILURE,
+                        &[(
+                            crate::metrics::METRIC_CODE_LABEL,
+                            format!("{}", e.status_code())
+                        )]
+                    );
+                    return Err(unauthorized_resp());
+                }
+            };
+
+            match user_provider
+                .auth(
+                    Identity::UserId(username.as_str(), None),
+                    crate::auth::Password::PlainText(password),
+                    catalog,
+                    schema,
+                )
+                .await
+            {
+                Ok(userinfo) => {
+                    request.extensions_mut().insert(userinfo);
+                    Ok(request)
+                }
+                Err(e) => {
+                    warn!("authenticate failed: {}", e);
+                    increment_counter!(
+                        crate::metrics::METRIC_AUTH_FAILURE,
+                        &[(
+                            crate::metrics::METRIC_CODE_LABEL,
+                            format!("{}", e.status_code())
+                        )]
+                    );
                     Err(unauthorized_resp())
                 }
             }
@@ -99,27 +139,18 @@ where
     }
 }
 
-async fn authorize<B: Send + Sync + 'static>(
-    user_provider: &UserProviderRef,
+fn extract_catalog_and_schema<B: Send + Sync + 'static>(
     request: &Request<B>,
-) -> crate::auth::Result<()> {
+) -> crate::auth::Result<(&str, &str)> {
     // try get database name
     let query = request.uri().query().unwrap_or_default();
     let input_database = extract_db_from_query(query).context(IllegalParamSnafu {
         msg: "db not provided or corrupted",
     })?;
 
-    let (catalog, database) =
-        crate::parse_catalog_and_schema_from_client_database_name(input_database);
-
-    let user_info = request
-        .extensions()
-        .get::<UserInfo>()
-        .context(InternalStateSnafu {
-            msg: "no user info provided while authorizing",
-        })?;
-
-    user_provider.authorize(catalog, database, user_info).await
+    Ok(crate::parse_catalog_and_schema_from_client_database_name(
+        input_database,
+    ))
 }
 
 fn get_influxdb_credentials<B: Send + Sync + 'static>(
@@ -142,7 +173,7 @@ fn get_influxdb_credentials<B: Send + Sync + 'static>(
             .split_once(':')
             .context(InvalidAuthorizationHeaderSnafu)?;
 
-        Ok(Some((username.to_string(), password.to_string())))
+        Ok(Some((username.to_string(), password.to_string().into())))
     } else {
         // try v1
         let Some(query_str) = request.uri().query() else { return Ok(None) };
@@ -150,7 +181,7 @@ fn get_influxdb_credentials<B: Send + Sync + 'static>(
         match extract_influxdb_user_from_query(query_str) {
             (None, None) => Ok(None),
             (Some(username), Some(password)) => {
-                Ok(Some((username.to_string(), password.to_string())))
+                Ok(Some((username.to_string(), password.to_string().into())))
             }
             _ => Err(Auth {
                 source: IllegalParam {
@@ -162,11 +193,10 @@ fn get_influxdb_credentials<B: Send + Sync + 'static>(
     }
 }
 
-async fn authenticate<B: Send + Sync + 'static>(
-    user_provider: &UserProviderRef,
+fn extract_username_and_password<B: Send + Sync + 'static>(
     request: &Request<B>,
-) -> Result<UserInfo> {
-    let (username, password) = if request.uri().path().contains("influxdb") {
+) -> Result<(Username, Password)> {
+    Ok(if request.uri().path().contains("influxdb") {
         // compatible with influxdb auth
         get_influxdb_credentials(request)?.context(NotFoundInfluxAuthSnafu)?
     } else {
@@ -175,14 +205,7 @@ async fn authenticate<B: Send + Sync + 'static>(
         match scheme {
             AuthScheme::Basic(username, password) => (username, password),
         }
-    };
-
-    Ok(user_provider
-        .authenticate(
-            Identity::UserId(&username, None),
-            crate::auth::Password::PlainText(&password),
-        )
-        .await?)
+    })
 }
 
 fn unauthorized_resp<RespBody>() -> Response<RespBody>
@@ -200,7 +223,7 @@ pub enum AuthScheme {
 }
 
 type Username = String;
-type Password = String;
+type Password = SecretString;
 
 impl TryFrom<&str> for AuthScheme {
     type Error = error::Error;
@@ -240,7 +263,7 @@ fn decode_basic(credential: Credential) -> Result<(Username, Password)> {
     let as_utf8 = String::from_utf8(decoded).context(error::InvalidUtf8ValueSnafu)?;
 
     if let Some((user_id, password)) = as_utf8.split_once(':') {
-        return Ok((user_id.to_string(), password.to_string()));
+        return Ok((user_id.to_string(), password.to_string().into()));
     }
 
     InvalidAuthorizationHeaderSnafu {}.fail()
@@ -285,6 +308,8 @@ fn extract_influxdb_user_from_query(query: &str) -> (Option<&str>, Option<&str>)
 mod tests {
     use std::assert_matches::assert_matches;
 
+    use secrecy::ExposeSecret;
+
     use super::*;
 
     #[test]
@@ -317,7 +342,7 @@ mod tests {
         let credential = "dXNlcm5hbWU6cGFzc3dvcmQ=";
         let (username, pwd) = decode_basic(credential).unwrap();
         assert_eq!("username", username);
-        assert_eq!("password", pwd);
+        assert_eq!("password", pwd.expose_secret());
 
         let wrong_credential = "dXNlcm5hbWU6cG Fzc3dvcmQ=";
         let result = decode_basic(wrong_credential);
@@ -332,7 +357,7 @@ mod tests {
 
         let auth_scheme_str = "basic dGVzdDp0ZXN0";
         let scheme: AuthScheme = auth_scheme_str.try_into().unwrap();
-        assert_matches!(scheme, AuthScheme::Basic(username, pwd) if username == "test" && pwd == "test");
+        assert_matches!(scheme, AuthScheme::Basic(username, pwd) if username == "test" && pwd.expose_secret() == "test");
 
         let unsupported = "digest";
         let auth_scheme: Result<AuthScheme> = unsupported.try_into();
@@ -345,7 +370,7 @@ mod tests {
         let req = mock_http_request(Some("Basic dXNlcm5hbWU6cGFzc3dvcmQ="), None).unwrap();
 
         let auth_scheme = auth_header(&req).unwrap();
-        assert_matches!(auth_scheme, AuthScheme::Basic(username, pwd) if username == "username" && pwd == "password");
+        assert_matches!(auth_scheme, AuthScheme::Basic(username, pwd) if username == "username" && pwd.expose_secret() == "password");
 
         let wrong_req = mock_http_request(Some("Basic dXNlcm5hbWU6 cGFzc3dvcmQ="), None).unwrap();
         let res = auth_header(&wrong_req);

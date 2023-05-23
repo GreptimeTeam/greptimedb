@@ -31,9 +31,12 @@ use storage::region::RegionImpl;
 use storage::EngineImpl;
 use store_api::manifest::Manifest;
 use store_api::storage::ReadContext;
+use table::engine::region_id;
+use table::metadata::TableType;
 use table::requests::{
     AddColumnRequest, AlterKind, DeleteRequest, FlushTableRequest, TableOptions,
 };
+use table::Table;
 
 use super::*;
 use crate::table::test_util::{
@@ -80,7 +83,8 @@ async fn setup_table_with_column_default_constraint() -> (TempDir, String, Table
             Arc::new(NoopLogStore::default()),
             object_store.clone(),
             compaction_scheduler,
-        ),
+        )
+        .unwrap(),
         object_store,
     );
 
@@ -98,6 +102,7 @@ async fn setup_table_with_column_default_constraint() -> (TempDir, String, Table
                 primary_key_indices: Vec::default(),
                 table_options: TableOptions::default(),
                 region_numbers: vec![0],
+                engine: MITO_ENGINE.to_string(),
             },
         )
         .await
@@ -176,11 +181,11 @@ fn test_region_name() {
 #[test]
 fn test_table_dir() {
     assert_eq!(
-        "greptime/public/1024/",
+        "data/greptime/public/1024/",
         table_dir("greptime", "public", 1024)
     );
     assert_eq!(
-        "0x4354a1/prometheus/1024/",
+        "data/0x4354a1/prometheus/1024/",
         table_dir("0x4354a1", "prometheus", 1024)
     );
 }
@@ -212,6 +217,7 @@ fn test_validate_create_table_request() {
         primary_key_indices: vec![0, 1],
         table_options: TableOptions::default(),
         region_numbers: vec![0],
+        engine: MITO_ENGINE.to_string(),
     };
 
     let err = validate_create_table_request(&request).unwrap_err();
@@ -373,6 +379,7 @@ async fn test_create_if_not_exists() {
         primary_key_indices: Vec::default(),
         table_options: TableOptions::default(),
         region_numbers: vec![0],
+        engine: MITO_ENGINE.to_string(),
     };
 
     let created_table = table_engine.create_table(&ctx, request).await.unwrap();
@@ -390,12 +397,77 @@ async fn test_create_if_not_exists() {
         primary_key_indices: Vec::default(),
         table_options: TableOptions::default(),
         region_numbers: vec![0],
+        engine: MITO_ENGINE.to_string(),
     };
 
     let result = table_engine.create_table(&ctx, request).await;
 
     assert!(result.is_err());
     assert!(matches!(result, Err(e) if format!("{e:?}").contains("Table already exists")));
+}
+
+#[tokio::test]
+async fn test_open_table_with_region_number() {
+    common_telemetry::init_default_ut_logging();
+
+    let ctx = EngineContext::default();
+    let open_req = OpenTableRequest {
+        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+        schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+        table_name: test_util::TABLE_NAME.to_string(),
+        // the test table id is 1
+        table_id: 1,
+        region_numbers: vec![0],
+    };
+
+    let invalid_open_req = OpenTableRequest {
+        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+        schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+        table_name: test_util::TABLE_NAME.to_string(),
+        // the test table id is 1
+        table_id: 1,
+        region_numbers: vec![1],
+    };
+
+    let (_engine, storage_engine, table, object_store, _dir) = {
+        let TestEngineComponents {
+            table_engine,
+            storage_engine,
+            table_ref: table,
+            object_store,
+            dir,
+            ..
+        } = test_util::setup_test_engine_and_table().await;
+
+        assert_eq!(MITO_ENGINE, table_engine.name());
+        // Now try to open the table again.
+        let reopened = table_engine
+            .open_table(&ctx, open_req.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(table.schema(), reopened.schema());
+
+        (table_engine, storage_engine, table, object_store, dir)
+    };
+
+    // Construct a new table engine, and try to open the table.
+    let table_engine = MitoEngine::new(EngineConfig::default(), storage_engine, object_store);
+
+    let region_not_found = table_engine
+        .open_table(&ctx, invalid_open_req.clone())
+        .await
+        .err()
+        .unwrap();
+
+    assert_eq!(region_not_found.to_string(), "Failed to operate table, source: Failed to operate table, source: Cannot find region, table: greptime.public.demo, region: 1");
+
+    let reopened = table_engine
+        .open_table(&ctx, open_req.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(table.schema(), reopened.schema());
 }
 
 #[tokio::test]
@@ -409,6 +481,7 @@ async fn test_open_table() {
         table_name: test_util::TABLE_NAME.to_string(),
         // the test table id is 1
         table_id: 1,
+        region_numbers: vec![0],
     };
 
     let (_engine, storage_engine, table, object_store, _dir) = {
@@ -600,6 +673,7 @@ async fn test_alter_rename_table() {
         primary_key_indices: vec![0],
         create_if_not_exists: true,
         table_options: TableOptions::default(),
+        engine: MITO_ENGINE.to_string(),
     };
     table_engine
         .create_table(&ctx, req)
@@ -640,6 +714,7 @@ async fn test_alter_rename_table() {
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: new_table_name.to_string(),
         table_id: 1,
+        region_numbers: vec![0],
     };
 
     // test reopen table
@@ -684,6 +759,7 @@ async fn test_drop_table() {
         primary_key_indices: Vec::default(),
         table_options: TableOptions::default(),
         region_numbers: vec![0],
+        engine: MITO_ENGINE.to_string(),
     };
 
     let created_table = table_engine
@@ -717,6 +793,7 @@ async fn test_drop_table() {
         primary_key_indices: Vec::default(),
         table_options: TableOptions::default(),
         region_numbers: vec![0],
+        engine: MITO_ENGINE.to_string(),
     };
     table_engine.create_table(&ctx, request).await.unwrap();
     assert!(table_engine.table_exists(&engine_ctx, &table_reference));

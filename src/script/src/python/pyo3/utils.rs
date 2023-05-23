@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use arrow::pyarrow::PyArrowException;
-use common_telemetry::info;
+use common_telemetry::{info, timer};
 use datafusion_common::ScalarValue;
 use datafusion_expr::ColumnarValue;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
@@ -29,6 +29,7 @@ use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyTuple};
 
 use crate::python::ffi_types::utils::{collect_diff_types_string, new_item_field};
 use crate::python::ffi_types::PyVector;
+use crate::python::metric;
 use crate::python::pyo3::builtins::greptime_builtins;
 
 /// prevent race condition of init cpython
@@ -39,6 +40,7 @@ pub(crate) fn to_py_err(err: impl ToString) -> PyErr {
 
 /// init cpython interpreter with `greptime` builtins, if already inited, do nothing
 pub(crate) fn init_cpython_interpreter() -> PyResult<()> {
+    let _t = timer!(metric::METRIC_PYO3_INIT_ELAPSED);
     let mut start = START_PYO3.lock().unwrap();
     if !*start {
         pyo3::append_to_inittab!(greptime_builtins);
@@ -276,7 +278,7 @@ pub fn try_into_columnar_value(py: Python<'_>, obj: PyObject) -> PyResult<Column
         if ret.is_empty() {
             return Ok(ColumnarValue::Scalar(ScalarValue::List(
                 None,
-                Box::new(new_item_field(ArrowDataType::Null)),
+                Arc::new(new_item_field(ArrowDataType::Null)),
             )));
         }
         let ty = ret[0].get_datatype();
@@ -289,7 +291,7 @@ pub fn try_into_columnar_value(py: Python<'_>, obj: PyObject) -> PyResult<Column
         }
         Ok(ColumnarValue::Scalar(ScalarValue::List(
             Some(ret),
-            Box::new(new_item_field(ty)),
+            Arc::new(new_item_field(ty)),
         )))
     } else {
         to_rust_types!(obj,

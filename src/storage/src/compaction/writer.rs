@@ -85,6 +85,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
 
+    use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_temp_dir;
     use common_time::Timestamp;
     use datatypes::prelude::{LogicalTypeId, ScalarVector, ScalarVectorBuilder};
@@ -93,7 +94,7 @@ mod tests {
         TimestampMillisecondVector, TimestampMillisecondVectorBuilder, UInt64VectorBuilder,
     };
     use object_store::services::Fs;
-    use object_store::{ObjectStore, ObjectStoreBuilder};
+    use object_store::ObjectStore;
     use store_api::storage::{ChunkReader, OpType, SequenceNumber};
 
     use super::*;
@@ -109,8 +110,7 @@ mod tests {
     fn schema_for_test() -> RegionSchemaRef {
         // Just build a region desc and use its columns metadata.
         let desc = RegionDescBuilder::new("test")
-            .enable_version_column(false)
-            .push_value_column(("v", LogicalTypeId::UInt64, true))
+            .push_field_column(("v", LogicalTypeId::UInt64, true))
             .build();
         let metadata: RegionMetadata = desc.try_into().unwrap();
         metadata.schema().clone()
@@ -140,8 +140,7 @@ mod tests {
         for key in ts {
             key_builders.push(Some(*key));
         }
-        let row_keys = vec![Arc::new(key_builders.finish()) as _];
-
+        let ts_col = Arc::new(key_builders.finish()) as _;
         let mut value_builders = UInt64VectorBuilder::with_capacity(values.len());
 
         for value in values {
@@ -153,8 +152,9 @@ mod tests {
             sequence,
             op_type,
             start_index_in_batch,
-            keys: row_keys,
+            keys: vec![],
             values: row_values,
+            timestamp: Some(ts_col),
         };
 
         assert_eq!(ts.len(), kvs.len());
@@ -224,9 +224,11 @@ mod tests {
         let SstInfo {
             time_range,
             file_size,
+            ..
         } = writer
             .write_sst(&sst::WriteOptions::default())
             .await
+            .unwrap()
             .unwrap();
         let handle = FileHandle::new(
             FileMeta {
@@ -276,8 +278,10 @@ mod tests {
     async fn test_sst_reader() {
         let dir = create_temp_dir("write_parquet");
         let path = dir.path().to_str().unwrap();
-        let backend = Fs::default().root(path).build().unwrap();
-        let object_store = ObjectStore::new(backend).finish();
+        let mut builder = Fs::default();
+        builder.root(path);
+
+        let object_store = ObjectStore::new(builder).unwrap().finish();
 
         let seq = AtomicU64::new(0);
         let schema = schema_for_test();
@@ -353,8 +357,9 @@ mod tests {
     async fn test_sst_split() {
         let dir = create_temp_dir("write_parquet");
         let path = dir.path().to_str().unwrap();
-        let backend = Fs::default().root(path).build().unwrap();
-        let object_store = ObjectStore::new(backend).finish();
+        let mut builder = Fs::default();
+        builder.root(path);
+        let object_store = ObjectStore::new(builder).unwrap().finish();
 
         let schema = schema_for_test();
         let seq = AtomicU64::new(0);
@@ -407,7 +412,9 @@ mod tests {
             .await
             .unwrap();
 
-        let opts = WriteOptions {};
+        let opts = WriteOptions {
+            sst_write_buffer_size: ReadableSize::mb(8),
+        };
         let s1 = ParquetWriter::new(
             &output_file_ids[0].as_parquet(),
             Source::Reader(reader1),
@@ -415,6 +422,7 @@ mod tests {
         )
         .write_sst(&opts)
         .await
+        .unwrap()
         .unwrap();
         assert_eq!(
             Some((
@@ -431,6 +439,7 @@ mod tests {
         )
         .write_sst(&opts)
         .await
+        .unwrap()
         .unwrap();
         assert_eq!(
             Some((
@@ -447,6 +456,7 @@ mod tests {
         )
         .write_sst(&opts)
         .await
+        .unwrap()
         .unwrap();
 
         assert_eq!(

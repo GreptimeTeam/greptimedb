@@ -1,0 +1,79 @@
+CREATE TABLE demo(host string, cpu double, memory double, ts TIMESTAMP time index);
+
+Affected Rows: 0
+
+insert into demo(host, cpu, memory, ts) values ('host1', 66.6, 1024, 1655276557000), ('host2', 88.8,  333.3, 1655276558000);
+
+Affected Rows: 2
+
+Copy demo TO '/tmp/demo/export/parquet/demo.parquet';
+
+Affected Rows: 2
+
+CREATE TABLE with_filename(host string, cpu double, memory double, ts timestamp time index);
+
+Affected Rows: 0
+
+Copy with_filename FROM '/tmp/demo/export/parquet/demo.parquet';
+
+Affected Rows: 2
+
+select * from with_filename order by ts;
+
++-------+------+--------+---------------------+
+| host  | cpu  | memory | ts                  |
++-------+------+--------+---------------------+
+| host1 | 66.6 | 1024.0 | 2022-06-15T07:02:37 |
+| host2 | 88.8 | 333.3  | 2022-06-15T07:02:38 |
++-------+------+--------+---------------------+
+
+CREATE TABLE with_path(host string, cpu double, memory double, ts timestamp time index);
+
+Affected Rows: 0
+
+Copy with_path FROM '/tmp/demo/export/parquet/';
+
+Affected Rows: 2
+
+select * from with_path order by ts;
+
++-------+------+--------+---------------------+
+| host  | cpu  | memory | ts                  |
++-------+------+--------+---------------------+
+| host1 | 66.6 | 1024.0 | 2022-06-15T07:02:37 |
+| host2 | 88.8 | 333.3  | 2022-06-15T07:02:38 |
++-------+------+--------+---------------------+
+
+CREATE TABLE with_pattern(host string, cpu double, memory double, ts timestamp time index);
+
+Affected Rows: 0
+
+Copy with_pattern FROM '/tmp/demo/export/parquet/' WITH (PATTERN = 'demo.*');
+
+Affected Rows: 2
+
+select * from with_pattern order by ts;
+
++-------+------+--------+---------------------+
+| host  | cpu  | memory | ts                  |
++-------+------+--------+---------------------+
+| host1 | 66.6 | 1024.0 | 2022-06-15T07:02:37 |
+| host2 | 88.8 | 333.3  | 2022-06-15T07:02:38 |
++-------+------+--------+---------------------+
+
+drop table demo;
+
+Affected Rows: 1
+
+drop table with_filename;
+
+Affected Rows: 1
+
+drop table with_path;
+
+Affected Rows: 1
+
+drop table with_pattern;
+
+Affected Rows: 1
+

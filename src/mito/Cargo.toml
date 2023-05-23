@@ -19,12 +19,15 @@ common-error = { path = "../common/error" }
 common-procedure = { path = "../common/procedure" }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
+common-datasource = { path = "../common/datasource" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
+dashmap = "5.4"
 datafusion.workspace = true
 datafusion-common.workspace = true
 datatypes = { path = "../datatypes" }
 futures.workspace = true
+key-lock = "0.1"
 log-store = { path = "../log-store" }
 object-store = { path = "../object-store" }
 serde = { version = "1.0", features = ["derive"] }
@@ -38,3 +41,4 @@ tokio.workspace = true
 
 [dev-dependencies]
 common-test-util = { path = "../common/test-util" }
+common-procedure-test = { path = "../common/procedure-test" }

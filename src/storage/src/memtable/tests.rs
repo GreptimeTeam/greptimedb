@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_time::Timestamp;
 use datatypes::prelude::*;
 use datatypes::timestamp::TimestampMillisecond;
 use datatypes::type_id::LogicalTypeId;
@@ -31,9 +32,8 @@ use crate::test_util::descriptor_util::RegionDescBuilder;
 pub fn schema_for_test() -> RegionSchemaRef {
     // Just build a region desc and use its columns metadata.
     let desc = RegionDescBuilder::new("test")
-        .enable_version_column(true)
-        .push_value_column(("v0", LogicalTypeId::UInt64, true))
-        .push_value_column(("v1", LogicalTypeId::UInt64, true))
+        .push_field_column(("v0", LogicalTypeId::UInt64, true))
+        .push_field_column(("v1", LogicalTypeId::UInt64, true))
         .build();
     let metadata: RegionMetadata = desc.try_into().unwrap();
 
@@ -44,23 +44,16 @@ fn kvs_for_test_with_index(
     sequence: SequenceNumber,
     op_type: OpType,
     start_index_in_batch: usize,
-    keys: &[(TimestampMillisecond, u64)],
+    keys: &[TimestampMillisecond],
     values: &[(Option<u64>, Option<u64>)],
 ) -> KeyValues {
     assert_eq!(keys.len(), values.len());
 
-    let mut key_builders = (
-        TimestampMillisecondVectorBuilder::with_capacity(keys.len()),
-        UInt64VectorBuilder::with_capacity(keys.len()),
-    );
+    let mut key_builders = TimestampMillisecondVectorBuilder::with_capacity(keys.len());
     for key in keys {
-        key_builders.0.push(Some(key.0));
-        key_builders.1.push(Some(key.1));
+        key_builders.push(Some(*key));
     }
-    let row_keys = vec![
-        Arc::new(key_builders.0.finish()) as _,
-        Arc::new(key_builders.1.finish()) as _,
-    ];
+    let ts_col = Arc::new(key_builders.finish()) as _;
 
     let mut value_builders = (
         UInt64VectorBuilder::with_capacity(values.len()),
@@ -79,8 +72,9 @@ fn kvs_for_test_with_index(
         sequence,
         op_type,
         start_index_in_batch,
-        keys: row_keys,
+        keys: vec![],
         values: row_values,
+        timestamp: Some(ts_col),
     };
 
     assert_eq!(keys.len(), kvs.len());
@@ -92,7 +86,7 @@ fn kvs_for_test_with_index(
 fn kvs_for_test(
     sequence: SequenceNumber,
     op_type: OpType,
-    keys: &[(TimestampMillisecond, u64)],
+    keys: &[TimestampMillisecond],
     values: &[(Option<u64>, Option<u64>)],
 ) -> KeyValues {
     kvs_for_test_with_index(sequence, op_type, 0, keys, values)
@@ -102,11 +96,10 @@ pub fn write_kvs(
     memtable: &dyn Memtable,
     sequence: SequenceNumber,
     op_type: OpType,
-    keys: &[(i64, u64)],
+    keys: &[i64],
     values: &[(Option<u64>, Option<u64>)],
 ) {
-    let keys: Vec<(TimestampMillisecond, u64)> =
-        keys.iter().map(|(l, r)| ((*l).into(), *r)).collect();
+    let keys: Vec<TimestampMillisecond> = keys.iter().map(|l| ((*l).into())).collect();
 
     let kvs = kvs_for_test(sequence, op_type, &keys, values);
 
@@ -114,22 +107,21 @@ pub fn write_kvs(
 }
 
 fn check_batch_valid(batch: &Batch) {
-    assert_eq!(6, batch.num_columns());
+    assert_eq!(5, batch.num_columns());
     let row_num = batch.column(0).len();
-    for i in 1..6 {
+    for i in 1..5 {
         assert_eq!(row_num, batch.column(i).len());
     }
 }
 
 fn check_iter_content(
     iter: &mut dyn BatchIterator,
-    keys: &[(i64, u64)],
+    keys: &[i64],
     sequences: &[u64],
     op_types: &[OpType],
     values: &[(Option<u64>, Option<u64>)],
 ) {
-    let keys: Vec<(TimestampMillisecond, u64)> =
-        keys.iter().map(|(l, r)| ((*l).into(), *r)).collect();
+    let keys: Vec<TimestampMillisecond> = keys.iter().map(|l| (*l).into()).collect();
 
     let mut index = 0;
     for batch in iter {
@@ -138,13 +130,12 @@ fn check_iter_content(
 
         let row_num = batch.column(0).len();
         for i in 0..row_num {
-            let (k0, k1) = (batch.column(0).get(i), batch.column(1).get(i));
-            let (v0, v1) = (batch.column(2).get(i), batch.column(3).get(i));
-            let sequence = batch.column(4).get(i);
-            let op_type = batch.column(5).get(i);
+            let k0 = batch.column(0).get(i);
+            let (v0, v1) = (batch.column(1).get(i), batch.column(2).get(i));
+            let sequence = batch.column(3).get(i);
+            let op_type = batch.column(4).get(i);
 
-            assert_eq!(Value::from(keys[index].0), k0);
-            assert_eq!(Value::from(keys[index].1), k1);
+            assert_eq!(Value::from(keys[index]), k0);
             assert_eq!(Value::from(values[index].0), v0);
             assert_eq!(Value::from(values[index].1), v1);
             assert_eq!(Value::from(sequences[index]), sequence);
@@ -209,21 +200,14 @@ fn write_iter_memtable_case(ctx: &TestContext) {
     assert!(iter.next().is_none());
     // Poll the empty iterator again.
     assert!(iter.next().is_none());
-    assert_eq!(0, ctx.memtable.bytes_allocated());
+    assert_eq!(0, ctx.memtable.stats().bytes_allocated());
 
     // Init test data.
     write_kvs(
         &*ctx.memtable,
         10, // sequence
         OpType::Put,
-        &[
-            (1000, 1),
-            (1000, 2),
-            (2002, 1),
-            (2003, 1),
-            (2003, 5),
-            (1001, 1),
-        ], // keys
+        &[1000, 1000, 2002, 2003, 2003, 1001], // keys
         &[
             (Some(1), None),
             (Some(2), None),
@@ -237,12 +221,12 @@ fn write_iter_memtable_case(ctx: &TestContext) {
         &*ctx.memtable,
         11, // sequence
         OpType::Put,
-        &[(1002, 1), (1003, 1), (1004, 1)],             // keys
+        &[1002, 1003, 1004],                            // keys
         &[(None, None), (Some(5), None), (None, None)], // values
     );
 
     // 9 key value pairs (6 + 3).
-    assert_eq!(704, ctx.memtable.bytes_allocated());
+    assert_eq!(576, ctx.memtable.stats().bytes_allocated());
 
     let batch_sizes = [1, 4, 8, consts::READ_BATCH_SIZE];
     for batch_size in batch_sizes {
@@ -259,21 +243,9 @@ fn write_iter_memtable_case(ctx: &TestContext) {
 
         check_iter_content(
             &mut *iter,
+            &[1000, 1001, 1002, 1003, 1004, 2002, 2003], // keys
+            &[10, 10, 11, 11, 11, 10, 10],               // sequences
             &[
-                (1000, 1),
-                (1000, 2),
-                (1001, 1),
-                (1002, 1),
-                (1003, 1),
-                (1004, 1),
-                (2002, 1),
-                (2003, 1),
-                (2003, 5),
-            ], // keys
-            &[10, 10, 10, 11, 11, 11, 10, 10, 10], // sequences
-            &[
-                OpType::Put,
-                OpType::Put,
                 OpType::Put,
                 OpType::Put,
                 OpType::Put,
@@ -283,14 +255,12 @@ fn write_iter_memtable_case(ctx: &TestContext) {
                 OpType::Put,
             ], // op_types
             &[
-                (Some(1), None),
                 (Some(2), None),
                 (Some(3), None),
                 (None, None),
                 (Some(5), None),
                 (None, None),
                 (Some(7), None),
-                (Some(8), None),
                 (Some(9), None),
             ], // values
         );
@@ -332,14 +302,7 @@ fn test_iter_batch_size() {
             &*ctx.memtable,
             10, // sequence
             OpType::Put,
-            &[
-                (1000, 1),
-                (1000, 2),
-                (1001, 1),
-                (2002, 1),
-                (2003, 1),
-                (2003, 5),
-            ], // keys
+            &[1000, 1000, 1001, 2002, 2003, 2003], // keys
             &[
                 (Some(1), None),
                 (Some(2), None),
@@ -350,7 +313,7 @@ fn test_iter_batch_size() {
             ], // values
         );
 
-        let total = 6;
+        let total = 4;
         // Batch size [less than, equal to, greater than] total
         let batch_sizes = [1, 6, 8];
         for batch_size in batch_sizes {
@@ -373,7 +336,7 @@ fn test_duplicate_key_across_batch() {
             &*ctx.memtable,
             10, // sequence
             OpType::Put,
-            &[(1000, 1), (1000, 2), (2000, 1), (2001, 2)], // keys
+            &[1000, 1001, 2000, 2001], // keys
             &[(Some(1), None), (None, None), (None, None), (None, None)], // values
         );
 
@@ -381,7 +344,7 @@ fn test_duplicate_key_across_batch() {
             &*ctx.memtable,
             11, // sequence
             OpType::Put,
-            &[(1000, 1), (2001, 2)],                   // keys
+            &[1000, 2001],                             // keys
             &[(Some(1231), None), (Some(1232), None)], // values
         );
 
@@ -395,8 +358,8 @@ fn test_duplicate_key_across_batch() {
             let mut iter = ctx.memtable.iter(&iter_ctx).unwrap();
             check_iter_content(
                 &mut *iter,
-                &[(1000, 1), (1000, 2), (2000, 1), (2001, 2)], // keys
-                &[11, 10, 10, 11],                             // sequences
+                &[1000, 1001, 2000, 2001], // keys
+                &[11, 10, 10, 11],         // sequences
                 &[OpType::Put, OpType::Put, OpType::Put, OpType::Put], // op_types
                 &[
                     (Some(1231), None),
@@ -417,7 +380,7 @@ fn test_duplicate_key_in_batch() {
             &*ctx.memtable,
             10, // sequence
             OpType::Put,
-            &[(1000, 1), (1000, 2), (1000, 1), (2001, 2)], // keys
+            &[1000, 1000, 1001, 2001], // keys
             &[(None, None), (None, None), (Some(1234), None), (None, None)], // values
         );
 
@@ -431,10 +394,10 @@ fn test_duplicate_key_in_batch() {
             let mut iter = ctx.memtable.iter(&iter_ctx).unwrap();
             check_iter_content(
                 &mut *iter,
-                &[(1000, 1), (1000, 2), (2001, 2)],       // keys
-                &[10, 10, 10],                            // sequences
-                &[OpType::Put, OpType::Put, OpType::Put], // op_types
-                &[(Some(1234), None), (None, None), (None, None), (None, None)], // values
+                &[1000, 1001, 2001],                               // keys
+                &[10, 10, 10],                                     // sequences
+                &[OpType::Put, OpType::Put, OpType::Put],          // op_types
+                &[(None, None), (Some(1234), None), (None, None)], // values
             );
         }
     });
@@ -448,7 +411,7 @@ fn test_sequence_visibility() {
             &*ctx.memtable,
             10, // sequence
             OpType::Put,
-            &[(1000, 1), (1000, 2)],             // keys
+            &[1000, 1000],                       // keys
             &[(Some(1), None), (Some(2), None)], // values
         );
 
@@ -456,7 +419,7 @@ fn test_sequence_visibility() {
             &*ctx.memtable,
             11, // sequence
             OpType::Put,
-            &[(1000, 1), (1000, 2)],               // keys
+            &[1000, 1000],                         // keys
             &[(Some(11), None), (Some(12), None)], // values
         );
 
@@ -464,7 +427,7 @@ fn test_sequence_visibility() {
             &*ctx.memtable,
             12, // sequence
             OpType::Put,
-            &[(1000, 1), (1000, 2)],               // keys
+            &[1000, 1000],                         // keys
             &[(Some(21), None), (Some(22), None)], // values
         );
 
@@ -474,6 +437,7 @@ fn test_sequence_visibility() {
                 visible_sequence: 9,
                 for_flush: false,
                 projected_schema: None,
+                time_range: None,
             };
 
             let mut iter = ctx.memtable.iter(&iter_ctx).unwrap();
@@ -492,15 +456,16 @@ fn test_sequence_visibility() {
                 visible_sequence: 10,
                 for_flush: false,
                 projected_schema: None,
+                time_range: None,
             };
 
             let mut iter = ctx.memtable.iter(&iter_ctx).unwrap();
             check_iter_content(
                 &mut *iter,
-                &[(1000, 1), (1000, 2)],             // keys
-                &[10, 10],                           // sequences
-                &[OpType::Put, OpType::Put],         // op_types
-                &[(Some(1), None), (Some(2), None)], // values
+                &[1000],                     // keys
+                &[10],                       // sequences
+                &[OpType::Put, OpType::Put], // op_types
+                &[(Some(2), None)],          // values
             );
         }
 
@@ -510,15 +475,16 @@ fn test_sequence_visibility() {
                 visible_sequence: 11,
                 for_flush: false,
                 projected_schema: None,
+                time_range: None,
             };
 
             let mut iter = ctx.memtable.iter(&iter_ctx).unwrap();
             check_iter_content(
                 &mut *iter,
-                &[(1000, 1), (1000, 2)],               // keys
-                &[11, 11],                             // sequences
-                &[OpType::Put, OpType::Put],           // op_types
-                &[(Some(11), None), (Some(12), None)], // values
+                &[1000],                     // keys
+                &[11],                       // sequences
+                &[OpType::Put, OpType::Put], // op_types
+                &[(Some(12), None)],         // values
             );
         }
     });
@@ -532,7 +498,7 @@ fn test_iter_after_none() {
             &*ctx.memtable,
             10, // sequence
             OpType::Put,
-            &[(1000, 0), (1001, 1), (1002, 2)], // keys
+            &[1000, 1001, 1002],                                  // keys
             &[(Some(0), None), (Some(1), None), (Some(2), None)], // values
         );
 
@@ -549,6 +515,40 @@ fn test_iter_after_none() {
 }
 
 #[test]
+fn test_filter_memtable() {
+    let tester = MemtableTester::default();
+    tester.run_testcase(|ctx| {
+        write_kvs(
+            &*ctx.memtable,
+            10, // sequence
+            OpType::Put,
+            &[1000, 1001, 1002],                                  // keys
+            &[(Some(0), None), (Some(1), None), (Some(2), None)], // values
+        );
+
+        let iter_ctx = IterContext {
+            batch_size: 4,
+            time_range: Some(
+                TimestampRange::new(
+                    Timestamp::new_millisecond(0),
+                    Timestamp::new_millisecond(1001),
+                )
+                .unwrap(),
+            ),
+            ..Default::default()
+        };
+
+        let mut iter = ctx.memtable.iter(&iter_ctx).unwrap();
+        let batch = iter.next().unwrap().unwrap();
+        assert_eq!(5, batch.columns.len());
+        assert_eq!(
+            Arc::new(TimestampMillisecondVector::from_slice([1000])) as Arc<_>,
+            batch.columns[0]
+        );
+    });
+}
+
+#[test]
 fn test_memtable_projection() {
     let tester = MemtableTester::default();
     // Only need v0, but row key columns and internal columns would also be read.
@@ -560,7 +560,7 @@ fn test_memtable_projection() {
             &*ctx.memtable,
             9, // sequence
             OpType::Put,
-            &[(1000, 0), (1001, 1), (1002, 2)], // keys
+            &[1000, 1001, 1002], // keys
             &[
                 (Some(10), Some(20)),
                 (Some(11), Some(21)),
@@ -578,17 +578,15 @@ fn test_memtable_projection() {
         let batch = iter.next().unwrap().unwrap();
         assert!(iter.next().is_none());
 
-        assert_eq!(5, batch.num_columns());
+        assert_eq!(4, batch.num_columns());
         let k0 = Arc::new(TimestampMillisecondVector::from_slice([1000, 1001, 1002])) as VectorRef;
-        let k1 = Arc::new(UInt64Vector::from_slice([0, 1, 2])) as VectorRef;
-        let v0 = Arc::new(UInt64Vector::from_slice([10, 11, 12])) as VectorRef;
+        let v0 = Arc::new(UInt64Vector::from_slice([20, 21, 22])) as VectorRef;
         let sequences = Arc::new(UInt64Vector::from_slice([9, 9, 9])) as VectorRef;
         let op_types = Arc::new(UInt8Vector::from_slice([1, 1, 1])) as VectorRef;
 
         assert_eq!(k0, *batch.column(0));
-        assert_eq!(k1, *batch.column(1));
-        assert_eq!(v0, *batch.column(2));
-        assert_eq!(sequences, *batch.column(3));
-        assert_eq!(op_types, *batch.column(4));
+        assert_eq!(v0, *batch.column(1));
+        assert_eq!(sequences, *batch.column(2));
+        assert_eq!(op_types, *batch.column(3));
     });
 }

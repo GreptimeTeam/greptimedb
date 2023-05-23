@@ -13,13 +13,13 @@
 // limitations under the License.
 
 use arrow::array::ArrayData;
-use arrow::bitmap::Bitmap;
+use arrow::buffer::NullBuffer;
 
 #[derive(Debug, PartialEq)]
-enum ValidityKind<'a> {
+enum ValidityKind {
     /// Whether the array slot is valid or not (null).
     Slots {
-        bitmap: &'a Bitmap,
+        bitmap: NullBuffer,
         len: usize,
         null_count: usize,
     },
@@ -31,17 +31,17 @@ enum ValidityKind<'a> {
 
 /// Validity of a vector.
 #[derive(Debug, PartialEq)]
-pub struct Validity<'a> {
-    kind: ValidityKind<'a>,
+pub struct Validity {
+    kind: ValidityKind,
 }
 
-impl<'a> Validity<'a> {
+impl Validity {
     /// Creates a `Validity` from [`ArrayData`].
-    pub fn from_array_data(data: &'a ArrayData) -> Validity<'a> {
-        match data.null_bitmap() {
-            Some(bitmap) => Validity {
+    pub fn from_array_data(data: ArrayData) -> Validity {
+        match data.nulls() {
+            Some(null_buf) => Validity {
                 kind: ValidityKind::Slots {
-                    bitmap,
+                    bitmap: null_buf.clone(),
                     len: data.len(),
                     null_count: data.null_count(),
                 },
@@ -51,14 +51,14 @@ impl<'a> Validity<'a> {
     }
 
     /// Returns `Validity` that all elements are valid.
-    pub fn all_valid(len: usize) -> Validity<'a> {
+    pub fn all_valid(len: usize) -> Validity {
         Validity {
             kind: ValidityKind::AllValid { len },
         }
     }
 
     /// Returns `Validity` that all elements are null.
-    pub fn all_null(len: usize) -> Validity<'a> {
+    pub fn all_null(len: usize) -> Validity {
         Validity {
             kind: ValidityKind::AllNull { len },
         }
@@ -66,9 +66,9 @@ impl<'a> Validity<'a> {
 
     /// Returns whether `i-th` bit is set.
     pub fn is_set(&self, i: usize) -> bool {
-        match self.kind {
-            ValidityKind::Slots { bitmap, .. } => bitmap.is_set(i),
-            ValidityKind::AllValid { len } => i < len,
+        match &self.kind {
+            ValidityKind::Slots { bitmap, .. } => bitmap.is_valid(i),
+            ValidityKind::AllValid { len } => i < *len,
             ValidityKind::AllNull { .. } => false,
         }
     }
@@ -136,7 +136,7 @@ mod tests {
     #[test]
     fn test_from_array_data() {
         let array = Int32Array::from_iter([None, Some(1), None]);
-        let validity = Validity::from_array_data(array.data());
+        let validity = Validity::from_array_data(array.to_data());
         assert_eq!(2, validity.null_count());
         assert!(!validity.is_set(0));
         assert!(validity.is_set(1));
@@ -145,13 +145,13 @@ mod tests {
         assert!(!validity.is_all_valid());
 
         let array = Int32Array::from_iter([None, None]);
-        let validity = Validity::from_array_data(array.data());
+        let validity = Validity::from_array_data(array.to_data());
         assert!(validity.is_all_null());
         assert!(!validity.is_all_valid());
         assert_eq!(2, validity.null_count());
 
         let array = Int32Array::from_iter_values([1, 2]);
-        let validity = Validity::from_array_data(array.data());
+        let validity = Validity::from_array_data(array.to_data());
         assert!(!validity.is_all_null());
         assert!(validity.is_all_valid());
         assert_eq!(0, validity.null_count());

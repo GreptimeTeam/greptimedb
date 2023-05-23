@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt;
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
@@ -60,6 +61,32 @@ pub enum ConcreteDataType {
     // Compound types:
     List(ListType),
     Dictionary(DictionaryType),
+}
+
+impl fmt::Display for ConcreteDataType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConcreteDataType::Null(_) => write!(f, "Null"),
+            ConcreteDataType::Boolean(_) => write!(f, "Boolean"),
+            ConcreteDataType::Int8(_) => write!(f, "Int8"),
+            ConcreteDataType::Int16(_) => write!(f, "Int16"),
+            ConcreteDataType::Int32(_) => write!(f, "Int32"),
+            ConcreteDataType::Int64(_) => write!(f, "Int64"),
+            ConcreteDataType::UInt8(_) => write!(f, "UInt8"),
+            ConcreteDataType::UInt16(_) => write!(f, "UInt16"),
+            ConcreteDataType::UInt32(_) => write!(f, "UInt32"),
+            ConcreteDataType::UInt64(_) => write!(f, "UInt64"),
+            ConcreteDataType::Float32(_) => write!(f, "Float32"),
+            ConcreteDataType::Float64(_) => write!(f, "Float64"),
+            ConcreteDataType::Binary(_) => write!(f, "Binary"),
+            ConcreteDataType::String(_) => write!(f, "String"),
+            ConcreteDataType::Date(_) => write!(f, "Date"),
+            ConcreteDataType::DateTime(_) => write!(f, "DateTime"),
+            ConcreteDataType::Timestamp(_) => write!(f, "Timestamp"),
+            ConcreteDataType::List(_) => write!(f, "List"),
+            ConcreteDataType::Dictionary(_) => write!(f, "Dictionary"),
+        }
+    }
 }
 
 // TODO(yingwen): Refactor these `is_xxx()` methods, such as adding a `properties()` method
@@ -362,7 +389,7 @@ mod tests {
             ConcreteDataType::String(_)
         ));
         assert_eq!(
-            ConcreteDataType::from_arrow_type(&ArrowDataType::List(Box::new(Field::new(
+            ConcreteDataType::from_arrow_type(&ArrowDataType::List(Arc::new(Field::new(
                 "item",
                 ArrowDataType::Int32,
                 true,
@@ -513,5 +540,82 @@ mod tests {
             *list_type.as_list().unwrap()
         );
         assert!(ConcreteDataType::int32_datatype().as_list().is_none());
+    }
+
+    #[test]
+    fn test_display_concrete_data_type() {
+        assert_eq!(
+            ConcreteDataType::from_arrow_type(&ArrowDataType::Null).to_string(),
+            "Null"
+        );
+        assert_eq!(
+            ConcreteDataType::from_arrow_type(&ArrowDataType::Boolean).to_string(),
+            "Boolean"
+        );
+        assert_eq!(
+            ConcreteDataType::from_arrow_type(&ArrowDataType::Binary).to_string(),
+            "Binary"
+        );
+        assert_eq!(
+            ConcreteDataType::from_arrow_type(&ArrowDataType::LargeBinary).to_string(),
+            "Binary"
+        );
+        assert_eq!(
+            ConcreteDataType::from_arrow_type(&ArrowDataType::Int8).to_string(),
+            "Int8"
+        );
+        assert_eq!(
+            ConcreteDataType::from_arrow_type(&ArrowDataType::Int16).to_string(),
+            "Int16"
+        );
+        assert_eq!(
+            ConcreteDataType::from_arrow_type(&ArrowDataType::Int32).to_string(),
+            "Int32"
+        );
+        assert_eq!(
+            ConcreteDataType::from_arrow_type(&ArrowDataType::Int64).to_string(),
+            "Int64"
+        );
+        assert_eq!(
+            ConcreteDataType::from_arrow_type(&ArrowDataType::UInt8).to_string(),
+            "UInt8"
+        );
+        assert_eq!(
+            ConcreteDataType::from_arrow_type(&ArrowDataType::UInt16).to_string(),
+            "UInt16"
+        );
+        assert_eq!(
+            ConcreteDataType::from_arrow_type(&ArrowDataType::UInt32).to_string(),
+            "UInt32"
+        );
+        assert_eq!(
+            ConcreteDataType::from_arrow_type(&ArrowDataType::UInt64).to_string(),
+            "UInt64"
+        );
+        assert_eq!(
+            ConcreteDataType::from_arrow_type(&ArrowDataType::Float32).to_string(),
+            "Float32"
+        );
+        assert_eq!(
+            ConcreteDataType::from_arrow_type(&ArrowDataType::Float64).to_string(),
+            "Float64"
+        );
+        assert_eq!(
+            ConcreteDataType::from_arrow_type(&ArrowDataType::Utf8).to_string(),
+            "String"
+        );
+        assert_eq!(
+            ConcreteDataType::from_arrow_type(&ArrowDataType::List(Arc::new(Field::new(
+                "item",
+                ArrowDataType::Int32,
+                true,
+            ))))
+            .to_string(),
+            "List"
+        );
+        assert_eq!(
+            ConcreteDataType::from_arrow_type(&ArrowDataType::Date32).to_string(),
+            "Date"
+        );
     }
 }

@@ -26,10 +26,11 @@ mod tests {
     use catalog::remote::{
         KvBackend, KvBackendRef, RemoteCatalogManager, RemoteCatalogProvider, RemoteSchemaProvider,
     };
-    use catalog::{CatalogList, CatalogManager, RegisterTableRequest};
-    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use catalog::{CatalogManager, RegisterTableRequest};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
     use datatypes::schema::RawSchema;
     use futures_util::StreamExt;
+    use table::engine::manager::{MemoryTableEngineManager, TableEngineManagerRef};
     use table::engine::{EngineContext, TableEngineRef};
     use table::requests::CreateTableRequest;
 
@@ -77,32 +78,47 @@ mod tests {
 
     async fn prepare_components(
         node_id: u64,
-    ) -> (KvBackendRef, TableEngineRef, Arc<RemoteCatalogManager>) {
+    ) -> (
+        KvBackendRef,
+        TableEngineRef,
+        Arc<RemoteCatalogManager>,
+        TableEngineManagerRef,
+    ) {
         let backend = Arc::new(MockKvBackend::default()) as KvBackendRef;
         let table_engine = Arc::new(MockTableEngine::default());
+        let engine_manager = Arc::new(MemoryTableEngineManager::alias(
+            MITO_ENGINE.to_string(),
+            table_engine.clone(),
+        ));
         let catalog_manager =
-            RemoteCatalogManager::new(table_engine.clone(), node_id, backend.clone());
+            RemoteCatalogManager::new(engine_manager.clone(), node_id, backend.clone());
         catalog_manager.start().await.unwrap();
-        (backend, table_engine, Arc::new(catalog_manager))
+        (
+            backend,
+            table_engine,
+            Arc::new(catalog_manager),
+            engine_manager as Arc<_>,
+        )
     }
 
     #[tokio::test]
     async fn test_remote_catalog_default() {
         common_telemetry::init_default_ut_logging();
         let node_id = 42;
-        let (_, _, catalog_manager) = prepare_components(node_id).await;
+        let (_, _, catalog_manager, _) = prepare_components(node_id).await;
         assert_eq!(
             vec![DEFAULT_CATALOG_NAME.to_string()],
-            catalog_manager.catalog_names().unwrap()
+            catalog_manager.catalog_names().await.unwrap()
         );
 
         let default_catalog = catalog_manager
             .catalog(DEFAULT_CATALOG_NAME)
+            .await
             .unwrap()
             .unwrap();
         assert_eq!(
             vec![DEFAULT_SCHEMA_NAME.to_string()],
-            default_catalog.schema_names().unwrap()
+            default_catalog.schema_names().await.unwrap()
         );
     }
 
@@ -110,7 +126,7 @@ mod tests {
     async fn test_remote_catalog_register_nonexistent() {
         common_telemetry::init_default_ut_logging();
         let node_id = 42;
-        let (_, table_engine, catalog_manager) = prepare_components(node_id).await;
+        let (_, table_engine, catalog_manager, _) = prepare_components(node_id).await;
         // register a new table with an nonexistent catalog
         let catalog_name = "nonexistent_catalog".to_string();
         let schema_name = "nonexistent_schema".to_string();
@@ -131,6 +147,7 @@ mod tests {
                     primary_key_indices: vec![],
                     create_if_not_exists: false,
                     table_options: Default::default(),
+                    engine: MITO_ENGINE.to_string(),
                 },
             )
             .await
@@ -154,21 +171,22 @@ mod tests {
     #[tokio::test]
     async fn test_register_table() {
         let node_id = 42;
-        let (_, table_engine, catalog_manager) = prepare_components(node_id).await;
+        let (_, table_engine, catalog_manager, _) = prepare_components(node_id).await;
         let default_catalog = catalog_manager
             .catalog(DEFAULT_CATALOG_NAME)
+            .await
             .unwrap()
             .unwrap();
         assert_eq!(
             vec![DEFAULT_SCHEMA_NAME.to_string()],
-            default_catalog.schema_names().unwrap()
+            default_catalog.schema_names().await.unwrap()
         );
 
         let default_schema = default_catalog
             .schema(DEFAULT_SCHEMA_NAME)
+            .await
             .unwrap()
             .unwrap();
-        assert_eq!(vec!["numbers"], default_schema.table_names().unwrap());
 
         // register a new table with an nonexistent catalog
         let catalog_name = DEFAULT_CATALOG_NAME.to_string();
@@ -191,6 +209,7 @@ mod tests {
                     primary_key_indices: vec![],
                     create_if_not_exists: false,
                     table_options: Default::default(),
+                    engine: MITO_ENGINE.to_string(),
                 },
             )
             .await
@@ -204,37 +223,35 @@ mod tests {
         };
         assert!(catalog_manager.register_table(reg_req).await.unwrap());
         assert_eq!(
-            HashSet::from([table_name, "numbers".to_string()]),
-            default_schema
-                .table_names()
-                .unwrap()
-                .into_iter()
-                .collect::<HashSet<_>>()
+            vec![table_name],
+            default_schema.table_names().await.unwrap()
         );
     }
 
     #[tokio::test]
     async fn test_register_catalog_schema_table() {
         let node_id = 42;
-        let (backend, table_engine, catalog_manager) = prepare_components(node_id).await;
+        let (backend, table_engine, catalog_manager, engine_manager) =
+            prepare_components(node_id).await;
 
         let catalog_name = "test_catalog".to_string();
         let schema_name = "nonexistent_schema".to_string();
         let catalog = Arc::new(RemoteCatalogProvider::new(
             catalog_name.clone(),
             backend.clone(),
+            engine_manager.clone(),
             node_id,
         ));
 
         // register catalog to catalog manager
-        catalog_manager
-            .register_catalog(catalog_name.clone(), catalog)
+        CatalogManager::register_catalog(&*catalog_manager, catalog_name.clone(), catalog)
+            .await
             .unwrap();
         assert_eq!(
             HashSet::<String>::from_iter(
                 vec![DEFAULT_CATALOG_NAME.to_string(), catalog_name.clone()].into_iter()
             ),
-            HashSet::from_iter(catalog_manager.catalog_names().unwrap().into_iter())
+            HashSet::from_iter(catalog_manager.catalog_names().await.unwrap().into_iter())
         );
 
         let table_to_register = table_engine
@@ -251,6 +268,7 @@ mod tests {
                     primary_key_indices: vec![],
                     create_if_not_exists: false,
                     table_options: Default::default(),
+                    engine: MITO_ENGINE.to_string(),
                 },
             )
             .await
@@ -274,24 +292,32 @@ mod tests {
 
         let new_catalog = catalog_manager
             .catalog(&catalog_name)
+            .await
             .unwrap()
             .expect("catalog should exist since it's already registered");
         let schema = Arc::new(RemoteSchemaProvider::new(
             catalog_name.clone(),
             schema_name.clone(),
             node_id,
+            engine_manager,
             backend.clone(),
         ));
 
         let prev = new_catalog
             .register_schema(schema_name.clone(), schema.clone())
+            .await
             .expect("Register schema should not fail");
         assert!(prev.is_none());
         assert!(catalog_manager.register_table(reg_req).await.unwrap());
 
         assert_eq!(
             HashSet::from([schema_name.clone()]),
-            new_catalog.schema_names().unwrap().into_iter().collect()
+            new_catalog
+                .schema_names()
+                .await
+                .unwrap()
+                .into_iter()
+                .collect()
         )
     }
 }

@@ -16,29 +16,26 @@ use std::any::Any;
 
 use common_error::ext::ErrorExt;
 use common_error::prelude::{Snafu, StatusCode};
-use snafu::{Backtrace, ErrorCompat};
+use snafu::Location;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
     #[snafu(display("Invalid catalog info: {}", key))]
-    InvalidCatalog { key: String, backtrace: Backtrace },
+    InvalidCatalog { key: String, location: Location },
 
     #[snafu(display("Failed to deserialize catalog entry value: {}", raw))]
     DeserializeCatalogEntryValue {
         raw: String,
-        backtrace: Backtrace,
+        location: Location,
         source: serde_json::error::Error,
     },
 
     #[snafu(display("Failed to serialize catalog entry value"))]
     SerializeCatalogEntryValue {
-        backtrace: Backtrace,
+        location: Location,
         source: serde_json::error::Error,
     },
-
-    #[snafu(display("Failed to parse node id: {}", key))]
-    ParseNodeId { key: String, backtrace: Backtrace },
 }
 
 impl ErrorExt for Error {
@@ -47,12 +44,7 @@ impl ErrorExt for Error {
             Error::InvalidCatalog { .. }
             | Error::DeserializeCatalogEntryValue { .. }
             | Error::SerializeCatalogEntryValue { .. } => StatusCode::Unexpected,
-            Error::ParseNodeId { .. } => StatusCode::InvalidArguments,
         }
-    }
-
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        ErrorCompat::backtrace(self)
     }
 
     fn as_any(&self) -> &dyn Any {

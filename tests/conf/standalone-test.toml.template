@@ -2,7 +2,6 @@ mode = 'standalone'
 enable_memory_catalog = false
 
 [wal]
-dir = '{wal_dir}'
 file_size = '1GB'
 purge_interval = '10m'
 purge_threshold = '50GB'
@@ -11,8 +10,12 @@ sync_write = false
 
 [storage]
 type = 'File'
-data_dir = '{data_dir}'
+data_home = '{data_home}'
 
 [grpc_options]
 addr = '127.0.0.1:4001'
 runtime_size = 8
+
+[procedure]
+max_retry_times = 3
+retry_delay = "500ms"

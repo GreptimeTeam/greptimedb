@@ -20,12 +20,13 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use chrono::offset::Local;
-use chrono::{DateTime, LocalResult, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, LocalResult, NaiveDateTime, TimeZone as ChronoTimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
 use crate::error;
 use crate::error::{ArithmeticOverflowSnafu, Error, ParseTimestampSnafu, TimestampOverflowSnafu};
+use crate::timezone::TimeZone;
 use crate::util::div_ceil;
 
 #[derive(Debug, Clone, Default, Copy, Serialize, Deserialize)]
@@ -48,7 +49,7 @@ impl Timestamp {
     /// The result time unit remains unchanged even if `duration` has a different unit with `self`.
     /// For example, a timestamp with value 1 and time unit second, subtracted by 1 millisecond
     /// and the result is still 1 second.
-    pub fn sub(&self, duration: Duration) -> error::Result<Self> {
+    pub fn sub_duration(&self, duration: Duration) -> error::Result<Self> {
         let duration: i64 = match self.unit {
             TimeUnit::Second => {
                 i64::try_from(duration.as_secs()).context(TimestampOverflowSnafu)?
@@ -77,6 +78,13 @@ impl Timestamp {
             value,
             unit: self.unit,
         })
+    }
+
+    /// Subtracts current timestamp with another timestamp, yielding a duration.
+    pub fn sub(&self, rhs: Self) -> Option<chrono::Duration> {
+        let lhs = self.to_chrono_datetime()?;
+        let rhs = rhs.to_chrono_datetime()?;
+        Some(lhs - rhs)
     }
 
     pub fn new(value: i64, unit: TimeUnit) -> Self {
@@ -164,16 +172,41 @@ impl Timestamp {
     /// Format timestamp to ISO8601 string. If the timestamp exceeds what chrono timestamp can
     /// represent, this function simply print the timestamp unit and value in plain string.
     pub fn to_iso8601_string(&self) -> String {
-        if let LocalResult::Single(datetime) = self.to_chrono_datetime() {
-            format!("{}", datetime.format("%Y-%m-%d %H:%M:%S%.f%z"))
+        self.as_formatted_string("%Y-%m-%d %H:%M:%S%.f%z", None)
+    }
+
+    pub fn to_local_string(&self) -> String {
+        self.as_formatted_string("%Y-%m-%d %H:%M:%S%.f", None)
+    }
+
+    /// Format timestamp for given timezone.
+    /// When timezone is None, using local time by default.
+    pub fn to_timezone_aware_string(&self, tz: Option<TimeZone>) -> String {
+        self.as_formatted_string("%Y-%m-%d %H:%M:%S%.f", tz)
+    }
+
+    fn as_formatted_string(self, pattern: &str, timezone: Option<TimeZone>) -> String {
+        if let Some(v) = self.to_chrono_datetime() {
+            match timezone {
+                Some(TimeZone::Offset(offset)) => {
+                    format!("{}", offset.from_utc_datetime(&v).format(pattern))
+                }
+                Some(TimeZone::Named(tz)) => {
+                    format!("{}", tz.from_utc_datetime(&v).format(pattern))
+                }
+                None => {
+                    let local = Local {};
+                    format!("{}", local.from_utc_datetime(&v).format(pattern))
+                }
+            }
         } else {
             format!("[Timestamp{}: {}]", self.unit, self.value)
         }
     }
 
-    pub fn to_chrono_datetime(&self) -> LocalResult<DateTime<Utc>> {
+    pub fn to_chrono_datetime(&self) -> Option<NaiveDateTime> {
         let (sec, nsec) = self.split();
-        Utc.timestamp_opt(sec, nsec)
+        NaiveDateTime::from_timestamp_opt(sec, nsec)
     }
 }
 
@@ -636,31 +669,33 @@ mod tests {
 
     #[test]
     fn test_to_iso8601_string() {
+        std::env::set_var("TZ", "Asia/Shanghai");
         let datetime_str = "2020-09-08 13:42:29.042+0000";
         let ts = Timestamp::from_str(datetime_str).unwrap();
-        assert_eq!(datetime_str, ts.to_iso8601_string());
+        assert_eq!("2020-09-08 21:42:29.042+0800", ts.to_iso8601_string());
 
         let ts_millis = 1668070237000;
         let ts = Timestamp::new_millisecond(ts_millis);
-        assert_eq!("2022-11-10 08:50:37+0000", ts.to_iso8601_string());
+        assert_eq!("2022-11-10 16:50:37+0800", ts.to_iso8601_string());
 
         let ts_millis = -1000;
         let ts = Timestamp::new_millisecond(ts_millis);
-        assert_eq!("1969-12-31 23:59:59+0000", ts.to_iso8601_string());
+        assert_eq!("1970-01-01 07:59:59+0800", ts.to_iso8601_string());
 
         let ts_millis = -1;
         let ts = Timestamp::new_millisecond(ts_millis);
-        assert_eq!("1969-12-31 23:59:59.999+0000", ts.to_iso8601_string());
+        assert_eq!("1970-01-01 07:59:59.999+0800", ts.to_iso8601_string());
 
         let ts_millis = -1001;
         let ts = Timestamp::new_millisecond(ts_millis);
-        assert_eq!("1969-12-31 23:59:58.999+0000", ts.to_iso8601_string());
+        assert_eq!("1970-01-01 07:59:58.999+0800", ts.to_iso8601_string());
     }
 
     #[test]
     fn test_serialize_to_json_value() {
+        std::env::set_var("TZ", "Asia/Shanghai");
         assert_eq!(
-            "1970-01-01 00:00:01+0000",
+            "1970-01-01 08:00:01+0800",
             match serde_json::Value::from(Timestamp::new(1, TimeUnit::Second)) {
                 Value::String(s) => s,
                 _ => unreachable!(),
@@ -668,7 +703,7 @@ mod tests {
         );
 
         assert_eq!(
-            "1970-01-01 00:00:00.001+0000",
+            "1970-01-01 08:00:00.001+0800",
             match serde_json::Value::from(Timestamp::new(1, TimeUnit::Millisecond)) {
                 Value::String(s) => s,
                 _ => unreachable!(),
@@ -676,7 +711,7 @@ mod tests {
         );
 
         assert_eq!(
-            "1970-01-01 00:00:00.000001+0000",
+            "1970-01-01 08:00:00.000001+0800",
             match serde_json::Value::from(Timestamp::new(1, TimeUnit::Microsecond)) {
                 Value::String(s) => s,
                 _ => unreachable!(),
@@ -684,7 +719,7 @@ mod tests {
         );
 
         assert_eq!(
-            "1970-01-01 00:00:00.000000001+0000",
+            "1970-01-01 08:00:00.000000001+0800",
             match serde_json::Value::from(Timestamp::new(1, TimeUnit::Nanosecond)) {
                 Value::String(s) => s,
                 _ => unreachable!(),
@@ -852,21 +887,118 @@ mod tests {
     #[test]
     fn test_timestamp_sub() {
         let res = Timestamp::new(1, TimeUnit::Second)
-            .sub(Duration::from_secs(1))
+            .sub_duration(Duration::from_secs(1))
             .unwrap();
         assert_eq!(0, res.value);
         assert_eq!(TimeUnit::Second, res.unit);
 
         let res = Timestamp::new(0, TimeUnit::Second)
-            .sub(Duration::from_secs(1))
+            .sub_duration(Duration::from_secs(1))
             .unwrap();
         assert_eq!(-1, res.value);
         assert_eq!(TimeUnit::Second, res.unit);
 
         let res = Timestamp::new(1, TimeUnit::Second)
-            .sub(Duration::from_millis(1))
+            .sub_duration(Duration::from_millis(1))
             .unwrap();
         assert_eq!(1, res.value);
         assert_eq!(TimeUnit::Second, res.unit);
+    }
+
+    #[test]
+    fn test_parse_in_time_zone() {
+        std::env::set_var("TZ", "Asia/Shanghai");
+        assert_eq!(
+            Timestamp::new(0, TimeUnit::Nanosecond),
+            Timestamp::from_str("1970-01-01 08:00:00.000").unwrap()
+        );
+
+        assert_eq!(
+            Timestamp::new(0, TimeUnit::Second),
+            Timestamp::from_str("1970-01-01 08:00:00").unwrap()
+        );
+    }
+
+    #[test]
+    fn test_to_local_string() {
+        std::env::set_var("TZ", "Asia/Shanghai");
+
+        assert_eq!(
+            "1970-01-01 08:00:00.000000001",
+            Timestamp::new(1, TimeUnit::Nanosecond).to_local_string()
+        );
+
+        assert_eq!(
+            "1970-01-01 08:00:00.001",
+            Timestamp::new(1, TimeUnit::Millisecond).to_local_string()
+        );
+
+        assert_eq!(
+            "1970-01-01 08:00:01",
+            Timestamp::new(1, TimeUnit::Second).to_local_string()
+        );
+    }
+
+    #[test]
+    fn test_subtract_timestamp() {
+        assert_eq!(
+            Some(chrono::Duration::milliseconds(42)),
+            Timestamp::new_millisecond(100).sub(Timestamp::new_millisecond(58))
+        );
+
+        assert_eq!(
+            Some(chrono::Duration::milliseconds(-42)),
+            Timestamp::new_millisecond(58).sub(Timestamp::new_millisecond(100))
+        );
+    }
+
+    #[test]
+    fn test_to_timezone_aware_string() {
+        std::env::set_var("TZ", "Asia/Shanghai");
+
+        assert_eq!(
+            "1970-01-01 08:00:00.001",
+            Timestamp::new(1, TimeUnit::Millisecond).to_timezone_aware_string(None)
+        );
+        assert_eq!(
+            "1970-01-01 08:00:00.001",
+            Timestamp::new(1, TimeUnit::Millisecond)
+                .to_timezone_aware_string(TimeZone::from_tz_string("SYSTEM").unwrap())
+        );
+        assert_eq!(
+            "1970-01-01 08:00:00.001",
+            Timestamp::new(1, TimeUnit::Millisecond)
+                .to_timezone_aware_string(TimeZone::from_tz_string("+08:00").unwrap())
+        );
+        assert_eq!(
+            "1970-01-01 07:00:00.001",
+            Timestamp::new(1, TimeUnit::Millisecond)
+                .to_timezone_aware_string(TimeZone::from_tz_string("+07:00").unwrap())
+        );
+        assert_eq!(
+            "1969-12-31 23:00:00.001",
+            Timestamp::new(1, TimeUnit::Millisecond)
+                .to_timezone_aware_string(TimeZone::from_tz_string("-01:00").unwrap())
+        );
+        assert_eq!(
+            "1970-01-01 08:00:00.001",
+            Timestamp::new(1, TimeUnit::Millisecond)
+                .to_timezone_aware_string(TimeZone::from_tz_string("Asia/Shanghai").unwrap())
+        );
+        assert_eq!(
+            "1970-01-01 00:00:00.001",
+            Timestamp::new(1, TimeUnit::Millisecond)
+                .to_timezone_aware_string(TimeZone::from_tz_string("UTC").unwrap())
+        );
+        assert_eq!(
+            "1970-01-01 01:00:00.001",
+            Timestamp::new(1, TimeUnit::Millisecond)
+                .to_timezone_aware_string(TimeZone::from_tz_string("Europe/Berlin").unwrap())
+        );
+        assert_eq!(
+            "1970-01-01 03:00:00.001",
+            Timestamp::new(1, TimeUnit::Millisecond)
+                .to_timezone_aware_string(TimeZone::from_tz_string("Europe/Moscow").unwrap())
+        );
     }
 }

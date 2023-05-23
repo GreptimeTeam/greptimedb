@@ -34,8 +34,9 @@ use table::metadata::TableId;
 use table::requests::InsertRequest;
 
 use crate::error::{
-    ColumnDataTypeSnafu, CreateVectorSnafu, DuplicatedTimestampColumnSnafu, IllegalInsertDataSnafu,
-    InvalidColumnProtoSnafu, MissingTimestampColumnSnafu, Result,
+    ColumnAlreadyExistsSnafu, ColumnDataTypeSnafu, CreateVectorSnafu,
+    DuplicatedTimestampColumnSnafu, InvalidColumnProtoSnafu, MissingTimestampColumnSnafu, Result,
+    UnexpectedValuesLengthSnafu,
 };
 const TAG_SEMANTIC_TYPE: i32 = SemanticType::Tag as i32;
 const TIMESTAMP_SEMANTIC_TYPE: i32 = SemanticType::Timestamp as i32;
@@ -195,6 +196,7 @@ pub fn build_create_expr_from_insertion(
     table_id: Option<TableId>,
     table_name: &str,
     columns: &[Column],
+    engine: &str,
 ) -> Result<CreateTableExpr> {
     let mut new_columns: HashSet<String> = HashSet::default();
     let mut column_defs = Vec::default();
@@ -256,6 +258,7 @@ pub fn build_create_expr_from_insertion(
         table_options: Default::default(),
         table_id: table_id.map(|id| api::v1::TableId { id }),
         region_ids: vec![0], // TODO:(hl): region id should be allocated by frontend
+        engine: engine.to_string(),
     };
 
     Ok(expr)
@@ -290,9 +293,11 @@ pub fn to_table_insert_request(
 
         ensure!(
             columns_values
-                .insert(column_name, vector_builder.to_vector())
+                .insert(column_name.clone(), vector_builder.to_vector())
                 .is_none(),
-            IllegalInsertDataSnafu
+            ColumnAlreadyExistsSnafu {
+                column: column_name
+            }
         );
     }
 
@@ -305,7 +310,7 @@ pub fn to_table_insert_request(
     })
 }
 
-fn add_values_to_builder(
+pub(crate) fn add_values_to_builder(
     builder: &mut Box<dyn MutableVector>,
     values: Values,
     row_count: usize,
@@ -315,7 +320,12 @@ fn add_values_to_builder(
     let values = convert_values(&data_type, values);
 
     if null_mask.is_empty() {
-        ensure!(values.len() == row_count, IllegalInsertDataSnafu);
+        ensure!(
+            values.len() == row_count,
+            UnexpectedValuesLengthSnafu {
+                reason: "If null_mask is empty, the length of values must be equal to row_count."
+            }
+        );
 
         values.iter().try_for_each(|value| {
             builder
@@ -326,7 +336,9 @@ fn add_values_to_builder(
         let null_mask = BitVec::from_vec(null_mask);
         ensure!(
             null_mask.count_ones() + values.len() == row_count,
-            IllegalInsertDataSnafu
+            UnexpectedValuesLengthSnafu {
+                reason: "If null_mask is not empty, the sum of the number of nulls and the length of values must be equal to row_count."
+            }
         );
 
         let mut idx_of_values = 0;
@@ -455,6 +467,7 @@ mod tests {
     use api::v1::column::{self, SemanticType, Values};
     use api::v1::{Column, ColumnDataType};
     use common_base::BitVec;
+    use common_catalog::consts::MITO_ENGINE;
     use common_query::physical_plan::PhysicalPlanRef;
     use common_query::prelude::Expr;
     use common_time::timestamp::Timestamp;
@@ -493,13 +506,22 @@ mod tests {
         let table_id = Some(10);
         let table_name = "test_metric";
 
-        assert!(build_create_expr_from_insertion("", "", table_id, table_name, &[]).is_err());
+        assert!(
+            build_create_expr_from_insertion("", "", table_id, table_name, &[], MITO_ENGINE)
+                .is_err()
+        );
 
         let insert_batch = mock_insert_batch();
 
-        let create_expr =
-            build_create_expr_from_insertion("", "", table_id, table_name, &insert_batch.0)
-                .unwrap();
+        let create_expr = build_create_expr_from_insertion(
+            "",
+            "",
+            table_id,
+            table_name,
+            &insert_batch.0,
+            MITO_ENGINE,
+        )
+        .unwrap();
 
         assert_eq!(table_id, create_expr.table_id.map(|x| x.id));
         assert_eq!(table_name, create_expr.table_name);

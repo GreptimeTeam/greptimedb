@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod alter;
+pub mod delete;
 pub mod error;
 pub mod insert;
 

@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use metrics::histogram;
 use metrics_exporter_prometheus::PrometheusBuilder;
 pub use metrics_exporter_prometheus::PrometheusHandle;
+use metrics_util::layers::{Layer, PrefixLayer};
 use once_cell::sync::Lazy;
 
 static PROMETHEUS_HANDLE: Lazy<Arc<RwLock<Option<PrometheusHandle>>>> =
@@ -45,7 +46,9 @@ fn init_prometheus_recorder() {
     unsafe {
         metrics::clear_recorder();
     }
-    match metrics::set_boxed_recorder(Box::new(recorder)) {
+    let layer = PrefixLayer::new("greptime");
+    let layered = layer.layer(recorder);
+    match metrics::set_boxed_recorder(Box::new(layered)) {
         Ok(_) => (),
         Err(err) => crate::warn!("Install prometheus recorder failed, cause: {}", err),
     };
@@ -60,6 +63,7 @@ pub fn try_handle() -> Option<PrometheusHandle> {
 pub struct Timer {
     start: Instant,
     name: &'static str,
+    labels: Vec<(String, String)>,
 }
 
 impl Timer {
@@ -67,7 +71,23 @@ impl Timer {
         Self {
             start: Instant::now(),
             name,
+            labels: Vec::new(),
         }
+    }
+
+    pub fn new_with_labels<S: Into<String> + Clone>(name: &'static str, labels: &[(S, S)]) -> Self {
+        Self {
+            start: Instant::now(),
+            name,
+            labels: labels
+                .iter()
+                .map(|(k, v)| (k.clone().into(), v.clone().into()))
+                .collect::<Vec<_>>(),
+        }
+    }
+
+    pub fn labels_mut(&mut self) -> &mut Vec<(String, String)> {
+        self.labels.as_mut()
     }
 
     pub fn elapsed(&self) -> Duration {
@@ -77,7 +97,11 @@ impl Timer {
 
 impl Drop for Timer {
     fn drop(&mut self) {
-        histogram!(self.name, self.start.elapsed());
+        if !self.labels.is_empty() {
+            histogram!(self.name, self.start.elapsed(), &self.labels);
+        } else {
+            histogram!(self.name, self.start.elapsed());
+        }
     }
 }
 
@@ -85,6 +109,9 @@ impl Drop for Timer {
 macro_rules! timer {
     ($name: expr) => {
         $crate::metric::Timer::new($name)
+    };
+    ($name:expr,$labels:expr) => {
+        $crate::metric::Timer::new_with_labels($name, $labels)
     };
 }
 
@@ -108,5 +135,49 @@ mod tests {
         let text = handle.render();
         assert!(text.contains("test_elapsed_timer_a"));
         assert!(text.contains("test_elapsed_timer_b"));
+    }
+
+    #[test]
+    fn test_elapsed_timer_with_label() {
+        init_default_metrics_recorder();
+        {
+            let t = Timer::new("test_elapsed_timer_a");
+            drop(t);
+        }
+        let handle = try_handle().unwrap();
+        let text = handle.render();
+        assert!(text.contains("test_elapsed_timer_a"));
+        assert!(!text.contains("test_elapsed_timer_b"));
+        let label_a = "label_a";
+        let label_b = "label_b";
+        let label_c = "label_c";
+        let label_d = "label_d";
+        let label_e = "label_e";
+        assert!(!text.contains(label_a));
+        assert!(!text.contains(label_b));
+
+        {
+            let mut timer_b = timer!("test_elapsed_timer_b", &[(label_a, "a"), (label_b, "b")]);
+            let labels = timer_b.labels_mut();
+            labels.push((label_c.to_owned(), "d".to_owned()));
+        }
+        let text = handle.render();
+        assert!(text.contains("test_elapsed_timer_a"));
+        assert!(text.contains("test_elapsed_timer_b"));
+        assert!(text.contains(label_a));
+        assert!(text.contains(label_b));
+        assert!(text.contains(label_c));
+
+        {
+            let mut timer_c = timer!("test_elapsed_timer_c");
+            let labels = timer_c.labels_mut();
+            labels.push((label_d.to_owned(), "d".to_owned()));
+            labels.push((label_e.to_owned(), "e".to_owned()));
+        }
+
+        let text = handle.render();
+        assert!(text.contains("test_elapsed_timer_c"));
+        assert!(text.contains(label_d));
+        assert!(text.contains(label_e));
     }
 }

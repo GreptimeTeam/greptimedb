@@ -53,8 +53,14 @@ impl MemtableVersion {
 
     /// Clone current memtable version and freeze its mutable memtables, which moves
     /// all mutable memtables to immutable memtable list.
+    ///
+    /// This method also calls [Memtable::mark_immutable()](crate::memtable::Memtable::mark_immutable()) to
+    /// mark the mutable memtable as immutable.
     pub fn freeze_mutable(&self, new_mutable: MemtableRef) -> MemtableVersion {
         let mut immutables = self.immutables.clone();
+        // Marks the mutable memtable as immutable so it can free the memory usage from our
+        // soft limit.
+        self.mutable.mark_immutable();
         immutables.push(self.mutable.clone());
 
         MemtableVersion {
@@ -64,15 +70,15 @@ impl MemtableVersion {
     }
 
     pub fn mutable_bytes_allocated(&self) -> usize {
-        self.mutable.bytes_allocated()
+        self.mutable.stats().bytes_allocated()
     }
 
     pub fn total_bytes_allocated(&self) -> usize {
         self.immutables
             .iter()
-            .map(|m| m.bytes_allocated())
+            .map(|m| m.stats().bytes_allocated())
             .sum::<usize>()
-            + self.mutable.bytes_allocated()
+            + self.mutable.stats().bytes_allocated()
     }
 
     /// Creates a new `MemtableVersion` that removes immutable memtables

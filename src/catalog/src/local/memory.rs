@@ -21,6 +21,7 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_telemetry::error;
+use metrics::{decrement_gauge, increment_gauge};
 use snafu::{ensure, OptionExt};
 use table::metadata::TableId;
 use table::table::TableIdProvider;
@@ -31,7 +32,7 @@ use crate::error::{
 };
 use crate::schema::SchemaProvider;
 use crate::{
-    CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, DeregisterTableRequest,
+    CatalogManager, CatalogProvider, CatalogProviderRef, DeregisterTableRequest,
     RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest,
     SchemaProviderRef,
 };
@@ -51,10 +52,10 @@ impl Default for MemoryCatalogManager {
         };
         let default_catalog = Arc::new(MemoryCatalogProvider::new());
         manager
-            .register_catalog("greptime".to_string(), default_catalog.clone())
+            .register_catalog_sync("greptime".to_string(), default_catalog.clone())
             .unwrap();
         default_catalog
-            .register_schema("public".to_string(), Arc::new(MemorySchemaProvider::new()))
+            .register_schema_sync("public".to_string(), Arc::new(MemorySchemaProvider::new()))
             .unwrap();
         manager
     }
@@ -75,70 +76,81 @@ impl CatalogManager for MemoryCatalogManager {
     }
 
     async fn register_table(&self, request: RegisterTableRequest) -> Result<bool> {
-        let catalogs = self.catalogs.write().unwrap();
-        let catalog = catalogs
-            .get(&request.catalog)
+        let schema = self
+            .catalog(&request.catalog)
             .context(CatalogNotFoundSnafu {
                 catalog_name: &request.catalog,
             })?
-            .clone();
-        let schema = catalog
-            .schema(&request.schema)?
-            .with_context(|| SchemaNotFoundSnafu {
+            .schema(&request.schema)
+            .await?
+            .context(SchemaNotFoundSnafu {
                 catalog: &request.catalog,
                 schema: &request.schema,
             })?;
+        increment_gauge!(
+            crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
+            1.0,
+            &[crate::metrics::db_label(&request.catalog, &request.schema)],
+        );
         schema
             .register_table(request.table_name, request.table)
+            .await
             .map(|v| v.is_none())
     }
 
     async fn rename_table(&self, request: RenameTableRequest) -> Result<bool> {
-        let catalogs = self.catalogs.write().unwrap();
-        let catalog = catalogs
-            .get(&request.catalog)
+        let catalog = self
+            .catalog(&request.catalog)
             .context(CatalogNotFoundSnafu {
                 catalog_name: &request.catalog,
-            })?
-            .clone();
-        let schema = catalog
-            .schema(&request.schema)?
-            .with_context(|| SchemaNotFoundSnafu {
-                catalog: &request.catalog,
-                schema: &request.schema,
             })?;
+        let schema =
+            catalog
+                .schema(&request.schema)
+                .await?
+                .with_context(|| SchemaNotFoundSnafu {
+                    catalog: &request.catalog,
+                    schema: &request.schema,
+                })?;
         Ok(schema
             .rename_table(&request.table_name, request.new_table_name)
+            .await
             .is_ok())
     }
 
     async fn deregister_table(&self, request: DeregisterTableRequest) -> Result<bool> {
-        let catalogs = self.catalogs.write().unwrap();
-        let catalog = catalogs
-            .get(&request.catalog)
+        let schema = self
+            .catalog(&request.catalog)
             .context(CatalogNotFoundSnafu {
                 catalog_name: &request.catalog,
             })?
-            .clone();
-        let schema = catalog
-            .schema(&request.schema)?
+            .schema(&request.schema)
+            .await?
             .with_context(|| SchemaNotFoundSnafu {
                 catalog: &request.catalog,
                 schema: &request.schema,
             })?;
+        decrement_gauge!(
+            crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
+            1.0,
+            &[crate::metrics::db_label(&request.catalog, &request.schema)],
+        );
         schema
             .deregister_table(&request.table_name)
+            .await
             .map(|v| v.is_some())
     }
 
     async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool> {
-        let catalogs = self.catalogs.write().unwrap();
-        let catalog = catalogs
-            .get(&request.catalog)
+        let catalog = self
+            .catalog(&request.catalog)
             .context(CatalogNotFoundSnafu {
                 catalog_name: &request.catalog,
             })?;
-        catalog.register_schema(request.schema, Arc::new(MemorySchemaProvider::new()))?;
+        catalog
+            .register_schema(request.schema, Arc::new(MemorySchemaProvider::new()))
+            .await?;
+        increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_SCHEMA_COUNT, 1.0);
         Ok(true)
     }
 
@@ -147,10 +159,9 @@ impl CatalogManager for MemoryCatalogManager {
         Ok(())
     }
 
-    fn schema(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>> {
-        let catalogs = self.catalogs.read().unwrap();
-        if let Some(c) = catalogs.get(catalog) {
-            c.schema(schema)
+    async fn schema(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>> {
+        if let Some(c) = self.catalog(catalog) {
+            c.schema(schema).await
         } else {
             Ok(None)
         }
@@ -162,15 +173,31 @@ impl CatalogManager for MemoryCatalogManager {
         schema: &str,
         table_name: &str,
     ) -> Result<Option<TableRef>> {
-        let catalog = {
-            let c = self.catalogs.read().unwrap();
-            let Some(c) = c.get(catalog) else { return Ok(None) };
-            c.clone()
-        };
-        match catalog.schema(schema)? {
-            None => Ok(None),
-            Some(s) => s.table(table_name).await,
-        }
+        let Some(catalog) = self
+            .catalog(catalog) else { return Ok(None)};
+        let Some(s) = catalog.schema(schema).await? else { return Ok(None) };
+        s.table(table_name).await
+    }
+
+    async fn catalog(&self, catalog: &str) -> Result<Option<CatalogProviderRef>> {
+        Ok(self.catalogs.read().unwrap().get(catalog).cloned())
+    }
+
+    async fn catalog_names(&self) -> Result<Vec<String>> {
+        Ok(self.catalogs.read().unwrap().keys().cloned().collect())
+    }
+
+    async fn register_catalog(
+        &self,
+        name: String,
+        catalog: CatalogProviderRef,
+    ) -> Result<Option<CatalogProviderRef>> {
+        increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_CATALOG_COUNT, 1.0);
+        self.register_catalog_sync(name, catalog)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -192,14 +219,8 @@ impl MemoryCatalogManager {
             }
         }
     }
-}
 
-impl CatalogList for MemoryCatalogManager {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn register_catalog(
+    pub fn register_catalog_sync(
         &self,
         name: String,
         catalog: CatalogProviderRef,
@@ -208,14 +229,8 @@ impl CatalogList for MemoryCatalogManager {
         Ok(catalogs.insert(name, catalog))
     }
 
-    fn catalog_names(&self) -> Result<Vec<String>> {
-        let catalogs = self.catalogs.read().unwrap();
-        Ok(catalogs.keys().map(|s| s.to_string()).collect())
-    }
-
-    fn catalog(&self, name: &str) -> Result<Option<CatalogProviderRef>> {
-        let catalogs = self.catalogs.read().unwrap();
-        Ok(catalogs.get(name).cloned())
+    fn catalog(&self, catalog_name: &str) -> Option<CatalogProviderRef> {
+        self.catalogs.read().unwrap().get(catalog_name).cloned()
     }
 }
 
@@ -237,19 +252,13 @@ impl MemoryCatalogProvider {
             schemas: RwLock::new(HashMap::new()),
         }
     }
-}
 
-impl CatalogProvider for MemoryCatalogProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn schema_names(&self) -> Result<Vec<String>> {
+    pub fn schema_names_sync(&self) -> Result<Vec<String>> {
         let schemas = self.schemas.read().unwrap();
         Ok(schemas.keys().cloned().collect())
     }
 
-    fn register_schema(
+    pub fn register_schema_sync(
         &self,
         name: String,
         schema: SchemaProviderRef,
@@ -259,12 +268,36 @@ impl CatalogProvider for MemoryCatalogProvider {
             !schemas.contains_key(&name),
             error::SchemaExistsSnafu { schema: &name }
         );
+        increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_SCHEMA_COUNT, 1.0);
         Ok(schemas.insert(name, schema))
     }
 
-    fn schema(&self, name: &str) -> Result<Option<Arc<dyn SchemaProvider>>> {
+    pub fn schema_sync(&self, name: &str) -> Result<Option<Arc<dyn SchemaProvider>>> {
         let schemas = self.schemas.read().unwrap();
         Ok(schemas.get(name).cloned())
+    }
+}
+
+#[async_trait::async_trait]
+impl CatalogProvider for MemoryCatalogProvider {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    async fn schema_names(&self) -> Result<Vec<String>> {
+        self.schema_names_sync()
+    }
+
+    async fn register_schema(
+        &self,
+        name: String,
+        schema: SchemaProviderRef,
+    ) -> Result<Option<SchemaProviderRef>> {
+        self.register_schema_sync(name, schema)
+    }
+
+    async fn schema(&self, name: &str) -> Result<Option<Arc<dyn SchemaProvider>>> {
+        self.schema_sync(name)
     }
 }
 
@@ -280,31 +313,8 @@ impl MemorySchemaProvider {
             tables: RwLock::new(HashMap::new()),
         }
     }
-}
 
-impl Default for MemorySchemaProvider {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait]
-impl SchemaProvider for MemorySchemaProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn table_names(&self) -> Result<Vec<String>> {
-        let tables = self.tables.read().unwrap();
-        Ok(tables.keys().cloned().collect())
-    }
-
-    async fn table(&self, name: &str) -> Result<Option<TableRef>> {
-        let tables = self.tables.read().unwrap();
-        Ok(tables.get(name).cloned())
-    }
-
-    fn register_table(&self, name: String, table: TableRef) -> Result<Option<TableRef>> {
+    pub fn register_table_sync(&self, name: String, table: TableRef) -> Result<Option<TableRef>> {
         let mut tables = self.tables.write().unwrap();
         if let Some(existing) = tables.get(name.as_str()) {
             // if table with the same name but different table id exists, then it's a fatal bug
@@ -322,28 +332,71 @@ impl SchemaProvider for MemorySchemaProvider {
         }
     }
 
-    fn rename_table(&self, name: &str, new_name: String) -> Result<TableRef> {
+    pub fn rename_table_sync(&self, name: &str, new_name: String) -> Result<TableRef> {
         let mut tables = self.tables.write().unwrap();
-        if tables.get(name).is_some() {
-            let table = tables.remove(name).unwrap();
-            tables.insert(new_name, table.clone());
-            Ok(table)
-        } else {
-            TableNotFoundSnafu {
+        let Some(table) = tables.remove(name) else {
+            return TableNotFoundSnafu {
                 table_info: name.to_string(),
             }
-            .fail()?
-        }
+                .fail()?;
+        };
+        let e = match tables.entry(new_name) {
+            Entry::Vacant(e) => e,
+            Entry::Occupied(e) => {
+                return TableExistsSnafu { table: e.key() }.fail();
+            }
+        };
+        e.insert(table.clone());
+        Ok(table)
     }
 
-    fn deregister_table(&self, name: &str) -> Result<Option<TableRef>> {
+    pub fn table_exist_sync(&self, name: &str) -> Result<bool> {
+        let tables = self.tables.read().unwrap();
+        Ok(tables.contains_key(name))
+    }
+
+    pub fn deregister_table_sync(&self, name: &str) -> Result<Option<TableRef>> {
         let mut tables = self.tables.write().unwrap();
         Ok(tables.remove(name))
     }
+}
 
-    fn table_exist(&self, name: &str) -> Result<bool> {
+impl Default for MemorySchemaProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl SchemaProvider for MemorySchemaProvider {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    async fn table_names(&self) -> Result<Vec<String>> {
         let tables = self.tables.read().unwrap();
-        Ok(tables.contains_key(name))
+        Ok(tables.keys().cloned().collect())
+    }
+
+    async fn table(&self, name: &str) -> Result<Option<TableRef>> {
+        let tables = self.tables.read().unwrap();
+        Ok(tables.get(name).cloned())
+    }
+
+    async fn register_table(&self, name: String, table: TableRef) -> Result<Option<TableRef>> {
+        self.register_table_sync(name, table)
+    }
+
+    async fn rename_table(&self, name: &str, new_name: String) -> Result<TableRef> {
+        self.rename_table_sync(name, new_name)
+    }
+
+    async fn deregister_table(&self, name: &str) -> Result<Option<TableRef>> {
+        self.deregister_table_sync(name)
+    }
+
+    async fn table_exist(&self, name: &str) -> Result<bool> {
+        self.table_exist_sync(name)
     }
 }
 
@@ -364,15 +417,20 @@ mod tests {
     #[tokio::test]
     async fn test_new_memory_catalog_list() {
         let catalog_list = new_memory_catalog_list().unwrap();
-        let default_catalog = catalog_list.catalog(DEFAULT_CATALOG_NAME).unwrap().unwrap();
+        let default_catalog = CatalogManager::catalog(&*catalog_list, DEFAULT_CATALOG_NAME)
+            .await
+            .unwrap()
+            .unwrap();
 
         let default_schema = default_catalog
             .schema(DEFAULT_SCHEMA_NAME)
+            .await
             .unwrap()
             .unwrap();
 
         default_schema
             .register_table("numbers".to_string(), Arc::new(NumbersTable::default()))
+            .await
             .unwrap();
 
         let table = default_schema.table("numbers").await.unwrap();
@@ -384,19 +442,18 @@ mod tests {
     async fn test_mem_provider() {
         let provider = MemorySchemaProvider::new();
         let table_name = "numbers";
-        assert!(!provider.table_exist(table_name).unwrap());
-        assert!(provider.deregister_table(table_name).unwrap().is_none());
+        assert!(!provider.table_exist_sync(table_name).unwrap());
+        provider.deregister_table_sync(table_name).unwrap();
         let test_table = NumbersTable::default();
         // register table successfully
         assert!(provider
-            .register_table(table_name.to_string(), Arc::new(test_table))
+            .register_table_sync(table_name.to_string(), Arc::new(test_table))
             .unwrap()
             .is_none());
-        assert!(provider.table_exist(table_name).unwrap());
+        assert!(provider.table_exist_sync(table_name).unwrap());
         let other_table = NumbersTable::new(12);
-        let result = provider.register_table(table_name.to_string(), Arc::new(other_table));
+        let result = provider.register_table_sync(table_name.to_string(), Arc::new(other_table));
         let err = result.err().unwrap();
-        assert!(err.backtrace_opt().is_some());
         assert_eq!(StatusCode::TableAlreadyExists, err.status_code());
     }
 
@@ -404,27 +461,27 @@ mod tests {
     async fn test_mem_provider_rename_table() {
         let provider = MemorySchemaProvider::new();
         let table_name = "num";
-        assert!(!provider.table_exist(table_name).unwrap());
+        assert!(!provider.table_exist_sync(table_name).unwrap());
         let test_table: TableRef = Arc::new(NumbersTable::default());
         // register test table
         assert!(provider
-            .register_table(table_name.to_string(), test_table.clone())
+            .register_table_sync(table_name.to_string(), test_table.clone())
             .unwrap()
             .is_none());
-        assert!(provider.table_exist(table_name).unwrap());
+        assert!(provider.table_exist_sync(table_name).unwrap());
 
         // rename test table
         let new_table_name = "numbers";
         provider
-            .rename_table(table_name, new_table_name.to_string())
+            .rename_table_sync(table_name, new_table_name.to_string())
             .unwrap();
 
         // test old table name not exist
-        assert!(!provider.table_exist(table_name).unwrap());
-        assert!(provider.deregister_table(table_name).unwrap().is_none());
+        assert!(!provider.table_exist_sync(table_name).unwrap());
+        provider.deregister_table_sync(table_name).unwrap();
 
         // test new table name exists
-        assert!(provider.table_exist(new_table_name).unwrap());
+        assert!(provider.table_exist_sync(new_table_name).unwrap());
         let registered_table = provider.table(new_table_name).await.unwrap().unwrap();
         assert_eq!(
             registered_table.table_info().ident.table_id,
@@ -432,7 +489,9 @@ mod tests {
         );
 
         let other_table = Arc::new(NumbersTable::new(2));
-        let result = provider.register_table(new_table_name.to_string(), other_table);
+        let result = provider
+            .register_table(new_table_name.to_string(), other_table)
+            .await;
         let err = result.err().unwrap();
         assert_eq!(StatusCode::TableAlreadyExists, err.status_code());
     }
@@ -442,6 +501,7 @@ mod tests {
         let catalog = MemoryCatalogManager::default();
         let schema = catalog
             .schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
+            .await
             .unwrap()
             .unwrap();
 
@@ -457,10 +517,10 @@ mod tests {
             table,
         };
         assert!(catalog.register_table(register_table_req).await.unwrap());
-        assert!(schema.table_exist(table_name).unwrap());
+        assert!(schema.table_exist(table_name).await.unwrap());
 
         // rename table
-        let new_table_name = "numbers";
+        let new_table_name = "numbers_new";
         let rename_table_req = RenameTableRequest {
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: DEFAULT_SCHEMA_NAME.to_string(),
@@ -469,8 +529,8 @@ mod tests {
             table_id,
         };
         assert!(catalog.rename_table(rename_table_req).await.unwrap());
-        assert!(!schema.table_exist(table_name).unwrap());
-        assert!(schema.table_exist(new_table_name).unwrap());
+        assert!(!schema.table_exist(table_name).await.unwrap());
+        assert!(schema.table_exist(new_table_name).await.unwrap());
 
         let registered_table = catalog
             .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, new_table_name)
@@ -504,6 +564,7 @@ mod tests {
         let catalog = MemoryCatalogManager::default();
         let schema = catalog
             .schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
+            .await
             .unwrap()
             .unwrap();
 
@@ -515,7 +576,7 @@ mod tests {
             table: Arc::new(NumbersTable::default()),
         };
         catalog.register_table(register_table_req).await.unwrap();
-        assert!(schema.table_exist("numbers").unwrap());
+        assert!(schema.table_exist("numbers").await.unwrap());
 
         let deregister_table_req = DeregisterTableRequest {
             catalog: DEFAULT_CATALOG_NAME.to_string(),
@@ -526,6 +587,6 @@ mod tests {
             .deregister_table(deregister_table_req)
             .await
             .unwrap();
-        assert!(!schema.table_exist("numbers").unwrap());
+        assert!(!schema.table_exist("numbers").await.unwrap());
     }
 }

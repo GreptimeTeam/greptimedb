@@ -92,6 +92,14 @@ impl StringBytes {
     pub fn as_utf8(&self) -> &str {
         unsafe { std::str::from_utf8_unchecked(&self.0) }
     }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 impl From<String> for StringBytes {
@@ -179,6 +187,17 @@ mod tests {
     }
 
     #[test]
+    fn test_bytes_len() {
+        let hello = b"hello".to_vec();
+        let bytes = Bytes::from(hello.clone());
+        assert_eq!(bytes.len(), hello.len());
+
+        let zero = b"".to_vec();
+        let bytes = Bytes::from(zero);
+        assert!(bytes.is_empty());
+    }
+
+    #[test]
     fn test_string_bytes_from() {
         let hello = "hello".to_string();
         let bytes = StringBytes::from(hello.clone());
@@ -189,6 +208,17 @@ mod tests {
         let bytes = StringBytes::from(world);
         assert_eq!(world, &bytes);
         assert_eq!(&bytes, world);
+    }
+
+    #[test]
+    fn test_string_bytes_len() {
+        let hello = "hello".to_string();
+        let bytes = StringBytes::from(hello.clone());
+        assert_eq!(bytes.len(), hello.len());
+
+        let zero = "".to_string();
+        let bytes = StringBytes::from(zero);
+        assert!(bytes.is_empty());
     }
 
     fn check_str(expect: &str, given: &str) {

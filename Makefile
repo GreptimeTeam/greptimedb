@@ -21,6 +21,10 @@ fmt: ## Format all the Rust code.
 
 .PHONY: fmt-toml
 fmt-toml: ## Format all TOML files.
+	taplo format --option "indent_string=    "
+
+.PHONY: check-toml
+check-toml: ## Check all TOML files.
 	taplo format --check --option "indent_string=    "
 
 .PHONY: docker-image
@@ -29,13 +33,12 @@ docker-image: ## Build docker image.
 
 ##@ Test
 
-.PHONY: unit-test
-unit-test: ## Run unit test.
-	cargo test --workspace
+test: nextest ## Run unit and integration tests.
+	cargo nextest run
 
-.PHONY: integration-test
-integration-test: ## Run integation test.
-	cargo test integration
+.PHONY: nextest ## Install nextest tools.
+nextest:
+	cargo --list | grep nextest || cargo install cargo-nextest --locked
 
 .PHONY: sqlness-test
 sqlness-test: ## Run sqlness test.
@@ -47,7 +50,7 @@ check: ## Cargo check all the targets.
 
 .PHONY: clippy
 clippy: ## Check clippy rules.
-	cargo clippy --workspace --all-targets -- -D warnings -D clippy::print_stdout -D clippy::print_stderr
+	cargo clippy --workspace --all-targets -- -D warnings
 
 .PHONY: fmt-check
 fmt-check: ## Check code format.

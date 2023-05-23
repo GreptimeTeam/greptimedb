@@ -18,7 +18,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use datafusion::arrow::array::{Array, TimestampMillisecondArray, UInt64Array};
+use datafusion::arrow::array::{Array, Float64Array, TimestampMillisecondArray, UInt64Array};
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::DFSchemaRef;
@@ -49,6 +49,8 @@ pub struct InstantManipulate {
     lookback_delta: Millisecond,
     interval: Millisecond,
     time_index_column: String,
+    /// A optional column for validating staleness
+    field_column: Option<String>,
     input: LogicalPlan,
 }
 
@@ -86,6 +88,7 @@ impl UserDefinedLogicalNodeCore for InstantManipulate {
             lookback_delta: self.lookback_delta,
             interval: self.interval,
             time_index_column: self.time_index_column.clone(),
+            field_column: self.field_column.clone(),
             input: inputs[0].clone(),
         }
     }
@@ -98,6 +101,7 @@ impl InstantManipulate {
         lookback_delta: Millisecond,
         interval: Millisecond,
         time_index_column: String,
+        field_column: Option<String>,
         input: LogicalPlan,
     ) -> Self {
         Self {
@@ -106,6 +110,7 @@ impl InstantManipulate {
             lookback_delta,
             interval,
             time_index_column,
+            field_column,
             input,
         }
     }
@@ -117,6 +122,7 @@ impl InstantManipulate {
             lookback_delta: self.lookback_delta,
             interval: self.interval,
             time_index_column: self.time_index_column.clone(),
+            field_column: self.field_column.clone(),
             input: exec_input,
             metric: ExecutionPlanMetricsSet::new(),
         })
@@ -130,6 +136,7 @@ pub struct InstantManipulateExec {
     lookback_delta: Millisecond,
     interval: Millisecond,
     time_index_column: String,
+    field_column: Option<String>,
 
     input: Arc<dyn ExecutionPlan>,
     metric: ExecutionPlanMetricsSet,
@@ -171,6 +178,7 @@ impl ExecutionPlan for InstantManipulateExec {
             lookback_delta: self.lookback_delta,
             interval: self.interval,
             time_index_column: self.time_index_column.clone(),
+            field_column: self.field_column.clone(),
             input: children[0].clone(),
             metric: self.metric.clone(),
         }))
@@ -189,12 +197,18 @@ impl ExecutionPlan for InstantManipulateExec {
             .column_with_name(&self.time_index_column)
             .expect("time index column not found")
             .0;
+        let field_index = self
+            .field_column
+            .as_ref()
+            .and_then(|name| schema.column_with_name(name))
+            .map(|x| x.0);
         Ok(Box::pin(InstantManipulateStream {
             start: self.start,
             end: self.end,
             lookback_delta: self.lookback_delta,
             interval: self.interval,
             time_index,
+            field_index,
             schema,
             input,
             metric: baseline_metric,
@@ -244,6 +258,7 @@ pub struct InstantManipulateStream {
     interval: Millisecond,
     // Column index of TIME INDEX column's position in schema
     time_index: usize,
+    field_index: Option<usize>,
 
     schema: SchemaRef,
     input: SendableRecordBatchStream,
@@ -282,6 +297,11 @@ impl InstantManipulateStream {
             .downcast_ref::<TimestampMillisecondArray>()
             .unwrap();
 
+        // field column for staleness check
+        let field_column = self
+            .field_index
+            .and_then(|index| input.column(index).as_any().downcast_ref::<Float64Array>());
+
         let mut cursor = 0;
         let aligned_ts = (self.start..=self.end)
             .step_by(self.interval as usize)
@@ -294,7 +314,12 @@ impl InstantManipulateStream {
                 let curr = ts_column.value(cursor);
                 match curr.cmp(&expected_ts) {
                     Ordering::Equal => {
-                        take_indices.push(Some(cursor as u64));
+                        if let Some(field_column) = &field_column && field_column.value(cursor).is_nan() {
+                            // ignore the NaN value
+                            take_indices.push(None);
+                        } else {
+                            take_indices.push(Some(cursor as u64));
+                        }
                         continue 'next;
                     }
                     Ordering::Greater => break,
@@ -308,6 +333,11 @@ impl InstantManipulateStream {
             // then, search backward to lookback
             loop {
                 let curr = ts_column.value(cursor);
+                if let Some(field_column) = &field_column && field_column.value(cursor).is_nan() {
+                    // if the newest value is NaN, it means the value is stale, so we should not use it
+                    take_indices.push(None);
+                    break;
+                }
                 if curr + self.lookback_delta < expected_ts {
                     // not found in lookback, leave this field blank.
                     take_indices.push(None);
@@ -388,11 +418,11 @@ mod test {
             180_000, 240_000, // every 60s
             241_000, 271_000, 291_000, // others
         ])) as _;
-        let value_column = Arc::new(Float64Array::from_slice([1.0; 10])) as _;
+        let field_column = Arc::new(Float64Array::from_slice([1.0; 10])) as _;
         let path_column = Arc::new(StringArray::from_slice(["foo"; 10])) as _;
         let data = RecordBatch::try_new(
             schema.clone(),
-            vec![timestamp_column, value_column, path_column],
+            vec![timestamp_column, field_column, path_column],
         )
         .unwrap();
 
@@ -413,6 +443,7 @@ mod test {
             lookback_delta,
             interval,
             time_index_column: TIME_INDEX_COLUMN.to_string(),
+            field_column: None,
             input: memory_exec,
             metric: ExecutionPlanMetricsSet::new(),
         });

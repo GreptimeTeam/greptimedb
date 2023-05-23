@@ -44,7 +44,6 @@ mod tests {
     }
 
     use common_error::prelude::{ErrorExt, Snafu};
-    use snafu::{Backtrace, ErrorCompat};
 
     #[derive(Debug, Snafu)]
     #[snafu(visibility(pub))]
@@ -60,10 +59,6 @@ mod tests {
     }
 
     impl ErrorExt for Error {
-        fn backtrace_opt(&self) -> Option<&Backtrace> {
-            ErrorCompat::backtrace(self)
-        }
-
         fn as_any(&self) -> &dyn Any {
             self
         }

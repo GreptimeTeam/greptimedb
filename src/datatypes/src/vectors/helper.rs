@@ -238,16 +238,18 @@ impl Helper {
             ArrowDataType::Date64 => Arc::new(DateTimeVector::try_from_arrow_array(array)?),
             ArrowDataType::List(_) => Arc::new(ListVector::try_from_arrow_array(array)?),
             ArrowDataType::Timestamp(unit, _) => match unit {
-                TimeUnit::Second => Arc::new(TimestampSecondVector::try_from_arrow_array(array)?),
-                TimeUnit::Millisecond => {
-                    Arc::new(TimestampMillisecondVector::try_from_arrow_array(array)?)
-                }
-                TimeUnit::Microsecond => {
-                    Arc::new(TimestampMicrosecondVector::try_from_arrow_array(array)?)
-                }
-                TimeUnit::Nanosecond => {
-                    Arc::new(TimestampNanosecondVector::try_from_arrow_array(array)?)
-                }
+                TimeUnit::Second => Arc::new(
+                    TimestampSecondVector::try_from_arrow_timestamp_array(array)?,
+                ),
+                TimeUnit::Millisecond => Arc::new(
+                    TimestampMillisecondVector::try_from_arrow_timestamp_array(array)?,
+                ),
+                TimeUnit::Microsecond => Arc::new(
+                    TimestampMicrosecondVector::try_from_arrow_timestamp_array(array)?,
+                ),
+                TimeUnit::Nanosecond => Arc::new(
+                    TimestampNanosecondVector::try_from_arrow_timestamp_array(array)?,
+                ),
             },
             ArrowDataType::Float16
             | ArrowDataType::Time32(_)
@@ -260,7 +262,7 @@ impl Helper {
             | ArrowDataType::LargeList(_)
             | ArrowDataType::FixedSizeList(_, _)
             | ArrowDataType::Struct(_)
-            | ArrowDataType::Union(_, _, _)
+            | ArrowDataType::Union(_, _)
             | ArrowDataType::Dictionary(_, _)
             | ArrowDataType::Decimal128(_, _)
             | ArrowDataType::Decimal256(_, _)
@@ -357,7 +359,7 @@ mod tests {
                 ScalarValue::Int32(Some(1)),
                 ScalarValue::Int32(Some(2)),
             ]),
-            Box::new(Field::new("item", ArrowDataType::Int32, true)),
+            Arc::new(Field::new("item", ArrowDataType::Int32, true)),
         );
         let vector = Helper::try_from_scalar_value(value, 3).unwrap();
         assert_eq!(

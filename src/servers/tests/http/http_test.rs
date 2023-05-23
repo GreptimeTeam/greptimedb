@@ -14,18 +14,27 @@
 
 use axum::Router;
 use axum_test_helper::TestClient;
-use servers::http::{HttpOptions, HttpServer};
+use common_test_util::ports;
+use servers::http::{HttpOptions, HttpServerBuilder};
 use table::test_util::MemTable;
 
 use crate::{create_testing_grpc_query_handler, create_testing_sql_query_handler};
 
 fn make_test_app() -> Router {
-    let server = HttpServer::new(
-        create_testing_sql_query_handler(MemTable::default_numbers_table()),
-        create_testing_grpc_query_handler(MemTable::default_numbers_table()),
-        HttpOptions::default(),
-    );
-    server.make_app()
+    let http_opts = HttpOptions {
+        addr: format!("127.0.0.1:{}", ports::get_port()),
+        ..Default::default()
+    };
+
+    let server = HttpServerBuilder::new(http_opts)
+        .with_sql_handler(create_testing_sql_query_handler(
+            MemTable::default_numbers_table(),
+        ))
+        .with_grpc_handler(create_testing_grpc_query_handler(
+            MemTable::default_numbers_table(),
+        ))
+        .build();
+    server.build(server.make_app())
 }
 
 #[tokio::test]

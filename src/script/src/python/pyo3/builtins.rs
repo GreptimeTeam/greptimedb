@@ -61,6 +61,7 @@ macro_rules! batch_import {
 #[pyo3(name = "greptime")]
 pub(crate) fn greptime_builtins(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_class::<PyVector>()?;
+    m.add_class::<PyDataFrame>()?;
     use self::query_engine;
     batch_import!(
         m,
@@ -125,23 +126,25 @@ fn get_globals(py: Python) -> PyResult<&PyDict> {
     Ok(globals)
 }
 
+/// In case of not wanting to repeat the same sql statement in sql,
+/// this function is still useful even we already have PyDataFrame.from_sql()
 #[pyfunction]
 fn dataframe(py: Python) -> PyResult<PyDataFrame> {
     let globals = get_globals(py)?;
     let df = globals
         .get_item("__dataframe__")
-        .ok_or(PyKeyError::new_err("No __dataframe__ variable is found"))?
+        .ok_or_else(|| PyKeyError::new_err("No __dataframe__ variable is found"))?
         .extract::<PyDataFrame>()?;
     Ok(df)
 }
 
 #[pyfunction]
 #[pyo3(name = "query")]
-fn query_engine(py: Python) -> PyResult<PyQueryEngine> {
+pub(crate) fn query_engine(py: Python) -> PyResult<PyQueryEngine> {
     let globals = get_globals(py)?;
     let query = globals
         .get_item("__query__")
-        .ok_or(PyKeyError::new_err("No __query__ variable is found"))?
+        .ok_or_else(|| PyKeyError::new_err("No __query__ variable is found"))?
         .extract::<PyQueryEngine>()?;
     Ok(query)
 }
@@ -278,8 +281,7 @@ fn sqrt(py: Python<'_>, val: PyObject) -> PyResult<PyObject> {
 ```
 */
 bind_call_unary_math_function!(
-    sqrt, sin, cos, tan, asin, acos, atan, floor, ceil, round, trunc, abs, signum, exp, ln, log2,
-    log10
+    sqrt, sin, cos, tan, asin, acos, atan, floor, ceil, trunc, abs, signum, exp, ln, log2, log10
 );
 
 /// return a random vector range from 0 to 1 and length of len
@@ -293,6 +295,15 @@ fn random(py: Python<'_>, len: usize) -> PyResult<PyObject> {
         math_expressions::random(args).map_err(|e| PyValueError::new_err(format!("{e:?}")))?;
 
     columnar_value_to_py_any(py, res)
+}
+
+#[pyfunction]
+fn round(py: Python<'_>, val: PyObject) -> PyResult<PyObject> {
+    let value = try_into_columnar_value(py, val)?;
+    let array = value.into_array(1);
+    let result =
+        math_expressions::round(&[array]).map_err(|e| PyValueError::new_err(format!("{e:?}")))?;
+    columnar_value_to_py_any(py, ColumnarValue::Array(result))
 }
 
 /// The macro for binding function in `datafusion_physical_expr::expressions`(most of them are aggregate function)
@@ -309,7 +320,7 @@ macro_rules! bind_aggr_expr {
                         Arc::new(expressions::Column::new(stringify!($EXPR), $idx)) as _,
                     )*
                         stringify!($AGGR_FUNC),
-                        $ARG_TY.to_arrow_array().data_type().to_owned()),
+                        $ARG_TY.arrow_data_type().to_owned()),
                 &[$($ARG.to_arrow_array()),*]
             )
         }
@@ -325,7 +336,7 @@ fn approx_distinct(py: Python<'_>, v0: &PyVector) -> PyResult<PyObject> {
         expressions::ApproxDistinct::new(
             Arc::new(expressions::Column::new("expr0", 0)) as _,
             "ApproxDistinct",
-            v0.to_arrow_array().data_type().to_owned(),
+            v0.arrow_data_type().to_owned(),
         ),
         &[v0.to_arrow_array()],
     );
@@ -348,7 +359,7 @@ fn approx_percentile_cont(py: Python<'_>, values: &PyVector, percent: f64) -> Py
                 Arc::new(percent) as _,
             ],
             "ApproxPercentileCont",
-            (values.to_arrow_array().data_type()).to_owned(),
+            values.arrow_data_type(),
         )
         .map_err(|e| PyValueError::new_err(format!("{e:?}")))?,
         &[values.to_arrow_array()],

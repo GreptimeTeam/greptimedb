@@ -16,21 +16,29 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::{Column, ColumnDataType, CreateTableExpr};
+use api::v1::alter_expr::Kind;
+use api::v1::{
+    AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, CreateTableExpr, DropColumn,
+    DropColumns, RenameTable,
+};
 use common_error::prelude::BoxedError;
 use datanode::instance::sql::table_idents_to_full_name;
 use datatypes::schema::ColumnSchema;
+use file_table_engine::table::immutable::ImmutableFileTableOptions;
+use query::sql::prepare_immutable_file_table_files_and_schema;
 use session::context::QueryContextRef;
 use snafu::{ensure, ResultExt};
-use sql::ast::{ColumnDef, ColumnOption, SqlOption, TableConstraint, Value};
-use sql::statements::column_def_to_schema;
-use sql::statements::create::{CreateTable, TIME_INDEX};
-use table::requests::TableOptions;
+use sql::ast::{ColumnDef, ColumnOption, TableConstraint};
+use sql::statements::alter::{AlterTable, AlterTableOperation};
+use sql::statements::create::{CreateExternalTable, CreateTable, TIME_INDEX};
+use sql::statements::{column_def_to_schema, sql_column_def_to_grpc_column_def};
+use sql::util::to_lowercase_options_map;
+use table::requests::{TableOptions, IMMUTABLE_TABLE_META_KEY};
 
 use crate::error::{
     self, BuildCreateExprOnInsertionSnafu, ColumnDataTypeSnafu,
-    ConvertColumnDefaultConstraintSnafu, IllegalPrimaryKeysDefSnafu, InvalidSqlSnafu,
-    ParseSqlSnafu, Result, UnrecognizedTableOptionSnafu,
+    ConvertColumnDefaultConstraintSnafu, ExternalSnafu, IllegalPrimaryKeysDefSnafu,
+    InvalidSqlSnafu, ParseSqlSnafu, Result,
 };
 
 pub type CreateExprFactoryRef = Arc<dyn CreateExprFactory + Send + Sync>;
@@ -43,6 +51,7 @@ pub trait CreateExprFactory {
         schema_name: &str,
         table_name: &str,
         columns: &[Column],
+        engine: &str,
     ) -> crate::error::Result<CreateTableExpr>;
 }
 
@@ -57,6 +66,7 @@ impl CreateExprFactory for DefaultCreateExprFactory {
         schema_name: &str,
         table_name: &str,
         columns: &[Column],
+        engine: &str,
     ) -> Result<CreateTableExpr> {
         let table_id = None;
         let create_expr = common_grpc_expr::build_create_expr_from_insertion(
@@ -65,6 +75,7 @@ impl CreateExprFactory for DefaultCreateExprFactory {
             table_id,
             table_name,
             columns,
+            engine,
         )
         .context(BuildCreateExprOnInsertionSnafu)?;
 
@@ -72,9 +83,8 @@ impl CreateExprFactory for DefaultCreateExprFactory {
     }
 }
 
-/// Convert `CreateTable` statement to `CreateExpr` gRPC request.
-pub(crate) fn create_to_expr(
-    create: &CreateTable,
+pub(crate) async fn create_external_expr(
+    create: CreateExternalTable,
     query_ctx: QueryContextRef,
 ) -> Result<CreateTableExpr> {
     let (catalog_name, schema_name, table_name) =
@@ -82,8 +92,47 @@ pub(crate) fn create_to_expr(
             .map_err(BoxedError::new)
             .context(error::ExternalSnafu)?;
 
+    let mut options = create.options;
+
+    let (files, schema) = prepare_immutable_file_table_files_and_schema(&options, &create.columns)
+        .await
+        .context(error::PrepareImmutableTableSnafu)?;
+
+    let meta = ImmutableFileTableOptions { files };
+    options.insert(
+        IMMUTABLE_TABLE_META_KEY.to_string(),
+        serde_json::to_string(&meta).context(error::EncodeJsonSnafu)?,
+    );
+
+    let expr = CreateTableExpr {
+        catalog_name,
+        schema_name,
+        table_name,
+        desc: "".to_string(),
+        column_defs: column_schemas_to_defs(schema.column_schemas)?,
+        time_index: "".to_string(),
+        primary_keys: vec![],
+        create_if_not_exists: create.if_not_exists,
+        table_options: options,
+        table_id: None,
+        region_ids: vec![],
+        engine: create.engine.to_string(),
+    };
+    Ok(expr)
+}
+
+/// Convert `CreateTable` statement to `CreateExpr` gRPC request.
+pub fn create_to_expr(create: &CreateTable, query_ctx: QueryContextRef) -> Result<CreateTableExpr> {
+    let (catalog_name, schema_name, table_name) =
+        table_idents_to_full_name(&create.name, query_ctx)
+            .map_err(BoxedError::new)
+            .context(error::ExternalSnafu)?;
+
     let time_index = find_time_index(&create.constraints)?;
-    let table_options = HashMap::from(&stmt_options_to_table_options(&create.options)?);
+    let table_options = HashMap::from(
+        &TableOptions::try_from(&to_lowercase_options_map(&create.options))
+            .context(error::UnrecognizedTableOptionSnafu)?,
+    );
     let expr = CreateTableExpr {
         catalog_name,
         schema_name,
@@ -96,6 +145,7 @@ pub(crate) fn create_to_expr(
         table_options,
         table_id: None,
         region_ids: vec![],
+        engine: create.engine.to_string(),
     };
     Ok(expr)
 }
@@ -187,7 +237,12 @@ fn columns_to_expr(
         .iter()
         .map(|c| column_def_to_schema(c, c.name.to_string() == time_index).context(ParseSqlSnafu))
         .collect::<Result<Vec<ColumnSchema>>>()?;
+    column_schemas_to_defs(column_schemas)
+}
 
+pub(crate) fn column_schemas_to_defs(
+    column_schemas: Vec<ColumnSchema>,
+) -> Result<Vec<api::v1::ColumnDef>> {
     let column_datatypes = column_schemas
         .iter()
         .map(|c| {
@@ -220,20 +275,48 @@ fn columns_to_expr(
         .collect()
 }
 
-// TODO(hl): This function is intentionally duplicated with that one in src/datanode/src/sql/create.rs:261
-// since we are going to remove the statement parsing stuff from datanode.
-// Refer: https://github.com/GreptimeTeam/greptimedb/issues/1010
-fn stmt_options_to_table_options(opts: &[SqlOption]) -> error::Result<TableOptions> {
-    let mut map = HashMap::with_capacity(opts.len());
-    for SqlOption { name, value } in opts {
-        let value_str = match value {
-            Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => s.clone(),
-            _ => value.to_string(),
-        };
-        map.insert(name.value.clone(), value_str);
-    }
-    let options = TableOptions::try_from(&map).context(UnrecognizedTableOptionSnafu)?;
-    Ok(options)
+pub(crate) fn to_alter_expr(
+    alter_table: AlterTable,
+    query_ctx: QueryContextRef,
+) -> Result<AlterExpr> {
+    let (catalog_name, schema_name, table_name) =
+        table_idents_to_full_name(alter_table.table_name(), query_ctx)
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+
+    let kind = match alter_table.alter_operation() {
+        AlterTableOperation::AddConstraint(_) => {
+            return error::NotSupportedSnafu {
+                feat: "ADD CONSTRAINT",
+            }
+            .fail();
+        }
+        AlterTableOperation::AddColumn { column_def } => Kind::AddColumns(AddColumns {
+            add_columns: vec![AddColumn {
+                column_def: Some(
+                    sql_column_def_to_grpc_column_def(column_def)
+                        .map_err(BoxedError::new)
+                        .context(ExternalSnafu)?,
+                ),
+                is_key: false,
+            }],
+        }),
+        AlterTableOperation::DropColumn { name } => Kind::DropColumns(DropColumns {
+            drop_columns: vec![DropColumn {
+                name: name.value.to_string(),
+            }],
+        }),
+        AlterTableOperation::RenameTable { new_table_name } => Kind::RenameTable(RenameTable {
+            new_table_name: new_table_name.to_string(),
+        }),
+    };
+
+    Ok(AlterExpr {
+        catalog_name,
+        schema_name,
+        table_name,
+        kind: Some(kind),
+    })
 }
 
 #[cfg(test)]

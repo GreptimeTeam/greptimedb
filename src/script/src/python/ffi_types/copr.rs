@@ -20,7 +20,6 @@ use std::result::Result as StdResult;
 use std::sync::{Arc, Weak};
 
 use common_recordbatch::{RecordBatch, RecordBatches};
-use datatypes::arrow::array::Array;
 use datatypes::arrow::compute;
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
@@ -37,10 +36,10 @@ use rustpython_vm as vm;
 use serde::Deserialize;
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
-use vm::builtins::{PyList, PyListRef};
 use vm::convert::ToPyObject;
-use vm::{pyclass as rspyclass, PyPayload, PyResult, VirtualMachine};
+use vm::{pyclass as rspyclass, PyObjectRef, PyPayload, PyResult, VirtualMachine};
 
+use super::py_recordbatch::PyRecordBatch;
 use crate::python::error::{ensure, ArrowSnafu, OtherSnafu, Result, TypeCastSnafu};
 use crate::python::ffi_types::PyVector;
 #[cfg(feature = "pyo3_backend")]
@@ -243,15 +242,14 @@ pub(crate) fn check_args_anno_real_type(
     );
     for (idx, arg) in args.iter().enumerate() {
         let anno_ty = copr.arg_types[idx].clone();
-        let real_ty = arg.to_arrow_array().data_type().clone();
-        let real_ty = ConcreteDataType::from_arrow_type(&real_ty);
+        let real_ty = arg.data_type();
         let arg_name = arg_names[idx].clone();
-        let col_idx = rb.schema.column_index_by_name(&arg_name).ok_or(
+        let col_idx = rb.schema.column_index_by_name(&arg_name).ok_or_else(|| {
             OtherSnafu {
                 reason: format!("Can't find column by name {arg_name}"),
             }
-            .build(),
-        )?;
+            .build()
+        })?;
         let is_nullable: bool = rb.schema.column_schemas()[col_idx].is_nullable();
         ensure!(
             anno_ty
@@ -261,11 +259,12 @@ pub(crate) fn check_args_anno_real_type(
                 .unwrap_or(true),
             OtherSnafu {
                 reason: format!(
-                    "column {}'s Type annotation is {:?}, but actual type is {:?}",
+                    "column {}'s Type annotation is {:?}, but actual type is {:?} with nullable=={}",
                     // It's safe to unwrap here, we already ensure the args and types number is the same when parsing
                     copr.deco_args.arg_names.as_ref().unwrap()[idx],
                     anno_ty,
-                    real_ty
+                    real_ty,
+                    is_nullable
                 )
             }
         )
@@ -344,20 +343,33 @@ pub(crate) enum Either {
     Rb(RecordBatches),
     AffectedRows(usize),
 }
+
+impl PyQueryEngine {
+    pub(crate) fn sql_to_rb(&self, sql: String) -> StdResult<RecordBatch, String> {
+        let res = self.query_with_new_thread(sql.clone())?;
+        match res {
+            Either::Rb(rbs) => {
+                let rb = compute::concat_batches(
+                    rbs.schema().arrow_schema(),
+                    rbs.iter().map(|r| r.df_record_batch()),
+                )
+                .map_err(|e| format!("Concat batches failed for query {sql}: {e}"))?;
+
+                RecordBatch::try_from_df_record_batch(rbs.schema(), rb)
+                    .map_err(|e| format!("Convert datafusion record batch to record batch failed for query {sql}: {e}"))
+            }
+            Either::AffectedRows(_) => Err(format!("Expect actual results from query {sql}")),
+        }
+    }
+}
+
 #[rspyclass]
 impl PyQueryEngine {
     pub(crate) fn from_weakref(inner: QueryEngineWeakRef) -> Self {
         Self { inner }
     }
-    #[cfg(feature = "pyo3_backend")]
-    pub(crate) fn get_ref(&self) -> Option<Arc<dyn QueryEngine>> {
-        self.inner.0.upgrade()
-    }
-    pub(crate) fn query_with_new_thread(
-        &self,
-        query: Option<Arc<dyn QueryEngine>>,
-        s: String,
-    ) -> StdResult<Either, String> {
+    pub(crate) fn query_with_new_thread(&self, s: String) -> StdResult<Either, String> {
+        let query = self.inner.0.upgrade();
         let thread_handle = std::thread::spawn(move || -> std::result::Result<_, String> {
             if let Some(engine) = query {
                 let stmt = QueryLanguageParser::parse_sql(&s).map_err(|e| e.to_string())?;
@@ -398,31 +410,32 @@ impl PyQueryEngine {
             .map_err(|e| format!("Dedicated thread for sql query panic: {e:?}"))?
     }
     // TODO(discord9): find a better way to call sql query api, now we don't if we are in async context or not
-    /// return sql query results in List[List[PyVector]], or List[usize] for AffectedRows number if no recordbatches is returned
+    /// - return sql query results in `PyRecordBatch`,  or
+    /// - a empty `PyDict` if query results is empty
+    /// - or number of AffectedRows
     #[pymethod]
-    fn sql(&self, s: String, vm: &VirtualMachine) -> PyResult<PyListRef> {
-        let query = self.inner.0.upgrade();
-        self.query_with_new_thread(query, s)
+    fn sql(&self, s: String, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        self.query_with_new_thread(s)
             .map_err(|e| vm.new_system_error(e))
             .map(|rbs| match rbs {
                 Either::Rb(rbs) => {
-                    let mut top_vec = Vec::with_capacity(rbs.iter().count());
-                    for rb in rbs.iter() {
-                        let mut vec_of_vec = Vec::with_capacity(rb.columns().len());
-                        for v in rb.columns() {
-                            let v = PyVector::from(v.clone());
-                            vec_of_vec.push(v.to_pyobject(vm));
-                        }
-                        let vec_of_vec = PyList::new_ref(vec_of_vec, vm.as_ref()).to_pyobject(vm);
-                        top_vec.push(vec_of_vec);
-                    }
-                    let top_vec = PyList::new_ref(top_vec, vm.as_ref());
-                    top_vec
+                    let rb = compute::concat_batches(
+                        rbs.schema().arrow_schema(),
+                        rbs.iter().map(|rb| rb.df_record_batch()),
+                    )
+                    .map_err(|e| {
+                        vm.new_runtime_error(format!("Failed to concat batches: {e:#?}"))
+                    })?;
+                    let rb =
+                        RecordBatch::try_from_df_record_batch(rbs.schema(), rb).map_err(|e| {
+                            vm.new_runtime_error(format!("Failed to cast recordbatch: {e:#?}"))
+                        })?;
+                    let rb = PyRecordBatch::new(rb);
+
+                    Ok(rb.to_pyobject(vm))
                 }
-                Either::AffectedRows(cnt) => {
-                    PyList::new_ref(vec![vm.ctx.new_int(cnt).into()], vm.as_ref())
-                }
-            })
+                Either::AffectedRows(cnt) => Ok(vm.ctx.new_int(cnt).to_pyobject(vm)),
+            })?
     }
 }
 

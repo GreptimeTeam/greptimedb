@@ -24,7 +24,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use common_telemetry::info;
+use common_telemetry::{debug, info};
 use store_api::manifest::ManifestVersion;
 use store_api::storage::{SchemaRef, SequenceNumber};
 
@@ -227,6 +227,26 @@ impl Version {
         self.flushed_sequence
     }
 
+    pub fn apply_checkpoint(
+        &mut self,
+        flushed_sequence: Option<SequenceNumber>,
+        manifest_version: ManifestVersion,
+        files: impl Iterator<Item = FileMeta>,
+    ) {
+        self.flushed_sequence = flushed_sequence.unwrap_or(self.flushed_sequence);
+        self.manifest_version = manifest_version;
+        let ssts = self.ssts.merge(files, std::iter::empty());
+        info!(
+            "After applying checkpoint, region: {}, id: {}, flushed_sequence: {}, manifest_version: {}",
+            self.metadata.name(),
+            self.metadata.id(),
+            self.flushed_sequence,
+            self.manifest_version,
+        );
+
+        self.ssts = Arc::new(ssts);
+    }
+
     pub fn apply_edit(&mut self, edit: VersionEdit) {
         let flushed_sequence = edit.flushed_sequence.unwrap_or(self.flushed_sequence);
         if self.flushed_sequence < flushed_sequence {
@@ -248,8 +268,9 @@ impl Version {
             .ssts
             .merge(handles_to_add, edit.files_to_remove.into_iter());
 
-        info!(
-            "After apply edit, region: {}, SST files: {:?}",
+        debug!(
+            "After applying edit, region: {}, id: {}, SST files: {:?}",
+            self.metadata.name(),
             self.metadata.id(),
             merged_ssts
         );
@@ -292,9 +313,7 @@ mod tests {
     use crate::test_util::descriptor_util::RegionDescBuilder;
 
     fn new_version_control() -> VersionControl {
-        let desc = RegionDescBuilder::new("version-test")
-            .enable_version_column(false)
-            .build();
+        let desc = RegionDescBuilder::new("version-test").build();
         let metadata: RegionMetadataRef = Arc::new(desc.try_into().unwrap());
         let memtable = DefaultMemtableBuilder::default().build(metadata.schema().clone());
 

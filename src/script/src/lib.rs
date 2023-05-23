@@ -12,10 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// TODO(discord9): spawn new process for executing python script(if hit gil limit) and use shared memory to communicate
+#![deny(clippy::implicit_clone)]
+
 pub mod engine;
 pub mod error;
 #[cfg(feature = "python")]
 pub mod manager;
 #[cfg(feature = "python")]
 pub mod python;
-mod table;
+pub mod table;

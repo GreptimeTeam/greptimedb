@@ -16,8 +16,11 @@ use std::sync::Arc;
 
 use api::v1::auth_header::AuthScheme;
 use api::v1::{Basic, GreptimeRequest, RequestHeader};
+use common_error::prelude::ErrorExt;
 use common_query::Output;
 use common_runtime::Runtime;
+use common_telemetry::{logging, timer};
+use metrics::increment_counter;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::OptionExt;
 use tonic::Status;
@@ -57,6 +60,10 @@ impl GreptimeRequestHandler {
 
         self.auth(header, &query_ctx).await?;
 
+        let _timer = timer!(
+            crate::metrics::METRIC_SERVER_GRPC_DB_REQUEST_TIMER,
+            &[(crate::metrics::METRIC_DB_LABEL, &query_ctx.get_db_string())]
+        );
         let handler = self.handler.clone();
 
         // Executes requests in another runtime to
@@ -66,11 +73,22 @@ impl GreptimeRequestHandler {
         //   - Obtaining a `JoinHandle` to get the panic message (if there's any).
         //     From its docs, `JoinHandle` is cancel safe. The task keeps running even it's handle been dropped.
         // 2. avoid the handler blocks the gRPC runtime incidentally.
-        let handle = self
-            .runtime
-            .spawn(async move { handler.do_query(query, query_ctx).await });
+        let handle = self.runtime.spawn(async move {
+            handler.do_query(query, query_ctx).await.map_err(|e| {
+                if e.status_code().should_log_error() {
+                    logging::error!(e; "Failed to handle request");
+                } else {
+                    // Currently, we still print a debug log.
+                    logging::debug!("Failed to handle request, err: {}", e);
+                }
+                e
+            })
+        });
 
         let output = handle.await.map_err(|e| {
+            // logs the runtime join error.
+            logging::error!("Failed to join handle, err: {}", e);
+
             if e.is_cancelled() {
                 Status::cancelled(e.to_string())
             } else if e.is_panic() {
@@ -98,11 +116,13 @@ impl GreptimeRequestHandler {
             })
             .context(NotFoundAuthHeaderSnafu)?;
 
-        let user_info = match auth_scheme {
+        match auth_scheme {
             AuthScheme::Basic(Basic { username, password }) => user_provider
-                .authenticate(
+                .auth(
                     Identity::UserId(&username, None),
-                    Password::PlainText(&password),
+                    Password::PlainText(password.into()),
+                    &query_ctx.current_catalog(),
+                    &query_ctx.current_schema(),
                 )
                 .await
                 .map_err(|e| Auth { source: e }),
@@ -110,27 +130,37 @@ impl GreptimeRequestHandler {
                 name: "Token AuthScheme".to_string(),
             }),
         }
-        .map_err(|e| Status::unauthenticated(e.to_string()))?;
-
-        user_provider
-            .authorize(
-                &query_ctx.current_catalog(),
-                &query_ctx.current_schema(),
-                &user_info,
-            )
-            .await
-            .map_err(|e| Status::permission_denied(e.to_string()))
+        .map_err(|e| {
+            increment_counter!(
+                crate::metrics::METRIC_AUTH_FAILURE,
+                &[(
+                    crate::metrics::METRIC_CODE_LABEL,
+                    format!("{}", e.status_code())
+                )]
+            );
+            Status::unauthenticated(e.to_string())
+        })?;
+        Ok(())
     }
 }
 
-fn create_query_context(header: Option<&RequestHeader>) -> QueryContextRef {
+pub(crate) fn create_query_context(header: Option<&RequestHeader>) -> QueryContextRef {
     let ctx = QueryContext::arc();
     if let Some(header) = header {
-        if !header.catalog.is_empty() {
-            ctx.set_current_catalog(&header.catalog);
-        }
-        if !header.schema.is_empty() {
-            ctx.set_current_schema(&header.schema);
+        // We provide dbname field in newer versions of protos/sdks
+        // parse dbname from header in priority
+        if !header.dbname.is_empty() {
+            let (catalog, schema) =
+                crate::parse_catalog_and_schema_from_client_database_name(&header.dbname);
+            ctx.set_current_catalog(catalog);
+            ctx.set_current_schema(schema);
+        } else {
+            if !header.catalog.is_empty() {
+                ctx.set_current_catalog(&header.catalog);
+            }
+            if !header.schema.is_empty() {
+                ctx.set_current_schema(&header.schema);
+            }
         }
     };
     ctx

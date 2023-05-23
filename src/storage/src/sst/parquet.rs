@@ -27,7 +27,7 @@ use arrow_array::{
 use async_compat::CompatExt;
 use async_stream::try_stream;
 use async_trait::async_trait;
-use common_telemetry::error;
+use common_telemetry::{error, warn};
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
@@ -38,8 +38,8 @@ use datatypes::prelude::ConcreteDataType;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::{ArrowPredicate, RowFilter};
-use parquet::arrow::{ArrowWriter, ParquetRecordBatchStreamBuilder, ProjectionMask};
-use parquet::basic::{Compression, Encoding};
+use parquet::arrow::{ParquetRecordBatchStreamBuilder, ProjectionMask};
+use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 use parquet::format::FileMetaData;
@@ -48,15 +48,14 @@ use snafu::{OptionExt, ResultExt};
 use table::predicate::Predicate;
 use tokio::io::BufReader;
 
-use crate::error::{
-    self, DecodeParquetTimeRangeSnafu, NewRecordBatchSnafu, ReadObjectSnafu, ReadParquetSnafu,
-    Result, WriteObjectSnafu, WriteParquetSnafu,
-};
+use crate::error::{self, DecodeParquetTimeRangeSnafu, ReadObjectSnafu, ReadParquetSnafu, Result};
 use crate::read::{Batch, BatchReader};
 use crate::schema::compat::ReadAdapter;
-use crate::schema::{ProjectedSchemaRef, StoreSchema, StoreSchemaRef};
+use crate::schema::{ProjectedSchemaRef, StoreSchema};
 use crate::sst;
+use crate::sst::stream_writer::BufferedWriter;
 use crate::sst::{FileHandle, Source, SstInfo};
+
 /// Parquet sst writer.
 pub struct ParquetWriter<'a> {
     file_path: &'a str,
@@ -75,21 +74,21 @@ impl<'a> ParquetWriter<'a> {
         }
     }
 
-    pub async fn write_sst(self, _opts: &sst::WriteOptions) -> Result<SstInfo> {
-        self.write_rows(None).await
+    pub async fn write_sst(self, opts: &sst::WriteOptions) -> Result<Option<SstInfo>> {
+        self.write_rows(None, opts).await
     }
 
     /// Iterates memtable and writes rows to Parquet file.
     /// A chunk of records yielded from each iteration with a size given
     /// in config will be written to a single row group.
-    async fn write_rows(mut self, extra_meta: Option<HashMap<String, String>>) -> Result<SstInfo> {
-        let projected_schema = self.source.projected_schema();
-        let store_schema = projected_schema.schema_to_read();
-        let schema = store_schema.arrow_schema().clone();
-        let object = self.object_store.object(self.file_path);
-
+    async fn write_rows(
+        mut self,
+        extra_meta: Option<HashMap<String, String>>,
+        opts: &sst::WriteOptions,
+    ) -> Result<Option<SstInfo>> {
+        let schema = self.source.schema();
         let writer_props = WriterProperties::builder()
-            .set_compression(Compression::ZSTD)
+            .set_compression(Compression::ZSTD(ZstdLevel::default()))
             .set_encoding(Encoding::PLAIN)
             .set_max_row_group_size(self.max_row_group_size)
             .set_key_value_metadata(extra_meta.map(|map| {
@@ -99,56 +98,48 @@ impl<'a> ParquetWriter<'a> {
             }))
             .build();
 
-        // TODO(hl): Since OpenDAL's writer is async and ArrowWriter requires a `std::io::Write`,
-        // here we use a Vec<u8> to buffer all parquet bytes in memory and write to object store
-        // at a time. Maybe we should find a better way to bridge ArrowWriter and OpenDAL's object.
-        let mut buf = vec![];
-        let mut arrow_writer = ArrowWriter::try_new(&mut buf, schema.clone(), Some(writer_props))
-            .context(WriteParquetSnafu)?;
+        let mut buffered_writer = BufferedWriter::try_new(
+            self.file_path.to_string(),
+            self.object_store.clone(),
+            &schema,
+            Some(writer_props),
+            opts.sst_write_buffer_size.as_bytes() as usize,
+        )
+        .await?;
+        let mut rows_written = 0;
 
         while let Some(batch) = self.source.next_batch().await? {
-            let arrow_batch = RecordBatch::try_new(
-                schema.clone(),
-                batch
-                    .columns()
-                    .iter()
-                    .map(|v| v.to_arrow_array())
-                    .collect::<Vec<_>>(),
-            )
-            .context(NewRecordBatchSnafu)?;
-            arrow_writer
-                .write(&arrow_batch)
-                .context(WriteParquetSnafu)?;
+            buffered_writer.write(&batch).await?;
+            rows_written += batch.num_rows();
         }
 
-        let file_meta = arrow_writer.close().context(WriteParquetSnafu)?;
+        if rows_written == 0 {
+            // if the source does not contain any batch, we skip writing an empty parquet file.
+            if !buffered_writer.abort().await {
+                warn!(
+                    "Partial file {} has been uploaded to remote storage",
+                    self.file_path
+                );
+            }
+            return Ok(None);
+        }
 
-        let time_range = decode_timestamp_range(&file_meta, store_schema)
-            .ok()
-            .flatten();
+        let (file_meta, file_size) = buffered_writer.close().await?;
+        let time_range = decode_timestamp_range(&file_meta, &schema).ok().flatten();
 
-        object.write(buf).await.context(WriteObjectSnafu {
-            path: object.path(),
-        })?;
-        let file_size = object
-            .metadata()
-            .await
-            .context(WriteObjectSnafu {
-                path: object.path(),
-            })?
-            .content_length();
-        Ok(SstInfo {
+        // object_store.write will make sure all bytes are written or an error is raised.
+        Ok(Some(SstInfo {
             time_range,
             file_size,
-        })
+            num_rows: rows_written,
+        }))
     }
 }
 
 fn decode_timestamp_range(
     file_meta: &FileMetaData,
-    store_schema: &StoreSchemaRef,
+    schema: &datatypes::schema::SchemaRef,
 ) -> Result<Option<(Timestamp, Timestamp)>> {
-    let schema = store_schema.schema();
     let (Some(ts_col_idx), Some(ts_col)) = (schema.timestamp_index(), schema.timestamp_column()) else { return Ok(None); };
     let ts_datatype = &ts_col.data_type;
     decode_timestamp_range_inner(file_meta, ts_col_idx, ts_datatype)
@@ -210,6 +201,13 @@ fn decode_timestamp_range_inner(
         end = end.max(max);
     }
 
+    assert!(
+        start <= end,
+        "Illegal timestamp range decoded from SST file {:?}, start: {}, end: {}",
+        file_meta,
+        start,
+        end
+    );
     Ok(Some((
         Timestamp::new(start, unit),
         Timestamp::new(end, unit),
@@ -245,9 +243,9 @@ impl ParquetReader {
     pub async fn chunk_stream(&self) -> Result<ChunkStream> {
         let file_path = self.file_handle.file_path();
         let operator = self.object_store.clone();
+
         let reader = operator
-            .object(&file_path)
-            .reader()
+            .reader(&file_path)
             .await
             .context(ReadObjectSnafu { path: &file_path })?
             .compat();
@@ -297,7 +295,7 @@ impl ParquetReader {
             }
         });
 
-        ChunkStream::new(adapter, Box::pin(chunk_stream))
+        ChunkStream::new(self.file_handle.clone(), adapter, Box::pin(chunk_stream))
     }
 
     /// Builds time range row filter.
@@ -500,13 +498,23 @@ impl ArrowPredicate for PlainTimestampRowFilter {
 pub type SendableChunkStream = Pin<Box<dyn Stream<Item = Result<RecordBatch>> + Send>>;
 
 pub struct ChunkStream {
+    // Holds the file handle in the stream to avoid the purger purge it.
+    _file_handle: FileHandle,
     adapter: ReadAdapter,
     stream: SendableChunkStream,
 }
 
 impl ChunkStream {
-    pub fn new(adapter: ReadAdapter, stream: SendableChunkStream) -> Result<Self> {
-        Ok(Self { adapter, stream })
+    pub fn new(
+        file_handle: FileHandle,
+        adapter: ReadAdapter,
+        stream: SendableChunkStream,
+    ) -> Result<Self> {
+        Ok(Self {
+            _file_handle: file_handle,
+            adapter,
+            stream,
+        })
     }
 }
 
@@ -526,12 +534,11 @@ mod tests {
     use std::sync::Arc;
 
     use common_test_util::temp_dir::create_temp_dir;
-    use datatypes::arrow::array::{Array, ArrayRef, UInt64Array, UInt8Array};
+    use datatypes::arrow::array::{Array, UInt64Array, UInt8Array};
     use datatypes::prelude::{ScalarVector, Vector};
     use datatypes::types::{TimestampMillisecondType, TimestampType};
     use datatypes::vectors::TimestampMillisecondVector;
     use object_store::services::Fs;
-    use object_store::ObjectStoreBuilder;
     use store_api::storage::OpType;
 
     use super::*;
@@ -542,8 +549,15 @@ mod tests {
     use crate::schema::ProjectedSchema;
     use crate::sst::{FileId, FileMeta};
 
+    fn create_object_store(root: &str) -> ObjectStore {
+        let mut builder = Fs::default();
+        builder.root(root);
+        ObjectStore::new(builder).unwrap().finish()
+    }
+
     #[tokio::test]
     async fn test_parquet_writer() {
+        common_telemetry::init_default_ut_logging();
         let schema = memtable_tests::schema_for_test();
         let memtable = DefaultMemtableBuilder::default().build(schema);
 
@@ -551,14 +565,7 @@ mod tests {
             &*memtable,
             10, // sequence
             OpType::Put,
-            &[
-                (1000, 1),
-                (1000, 2),
-                (2002, 1),
-                (2003, 1),
-                (2003, 5),
-                (1001, 1),
-            ], // keys
+            &[1000, 1002, 2002, 2003, 2003, 1001], // keys
             &[
                 (Some(1), Some(1234)),
                 (Some(2), Some(1234)),
@@ -571,8 +578,8 @@ mod tests {
 
         let dir = create_temp_dir("write_parquet");
         let path = dir.path().to_str().unwrap();
-        let backend = Fs::default().root(path).build().unwrap();
-        let object_store = ObjectStore::new(backend).finish();
+
+        let object_store = create_object_store(path);
         let sst_file_name = "test-flush.parquet";
         let iter = memtable.iter(&IterContext::default()).unwrap();
         let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
@@ -583,64 +590,50 @@ mod tests {
             .unwrap();
 
         // verify parquet file
-        let reader = BufReader::new(
-            object_store
-                .object(sst_file_name)
-                .reader()
-                .await
-                .unwrap()
-                .compat(),
-        );
+        let reader = BufReader::new(object_store.reader(sst_file_name).await.unwrap().compat());
 
         let builder = ParquetRecordBatchStreamBuilder::new(reader).await.unwrap();
 
         let mut stream = builder.build().unwrap();
-        // chunk schema: timestamp, __version, v1, __sequence, __op_type
+        // chunk schema: timestamp, v1, __sequence, __op_type
         let chunk = stream.next().await.unwrap().unwrap();
-        assert_eq!(6, chunk.columns().len());
+        assert_eq!(5, chunk.columns().len());
 
         // timestamp
         assert_eq!(
             &TimestampMillisecondVector::from_slice([
                 1000.into(),
-                1000.into(),
                 1001.into(),
+                1002.into(),
                 2002.into(),
                 2003.into(),
-                2003.into()
             ])
             .to_arrow_array(),
             chunk.column(0)
         );
 
-        // version
-        assert_eq!(
-            &(Arc::new(UInt64Array::from(vec![1, 2, 1, 1, 1, 5])) as ArrayRef),
-            chunk.column(1)
-        );
-
         // v0
         assert_eq!(
-            &(Arc::new(UInt64Array::from(vec![1, 2, 3, 7, 8, 9])) as Arc<dyn Array>),
-            chunk.column(2)
+            &(Arc::new(UInt64Array::from(vec![1, 3, 2, 7, 9])) as Arc<dyn Array>),
+            chunk.column(1)
         );
 
         // v1
         assert_eq!(
-            &(Arc::new(UInt64Array::from(vec![1234; 6])) as Arc<dyn Array>),
-            chunk.column(3)
+            &(Arc::new(UInt64Array::from(vec![1234; 5])) as Arc<dyn Array>),
+            chunk.column(2)
         );
 
         // sequence
         assert_eq!(
-            &(Arc::new(UInt64Array::from(vec![10; 6])) as Arc<dyn Array>),
-            chunk.column(4)
+            &(Arc::new(UInt64Array::from(vec![10; 5])) as Arc<dyn Array>),
+            chunk.column(3)
         );
 
         // op_type
         assert_eq!(
-            &(Arc::new(UInt8Array::from(vec![1; 6])) as Arc<dyn Array>),
-            chunk.column(5)
+            &(Arc::new(UInt8Array::from(vec![1; 5])) as Arc<dyn Array>),
+            chunk.column(4)
         );
     }
 
@@ -655,7 +648,7 @@ mod tests {
         let mut values_vec = Vec::with_capacity(rows_total);
 
         for i in 0..rows_total {
-            keys_vec.push((i as i64, i as u64));
+            keys_vec.push(i as i64);
             values_vec.push((Some(i as u64), Some(i as u64)));
         }
 
@@ -669,8 +662,7 @@ mod tests {
 
         let dir = create_temp_dir("write_parquet");
         let path = dir.path().to_str().unwrap();
-        let backend = Fs::default().root(path).build().unwrap();
-        let object_store = ObjectStore::new(backend).finish();
+        let object_store = create_object_store(path);
         let sst_file_handle = new_file_handle(FileId::random());
         let sst_file_name = sst_file_handle.file_name();
         let iter = memtable.iter(&IterContext::default()).unwrap();
@@ -679,9 +671,11 @@ mod tests {
         let SstInfo {
             time_range,
             file_size,
+            ..
         } = writer
             .write_sst(&sst::WriteOptions::default())
             .await
+            .unwrap()
             .unwrap();
 
         assert_eq!(
@@ -692,13 +686,7 @@ mod tests {
             time_range
         );
         assert_ne!(file_size, 0);
-        let operator = ObjectStore::new(
-            Fs::default()
-                .root(dir.path().to_str().unwrap())
-                .build()
-                .unwrap(),
-        )
-        .finish();
+        let operator = create_object_store(dir.path().to_str().unwrap());
 
         let projected_schema = Arc::new(ProjectedSchema::new(schema, Some(vec![1])).unwrap());
         let reader = ParquetReader::new(
@@ -746,14 +734,7 @@ mod tests {
             &*memtable,
             10, // sequence
             OpType::Put,
-            &[
-                (1000, 1),
-                (1000, 2),
-                (2002, 1),
-                (2003, 1),
-                (2003, 5),
-                (1001, 1),
-            ], // keys
+            &[1000, 1002, 2002, 2003, 2003, 1001], // keys
             &[
                 (Some(1), Some(1234)),
                 (Some(2), Some(1234)),
@@ -766,8 +747,8 @@ mod tests {
 
         let dir = create_temp_dir("write_parquet");
         let path = dir.path().to_str().unwrap();
-        let backend = Fs::default().root(path).build().unwrap();
-        let object_store = ObjectStore::new(backend).finish();
+
+        let object_store = create_object_store(path);
         let file_handle = new_file_handle(FileId::random());
         let sst_file_name = file_handle.file_name();
         let iter = memtable.iter(&IterContext::default()).unwrap();
@@ -776,9 +757,11 @@ mod tests {
         let SstInfo {
             time_range,
             file_size,
+            ..
         } = writer
             .write_sst(&sst::WriteOptions::default())
             .await
+            .unwrap()
             .unwrap();
 
         assert_eq!(
@@ -789,13 +772,7 @@ mod tests {
             time_range
         );
         assert_ne!(file_size, 0);
-        let operator = ObjectStore::new(
-            Fs::default()
-                .root(dir.path().to_str().unwrap())
-                .build()
-                .unwrap(),
-        )
-        .finish();
+        let operator = create_object_store(dir.path().to_str().unwrap());
 
         let projected_schema = Arc::new(ProjectedSchema::new(schema, Some(vec![1])).unwrap());
         let reader = ParquetReader::new(
@@ -808,7 +785,7 @@ mod tests {
 
         let mut stream = reader.chunk_stream().await.unwrap();
         assert_eq!(
-            6,
+            5,
             stream
                 .next_batch()
                 .await
@@ -863,15 +840,7 @@ mod tests {
             &*memtable,
             10, // sequence
             OpType::Put,
-            &[
-                (1000, 1),
-                (1000, 2),
-                (2002, 1),
-                (2003, 1),
-                (2003, 5),
-                (1001, 1),
-                (3001, 1),
-            ], // keys
+            &[1000, 1002, 2002, 2003, 2003, 1001, 3001], // keys
             &[
                 (Some(1), Some(1234)),
                 (Some(2), Some(1234)),
@@ -885,8 +854,7 @@ mod tests {
 
         let dir = create_temp_dir("read-parquet-by-range");
         let path = dir.path().to_str().unwrap();
-        let backend = Fs::default().root(path).build().unwrap();
-        let object_store = ObjectStore::new(backend).finish();
+        let object_store = create_object_store(path);
         let sst_file_handle = new_file_handle(FileId::random());
         let sst_file_name = sst_file_handle.file_name();
         let iter = memtable.iter(&IterContext::default()).unwrap();
@@ -895,9 +863,11 @@ mod tests {
         let SstInfo {
             time_range,
             file_size,
+            ..
         } = writer
             .write_sst(&sst::WriteOptions::default())
             .await
+            .unwrap()
             .unwrap();
 
         assert_eq!(
@@ -909,15 +879,14 @@ mod tests {
         );
         assert_ne!(file_size, 0);
 
-        let projected_schema =
-            Arc::new(ProjectedSchema::new(schema, Some(vec![1, 0, 3, 2])).unwrap());
+        let projected_schema = Arc::new(ProjectedSchema::new(schema, Some(vec![1, 0, 2])).unwrap());
 
         check_range_read(
             sst_file_handle.clone(),
             object_store.clone(),
             projected_schema.clone(),
             TimestampRange::with_unit(1000, 2003, TimeUnit::Millisecond).unwrap(),
-            vec![1000, 1000, 1001, 2002],
+            vec![1000, 1001, 1002, 2002],
         )
         .await;
 
@@ -926,7 +895,7 @@ mod tests {
             object_store.clone(),
             projected_schema.clone(),
             TimestampRange::with_unit(2002, 3001, TimeUnit::Millisecond).unwrap(),
-            vec![2002, 2003, 2003],
+            vec![2002, 2003],
         )
         .await;
 
@@ -946,7 +915,7 @@ mod tests {
             object_store.clone(),
             projected_schema.clone(),
             TimestampRange::with_unit(1000, 3000, TimeUnit::Millisecond).unwrap(),
-            vec![1000, 1000, 1001, 2002, 2003, 2003],
+            vec![1000, 1001, 1002, 2002, 2003],
         )
         .await;
 
@@ -956,7 +925,7 @@ mod tests {
             object_store,
             projected_schema,
             TimestampRange::min_to_max(),
-            vec![1000, 1000, 1001, 2002, 2003, 2003, 3001],
+            vec![1000, 1001, 1002, 2002, 2003, 3001],
         )
         .await;
     }
@@ -969,6 +938,29 @@ mod tests {
                 col_unit
             )
         )
+    }
+
+    #[tokio::test]
+    async fn test_write_empty_file() {
+        common_telemetry::init_default_ut_logging();
+        let schema = memtable_tests::schema_for_test();
+        let memtable = DefaultMemtableBuilder::default().build(schema.clone());
+
+        let dir = create_temp_dir("read-parquet-by-range");
+        let path = dir.path().to_str().unwrap();
+        let mut builder = Fs::default();
+        builder.root(path);
+        let object_store = ObjectStore::new(builder).unwrap().finish();
+        let sst_file_name = "test-read.parquet";
+        let iter = memtable.iter(&IterContext::default()).unwrap();
+        let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
+
+        let sst_info_opt = writer
+            .write_sst(&sst::WriteOptions::default())
+            .await
+            .unwrap();
+
+        assert!(sst_info_opt.is_none());
     }
 
     #[test]

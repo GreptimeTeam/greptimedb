@@ -25,6 +25,7 @@ mod tests {
     use std::sync::Arc;
 
     use arrow::array::{Array, PrimitiveArray};
+    use arrow_array::ArrayRef;
     use common_time::DateTime;
     use datafusion_common::from_slice::FromSlice;
 
@@ -37,6 +38,7 @@ mod tests {
 
     #[test]
     fn test_datetime_vector() {
+        std::env::set_var("TZ", "Asia/Shanghai");
         let v = DateTimeVector::new(PrimitiveArray::from_slice([1, 2, 3]));
         assert_eq!(ConcreteDataType::datetime_datatype(), v.data_type());
         assert_eq!(3, v.len());
@@ -63,7 +65,7 @@ mod tests {
             unreachable!()
         }
         assert_eq!(
-            "[\"1970-01-01 00:00:01\",\"1970-01-01 00:00:02\",\"1970-01-01 00:00:03\"]",
+            "[\"1970-01-01 08:00:01+0800\",\"1970-01-01 08:00:02+0800\",\"1970-01-01 08:00:03+0800\"]",
             serde_json::to_string(&v.serialize_to_json().unwrap()).unwrap()
         );
     }
@@ -107,8 +109,8 @@ mod tests {
     #[test]
     fn test_datetime_from_arrow() {
         let vector = DateTimeVector::from_wrapper_slice([DateTime::new(1), DateTime::new(2)]);
-        let arrow = vector.as_arrow().slice(0, vector.len());
-        let vector2 = DateTimeVector::try_from_arrow_array(&arrow).unwrap();
+        let arrow: ArrayRef = Arc::new(vector.as_arrow().slice(0, vector.len())) as _;
+        let vector2 = DateTimeVector::try_from_arrow_array(arrow).unwrap();
         assert_eq!(vector, vector2);
     }
 }

@@ -15,7 +15,8 @@
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 
-use common_telemetry::{error, info};
+use common_base::readable_size::ReadableSize;
+use common_telemetry::{debug, error, timer};
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
@@ -29,6 +30,8 @@ use crate::sst::{
     AccessLayerRef, FileHandle, FileId, FileMeta, Level, Source, SstInfo, WriteOptions,
 };
 use crate::wal::Wal;
+
+const MAX_PARALLEL_COMPACTION: usize = 8;
 
 #[async_trait::async_trait]
 pub trait CompactionTask: Debug + Send + Sync + 'static {
@@ -44,6 +47,8 @@ pub struct CompactionTaskImpl<S: LogStore> {
     pub wal: Wal<S>,
     pub manifest: RegionManifest,
     pub expired_ssts: Vec<FileHandle>,
+    pub sst_write_buffer_size: ReadableSize,
+    pub compaction_time_window: Option<i64>,
 }
 
 impl<S: LogStore> Debug for CompactionTaskImpl<S> {
@@ -69,26 +74,35 @@ impl<S: LogStore> CompactionTaskImpl<S> {
         for output in self.outputs.drain(..) {
             let schema = self.schema.clone();
             let sst_layer = self.sst_layer.clone();
+            let sst_write_buffer_size = self.sst_write_buffer_size;
             compacted_inputs.extend(output.inputs.iter().map(FileHandle::meta));
 
             // TODO(hl): Maybe spawn to runtime to exploit in-job parallelism.
             futs.push(async move {
-                match output.build(region_id, schema, sst_layer).await {
-                    Ok(meta) => Ok(meta),
-                    Err(e) => Err(e),
-                }
+                output
+                    .build(region_id, schema, sst_layer, sst_write_buffer_size)
+                    .await
             });
         }
 
-        let outputs = futures::future::join_all(futs)
-            .await
-            .into_iter()
-            .collect::<Result<_>>()?;
+        let mut outputs = HashSet::with_capacity(futs.len());
+        while !futs.is_empty() {
+            let mut task_chunk = Vec::with_capacity(MAX_PARALLEL_COMPACTION);
+            for _ in 0..MAX_PARALLEL_COMPACTION {
+                if let Some(task) = futs.pop() {
+                    task_chunk.push(task);
+                }
+            }
+            let metas = futures::future::try_join_all(task_chunk).await?;
+            outputs.extend(metas.into_iter().flatten());
+        }
+
         let inputs = compacted_inputs.into_iter().collect();
         Ok((outputs, inputs))
     }
 
     /// Writes updated SST info into manifest.
+    // TODO(etolbakov): we are not persisting inferred compaction_time_window (#1083)[https://github.com/GreptimeTeam/greptimedb/pull/1083]
     async fn write_manifest_and_apply(
         &self,
         output: HashSet<FileMeta>,
@@ -103,7 +117,7 @@ impl<S: LogStore> CompactionTaskImpl<S> {
             files_to_add: Vec::from_iter(output.into_iter()),
             files_to_remove: Vec::from_iter(input.into_iter()),
         };
-        info!(
+        debug!(
             "Compacted region: {}, region edit: {:?}",
             version.metadata().name(),
             edit
@@ -126,6 +140,7 @@ impl<S: LogStore> CompactionTaskImpl<S> {
 #[async_trait::async_trait]
 impl<S: LogStore> CompactionTask for CompactionTaskImpl<S> {
     async fn run(mut self) -> Result<()> {
+        let _timer = timer!(crate::metrics::COMPACT_ELAPSED);
         self.mark_files_compacting(true);
 
         let (output, mut compacted) = self.merge_ssts().await.map_err(|e| {
@@ -162,7 +177,8 @@ impl CompactionOutput {
         region_id: RegionId,
         schema: RegionSchemaRef,
         sst_layer: AccessLayerRef,
-    ) -> Result<FileMeta> {
+        sst_write_buffer_size: ReadableSize,
+    ) -> Result<Option<FileMeta>> {
         let reader = build_sst_reader(
             schema,
             sst_layer.clone(),
@@ -173,22 +189,26 @@ impl CompactionOutput {
         .await?;
 
         let output_file_id = FileId::random();
-        let opts = WriteOptions {};
+        let opts = WriteOptions {
+            sst_write_buffer_size,
+        };
 
-        let SstInfo {
-            time_range,
-            file_size,
-        } = sst_layer
+        Ok(sst_layer
             .write_sst(output_file_id, Source::Reader(reader), &opts)
-            .await?;
-
-        Ok(FileMeta {
-            region_id,
-            file_id: output_file_id,
-            time_range,
-            level: self.output_level,
-            file_size,
-        })
+            .await?
+            .map(
+                |SstInfo {
+                     time_range,
+                     file_size,
+                     ..
+                 }| FileMeta {
+                    region_id,
+                    file_id: output_file_id,
+                    time_range,
+                    level: self.output_level,
+                    file_size,
+                },
+            ))
     }
 }
 

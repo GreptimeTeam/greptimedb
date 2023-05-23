@@ -12,18 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_telemetry::logging::LoggingOptions;
 use meta_client::MetaClientOptions;
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
 use servers::Mode;
 
-use crate::grpc::GrpcOptions;
-use crate::influxdb::InfluxdbOptions;
-use crate::mysql::MysqlOptions;
-use crate::opentsdb::OpentsdbOptions;
-use crate::postgres::PostgresOptions;
-use crate::prom::PromOptions;
-use crate::prometheus::PrometheusOptions;
+use crate::service_config::{
+    GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PromOptions,
+    PrometheusOptions,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -38,6 +36,7 @@ pub struct FrontendOptions {
     pub prometheus_options: Option<PrometheusOptions>,
     pub prom_options: Option<PromOptions>,
     pub meta_client_options: Option<MetaClientOptions>,
+    pub logging: LoggingOptions,
 }
 
 impl Default for FrontendOptions {
@@ -53,7 +52,14 @@ impl Default for FrontendOptions {
             prometheus_options: Some(PrometheusOptions::default()),
             prom_options: Some(PromOptions::default()),
             meta_client_options: None,
+            logging: LoggingOptions::default(),
         }
+    }
+}
+
+impl FrontendOptions {
+    pub fn env_list_keys() -> Option<&'static [&'static str]> {
+        Some(&["meta_client_options.metasrv_addrs"])
     }
 }
 

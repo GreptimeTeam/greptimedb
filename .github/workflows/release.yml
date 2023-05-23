@@ -5,25 +5,120 @@ on:
   schedule:
     # At 00:00 on Monday.
     - cron: '0 0 * * 1'
+  # Mannually trigger only builds binaries.
   workflow_dispatch:
 
 name: Release
 
 env:
-  RUST_TOOLCHAIN: nightly-2023-02-26
+  RUST_TOOLCHAIN: nightly-2023-05-03
 
-  SCHEDULED_BUILD_VERSION_PREFIX: v0.2.0
+  SCHEDULED_BUILD_VERSION_PREFIX: v0.3.0
 
   SCHEDULED_PERIOD: nightly
 
   CARGO_PROFILE: nightly
 
-  ## FIXME(zyy17): Enable it after the tests are stabled.
-  DISABLE_RUN_TESTS: true
+  # Controls whether to run tests, include unit-test, integration-test and sqlness.
+  DISABLE_RUN_TESTS: false
 
 jobs:
-  build:
-    name: Build binary
+  build-macos:
+    name: Build macOS binary
+    strategy:
+      matrix:
+        # The file format is greptime-<os>-<arch>
+        include:
+          - arch: aarch64-apple-darwin
+            os: macos-latest
+            file: greptime-darwin-arm64
+            continue-on-error: false
+            opts: "-F servers/dashboard"
+          - arch: x86_64-apple-darwin
+            os: macos-latest
+            file: greptime-darwin-amd64
+            continue-on-error: false
+            opts: "-F servers/dashboard"
+          - arch: aarch64-apple-darwin
+            os: macos-latest
+            file: greptime-darwin-arm64-pyo3
+            continue-on-error: false
+            opts: "-F pyo3_backend,servers/dashboard"
+          - arch: x86_64-apple-darwin
+            os: macos-latest
+            file: greptime-darwin-amd64-pyo3
+            continue-on-error: false
+            opts: "-F pyo3_backend,servers/dashboard"
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.continue-on-error }}
+    if: github.repository == 'GreptimeTeam/greptimedb'
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v3
+
+      - name: Cache cargo assets
+        id: cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ matrix.arch }}-build-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install Protoc for macos
+        if: contains(matrix.arch, 'darwin')
+        run: |
+          brew install protobuf
+
+      - name: Install etcd for macos
+        if: contains(matrix.arch, 'darwin')
+        run: |
+          brew install etcd
+          brew services start etcd
+
+      - name: Install rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.arch }}
+      - name: Install latest nextest release
+        uses: taiki-e/install-action@nextest
+      - name: Output package versions
+        run: protoc --version ; cargo version ; rustc --version ; gcc --version ; g++ --version
+
+      - name: Run tests
+        if: env.DISABLE_RUN_TESTS == 'false'
+        run: make test sqlness-test
+
+      - name: Run cargo build
+        if: contains(matrix.arch, 'darwin') || contains(matrix.opts, 'pyo3_backend') == false
+        run: cargo build --profile ${{ env.CARGO_PROFILE }} --locked --target ${{ matrix.arch }} ${{ matrix.opts }}
+
+      - name: Calculate checksum and rename binary
+        shell: bash
+        run: |
+          cd target/${{ matrix.arch }}/${{ env.CARGO_PROFILE }}
+          chmod +x greptime
+          tar -zcvf ${{ matrix.file }}.tgz greptime
+          echo $(shasum -a 256 ${{ matrix.file }}.tgz | cut -f1 -d' ') > ${{ matrix.file }}.sha256sum
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ matrix.file }}
+          path: target/${{ matrix.arch }}/${{ env.CARGO_PROFILE }}/${{ matrix.file }}.tgz
+
+      - name: Upload checksum of artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ matrix.file }}.sha256sum
+          path: target/${{ matrix.arch }}/${{ env.CARGO_PROFILE }}/${{ matrix.file }}.sha256sum
+
+  build-linux:
+    name: Build linux binary
     strategy:
       matrix:
         # The file format is greptime-<os>-<arch>
@@ -32,38 +127,22 @@ jobs:
             os: ubuntu-2004-16-cores
             file: greptime-linux-amd64
             continue-on-error: false
+            opts: "-F servers/dashboard"
           - arch: aarch64-unknown-linux-gnu
             os: ubuntu-2004-16-cores
             file: greptime-linux-arm64
             continue-on-error: false
-          - arch: aarch64-apple-darwin
-            os: macos-latest
-            file: greptime-darwin-arm64
-            continue-on-error: false
-          - arch: x86_64-apple-darwin
-            os: macos-latest
-            file: greptime-darwin-amd64
-            continue-on-error: false
+            opts: "-F servers/dashboard"
           - arch: x86_64-unknown-linux-gnu
             os: ubuntu-2004-16-cores
             file: greptime-linux-amd64-pyo3
             continue-on-error: false
-            opts: "-F pyo3_backend"
+            opts: "-F pyo3_backend,servers/dashboard"
           - arch: aarch64-unknown-linux-gnu
             os: ubuntu-2004-16-cores
             file: greptime-linux-arm64-pyo3
             continue-on-error: false
-            opts: "-F pyo3_backend"
-          - arch: aarch64-apple-darwin
-            os: macos-latest
-            file: greptime-darwin-arm64-pyo3
-            continue-on-error: false
-            opts: "-F pyo3_backend"
-          - arch: x86_64-apple-darwin
-            os: macos-latest
-            file: greptime-darwin-amd64-pyo3
-            continue-on-error: false
-            opts: "-F pyo3_backend"
+            opts: "-F pyo3_backend,servers/dashboard"
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.continue-on-error }}
     if: github.repository == 'GreptimeTeam/greptimedb'
@@ -91,11 +170,6 @@ jobs:
           sudo cp protoc/bin/protoc /usr/local/bin/
           sudo cp -r protoc/include/google /usr/local/include/
 
-      - name: Install Protoc for macos
-        if: contains(matrix.arch, 'darwin')
-        run: |
-          brew install protobuf
-
       - name: Install etcd for linux
         if: contains(matrix.arch, 'linux') && endsWith(matrix.arch, '-gnu')
         run: |
@@ -108,12 +182,6 @@ jobs:
 
           sudo cp -a /tmp/etcd-download/etcd* /usr/local/bin/
           nohup etcd >/tmp/etcd.log 2>&1 &
-
-      - name: Install etcd for macos
-        if: contains(matrix.arch, 'darwin')
-        run: |
-          brew install etcd
-          brew services start etcd
 
       - name: Install dependencies for linux
         if: contains(matrix.arch, 'linux') && endsWith(matrix.arch, '-gnu')
@@ -133,13 +201,18 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.arch }}
-
+      - name: Install latest nextest release
+        uses: taiki-e/install-action@nextest
       - name: Output package versions
         run: protoc --version ; cargo version ; rustc --version ; gcc --version ; g++ --version
 
       - name: Run tests
         if: env.DISABLE_RUN_TESTS == 'false'
-        run: make unit-test integration-test sqlness-test
+        run: make test sqlness-test
+
+      - name: Run cargo build
+        if: contains(matrix.arch, 'darwin') || contains(matrix.opts, 'pyo3_backend') == false
+        run: cargo build --profile ${{ env.CARGO_PROFILE }} --locked --target ${{ matrix.arch }} ${{ matrix.opts }}
 
       - name: Run cargo build with pyo3 for aarch64-linux
         if: contains(matrix.arch, 'aarch64-unknown-linux-gnu') && contains(matrix.opts, 'pyo3_backend')
@@ -164,7 +237,7 @@ jobs:
           export LD_LIBRARY_PATH=$PYTHON_INSTALL_PATH_AMD64/lib:$LD_LIBRARY_PATH
           export LIBRARY_PATH=$PYTHON_INSTALL_PATH_AMD64/lib:$LIBRARY_PATH
           export PATH=$PYTHON_INSTALL_PATH_AMD64/bin:$PATH
-          
+
           echo "implementation=CPython" >> pyo3.config
           echo "version=3.10" >> pyo3.config
           echo "implementation=CPython" >> pyo3.config
@@ -183,10 +256,6 @@ jobs:
           alias pip=$PYTHON_INSTALL_PATH_AMD64/bin/python3-pip
 
           cargo build --profile ${{ env.CARGO_PROFILE }} --locked --target ${{ matrix.arch }} ${{ matrix.opts }}
-
-      - name: Run cargo build
-        if: contains(matrix.arch, 'darwin') || contains(matrix.opts, 'pyo3_backend') == false
-        run: cargo build --profile ${{ env.CARGO_PROFILE }} --locked --target ${{ matrix.arch }} ${{ matrix.opts }}
 
       - name: Calculate checksum and rename binary
         shell: bash
@@ -210,9 +279,9 @@ jobs:
 
   docker:
     name: Build docker image
-    needs: [build]
+    needs: [build-linux, build-macos]
     runs-on: ubuntu-latest
-    if: github.repository == 'GreptimeTeam/greptimedb'
+    if: github.repository == 'GreptimeTeam/greptimedb' && github.event_name != 'workflow_dispatch'
     steps:
       - name: Checkout sources
         uses: actions/checkout@v3
@@ -252,9 +321,8 @@ jobs:
 
       - name: Unzip the amd64 artifacts
         run: |
-          cd amd64
-          tar xvf greptime-linux-amd64-pyo3.tgz
-          rm greptime-linux-amd64-pyo3.tgz
+          tar xvf amd64/greptime-linux-amd64-pyo3.tgz -C amd64/ && rm amd64/greptime-linux-amd64-pyo3.tgz
+          cp -r amd64 docker/ci
 
       - name: Download arm64 binary
         id: download-arm64
@@ -267,15 +335,14 @@ jobs:
         id: unzip-arm64
         if: success() || steps.download-arm64.conclusion == 'success'
         run: |
-          cd arm64
-          tar xvf greptime-linux-arm64-pyo3.tgz
-          rm greptime-linux-arm64-pyo3.tgz
+          tar xvf arm64/greptime-linux-arm64-pyo3.tgz -C arm64/ && rm arm64/greptime-linux-arm64-pyo3.tgz
+          cp -r arm64 docker/ci
 
       - name: Build and push all
         uses: docker/build-push-action@v3
         if: success() || steps.unzip-arm64.conclusion == 'success' # Build and push all platform if unzip-arm64 succeeds
         with:
-          context: .
+          context: ./docker/ci/
           file: ./docker/ci/Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
@@ -287,7 +354,7 @@ jobs:
         uses: docker/build-push-action@v3
         if: success() || steps.download-arm64.conclusion == 'failure' # Only build and push amd64 platform if download-arm64 fails
         with:
-          context: .
+          context: ./docker/ci/
           file: ./docker/ci/Dockerfile
           push: true
           platforms: linux/amd64
@@ -298,9 +365,9 @@ jobs:
   release:
     name: Release artifacts
     # Release artifacts only when all the artifacts are built successfully.
-    needs: [build,docker]
+    needs: [build-linux, build-macos, docker]
     runs-on: ubuntu-latest
-    if: github.repository == 'GreptimeTeam/greptimedb'
+    if: github.repository == 'GreptimeTeam/greptimedb' && github.event_name != 'workflow_dispatch'
     steps:
       - name: Checkout sources
         uses: actions/checkout@v3
@@ -316,35 +383,50 @@ jobs:
           SCHEDULED_BUILD_VERSION=${{ env.SCHEDULED_BUILD_VERSION_PREFIX }}-${{ env.SCHEDULED_PERIOD }}-$buildTime
           echo "SCHEDULED_BUILD_VERSION=${SCHEDULED_BUILD_VERSION}" >> $GITHUB_ENV
 
+      # Only publish release when the release tag is like v1.0.0, v1.0.1, v1.0.2, etc.
+      - name: Set whether it is the latest release
+        run: |
+          if [[ "${{ github.ref_name }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "prerelease=false" >> $GITHUB_ENV
+            echo "makeLatest=true" >> $GITHUB_ENV
+          else
+            echo "prerelease=true" >> $GITHUB_ENV
+            echo "makeLatest=false" >> $GITHUB_ENV
+          fi
+
       - name: Create scheduled build git tag
         if: github.event_name == 'schedule'
         run: |
           git tag ${{ env.SCHEDULED_BUILD_VERSION }}
 
       - name: Publish scheduled release # configure the different release title and tags.
-        uses: softprops/action-gh-release@v1
+        uses: ncipollo/release-action@v1
         if: github.event_name == 'schedule'
         with:
           name: "Release ${{ env.SCHEDULED_BUILD_VERSION }}"
-          tag_name: ${{ env.SCHEDULED_BUILD_VERSION }}
-          generate_release_notes: true
-          files: |
+          prerelease: ${{ env.prerelease }}
+          makeLatest: ${{ env.makeLatest }}
+          tag: ${{ env.SCHEDULED_BUILD_VERSION }}
+          generateReleaseNotes: true
+          artifacts: |
             **/greptime-*
 
       - name: Publish release
-        uses: softprops/action-gh-release@v1
+        uses: ncipollo/release-action@v1
         if: github.event_name != 'schedule'
         with:
-          name: "Release ${{ github.ref_name }}"
-          files: |
+          name: "${{ github.ref_name }}"
+          prerelease: ${{ env.prerelease }}
+          makeLatest: ${{ env.makeLatest }}
+          generateReleaseNotes: true
+          artifacts: |
             **/greptime-*
 
-  docker-push-uhub:
-    name: Push docker image to UCloud Container Registry
+  docker-push-acr:
+    name: Push docker image to alibaba cloud container registry
     needs: [docker]
     runs-on: ubuntu-latest
-    if: github.repository == 'GreptimeTeam/greptimedb'
-    # Push to uhub may fail(500 error), but we don't want to block the release process. The failed job will be retried manually.
+    if: github.repository == 'GreptimeTeam/greptimedb' && github.event_name != 'workflow_dispatch'
     continue-on-error: true
     steps:
       - name: Checkout sources
@@ -356,12 +438,12 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
 
-      - name: Login to UCloud Container Registry
+      - name: Login to alibaba cloud container registry
         uses: docker/login-action@v2
         with:
-          registry: uhub.service.ucloud.cn
-          username: ${{ secrets.UCLOUD_USERNAME }}
-          password: ${{ secrets.UCLOUD_PASSWORD }}
+          registry: registry.cn-hangzhou.aliyuncs.com
+          username: ${{ secrets.ALICLOUD_USERNAME }}
+          password: ${{ secrets.ALICLOUD_PASSWORD }}
 
       - name: Configure scheduled build image tag # the tag would be ${SCHEDULED_BUILD_VERSION_PREFIX}-YYYYMMDD-${SCHEDULED_PERIOD}
         shell: bash
@@ -378,9 +460,9 @@ jobs:
           VERSION=${{ github.ref_name }}
           echo "IMAGE_TAG=${VERSION:1}" >> $GITHUB_ENV
 
-      - name: Push image to uhub # Use 'docker buildx imagetools create' to create a new image base on source image.
+      - name: Push image to alibaba cloud container registry # Use 'docker buildx imagetools create' to create a new image base on source image.
         run: |
           docker buildx imagetools create \
-            --tag uhub.service.ucloud.cn/greptime/greptimedb:latest \
-            --tag uhub.service.ucloud.cn/greptime/greptimedb:${{ env.IMAGE_TAG }} \
+            --tag registry.cn-hangzhou.aliyuncs.com/greptime/greptimedb:latest \
+            --tag registry.cn-hangzhou.aliyuncs.com/greptime/greptimedb:${{ env.IMAGE_TAG }} \
             greptime/greptimedb:${{ env.IMAGE_TAG }}

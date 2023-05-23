@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::future::Future;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -24,11 +25,14 @@ use tokio::sync::oneshot;
 pub use tokio::task::{JoinError, JoinHandle};
 
 use crate::error::*;
-use crate::metric::*;
+use crate::metrics::*;
+
+static RUNTIME_ID: AtomicUsize = AtomicUsize::new(0);
 
 /// A runtime to run future tasks
 #[derive(Clone, Debug)]
 pub struct Runtime {
+    name: String,
     handle: Handle,
     // Used to receive a drop signal when dropper is dropped, inspired by databend
     _dropper: Arc<Dropper>,
@@ -73,9 +77,14 @@ impl Runtime {
     pub fn block_on<F: Future>(&self, future: F) -> F::Output {
         self.handle.block_on(future)
     }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 pub struct Builder {
+    runtime_name: String,
     thread_name: String,
     builder: RuntimeBuilder,
 }
@@ -83,6 +92,7 @@ pub struct Builder {
 impl Default for Builder {
     fn default() -> Self {
         Self {
+            runtime_name: format!("runtime-{}", RUNTIME_ID.fetch_add(1, Ordering::Relaxed)),
             thread_name: "default-worker".to_string(),
             builder: RuntimeBuilder::new_multi_thread(),
         }
@@ -116,6 +126,11 @@ impl Builder {
         self
     }
 
+    pub fn runtime_name(&mut self, val: impl Into<String>) -> &mut Self {
+        self.runtime_name = val.into();
+        self
+    }
+
     /// Sets name of threads spawned by the Runtime thread pool
     pub fn thread_name(&mut self, val: impl Into<String>) -> &mut Self {
         self.thread_name = val.into();
@@ -142,6 +157,7 @@ impl Builder {
             .spawn(move || runtime.block_on(recv_stop));
 
         Ok(Runtime {
+            name: self.runtime_name.clone(),
             handle,
             _dropper: Arc::new(Dropper {
                 close: Some(send_stop),

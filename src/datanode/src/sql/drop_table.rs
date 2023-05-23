@@ -12,51 +12,94 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use catalog::DeregisterTableRequest;
-use common_error::prelude::BoxedError;
+use common_procedure::{watcher, ProcedureWithId};
 use common_query::Output;
 use common_telemetry::info;
 use snafu::ResultExt;
-use table::engine::{EngineContext, TableReference};
+use table::engine::TableReference;
 use table::requests::DropTableRequest;
+use table_procedure::DropTableProcedure;
 
 use crate::error::{self, Result};
 use crate::sql::SqlHandler;
 
 impl SqlHandler {
-    pub async fn drop_table(&self, req: DropTableRequest) -> Result<Output> {
-        let deregister_table_req = DeregisterTableRequest {
-            catalog: req.catalog_name.clone(),
-            schema: req.schema_name.clone(),
-            table_name: req.table_name.clone(),
-        };
-
-        let table_reference = TableReference {
+    pub(crate) async fn drop_table(&self, req: DropTableRequest) -> Result<Output> {
+        let table_name = req.table_name.clone();
+        let table_ref = TableReference {
             catalog: &req.catalog_name,
             schema: &req.schema_name,
-            table: &req.table_name,
+            table: &table_name,
         };
-        let table_full_name = table_reference.to_string();
 
-        self.catalog_manager
-            .deregister_table(deregister_table_req)
+        let table = self.get_table(&table_ref).await?;
+        let engine_procedure = self.engine_procedure(table)?;
+
+        let procedure =
+            DropTableProcedure::new(req, self.catalog_manager.clone(), engine_procedure);
+
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        let procedure_id = procedure_with_id.id;
+
+        info!("Drop table {} by procedure {}", table_name, procedure_id);
+
+        let mut watcher = self
+            .procedure_manager
+            .submit(procedure_with_id)
             .await
-            .map_err(BoxedError::new)
-            .context(error::DropTableSnafu {
-                table_name: table_full_name.clone(),
-            })?;
+            .context(error::SubmitProcedureSnafu { procedure_id })?;
 
-        let ctx = EngineContext {};
-        self.table_engine()
-            .drop_table(&ctx, req)
+        watcher::wait(&mut watcher)
             .await
-            .map_err(BoxedError::new)
-            .context(error::DropTableSnafu {
-                table_name: table_full_name.clone(),
-            })?;
-
-        info!("Successfully dropped table: {}", table_full_name);
+            .context(error::WaitProcedureSnafu { procedure_id })?;
 
         Ok(Output::AffectedRows(1))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use query::parser::{QueryLanguageParser, QueryStatement};
+    use query::query_engine::SqlStatementExecutor;
+    use session::context::QueryContext;
+
+    use super::*;
+    use crate::tests::test_util::MockInstance;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_drop_table_by_procedure() {
+        let instance = MockInstance::new("alter_table_by_procedure").await;
+
+        // Create table first.
+        let sql = r#"create table test_drop(
+                            host string,
+                            ts timestamp,
+                            cpu double default 0,
+                            TIME INDEX (ts),
+                            PRIMARY KEY(host)
+                        ) engine=mito with(regions=1);"#;
+        let stmt = match QueryLanguageParser::parse_sql(sql).unwrap() {
+            QueryStatement::Sql(sql) => sql,
+            _ => unreachable!(),
+        };
+        let output = instance
+            .inner()
+            .execute_sql(stmt, QueryContext::arc())
+            .await
+            .unwrap();
+        assert!(matches!(output, Output::AffectedRows(0)));
+
+        // Drop table.
+        let sql = r#"drop table test_drop"#;
+        let stmt = match QueryLanguageParser::parse_sql(sql).unwrap() {
+            QueryStatement::Sql(sql) => sql,
+            _ => unreachable!(),
+        };
+        let output = instance
+            .inner()
+            .execute_sql(stmt, QueryContext::arc())
+            .await
+            .unwrap();
+        assert!(matches!(output, Output::AffectedRows(1)));
     }
 }

@@ -15,12 +15,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, error, info};
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
+use tokio::sync::oneshot::Sender;
 use tokio::sync::Notify;
 
-use crate::compaction::picker::{Picker, PickerContext};
+use crate::compaction::picker::Picker;
 use crate::compaction::task::CompactionTask;
 use crate::error::Result;
 use crate::manifest::region::RegionManifest;
@@ -39,6 +41,14 @@ impl<S: LogStore> Request for CompactionRequestImpl<S> {
     fn key(&self) -> RegionId {
         self.region_id
     }
+
+    fn complete(self, result: Result<()>) {
+        if let Some(sender) = self.sender {
+            // We don't care the send result as callers might not
+            // wait the result.
+            let _ = sender.send(result);
+        }
+    }
 }
 
 /// Region compaction request.
@@ -50,6 +60,11 @@ pub struct CompactionRequestImpl<S: LogStore> {
     pub manifest: RegionManifest,
     pub wal: Wal<S>,
     pub ttl: Option<Duration>,
+    pub compaction_time_window: Option<i64>,
+    /// Compaction result sender.
+    pub sender: Option<Sender<Result<()>>>,
+
+    pub sst_write_buffer_size: ReadableSize,
 }
 
 impl<S: LogStore> CompactionRequestImpl<S> {
@@ -88,8 +103,9 @@ where
         finish_notifier: Arc<Notify>,
     ) -> Result<()> {
         let region_id = req.key();
-        let Some(task) = self.picker.pick(&PickerContext {}, &req)? else {
+        let Some(task) = self.picker.pick(&req)? else {
             info!("No file needs compaction in region: {:?}", region_id);
+            req.complete(Ok(()));
             return Ok(());
         };
 
@@ -99,8 +115,12 @@ where
             if let Err(e) = task.run().await {
                 // TODO(hl): maybe resubmit compaction task on failure?
                 error!(e; "Failed to compact region: {:?}", region_id);
+
+                req.complete(Err(e));
             } else {
                 info!("Successfully compacted region: {:?}", region_id);
+
+                req.complete(Ok(()));
             }
             // releases rate limit token
             token.try_release();

@@ -20,6 +20,7 @@
 
 use datafusion::scalar::ScalarValue;
 use datatypes::prelude::ConcreteDataType;
+use datatypes::types::TimestampType;
 use substrait_proto::proto::expression::literal::LiteralType;
 use substrait_proto::proto::r#type::{self as s_type, Kind, Nullability};
 use substrait_proto::proto::{Type as SType, Type};
@@ -71,7 +72,14 @@ pub fn to_concrete_type(ty: &SType) -> Result<(ConcreteDataType, bool)> {
         Kind::Binary(desc) => substrait_kind!(desc, binary_datatype),
         Kind::Timestamp(desc) => substrait_kind!(
             desc,
-            ConcreteDataType::timestamp_datatype(Default::default())
+            ConcreteDataType::timestamp_datatype(
+                TimestampType::try_from(desc.type_variation_reference as u64)
+                    .map_err(|_| UnsupportedSubstraitTypeSnafu {
+                        ty: format!("{kind:?}")
+                    }
+                    .build())?
+                    .unit()
+            )
         ),
         Kind::Date(desc) => substrait_kind!(desc, date_datatype),
         Kind::Time(_)
@@ -95,7 +103,7 @@ pub fn to_concrete_type(ty: &SType) -> Result<(ConcreteDataType, bool)> {
 }
 
 macro_rules! build_substrait_kind {
-    ($kind:ident,$s_type:ident,$nullable:ident,$variation:literal) => {{
+    ($kind:ident,$s_type:ident,$nullable:ident,$variation:expr) => {{
         let nullability = match $nullable {
             Some(true) => Nullability::Nullable,
             Some(false) => Nullability::Required,
@@ -129,8 +137,8 @@ pub fn from_concrete_type(ty: ConcreteDataType, nullability: Option<bool>) -> Re
         ConcreteDataType::String(_) => build_substrait_kind!(String, String, nullability, 0),
         ConcreteDataType::Date(_) => build_substrait_kind!(Date, Date, nullability, 0),
         ConcreteDataType::DateTime(_) => UnsupportedConcreteTypeSnafu { ty }.fail()?,
-        ConcreteDataType::Timestamp(_) => {
-            build_substrait_kind!(Timestamp, Timestamp, nullability, 0)
+        ConcreteDataType::Timestamp(ty) => {
+            build_substrait_kind!(Timestamp, Timestamp, nullability, ty.precision() as u32)
         }
         ConcreteDataType::List(_) | ConcreteDataType::Dictionary(_) => {
             UnsupportedConcreteTypeSnafu { ty }.fail()?

@@ -25,7 +25,7 @@ use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::{Float32Vector, Float64Vector, Int64Vector, VectorRef};
 use ron::from_str as from_ron_string;
-use rustpython_parser::parser;
+use rustpython_parser::{parse, Mode};
 use serde::{Deserialize, Serialize};
 
 use crate::python::error::{get_error_reason_loc, pretty_print_error_in_src, visualize_loc, Error};
@@ -181,7 +181,7 @@ fn test_type_anno() {
 def a(cpu, mem: vector[f64])->(vector[f64|None], vector[f64], vector[_], vector[ _ | None]):
     return cpu + mem, cpu - mem, cpu * mem, cpu / mem
 "#;
-    let pyast = parser::parse(python_source, parser::Mode::Interactive, "<embedded>").unwrap();
+    let pyast = parse(python_source, Mode::Interactive, "<embedded>").unwrap();
     let copr = parse_and_compile_copr(python_source, None);
     dbg!(copr);
 }
@@ -255,7 +255,7 @@ def calc_rvs(open_time, close):
     .unwrap();
     let ret = exec_coprocessor(python_source, &Some(rb));
     if let Err(Error::PyParse {
-        backtrace: _,
+        location: _,
         source,
     }) = ret
     {
@@ -305,7 +305,7 @@ def a(cpu, mem):
     .unwrap();
     let ret = exec_coprocessor(python_source, &Some(rb));
     if let Err(Error::PyParse {
-        backtrace: _,
+        location: _,
         source,
     }) = ret
     {

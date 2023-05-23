@@ -18,7 +18,7 @@ use std::result::Result as StdResult;
 use std::sync::Arc;
 
 use common_recordbatch::RecordBatch;
-use common_telemetry::info;
+use common_telemetry::{info, timer};
 use datatypes::vectors::VectorRef;
 use rustpython_vm::builtins::{PyBaseExceptionRef, PyDict, PyStr, PyTuple};
 use rustpython_vm::class::PyClassImpl;
@@ -29,7 +29,9 @@ use snafu::{OptionExt, ResultExt};
 
 use crate::python::error::{ensure, ret_other_error_with, NewRecordBatchSnafu, OtherSnafu, Result};
 use crate::python::ffi_types::copr::PyQueryEngine;
+use crate::python::ffi_types::py_recordbatch::PyRecordBatch;
 use crate::python::ffi_types::{check_args_anno_real_type, select_from_rb, Coprocessor, PyVector};
+use crate::python::metric;
 use crate::python::rspython::builtins::init_greptime_builtins;
 use crate::python::rspython::dataframe_impl::data_frame::set_dataframe_in_scope;
 use crate::python::rspython::dataframe_impl::init_data_frame;
@@ -43,6 +45,7 @@ pub(crate) fn rspy_exec_parsed(
     rb: &Option<RecordBatch>,
     params: &HashMap<String, String>,
 ) -> Result<RecordBatch> {
+    let _t = timer!(metric::METRIC_RSPY_EXEC_TOTAL_ELAPSED);
     // 3. get args from `rb`, and cast them into PyVector
     let args: Vec<PyVector> = if let Some(rb) = rb {
         let arg_names = copr.deco_args.arg_names.clone().unwrap_or(vec![]);
@@ -99,6 +102,8 @@ pub(crate) fn exec_with_cached_vm(
     vm: &Arc<Interpreter>,
 ) -> Result<RecordBatch> {
     vm.enter(|vm| -> Result<RecordBatch> {
+        let _t = timer!(metric::METRIC_RSPY_EXEC_ELAPSED);
+
         // set arguments with given name and values
         let scope = vm.new_scope_with_builtins();
         if let Some(rb) = rb {
@@ -184,6 +189,7 @@ fn try_into_columns(
 
 /// init interpreter with type PyVector and Module: greptime
 pub(crate) fn init_interpreter() -> Arc<Interpreter> {
+    let _t = timer!(metric::METRIC_RSPY_INIT_ELAPSED);
     INTERPRETER.with(|i| {
         i.borrow_mut()
             .get_or_insert_with(|| {
@@ -207,10 +213,11 @@ pub(crate) fn init_interpreter() -> Arc<Interpreter> {
                     // so according to this issue:
                     // https://github.com/RustPython/RustPython/issues/4292
                     // add this line for stdlib, so rustpython can found stdlib's python part in bytecode format
-                    vm.add_frozen(rustpython_pylib::frozen_stdlib());
+                    vm.add_frozen(rustpython_pylib::FROZEN_STDLIB);
                     // add our own custom datatype and module
                     PyVector::make_class(&vm.ctx);
                     PyQueryEngine::make_class(&vm.ctx);
+                    PyRecordBatch::make_class(&vm.ctx);
                     init_greptime_builtins("greptime", vm);
                     init_data_frame("data_frame", vm);
                 }));

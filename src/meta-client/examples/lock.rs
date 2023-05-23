@@ -14,9 +14,10 @@
 
 use std::time::Duration;
 
+use api::v1::meta::Role;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::rpc::lock::{LockRequest, UnlockRequest};
 use meta_client::client::{MetaClient, MetaClientBuilder};
-use meta_client::rpc::lock::{LockRequest, UnlockRequest};
 use tracing::{info, subscriber};
 use tracing_subscriber::FmtSubscriber;
 
@@ -33,7 +34,7 @@ async fn run() {
         .connect_timeout(Duration::from_secs(5))
         .tcp_nodelay(true);
     let channel_manager = ChannelManager::with_config(config);
-    let mut meta_client = MetaClientBuilder::new(id.0, id.1)
+    let mut meta_client = MetaClientBuilder::new(id.0, id.1, Role::Datanode)
         .enable_lock()
         .channel_manager(channel_manager)
         .build();

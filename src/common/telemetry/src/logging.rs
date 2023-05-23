@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex, Once};
 use once_cell::sync::Lazy;
 use opentelemetry::global;
 use opentelemetry::sdk::propagation::TraceContextPropagator;
+use serde::{Deserialize, Serialize};
 pub use tracing::{event, span, Level};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
@@ -30,6 +31,30 @@ use tracing_subscriber::prelude::*;
 use tracing_subscriber::{filter, EnvFilter, Registry};
 
 pub use crate::{debug, error, info, log, trace, warn};
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LoggingOptions {
+    pub dir: String,
+    pub level: String,
+    pub enable_jaeger_tracing: bool,
+}
+
+impl Default for LoggingOptions {
+    fn default() -> Self {
+        Self {
+            dir: "/tmp/greptimedb/logs".to_string(),
+            level: "info".to_string(),
+            enable_jaeger_tracing: false,
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct TracingOptions {
+    #[cfg(feature = "tokio-console")]
+    pub tokio_console_addr: Option<String>,
+}
 
 /// Init tracing for unittest.
 /// Write logs to file `unittest`.
@@ -47,7 +72,16 @@ pub fn init_default_ut_logging() {
             env::var("UNITTEST_LOG_DIR").unwrap_or_else(|_| "/tmp/__unittest_logs".to_string());
 
         let level = env::var("UNITTEST_LOG_LEVEL").unwrap_or_else(|_| "DEBUG".to_string());
-        *g = Some(init_global_logging("unittest", &dir, &level, false));
+        let opts = LoggingOptions {
+            dir: dir.clone(),
+            level,
+            ..Default::default()
+        };
+        *g = Some(init_global_logging(
+            "unittest",
+            &opts,
+            TracingOptions::default(),
+        ));
 
         info!("logs dir = {}", dir);
     });
@@ -56,13 +90,16 @@ pub fn init_default_ut_logging() {
 static GLOBAL_UT_LOG_GUARD: Lazy<Arc<Mutex<Option<Vec<WorkerGuard>>>>> =
     Lazy::new(|| Arc::new(Mutex::new(None)));
 
+#[allow(clippy::print_stdout)]
 pub fn init_global_logging(
     app_name: &str,
-    dir: &str,
-    level: &str,
-    enable_jaeger_tracing: bool,
+    opts: &LoggingOptions,
+    tracing_opts: TracingOptions,
 ) -> Vec<WorkerGuard> {
     let mut guards = vec![];
+    let dir = &opts.dir;
+    let level = &opts.level;
+    let enable_jaeger_tracing = opts.enable_jaeger_tracing;
 
     // Enable log compatible layer to convert log record to tracing span.
     LogTracer::init().expect("log tracer must be valid");
@@ -99,22 +136,55 @@ pub fn init_global_logging(
         .with_target("reqwest", Level::WARN)
         .with_target("sqlparser", Level::WARN)
         .with_target("h2", Level::INFO)
+        .with_target("opendal", Level::INFO)
         .with_default(
             directives
                 .parse::<filter::LevelFilter>()
                 .expect("error parsing level string"),
         );
 
+    // Must enable 'tokio_unstable' cfg to use this feature.
+    // For example: `RUSTFLAGS="--cfg tokio_unstable" cargo run -F common-telemetry/console -- standalone start`
+    #[cfg(feature = "tokio-console")]
+    let subscriber = {
+        let tokio_console_layer = if let Some(tokio_console_addr) = &tracing_opts.tokio_console_addr
+        {
+            let addr: std::net::SocketAddr = tokio_console_addr.parse().unwrap_or_else(|e| {
+                panic!("Invalid binding address '{tokio_console_addr}' for tokio-console: {e}");
+            });
+            println!("tokio-console listening on {addr}");
+
+            Some(
+                console_subscriber::ConsoleLayer::builder()
+                    .server_addr(addr)
+                    .spawn(),
+            )
+        } else {
+            None
+        };
+
+        let stdout_logging_layer = stdout_logging_layer.with_filter(filter.clone());
+
+        let file_logging_layer = file_logging_layer.with_filter(filter);
+
+        Registry::default()
+            .with(tokio_console_layer)
+            .with(JsonStorageLayer)
+            .with(stdout_logging_layer)
+            .with(file_logging_layer)
+            .with(err_file_logging_layer.with_filter(filter::LevelFilter::ERROR))
+    };
+
+    // consume the `tracing_opts`, to avoid "unused" warnings
+    let _ = tracing_opts;
+
+    #[cfg(not(feature = "tokio-console"))]
     let subscriber = Registry::default()
         .with(filter)
         .with(JsonStorageLayer)
         .with(stdout_logging_layer)
         .with(file_logging_layer)
         .with(err_file_logging_layer.with_filter(filter::LevelFilter::ERROR));
-
-    // Must enable 'tokio_unstable' cfg, https://github.com/tokio-rs/console
-    #[cfg(feature = "console")]
-    let subscriber = subscriber.with(console_subscriber::spawn());
 
     if enable_jaeger_tracing {
         // Jaeger layer.

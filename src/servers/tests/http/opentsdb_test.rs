@@ -19,10 +19,11 @@ use async_trait::async_trait;
 use axum::Router;
 use axum_test_helper::TestClient;
 use common_query::Output;
+use common_test_util::ports;
 use datatypes::schema::Schema;
 use query::parser::PromQuery;
 use servers::error::{self, Result};
-use servers::http::{HttpOptions, HttpServer};
+use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::opentsdb::codec::DataPoint;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
@@ -85,16 +86,24 @@ impl SqlQueryHandler for DummyInstance {
         unimplemented!()
     }
 
-    fn is_valid_schema(&self, _catalog: &str, _schema: &str) -> Result<bool> {
+    async fn is_valid_schema(&self, _catalog: &str, _schema: &str) -> Result<bool> {
         Ok(true)
     }
 }
 
 fn make_test_app(tx: mpsc::Sender<String>) -> Router {
+    let http_opts = HttpOptions {
+        addr: format!("127.0.0.1:{}", ports::get_port()),
+        ..Default::default()
+    };
+
     let instance = Arc::new(DummyInstance { tx });
-    let mut server = HttpServer::new(instance.clone(), instance.clone(), HttpOptions::default());
-    server.set_opentsdb_handler(instance);
-    server.make_app()
+    let server = HttpServerBuilder::new(http_opts)
+        .with_grpc_handler(instance.clone())
+        .with_sql_handler(instance.clone())
+        .with_opentsdb_handler(instance)
+        .build();
+    server.build(server.make_app())
 }
 
 #[tokio::test]

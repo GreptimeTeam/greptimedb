@@ -97,6 +97,25 @@ pub trait Procedure: Send + Sync {
     fn lock_key(&self) -> LockKey;
 }
 
+#[async_trait]
+impl<T: Procedure + ?Sized> Procedure for Box<T> {
+    fn type_name(&self) -> &str {
+        (**self).type_name()
+    }
+
+    async fn execute(&mut self, ctx: &Context) -> Result<Status> {
+        (**self).execute(ctx).await
+    }
+
+    fn dump(&self) -> Result<String> {
+        (**self).dump()
+    }
+
+    fn lock_key(&self) -> LockKey {
+        (**self).lock_key()
+    }
+}
+
 /// Keys to identify required locks.
 ///
 /// [LockKey] always sorts keys lexicographically so that they can be acquired
@@ -259,6 +278,10 @@ impl ProcedureState {
 pub trait ProcedureManager: Send + Sync + 'static {
     /// Registers loader for specific procedure type `name`.
     fn register_loader(&self, name: &str, loader: BoxedProcedureLoader) -> Result<()>;
+
+    fn start(&self) -> Result<()>;
+
+    async fn stop(&self) -> Result<()>;
 
     /// Submits a procedure to execute.
     ///

@@ -12,24 +12,37 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
+use std::sync::Arc;
+
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request as GrpcRequest;
 use api::v1::query_request::Query;
-use api::v1::{CreateDatabaseExpr, DdlRequest, InsertRequest};
+use api::v1::{CreateDatabaseExpr, DdlRequest, DeleteRequest, InsertRequest};
 use async_trait::async_trait;
+use catalog::CatalogManagerRef;
 use common_query::Output;
+use datafusion::catalog::catalog::{
+    CatalogList, CatalogProvider, MemoryCatalogList, MemoryCatalogProvider,
+};
+use datafusion::catalog::schema::SchemaProvider;
+use datafusion::datasource::TableProvider;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::plan::LogicalPlan;
+use query::query_engine::SqlStatementExecutor;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::prelude::*;
 use sql::statements::statement::Statement;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
+use table::engine::TableReference;
 use table::requests::CreateDatabaseRequest;
+use table::table::adapter::DfTableProviderAdapter;
 
 use crate::error::{
-    self, DecodeLogicalPlanSnafu, ExecuteLogicalPlanSnafu, ExecuteSqlSnafu, PlanStatementSnafu,
-    Result,
+    self, CatalogNotFoundSnafu, CatalogSnafu, DecodeLogicalPlanSnafu, DeleteExprToRequestSnafu,
+    DeleteSnafu, ExecuteLogicalPlanSnafu, ExecuteSqlSnafu, InsertSnafu, PlanStatementSnafu, Result,
+    SchemaNotFoundSnafu, TableNotFoundSnafu,
 };
 use crate::instance::Instance;
 
@@ -46,9 +59,20 @@ impl Instance {
         self.sql_handler.create_database(req, query_ctx).await
     }
 
-    pub(crate) async fn execute_logical(&self, plan_bytes: Vec<u8>) -> Result<Output> {
+    pub(crate) async fn execute_logical(
+        &self,
+        plan_bytes: Vec<u8>,
+        ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let catalog_list = new_dummy_catalog_list(
+            &ctx.current_catalog(),
+            &ctx.current_schema(),
+            self.catalog_manager.clone(),
+        )
+        .await?;
+
         let logical_plan = DFLogicalSubstraitConvertor
-            .decode(plan_bytes.as_slice(), self.catalog_manager.clone())
+            .decode(plan_bytes.as_slice(), Arc::new(catalog_list) as Arc<_>)
             .await
             .context(DecodeLogicalPlanSnafu)?;
 
@@ -65,7 +89,7 @@ impl Instance {
                 match stmt {
                     // TODO(LFC): Remove SQL execution branch here.
                     // Keep this because substrait can't handle much of SQLs now.
-                    QueryStatement::Sql(Statement::Query(_)) => {
+                    QueryStatement::Sql(Statement::Query(_)) | QueryStatement::Promql(_) => {
                         let plan = self
                             .query_engine
                             .planner()
@@ -77,10 +101,12 @@ impl Instance {
                             .await
                             .context(ExecuteLogicalPlanSnafu)
                     }
-                    _ => self.execute_stmt(stmt, ctx).await,
+                    QueryStatement::Sql(stmt) => {
+                        self.execute_sql(stmt, ctx).await.context(ExecuteSqlSnafu)
+                    }
                 }
             }
-            Query::LogicalPlan(plan) => self.execute_logical(plan).await,
+            Query::LogicalPlan(plan) => self.execute_logical(plan, ctx).await,
             Query::PromRangeQuery(promql) => {
                 let prom_query = PromQuery {
                     query: promql.query,
@@ -101,20 +127,47 @@ impl Instance {
         let catalog = &ctx.current_catalog();
         let schema = &ctx.current_schema();
         let table_name = &request.table_name.clone();
+        let table_ref = TableReference::full(catalog, schema, table_name);
+
         let table = self
             .catalog_manager
             .table(catalog, schema, table_name)
             .await
-            .context(error::CatalogSnafu)?
-            .context(error::TableNotFoundSnafu { table_name })?;
+            .context(CatalogSnafu)?
+            .with_context(|| TableNotFoundSnafu {
+                table_name: table_ref.to_string(),
+            })?;
 
         let request = common_grpc_expr::insert::to_table_insert_request(catalog, schema, request)
             .context(error::InsertDataSnafu)?;
 
-        let affected_rows = table
-            .insert(request)
+        let affected_rows = table.insert(request).await.with_context(|_| InsertSnafu {
+            table_name: table_ref.to_string(),
+        })?;
+        Ok(Output::AffectedRows(affected_rows))
+    }
+
+    async fn handle_delete(&self, request: DeleteRequest, ctx: QueryContextRef) -> Result<Output> {
+        let catalog = &ctx.current_catalog();
+        let schema = &ctx.current_schema();
+        let table_name = &request.table_name.clone();
+        let table_ref = TableReference::full(catalog, schema, table_name);
+
+        let table = self
+            .catalog_manager
+            .table(catalog, schema, table_name)
             .await
-            .context(error::InsertSnafu { table_name })?;
+            .context(CatalogSnafu)?
+            .with_context(|| TableNotFoundSnafu {
+                table_name: table_ref.to_string(),
+            })?;
+
+        let request = common_grpc_expr::delete::to_table_delete_request(request)
+            .context(DeleteExprToRequestSnafu)?;
+
+        let affected_rows = table.delete(request).await.with_context(|_| DeleteSnafu {
+            table_name: table_ref.to_string(),
+        })?;
         Ok(Output::AffectedRows(affected_rows))
     }
 
@@ -139,6 +192,7 @@ impl GrpcQueryHandler for Instance {
     async fn do_query(&self, request: GrpcRequest, ctx: QueryContextRef) -> Result<Output> {
         match request {
             GrpcRequest::Insert(request) => self.handle_insert(request, ctx).await,
+            GrpcRequest::Delete(request) => self.handle_delete(request, ctx).await,
             GrpcRequest::Query(query_request) => {
                 let query = query_request
                     .query
@@ -152,6 +206,89 @@ impl GrpcQueryHandler for Instance {
     }
 }
 
+struct DummySchemaProvider {
+    catalog: String,
+    schema: String,
+    table_names: Vec<String>,
+    catalog_manager: CatalogManagerRef,
+}
+
+impl DummySchemaProvider {
+    pub async fn try_new(
+        catalog_name: String,
+        schema_name: String,
+        catalog_manager: CatalogManagerRef,
+    ) -> Result<Self> {
+        let catalog = catalog_manager
+            .catalog(&catalog_name)
+            .await
+            .context(CatalogSnafu)?
+            .context(CatalogNotFoundSnafu {
+                name: &catalog_name,
+            })?;
+        let schema = catalog
+            .schema(&schema_name)
+            .await
+            .context(CatalogSnafu)?
+            .context(SchemaNotFoundSnafu { name: &schema_name })?;
+        let table_names = schema.table_names().await.context(CatalogSnafu)?;
+        Ok(Self {
+            catalog: catalog_name,
+            schema: schema_name,
+            table_names,
+            catalog_manager,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl SchemaProvider for DummySchemaProvider {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn table_names(&self) -> Vec<String> {
+        self.table_names.clone()
+    }
+
+    async fn table(&self, name: &str) -> Option<Arc<dyn TableProvider>> {
+        self.catalog_manager
+            .table(&self.catalog, &self.schema, name)
+            .await
+            .context(CatalogSnafu)
+            .ok()
+            .flatten()
+            .map(|t| Arc::new(DfTableProviderAdapter::new(t)) as Arc<_>)
+    }
+
+    fn table_exist(&self, name: &str) -> bool {
+        self.table_names.iter().any(|t| t == name)
+    }
+}
+
+async fn new_dummy_catalog_list(
+    catalog_name: &str,
+    schema_name: &str,
+    catalog_manager: CatalogManagerRef,
+) -> Result<MemoryCatalogList> {
+    let schema_provider = DummySchemaProvider::try_new(
+        catalog_name.to_string(),
+        schema_name.to_string(),
+        catalog_manager,
+    )
+    .await?;
+    let catalog_provider = MemoryCatalogProvider::new();
+    catalog_provider
+        .register_schema(schema_name, Arc::new(schema_provider) as Arc<_>)
+        .unwrap();
+    let catalog_list = MemoryCatalogList::new();
+    catalog_list.register_catalog(
+        catalog_name.to_string(),
+        Arc::new(catalog_provider) as Arc<_>,
+    );
+    Ok(catalog_list)
+}
+
 #[cfg(test)]
 mod test {
     use api::v1::column::{SemanticType, Values};
@@ -159,6 +296,7 @@ mod test {
         alter_expr, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef,
         CreateDatabaseExpr, CreateTableExpr, QueryRequest,
     };
+    use common_catalog::consts::MITO_ENGINE;
     use common_recordbatch::RecordBatches;
     use datatypes::prelude::*;
     use query::parser::QueryLanguageParser;
@@ -213,6 +351,7 @@ mod test {
                     },
                 ],
                 time_index: "ts".to_string(),
+                engine: MITO_ENGINE.to_string(),
                 ..Default::default()
             })),
         });
@@ -240,12 +379,11 @@ mod test {
         let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
         assert!(matches!(output, Output::AffectedRows(0)));
 
-        let stmt = QueryLanguageParser::parse_sql(
+        let Ok(QueryStatement::Sql(stmt)) = QueryLanguageParser::parse_sql(
             "INSERT INTO my_database.my_table (a, b, ts) VALUES ('s', 1, 1672384140000)",
-        )
-        .unwrap();
+        ) else { unreachable!() };
         let output = instance
-            .execute_stmt(stmt, QueryContext::arc())
+            .execute_sql(stmt, QueryContext::arc())
             .await
             .unwrap();
         assert!(matches!(output, Output::AffectedRows(1)));
@@ -327,6 +465,72 @@ mod test {
 | 2022-12-30T07:09:01 | host2 |     |
 | 2022-12-30T07:09:02 | host3 | 3.0 |
 +---------------------+-------+-----+";
+        assert_eq!(recordbatches.pretty_print().unwrap(), expected);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_handle_delete() {
+        let instance = MockInstance::new("test_handle_delete").await;
+        let instance = instance.inner();
+        test_util::create_test_table(instance, ConcreteDataType::timestamp_millisecond_datatype())
+            .await
+            .unwrap();
+
+        let query = GrpcRequest::Query(QueryRequest {
+            query: Some(Query::Sql(
+                "INSERT INTO demo(host, cpu, memory, ts) VALUES \
+                            ('host1', 66.6, 1024, 1672201025000),\
+                            ('host2', 88.8, 333.3, 1672201026000),\
+                            ('host3', 88.8, 333.3, 1672201026000)"
+                    .to_string(),
+            )),
+        });
+        let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
+        assert!(matches!(output, Output::AffectedRows(3)));
+
+        let request = DeleteRequest {
+            table_name: "demo".to_string(),
+            region_number: 0,
+            key_columns: vec![
+                Column {
+                    column_name: "host".to_string(),
+                    values: Some(Values {
+                        string_values: vec!["host2".to_string()],
+                        ..Default::default()
+                    }),
+                    datatype: ColumnDataType::String as i32,
+                    ..Default::default()
+                },
+                Column {
+                    column_name: "ts".to_string(),
+                    values: Some(Values {
+                        ts_millisecond_values: vec![1672201026000],
+                        ..Default::default()
+                    }),
+                    datatype: ColumnDataType::TimestampMillisecond as i32,
+                    ..Default::default()
+                },
+            ],
+            row_count: 1,
+        };
+
+        let request = GrpcRequest::Delete(request);
+        let output = instance
+            .do_query(request, QueryContext::arc())
+            .await
+            .unwrap();
+        assert!(matches!(output, Output::AffectedRows(1)));
+
+        let output = exec_selection(instance, "SELECT ts, host, cpu FROM demo").await;
+        let Output::Stream(stream) = output else { unreachable!() };
+        let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
+        let expected = "\
++---------------------+-------+------+
+| ts                  | host  | cpu  |
++---------------------+-------+------+
+| 2022-12-28T04:17:05 | host1 | 66.6 |
+| 2022-12-28T04:17:06 | host3 | 88.8 |
++---------------------+-------+------+";
         assert_eq!(recordbatches.pretty_print().unwrap(), expected);
     }
 

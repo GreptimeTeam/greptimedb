@@ -16,6 +16,7 @@
 
 mod engine;
 pub mod error;
+pub(crate) mod metric;
 pub(crate) mod utils;
 
 pub use self::engine::{PyEngine, PyScript};

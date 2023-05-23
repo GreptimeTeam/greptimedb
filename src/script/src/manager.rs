@@ -45,24 +45,33 @@ impl ScriptManager {
         })
     }
 
+    /// compile script, and register them to the query engine and UDF registry
     async fn compile(&self, name: &str, script: &str) -> Result<Arc<PyScript>> {
-        let script = Arc::new(
-            self.py_engine
-                .compile(script, CompileContext::default())
-                .await
-                .context(CompilePythonSnafu { name })?,
-        );
+        let script = Arc::new(Self::compile_without_cache(&self.py_engine, name, script).await?);
 
-        let mut compiled = self.compiled.write().unwrap();
-        compiled.insert(name.to_string(), script.clone());
-
+        {
+            let mut compiled = self.compiled.write().unwrap();
+            compiled.insert(name.to_string(), script.clone());
+        }
         logging::info!("Compiled and cached script: {}", name);
 
-        script.as_ref().register_udf();
+        script.as_ref().register_udf().await;
 
         logging::info!("Script register as UDF: {}", name);
 
         Ok(script)
+    }
+
+    /// compile script to PyScript, but not register them to the query engine and UDF registry nor caching in `compiled`
+    async fn compile_without_cache(
+        py_engine: &PyEngine,
+        name: &str,
+        script: &str,
+    ) -> Result<PyScript> {
+        py_engine
+            .compile(script, CompileContext::default())
+            .await
+            .context(CompilePythonSnafu { name })
     }
 
     pub async fn insert_and_compile(
@@ -117,6 +126,7 @@ mod tests {
     use mito::config::EngineConfig as TableEngineConfig;
     use mito::table::test_util::new_test_object_store;
     use query::QueryEngineFactory;
+    use table::engine::manager::MemoryTableEngineManager;
 
     use super::*;
     type DefaultEngine = MitoEngine<EngineImpl<RaftEngineLogStore>>;
@@ -150,17 +160,18 @@ mod tests {
                 Arc::new(log_store),
                 object_store.clone(),
                 compaction_scheduler,
-            ),
+            )
+            .unwrap(),
             object_store,
         ));
-
+        let engine_manager = Arc::new(MemoryTableEngineManager::new(mock_engine.clone()));
         let catalog_manager = Arc::new(
-            catalog::local::LocalCatalogManager::try_new(mock_engine.clone())
+            catalog::local::LocalCatalogManager::try_new(engine_manager)
                 .await
                 .unwrap(),
         );
 
-        let factory = QueryEngineFactory::new(catalog_manager.clone());
+        let factory = QueryEngineFactory::new(catalog_manager.clone(), false);
         let query_engine = factory.query_engine();
         let mgr = ScriptManager::new(catalog_manager.clone(), query_engine)
             .await

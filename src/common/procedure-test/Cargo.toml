@@ -1,0 +1,9 @@
+[package]
+name = "common-procedure-test"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+common-procedure = { path = "../procedure" }

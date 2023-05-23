@@ -14,20 +14,23 @@
 
 //! Procedures for table operations.
 
+mod alter;
 mod create;
+mod drop;
 pub mod error;
-#[cfg(test)]
-mod test_util;
 
+pub use alter::AlterTableProcedure;
 use catalog::CatalogManagerRef;
 use common_procedure::ProcedureManager;
 pub use create::CreateTableProcedure;
+pub use drop::DropTableProcedure;
 use table::engine::{TableEngineProcedureRef, TableEngineRef};
 
 /// Register all procedure loaders to the procedure manager.
 ///
 /// # Panics
 /// Panics on error.
+#[allow(clippy::items_after_test_module)]
 pub fn register_procedure_loaders(
     catalog_manager: CatalogManagerRef,
     engine_procedure: TableEngineProcedureRef,
@@ -35,9 +38,18 @@ pub fn register_procedure_loaders(
     procedure_manager: &dyn ProcedureManager,
 ) {
     CreateTableProcedure::register_loader(
-        catalog_manager,
-        engine_procedure,
+        catalog_manager.clone(),
+        engine_procedure.clone(),
         table_engine,
         procedure_manager,
     );
+    AlterTableProcedure::register_loader(
+        catalog_manager.clone(),
+        engine_procedure.clone(),
+        procedure_manager,
+    );
+    DropTableProcedure::register_loader(catalog_manager, engine_procedure, procedure_manager);
 }
+
+#[cfg(test)]
+mod test_util;

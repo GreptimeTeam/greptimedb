@@ -36,7 +36,7 @@ SELECT a AS k, b FROM test UNION SELECT a AS k, b FROM test ORDER BY k;
 
 SELECT a % 2, b FROM test UNION SELECT b, a % 2 AS k ORDER BY a % 2;
 
-Error: 3000(PlanQuery), No field named 'b'.
+Error: 3000(PlanQuery), No field named b.
 
 SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY a % 2;
 

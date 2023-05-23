@@ -12,24 +12,32 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![feature(async_closure)]
 #![feature(btree_drain_filter)]
+
 pub mod bootstrap;
 pub mod cluster;
 pub mod election;
 pub mod error;
-// TODO(LFC): TBC
-#[allow(dead_code)]
 mod failure_detector;
 pub mod handler;
 pub mod keys;
 pub mod lease;
 pub mod lock;
+pub mod metadata_service;
 pub mod metasrv;
+mod metrics;
 #[cfg(feature = "mock")]
 pub mod mocks;
+pub mod procedure;
 pub mod selector;
 mod sequence;
 pub mod service;
+pub mod table_routes;
+
+#[cfg(test)]
+mod test_util;
+
 pub mod util;
 
 pub use crate::error::Result;

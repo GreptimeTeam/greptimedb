@@ -19,7 +19,6 @@ use api::v1::greptime_request::{Request as GreptimeRequest, Request};
 use api::v1::query_request::Query;
 use async_trait::async_trait;
 use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
-use catalog::{CatalogList, CatalogProvider, SchemaProvider};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use datatypes::schema::Schema;
@@ -106,7 +105,7 @@ impl SqlQueryHandler for DummyInstance {
         }
     }
 
-    fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
+    async fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
         Ok(catalog == DEFAULT_CATALOG_NAME && schema == DEFAULT_SCHEMA_NAME)
     }
 }
@@ -119,7 +118,7 @@ impl ScriptHandler for DummyInstance {
             .compile(script, CompileContext::default())
             .await
             .unwrap();
-        script.register_udf();
+        script.register_udf().await;
         self.scripts
             .write()
             .unwrap()
@@ -155,7 +154,7 @@ impl GrpcQueryHandler for DummyInstance {
         ctx: QueryContextRef,
     ) -> std::result::Result<Output, Self::Error> {
         let output = match request {
-            Request::Insert(_) => unimplemented!(),
+            Request::Insert(_) | Request::Delete(_) => unimplemented!(),
             Request::Query(query_request) => {
                 let query = query_request.query.unwrap();
                 match query {
@@ -202,15 +201,17 @@ fn create_testing_instance(table: MemTable) -> DummyInstance {
     let schema_provider = Arc::new(MemorySchemaProvider::new());
     let catalog_provider = Arc::new(MemoryCatalogProvider::new());
     let catalog_list = Arc::new(MemoryCatalogManager::default());
-    schema_provider.register_table(table_name, table).unwrap();
+    schema_provider
+        .register_table_sync(table_name, table)
+        .unwrap();
     catalog_provider
-        .register_schema(DEFAULT_SCHEMA_NAME.to_string(), schema_provider)
+        .register_schema_sync(DEFAULT_SCHEMA_NAME.to_string(), schema_provider)
         .unwrap();
     catalog_list
-        .register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider)
+        .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string(), catalog_provider)
         .unwrap();
 
-    let factory = QueryEngineFactory::new(catalog_list);
+    let factory = QueryEngineFactory::new(catalog_list, false);
     let query_engine = factory.query_engine();
     DummyInstance::new(query_engine)
 }

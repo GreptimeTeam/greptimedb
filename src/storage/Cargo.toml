@@ -13,6 +13,7 @@ arrow.workspace = true
 arrow-array.workspace = true
 bytes = "1.1"
 common-base = { path = "../common/base" }
+common-datasource = { path = "../common/datasource" }
 common-error = { path = "../common/error" }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
@@ -25,6 +26,7 @@ datafusion-expr.workspace = true
 futures.workspace = true
 futures-util.workspace = true
 lazy_static = "1.4"
+metrics.workspace = true
 object-store = { path = "../object-store" }
 parquet = { workspace = true, features = ["async"] }
 paste.workspace = true
@@ -51,7 +53,7 @@ log-store = { path = "../log-store" }
 rand.workspace = true
 
 [build-dependencies]
-tonic-build = "0.8"
+tonic-build = "0.9"
 
 [[bench]]
 name = "bench_main"

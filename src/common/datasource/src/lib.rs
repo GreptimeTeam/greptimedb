@@ -12,7 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![feature(assert_matches)]
+
+pub mod buffered_writer;
+pub mod compression;
 pub mod error;
+pub mod file_format;
 pub mod lister;
 pub mod object_store;
+pub mod share_buffer;
+#[cfg(test)]
+pub mod test_util;
+#[cfg(test)]
+pub mod tests;
 pub mod util;

@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::meta::{BatchPutRequest, HeartbeatRequest, KeyValue};
-use common_telemetry::{info, warn};
+use api::v1::meta::{BatchPutRequest, HeartbeatRequest, KeyValue, Role};
+use common_telemetry::{trace, warn};
 use common_time::util as time_util;
 use tokio::sync::mpsc::{self, Sender};
 
@@ -55,16 +55,16 @@ impl KeepLeaseHandler {
 
 #[async_trait::async_trait]
 impl HeartbeatHandler for KeepLeaseHandler {
+    fn is_acceptable(&self, role: Role) -> bool {
+        role == Role::Datanode
+    }
+
     async fn handle(
         &self,
         req: &HeartbeatRequest,
-        ctx: &mut Context,
+        _ctx: &mut Context,
         _acc: &mut HeartbeatAccumulator,
     ) -> Result<()> {
-        if ctx.is_skip_all() {
-            return Ok(());
-        }
-
         let HeartbeatRequest { header, peer, .. } = req;
         if let Some(peer) = &peer {
             let key = LeaseKey {
@@ -76,7 +76,7 @@ impl HeartbeatHandler for KeepLeaseHandler {
                 node_addr: peer.addr.clone(),
             };
 
-            info!("Receive a heartbeat: {key:?}, {value:?}");
+            trace!("Receive a heartbeat: {key:?}, {value:?}");
 
             let key = key.try_into()?;
             let value = value.try_into()?;

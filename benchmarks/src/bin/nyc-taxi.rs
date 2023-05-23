@@ -126,12 +126,13 @@ fn convert_record_batch(record_batch: RecordBatch) -> (Vec<Column>, u32) {
 
     for (array, field) in record_batch.columns().iter().zip(fields.iter()) {
         let (values, datatype) = build_values(array);
+
         let column = Column {
-            column_name: field.name().to_owned(),
+            column_name: field.name().clone(),
             values: Some(values),
             null_mask: array
-                .data()
-                .null_bitmap()
+                .to_data()
+                .nulls()
                 .map(|bitmap| bitmap.buffer().as_slice().to_vec())
                 .unwrap_or_default(),
             datatype: datatype.into(),
@@ -182,10 +183,10 @@ fn build_values(column: &ArrayRef) -> (Values, ColumnDataType) {
             let values = array.values();
             (
                 Values {
-                    i64_values: values.to_vec(),
+                    ts_microsecond_values: values.to_vec(),
                     ..Default::default()
                 },
-                ColumnDataType::Int64,
+                ColumnDataType::TimestampMicrosecond,
             )
         }
         DataType::Utf8 => {
@@ -224,7 +225,7 @@ fn build_values(column: &ArrayRef) -> (Values, ColumnDataType) {
         | DataType::FixedSizeList(_, _)
         | DataType::LargeList(_)
         | DataType::Struct(_)
-        | DataType::Union(_, _, _)
+        | DataType::Union(_, _)
         | DataType::Dictionary(_, _)
         | DataType::Decimal128(_, _)
         | DataType::Decimal256(_, _)
@@ -252,13 +253,13 @@ fn create_table_expr() -> CreateTableExpr {
             },
             ColumnDef {
                 name: "tpep_pickup_datetime".to_string(),
-                datatype: ColumnDataType::Int64 as i32,
+                datatype: ColumnDataType::TimestampMicrosecond as i32,
                 is_nullable: true,
                 default_constraint: vec![],
             },
             ColumnDef {
                 name: "tpep_dropoff_datetime".to_string(),
-                datatype: ColumnDataType::Int64 as i32,
+                datatype: ColumnDataType::TimestampMicrosecond as i32,
                 is_nullable: true,
                 default_constraint: vec![],
             },
@@ -365,6 +366,7 @@ fn create_table_expr() -> CreateTableExpr {
         table_options: Default::default(),
         region_ids: vec![0],
         table_id: None,
+        engine: "mito".to_string(),
     }
 }
 

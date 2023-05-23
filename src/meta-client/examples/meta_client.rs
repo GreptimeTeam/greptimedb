@@ -15,16 +15,18 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use api::v1::meta::{HeartbeatRequest, Peer};
+use api::v1::meta::{HeartbeatRequest, Peer, Role};
 use chrono::DateTime;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::rpc::router::{CreateRequest, Partition};
+use common_meta::rpc::store::{
+    BatchDeleteRequest, BatchGetRequest, BatchPutRequest, CompareAndPutRequest, DeleteRangeRequest,
+    PutRequest, RangeRequest,
+};
+use common_meta::table_name::TableName;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema};
 use meta_client::client::MetaClientBuilder;
-use meta_client::rpc::{
-    BatchPutRequest, CompareAndPutRequest, CreateRequest, DeleteRangeRequest, Partition,
-    PutRequest, RangeRequest, TableName,
-};
 use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
 use table::requests::TableOptions;
 use tracing::{event, subscriber, Level};
@@ -43,7 +45,7 @@ async fn run() {
         .connect_timeout(Duration::from_secs(5))
         .tcp_nodelay(true);
     let channel_manager = ChannelManager::with_config(config);
-    let mut meta_client = MetaClientBuilder::new(id.0, id.1)
+    let mut meta_client = MetaClientBuilder::new(id.0, id.1, Role::Datanode)
         .enable_heartbeat()
         .enable_router()
         .enable_store()
@@ -72,7 +74,7 @@ async fn run() {
 
     tokio::spawn(async move {
         while let Some(res) = receiver.message().await.unwrap() {
-            event!(Level::INFO, "heartbeat response: {:#?}", res);
+            event!(Level::TRACE, "heartbeat response: {:#?}", res);
         }
     });
 
@@ -146,6 +148,30 @@ async fn run() {
     // get none
     let res = meta_client.range(range).await.unwrap();
     event!(Level::INFO, "get range result: {:#?}", res);
+
+    // batch delete
+    // put two
+    let batch_put = BatchPutRequest::new()
+        .add_kv(b"batch_put1".to_vec(), b"batch_put_v1".to_vec())
+        .add_kv(b"batch_put2".to_vec(), b"batch_put_v2".to_vec())
+        .with_prev_kv();
+    let res = meta_client.batch_put(batch_put).await.unwrap();
+    event!(Level::INFO, "batch put result: {:#?}", res);
+
+    // delete one
+    let batch_delete = BatchDeleteRequest::new()
+        .add_key(b"batch_put1".to_vec())
+        .with_prev_kv();
+    let res = meta_client.batch_delete(batch_delete).await.unwrap();
+    event!(Level::INFO, "batch delete result: {:#?}", res);
+
+    // get other one
+    let batch_get = BatchGetRequest::new()
+        .add_key(b"batch_put1".to_vec())
+        .add_key(b"batch_put2".to_vec());
+
+    let res = meta_client.batch_get(batch_get).await.unwrap();
+    event!(Level::INFO, "batch get result: {:#?}", res);
 }
 
 fn new_table_info() -> RawTableInfo {

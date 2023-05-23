@@ -16,17 +16,18 @@ use std::sync::Arc;
 
 use async_recursion::async_recursion;
 use async_trait::async_trait;
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Buf, Bytes};
 use catalog::table_source::DfTableSourceProvider;
 use catalog::CatalogManagerRef;
 use common_catalog::format_full_table_name;
 use common_telemetry::debug;
 use datafusion::arrow::datatypes::SchemaRef as ArrowSchemaRef;
-use datafusion::common::{DFField, DFSchema, OwnedTableReference};
+use datafusion::catalog::catalog::CatalogList;
+use datafusion::common::{DFField, DFSchema};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::physical_plan::project_schema;
+use datafusion::sql::TableReference;
 use datafusion_expr::{Filter, LogicalPlan, TableScan};
-use prost::Message;
 use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
 use substrait_proto::proto::expression::mask_expression::{StructItem, StructSelect};
@@ -41,41 +42,35 @@ use table::table::adapter::DfTableProviderAdapter;
 use crate::context::ConvertorContext;
 use crate::df_expr::{expression_from_df_expr, to_df_expr};
 use crate::error::{
-    self, DFInternalSnafu, DecodeRelSnafu, EmptyPlanSnafu, EncodeRelSnafu, Error,
-    InvalidParametersSnafu, MissingFieldSnafu, ResolveTableSnafu, SchemaNotMatchSnafu,
-    UnknownPlanSnafu, UnsupportedExprSnafu, UnsupportedPlanSnafu,
+    self, DFInternalSnafu, EmptyPlanSnafu, Error, InvalidParametersSnafu, MissingFieldSnafu,
+    ResolveTableSnafu, SchemaNotMatchSnafu, UnknownPlanSnafu, UnsupportedExprSnafu,
+    UnsupportedPlanSnafu,
 };
 use crate::schema::{from_schema, to_schema};
 use crate::SubstraitPlan;
 
-pub struct DFLogicalSubstraitConvertor;
+pub struct DFLogicalSubstraitConvertorDeprecated;
 
 #[async_trait]
-impl SubstraitPlan for DFLogicalSubstraitConvertor {
+impl SubstraitPlan for DFLogicalSubstraitConvertorDeprecated {
     type Error = Error;
 
     type Plan = LogicalPlan;
 
     async fn decode<B: Buf + Send>(
         &self,
-        message: B,
-        catalog_manager: CatalogManagerRef,
+        _message: B,
+        _catalog_list: Arc<dyn CatalogList>,
     ) -> Result<Self::Plan, Self::Error> {
-        let plan = Plan::decode(message).context(DecodeRelSnafu)?;
-        self.convert_plan(plan, catalog_manager).await
+        unimplemented!()
     }
 
     fn encode(&self, plan: Self::Plan) -> Result<Bytes, Self::Error> {
-        let plan = self.convert_df_plan(plan)?;
-
-        let mut buf = BytesMut::new();
-        plan.encode(&mut buf).context(EncodeRelSnafu)?;
-
-        Ok(buf.freeze())
+        unimplemented!()
     }
 }
 
-impl DFLogicalSubstraitConvertor {
+impl DFLogicalSubstraitConvertorDeprecated {
     async fn convert_plan(
         &self,
         mut plan: Plan,
@@ -196,6 +191,14 @@ impl DFLogicalSubstraitConvertor {
                 name: "Cross Relation",
             }
             .fail()?,
+            RelType::HashJoin(_) => UnsupportedPlanSnafu {
+                name: "Cross Relation",
+            }
+            .fail()?,
+            RelType::MergeJoin(_) => UnsupportedPlanSnafu {
+                name: "Cross Relation",
+            }
+            .fail()?,
         };
 
         Ok(logical_plan)
@@ -240,13 +243,13 @@ impl DFLogicalSubstraitConvertor {
             .projection
             .map(|mask_expr| self.convert_mask_expression(mask_expr));
 
-        let table_ref = OwnedTableReference::Full {
-            catalog: catalog_name.clone(),
-            schema: schema_name.clone(),
-            table: table_name.clone(),
-        };
+        let table_ref = TableReference::full(
+            catalog_name.clone(),
+            schema_name.clone(),
+            table_name.clone(),
+        );
         let adapter = table_provider
-            .resolve_table(table_ref)
+            .resolve_table(table_ref.clone())
             .await
             .with_context(|_| ResolveTableSnafu {
                 table_name: format_full_table_name(&catalog_name, &schema_name, &table_name),
@@ -272,14 +275,13 @@ impl DFLogicalSubstraitConvertor {
         };
 
         // Calculate the projected schema
-        let qualified = &format_full_table_name(&catalog_name, &schema_name, &table_name);
         let projected_schema = Arc::new(
             project_schema(&stored_schema, projection.as_ref())
                 .and_then(|x| {
                     DFSchema::new_with_metadata(
                         x.fields()
                             .iter()
-                            .map(|f| DFField::from_qualified(qualified, f.clone()))
+                            .map(|f| DFField::from_qualified(table_ref.clone(), f.clone()))
                             .collect(),
                         x.metadata().clone(),
                     )
@@ -291,7 +293,7 @@ impl DFLogicalSubstraitConvertor {
 
         // TODO(ruihang): Support limit(fetch)
         Ok(LogicalPlan::TableScan(TableScan {
-            table_name: qualified.to_string(),
+            table_name: table_ref,
             source: adapter,
             projection,
             projected_schema,
@@ -311,7 +313,7 @@ impl DFLogicalSubstraitConvertor {
     }
 }
 
-impl DFLogicalSubstraitConvertor {
+impl DFLogicalSubstraitConvertorDeprecated {
     fn logical_plan_to_rel(
         &self,
         ctx: &mut ConvertorContext,
@@ -398,7 +400,6 @@ impl DFLogicalSubstraitConvertor {
             | LogicalPlan::CreateCatalog(_)
             | LogicalPlan::DropView(_)
             | LogicalPlan::Distinct(_)
-            | LogicalPlan::SetVariable(_)
             | LogicalPlan::CreateExternalTable(_)
             | LogicalPlan::CreateMemoryTable(_)
             | LogicalPlan::DropTable(_)
@@ -409,7 +410,8 @@ impl DFLogicalSubstraitConvertor {
             | LogicalPlan::Prepare(_)
             | LogicalPlan::Dml(_)
             | LogicalPlan::DescribeTable(_)
-            | LogicalPlan::Unnest(_) => InvalidParametersSnafu {
+            | LogicalPlan::Unnest(_)
+            | LogicalPlan::Statement(_) => InvalidParametersSnafu {
                 reason: format!(
                     "Trying to convert DDL/DML plan to substrait proto, plan: {plan:?}",
                 ),
@@ -529,108 +531,4 @@ fn same_schema_without_metadata(lhs: &ArrowSchemaRef, rhs: &ArrowSchemaRef) -> b
                 && x.data_type() == y.data_type()
                 && x.is_nullable() == y.is_nullable()
         })
-}
-
-#[cfg(test)]
-mod test {
-    use catalog::local::{LocalCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
-    use catalog::{CatalogList, CatalogProvider, RegisterTableRequest};
-    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use datafusion::common::{DFSchema, ToDFSchema};
-    use datafusion_expr::TableSource;
-    use datatypes::schema::RawSchema;
-    use table::requests::CreateTableRequest;
-    use table::test_util::{EmptyTable, MockTableEngine};
-
-    use super::*;
-    use crate::schema::test::supported_types;
-
-    const DEFAULT_TABLE_NAME: &str = "SubstraitTable";
-
-    async fn build_mock_catalog_manager() -> CatalogManagerRef {
-        let mock_table_engine = Arc::new(MockTableEngine::new());
-        let catalog_manager = Arc::new(
-            LocalCatalogManager::try_new(mock_table_engine)
-                .await
-                .unwrap(),
-        );
-        let schema_provider = Arc::new(MemorySchemaProvider::new());
-        let catalog_provider = Arc::new(MemoryCatalogProvider::new());
-        catalog_provider
-            .register_schema(DEFAULT_SCHEMA_NAME.to_string(), schema_provider)
-            .unwrap();
-        catalog_manager
-            .register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider)
-            .unwrap();
-
-        catalog_manager.init().await.unwrap();
-        catalog_manager
-    }
-
-    fn build_create_table_request<N: ToString>(table_name: N) -> CreateTableRequest {
-        CreateTableRequest {
-            id: 1,
-            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-            table_name: table_name.to_string(),
-            desc: None,
-            schema: RawSchema::new(supported_types()),
-            region_numbers: vec![0],
-            primary_key_indices: vec![],
-            create_if_not_exists: true,
-            table_options: Default::default(),
-        }
-    }
-
-    async fn logical_plan_round_trip(plan: LogicalPlan, catalog: CatalogManagerRef) {
-        let convertor = DFLogicalSubstraitConvertor;
-
-        let proto = convertor.encode(plan.clone()).unwrap();
-        let tripped_plan = convertor.decode(proto, catalog).await.unwrap();
-
-        assert_eq!(format!("{plan:?}"), format!("{tripped_plan:?}"));
-    }
-
-    #[tokio::test]
-    async fn test_table_scan() {
-        let catalog_manager = build_mock_catalog_manager().await;
-        let table_ref = Arc::new(EmptyTable::new(build_create_table_request(
-            DEFAULT_TABLE_NAME,
-        )));
-        catalog_manager
-            .register_table(RegisterTableRequest {
-                catalog: DEFAULT_CATALOG_NAME.to_string(),
-                schema: DEFAULT_SCHEMA_NAME.to_string(),
-                table_name: DEFAULT_TABLE_NAME.to_string(),
-                table_id: 1,
-                table: table_ref.clone(),
-            })
-            .await
-            .unwrap();
-        let adapter = Arc::new(DefaultTableSource::new(Arc::new(
-            DfTableProviderAdapter::new(table_ref),
-        )));
-
-        let projection = vec![1, 3, 5];
-        let df_schema = adapter.schema().to_dfschema().unwrap();
-        let projected_fields = projection
-            .iter()
-            .map(|index| df_schema.field(*index).clone())
-            .collect();
-        let projected_schema =
-            Arc::new(DFSchema::new_with_metadata(projected_fields, Default::default()).unwrap());
-
-        let table_scan_plan = LogicalPlan::TableScan(TableScan {
-            table_name: format!(
-                "{DEFAULT_CATALOG_NAME}.{DEFAULT_SCHEMA_NAME}.{DEFAULT_TABLE_NAME}",
-            ),
-            source: adapter,
-            projection: Some(projection),
-            projected_schema,
-            filters: vec![],
-            fetch: None,
-        });
-
-        logical_plan_round_trip(table_scan_plan, catalog_manager).await;
-    }
 }

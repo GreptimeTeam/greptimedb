@@ -19,13 +19,14 @@ use aide::transform::TransformOperation;
 use axum::extract::{Json, Query, State};
 use axum::{Extension, Form};
 use common_error::status_code::StatusCode;
-use common_telemetry::metric;
+use common_telemetry::timer;
 use query::parser::PromQuery;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use session::context::UserInfo;
 
 use crate::http::{ApiState, JsonResponse};
+use crate::metrics_handler::MetricsHandler;
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct SqlQuery {
@@ -47,9 +48,13 @@ pub async fn sql(
     let start = Instant::now();
     let sql = query_params.sql.or(form_params.sql);
     let db = query_params.db.or(form_params.db);
+    let _timer = timer!(
+        crate::metrics::METRIC_HTTP_SQL_ELAPSED,
+        &[(crate::metrics::METRIC_DB_LABEL, db.as_deref().unwrap_or(""))]
+    );
 
     let resp = if let Some(sql) = &sql {
-        match super::query_context_from_db(sql_handler.clone(), db) {
+        match crate::http::query_context_from_db(sql_handler.clone(), db).await {
             Ok(query_ctx) => {
                 JsonResponse::from_output(sql_handler.do_query(sql, query_ctx).await).await
             }
@@ -96,8 +101,13 @@ pub async fn promql(
     let sql_handler = &state.sql_handler;
     let exec_start = Instant::now();
     let db = params.db.clone();
+    let _timer = timer!(
+        crate::metrics::METRIC_HTTP_PROMQL_ELAPSED,
+        &[(crate::metrics::METRIC_DB_LABEL, db.as_deref().unwrap_or(""))]
+    );
+
     let prom_query = params.into();
-    let resp = match super::query_context_from_db(sql_handler.clone(), db) {
+    let resp = match super::query_context_from_db(sql_handler.clone(), db).await {
         Ok(query_ctx) => {
             JsonResponse::from_output(sql_handler.do_promql_query(&prom_query, query_ctx).await)
                 .await
@@ -114,12 +124,11 @@ pub(crate) fn sql_docs(op: TransformOperation) -> TransformOperation {
 
 /// Handler to export metrics
 #[axum_macros::debug_handler]
-pub async fn metrics(Query(_params): Query<HashMap<String, String>>) -> String {
-    if let Some(handle) = metric::try_handle() {
-        handle.render()
-    } else {
-        "Prometheus handle not initialized.".to_owned()
-    }
+pub async fn metrics(
+    State(state): State<MetricsHandler>,
+    Query(_params): Query<HashMap<String, String>>,
+) -> String {
+    state.render()
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]

@@ -18,11 +18,13 @@ use std::string::FromUtf8Error;
 
 use axum::http::StatusCode as HttpStatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
+use axum::{http, Json};
 use base64::DecodeError;
 use catalog;
 use common_error::prelude::*;
+use query::parser::PromQuery;
 use serde_json::json;
+use snafu::Location;
 use tonic::codegen::http::{HeaderMap, HeaderValue};
 use tonic::metadata::MetadataMap;
 use tonic::Code;
@@ -57,10 +59,7 @@ pub enum Error {
     StartGrpc { source: tonic::transport::Error },
 
     #[snafu(display("{} server is already started", server))]
-    AlreadyStarted {
-        server: String,
-        backtrace: Backtrace,
-    },
+    AlreadyStarted { server: String, location: Location },
 
     #[snafu(display("Failed to bind address {}, source: {}", addr, source))]
     TcpBind {
@@ -81,12 +80,6 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to execute sql statement, source: {}", source))]
-    ExecuteStatement {
-        #[snafu(backtrace)]
-        source: BoxedError,
-    },
-
     #[snafu(display("Failed to check database validity, source: {}", source))]
     CheckDatabaseValidity {
         #[snafu(backtrace)]
@@ -95,13 +88,6 @@ pub enum Error {
 
     #[snafu(display("Failed to describe statement, source: {}", source))]
     DescribeStatement { source: BoxedError },
-
-    #[snafu(display("Failed to execute alter: {}, source: {}", query, source))]
-    ExecuteAlter {
-        query: String,
-        #[snafu(backtrace)]
-        source: BoxedError,
-    },
 
     #[snafu(display("Failed to insert script with name: {}, source: {}", name, source))]
     InsertScript {
@@ -121,10 +107,7 @@ pub enum Error {
     NotSupported { feat: String },
 
     #[snafu(display("Invalid query: {}", reason))]
-    InvalidQuery {
-        reason: String,
-        backtrace: Backtrace,
-    },
+    InvalidQuery { reason: String, location: Location },
 
     #[snafu(display("Failed to parse InfluxDB line protocol, source: {}", source))]
     InfluxdbLineProtocol {
@@ -139,10 +122,10 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to convert time precision, name: {}", name))]
-    TimePrecision { name: String, backtrace: Backtrace },
+    TimePrecision { name: String, location: Location },
 
     #[snafu(display("Connection reset by peer"))]
-    ConnResetByPeer { backtrace: Backtrace },
+    ConnResetByPeer { location: Location },
 
     #[snafu(display("Hyper error, source: {}", source))]
     Hyper { source: hyper::Error },
@@ -150,60 +133,37 @@ pub enum Error {
     #[snafu(display("Invalid OpenTSDB line, source: {}", source))]
     InvalidOpentsdbLine {
         source: FromUtf8Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Invalid OpenTSDB Json request, source: {}", source))]
     InvalidOpentsdbJsonRequest {
         source: serde_json::error::Error,
-        backtrace: Backtrace,
-    },
-
-    #[snafu(display(
-        "Failed to put OpenTSDB data point: {:?}, source: {}",
-        data_point,
-        source
-    ))]
-    PutOpentsdbDataPoint {
-        data_point: String,
-        #[snafu(backtrace)]
-        source: BoxedError,
+        location: Location,
     },
 
     #[snafu(display("Failed to decode prometheus remote request, source: {}", source))]
     DecodePromRemoteRequest {
-        backtrace: Backtrace,
+        location: Location,
         source: prost::DecodeError,
     },
 
     #[snafu(display("Failed to decompress prometheus remote request, source: {}", source))]
     DecompressPromRemoteRequest {
-        backtrace: Backtrace,
+        location: Location,
         source: snap::Error,
     },
 
     #[snafu(display("Invalid prometheus remote request, msg: {}", msg))]
-    InvalidPromRemoteRequest { msg: String, backtrace: Backtrace },
+    InvalidPromRemoteRequest { msg: String, location: Location },
 
     #[snafu(display("Invalid prometheus remote read query result, msg: {}", msg))]
-    InvalidPromRemoteReadQueryResult { msg: String, backtrace: Backtrace },
+    InvalidPromRemoteReadQueryResult { msg: String, location: Location },
 
     #[snafu(display("Invalid Flight ticket, source: {}", source))]
     InvalidFlightTicket {
         source: api::DecodeError,
-        backtrace: Backtrace,
-    },
-
-    #[snafu(display("Failed to start frontend service, source: {}", source))]
-    StartFrontend {
-        #[snafu(backtrace)]
-        source: BoxedError,
-    },
-
-    #[snafu(display("Failed to build context, msg: {}", err_msg))]
-    BuildingContext {
-        err_msg: String,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Tls is required for {}, plain connection is rejected", server))]
@@ -224,35 +184,29 @@ pub enum Error {
     #[snafu(display("Invalid visibility ASCII chars, source: {}", source))]
     InvisibleASCII {
         source: hyper::header::ToStrError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Unsupported http auth scheme, name: {}", name))]
     UnsupportedAuthScheme { name: String },
 
     #[snafu(display("Invalid http authorization header"))]
-    InvalidAuthorizationHeader { backtrace: Backtrace },
+    InvalidAuthorizationHeader { location: Location },
 
     #[snafu(display("Invalid base64 value, source: {:?}", source))]
     InvalidBase64Value {
         source: DecodeError,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Invalid utf-8 value, source: {:?}", source))]
     InvalidUtf8Value {
         source: FromUtf8Error,
-        backtrace: Backtrace,
+        location: Location,
     },
 
     #[snafu(display("Error accessing catalog: {}", source))]
     CatalogError { source: catalog::error::Error },
-
-    #[snafu(display("Failed to convert Flight Message, source: {}", source))]
-    ConvertFlightMessage {
-        #[snafu(backtrace)]
-        source: common_grpc::error::Error,
-    },
 
     #[snafu(display("Cannot find requested database: {}-{}", catalog, schema))]
     DatabaseNotFound { catalog: String, schema: String },
@@ -273,8 +227,24 @@ pub enum Error {
     #[snafu(display("Failed to build gRPC reflection service, source: {}", source))]
     GrpcReflectionService {
         source: tonic_reflection::server::Error,
-        backtrace: Backtrace,
+        location: Location,
     },
+
+    #[snafu(display("Failed to build HTTP response, source: {source}"))]
+    BuildHttpResponse {
+        source: http::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to parse PromQL: {query:?}, source: {source}"))]
+    ParsePromQL {
+        query: PromQuery,
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
+
+    #[snafu(display("{}", reason))]
+    UnexpectedResult { reason: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -294,16 +264,13 @@ impl ErrorExt for Error {
             | TcpBind { .. }
             | CatalogError { .. }
             | GrpcReflectionService { .. }
-            | BuildingContext { .. } => StatusCode::Internal,
+            | BuildHttpResponse { .. } => StatusCode::Internal,
 
             InsertScript { source, .. }
             | ExecuteScript { source, .. }
             | ExecuteQuery { source, .. }
             | ExecuteGrpcQuery { source, .. }
-            | ExecuteStatement { source, .. }
-            | CheckDatabaseValidity { source, .. }
-            | ExecuteAlter { source, .. }
-            | PutOpentsdbDataPoint { source, .. } => source.status_code(),
+            | CheckDatabaseValidity { source, .. } => source.status_code(),
 
             NotSupported { .. }
             | InvalidQuery { .. }
@@ -318,13 +285,10 @@ impl ErrorExt for Error {
             | InvalidPrepareStatement { .. }
             | TimePrecision { .. } => StatusCode::InvalidArguments,
 
-            InfluxdbLinesWrite { source, .. } | ConvertFlightMessage { source } => {
-                source.status_code()
-            }
+            InfluxdbLinesWrite { source, .. } => source.status_code(),
 
             Hyper { .. } => StatusCode::Unknown,
             TlsRequired { .. } => StatusCode::Unknown,
-            StartFrontend { source, .. } => source.status_code(),
             Auth { source, .. } => source.status_code(),
             DescribeStatement { source } => source.status_code(),
 
@@ -339,11 +303,11 @@ impl ErrorExt for Error {
             #[cfg(feature = "mem-prof")]
             DumpProfileData { source, .. } => source.status_code(),
             InvalidFlushArgument { .. } => StatusCode::InvalidArguments,
-        }
-    }
 
-    fn backtrace_opt(&self) -> Option<&Backtrace> {
-        ErrorCompat::backtrace(self)
+            ParsePromQL { source, .. } => source.status_code(),
+
+            UnexpectedResult { .. } => StatusCode::Unexpected,
+        }
     }
 
     fn as_any(&self) -> &dyn Any {

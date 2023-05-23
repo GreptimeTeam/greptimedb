@@ -21,12 +21,14 @@ use common_query::error::Result as QueryResult;
 use common_query::physical_plan::{Partitioning, PhysicalPlan, PhysicalPlanRef};
 use common_recordbatch::SendableRecordBatchStream;
 use datafusion::execution::context::TaskContext;
+use datafusion_physical_expr::PhysicalSortExpr;
 use datatypes::schema::SchemaRef;
 use snafu::OptionExt;
 
 pub struct SimpleTableScan {
     stream: Mutex<Option<SendableRecordBatchStream>>,
     schema: SchemaRef,
+    output_ordering: Option<Vec<PhysicalSortExpr>>,
 }
 
 impl Debug for SimpleTableScan {
@@ -41,10 +43,17 @@ impl Debug for SimpleTableScan {
 impl SimpleTableScan {
     pub fn new(stream: SendableRecordBatchStream) -> Self {
         let schema = stream.schema();
+
         Self {
             stream: Mutex::new(Some(stream)),
             schema,
+            output_ordering: None,
         }
+    }
+
+    pub fn with_output_ordering(mut self, output_ordering: Vec<PhysicalSortExpr>) -> Self {
+        self.output_ordering = Some(output_ordering);
+        self
     }
 }
 
@@ -59,6 +68,10 @@ impl PhysicalPlan for SimpleTableScan {
 
     fn output_partitioning(&self) -> Partitioning {
         Partitioning::UnknownPartitioning(1)
+    }
+
+    fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
+        self.output_ordering.as_deref()
     }
 
     fn children(&self) -> Vec<PhysicalPlanRef> {

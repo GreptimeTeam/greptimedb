@@ -12,4 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod catalog;
+pub mod cluster;
+mod grpc;
+mod influxdb;
+mod instance;
+mod opentsdb;
+mod prometheus;
+mod table;
 pub mod test_util;
+
+// TODO(LFC): Refactor: move instance structs out of mod "tests", like the `GreptimeDbCluster`.
+#[cfg(test)]
+mod tests;
+
+#[cfg(test)]
+// allowed because https://docs.rs/rstest_reuse/0.5.0/rstest_reuse/#use-rstest_reuse-at-the-top-of-your-crate
+#[allow(clippy::single_component_path_imports)]
+use rstest_reuse;

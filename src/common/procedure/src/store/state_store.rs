@@ -15,22 +15,25 @@
 use std::pin::Pin;
 use std::sync::Arc;
 
+use async_stream::try_stream;
 use async_trait::async_trait;
-use futures::{Stream, TryStreamExt};
-use object_store::{ObjectMode, ObjectStore};
+use common_error::ext::PlainError;
+use common_error::prelude::{BoxedError, StatusCode};
+use futures::{Stream, StreamExt};
+use object_store::{EntryMode, Metakey, ObjectStore};
 use snafu::ResultExt;
 
-use crate::error::{DeleteStateSnafu, Error, PutStateSnafu, Result};
+use crate::error::{DeleteStateSnafu, ListStateSnafu, PutStateSnafu, Result};
 
 /// Key value from state store.
-type KeyValue = (String, Vec<u8>);
+pub type KeyValue = (String, Vec<u8>);
 
 /// Stream that yields [KeyValue].
-type KeyValueStream = Pin<Box<dyn Stream<Item = Result<KeyValue>> + Send>>;
+pub type KeyValueStream = Pin<Box<dyn Stream<Item = Result<KeyValue>> + Send>>;
 
 /// Storage layer for persisting procedure's state.
 #[async_trait]
-pub(crate) trait StateStore: Send + Sync {
+pub trait StateStore: Send + Sync {
     /// Puts `key` and `value` into the store.
     async fn put(&self, key: &str, value: Vec<u8>) -> Result<()>;
 
@@ -42,7 +45,11 @@ pub(crate) trait StateStore: Send + Sync {
     async fn walk_top_down(&self, path: &str) -> Result<KeyValueStream>;
 
     /// Deletes key-value pairs by `keys`.
-    async fn delete(&self, keys: &[String]) -> Result<()>;
+    async fn batch_delete(&self, keys: &[String]) -> Result<()>;
+
+    /// Deletes one key-value pair by `key`. Return `Ok` if the key
+    /// does not exist.
+    async fn delete(&self, key: &str) -> Result<()>;
 }
 
 /// Reference counted pointer to [StateStore].
@@ -50,13 +57,13 @@ pub(crate) type StateStoreRef = Arc<dyn StateStore>;
 
 /// [StateStore] based on [ObjectStore].
 #[derive(Debug)]
-pub(crate) struct ObjectStateStore {
+pub struct ObjectStateStore {
     store: ObjectStore,
 }
 
 impl ObjectStateStore {
     /// Returns a new [ObjectStateStore] with specific `store`.
-    pub(crate) fn new(store: ObjectStore) -> ObjectStateStore {
+    pub fn new(store: ObjectStore) -> ObjectStateStore {
         ObjectStateStore { store }
     }
 }
@@ -64,50 +71,90 @@ impl ObjectStateStore {
 #[async_trait]
 impl StateStore for ObjectStateStore {
     async fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
-        let object = self.store.object(key);
-        object.write(value).await.context(PutStateSnafu { key })
+        self.store
+            .write(key, value)
+            .await
+            .map_err(|e| {
+                BoxedError::new(PlainError::new(
+                    e.to_string(),
+                    StatusCode::StorageUnavailable,
+                ))
+            })
+            .context(PutStateSnafu { key })
     }
 
     async fn walk_top_down(&self, path: &str) -> Result<KeyValueStream> {
-        let path_string = path.to_string();
-
-        let lister = self
+        let mut lister = self
             .store
-            .object(path)
-            .scan()
+            .scan(path)
             .await
-            .map_err(|e| Error::ListState {
-                path: path_string.clone(),
-                source: e,
-            })?;
-
-        let stream = lister
-            .try_filter_map(|entry| async move {
-                let key = entry.path();
-                let key_value = match entry.mode().await? {
-                    ObjectMode::FILE => {
-                        let value = entry.read().await?;
-
-                        Some((key.to_string(), value))
-                    }
-                    ObjectMode::DIR | ObjectMode::Unknown => None,
-                };
-
-                Ok(key_value)
+            .map_err(|e| {
+                BoxedError::new(PlainError::new(
+                    e.to_string(),
+                    StatusCode::StorageUnavailable,
+                ))
             })
-            .map_err(move |e| Error::ListState {
-                path: path_string.clone(),
-                source: e,
-            });
+            .context(ListStateSnafu { path })?;
+
+        let store = self.store.clone();
+
+        let path_string = path.to_string();
+        let stream = try_stream!({
+            while let Some(res) = lister.next().await {
+                let entry = res
+                    .map_err(|e| {
+                        BoxedError::new(PlainError::new(
+                            e.to_string(),
+                            StatusCode::StorageUnavailable,
+                        ))
+                    })
+                    .context(ListStateSnafu { path: &path_string })?;
+                let key = entry.path();
+                let metadata = store
+                    .metadata(&entry, Metakey::Mode)
+                    .await
+                    .map_err(|e| {
+                        BoxedError::new(PlainError::new(
+                            e.to_string(),
+                            StatusCode::StorageUnavailable,
+                        ))
+                    })
+                    .context(ListStateSnafu { path: key })?;
+                if let EntryMode::FILE = metadata.mode() {
+                    let value = store
+                        .read(key)
+                        .await
+                        .map_err(|e| {
+                            BoxedError::new(PlainError::new(
+                                e.to_string(),
+                                StatusCode::StorageUnavailable,
+                            ))
+                        })
+                        .context(ListStateSnafu { path: key })?;
+                    yield (key.to_string(), value);
+                }
+            }
+        });
 
         Ok(Box::pin(stream))
     }
 
-    async fn delete(&self, keys: &[String]) -> Result<()> {
-        for key in keys {
-            let object = self.store.object(key);
-            object.delete().await.context(DeleteStateSnafu { key })?;
-        }
+    async fn batch_delete(&self, keys: &[String]) -> Result<()> {
+        self.store
+            .remove(keys.to_vec())
+            .await
+            .with_context(|_| DeleteStateSnafu {
+                key: format!("{:?}", keys),
+            })?;
+
+        Ok(())
+    }
+
+    async fn delete(&self, key: &str) -> Result<()> {
+        self.store
+            .delete(key)
+            .await
+            .with_context(|_| DeleteStateSnafu { key })?;
 
         Ok(())
     }
@@ -116,8 +163,8 @@ impl StateStore for ObjectStateStore {
 #[cfg(test)]
 mod tests {
     use common_test_util::temp_dir::create_temp_dir;
+    use futures_util::TryStreamExt;
     use object_store::services::Fs as Builder;
-    use object_store::ObjectStoreBuilder;
 
     use super::*;
 
@@ -125,8 +172,10 @@ mod tests {
     async fn test_object_state_store() {
         let dir = create_temp_dir("state_store");
         let store_dir = dir.path().to_str().unwrap();
-        let accessor = Builder::default().root(store_dir).build().unwrap();
-        let object_store = ObjectStore::new(accessor).finish();
+        let mut builder = Builder::default();
+        builder.root(store_dir);
+
+        let object_store = ObjectStore::new(builder).unwrap().finish();
         let state_store = ObjectStateStore::new(object_store);
 
         let data: Vec<_> = state_store
@@ -176,7 +225,7 @@ mod tests {
         );
 
         state_store
-            .delete(&["a/2".to_string(), "b/1".to_string()])
+            .batch_delete(&["a/2".to_string(), "b/1".to_string()])
             .await
             .unwrap();
         let mut data: Vec<_> = state_store
@@ -188,5 +237,41 @@ mod tests {
             .unwrap();
         data.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(vec![("a/1".to_string(), b"v1".to_vec()),], data);
+    }
+
+    #[tokio::test]
+    async fn test_object_state_store_delete() {
+        let dir = create_temp_dir("state_store_list");
+        let store_dir = dir.path().to_str().unwrap();
+        let mut builder = Builder::default();
+        builder.root(store_dir);
+
+        let object_store = ObjectStore::new(builder).unwrap().finish();
+        let state_store = ObjectStateStore::new(object_store);
+
+        state_store.put("a/1", b"v1".to_vec()).await.unwrap();
+        state_store.put("a/2", b"v2".to_vec()).await.unwrap();
+        state_store.put("b/1", b"v3".to_vec()).await.unwrap();
+
+        state_store.delete("b/1").await.unwrap();
+
+        let mut data: Vec<_> = state_store
+            .walk_top_down("a/")
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        data.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            vec![
+                ("a/1".to_string(), b"v1".to_vec()),
+                ("a/2".to_string(), b"v2".to_vec()),
+            ],
+            data
+        );
+
+        // Delete returns Ok even the key doesn't exist.
+        state_store.delete("b/1").await.unwrap();
     }
 }

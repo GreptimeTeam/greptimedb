@@ -20,28 +20,32 @@ mod tests {
     use catalog::{CatalogManager, RegisterTableRequest, RenameTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_telemetry::{error, info};
+    use common_test_util::temp_dir::TempDir;
     use mito::config::EngineConfig;
+    use table::engine::manager::MemoryTableEngineManager;
     use table::table::numbers::NumbersTable;
     use table::TableRef;
     use tokio::sync::Mutex;
 
-    async fn create_local_catalog_manager() -> Result<LocalCatalogManager, catalog::error::Error> {
-        let (_dir, object_store) =
+    async fn create_local_catalog_manager(
+    ) -> Result<(TempDir, LocalCatalogManager), catalog::error::Error> {
+        let (dir, object_store) =
             mito::table::test_util::new_test_object_store("setup_mock_engine_and_table").await;
         let mock_engine = Arc::new(mito::table::test_util::MockMitoEngine::new(
             EngineConfig::default(),
             mito::table::test_util::MockEngine::default(),
             object_store,
         ));
-        let catalog_manager = LocalCatalogManager::try_new(mock_engine).await.unwrap();
+        let engine_manager = Arc::new(MemoryTableEngineManager::new(mock_engine.clone()));
+        let catalog_manager = LocalCatalogManager::try_new(engine_manager).await.unwrap();
         catalog_manager.start().await?;
-        Ok(catalog_manager)
+        Ok((dir, catalog_manager))
     }
 
     #[tokio::test]
     async fn test_rename_table() {
         common_telemetry::init_default_ut_logging();
-        let catalog_manager = create_local_catalog_manager().await.unwrap();
+        let (_dir, catalog_manager) = create_local_catalog_manager().await.unwrap();
         // register table
         let table_name = "test_table";
         let table_id = 42;
@@ -79,7 +83,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_duplicate_register() {
-        let catalog_manager = create_local_catalog_manager().await.unwrap();
+        let (_dir, catalog_manager) = create_local_catalog_manager().await.unwrap();
         let request = RegisterTableRequest {
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: DEFAULT_SCHEMA_NAME.to_string(),
@@ -116,8 +120,9 @@ mod tests {
     fn test_concurrent_register() {
         common_telemetry::init_default_ut_logging();
         let rt = Arc::new(tokio::runtime::Builder::new_multi_thread().build().unwrap());
-        let catalog_manager =
-            Arc::new(rt.block_on(async { create_local_catalog_manager().await.unwrap() }));
+        let (_dir, catalog_manager) =
+            rt.block_on(async { create_local_catalog_manager().await.unwrap() });
+        let catalog_manager = Arc::new(catalog_manager);
 
         let succeed: Arc<Mutex<Option<TableRef>>> = Arc::new(Mutex::new(None));
 

@@ -51,7 +51,7 @@ GreptimeDB uses the [Apache 2.0 license](https://github.com/GreptimeTeam/greptim
 - To ensure that community is free and confident in its ability to use your contributions, please sign the Contributor License Agreement (CLA) which will be incorporated in the pull request process.
 - Make sure all your codes are formatted and follow the [coding style](https://pingcap.github.io/style-guide/rust/).
 - Make sure all unit tests are passed (using `cargo test --workspace` or [nextest](https://nexte.st/index.html) `cargo nextest run`).
-- Make sure all clippy warnings are fixed (you can check it locally by running `cargo clippy --workspace --all-targets -- -D warnings -D clippy::print_stdout -D clippy::print_stderr`).
+- Make sure all clippy warnings are fixed (you can check it locally by running `cargo clippy --workspace --all-targets -- -D warnings`).
 
 #### `pre-commit` Hooks
 
@@ -107,6 +107,6 @@ The core team will be thrilled if you participate in any way you like. When you 
 
 Also, see some extra GreptimeDB content:
 
-- [GreptimeDB Docs](https://greptime.com/docs)
-- [Learn GreptimeDB](https://greptime.com/products/db)
+- [GreptimeDB Docs](https://docs.greptime.com/)
+- [Learn GreptimeDB](https://greptime.com/product/db)
 - [Greptime Inc. Website](https://greptime.com)
