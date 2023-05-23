@@ -210,7 +210,7 @@ pub fn create_tmp_dir_and_datanode_opts(
 pub fn create_datanode_opts(store: ObjectStoreConfig, wal_dir: String) -> DatanodeOptions {
     DatanodeOptions {
         wal: WalConfig {
-            dir: Some(wal_tmp_dir.path().to_str().unwrap().to_string()),
+            dir: Some(wal_dir),
             ..Default::default()
         },
         storage: StorageConfig {
