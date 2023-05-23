@@ -246,10 +246,12 @@ pub async fn datanode_stat(catalog_manager: &CatalogManagerRef) -> (u64, Vec<Reg
 
                 let Ok(table_ids) = schema.table_ids().await else { continue };
                 for table_id in table_ids {
-                     let Ok(Some(table)) = schema.table(&table_id).await else { continue };
+                    let Ok(Some(table)) = schema.table(&table_id).await else { continue };
 
                     let region_numbers = &table.table_info().meta.region_numbers;
                     region_number += region_numbers.len() as u64;
+
+                    let engine = &table.table_info().meta.engine;
 
                     match table.region_stats() {
                         Ok(stats) => {
@@ -262,6 +264,7 @@ pub async fn datanode_stat(catalog_manager: &CatalogManagerRef) -> (u64, Vec<Reg
                                     table_id: table_id.clone(),
                                 }),
                                 approximate_bytes: stat.disk_usage_bytes as i64,
+                                attrs: HashMap::from([("engine_name".to_owned(), engine.clone())]),
                                 ..Default::default()
                             });
 
@@ -272,7 +275,6 @@ pub async fn datanode_stat(catalog_manager: &CatalogManagerRef) -> (u64, Vec<Reg
                         }
                     };
                 }
-
             }
         }
     }
