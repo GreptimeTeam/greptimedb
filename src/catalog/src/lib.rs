@@ -265,32 +265,33 @@ pub async fn datanode_stat(catalog_manager: &CatalogManagerRef) -> Result<(u64, 
                             .table(&table_id)
                             .await?
                             .context(error::TableIdNotFoundSnafu {
-                                table_info: &table_name,
+                                table_info: &table_id,
                             })?;
 
-                let region_numbers = &table.table_info().meta.region_numbers;
-                region_number += region_numbers.len() as u64;
+                    let region_numbers = &table.table_info().meta.region_numbers;
+                    region_number += region_numbers.len() as u64;
 
-                match table.region_stats() {
-                    Ok(stats) => {
-                        let stats = stats.into_iter().map(|stat| RegionStat {
-                            region_id: stat.region_id,
-                            table_name: Some(TableName {
-                                catalog_name: catalog_name.clone(),
-                                schema_name: schema_name.clone(),
-                                table_name: table_name.clone(),
-                                table_id: table_id.clone(),
-                            }),
-                            approximate_bytes: stat.disk_usage_bytes as i64,
-                            ..Default::default()
-                        });
+                    match table.region_stats() {
+                        Ok(stats) => {
+                            let stats = stats.into_iter().map(|stat| RegionStat {
+                                region_id: stat.region_id,
+                                table_name: Some(TableName {
+                                    catalog_name: catalog_name.clone(),
+                                    schema_name: schema_name.clone(),
+                                    table_name: table_name.clone(),
+                                    table_id: table_id.clone(),
+                                }),
+                                approximate_bytes: stat.disk_usage_bytes as i64,
+                                ..Default::default()
+                            });
 
-                        region_stats.extend(stats);
-                    }
-                    Err(e) => {
-                        warn!("Failed to get region status, err: {:?}", e);
-                    }
-                };
+                            region_stats.extend(stats);
+                        }
+                        Err(e) => {
+                            warn!("Failed to get region status, err: {:?}", e);
+                        }
+                    };
+                }
             }
         }
     }
