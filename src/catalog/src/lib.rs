@@ -19,6 +19,7 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use api::v1::meta::{RegionStat, TableName};
+use common_telemetry::tracing::Id;
 use common_telemetry::{info, warn};
 use snafu::{OptionExt, ResultExt};
 use table::engine::{EngineContext, TableEngineRef};
@@ -114,6 +115,7 @@ pub trait CatalogManager: CatalogList {
         catalog: &str,
         schema: &str,
         table_name: &str,
+        table_id: &uint64,
     ) -> Result<Option<TableRef>>;
 }
 
@@ -257,6 +259,15 @@ pub async fn datanode_stat(catalog_manager: &CatalogManagerRef) -> Result<(u64, 
                             table_info: &table_name,
                         })?;
 
+                for table_id in table.table_ids()? {
+                    let id =
+                        table
+                            .table(&table_id)
+                            .await?
+                            .context(error::TableIdNotFoundSnafu {
+                                table_info: &table_name,
+                            })?;
+
                 let region_numbers = &table.table_info().meta.region_numbers;
                 region_number += region_numbers.len() as u64;
 
@@ -268,6 +279,7 @@ pub async fn datanode_stat(catalog_manager: &CatalogManagerRef) -> Result<(u64, 
                                 catalog_name: catalog_name.clone(),
                                 schema_name: schema_name.clone(),
                                 table_name: table_name.clone(),
+                                table_id: table_id.clone(),
                             }),
                             approximate_bytes: stat.disk_usage_bytes as i64,
                             ..Default::default()
