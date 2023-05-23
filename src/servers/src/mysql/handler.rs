@@ -34,7 +34,7 @@ use rand::RngCore;
 use session::context::Channel;
 use session::Session;
 use snafu::ensure;
-use sql::dialect::GenericDialect;
+use sql::dialect::MySqlDialect;
 use sql::parser::ParserContext;
 use sql::statements::statement::Statement;
 use tokio::io::AsyncWrite;
@@ -331,7 +331,7 @@ fn format_duration(duration: Duration) -> String {
 }
 
 async fn validate_query(query: &str) -> Result<Statement> {
-    let statement = ParserContext::create_with_dialect(query, &GenericDialect {});
+    let statement = ParserContext::create_with_dialect(query, &MySqlDialect {});
     let mut statement = statement.map_err(|e| {
         InvalidPrepareStatementSnafu {
             err_msg: e.to_string(),

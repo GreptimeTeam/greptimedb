@@ -33,7 +33,7 @@ use pgwire::api::stmt::QueryParser;
 use pgwire::api::store::MemPortalStore;
 use pgwire::api::{ClientInfo, Type};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
-use sql::dialect::GenericDialect;
+use sql::dialect::PostgreSqlDialect;
 use sql::parser::ParserContext;
 use sql::statements::statement::Statement;
 
@@ -260,7 +260,7 @@ impl QueryParser for POCQueryParser {
 
     fn parse_sql(&self, sql: &str, types: &[Type]) -> PgWireResult<Self::Statement> {
         increment_counter!(crate::metrics::METRIC_POSTGRES_PREPARED_COUNT);
-        let mut stmts = ParserContext::create_with_dialect(sql, &GenericDialect {})
+        let mut stmts = ParserContext::create_with_dialect(sql, &PostgreSqlDialect {})
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         if stmts.len() != 1 {
             Err(PgWireError::UserError(Box::new(ErrorInfo::new(

@@ -25,11 +25,19 @@ use common_time::TimeZone;
 pub type QueryContextRef = Arc<QueryContext>;
 pub type ConnInfoRef = Arc<ConnInfo>;
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum SqlDialect {
+    Mysql,
+    Posgrel,
+    GreptimeDb,
+}
+
 #[derive(Debug)]
 pub struct QueryContext {
     current_catalog: ArcSwap<String>,
     current_schema: ArcSwap<String>,
     time_zone: ArcSwap<Option<TimeZone>>,
+    sql_dialect: SqlDialect,
 }
 
 impl Default for QueryContext {
@@ -59,23 +67,36 @@ impl QueryContext {
             current_catalog: ArcSwap::new(Arc::new(DEFAULT_CATALOG_NAME.to_string())),
             current_schema: ArcSwap::new(Arc::new(DEFAULT_SCHEMA_NAME.to_string())),
             time_zone: ArcSwap::new(Arc::new(None)),
+            sql_dialect: SqlDialect::GreptimeDb,
         }
     }
 
     pub fn with(catalog: &str, schema: &str) -> Self {
+        Self::with_sql_dialect(catalog, schema, SqlDialect::GreptimeDb)
+    }
+
+    pub fn with_sql_dialect(catalog: &str, schema: &str, sql_dialect: SqlDialect) -> Self {
         Self {
             current_catalog: ArcSwap::new(Arc::new(catalog.to_string())),
             current_schema: ArcSwap::new(Arc::new(schema.to_string())),
             time_zone: ArcSwap::new(Arc::new(None)),
+            sql_dialect,
         }
     }
 
+    #[inline]
     pub fn current_schema(&self) -> String {
         self.current_schema.load().as_ref().clone()
     }
 
+    #[inline]
     pub fn current_catalog(&self) -> String {
         self.current_catalog.load().as_ref().clone()
+    }
+
+    #[inline]
+    pub fn sql_dialect(&self) -> &SqlDialect {
+        &self.sql_dialect
     }
 
     pub fn set_current_schema(&self, schema: &str) {
