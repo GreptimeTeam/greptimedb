@@ -29,6 +29,14 @@ pub mod state_store;
 /// Key prefix of procedure store.
 const PROC_PATH: &str = "procedure/";
 
+/// Constructs a path for procedure store.
+macro_rules! proc_path {
+    ($store: expr, $fmt:expr) => { format!("{}{}", $store.proc_path(), format_args!($fmt)) };
+    ($store: expr, $fmt:expr, $($args:tt)*) => { format!("{}{}", $store.proc_path(), format_args!($fmt, $($args)*)) };
+}
+
+pub(crate) use proc_path;
+
 /// Serialized data of a procedure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcedureMessage {
@@ -44,7 +52,6 @@ pub struct ProcedureMessage {
 }
 
 /// Procedure storage layer.
-#[derive(Clone)]
 pub(crate) struct ProcedureStore {
     proc_path: String,
     store: StateStoreRef,
@@ -59,8 +66,8 @@ impl ProcedureStore {
     }
 
     #[inline]
-    pub(crate) fn proc_path_with(&self, path: &str) -> String {
-        format!("{}{path}", self.proc_path)
+    pub(crate) fn proc_path(&self) -> &str {
+        &self.proc_path
     }
 
     /// Dump the `procedure` to the storage.
@@ -81,7 +88,7 @@ impl ProcedureStore {
             step,
         };
         let key = ParsedKey {
-            prefix: self.proc_path.to_string(),
+            prefix: &self.proc_path,
             procedure_id,
             step,
             key_type: KeyType::Step,
@@ -101,7 +108,7 @@ impl ProcedureStore {
         step: u32,
     ) -> Result<()> {
         let key = ParsedKey {
-            prefix: self.proc_path.to_string(),
+            prefix: &self.proc_path,
             procedure_id,
             step,
             key_type: KeyType::Commit,
@@ -119,7 +126,7 @@ impl ProcedureStore {
         step: u32,
     ) -> Result<()> {
         let key = ParsedKey {
-            prefix: self.proc_path.to_string(),
+            prefix: &self.proc_path,
             procedure_id,
             step,
             key_type: KeyType::Rollback,
@@ -132,7 +139,7 @@ impl ProcedureStore {
 
     /// Delete states of procedure from the storage.
     pub(crate) async fn delete_procedure(&self, procedure_id: ProcedureId) -> Result<()> {
-        let path = self.proc_path_with(&format!("{procedure_id}/"));
+        let path = proc_path!(self, "{procedure_id}/");
         // TODO(yingwen): We can optimize this to avoid reading the value.
         let mut key_values = self.store.walk_top_down(&path).await?;
         // 8 should be enough for most procedures.
@@ -253,14 +260,14 @@ impl KeyType {
 
 /// Key to refer the procedure in the [ProcedureStore].
 #[derive(Debug, PartialEq, Eq)]
-struct ParsedKey {
-    prefix: String,
+struct ParsedKey<'a> {
+    prefix: &'a str,
     procedure_id: ProcedureId,
     step: u32,
     key_type: KeyType,
 }
 
-impl fmt::Display for ParsedKey {
+impl<'a> fmt::Display for ParsedKey<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -273,9 +280,9 @@ impl fmt::Display for ParsedKey {
     }
 }
 
-impl ParsedKey {
+impl<'a> ParsedKey<'a> {
     /// Try to parse the key from specific `input`.
-    fn parse_str(prefix: &str, input: &str) -> Option<ParsedKey> {
+    fn parse_str(prefix: &'a str, input: &str) -> Option<ParsedKey<'a>> {
         let input = input.strip_prefix(prefix)?;
         let mut iter = input.rsplit('/');
         let name = iter.next()?;
@@ -290,7 +297,7 @@ impl ParsedKey {
         let step = step_str.parse().ok()?;
 
         Some(ParsedKey {
-            prefix: prefix.to_string(),
+            prefix,
             procedure_id,
             step,
             key_type,
@@ -337,13 +344,13 @@ mod tests {
 
         let procedure_id = ProcedureId::random();
         let key = ParsedKey {
-            prefix: store.proc_path.to_string(),
+            prefix: &store.proc_path,
             procedure_id,
             step: 2,
             key_type: KeyType::Step,
         };
         assert_eq!(
-            store.proc_path_with(&format!("{procedure_id}/0000000002.step")),
+            proc_path!(store, "{procedure_id}/0000000002.step"),
             key.to_string()
         );
         assert_eq!(
@@ -352,13 +359,13 @@ mod tests {
         );
 
         let key = ParsedKey {
-            prefix: store.proc_path.to_string(),
+            prefix: &store.proc_path,
             procedure_id,
             step: 2,
             key_type: KeyType::Commit,
         };
         assert_eq!(
-            store.proc_path_with(&format!("{procedure_id}/0000000002.commit")),
+            proc_path!(store, "{procedure_id}/0000000002.commit"),
             key.to_string()
         );
         assert_eq!(
@@ -367,13 +374,13 @@ mod tests {
         );
 
         let key = ParsedKey {
-            prefix: store.proc_path.to_string(),
+            prefix: &store.proc_path,
             procedure_id,
             step: 2,
             key_type: KeyType::Rollback,
         };
         assert_eq!(
-            store.proc_path_with(&format!("{procedure_id}/0000000002.rollback")),
+            proc_path!(store, "{procedure_id}/0000000002.rollback"),
             key.to_string()
         );
         assert_eq!(
@@ -393,24 +400,24 @@ mod tests {
         assert!(ParsedKey::parse_str(&store.proc_path, "procedure-0000000003.step").is_none());
 
         let procedure_id = ProcedureId::random();
-        let input = store.proc_path_with(&format!("{procedure_id}"));
+        let input = proc_path!(store, "{procedure_id}");
         assert!(ParsedKey::parse_str(&store.proc_path, &input).is_none());
 
-        let input = store.proc_path_with(&format!("{procedure_id}"));
+        let input = proc_path!(store, "{procedure_id}");
         assert!(ParsedKey::parse_str(&store.proc_path, &input).is_none());
 
-        let input = store.proc_path_with(&format!("{procedure_id}/0000000003"));
+        let input = proc_path!(store, "{procedure_id}/0000000003");
         assert!(ParsedKey::parse_str(&store.proc_path, &input).is_none());
 
-        let input = store.proc_path_with(&format!("{procedure_id}/0000000003."));
+        let input = proc_path!(store, "{procedure_id}/0000000003.");
         assert!(ParsedKey::parse_str(&store.proc_path, &input).is_none());
 
-        let input = store.proc_path_with(&format!("{procedure_id}/0000000003.other"));
+        let input = proc_path!(store, "{procedure_id}/0000000003.other");
         assert!(ParsedKey::parse_str(&store.proc_path, &input).is_none());
 
         assert!(ParsedKey::parse_str(&store.proc_path, "12345/0000000003.step").is_none());
 
-        let input = store.proc_path_with(&format!("{procedure_id}-0000000003.commit"));
+        let input = proc_path!(store, "{procedure_id}-0000000003.commit");
         assert!(ParsedKey::parse_str(&store.proc_path, &input).is_none());
     }
 

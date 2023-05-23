@@ -364,9 +364,8 @@ impl Default for ManagerConfig {
 
 /// A [ProcedureManager] that maintains procedure states locally.
 pub struct LocalManager {
-    parent_path: String,
     manager_ctx: Arc<ManagerContext>,
-    state_store: StateStoreRef,
+    procedure_store: Arc<ProcedureStore>,
     max_retry_times: usize,
     retry_delay: Duration,
     remove_outdated_meta_task: RepeatedTask<Error>,
@@ -385,8 +384,7 @@ impl LocalManager {
         );
         LocalManager {
             manager_ctx,
-            state_store,
-            parent_path: config.parent_path,
+            procedure_store: Arc::new(ProcedureStore::new(&config.parent_path, state_store)),
             max_retry_times: config.max_retry_times,
             retry_delay: config.retry_delay,
             remove_outdated_meta_task,
@@ -409,7 +407,7 @@ impl LocalManager {
             exponential_builder: ExponentialBuilder::default()
                 .with_min_delay(self.retry_delay)
                 .with_max_times(self.max_retry_times),
-            store: ProcedureStore::new(&self.parent_path, self.state_store.clone()),
+            store: self.procedure_store.clone(),
             rolling_back: false,
         };
 
@@ -470,8 +468,7 @@ impl ProcedureManager for LocalManager {
         logging::info!("LocalManager start to recover");
         let recover_start = Instant::now();
 
-        let procedure_store = ProcedureStore::new(&self.parent_path, self.state_store.clone());
-        let (messages, finished_ids) = procedure_store.load_messages().await?;
+        let (messages, finished_ids) = self.procedure_store.load_messages().await?;
 
         for (procedure_id, message) in &messages {
             if message.parent_id.is_none() {
@@ -506,7 +503,7 @@ impl ProcedureManager for LocalManager {
             );
 
             for procedure_id in finished_ids {
-                if let Err(e) = procedure_store.delete_procedure(procedure_id).await {
+                if let Err(e) = self.procedure_store.delete_procedure(procedure_id).await {
                     logging::error!(e; "Failed to delete procedure {}", procedure_id);
                 }
             }
