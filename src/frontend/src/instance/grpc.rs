@@ -17,40 +17,43 @@ use api::v1::query_request::Query;
 use async_trait::async_trait;
 use common_query::Output;
 use query::parser::PromQuery;
+use servers::interceptor::{GrpcQueryInterceptor, GrpcQueryInterceptorRef};
 use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt};
 
-use crate::error::{self, Result};
+use crate::error::{Error, IncompleteGrpcResultSnafu, NotSupportedSnafu, Result};
 use crate::instance::Instance;
 
 #[async_trait]
 impl GrpcQueryHandler for Instance {
-    type Error = error::Error;
+    type Error = Error;
 
     async fn do_query(&self, request: Request, ctx: QueryContextRef) -> Result<Output> {
+        let interceptor_ref = self.plugins.get::<GrpcQueryInterceptorRef<Error>>();
+        let interceptor = interceptor_ref.as_ref();
+        interceptor.pre_execute(&request, ctx.clone())?;
+
         let output = match request {
-            Request::Insert(request) => self.handle_insert(request, ctx).await?,
+            Request::Insert(request) => self.handle_insert(request, ctx.clone()).await?,
             Request::Query(query_request) => {
-                let query = query_request
-                    .query
-                    .context(error::IncompleteGrpcResultSnafu {
-                        err_msg: "Missing field 'QueryRequest.query'",
-                    })?;
+                let query = query_request.query.context(IncompleteGrpcResultSnafu {
+                    err_msg: "Missing field 'QueryRequest.query'",
+                })?;
                 match query {
                     Query::Sql(sql) => {
-                        let mut result = SqlQueryHandler::do_query(self, &sql, ctx).await;
+                        let mut result = SqlQueryHandler::do_query(self, &sql, ctx.clone()).await;
                         ensure!(
                             result.len() == 1,
-                            error::NotSupportedSnafu {
+                            NotSupportedSnafu {
                                 feat: "execute multiple statements in SQL query string through GRPC interface"
                             }
                         );
                         result.remove(0)?
                     }
                     Query::LogicalPlan(_) => {
-                        return error::NotSupportedSnafu {
+                        return NotSupportedSnafu {
                             feat: "Execute LogicalPlan in Frontend",
                         }
                         .fail();
@@ -63,10 +66,10 @@ impl GrpcQueryHandler for Instance {
                             step: promql.step,
                         };
                         let mut result =
-                            SqlQueryHandler::do_promql_query(self, &prom_query, ctx).await;
+                            SqlQueryHandler::do_promql_query(self, &prom_query, ctx.clone()).await;
                         ensure!(
                             result.len() == 1,
-                            error::NotSupportedSnafu {
+                            NotSupportedSnafu {
                                 feat: "execute multiple statements in PromQL query string through GRPC interface"
                             }
                         );
@@ -75,9 +78,12 @@ impl GrpcQueryHandler for Instance {
                 }
             }
             Request::Ddl(_) | Request::Delete(_) => {
-                GrpcQueryHandler::do_query(self.grpc_query_handler.as_ref(), request, ctx).await?
+                GrpcQueryHandler::do_query(self.grpc_query_handler.as_ref(), request, ctx.clone())
+                    .await?
             }
         };
+
+        let output = interceptor.post_execute(output, ctx)?;
         Ok(output)
     }
 }
