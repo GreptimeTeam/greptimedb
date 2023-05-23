@@ -16,13 +16,16 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use common_query::error::{self, Result, UnsupportedInputDataTypeSnafu};
+use common_query::error::{InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu};
 use common_query::prelude::{Signature, Volatility};
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::types::StringType;
-use datatypes::vectors::{Int64Vector, StringVector, Vector, VectorRef};
+use datatypes::types::TimestampType;
+use datatypes::vectors::{
+    Int64Vector, StringVector, TimestampMicrosecondVector, TimestampMillisecondVector,
+    TimestampNanosecondVector, TimestampSecondVector, Vector, VectorRef,
+};
 use snafu::ensure;
 
 use crate::scalars::function::{Function, FunctionContext};
@@ -52,8 +55,17 @@ impl Function for ToUnixtimeFunction {
     }
 
     fn signature(&self) -> Signature {
-        Signature::exact(
-            vec![ConcreteDataType::String(StringType)],
+        Signature::uniform(
+            1,
+            vec![
+                ConcreteDataType::string_datatype(),
+                ConcreteDataType::int32_datatype(),
+                ConcreteDataType::int64_datatype(),
+                ConcreteDataType::timestamp_second_datatype(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                ConcreteDataType::timestamp_microsecond_datatype(),
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+            ],
             Volatility::Immutable,
         )
     }
@@ -61,7 +73,7 @@ impl Function for ToUnixtimeFunction {
     fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure!(
             columns.len() == 1,
-            error::InvalidFuncArgsSnafu {
+            InvalidFuncArgsSnafu {
                 err_msg: format!(
                     "The length of the args is not correct, expect exactly one, have: {}",
                     columns.len()
@@ -78,6 +90,43 @@ impl Function for ToUnixtimeFunction {
                         .map(|i| convert_to_seconds(&vector.get(i).to_string()))
                         .collect::<Vec<_>>(),
                 )))
+            }
+            ConcreteDataType::Int64(_) | ConcreteDataType::Int32(_) => {
+                let array = columns[0].to_arrow_array();
+                Ok(Arc::new(Int64Vector::try_from_arrow_array(&array).unwrap()))
+            }
+            ConcreteDataType::Timestamp(ts) => {
+                let array = columns[0].to_arrow_array();
+                let value = match ts {
+                    TimestampType::Second(_) => {
+                        let vector = TimestampSecondVector::try_from_arrow_array(array).unwrap();
+                        (0..vector.len())
+                            .map(|i| (vector.get(i)).as_timestamp().map(|ts| ts.value()))
+                            .collect::<Vec<_>>()
+                    }
+                    TimestampType::Millisecond(_) => {
+                        let vector =
+                            TimestampMillisecondVector::try_from_arrow_array(array).unwrap();
+                        (0..vector.len())
+                            .map(|i| (vector.get(i)).as_timestamp().map(|ts| ts.value()))
+                            .collect::<Vec<_>>()
+                    }
+                    TimestampType::Microsecond(_) => {
+                        let vector =
+                            TimestampMicrosecondVector::try_from_arrow_array(array).unwrap();
+                        (0..vector.len())
+                            .map(|i| (vector.get(i)).as_timestamp().map(|ts| ts.value()))
+                            .collect::<Vec<_>>()
+                    }
+                    TimestampType::Nanosecond(_) => {
+                        let vector =
+                            TimestampNanosecondVector::try_from_arrow_array(array).unwrap();
+                        (0..vector.len())
+                            .map(|i| (vector.get(i)).as_timestamp().map(|ts| ts.value()))
+                            .collect::<Vec<_>>()
+                    }
+                };
+                Ok(Arc::new(Int64Vector::from(value)))
             }
             _ => UnsupportedInputDataTypeSnafu {
                 function: NAME,
@@ -97,16 +146,17 @@ impl fmt::Display for ToUnixtimeFunction {
 #[cfg(test)]
 mod tests {
     use common_query::prelude::TypeSignature;
-    use datatypes::prelude::ConcreteDataType;
-    use datatypes::types::StringType;
+    use datatypes::prelude::{ConcreteDataType, ScalarVectorBuilder};
+    use datatypes::scalars::ScalarVector;
+    use datatypes::timestamp::TimestampSecond;
     use datatypes::value::Value;
-    use datatypes::vectors::StringVector;
+    use datatypes::vectors::{StringVector, TimestampSecondVector};
 
     use super::{ToUnixtimeFunction, *};
     use crate::scalars::Function;
 
     #[test]
-    fn test_to_unixtime() {
+    fn test_string_to_unixtime() {
         let f = ToUnixtimeFunction::default();
         assert_eq!("to_unixtime", f.name());
         assert_eq!(
@@ -115,10 +165,18 @@ mod tests {
         );
 
         assert!(matches!(f.signature(),
-                         Signature {
-                            type_signature: TypeSignature::Exact(valid_types),
-                            volatility: Volatility::Immutable
-                         } if  valid_types == vec![ConcreteDataType::String(StringType)]
+        Signature {
+                type_signature: TypeSignature::Uniform(1, valid_types),
+                volatility: Volatility::Immutable
+            } if  valid_types == vec![
+                ConcreteDataType::string_datatype(),
+                ConcreteDataType::int32_datatype(),
+                ConcreteDataType::int64_datatype(),
+                ConcreteDataType::timestamp_second_datatype(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                ConcreteDataType::timestamp_microsecond_datatype(),
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+            ]
         ));
 
         let times = vec![
@@ -144,5 +202,107 @@ mod tests {
                 _ => unreachable!(),
             }
         }
+    }
+
+    #[test]
+    fn test_int_to_unixtime() {
+        let f = ToUnixtimeFunction::default();
+        assert_eq!("to_unixtime", f.name());
+        assert_eq!(
+            ConcreteDataType::timestamp_second_datatype(),
+            f.return_type(&[]).unwrap()
+        );
+
+        assert!(matches!(f.signature(),
+        Signature {
+                type_signature: TypeSignature::Uniform(1, valid_types),
+                volatility: Volatility::Immutable
+            } if  valid_types == vec![
+                ConcreteDataType::string_datatype(),
+                ConcreteDataType::int32_datatype(),
+                ConcreteDataType::int64_datatype(),
+                ConcreteDataType::timestamp_second_datatype(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                ConcreteDataType::timestamp_microsecond_datatype(),
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+            ]
+        ));
+
+        let times = vec![Some(3_i64), None, Some(5_i64), None];
+        let results = vec![Some(3), None, Some(5), None];
+        let args: Vec<VectorRef> = vec![Arc::new(Int64Vector::from(times.clone()))];
+        let vector = f.eval(FunctionContext::default(), &args).unwrap();
+        assert_eq!(4, vector.len());
+        for (i, _t) in times.iter().enumerate() {
+            let v = vector.get(i);
+            if i == 1 || i == 3 {
+                assert_eq!(Value::Null, v);
+                continue;
+            }
+            match v {
+                Value::Int64(ts) => {
+                    assert_eq!(ts, (*results.get(i).unwrap()).unwrap());
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn test_timestamp_to_unixtime() {
+        let f = ToUnixtimeFunction::default();
+        assert_eq!("to_unixtime", f.name());
+        assert_eq!(
+            ConcreteDataType::timestamp_second_datatype(),
+            f.return_type(&[]).unwrap()
+        );
+
+        assert!(matches!(f.signature(),
+        Signature {
+                type_signature: TypeSignature::Uniform(1, valid_types),
+                volatility: Volatility::Immutable
+            } if  valid_types == vec![
+                ConcreteDataType::string_datatype(),
+                ConcreteDataType::int32_datatype(),
+                ConcreteDataType::int64_datatype(),
+                ConcreteDataType::timestamp_second_datatype(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                ConcreteDataType::timestamp_microsecond_datatype(),
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+            ]
+        ));
+
+        let times: Vec<Option<TimestampSecond>> = vec![
+            Some(TimestampSecond::new(123)),
+            None,
+            Some(TimestampSecond::new(42)),
+            None,
+        ];
+        let results = vec![Some(123), None, Some(42), None];
+        let ts_vector: TimestampSecondVector = build_vector_from_slice(&times);
+        let args: Vec<VectorRef> = vec![Arc::new(ts_vector)];
+        let vector = f.eval(FunctionContext::default(), &args).unwrap();
+        assert_eq!(4, vector.len());
+        for (i, _t) in times.iter().enumerate() {
+            let v = vector.get(i);
+            if i == 1 || i == 3 {
+                assert_eq!(Value::Null, v);
+                continue;
+            }
+            match v {
+                Value::Int64(ts) => {
+                    assert_eq!(ts, (*results.get(i).unwrap()).unwrap());
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    fn build_vector_from_slice<T: ScalarVector>(items: &[Option<T::RefItem<'_>>]) -> T {
+        let mut builder = T::Builder::with_capacity(items.len());
+        for item in items {
+            builder.push(*item);
+        }
+        builder.finish()
     }
 }
