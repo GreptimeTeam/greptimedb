@@ -89,7 +89,10 @@ impl HeartbeatResponseHandlerExecutor for HandlerGroupExecutor {
             match handler.handle(&mut ctx) {
                 Ok(HandleControl::Done) => break,
                 Ok(HandleControl::Continue) => {}
-                Err(e) => error!(e;"Error while handling: {:?}", ctx.response),
+                Err(e) => {
+                    error!(e;"Error while handling: {:?}", ctx.response);
+                    break;
+                }
             }
         }
         Ok(())

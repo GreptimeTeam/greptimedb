@@ -17,7 +17,7 @@ use std::sync::Arc;
 use catalog::{CatalogManagerRef, DeregisterTableRequest};
 use common_catalog::format_full_table_name;
 use common_meta::instruction::{Instruction, InstructionReply, RegionIdent, SimpleReply};
-use common_telemetry::error;
+use common_telemetry::{error, warn};
 use log::info;
 use snafu::ResultExt;
 use store_api::storage::RegionNumber;
@@ -110,7 +110,7 @@ impl CloseRegionHandler {
     }
 
     /// Returns true if a table or target regions have been closed.
-    async fn table_closed(
+    async fn regions_closed(
         &self,
         catalog_name: &str,
         schema_name: &str,
@@ -159,7 +159,7 @@ impl CloseRegionHandler {
         let ctx = EngineContext::default();
 
         if self
-            .table_closed(
+            .regions_closed(
                 table_ref.catalog,
                 table_ref.schema,
                 table_ref.table,
@@ -207,7 +207,7 @@ impl CloseRegionHandler {
             };
         }
 
-        info!("Trying to close a non-existing table: {}", table_ref);
+        warn!("Trying to close a non-existing table: {}", table_ref);
         // Table doesn't exist
         Ok(true)
     }
