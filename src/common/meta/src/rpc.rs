@@ -13,15 +13,11 @@
 // limitations under the License.
 
 pub mod lock;
-mod store;
+pub mod router;
+pub mod store;
+pub mod util;
 
 use api::v1::meta::{KeyValue as PbKeyValue, ResponseHeader as PbResponseHeader};
-pub use store::{
-    BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
-    BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
-    DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest, PutResponse,
-    RangeRequest, RangeResponse,
-};
 
 #[derive(Debug, Clone)]
 pub struct ResponseHeader(PbResponseHeader);

@@ -73,9 +73,6 @@ pub enum Error {
         source: sql::error::Error,
     },
 
-    #[snafu(display("Missing insert values"))]
-    MissingInsertValues { location: Location },
-
     #[snafu(display("Column datatype error, source: {}", source))]
     ColumnDataType {
         #[snafu(backtrace)]
@@ -107,9 +104,6 @@ pub enum Error {
     #[snafu(display("Invalid SQL, error: {}", err_msg))]
     InvalidSql { err_msg: String, location: Location },
 
-    #[snafu(display("Illegal Frontend state: {}", err_msg))]
-    IllegalFrontendState { err_msg: String, location: Location },
-
     #[snafu(display("Incomplete GRPC result: {}", err_msg))]
     IncompleteGrpcResult { err_msg: String, location: Location },
 
@@ -125,24 +119,6 @@ pub enum Error {
     #[snafu(display("Table not found: {}", table_name))]
     TableNotFound {
         table_name: String,
-        location: Location,
-    },
-
-    #[snafu(display("Column {} not found in table {}", column_name, table_name))]
-    ColumnNotFound {
-        column_name: String,
-        table_name: String,
-        location: Location,
-    },
-
-    #[snafu(display(
-        "Columns and values number mismatch, columns: {}, values: {}",
-        columns,
-        values,
-    ))]
-    ColumnValuesNumberMismatch {
-        columns: usize,
-        values: usize,
         location: Location,
     },
 
@@ -356,12 +332,6 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
-    #[snafu(display(
-        "No valid default value can be built automatically, column: {}",
-        column,
-    ))]
-    ColumnNoneDefaultValue { column: String, location: Location },
-
     #[snafu(display("SQL execution intercepted, source: {}", source))]
     SqlExecIntercepted {
         #[snafu(backtrace)]
@@ -557,15 +527,12 @@ impl ErrorExt for Error {
             Error::ParseAddr { .. }
             | Error::InvalidSql { .. }
             | Error::InvalidInsertRequest { .. }
-            | Error::ColumnValuesNumberMismatch { .. }
             | Error::IllegalPrimaryKeysDef { .. }
             | Error::CatalogNotFound { .. }
             | Error::SchemaNotFound { .. }
             | Error::SchemaExists { .. }
-            | Error::MissingInsertValues { .. }
             | Error::PrimaryKeyNotFound { .. }
             | Error::MissingMetasrvOpts { .. }
-            | Error::ColumnNoneDefaultValue { .. }
             | Error::BuildRegex { .. }
             | Error::InvalidSchema { .. }
             | Error::PrepareImmutableTable { .. }
@@ -609,13 +576,11 @@ impl ErrorExt for Error {
             | Error::BuildDfLogicalPlan { .. }
             | Error::BuildTableMeta { .. } => StatusCode::Internal,
 
-            Error::IllegalFrontendState { .. }
-            | Error::IncompleteGrpcResult { .. }
+            Error::IncompleteGrpcResult { .. }
             | Error::ContextValueNotFound { .. }
             | Error::EncodeJson { .. } => StatusCode::Unexpected,
 
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
-            Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
 
             Error::JoinTask { .. }
             | Error::BuildParquetRecordBatchStream { .. }

@@ -64,13 +64,6 @@ pub enum Error {
         source: meta_srv::error::Error,
     },
 
-    #[snafu(display("Failed to read config file: {}, source: {}", path, source))]
-    ReadConfig {
-        path: String,
-        source: std::io::Error,
-        location: Location,
-    },
-
     #[snafu(display("Missing config, msg: {}", msg))]
     MissingConfig { msg: String, location: Location },
 
@@ -175,8 +168,7 @@ impl ErrorExt for Error {
             Error::ShutdownMetaServer { source } => source.status_code(),
             Error::BuildMetaServer { source } => source.status_code(),
             Error::UnsupportedSelectorType { source, .. } => source.status_code(),
-            Error::ReadConfig { .. }
-            | Error::MissingConfig { .. }
+            Error::MissingConfig { .. }
             | Error::LoadLayeredConfig { .. }
             | Error::IllegalConfig { .. }
             | Error::InvalidReplCommand { .. }

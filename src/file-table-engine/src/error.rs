@@ -134,9 +134,6 @@ pub enum Error {
         source: common_datasource::error::Error,
     },
 
-    #[snafu(display("Unsupported file format: {}", format))]
-    UnsupportedFileFormat { format: String, location: Location },
-
     #[snafu(display("Failed to build csv config: {}", source))]
     BuildCsvConfig {
         source: common_datasource::file_format::csv::CsvConfigBuilderError,
@@ -191,7 +188,6 @@ impl ErrorExt for Error {
             | BuildTableMeta { .. }
             | BuildTableInfo { .. }
             | InvalidRawSchema { .. }
-            | UnsupportedFileFormat { .. }
             | BuildCsvConfig { .. }
             | ProjectSchema { .. }
             | MissingRequiredField { .. }

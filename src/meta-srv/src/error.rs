@@ -33,9 +33,6 @@ pub enum Error {
         server: String,
     },
 
-    #[snafu(display("Error stream request next is None"))]
-    StreamNone { location: Location },
-
     #[snafu(display("Empty key is not allowed"))]
     EmptyKey { location: Location },
 
@@ -187,12 +184,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to decode table global value, source: {}", source))]
-    DecodeTableGlobalValue {
-        source: prost::DecodeError,
-        location: Location,
-    },
-
     #[snafu(display("Unexpected, violated: {}", violated))]
     Unexpected {
         violated: String,
@@ -257,12 +248,6 @@ pub enum Error {
         func_name: String,
         retry_num: usize,
         location: Location,
-    },
-
-    #[snafu(display("An error occurred in Meta, source: {}", source))]
-    MetaInternal {
-        #[snafu(backtrace)]
-        source: BoxedError,
     },
 
     #[snafu(display("Failed to lock based on etcd, source: {}", source))]
@@ -385,14 +370,12 @@ impl ErrorExt for Error {
 
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::StreamNone { .. }
-            | Error::EtcdFailed { .. }
+            Error::EtcdFailed { .. }
             | Error::ConnectEtcd { .. }
             | Error::TcpBind { .. }
             | Error::SerializeToJson { .. }
             | Error::DeserializeFromJson { .. }
             | Error::DecodeTableRoute { .. }
-            | Error::DecodeTableGlobalValue { .. }
             | Error::NoLeader { .. }
             | Error::CreateChannel { .. }
             | Error::BatchGet { .. }
@@ -442,7 +425,6 @@ impl ErrorExt for Error {
             | Error::Unexpected { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::InvalidCatalogValue { source, .. } => source.status_code(),
-            Error::MetaInternal { source } => source.status_code(),
             Error::RecoverProcedure { source } => source.status_code(),
             Error::ShutdownServer { source, .. } | Error::StartHttp { source } => {
                 source.status_code()

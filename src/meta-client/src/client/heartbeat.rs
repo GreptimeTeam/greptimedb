@@ -18,7 +18,7 @@ use std::sync::Arc;
 use api::v1::meta::heartbeat_client::HeartbeatClient;
 use api::v1::meta::{AskLeaderRequest, HeartbeatRequest, HeartbeatResponse, RequestHeader, Role};
 use common_grpc::channel_manager::ChannelManager;
-use common_meta::util;
+use common_meta::rpc::util;
 use common_telemetry::{debug, info};
 use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::{mpsc, RwLock};

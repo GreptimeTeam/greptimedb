@@ -1186,6 +1186,7 @@ dependencies = [
  "common-catalog",
  "common-error",
  "common-grpc",
+ "common-meta",
  "common-query",
  "common-recordbatch",
  "common-runtime",

@@ -160,9 +160,6 @@ pub enum Error {
         source: common_datasource::error::Error,
     },
 
-    #[snafu(display("Unsupported file format: {}", format))]
-    UnsupportedFileFormat { format: String, location: Location },
-
     #[snafu(display("Failed to parse file format: {}", source))]
     ParseFileFormat {
         #[snafu(backtrace)]
@@ -197,7 +194,6 @@ impl ErrorExt for Error {
             | ParseFloat { .. }
             | MissingRequiredField { .. }
             | BuildRegex { .. }
-            | UnsupportedFileFormat { .. }
             | ConvertSchema { .. } => StatusCode::InvalidArguments,
 
             BuildBackend { .. } | ListObjects { .. } => StatusCode::StorageUnavailable,

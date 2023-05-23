@@ -18,15 +18,15 @@ use std::time::Duration;
 use api::v1::meta::{HeartbeatRequest, Peer, Role};
 use chrono::DateTime;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
-use common_meta::router::{CreateRequest, Partition};
+use common_meta::rpc::router::{CreateRequest, Partition};
+use common_meta::rpc::store::{
+    BatchDeleteRequest, BatchGetRequest, BatchPutRequest, CompareAndPutRequest, DeleteRangeRequest,
+    PutRequest, RangeRequest,
+};
 use common_meta::table_name::TableName;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema};
 use meta_client::client::MetaClientBuilder;
-use meta_client::rpc::{
-    BatchDeleteRequest, BatchGetRequest, BatchPutRequest, CompareAndPutRequest, DeleteRangeRequest,
-    PutRequest, RangeRequest,
-};
 use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
 use table::requests::TableOptions;
 use tracing::{event, subscriber, Level};

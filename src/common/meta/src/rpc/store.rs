@@ -21,14 +21,12 @@ use api::v1::meta::{
     DeleteRangeResponse as PbDeleteRangeResponse, KeyValue as PbKeyValue,
     MoveValueRequest as PbMoveValueRequest, MoveValueResponse as PbMoveValueResponse,
     PutRequest as PbPutRequest, PutResponse as PbPutResponse, RangeRequest as PbRangeRequest,
-    RangeResponse as PbRangeResponse, ResponseHeader as PbResponseHeader,
+    RangeResponse as PbRangeResponse,
 };
-use common_meta::util;
-use snafu::ResultExt;
 
 use crate::error;
-use crate::error::{InvalidResponseHeaderSnafu, Result};
-use crate::rpc::{KeyValue, ResponseHeader};
+use crate::error::Result;
+use crate::rpc::{util, KeyValue, ResponseHeader};
 
 #[derive(Debug, Clone, Default)]
 pub struct RangeRequest {
@@ -128,7 +126,7 @@ impl TryFrom<PbRangeResponse> for RangeResponse {
     type Error = error::Error;
 
     fn try_from(pb: PbRangeResponse) -> Result<Self> {
-        check_response_header(pb.header.as_ref())?;
+        util::check_response_header(pb.header.as_ref())?;
 
         Ok(Self::new(pb))
     }
@@ -220,7 +218,7 @@ impl TryFrom<PbPutResponse> for PutResponse {
     type Error = error::Error;
 
     fn try_from(pb: PbPutResponse) -> Result<Self> {
-        check_response_header(pb.header.as_ref())?;
+        util::check_response_header(pb.header.as_ref())?;
 
         Ok(Self::new(pb))
     }
@@ -282,7 +280,7 @@ impl TryFrom<PbBatchGetResponse> for BatchGetResponse {
     type Error = error::Error;
 
     fn try_from(pb: PbBatchGetResponse) -> Result<Self> {
-        check_response_header(pb.header.as_ref())?;
+        util::check_response_header(pb.header.as_ref())?;
 
         Ok(Self(pb))
     }
@@ -357,7 +355,7 @@ impl TryFrom<PbBatchPutResponse> for BatchPutResponse {
     type Error = error::Error;
 
     fn try_from(pb: PbBatchPutResponse) -> Result<Self> {
-        check_response_header(pb.header.as_ref())?;
+        util::check_response_header(pb.header.as_ref())?;
 
         Ok(Self::new(pb))
     }
@@ -429,7 +427,7 @@ impl TryFrom<PbBatchDeleteResponse> for BatchDeleteResponse {
     type Error = error::Error;
 
     fn try_from(pb: PbBatchDeleteResponse) -> Result<Self> {
-        check_response_header(pb.header.as_ref())?;
+        util::check_response_header(pb.header.as_ref())?;
 
         Ok(Self::new(pb))
     }
@@ -513,7 +511,7 @@ impl TryFrom<PbCompareAndPutResponse> for CompareAndPutResponse {
     type Error = error::Error;
 
     fn try_from(pb: PbCompareAndPutResponse) -> Result<Self> {
-        check_response_header(pb.header.as_ref())?;
+        util::check_response_header(pb.header.as_ref())?;
 
         Ok(Self::new(pb))
     }
@@ -633,7 +631,7 @@ impl TryFrom<PbDeleteRangeResponse> for DeleteRangeResponse {
     type Error = error::Error;
 
     fn try_from(pb: PbDeleteRangeResponse) -> Result<Self> {
-        check_response_header(pb.header.as_ref())?;
+        util::check_response_header(pb.header.as_ref())?;
 
         Ok(Self::new(pb))
     }
@@ -697,7 +695,7 @@ impl TryFrom<PbMoveValueResponse> for MoveValueResponse {
     type Error = error::Error;
 
     fn try_from(pb: PbMoveValueResponse) -> Result<Self> {
-        check_response_header(pb.header.as_ref())?;
+        util::check_response_header(pb.header.as_ref())?;
 
         Ok(Self::new(pb))
     }
@@ -718,10 +716,6 @@ impl MoveValueResponse {
     pub fn take_kv(&mut self) -> Option<KeyValue> {
         self.0.kv.take().map(KeyValue::new)
     }
-}
-
-fn check_response_header(header: Option<&PbResponseHeader>) -> Result<()> {
-    util::check_response_header(header).context(InvalidResponseHeaderSnafu)
 }
 
 #[cfg(test)]

@@ -15,7 +15,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use common_meta::router::{RouteRequest, TableRoute};
+use common_meta::rpc::router::{RouteRequest, TableRoute};
 use common_meta::table_name::TableName;
 use meta_client::client::MetaClient;
 use moka::future::{Cache, CacheBuilder};

@@ -59,9 +59,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Timestamp column {} not found", name,))]
-    TimestampNotFound { name: String, location: Location },
-
     #[snafu(display(
         "Failed to parse version in schema meta, value: {}, source: {}",
         value,
