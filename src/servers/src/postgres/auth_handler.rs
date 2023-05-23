@@ -170,7 +170,7 @@ impl StartupHandler for PostgresServerHandler {
                         ))
                         .await?;
                 } else {
-                    set_query_context_from_client_info(client, self.query_ctx.clone());
+                    set_query_context_from_client_info(client, self.session.context());
                     auth::finish_authentication(client, self.param_provider.as_ref()).await;
                 }
             }
@@ -193,7 +193,7 @@ impl StartupHandler for PostgresServerHandler {
                     )
                     .await;
                 }
-                set_query_context_from_client_info(client, self.query_ctx.clone());
+                set_query_context_from_client_info(client, self.session.context());
                 auth::finish_authentication(client, self.param_provider.as_ref()).await;
             }
             _ => {}

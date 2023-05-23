@@ -163,15 +163,30 @@ impl UserInfo {
     }
 }
 
+#[derive(Debug)]
 pub struct ConnInfo {
-    pub client_host: SocketAddr,
+    pub client_addr: Option<SocketAddr>,
     pub channel: Channel,
 }
 
+impl std::fmt::Display for ConnInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "{}[{}]",
+            self.channel,
+            self.client_addr
+                .map(|addr| addr.to_string())
+                .as_deref()
+                .unwrap_or("unknown client addr")
+        )
+    }
+}
+
 impl ConnInfo {
-    pub fn new(client_host: SocketAddr, channel: Channel) -> Self {
+    pub fn new(client_addr: Option<SocketAddr>, channel: Channel) -> Self {
         Self {
-            client_host,
+            client_addr,
             channel,
         }
     }
@@ -179,13 +194,19 @@ impl ConnInfo {
 
 #[derive(Debug, PartialEq)]
 pub enum Channel {
-    Grpc,
-    Http,
     Mysql,
     Postgres,
     Opentsdb,
-    Influxdb,
-    Prometheus,
+}
+
+impl std::fmt::Display for Channel {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Channel::Mysql => write!(f, "mysql"),
+            Channel::Postgres => write!(f, "postgres"),
+            Channel::Opentsdb => write!(f, "opentsdb"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -196,7 +217,7 @@ mod test {
 
     #[test]
     fn test_session() {
-        let session = Session::new("127.0.0.1:9000".parse().unwrap(), Channel::Mysql);
+        let session = Session::new(Some("127.0.0.1:9000".parse().unwrap()), Channel::Mysql);
         // test user_info
         assert_eq!(session.user_info().username(), "greptime");
         session.set_user_info(UserInfo::new("root"));
@@ -204,11 +225,11 @@ mod test {
 
         // test channel
         assert_eq!(session.conn_info().channel, Channel::Mysql);
-        assert_eq!(
-            session.conn_info().client_host.ip().to_string(),
-            "127.0.0.1"
-        );
-        assert_eq!(session.conn_info().client_host.port(), 9000);
+        let client_addr = session.conn_info().client_addr.as_ref().unwrap();
+        assert_eq!(client_addr.ip().to_string(), "127.0.0.1");
+        assert_eq!(client_addr.port(), 9000);
+
+        assert_eq!("mysql[127.0.0.1:9000]", session.conn_info().to_string());
     }
 
     #[test]

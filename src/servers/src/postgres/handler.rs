@@ -55,13 +55,13 @@ impl SimpleQueryHandler for PostgresServerHandler {
                 ),
                 (
                     crate::metrics::METRIC_DB_LABEL,
-                    self.query_ctx.get_db_string()
+                    &self.session.context().get_db_string()
                 )
             ]
         );
         let outputs = self
             .query_handler
-            .do_query(query, self.query_ctx.clone())
+            .do_query(query, self.session.context())
             .await;
 
         let mut results = Vec::with_capacity(outputs.len());
@@ -361,7 +361,7 @@ impl ExtendedQueryHandler for PostgresServerHandler {
                 ),
                 (
                     crate::metrics::METRIC_DB_LABEL,
-                    self.query_ctx.get_db_string()
+                    &self.session.context().get_db_string()
                 )
             ]
         );
@@ -376,7 +376,7 @@ impl ExtendedQueryHandler for PostgresServerHandler {
 
         let output = self
             .query_handler
-            .do_query(&sql, self.query_ctx.clone())
+            .do_query(&sql, self.session.context())
             .await
             .remove(0);
 
@@ -407,7 +407,7 @@ impl ExtendedQueryHandler for PostgresServerHandler {
 
         if let Some(schema) = self
             .query_handler
-            .do_describe(stmt.clone(), self.query_ctx.clone())
+            .do_describe(stmt.clone(), self.session.context())
             .await
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?
         {

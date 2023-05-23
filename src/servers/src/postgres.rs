@@ -31,7 +31,8 @@ use pgwire::api::auth::ServerParameterProvider;
 use pgwire::api::store::MemPortalStore;
 use pgwire::api::{ClientInfo, MakeHandler};
 pub use server::PostgresServer;
-use session::context::{QueryContext, QueryContextRef};
+use session::context::Channel;
+use session::Session;
 use sql::statements::statement::Statement;
 
 use self::auth_handler::PgLoginVerifier;
@@ -73,7 +74,7 @@ pub struct PostgresServerHandler {
     force_tls: bool,
     param_provider: Arc<GreptimeDBStartupParameters>,
 
-    query_ctx: QueryContextRef,
+    session: Session,
     portal_store: Arc<MemPortalStore<(Statement, String)>>,
     query_parser: Arc<POCQueryParser>,
 }
@@ -90,18 +91,18 @@ pub(crate) struct MakePostgresServerHandler {
 }
 
 impl MakeHandler for MakePostgresServerHandler {
-    type Handler = Arc<PostgresServerHandler>;
+    type Handler = PostgresServerHandler;
 
     fn make(&self) -> Self::Handler {
-        Arc::new(PostgresServerHandler {
+        PostgresServerHandler {
             query_handler: self.query_handler.clone(),
             login_verifier: PgLoginVerifier::new(self.user_provider.clone()),
             force_tls: self.force_tls,
             param_provider: self.param_provider.clone(),
 
-            query_ctx: QueryContext::arc(),
+            session: Session::new(None, Channel::Postgres),
             portal_store: Arc::new(MemPortalStore::new()),
             query_parser: self.query_parser.clone(),
-        })
+        }
     }
 }

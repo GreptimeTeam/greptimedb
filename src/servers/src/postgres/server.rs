@@ -73,19 +73,22 @@ impl PostgresServer {
         accepting_stream.for_each(move |tcp_stream| {
             let io_runtime = io_runtime.clone();
             let tls_acceptor = tls_acceptor.clone();
-            let handler = handler.make();
-
+            let mut handler = handler.make();
             async move {
                 match tcp_stream {
                     Err(error) => error!("Broken pipe: {}", error), // IoError doesn't impl ErrorExt.
                     Ok(io_stream) => {
                         match io_stream.peer_addr() {
-                            Ok(addr) => debug!("PostgreSQL client coming from {}", addr),
+                            Ok(addr) => {
+                                handler.session.mut_conn_info().client_addr = Some(addr);
+                                debug!("PostgreSQL client coming from {}", addr)
+                            }
                             Err(e) => warn!("Failed to get PostgreSQL client addr, err: {}", e),
                         }
 
                         io_runtime.spawn(async move {
                             increment_gauge!(crate::metrics::METRIC_POSTGRES_CONNECTIONS, 1.0);
+                            let handler = Arc::new(handler);
                             let r = process_socket(
                                 io_stream,
                                 tls_acceptor.clone(),

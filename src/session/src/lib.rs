@@ -18,33 +18,59 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 
-use crate::context::{Channel, ConnInfo, ConnInfoRef, QueryContext, QueryContextRef, UserInfo};
+use crate::context::{Channel, ConnInfo, QueryContext, QueryContextRef, SqlDialect, UserInfo};
 
+/// Session for persistent connection such as MySQL, PostgreSQL etc.
+#[derive(Debug)]
 pub struct Session {
     query_ctx: QueryContextRef,
     user_info: ArcSwap<UserInfo>,
-    conn_info: ConnInfoRef,
+    conn_info: ConnInfo,
 }
 
+pub type SessionRef = Arc<Session>;
+
 impl Session {
-    pub fn new(addr: SocketAddr, channel: Channel) -> Self {
+    pub fn new(addr: Option<SocketAddr>, channel: Channel) -> Self {
+        let sql_dialect = match &channel {
+            Channel::Mysql => SqlDialect::Mysql,
+            Channel::Postgres => SqlDialect::Posgrel,
+            _other => SqlDialect::GreptimeDb,
+        };
         Session {
-            query_ctx: Arc::new(QueryContext::new()),
+            query_ctx: Arc::new(QueryContext::with_sql_dialect(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+                sql_dialect,
+            )),
             user_info: ArcSwap::new(Arc::new(UserInfo::default())),
-            conn_info: Arc::new(ConnInfo::new(addr, channel)),
+            conn_info: ConnInfo::new(addr, channel),
         }
     }
 
+    #[inline]
     pub fn context(&self) -> QueryContextRef {
         self.query_ctx.clone()
     }
-    pub fn conn_info(&self) -> ConnInfoRef {
-        self.conn_info.clone()
+
+    #[inline]
+    pub fn conn_info(&self) -> &ConnInfo {
+        &self.conn_info
     }
+
+    #[inline]
+    pub fn mut_conn_info(&mut self) -> &mut ConnInfo {
+        &mut self.conn_info
+    }
+
+    #[inline]
     pub fn user_info(&self) -> Arc<UserInfo> {
         self.user_info.load().clone()
     }
+
+    #[inline]
     pub fn set_user_info(&self, user_info: UserInfo) {
         self.user_info.store(Arc::new(user_info));
     }

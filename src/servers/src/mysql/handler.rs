@@ -32,7 +32,7 @@ use opensrv_mysql::{
 use parking_lot::RwLock;
 use rand::RngCore;
 use session::context::Channel;
-use session::Session;
+use session::{Session, SessionRef};
 use snafu::ensure;
 use sql::dialect::MySqlDialect;
 use sql::parser::ParserContext;
@@ -48,7 +48,7 @@ use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 pub struct MysqlInstanceShim {
     query_handler: ServerSqlQueryHandlerRef,
     salt: [u8; 20],
-    session: Arc<Session>,
+    session: SessionRef,
     user_provider: Option<UserProviderRef>,
     // TODO(SSebo): use something like moka to achieve TTL or LRU
     prepared_stmts: Arc<RwLock<HashMap<u32, String>>>,
@@ -77,7 +77,7 @@ impl MysqlInstanceShim {
         MysqlInstanceShim {
             query_handler,
             salt: scramble,
-            session: Arc::new(Session::new(client_addr, Channel::Mysql)),
+            session: Arc::new(Session::new(Some(client_addr), Channel::Mysql)),
             user_provider,
             prepared_stmts: Default::default(),
             prepared_stmts_counter: AtomicU32::new(1),
@@ -140,9 +140,13 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         let username = String::from_utf8_lossy(username);
 
         let mut user_info = None;
-        let addr = self.session.conn_info().client_host.to_string();
+        let addr = self
+            .session
+            .conn_info()
+            .client_addr
+            .map(|addr| addr.to_string());
         if let Some(user_provider) = &self.user_provider {
-            let user_id = Identity::UserId(&username, Some(addr.as_str()));
+            let user_id = Identity::UserId(&username, addr.as_deref());
 
             let password = match auth_plugin {
                 "mysql_native_password" => Password::MysqlNativePassword(auth_data, salt),
