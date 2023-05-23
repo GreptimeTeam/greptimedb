@@ -22,7 +22,7 @@ use log::info;
 use snafu::ResultExt;
 use store_api::storage::RegionNumber;
 use table::engine::manager::TableEngineManagerRef;
-use table::engine::{EngineContext, TableReference};
+use table::engine::{CloseTableResult, EngineContext, TableReference};
 use table::requests::CloseTableRequest;
 
 use crate::error::{self, Result};
@@ -177,7 +177,7 @@ impl CloseRegionHandler {
             })?
             .is_some()
         {
-            return if engine
+            return match engine
                 .close_table(
                     &ctx,
                     CloseTableRequest {
@@ -192,12 +192,18 @@ impl CloseRegionHandler {
                     table_name: table_ref.to_string(),
                     region_numbers: region_numbers.clone(),
                 })? {
-                // Deregister table if The table released.
-                self.deregister_table(table_ref).await
-            } else {
-                // Requires caller to update the region_numbers
-                info!("Close partial regions in table: {}", table_ref);
-                Ok(true)
+                CloseTableResult::NotFound | CloseTableResult::Released(_) => {
+                    // Deregister table if The table released.
+                    self.deregister_table(table_ref).await
+                }
+                CloseTableResult::PartialClosed(regions) => {
+                    // Requires caller to update the region_numbers
+                    info!(
+                        "Close partial regions: {:?} in table: {}",
+                        regions, table_ref
+                    );
+                    Ok(true)
+                }
             };
         }
 

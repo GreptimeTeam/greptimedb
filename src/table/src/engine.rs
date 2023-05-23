@@ -16,7 +16,7 @@ use std::fmt::{self, Display};
 use std::sync::Arc;
 
 use common_procedure::BoxedProcedure;
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, RegionNumber};
 
 use crate::error::{self, Result};
 use crate::metadata::TableId;
@@ -59,6 +59,19 @@ impl<'a> Display for TableReference<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}.{}.{}", self.catalog, self.schema, self.table)
     }
+}
+
+/// CloseTableResult
+///
+/// Returns [`CloseTableResult::Released`] and closed region numbers if a table was removed
+/// from the engine.
+/// Returns [`CloseTableResult::PartialClosed`] and closed region numbers if only partial
+/// regions were closed.
+#[derive(Debug)]
+pub enum CloseTableResult {
+    Released(Vec<RegionNumber>),
+    PartialClosed(Vec<RegionNumber>),
+    NotFound,
 }
 
 /// Table engine abstraction.
@@ -108,10 +121,12 @@ pub trait TableEngine: Send + Sync {
 
     /// Closes the (partial) given table.
     ///
-    /// Removes a table if all regions are closed.
-    /// Returns true if table is removed in the engine.
-    /// Returns false if table is only partial closed.
-    async fn close_table(&self, _ctx: &EngineContext, _request: CloseTableRequest) -> Result<bool> {
+    /// Removes a table from the engine if all regions are closed.
+    async fn close_table(
+        &self,
+        _ctx: &EngineContext,
+        _request: CloseTableRequest,
+    ) -> Result<CloseTableResult> {
         error::UnsupportedSnafu {
             operation: "close_table",
         }
