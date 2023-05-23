@@ -33,7 +33,7 @@ pub struct Instance {
 }
 
 impl Instance {
-    pub async fn run(&mut self) -> Result<()> {
+    pub async fn start(&mut self) -> Result<()> {
         self.frontend
             .catalog_manager()
             .start()

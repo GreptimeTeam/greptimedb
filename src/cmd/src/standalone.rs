@@ -152,7 +152,7 @@ pub struct Instance {
 }
 
 impl Instance {
-    pub async fn run(&mut self) -> Result<()> {
+    pub async fn start(&mut self) -> Result<()> {
         // Start datanode instance before starting services, to avoid requests come in before internal components are started.
         self.datanode
             .start_instance()

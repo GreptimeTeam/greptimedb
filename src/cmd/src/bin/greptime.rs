@@ -46,13 +46,13 @@ pub enum Application {
 }
 
 impl Application {
-    async fn run(&mut self) -> Result<()> {
+    async fn start(&mut self) -> Result<()> {
         match self {
-            Application::Datanode(instance) => instance.run().await,
-            Application::Frontend(instance) => instance.run().await,
-            Application::Metasrv(instance) => instance.run().await,
-            Application::Standalone(instance) => instance.run().await,
-            Application::Cli(instance) => instance.run().await,
+            Application::Datanode(instance) => instance.start().await,
+            Application::Frontend(instance) => instance.start().await,
+            Application::Metasrv(instance) => instance.start().await,
+            Application::Standalone(instance) => instance.start().await,
+            Application::Cli(instance) => instance.start().await,
         }
     }
 
@@ -188,7 +188,7 @@ async fn main() -> Result<()> {
     let mut app = cmd.build(opts).await?;
 
     tokio::select! {
-        result = app.run() => {
+        result = app.start() => {
             if let Err(err) = result {
                 error!(err; "Fatal error occurs!");
             }

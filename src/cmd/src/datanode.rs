@@ -29,7 +29,7 @@ pub struct Instance {
 }
 
 impl Instance {
-    pub async fn run(&mut self) -> Result<()> {
+    pub async fn start(&mut self) -> Result<()> {
         self.datanode.start().await.context(StartDatanodeSnafu)
     }
 
