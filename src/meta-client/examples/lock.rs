@@ -16,8 +16,8 @@ use std::time::Duration;
 
 use api::v1::meta::Role;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::rpc::lock::{LockRequest, UnlockRequest};
 use meta_client::client::{MetaClient, MetaClientBuilder};
-use meta_client::rpc::lock::{LockRequest, UnlockRequest};
 use tracing::{info, subscriber};
 use tracing_subscriber::FmtSubscriber;
 

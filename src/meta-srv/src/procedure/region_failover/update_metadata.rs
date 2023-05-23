@@ -16,7 +16,7 @@ use api::v1::meta::{TableName, TableRouteValue};
 use async_trait::async_trait;
 use catalog::helper::TableGlobalKey;
 use common_meta::peer::Peer;
-use common_meta::router::TableRoute;
+use common_meta::rpc::router::TableRoute;
 use common_meta::RegionIdent;
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};

@@ -20,7 +20,14 @@ mod store;
 
 use api::v1::meta::Role;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
-use common_meta::router::{CreateRequest, DeleteRequest, RouteRequest, RouteResponse};
+use common_meta::rpc::lock::{LockRequest, LockResponse, UnlockRequest};
+use common_meta::rpc::router::{CreateRequest, DeleteRequest, RouteRequest, RouteResponse};
+use common_meta::rpc::store::{
+    BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
+    BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
+    DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest, PutResponse,
+    RangeRequest, RangeResponse,
+};
 use common_telemetry::info;
 use heartbeat::Client as HeartbeatClient;
 use lock::Client as LockClient;
@@ -31,13 +38,6 @@ use store::Client as StoreClient;
 pub use self::heartbeat::{HeartbeatSender, HeartbeatStream};
 use crate::error;
 use crate::error::{ConvertMetaRequestSnafu, ConvertMetaResponseSnafu, Result};
-use crate::rpc::lock::{LockRequest, LockResponse, UnlockRequest};
-use crate::rpc::{
-    BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
-    BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
-    DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest, PutResponse,
-    RangeRequest, RangeResponse,
-};
 
 pub type Id = (u64, u64);
 
@@ -251,22 +251,38 @@ impl MetaClient {
 
     /// Range gets the keys in the range from the key-value store.
     pub async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
-        self.store_client()?.range(req.into()).await?.try_into()
+        self.store_client()?
+            .range(req.into())
+            .await?
+            .try_into()
+            .context(ConvertMetaResponseSnafu)
     }
 
     /// Put puts the given key into the key-value store.
     pub async fn put(&self, req: PutRequest) -> Result<PutResponse> {
-        self.store_client()?.put(req.into()).await?.try_into()
+        self.store_client()?
+            .put(req.into())
+            .await?
+            .try_into()
+            .context(ConvertMetaResponseSnafu)
     }
 
     /// BatchGet atomically get values by the given keys from the key-value store.
     pub async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse> {
-        self.store_client()?.batch_get(req.into()).await?.try_into()
+        self.store_client()?
+            .batch_get(req.into())
+            .await?
+            .try_into()
+            .context(ConvertMetaResponseSnafu)
     }
 
     /// BatchPut atomically puts the given keys into the key-value store.
     pub async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
-        self.store_client()?.batch_put(req.into()).await?.try_into()
+        self.store_client()?
+            .batch_put(req.into())
+            .await?
+            .try_into()
+            .context(ConvertMetaResponseSnafu)
     }
 
     /// BatchDelete atomically deletes the given keys from the key-value store.
@@ -275,6 +291,7 @@ impl MetaClient {
             .batch_delete(req.into())
             .await?
             .try_into()
+            .context(ConvertMetaResponseSnafu)
     }
 
     /// CompareAndPut atomically puts the value to the given updated
@@ -287,6 +304,7 @@ impl MetaClient {
             .compare_and_put(req.into())
             .await?
             .try_into()
+            .context(ConvertMetaResponseSnafu)
     }
 
     /// DeleteRange deletes the given range from the key-value store.
@@ -295,6 +313,7 @@ impl MetaClient {
             .delete_range(req.into())
             .await?
             .try_into()
+            .context(ConvertMetaResponseSnafu)
     }
 
     /// MoveValue atomically renames the key to the given updated key.
@@ -303,6 +322,7 @@ impl MetaClient {
             .move_value(req.into())
             .await?
             .try_into()
+            .context(ConvertMetaResponseSnafu)
     }
 
     pub async fn lock(&self, req: LockRequest) -> Result<LockResponse> {
@@ -360,7 +380,7 @@ mod tests {
 
     use api::v1::meta::{HeartbeatRequest, Peer};
     use chrono::DateTime;
-    use common_meta::router::Partition;
+    use common_meta::rpc::router::Partition;
     use common_meta::table_name::TableName;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, RawSchema};
