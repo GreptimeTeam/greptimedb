@@ -37,7 +37,7 @@ use datatypes::arrow::datatypes::Schema as ArrowSchema;
 use datatypes::schema::{Schema, SchemaRef};
 use object_store::ObjectStore;
 use snafu::ResultExt;
-use table::table::scan::SimpleTableScan;
+use table::table::scan::StreamScanAdapter;
 
 use crate::error::{self, BuildStreamSnafu, Result};
 
@@ -117,7 +117,7 @@ fn build_scan_plan<T: FileOpener + Send + 'static>(
     .context(error::BuildStreamSnafu)?;
     let adapter = RecordBatchStreamAdapter::try_new(Box::pin(stream))
         .context(error::BuildStreamAdapterSnafu)?;
-    Ok(Arc::new(SimpleTableScan::new(Box::pin(adapter))))
+    Ok(Arc::new(StreamScanAdapter::new(Box::pin(adapter))))
 }
 
 fn build_record_batch_stream<T: FileOpener + Send + 'static>(

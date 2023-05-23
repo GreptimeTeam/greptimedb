@@ -33,7 +33,7 @@ use store_api::storage::{RegionNumber, ScanRequest};
 
 use crate::error::Result;
 use crate::metadata::{TableId, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType};
-use crate::table::scan::SimpleTableScan;
+use crate::table::scan::StreamScanAdapter;
 use crate::table::{Expr, Table};
 
 const NUMBER_COLUMN: &str = "number";
@@ -132,7 +132,7 @@ impl Table for NumbersTable {
         )
         .into()];
         Ok(Arc::new(
-            SimpleTableScan::new(stream).with_output_ordering(output_ordering),
+            StreamScanAdapter::new(stream).with_output_ordering(output_ordering),
         ))
     }
 

@@ -34,7 +34,7 @@ use crate::error::{Result, SchemaConversionSnafu, TableProjectionSnafu, TablesRe
 use crate::metadata::{
     TableId, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType, TableVersion,
 };
-use crate::table::scan::SimpleTableScan;
+use crate::table::scan::StreamScanAdapter;
 use crate::{ColumnStatistics, Table, TableStatistics};
 
 #[derive(Debug, Clone)]
@@ -167,7 +167,7 @@ impl Table for MemTable {
         )
         .map_err(BoxedError::new)
         .context(TablesRecordBatchSnafu)?;
-        Ok(Arc::new(SimpleTableScan::new(Box::pin(MemtableStream {
+        Ok(Arc::new(StreamScanAdapter::new(Box::pin(MemtableStream {
             schema: recordbatch.schema.clone(),
             recordbatch: Some(recordbatch),
         }))))

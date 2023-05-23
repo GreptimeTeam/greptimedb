@@ -48,7 +48,7 @@ use table::metadata::{
 use table::requests::{
     AddColumnRequest, AlterKind, AlterTableRequest, DeleteRequest, InsertRequest,
 };
-use table::table::scan::SimpleTableScan;
+use table::table::scan::StreamScanAdapter;
 use table::table::{AlterContext, Table};
 use table::{error as table_error, RegionStat};
 use tokio::sync::Mutex;
@@ -211,7 +211,7 @@ impl<R: Region> Table for MitoTable<R> {
         });
 
         let stream = Box::pin(ChunkStream { schema, stream });
-        Ok(Arc::new(SimpleTableScan::new(stream)))
+        Ok(Arc::new(StreamScanAdapter::new(stream)))
     }
 
     async fn scan_to_stream(&self, request: ScanRequest) -> TableResult<SendableRecordBatchStream> {

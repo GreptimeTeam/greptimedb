@@ -16,6 +16,7 @@ use std::collections::{HashMap, HashSet};
 
 use common_error::ext::ErrorExt;
 use common_query::logical_plan::Expr;
+use datatypes::arrow::compute::SortOptions;
 use datatypes::vectors::VectorRef;
 
 use crate::storage::{ColumnDescriptor, RegionDescriptor, SequenceNumber};
@@ -38,7 +39,7 @@ pub trait WriteRequest: Send {
     fn delete(&mut self, keys: HashMap<String, VectorRef>) -> Result<(), Self::Error>;
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Debug)]
 pub struct ScanRequest {
     /// Max sequence number to read, None for latest sequence.
     ///
@@ -50,12 +51,18 @@ pub struct ScanRequest {
     /// Filters pushed down
     pub filters: Vec<Expr>,
     /// Expected output ordering. This is only a hint and isn't guaranteed.
-    pub output_ordering: Option<Vec<usize>>,
+    pub output_ordering: Option<Vec<OrderOption>>,
     /// limit can be used to reduce the amount scanned
     /// from the datasource as a performance optimization.
     /// If set, it contains the amount of rows needed by the caller,
     /// The data source should return *at least* this number of rows if available.
     pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct OrderOption {
+    pub index: usize,
+    pub options: SortOptions,
 }
 
 #[derive(Debug)]

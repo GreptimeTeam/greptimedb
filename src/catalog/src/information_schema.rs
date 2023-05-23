@@ -26,7 +26,6 @@ use datafusion::datasource::streaming::{PartitionStream, StreamingTable};
 use datatypes::schema::SchemaRef;
 use snafu::ResultExt;
 use store_api::storage::ScanRequest;
-use table::table::adapter::TableAdapter;
 use table::{Result as TableResult, Table, TableRef};
 
 use self::columns::InformationSchemaColumns;
