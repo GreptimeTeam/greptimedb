@@ -21,10 +21,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use common_query::physical_plan::PhysicalPlanRef;
 use common_query::prelude::Expr;
-use common_recordbatch::{DfSendableRecordBatchStream, SendableRecordBatchStream};
-use datafusion::datasource::streaming::{PartitionStream, StreamingTable};
+use common_recordbatch::SendableRecordBatchStream;
+use datafusion::datasource::streaming::PartitionStream;
 use datatypes::schema::SchemaRef;
-use snafu::ResultExt;
 use store_api::storage::ScanRequest;
 use table::{Result as TableResult, Table, TableRef};
 
