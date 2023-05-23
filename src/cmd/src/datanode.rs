@@ -91,7 +91,7 @@ struct StartCommand {
     #[clap(short, long)]
     config_file: Option<String>,
     #[clap(long)]
-    data_dir: Option<String>,
+    data_home: Option<String>,
     #[clap(long)]
     wal_dir: Option<String>,
     #[clap(long)]
@@ -147,14 +147,14 @@ impl StartCommand {
             .fail();
         }
 
-        if let Some(data_dir) = &self.data_dir {
+        if let Some(data_home) = &self.data_home {
             opts.storage.store = ObjectStoreConfig::File(FileConfig {
-                data_dir: data_dir.clone(),
+                data_home: data_home.clone(),
             });
         }
 
         if let Some(wal_dir) = &self.wal_dir {
-            opts.wal.dir = wal_dir.clone();
+            opts.wal.dir = Some(wal_dir.clone());
         }
 
         if let Some(http_addr) = &self.http_addr {
@@ -214,7 +214,7 @@ mod tests {
             tcp_nodelay = true
 
             [wal]
-            dir = "/tmp/greptimedb/wal"
+            dir = "/other/wal"
             file_size = "1GB"
             purge_threshold = "50GB"
             purge_interval = "10m"
@@ -223,7 +223,7 @@ mod tests {
 
             [storage]
             type = "File"
-            data_dir = "/tmp/greptimedb/data/"
+            data_home = "/tmp/greptimedb/"
 
             [storage.compaction]
             max_inflight_tasks = 3
@@ -255,6 +255,7 @@ mod tests {
         assert_eq!(2, options.mysql_runtime_size);
         assert_eq!(Some(42), options.node_id);
 
+        assert_eq!("/other/wal", options.wal.dir.unwrap());
         assert_eq!(Duration::from_secs(600), options.wal.purge_interval);
         assert_eq!(1024 * 1024 * 1024, options.wal.file_size.0);
         assert_eq!(1024 * 1024 * 1024 * 50, options.wal.purge_threshold.0);
@@ -273,8 +274,8 @@ mod tests {
         assert!(tcp_nodelay);
 
         match &options.storage.store {
-            ObjectStoreConfig::File(FileConfig { data_dir, .. }) => {
-                assert_eq!("/tmp/greptimedb/data/", data_dir)
+            ObjectStoreConfig::File(FileConfig { data_home, .. }) => {
+                assert_eq!("/tmp/greptimedb/", data_home)
             }
             ObjectStoreConfig::S3 { .. } => unreachable!(),
             ObjectStoreConfig::Oss { .. } => unreachable!(),
@@ -374,7 +375,6 @@ mod tests {
             tcp_nodelay = true
 
             [wal]
-            dir = "/tmp/greptimedb/wal"
             file_size = "1GB"
             purge_threshold = "50GB"
             purge_interval = "10m"
@@ -383,7 +383,7 @@ mod tests {
 
             [storage]
             type = "File"
-            data_dir = "/tmp/greptimedb/data/"
+            data_home = "/tmp/greptimedb/"
 
             [storage.compaction]
             max_inflight_tasks = 3
@@ -464,7 +464,7 @@ mod tests {
                 assert_eq!(opts.storage.compaction.max_purge_tasks, 32);
 
                 // Should be read from cli, cli > config file > env > default values.
-                assert_eq!(opts.wal.dir, "/other/wal/dir");
+                assert_eq!(opts.wal.dir.unwrap(), "/other/wal/dir");
 
                 // Should be default value.
                 assert_eq!(

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Datanode configurations
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,6 +36,9 @@ use crate::instance::{Instance, InstanceRef};
 use crate::server::Services;
 
 pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize(1024);
+
+/// Default data home in file storage
+const DEFAULT_DATA_HOME: &str = "/tmp/greptimedb";
 
 /// Object storage config
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,7 +63,7 @@ pub struct StorageConfig {
 #[derive(Debug, Clone, Serialize, Default, Deserialize)]
 #[serde(default)]
 pub struct FileConfig {
-    pub data_dir: String,
+    pub data_home: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,7 +127,7 @@ impl Default for OssConfig {
 impl Default for ObjectStoreConfig {
     fn default() -> Self {
         ObjectStoreConfig::File(FileConfig {
-            data_dir: "/tmp/greptimedb/data/".to_string(),
+            data_home: DEFAULT_DATA_HOME.to_string(),
         })
     }
 }
@@ -131,7 +136,7 @@ impl Default for ObjectStoreConfig {
 #[serde(default)]
 pub struct WalConfig {
     // wal directory
-    pub dir: String,
+    pub dir: Option<String>,
     // wal file size in bytes
     pub file_size: ReadableSize,
     // wal purge threshold in bytes
@@ -148,7 +153,7 @@ pub struct WalConfig {
 impl Default for WalConfig {
     fn default() -> Self {
         Self {
-            dir: "/tmp/greptimedb/wal".to_string(),
+            dir: None,
             file_size: ReadableSize::gb(1),        // log file size 1G
             purge_threshold: ReadableSize::gb(50), // purge threshold 50G
             purge_interval: Duration::from_secs(600),
@@ -342,7 +347,7 @@ pub struct Datanode {
 
 impl Datanode {
     pub async fn new(opts: DatanodeOptions) -> Result<Datanode> {
-        let instance = Arc::new(Instance::new(&opts).await?);
+        let instance = Arc::new(Instance::with_opts(&opts).await?);
         let services = match opts.mode {
             Mode::Distributed => Some(Services::try_new(instance.clone(), &opts).await?),
             Mode::Standalone => None,

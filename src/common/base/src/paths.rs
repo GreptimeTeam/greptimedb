@@ -12,17 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
-#![feature(trait_upcasting)]
+//! Path constants for table engines, cluster states and WAL
+/// All paths relative to data_home(file storage) or root path(S3, OSS etc).
 
-pub mod datanode;
-pub mod error;
-mod heartbeat;
-pub mod instance;
-pub mod metrics;
-mod mock;
-pub mod server;
-pub mod sql;
-mod store;
-#[cfg(test)]
-mod tests;
+/// WAL dir for local file storage
+pub const WAL_DIR: &str = "wal/";
+
+/// Data dir for table engines
+pub const DATA_DIR: &str = "data/";
+
+/// Cluster state dir
+pub const CLUSTER_DIR: &str = "cluster/";

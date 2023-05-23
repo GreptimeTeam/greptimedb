@@ -429,6 +429,9 @@ pub enum Error {
     StopProcedureManager {
         source: common_procedure::error::Error,
     },
+
+    #[snafu(display("Missing WAL dir config"))]
+    MissingWalDirConfig { location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -483,6 +486,7 @@ impl ErrorExt for Error {
             | MissingNodeId { .. }
             | MissingMetasrvOpts { .. }
             | ColumnNoneDefaultValue { .. }
+            | MissingWalDirConfig { .. }
             | PrepareImmutableTable { .. } => StatusCode::InvalidArguments,
 
             EncodeJson { .. } | DecodeJson { .. } | PayloadNotExist { .. } => {

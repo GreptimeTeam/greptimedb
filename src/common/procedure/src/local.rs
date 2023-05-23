@@ -343,6 +343,7 @@ impl ManagerContext {
 /// Config for [LocalManager].
 #[derive(Debug)]
 pub struct ManagerConfig {
+    pub parent_path: String,
     pub max_retry_times: usize,
     pub retry_delay: Duration,
     pub remove_outdated_meta_task_interval: Duration,
@@ -352,6 +353,7 @@ pub struct ManagerConfig {
 impl Default for ManagerConfig {
     fn default() -> Self {
         Self {
+            parent_path: "".to_string(),
             max_retry_times: 3,
             retry_delay: Duration::from_millis(500),
             remove_outdated_meta_task_interval: Duration::from_secs(60 * 10),
@@ -363,7 +365,7 @@ impl Default for ManagerConfig {
 /// A [ProcedureManager] that maintains procedure states locally.
 pub struct LocalManager {
     manager_ctx: Arc<ManagerContext>,
-    state_store: StateStoreRef,
+    procedure_store: Arc<ProcedureStore>,
     max_retry_times: usize,
     retry_delay: Duration,
     remove_outdated_meta_task: RepeatedTask<Error>,
@@ -382,7 +384,7 @@ impl LocalManager {
         );
         LocalManager {
             manager_ctx,
-            state_store,
+            procedure_store: Arc::new(ProcedureStore::new(&config.parent_path, state_store)),
             max_retry_times: config.max_retry_times,
             retry_delay: config.retry_delay,
             remove_outdated_meta_task,
@@ -405,7 +407,7 @@ impl LocalManager {
             exponential_builder: ExponentialBuilder::default()
                 .with_min_delay(self.retry_delay)
                 .with_max_times(self.max_retry_times),
-            store: ProcedureStore::new(self.state_store.clone()),
+            store: self.procedure_store.clone(),
             rolling_back: false,
         };
 
@@ -466,8 +468,7 @@ impl ProcedureManager for LocalManager {
         logging::info!("LocalManager start to recover");
         let recover_start = Instant::now();
 
-        let procedure_store = ProcedureStore::new(self.state_store.clone());
-        let (messages, finished_ids) = procedure_store.load_messages().await?;
+        let (messages, finished_ids) = self.procedure_store.load_messages().await?;
 
         for (procedure_id, message) in &messages {
             if message.parent_id.is_none() {
@@ -502,7 +503,7 @@ impl ProcedureManager for LocalManager {
             );
 
             for procedure_id in finished_ids {
-                if let Err(e) = procedure_store.delete_procedure(procedure_id).await {
+                if let Err(e) = self.procedure_store.delete_procedure(procedure_id).await {
                     logging::error!(e; "Failed to delete procedure {}", procedure_id);
                 }
             }
@@ -571,7 +572,7 @@ mod tests {
 
     use super::*;
     use crate::error::Error;
-    use crate::store::ObjectStateStore;
+    use crate::store::state_store::ObjectStateStore;
     use crate::{Context, Procedure, Status};
 
     #[test]
@@ -680,6 +681,7 @@ mod tests {
     fn test_register_loader() {
         let dir = create_temp_dir("register");
         let config = ManagerConfig {
+            parent_path: "data/".to_string(),
             max_retry_times: 3,
             retry_delay: Duration::from_millis(500),
             ..Default::default()
@@ -702,6 +704,7 @@ mod tests {
         let dir = create_temp_dir("recover");
         let object_store = test_util::new_object_store(&dir);
         let config = ManagerConfig {
+            parent_path: "data/".to_string(),
             max_retry_times: 3,
             retry_delay: Duration::from_millis(500),
             ..Default::default()
@@ -714,7 +717,7 @@ mod tests {
             .unwrap();
 
         // Prepare data
-        let procedure_store = ProcedureStore::from(object_store.clone());
+        let procedure_store = ProcedureStore::from_object_store(object_store.clone());
         let root: BoxedProcedure = Box::new(ProcedureToLoad::new("test recover manager"));
         let root_id = ProcedureId::random();
         // Prepare data for the root procedure.
@@ -749,6 +752,7 @@ mod tests {
     async fn test_submit_procedure() {
         let dir = create_temp_dir("submit");
         let config = ManagerConfig {
+            parent_path: "data/".to_string(),
             max_retry_times: 3,
             retry_delay: Duration::from_millis(500),
             ..Default::default()
@@ -798,6 +802,7 @@ mod tests {
     async fn test_state_changed_on_err() {
         let dir = create_temp_dir("on_err");
         let config = ManagerConfig {
+            parent_path: "data/".to_string(),
             max_retry_times: 3,
             retry_delay: Duration::from_millis(500),
             ..Default::default()
@@ -860,6 +865,7 @@ mod tests {
         let dir = create_temp_dir("remove_outdated_meta_task");
         let object_store = test_util::new_object_store(&dir);
         let config = ManagerConfig {
+            parent_path: "data/".to_string(),
             max_retry_times: 3,
             retry_delay: Duration::from_millis(500),
             remove_outdated_meta_task_interval: Duration::from_millis(1),

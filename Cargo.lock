@@ -1872,6 +1872,8 @@ dependencies = [
 name = "common-test-util"
 version = "0.2.0"
 dependencies = [
+ "once_cell",
+ "rand",
  "tempfile",
 ]
 

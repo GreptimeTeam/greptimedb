@@ -211,14 +211,14 @@ impl Env {
         #[derive(Serialize)]
         struct Context {
             wal_dir: String,
-            data_dir: String,
+            data_home: String,
             procedure_dir: String,
         }
 
         let greptimedb_dir = format!("/tmp/greptimedb-{subcommand}-{}", db_ctx.time);
         let ctx = Context {
             wal_dir: format!("{greptimedb_dir}/wal/"),
-            data_dir: format!("{greptimedb_dir}/data/"),
+            data_home: format!("{greptimedb_dir}/"),
             procedure_dir: format!("{greptimedb_dir}/procedure/"),
         };
         let rendered = tt.render(subcommand, &ctx).unwrap();

@@ -11,18 +11,16 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-#![feature(assert_matches)]
-#![feature(trait_upcasting)]
+use once_cell::sync::OnceCell;
+use rand::Rng;
 
-pub mod datanode;
-pub mod error;
-mod heartbeat;
-pub mod instance;
-pub mod metrics;
-mod mock;
-pub mod server;
-pub mod sql;
-mod store;
-#[cfg(test)]
-mod tests;
+static PORTS: OnceCell<AtomicUsize> = OnceCell::new();
+
+/// Return a unique port(in runtime) for test
+pub fn get_port() -> usize {
+    PORTS
+        .get_or_init(|| AtomicUsize::new(rand::thread_rng().gen_range(3000..3800)))
+        .fetch_add(1, Ordering::Relaxed)
+}

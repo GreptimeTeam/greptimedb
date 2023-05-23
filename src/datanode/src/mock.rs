@@ -32,7 +32,7 @@ impl Instance {
     pub async fn with_mock_meta_server(opts: &DatanodeOptions, meta_srv: MockInfo) -> Result<Self> {
         let meta_client = Arc::new(mock_meta_client(meta_srv, opts.node_id.unwrap_or(42)).await);
         let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
-        Instance::new_with(opts, Some(meta_client), compaction_scheduler).await
+        Instance::new(opts, Some(meta_client), compaction_scheduler).await
     }
 }
 
