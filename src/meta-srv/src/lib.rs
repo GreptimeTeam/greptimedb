@@ -29,10 +29,15 @@ pub mod metasrv;
 mod metrics;
 #[cfg(feature = "mock")]
 pub mod mocks;
-mod procedure;
+pub mod procedure;
 pub mod selector;
 mod sequence;
 pub mod service;
+pub mod table_routes;
+
+#[cfg(test)]
+mod test_util;
+
 pub mod util;
 
 pub use crate::error::Result;

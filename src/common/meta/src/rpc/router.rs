@@ -16,16 +16,18 @@ use std::collections::{HashMap, HashSet};
 
 use api::v1::meta::{
     CreateRequest as PbCreateRequest, DeleteRequest as PbDeleteRequest, Partition as PbPartition,
-    Region as PbRegion, RouteRequest as PbRouteRequest, RouteResponse as PbRouteResponse,
-    Table as PbTable,
+    Peer as PbPeer, Region as PbRegion, RegionRoute as PbRegionRoute,
+    RouteRequest as PbRouteRequest, RouteResponse as PbRouteResponse, Table as PbTable,
+    TableRoute as PbTableRoute,
 };
 use serde::{Deserialize, Serialize, Serializer};
 use snafu::{OptionExt, ResultExt};
 use table::metadata::RawTableInfo;
 
-use crate::error;
-use crate::error::Result;
-use crate::rpc::{util, Peer, TableName};
+use crate::error::{self, Result};
+use crate::peer::Peer;
+use crate::rpc::util;
+use crate::table_name::TableName;
 
 #[derive(Debug, Clone)]
 pub struct CreateRequest<'a> {
@@ -125,57 +127,124 @@ impl TryFrom<PbRouteResponse> for RouteResponse {
     fn try_from(pb: PbRouteResponse) -> Result<Self> {
         util::check_response_header(pb.header.as_ref())?;
 
-        let peers: Vec<Peer> = pb.peers.into_iter().map(Into::into).collect();
-        let get_peer = |index: u64| peers.get(index as usize).map(ToOwned::to_owned);
-        let mut table_routes = Vec::with_capacity(pb.table_routes.len());
-        for table_route in pb.table_routes.into_iter() {
-            let table = table_route
-                .table
-                .context(error::RouteInfoCorruptedSnafu {
-                    err_msg: "table required",
-                })?
-                .try_into()?;
-
-            let mut region_routes = Vec::with_capacity(table_route.region_routes.len());
-            for region_route in table_route.region_routes.into_iter() {
-                let region = region_route
-                    .region
-                    .context(error::RouteInfoCorruptedSnafu {
-                        err_msg: "'region' not found",
-                    })?
-                    .into();
-
-                let leader_peer = get_peer(region_route.leader_peer_index);
-                let follower_peers = region_route
-                    .follower_peer_indexes
-                    .into_iter()
-                    .filter_map(get_peer)
-                    .collect::<Vec<_>>();
-
-                region_routes.push(RegionRoute {
-                    region,
-                    leader_peer,
-                    follower_peers,
-                });
-            }
-
-            table_routes.push(TableRoute {
-                table,
-                region_routes,
-            });
-        }
-
+        let table_routes = pb
+            .table_routes
+            .into_iter()
+            .map(|x| TableRoute::try_from_raw(&pb.peers, x))
+            .collect::<Result<Vec<_>>>()?;
         Ok(Self { table_routes })
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct TableRoute {
     pub table: Table,
     pub region_routes: Vec<RegionRoute>,
 }
 
 impl TableRoute {
+    pub fn try_from_raw(peers: &[PbPeer], table_route: PbTableRoute) -> Result<Self> {
+        let table = table_route
+            .table
+            .context(error::RouteInfoCorruptedSnafu {
+                err_msg: "'table' is empty in table route",
+            })?
+            .try_into()?;
+
+        let mut region_routes = Vec::with_capacity(table_route.region_routes.len());
+        for region_route in table_route.region_routes.into_iter() {
+            let region = region_route
+                .region
+                .context(error::RouteInfoCorruptedSnafu {
+                    err_msg: "'region' is empty in region route",
+                })?
+                .into();
+
+            let leader_peer = peers
+                .get(region_route.leader_peer_index as usize)
+                .cloned()
+                .map(Into::into);
+
+            let follower_peers = region_route
+                .follower_peer_indexes
+                .into_iter()
+                .filter_map(|x| peers.get(x as usize).cloned().map(Into::into))
+                .collect::<Vec<_>>();
+
+            region_routes.push(RegionRoute {
+                region,
+                leader_peer,
+                follower_peers,
+            });
+        }
+
+        Ok(Self {
+            table,
+            region_routes,
+        })
+    }
+
+    pub fn try_into_raw(self) -> Result<(Vec<PbPeer>, PbTableRoute)> {
+        let mut peers = HashSet::new();
+        self.region_routes
+            .iter()
+            .filter_map(|x| x.leader_peer.as_ref())
+            .for_each(|p| {
+                peers.insert(p.clone());
+            });
+        self.region_routes
+            .iter()
+            .flat_map(|x| x.follower_peers.iter())
+            .for_each(|p| {
+                peers.insert(p.clone());
+            });
+        let mut peers = peers.into_iter().map(Into::into).collect::<Vec<PbPeer>>();
+        peers.sort_by_key(|x| x.id);
+
+        let find_peer = |peer_id: u64| -> u64 {
+            peers
+                .iter()
+                .enumerate()
+                .find_map(|(i, x)| {
+                    if x.id == peer_id {
+                        Some(i as u64)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| {
+                    panic!("Peer {peer_id} must be present when collecting all peers.")
+                })
+        };
+
+        let mut region_routes = Vec::with_capacity(self.region_routes.len());
+        for region_route in self.region_routes.into_iter() {
+            let leader_peer_index = region_route.leader_peer.map(|x| find_peer(x.id)).context(
+                error::RouteInfoCorruptedSnafu {
+                    err_msg: "'leader_peer' is empty in region route",
+                },
+            )?;
+
+            let follower_peer_indexes = region_route
+                .follower_peers
+                .iter()
+                .map(|x| find_peer(x.id))
+                .collect::<Vec<_>>();
+
+            region_routes.push(PbRegionRoute {
+                region: Some(region_route.region.into()),
+                leader_peer_index,
+                follower_peer_indexes,
+            });
+        }
+
+        let table_route = PbTableRoute {
+            table: Some(self.table.into()),
+            region_routes,
+        };
+        Ok((peers, table_route))
+    }
+
     pub fn find_leaders(&self) -> HashSet<Peer> {
         self.region_routes
             .iter()
@@ -199,7 +268,7 @@ impl TableRoute {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Table {
     pub id: u64,
     pub table_name: TableName,
@@ -225,14 +294,24 @@ impl TryFrom<PbTable> for Table {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+impl From<Table> for PbTable {
+    fn from(table: Table) -> Self {
+        PbTable {
+            id: table.id,
+            table_name: Some(table.table_name.into()),
+            table_schema: table.table_schema,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 pub struct RegionRoute {
     pub region: Region,
     pub leader_peer: Option<Peer>,
     pub follower_peers: Vec<Peer>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 pub struct Region {
     pub id: u64,
     pub name: String,
@@ -251,7 +330,18 @@ impl From<PbRegion> for Region {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+impl From<Region> for PbRegion {
+    fn from(region: Region) -> Self {
+        Self {
+            id: region.id,
+            name: region.name,
+            partition: region.partition.map(Into::into),
+            attrs: region.attrs,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Partition {
     #[serde(serialize_with = "as_utf8_vec")]
     pub column_list: Vec<Vec<u8>>,
@@ -494,5 +584,98 @@ mod tests {
         assert_eq!(1, region_route.follower_peers.len());
         assert_eq!(2, region_route.follower_peers.get(0).unwrap().id);
         assert_eq!("peer2", region_route.follower_peers.get(0).unwrap().addr);
+    }
+
+    #[test]
+    fn test_table_route_raw_conversion() {
+        let raw_peers = vec![
+            PbPeer {
+                id: 1,
+                addr: "a1".to_string(),
+            },
+            PbPeer {
+                id: 2,
+                addr: "a2".to_string(),
+            },
+            PbPeer {
+                id: 3,
+                addr: "a3".to_string(),
+            },
+        ];
+
+        // region distribution:
+        // region id => leader peer id + [follower peer id]
+        // 1 => 2 + [1, 3]
+        // 2 => 1 + [2, 3]
+
+        let raw_table_route = PbTableRoute {
+            table: Some(PbTable {
+                id: 1,
+                table_name: Some(PbTableName {
+                    catalog_name: "c1".to_string(),
+                    schema_name: "s1".to_string(),
+                    table_name: "t1".to_string(),
+                }),
+                table_schema: vec![],
+            }),
+            region_routes: vec![
+                PbRegionRoute {
+                    region: Some(PbRegion {
+                        id: 1,
+                        name: "r1".to_string(),
+                        partition: None,
+                        attrs: HashMap::new(),
+                    }),
+                    leader_peer_index: 1,
+                    follower_peer_indexes: vec![0, 2],
+                },
+                PbRegionRoute {
+                    region: Some(PbRegion {
+                        id: 2,
+                        name: "r2".to_string(),
+                        partition: None,
+                        attrs: HashMap::new(),
+                    }),
+                    leader_peer_index: 0,
+                    follower_peer_indexes: vec![1, 2],
+                },
+            ],
+        };
+        let table_route = TableRoute {
+            table: Table {
+                id: 1,
+                table_name: TableName::new("c1", "s1", "t1"),
+                table_schema: vec![],
+            },
+            region_routes: vec![
+                RegionRoute {
+                    region: Region {
+                        id: 1,
+                        name: "r1".to_string(),
+                        partition: None,
+                        attrs: HashMap::new(),
+                    },
+                    leader_peer: Some(Peer::new(2, "a2")),
+                    follower_peers: vec![Peer::new(1, "a1"), Peer::new(3, "a3")],
+                },
+                RegionRoute {
+                    region: Region {
+                        id: 2,
+                        name: "r2".to_string(),
+                        partition: None,
+                        attrs: HashMap::new(),
+                    },
+                    leader_peer: Some(Peer::new(1, "a1")),
+                    follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
+                },
+            ],
+        };
+
+        let from_raw = TableRoute::try_from_raw(&raw_peers, raw_table_route.clone()).unwrap();
+        assert_eq!(from_raw, table_route);
+
+        let into_raw = table_route.try_into_raw().unwrap();
+        assert_eq!(into_raw.0, raw_peers);
+        assert_eq!(into_raw.1, raw_table_route);
     }
 }

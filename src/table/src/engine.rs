@@ -15,12 +15,15 @@
 use std::fmt::{self, Display};
 use std::sync::Arc;
 
+use common_base::paths::DATA_DIR;
 use common_procedure::BoxedProcedure;
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, RegionNumber};
 
-use crate::error::Result;
+use crate::error::{self, Result};
 use crate::metadata::TableId;
-use crate::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
+use crate::requests::{
+    AlterTableRequest, CloseTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest,
+};
 use crate::TableRef;
 pub mod manager;
 
@@ -57,6 +60,19 @@ impl<'a> Display for TableReference<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}.{}.{}", self.catalog, self.schema, self.table)
     }
+}
+
+/// CloseTableResult
+///
+/// Returns [`CloseTableResult::Released`] and closed region numbers if a table was removed
+/// from the engine.
+/// Returns [`CloseTableResult::PartialClosed`] and closed region numbers if only partial
+/// regions were closed.
+#[derive(Debug)]
+pub enum CloseTableResult {
+    Released(Vec<RegionNumber>),
+    PartialClosed(Vec<RegionNumber>),
+    NotFound,
 }
 
 /// Table engine abstraction.
@@ -104,7 +120,21 @@ pub trait TableEngine: Send + Sync {
     /// Drops the given table. Return true if the table is dropped, or false if the table doesn't exist.
     async fn drop_table(&self, ctx: &EngineContext, request: DropTableRequest) -> Result<bool>;
 
-    /// Close the table.
+    /// Closes the (partial) given table.
+    ///
+    /// Removes a table from the engine if all regions are closed.
+    async fn close_table(
+        &self,
+        _ctx: &EngineContext,
+        _request: CloseTableRequest,
+    ) -> Result<CloseTableResult> {
+        error::UnsupportedSnafu {
+            operation: "close_table",
+        }
+        .fail()?
+    }
+
+    /// Close the engine.
     async fn close(&self) -> Result<()>;
 }
 
@@ -153,7 +183,7 @@ pub fn region_id(table_id: TableId, n: u32) -> RegionId {
 
 #[inline]
 pub fn table_dir(catalog_name: &str, schema_name: &str, table_id: TableId) -> String {
-    format!("{catalog_name}/{schema_name}/{table_id}/")
+    format!("{DATA_DIR}{catalog_name}/{schema_name}/{table_id}/")
 }
 
 #[cfg(test)]

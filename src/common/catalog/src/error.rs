@@ -36,9 +36,6 @@ pub enum Error {
         location: Location,
         source: serde_json::error::Error,
     },
-
-    #[snafu(display("Failed to parse node id: {}", key))]
-    ParseNodeId { key: String, location: Location },
 }
 
 impl ErrorExt for Error {
@@ -47,7 +44,6 @@ impl ErrorExt for Error {
             Error::InvalidCatalog { .. }
             | Error::DeserializeCatalogEntryValue { .. }
             | Error::SerializeCatalogEntryValue { .. } => StatusCode::Unexpected,
-            Error::ParseNodeId { .. } => StatusCode::InvalidArguments,
         }
     }
 

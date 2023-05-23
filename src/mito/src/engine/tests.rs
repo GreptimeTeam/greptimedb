@@ -181,11 +181,11 @@ fn test_region_name() {
 #[test]
 fn test_table_dir() {
     assert_eq!(
-        "greptime/public/1024/",
+        "data/greptime/public/1024/",
         table_dir("greptime", "public", 1024)
     );
     assert_eq!(
-        "0x4354a1/prometheus/1024/",
+        "data/0x4354a1/prometheus/1024/",
         table_dir("0x4354a1", "prometheus", 1024)
     );
 }

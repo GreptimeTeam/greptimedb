@@ -60,7 +60,6 @@ use crate::error::{
 };
 use crate::manifest::action::*;
 use crate::manifest::TableManifest;
-
 #[inline]
 fn table_manifest_dir(table_dir: &str) -> String {
     format!("{table_dir}/manifest/")
@@ -71,7 +70,7 @@ pub struct MitoTable<R: Region> {
     manifest: TableManifest,
     // guarded by `self.alter_lock`
     table_info: ArcSwap<TableInfo>,
-    regions: HashMap<RegionNumber, R>,
+    regions: ArcSwap<HashMap<RegionNumber, R>>,
     alter_lock: Mutex<()>,
 }
 
@@ -89,9 +88,8 @@ impl<R: Region> Table for MitoTable<R> {
         if request.columns_values.is_empty() {
             return Ok(0);
         }
-
-        let region = self
-            .regions
+        let regions = self.regions.load();
+        let region = regions
             .get(&request.region_number)
             .with_context(|| RegionNotFoundSnafu {
                 table: common_catalog::format_full_table_name(
@@ -145,14 +143,16 @@ impl<R: Region> Table for MitoTable<R> {
         _limit: Option<usize>,
     ) -> TableResult<PhysicalPlanRef> {
         let read_ctx = ReadContext::default();
-        let mut readers = Vec::with_capacity(self.regions.len());
+        let regions = self.regions.load();
+
+        let mut readers = Vec::with_capacity(regions.len());
         let mut first_schema: Option<Arc<Schema>> = None;
 
         let table_info = self.table_info.load();
         // TODO(hl): Currently the API between frontend and datanode is under refactoring in
         // https://github.com/GreptimeTeam/greptimedb/issues/597 . Once it's finished, query plan
         // can carry filtered region info to avoid scanning all regions on datanode.
-        for region in self.regions.values() {
+        for region in regions.values() {
             let snapshot = region
                 .snapshot(&read_ctx)
                 .map_err(BoxedError::new)
@@ -261,10 +261,11 @@ impl<R: Region> Table for MitoTable<R> {
         if request.key_column_values.is_empty() {
             return Ok(0);
         }
+        let regions = self.regions.load();
         let mut rows_deleted = 0;
         // TODO(hl): Should be tracked by procedure.
         // TODO(hl): Parse delete request into region->keys instead of delete in each region
-        for region in self.regions.values() {
+        for region in regions.values() {
             let mut write_request = region.write_request();
             let key_column_values = request.key_column_values.clone();
             // Safety: key_column_values isn't empty.
@@ -301,8 +302,10 @@ impl<R: Region> Table for MitoTable<R> {
                 reason: FlushReason::Manually,
             })
             .unwrap_or_default();
+        let regions = self.regions.load();
+
         if let Some(region_number) = region_number {
-            if let Some(region) = self.regions.get(&region_number) {
+            if let Some(region) = regions.get(&region_number) {
                 region
                     .flush(&flush_ctx)
                     .await
@@ -310,37 +313,19 @@ impl<R: Region> Table for MitoTable<R> {
                     .context(table_error::TableOperationSnafu)?;
             }
         } else {
-            futures::future::try_join_all(
-                self.regions.values().map(|region| region.flush(&flush_ctx)),
-            )
-            .await
-            .map_err(BoxedError::new)
-            .context(table_error::TableOperationSnafu)?;
+            futures::future::try_join_all(regions.values().map(|region| region.flush(&flush_ctx)))
+                .await
+                .map_err(BoxedError::new)
+                .context(table_error::TableOperationSnafu)?;
         }
 
         Ok(())
     }
 
-    async fn close(&self) -> TableResult<()> {
-        futures::future::try_join_all(self.regions.values().map(|region| region.close()))
-            .await
-            .map_err(BoxedError::new)
-            .context(table_error::TableOperationSnafu)?;
-
-        Ok(())
-    }
-
-    async fn drop_regions(&self) -> TableResult<()> {
-        futures::future::try_join_all(self.regions.values().map(|region| region.drop_region()))
-            .await
-            .map_err(BoxedError::new)
-            .context(table_error::TableOperationSnafu)?;
-        Ok(())
-    }
-
     fn region_stats(&self) -> TableResult<Vec<RegionStat>> {
-        Ok(self
-            .regions
+        let regions = self.regions.load();
+
+        Ok(regions
             .values()
             .map(|region| RegionStat {
                 region_id: region.id(),
@@ -349,8 +334,10 @@ impl<R: Region> Table for MitoTable<R> {
             .collect())
     }
 
-    fn contain_regions(&self, region: RegionNumber) -> TableResult<bool> {
-        Ok(self.regions.contains_key(&region))
+    fn contains_region(&self, region: RegionNumber) -> TableResult<bool> {
+        let regions = self.regions.load();
+
+        Ok(regions.contains_key(&region))
     }
 }
 
@@ -386,7 +373,7 @@ impl<R: Region> MitoTable<R> {
     ) -> Self {
         Self {
             table_info: ArcSwap::new(Arc::new(table_info)),
-            regions,
+            regions: ArcSwap::new(Arc::new(regions)),
             manifest,
             alter_lock: Mutex::new(()),
         }
@@ -456,8 +443,13 @@ impl<R: Region> MitoTable<R> {
         object_store: ObjectStore,
         compress_type: CompressionType,
     ) -> Result<MitoTable<R>> {
-        let manifest =
-            TableManifest::create(&table_manifest_dir(table_dir), object_store, compress_type);
+        let manifest_dir = table_manifest_dir(table_dir);
+        let manifest = TableManifest::create(&manifest_dir, object_store, compress_type);
+        logging::info!(
+            "Create table manifest at {}, table_name: {}",
+            manifest_dir,
+            table_name
+        );
 
         let _timer =
             common_telemetry::timer!(crate::metrics::MITO_CREATE_TABLE_UPDATE_MANIFEST_ELAPSED);
@@ -529,9 +521,48 @@ impl<R: Region> MitoTable<R> {
         Ok(table_info)
     }
 
+    /// Remove regions
+    /// Notes: Please release regions in StorageEngine.
+    pub async fn remove_regions(
+        &self,
+        region_numbers: &[RegionNumber],
+    ) -> TableResult<HashMap<RegionNumber, R>> {
+        let mut removed = HashMap::with_capacity(region_numbers.len());
+        self.regions.rcu(|regions| {
+            removed.clear();
+            let mut regions = HashMap::clone(regions);
+            for region_number in region_numbers {
+                if let Some(region) = regions.remove(region_number) {
+                    removed.insert(*region_number, region);
+                }
+            }
+
+            Arc::new(regions)
+        });
+
+        Ok(removed)
+    }
+
+    pub async fn drop_regions(&self, region_number: &[RegionNumber]) -> TableResult<()> {
+        let regions = self.remove_regions(region_number).await?;
+
+        futures::future::try_join_all(regions.values().map(|region| region.drop_region()))
+            .await
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)?;
+        Ok(())
+    }
+
+    pub fn is_releasable(&self) -> bool {
+        let regions = self.regions.load();
+
+        regions.is_empty()
+    }
+
     #[inline]
-    pub fn regions(&self) -> &HashMap<RegionNumber, R> {
-        &self.regions
+    pub fn region_ids(&self) -> Vec<RegionNumber> {
+        let regions = self.regions.load();
+        regions.iter().map(|(k, _)| *k).collect()
     }
 
     pub fn set_table_info(&self, table_info: TableInfo) {
@@ -555,7 +586,7 @@ impl<R: Region> MitoTable<R> {
         table_version: TableVersion,
         alter_op: &AlterOperation,
     ) -> TableResult<()> {
-        let regions = self.regions();
+        let regions = self.regions.load();
         for region in regions.values() {
             let region_meta = region.in_memory_metadata();
             if u64::from(region_meta.version()) > table_version {
@@ -585,7 +616,7 @@ impl<R: Region> MitoTable<R> {
     }
 
     pub async fn load_region(&self, region_number: RegionNumber, _region: R) -> TableResult<()> {
-        let info = self.table_info.load_full();
+        let info = self.table_info.load();
 
         // TODO(weny): Supports to load the region
         warn!(

@@ -181,7 +181,7 @@ pub async fn build_meta_srv(opts: &MetaSrvOptions) -> Result<MetaSrv> {
         SelectorType::LeaseBased => Arc::new(LeaseBasedSelector) as SelectorRef,
     };
 
-    let meta_srv = MetaSrvBuilder::new()
+    MetaSrvBuilder::new()
         .options(opts.clone())
         .kv_store(kv_store)
         .in_memory(in_memory)
@@ -190,9 +190,7 @@ pub async fn build_meta_srv(opts: &MetaSrvOptions) -> Result<MetaSrv> {
         .meta_peer_client(meta_peer_client)
         .lock(lock)
         .build()
-        .await;
-
-    Ok(meta_srv)
+        .await
 }
 
 pub async fn make_meta_srv(opts: &MetaSrvOptions) -> Result<MetaSrv> {

@@ -80,12 +80,6 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to execute sql statement, source: {}", source))]
-    ExecuteStatement {
-        #[snafu(backtrace)]
-        source: BoxedError,
-    },
-
     #[snafu(display("Failed to check database validity, source: {}", source))]
     CheckDatabaseValidity {
         #[snafu(backtrace)]
@@ -94,13 +88,6 @@ pub enum Error {
 
     #[snafu(display("Failed to describe statement, source: {}", source))]
     DescribeStatement { source: BoxedError },
-
-    #[snafu(display("Failed to execute alter: {}, source: {}", query, source))]
-    ExecuteAlter {
-        query: String,
-        #[snafu(backtrace)]
-        source: BoxedError,
-    },
 
     #[snafu(display("Failed to insert script with name: {}, source: {}", name, source))]
     InsertScript {
@@ -155,17 +142,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Failed to put OpenTSDB data point: {:?}, source: {}",
-        data_point,
-        source
-    ))]
-    PutOpentsdbDataPoint {
-        data_point: String,
-        #[snafu(backtrace)]
-        source: BoxedError,
-    },
-
     #[snafu(display("Failed to decode prometheus remote request, source: {}", source))]
     DecodePromRemoteRequest {
         location: Location,
@@ -189,15 +165,6 @@ pub enum Error {
         source: api::DecodeError,
         location: Location,
     },
-
-    #[snafu(display("Failed to start frontend service, source: {}", source))]
-    StartFrontend {
-        #[snafu(backtrace)]
-        source: BoxedError,
-    },
-
-    #[snafu(display("Failed to build context, msg: {}", err_msg))]
-    BuildingContext { err_msg: String, location: Location },
 
     #[snafu(display("Tls is required for {}, plain connection is rejected", server))]
     TlsRequired { server: String },
@@ -240,12 +207,6 @@ pub enum Error {
 
     #[snafu(display("Error accessing catalog: {}", source))]
     CatalogError { source: catalog::error::Error },
-
-    #[snafu(display("Failed to convert Flight Message, source: {}", source))]
-    ConvertFlightMessage {
-        #[snafu(backtrace)]
-        source: common_grpc::error::Error,
-    },
 
     #[snafu(display("Cannot find requested database: {}-{}", catalog, schema))]
     DatabaseNotFound { catalog: String, schema: String },
@@ -303,17 +264,13 @@ impl ErrorExt for Error {
             | TcpBind { .. }
             | CatalogError { .. }
             | GrpcReflectionService { .. }
-            | BuildingContext { .. }
             | BuildHttpResponse { .. } => StatusCode::Internal,
 
             InsertScript { source, .. }
             | ExecuteScript { source, .. }
             | ExecuteQuery { source, .. }
             | ExecuteGrpcQuery { source, .. }
-            | ExecuteStatement { source, .. }
-            | CheckDatabaseValidity { source, .. }
-            | ExecuteAlter { source, .. }
-            | PutOpentsdbDataPoint { source, .. } => source.status_code(),
+            | CheckDatabaseValidity { source, .. } => source.status_code(),
 
             NotSupported { .. }
             | InvalidQuery { .. }
@@ -328,13 +285,10 @@ impl ErrorExt for Error {
             | InvalidPrepareStatement { .. }
             | TimePrecision { .. } => StatusCode::InvalidArguments,
 
-            InfluxdbLinesWrite { source, .. } | ConvertFlightMessage { source } => {
-                source.status_code()
-            }
+            InfluxdbLinesWrite { source, .. } => source.status_code(),
 
             Hyper { .. } => StatusCode::Unknown,
             TlsRequired { .. } => StatusCode::Unknown,
-            StartFrontend { source, .. } => source.status_code(),
             Auth { source, .. } => source.status_code(),
             DescribeStatement { source } => source.status_code(),
 

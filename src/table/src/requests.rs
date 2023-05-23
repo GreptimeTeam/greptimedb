@@ -234,6 +234,26 @@ impl DropTableRequest {
     }
 }
 
+/// Drop table request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CloseTableRequest {
+    pub catalog_name: String,
+    pub schema_name: String,
+    pub table_name: String,
+    /// Do nothing if region_numbers is empty
+    pub region_numbers: Vec<RegionNumber>,
+}
+
+impl CloseTableRequest {
+    pub fn table_ref(&self) -> TableReference {
+        TableReference {
+            catalog: &self.catalog_name,
+            schema: &self.schema_name,
+            table: &self.table_name,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct InsertRequest {
     pub catalog_name: String,

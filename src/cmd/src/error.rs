@@ -64,13 +64,6 @@ pub enum Error {
         source: meta_srv::error::Error,
     },
 
-    #[snafu(display("Failed to read config file: {}, source: {}", path, source))]
-    ReadConfig {
-        path: String,
-        source: std::io::Error,
-        location: Location,
-    },
-
     #[snafu(display("Missing config, msg: {}", msg))]
     MissingConfig { msg: String, location: Location },
 
@@ -154,6 +147,12 @@ pub enum Error {
         source: ConfigError,
         location: Location,
     },
+
+    #[snafu(display("Failed to start catalog manager, source: {}", source))]
+    StartCatalogManager {
+        #[snafu(backtrace)]
+        source: catalog::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -169,8 +168,7 @@ impl ErrorExt for Error {
             Error::ShutdownMetaServer { source } => source.status_code(),
             Error::BuildMetaServer { source } => source.status_code(),
             Error::UnsupportedSelectorType { source, .. } => source.status_code(),
-            Error::ReadConfig { .. }
-            | Error::MissingConfig { .. }
+            Error::MissingConfig { .. }
             | Error::LoadLayeredConfig { .. }
             | Error::IllegalConfig { .. }
             | Error::InvalidReplCommand { .. }
@@ -185,6 +183,7 @@ impl ErrorExt for Error {
                 source.status_code()
             }
             Error::SubstraitEncodeLogicalPlan { source } => source.status_code(),
+            Error::StartCatalogManager { source } => source.status_code(),
         }
     }
 

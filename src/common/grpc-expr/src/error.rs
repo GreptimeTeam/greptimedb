@@ -14,7 +14,6 @@
 
 use std::any::Any;
 
-use api::DecodeError;
 use common_error::ext::ErrorExt;
 use common_error::prelude::{Snafu, StatusCode};
 use snafu::Location;
@@ -27,9 +26,6 @@ pub enum Error {
         column_name: String,
         table_name: String,
     },
-
-    #[snafu(display("Failed to convert bytes to insert batch, source: {}", source))]
-    DecodeInsert { source: DecodeError },
 
     #[snafu(display("Illegal delete request, reason: {reason}"))]
     IllegalDeleteRequest { reason: String, location: Location },
@@ -65,12 +61,6 @@ pub enum Error {
     #[snafu(display("Missing required field in protobuf, field: {}", field))]
     MissingField { field: String, location: Location },
 
-    #[snafu(display("Invalid column default constraint, source: {}", source))]
-    ColumnDefaultConstraint {
-        #[snafu(backtrace)]
-        source: datatypes::error::Error,
-    },
-
     #[snafu(display(
         "Invalid column proto definition, column: {}, source: {}",
         column,
@@ -102,9 +92,7 @@ impl ErrorExt for Error {
         match self {
             Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
 
-            Error::DecodeInsert { .. } | Error::IllegalDeleteRequest { .. } => {
-                StatusCode::InvalidArguments
-            }
+            Error::IllegalDeleteRequest { .. } => StatusCode::InvalidArguments,
 
             Error::ColumnDataType { .. } => StatusCode::Internal,
             Error::DuplicatedTimestampColumn { .. } | Error::MissingTimestampColumn { .. } => {
@@ -113,7 +101,6 @@ impl ErrorExt for Error {
             Error::InvalidColumnProto { .. } => StatusCode::InvalidArguments,
             Error::CreateVector { .. } => StatusCode::InvalidArguments,
             Error::MissingField { .. } => StatusCode::InvalidArguments,
-            Error::ColumnDefaultConstraint { source, .. } => source.status_code(),
             Error::InvalidColumnDef { source, .. } => source.status_code(),
             Error::UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
             Error::UnexpectedValuesLength { .. } | Error::ColumnAlreadyExists { .. } => {

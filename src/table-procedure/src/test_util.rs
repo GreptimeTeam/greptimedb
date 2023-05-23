@@ -46,6 +46,10 @@ pub struct TestEnv {
 impl TestEnv {
     pub fn new(prefix: &str) -> TestEnv {
         let dir = create_temp_dir(prefix);
+        TestEnv::from_temp_dir(dir)
+    }
+
+    pub fn from_temp_dir(dir: TempDir) -> TestEnv {
         let store_dir = format!("{}/db", dir.path().to_string_lossy());
         let mut builder = Fs::default();
         builder.root(&store_dir);

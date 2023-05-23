@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use catalog::error::Error as CatalogError;
 use catalog::{CatalogManagerRef, RegisterTableRequest};
 use common_catalog::format_full_table_name;
 use common_meta::instruction::{Instruction, InstructionReply, RegionIdent, SimpleReply};
@@ -25,7 +26,7 @@ use table::engine::EngineContext;
 use table::requests::OpenTableRequest;
 
 use crate::error::{self, Result};
-use crate::heartbeat::handler::HeartbeatResponseHandler;
+use crate::heartbeat::handler::{HandleControl, HeartbeatResponseHandler};
 use crate::heartbeat::HeartbeatResponseHandlerContext;
 
 #[derive(Clone)]
@@ -42,12 +43,11 @@ impl HeartbeatResponseHandler for OpenRegionHandler {
         )
     }
 
-    fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> Result<()> {
+    fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> Result<HandleControl> {
         let Some((meta, Instruction::OpenRegion(region_ident))) = ctx.incoming_message.take() else {
             unreachable!("OpenRegionHandler: should be guarded by 'is_acceptable'");
         };
 
-        ctx.finish();
         let mailbox = ctx.mailbox.clone();
         let self_ref = Arc::new(self.clone());
 
@@ -61,11 +61,21 @@ impl HeartbeatResponseHandler for OpenRegionHandler {
                 error!(e; "Failed to send reply to mailbox");
             }
         });
-        Ok(())
+        Ok(HandleControl::Done)
     }
 }
 
 impl OpenRegionHandler {
+    pub fn new(
+        catalog_manager: CatalogManagerRef,
+        table_engine_manager: TableEngineManagerRef,
+    ) -> Self {
+        Self {
+            catalog_manager,
+            table_engine_manager,
+        }
+    }
+
     fn map_result(result: Result<bool>) -> InstructionReply {
         result.map_or_else(
             |error| {
@@ -91,6 +101,7 @@ impl OpenRegionHandler {
             table_id,
             region_number,
             engine,
+            ..
         } = ident;
 
         (
@@ -105,8 +116,8 @@ impl OpenRegionHandler {
         )
     }
 
-    /// Returns true if table has been opened.
-    async fn check_table(
+    /// Returns true if a table or target regions have been opened.
+    async fn regions_opened(
         &self,
         catalog_name: &str,
         schema_name: &str,
@@ -122,7 +133,7 @@ impl OpenRegionHandler {
             for r in region_numbers {
                 let region_exist =
                     table
-                        .contain_regions(*r)
+                        .contains_region(*r)
                         .with_context(|_| error::CheckRegionSnafu {
                             table_name: format_full_table_name(
                                 catalog_name,
@@ -140,8 +151,9 @@ impl OpenRegionHandler {
                     return Ok(false);
                 }
             }
+            return Ok(true);
         }
-        Ok(true)
+        Ok(false)
     }
 
     async fn open_region_inner(&self, engine: String, request: OpenTableRequest) -> Result<bool> {
@@ -161,7 +173,7 @@ impl OpenRegionHandler {
         let ctx = EngineContext::default();
 
         if self
-            .check_table(catalog_name, schema_name, table_name, region_numbers)
+            .regions_opened(catalog_name, schema_name, table_name, region_numbers)
             .await?
         {
             return Ok(true);
@@ -181,13 +193,13 @@ impl OpenRegionHandler {
                 table_id: request.table_id,
                 table,
             };
-            self.catalog_manager
-                .register_table(request)
-                .await
-                .with_context(|_| error::RegisterTableSnafu {
+            let result = self.catalog_manager.register_table(request).await;
+            match result {
+                Ok(_) | Err(CatalogError::TableExists { .. }) => Ok(true),
+                e => e.with_context(|_| error::RegisterTableSnafu {
                     table_name: format_full_table_name(catalog_name, schema_name, table_name),
-                })?;
-            Ok(true)
+                }),
+            }
         } else {
             // Case 1:
             // TODO(weny): Fix/Cleanup the broken table manifest
@@ -195,6 +207,8 @@ impl OpenRegionHandler {
             // Therefore, we won't meet this case, in theory.
 
             // Case 2: The target region was not found in table meta
+
+            // Case 3: The table not exist
             Ok(false)
         }
     }

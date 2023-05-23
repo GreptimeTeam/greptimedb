@@ -108,12 +108,7 @@ pub trait Table: Send + Sync {
     }
 
     /// Close the table.
-    async fn close(&self) -> Result<()> {
-        Ok(())
-    }
-
-    /// Drop regions
-    async fn drop_regions(&self) -> Result<()> {
+    async fn close(&self, _regions: &[RegionNumber]) -> Result<()> {
         Ok(())
     }
 
@@ -126,7 +121,7 @@ pub trait Table: Send + Sync {
     }
 
     /// Return true if contains the region
-    fn contain_regions(&self, _region: RegionNumber) -> Result<bool> {
+    fn contains_region(&self, _region: RegionNumber) -> Result<bool> {
         UnsupportedSnafu {
             operation: "contain_region",
         }

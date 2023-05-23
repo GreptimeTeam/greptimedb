@@ -12,10 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::{Display, Formatter};
+
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize)]
+use crate::{ClusterId, DatanodeId};
+
+#[derive(Eq, Hash, PartialEq, Clone, Debug, Serialize, Deserialize)]
 pub struct RegionIdent {
+    pub cluster_id: ClusterId,
+    pub datanode_id: DatanodeId,
     pub catalog: String,
     pub schema: String,
     pub table: String,
@@ -24,10 +30,33 @@ pub struct RegionIdent {
     pub region_number: u32,
 }
 
+impl Display for RegionIdent {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "RegionIdent(datanode_id='{}.{}', table_id='{}', table_name='{}.{}.{}', table_engine='{}', region_no='{}')",
+            self.cluster_id,
+            self.datanode_id,
+            self.table_id,
+            self.catalog,
+            self.schema,
+            self.table,
+            self.engine,
+            self.region_number
+        )
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct SimpleReply {
     pub result: bool,
     pub error: Option<String>,
+}
+
+impl Display for SimpleReply {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "(result={}, error={:?})", self.result, self.error)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -37,11 +66,29 @@ pub enum Instruction {
     CloseRegion(RegionIdent),
 }
 
+impl Display for Instruction {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OpenRegion(region) => write!(f, "Instruction::OpenRegion({})", region),
+            Self::CloseRegion(region) => write!(f, "Instruction::CloseRegion({})", region),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InstructionReply {
     OpenRegion(SimpleReply),
     CloseRegion(SimpleReply),
+}
+
+impl Display for InstructionReply {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OpenRegion(reply) => write!(f, "InstructionReply::OpenRegion({})", reply),
+            Self::CloseRegion(reply) => write!(f, "InstructionReply::CloseRegion({})", reply),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -51,6 +98,8 @@ mod tests {
     #[test]
     fn test_serialize_instruction() {
         let open_region = Instruction::OpenRegion(RegionIdent {
+            cluster_id: 1,
+            datanode_id: 2,
             catalog: "foo".to_string(),
             schema: "bar".to_string(),
             table: "hi".to_string(),
@@ -62,11 +111,13 @@ mod tests {
         let serialized = serde_json::to_string(&open_region).unwrap();
 
         assert_eq!(
-            r#"{"type":"open_region","catalog":"foo","schema":"bar","table":"hi","table_id":1024,"engine":"mito","region_number":1}"#,
+            r#"{"type":"open_region","cluster_id":1,"datanode_id":2,"catalog":"foo","schema":"bar","table":"hi","table_id":1024,"engine":"mito","region_number":1}"#,
             serialized
         );
 
         let close_region = Instruction::CloseRegion(RegionIdent {
+            cluster_id: 1,
+            datanode_id: 2,
             catalog: "foo".to_string(),
             schema: "bar".to_string(),
             table: "hi".to_string(),
@@ -78,7 +129,7 @@ mod tests {
         let serialized = serde_json::to_string(&close_region).unwrap();
 
         assert_eq!(
-            r#"{"type":"close_region","catalog":"foo","schema":"bar","table":"hi","table_id":1024,"engine":"mito","region_number":1}"#,
+            r#"{"type":"close_region","cluster_id":1,"datanode_id":2,"catalog":"foo","schema":"bar","table":"hi","table_id":1024,"engine":"mito","region_number":1}"#,
             serialized
         );
     }

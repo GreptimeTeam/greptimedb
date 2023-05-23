@@ -24,7 +24,8 @@ tcp_nodelay = true
 
 # WAL options, see `standalone.example.toml`.
 [wal]
-dir = "/tmp/greptimedb/wal"
+# WAL data directory
+# dir = "/tmp/greptimedb/wal"
 file_size = "1GB"
 purge_threshold = "50GB"
 purge_interval = "10m"
@@ -34,7 +35,7 @@ sync_write = false
 # Storage options, see `standalone.example.toml`.
 [storage]
 type = "File"
-data_dir = "/tmp/greptimedb/data/"
+data_home = "/tmp/greptimedb/"
 
 # Compaction options, see `standalone.example.toml`.
 [storage.compaction]
@@ -58,8 +59,12 @@ checkpoint_on_startup = false
 max_flush_tasks = 8
 # Default write buffer size for a region.
 region_write_buffer_size = "32MB"
+# Interval to check whether a region needs flush.
+picker_schedule_interval = "5m"
 # Interval to auto flush a region if it has not flushed yet.
 auto_flush_interval = "1h"
+# Global write buffer size for all regions.
+global_write_buffer_size = "1GB"
 
 # Procedure storage options, see `standalone.example.toml`.
 [procedure]

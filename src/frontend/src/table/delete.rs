@@ -13,9 +13,9 @@
 // limitations under the License.
 
 use api::v1::DeleteRequest as GrpcDeleteRequest;
+use common_meta::table_name::TableName;
 use common_query::Output;
 use futures::future;
-use meta_client::rpc::TableName;
 use snafu::ResultExt;
 use store_api::storage::RegionNumber;
 use table::requests::DeleteRequest;

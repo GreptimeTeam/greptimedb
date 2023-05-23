@@ -22,6 +22,7 @@ use catalog::helper::{TableGlobalKey, TableGlobalValue};
 use catalog::remote::KvBackendRef;
 use client::Database;
 use common_error::prelude::BoxedError;
+use common_meta::table_name::TableName;
 use common_query::error::Result as QueryResult;
 use common_query::logical_plan::Expr;
 use common_query::physical_plan::{PhysicalPlan, PhysicalPlanRef};
@@ -35,7 +36,6 @@ use datafusion::physical_plan::{
 };
 use datafusion_common::DataFusionError;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
-use meta_client::rpc::TableName;
 use partition::manager::PartitionRuleManagerRef;
 use partition::splitter::WriteSplitter;
 use snafu::prelude::*;
@@ -498,11 +498,10 @@ mod test {
 
     use catalog::error::Result;
     use catalog::remote::{KvBackend, ValueIter};
+    use common_meta::rpc::router::{Region, RegionRoute, Table, TableRoute};
     use datafusion_expr::expr_fn::{and, binary_expr, col, or};
     use datafusion_expr::{lit, Operator};
     use meta_client::client::MetaClient;
-    use meta_client::rpc::router::RegionRoute;
-    use meta_client::rpc::{Region, Table, TableRoute};
     use meter_core::collect::Collect;
     use meter_core::data::{ReadRecord, WriteRecord};
     use meter_core::global::global_registry;

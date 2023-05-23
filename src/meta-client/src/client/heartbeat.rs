@@ -18,6 +18,7 @@ use std::sync::Arc;
 use api::v1::meta::heartbeat_client::HeartbeatClient;
 use api::v1::meta::{AskLeaderRequest, HeartbeatRequest, HeartbeatResponse, RequestHeader, Role};
 use common_grpc::channel_manager::ChannelManager;
+use common_meta::rpc::util;
 use common_telemetry::{debug, info};
 use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::{mpsc, RwLock};
@@ -27,8 +28,7 @@ use tonic::Streaming;
 
 use crate::client::Id;
 use crate::error;
-use crate::error::Result;
-use crate::rpc::util;
+use crate::error::{InvalidResponseHeaderSnafu, Result};
 
 pub struct HeartbeatSender {
     id: Id,
@@ -81,7 +81,8 @@ impl HeartbeatStream {
     pub async fn message(&mut self) -> Result<Option<HeartbeatResponse>> {
         let res = self.stream.message().await.context(error::TonicStatusSnafu);
         if let Ok(Some(heartbeat)) = &res {
-            util::check_response_header(heartbeat.header.as_ref())?;
+            util::check_response_header(heartbeat.header.as_ref())
+                .context(InvalidResponseHeaderSnafu)?;
         }
         res
     }

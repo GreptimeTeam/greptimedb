@@ -39,3 +39,6 @@ benchmarks/data
 # dashboard files
 !/src/servers/dashboard/VERSION
 /src/servers/dashboard/*
+
+# Vscode workspace
+*.code-workspace

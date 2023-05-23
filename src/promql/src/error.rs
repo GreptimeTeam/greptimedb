@@ -49,12 +49,6 @@ pub enum Error {
     #[snafu(display("Cannot find value columns in table {}", table))]
     ValueNotFound { table: String, location: Location },
 
-    #[snafu(display("Cannot find the table {}", table))]
-    TableNotFound {
-        table: String,
-        source: datafusion::error::DataFusionError,
-    },
-
     #[snafu(display(
         "Cannot accept multiple vector as function input, PromQL expr: {:?}",
         expr
@@ -120,7 +114,7 @@ impl ErrorExt for Error {
             | IllegalRange { .. }
             | EmptyRange { .. } => StatusCode::Internal,
 
-            TableNotFound { .. } | TableNameNotFound { .. } => StatusCode::TableNotFound,
+            TableNameNotFound { .. } => StatusCode::TableNotFound,
 
             Catalog { source } => source.status_code(),
         }

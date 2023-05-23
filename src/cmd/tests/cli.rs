@@ -51,7 +51,7 @@ mod tests {
     #[ignore]
     #[test]
     fn test_repl() {
-        let data_dir = create_temp_dir("data");
+        let data_home = create_temp_dir("data");
         let wal_dir = create_temp_dir("wal");
 
         let mut bin_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -65,7 +65,7 @@ mod tests {
                 "start",
                 "--rpc-addr=0.0.0.0:4321",
                 "--node-id=1",
-                &format!("--data-dir={}", data_dir.path().display()),
+                &format!("--data-home={}", data_home.path().display()),
                 &format!("--wal-dir={}", wal_dir.path().display()),
             ])
             .stdout(Stdio::null())

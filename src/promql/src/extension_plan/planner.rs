@@ -25,7 +25,7 @@ use crate::extension_plan::{
     EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
 
-pub struct PromExtensionPlanner {}
+pub struct PromExtensionPlanner;
 
 #[async_trait]
 impl ExtensionPlanner for PromExtensionPlanner {

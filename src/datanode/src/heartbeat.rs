@@ -81,6 +81,8 @@ impl HeartbeatTask {
         handler_executor: HeartbeatResponseHandlerExecutorRef,
         mailbox: MailboxRef,
     ) -> Result<HeartbeatSender> {
+        let client_id = meta_client.id();
+
         let (tx, mut rx) = meta_client.heartbeat().await.context(MetaClientInitSnafu)?;
         common_runtime::spawn_bg(async move {
             while let Some(res) = match rx.message().await {
@@ -90,6 +92,10 @@ impl HeartbeatTask {
                     None
                 }
             } {
+                if let Some(msg) = res.mailbox_message.as_ref() {
+                    info!("Received mailbox message: {msg:?}, meta_client id: {client_id:?}");
+                }
+
                 let ctx = HeartbeatResponseHandlerContext::new(mailbox.clone(), res);
                 if let Err(e) = Self::handle_response(ctx, handler_executor.clone()) {
                     error!(e;"Error while handling heartbeat response");
@@ -124,6 +130,8 @@ impl HeartbeatTask {
         let interval = self.interval;
         let node_id = self.node_id;
         let addr = resolve_addr(&self.server_addr, &self.server_hostname);
+        info!("Starting heartbeat to Metasrv with interval {interval}. My node id is {node_id}, address is {addr}.");
+
         let meta_client = self.meta_client.clone();
         let catalog_manager_clone = self.catalog_manager.clone();
 

@@ -16,7 +16,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::{Column, ColumnDataType, CreateTableExpr};
+use api::v1::alter_expr::Kind;
+use api::v1::{
+    AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, CreateTableExpr, DropColumn,
+    DropColumns, RenameTable,
+};
 use common_error::prelude::BoxedError;
 use datanode::instance::sql::table_idents_to_full_name;
 use datatypes::schema::ColumnSchema;
@@ -25,15 +29,16 @@ use query::sql::prepare_immutable_file_table_files_and_schema;
 use session::context::QueryContextRef;
 use snafu::{ensure, ResultExt};
 use sql::ast::{ColumnDef, ColumnOption, TableConstraint};
-use sql::statements::column_def_to_schema;
+use sql::statements::alter::{AlterTable, AlterTableOperation};
 use sql::statements::create::{CreateExternalTable, CreateTable, TIME_INDEX};
+use sql::statements::{column_def_to_schema, sql_column_def_to_grpc_column_def};
 use sql::util::to_lowercase_options_map;
 use table::requests::{TableOptions, IMMUTABLE_TABLE_META_KEY};
 
 use crate::error::{
     self, BuildCreateExprOnInsertionSnafu, ColumnDataTypeSnafu,
-    ConvertColumnDefaultConstraintSnafu, IllegalPrimaryKeysDefSnafu, InvalidSqlSnafu,
-    ParseSqlSnafu, Result,
+    ConvertColumnDefaultConstraintSnafu, ExternalSnafu, IllegalPrimaryKeysDefSnafu,
+    InvalidSqlSnafu, ParseSqlSnafu, Result,
 };
 
 pub type CreateExprFactoryRef = Arc<dyn CreateExprFactory + Send + Sync>;
@@ -268,6 +273,50 @@ pub(crate) fn column_schemas_to_defs(
             })
         })
         .collect()
+}
+
+pub(crate) fn to_alter_expr(
+    alter_table: AlterTable,
+    query_ctx: QueryContextRef,
+) -> Result<AlterExpr> {
+    let (catalog_name, schema_name, table_name) =
+        table_idents_to_full_name(alter_table.table_name(), query_ctx)
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+
+    let kind = match alter_table.alter_operation() {
+        AlterTableOperation::AddConstraint(_) => {
+            return error::NotSupportedSnafu {
+                feat: "ADD CONSTRAINT",
+            }
+            .fail();
+        }
+        AlterTableOperation::AddColumn { column_def } => Kind::AddColumns(AddColumns {
+            add_columns: vec![AddColumn {
+                column_def: Some(
+                    sql_column_def_to_grpc_column_def(column_def)
+                        .map_err(BoxedError::new)
+                        .context(ExternalSnafu)?,
+                ),
+                is_key: false,
+            }],
+        }),
+        AlterTableOperation::DropColumn { name } => Kind::DropColumns(DropColumns {
+            drop_columns: vec![DropColumn {
+                name: name.value.to_string(),
+            }],
+        }),
+        AlterTableOperation::RenameTable { new_table_name } => Kind::RenameTable(RenameTable {
+            new_table_name: new_table_name.to_string(),
+        }),
+    };
+
+    Ok(AlterExpr {
+        catalog_name,
+        schema_name,
+        table_name,
+        kind: Some(kind),
+    })
 }
 
 #[cfg(test)]

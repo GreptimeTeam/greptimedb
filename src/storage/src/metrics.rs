@@ -30,3 +30,5 @@ pub const REGION_COUNT: &str = "storage.region_count";
 pub const LOG_STORE_WRITE_ELAPSED: &str = "storage.logstore.write.elapsed";
 /// Elapsed time of a compact job.
 pub const COMPACT_ELAPSED: &str = "storage.compact.elapsed";
+/// Global write buffer size in bytes.
+pub const WRITE_BUFFER_BYTES: &str = "storage.write_buffer_bytes";

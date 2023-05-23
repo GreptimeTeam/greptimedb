@@ -402,7 +402,7 @@ impl EngineInner {
 
         let tables = self.tables.read().unwrap().clone();
 
-        futures::future::try_join_all(tables.values().map(|t| t.close()))
+        futures::future::try_join_all(tables.values().map(|t| t.close(&[])))
             .await
             .map_err(BoxedError::new)
             .context(table_error::TableOperationSnafu)?;
@@ -435,8 +435,9 @@ impl EngineInner {
         let _lock = self.table_mutex.lock().await;
 
         if let Some(table) = self.get_table_by_full_name(&full_name) {
+            let regions = Vec::new();
             table
-                .close()
+                .close(&regions)
                 .await
                 .map_err(BoxedError::new)
                 .context(table_error::TableOperationSnafu)?;

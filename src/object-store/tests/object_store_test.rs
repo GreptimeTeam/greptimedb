@@ -18,7 +18,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use common_telemetry::{logging, metric};
 use common_test_util::temp_dir::create_temp_dir;
-use object_store::cache_policy::LruCacheLayer;
+use object_store::layers::LruCacheLayer;
 use object_store::services::{Fs, S3};
 use object_store::test_util::TempFolder;
 use object_store::{util, ObjectStore, ObjectStoreBuilder};

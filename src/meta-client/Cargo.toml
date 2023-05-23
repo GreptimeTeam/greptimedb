@@ -11,6 +11,7 @@ chrono.workspace = true
 common-error = { path = "../common/error" }
 common-grpc = { path = "../common/grpc" }
 common-telemetry = { path = "../common/telemetry" }
+common-meta = { path = "../common/meta" }
 etcd-client = "0.10"
 rand.workspace = true
 serde.workspace = true

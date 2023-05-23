@@ -231,7 +231,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         log::debug!("execute replaced query: {}", query);
 
         let outputs = self.do_query(&query).await;
-        writer::write_output(w, &query, outputs).await?;
+        writer::write_output(w, &query, self.session.context(), outputs).await?;
 
         Ok(())
     }
@@ -263,7 +263,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             ]
         );
         let outputs = self.do_query(query).await;
-        writer::write_output(writer, query, outputs).await?;
+        writer::write_output(writer, query, self.session.context(), outputs).await?;
         Ok(())
     }
 

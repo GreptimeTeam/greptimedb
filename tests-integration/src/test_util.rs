@@ -14,7 +14,6 @@
 
 use std::env;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,6 +23,7 @@ use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID, MITO_ENGINE,
 };
 use common_runtime::Builder as RuntimeBuilder;
+use common_test_util::ports;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datanode::datanode::{
     DatanodeOptions, FileConfig, ObjectStoreConfig, OssConfig, ProcedureConfig, S3Config,
@@ -38,8 +38,6 @@ use frontend::instance::Instance as FeInstance;
 use object_store::services::{Oss, S3};
 use object_store::test_util::TempFolder;
 use object_store::ObjectStore;
-use once_cell::sync::OnceCell;
-use rand::Rng;
 use secrecy::ExposeSecret;
 use servers::grpc::GrpcServer;
 use servers::http::{HttpOptions, HttpServerBuilder};
@@ -52,14 +50,6 @@ use servers::Mode;
 use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineRef};
 use table::requests::{CreateTableRequest, TableOptions};
-
-static PORTS: OnceCell<AtomicUsize> = OnceCell::new();
-
-fn get_port() -> usize {
-    PORTS
-        .get_or_init(|| AtomicUsize::new(rand::thread_rng().gen_range(3500..3900)))
-        .fetch_add(1, Ordering::Relaxed)
-}
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum StorageType {
@@ -104,10 +94,10 @@ fn s3_test_config() -> S3Config {
     }
 }
 
-fn get_test_store_config(
+pub fn get_test_store_config(
     store_type: &StorageType,
     name: &str,
-) -> (ObjectStoreConfig, Option<TempDirGuard>) {
+) -> (ObjectStoreConfig, TempDirGuard) {
     let _ = dotenv::dotenv();
 
     match store_type {
@@ -133,10 +123,7 @@ fn get_test_store_config(
 
             let store = ObjectStore::new(builder).unwrap().finish();
 
-            (
-                config,
-                Some(TempDirGuard::Oss(TempFolder::new(&store, "/"))),
-            )
+            (config, TempDirGuard::Oss(TempFolder::new(&store, "/")))
         }
         StorageType::S3 | StorageType::S3WithCache => {
             let mut s3_config = s3_test_config();
@@ -163,41 +150,40 @@ fn get_test_store_config(
 
             let store = ObjectStore::new(builder).unwrap().finish();
 
-            (config, Some(TempDirGuard::S3(TempFolder::new(&store, "/"))))
+            (config, TempDirGuard::S3(TempFolder::new(&store, "/")))
         }
         StorageType::File => {
             let data_tmp_dir = create_temp_dir(&format!("gt_data_{name}"));
 
             (
                 ObjectStoreConfig::File(FileConfig {
-                    data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
+                    data_home: data_tmp_dir.path().to_str().unwrap().to_string(),
                 }),
-                Some(TempDirGuard::File(data_tmp_dir)),
+                TempDirGuard::File(data_tmp_dir),
             )
         }
     }
 }
 
-enum TempDirGuard {
+pub enum TempDirGuard {
     File(TempDir),
     S3(TempFolder),
     Oss(TempFolder),
 }
 
-/// Create a tmp dir(will be deleted once it goes out of scope.) and a default `DatanodeOptions`,
-/// Only for test.
 pub struct TestGuard {
-    _wal_tmp_dir: TempDir,
-    data_tmp_dir: Option<TempDirGuard>,
+    pub wal_guard: WalGuard,
+    pub storage_guard: StorageGuard,
 }
+
+pub struct WalGuard(pub TempDir);
+
+pub struct StorageGuard(pub TempDirGuard);
 
 impl TestGuard {
     pub async fn remove_all(&mut self) {
-        if let Some(TempDirGuard::S3(mut guard)) = self.data_tmp_dir.take() {
-            guard.remove_all().await.unwrap();
-        }
-        if let Some(TempDirGuard::Oss(mut guard)) = self.data_tmp_dir.take() {
-            guard.remove_all().await.unwrap();
+        if let TempDirGuard::S3(guard) | TempDirGuard::Oss(guard) = &mut self.storage_guard.0 {
+            guard.remove_all().await.unwrap()
         }
     }
 }
@@ -207,12 +193,24 @@ pub fn create_tmp_dir_and_datanode_opts(
     name: &str,
 ) -> (DatanodeOptions, TestGuard) {
     let wal_tmp_dir = create_temp_dir(&format!("gt_wal_{name}"));
+    let wal_dir = wal_tmp_dir.path().to_str().unwrap().to_string();
 
     let (store, data_tmp_dir) = get_test_store_config(&store_type, name);
+    let opts = create_datanode_opts(store, wal_dir);
 
-    let opts = DatanodeOptions {
+    (
+        opts,
+        TestGuard {
+            wal_guard: WalGuard(wal_tmp_dir),
+            storage_guard: StorageGuard(data_tmp_dir),
+        },
+    )
+}
+
+pub fn create_datanode_opts(store: ObjectStoreConfig, wal_dir: String) -> DatanodeOptions {
+    DatanodeOptions {
         wal: WalConfig {
-            dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
+            dir: Some(wal_dir),
             ..Default::default()
         },
         storage: StorageConfig {
@@ -222,14 +220,7 @@ pub fn create_tmp_dir_and_datanode_opts(
         mode: Mode::Standalone,
         procedure: ProcedureConfig::default(),
         ..Default::default()
-    };
-    (
-        opts,
-        TestGuard {
-            _wal_tmp_dir: wal_tmp_dir,
-            data_tmp_dir,
-        },
-    )
+    }
 }
 
 pub async fn create_test_table(
@@ -299,7 +290,12 @@ pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router
         .await
         .unwrap();
     instance.start().await.unwrap();
-    let http_server = HttpServerBuilder::new(HttpOptions::default())
+
+    let http_opts = HttpOptions {
+        addr: format!("127.0.0.1:{}", ports::get_port()),
+        ..Default::default()
+    };
+    let http_server = HttpServerBuilder::new(http_opts)
         .with_sql_handler(ServerSqlQueryHandlerAdaptor::arc(Arc::new(
             frontend_instance,
         )))
@@ -326,8 +322,14 @@ pub async fn setup_test_http_app_with_frontend(
     )
     .await
     .unwrap();
+
+    let http_opts = HttpOptions {
+        addr: format!("127.0.0.1:{}", ports::get_port()),
+        ..Default::default()
+    };
+
     let frontend_ref = Arc::new(frontend);
-    let http_server = HttpServerBuilder::new(HttpOptions::default())
+    let http_server = HttpServerBuilder::new(http_opts)
         .with_sql_handler(ServerSqlQueryHandlerAdaptor::arc(frontend_ref.clone()))
         .with_grpc_handler(ServerGrpcQueryHandlerAdaptor::arc(frontend_ref.clone()))
         .with_script_handler(frontend_ref)
@@ -375,7 +377,7 @@ pub async fn setup_grpc_server(
             .unwrap(),
     );
 
-    let fe_grpc_addr = format!("127.0.0.1:{}", get_port());
+    let fe_grpc_addr = format!("127.0.0.1:{}", ports::get_port());
 
     let fe_instance = FeInstance::try_new_standalone(instance.clone())
         .await

@@ -22,6 +22,7 @@ use datatypes::schema::{ColumnSchema, SchemaRef};
 use opensrv_mysql::{
     Column, ColumnFlags, ColumnType, ErrorKind, OkResponse, QueryResultWriter, RowWriter,
 };
+use session::context::QueryContextRef;
 use snafu::prelude::*;
 use tokio::io::AsyncWrite;
 
@@ -31,9 +32,10 @@ use crate::error::{self, Error, Result};
 pub async fn write_output<'a, W: AsyncWrite + Send + Sync + Unpin>(
     w: QueryResultWriter<'a, W>,
     query: &str,
+    query_context: QueryContextRef,
     outputs: Vec<Result<Output>>,
 ) -> Result<()> {
-    let mut writer = Some(MysqlResultWriter::new(w));
+    let mut writer = Some(MysqlResultWriter::new(w, query_context.clone()));
     for output in outputs {
         let result_writer = writer.take().context(error::InternalSnafu {
             err_msg: "Sending multiple result set is unsupported",
@@ -54,11 +56,18 @@ struct QueryResult {
 
 pub struct MysqlResultWriter<'a, W: AsyncWrite + Unpin> {
     writer: QueryResultWriter<'a, W>,
+    query_context: QueryContextRef,
 }
 
 impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
-    pub fn new(writer: QueryResultWriter<'a, W>) -> MysqlResultWriter<'a, W> {
-        MysqlResultWriter::<'a, W> { writer }
+    pub fn new(
+        writer: QueryResultWriter<'a, W>,
+        query_context: QueryContextRef,
+    ) -> MysqlResultWriter<'a, W> {
+        MysqlResultWriter::<'a, W> {
+            writer,
+            query_context,
+        }
     }
 
     /// Try to write one result set. If there are more than one result set, return `Some`.
@@ -80,18 +89,23 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                         recordbatches,
                         schema,
                     };
-                    Self::write_query_result(query, query_result, self.writer).await?;
+                    Self::write_query_result(query, query_result, self.writer, self.query_context)
+                        .await?;
                 }
                 Output::RecordBatches(recordbatches) => {
                     let query_result = QueryResult {
                         schema: recordbatches.schema(),
                         recordbatches: recordbatches.take(),
                     };
-                    Self::write_query_result(query, query_result, self.writer).await?;
+                    Self::write_query_result(query, query_result, self.writer, self.query_context)
+                        .await?;
                 }
                 Output::AffectedRows(rows) => {
                     let next_writer = Self::write_affected_rows(self.writer, rows).await?;
-                    return Ok(Some(MysqlResultWriter::new(next_writer)));
+                    return Ok(Some(MysqlResultWriter::new(
+                        next_writer,
+                        self.query_context,
+                    )));
                 }
             },
             Err(error) => Self::write_query_error(query, error, self.writer).await?,
@@ -122,6 +136,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
         query: &str,
         query_result: QueryResult,
         writer: QueryResultWriter<'a, W>,
+        query_context: QueryContextRef,
     ) -> Result<()> {
         match create_mysql_column_def(&query_result.schema) {
             Ok(column_def) => {
@@ -129,7 +144,8 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                 // to return a new QueryResultWriter.
                 let mut row_writer = writer.start(&column_def).await?;
                 for recordbatch in &query_result.recordbatches {
-                    Self::write_recordbatch(&mut row_writer, recordbatch).await?;
+                    Self::write_recordbatch(&mut row_writer, recordbatch, query_context.clone())
+                        .await?;
                 }
                 row_writer.finish().await?;
                 Ok(())
@@ -141,6 +157,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
     async fn write_recordbatch(
         row_writer: &mut RowWriter<'_, W>,
         recordbatch: &RecordBatch,
+        query_context: QueryContextRef,
     ) -> Result<()> {
         for row in recordbatch.rows() {
             for value in row.into_iter() {
@@ -161,7 +178,8 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                     Value::Binary(v) => row_writer.write_col(v.deref())?,
                     Value::Date(v) => row_writer.write_col(v.val())?,
                     Value::DateTime(v) => row_writer.write_col(v.val())?,
-                    Value::Timestamp(v) => row_writer.write_col(v.to_local_string())?,
+                    Value::Timestamp(v) => row_writer
+                        .write_col(v.to_timezone_aware_string(query_context.time_zone()))?,
                     Value::List(_) => {
                         return Err(Error::Internal {
                             err_msg: format!(

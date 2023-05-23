@@ -127,15 +127,21 @@ impl Instance {
     ) -> Result<Self> {
         let meta_client = Self::create_meta_client(opts).await?;
 
+        let datanode_clients = Arc::new(DatanodeClients::default());
+
+        Self::try_new_distributed_with(meta_client, datanode_clients, plugins).await
+    }
+
+    pub async fn try_new_distributed_with(
+        meta_client: Arc<MetaClient>,
+        datanode_clients: Arc<DatanodeClients>,
+        plugins: Arc<Plugins>,
+    ) -> Result<Self> {
         let meta_backend = Arc::new(MetaKvBackend {
             client: meta_client.clone(),
         });
         let table_routes = Arc::new(TableRoutes::new(meta_client.clone()));
         let partition_manager = Arc::new(PartitionRuleManager::new(table_routes));
-
-        let mut datanode_clients = DatanodeClients::default();
-        datanode_clients.start();
-        let datanode_clients = Arc::new(datanode_clients);
 
         let mut catalog_manager =
             FrontendCatalogManager::new(meta_backend, partition_manager, datanode_clients.clone());
@@ -151,7 +157,7 @@ impl Instance {
         let catalog_manager = Arc::new(catalog_manager);
 
         let query_engine =
-            QueryEngineFactory::new_with_plugins(catalog_manager.clone(), plugins.clone())
+            QueryEngineFactory::new_with_plugins(catalog_manager.clone(), false, plugins.clone())
                 .query_engine();
 
         let script_executor =
@@ -197,7 +203,7 @@ impl Instance {
             .connect_timeout(Duration::from_millis(meta_config.connect_timeout_millis))
             .tcp_nodelay(meta_config.tcp_nodelay);
 
-        let mut channel_manager = ChannelManager::with_config(channel_config);
+        let channel_manager = ChannelManager::with_config(channel_config);
         channel_manager.start_channel_recycle();
 
         let mut meta_client = MetaClientBuilder::new(0, 0, Role::Frontend)
@@ -243,36 +249,6 @@ impl Instance {
         self.servers = Arc::new(servers);
 
         Ok(())
-    }
-
-    pub async fn new_distributed(
-        catalog_manager: CatalogManagerRef,
-        dist_instance: Arc<DistInstance>,
-    ) -> Self {
-        let query_engine = QueryEngineFactory::new(catalog_manager.clone()).query_engine();
-        let script_executor = Arc::new(
-            ScriptExecutor::new(catalog_manager.clone(), query_engine.clone())
-                .await
-                .unwrap(),
-        );
-
-        let statement_executor = Arc::new(StatementExecutor::new(
-            catalog_manager.clone(),
-            query_engine.clone(),
-            dist_instance.clone(),
-        ));
-
-        Instance {
-            catalog_manager,
-            script_executor,
-            statement_executor,
-            query_engine,
-            create_expr_factory: Arc::new(DefaultCreateExprFactory),
-            grpc_query_handler: dist_instance,
-            plugins: Default::default(),
-            servers: Arc::new(HashMap::new()),
-            heartbeat_task: None,
-        }
     }
 
     pub fn catalog_manager(&self) -> &CatalogManagerRef {

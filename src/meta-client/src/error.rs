@@ -18,13 +18,6 @@ use snafu::Location;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Failed to connect to {}, source: {}", url, source))]
-    ConnectFailed {
-        url: String,
-        source: tonic::transport::Error,
-        location: Location,
-    },
-
     #[snafu(display("Illegal GRPC client state: {}", err_msg))]
     IllegalGrpcClientState { err_msg: String, location: Location },
 
@@ -55,20 +48,22 @@ pub enum Error {
     #[snafu(display("Failed create heartbeat stream to server"))]
     CreateHeartbeatStream { location: Location },
 
-    #[snafu(display("Route info corrupted: {}", err_msg))]
-    RouteInfoCorrupted { err_msg: String, location: Location },
-
-    #[snafu(display("Illegal state from server, code: {}, error: {}", code, err_msg))]
-    IllegalServerState {
-        code: i32,
-        err_msg: String,
-        location: Location,
+    #[snafu(display("Invalid response header, source: {}", source))]
+    InvalidResponseHeader {
+        #[snafu(backtrace)]
+        source: common_meta::error::Error,
     },
 
-    #[snafu(display("Failed to serde json, source: {}", source))]
-    SerdeJson {
-        source: serde_json::error::Error,
-        location: Location,
+    #[snafu(display("Failed to convert Metasrv request, source: {}", source))]
+    ConvertMetaRequest {
+        #[snafu(backtrace)]
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Failed to convert Metasrv response, source: {}", source))]
+    ConvertMetaResponse {
+        #[snafu(backtrace)]
+        source: common_meta::error::Error,
     },
 }
 
@@ -82,18 +77,18 @@ impl ErrorExt for Error {
 
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::ConnectFailed { .. }
-            | Error::IllegalGrpcClientState { .. }
+            Error::IllegalGrpcClientState { .. }
             | Error::TonicStatus { .. }
             | Error::AskLeader { .. }
             | Error::NoLeader { .. }
             | Error::NotStarted { .. }
             | Error::SendHeartbeat { .. }
             | Error::CreateHeartbeatStream { .. }
-            | Error::CreateChannel { .. }
-            | Error::IllegalServerState { .. }
-            | Error::SerdeJson { .. } => StatusCode::Internal,
-            Error::RouteInfoCorrupted { .. } => StatusCode::Unexpected,
+            | Error::CreateChannel { .. } => StatusCode::Internal,
+
+            Error::InvalidResponseHeader { source }
+            | Error::ConvertMetaRequest { source }
+            | Error::ConvertMetaResponse { source } => source.status_code(),
         }
     }
 }

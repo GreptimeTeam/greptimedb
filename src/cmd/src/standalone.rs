@@ -21,14 +21,11 @@ use common_telemetry::logging::LoggingOptions;
 use datanode::datanode::{Datanode, DatanodeOptions, ProcedureConfig, StorageConfig, WalConfig};
 use datanode::instance::InstanceRef;
 use frontend::frontend::FrontendOptions;
-use frontend::grpc::GrpcOptions;
-use frontend::influxdb::InfluxdbOptions;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
-use frontend::mysql::MysqlOptions;
-use frontend::opentsdb::OpentsdbOptions;
-use frontend::postgres::PostgresOptions;
-use frontend::prom::PromOptions;
-use frontend::prometheus::PrometheusOptions;
+use frontend::service_config::{
+    GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PromOptions,
+    PrometheusOptions,
+};
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
@@ -155,7 +152,7 @@ pub struct Instance {
 }
 
 impl Instance {
-    pub async fn run(&mut self) -> Result<()> {
+    pub async fn start(&mut self) -> Result<()> {
         // Start datanode instance before starting services, to avoid requests come in before internal components are started.
         self.datanode
             .start_instance()
@@ -452,7 +449,7 @@ mod tests {
         );
         assert!(fe_opts.influxdb_options.as_ref().unwrap().enable);
 
-        assert_eq!("/tmp/greptimedb/test/wal", dn_opts.wal.dir);
+        assert_eq!("/tmp/greptimedb/test/wal", dn_opts.wal.dir.unwrap());
         match &dn_opts.storage.store {
             datanode::datanode::ObjectStoreConfig::S3(s3_config) => {
                 assert_eq!(

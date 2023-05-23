@@ -18,6 +18,7 @@ use common_error::status_code::StatusCode as ErrorCode;
 use serde_json::json;
 use servers::http::handler::HealthResponse;
 use servers::http::{JsonOutput, JsonResponse};
+use servers::prom::PromJsonResponse;
 use tests_integration::test_util::{
     setup_test_http_app, setup_test_http_app_with_frontend, setup_test_prom_app_with_frontend,
     StorageType,
@@ -348,6 +349,37 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
+
+    // label values
+    // should return error if there is no match[]
+    let res = client.get("/api/v1/label/instance/values").send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let prom_resp = res.json::<PromJsonResponse>().await;
+    assert_eq!(prom_resp.status, "error");
+    assert!(prom_resp.error.is_some_and(|err| !err.is_empty()));
+    assert!(prom_resp.error_type.is_some_and(|err| !err.is_empty()));
+
+    // single match[]
+    let res = client
+        .get("/api/v1/label/instance/values?match[]=up")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let prom_resp = res.json::<PromJsonResponse>().await;
+    assert_eq!(prom_resp.status, "success");
+    assert!(prom_resp.error.is_none());
+    assert!(prom_resp.error_type.is_none());
+
+    // multiple match[]
+    let res = client
+        .get("/api/v1/label/instance/values?match[]=up&match[]=system_metrics")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let prom_resp = res.json::<PromJsonResponse>().await;
+    assert_eq!(prom_resp.status, "success");
+    assert!(prom_resp.error.is_none());
+    assert!(prom_resp.error_type.is_none());
     guard.remove_all().await;
 }
 

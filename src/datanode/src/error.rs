@@ -18,7 +18,6 @@ use common_error::prelude::*;
 use common_procedure::ProcedureId;
 use serde_json::error::Error as JsonError;
 use snafu::Location;
-use storage::error::Error as StorageError;
 use store_api::storage::RegionNumber;
 use table::error::Error as TableError;
 
@@ -40,6 +39,13 @@ pub enum Error {
         source: catalog::error::Error,
     },
 
+    #[snafu(display("Failed to deregister table: {}, source: {}", table_name, source))]
+    DeregisterTable {
+        table_name: String,
+        #[snafu(backtrace)]
+        source: catalog::error::Error,
+    },
+
     #[snafu(display("Failed to open table: {}, source: {}", table_name, source))]
     OpenTable {
         table_name: String,
@@ -52,6 +58,19 @@ pub enum Error {
         table_name: String,
         #[snafu(backtrace)]
         source: catalog::error::Error,
+    },
+
+    #[snafu(display(
+        "Failed to close regions {:?} in table {}, source: {}",
+        region_numbers,
+        table_name,
+        source
+    ))]
+    CloseTable {
+        table_name: String,
+        region_numbers: Vec<RegionNumber>,
+        #[snafu(backtrace)]
+        source: TableError,
     },
 
     #[snafu(display("Failed to send message: {err_msg}"))]
@@ -111,13 +130,6 @@ pub enum Error {
 
     #[snafu(display("Failed to get table: {}, source: {}", table_name, source))]
     GetTable {
-        table_name: String,
-        #[snafu(backtrace)]
-        source: TableError,
-    },
-
-    #[snafu(display("Failed to alter table {}, source: {}", table_name, source))]
-    AlterTable {
         table_name: String,
         #[snafu(backtrace)]
         source: TableError,
@@ -216,15 +228,6 @@ pub enum Error {
         source: std::net::AddrParseError,
     },
 
-    #[snafu(display("Failed to bind address {}, source: {}", addr, source))]
-    TcpBind {
-        addr: String,
-        source: std::io::Error,
-    },
-
-    #[snafu(display("Failed to start gRPC server, source: {}", source))]
-    StartGrpc { source: tonic::transport::Error },
-
     #[snafu(display("Failed to create directory {}, source: {}", dir, source))]
     CreateDir { dir: String, source: std::io::Error },
 
@@ -236,9 +239,6 @@ pub enum Error {
         #[snafu(backtrace)]
         source: log_store::error::Error,
     },
-
-    #[snafu(display("Failed to storage engine, source: {}", source))]
-    OpenStorageEngine { source: StorageError },
 
     #[snafu(display("Failed to init backend, source: {}", source))]
     InitBackend {
@@ -258,12 +258,6 @@ pub enum Error {
     #[snafu(display("Not support SQL, error: {}", msg))]
     NotSupportSql { msg: String },
 
-    #[snafu(display("Failed to convert datafusion schema, source: {}", source))]
-    ConvertSchema {
-        #[snafu(backtrace)]
-        source: datatypes::error::Error,
-    },
-
     #[snafu(display("Specified timestamp key or primary key column not found: {}", name))]
     KeyColumnNotFound { name: String, location: Location },
 
@@ -277,18 +271,6 @@ pub enum Error {
     ConstraintNotSupported {
         constraint: String,
         location: Location,
-    },
-
-    #[snafu(display("Failed to insert into system catalog table, source: {}", source))]
-    InsertSystemCatalog {
-        #[snafu(backtrace)]
-        source: catalog::error::Error,
-    },
-
-    #[snafu(display("Failed to rename table, source: {}", source))]
-    RenameTable {
-        #[snafu(backtrace)]
-        source: catalog::error::Error,
     },
 
     #[snafu(display("Failed to register a new schema, source: {}", source))]
@@ -335,12 +317,6 @@ pub enum Error {
         source: common_time::error::Error,
     },
 
-    #[snafu(display("Failed to infer schema: {}", source))]
-    InferSchema {
-        #[snafu(backtrace)]
-        source: query::error::Error,
-    },
-
     #[snafu(display("Failed to prepare immutable table: {}", source))]
     PrepareImmutableTable {
         #[snafu(backtrace)]
@@ -383,12 +359,6 @@ pub enum Error {
         source: table::error::Error,
     },
 
-    #[snafu(display("Failed to do vector computation, source: {}", source))]
-    VectorComputation {
-        #[snafu(backtrace)]
-        source: datatypes::error::Error,
-    },
-
     #[snafu(display("Missing node id option in distributed mode"))]
     MissingNodeId { location: Location },
 
@@ -417,12 +387,6 @@ pub enum Error {
         column,
     ))]
     ColumnNoneDefaultValue { column: String, location: Location },
-
-    #[snafu(display("Failed to describe schema for given statement, source: {}", source))]
-    DescribeStatement {
-        #[snafu(backtrace)]
-        source: query::error::Error,
-    },
 
     #[snafu(display("Unrecognized table option: {}", source))]
     UnrecognizedTableOption {
@@ -492,6 +456,9 @@ pub enum Error {
     StopProcedureManager {
         source: common_procedure::error::Error,
     },
+
+    #[snafu(display("Missing WAL dir config"))]
+    MissingWalDirConfig { location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -503,21 +470,21 @@ impl ErrorExt for Error {
             ExecuteSql { source }
             | PlanStatement { source }
             | ExecuteStatement { source }
-            | ExecuteLogicalPlan { source }
-            | DescribeStatement { source } => source.status_code(),
+            | ExecuteLogicalPlan { source } => source.status_code(),
 
             OpenTable { source, .. } => source.status_code(),
-            RegisterTable { source, .. } | AccessCatalog { source, .. } => source.status_code(),
+            RegisterTable { source, .. }
+            | DeregisterTable { source, .. }
+            | AccessCatalog { source, .. } => source.status_code(),
 
             DecodeLogicalPlan { source } => source.status_code(),
             NewCatalog { source } | RegisterSchema { source } => source.status_code(),
             FindTable { source, .. } => source.status_code(),
-            CreateTable { source, .. }
-            | GetTable { source, .. }
-            | AlterTable { source, .. }
-            | CheckRegion { source, .. } => source.status_code(),
+            CreateTable { source, .. } | CheckRegion { source, .. } => source.status_code(),
             DropTable { source, .. } => source.status_code(),
             FlushTable { source, .. } => source.status_code(),
+            GetTable { source, .. } => source.status_code(),
+            CloseTable { source, .. } => source.status_code(),
 
             Insert { source, .. } => source.status_code(),
             Delete { source, .. } => source.status_code(),
@@ -533,10 +500,6 @@ impl ErrorExt for Error {
             | CreateExprToRequest { source }
             | DeleteExprToRequest { source }
             | InsertData { source } => source.status_code(),
-
-            ConvertSchema { source, .. } | VectorComputation { source } => source.status_code(),
-
-            InferSchema { source, .. } => source.status_code(),
 
             ColumnValuesNumberMismatch { .. }
             | InvalidSql { .. }
@@ -554,6 +517,7 @@ impl ErrorExt for Error {
             | MissingNodeId { .. }
             | MissingMetasrvOpts { .. }
             | ColumnNoneDefaultValue { .. }
+            | MissingWalDirConfig { .. }
             | PrepareImmutableTable { .. } => StatusCode::InvalidArguments,
 
             EncodeJson { .. } | DecodeJson { .. } | PayloadNotExist { .. } => {
@@ -563,12 +527,8 @@ impl ErrorExt for Error {
             // TODO(yingwen): Further categorize http error.
             StartServer { .. }
             | ParseAddr { .. }
-            | TcpBind { .. }
-            | StartGrpc { .. }
             | CreateDir { .. }
             | RemoveDir { .. }
-            | InsertSystemCatalog { .. }
-            | RenameTable { .. }
             | Catalog { .. }
             | MissingRequiredField { .. }
             | IncorrectInternalState { .. }
@@ -580,7 +540,6 @@ impl ErrorExt for Error {
             InitBackend { .. } => StatusCode::StorageUnavailable,
 
             OpenLogStore { source } => source.status_code(),
-            OpenStorageEngine { source } => source.status_code(),
             RuntimeResource { .. } => StatusCode::RuntimeResourcesExhausted,
             MetaClientInit { source, .. } => source.status_code(),
             TableIdProviderNotFound { .. } => StatusCode::Unsupported,

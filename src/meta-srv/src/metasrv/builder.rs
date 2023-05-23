@@ -18,15 +18,19 @@ use std::sync::Arc;
 use common_procedure::local::{LocalManager, ManagerConfig};
 
 use crate::cluster::MetaPeerClient;
+use crate::error::Result;
 use crate::handler::mailbox_handler::MailboxHandler;
 use crate::handler::{
     CheckLeaderHandler, CollectStatsHandler, HeartbeatHandlerGroup, HeartbeatMailbox,
-    KeepLeaseHandler, OnLeaderStartHandler, PersistStatsHandler, RegionFailureHandler,
+    KeepLeaseHandler, OnLeaderStartHandler, PersistStatsHandler, Pushers, RegionFailureHandler,
     ResponseHeaderHandler,
 };
 use crate::lock::DistLockRef;
 use crate::metadata_service::{DefaultMetadataService, MetadataServiceRef};
-use crate::metasrv::{ElectionRef, MetaSrv, MetaSrvOptions, SelectorRef, TABLE_ID_SEQ};
+use crate::metasrv::{
+    ElectionRef, MetaSrv, MetaSrvOptions, SelectorContext, SelectorRef, TABLE_ID_SEQ,
+};
+use crate::procedure::region_failover::RegionFailoverManager;
 use crate::procedure::state_store::MetaStateStore;
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::sequence::Sequence;
@@ -106,7 +110,7 @@ impl MetaSrvBuilder {
         self
     }
 
-    pub async fn build(self) -> MetaSrv {
+    pub async fn build(self) -> Result<MetaSrv> {
         let started = Arc::new(AtomicBool::new(false));
 
         let MetaSrvBuilder {
@@ -129,13 +133,34 @@ impl MetaSrvBuilder {
 
         let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector));
 
+        let pushers = Pushers::default();
+        let mailbox_sequence = Sequence::new("heartbeat_mailbox", 1, 100, kv_store.clone());
+        let mailbox = HeartbeatMailbox::create(pushers.clone(), mailbox_sequence);
+
+        let state_store = Arc::new(MetaStateStore::new(kv_store.clone()));
+        let procedure_manager = Arc::new(LocalManager::new(ManagerConfig::default(), state_store));
+
         let handler_group = match handler_group {
             Some(handler_group) => handler_group,
             None => {
-                let mut region_failure_handler = RegionFailureHandler::new(election.clone());
-                region_failure_handler.start().await;
+                let region_failover_manager = Arc::new(RegionFailoverManager::new(
+                    mailbox.clone(),
+                    procedure_manager.clone(),
+                    selector.clone(),
+                    SelectorContext {
+                        server_addr: options.server_addr.clone(),
+                        datanode_lease_secs: options.datanode_lease_secs,
+                        kv_store: kv_store.clone(),
+                        catalog: None,
+                        schema: None,
+                    },
+                ));
 
-                let group = HeartbeatHandlerGroup::default();
+                let region_failure_handler =
+                    RegionFailureHandler::try_new(election.clone(), region_failover_manager)
+                        .await?;
+
+                let group = HeartbeatHandlerGroup::new(pushers);
                 let keep_lease_handler = KeepLeaseHandler::new(kv_store.clone());
                 group.add_handler(ResponseHeaderHandler::default()).await;
                 // `KeepLeaseHandler` should preferably be in front of `CheckLeaderHandler`,
@@ -154,17 +179,10 @@ impl MetaSrvBuilder {
 
         let table_id_sequence = Arc::new(Sequence::new(TABLE_ID_SEQ, 1024, 10, kv_store.clone()));
 
-        let config = ManagerConfig::default();
-        let state_store = Arc::new(MetaStateStore::new(kv_store.clone()));
-        let procedure_manager = Arc::new(LocalManager::new(config, state_store));
-
         let metadata_service = metadata_service
             .unwrap_or_else(|| Arc::new(DefaultMetadataService::new(kv_store.clone())));
 
-        let mailbox_sequence = Sequence::new("heartbeat_mailbox", 1, 100, kv_store.clone());
-        let mailbox = HeartbeatMailbox::create(handler_group.pushers(), mailbox_sequence);
-
-        MetaSrv {
+        Ok(MetaSrv {
             started,
             options,
             in_memory,
@@ -178,7 +196,7 @@ impl MetaSrvBuilder {
             procedure_manager,
             metadata_service,
             mailbox,
-        }
+        })
     }
 }
 
