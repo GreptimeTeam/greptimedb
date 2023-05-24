@@ -89,6 +89,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to project arrow schema, source: {}", source))]
+    ProjectArrowSchema {
+        source: arrow::error::ArrowError,
+        location: Location,
+    },
+
     #[snafu(display("Unsupported column default constraint expression: {}", expr))]
     UnsupportedDefaultExpr { expr: String, location: Location },
 

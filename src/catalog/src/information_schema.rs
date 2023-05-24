@@ -21,8 +21,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use common_query::physical_plan::PhysicalPlanRef;
 use common_query::prelude::Expr;
-use common_recordbatch::SendableRecordBatchStream;
+use common_recordbatch::{RecordBatchStreamAdaptor, SendableRecordBatchStream};
 use datatypes::schema::SchemaRef;
+use futures_util::StreamExt;
 use store_api::storage::ScanRequest;
 use table::{Result as TableResult, Table, TableRef};
 
@@ -129,12 +130,31 @@ impl Table for InformationTable {
         unimplemented!()
     }
 
-    async fn scan_to_stream(
-        &self,
-        _request: ScanRequest,
-    ) -> TableResult<SendableRecordBatchStream> {
-        // TODO(ruihang): remove the second unwrap
-        let stream = self.stream.lock().unwrap().take().unwrap();
-        Ok(stream)
+    async fn scan_to_stream(&self, request: ScanRequest) -> TableResult<SendableRecordBatchStream> {
+        let projection = request.projection;
+        let stream = self
+            .stream
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap()
+            .map(move |batch| {
+                batch
+                    .map(|batch| {
+                        if let Some(projection) = &projection {
+                            let projected = batch.try_project(projection);
+                            println!("{:?}", projected);
+                            projected
+                        } else {
+                            Ok(batch)
+                        }
+                    })
+                    .flatten()
+            });
+        let stream = RecordBatchStreamAdaptor {
+            schema: self.schema(),
+            stream: Box::pin(stream),
+        };
+        Ok(Box::pin(stream))
     }
 }

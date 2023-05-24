@@ -70,6 +70,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to project Arrow RecordBatch, source: {}", source))]
+    ProjectArrowRecordBatch {
+        source: datatypes::arrow::error::ArrowError,
+        location: Location,
+    },
+
     #[snafu(display("Column {} not exists in table {}", column_name, table_name))]
     ColumnNotExists {
         column_name: String,
@@ -101,7 +107,8 @@ impl ErrorExt for Error {
             | Error::PollStream { .. }
             | Error::Format { .. }
             | Error::InitRecordbatchStream { .. }
-            | Error::ColumnNotExists { .. } => StatusCode::Internal,
+            | Error::ColumnNotExists { .. }
+            | Error::ProjectArrowRecordBatch { .. } => StatusCode::Internal,
 
             Error::External { source } => source.status_code(),
 

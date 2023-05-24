@@ -111,7 +111,7 @@ impl Stream for DfRecordBatchStreamAdapter {
     }
 }
 
-/// DataFusion SendableRecordBatchStream -> Greptime RecordBatchStream
+/// DataFusion [SendableRecordBatchStream](DfSendableRecordBatchStream) -> Greptime [RecordBatchStream]
 pub struct RecordBatchStreamAdapter {
     schema: SchemaRef,
     stream: DfSendableRecordBatchStream,

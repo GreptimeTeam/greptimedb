@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use datatypes::schema::SchemaRef;
 use datatypes::value::Value;
@@ -21,7 +22,10 @@ use serde::ser::{Error, SerializeStruct};
 use serde::{Serialize, Serializer};
 use snafu::{OptionExt, ResultExt};
 
-use crate::error::{self, CastVectorSnafu, ColumnNotExistsSnafu, Result};
+use crate::error::{
+    self, CastVectorSnafu, ColumnNotExistsSnafu, DataTypesSnafu, ProjectArrowRecordBatchSnafu,
+    Result,
+};
 use crate::DfRecordBatch;
 
 /// A two-dimensional batch of column-oriented data with a defined schema.
@@ -45,6 +49,24 @@ impl RecordBatch {
             .context(error::NewDfRecordBatchSnafu)?;
 
         Ok(RecordBatch {
+            schema,
+            columns,
+            df_record_batch,
+        })
+    }
+
+    pub fn try_project(&self, indices: &[usize]) -> Result<Self> {
+        let schema = Arc::new(self.schema.try_project(indices).context(DataTypesSnafu)?);
+        let mut columns = Vec::with_capacity(indices.len());
+        for index in indices {
+            columns.push(self.columns[*index].clone());
+        }
+        let df_record_batch = self
+            .df_record_batch
+            .project(indices)
+            .context(ProjectArrowRecordBatchSnafu)?;
+
+        Ok(Self {
             schema,
             columns,
             df_record_batch,
