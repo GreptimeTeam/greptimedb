@@ -24,7 +24,9 @@ use common_query::prelude::Expr;
 use common_recordbatch::{RecordBatchStreamAdaptor, SendableRecordBatchStream};
 use datatypes::schema::SchemaRef;
 use futures_util::StreamExt;
+use snafu::ResultExt;
 use store_api::storage::ScanRequest;
+use table::error::SchemaConversionSnafu;
 use table::{Result as TableResult, Table, TableRef};
 
 use self::columns::InformationSchemaColumns;
@@ -132,6 +134,15 @@ impl Table for InformationTable {
 
     async fn scan_to_stream(&self, request: ScanRequest) -> TableResult<SendableRecordBatchStream> {
         let projection = request.projection;
+        let projected_schema = if let Some(projection) = &projection {
+            Arc::new(
+                self.schema()
+                    .try_project(projection)
+                    .context(SchemaConversionSnafu)?,
+            )
+        } else {
+            self.schema().clone()
+        };
         let stream = self
             .stream
             .lock()
@@ -143,7 +154,6 @@ impl Table for InformationTable {
                     .map(|batch| {
                         if let Some(projection) = &projection {
                             let projected = batch.try_project(projection);
-                            println!("{:?}", projected);
                             projected
                         } else {
                             Ok(batch)
@@ -152,7 +162,7 @@ impl Table for InformationTable {
                     .flatten()
             });
         let stream = RecordBatchStreamAdaptor {
-            schema: self.schema(),
+            schema: projected_schema,
             stream: Box::pin(stream),
         };
         Ok(Box::pin(stream))
