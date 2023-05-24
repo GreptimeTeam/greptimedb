@@ -129,7 +129,7 @@ pub fn init_global_logging(
 
     // resolve log level settings from:
     // - options from command line or config files
-    // - environment variables
+    // - environment variable: RUST_LOG
     // - default settings
     let rust_log_env = std::env::var(EnvFilter::DEFAULT_ENV).ok();
     let targets_string = level
@@ -138,7 +138,7 @@ pub fn init_global_logging(
         .unwrap_or(DEFAULT_LOG_TARGETS);
     let filter = targets_string
         .parse::<filter::Targets>()
-        .expect("error parsing level string");
+        .expect("error parsing log level string");
 
     // Must enable 'tokio_unstable' cfg to use this feature.
     // For example: `RUSTFLAGS="--cfg tokio_unstable" cargo run -F common-telemetry/console -- standalone start`
