@@ -30,6 +30,9 @@ pub trait SchemaProvider: Sync + Send {
     /// Retrieves the list of available table names in this schema.
     async fn table_names(&self) -> Result<Vec<String>>;
 
+    /// Retrieves the list of available table ids in this schema.
+    async fn table_ids(&self) -> Result<Vec<String>>;
+
     /// Retrieves a specific table from the schema by name, provided it exists.
     async fn table(&self, name: &str) -> Result<Option<TableRef>>;
 

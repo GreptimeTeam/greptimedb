@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_catalog::consts::{INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_TABLE_NAME};
+use datatypes::arrow::array::UInt64Array;
 use snafu::ResultExt;
 use table::metadata::TableId;
 use table::{Table, TableRef};
@@ -42,6 +43,10 @@ impl SchemaProvider for InformationSchema {
 
     async fn table_names(&self) -> Result<Vec<String>, Error> {
         Ok(vec![SYSTEM_CATALOG_TABLE_NAME.to_string()])
+    }
+
+    async fn table_ids(&self) -> Result<Vec<String>, Error> {
+        Ok(vec![SYSTEM_CATALOG_TABLE_ID.to_string()])
     }
 
     async fn table(&self, name: &str) -> Result<Option<TableRef>, Error> {

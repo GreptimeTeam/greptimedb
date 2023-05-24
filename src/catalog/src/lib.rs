@@ -107,7 +107,6 @@ pub trait CatalogManager: Send + Sync {
         catalog: &str,
         schema: &str,
         table_name: &str,
-        table_id: &uint64,
     ) -> Result<Option<TableRef>>;
 
     fn as_any(&self) -> &dyn Any;
