@@ -216,20 +216,34 @@ impl<R: Region> Table for MitoTable<R> {
 
     async fn scan_to_stream(&self, request: ScanRequest) -> TableResult<SendableRecordBatchStream> {
         let read_ctx = ReadContext::default();
-        let mut readers = Vec::with_capacity(self.regions.len());
+        let regions = self.regions.load();
+        let mut readers = Vec::with_capacity(regions.len());
         let mut first_schema: Option<Arc<Schema>> = None;
 
         let table_info = self.table_info.load();
         // TODO(hl): Currently the API between frontend and datanode is under refactoring in
         // https://github.com/GreptimeTeam/greptimedb/issues/597 . Once it's finished, query plan
         // can carry filtered region info to avoid scanning all regions on datanode.
-        for region in self.regions.values() {
+        for region in regions.values() {
             let snapshot = region
                 .snapshot(&read_ctx)
                 .map_err(BoxedError::new)
                 .context(table_error::TableOperationSnafu)?;
+
+            let projection = self
+                .transform_projection(region, request.projection.clone())
+                .map_err(BoxedError::new)
+                .context(table_error::TableOperationSnafu)?;
+            let filters = request.filters.clone().into();
+
+            let scan_request = ScanRequest {
+                projection,
+                filters,
+                ..Default::default()
+            };
+
             let reader = snapshot
-                .scan(&read_ctx, request.clone())
+                .scan(&read_ctx, scan_request)
                 .await
                 .map_err(BoxedError::new)
                 .context(table_error::TableOperationSnafu)?
@@ -262,6 +276,7 @@ impl<R: Region> Table for MitoTable<R> {
         })?;
 
         let schema = stream_schema.clone();
+
         let stream = Box::pin(async_stream::try_stream! {
             for mut reader in readers {
                 while let Some(chunk) = reader.next_chunk().await.map_err(BoxedError::new).context(ExternalSnafu)? {

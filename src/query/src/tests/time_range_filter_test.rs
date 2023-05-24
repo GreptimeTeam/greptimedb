@@ -74,6 +74,7 @@ impl Table for MemTableWrapper {
         &self,
         request: ScanRequest,
     ) -> table::Result<SendableRecordBatchStream> {
+        *self.filter.write().await = request.filters.clone();
         self.inner.scan_to_stream(request).await
     }
 
