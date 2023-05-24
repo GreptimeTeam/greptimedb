@@ -245,6 +245,14 @@ pub enum Error {
 
     #[snafu(display("{}", reason))]
     UnexpectedResult { reason: String, location: Location },
+
+    // this error is used for custom error mapping
+    // please do not delete it
+    #[snafu(display("Other error, source: {}", source))]
+    Other {
+        source: BoxedError,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -305,6 +313,7 @@ impl ErrorExt for Error {
             InvalidFlushArgument { .. } => StatusCode::InvalidArguments,
 
             ParsePromQL { source, .. } => source.status_code(),
+            Other { source, .. } => source.status_code(),
 
             UnexpectedResult { .. } => StatusCode::Unexpected,
         }
