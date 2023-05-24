@@ -247,7 +247,7 @@ pub enum Error {
     UnexpectedResult { reason: String, location: Location },
 
     #[allow(dead_code)]
-    #[snafu(display("Servers Internal error, source: {}", source))]
+    #[snafu(display("Servers internal error, source: {}", source))]
     ServersInternal {
         source: BoxedError,
         location: Location,

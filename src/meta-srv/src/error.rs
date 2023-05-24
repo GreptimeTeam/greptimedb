@@ -353,7 +353,7 @@ pub enum Error {
     },
 
     #[allow(dead_code)]
-    #[snafu(display("Meta Internal error, source: {}", source))]
+    #[snafu(display("Meta internal error, source: {}", source))]
     MetaInternal {
         source: BoxedError,
         location: Location,
