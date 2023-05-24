@@ -181,6 +181,26 @@ impl Stream for SimpleRecordBatchStream {
     }
 }
 
+/// Adapt a [Stream] of [RecordBatch] to a [RecordBatchStream].
+pub struct RecordBatchStreamAdaptor {
+    pub schema: SchemaRef,
+    pub stream: Pin<Box<dyn Stream<Item = Result<RecordBatch>> + Send>>,
+}
+
+impl RecordBatchStream for RecordBatchStreamAdaptor {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+}
+
+impl Stream for RecordBatchStreamAdaptor {
+    type Item = Result<RecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.stream).poll_next(ctx)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

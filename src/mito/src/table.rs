@@ -27,7 +27,9 @@ use common_error::ext::BoxedError;
 use common_query::logical_plan::Expr;
 use common_query::physical_plan::PhysicalPlanRef;
 use common_recordbatch::error::{ExternalSnafu, Result as RecordBatchResult};
-use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
+use common_recordbatch::{
+    RecordBatch, RecordBatchStream, RecordBatchStreamAdaptor, SendableRecordBatchStream,
+};
 use common_telemetry::{logging, warn};
 use datatypes::schema::Schema;
 use futures::task::{Context, Poll};
@@ -210,7 +212,7 @@ impl<R: Region> Table for MitoTable<R> {
             }
         });
 
-        let stream = Box::pin(ChunkStream { schema, stream });
+        let stream = Box::pin(RecordBatchStreamAdaptor { schema, stream });
         Ok(Arc::new(StreamScanAdapter::new(stream)))
     }
 
@@ -286,7 +288,7 @@ impl<R: Region> Table for MitoTable<R> {
             }
         });
 
-        Ok(Box::pin(ChunkStream { schema, stream }))
+        Ok(Box::pin(RecordBatchStreamAdaptor { schema, stream }))
     }
 
     fn supports_filters_pushdown(&self, filters: &[&Expr]) -> TableResult<Vec<FilterPushDownType>> {
@@ -413,25 +415,6 @@ impl<R: Region> Table for MitoTable<R> {
         let regions = self.regions.load();
 
         Ok(regions.contains_key(&region))
-    }
-}
-
-struct ChunkStream {
-    schema: SchemaRef,
-    stream: Pin<Box<dyn Stream<Item = RecordBatchResult<RecordBatch>> + Send>>,
-}
-
-impl RecordBatchStream for ChunkStream {
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
-    }
-}
-
-impl Stream for ChunkStream {
-    type Item = RecordBatchResult<RecordBatch>;
-
-    fn poll_next(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.stream).poll_next(ctx)
     }
 }
 
