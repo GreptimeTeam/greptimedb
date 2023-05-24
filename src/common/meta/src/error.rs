@@ -13,11 +13,30 @@
 // limitations under the License.
 
 use common_error::prelude::*;
+use serde_json::error::Error as JsonError;
 use snafu::Location;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Failed to encode object into json, source: {}", source))]
+    EncodeJson {
+        location: Location,
+        source: JsonError,
+    },
+
+    #[snafu(display("Failed to decode object from json, source: {}", source))]
+    DecodeJson {
+        location: Location,
+        source: JsonError,
+    },
+
+    #[snafu(display("Payload not exist"))]
+    PayloadNotExist { location: Location },
+
+    #[snafu(display("Failed to send message: {err_msg}"))]
+    SendMessage { err_msg: String, location: Location },
+
     #[snafu(display("Failed to serde json, source: {}", source))]
     SerdeJson {
         source: serde_json::error::Error,
@@ -39,9 +58,16 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
+        use Error::*;
         match self {
-            Error::IllegalServerState { .. } => StatusCode::Internal,
-            Error::SerdeJson { .. } | Error::RouteInfoCorrupted { .. } => StatusCode::Unexpected,
+            IllegalServerState { .. } => StatusCode::Internal,
+            SerdeJson { .. } | RouteInfoCorrupted { .. } => StatusCode::Unexpected,
+
+            SendMessage { .. } => StatusCode::Internal,
+
+            EncodeJson { .. } | DecodeJson { .. } | PayloadNotExist { .. } => {
+                StatusCode::Unexpected
+            }
         }
     }
 

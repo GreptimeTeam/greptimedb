@@ -25,14 +25,6 @@ use table::error::Error as TableError;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Failed to check region in table: {}, source: {}", table_name, source))]
-    CheckRegion {
-        table_name: String,
-        #[snafu(backtrace)]
-        source: TableError,
-        region_number: RegionNumber,
-    },
-
     #[snafu(display("Failed to access catalog, source: {}", source))]
     AccessCatalog {
         #[snafu(backtrace)]
@@ -46,6 +38,13 @@ pub enum Error {
         source: catalog::error::Error,
     },
 
+    #[snafu(display("Failed to register table: {}, source: {}", table_name, source))]
+    RegisterTable {
+        table_name: String,
+        location: Location,
+        source: catalog::error::Error,
+    },
+
     #[snafu(display("Failed to open table: {}, source: {}", table_name, source))]
     OpenTable {
         table_name: String,
@@ -53,11 +52,11 @@ pub enum Error {
         source: TableError,
     },
 
-    #[snafu(display("Failed to register table: {}, source: {}", table_name, source))]
-    RegisterTable {
+    #[snafu(display("Failed to get table: {}, source: {}", table_name, source))]
+    GetTable {
         table_name: String,
-        #[snafu(backtrace)]
-        source: catalog::error::Error,
+        location: Location,
+        source: TableError,
     },
 
     #[snafu(display(
@@ -73,8 +72,24 @@ pub enum Error {
         source: TableError,
     },
 
-    #[snafu(display("Failed to send message: {err_msg}"))]
-    SendMessage { err_msg: String, location: Location },
+    #[snafu(display(
+        "Failed to check region {} in table: {}, source: {}",
+        region_number,
+        table_name,
+        source
+    ))]
+    CheckRegion {
+        table_name: String,
+        location: Location,
+        source: TableError,
+        region_number: RegionNumber,
+    },
+
+    #[snafu(display("Failed to handle heartbeat response, source: {}", source))]
+    HandleHeartbeatResponse {
+        location: Location,
+        source: common_meta::error::Error,
+    },
 
     #[snafu(display("Failed to execute sql, source: {}", source))]
     ExecuteSql {
@@ -123,13 +138,6 @@ pub enum Error {
 
     #[snafu(display("Failed to create table: {}, source: {}", table_name, source))]
     CreateTable {
-        table_name: String,
-        #[snafu(backtrace)]
-        source: TableError,
-    },
-
-    #[snafu(display("Failed to get table: {}, source: {}", table_name, source))]
-    GetTable {
         table_name: String,
         #[snafu(backtrace)]
         source: TableError,
@@ -438,7 +446,7 @@ pub enum Error {
         source: JsonError,
     },
 
-    #[snafu(display("Failed to decode object into json, source: {}", source))]
+    #[snafu(display("Failed to decode object from json, source: {}", source))]
     DecodeJson {
         location: Location,
         source: JsonError,
@@ -472,19 +480,14 @@ impl ErrorExt for Error {
             | ExecuteStatement { source }
             | ExecuteLogicalPlan { source } => source.status_code(),
 
-            OpenTable { source, .. } => source.status_code(),
-            RegisterTable { source, .. }
-            | DeregisterTable { source, .. }
-            | AccessCatalog { source, .. } => source.status_code(),
+            HandleHeartbeatResponse { source, .. } => source.status_code(),
 
             DecodeLogicalPlan { source } => source.status_code(),
             NewCatalog { source } | RegisterSchema { source } => source.status_code(),
             FindTable { source, .. } => source.status_code(),
-            CreateTable { source, .. } | CheckRegion { source, .. } => source.status_code(),
+            CreateTable { source, .. } => source.status_code(),
             DropTable { source, .. } => source.status_code(),
             FlushTable { source, .. } => source.status_code(),
-            GetTable { source, .. } => source.status_code(),
-            CloseTable { source, .. } => source.status_code(),
 
             Insert { source, .. } => source.status_code(),
             Delete { source, .. } => source.status_code(),
@@ -524,6 +527,15 @@ impl ErrorExt for Error {
                 StatusCode::Unexpected
             }
 
+            AccessCatalog { source, .. }
+            | DeregisterTable { source, .. }
+            | RegisterTable { source, .. } => source.status_code(),
+
+            CheckRegion { source, .. }
+            | OpenTable { source, .. }
+            | CloseTable { source, .. }
+            | GetTable { source, .. } => source.status_code(),
+
             // TODO(yingwen): Further categorize http error.
             StartServer { .. }
             | ParseAddr { .. }
@@ -534,8 +546,7 @@ impl ErrorExt for Error {
             | IncorrectInternalState { .. }
             | ShutdownServer { .. }
             | ShutdownInstance { .. }
-            | CloseTableEngine { .. }
-            | SendMessage { .. } => StatusCode::Internal,
+            | CloseTableEngine { .. } => StatusCode::Internal,
 
             InitBackend { .. } => StatusCode::StorageUnavailable,
 

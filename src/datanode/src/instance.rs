@@ -24,6 +24,8 @@ use common_base::paths::{CLUSTER_DIR, WAL_DIR};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use common_error::prelude::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
+use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::store::state_store::ObjectStateStore;
 use common_procedure::ProcedureManagerRef;
@@ -60,8 +62,6 @@ use crate::error::{
 };
 use crate::heartbeat::handler::close_region::CloseRegionHandler;
 use crate::heartbeat::handler::open_region::OpenRegionHandler;
-use crate::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
-use crate::heartbeat::handler::HandlerGroupExecutor;
 use crate::heartbeat::HeartbeatTask;
 use crate::sql::{SqlHandler, SqlRequest};
 use crate::store;

@@ -1757,11 +1757,16 @@ dependencies = [
  "chrono",
  "common-catalog",
  "common-error",
+ "common-runtime",
+ "common-telemetry",
+ "common-time",
  "datatypes",
  "serde",
  "serde_json",
  "snafu",
+ "store-api",
  "table",
+ "tokio",
 ]
 
 [[package]]

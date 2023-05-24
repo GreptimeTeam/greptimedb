@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod error;
+pub mod heartbeat;
 pub mod instruction;
 pub mod peer;
 pub mod rpc;

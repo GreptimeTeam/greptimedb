@@ -20,6 +20,10 @@ use api::v1::meta::HeartbeatResponse;
 use api::v1::query_request::Query;
 use api::v1::QueryRequest;
 use catalog::CatalogManagerRef;
+use common_meta::heartbeat::handler::{
+    HandlerGroupExecutor, HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutor,
+};
+use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MessageMeta};
 use common_meta::instruction::{Instruction, InstructionReply, RegionIdent, SimpleReply};
 use common_query::Output;
 use datatypes::prelude::ConcreteDataType;
@@ -31,10 +35,6 @@ use tokio::sync::mpsc::{self, Receiver};
 
 use crate::heartbeat::handler::close_region::CloseRegionHandler;
 use crate::heartbeat::handler::open_region::OpenRegionHandler;
-use crate::heartbeat::handler::{
-    HandlerGroupExecutor, HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutor,
-};
-use crate::heartbeat::mailbox::{HeartbeatMailbox, MessageMeta};
 use crate::instance::Instance;
 
 pub(crate) mod test_util;
@@ -205,6 +205,15 @@ async fn parepare_handler_test(name: &str) -> HandlerTestGuard {
     }
 }
 
+pub fn test_message_meta(id: u64, subject: &str, to: &str, from: &str) -> MessageMeta {
+    MessageMeta {
+        id,
+        subject: subject.to_string(),
+        to: to.to_string(),
+        from: from.to_string(),
+    }
+}
+
 fn handle_instruction(
     executor: Arc<dyn HeartbeatResponseHandlerExecutor>,
     mailbox: Arc<HeartbeatMailbox>,
@@ -213,7 +222,7 @@ fn handle_instruction(
     let response = HeartbeatResponse::default();
     let mut ctx: HeartbeatResponseHandlerContext =
         HeartbeatResponseHandlerContext::new(mailbox, response);
-    ctx.incoming_message = Some((MessageMeta::new_test(1, "hi", "foo", "bar"), instruction));
+    ctx.incoming_message = Some((test_message_meta(1, "hi", "foo", "bar"), instruction));
     executor.handle(ctx).unwrap();
 }
 
