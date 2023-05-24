@@ -41,7 +41,7 @@ pub enum Error {
     #[snafu(display("Failed to register table: {}, source: {}", table_name, source))]
     RegisterTable {
         table_name: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: catalog::error::Error,
     },
 
@@ -55,7 +55,7 @@ pub enum Error {
     #[snafu(display("Failed to get table: {}, source: {}", table_name, source))]
     GetTable {
         table_name: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: TableError,
     },
 
@@ -80,14 +80,14 @@ pub enum Error {
     ))]
     CheckRegion {
         table_name: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: TableError,
         region_number: RegionNumber,
     },
 
     #[snafu(display("Failed to handle heartbeat response, source: {}", source))]
     HandleHeartbeatResponse {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_meta::error::Error,
     },
 
@@ -480,7 +480,7 @@ impl ErrorExt for Error {
             | ExecuteStatement { source }
             | ExecuteLogicalPlan { source } => source.status_code(),
 
-            HandleHeartbeatResponse { source } => source.status_code(),
+            HandleHeartbeatResponse { source, .. } => source.status_code(),
 
             DecodeLogicalPlan { source } => source.status_code(),
             NewCatalog { source } | RegisterSchema { source } => source.status_code(),
