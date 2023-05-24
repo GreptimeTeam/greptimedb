@@ -17,7 +17,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_stream::stream;
-
 use common_meta::rpc::store::{CompareAndPutRequest, DeleteRangeRequest, PutRequest, RangeRequest};
 use common_telemetry::{info, timer};
 use meta_client::client::MetaClient;
