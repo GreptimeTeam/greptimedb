@@ -354,9 +354,8 @@ pub enum Error {
 
     // this error is used for custom error mapping
     // please do not delete it
-    #[allow(dead_code)]
-    #[snafu(display("Internal error, source: {}", source))]
-    MetaInternal {
+    #[snafu(display("Other error, source: {}", source))]
+    Other {
         source: BoxedError,
         location: Location,
     },
@@ -441,7 +440,7 @@ impl ErrorExt for Error {
 
             Error::RegisterProcedureLoader { source, .. } => source.status_code(),
             Error::TableRouteConversion { source } => source.status_code(),
-            Error::MetaInternal { source, .. } => source.status_code(),
+            Error::Other { source, .. } => source.status_code(),
         }
     }
 }

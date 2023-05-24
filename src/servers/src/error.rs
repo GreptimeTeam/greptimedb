@@ -248,9 +248,8 @@ pub enum Error {
 
     // this error is used for custom error mapping
     // please do not delete it
-    #[allow(dead_code)]
-    #[snafu(display("Internal error, source: {}", source))]
-    ServersInternal {
+    #[snafu(display("Other error, source: {}", source))]
+    Other {
         source: BoxedError,
         location: Location,
     },
@@ -314,7 +313,7 @@ impl ErrorExt for Error {
             InvalidFlushArgument { .. } => StatusCode::InvalidArguments,
 
             ParsePromQL { source, .. } => source.status_code(),
-            ServersInternal { source, .. } => source.status_code(),
+            Other { source, .. } => source.status_code(),
 
             UnexpectedResult { .. } => StatusCode::Unexpected,
         }
