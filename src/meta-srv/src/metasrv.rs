@@ -120,7 +120,7 @@ pub struct MetaSrv {
     handler_group: HeartbeatHandlerGroup,
     election: Option<ElectionRef>,
     meta_peer_client: Option<MetaPeerClient>,
-    lock: Option<DistLockRef>,
+    lock: DistLockRef,
     procedure_manager: ProcedureManagerRef,
     metadata_service: MetadataServiceRef,
     mailbox: MailboxRef,
@@ -244,8 +244,8 @@ impl MetaSrv {
     }
 
     #[inline]
-    pub fn lock(&self) -> Option<DistLockRef> {
-        self.lock.clone()
+    pub fn lock(&self) -> &DistLockRef {
+        &self.lock
     }
 
     #[inline]

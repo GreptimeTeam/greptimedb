@@ -134,6 +134,7 @@ async fn run_region_failover_procedure(cluster: &GreptimeDbCluster, failed_regio
                 catalog: None,
                 schema: None,
             },
+            dist_lock: meta_srv.lock().clone(),
         },
     );
     let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));

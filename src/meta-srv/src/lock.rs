@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod etcd;
+pub(crate) mod memory;
 
 use std::sync::Arc;
 
@@ -26,6 +27,14 @@ pub struct Opts {
     // If the expiration time is exceeded and currently holds the lock, the lock is
     // automatically released.
     pub expire_secs: Option<u64>,
+}
+
+impl Default for Opts {
+    fn default() -> Self {
+        Opts {
+            expire_secs: Some(DEFAULT_EXPIRE_TIME_SECS),
+        }
+    }
 }
 
 #[async_trait::async_trait]

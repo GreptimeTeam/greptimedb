@@ -17,6 +17,7 @@ use std::sync::Arc;
 use common_procedure::local::{LocalManager, ManagerConfig};
 
 use crate::handler::{HeartbeatMailbox, Pushers};
+use crate::lock::memory::MemLock;
 use crate::metasrv::SelectorContext;
 use crate::procedure::region_failover::RegionFailoverManager;
 use crate::procedure::state_store::MetaStateStore;
@@ -48,5 +49,6 @@ pub(crate) fn create_region_failover_manager() -> Arc<RegionFailoverManager> {
         procedure_manager,
         selector,
         selector_ctx,
+        Arc::new(MemLock::default()),
     ))
 }
