@@ -14,10 +14,10 @@
 
 use std::sync::Arc;
 
-use common_meta::instruction::{Instruction, InstructionReply};
 use tokio::sync::mpsc::Sender;
 
 use crate::error::{self, Result};
+use crate::instruction::{Instruction, InstructionReply};
 
 pub type IncomingMessage = (MessageMeta, Instruction);
 pub type OutgoingMessage = (MessageMeta, InstructionReply);

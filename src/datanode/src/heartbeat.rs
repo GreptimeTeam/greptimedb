@@ -18,23 +18,20 @@ use std::time::Duration;
 
 use api::v1::meta::{HeartbeatRequest, NodeStat, Peer};
 use catalog::{datanode_stat, CatalogManagerRef};
+use common_meta::heartbeat::handler::{
+    HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutorRef,
+};
+use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef};
+use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
 use common_telemetry::{error, info, trace, warn};
-use mailbox::{HeartbeatMailbox, MailboxRef};
 use meta_client::client::{HeartbeatSender, MetaClient};
 use snafu::ResultExt;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-use self::handler::{HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutorRef};
-use self::utils::outgoing_message_to_mailbox_message;
-use crate::error::{MetaClientInitSnafu, Result};
+use crate::error::{self, MetaClientInitSnafu, Result};
 
-pub mod handler;
-pub mod utils;
-
-// TODO(weny): remove allow dead_code
-#[allow(dead_code)]
-pub mod mailbox;
+pub(crate) mod handler;
 
 pub struct HeartbeatTask {
     node_id: u64,
@@ -114,7 +111,9 @@ impl HeartbeatTask {
         handler_executor: HeartbeatResponseHandlerExecutorRef,
     ) -> Result<()> {
         trace!("heartbeat response: {:?}", ctx.response);
-        handler_executor.handle(ctx)
+        handler_executor
+            .handle(ctx)
+            .context(error::HandleHeartbeatResponseSnafu)
     }
 
     /// Start heartbeat task, spawn background task.

@@ -17,6 +17,10 @@ use std::sync::Arc;
 use catalog::error::Error as CatalogError;
 use catalog::{CatalogManagerRef, RegisterTableRequest};
 use common_catalog::format_full_table_name;
+use common_meta::error::Result as MetaResult;
+use common_meta::heartbeat::handler::{
+    HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
+};
 use common_meta::instruction::{Instruction, InstructionReply, RegionIdent, SimpleReply};
 use common_telemetry::{error, warn};
 use snafu::ResultExt;
@@ -26,8 +30,6 @@ use table::engine::EngineContext;
 use table::requests::OpenTableRequest;
 
 use crate::error::{self, Result};
-use crate::heartbeat::handler::{HandleControl, HeartbeatResponseHandler};
-use crate::heartbeat::HeartbeatResponseHandlerContext;
 
 #[derive(Clone)]
 pub struct OpenRegionHandler {
@@ -43,7 +45,7 @@ impl HeartbeatResponseHandler for OpenRegionHandler {
         )
     }
 
-    fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> Result<HandleControl> {
+    fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> MetaResult<HandleControl> {
         let Some((meta, Instruction::OpenRegion(region_ident))) = ctx.incoming_message.take() else {
             unreachable!("OpenRegionHandler: should be guarded by 'is_acceptable'");
         };
