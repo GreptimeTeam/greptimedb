@@ -246,8 +246,10 @@ pub enum Error {
     #[snafu(display("{}", reason))]
     UnexpectedResult { reason: String, location: Location },
 
+    // this error is used for custom error mapping
+    // please do not delete it
     #[allow(dead_code)]
-    #[snafu(display("Servers internal error, source: {}", source))]
+    #[snafu(display("Internal error, source: {}", source))]
     ServersInternal {
         source: BoxedError,
         location: Location,

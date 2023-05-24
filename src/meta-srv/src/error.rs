@@ -352,8 +352,10 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    // this error is used for custom error mapping
+    // please do not delete it
     #[allow(dead_code)]
-    #[snafu(display("Meta internal error, source: {}", source))]
+    #[snafu(display("Internal error, source: {}", source))]
     MetaInternal {
         source: BoxedError,
         location: Location,
