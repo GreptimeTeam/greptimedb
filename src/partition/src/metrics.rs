@@ -12,15 +12,5 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
-
-pub mod columns;
-pub mod error;
-pub mod manager;
-pub mod metrics;
-pub mod partition;
-pub mod range;
-pub mod route;
-pub mod splitter;
-
-pub use crate::partition::{PartitionRule, PartitionRuleRef};
+pub(crate) const METRIC_TABLE_ROUTE_GET_REMOTE: &str = "frontend.table_route.get.remote";
+pub(crate) const METRIC_TABLE_ROUTE_GET: &str = "frontend.table_route.get";

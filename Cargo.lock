@@ -5878,6 +5878,7 @@ dependencies = [
  "common-error",
  "common-meta",
  "common-query",
+ "common-telemetry",
  "datafusion",
  "datafusion-common",
  "datafusion-expr",
