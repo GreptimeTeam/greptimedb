@@ -24,6 +24,8 @@ use snafu::ResultExt;
 use crate::error;
 use crate::error::Result;
 
+pub mod handler;
+
 #[derive(Clone)]
 pub struct HeartbeatTask {
     meta_client: Arc<MetaClient>,
