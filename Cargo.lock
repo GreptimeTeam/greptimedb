@@ -1760,7 +1760,6 @@ dependencies = [
  "common-telemetry",
  "common-time",
  "datatypes",
- "log",
  "serde",
  "serde_json",
  "snafu",

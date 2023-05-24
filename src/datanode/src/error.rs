@@ -72,7 +72,12 @@ pub enum Error {
         source: TableError,
     },
 
-    #[snafu(display("Failed to check region in table: {}, source: {}", table_name, source))]
+    #[snafu(display(
+        "Failed to check region {} in table: {}, source: {}",
+        region_number,
+        table_name,
+        source
+    ))]
     CheckRegion {
         table_name: String,
         #[snafu(backtrace)]
@@ -80,7 +85,7 @@ pub enum Error {
         region_number: RegionNumber,
     },
 
-    #[snafu(display("Failed to handler heartbeat response, source: {}", source))]
+    #[snafu(display("Failed to handle heartbeat response, source: {}", source))]
     HandleHeartbeatResponse {
         #[snafu(backtrace)]
         source: common_meta::error::Error,
@@ -441,7 +446,7 @@ pub enum Error {
         source: JsonError,
     },
 
-    #[snafu(display("Failed to decode object into json, source: {}", source))]
+    #[snafu(display("Failed to decode object from json, source: {}", source))]
     DecodeJson {
         location: Location,
         source: JsonError,

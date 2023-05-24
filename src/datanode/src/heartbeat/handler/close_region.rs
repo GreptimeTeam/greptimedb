@@ -21,8 +21,7 @@ use common_meta::heartbeat::handler::{
     HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
 };
 use common_meta::instruction::{Instruction, InstructionReply, RegionIdent, SimpleReply};
-use common_telemetry::{error, warn};
-use log::info;
+use common_telemetry::{error, info, warn};
 use snafu::ResultExt;
 use store_api::storage::RegionNumber;
 use table::engine::manager::TableEngineManagerRef;

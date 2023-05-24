@@ -25,7 +25,7 @@ pub enum Error {
         source: JsonError,
     },
 
-    #[snafu(display("Failed to decode object into json, source: {}", source))]
+    #[snafu(display("Failed to decode object from json, source: {}", source))]
     DecodeJson {
         location: Location,
         source: JsonError,
