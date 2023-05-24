@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use api::v1::meta::{HeartbeatRequest};
+use api::v1::meta::HeartbeatRequest;
 use common_meta::heartbeat::handler::{
     HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutorRef,
 };
