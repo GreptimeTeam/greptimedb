@@ -134,8 +134,9 @@ impl StartCommand {
         if let Some(dir) = top_level_opts.log_dir {
             opts.logging.dir = dir;
         }
-        if let Some(level) = top_level_opts.log_level {
-            opts.logging.level = level;
+
+        if top_level_opts.log_level.is_some() {
+            opts.logging.level = top_level_opts.log_level;
         }
 
         let tls_opts = TlsOption::new(
@@ -296,7 +297,7 @@ mod tests {
             [http_options]
             addr = "127.0.0.1:4000"
             timeout = "30s"
-            
+
             [logging]
             level = "debug"
             dir = "/tmp/greptimedb/test/logs"
@@ -321,7 +322,7 @@ mod tests {
             fe_opts.http_options.as_ref().unwrap().timeout
         );
 
-        assert_eq!("debug".to_string(), fe_opts.logging.level);
+        assert_eq!("debug", fe_opts.logging.level.as_ref().unwrap());
         assert_eq!("/tmp/greptimedb/test/logs".to_string(), fe_opts.logging.dir);
     }
 
@@ -365,7 +366,7 @@ mod tests {
 
         let logging_opt = options.logging_options();
         assert_eq!("/tmp/greptimedb/test/logs", logging_opt.dir);
-        assert_eq!("debug", logging_opt.level);
+        assert_eq!("debug", logging_opt.level.as_ref().unwrap());
     }
 
     #[test]
@@ -376,7 +377,7 @@ mod tests {
 
             [http_options]
             addr = "127.0.0.1:4000"
-            
+
             [meta_client_options]
             timeout_millis = 3000
             connect_timeout_millis = 5000
