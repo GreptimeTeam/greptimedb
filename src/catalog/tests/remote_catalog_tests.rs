@@ -24,7 +24,8 @@ mod tests {
 
     use catalog::helper::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
     use catalog::remote::{
-        KvBackend, KvBackendRef, RemoteCatalogManager, RemoteCatalogProvider, RemoteSchemaProvider,
+        CachedMetaKvBackend, KvBackend, KvBackendRef, RemoteCatalogManager, RemoteCatalogProvider,
+        RemoteSchemaProvider,
     };
     use catalog::{CatalogManager, RegisterTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
@@ -76,6 +77,52 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_cached_backend() {
+        common_telemetry::init_default_ut_logging();
+        let backend = CachedMetaKvBackend::wrap(Arc::new(MockKvBackend::default()));
+
+        let default_catalog_key = CatalogKey {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+        }
+        .to_string();
+
+        backend
+            .set(
+                default_catalog_key.as_bytes(),
+                &CatalogValue {}.as_bytes().unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let ret = backend.get(b"__c-greptime").await.unwrap();
+        assert!(ret.is_some());
+
+        let _ = backend
+            .compare_and_set(
+                b"__c-greptime",
+                &CatalogValue {}.as_bytes().unwrap(),
+                b"123",
+            )
+            .await
+            .unwrap();
+
+        let ret = backend.get(b"__c-greptime").await.unwrap();
+        assert!(ret.is_some());
+        assert_eq!(&b"123"[..], &(ret.as_ref().unwrap().1));
+
+        let _ = backend.set(b"__c-greptime", b"1234").await;
+
+        let ret = backend.get(b"__c-greptime").await.unwrap();
+        assert!(ret.is_some());
+        assert_eq!(&b"1234"[..], &(ret.as_ref().unwrap().1));
+
+        backend.delete(b"__c-greptime").await.unwrap();
+
+        let ret = backend.get(b"__c-greptime").await.unwrap();
+        assert!(ret.is_none());
+    }
+
     async fn prepare_components(
         node_id: u64,
     ) -> (
@@ -84,17 +131,22 @@ mod tests {
         Arc<RemoteCatalogManager>,
         TableEngineManagerRef,
     ) {
-        let backend = Arc::new(MockKvBackend::default()) as KvBackendRef;
+        let cached_backend = Arc::new(CachedMetaKvBackend::wrap(
+            Arc::new(MockKvBackend::default()),
+        ));
+
         let table_engine = Arc::new(MockTableEngine::default());
         let engine_manager = Arc::new(MemoryTableEngineManager::alias(
             MITO_ENGINE.to_string(),
             table_engine.clone(),
         ));
+
         let catalog_manager =
-            RemoteCatalogManager::new(engine_manager.clone(), node_id, backend.clone());
+            RemoteCatalogManager::new(engine_manager.clone(), node_id, cached_backend.clone());
         catalog_manager.start().await.unwrap();
+
         (
-            backend,
+            cached_backend,
             table_engine,
             Arc::new(catalog_manager),
             engine_manager as Arc<_>,

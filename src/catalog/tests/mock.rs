@@ -139,12 +139,16 @@ impl KvBackend for MockKvBackend {
     }
 
     async fn delete_range(&self, key: &[u8], end: &[u8]) -> Result<(), Error> {
-        let start = key.to_vec();
-        let end = end.to_vec();
-        let range = start..end;
-
         let mut map = self.map.write().await;
-        map.retain(|k, _| !range.contains(k));
+        if end.is_empty() {
+            let _ = map.remove(key);
+        } else {
+            let start = key.to_vec();
+            let end = end.to_vec();
+            let range = start..end;
+
+            map.retain(|k, _| !range.contains(k));
+        }
         Ok(())
     }
 }
