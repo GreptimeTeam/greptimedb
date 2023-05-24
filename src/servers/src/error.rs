@@ -245,6 +245,13 @@ pub enum Error {
 
     #[snafu(display("{}", reason))]
     UnexpectedResult { reason: String, location: Location },
+
+    #[allow(dead_code)]
+    #[snafu(display("Servers Internal error, source: {}", source))]
+    ServersInternal {
+        source: BoxedError,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -305,6 +312,7 @@ impl ErrorExt for Error {
             InvalidFlushArgument { .. } => StatusCode::InvalidArguments,
 
             ParsePromQL { source, .. } => source.status_code(),
+            ServersInternal { source, .. } => source.status_code(),
 
             UnexpectedResult { .. } => StatusCode::Unexpected,
         }
