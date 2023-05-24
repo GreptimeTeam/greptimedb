@@ -20,7 +20,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use axum::body::BoxBody;
 use axum::extract::{Path, Query, State};
-use axum::{routing, Form, Json, Router};
+use axum::{middleware, routing, Form, Json, Router};
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_error::prelude::ErrorExt;
 use common_error::status_code::StatusCode;
@@ -56,6 +56,7 @@ use crate::error::{
     StartHttpSnafu, UnexpectedResultSnafu,
 };
 use crate::http::authorize::HttpAuth;
+use crate::http::track_metrics;
 use crate::prometheus::{FIELD_COLUMN_NAME, TIMESTAMP_COLUMN_NAME};
 use crate::server::Server;
 
@@ -114,6 +115,9 @@ impl PromServer {
                         HttpAuth::<BoxBody>::new(self.user_provider.clone()),
                     )),
             )
+            // We need to register the metrics layer again since start a new http server
+            // for the PromServer.
+            .route_layer(middleware::from_fn(track_metrics))
     }
 }
 
