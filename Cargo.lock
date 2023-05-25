@@ -3118,6 +3118,7 @@ dependencies = [
  "meta-srv",
  "meter-core",
  "meter-macros",
+ "metrics",
  "mito",
  "moka 0.9.7",
  "object-store",
