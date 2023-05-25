@@ -463,8 +463,8 @@ impl DistInstance {
         }
 
         let key = SchemaKey {
-            catalog_name: catalog,
-            schema_name: expr.database_name,
+            catalog_name: catalog.clone(),
+            schema_name: expr.database_name.clone(),
         };
         let value = SchemaValue {};
         let client = self
@@ -475,16 +475,26 @@ impl DistInstance {
         let request = CompareAndPutRequest::new()
             .with_key(key.to_string())
             .with_value(value.as_bytes().context(CatalogEntrySerdeSnafu)?);
+
         let response = client
             .compare_and_put(request.into())
             .await
             .context(RequestMetaSnafu)?;
+
         ensure!(
             response.success,
             SchemaExistsSnafu {
                 name: key.schema_name
             }
         );
+
+        // Since the database created on meta does not go through KvBackend, so we manually
+        // invalidate the cache here.
+        //
+        // TODO(fys): when the meta invalidation cache mechanism is established, remove it.
+        self.catalog_manager()
+            .invalidate_schema(&catalog, &expr.database_name)
+            .await;
 
         Ok(Output::AffectedRows(1))
     }
