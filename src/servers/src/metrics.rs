@@ -41,3 +41,9 @@ pub(crate) const METRIC_POSTGRES_PREPARED_COUNT: &str = "servers.postgres_prepar
 
 pub(crate) const METRIC_SERVER_GRPC_DB_REQUEST_TIMER: &str = "servers.grpc.db_request_elapsed";
 pub(crate) const METRIC_SERVER_GRPC_PROM_REQUEST_TIMER: &str = "servers.grpc.prom_request_elapsed";
+
+pub(crate) const METRIC_HTTP_REQUESTS_TOTAL: &str = "servers.http_requests_total";
+pub(crate) const METRIC_HTTP_REQUESTS_ELAPSED: &str = "servers.http_requests_elapsed";
+pub(crate) const METRIC_METHOD_LABEL: &str = "method";
+pub(crate) const METRIC_PATH_LABEL: &str = "path";
+pub(crate) const METRIC_STATUS_LABEL: &str = "status";

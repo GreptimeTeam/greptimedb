@@ -22,6 +22,7 @@ use axum::{http, Json};
 use base64::DecodeError;
 use catalog;
 use common_error::prelude::*;
+use common_telemetry::logging;
 use query::parser::PromQuery;
 use serde_json::json;
 use snafu::Location;
@@ -367,7 +368,11 @@ impl IntoResponse for Error {
             | Error::InvalidPromRemoteRequest { .. }
             | Error::InvalidQuery { .. }
             | Error::TimePrecision { .. } => (HttpStatusCode::BAD_REQUEST, self.to_string()),
-            _ => (HttpStatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
+            _ => {
+                logging::error!(self; "Failed to handle HTTP request");
+
+                (HttpStatusCode::INTERNAL_SERVER_ERROR, self.to_string())
+            }
         };
         let body = Json(json!({
             "error": error_message,
