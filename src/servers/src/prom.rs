@@ -446,7 +446,6 @@ pub async fn instant_query(
     let query_ctx = QueryContext::with(catalog, schema);
 
     let result = handler.do_query(&prom_query, Arc::new(query_ctx)).await;
-    println!("result: {:?}", result);
     let (metric_name, result_type) =
         retrieve_metric_name_and_result_type(&prom_query.query).unwrap_or_default();
     PromJsonResponse::from_query_result(result, metric_name, result_type).await
