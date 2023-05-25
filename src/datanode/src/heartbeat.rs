@@ -41,7 +41,7 @@ pub struct HeartbeatTask {
     meta_client: Arc<MetaClient>,
     catalog_manager: CatalogManagerRef,
     interval: u64,
-    heartbeat_response_handler_exector: HeartbeatResponseHandlerExecutorRef,
+    resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
 }
 
 impl Drop for HeartbeatTask {
@@ -58,7 +58,7 @@ impl HeartbeatTask {
         server_hostname: Option<String>,
         meta_client: Arc<MetaClient>,
         catalog_manager: CatalogManagerRef,
-        heartbeat_response_handler_exector: HeartbeatResponseHandlerExecutorRef,
+        resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
     ) -> Self {
         Self {
             node_id,
@@ -68,7 +68,7 @@ impl HeartbeatTask {
             meta_client,
             catalog_manager,
             interval: 5_000, // default interval is set to 5 secs
-            heartbeat_response_handler_exector,
+            resp_handler_executor,
         }
     }
 
@@ -95,7 +95,7 @@ impl HeartbeatTask {
 
                 let ctx = HeartbeatResponseHandlerContext::new(mailbox.clone(), res);
                 if let Err(e) = Self::handle_response(ctx, handler_executor.clone()) {
-                    error!(e;"Error while handling heartbeat response");
+                    error!(e; "Error while handling heartbeat response");
                 }
                 if !running.load(Ordering::Acquire) {
                     info!("Heartbeat task shutdown");
@@ -134,7 +134,7 @@ impl HeartbeatTask {
         let meta_client = self.meta_client.clone();
         let catalog_manager_clone = self.catalog_manager.clone();
 
-        let handler_executor = self.heartbeat_response_handler_exector.clone();
+        let handler_executor = self.resp_handler_executor.clone();
 
         let (outgoing_tx, mut outgoing_rx) = mpsc::channel(16);
         let mailbox = Arc::new(HeartbeatMailbox::new(outgoing_tx));

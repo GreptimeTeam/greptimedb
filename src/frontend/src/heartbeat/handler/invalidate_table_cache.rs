@@ -62,7 +62,7 @@ impl HeartbeatResponseHandler for InvalidateTableCacheHandler {
                 ))
                 .await
             {
-                error!(e;"Failed to send reply to mailbox");
+                error!(e; "Failed to send reply to mailbox");
             }
         });
 

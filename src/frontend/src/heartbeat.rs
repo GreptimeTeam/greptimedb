@@ -38,7 +38,7 @@ pub struct HeartbeatTask {
     meta_client: Arc<MetaClient>,
     report_interval: u64,
     retry_interval: u64,
-    heartbeat_response_handler_exector: HeartbeatResponseHandlerExecutorRef,
+    resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
 }
 
 impl HeartbeatTask {
@@ -46,13 +46,13 @@ impl HeartbeatTask {
         meta_client: Arc<MetaClient>,
         report_interval: u64,
         retry_interval: u64,
-        heartbeat_response_handler_exector: HeartbeatResponseHandlerExecutorRef,
+        resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
     ) -> Self {
         HeartbeatTask {
             meta_client,
             report_interval,
             retry_interval,
-            heartbeat_response_handler_exector,
+            resp_handler_executor,
         }
     }
 
@@ -86,7 +86,7 @@ impl HeartbeatTask {
                         trace!("Received a heartbeat response: {:?}", resp);
                         let ctx = HeartbeatResponseHandlerContext::new(mailbox.clone(), resp);
                         if let Err(e) = capture_self.handle_response(ctx) {
-                            error!(e;"Error while handling heartbeat response");
+                            error!(e; "Error while handling heartbeat response");
                         }
                     }
                     Ok(None) => break,
@@ -156,7 +156,7 @@ impl HeartbeatTask {
     }
 
     fn handle_response(&self, ctx: HeartbeatResponseHandlerContext) -> Result<()> {
-        self.heartbeat_response_handler_exector
+        self.resp_handler_executor
             .handle(ctx)
             .context(error::HandleHeartbeatResponseSnafu)
     }
