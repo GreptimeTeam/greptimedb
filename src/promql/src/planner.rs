@@ -48,7 +48,8 @@ use crate::error::{
     UnsupportedExprSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
 };
 use crate::extension_plan::{
-    EmptyMetric, InstantManipulate, Millisecond, RangeManipulate, SeriesDivide, SeriesNormalize,
+    build_special_time_expr, EmptyMetric, InstantManipulate, Millisecond, RangeManipulate,
+    SeriesDivide, SeriesNormalize,
 };
 use crate::functions::{
     AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, HoltWinters, IDelta,
@@ -360,6 +361,7 @@ impl PromPlanner {
                     self.ctx.time_index_column = Some(SPECIAL_TIME_FUNCTION.to_string());
                     self.ctx.field_columns = vec![DEFAULT_FIELD_COLUMN.to_string()];
                     self.ctx.table_name = Some(String::new());
+                    let time_expr = build_special_time_expr(SPECIAL_TIME_FUNCTION);
 
                     return Ok(LogicalPlan::Extension(Extension {
                         node: Arc::new(
@@ -369,6 +371,7 @@ impl PromPlanner {
                                 self.ctx.interval,
                                 SPECIAL_TIME_FUNCTION.to_string(),
                                 DEFAULT_FIELD_COLUMN.to_string(),
+                                time_expr,
                             )
                             .context(DataFusionPlanningSnafu)?,
                         ),
