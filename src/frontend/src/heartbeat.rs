@@ -133,7 +133,8 @@ impl HeartbeatTask {
                                 }
                             }
                         } else {
-                            None
+                            // Receives None that means Sender was dropped, we need to break the current loop
+                            break
                         }
                     }
                     _ = &mut sleep => {
