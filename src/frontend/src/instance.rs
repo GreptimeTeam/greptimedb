@@ -36,6 +36,8 @@ use common_base::Plugins;
 use common_catalog::consts::MITO_ENGINE;
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
+use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_query::Output;
 use common_telemetry::logging::{debug, info};
 use common_telemetry::timer;
@@ -75,6 +77,7 @@ use crate::error::{
 };
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::FrontendOptions;
+use crate::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
 use crate::heartbeat::HeartbeatTask;
 use crate::instance::standalone::StandaloneGrpcQueryHandler;
 use crate::metrics;
@@ -143,7 +146,7 @@ impl Instance {
 
         let mut catalog_manager = FrontendCatalogManager::new(
             meta_backend.clone(),
-            meta_backend,
+            meta_backend.clone(),
             partition_manager,
             datanode_clients.clone(),
         );
@@ -173,7 +176,17 @@ impl Instance {
 
         plugins.insert::<StatementExecutorRef>(statement_executor.clone());
 
-        let heartbeat_task = Some(HeartbeatTask::new(meta_client, 5, 5));
+        let handlers_executor = HandlerGroupExecutor::new(vec![
+            Arc::new(ParseMailboxMessageHandler::default()),
+            Arc::new(InvalidateTableCacheHandler::new(meta_backend)),
+        ]);
+
+        let heartbeat_task = Some(HeartbeatTask::new(
+            meta_client,
+            5,
+            5,
+            Arc::new(handlers_executor),
+        ));
 
         Ok(Instance {
             catalog_manager,

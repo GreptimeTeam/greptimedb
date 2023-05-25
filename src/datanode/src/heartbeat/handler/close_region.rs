@@ -74,7 +74,7 @@ impl HeartbeatResponseHandler for CloseRegionHandler {
                 .send((meta, CloseRegionHandler::map_result(result)))
                 .await
             {
-                error!(e;"Failed to send reply to mailbox");
+                error!(e; "Failed to send reply to mailbox");
             }
         });
 
