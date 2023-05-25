@@ -1222,7 +1222,7 @@ dependencies = [
  "lazy_static",
  "log-store",
  "meta-client",
- "metrics 0.20.1",
+ "metrics 0.21.0",
  "mito",
  "moka 0.11.0",
  "object-store",
@@ -1860,7 +1860,7 @@ dependencies = [
  "async-trait",
  "common-error",
  "common-telemetry",
- "metrics 0.20.1",
+ "metrics 0.21.0",
  "once_cell",
  "paste",
  "snafu",
@@ -1876,7 +1876,7 @@ dependencies = [
  "backtrace",
  "common-error",
  "console-subscriber",
- "metrics 0.20.1",
+ "metrics 0.21.0",
  "metrics-exporter-prometheus",
  "metrics-util",
  "once_cell",
@@ -2577,7 +2577,7 @@ dependencies = [
  "log-store",
  "meta-client",
  "meta-srv",
- "metrics 0.20.1",
+ "metrics 0.21.0",
  "mito",
  "object-store",
  "pin-project",
@@ -3149,7 +3149,7 @@ dependencies = [
  "meta-srv",
  "meter-core",
  "meter-macros",
- "metrics",
+ "metrics 0.21.0",
  "mito",
  "moka 0.9.7",
  "object-store",
@@ -4988,7 +4988,7 @@ dependencies = [
  "h2",
  "http-body",
  "lazy_static",
- "metrics 0.20.1",
+ "metrics 0.21.0",
  "once_cell",
  "parking_lot",
  "prost",
@@ -5051,16 +5051,15 @@ dependencies = [
 
 [[package]]
 name = "metrics-exporter-prometheus"
-version = "0.11.0"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8603921e1f54ef386189335f288441af761e0fc61bcb552168d9cedfe63ebc70"
+checksum = "8a4964177ddfdab1e3a2b37aec7cf320e14169abb0ed73999f558136409178d5"
 dependencies = [
+ "base64 0.21.0",
  "indexmap",
- "metrics 0.20.1",
+ "metrics 0.21.0",
  "metrics-util",
- "parking_lot",
- "portable-atomic 0.3.19",
- "quanta 0.10.1",
+ "quanta 0.11.0",
  "thiserror",
 ]
 
@@ -5103,21 +5102,19 @@ dependencies = [
 
 [[package]]
 name = "metrics-util"
-version = "0.14.0"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7d24dc2dbae22bff6f1f9326ffce828c9f07ef9cc1e8002e5279f845432a30a"
+checksum = "111cb375987443c3de8d503580b536f77dc8416d32db62d9456db5d93bd7ac47"
 dependencies = [
  "aho-corasick 0.7.20",
  "crossbeam-epoch",
  "crossbeam-utils",
- "hashbrown 0.12.3",
+ "hashbrown 0.13.2",
  "indexmap",
- "metrics 0.20.1",
+ "metrics 0.21.0",
  "num_cpus",
- "ordered-float 2.10.0",
- "parking_lot",
- "portable-atomic 0.3.19",
- "quanta 0.10.1",
+ "ordered-float 3.7.0",
+ "quanta 0.11.0",
  "radix_trie",
  "sketches-ddsketch",
 ]
@@ -5637,7 +5634,7 @@ dependencies = [
  "futures",
  "lru 0.9.0",
  "md5",
- "metrics 0.20.1",
+ "metrics 0.21.0",
  "opendal",
  "pin-project",
  "tokio",
@@ -6773,7 +6770,7 @@ dependencies = [
  "futures",
  "futures-util",
  "humantime",
- "metrics 0.20.1",
+ "metrics 0.21.0",
  "num",
  "num-traits",
  "object-store",
@@ -8189,7 +8186,7 @@ dependencies = [
  "humantime-serde",
  "hyper",
  "influxdb_line_protocol",
- "metrics 0.20.1",
+ "metrics 0.21.0",
  "metrics-process",
  "mime_guess",
  "mysql_async",
@@ -8649,7 +8646,7 @@ dependencies = [
  "futures-util",
  "lazy_static",
  "log-store",
- "metrics 0.20.1",
+ "metrics 0.21.0",
  "object-store",
  "parquet",
  "paste",
