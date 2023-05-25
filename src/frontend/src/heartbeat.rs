@@ -138,7 +138,7 @@ impl HeartbeatTask {
                         }
                     }
                     _ = &mut sleep => {
-                        sleep.as_mut().reset(Instant::now() + Duration::from_millis(report_interval));
+                        sleep.as_mut().reset(Instant::now() + Duration::from_secs(report_interval));
                         Some(HeartbeatRequest::default())
                     }
                 };
