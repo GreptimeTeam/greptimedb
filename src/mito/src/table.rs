@@ -17,7 +17,6 @@ pub mod test_util;
 
 use std::any::Any;
 use std::collections::HashMap;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -26,14 +25,10 @@ use common_datasource::compression::CompressionType;
 use common_error::ext::BoxedError;
 use common_query::logical_plan::Expr;
 use common_query::physical_plan::PhysicalPlanRef;
-use common_recordbatch::error::{ExternalSnafu, Result as RecordBatchResult};
-use common_recordbatch::{
-    RecordBatch, RecordBatchStream, RecordBatchStreamAdaptor, SendableRecordBatchStream,
-};
+use common_recordbatch::error::ExternalSnafu;
+use common_recordbatch::{RecordBatch, RecordBatchStreamAdaptor, SendableRecordBatchStream};
 use common_telemetry::{logging, warn};
 use datatypes::schema::Schema;
-use futures::task::{Context, Poll};
-use futures::Stream;
 use object_store::ObjectStore;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::manifest::{self, Manifest, ManifestVersion, MetaActionIterator};
@@ -236,7 +231,7 @@ impl<R: Region> Table for MitoTable<R> {
                 .transform_projection(region, request.projection.clone())
                 .map_err(BoxedError::new)
                 .context(table_error::TableOperationSnafu)?;
-            let filters = request.filters.clone().into();
+            let filters = request.filters.clone();
 
             let scan_request = ScanRequest {
                 projection,

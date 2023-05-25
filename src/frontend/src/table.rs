@@ -50,7 +50,6 @@ use store_api::storage::{RegionNumber, ScanRequest};
 use table::error::TableOperationSnafu;
 use table::metadata::{FilterPushDownType, TableInfo, TableInfoRef};
 use table::requests::{AlterKind, AlterTableRequest, DeleteRequest, InsertRequest};
-use table::table::scan::StreamScanAdapter;
 use table::table::AlterContext;
 use table::{meter_insert_request, Table};
 use tokio::sync::RwLock;

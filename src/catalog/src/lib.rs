@@ -13,7 +13,6 @@
 // limitations under the License.
 
 #![feature(assert_matches)]
-#![feature(result_flattening)]
 
 use std::any::Any;
 use std::collections::HashMap;

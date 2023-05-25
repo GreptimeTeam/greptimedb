@@ -141,7 +141,7 @@ impl Table for InformationTable {
                     .context(SchemaConversionSnafu)?,
             )
         } else {
-            self.schema().clone()
+            self.schema()
         };
         let stream = self
             .stream
@@ -150,16 +150,13 @@ impl Table for InformationTable {
             .take()
             .unwrap()
             .map(move |batch| {
-                batch
-                    .map(|batch| {
-                        if let Some(projection) = &projection {
-                            let projected = batch.try_project(projection);
-                            projected
-                        } else {
-                            Ok(batch)
-                        }
-                    })
-                    .flatten()
+                batch.and_then(|batch| {
+                    if let Some(projection) = &projection {
+                        batch.try_project(projection)
+                    } else {
+                        Ok(batch)
+                    }
+                })
             });
         let stream = RecordBatchStreamAdaptor {
             schema: projected_schema,
