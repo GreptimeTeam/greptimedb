@@ -64,13 +64,6 @@ impl EmptyMetric {
         field_column_name: String,
         field_expr: Expr,
     ) -> DataFusionResult<Self> {
-        // let ts_field = DFField::new(
-        //     Some(""),
-        //     &time_index_column_name,
-        //     DataType::Timestamp(TimeUnit::Millisecond, None),
-        //     false,
-        // );
-        // let ts_only_schema = DFSchema::new_with_metadata(vec![ts_field.clone()], HashMap::new())?;
         let ts_only_schema = build_ts_only_schema(&time_index_column_name);
         let field_data_type = field_expr.get_type(&ts_only_schema)?;
         let schema = Arc::new(DFSchema::new_with_metadata(
@@ -287,14 +280,6 @@ impl Stream for EmptyMetricStream {
                 RecordBatch::try_new(self.result_schema.clone(), vec![time_array, field_array])
                     .map_err(DataFusionError::ArrowError);
 
-            // let float_array =
-            //     Float64Array::from_iter(time_array.iter().map(|v| *v as f64 / 1000.0));
-            // let millisecond_array = TimestampMillisecondArray::from(time_array);
-            // let batch = RecordBatch::try_new(
-            //     self.result_schema.clone(),
-            //     vec![Arc::new(millisecond_array), Arc::new(float_array)],
-            // )
-            // .map_err(DataFusionError::ArrowError);
             Poll::Ready(Some(batch))
         } else {
             Poll::Ready(None)
