@@ -41,6 +41,7 @@ pub mod write_batch;
 pub use engine::EngineImpl;
 mod file_purger;
 mod metrics;
+mod window_infer;
 
 pub use sst::parquet::ParquetWriter;
 pub use sst::Source;

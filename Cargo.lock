@@ -8517,6 +8517,7 @@ dependencies = [
  "datatypes",
  "futures",
  "futures-util",
+ "itertools",
  "lazy_static",
  "log-store",
  "metrics",

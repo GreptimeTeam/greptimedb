@@ -47,7 +47,7 @@ const MILLISECOND_VARIATION: u64 = 3;
 const MICROSECOND_VARIATION: u64 = 6;
 const NANOSECOND_VARIATION: u64 = 9;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[enum_dispatch(DataType)]
 pub enum TimestampType {
     Second(TimestampSecondType),
@@ -92,6 +92,10 @@ impl TimestampType {
         }
     }
 
+    pub fn create_timestamp(&self, val: i64) -> Timestamp {
+        Timestamp::new(val, self.unit())
+    }
+
     pub fn precision(&self) -> u64 {
         match self {
             TimestampType::Second(_) => SECOND_VARIATION,
@@ -105,7 +109,7 @@ impl TimestampType {
 macro_rules! impl_data_type_for_timestamp {
     ($unit: ident) => {
         paste! {
-            #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+            #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
             pub struct [<Timestamp $unit Type>];
 
             impl DataType for [<Timestamp $unit Type>] {

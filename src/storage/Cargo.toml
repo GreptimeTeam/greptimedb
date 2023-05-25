@@ -25,6 +25,7 @@ datafusion-common.workspace = true
 datafusion-expr.workspace = true
 futures.workspace = true
 futures-util.workspace = true
+itertools = "0.10"
 lazy_static = "1.4"
 metrics.workspace = true
 object-store = { path = "../object-store" }
