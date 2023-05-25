@@ -71,7 +71,9 @@ pub fn init_default_ut_logging() {
         let dir =
             env::var("UNITTEST_LOG_DIR").unwrap_or_else(|_| "/tmp/__unittest_logs".to_string());
 
-        let level = env::var("UNITTEST_LOG_LEVEL").unwrap_or_else(|_| "DEBUG".to_string());
+        let level = env::var("UNITTEST_LOG_LEVEL").unwrap_or_else(|_|
+            "debug,hyper=warn,tower=warn,datafusion=warn,reqwest=warn,sqlparser=warn,h2=info,opendal=info".to_string()
+        );
         let opts = LoggingOptions {
             dir: dir.clone(),
             level: Some(level),
@@ -90,8 +92,7 @@ pub fn init_default_ut_logging() {
 static GLOBAL_UT_LOG_GUARD: Lazy<Arc<Mutex<Option<Vec<WorkerGuard>>>>> =
     Lazy::new(|| Arc::new(Mutex::new(None)));
 
-const DEFAULT_LOG_TARGETS: &str =
-    "info,hyper=warn,tower=warn,datafusion=warn,reqwest=warn,sqlparser=warn,h2=info,opendal=info";
+const DEFAULT_LOG_TARGETS: &str = "info";
 
 #[allow(clippy::print_stdout)]
 pub fn init_global_logging(
