@@ -28,6 +28,7 @@ use datafusion::logical_expr::{
     LogicalPlan, LogicalPlanBuilder, Operator, ScalarUDF,
 };
 use datafusion::optimizer::utils;
+use datafusion::prelude as df_prelude;
 use datafusion::prelude::{Column, Expr as DfExpr, JoinType};
 use datafusion::scalar::ScalarValue;
 use datafusion::sql::TableReference;
@@ -61,6 +62,8 @@ const LEFT_PLAN_JOIN_ALIAS: &str = "lhs";
 
 /// `time()` function in PromQL.
 const SPECIAL_TIME_FUNCTION: &str = "time";
+
+const DEFAULT_TIME_INDEX_COLUMN: &str = "time";
 
 /// default value column name for empty metric
 const DEFAULT_FIELD_COLUMN: &str = "value";
@@ -182,11 +185,30 @@ impl PromPlanner {
                     Self::try_build_literal_expr(lhs),
                     Self::try_build_literal_expr(rhs),
                 ) {
-                    // TODO(ruihang): handle literal-only expressions
-                    (Some(_lhs), Some(_rhs)) => UnsupportedExprSnafu {
-                        name: "Literal-only expression",
+                    (Some(lhs), Some(rhs)) => {
+                        self.ctx.time_index_column = Some(DEFAULT_TIME_INDEX_COLUMN.to_string());
+                        self.ctx.field_columns = vec![DEFAULT_FIELD_COLUMN.to_string()];
+                        self.ctx.table_name = Some(String::new());
+                        let field_expr = DfExpr::BinaryExpr(BinaryExpr {
+                            left: Box::new(lhs),
+                            op: Self::prom_token_to_binary_op(*op)?,
+                            right: Box::new(rhs),
+                        });
+
+                        LogicalPlan::Extension(Extension {
+                            node: Arc::new(
+                                EmptyMetric::new(
+                                    self.ctx.start,
+                                    self.ctx.end,
+                                    self.ctx.interval,
+                                    SPECIAL_TIME_FUNCTION.to_string(),
+                                    DEFAULT_FIELD_COLUMN.to_string(),
+                                    field_expr,
+                                )
+                                .context(DataFusionPlanningSnafu)?,
+                            ),
+                        })
                     }
-                    .fail()?,
                     // lhs is a literal, rhs is a column
                     (Some(expr), None) => {
                         let input = self.prom_expr_to_plan(*rhs.clone()).await?;
@@ -284,14 +306,46 @@ impl PromPlanner {
                 name: "Prom Subquery",
             }
             .fail()?,
-            PromExpr::NumberLiteral(NumberLiteral { .. }) => UnsupportedExprSnafu {
-                name: "Prom Number Literal",
+            PromExpr::NumberLiteral(NumberLiteral { val }) => {
+                self.ctx.time_index_column = Some(DEFAULT_TIME_INDEX_COLUMN.to_string());
+                self.ctx.field_columns = vec![DEFAULT_FIELD_COLUMN.to_string()];
+                self.ctx.table_name = Some(String::new());
+                let literal_expr = df_prelude::lit(*val);
+
+                LogicalPlan::Extension(Extension {
+                    node: Arc::new(
+                        EmptyMetric::new(
+                            self.ctx.start,
+                            self.ctx.end,
+                            self.ctx.interval,
+                            SPECIAL_TIME_FUNCTION.to_string(),
+                            DEFAULT_FIELD_COLUMN.to_string(),
+                            literal_expr,
+                        )
+                        .context(DataFusionPlanningSnafu)?,
+                    ),
+                })
             }
-            .fail()?,
-            PromExpr::StringLiteral(StringLiteral { .. }) => UnsupportedExprSnafu {
-                name: "Prom String Literal",
+            PromExpr::StringLiteral(StringLiteral { val }) => {
+                self.ctx.time_index_column = Some(DEFAULT_TIME_INDEX_COLUMN.to_string());
+                self.ctx.field_columns = vec![DEFAULT_FIELD_COLUMN.to_string()];
+                self.ctx.table_name = Some(String::new());
+                let literal_expr = df_prelude::lit(val.to_string());
+
+                LogicalPlan::Extension(Extension {
+                    node: Arc::new(
+                        EmptyMetric::new(
+                            self.ctx.start,
+                            self.ctx.end,
+                            self.ctx.interval,
+                            SPECIAL_TIME_FUNCTION.to_string(),
+                            DEFAULT_FIELD_COLUMN.to_string(),
+                            literal_expr,
+                        )
+                        .context(DataFusionPlanningSnafu)?,
+                    ),
+                })
             }
-            .fail()?,
             PromExpr::VectorSelector(VectorSelector {
                 name: _,
                 offset,
