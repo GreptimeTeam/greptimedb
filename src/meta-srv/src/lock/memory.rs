@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use dashmap::DashMap;
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use crate::error::Result;
@@ -23,8 +23,8 @@ use crate::lock::{DistLock, Key, Opts};
 
 #[derive(Default)]
 pub(crate) struct MemLock {
-    mutexes: Arc<Mutex<HashMap<Key, Arc<Mutex<()>>>>>,
-    guards: Arc<Mutex<HashMap<Key, OwnedMutexGuard<()>>>>,
+    mutexes: DashMap<Key, Arc<Mutex<()>>>,
+    guards: DashMap<Key, OwnedMutexGuard<()>>,
 }
 
 #[async_trait]
@@ -32,32 +32,29 @@ impl DistLock for MemLock {
     async fn lock(&self, name: Vec<u8>, _opts: Opts) -> Result<Key> {
         let key = name;
 
-        let mutex = {
-            let mut mutexes = self.mutexes.lock().await;
-            mutexes
-                .entry(key.clone())
-                .or_insert_with(|| Arc::new(Mutex::new(())))
-                .clone()
-        };
+        let mutex = self
+            .mutexes
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
 
         let guard = mutex.lock_owned().await;
 
-        let mut guards = self.guards.lock().await;
-        guards.insert(key.clone(), guard);
+        self.guards.insert(key.clone(), guard);
         Ok(key)
     }
 
     async fn unlock(&self, key: Vec<u8>) -> Result<()> {
-        let mut guards = self.guards.lock().await;
         // drop the guard, so that the mutex can be unlocked,
         // effectively make the `mutex.lock_owned` in `lock` method to proceed
-        guards.remove(&key);
+        self.guards.remove(&key);
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use rand::seq::SliceRandom;
