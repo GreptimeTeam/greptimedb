@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use session::context::UserInfo;
 
 use crate::http::{ApiState, JsonResponse};
+use crate::metrics::PROCESS_COLLECTOR;
 use crate::metrics_handler::MetricsHandler;
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
@@ -128,6 +129,9 @@ pub async fn metrics(
     State(state): State<MetricsHandler>,
     Query(_params): Query<HashMap<String, String>>,
 ) -> String {
+    // Collect process metrics.
+    PROCESS_COLLECTOR.collect();
+
     state.render()
 }
 

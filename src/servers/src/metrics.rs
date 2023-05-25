@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use metrics_process::Collector;
+use once_cell::sync::Lazy;
+
 pub(crate) const METRIC_DB_LABEL: &str = "db";
 pub(crate) const METRIC_CODE_LABEL: &str = "code";
 
@@ -47,3 +50,11 @@ pub(crate) const METRIC_HTTP_REQUESTS_ELAPSED: &str = "servers.http_requests_ela
 pub(crate) const METRIC_METHOD_LABEL: &str = "method";
 pub(crate) const METRIC_PATH_LABEL: &str = "path";
 pub(crate) const METRIC_STATUS_LABEL: &str = "status";
+
+/// Prometheus style process metrics collector.
+pub(crate) static PROCESS_COLLECTOR: Lazy<Collector> = Lazy::new(|| {
+    let collector = Collector::default();
+    // Describe collector.
+    collector.describe();
+    collector
+});
