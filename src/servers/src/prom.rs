@@ -388,11 +388,13 @@ impl PromJsonResponse {
             .map(|(tags, mut values)| {
                 let metric = tags.into_iter().collect();
                 match result_type {
-                    Some(ValueType::Vector) => Ok(PromSeries {
-                        metric,
-                        value: values.pop(),
-                        ..Default::default()
-                    }),
+                    Some(ValueType::Vector) | Some(ValueType::Scalar) | Some(ValueType::String) => {
+                        Ok(PromSeries {
+                            metric,
+                            value: values.pop(),
+                            ..Default::default()
+                        })
+                    }
                     Some(ValueType::Matrix) => Ok(PromSeries {
                         metric,
                         values,
@@ -690,8 +692,8 @@ fn promql_expr_to_metric_name(expr: &PromqlExpr) -> Option<String> {
         }
         PromqlExpr::Paren(ParenExpr { expr }) => promql_expr_to_metric_name(expr),
         PromqlExpr::Subquery(SubqueryExpr { expr, .. }) => promql_expr_to_metric_name(expr),
-        PromqlExpr::NumberLiteral(_) => None,
-        PromqlExpr::StringLiteral(_) => None,
+        PromqlExpr::NumberLiteral(_) => Some(String::new()),
+        PromqlExpr::StringLiteral(_) => Some(String::new()),
         PromqlExpr::Extension(_) => None,
         PromqlExpr::VectorSelector(VectorSelector { matchers, .. }) => {
             matchers.find_matchers(METRIC_NAME).pop().cloned()
