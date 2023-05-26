@@ -27,7 +27,7 @@ use store_api::storage::{RegionId, RegionNumber};
 use table::requests::InsertRequest;
 
 use crate::columns::RangeColumnsPartitionRule;
-use crate::error::Result;
+use crate::error::{FindLeaderSnafu, Result};
 use crate::partition::{PartitionBound, PartitionDef, PartitionExpr};
 use crate::range::RangePartitionRule;
 use crate::route::TableRoutes;
@@ -93,6 +93,20 @@ impl PartitionRuleManager {
                 .push(*region);
         }
         Ok(datanodes)
+    }
+
+    /// Find all leader peers of given table.
+    pub async fn find_table_region_leaders(&self, table: &TableName) -> Result<Vec<Peer>> {
+        let route = self.table_routes.get_route(table).await?;
+        let mut peers = vec![];
+        for peer in &route.region_routes {
+            peers.push(peer.leader_peer.clone().context(FindLeaderSnafu {
+                region_id: peer.region.id,
+                table_name: table.to_string(),
+            })?);
+        }
+
+        Ok(peers)
     }
 
     pub async fn find_table_partitions(&self, table: &TableName) -> Result<Vec<PartitionInfo>> {

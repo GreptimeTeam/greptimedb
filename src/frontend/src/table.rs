@@ -62,6 +62,7 @@ pub struct DistTable {
     table_name: TableName,
     table_info: TableInfoRef,
     partition_manager: PartitionRuleManagerRef,
+    // TODO(ruihang): move this field into PartitionRuleManager
     datanode_clients: Arc<DatanodeClients>,
     backend: KvBackendRef,
 }
@@ -470,7 +471,7 @@ impl PartitionExec {
             return Ok(());
         }
 
-        let plan = TableScanPlan {
+        let plan: TableScanPlan = TableScanPlan {
             table_name: self.table_name.clone(),
             projection: self.projection.clone(),
             filters: self.filters.clone(),

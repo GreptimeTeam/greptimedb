@@ -12,9 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::sync::Arc;
 
+use arrow_schema::SchemaRef as ArrowSchemaRef;
+use common_base::bytes::Bytes;
+use common_meta::peer::Peer;
+use common_query::physical_plan::TaskContext;
+use common_recordbatch::DfSendableRecordBatchStream;
+use datafusion::physical_plan::{ExecutionPlan, Partitioning};
+use datafusion_common::{DataFusionError, Result, Statistics};
 use datafusion_expr::{Extension, LogicalPlan, UserDefinedLogicalNodeCore};
+use datafusion_physical_expr::PhysicalSortExpr;
 
 #[derive(Debug, Hash, PartialEq, Eq)]
 pub struct MergeScanLogicalPlan {
@@ -80,5 +89,65 @@ impl MergeScanLogicalPlan {
 
     pub fn input(&self) -> &LogicalPlan {
         &self.input
+    }
+}
+
+#[derive(Debug)]
+pub struct MergeScanExec {
+    peers: Vec<Peer>,
+    substrait_plan: Bytes,
+    schema: ArrowSchemaRef,
+}
+
+impl MergeScanExec {
+    pub fn new(peers: Vec<Peer>, substrait_plan: Bytes, schema: ArrowSchemaRef) -> Self {
+        Self {
+            peers,
+            substrait_plan,
+            schema,
+        }
+    }
+}
+
+impl ExecutionPlan for MergeScanExec {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn schema(&self) -> ArrowSchemaRef {
+        self.schema.clone()
+    }
+
+    fn output_partitioning(&self) -> Partitioning {
+        Partitioning::UnknownPartitioning(1)
+    }
+
+    fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
+        None
+    }
+
+    fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        _children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Err(DataFusionError::Execution(
+            "should not call `with_new_children` on MergeScanExec".to_string(),
+        ))
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> Result<DfSendableRecordBatchStream> {
+        todo!()
+    }
+
+    fn statistics(&self) -> Statistics {
+        Statistics::default()
     }
 }

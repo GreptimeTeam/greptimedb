@@ -133,7 +133,7 @@ async fn test_query_validate() -> Result<()> {
     });
     let plugins = Arc::new(plugins);
 
-    let factory = QueryEngineFactory::new_with_plugins(catalog_list, false, plugins);
+    let factory = QueryEngineFactory::new_with_plugins(catalog_list, false, None, plugins);
     let engine = factory.query_engine();
 
     let stmt = QueryLanguageParser::parse_sql("select number from public.numbers").unwrap();

@@ -26,6 +26,7 @@ use common_function::scalars::{FunctionRef, FUNCTION_REGISTRY};
 use common_query::prelude::ScalarUdf;
 use common_query::Output;
 use datatypes::schema::Schema;
+use partition::manager::PartitionRuleManager;
 use session::context::QueryContextRef;
 use sql::statements::statement::Statement;
 
@@ -66,17 +67,19 @@ pub struct QueryEngineFactory {
 
 impl QueryEngineFactory {
     pub fn new(catalog_manager: CatalogManagerRef, with_dist_planner: bool) -> Self {
-        Self::new_with_plugins(catalog_manager, with_dist_planner, Default::default())
+        Self::new_with_plugins(catalog_manager, with_dist_planner, None, Default::default())
     }
 
     pub fn new_with_plugins(
         catalog_manager: CatalogManagerRef,
         with_dist_planner: bool,
+        partition_manager: Option<Arc<PartitionRuleManager>>,
         plugins: Arc<Plugins>,
     ) -> Self {
         let state = Arc::new(QueryEngineState::new(
             catalog_manager,
             with_dist_planner,
+            partition_manager,
             plugins,
         ));
         let query_engine = Arc::new(DatafusionQueryEngine::new(state));

@@ -22,6 +22,7 @@ use api::v1::meta::{
 };
 use serde::{Deserialize, Serialize, Serializer};
 use snafu::{OptionExt, ResultExt};
+use store_api::storage::RegionId;
 use table::metadata::RawTableInfo;
 
 use crate::error::{self, Result};
@@ -313,7 +314,7 @@ pub struct RegionRoute {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 pub struct Region {
-    pub id: u64,
+    pub id: RegionId,
     pub name: String,
     pub partition: Option<Partition>,
     pub attrs: HashMap<String, String>,

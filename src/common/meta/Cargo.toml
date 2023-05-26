@@ -9,8 +9,9 @@ api = { path = "../../api" }
 common-catalog = { path = "../catalog" }
 common-error = { path = "../error" }
 serde.workspace = true
-snafu.workspace = true
 serde_json.workspace = true
+snafu.workspace = true
+store-api = { path = "../../store-api" }
 table = { path = "../../table" }
 
 [dev-dependencies]

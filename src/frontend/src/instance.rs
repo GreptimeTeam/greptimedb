@@ -143,8 +143,11 @@ impl Instance {
         let table_routes = Arc::new(TableRoutes::new(meta_client.clone()));
         let partition_manager = Arc::new(PartitionRuleManager::new(table_routes));
 
-        let mut catalog_manager =
-            FrontendCatalogManager::new(meta_backend, partition_manager, datanode_clients.clone());
+        let mut catalog_manager = FrontendCatalogManager::new(
+            meta_backend,
+            partition_manager.clone(),
+            datanode_clients.clone(),
+        );
 
         let dist_instance = DistInstance::new(
             meta_client.clone(),
@@ -156,9 +159,13 @@ impl Instance {
         catalog_manager.set_dist_instance(dist_instance.clone());
         let catalog_manager = Arc::new(catalog_manager);
 
-        let query_engine =
-            QueryEngineFactory::new_with_plugins(catalog_manager.clone(), false, plugins.clone())
-                .query_engine();
+        let query_engine = QueryEngineFactory::new_with_plugins(
+            catalog_manager.clone(),
+            false,
+            Some(partition_manager),
+            plugins.clone(),
+        )
+        .query_engine();
 
         let script_executor =
             Arc::new(ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?);

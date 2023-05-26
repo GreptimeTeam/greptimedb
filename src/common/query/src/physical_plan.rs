@@ -32,12 +32,12 @@ use crate::DfPhysicalPlan;
 
 pub type PhysicalPlanRef = Arc<dyn PhysicalPlan>;
 
-/// `PhysicalPlan` represent nodes in the Physical Plan.
+/// [`PhysicalPlan`] represent nodes in the Physical Plan.
 ///
-/// Each `PhysicalPlan` is Partition-aware and is responsible for
-/// creating the actual `async` [`SendableRecordBatchStream`]s
-/// of [`RecordBatch`] that incrementally compute the operator's
-/// output from its input partition.
+/// Each [`PhysicalPlan`] is partition-aware and is responsible for
+/// creating the actual "async" [`SendableRecordBatchStream`]s
+/// of [`RecordBatch`](common_recordbatch::RecordBatch) that incrementally
+/// compute the operator's  output from its input partition.
 pub trait PhysicalPlan: Debug + Send + Sync {
     /// Returns the physical plan as [`Any`](std::any::Any) so that it can be
     /// downcast to a specific implementation.

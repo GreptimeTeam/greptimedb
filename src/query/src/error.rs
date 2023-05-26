@@ -15,6 +15,7 @@
 use std::any::Any;
 
 use common_error::prelude::*;
+use common_meta::table_name::TableName;
 use datafusion::error::DataFusionError;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
@@ -100,6 +101,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to encode Substrait logical plan, source: {}", source))]
+    EncodeSubstraitLogicalPlan {
+        source: substrait::error::Error,
+        location: Location,
+    },
+
     #[snafu(display("General SQL error: {}", source))]
     Sql {
         #[snafu(backtrace)]
@@ -119,6 +126,9 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Table identifier is incomplete"))]
+    IncompleteTableIdentifier { location: Location },
+
     #[snafu(display("Failed to convert value to sql value: {}", value))]
     ConvertSqlValue {
         value: Value,
@@ -131,6 +141,13 @@ pub enum Error {
         datatype: ConcreteDataType,
         #[snafu(backtrace)]
         source: sql::error::Error,
+    },
+
+    #[snafu(display("Failed to route partition of table {}, source: {}", table, source))]
+    RoutePartition {
+        table: TableName,
+        source: partition::error::Error,
+        location: Location,
     },
 
     #[snafu(display("Failed to parse SQL, source: {}", source))]
@@ -194,9 +211,11 @@ impl ErrorExt for Error {
             | ParseFloat { .. }
             | MissingRequiredField { .. }
             | BuildRegex { .. }
+            | IncompleteTableIdentifier { .. }
             | ConvertSchema { .. } => StatusCode::InvalidArguments,
 
             BuildBackend { .. } | ListObjects { .. } => StatusCode::StorageUnavailable,
+            EncodeSubstraitLogicalPlan { source, .. } => source.status_code(),
 
             ParseFileFormat { source, .. } | InferSchema { source, .. } => source.status_code(),
 
@@ -208,7 +227,9 @@ impl ErrorExt for Error {
             ParseSql { source } => source.status_code(),
             CreateRecordBatch { source } => source.status_code(),
             QueryExecution { source } | QueryPlan { source } => source.status_code(),
-            DataFusion { .. } | MissingTimestampColumn { .. } => StatusCode::Internal,
+            DataFusion { .. } | MissingTimestampColumn { .. } | RoutePartition { .. } => {
+                StatusCode::Internal
+            }
             Sql { source } => source.status_code(),
             PlanSql { .. } => StatusCode::PlanQuery,
             ConvertSqlType { source, .. } | ConvertSqlValue { source, .. } => source.status_code(),

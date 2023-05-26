@@ -26,10 +26,11 @@ use datafusion::catalog::catalog::MemoryCatalogList;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::{QueryPlanner, SessionConfig, SessionState};
 use datafusion::execution::runtime_env::RuntimeEnv;
-use datafusion::physical_plan::planner::DefaultPhysicalPlanner;
+use datafusion::physical_plan::planner::{DefaultPhysicalPlanner, ExtensionPlanner};
 use datafusion::physical_plan::{ExecutionPlan, PhysicalPlanner};
 use datafusion_expr::LogicalPlan as DfLogicalPlan;
 use datafusion_optimizer::analyzer::Analyzer;
+use partition::manager::PartitionRuleManager;
 use promql::extension_plan::PromExtensionPlanner;
 
 use crate::dist_plan::{DistExtensionPlanner, DistPlannerAnalyzer};
@@ -59,6 +60,7 @@ impl QueryEngineState {
     pub fn new(
         catalog_list: CatalogManagerRef,
         with_dist_planner: bool,
+        partition_manager: Option<Arc<PartitionRuleManager>>,
         plugins: Arc<Plugins>,
     ) -> Self {
         let runtime_env = Arc::new(RuntimeEnv::default());
@@ -76,7 +78,10 @@ impl QueryEngineState {
             Arc::new(MemoryCatalogList::default()), // pass a dummy catalog list
         )
         .with_analyzer_rules(analyzer.rules)
-        .with_query_planner(Arc::new(DfQueryPlanner::new()));
+        .with_query_planner(Arc::new(DfQueryPlanner::new(
+            partition_manager,
+            catalog_list.clone(),
+        )));
 
         let df_context = SessionContext::with_state(session_state);
 
@@ -145,12 +150,17 @@ impl QueryPlanner for DfQueryPlanner {
 }
 
 impl DfQueryPlanner {
-    fn new() -> Self {
+    fn new(
+        partition_manager: Option<Arc<PartitionRuleManager>>,
+        catalog_manager: CatalogManagerRef,
+    ) -> Self {
+        let mut planners: Vec<Arc<dyn ExtensionPlanner + Send + Sync>> =
+            vec![Arc::new(PromExtensionPlanner)];
+        if let Some(partition_manager) = partition_manager {
+            planners.push(Arc::new(DistExtensionPlanner::new(partition_manager)));
+        }
         Self {
-            physical_planner: DefaultPhysicalPlanner::with_extension_planners(vec![
-                Arc::new(PromExtensionPlanner),
-                Arc::new(DistExtensionPlanner),
-            ]),
+            physical_planner: DefaultPhysicalPlanner::with_extension_planners(planners),
         }
     }
 }
