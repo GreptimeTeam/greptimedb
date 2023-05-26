@@ -21,7 +21,7 @@ use common_catalog::build_db_string;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_telemetry::debug;
 use common_time::TimeZone;
-use sql::dialect::{Dialect, GenericDialect, MySqlDialect, PostgreSqlDialect};
+use sql::dialect::{Dialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
 
 pub type QueryContextRef = Arc<QueryContext>;
 pub type ConnInfoRef = Arc<ConnInfo>;
@@ -61,12 +61,12 @@ impl QueryContext {
             current_catalog: ArcSwap::new(Arc::new(DEFAULT_CATALOG_NAME.to_string())),
             current_schema: ArcSwap::new(Arc::new(DEFAULT_SCHEMA_NAME.to_string())),
             time_zone: ArcSwap::new(Arc::new(None)),
-            sql_dialect: Box::new(GenericDialect {}),
+            sql_dialect: Box::new(GreptimeDbDialect {}),
         }
     }
 
     pub fn with(catalog: &str, schema: &str) -> Self {
-        Self::with_sql_dialect(catalog, schema, Box::new(GenericDialect {}))
+        Self::with_sql_dialect(catalog, schema, Box::new(GreptimeDbDialect {}))
     }
 
     pub fn with_sql_dialect(
@@ -202,7 +202,7 @@ impl Channel {
         match self {
             Channel::Mysql => Box::new(MySqlDialect {}),
             Channel::Postgres => Box::new(PostgreSqlDialect {}),
-            Channel::Opentsdb => Box::new(GenericDialect {}),
+            Channel::Opentsdb => Box::new(GreptimeDbDialect {}),
         }
     }
 }
