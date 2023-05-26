@@ -622,7 +622,9 @@ impl<R: Region> MitoTable<R> {
 
         self.regions.rcu(|regions| {
             let mut regions = HashMap::clone(regions);
-            regions.entry(region_number).or_insert(region.clone());
+            regions
+                .entry(region_number)
+                .or_insert_with(|| region.clone());
 
             Arc::new(regions)
         });
