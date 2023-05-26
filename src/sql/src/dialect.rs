@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub use sqlparser::dialect::{Dialect, GenericDialect, MySqlDialect, PostgreSqlDialect};
+pub use sqlparser::dialect::{Dialect, MySqlDialect, PostgreSqlDialect};
 
 /// GreptimeDb dialect
 #[derive(Debug, Clone)]
@@ -32,7 +32,7 @@ impl Dialect for GreptimeDbDialect {
             || ch == '_'
     }
 
-    // Accepts both `identifer` and "identifer".
+    // Accepts both `identifier` and "identifier".
     fn is_delimited_identifier_start(&self, ch: char) -> bool {
         ch == '`' || ch == '"'
     }

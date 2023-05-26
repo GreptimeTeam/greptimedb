@@ -46,9 +46,8 @@ impl<'a> ParserContext<'a> {
 mod tests {
     use std::assert_matches::assert_matches;
 
-    use sqlparser::dialect::GenericDialect;
-
     use super::*;
+    use crate::dialect::GreptimeDbDialect;
 
     #[test]
     pub fn test_parse_insert() {
@@ -56,7 +55,7 @@ mod tests {
             'test1',1,'true',
             'test2',2,'false')
          ";
-        let result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
+        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
         assert_eq!(1, result.len());
         assert_matches!(result[0], Statement::Insert { .. })
     }
@@ -64,7 +63,7 @@ mod tests {
     #[test]
     pub fn test_parse_invalid_insert() {
         let sql = r"INSERT INTO table_1 VALUES ("; // intentionally a bad sql
-        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
         assert!(result.is_err(), "result is: {result:?}");
     }
 }

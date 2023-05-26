@@ -874,7 +874,7 @@ fn find_partition_columns(
 #[cfg(test)]
 mod test {
     use session::context::QueryContext;
-    use sql::dialect::GenericDialect;
+    use sql::dialect::GreptimeDbDialect;
     use sql::parser::ParserContext;
     use sql::statements::statement::Statement;
 
@@ -908,7 +908,7 @@ ENGINE=mito",
             ),
         ];
         for (sql, expected) in cases {
-            let result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
+            let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
             match &result[0] {
                 Statement::CreateTable(c) => {
                     let expr = expr_factory::create_to_expr(c, QueryContext::arc()).unwrap();

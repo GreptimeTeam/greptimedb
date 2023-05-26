@@ -79,14 +79,14 @@ mod tests {
     use std::assert_matches::assert_matches;
 
     use sqlparser::ast::{ColumnOption, DataType};
-    use sqlparser::dialect::GenericDialect;
 
     use super::*;
+    use crate::dialect::GreptimeDbDialect;
 
     #[test]
     fn test_parse_alter_add_column() {
         let sql = "ALTER TABLE my_metric_1 ADD tagk_i STRING Null;";
-        let mut result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
+        let mut result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
         assert_eq!(1, result.len());
 
         let statement = result.remove(0);
@@ -116,13 +116,13 @@ mod tests {
     #[test]
     fn test_parse_alter_drop_column() {
         let sql = "ALTER TABLE my_metric_1 DROP a";
-        let result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap_err();
+        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap_err();
         assert!(result
             .to_string()
             .contains("expect keyword COLUMN after ALTER TABLE DROP"));
 
         let sql = "ALTER TABLE my_metric_1 DROP COLUMN a";
-        let mut result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
+        let mut result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
         assert_eq!(1, result.len());
 
         let statement = result.remove(0);
@@ -147,13 +147,13 @@ mod tests {
     #[test]
     fn test_parse_alter_rename_table() {
         let sql = "ALTER TABLE test_table table_t";
-        let result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap_err();
+        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap_err();
         assert!(result
             .to_string()
             .contains("expect keyword ADD or DROP or RENAME after ALTER TABLE"));
 
         let sql = "ALTER TABLE test_table RENAME table_t";
-        let mut result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
+        let mut result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
         assert_eq!(1, result.len());
 
         let statement = result.remove(0);

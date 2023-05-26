@@ -194,7 +194,6 @@ impl ConnInfo {
 pub enum Channel {
     Mysql,
     Postgres,
-    Opentsdb,
 }
 
 impl Channel {
@@ -202,7 +201,6 @@ impl Channel {
         match self {
             Channel::Mysql => Box::new(MySqlDialect {}),
             Channel::Postgres => Box::new(PostgreSqlDialect {}),
-            Channel::Opentsdb => Box::new(GreptimeDbDialect {}),
         }
     }
 }
@@ -212,7 +210,6 @@ impl std::fmt::Display for Channel {
         match self {
             Channel::Mysql => write!(f, "mysql"),
             Channel::Postgres => write!(f, "postgres"),
-            Channel::Opentsdb => write!(f, "opentsdb"),
         }
     }
 }
