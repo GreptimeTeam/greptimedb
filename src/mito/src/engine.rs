@@ -585,7 +585,6 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                     Some(table)
                 } else {
                     // Loads missing regions
-                    // TODO(weny): Supports to load regions
                     self.load_missing_regions(ctx, table.clone(), &request.region_numbers)
                         .await?;
 

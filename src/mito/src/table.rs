@@ -28,7 +28,7 @@ use common_query::logical_plan::Expr;
 use common_query::physical_plan::PhysicalPlanRef;
 use common_recordbatch::error::{ExternalSnafu, Result as RecordBatchResult};
 use common_recordbatch::{RecordBatch, RecordBatchStream};
-use common_telemetry::{logging, warn};
+use common_telemetry::{info, logging};
 use datatypes::schema::Schema;
 use futures::task::{Context, Poll};
 use futures::Stream;
@@ -615,12 +615,22 @@ impl<R: Region> MitoTable<R> {
         Ok(())
     }
 
-    pub async fn load_region(&self, region_number: RegionNumber, _region: R) -> TableResult<()> {
+    // Loads a region if the slot of the corresponding region number was not occupied.
+    // Assuming the regions with the same region_number are the same.
+    pub async fn load_region(&self, region_number: RegionNumber, region: R) -> TableResult<()> {
         let info = self.table_info.load();
 
-        // TODO(weny): Supports to load the region
-        warn!(
-            "MitoTable try to load region: {} in table: {}",
+        self.regions.rcu(|regions| {
+            let mut regions = HashMap::clone(regions);
+            regions
+                .entry(region_number)
+                .or_insert_with(|| region.clone());
+
+            Arc::new(regions)
+        });
+
+        info!(
+            "MitoTable loads new region: {} in table: {}",
             region_number,
             format!("{}.{}.{}", info.catalog_name, info.schema_name, info.name)
         );
