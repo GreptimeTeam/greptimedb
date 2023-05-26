@@ -27,6 +27,7 @@ use crate::handler::node_stat::Stat;
 
 pub(crate) const REMOVED_PREFIX: &str = "__removed";
 pub(crate) const DN_LEASE_PREFIX: &str = "__meta_dnlease";
+pub(crate) const FE_LEASE_PREFIX: &str = "__meta_felease";
 pub(crate) const SEQ_PREFIX: &str = "__meta_seq";
 pub(crate) const TABLE_ROUTE_PREFIX: &str = "__meta_table_route";
 
@@ -35,33 +36,41 @@ pub const DN_STAT_PREFIX: &str = "__meta_dnstat";
 lazy_static! {
     static ref DATANODE_LEASE_KEY_PATTERN: Regex =
         Regex::new(&format!("^{DN_LEASE_PREFIX}-([0-9]+)-([0-9]+)$")).unwrap();
+    static ref FRONTEND_LEASE_KEY_PATTERN: Regex =
+        Regex::new(&format!("^{FE_LEASE_PREFIX}-([0-9]+)-([0-9]+)$")).unwrap();
     static ref DATANODE_STAT_KEY_PATTERN: Regex =
         Regex::new(&format!("^{DN_STAT_PREFIX}-([0-9]+)-([0-9]+)$")).unwrap();
 }
+
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]
-pub struct LeaseKey {
+pub struct DnLeaseKey {
     pub cluster_id: u64,
     pub node_id: u64,
 }
 
-impl FromStr for LeaseKey {
+fn try_from_str(key: &str, regex: &Regex) -> Result<(u64, u64)> {
+    let caps = regex
+        .captures(key)
+        .context(error::InvalidLeaseKeySnafu { key })?;
+
+    ensure!(caps.len() == 3, error::InvalidLeaseKeySnafu { key });
+
+    let cluster_id = caps[1].to_string();
+    let node_id = caps[2].to_string();
+    let cluster_id: u64 = cluster_id.parse().context(error::ParseNumSnafu {
+        err_msg: format!("invalid cluster_id: {cluster_id}"),
+    })?;
+    let node_id: u64 = node_id.parse().context(error::ParseNumSnafu {
+        err_msg: format!("invalid node_id: {node_id}"),
+    })?;
+    Ok((cluster_id, node_id))
+}
+
+impl FromStr for DnLeaseKey {
     type Err = error::Error;
 
     fn from_str(key: &str) -> Result<Self> {
-        let caps = DATANODE_LEASE_KEY_PATTERN
-            .captures(key)
-            .context(error::InvalidLeaseKeySnafu { key })?;
-
-        ensure!(caps.len() == 3, error::InvalidLeaseKeySnafu { key });
-
-        let cluster_id = caps[1].to_string();
-        let node_id = caps[2].to_string();
-        let cluster_id: u64 = cluster_id.parse().context(error::ParseNumSnafu {
-            err_msg: format!("invalid cluster_id: {cluster_id}"),
-        })?;
-        let node_id: u64 = node_id.parse().context(error::ParseNumSnafu {
-            err_msg: format!("invalid node_id: {node_id}"),
-        })?;
+        let (cluster_id, node_id) = try_from_str(key, &DATANODE_LEASE_KEY_PATTERN)?;
 
         Ok(Self {
             cluster_id,
@@ -70,7 +79,7 @@ impl FromStr for LeaseKey {
     }
 }
 
-impl TryFrom<Vec<u8>> for LeaseKey {
+impl TryFrom<Vec<u8>> for DnLeaseKey {
     type Error = error::Error;
 
     fn try_from(bytes: Vec<u8>) -> Result<Self> {
@@ -80,13 +89,54 @@ impl TryFrom<Vec<u8>> for LeaseKey {
     }
 }
 
-impl TryFrom<LeaseKey> for Vec<u8> {
+impl TryFrom<DnLeaseKey> for Vec<u8> {
     type Error = error::Error;
 
-    fn try_from(dn_key: LeaseKey) -> Result<Self> {
+    fn try_from(dn_key: DnLeaseKey) -> Result<Self> {
         Ok(format!(
             "{}-{}-{}",
             DN_LEASE_PREFIX, dn_key.cluster_id, dn_key.node_id
+        )
+        .into_bytes())
+    }
+}
+
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
+pub struct FeLeaseKey {
+    pub cluster_id: u64,
+    pub node_id: u64,
+}
+
+impl FromStr for FeLeaseKey {
+    type Err = error::Error;
+
+    fn from_str(key: &str) -> Result<Self> {
+        let (cluster_id, node_id) = try_from_str(key, &FRONTEND_LEASE_KEY_PATTERN)?;
+
+        Ok(Self {
+            cluster_id,
+            node_id,
+        })
+    }
+}
+
+impl TryFrom<Vec<u8>> for FeLeaseKey {
+    type Error = error::Error;
+
+    fn try_from(bytes: Vec<u8>) -> Result<Self> {
+        String::from_utf8(bytes)
+            .context(error::LeaseKeyFromUtf8Snafu {})
+            .map(|x| x.parse())?
+    }
+}
+
+impl TryFrom<FeLeaseKey> for Vec<u8> {
+    type Error = error::Error;
+
+    fn try_from(dn_key: FeLeaseKey) -> Result<Self> {
+        Ok(format!(
+            "{}-{}-{}",
+            FE_LEASE_PREFIX, dn_key.cluster_id, dn_key.node_id
         )
         .into_bytes())
     }
@@ -193,8 +243,8 @@ pub struct StatKey {
     pub node_id: u64,
 }
 
-impl From<&LeaseKey> for StatKey {
-    fn from(lease_key: &LeaseKey) -> Self {
+impl From<&DnLeaseKey> for StatKey {
+    fn from(lease_key: &DnLeaseKey) -> Self {
         StatKey {
             cluster_id: lease_key.cluster_id,
             node_id: lease_key.node_id,
@@ -346,13 +396,13 @@ mod tests {
 
     #[test]
     fn test_lease_key_round_trip() {
-        let key = LeaseKey {
+        let key = DnLeaseKey {
             cluster_id: 0,
             node_id: 1,
         };
 
         let key_bytes: Vec<u8> = key.clone().try_into().unwrap();
-        let new_key: LeaseKey = key_bytes.try_into().unwrap();
+        let new_key: DnLeaseKey = key_bytes.try_into().unwrap();
 
         assert_eq!(new_key, key);
     }
@@ -407,7 +457,7 @@ mod tests {
 
     #[test]
     fn test_lease_key_to_stat_key() {
-        let lease_key = LeaseKey {
+        let lease_key = DnLeaseKey {
             cluster_id: 1,
             node_id: 101,
         };

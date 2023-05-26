@@ -16,7 +16,7 @@ use api::v1::meta::Peer;
 use common_time::util as time_util;
 
 use crate::error::Result;
-use crate::keys::{LeaseKey, LeaseValue};
+use crate::keys::{DnLeaseKey, LeaseValue};
 use crate::lease;
 use crate::metasrv::SelectorContext;
 use crate::selector::{Namespace, Selector};
@@ -30,7 +30,7 @@ impl Selector for LeaseBasedSelector {
 
     async fn select(&self, ns: Namespace, ctx: &Self::Context) -> Result<Self::Output> {
         // filter out the nodes out lease
-        let lease_filter = |_: &LeaseKey, v: &LeaseValue| {
+        let lease_filter = |_: &DnLeaseKey, v: &LeaseValue| {
             time_util::current_time_millis() - v.timestamp_millis < ctx.datanode_lease_secs * 1000
         };
         let mut lease_kvs = lease::alive_datanodes(ns, &ctx.kv_store, lease_filter).await?;

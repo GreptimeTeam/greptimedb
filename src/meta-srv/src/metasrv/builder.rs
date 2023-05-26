@@ -15,6 +15,7 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+use api::v1::meta::Role;
 use common_procedure::local::{LocalManager, ManagerConfig};
 
 use crate::cluster::MetaPeerClient;
@@ -161,12 +162,14 @@ impl MetaSrvBuilder {
                         .await?;
 
                 let group = HeartbeatHandlerGroup::new(pushers);
-                let keep_lease_handler = KeepLeaseHandler::new(kv_store.clone());
+                let dn_keep_lease_handler = KeepLeaseHandler::new(kv_store.clone(), Role::Datanode);
+                let fe_keep_lease_handler = KeepLeaseHandler::new(kv_store.clone(), Role::Frontend);
                 group.add_handler(ResponseHeaderHandler::default()).await;
                 // `KeepLeaseHandler` should preferably be in front of `CheckLeaderHandler`,
                 // because even if the current meta-server node is no longer the leader it can
                 // still help the datanode to keep lease.
-                group.add_handler(keep_lease_handler).await;
+                group.add_handler(dn_keep_lease_handler).await;
+                group.add_handler(fe_keep_lease_handler).await;
                 group.add_handler(CheckLeaderHandler::default()).await;
                 group.add_handler(OnLeaderStartHandler::default()).await;
                 group.add_handler(CollectStatsHandler).await;

@@ -15,7 +15,7 @@
 use api::v1::meta::RangeRequest;
 
 use crate::error::Result;
-use crate::keys::{LeaseKey, LeaseValue, DN_LEASE_PREFIX};
+use crate::keys::{DnLeaseKey, LeaseValue, DN_LEASE_PREFIX};
 use crate::service::store::kv::KvStoreRef;
 use crate::util;
 
@@ -23,9 +23,9 @@ pub async fn alive_datanodes<P>(
     cluster_id: u64,
     kv_store: &KvStoreRef,
     predicate: P,
-) -> Result<Vec<(LeaseKey, LeaseValue)>>
+) -> Result<Vec<(DnLeaseKey, LeaseValue)>>
 where
-    P: Fn(&LeaseKey, &LeaseValue) -> bool,
+    P: Fn(&DnLeaseKey, &LeaseValue) -> bool,
 {
     let key = get_lease_prefix(cluster_id);
     let range_end = util::get_prefix_end_key(&key);
@@ -40,7 +40,7 @@ where
     let kvs = res.kvs;
     let mut lease_kvs = vec![];
     for kv in kvs {
-        let lease_key: LeaseKey = kv.key.try_into()?;
+        let lease_key: DnLeaseKey = kv.key.try_into()?;
         let lease_value: LeaseValue = kv.value.try_into()?;
         if !predicate(&lease_key, &lease_value) {
             continue;

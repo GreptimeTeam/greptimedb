@@ -19,16 +19,17 @@ use tokio::sync::mpsc::{self, Sender};
 
 use crate::error::Result;
 use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
-use crate::keys::{LeaseKey, LeaseValue};
+use crate::keys::{DnLeaseKey, FeLeaseKey, LeaseValue};
 use crate::metasrv::Context;
 use crate::service::store::kv::KvStoreRef;
 
 pub struct KeepLeaseHandler {
     tx: Sender<KeyValue>,
+    role: Role,
 }
 
 impl KeepLeaseHandler {
-    pub fn new(kv_store: KvStoreRef) -> Self {
+    pub fn new(kv_store: KvStoreRef, role: Role) -> Self {
         let (tx, mut rx) = mpsc::channel(1024);
         common_runtime::spawn_bg(async move {
             while let Some(kv) = rx.recv().await {
@@ -49,14 +50,14 @@ impl KeepLeaseHandler {
             }
         });
 
-        Self { tx }
+        Self { tx, role }
     }
 }
 
 #[async_trait::async_trait]
 impl HeartbeatHandler for KeepLeaseHandler {
     fn is_acceptable(&self, role: Role) -> bool {
-        role == Role::Datanode
+        role == self.role
     }
 
     async fn handle(
@@ -67,18 +68,30 @@ impl HeartbeatHandler for KeepLeaseHandler {
     ) -> Result<()> {
         let HeartbeatRequest { header, peer, .. } = req;
         if let Some(peer) = &peer {
-            let key = LeaseKey {
-                cluster_id: header.as_ref().map_or(0, |h| h.cluster_id),
-                node_id: peer.id,
-            };
             let value = LeaseValue {
                 timestamp_millis: time_util::current_time_millis(),
                 node_addr: peer.addr.clone(),
             };
 
-            trace!("Receive a heartbeat: {key:?}, {value:?}");
+            let key = match self.role {
+                Role::Datanode => {
+                    let key = DnLeaseKey {
+                        cluster_id: header.as_ref().map_or(0, |h| h.cluster_id),
+                        node_id: peer.id,
+                    };
+                    trace!("Receive a heartbeat: {key:?}, {value:?}");
+                    key.try_into()?
+                }
+                Role::Frontend => {
+                    let key = FeLeaseKey {
+                        cluster_id: header.as_ref().map_or(0, |h| h.cluster_id),
+                        node_id: peer.id,
+                    };
+                    trace!("Receive a heartbeat: {key:?}, {value:?}");
+                    key.try_into()?
+                }
+            };
 
-            let key = key.try_into()?;
             let value = value.try_into()?;
 
             if let Err(err) = self.tx.send(KeyValue { key, value }).await {

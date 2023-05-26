@@ -20,7 +20,7 @@ use common_time::util as time_util;
 
 use crate::cluster::MetaPeerClient;
 use crate::error::Result;
-use crate::keys::{LeaseKey, LeaseValue, StatKey};
+use crate::keys::{DnLeaseKey, LeaseValue, StatKey};
 use crate::lease;
 use crate::metasrv::SelectorContext;
 use crate::selector::{Namespace, Selector};
@@ -38,10 +38,10 @@ impl Selector for LoadBasedSelector {
 
     async fn select(&self, ns: Namespace, ctx: &Self::Context) -> Result<Self::Output> {
         // get alive datanodes
-        let lease_filter = |_: &LeaseKey, v: &LeaseValue| {
+        let lease_filter = |_: &DnLeaseKey, v: &LeaseValue| {
             time_util::current_time_millis() - v.timestamp_millis < ctx.datanode_lease_secs * 1000
         };
-        let lease_kvs: HashMap<LeaseKey, LeaseValue> =
+        let lease_kvs: HashMap<DnLeaseKey, LeaseValue> =
             lease::alive_datanodes(ns, &ctx.kv_store, lease_filter)
                 .await?
                 .into_iter()
@@ -61,7 +61,7 @@ impl Selector for LoadBasedSelector {
             .collect();
         let stat_kvs = self.meta_peer_client.get_dn_stat_kvs(stat_keys).await?;
 
-        let mut tuples: Vec<(LeaseKey, LeaseValue, u64)> = lease_kvs
+        let mut tuples: Vec<(DnLeaseKey, LeaseValue, u64)> = lease_kvs
             .into_iter()
             .map(|(lease_k, lease_v)| {
                 let stat_key: StatKey = (&lease_k).into();
