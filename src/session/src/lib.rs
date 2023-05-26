@@ -38,7 +38,7 @@ impl Session {
             query_ctx: Arc::new(QueryContext::with_sql_dialect(
                 DEFAULT_CATALOG_NAME,
                 DEFAULT_SCHEMA_NAME,
-                (&channel).into(),
+                channel.dialect(),
             )),
             user_info: ArcSwap::new(Arc::new(UserInfo::default())),
             conn_info: ConnInfo::new(addr, channel),

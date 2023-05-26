@@ -64,7 +64,7 @@ use servers::query_handler::{
 };
 use session::context::QueryContextRef;
 use snafu::prelude::*;
-use sql::dialect::GenericDialect;
+use sql::dialect::Dialect;
 use sql::parser::ParserContext;
 use sql::statements::copy::CopyTable;
 use sql::statements::statement::Statement;
@@ -444,8 +444,8 @@ impl FrontendInstance for Instance {
     }
 }
 
-fn parse_stmt(sql: &str) -> Result<Vec<Statement>> {
-    ParserContext::create_with_dialect(sql, &GenericDialect {}).context(ParseSqlSnafu)
+fn parse_stmt(sql: &str, dialect: &(dyn Dialect + Send + Sync)) -> Result<Vec<Statement>> {
+    ParserContext::create_with_dialect(sql, dialect).context(ParseSqlSnafu)
 }
 
 impl Instance {
@@ -470,7 +470,7 @@ impl SqlQueryHandler for Instance {
             Err(e) => return vec![Err(e)],
         };
 
-        match parse_stmt(query.as_ref())
+        match parse_stmt(query.as_ref(), query_ctx.sql_dialect())
             .and_then(|stmts| query_interceptor.post_parsing(stmts, query_ctx.clone()))
         {
             Ok(stmts) => {
@@ -661,6 +661,7 @@ mod tests {
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
     use query::query_engine::options::QueryOptions;
     use session::context::QueryContext;
+    use sql::dialect::GenericDialect;
     use strfmt::Format;
 
     use super::*;
@@ -745,7 +746,7 @@ mod tests {
         CREATE DATABASE test_database;
         SHOW DATABASES;
         "#;
-        let stmts = parse_stmt(sql).unwrap();
+        let stmts = parse_stmt(sql, &GenericDialect {}).unwrap();
         assert_eq!(stmts.len(), 4);
         for stmt in stmts {
             let re = check_permission(plugins.clone(), &stmt, &query_ctx);
@@ -756,7 +757,7 @@ mod tests {
         SHOW CREATE TABLE demo;
         ALTER TABLE demo ADD COLUMN new_col INT;
         "#;
-        let stmts = parse_stmt(sql).unwrap();
+        let stmts = parse_stmt(sql, &GenericDialect {}).unwrap();
         assert_eq!(stmts.len(), 2);
         for stmt in stmts {
             let re = check_permission(plugins.clone(), &stmt, &query_ctx);
@@ -764,7 +765,7 @@ mod tests {
         }
 
         let sql = "USE randomschema";
-        let stmts = parse_stmt(sql).unwrap();
+        let stmts = parse_stmt(sql, &GenericDialect {}).unwrap();
         let re = check_permission(plugins.clone(), &stmts[0], &query_ctx);
         assert!(re.is_ok());
 
@@ -797,7 +798,7 @@ mod tests {
         }
 
         fn do_test(sql: &str, plugins: Arc<Plugins>, query_ctx: &QueryContextRef, is_ok: bool) {
-            let stmt = &parse_stmt(sql).unwrap()[0];
+            let stmt = &parse_stmt(sql, &GenericDialect {}).unwrap()[0];
             let re = check_permission(plugins, stmt, query_ctx);
             if is_ok {
                 assert!(re.is_ok());
@@ -825,12 +826,12 @@ mod tests {
 
         // test show tables
         let sql = "SHOW TABLES FROM public";
-        let stmt = parse_stmt(sql).unwrap();
+        let stmt = parse_stmt(sql, &GenericDialect {}).unwrap();
         let re = check_permission(plugins.clone(), &stmt[0], &query_ctx);
         assert!(re.is_ok());
 
         let sql = "SHOW TABLES FROM wrongschema";
-        let stmt = parse_stmt(sql).unwrap();
+        let stmt = parse_stmt(sql, &GenericDialect {}).unwrap();
         let re = check_permission(plugins.clone(), &stmt[0], &query_ctx);
         assert!(re.is_err());
 

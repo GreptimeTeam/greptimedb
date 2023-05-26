@@ -21,23 +21,17 @@ use common_catalog::build_db_string;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_telemetry::debug;
 use common_time::TimeZone;
+use sql::dialect::{Dialect, GenericDialect, MySqlDialect, PostgreSqlDialect};
 
 pub type QueryContextRef = Arc<QueryContext>;
 pub type ConnInfoRef = Arc<ConnInfo>;
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub enum SqlDialect {
-    Mysql,
-    Postgres,
-    GreptimeDb,
-}
 
 #[derive(Debug)]
 pub struct QueryContext {
     current_catalog: ArcSwap<String>,
     current_schema: ArcSwap<String>,
     time_zone: ArcSwap<Option<TimeZone>>,
-    sql_dialect: SqlDialect,
+    sql_dialect: Box<dyn Dialect + Send + Sync>,
 }
 
 impl Default for QueryContext {
@@ -67,15 +61,19 @@ impl QueryContext {
             current_catalog: ArcSwap::new(Arc::new(DEFAULT_CATALOG_NAME.to_string())),
             current_schema: ArcSwap::new(Arc::new(DEFAULT_SCHEMA_NAME.to_string())),
             time_zone: ArcSwap::new(Arc::new(None)),
-            sql_dialect: SqlDialect::GreptimeDb,
+            sql_dialect: Box::new(GenericDialect {}),
         }
     }
 
     pub fn with(catalog: &str, schema: &str) -> Self {
-        Self::with_sql_dialect(catalog, schema, SqlDialect::GreptimeDb)
+        Self::with_sql_dialect(catalog, schema, Box::new(GenericDialect {}))
     }
 
-    pub fn with_sql_dialect(catalog: &str, schema: &str, sql_dialect: SqlDialect) -> Self {
+    pub fn with_sql_dialect(
+        catalog: &str,
+        schema: &str,
+        sql_dialect: Box<dyn Dialect + Send + Sync>,
+    ) -> Self {
         Self {
             current_catalog: ArcSwap::new(Arc::new(catalog.to_string())),
             current_schema: ArcSwap::new(Arc::new(schema.to_string())),
@@ -95,8 +93,8 @@ impl QueryContext {
     }
 
     #[inline]
-    pub fn sql_dialect(&self) -> &SqlDialect {
-        &self.sql_dialect
+    pub fn sql_dialect(&self) -> &(dyn Dialect + Send + Sync) {
+        &*self.sql_dialect
     }
 
     pub fn set_current_schema(&self, schema: &str) {
@@ -199,22 +197,22 @@ pub enum Channel {
     Opentsdb,
 }
 
+impl Channel {
+    pub fn dialect(&self) -> Box<dyn Dialect + Send + Sync> {
+        match self {
+            Channel::Mysql => Box::new(MySqlDialect {}),
+            Channel::Postgres => Box::new(PostgreSqlDialect {}),
+            Channel::Opentsdb => Box::new(GenericDialect {}),
+        }
+    }
+}
+
 impl std::fmt::Display for Channel {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             Channel::Mysql => write!(f, "mysql"),
             Channel::Postgres => write!(f, "postgres"),
             Channel::Opentsdb => write!(f, "opentsdb"),
-        }
-    }
-}
-
-impl From<&Channel> for SqlDialect {
-    fn from(channel: &Channel) -> Self {
-        match &channel {
-            Channel::Mysql => SqlDialect::Mysql,
-            Channel::Postgres => SqlDialect::Postgres,
-            Channel::Opentsdb => SqlDialect::GreptimeDb,
         }
     }
 }
@@ -255,12 +253,5 @@ mod test {
         context.set_current_schema("test");
 
         assert_eq!("test", context.get_db_string());
-    }
-
-    #[test]
-    fn test_sql_dialect() {
-        assert_eq!(SqlDialect::Mysql, (&Channel::Mysql).into());
-        assert_eq!(SqlDialect::Postgres, (&Channel::Postgres).into());
-        assert_eq!(SqlDialect::GreptimeDb, (&Channel::Opentsdb).into());
     }
 }

@@ -8213,6 +8213,7 @@ dependencies = [
  "common-catalog",
  "common-telemetry",
  "common-time",
+ "sql",
 ]
 
 [[package]]
@@ -8484,7 +8485,6 @@ name = "sql"
 version = "0.2.0"
 dependencies = [
  "api",
- "catalog",
  "common-base",
  "common-catalog",
  "common-datasource",
