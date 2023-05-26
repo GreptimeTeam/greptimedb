@@ -28,12 +28,12 @@ use tokio::sync::mpsc;
 
 use super::invalidate_table_cache::InvalidateTableCacheHandler;
 
-pub struct MockKvCacheInvalidtor {
+pub struct MockKvCacheInvalidator {
     inner: Mutex<HashMap<Vec<u8>, i32>>,
 }
 
 #[async_trait::async_trait]
-impl KvCacheInvalidator for MockKvCacheInvalidtor {
+impl KvCacheInvalidator for MockKvCacheInvalidator {
     async fn invalidate_key(&self, key: &[u8]) {
         self.inner.lock().unwrap().remove(key);
     }
@@ -48,7 +48,7 @@ async fn test_invalidate_table_cache_handler() {
     };
 
     let inner = HashMap::from([(table_key.to_string().as_bytes().to_vec(), 1)]);
-    let backend = Arc::new(MockKvCacheInvalidtor {
+    let backend = Arc::new(MockKvCacheInvalidator {
         inner: Mutex::new(inner),
     });
 

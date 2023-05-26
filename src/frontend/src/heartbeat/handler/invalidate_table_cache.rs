@@ -23,7 +23,7 @@ use common_telemetry::error;
 
 #[derive(Clone)]
 pub struct InvalidateTableCacheHandler {
-    backend_cache_invalidtor: KvCacheInvalidatorRef,
+    backend_cache_invalidator: KvCacheInvalidatorRef,
 }
 
 impl HeartbeatResponseHandler for InvalidateTableCacheHandler {
@@ -71,9 +71,9 @@ impl HeartbeatResponseHandler for InvalidateTableCacheHandler {
 }
 
 impl InvalidateTableCacheHandler {
-    pub fn new(backend_cache_invalidtor: KvCacheInvalidatorRef) -> Self {
+    pub fn new(backend_cache_invalidator: KvCacheInvalidatorRef) -> Self {
         Self {
-            backend_cache_invalidtor,
+            backend_cache_invalidator,
         }
     }
 
@@ -87,6 +87,6 @@ impl InvalidateTableCacheHandler {
 
         let tg_key = tg_key.as_bytes();
 
-        self.backend_cache_invalidtor.invalidate_key(tg_key).await;
+        self.backend_cache_invalidator.invalidate_key(tg_key).await;
     }
 }
