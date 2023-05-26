@@ -331,6 +331,7 @@ fn parse_immutable_file_table_format(
 ) -> Result<Box<dyn FileFormat>> {
     Ok(
         match Format::try_from(options).context(error::ParseFileFormatSnafu)? {
+            Format::Avro(format) => Box::new(format),
             Format::Csv(format) => Box::new(format),
             Format::Json(format) => Box::new(format),
             Format::Parquet(format) => Box::new(format),

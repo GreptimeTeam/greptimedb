@@ -84,7 +84,13 @@ impl StatementExecutor {
         object_store: ObjectStore,
         path: &str,
     ) -> Result<SchemaRef> {
-        match format {
+        match format {            
+            Format::Avro(format) => Ok(Arc::new(
+                format
+                    .infer_schema(&object_store, path)
+                    .await
+                    .context(error::InferSchemaSnafu { path })?,
+            )),
             Format::Csv(format) => Ok(Arc::new(
                 format
                     .infer_schema(&object_store, path)
@@ -149,6 +155,7 @@ impl StatementExecutor {
         projection: Vec<usize>,
     ) -> Result<DfSendableRecordBatchStream> {
         match format {
+            Format::Avro(_) => todo!(),
             Format::Csv(format) => {
                 let csv_conf = CsvConfigBuilder::default()
                     .batch_size(DEFAULT_BATCH_SIZE)

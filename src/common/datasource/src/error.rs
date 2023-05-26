@@ -116,7 +116,7 @@ pub enum Error {
     #[snafu(display("Failed to convert avro to schema: {}", source))]
     AvroToSchema {
         location: Location,
-        source: arrow_schema::ArrowError, // TODO use an Arrow specific error here
+        source: datafusion::error::DataFusionError,
     },
 
     #[snafu(display("Failed to infer schema from file, source: {}", source))]
@@ -181,6 +181,7 @@ impl ErrorExt for Error {
             | EmptyHostPath { .. }
             | InvalidPath { .. }
             | InferSchema { .. }
+            | AvroToSchema { .. }
             | ReadParquetSnafu { .. }
             | ParquetToSchema { .. }
             | ParseFormat { .. }
@@ -208,6 +209,7 @@ impl ErrorExt for Error {
             ListObjects { location, .. } => Some(*location),
             InferSchema { location, .. } => Some(*location),
             ReadParquetSnafu { location, .. } => Some(*location),
+            AvroToSchema { location, .. } => Some(*location),
             ParquetToSchema { location, .. } => Some(*location),
             Decompression { location, .. } => Some(*location),
             JoinHandle { location, .. } => Some(*location),

@@ -27,6 +27,7 @@ use storage::sst::SstInfo;
 use storage::{ParquetWriter, Source};
 use table::engine::TableReference;
 use table::requests::CopyTableRequest;
+use apache_avro::Writer;
 
 use crate::error::{self, Result, WriteParquetSnafu};
 use crate::statement::StatementExecutor;

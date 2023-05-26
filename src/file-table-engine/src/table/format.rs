@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use common_datasource::file_format::avro::{AvroFormat, AvroOpener}
 use common_datasource::file_format::csv::{CsvConfigBuilder, CsvFormat, CsvOpener};
 use common_datasource::file_format::json::{JsonFormat, JsonOpener};
 use common_datasource::file_format::parquet::{DefaultParquetFileReaderFactory, ParquetFormat};
@@ -41,6 +42,14 @@ const DEFAULT_BATCH_SIZE: usize = 8192;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CreateScanPlanContext {}
+
+fn build_avro_opener(
+    file_schema: Arc<ArrowSchema>,
+    config: &ScanPlanConfig,
+    format: &AvroFormat,
+) -> Result<AvroOpener> {
+    todo!()
+}
 
 fn build_csv_opener(
     file_schema: Arc<ArrowSchema>,
@@ -114,6 +123,16 @@ fn build_scan_plan<T: FileOpener + Send + 'static>(
     let adapter = RecordBatchStreamAdapter::try_new(Box::pin(stream))
         .context(error::BuildStreamAdapterSnafu)?;
     Ok(Arc::new(SimpleTableScan::new(Box::pin(adapter))))
+}
+
+fn new_avro_scan_plan(
+    _ctx: &CreateScanPlanContext,
+    config: &ScanPlanConfig,
+    format: &AvroFormat,
+) -> Result<PhysicalPlanRef> {
+    let file_schema = config.file_schema.arrow_schema().clone();
+    let opener = build_avro_opener(file_schema.clone(), config, format)?;
+    arc
 }
 
 fn new_csv_scan_plan(
@@ -234,6 +253,7 @@ pub fn create_physical_plan(
     config: &ScanPlanConfig,
 ) -> Result<PhysicalPlanRef> {
     match format {
+        Format::Avro(format) => new_avro_scan_plan(ctx, config, format),
         Format::Csv(format) => new_csv_scan_plan(ctx, config, format),
         Format::Json(format) => new_json_scan_plan(ctx, config, format),
         Format::Parquet(format) => new_parquet_scan_plan(ctx, config, format),

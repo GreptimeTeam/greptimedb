@@ -38,6 +38,7 @@ use object_store::ObjectStore;
 use snafu::ResultExt;
 use tokio_util::compat::FuturesAsyncWriteCompatExt;
 
+use self::avro::AvroFormat;
 use self::csv::CsvFormat;
 use self::json::JsonFormat;
 use self::parquet::ParquetFormat;
@@ -55,6 +56,7 @@ pub const FILE_PATTERN: &str = "pattern";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
+    Avro(AvroFormat),
     Csv(CsvFormat),
     Json(JsonFormat),
     Parquet(ParquetFormat),

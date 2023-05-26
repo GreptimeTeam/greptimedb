@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::io::BufReader;
+
 use arrow_schema::Schema;
 use async_trait::async_trait;
-use datafusion::avro_to_arrow;
+use datafusion::avro_to_arrow::{self, read_avro_schema_from_reader};
 use object_store::{ObjectStore, Reader};
 use snafu::ResultExt;
+use tokio_util::io::SyncIoBridge;
 
 use crate::error::{self, Result};
 use crate::file_format::FileFormat;
@@ -24,17 +27,35 @@ use crate::file_format::FileFormat;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AvroFormat {}
 
+// #[derive(Debug, Clone, Builder)]
+pub struct AvroConfig {
+// TODO
+}
+
 #[async_trait]
 impl FileFormat for AvroFormat {
 
     async fn infer_schema(&self, store: &ObjectStore, path: &str) -> Result<Schema> {
-        let mut reader: Reader = store
+        let reader: Reader = store
             .reader(path)
             .await
             .context(error::ReadObjectSnafu { path })?;
 
-        let schema = avro_to_arrow::read_avro_schema_from_reader(&mut reader)
-            .context(error::ParquetToSchemaSnafu)?;
-        Ok(schema)
+        common_runtime::spawn_blocking_read(move || {
+            let mut buf_reader = BufReader::new(SyncIoBridge::new(reader));
+
+            let schema = read_avro_schema_from_reader(&mut buf_reader)
+                .context(error::AvroToSchemaSnafu)?;
+            Ok(schema)
+        })
+        .await
+        .context(error::JoinHandleSnafu)?
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct AvroOpener {
+    //TODO
+    config: Arc<AvroConfig>,
+    object_store: Arc<ObjectStore>,    
 }
