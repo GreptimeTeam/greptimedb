@@ -50,7 +50,7 @@ pub(crate) trait WindowInfer {
 
 /// [PlainWindowInference] simply finds the minimum time span within all SST files and memtables,
 /// matches that time span into a set of predefined time windows.
-pub struct PlainWindowInference;
+pub(crate) struct PlainWindowInference;
 
 impl WindowInfer for PlainWindowInference {
     fn infer_window(
@@ -98,6 +98,12 @@ impl WindowInfer for PlainWindowInference {
     }
 }
 
+/// Given a set of time spans and a min duration, this function aligns the time spans to windows that
+/// collectively covers all the time spans.
+///
+/// For example, given time span `[1, 6)` and duration 5, the span can be aligned and split to
+/// two windows with length 5: `[0, 5)` and `[5, 10]`, and these two windows can cover the original
+/// span `[1, 6)`.
 fn align_durations_to_windows(durations: &[(i64, i64)], min_duration: i64) -> HashSet<(i64, i64)> {
     let mut res = HashSet::new();
     for (start, end) in durations {
@@ -117,13 +123,19 @@ fn align_durations_to_windows(durations: &[(i64, i64)], min_duration: i64) -> Ha
     res
 }
 
+/// Find the most suitable time window size according to the `min_duration` found across all
+/// SST files and memtables through a binary search.
 fn min_duration_to_window_size(min_duration: i64) -> i64 {
-    for window in TIME_WINDOW_SIZE {
-        if window >= min_duration {
-            return window;
+    match TIME_WINDOW_SIZE.binary_search(&min_duration) {
+        Ok(idx) => TIME_WINDOW_SIZE[idx],
+        Err(idx) => {
+            if idx < TIME_WINDOW_SIZE.len() {
+                TIME_WINDOW_SIZE[idx]
+            } else {
+                TIME_WINDOW_SIZE.last().copied().unwrap()
+            }
         }
     }
-    return TIME_WINDOW_SIZE.last().copied().unwrap();
 }
 
 #[cfg(test)]
@@ -134,6 +146,9 @@ mod tests {
 
     #[test]
     fn test_get_time_window_size() {
+        for window in TIME_WINDOW_SIZE {
+            assert_eq!(window, min_duration_to_window_size(window));
+        }
         assert_eq!(60, min_duration_to_window_size(1));
         assert_eq!(60 * 10, min_duration_to_window_size(100));
         assert_eq!(60 * 30, min_duration_to_window_size(1800));
