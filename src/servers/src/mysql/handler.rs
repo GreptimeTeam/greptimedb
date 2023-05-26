@@ -206,11 +206,11 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             &[
                 (
                     crate::metrics::METRIC_MYSQL_SUBPROTOCOL_LABEL,
-                    crate::metrics::METRIC_MYSQL_BINQUERY
+                    crate::metrics::METRIC_MYSQL_BINQUERY.to_string()
                 ),
                 (
                     crate::metrics::METRIC_DB_LABEL,
-                    &self.session.context().get_db_string()
+                    self.session.context().get_db_string()
                 )
             ]
         );
@@ -254,11 +254,11 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             &[
                 (
                     crate::metrics::METRIC_MYSQL_SUBPROTOCOL_LABEL,
-                    crate::metrics::METRIC_MYSQL_TEXTQUERY
+                    crate::metrics::METRIC_MYSQL_TEXTQUERY.to_string()
                 ),
                 (
                     crate::metrics::METRIC_DB_LABEL,
-                    &self.session.context().get_db_string()
+                    self.session.context().get_db_string()
                 )
             ]
         );

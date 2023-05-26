@@ -65,9 +65,9 @@ impl KvStore for EtcdStore {
         let _timer = timer!(
             METRIC_META_KV_REQUEST,
             &[
-                ("target", "etcd"),
-                ("op", "range"),
-                ("cluster_id", &cluster_id.to_string())
+                ("target", "etcd".to_string()),
+                ("op", "range".to_string()),
+                ("cluster_id", cluster_id.to_string())
             ]
         );
 
@@ -103,9 +103,9 @@ impl KvStore for EtcdStore {
         let _timer = timer!(
             METRIC_META_KV_REQUEST,
             &[
-                ("target", "etcd"),
-                ("op", "put"),
-                ("cluster_id", &cluster_id.to_string())
+                ("target", "etcd".to_string()),
+                ("op", "put".to_string()),
+                ("cluster_id", cluster_id.to_string())
             ]
         );
 
@@ -132,9 +132,9 @@ impl KvStore for EtcdStore {
         let _timer = timer!(
             METRIC_META_KV_REQUEST,
             &[
-                ("target", "etcd"),
-                ("op", "batch_get"),
-                ("cluster_id", &cluster_id.to_string())
+                ("target", "etcd".to_string()),
+                ("op", "batch_get".to_string()),
+                ("cluster_id", cluster_id.to_string())
             ]
         );
 
@@ -175,9 +175,9 @@ impl KvStore for EtcdStore {
         let _timer = timer!(
             METRIC_META_KV_REQUEST,
             &[
-                ("target", "etcd"),
-                ("op", "batch_put"),
-                ("cluster_id", &cluster_id.to_string())
+                ("target", "etcd".to_string()),
+                ("op", "batch_put".to_string()),
+                ("cluster_id", cluster_id.to_string())
             ]
         );
 
@@ -220,9 +220,9 @@ impl KvStore for EtcdStore {
         let _timer = timer!(
             METRIC_META_KV_REQUEST,
             &[
-                ("target", "etcd"),
-                ("op", "batch_delete"),
-                ("cluster_id", &cluster_id.to_string())
+                ("target", "etcd".to_string()),
+                ("op", "batch_delete".to_string()),
+                ("cluster_id", cluster_id.to_string())
             ]
         );
 
@@ -269,9 +269,9 @@ impl KvStore for EtcdStore {
         let _timer = timer!(
             METRIC_META_KV_REQUEST,
             &[
-                ("target", "etcd"),
-                ("op", "compare_and_put"),
-                ("cluster_id", &cluster_id.to_string())
+                ("target", "etcd".to_string()),
+                ("op", "compare_and_put".to_string()),
+                ("cluster_id", cluster_id.to_string())
             ]
         );
 
@@ -329,9 +329,9 @@ impl KvStore for EtcdStore {
         let _timer = timer!(
             METRIC_META_KV_REQUEST,
             &[
-                ("target", "etcd"),
-                ("op", "delete_range"),
-                ("cluster_id", &cluster_id.to_string())
+                ("target", "etcd".to_string()),
+                ("op", "delete_range".to_string()),
+                ("cluster_id", cluster_id.to_string())
             ]
         );
 
@@ -367,9 +367,9 @@ impl KvStore for EtcdStore {
         let _timer = timer!(
             METRIC_META_KV_REQUEST,
             &[
-                ("target", "etcd"),
-                ("op", "move_value"),
-                ("cluster_id", &cluster_id.to_string())
+                ("target", "etcd".to_string()),
+                ("op", "move_value".to_string()),
+                ("cluster_id", cluster_id.to_string())
             ]
         );
 

@@ -62,7 +62,7 @@ impl GreptimeRequestHandler {
 
         let _timer = timer!(
             crate::metrics::METRIC_SERVER_GRPC_DB_REQUEST_TIMER,
-            &[(crate::metrics::METRIC_DB_LABEL, &query_ctx.get_db_string())]
+            &[(crate::metrics::METRIC_DB_LABEL, query_ctx.get_db_string())]
         );
         let handler = self.handler.clone();
 
