@@ -56,13 +56,13 @@ async fn test_close_region_handler() {
         engine_manager_ref,
         catalog_manager_ref,
         ..
-    } = parepare_handler_test("test_close_region_handler").await;
+    } = prepare_handler_test("test_close_region_handler").await;
 
     let executor = Arc::new(HandlerGroupExecutor::new(vec![Arc::new(
         CloseRegionHandler::new(catalog_manager_ref.clone(), engine_manager_ref.clone()),
     )]));
 
-    parepare_table(instance.inner()).await;
+    prepare_table(instance.inner()).await;
 
     // Closes demo table
     handle_instruction(
@@ -121,7 +121,7 @@ async fn test_open_region_handler() {
         engine_manager_ref,
         catalog_manager_ref,
         ..
-    } = parepare_handler_test("test_open_region_handler").await;
+    } = prepare_handler_test("test_open_region_handler").await;
 
     let executor = Arc::new(HandlerGroupExecutor::new(vec![
         Arc::new(OpenRegionHandler::new(
@@ -134,7 +134,7 @@ async fn test_open_region_handler() {
         )),
     ]));
 
-    parepare_table(instance.inner()).await;
+    prepare_table(instance.inner()).await;
 
     // Opens a opened table
     handle_instruction(executor.clone(), mailbox.clone(), open_region_instruction());
@@ -188,7 +188,7 @@ async fn test_open_region_handler() {
     assert_test_table_found(instance.inner()).await;
 }
 
-async fn parepare_handler_test(name: &str) -> HandlerTestGuard {
+async fn prepare_handler_test(name: &str) -> HandlerTestGuard {
     let mock_instance = MockInstance::new(name).await;
     let instance = mock_instance.inner();
     let engine_manager = instance.sql_handler().table_engine_manager().clone();
@@ -252,7 +252,7 @@ fn open_region_instruction() -> Instruction {
     })
 }
 
-async fn parepare_table(instance: &Instance) {
+async fn prepare_table(instance: &Instance) {
     test_util::create_test_table(instance, ConcreteDataType::timestamp_millisecond_datatype())
         .await
         .unwrap();
