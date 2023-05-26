@@ -55,7 +55,7 @@ impl SimpleQueryHandler for PostgresServerHandler {
                 ),
                 (
                     crate::metrics::METRIC_DB_LABEL,
-                    &self.session.context().get_db_string()
+                    self.session.context().get_db_string()
                 )
             ]
         );
@@ -361,7 +361,7 @@ impl ExtendedQueryHandler for PostgresServerHandler {
                 ),
                 (
                     crate::metrics::METRIC_DB_LABEL,
-                    &self.session.context().get_db_string()
+                    self.session.context().get_db_string()
                 )
             ]
         );
