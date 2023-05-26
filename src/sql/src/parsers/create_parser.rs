@@ -1372,7 +1372,7 @@ ENGINE=mito";
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("Please provide an extra partition that is bounded by 'MAXVALUE'."));
+            .contains("Expected a concrete value, found: MAXVALU"));
     }
 
     fn assert_column_def(column: &ColumnDef, name: &str, data_type: &str) {
