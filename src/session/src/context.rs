@@ -28,7 +28,7 @@ pub type ConnInfoRef = Arc<ConnInfo>;
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum SqlDialect {
     Mysql,
-    Posgrel,
+    Postgres,
     GreptimeDb,
 }
 
@@ -209,6 +209,16 @@ impl std::fmt::Display for Channel {
     }
 }
 
+impl From<&Channel> for SqlDialect {
+    fn from(channel: &Channel) -> Self {
+        match &channel {
+            Channel::Mysql => SqlDialect::Mysql,
+            Channel::Postgres => SqlDialect::Postgres,
+            Channel::Opentsdb => SqlDialect::GreptimeDb,
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -245,5 +255,12 @@ mod test {
         context.set_current_schema("test");
 
         assert_eq!("test", context.get_db_string());
+    }
+
+    #[test]
+    fn test_sql_dialect() {
+        assert_eq!(SqlDialect::Mysql, (&Channel::Mysql).into());
+        assert_eq!(SqlDialect::Postgres, (&Channel::Postgres).into());
+        assert_eq!(SqlDialect::GreptimeDb, (&Channel::Opentsdb).into());
     }
 }

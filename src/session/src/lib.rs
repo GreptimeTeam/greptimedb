@@ -20,7 +20,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 
-use crate::context::{Channel, ConnInfo, QueryContext, QueryContextRef, SqlDialect, UserInfo};
+use crate::context::{Channel, ConnInfo, QueryContext, QueryContextRef, UserInfo};
 
 /// Session for persistent connection such as MySQL, PostgreSQL etc.
 #[derive(Debug)]
@@ -34,16 +34,11 @@ pub type SessionRef = Arc<Session>;
 
 impl Session {
     pub fn new(addr: Option<SocketAddr>, channel: Channel) -> Self {
-        let sql_dialect = match &channel {
-            Channel::Mysql => SqlDialect::Mysql,
-            Channel::Postgres => SqlDialect::Posgrel,
-            _other => SqlDialect::GreptimeDb,
-        };
         Session {
             query_ctx: Arc::new(QueryContext::with_sql_dialect(
                 DEFAULT_CATALOG_NAME,
                 DEFAULT_SCHEMA_NAME,
-                sql_dialect,
+                (&channel).into(),
             )),
             user_info: ArcSwap::new(Arc::new(UserInfo::default())),
             conn_info: ConnInfo::new(addr, channel),
