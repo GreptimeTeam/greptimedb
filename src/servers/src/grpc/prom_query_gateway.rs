@@ -72,7 +72,7 @@ impl PrometheusGateway for PrometheusGatewayService {
             crate::metrics::METRIC_SERVER_GRPC_PROM_REQUEST_TIMER,
             &[(
                 crate::metrics::METRIC_DB_LABEL,
-                &query_context.get_db_string()
+                query_context.get_db_string()
             )]
         );
         let result = self.handler.do_query(&prom_query, query_context).await;

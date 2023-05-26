@@ -1222,7 +1222,7 @@ dependencies = [
  "lazy_static",
  "log-store",
  "meta-client",
- "metrics 0.21.0",
+ "metrics",
  "mito",
  "moka 0.11.0",
  "object-store",
@@ -1860,7 +1860,7 @@ dependencies = [
  "async-trait",
  "common-error",
  "common-telemetry",
- "metrics 0.21.0",
+ "metrics",
  "once_cell",
  "paste",
  "snafu",
@@ -1876,7 +1876,7 @@ dependencies = [
  "backtrace",
  "common-error",
  "console-subscriber",
- "metrics 0.21.0",
+ "metrics",
  "metrics-exporter-prometheus",
  "metrics-util",
  "once_cell",
@@ -2577,7 +2577,7 @@ dependencies = [
  "log-store",
  "meta-client",
  "meta-srv",
- "metrics 0.21.0",
+ "metrics",
  "mito",
  "object-store",
  "pin-project",
@@ -3149,7 +3149,7 @@ dependencies = [
  "meta-srv",
  "meter-core",
  "meter-macros",
- "metrics 0.21.0",
+ "metrics",
  "mito",
  "moka 0.9.7",
  "object-store",
@@ -4263,7 +4263,7 @@ checksum = "cef509aa9bc73864d6756f0d34d35504af3cf0844373afe9b8669a5b8005a729"
 dependencies = [
  "console",
  "number_prefix",
- "portable-atomic 0.3.19",
+ "portable-atomic",
  "unicode-width",
 ]
 
@@ -4988,7 +4988,7 @@ dependencies = [
  "h2",
  "http-body",
  "lazy_static",
- "metrics 0.21.0",
+ "metrics",
  "once_cell",
  "parking_lot",
  "prost",
@@ -5034,32 +5034,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b9b8653cec6897f73b519a43fba5ee3d50f62fe9af80b428accdcc093b4a849"
 dependencies = [
  "ahash 0.7.6",
- "metrics-macros 0.6.0",
- "portable-atomic 0.3.19",
-]
-
-[[package]]
-name = "metrics"
-version = "0.21.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa8ebbd1a9e57bbab77b9facae7f5136aea44c356943bf9a198f647da64285d6"
-dependencies = [
- "ahash 0.8.3",
- "metrics-macros 0.7.0",
- "portable-atomic 1.3.2",
+ "metrics-macros",
+ "portable-atomic",
 ]
 
 [[package]]
 name = "metrics-exporter-prometheus"
-version = "0.12.1"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a4964177ddfdab1e3a2b37aec7cf320e14169abb0ed73999f558136409178d5"
+checksum = "8603921e1f54ef386189335f288441af761e0fc61bcb552168d9cedfe63ebc70"
 dependencies = [
- "base64 0.21.0",
  "indexmap",
- "metrics 0.21.0",
+ "metrics",
  "metrics-util",
- "quanta 0.11.0",
+ "parking_lot",
+ "portable-atomic",
+ "quanta 0.10.1",
  "thiserror",
 ]
 
@@ -5075,25 +5065,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "metrics-macros"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ddece26afd34c31585c74a4db0630c376df271c285d682d1e55012197830b6df"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.15",
-]
-
-[[package]]
 name = "metrics-process"
-version = "1.0.10"
+version = "1.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "767e7caea6cb64b66f96f7ab0e5f8bd8334d72dbbc522c99bed71d8a382d515f"
+checksum = "99eab79be9f7c18565e889d6eaed6f1ebdafb2b6a88aef446d2fee5e7796ed10"
 dependencies = [
  "libproc",
  "mach2",
- "metrics 0.21.0",
+ "metrics",
  "once_cell",
  "procfs",
  "rlimit",
@@ -5102,19 +5081,21 @@ dependencies = [
 
 [[package]]
 name = "metrics-util"
-version = "0.15.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "111cb375987443c3de8d503580b536f77dc8416d32db62d9456db5d93bd7ac47"
+checksum = "f7d24dc2dbae22bff6f1f9326ffce828c9f07ef9cc1e8002e5279f845432a30a"
 dependencies = [
  "aho-corasick 0.7.20",
  "crossbeam-epoch",
  "crossbeam-utils",
- "hashbrown 0.13.2",
+ "hashbrown 0.12.3",
  "indexmap",
- "metrics 0.21.0",
+ "metrics",
  "num_cpus",
- "ordered-float 3.7.0",
- "quanta 0.11.0",
+ "ordered-float 2.10.0",
+ "parking_lot",
+ "portable-atomic",
+ "quanta 0.10.1",
  "radix_trie",
  "sketches-ddsketch",
 ]
@@ -5634,7 +5615,7 @@ dependencies = [
  "futures",
  "lru 0.9.0",
  "md5",
- "metrics 0.21.0",
+ "metrics",
  "opendal",
  "pin-project",
  "tokio",
@@ -5692,7 +5673,7 @@ dependencies = [
  "hyper",
  "log",
  "md-5",
- "metrics 0.20.1",
+ "metrics",
  "once_cell",
  "parking_lot",
  "percent-encoding",
@@ -6299,12 +6280,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "26f6a7b87c2e435a3241addceeeff740ff8b7e76b74c13bf9acb17fa454ea00b"
 
 [[package]]
-name = "portable-atomic"
-version = "1.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc59d1bcc64fc5d021d67521f818db868368028108d37f0e98d74e33f68297b5"
-
-[[package]]
 name = "postgres-protocol"
 version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6770,7 +6745,7 @@ dependencies = [
  "futures",
  "futures-util",
  "humantime",
- "metrics 0.21.0",
+ "metrics",
  "num",
  "num-traits",
  "object-store",
@@ -8186,7 +8161,7 @@ dependencies = [
  "humantime-serde",
  "hyper",
  "influxdb_line_protocol",
- "metrics 0.21.0",
+ "metrics",
  "metrics-process",
  "mime_guess",
  "mysql_async",
@@ -8646,7 +8621,7 @@ dependencies = [
  "futures-util",
  "lazy_static",
  "log-store",
- "metrics 0.21.0",
+ "metrics",
  "object-store",
  "parquet",
  "paste",

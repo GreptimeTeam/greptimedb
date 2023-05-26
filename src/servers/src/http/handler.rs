@@ -51,7 +51,10 @@ pub async fn sql(
     let db = query_params.db.or(form_params.db);
     let _timer = timer!(
         crate::metrics::METRIC_HTTP_SQL_ELAPSED,
-        &[(crate::metrics::METRIC_DB_LABEL, db.as_deref().unwrap_or(""))]
+        &[(
+            crate::metrics::METRIC_DB_LABEL,
+            db.clone().unwrap_or_default()
+        )]
     );
 
     let resp = if let Some(sql) = &sql {
@@ -104,7 +107,10 @@ pub async fn promql(
     let db = params.db.clone();
     let _timer = timer!(
         crate::metrics::METRIC_HTTP_PROMQL_ELAPSED,
-        &[(crate::metrics::METRIC_DB_LABEL, db.as_deref().unwrap_or(""))]
+        &[(
+            crate::metrics::METRIC_DB_LABEL,
+            db.clone().unwrap_or_default()
+        )]
     );
 
     let prom_query = params.into();
