@@ -1234,6 +1234,44 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
 }
 
 #[apply(both_instances_cases)]
+async fn test_cast_type_issue_1594(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+
+    // setups
+    execute_sql(
+        &instance,
+        "create table tsbs_cpu(hostname STRING, environment STRING, usage_user DOUBLE, usage_system DOUBLE, usage_idle DOUBLE, usage_nice DOUBLE, usage_iowait DOUBLE, usage_irq DOUBLE, usage_softirq DOUBLE, usage_steal DOUBLE, usage_guest DOUBLE, usage_guest_nice DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(hostname));",
+    )
+    .await;
+    let filepath = get_data_dir("../src/common/datasource/tests/csv/type_cast.csv")
+        .canonicalize()
+        .unwrap()
+        .display()
+        .to_string();
+
+    let output = execute_sql(
+        &instance,
+        &format!("copy tsbs_cpu from '{}' WITH(FORMAT='csv');", &filepath),
+    )
+    .await;
+
+    assert!(matches!(output, Output::AffectedRows(5)));
+
+    let output = execute_sql(&instance, "select * from tsbs_cpu order by hostname;").await;
+    let expected = "\
++----------+-------------+------------+--------------+------------+------------+--------------+-----------+---------------+-------------+-------------+------------------+---------------------+
+| hostname | environment | usage_user | usage_system | usage_idle | usage_nice | usage_iowait | usage_irq | usage_softirq | usage_steal | usage_guest | usage_guest_nice | ts                  |
++----------+-------------+------------+--------------+------------+------------+--------------+-----------+---------------+-------------+-------------+------------------+---------------------+
+| host_0   | test        | 32.0       | 58.0         | 36.0       | 72.0       | 61.0         | 21.0      | 53.0          | 12.0        | 59.0        | 72.0             | 2023-04-01T00:00:00 |
+| host_1   | staging     | 12.0       | 32.0         | 50.0       | 84.0       | 19.0         | 73.0      | 38.0          | 37.0        | 72.0        | 2.0              | 2023-04-01T00:00:00 |
+| host_2   | test        | 98.0       | 5.0          | 40.0       | 95.0       | 64.0         | 39.0      | 21.0          | 63.0        | 53.0        | 94.0             | 2023-04-01T00:00:00 |
+| host_3   | test        | 98.0       | 95.0         | 7.0        | 48.0       | 99.0         | 67.0      | 14.0          | 86.0        | 36.0        | 23.0             | 2023-04-01T00:00:00 |
+| host_4   | test        | 32.0       | 44.0         | 11.0       | 53.0       | 64.0         | 9.0       | 17.0          | 39.0        | 20.0        | 7.0              | 2023-04-01T00:00:00 |
++----------+-------------+------------+--------------+------------+------------+--------------+-----------+---------------+-------------+-------------+------------------+---------------------+";
+    check_output_stream(output, expected).await;
+}
+
+#[apply(both_instances_cases)]
 async fn test_information_schema_dot_tables(instance: Arc<dyn MockInstance>) {
     let is_distributed_mode = instance.is_distributed_mode();
     let instance = instance.frontend();
