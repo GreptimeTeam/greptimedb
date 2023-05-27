@@ -17,5 +17,5 @@ mod grpc;
 #[macro_use]
 mod http;
 
-grpc_tests!(File, S3, S3WithCache, Oss);
-http_tests!(File, S3, S3WithCache, Oss);
+grpc_tests!(File, S3, S3WithCache, Oss, Azblob);
+http_tests!(File, S3, S3WithCache, Oss, Azblob);

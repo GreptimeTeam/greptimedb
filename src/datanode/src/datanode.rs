@@ -105,7 +105,7 @@ pub struct AzblobConfig {
     pub account_name: SecretString,
     #[serde(skip_serializing)]
     pub account_key: SecretString,
-    pub endpoint: Option<String>,
+    pub endpoint: String,
     pub sas_token: Option<String>,
     pub cache_path: Option<String>,
     pub cache_capacity: Option<ReadableSize>,
@@ -147,7 +147,7 @@ impl Default for AzblobConfig {
             root: String::default(),
             account_name: SecretString::from(String::default()),
             account_key: SecretString::from(String::default()),
-            endpoint: Option::default(),
+            endpoint: String::default(),
             cache_path: Option::default(),
             cache_capacity: Option::default(),
             sas_token: Option::default(),

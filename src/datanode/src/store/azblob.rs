@@ -33,12 +33,9 @@ pub(crate) async fn new_azblob_object_store(azblob_config: &AzblobConfig) -> Res
     builder
         .root(&root)
         .container(&azblob_config.container)
+        .endpoint(&azblob_config.endpoint)
         .account_name(azblob_config.account_name.expose_secret())
         .account_key(azblob_config.account_key.expose_secret());
-
-    if azblob_config.endpoint.is_some() {
-        builder.endpoint(azblob_config.endpoint.as_ref().unwrap());
-    }
 
     if azblob_config.sas_token.is_some() {
         builder.sas_token(azblob_config.sas_token.as_ref().unwrap());
