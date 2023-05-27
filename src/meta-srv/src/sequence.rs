@@ -130,7 +130,7 @@ impl Inner {
                     let value = kv.value;
                     ensure!(
                         value.len() == std::mem::size_of::<u64>(),
-                        error::UnexceptedSequenceValueSnafu {
+                        error::UnexpectedSequenceValueSnafu {
                             err_msg: format!("key={}, unexpected value={:?}", self.name, value)
                         }
                     );

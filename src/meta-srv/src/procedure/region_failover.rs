@@ -16,6 +16,7 @@ mod activate_region;
 mod deactivate_region;
 mod failover_end;
 mod failover_start;
+mod invalidate_cache;
 mod update_metadata;
 
 use std::collections::HashSet;
@@ -226,6 +227,17 @@ trait State: Sync + Send + Debug {
 ///                                 │ placement metadata
 ///                                 │
 ///                        ┌────────▼────────┐
+///                        │ InvalidateCache ◄─────────────────────┐
+///                        └────────┬────────┘                     │
+///                                 │                              │
+///                                 │ Sends "Invalidate Table      │
+///                                 │ Cache" to Frontend nodes     │
+///                                 │ and waits for 2 seconds      │
+///                                 │                              │
+///                         success ├──────────────────────────────┘
+///                                 │                       failed
+///                                 │
+///                        ┌────────▼────────┐
 ///                        │RegionFailoverEnd│
 ///                        └─────────────────┘
 /// ```
@@ -433,9 +445,19 @@ mod tests {
                 heartbeat_receivers.insert(datanode_id, rx);
             }
 
+            for frontend_id in 4..=7 {
+                let (tx, rx) = tokio::sync::mpsc::channel(1);
+
+                let pusher_id = Channel::Frontend(frontend_id).pusher_id();
+                let pusher = Pusher::new(tx, &RequestHeader::default());
+                let _ = pushers.insert(pusher_id, pusher).await;
+
+                heartbeat_receivers.insert(frontend_id, rx);
+            }
+
             let mailbox_sequence =
                 Sequence::new("test_heartbeat_mailbox", 0, 100, kv_store.clone());
-            let mailbox = HeartbeatMailbox::create(pushers, mailbox_sequence);
+            let mailbox = HeartbeatMailbox::create(pushers.clone(), mailbox_sequence);
 
             let selector = self.selector.unwrap_or_else(|| {
                 let nodes = (1..=table_global_value.regions_id_map.len())

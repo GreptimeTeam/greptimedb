@@ -47,6 +47,20 @@ impl Display for RegionIdent {
     }
 }
 
+impl From<RegionIdent> for TableIdent {
+    fn from(region_ident: RegionIdent) -> Self {
+        TableIdent {
+            cluster_id: region_ident.cluster_id,
+            datanode_id: region_ident.datanode_id,
+            catalog: region_ident.catalog,
+            schema: region_ident.schema,
+            table: region_ident.table,
+            table_id: region_ident.table_id,
+            engine: region_ident.engine,
+        }
+    }
+}
+
 #[derive(Eq, Hash, PartialEq, Clone, Debug, Serialize, Deserialize)]
 pub struct TableIdent {
     pub cluster_id: ClusterId,
@@ -86,7 +100,7 @@ impl Display for SimpleReply {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Instruction {
     OpenRegion(RegionIdent),

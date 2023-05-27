@@ -22,7 +22,7 @@ use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
-use super::failover_end::RegionFailoverEnd;
+use super::invalidate_cache::InvalidateCache;
 use super::{RegionFailoverContext, State};
 use crate::error::{
     CorruptedTableRouteSnafu, Result, RetryLaterSnafu, TableNotFoundSnafu,
@@ -212,7 +212,7 @@ impl State for UpdateRegionMetadata {
                 }
                 .build()
             })?;
-        Ok(Box::new(RegionFailoverEnd))
+        Ok(Box::new(InvalidateCache))
     }
 }
 
@@ -222,8 +222,25 @@ mod tests {
     use catalog::helper::TableGlobalValue;
 
     use super::super::tests::{TestingEnv, TestingEnvBuilder};
-    use super::*;
+    use super::{State, *};
     use crate::table_routes::tests::new_region_route;
+
+    #[tokio::test]
+    async fn test_next_state() {
+        let TestingEnv {
+            context,
+            failed_region,
+            heartbeat_receivers: _,
+        } = TestingEnvBuilder::new().with_failed_region(1).build().await;
+
+        let state = UpdateRegionMetadata::new(Peer::new(2, ""));
+
+        let next_state = Box::new(state)
+            .next(&context, &failed_region)
+            .await
+            .unwrap();
+        assert_eq!(format!("{next_state:?}"), "InvalidateCache");
+    }
 
     #[tokio::test]
     async fn test_update_table_global_value() {
