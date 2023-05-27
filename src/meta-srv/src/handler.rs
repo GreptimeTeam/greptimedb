@@ -183,18 +183,18 @@ impl HeartbeatHandlerGroup {
     ) -> Result<HeartbeatResponse> {
         let mut acc = HeartbeatAccumulator::default();
         let handlers = self.handlers.read().await;
+        let role = req
+            .header
+            .as_ref()
+            .and_then(|h| Role::from_i32(h.role))
+            .context(error::InvalidArgumentsSnafu {
+                err_msg: format!("invalid role: {:?}", req.header),
+            })?;
+
         for h in handlers.iter() {
             if ctx.is_skip_all() {
                 break;
             }
-
-            let role = req
-                .header
-                .as_ref()
-                .and_then(|h| Role::from_i32(h.role))
-                .context(error::InvalidArgumentsSnafu {
-                    err_msg: format!("invalid role: {:?}", req.header),
-                })?;
 
             if h.is_acceptable(role) {
                 h.handle(&req, &mut ctx, &mut acc).await?;
