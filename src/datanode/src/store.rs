@@ -14,6 +14,7 @@
 
 //! object storage utilities
 
+mod azblob;
 mod fs;
 mod oss;
 mod s3;
@@ -36,6 +37,9 @@ pub(crate) async fn new_object_store(store_config: &ObjectStoreConfig) -> Result
         ObjectStoreConfig::File(file_config) => fs::new_fs_object_store(file_config).await,
         ObjectStoreConfig::S3(s3_config) => s3::new_s3_object_store(s3_config).await,
         ObjectStoreConfig::Oss(oss_config) => oss::new_oss_object_store(oss_config).await,
+        ObjectStoreConfig::Azblob(azblob_config) => {
+            azblob::new_azblob_object_store(azblob_config).await
+        }
     }?;
 
     // Enable retry layer and cache layer for non-fs object storages
@@ -72,6 +76,13 @@ async fn create_object_store_with_cache(
         ObjectStoreConfig::Oss(oss_config) => {
             let path = oss_config.cache_path.as_ref();
             let capacity = oss_config
+                .cache_capacity
+                .unwrap_or(DEFAULT_OBJECT_STORE_CACHE_SIZE);
+            (path, capacity)
+        }
+        ObjectStoreConfig::Azblob(azblob_config) => {
+            let path = azblob_config.cache_path.as_ref();
+            let capacity = azblob_config
                 .cache_capacity
                 .unwrap_or(DEFAULT_OBJECT_STORE_CACHE_SIZE);
             (path, capacity)

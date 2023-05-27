@@ -47,6 +47,7 @@ pub enum ObjectStoreConfig {
     File(FileConfig),
     S3(S3Config),
     Oss(OssConfig),
+    Azblob(AzblobConfig),
 }
 
 /// Storage engine config
@@ -95,6 +96,21 @@ pub struct OssConfig {
     pub cache_capacity: Option<ReadableSize>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AzblobConfig {
+    pub container: String,
+    pub root: String,
+    #[serde(skip_serializing)]
+    pub account_name: SecretString,
+    #[serde(skip_serializing)]
+    pub account_key: SecretString,
+    pub endpoint: Option<String>,
+    pub sas_token: Option<String>,
+    pub cache_path: Option<String>,
+    pub cache_capacity: Option<ReadableSize>,
+}
+
 impl Default for S3Config {
     fn default() -> Self {
         Self {
@@ -120,6 +136,21 @@ impl Default for OssConfig {
             endpoint: String::default(),
             cache_path: Option::default(),
             cache_capacity: Option::default(),
+        }
+    }
+}
+
+impl Default for AzblobConfig {
+    fn default() -> Self {
+        Self {
+            container: String::default(),
+            root: String::default(),
+            account_name: SecretString::from(String::default()),
+            account_key: SecretString::from(String::default()),
+            endpoint: Option::default(),
+            cache_path: Option::default(),
+            cache_capacity: Option::default(),
+            sas_token: Option::default(),
         }
     }
 }
