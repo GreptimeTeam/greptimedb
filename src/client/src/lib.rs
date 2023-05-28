@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod client;
+pub mod client_manager;
 mod database;
 mod error;
 pub mod load_balance;

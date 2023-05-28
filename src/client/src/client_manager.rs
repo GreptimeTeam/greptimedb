@@ -15,11 +15,12 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use client::Client;
 use common_grpc::channel_manager::ChannelManager;
 use common_meta::peer::Peer;
 use common_telemetry::info;
 use moka::future::{Cache, CacheBuilder};
+
+use crate::Client;
 
 pub struct DatanodeClients {
     channel_manager: ChannelManager,
@@ -41,7 +42,7 @@ impl Default for DatanodeClients {
 }
 
 impl DatanodeClients {
-    pub(crate) fn start(&self) {
+    pub fn start(&self) {
         let mut started = self.started.lock().unwrap();
         if *started {
             return;
@@ -53,7 +54,7 @@ impl DatanodeClients {
         *started = true;
     }
 
-    pub(crate) async fn get_client(&self, datanode: &Peer) -> Client {
+    pub async fn get_client(&self, datanode: &Peer) -> Client {
         self.clients
             .get_with_by_ref(datanode, async move {
                 Client::with_manager_and_urls(

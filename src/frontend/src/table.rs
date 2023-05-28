@@ -20,6 +20,7 @@ use api::v1::AlterExpr;
 use async_trait::async_trait;
 use catalog::helper::{TableGlobalKey, TableGlobalValue};
 use catalog::remote::KvBackendRef;
+use client::client_manager::DatanodeClients;
 use client::Database;
 use common_error::prelude::BoxedError;
 use common_meta::table_name::TableName;
@@ -47,7 +48,6 @@ use table::table::AlterContext;
 use table::{meter_insert_request, Table};
 use tokio::sync::RwLock;
 
-use crate::datanode::DatanodeClients;
 use crate::error::{self, FindDatanodeSnafu, FindTableRouteSnafu, Result};
 use crate::table::delete::to_grpc_delete_request;
 use crate::table::insert::to_grpc_insert_request;

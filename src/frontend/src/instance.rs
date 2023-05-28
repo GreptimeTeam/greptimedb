@@ -32,6 +32,7 @@ use api::v1::{AddColumns, AlterExpr, Column, DdlRequest, InsertRequest};
 use async_trait::async_trait;
 use catalog::remote::MetaKvBackend;
 use catalog::CatalogManagerRef;
+use client::client_manager::DatanodeClients;
 use common_base::Plugins;
 use common_catalog::consts::MITO_ENGINE;
 use common_error::ext::BoxedError;
@@ -68,7 +69,6 @@ use sql::statements::copy::CopyTable;
 use sql::statements::statement::Statement;
 
 use crate::catalog::FrontendCatalogManager;
-use crate::datanode::DatanodeClients;
 use crate::error::{
     self, Error, ExecutePromqlSnafu, ExternalSnafu, InvalidInsertRequestSnafu,
     MissingMetasrvOptsSnafu, ParseSqlSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu,

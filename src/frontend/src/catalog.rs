@@ -32,6 +32,7 @@ use catalog::{
     RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest,
     SchemaProvider, SchemaProviderRef,
 };
+use client::client_manager::DatanodeClients;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::BoxedError;
 use common_meta::table_name::TableName;
@@ -43,7 +44,6 @@ use snafu::prelude::*;
 use table::table::numbers::NumbersTable;
 use table::TableRef;
 
-use crate::datanode::DatanodeClients;
 use crate::expr_factory;
 use crate::instance::distributed::DistInstance;
 use crate::table::DistTable;
