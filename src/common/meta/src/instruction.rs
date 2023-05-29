@@ -47,6 +47,33 @@ impl Display for RegionIdent {
     }
 }
 
+#[derive(Eq, Hash, PartialEq, Clone, Debug, Serialize, Deserialize)]
+pub struct TableIdent {
+    pub cluster_id: ClusterId,
+    pub datanode_id: DatanodeId,
+    pub catalog: String,
+    pub schema: String,
+    pub table: String,
+    pub table_id: u32,
+    pub engine: String,
+}
+
+impl Display for TableIdent {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "TableIdent(datanode_id='{}.{}', table_id='{}', table_name='{}.{}.{}', table_engine='{}')",
+            self.cluster_id,
+            self.datanode_id,
+            self.table_id,
+            self.catalog,
+            self.schema,
+            self.table,
+            self.engine,
+        )
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct SimpleReply {
     pub result: bool,
@@ -64,6 +91,7 @@ impl Display for SimpleReply {
 pub enum Instruction {
     OpenRegion(RegionIdent),
     CloseRegion(RegionIdent),
+    InvalidateTableCache(TableIdent),
 }
 
 impl Display for Instruction {
@@ -71,6 +99,7 @@ impl Display for Instruction {
         match self {
             Self::OpenRegion(region) => write!(f, "Instruction::OpenRegion({})", region),
             Self::CloseRegion(region) => write!(f, "Instruction::CloseRegion({})", region),
+            Self::InvalidateTableCache(table) => write!(f, "Instruction::Invalidate({})", table),
         }
     }
 }
@@ -80,6 +109,7 @@ impl Display for Instruction {
 pub enum InstructionReply {
     OpenRegion(SimpleReply),
     CloseRegion(SimpleReply),
+    InvalidateTableCache(SimpleReply),
 }
 
 impl Display for InstructionReply {
@@ -87,6 +117,9 @@ impl Display for InstructionReply {
         match self {
             Self::OpenRegion(reply) => write!(f, "InstructionReply::OpenRegion({})", reply),
             Self::CloseRegion(reply) => write!(f, "InstructionReply::CloseRegion({})", reply),
+            Self::InvalidateTableCache(reply) => {
+                write!(f, "InstructionReply::Invalidate({})", reply)
+            }
         }
     }
 }

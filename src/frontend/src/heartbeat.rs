@@ -13,30 +13,46 @@
 // limitations under the License.
 
 use std::sync::Arc;
-use std::time::Duration;
 
-use api::v1::meta::{HeartbeatRequest, HeartbeatResponse};
+use api::v1::meta::HeartbeatRequest;
+use common_meta::heartbeat::handler::{
+    HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutorRef,
+};
+use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef, OutgoingMessage};
+use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
 use common_telemetry::tracing::trace;
 use common_telemetry::{error, info};
 use meta_client::client::{HeartbeatSender, HeartbeatStream, MetaClient};
 use snafu::ResultExt;
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::Receiver;
+use tokio::time::{Duration, Instant};
 
 use crate::error;
 use crate::error::Result;
+
+pub mod handler;
 
 #[derive(Clone)]
 pub struct HeartbeatTask {
     meta_client: Arc<MetaClient>,
     report_interval: u64,
     retry_interval: u64,
+    resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
 }
 
 impl HeartbeatTask {
-    pub fn new(meta_client: Arc<MetaClient>, report_interval: u64, retry_interval: u64) -> Self {
+    pub fn new(
+        meta_client: Arc<MetaClient>,
+        report_interval: u64,
+        retry_interval: u64,
+        resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
+    ) -> Self {
         HeartbeatTask {
             meta_client,
             report_interval,
             retry_interval,
+            resp_handler_executor,
         }
     }
 
@@ -49,21 +65,30 @@ impl HeartbeatTask {
 
         info!("A heartbeat connection has been established with metasrv");
 
-        self.start_handle_resp_stream(resp_stream);
+        let (outgoing_tx, outgoing_rx) = mpsc::channel(16);
+        let mailbox = Arc::new(HeartbeatMailbox::new(outgoing_tx));
 
-        self.start_heartbeat_report(req_sender);
+        self.start_handle_resp_stream(resp_stream, mailbox);
+
+        self.start_heartbeat_report(req_sender, outgoing_rx);
 
         Ok(())
     }
 
-    fn start_handle_resp_stream(&self, mut resp_stream: HeartbeatStream) {
+    fn start_handle_resp_stream(&self, mut resp_stream: HeartbeatStream, mailbox: MailboxRef) {
         let capture_self = self.clone();
         let retry_interval = self.retry_interval;
 
         common_runtime::spawn_bg(async move {
             loop {
                 match resp_stream.message().await {
-                    Ok(Some(resp)) => capture_self.handle_response(resp).await,
+                    Ok(Some(resp)) => {
+                        trace!("Received a heartbeat response: {:?}", resp);
+                        let ctx = HeartbeatResponseHandlerContext::new(mailbox.clone(), resp);
+                        if let Err(e) = capture_self.handle_response(ctx) {
+                            error!(e; "Error while handling heartbeat response");
+                        }
+                    }
                     Ok(None) => break,
                     Err(e) => {
                         error!(e; "Occur error while reading heartbeat response");
@@ -79,27 +104,61 @@ impl HeartbeatTask {
         });
     }
 
-    fn start_heartbeat_report(&self, req_sender: HeartbeatSender) {
+    fn start_heartbeat_report(
+        &self,
+        req_sender: HeartbeatSender,
+        mut outgoing_rx: Receiver<OutgoingMessage>,
+    ) {
         let report_interval = self.report_interval;
 
         common_runtime::spawn_bg(async move {
+            let sleep = tokio::time::sleep(Duration::from_millis(0));
+            tokio::pin!(sleep);
+
             loop {
-                let req = HeartbeatRequest::default();
+                let req = tokio::select! {
+                    message = outgoing_rx.recv() => {
+                        if let Some(message) = message {
+                            match outgoing_message_to_mailbox_message(message) {
+                                Ok(message) => {
+                                    let req = HeartbeatRequest {
+                                        mailbox_message: Some(message),
+                                        ..Default::default()
+                                    };
+                                    Some(req)
+                                }
+                                Err(e) => {
+                                    error!(e;"Failed to encode mailbox messages!");
+                                    None
+                                }
+                            }
+                        } else {
+                            // Receives None that means Sender was dropped, we need to break the current loop
+                            break
+                        }
+                    }
+                    _ = &mut sleep => {
+                        sleep.as_mut().reset(Instant::now() + Duration::from_secs(report_interval));
+                        Some(HeartbeatRequest::default())
+                    }
+                };
 
-                if let Err(e) = req_sender.send(req.clone()).await {
-                    error!(e; "Failed to send heartbeat to metasrv");
-                    break;
-                } else {
-                    trace!("Send a heartbeat request to metasrv, content: {:?}", req);
+                if let Some(req) = req {
+                    if let Err(e) = req_sender.send(req.clone()).await {
+                        error!(e; "Failed to send heartbeat to metasrv");
+                        break;
+                    } else {
+                        trace!("Send a heartbeat request to metasrv, content: {:?}", req);
+                    }
                 }
-
-                tokio::time::sleep(Duration::from_secs(report_interval)).await;
             }
         });
     }
 
-    async fn handle_response(&self, resp: HeartbeatResponse) {
-        trace!("Received a heartbeat response: {:?}", resp);
+    fn handle_response(&self, ctx: HeartbeatResponseHandlerContext) -> Result<()> {
+        self.resp_handler_executor
+            .handle(ctx)
+            .context(error::HandleHeartbeatResponseSnafu)
     }
 
     async fn start_with_retry(&self, retry_interval: Duration) {

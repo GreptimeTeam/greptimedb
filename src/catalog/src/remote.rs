@@ -16,7 +16,7 @@ use std::fmt::Debug;
 use std::pin::Pin;
 use std::sync::Arc;
 
-pub use client::MetaKvBackend;
+pub use client::CachedMetaKvBackend;
 use futures::Stream;
 use futures_util::StreamExt;
 pub use manager::{RemoteCatalogManager, RemoteCatalogProvider, RemoteSchemaProvider};
@@ -74,6 +74,13 @@ pub trait KvBackend: Send + Sync {
 
 pub type KvBackendRef = Arc<dyn KvBackend>;
 
+#[async_trait::async_trait]
+pub trait KvCacheInvalidator: Send + Sync {
+    async fn invalidate_key(&self, key: &[u8]);
+}
+
+pub type KvCacheInvalidatorRef = Arc<dyn KvCacheInvalidator>;
+
 #[cfg(test)]
 mod tests {
     use async_stream::stream;
@@ -119,12 +126,16 @@ mod tests {
     #[tokio::test]
     async fn test_get() {
         let backend = MockKvBackend {};
+
         let result = backend.get(0.to_string().as_bytes()).await;
         assert_eq!(0.to_string().as_bytes(), result.unwrap().unwrap().0);
+
         let result = backend.get(1.to_string().as_bytes()).await;
         assert_eq!(1.to_string().as_bytes(), result.unwrap().unwrap().0);
+
         let result = backend.get(2.to_string().as_bytes()).await;
         assert_eq!(2.to_string().as_bytes(), result.unwrap().unwrap().0);
+
         let result = backend.get(3.to_string().as_bytes()).await;
         assert!(result.unwrap().is_none());
     }

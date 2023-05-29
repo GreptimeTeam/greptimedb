@@ -30,12 +30,14 @@ use api::v1::greptime_request::Request;
 use api::v1::meta::Role;
 use api::v1::{AddColumns, AlterExpr, Column, DdlRequest, InsertRequest};
 use async_trait::async_trait;
-use catalog::remote::MetaKvBackend;
+use catalog::remote::CachedMetaKvBackend;
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
 use common_catalog::consts::MITO_ENGINE;
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
+use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_query::Output;
 use common_telemetry::logging::{debug, info};
 use common_telemetry::timer;
@@ -75,6 +77,7 @@ use crate::error::{
 };
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::FrontendOptions;
+use crate::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
 use crate::heartbeat::HeartbeatTask;
 use crate::instance::standalone::StandaloneGrpcQueryHandler;
 use crate::metrics;
@@ -137,14 +140,16 @@ impl Instance {
         datanode_clients: Arc<DatanodeClients>,
         plugins: Arc<Plugins>,
     ) -> Result<Self> {
-        let meta_backend = Arc::new(MetaKvBackend {
-            client: meta_client.clone(),
-        });
+        let meta_backend = Arc::new(CachedMetaKvBackend::new(meta_client.clone()));
         let table_routes = Arc::new(TableRoutes::new(meta_client.clone()));
         let partition_manager = Arc::new(PartitionRuleManager::new(table_routes));
 
-        let mut catalog_manager =
-            FrontendCatalogManager::new(meta_backend, partition_manager, datanode_clients.clone());
+        let mut catalog_manager = FrontendCatalogManager::new(
+            meta_backend.clone(),
+            meta_backend.clone(),
+            partition_manager,
+            datanode_clients.clone(),
+        );
 
         let dist_instance = DistInstance::new(
             meta_client.clone(),
@@ -171,7 +176,17 @@ impl Instance {
 
         plugins.insert::<StatementExecutorRef>(statement_executor.clone());
 
-        let heartbeat_task = Some(HeartbeatTask::new(meta_client, 5, 5));
+        let handlers_executor = HandlerGroupExecutor::new(vec![
+            Arc::new(ParseMailboxMessageHandler::default()),
+            Arc::new(InvalidateTableCacheHandler::new(meta_backend)),
+        ]);
+
+        let heartbeat_task = Some(HeartbeatTask::new(
+            meta_client,
+            5,
+            5,
+            Arc::new(handlers_executor),
+        ));
 
         Ok(Instance {
             catalog_manager,

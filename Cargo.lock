@@ -553,7 +553,7 @@ dependencies = [
  "log",
  "parking",
  "polling",
- "rustix",
+ "rustix 0.37.14",
  "slab",
  "socket2 0.4.9",
  "waker-fn",
@@ -840,6 +840,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "bindgen"
+version = "0.64.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4243e6031260db77ede97ad86c27e501d646a27ab57b59a574f725d98ab1fb4"
+dependencies = [
+ "bitflags 1.3.2",
+ "cexpr",
+ "clang-sys",
+ "lazy_static",
+ "lazycell",
+ "peeking_take_while",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "rustc-hash",
+ "shlex",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -1204,6 +1224,7 @@ dependencies = [
  "meta-client",
  "metrics",
  "mito",
+ "moka 0.11.0",
  "object-store",
  "parking_lot",
  "regex",
@@ -1757,11 +1778,16 @@ dependencies = [
  "chrono",
  "common-catalog",
  "common-error",
+ "common-runtime",
+ "common-telemetry",
+ "common-time",
  "datatypes",
  "serde",
  "serde_json",
  "snafu",
+ "store-api",
  "table",
+ "tokio",
 ]
 
 [[package]]
@@ -2876,6 +2902,17 @@ dependencies = [
 
 [[package]]
 name = "errno"
+version = "0.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f639046355ee4f37944e44f60642c6f3a7efa3cf6b78c78a0d989a8ce6c396a1"
+dependencies = [
+ "errno-dragonfly",
+ "libc",
+ "winapi",
+]
+
+[[package]]
+name = "errno"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4bcfec3a70f97c962c307b2d2c56e358cf1d00b558d74262b5f929ee8cc7e73a"
@@ -2975,7 +3012,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39ae6b3d9530211fb3b12a95374b8b0823be812f53d09e18c5675c0146b09642"
 dependencies = [
  "cfg-if 1.0.0",
- "rustix",
+ "rustix 0.37.14",
  "windows-sys 0.48.0",
 ]
 
@@ -3113,8 +3150,9 @@ dependencies = [
  "meta-srv",
  "meter-core",
  "meter-macros",
+ "metrics",
  "mito",
- "moka",
+ "moka 0.9.7",
  "object-store",
  "openmetrics-parser",
  "partition",
@@ -4333,7 +4371,7 @@ checksum = "adcf93614601c8129ddf72e2d5633df827ba6551541c6d8c59520a371475be1f"
 dependencies = [
  "hermit-abi 0.3.1",
  "io-lifetimes",
- "rustix",
+ "rustix 0.37.14",
  "windows-sys 0.48.0",
 ]
 
@@ -4556,6 +4594,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "348108ab3fba42ec82ff6e9564fc4ca0247bdccdc68dd8af9764bbc79c3c8ffb"
 
 [[package]]
+name = "libproc"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b18cbf29f8ff3542ba22bdce9ac610fcb75d74bb4e2b306b2a2762242025b4f"
+dependencies = [
+ "bindgen 0.64.0",
+ "errno 0.2.8",
+ "libc",
+]
+
+[[package]]
 name = "libsqlite3-sys"
 version = "0.25.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4591,6 +4640,12 @@ name = "linked-hash-map"
 version = "0.5.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0717cef1bc8b636c6e1c1bbdefc09e6322da8a9321966e8928ef80d20f7f770f"
+
+[[package]]
+name = "linux-raw-sys"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f051f77a7c8e6957c0696eac88f26b0117e54f52d3fc682ab19397a8812846a4"
 
 [[package]]
 name = "linux-raw-sys"
@@ -4772,6 +4827,15 @@ name = "mach"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b823e83b2affd8f40a9ee8c29dbc56404c1e34cd2710921f2801e2cf29527afa"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "mach2"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d0d1830bcd151a6fc4aea1369af235b36c1528fe976b8ff678683c9995eade8"
 dependencies = [
  "libc",
 ]
@@ -4986,7 +5050,7 @@ dependencies = [
  "metrics-util",
  "parking_lot",
  "portable-atomic",
- "quanta",
+ "quanta 0.10.1",
  "thiserror",
 ]
 
@@ -4999,6 +5063,21 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "metrics-process"
+version = "1.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "99eab79be9f7c18565e889d6eaed6f1ebdafb2b6a88aef446d2fee5e7796ed10"
+dependencies = [
+ "libproc",
+ "mach2",
+ "metrics",
+ "once_cell",
+ "procfs",
+ "rlimit",
+ "windows 0.48.0",
 ]
 
 [[package]]
@@ -5017,7 +5096,7 @@ dependencies = [
  "ordered-float 2.10.0",
  "parking_lot",
  "portable-atomic",
- "quanta",
+ "quanta 0.10.1",
  "radix_trie",
  "sketches-ddsketch",
 ]
@@ -5116,7 +5195,33 @@ dependencies = [
  "num_cpus",
  "once_cell",
  "parking_lot",
- "quanta",
+ "quanta 0.10.1",
+ "rustc_version 0.4.0",
+ "scheduled-thread-pool",
+ "skeptic",
+ "smallvec",
+ "tagptr",
+ "thiserror",
+ "triomphe",
+ "uuid",
+]
+
+[[package]]
+name = "moka"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "934030d03f6191edbb4ba16835ccdb80d560788ac686570a8e2986a0fb59ded8"
+dependencies = [
+ "async-io",
+ "async-lock",
+ "crossbeam-channel",
+ "crossbeam-epoch",
+ "crossbeam-utils",
+ "futures-util",
+ "num_cpus",
+ "once_cell",
+ "parking_lot",
+ "quanta 0.11.0",
  "rustc_version 0.4.0",
  "scheduled-thread-pool",
  "skeptic",
@@ -5203,7 +5308,7 @@ checksum = "e6b76684cc6825e9e5f3d9d41968faf04c6f9eb39815dc9827695b1eb5faa826"
 dependencies = [
  "base64 0.21.0",
  "bigdecimal",
- "bindgen",
+ "bindgen 0.65.1",
  "bitflags 2.1.0",
  "bitvec",
  "byteorder",
@@ -5843,12 +5948,13 @@ dependencies = [
  "common-error",
  "common-meta",
  "common-query",
+ "common-telemetry",
  "datafusion",
  "datafusion-common",
  "datafusion-expr",
  "datatypes",
  "meta-client",
- "moka",
+ "moka 0.9.7",
  "serde",
  "serde_json",
  "snafu",
@@ -6315,6 +6421,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "procfs"
+version = "0.15.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "943ca7f9f29bab5844ecd8fdb3992c5969b6622bb9609b9502fef9b4310e3f1f"
+dependencies = [
+ "bitflags 1.3.2",
+ "byteorder",
+ "hex",
+ "lazy_static",
+ "rustix 0.36.14",
+]
+
+[[package]]
 name = "prodash"
 version = "23.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6575,6 +6694,22 @@ dependencies = [
  "once_cell",
  "raw-cpuid",
  "wasi 0.10.0+wasi-snapshot-preview1",
+ "web-sys",
+ "winapi",
+]
+
+[[package]]
+name = "quanta"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8cc73c42f9314c4bdce450c77e6f09ecbddefbeddb1b5979ded332a3913ded33"
+dependencies = [
+ "crossbeam-utils",
+ "libc",
+ "mach2",
+ "once_cell",
+ "raw-cpuid",
+ "wasi 0.11.0+wasi-snapshot-preview1",
  "web-sys",
  "winapi",
 ]
@@ -7022,6 +7157,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rlimit"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8a29d87a652dc4d43c586328706bb5cdff211f3f39a530f240b53f7221dab8e"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "ron"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7185,15 +7329,29 @@ dependencies = [
 
 [[package]]
 name = "rustix"
+version = "0.36.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "14e4d67015953998ad0eb82887a0eb0129e18a7e2f3b7b0f6c422fddcd503d62"
+dependencies = [
+ "bitflags 1.3.2",
+ "errno 0.3.1",
+ "io-lifetimes",
+ "libc",
+ "linux-raw-sys 0.1.4",
+ "windows-sys 0.45.0",
+]
+
+[[package]]
+name = "rustix"
 version = "0.37.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9b864d3c18a5785a05953adeed93e2dca37ed30f18e69bba9f30079d51f363f"
 dependencies = [
  "bitflags 1.3.2",
- "errno",
+ "errno 0.3.1",
  "io-lifetimes",
  "libc",
- "linux-raw-sys",
+ "linux-raw-sys 0.3.4",
  "windows-sys 0.48.0",
 ]
 
@@ -8006,6 +8164,7 @@ dependencies = [
  "hyper",
  "influxdb_line_protocol",
  "metrics",
+ "metrics-process",
  "mime_guess",
  "mysql_async",
  "num_cpus",
@@ -8800,7 +8959,7 @@ dependencies = [
  "cfg-if 1.0.0",
  "fastrand",
  "redox_syscall 0.3.5",
- "rustix",
+ "rustix 0.37.14",
  "windows-sys 0.45.0",
 ]
 

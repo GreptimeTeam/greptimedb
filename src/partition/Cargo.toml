@@ -11,6 +11,7 @@ common-catalog = { path = "../common/catalog" }
 common-error = { path = "../common/error" }
 common-query = { path = "../common/query" }
 common-meta = { path = "../common/meta" }
+common-telemetry = { path = "../common/telemetry" }
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datafusion.workspace = true

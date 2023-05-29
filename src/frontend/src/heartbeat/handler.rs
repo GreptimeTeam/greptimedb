@@ -12,5 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod close_region;
-pub mod open_region;
+pub mod invalidate_table_cache;
+#[cfg(test)]
+mod tests;

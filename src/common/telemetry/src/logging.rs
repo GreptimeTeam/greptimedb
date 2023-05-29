@@ -36,7 +36,7 @@ pub use crate::{debug, error, info, log, trace, warn};
 #[serde(default)]
 pub struct LoggingOptions {
     pub dir: String,
-    pub level: String,
+    pub level: Option<String>,
     pub enable_jaeger_tracing: bool,
 }
 
@@ -44,7 +44,7 @@ impl Default for LoggingOptions {
     fn default() -> Self {
         Self {
             dir: "/tmp/greptimedb/logs".to_string(),
-            level: "info".to_string(),
+            level: None,
             enable_jaeger_tracing: false,
         }
     }
@@ -71,10 +71,12 @@ pub fn init_default_ut_logging() {
         let dir =
             env::var("UNITTEST_LOG_DIR").unwrap_or_else(|_| "/tmp/__unittest_logs".to_string());
 
-        let level = env::var("UNITTEST_LOG_LEVEL").unwrap_or_else(|_| "DEBUG".to_string());
+        let level = env::var("UNITTEST_LOG_LEVEL").unwrap_or_else(|_|
+            "debug,hyper=warn,tower=warn,datafusion=warn,reqwest=warn,sqlparser=warn,h2=info,opendal=info".to_string()
+        );
         let opts = LoggingOptions {
             dir: dir.clone(),
-            level,
+            level: Some(level),
             ..Default::default()
         };
         *g = Some(init_global_logging(
@@ -89,6 +91,8 @@ pub fn init_default_ut_logging() {
 
 static GLOBAL_UT_LOG_GUARD: Lazy<Arc<Mutex<Option<Vec<WorkerGuard>>>>> =
     Lazy::new(|| Arc::new(Mutex::new(None)));
+
+const DEFAULT_LOG_TARGETS: &str = "info";
 
 #[allow(clippy::print_stdout)]
 pub fn init_global_logging(
@@ -124,24 +128,18 @@ pub fn init_global_logging(
         BunyanFormattingLayer::new(app_name.to_string(), err_rolling_writer);
     guards.push(err_rolling_writer_guard);
 
-    // Use env RUST_LOG to initialize log if present.
-    // Otherwise use the specified level.
-    let directives = env::var(EnvFilter::DEFAULT_ENV).unwrap_or_else(|_x| level.to_string());
-    let filter = filter::Targets::new()
-        // Only enable WARN and ERROR for 3rd-party crates
-        // TODO(dennis): configure them?
-        .with_target("hyper", Level::WARN)
-        .with_target("tower", Level::WARN)
-        .with_target("datafusion", Level::WARN)
-        .with_target("reqwest", Level::WARN)
-        .with_target("sqlparser", Level::WARN)
-        .with_target("h2", Level::INFO)
-        .with_target("opendal", Level::INFO)
-        .with_default(
-            directives
-                .parse::<filter::LevelFilter>()
-                .expect("error parsing level string"),
-        );
+    // resolve log level settings from:
+    // - options from command line or config files
+    // - environment variable: RUST_LOG
+    // - default settings
+    let rust_log_env = std::env::var(EnvFilter::DEFAULT_ENV).ok();
+    let targets_string = level
+        .as_deref()
+        .or(rust_log_env.as_deref())
+        .unwrap_or(DEFAULT_LOG_TARGETS);
+    let filter = targets_string
+        .parse::<filter::Targets>()
+        .expect("error parsing log level string");
 
     // Must enable 'tokio_unstable' cfg to use this feature.
     // For example: `RUSTFLAGS="--cfg tokio_unstable" cargo run -F common-telemetry/console -- standalone start`

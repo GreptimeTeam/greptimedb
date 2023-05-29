@@ -57,7 +57,7 @@ pub async fn remote_write(
         crate::metrics::METRIC_HTTP_PROMETHEUS_WRITE_ELAPSED,
         &[(
             crate::metrics::METRIC_DB_LABEL,
-            params.db.as_deref().unwrap_or("")
+            params.db.clone().unwrap_or_default()
         )]
     );
     let ctx = if let Some(db) = params.db {
@@ -97,7 +97,7 @@ pub async fn remote_read(
         crate::metrics::METRIC_HTTP_PROMETHEUS_READ_ELAPSED,
         &[(
             crate::metrics::METRIC_DB_LABEL,
-            params.db.as_deref().unwrap_or("")
+            params.db.clone().unwrap_or_default()
         )]
     );
     let ctx = if let Some(db) = params.db {

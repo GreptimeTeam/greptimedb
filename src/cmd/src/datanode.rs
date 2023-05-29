@@ -113,8 +113,9 @@ impl StartCommand {
         if let Some(dir) = top_level_opts.log_dir {
             opts.logging.dir = dir;
         }
-        if let Some(level) = top_level_opts.log_level {
-            opts.logging.level = level;
+
+        if top_level_opts.log_level.is_some() {
+            opts.logging.level = top_level_opts.log_level;
         }
 
         if let Some(addr) = &self.rpc_addr {
@@ -300,7 +301,7 @@ mod tests {
             options.storage.manifest,
         );
 
-        assert_eq!("debug".to_string(), options.logging.level);
+        assert_eq!("debug", options.logging.level.unwrap());
         assert_eq!("/tmp/greptimedb/test/logs".to_string(), options.logging.dir);
     }
 
@@ -353,7 +354,7 @@ mod tests {
 
         let logging_opt = options.logging_options();
         assert_eq!("/tmp/greptimedb/test/logs", logging_opt.dir);
-        assert_eq!("debug", logging_opt.level);
+        assert_eq!("debug", logging_opt.level.as_ref().unwrap());
     }
 
     #[test]

@@ -16,9 +16,12 @@ use std::sync::Arc;
 
 use catalog::{CatalogManagerRef, DeregisterTableRequest};
 use common_catalog::format_full_table_name;
+use common_meta::error::Result as MetaResult;
+use common_meta::heartbeat::handler::{
+    HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
+};
 use common_meta::instruction::{Instruction, InstructionReply, RegionIdent, SimpleReply};
-use common_telemetry::{error, warn};
-use log::info;
+use common_telemetry::{error, info, warn};
 use snafu::ResultExt;
 use store_api::storage::RegionNumber;
 use table::engine::manager::TableEngineManagerRef;
@@ -26,8 +29,6 @@ use table::engine::{CloseTableResult, EngineContext, TableReference};
 use table::requests::CloseTableRequest;
 
 use crate::error::{self, Result};
-use crate::heartbeat::handler::{HandleControl, HeartbeatResponseHandler};
-use crate::heartbeat::HeartbeatResponseHandlerContext;
 
 #[derive(Clone)]
 pub struct CloseRegionHandler {
@@ -43,7 +44,7 @@ impl HeartbeatResponseHandler for CloseRegionHandler {
         )
     }
 
-    fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> Result<HandleControl> {
+    fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> MetaResult<HandleControl> {
         let Some((meta, Instruction::CloseRegion(region_ident))) = ctx.incoming_message.take() else {
             unreachable!("CloseRegionHandler: should be guarded by 'is_acceptable'");
         };
@@ -73,7 +74,7 @@ impl HeartbeatResponseHandler for CloseRegionHandler {
                 .send((meta, CloseRegionHandler::map_result(result)))
                 .await
             {
-                error!(e;"Failed to send reply to mailbox");
+                error!(e; "Failed to send reply to mailbox");
             }
         });
 

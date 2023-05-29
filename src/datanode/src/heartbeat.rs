@@ -18,23 +18,20 @@ use std::time::Duration;
 
 use api::v1::meta::{HeartbeatRequest, NodeStat, Peer};
 use catalog::{datanode_stat, CatalogManagerRef};
+use common_meta::heartbeat::handler::{
+    HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutorRef,
+};
+use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef};
+use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
 use common_telemetry::{error, info, trace, warn};
-use mailbox::{HeartbeatMailbox, MailboxRef};
 use meta_client::client::{HeartbeatSender, MetaClient};
 use snafu::ResultExt;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-use self::handler::{HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutorRef};
-use self::utils::outgoing_message_to_mailbox_message;
-use crate::error::{MetaClientInitSnafu, Result};
+use crate::error::{self, MetaClientInitSnafu, Result};
 
-pub mod handler;
-pub mod utils;
-
-// TODO(weny): remove allow dead_code
-#[allow(dead_code)]
-pub mod mailbox;
+pub(crate) mod handler;
 
 pub struct HeartbeatTask {
     node_id: u64,
@@ -44,7 +41,7 @@ pub struct HeartbeatTask {
     meta_client: Arc<MetaClient>,
     catalog_manager: CatalogManagerRef,
     interval: u64,
-    heartbeat_response_handler_exector: HeartbeatResponseHandlerExecutorRef,
+    resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
 }
 
 impl Drop for HeartbeatTask {
@@ -61,7 +58,7 @@ impl HeartbeatTask {
         server_hostname: Option<String>,
         meta_client: Arc<MetaClient>,
         catalog_manager: CatalogManagerRef,
-        heartbeat_response_handler_exector: HeartbeatResponseHandlerExecutorRef,
+        resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
     ) -> Self {
         Self {
             node_id,
@@ -71,7 +68,7 @@ impl HeartbeatTask {
             meta_client,
             catalog_manager,
             interval: 5_000, // default interval is set to 5 secs
-            heartbeat_response_handler_exector,
+            resp_handler_executor,
         }
     }
 
@@ -98,7 +95,7 @@ impl HeartbeatTask {
 
                 let ctx = HeartbeatResponseHandlerContext::new(mailbox.clone(), res);
                 if let Err(e) = Self::handle_response(ctx, handler_executor.clone()) {
-                    error!(e;"Error while handling heartbeat response");
+                    error!(e; "Error while handling heartbeat response");
                 }
                 if !running.load(Ordering::Acquire) {
                     info!("Heartbeat task shutdown");
@@ -114,7 +111,9 @@ impl HeartbeatTask {
         handler_executor: HeartbeatResponseHandlerExecutorRef,
     ) -> Result<()> {
         trace!("heartbeat response: {:?}", ctx.response);
-        handler_executor.handle(ctx)
+        handler_executor
+            .handle(ctx)
+            .context(error::HandleHeartbeatResponseSnafu)
     }
 
     /// Start heartbeat task, spawn background task.
@@ -135,7 +134,7 @@ impl HeartbeatTask {
         let meta_client = self.meta_client.clone();
         let catalog_manager_clone = self.catalog_manager.clone();
 
-        let handler_executor = self.heartbeat_response_handler_exector.clone();
+        let handler_executor = self.resp_handler_executor.clone();
 
         let (outgoing_tx, mut outgoing_rx) = mpsc::channel(16);
         let mailbox = Arc::new(HeartbeatMailbox::new(outgoing_tx));

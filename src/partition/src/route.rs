@@ -17,11 +17,13 @@ use std::time::Duration;
 
 use common_meta::rpc::router::{RouteRequest, TableRoute};
 use common_meta::table_name::TableName;
+use common_telemetry::timer;
 use meta_client::client::MetaClient;
 use moka::future::{Cache, CacheBuilder};
 use snafu::{ensure, ResultExt};
 
 use crate::error::{self, Result};
+use crate::metrics;
 
 pub struct TableRoutes {
     meta_client: Arc<MetaClient>,
@@ -42,6 +44,8 @@ impl TableRoutes {
     }
 
     pub async fn get_route(&self, table_name: &TableName) -> Result<Arc<TableRoute>> {
+        let _timer = timer!(metrics::METRIC_TABLE_ROUTE_GET);
+
         self.cache
             .try_get_with_by_ref(table_name, self.get_from_meta(table_name))
             .await
@@ -54,6 +58,8 @@ impl TableRoutes {
     }
 
     async fn get_from_meta(&self, table_name: &TableName) -> Result<Arc<TableRoute>> {
+        let _timer = timer!(metrics::METRIC_TABLE_ROUTE_GET_REMOTE);
+
         let mut resp = self
             .meta_client
             .route(RouteRequest {
