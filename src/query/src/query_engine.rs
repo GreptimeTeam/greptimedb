@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
+use client::client_manager::DatanodeClients;
 use common_base::Plugins;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::{FunctionRef, FUNCTION_REGISTRY};
@@ -67,19 +68,27 @@ pub struct QueryEngineFactory {
 
 impl QueryEngineFactory {
     pub fn new(catalog_manager: CatalogManagerRef, with_dist_planner: bool) -> Self {
-        Self::new_with_plugins(catalog_manager, with_dist_planner, None, Default::default())
+        Self::new_with_plugins(
+            catalog_manager,
+            with_dist_planner,
+            None,
+            None,
+            Default::default(),
+        )
     }
 
     pub fn new_with_plugins(
         catalog_manager: CatalogManagerRef,
         with_dist_planner: bool,
         partition_manager: Option<Arc<PartitionRuleManager>>,
+        clients: Option<Arc<DatanodeClients>>,
         plugins: Arc<Plugins>,
     ) -> Self {
         let state = Arc::new(QueryEngineState::new(
             catalog_manager,
             with_dist_planner,
             partition_manager,
+            clients,
             plugins,
         ));
         let query_engine = Arc::new(DatafusionQueryEngine::new(state));

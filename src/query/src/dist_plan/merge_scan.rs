@@ -13,17 +13,27 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::mem;
 use std::sync::Arc;
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
+use async_stream::try_stream;
+use client::client_manager::DatanodeClients;
+use client::Database;
 use common_base::bytes::Bytes;
 use common_meta::peer::Peer;
+use common_meta::table_name::TableName;
 use common_query::physical_plan::TaskContext;
-use common_recordbatch::DfSendableRecordBatchStream;
+use common_query::Output;
+use common_recordbatch::{DfSendableRecordBatchStream, SendableRecordBatchStream};
 use datafusion::physical_plan::{ExecutionPlan, Partitioning};
 use datafusion_common::{DataFusionError, Result, Statistics};
 use datafusion_expr::{Extension, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion_physical_expr::PhysicalSortExpr;
+use snafu::ResultExt;
+use tokio::sync::Mutex;
+
+use crate::error::{RemoteRequestSnafu, UnexpectedOutputKindSnafu};
 
 #[derive(Debug, Hash, PartialEq, Eq)]
 pub struct MergeScanLogicalPlan {
@@ -94,18 +104,80 @@ impl MergeScanLogicalPlan {
 
 #[derive(Debug)]
 pub struct MergeScanExec {
+    table: TableName,
     peers: Vec<Peer>,
     substrait_plan: Bytes,
     schema: ArrowSchemaRef,
+    clients: Arc<DatanodeClients>,
+    databases: Arc<Mutex<Vec<Database>>>,
 }
 
 impl MergeScanExec {
-    pub fn new(peers: Vec<Peer>, substrait_plan: Bytes, schema: ArrowSchemaRef) -> Self {
+    pub fn new(
+        table: TableName,
+        peers: Vec<Peer>,
+        substrait_plan: Bytes,
+        schema: ArrowSchemaRef,
+        clients: Arc<DatanodeClients>,
+    ) -> Self {
         Self {
+            table,
             peers,
             substrait_plan,
             schema,
+            clients,
+            databases: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Build database clients and store them in `self.databases`
+    pub async fn init(&self) {
+        if self.peers.is_empty() || self.databases.lock().await.len() == self.peers.len() {
+            return;
+        }
+
+        let mut databases = Vec::with_capacity(self.peers.len());
+        for peer in &self.peers {
+            let client = self.clients.get_client(peer).await;
+            let database = Database::new(&self.table.catalog_name, &self.table.schema_name, client);
+            databases.push(database);
+        }
+        *self.databases.lock().await = databases;
+    }
+
+    pub async fn to_stream(&self) -> Result<SendableRecordBatchStream> {
+        let databases = mem::take(&mut *self.databases.lock().await);
+
+        let stream = try_stream!({
+            for database in databases {
+                let output: Output = database
+                    .logical_plan(self.substrait_plan.to_vec())
+                    .await
+                    .context(RemoteRequestSnafu)?;
+
+                yield ();
+
+                // match output {
+                //     Output::AffectedRows(_) => UnexpectedOutputKindSnafu {
+                //         expected: "RecordBatches or Stream",
+                //         got: "AffectedRows",
+                //     }
+                //     .fail()?,
+                //     Output::RecordBatches(record_batches) => {
+                //         for batch in record_batches {
+                //             yield batch;
+                //         }
+                //     }
+                //     Output::Stream(stream) => {
+                //         for batch in stream.next().await {
+                //             yield batch;
+                //         }
+                //     }
+                // }
+            }
+        });
+
+        todo!()
     }
 }
 

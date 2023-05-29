@@ -152,7 +152,7 @@ impl Instance {
         let dist_instance = DistInstance::new(
             meta_client.clone(),
             Arc::new(catalog_manager.clone()),
-            datanode_clients,
+            datanode_clients.clone(),
         );
         let dist_instance = Arc::new(dist_instance);
 
@@ -163,6 +163,7 @@ impl Instance {
             catalog_manager.clone(),
             false,
             Some(partition_manager),
+            Some(datanode_clients),
             plugins.clone(),
         )
         .query_engine();

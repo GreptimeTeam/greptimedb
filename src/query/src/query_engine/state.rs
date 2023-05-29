@@ -18,6 +18,7 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
+use client::client_manager::DatanodeClients;
 use common_base::Plugins;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::physical_plan::SessionContext;
@@ -61,6 +62,7 @@ impl QueryEngineState {
         catalog_list: CatalogManagerRef,
         with_dist_planner: bool,
         partition_manager: Option<Arc<PartitionRuleManager>>,
+        datanode_clients: Option<Arc<DatanodeClients>>,
         plugins: Arc<Plugins>,
     ) -> Self {
         let runtime_env = Arc::new(RuntimeEnv::default());
@@ -80,7 +82,7 @@ impl QueryEngineState {
         .with_analyzer_rules(analyzer.rules)
         .with_query_planner(Arc::new(DfQueryPlanner::new(
             partition_manager,
-            catalog_list.clone(),
+            datanode_clients,
         )));
 
         let df_context = SessionContext::with_state(session_state);
@@ -152,12 +154,13 @@ impl QueryPlanner for DfQueryPlanner {
 impl DfQueryPlanner {
     fn new(
         partition_manager: Option<Arc<PartitionRuleManager>>,
-        catalog_manager: CatalogManagerRef,
+        datanode_clients: Option<Arc<DatanodeClients>>,
     ) -> Self {
         let mut planners: Vec<Arc<dyn ExtensionPlanner + Send + Sync>> =
             vec![Arc::new(PromExtensionPlanner)];
-        if let Some(partition_manager) = partition_manager {
-            planners.push(Arc::new(DistExtensionPlanner::new(partition_manager)));
+        if let Some(partition_manager) = partition_manager
+         && let Some(datanode_clients) = datanode_clients {
+            planners.push(Arc::new(DistExtensionPlanner::new(partition_manager, datanode_clients)));
         }
         Self {
             physical_planner: DefaultPhysicalPlanner::with_extension_planners(planners),

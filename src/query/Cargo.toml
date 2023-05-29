@@ -8,9 +8,11 @@ license.workspace = true
 ahash = { version = "0.8", features = ["compile-time-rng"] }
 arc-swap = "1.0"
 arrow-schema.workspace = true
+async-stream.workspace = true
 async-trait = "0.1"
 catalog = { path = "../catalog" }
 chrono.workspace = true
+client = { path = "../client" }
 common-base = { path = "../common/base" }
 common-catalog = { path = "../common/catalog" }
 common-datasource = { path = "../common/datasource" }

@@ -17,6 +17,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use client::client_manager::DatanodeClients;
 use common_meta::peer::Peer;
 use common_meta::table_name::TableName;
 use datafusion::common::Result;
@@ -35,11 +36,18 @@ use crate::error::{self, IncompleteTableIdentifierSnafu};
 
 pub struct DistExtensionPlanner {
     partition_manager: Arc<PartitionRuleManager>,
+    clients: Arc<DatanodeClients>,
 }
 
 impl DistExtensionPlanner {
-    pub fn new(partition_manager: Arc<PartitionRuleManager>) -> Self {
-        Self { partition_manager }
+    pub fn new(
+        partition_manager: Arc<PartitionRuleManager>,
+        clients: Arc<DatanodeClients>,
+    ) -> Self {
+        Self {
+            partition_manager,
+            clients,
+        }
     }
 }
 
@@ -78,9 +86,11 @@ impl ExtensionPlanner for DistExtensionPlanner {
                     .into();
                 let peers = self.get_peers(&table_name).await?;
                 let exec = MergeScanExec::new(
+                    table_name,
                     peers,
                     substrait_plan,
                     Arc::new(input_schema.as_ref().into()),
+                    self.clients.clone(),
                 );
 
                 Ok(Some(Arc::new(exec) as _))

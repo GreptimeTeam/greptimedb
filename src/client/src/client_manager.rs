@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::{Debug, Formatter};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -38,6 +39,14 @@ impl Default for DatanodeClients {
                 .build(),
             started: Arc::new(Mutex::new(false)),
         }
+    }
+}
+
+impl Debug for DatanodeClients {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DatanodeClients")
+            .field("channel_manager", &self.channel_manager)
+            .finish()
     }
 }
 

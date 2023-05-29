@@ -156,6 +156,19 @@ pub enum Error {
         source: sql::error::Error,
     },
 
+    #[snafu(display("Failed to request remote peer, source: {}", source))]
+    RemoteRequest {
+        source: client::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Unexpected query output. Expected: {}, Got: {}", expected, got))]
+    UnexpectedOutputKind {
+        expected: String,
+        got: String,
+        location: Location,
+    },
+
     #[snafu(display("Missing required field: {}", name))]
     MissingRequiredField { name: String, location: Location },
 
@@ -233,6 +246,8 @@ impl ErrorExt for Error {
             Sql { source } => source.status_code(),
             PlanSql { .. } => StatusCode::PlanQuery,
             ConvertSqlType { source, .. } | ConvertSqlValue { source, .. } => source.status_code(),
+            RemoteRequest { source, .. } => source.status_code(),
+            UnexpectedOutputKind { .. } => StatusCode::Unexpected,
         }
     }
 

@@ -271,6 +271,7 @@ async fn create_query_engine(meta_addr: &str) -> Result<DatafusionQueryEngine> {
         catalog_list,
         false,
         None,
+        None,
         Default::default(),
     ));
 
