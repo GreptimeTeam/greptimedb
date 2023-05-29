@@ -18,13 +18,16 @@ use std::sync::{Arc, Mutex};
 use common_query::logical_plan::Expr;
 use common_query::physical_plan::DfPhysicalPlanAdapter;
 use common_query::DfPhysicalPlan;
+use common_recordbatch::OrderOption;
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::datasource::datasource::TableProviderFilterPushDown as DfTableProviderFilterPushDown;
 use datafusion::datasource::{TableProvider, TableType as DfTableType};
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::SessionState;
 use datafusion_expr::expr::Expr as DfExpr;
-use store_api::storage::{OrderOption, ScanRequest};
+use datafusion_physical_expr::expressions::Column;
+use datafusion_physical_expr::PhysicalSortExpr;
+use store_api::storage::ScanRequest;
 
 use super::scan::StreamScanAdapter;
 use crate::table::{TableRef, TableType};
@@ -86,8 +89,28 @@ impl TableProvider for DfTableProviderAdapter {
             request.clone()
         };
         let stream = self.table.scan_to_stream(request).await?;
-        let stream_adapter = Arc::new(StreamScanAdapter::new(stream));
-        Ok(Arc::new(DfPhysicalPlanAdapter(stream_adapter)))
+
+        // build sort physical expr
+        let schema = stream.schema();
+        let sort_expr = stream.output_ordering().map(|order_opts| {
+            order_opts
+                .iter()
+                .map(|order_opt| {
+                    let col_name = schema.column_name_by_index(order_opt.index);
+                    let col_expr = Arc::new(Column::new(col_name, order_opt.index));
+                    PhysicalSortExpr {
+                        expr: col_expr,
+                        options: order_opt.options,
+                    }
+                })
+                .collect::<Vec<_>>()
+        });
+
+        let mut stream_adapter = StreamScanAdapter::new(stream);
+        if let Some(sort_expr) = sort_expr {
+            stream_adapter = stream_adapter.with_output_ordering(sort_expr);
+        }
+        Ok(Arc::new(DfPhysicalPlanAdapter(Arc::new(stream_adapter))))
     }
 
     fn supports_filters_pushdown(

@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 
 use common_error::ext::ErrorExt;
 use common_query::logical_plan::Expr;
-use datatypes::arrow::compute::SortOptions;
+use common_recordbatch::OrderOption;
 use datatypes::vectors::VectorRef;
 
 use crate::storage::{ColumnDescriptor, RegionDescriptor, SequenceNumber};
@@ -57,12 +57,6 @@ pub struct ScanRequest {
     /// If set, it contains the amount of rows needed by the caller,
     /// The data source should return *at least* this number of rows if available.
     pub limit: Option<usize>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct OrderOption {
-    pub index: usize,
-    pub options: SortOptions,
 }
 
 #[derive(Debug)]

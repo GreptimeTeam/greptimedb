@@ -8654,6 +8654,7 @@ dependencies = [
  "common-base",
  "common-error",
  "common-query",
+ "common-recordbatch",
  "common-time",
  "datatypes",
  "derive_builder 0.11.2",

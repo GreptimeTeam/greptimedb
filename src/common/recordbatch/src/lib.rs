@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use datafusion::physical_plan::memory::MemoryStream;
 pub use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
+use datatypes::arrow::compute::SortOptions;
 pub use datatypes::arrow::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::arrow::util::pretty;
 use datatypes::prelude::VectorRef;
@@ -34,9 +35,19 @@ use snafu::{ensure, ResultExt};
 
 pub trait RecordBatchStream: Stream<Item = Result<RecordBatch>> {
     fn schema(&self) -> SchemaRef;
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        None
+    }
 }
 
 pub type SendableRecordBatchStream = Pin<Box<dyn RecordBatchStream + Send>>;
+
+#[derive(Debug, Clone, Copy)]
+pub struct OrderOption {
+    pub index: usize,
+    pub options: SortOptions,
+}
 
 /// EmptyRecordBatchStream can be used to create a RecordBatchStream
 /// that will produce no results

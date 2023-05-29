@@ -36,7 +36,7 @@ pub use self::engine::{CreateOptions, EngineContext, OpenOptions, StorageEngine}
 pub use self::metadata::RegionMeta;
 pub use self::region::{FlushContext, FlushReason, Region, RegionStat, WriteContext};
 pub use self::requests::{
-    AddColumn, AlterOperation, AlterRequest, GetRequest, OrderOption, ScanRequest, WriteRequest,
+    AddColumn, AlterOperation, AlterRequest, GetRequest, ScanRequest, WriteRequest,
 };
 pub use self::responses::{GetResponse, ScanResponse, WriteResponse};
 pub use self::snapshot::{ReadContext, Snapshot};
