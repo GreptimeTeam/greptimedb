@@ -147,7 +147,7 @@ impl Instance {
         let mut catalog_manager = FrontendCatalogManager::new(
             meta_backend.clone(),
             meta_backend.clone(),
-            partition_manager,
+            partition_manager.clone(),
             datanode_clients.clone(),
         );
 
@@ -178,7 +178,10 @@ impl Instance {
 
         let handlers_executor = HandlerGroupExecutor::new(vec![
             Arc::new(ParseMailboxMessageHandler::default()),
-            Arc::new(InvalidateTableCacheHandler::new(meta_backend)),
+            Arc::new(InvalidateTableCacheHandler::new(
+                meta_backend,
+                partition_manager,
+            )),
         ]);
 
         let heartbeat_task = Some(HeartbeatTask::new(
