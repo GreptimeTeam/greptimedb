@@ -92,7 +92,7 @@ impl WindowInfer for PlainWindowInference {
         }
 
         let window_size = min_duration_to_window_size(min_duration_sec);
-        align_durations_to_windows(&durations, window_size)
+        align_time_spans_to_windows(&durations, window_size)
             .into_iter()
             .sorted_by(|(l_start, _), (r_start, _)| r_start.cmp(l_start)) // sort time windows in descending order
             // unwrap safety: we ensure that end>=start so that TimestampRange::with_unit won't return None
@@ -107,7 +107,7 @@ impl WindowInfer for PlainWindowInference {
 /// For example, given time span `[1, 6)` and duration 5, the span can be aligned and split to
 /// two windows with length 5: `[0, 5)` and `[5, 10]`, and these two windows can cover the original
 /// span `[1, 6)`.
-fn align_durations_to_windows(durations: &[(i64, i64)], min_duration: i64) -> HashSet<(i64, i64)> {
+fn align_time_spans_to_windows(durations: &[(i64, i64)], min_duration: i64) -> HashSet<(i64, i64)> {
     let mut res = HashSet::new();
     for (start, end) in durations {
         let mut next = *start;
@@ -149,6 +149,7 @@ mod tests {
 
     #[test]
     fn test_get_time_window_size() {
+        assert_eq!(60, min_duration_to_window_size(0));
         for window in TIME_WINDOW_SIZE {
             assert_eq!(window, min_duration_to_window_size(window));
         }
@@ -170,7 +171,7 @@ mod tests {
         min_duration: i64,
         expected: &[(i64, i64)],
     ) {
-        let res = align_durations_to_windows(durations, min_duration);
+        let res = align_time_spans_to_windows(durations, min_duration);
         let expected = expected.iter().copied().collect::<HashSet<_>>();
         assert_eq!(res, expected);
     }
