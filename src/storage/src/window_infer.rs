@@ -23,17 +23,16 @@ use crate::memtable::MemtableStats;
 use crate::sst::FileMeta;
 
 /// A set of predefined time windows.
-const TIME_WINDOW_SIZE: [i64; 10] = [
-    60,                 // 1 minute
-    60 * 10,            // 10 minute
-    60 * 30,            // 30 minute
-    60 * 60,            // 1 hour
-    2 * 60 * 60,        // 2 hours
-    6 * 60 * 60,        // 6 hours
-    12 * 60 * 60,       // 12 hours
-    24 * 60 * 60,       // 1 day
-    7 * 24 * 60 * 60,   // 1 week
-    365 * 24 * 60 * 60, // 1 year
+const TIME_WINDOW_SIZE: [i64; 9] = [
+    60,               // 1 minute
+    60 * 10,          // 10 minute
+    60 * 30,          // 30 minute
+    60 * 60,          // 1 hour
+    2 * 60 * 60,      // 2 hours
+    6 * 60 * 60,      // 6 hours
+    12 * 60 * 60,     // 12 hours
+    24 * 60 * 60,     // 1 day
+    7 * 24 * 60 * 60, // 1 week
 ];
 
 /// [WindowInfer] infers the time windows that can be used to optimize table scans ordered by
@@ -48,8 +47,8 @@ pub(crate) trait WindowInfer {
         -> Vec<TimestampRange>;
 }
 
-/// [PlainWindowInference] simply finds the minimum time span within all SST files and memtables,
-/// matches that time span into a set of predefined time windows.
+/// [PlainWindowInference] simply finds the minimum time span within all SST files in level 0 and
+/// memtables, matches that time span into a set of predefined time windows.
 pub(crate) struct PlainWindowInference;
 
 impl WindowInfer for PlainWindowInference {
@@ -65,9 +64,13 @@ impl WindowInfer for PlainWindowInference {
             if let Some((start, end)) = &meta.time_range {
                 // unwrap safety: converting timestamps with any unit to seconds won't overflow.
                 let start_sec = start.convert_to(TimeUnit::Second).unwrap().value();
+                // file timestamp range end is inclusive
                 let end_sec = end.convert_to_ceil(TimeUnit::Second).unwrap().value();
                 debug_assert!(end_sec >= start_sec);
-                min_duration_sec = min_duration_sec.min(end_sec - start_sec);
+                if meta.level == 0 {
+                    // only level 0 is involved when calculating time windows.
+                    min_duration_sec = min_duration_sec.min(end_sec - start_sec);
+                }
                 durations.push((start_sec, end_sec));
             }
         }
@@ -158,8 +161,8 @@ mod tests {
         assert_eq!(12 * 60 * 60, min_duration_to_window_size(21601));
         assert_eq!(24 * 60 * 60, min_duration_to_window_size(43201));
         assert_eq!(7 * 24 * 60 * 60, min_duration_to_window_size(604799));
-        assert_eq!(365 * 24 * 60 * 60, min_duration_to_window_size(31535999));
-        assert_eq!(365 * 24 * 60 * 60, min_duration_to_window_size(i64::MAX));
+        assert_eq!(7 * 24 * 60 * 60, min_duration_to_window_size(31535999));
+        assert_eq!(7 * 24 * 60 * 60, min_duration_to_window_size(i64::MAX));
     }
 
     fn check_align_durations_to_windows(
@@ -282,6 +285,42 @@ mod tests {
                 TimestampRange::with_unit(60 * 60, 61 * 60, TimeUnit::Second).unwrap(),
                 TimestampRange::with_unit(60, 120, TimeUnit::Second).unwrap(),
                 TimestampRange::with_unit(0, 60, TimeUnit::Second).unwrap(),
+            ],
+            res
+        );
+
+        let res = window_inference.infer_window(
+            &[
+                FileMeta {
+                    time_range: Some((
+                        Timestamp::new(0, TimeUnit::Millisecond),
+                        Timestamp::new(60 * 1000, TimeUnit::Millisecond),
+                    )),
+                    level: 1, // this SST will be ignored
+                    ..Default::default()
+                },
+                FileMeta {
+                    time_range: Some((
+                        Timestamp::new(0, TimeUnit::Millisecond),
+                        Timestamp::new(10 * 60 * 1000, TimeUnit::Millisecond),
+                    )),
+                    ..Default::default()
+                },
+            ],
+            &[MemtableStats {
+                max_timestamp: Timestamp::new(60 * 30 * 1000 + 1, TimeUnit::Millisecond),
+                min_timestamp: Timestamp::new(0, TimeUnit::Millisecond),
+                ..Default::default()
+            }],
+        );
+
+        // inferred window size should be 600 sec
+        assert_eq!(
+            vec![
+                TimestampRange::with_unit(1800, 2400, TimeUnit::Second).unwrap(),
+                TimestampRange::with_unit(1200, 1800, TimeUnit::Second).unwrap(),
+                TimestampRange::with_unit(600, 1200, TimeUnit::Second).unwrap(),
+                TimestampRange::with_unit(0, 600, TimeUnit::Second).unwrap(),
             ],
             res
         );
