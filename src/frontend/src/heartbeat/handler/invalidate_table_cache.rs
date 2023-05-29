@@ -19,11 +19,14 @@ use common_meta::heartbeat::handler::{
     HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
 };
 use common_meta::instruction::{Instruction, InstructionReply, SimpleReply, TableIdent};
-use common_telemetry::error;
+use common_meta::table_name::TableName;
+use common_telemetry::{error, info};
+use partition::manager::TableRouteCacheInvalidatorRef;
 
 #[derive(Clone)]
 pub struct InvalidateTableCacheHandler {
     backend_cache_invalidator: KvCacheInvalidatorRef,
+    table_route_cache_invalidator: TableRouteCacheInvalidatorRef,
 }
 
 impl HeartbeatResponseHandler for InvalidateTableCacheHandler {
@@ -71,9 +74,13 @@ impl HeartbeatResponseHandler for InvalidateTableCacheHandler {
 }
 
 impl InvalidateTableCacheHandler {
-    pub fn new(backend_cache_invalidator: KvCacheInvalidatorRef) -> Self {
+    pub fn new(
+        backend_cache_invalidator: KvCacheInvalidatorRef,
+        table_route_cache_invalidator: TableRouteCacheInvalidatorRef,
+    ) -> Self {
         Self {
             backend_cache_invalidator,
+            table_route_cache_invalidator,
         }
     }
 
@@ -84,9 +91,19 @@ impl InvalidateTableCacheHandler {
             table_name: table_name.to_string(),
         }
         .to_string();
-
+        info!("invalidate table cache: {}", tg_key);
         let tg_key = tg_key.as_bytes();
 
         self.backend_cache_invalidator.invalidate_key(tg_key).await;
+
+        let table = &TableName {
+            catalog_name: catalog_name.to_string(),
+            schema_name: schema_name.to_string(),
+            table_name: table_name.to_string(),
+        };
+
+        self.table_route_cache_invalidator
+            .invalidate_table_route(table)
+            .await;
     }
 }

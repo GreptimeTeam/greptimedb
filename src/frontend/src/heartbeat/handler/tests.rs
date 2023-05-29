@@ -24,6 +24,8 @@ use common_meta::heartbeat::handler::{
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MessageMeta};
 use common_meta::instruction::{Instruction, InstructionReply, SimpleReply, TableIdent};
+use common_meta::table_name::TableName;
+use partition::manager::TableRouteCacheInvalidator;
 use tokio::sync::mpsc;
 
 use super::invalidate_table_cache::InvalidateTableCacheHandler;
@@ -36,6 +38,17 @@ pub struct MockKvCacheInvalidator {
 impl KvCacheInvalidator for MockKvCacheInvalidator {
     async fn invalidate_key(&self, key: &[u8]) {
         self.inner.lock().unwrap().remove(key);
+    }
+}
+
+pub struct MockTableRouteCacheInvalidator {
+    inner: Mutex<HashMap<String, i32>>,
+}
+
+#[async_trait::async_trait]
+impl TableRouteCacheInvalidator for MockTableRouteCacheInvalidator {
+    async fn invalidate_table_route(&self, table: &TableName) {
+        self.inner.lock().unwrap().remove(&table.to_string());
     }
 }
 
@@ -52,8 +65,13 @@ async fn test_invalidate_table_cache_handler() {
         inner: Mutex::new(inner),
     });
 
+    let inner = HashMap::from([(table_key.to_string(), 1)]);
+    let table_route = Arc::new(MockTableRouteCacheInvalidator {
+        inner: Mutex::new(inner),
+    });
+
     let executor = Arc::new(HandlerGroupExecutor::new(vec![Arc::new(
-        InvalidateTableCacheHandler::new(backend.clone()),
+        InvalidateTableCacheHandler::new(backend.clone(), table_route.clone()),
     )]));
 
     let (tx, mut rx) = mpsc::channel(8);
@@ -84,6 +102,18 @@ async fn test_invalidate_table_cache_handler() {
         .lock()
         .unwrap()
         .contains_key(table_key.to_string().as_bytes()));
+
+    let table_name = TableName {
+        catalog_name: "test".to_string(),
+        schema_name: "greptime".to_string(),
+        table_name: "foo_table".to_string(),
+    };
+
+    assert!(!table_route
+        .inner
+        .lock()
+        .unwrap()
+        .contains_key(&table_name.to_string()));
 
     // removes a invalid key
     handle_instruction(
