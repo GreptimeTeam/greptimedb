@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::ops::Range;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -37,6 +38,26 @@ impl Channel {
         match self {
             Channel::Datanode(id) => format!("{}-{}", Role::Datanode as i32, id),
             Channel::Frontend(id) => format!("{}-{}", Role::Frontend as i32, id),
+        }
+    }
+}
+
+pub enum BroadcastChannel {
+    Datanode,
+    Frontend,
+}
+
+impl BroadcastChannel {
+    pub(crate) fn pusher_range(&self) -> Range<String> {
+        match self {
+            BroadcastChannel::Datanode => Range {
+                start: format!("{}-", Role::Datanode as i32),
+                end: format!("{}-", Role::Frontend as i32),
+            },
+            BroadcastChannel::Frontend => Range {
+                start: format!("{}-", Role::Frontend as i32),
+                end: format!("{}-", Role::Frontend as i32 + 1),
+            },
         }
     }
 }
@@ -81,6 +102,8 @@ pub trait Mailbox: Send + Sync {
         timeout: Duration,
     ) -> Result<MailboxReceiver>;
 
+    async fn broadcast(&self, ch: &BroadcastChannel, msg: &MailboxMessage) -> Result<()>;
+
     async fn on_recv(&self, id: MessageId, maybe_msg: Result<MailboxMessage>) -> Result<()>;
 }
 
@@ -92,5 +115,17 @@ mod tests {
     fn test_channel_pusher_id() {
         assert_eq!(Channel::Datanode(42).pusher_id(), "0-42");
         assert_eq!(Channel::Frontend(42).pusher_id(), "1-42");
+    }
+
+    #[test]
+    fn test_channel_pusher_range() {
+        assert_eq!(
+            BroadcastChannel::Datanode.pusher_range(),
+            ("0-".to_string().."1-".to_string())
+        );
+        assert_eq!(
+            BroadcastChannel::Frontend.pusher_range(),
+            ("1-".to_string().."2-".to_string())
+        );
     }
 }
