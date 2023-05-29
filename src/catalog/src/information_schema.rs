@@ -24,9 +24,9 @@ use common_query::prelude::Expr;
 use common_recordbatch::{RecordBatchStreamAdaptor, SendableRecordBatchStream};
 use datatypes::schema::SchemaRef;
 use futures_util::StreamExt;
-use snafu::ResultExt;
+use snafu::{ResultExt, OptionExt};
 use store_api::storage::ScanRequest;
-use table::error::SchemaConversionSnafu;
+use table::error::{DuplicatedExecuteCallSnafu, SchemaConversionSnafu};
 use table::{Result as TableResult, Table, TableRef};
 
 use self::columns::InformationSchemaColumns;
@@ -148,7 +148,7 @@ impl Table for InformationTable {
             .lock()
             .unwrap()
             .take()
-            .unwrap()
+            .context(DuplicatedExecuteCallSnafu)?
             .map(move |batch| {
                 batch.and_then(|batch| {
                     if let Some(projection) = &projection {

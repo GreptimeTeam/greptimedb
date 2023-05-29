@@ -86,11 +86,9 @@ impl InformationSchemaColumns {
             }),
         ));
         Ok(Box::pin(
-            RecordBatchStreamAdapter::try_new(Box::pin(DfRecordBatchStreamAdapter::new(
-                schema, stream,
-            )))
-            .map_err(BoxedError::new)
-            .context(InternalSnafu)?,
+            RecordBatchStreamAdapter::try_new(stream)
+                .map_err(BoxedError::new)
+                .context(InternalSnafu)?,
         ))
     }
 }

@@ -79,6 +79,9 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Duplicated call to plan execute method"))]
+    DuplicatedExecuteCall { location: Location },
+
     #[snafu(display(
         "Not allowed to remove index column {} from table {}",
         column_name,
@@ -141,7 +144,9 @@ impl ErrorExt for Error {
             Error::RemoveColumnInIndex { .. } | Error::BuildColumnDescriptor { .. } => {
                 StatusCode::InvalidArguments
             }
-            Error::TablesRecordBatch { .. } => StatusCode::Unexpected,
+            Error::TablesRecordBatch { .. } | Error::DuplicatedExecuteCall { .. } => {
+                StatusCode::Unexpected
+            }
             Error::ColumnExists { .. } => StatusCode::TableColumnExists,
             Error::SchemaBuild { source, .. } => source.status_code(),
             Error::TableOperation { source } => source.status_code(),
