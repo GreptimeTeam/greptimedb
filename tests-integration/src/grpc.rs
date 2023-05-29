@@ -109,6 +109,7 @@ mod test {
                 table_name: "table_created_through_grpc".to_string(),
                 kind: Some(alter_expr::Kind::AddColumns(AddColumns {
                     add_columns: vec![AddColumn {
+                        location: None,
                         column_def: Some(ColumnDef {
                             name: "b".to_string(),
                             datatype: ColumnDataType::Int32 as _,
