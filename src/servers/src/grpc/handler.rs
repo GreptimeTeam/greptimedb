@@ -13,22 +13,29 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::time::Instant;
 
+use api::helper::request_type;
 use api::v1::auth_header::AuthScheme;
 use api::v1::{Basic, GreptimeRequest, RequestHeader};
 use common_error::prelude::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_runtime::Runtime;
-use common_telemetry::{logging, timer};
-use metrics::increment_counter;
+use common_telemetry::logging;
+use metrics::{histogram, increment_counter};
 use session::context::{QueryContext, QueryContextRef};
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 use tonic::Status;
 
 use crate::auth::{Identity, Password, UserProviderRef};
 use crate::error::Error::{Auth, UnsupportedAuthScheme};
-use crate::error::{InvalidQuerySnafu, NotFoundAuthHeaderSnafu};
+use crate::error::{InvalidQuerySnafu, JoinTaskSnafu, NotFoundAuthHeaderSnafu};
 use crate::grpc::TonicResult;
+use crate::metrics::{
+    METRIC_AUTH_FAILURE, METRIC_CODE_LABEL, METRIC_SERVER_GRPC_DB_REQUEST_TIMER,
+    METRIC_STATUS_LABEL, METRIC_TYPE_LABEL,
+};
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 
 pub struct GreptimeRequestHandler {
@@ -60,11 +67,10 @@ impl GreptimeRequestHandler {
 
         self.auth(header, &query_ctx).await?;
 
-        let _timer = timer!(
-            crate::metrics::METRIC_SERVER_GRPC_DB_REQUEST_TIMER,
-            &[(crate::metrics::METRIC_DB_LABEL, query_ctx.get_db_string())]
-        );
         let handler = self.handler.clone();
+        let request_type = request_type(&query);
+        let db = query_ctx.get_db_string();
+        let timer = RequestTimer::new(db.clone(), request_type);
 
         // Executes requests in another runtime to
         // 1. prevent the execution from being cancelled unexpected by Tonic runtime;
@@ -85,17 +91,9 @@ impl GreptimeRequestHandler {
             })
         });
 
-        let output = handle.await.map_err(|e| {
-            // logs the runtime join error.
-            logging::error!("Failed to join handle, err: {}", e);
-
-            if e.is_cancelled() {
-                Status::cancelled(e.to_string())
-            } else if e.is_panic() {
-                Status::internal(format!("{:?}", e.into_panic()))
-            } else {
-                Status::unknown(e.to_string())
-            }
+        let output = handle.await.context(JoinTaskSnafu).map_err(|e| {
+            timer.record(e.status_code());
+            e
         })??;
         Ok(output)
     }
@@ -132,11 +130,8 @@ impl GreptimeRequestHandler {
         }
         .map_err(|e| {
             increment_counter!(
-                crate::metrics::METRIC_AUTH_FAILURE,
-                &[(
-                    crate::metrics::METRIC_CODE_LABEL,
-                    format!("{}", e.status_code())
-                )]
+                METRIC_AUTH_FAILURE,
+                &[(METRIC_CODE_LABEL, format!("{}", e.status_code()))]
             );
             Status::unauthenticated(e.to_string())
         })?;
@@ -164,4 +159,45 @@ pub(crate) fn create_query_context(header: Option<&RequestHeader>) -> QueryConte
         }
     };
     ctx
+}
+
+/// Histogram timer for handling gRPC request.
+///
+/// The timer records the elapsed time with [StatusCode::Success] on drop.
+struct RequestTimer {
+    start: Instant,
+    db: String,
+    request_type: &'static str,
+    status_code: StatusCode,
+}
+
+impl RequestTimer {
+    /// Returns a new timer.
+    fn new(db: String, request_type: &'static str) -> RequestTimer {
+        RequestTimer {
+            start: Instant::now(),
+            db,
+            request_type,
+            status_code: StatusCode::Success,
+        }
+    }
+
+    /// Consumes the timer and record the elapsed time with specific `status_code`.
+    fn record(mut self, status_code: StatusCode) {
+        self.status_code = status_code;
+    }
+}
+
+impl Drop for RequestTimer {
+    fn drop(&mut self) {
+        histogram!(
+            METRIC_SERVER_GRPC_DB_REQUEST_TIMER,
+            self.start.elapsed(),
+            &[
+                (METRIC_CODE_LABEL, std::mem::take(&mut self.db)),
+                (METRIC_TYPE_LABEL, self.request_type.to_string()),
+                (METRIC_STATUS_LABEL, self.status_code.to_string())
+            ]
+        );
+    }
 }

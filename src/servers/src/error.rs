@@ -254,6 +254,12 @@ pub enum Error {
         source: BoxedError,
         location: Location,
     },
+
+    #[snafu(display("Failed to join task, source: {}", source))]
+    JoinTask {
+        source: tokio::task::JoinError,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -317,11 +323,48 @@ impl ErrorExt for Error {
             Other { source, .. } => source.status_code(),
 
             UnexpectedResult { .. } => StatusCode::Unexpected,
+
+            JoinTask { source, .. } => {
+                if source.is_cancelled() {
+                    StatusCode::Cancelled
+                } else if source.is_panic() {
+                    StatusCode::Unexpected
+                } else {
+                    StatusCode::Unknown
+                }
+            }
         }
     }
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+/// Returns the tonic [Code] of a [StatusCode].
+fn status_to_tonic_code(status_code: StatusCode) -> Code {
+    match status_code {
+        StatusCode::Success => Code::Ok,
+        StatusCode::Unknown => Code::Unknown,
+        StatusCode::Unsupported => Code::Unimplemented,
+        StatusCode::Unexpected
+        | StatusCode::Internal
+        | StatusCode::PlanQuery
+        | StatusCode::EngineExecuteQuery => Code::Internal,
+        StatusCode::InvalidArguments | StatusCode::InvalidSyntax => Code::InvalidArgument,
+        StatusCode::Cancelled => Code::Cancelled,
+        StatusCode::TableAlreadyExists | StatusCode::TableColumnExists => Code::AlreadyExists,
+        StatusCode::TableNotFound
+        | StatusCode::TableColumnNotFound
+        | StatusCode::DatabaseNotFound
+        | StatusCode::UserNotFound => Code::NotFound,
+        StatusCode::StorageUnavailable => Code::Unavailable,
+        StatusCode::RuntimeResourcesExhausted => Code::ResourceExhausted,
+        StatusCode::UnsupportedPasswordType
+        | StatusCode::UserPasswordMismatch
+        | StatusCode::AuthHeaderNotFound
+        | StatusCode::InvalidAuthHeader => Code::Unauthenticated,
+        StatusCode::AccessDenied => Code::PermissionDenied,
     }
 }
 
@@ -331,7 +374,8 @@ impl From<Error> for tonic::Status {
 
         // If either of the status_code or error msg cannot convert to valid HTTP header value
         // (which is a very rare case), just ignore. Client will use Tonic status code and message.
-        if let Ok(code) = HeaderValue::from_bytes(err.status_code().to_string().as_bytes()) {
+        let status_code = err.status_code();
+        if let Ok(code) = HeaderValue::from_bytes(status_code.to_string().as_bytes()) {
             headers.insert(INNER_ERROR_CODE, code);
         }
         let root_error = err.iter_chain().last().unwrap();
@@ -340,7 +384,7 @@ impl From<Error> for tonic::Status {
         }
 
         let metadata = MetadataMap::from_headers(headers);
-        tonic::Status::with_metadata(Code::Internal, err.to_string(), metadata)
+        tonic::Status::with_metadata(status_to_tonic_code(status_code), err.to_string(), metadata)
     }
 }
 
