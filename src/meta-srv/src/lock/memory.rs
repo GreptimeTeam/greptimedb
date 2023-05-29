@@ -29,9 +29,7 @@ pub(crate) struct MemLock {
 
 #[async_trait]
 impl DistLock for MemLock {
-    async fn lock(&self, name: Vec<u8>, _opts: Opts) -> Result<Key> {
-        let key = name;
-
+    async fn lock(&self, key: Vec<u8>, _opts: Opts) -> Result<Key> {
         let mutex = self
             .mutexes
             .entry(key.clone())

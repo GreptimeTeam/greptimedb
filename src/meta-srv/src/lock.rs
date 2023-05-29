@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod etcd;
+pub(crate) mod keys;
 pub(crate) mod memory;
 
 use std::sync::Arc;

@@ -29,7 +29,8 @@ use crate::error::{
     TableRouteConversionSnafu,
 };
 use crate::keys::TableRouteKey;
-use crate::lock::{Key, Opts};
+use crate::lock::keys::table_metadata_lock_key;
+use crate::lock::Opts;
 use crate::table_routes;
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -213,14 +214,6 @@ impl State for UpdateRegionMetadata {
             })?;
         Ok(Box::new(RegionFailoverEnd))
     }
-}
-
-fn table_metadata_lock_key(region: &RegionIdent) -> Key {
-    format!(
-        "table_metadata_lock_({}-{}.{}.{}-{})",
-        region.cluster_id, region.catalog, region.schema, region.table, region.table_id,
-    )
-    .into_bytes()
 }
 
 #[cfg(test)]
