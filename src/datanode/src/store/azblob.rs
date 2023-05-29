@@ -37,8 +37,8 @@ pub(crate) async fn new_azblob_object_store(azblob_config: &AzblobConfig) -> Res
         .account_name(azblob_config.account_name.expose_secret())
         .account_key(azblob_config.account_key.expose_secret());
 
-    if azblob_config.sas_token.is_some() {
-        builder.sas_token(azblob_config.sas_token.as_ref().unwrap());
+    if let Some(token) = &azblob_config.sas_token {
+        builder.sas_token(token);
     }
 
     Ok(ObjectStore::new(builder)
