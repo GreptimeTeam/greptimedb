@@ -79,8 +79,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Duplicated call to plan execute method"))]
-    DuplicatedExecuteCall { location: Location },
+    #[snafu(display("Duplicated call to plan execute method. table: {}", table))]
+    DuplicatedExecuteCall { location: Location, table: String },
 
     #[snafu(display(
         "Not allowed to remove index column {} from table {}",

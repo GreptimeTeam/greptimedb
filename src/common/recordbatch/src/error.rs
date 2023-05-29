@@ -70,10 +70,17 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to project Arrow RecordBatch, source: {}", source))]
+    #[snafu(display(
+        "Failed to project Arrow RecordBatch with schema {:?} and projection {:?}, source: {}",
+        schema,
+        projection,
+        source
+    ))]
     ProjectArrowRecordBatch {
         source: datatypes::arrow::error::ArrowError,
         location: Location,
+        schema: datatypes::schema::SchemaRef,
+        projection: Vec<usize>,
     },
 
     #[snafu(display("Column {} not exists in table {}", column_name, table_name))]

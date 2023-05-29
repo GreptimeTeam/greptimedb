@@ -148,7 +148,9 @@ impl Table for InformationTable {
             .lock()
             .unwrap()
             .take()
-            .context(DuplicatedExecuteCallSnafu)?
+            .with_context(|| DuplicatedExecuteCallSnafu {
+                table: self.table_info().name.clone(),
+            })?
             .map(move |batch| {
                 batch.and_then(|batch| {
                     if let Some(projection) = &projection {

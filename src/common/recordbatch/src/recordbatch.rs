@@ -61,10 +61,12 @@ impl RecordBatch {
         for index in indices {
             columns.push(self.columns[*index].clone());
         }
-        let df_record_batch = self
-            .df_record_batch
-            .project(indices)
-            .context(ProjectArrowRecordBatchSnafu)?;
+        let df_record_batch = self.df_record_batch.project(indices).with_context(|_| {
+            ProjectArrowRecordBatchSnafu {
+                schema: self.schema.clone(),
+                projection: indices.to_vec(),
+            }
+        })?;
 
         Ok(Self {
             schema,
