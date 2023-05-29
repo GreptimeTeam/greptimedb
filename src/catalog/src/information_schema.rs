@@ -24,7 +24,7 @@ use common_query::prelude::Expr;
 use common_recordbatch::{RecordBatchStreamAdaptor, SendableRecordBatchStream};
 use datatypes::schema::SchemaRef;
 use futures_util::StreamExt;
-use snafu::{ResultExt, OptionExt};
+use snafu::{OptionExt, ResultExt};
 use store_api::storage::ScanRequest;
 use table::error::{DuplicatedExecuteCallSnafu, SchemaConversionSnafu};
 use table::{Result as TableResult, Table, TableRef};
