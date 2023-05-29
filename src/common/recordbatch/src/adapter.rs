@@ -160,7 +160,6 @@ enum AsyncRecordBatchStreamAdapterState {
     Failed,
 }
 
-// TODO(ruihang): figure out what this adapter adapts to.
 pub struct AsyncRecordBatchStreamAdapter {
     schema: SchemaRef,
     state: AsyncRecordBatchStreamAdapterState,
