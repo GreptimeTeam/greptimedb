@@ -104,6 +104,12 @@ pub enum Error {
         source: datafusion::parquet::errors::ParquetError,
     },
 
+    #[snafu(display("Failed to convert avro to schema: {}", source))]
+    AvroToSchema {
+        location: Location,
+        source: datafusion::error::DataFusionError,
+    },
+
     #[snafu(display("Failed to infer schema from file, source: {}", source))]
     InferSchema {
         location: Location,
@@ -162,6 +168,7 @@ impl ErrorExt for Error {
             | InvalidUrl { .. }
             | EmptyHostPath { .. }
             | InferSchema { .. }
+            | AvroToSchema { .. }
             | ReadParquetSnafu { .. }
             | ParquetToSchema { .. }
             | ParseFormat { .. }
@@ -187,6 +194,7 @@ impl ErrorExt for Error {
             ListObjects { location, .. } => Some(*location),
             InferSchema { location, .. } => Some(*location),
             ReadParquetSnafu { location, .. } => Some(*location),
+            AvroToSchema { location, .. } => Some(*location),
             ParquetToSchema { location, .. } => Some(*location),
             JoinHandle { location, .. } => Some(*location),
             ParseFormat { location, .. } => Some(*location),

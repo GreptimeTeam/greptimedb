@@ -27,6 +27,7 @@ use storage::sst::SstInfo;
 use storage::{ParquetWriter, Source};
 use table::engine::TableReference;
 use table::requests::CopyTableRequest;
+use apache_avro::Writer;
 
 use crate::error::{self, Result, WriteParquetSnafu};
 use crate::statement::StatementExecutor;
@@ -42,6 +43,7 @@ impl StatementExecutor {
         let threshold = ReadableSize::mb(4).as_bytes() as usize;
 
         match format {
+            Format::Avro(_) => todo!(),
             Format::Csv(_) => stream_to_csv(
                 Box::pin(DfRecordBatchStreamAdapter::new(stream)),
                 object_store,
