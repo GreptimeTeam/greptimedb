@@ -21,20 +21,20 @@ use common_error::prelude::BoxedError;
 use common_query::physical_plan::PhysicalPlanRef;
 use common_query::prelude::Expr;
 use common_recordbatch::error::Result as RecordBatchResult;
-use common_recordbatch::{RecordBatch, RecordBatchStream};
+use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::UInt32Vector;
 use futures::task::{Context, Poll};
 use futures::Stream;
 use snafu::prelude::*;
-use store_api::storage::RegionNumber;
+use store_api::storage::{RegionNumber, ScanRequest};
 
 use crate::error::{Result, SchemaConversionSnafu, TableProjectionSnafu, TablesRecordBatchSnafu};
 use crate::metadata::{
     TableId, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType, TableVersion,
 };
-use crate::table::scan::SimpleTableScan;
+use crate::table::scan::StreamScanAdapter;
 use crate::{ColumnStatistics, Table, TableStatistics};
 
 #[derive(Debug, Clone)]
@@ -167,10 +167,41 @@ impl Table for MemTable {
         )
         .map_err(BoxedError::new)
         .context(TablesRecordBatchSnafu)?;
-        Ok(Arc::new(SimpleTableScan::new(Box::pin(MemtableStream {
+        Ok(Arc::new(StreamScanAdapter::new(Box::pin(MemtableStream {
             schema: recordbatch.schema.clone(),
             recordbatch: Some(recordbatch),
         }))))
+    }
+
+    async fn scan_to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
+        let df_recordbatch = if let Some(indices) = request.projection {
+            self.recordbatch
+                .df_record_batch()
+                .project(&indices)
+                .context(TableProjectionSnafu)?
+        } else {
+            self.recordbatch.df_record_batch().clone()
+        };
+
+        let rows = df_recordbatch.num_rows();
+        let limit = if let Some(limit) = request.limit {
+            limit.min(rows)
+        } else {
+            rows
+        };
+        let df_recordbatch = df_recordbatch.slice(0, limit);
+
+        let recordbatch = RecordBatch::try_from_df_record_batch(
+            Arc::new(Schema::try_from(df_recordbatch.schema()).context(SchemaConversionSnafu)?),
+            df_recordbatch,
+        )
+        .map_err(BoxedError::new)
+        .context(TablesRecordBatchSnafu)?;
+
+        Ok(Box::pin(MemtableStream {
+            schema: recordbatch.schema.clone(),
+            recordbatch: Some(recordbatch),
+        }))
     }
 
     fn statistics(&self) -> Option<TableStatistics> {

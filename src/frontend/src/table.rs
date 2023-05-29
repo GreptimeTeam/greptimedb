@@ -14,6 +14,7 @@
 
 use std::any::Any;
 use std::iter;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use api::v1::AlterExpr;
@@ -28,7 +29,12 @@ use common_query::logical_plan::Expr;
 use common_query::physical_plan::{PhysicalPlan, PhysicalPlanRef};
 use common_query::Output;
 use common_recordbatch::adapter::AsyncRecordBatchStreamAdapter;
-use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
+use common_recordbatch::error::{
+    InitRecordbatchStreamSnafu, PollStreamSnafu, Result as RecordBatchResult,
+};
+use common_recordbatch::{
+    RecordBatch, RecordBatchStreamAdaptor, RecordBatches, SendableRecordBatchStream,
+};
 use common_telemetry::debug;
 use datafusion::execution::context::TaskContext;
 use datafusion::physical_plan::{
@@ -36,10 +42,11 @@ use datafusion::physical_plan::{
 };
 use datafusion_common::DataFusionError;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use futures_util::{Stream, StreamExt};
 use partition::manager::PartitionRuleManagerRef;
 use partition::splitter::WriteSplitter;
 use snafu::prelude::*;
-use store_api::storage::RegionNumber;
+use store_api::storage::{RegionNumber, ScanRequest};
 use table::error::TableOperationSnafu;
 use table::metadata::{FilterPushDownType, TableInfo, TableInfoRef};
 use table::requests::{AlterKind, AlterTableRequest, DeleteRequest, InsertRequest};
@@ -153,6 +160,70 @@ impl Table for DistTable {
             partition_execs,
         };
         Ok(Arc::new(dist_scan))
+    }
+
+    // TODO(ruihang): DistTable should not call this method directly
+    async fn scan_to_stream(
+        &self,
+        request: ScanRequest,
+    ) -> table::Result<SendableRecordBatchStream> {
+        let partition_rule = self
+            .partition_manager
+            .find_table_partition_rule(&self.table_name)
+            .await
+            .map_err(BoxedError::new)
+            .context(TableOperationSnafu)?;
+
+        let regions = self
+            .partition_manager
+            .find_regions_by_filters(partition_rule, &request.filters)
+            .map_err(BoxedError::new)
+            .context(TableOperationSnafu)?;
+        let datanodes = self
+            .partition_manager
+            .find_region_datanodes(&self.table_name, regions)
+            .await
+            .map_err(BoxedError::new)
+            .context(TableOperationSnafu)?;
+
+        let table_name = &self.table_name;
+        let mut partition_execs = Vec::with_capacity(datanodes.len());
+        for (datanode, _regions) in datanodes.iter() {
+            let client = self.datanode_clients.get_client(datanode).await;
+            let db = Database::new(&table_name.catalog_name, &table_name.schema_name, client);
+            let datanode_instance = DatanodeInstance::new(Arc::new(self.clone()) as _, db);
+
+            partition_execs.push(Arc::new(PartitionExec {
+                table_name: table_name.clone(),
+                datanode_instance,
+                projection: request.projection.clone(),
+                filters: request.filters.clone(),
+                limit: request.limit,
+                batches: Arc::new(RwLock::new(None)),
+            }));
+        }
+
+        let schema = project_schema(self.schema(), request.projection.as_ref());
+        let schema_to_move = schema.clone();
+        let stream: Pin<Box<dyn Stream<Item = RecordBatchResult<RecordBatch>> + Send>> = Box::pin(
+            async_stream::try_stream! {
+                for partition_exec in partition_execs {
+                    partition_exec
+                        .maybe_init()
+                        .await
+                        .map_err(|e| DataFusionError::External(Box::new(e)))
+                        .context(InitRecordbatchStreamSnafu)?;
+                    let mut stream = partition_exec.as_stream().await.context(InitRecordbatchStreamSnafu)?;
+
+                    while let Some(batch) = stream.next().await{
+                        yield RecordBatch::try_from_df_record_batch(schema_to_move.clone(),batch.context(PollStreamSnafu)?)?
+                    }
+                }
+            },
+        );
+        let record_batch_stream = RecordBatchStreamAdaptor { schema, stream };
+
+        Ok(Box::pin(record_batch_stream))
     }
 
     fn supports_filters_pushdown(

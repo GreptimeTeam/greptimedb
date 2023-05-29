@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![feature(let_chains)]
+
 pub mod arrow_array;
 pub mod data_type;
 pub mod error;

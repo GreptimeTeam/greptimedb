@@ -142,7 +142,7 @@ pub enum Error {
 
     #[snafu(display("Failed to build stream: {}", source))]
     BuildStream {
-        source: datafusion::error::DataFusionError,
+        source: DataFusionError,
         location: Location,
     },
 

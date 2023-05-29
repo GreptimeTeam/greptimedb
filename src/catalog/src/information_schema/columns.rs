@@ -18,8 +18,10 @@ use arrow_schema::SchemaRef as ArrowSchemaRef;
 use common_catalog::consts::{
     SEMANTIC_TYPE_FIELD, SEMANTIC_TYPE_PRIMARY_KEY, SEMANTIC_TYPE_TIME_INDEX,
 };
+use common_error::prelude::BoxedError;
 use common_query::physical_plan::TaskContext;
-use common_recordbatch::RecordBatch;
+use common_recordbatch::adapter::RecordBatchStreamAdapter;
+use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use datafusion::datasource::streaming::PartitionStream as DfPartitionStream;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
 use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
@@ -29,7 +31,7 @@ use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{StringVectorBuilder, VectorRef};
 use snafu::ResultExt;
 
-use crate::error::{CreateRecordBatchSnafu, Result};
+use crate::error::{CreateRecordBatchSnafu, InternalSnafu, Result};
 use crate::CatalogProviderRef;
 
 pub(super) struct InformationSchemaColumns {
@@ -68,6 +70,26 @@ impl InformationSchemaColumns {
             self.catalog_name.clone(),
             self.catalog_provider.clone(),
         )
+    }
+
+    pub fn to_stream(&self) -> Result<SendableRecordBatchStream> {
+        let schema = self.schema().clone();
+        let mut builder = self.builder();
+        let stream = Box::pin(DfRecordBatchStreamAdapter::new(
+            schema,
+            futures::stream::once(async move {
+                builder
+                    .make_tables()
+                    .await
+                    .map(|x| x.into_df_record_batch())
+                    .map_err(Into::into)
+            }),
+        ));
+        Ok(Box::pin(
+            RecordBatchStreamAdapter::try_new(stream)
+                .map_err(BoxedError::new)
+                .context(InternalSnafu)?,
+        ))
     }
 }
 

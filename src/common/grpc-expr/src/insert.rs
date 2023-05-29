@@ -459,26 +459,20 @@ fn is_null(null_mask: &BitVec, idx: usize) -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
-    use std::any::Any;
     use std::sync::Arc;
-    use std::{assert_eq, unimplemented, vec};
+    use std::{assert_eq, vec};
 
     use api::helper::ColumnDataTypeWrapper;
     use api::v1::column::{self, SemanticType, Values};
     use api::v1::{Column, ColumnDataType};
     use common_base::BitVec;
     use common_catalog::consts::MITO_ENGINE;
-    use common_query::physical_plan::PhysicalPlanRef;
-    use common_query::prelude::Expr;
     use common_time::timestamp::Timestamp;
     use datatypes::data_type::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
+    use datatypes::schema::{ColumnSchema, SchemaBuilder};
     use datatypes::types::{TimestampMillisecondType, TimestampSecondType, TimestampType};
     use datatypes::value::Value;
     use snafu::ResultExt;
-    use table::error::Result as TableResult;
-    use table::metadata::TableInfoRef;
-    use table::Table;
 
     use super::*;
     use crate::error;
@@ -731,49 +725,6 @@ mod tests {
 
         assert_eq!(None, is_null(&null_mask, 16));
         assert_eq!(None, is_null(&null_mask, 99));
-    }
-
-    struct DemoTable;
-
-    #[async_trait::async_trait]
-    impl Table for DemoTable {
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-
-        fn schema(&self) -> SchemaRef {
-            let column_schemas = vec![
-                ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
-                ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
-                ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
-                ColumnSchema::new(
-                    "ts",
-                    ConcreteDataType::timestamp_millisecond_datatype(),
-                    true,
-                )
-                .with_time_index(true),
-            ];
-
-            Arc::new(
-                SchemaBuilder::try_from(column_schemas)
-                    .unwrap()
-                    .build()
-                    .unwrap(),
-            )
-        }
-
-        fn table_info(&self) -> TableInfoRef {
-            unimplemented!()
-        }
-
-        async fn scan(
-            &self,
-            _projection: Option<&Vec<usize>>,
-            _filters: &[Expr],
-            _limit: Option<usize>,
-        ) -> TableResult<PhysicalPlanRef> {
-            unimplemented!();
-        }
     }
 
     fn mock_insert_batch() -> (Vec<Column>, u32) {

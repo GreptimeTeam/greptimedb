@@ -17,7 +17,6 @@ pub mod test_util;
 
 use std::any::Any;
 use std::collections::HashMap;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -26,12 +25,10 @@ use common_datasource::compression::CompressionType;
 use common_error::ext::BoxedError;
 use common_query::logical_plan::Expr;
 use common_query::physical_plan::PhysicalPlanRef;
-use common_recordbatch::error::{ExternalSnafu, Result as RecordBatchResult};
-use common_recordbatch::{RecordBatch, RecordBatchStream};
+use common_recordbatch::error::ExternalSnafu;
+use common_recordbatch::{RecordBatch, RecordBatchStreamAdaptor, SendableRecordBatchStream};
 use common_telemetry::{info, logging};
 use datatypes::schema::Schema;
-use futures::task::{Context, Poll};
-use futures::Stream;
 use object_store::ObjectStore;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::manifest::{self, Manifest, ManifestVersion, MetaActionIterator};
@@ -48,7 +45,7 @@ use table::metadata::{
 use table::requests::{
     AddColumnRequest, AlterKind, AlterTableRequest, DeleteRequest, InsertRequest,
 };
-use table::table::scan::SimpleTableScan;
+use table::table::scan::StreamScanAdapter;
 use table::table::{AlterContext, Table};
 use table::{error as table_error, RegionStat};
 use tokio::sync::Mutex;
@@ -210,8 +207,83 @@ impl<R: Region> Table for MitoTable<R> {
             }
         });
 
-        let stream = Box::pin(ChunkStream { schema, stream });
-        Ok(Arc::new(SimpleTableScan::new(stream)))
+        let stream = Box::pin(RecordBatchStreamAdaptor { schema, stream });
+        Ok(Arc::new(StreamScanAdapter::new(stream)))
+    }
+
+    async fn scan_to_stream(&self, request: ScanRequest) -> TableResult<SendableRecordBatchStream> {
+        let read_ctx = ReadContext::default();
+        let regions = self.regions.load();
+        let mut readers = Vec::with_capacity(regions.len());
+        let mut first_schema: Option<Arc<Schema>> = None;
+
+        let table_info = self.table_info.load();
+        // TODO(hl): Currently the API between frontend and datanode is under refactoring in
+        // https://github.com/GreptimeTeam/greptimedb/issues/597 . Once it's finished, query plan
+        // can carry filtered region info to avoid scanning all regions on datanode.
+        for region in regions.values() {
+            let snapshot = region
+                .snapshot(&read_ctx)
+                .map_err(BoxedError::new)
+                .context(table_error::TableOperationSnafu)?;
+
+            let projection = self
+                .transform_projection(region, request.projection.clone())
+                .map_err(BoxedError::new)
+                .context(table_error::TableOperationSnafu)?;
+            let filters = request.filters.clone();
+
+            let scan_request = ScanRequest {
+                projection,
+                filters,
+                ..Default::default()
+            };
+
+            let reader = snapshot
+                .scan(&read_ctx, scan_request)
+                .await
+                .map_err(BoxedError::new)
+                .context(table_error::TableOperationSnafu)?
+                .reader;
+
+            let schema = reader.user_schema().clone();
+            if let Some(first_schema) = &first_schema {
+                // TODO(hl): we assume all regions' schemas are the same, but undergoing table altering
+                // may make these schemas inconsistent.
+                ensure!(
+                    first_schema.version() == schema.version(),
+                    RegionSchemaMismatchSnafu {
+                        table: common_catalog::format_full_table_name(
+                            &table_info.catalog_name,
+                            &table_info.schema_name,
+                            &table_info.name
+                        )
+                    }
+                );
+            } else {
+                first_schema = Some(schema);
+            }
+            readers.push(reader);
+        }
+
+        // TODO(hl): we assume table contains at least one region, but with region migration this
+        // assumption may become invalid.
+        let stream_schema = first_schema.context(InvalidTableSnafu {
+            table_id: table_info.ident.table_id,
+        })?;
+
+        let schema = stream_schema.clone();
+
+        let stream = Box::pin(async_stream::try_stream! {
+            for mut reader in readers {
+                while let Some(chunk) = reader.next_chunk().await.map_err(BoxedError::new).context(ExternalSnafu)? {
+                    let chunk = reader.project_chunk(chunk);
+                    yield RecordBatch::new(stream_schema.clone(), chunk.columns)?
+                }
+            }
+        });
+
+        Ok(Box::pin(RecordBatchStreamAdaptor { schema, stream }))
     }
 
     fn supports_filters_pushdown(&self, filters: &[&Expr]) -> TableResult<Vec<FilterPushDownType>> {
@@ -338,25 +410,6 @@ impl<R: Region> Table for MitoTable<R> {
         let regions = self.regions.load();
 
         Ok(regions.contains_key(&region))
-    }
-}
-
-struct ChunkStream {
-    schema: SchemaRef,
-    stream: Pin<Box<dyn Stream<Item = RecordBatchResult<RecordBatch>> + Send>>,
-}
-
-impl RecordBatchStream for ChunkStream {
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
-    }
-}
-
-impl Stream for ChunkStream {
-    type Item = RecordBatchResult<RecordBatch>;
-
-    fn poll_next(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.stream).poll_next(ctx)
     }
 }
 

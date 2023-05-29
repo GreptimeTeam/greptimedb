@@ -22,8 +22,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_query::logical_plan::Expr;
 use common_query::physical_plan::PhysicalPlanRef;
+use common_recordbatch::SendableRecordBatchStream;
 use datatypes::schema::SchemaRef;
-use store_api::storage::RegionNumber;
+use store_api::storage::{RegionNumber, ScanRequest};
 
 use crate::error::{Result, UnsupportedSnafu};
 use crate::metadata::{FilterPushDownType, TableId, TableInfoRef, TableType};
@@ -72,6 +73,8 @@ pub trait Table: Send + Sync {
         // The datasource should return *at least* this number of rows if available.
         limit: Option<usize>,
     ) -> Result<PhysicalPlanRef>;
+
+    async fn scan_to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream>;
 
     /// Tests whether the table provider can make use of any or all filter expressions
     /// to optimise data retrieval.
