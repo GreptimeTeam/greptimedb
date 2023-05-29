@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::mem;
 use std::sync::Arc;
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
@@ -21,19 +20,24 @@ use async_stream::try_stream;
 use client::client_manager::DatanodeClients;
 use client::Database;
 use common_base::bytes::Bytes;
+use common_error::prelude::BoxedError;
 use common_meta::peer::Peer;
 use common_meta::table_name::TableName;
 use common_query::physical_plan::TaskContext;
 use common_query::Output;
-use common_recordbatch::{DfSendableRecordBatchStream, SendableRecordBatchStream};
+use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
+use common_recordbatch::error::ExternalSnafu;
+use common_recordbatch::{
+    DfSendableRecordBatchStream, RecordBatchStreamAdaptor, SendableRecordBatchStream,
+};
 use datafusion::physical_plan::{ExecutionPlan, Partitioning};
 use datafusion_common::{DataFusionError, Result, Statistics};
 use datafusion_expr::{Extension, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion_physical_expr::PhysicalSortExpr;
+use futures_util::StreamExt;
 use snafu::ResultExt;
-use tokio::sync::Mutex;
 
-use crate::error::{RemoteRequestSnafu, UnexpectedOutputKindSnafu};
+use crate::error::{ConvertSchemaSnafu, RemoteRequestSnafu, UnexpectedOutputKindSnafu};
 
 #[derive(Debug, Hash, PartialEq, Eq)]
 pub struct MergeScanLogicalPlan {
@@ -107,9 +111,8 @@ pub struct MergeScanExec {
     table: TableName,
     peers: Vec<Peer>,
     substrait_plan: Bytes,
-    schema: ArrowSchemaRef,
+    arrow_schema: ArrowSchemaRef,
     clients: Arc<DatanodeClients>,
-    databases: Arc<Mutex<Vec<Database>>>,
 }
 
 impl MergeScanExec {
@@ -117,67 +120,69 @@ impl MergeScanExec {
         table: TableName,
         peers: Vec<Peer>,
         substrait_plan: Bytes,
-        schema: ArrowSchemaRef,
+        arrow_schema: ArrowSchemaRef,
         clients: Arc<DatanodeClients>,
     ) -> Self {
         Self {
             table,
             peers,
             substrait_plan,
-            schema,
+            arrow_schema,
             clients,
-            databases: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    /// Build database clients and store them in `self.databases`
-    pub async fn init(&self) {
-        if self.peers.is_empty() || self.databases.lock().await.len() == self.peers.len() {
-            return;
-        }
+    pub fn to_stream(&self) -> Result<SendableRecordBatchStream> {
+        let substrait_plan = self.substrait_plan.to_vec();
+        let peers = self.peers.clone();
+        let clients = self.clients.clone();
+        let table = self.table.clone();
 
-        let mut databases = Vec::with_capacity(self.peers.len());
-        for peer in &self.peers {
-            let client = self.clients.get_client(peer).await;
-            let database = Database::new(&self.table.catalog_name, &self.table.schema_name, client);
-            databases.push(database);
-        }
-        *self.databases.lock().await = databases;
-    }
-
-    pub async fn to_stream(&self) -> Result<SendableRecordBatchStream> {
-        let databases = mem::take(&mut *self.databases.lock().await);
-
-        let stream = try_stream!({
-            for database in databases {
+        let stream = try_stream! {
+            for peer in peers{
+                let client = clients.get_client(&peer).await;
+                let database = Database::new(&table.catalog_name, &table.schema_name, client);
                 let output: Output = database
-                    .logical_plan(self.substrait_plan.to_vec())
+                    .logical_plan(substrait_plan.clone())
                     .await
-                    .context(RemoteRequestSnafu)?;
+                    .context(RemoteRequestSnafu)
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?;
 
-                yield ();
-
-                // match output {
-                //     Output::AffectedRows(_) => UnexpectedOutputKindSnafu {
-                //         expected: "RecordBatches or Stream",
-                //         got: "AffectedRows",
-                //     }
-                //     .fail()?,
-                //     Output::RecordBatches(record_batches) => {
-                //         for batch in record_batches {
-                //             yield batch;
-                //         }
-                //     }
-                //     Output::Stream(stream) => {
-                //         for batch in stream.next().await {
-                //             yield batch;
-                //         }
-                //     }
-                // }
+                match output {
+                    Output::AffectedRows(_) => {
+                        Err(BoxedError::new(
+                            UnexpectedOutputKindSnafu {
+                                expected: "RecordBatches or Stream",
+                                got: "AffectedRows",
+                            }
+                            .build(),
+                        ))
+                        .context(ExternalSnafu)?;
+                    }
+                    Output::RecordBatches(record_batches) => {
+                        for batch in record_batches.into_iter() {
+                            yield batch;
+                        }
+                    }
+                    Output::Stream(mut stream) => {
+                        while let Some(batch) = stream.next().await {
+                            yield batch?;
+                        }
+                    }
+                }
             }
-        });
+        };
 
-        todo!()
+        Ok(Box::pin(RecordBatchStreamAdaptor {
+            schema: Arc::new(
+                self.arrow_schema
+                    .clone()
+                    .try_into()
+                    .context(ConvertSchemaSnafu)?,
+            ),
+            stream: Box::pin(stream),
+        }))
     }
 }
 
@@ -187,7 +192,7 @@ impl ExecutionPlan for MergeScanExec {
     }
 
     fn schema(&self) -> ArrowSchemaRef {
-        self.schema.clone()
+        self.arrow_schema.clone()
     }
 
     fn output_partitioning(&self) -> Partitioning {
@@ -213,10 +218,10 @@ impl ExecutionPlan for MergeScanExec {
 
     fn execute(
         &self,
-        partition: usize,
-        context: Arc<TaskContext>,
+        _partition: usize,
+        _context: Arc<TaskContext>,
     ) -> Result<DfSendableRecordBatchStream> {
-        todo!()
+        Ok(Box::pin(DfRecordBatchStreamAdapter::new(self.to_stream()?)))
     }
 
     fn statistics(&self) -> Statistics {

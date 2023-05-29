@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use catalog::remote::{CachedMetaKvBackend, MetaKvBackend};
+use catalog::remote::CachedMetaKvBackend;
 use client::client_manager::DatanodeClients;
 use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::ErrorExt;

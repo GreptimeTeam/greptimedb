@@ -1498,7 +1498,7 @@ dependencies = [
  "datatypes",
  "enum_dispatch",
  "futures-util",
- "moka",
+ "moka 0.9.7",
  "parking_lot",
  "prost",
  "rand",
