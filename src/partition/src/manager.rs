@@ -34,6 +34,13 @@ use crate::route::TableRoutes;
 use crate::splitter::{InsertRequestSplit, WriteSplitter};
 use crate::{error, PartitionRuleRef};
 
+#[async_trait::async_trait]
+pub trait TableRouteCacheInvalidator: Send + Sync {
+    async fn invalidate_table_route(&self, table: &TableName);
+}
+
+pub type TableRouteCacheInvalidatorRef = Arc<dyn TableRouteCacheInvalidator>;
+
 pub type PartitionRuleManagerRef = Arc<PartitionRuleManager>;
 
 /// PartitionRuleManager manages the table routes and partition rules.
@@ -48,6 +55,13 @@ pub struct PartitionRuleManager {
 pub struct PartitionInfo {
     pub id: RegionId,
     pub partition: PartitionDef,
+}
+
+#[async_trait::async_trait]
+impl TableRouteCacheInvalidator for PartitionRuleManager {
+    async fn invalidate_table_route(&self, table: &TableName) {
+        self.table_routes.invalidate_table_route(table).await
+    }
 }
 
 impl PartitionRuleManager {

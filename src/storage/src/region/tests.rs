@@ -14,41 +14,54 @@
 
 //! Region tests.
 
+use std::collections::{HashMap, HashSet};
+
+use common_base::readable_size::ReadableSize;
+use common_datasource::compression::CompressionType;
+use common_telemetry::logging;
+use common_test_util::temp_dir::{create_temp_dir, TempDir};
+use common_time::range::TimestampRange;
+use common_time::timestamp::TimeUnit;
+use datatypes::prelude::{LogicalTypeId, ScalarVector, WrapperType};
+use datatypes::timestamp::TimestampMillisecond;
+use datatypes::vectors::{
+    BooleanVector, Int64Vector, StringVector, TimestampMillisecondVector, VectorRef,
+};
+use log_store::raft_engine::log_store::RaftEngineLogStore;
+use log_store::NoopLogStore;
+use object_store::services::Fs;
+use object_store::ObjectStore;
+use store_api::manifest::{Manifest, MAX_VERSION};
+use store_api::storage::{
+    Chunk, ChunkReader, FlushContext, FlushReason, ReadContext, Region, RegionMeta, ScanRequest,
+    SequenceNumber, Snapshot, WriteContext, WriteRequest,
+};
+
+use super::*;
+use crate::chunk::ChunkReaderImpl;
+use crate::compaction::noop::NoopCompactionScheduler;
+use crate::engine;
+use crate::engine::RegionMap;
+use crate::file_purger::noop::NoopFilePurgeHandler;
+use crate::flush::{FlushScheduler, PickerConfig, SizeBasedStrategy};
+use crate::manifest::action::{RegionChange, RegionMetaActionList};
+use crate::manifest::manifest_compress_type;
+use crate::manifest::region::RegionManifest;
+use crate::manifest::test_utils::*;
+use crate::memtable::DefaultMemtableBuilder;
+use crate::metadata::RegionMetadata;
+use crate::region::{RegionImpl, StoreConfig};
+use crate::scheduler::{LocalScheduler, SchedulerConfig};
+use crate::sst::{FileId, FsAccessLayer};
+use crate::test_util::descriptor_util::RegionDescBuilder;
+use crate::test_util::{self, config_util, schema_util, write_batch_util};
+
 mod alter;
 mod basic;
 mod close;
 mod compact;
 mod flush;
 mod projection;
-
-use std::collections::{HashMap, HashSet};
-
-use common_telemetry::logging;
-use common_test_util::temp_dir::create_temp_dir;
-use datatypes::prelude::{ScalarVector, WrapperType};
-use datatypes::timestamp::TimestampMillisecond;
-use datatypes::type_id::LogicalTypeId;
-use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, VectorRef};
-use log_store::raft_engine::log_store::RaftEngineLogStore;
-use log_store::NoopLogStore;
-use object_store::services::Fs;
-use object_store::ObjectStore;
-use store_api::manifest::MAX_VERSION;
-use store_api::storage::{
-    Chunk, ChunkReader, RegionMeta, ScanRequest, SequenceNumber, Snapshot, WriteRequest,
-};
-
-use super::*;
-use crate::chunk::ChunkReaderImpl;
-use crate::file_purger::noop::NoopFilePurgeHandler;
-use crate::manifest::action::{RegionChange, RegionMetaActionList};
-use crate::manifest::manifest_compress_type;
-use crate::manifest::test_utils::*;
-use crate::memtable::DefaultMemtableBuilder;
-use crate::scheduler::{LocalScheduler, SchedulerConfig};
-use crate::sst::{FileId, FsAccessLayer};
-use crate::test_util::descriptor_util::RegionDescBuilder;
-use crate::test_util::{self, config_util, schema_util, write_batch_util};
 
 /// Create metadata of a region with schema: (timestamp, v0).
 pub fn new_metadata(region_name: &str) -> RegionMetadata {
@@ -463,4 +476,232 @@ fn assert_recovered_manifest(
         ]),
         files
     );
+}
+
+fn create_region_meta(region_name: &str) -> RegionMetadata {
+    let desc = RegionDescBuilder::new(region_name)
+        .push_field_column(("v0", LogicalTypeId::Int64, true))
+        .push_field_column(("v1", LogicalTypeId::String, true))
+        .push_field_column(("v2", LogicalTypeId::Boolean, true))
+        .build();
+    desc.try_into().unwrap()
+}
+
+async fn create_store_config(region_name: &str, root: &str) -> StoreConfig<NoopLogStore> {
+    let mut builder = Fs::default();
+    builder.root(root);
+    let object_store = ObjectStore::new(builder).unwrap().finish();
+    let parent_dir = "";
+    let sst_dir = engine::region_sst_dir(parent_dir, region_name);
+    let manifest_dir = engine::region_manifest_dir(parent_dir, region_name);
+
+    let sst_layer = Arc::new(FsAccessLayer::new(&sst_dir, object_store.clone()));
+    let manifest = RegionManifest::with_checkpointer(
+        &manifest_dir,
+        object_store,
+        CompressionType::Uncompressed,
+        None,
+        None,
+    );
+    manifest.start().await.unwrap();
+
+    let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
+
+    let regions = Arc::new(RegionMap::new());
+
+    let flush_scheduler = Arc::new(
+        FlushScheduler::new(
+            SchedulerConfig::default(),
+            compaction_scheduler.clone(),
+            regions,
+            PickerConfig::default(),
+        )
+        .unwrap(),
+    );
+
+    let log_store = Arc::new(NoopLogStore::default());
+
+    let file_purger = Arc::new(LocalScheduler::new(
+        SchedulerConfig::default(),
+        NoopFilePurgeHandler,
+    ));
+    StoreConfig {
+        log_store,
+        sst_layer,
+        manifest,
+        memtable_builder: Arc::new(DefaultMemtableBuilder::default()),
+        flush_scheduler,
+        flush_strategy: Arc::new(SizeBasedStrategy::default()),
+        compaction_scheduler,
+        engine_config: Default::default(),
+        file_purger,
+        ttl: None,
+        compaction_time_window: None,
+        write_buffer_size: ReadableSize::mb(32).0 as usize,
+    }
+}
+
+struct WindowedReaderTester {
+    data_written: Vec<Vec<(i64, i64, String, bool)>>,
+    time_windows: Vec<(i64, i64)>,
+    expected_ts: Vec<i64>,
+    region: RegionImpl<NoopLogStore>,
+    _temp_dir: TempDir,
+}
+
+impl WindowedReaderTester {
+    async fn new(
+        region_name: &'static str,
+        data_written: Vec<Vec<(i64, i64, String, bool)>>,
+        time_windows: Vec<(i64, i64)>,
+        expected_ts: Vec<i64>,
+    ) -> Self {
+        let temp_dir = create_temp_dir(&format!("write_and_read_windowed_{}", region_name));
+        let root = temp_dir.path().to_str().unwrap();
+        let metadata = create_region_meta(region_name);
+        let store_config = create_store_config(region_name, root).await;
+        let region = RegionImpl::create(metadata, store_config).await.unwrap();
+
+        let tester = Self {
+            data_written,
+            time_windows,
+            expected_ts,
+            region,
+            _temp_dir: temp_dir,
+        };
+        tester.prepare().await;
+        tester
+    }
+
+    async fn prepare(&self) {
+        for batch in &self.data_written {
+            let mut write_batch = self.region.write_request();
+            let ts = TimestampMillisecondVector::from_iterator(
+                batch
+                    .iter()
+                    .map(|(v, _, _, _)| TimestampMillisecond::new(*v)),
+            );
+            let v0 = Int64Vector::from_iterator(batch.iter().map(|(_, v, _, _)| *v));
+            let v1 = StringVector::from_iterator(batch.iter().map(|(_, _, v, _)| v.as_str()));
+            let v2 = BooleanVector::from_iterator(batch.iter().map(|(_, _, _, v)| *v));
+
+            let columns = [
+                ("timestamp".to_string(), Arc::new(ts) as VectorRef),
+                ("v0".to_string(), Arc::new(v0) as VectorRef),
+                ("v1".to_string(), Arc::new(v1) as VectorRef),
+                ("v2".to_string(), Arc::new(v2) as VectorRef),
+            ]
+            .into_iter()
+            .collect::<HashMap<String, VectorRef>>();
+            write_batch.put(columns).unwrap();
+
+            self.region
+                .write(&WriteContext {}, write_batch)
+                .await
+                .unwrap();
+
+            // flush the region to ensure data resides across SST files.
+            self.region
+                .flush(&FlushContext {
+                    wait: true,
+                    reason: FlushReason::Others,
+                })
+                .await
+                .unwrap();
+        }
+    }
+
+    async fn check(&self) {
+        let windows = self
+            .time_windows
+            .iter()
+            .map(|(start, end)| {
+                TimestampRange::with_unit(*start, *end, TimeUnit::Millisecond).unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        let read_context = ReadContext::default();
+        let snapshot = self.region.snapshot(&read_context).unwrap();
+        let response = snapshot
+            .windowed_scan(
+                &read_context,
+                ScanRequest {
+                    sequence: None,
+                    projection: None,
+                    filters: vec![],
+                },
+                windows,
+            )
+            .await
+            .unwrap();
+
+        let mut timestamps = Vec::with_capacity(self.expected_ts.len());
+
+        let mut reader = response.reader;
+        let ts_index = reader.user_schema().timestamp_index().unwrap();
+        while let Some(chunk) = reader.next_chunk().await.unwrap() {
+            let ts_col = &chunk.columns[ts_index];
+            let ts_col = ts_col
+                .as_any()
+                .downcast_ref::<TimestampMillisecondVector>()
+                .unwrap();
+            for ts in ts_col.iter_data() {
+                timestamps.push(ts.unwrap().0.value());
+            }
+        }
+        assert_eq!(timestamps, self.expected_ts);
+    }
+}
+
+#[tokio::test]
+async fn test_read_by_chunk_reader() {
+    common_telemetry::init_default_ut_logging();
+
+    WindowedReaderTester::new(
+        "test_region",
+        vec![vec![(1, 1, "1".to_string(), false)]],
+        vec![(1, 2)],
+        vec![1],
+    )
+    .await
+    .check()
+    .await;
+
+    WindowedReaderTester::new(
+        "test_region",
+        vec![
+            vec![
+                (1, 1, "1".to_string(), false),
+                (2, 2, "2".to_string(), false),
+            ],
+            vec![
+                (3, 3, "3".to_string(), false),
+                (4, 4, "4".to_string(), false),
+            ],
+        ],
+        vec![(1, 2), (2, 3), (3, 4), (4, 5)],
+        vec![4, 3, 2, 1],
+    )
+    .await
+    .check()
+    .await;
+
+    WindowedReaderTester::new(
+        "test_region",
+        vec![
+            vec![
+                (1, 1, "1".to_string(), false),
+                (2, 2, "2".to_string(), false),
+            ],
+            vec![
+                (3, 3, "3".to_string(), false),
+                (4, 4, "4".to_string(), false),
+            ],
+        ],
+        vec![(1, 2), (2, 3), (4, 5), (3, 4)],
+        vec![3, 4, 2, 1],
+    )
+    .await
+    .check()
+    .await;
 }

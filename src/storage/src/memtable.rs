@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use common_time::range::TimestampRange;
+use common_time::Timestamp;
 use datatypes::vectors::VectorRef;
 use metrics::{decrement_gauge, increment_gauge};
 use store_api::storage::{consts, OpType, SequenceNumber};
@@ -39,16 +40,16 @@ use crate::schema::{ProjectedSchemaRef, RegionSchemaRef};
 /// Unique id for memtables under same region.
 pub type MemtableId = u32;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct MemtableStats {
     /// The  estimated bytes allocated by this memtable from heap. Result
     /// of this method may be larger than the estimated based on [`num_rows`] because
     /// of the implementor's pre-alloc behavior.
-    estimated_bytes: usize,
+    pub estimated_bytes: usize,
     /// The max timestamp that this memtable contains.
-    pub max_timestamp: i64,
+    pub max_timestamp: Timestamp,
     /// The min timestamp that this memtable contains.
-    pub min_timestamp: i64,
+    pub min_timestamp: Timestamp,
 }
 
 impl MemtableStats {

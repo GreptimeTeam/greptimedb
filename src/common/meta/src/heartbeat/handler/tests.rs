@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_meta::instruction::{InstructionReply, SimpleReply};
 use tokio::sync::mpsc;
 
 use crate::heartbeat::mailbox::{HeartbeatMailbox, MessageMeta};
+use crate::instruction::{InstructionReply, SimpleReply};
 
 #[tokio::test]
 async fn test_heartbeat_mailbox() {

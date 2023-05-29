@@ -51,7 +51,7 @@ pub async fn influxdb_write(
         .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
     let _timer = timer!(
         crate::metrics::METRIC_HTTP_INFLUXDB_WRITE_ELAPSED,
-        &[(crate::metrics::METRIC_DB_LABEL, &db)]
+        &[(crate::metrics::METRIC_DB_LABEL, db.clone())]
     );
     let (catalog, schema) = parse_catalog_and_schema_from_client_database_name(&db);
     let ctx = Arc::new(QueryContext::with(catalog, schema));

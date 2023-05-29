@@ -24,7 +24,7 @@ use datafusion_common::DFSchemaRef;
 use snafu::{ensure, ResultExt};
 
 use crate::data_type::DataType;
-use crate::error::{self, Error, Result};
+use crate::error::{self, Error, ProjectArrowSchemaSnafu, Result};
 pub use crate::schema::column_schema::{ColumnSchema, Metadata, COMMENT_KEY, TIME_INDEX_KEY};
 pub use crate::schema::constraint::ColumnDefaultConstraint;
 pub use crate::schema::raw::RawSchema;
@@ -70,12 +70,10 @@ impl Schema {
         SchemaBuilder::try_from(column_schemas)?.build()
     }
 
-    #[inline]
     pub fn arrow_schema(&self) -> &Arc<ArrowSchema> {
         &self.arrow_schema
     }
 
-    #[inline]
     pub fn column_schemas(&self) -> &[ColumnSchema] {
         &self.column_schemas
     }
@@ -89,50 +87,74 @@ impl Schema {
     /// Retrieve the column's name by index
     /// # Panics
     /// This method **may** panic if the index is out of range of column schemas.
-    #[inline]
     pub fn column_name_by_index(&self, idx: usize) -> &str {
         &self.column_schemas[idx].name
     }
 
-    #[inline]
     pub fn column_index_by_name(&self, name: &str) -> Option<usize> {
         self.name_to_index.get(name).copied()
     }
 
-    #[inline]
     pub fn contains_column(&self, name: &str) -> bool {
         self.name_to_index.contains_key(name)
     }
 
-    #[inline]
     pub fn num_columns(&self) -> usize {
         self.column_schemas.len()
     }
 
-    #[inline]
     pub fn is_empty(&self) -> bool {
         self.column_schemas.is_empty()
     }
 
     /// Returns index of the timestamp key column.
-    #[inline]
     pub fn timestamp_index(&self) -> Option<usize> {
         self.timestamp_index
     }
 
-    #[inline]
     pub fn timestamp_column(&self) -> Option<&ColumnSchema> {
         self.timestamp_index.map(|idx| &self.column_schemas[idx])
     }
 
-    #[inline]
     pub fn version(&self) -> u32 {
         self.version
     }
 
-    #[inline]
     pub fn metadata(&self) -> &HashMap<String, String> {
         &self.arrow_schema.metadata
+    }
+
+    /// Generate a new projected schema
+    ///
+    /// # Panic
+    ///
+    /// If the index out ouf bound
+    pub fn try_project(&self, indices: &[usize]) -> Result<Self> {
+        let mut column_schemas = Vec::with_capacity(indices.len());
+        let mut timestamp_index = None;
+        for index in indices {
+            if let Some(ts_index) = self.timestamp_index && ts_index == *index {
+                timestamp_index = Some(column_schemas.len());
+            }
+            column_schemas.push(self.column_schemas[*index].clone());
+        }
+        let arrow_schema = self
+            .arrow_schema
+            .project(indices)
+            .context(ProjectArrowSchemaSnafu)?;
+        let name_to_index = column_schemas
+            .iter()
+            .enumerate()
+            .map(|(pos, column_schema)| (column_schema.name.clone(), pos))
+            .collect();
+
+        Ok(Self {
+            column_schemas,
+            name_to_index,
+            arrow_schema: Arc::new(arrow_schema),
+            timestamp_index,
+            version: self.version,
+        })
     }
 }
 

@@ -20,6 +20,7 @@ use api::v1::{Column, InsertRequest as GrpcInsertRequest};
 use common_query::Output;
 use datatypes::prelude::{ConcreteDataType, VectorRef};
 use futures::future;
+use metrics::counter;
 use snafu::{ensure, ResultExt};
 use store_api::storage::RegionNumber;
 use table::requests::InsertRequest;
@@ -47,6 +48,7 @@ impl DistTable {
         .context(JoinTaskSnafu)?;
 
         let affected_rows = results.into_iter().sum::<Result<u32>>()?;
+        counter!(crate::metrics::DIST_INGEST_ROW_COUNT, affected_rows as u64);
         Ok(Output::AffectedRows(affected_rows as _))
     }
 }

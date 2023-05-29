@@ -202,6 +202,19 @@ impl DistInstance {
                 .await
                 .context(RequestDatanodeSnafu)?;
         }
+
+        // Since the table information created on meta does not go through KvBackend, so we
+        // manually invalidate the cache here.
+        //
+        // TODO(fys): when the meta invalidation cache mechanism is established, remove it.
+        self.catalog_manager
+            .invalidate_table(
+                &table_name.catalog_name,
+                &table_name.schema_name,
+                &table_name.table_name,
+            )
+            .await;
+
         Ok(table)
     }
 
@@ -259,6 +272,18 @@ impl DistInstance {
                     .context(RequestDatanodeSnafu)?;
             }
         }
+
+        // Since the table information dropped on meta does not go through KvBackend, so we
+        // manually invalidate the cache here.
+        //
+        // TODO(fys): when the meta invalidation cache mechanism is established, remove it.
+        self.catalog_manager()
+            .invalidate_table(
+                &table_name.catalog_name,
+                &table_name.schema_name,
+                &table_name.table_name,
+            )
+            .await;
 
         Ok(Output::AffectedRows(1))
     }
@@ -438,8 +463,8 @@ impl DistInstance {
         }
 
         let key = SchemaKey {
-            catalog_name: catalog,
-            schema_name: expr.database_name,
+            catalog_name: catalog.clone(),
+            schema_name: expr.database_name.clone(),
         };
         let value = SchemaValue {};
         let client = self
@@ -450,16 +475,26 @@ impl DistInstance {
         let request = CompareAndPutRequest::new()
             .with_key(key.to_string())
             .with_value(value.as_bytes().context(CatalogEntrySerdeSnafu)?);
+
         let response = client
             .compare_and_put(request.into())
             .await
             .context(RequestMetaSnafu)?;
+
         ensure!(
             response.success,
             SchemaExistsSnafu {
                 name: key.schema_name
             }
         );
+
+        // Since the database created on meta does not go through KvBackend, so we manually
+        // invalidate the cache here.
+        //
+        // TODO(fys): when the meta invalidation cache mechanism is established, remove it.
+        self.catalog_manager()
+            .invalidate_schema(&catalog, &expr.database_name)
+            .await;
 
         Ok(Output::AffectedRows(1))
     }
@@ -470,12 +505,15 @@ impl DistInstance {
         } else {
             expr.catalog_name.as_str()
         };
+
         let schema_name = if expr.schema_name.is_empty() {
             DEFAULT_SCHEMA_NAME
         } else {
             expr.schema_name.as_str()
         };
+
         let table_name = expr.table_name.as_str();
+
         let table = self
             .catalog_manager
             .table(catalog_name, schema_name, table_name)
@@ -489,6 +527,7 @@ impl DistInstance {
             .context(AlterExprToRequestSnafu)?;
 
         let mut context = AlterContext::with_capacity(1);
+
         context.insert(expr);
 
         table.alter(context, &request).await.context(TableSnafu)?;

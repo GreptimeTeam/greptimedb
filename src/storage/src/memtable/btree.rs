@@ -158,10 +158,19 @@ impl Memtable for BTreeMemtable {
     }
 
     fn stats(&self) -> MemtableStats {
+        let ts_meta = self.schema.column_metadata(self.schema.timestamp_index());
+
+        let Some(timestamp_type) = ts_meta.desc.data_type.as_timestamp() else {
+            // safety: timestamp column always has timestamp type, otherwise it's a bug.
+            panic!("Timestamp column is not a valid timestamp type: {:?}", self.schema);
+        };
+
         MemtableStats {
             estimated_bytes: self.alloc_tracker.bytes_allocated(),
-            max_timestamp: self.max_timestamp.load(AtomicOrdering::Relaxed),
-            min_timestamp: self.min_timestamp.load(AtomicOrdering::Relaxed),
+            max_timestamp: timestamp_type
+                .create_timestamp(self.max_timestamp.load(AtomicOrdering::Relaxed)),
+            min_timestamp: timestamp_type
+                .create_timestamp(self.min_timestamp.load(AtomicOrdering::Relaxed)),
         }
     }
 

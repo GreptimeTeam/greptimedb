@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -41,7 +42,10 @@ use crate::error::{self, DeserializeFromJsonSnafu, Result, UnexpectedInstruction
 use crate::metasrv::Context;
 use crate::metrics::METRIC_META_HEARTBEAT_CONNECTION_NUM;
 use crate::sequence::Sequence;
-use crate::service::mailbox::{Channel, Mailbox, MailboxReceiver, MailboxRef, MessageId};
+use crate::service::mailbox::{
+    BroadcastChannel, Channel, Mailbox, MailboxReceiver, MailboxRef, MessageId,
+};
+
 mod check_leader_handler;
 mod collect_stats_handler;
 pub(crate) mod failure_handler;
@@ -130,6 +134,30 @@ impl Pushers {
             .await
     }
 
+    async fn broadcast(
+        &self,
+        range: Range<String>,
+        mailbox_message: &MailboxMessage,
+    ) -> Result<()> {
+        let pushers = self.0.read().await;
+        let pushers = pushers
+            .range(range)
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>();
+        for pusher in pushers {
+            let mut mailbox_message = mailbox_message.clone();
+            mailbox_message.id = 0; // one-way message
+            pusher
+                .push(HeartbeatResponse {
+                    header: Some(pusher.header()),
+                    mailbox_message: Some(mailbox_message),
+                })
+                .await?;
+        }
+
+        Ok(())
+    }
+
     pub(crate) async fn insert(&self, pusher_id: String, pusher: Pusher) -> Option<Pusher> {
         self.0.write().await.insert(pusher_id, pusher)
     }
@@ -183,18 +211,18 @@ impl HeartbeatHandlerGroup {
     ) -> Result<HeartbeatResponse> {
         let mut acc = HeartbeatAccumulator::default();
         let handlers = self.handlers.read().await;
+        let role = req
+            .header
+            .as_ref()
+            .and_then(|h| Role::from_i32(h.role))
+            .context(error::InvalidArgumentsSnafu {
+                err_msg: format!("invalid role: {:?}", req.header),
+            })?;
+
         for h in handlers.iter() {
             if ctx.is_skip_all() {
                 break;
             }
-
-            let role = req
-                .header
-                .as_ref()
-                .and_then(|h| Role::from_i32(h.role))
-                .context(error::InvalidArgumentsSnafu {
-                    err_msg: format!("invalid role: {:?}", req.header),
-                })?;
 
             if h.is_acceptable(role) {
                 h.handle(&req, &mut ctx, &mut acc).await?;
@@ -319,6 +347,10 @@ impl Mailbox for HeartbeatMailbox {
         self.pushers.push(&pusher_id, msg).await?;
 
         Ok(MailboxReceiver::new(message_id, rx))
+    }
+
+    async fn broadcast(&self, ch: &BroadcastChannel, msg: &MailboxMessage) -> Result<()> {
+        self.pushers.broadcast(ch.pusher_range(), msg).await
     }
 
     async fn on_recv(&self, id: MessageId, maybe_msg: Result<MailboxMessage>) -> Result<()> {

@@ -12,13 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::string::FromUtf8Error;
-
 use common_error::prelude::*;
 use snafu::Location;
 use tokio::sync::mpsc::error::SendError;
 use tonic::codegen::http;
-use tonic::{Code, Status};
+use tonic::Code;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -273,7 +271,7 @@ pub enum Error {
 
     #[snafu(display("Invalid utf-8 value, source: {:?}", source))]
     InvalidUtf8Value {
-        source: FromUtf8Error,
+        source: std::string::FromUtf8Error,
         location: Location,
     },
 
@@ -353,13 +351,21 @@ pub enum Error {
         #[snafu(backtrace)]
         source: common_meta::error::Error,
     },
+
+    // this error is used for custom error mapping
+    // please do not delete it
+    #[snafu(display("Other error, source: {}", source))]
+    Other {
+        source: BoxedError,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-impl From<Error> for Status {
+impl From<Error> for tonic::Status {
     fn from(err: Error) -> Self {
-        Status::new(Code::Internal, err.to_string())
+        tonic::Status::new(Code::Internal, err.to_string())
     }
 }
 
@@ -433,14 +439,14 @@ impl ErrorExt for Error {
             Error::RegionFailoverCandidatesNotFound { .. } => StatusCode::RuntimeResourcesExhausted,
 
             Error::RegisterProcedureLoader { source, .. } => source.status_code(),
-
             Error::TableRouteConversion { source } => source.status_code(),
+            Error::Other { source, .. } => source.status_code(),
         }
     }
 }
 
 // for form tonic
-pub(crate) fn match_for_io_error(err_status: &Status) -> Option<&std::io::Error> {
+pub(crate) fn match_for_io_error(err_status: &tonic::Status) -> Option<&std::io::Error> {
     let mut err: &(dyn std::error::Error + 'static) = err_status;
 
     loop {

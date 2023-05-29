@@ -170,6 +170,17 @@ impl ConcreteDataType {
             _ => None,
         }
     }
+
+    /// Try to cast data type as a [`TimestampType`].
+    pub fn as_timestamp(&self) -> Option<TimestampType> {
+        match self {
+            ConcreteDataType::Int64(_) => {
+                Some(TimestampType::Millisecond(TimestampMillisecondType))
+            }
+            ConcreteDataType::Timestamp(t) => Some(*t),
+            _ => None,
+        }
+    }
 }
 
 impl TryFrom<&ArrowDataType> for ConcreteDataType {

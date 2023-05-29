@@ -51,11 +51,11 @@ impl SimpleQueryHandler for PostgresServerHandler {
             &[
                 (
                     crate::metrics::METRIC_POSTGRES_SUBPROTOCOL_LABEL,
-                    crate::metrics::METRIC_POSTGRES_SIMPLE_QUERY
+                    crate::metrics::METRIC_POSTGRES_SIMPLE_QUERY.to_string()
                 ),
                 (
                     crate::metrics::METRIC_DB_LABEL,
-                    &self.query_ctx.get_db_string()
+                    self.query_ctx.get_db_string()
                 )
             ]
         );
@@ -357,11 +357,11 @@ impl ExtendedQueryHandler for PostgresServerHandler {
             &[
                 (
                     crate::metrics::METRIC_POSTGRES_SUBPROTOCOL_LABEL,
-                    crate::metrics::METRIC_POSTGRES_EXTENDED_QUERY
+                    crate::metrics::METRIC_POSTGRES_EXTENDED_QUERY.to_string()
                 ),
                 (
                     crate::metrics::METRIC_DB_LABEL,
-                    &self.query_ctx.get_db_string()
+                    self.query_ctx.get_db_string()
                 )
             ]
         );

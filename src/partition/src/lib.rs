@@ -17,6 +17,7 @@
 pub mod columns;
 pub mod error;
 pub mod manager;
+pub mod metrics;
 pub mod partition;
 pub mod range;
 pub mod route;

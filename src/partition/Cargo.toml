@@ -7,10 +7,12 @@ license.workspace = true
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+async-trait = "0.1"
 common-catalog = { path = "../common/catalog" }
 common-error = { path = "../common/error" }
 common-query = { path = "../common/query" }
 common-meta = { path = "../common/meta" }
+common-telemetry = { path = "../common/telemetry" }
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datafusion.workspace = true

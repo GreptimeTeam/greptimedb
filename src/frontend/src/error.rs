@@ -24,6 +24,12 @@ use store_api::storage::RegionId;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Failed to handle heartbeat response, source: {}", source))]
+    HandleHeartbeatResponse {
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("{source}"))]
     External {
         #[snafu(backtrace)]
@@ -540,6 +546,8 @@ impl ErrorExt for Error {
             | Error::ProjectSchema { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
+
+            Error::HandleHeartbeatResponse { source, .. } => source.status_code(),
 
             Error::RuntimeResource { source, .. } => source.status_code(),
             Error::ExecutePromql { source, .. } => source.status_code(),

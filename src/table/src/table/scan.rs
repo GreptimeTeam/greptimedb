@@ -25,22 +25,23 @@ use datafusion_physical_expr::PhysicalSortExpr;
 use datatypes::schema::SchemaRef;
 use snafu::OptionExt;
 
-pub struct SimpleTableScan {
+/// Adapt greptime's [SendableRecordBatchStream] to DataFusion's [PhysicalPlan].
+pub struct StreamScanAdapter {
     stream: Mutex<Option<SendableRecordBatchStream>>,
     schema: SchemaRef,
     output_ordering: Option<Vec<PhysicalSortExpr>>,
 }
 
-impl Debug for SimpleTableScan {
+impl Debug for StreamScanAdapter {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SimpleTableScan")
+        f.debug_struct("StreamScanAdapter")
             .field("stream", &"<SendableRecordBatchStream>")
             .field("schema", &self.schema)
             .finish()
     }
 }
 
-impl SimpleTableScan {
+impl StreamScanAdapter {
     pub fn new(stream: SendableRecordBatchStream) -> Self {
         let schema = stream.schema();
 
@@ -57,7 +58,7 @@ impl SimpleTableScan {
     }
 }
 
-impl PhysicalPlan for SimpleTableScan {
+impl PhysicalPlan for StreamScanAdapter {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -126,7 +127,7 @@ mod test {
             RecordBatches::try_new(schema.clone(), vec![batch1.clone(), batch2.clone()]).unwrap();
         let stream = recordbatches.as_stream();
 
-        let scan = SimpleTableScan::new(stream);
+        let scan = StreamScanAdapter::new(stream);
 
         assert_eq!(scan.schema(), schema);
 

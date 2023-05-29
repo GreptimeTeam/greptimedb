@@ -47,7 +47,10 @@ impl router_server::Router for MetaSrv {
 
         let _timer = timer!(
             METRIC_META_ROUTE_REQUEST,
-            &[("op", "create"), ("cluster_id", &cluster_id.to_string())]
+            &[
+                ("op", "create".to_string()),
+                ("cluster_id", cluster_id.to_string())
+            ]
         );
 
         let table_name = table_name.clone().context(error::EmptyTableNameSnafu)?;
@@ -73,7 +76,10 @@ impl router_server::Router for MetaSrv {
 
         let _timer = timer!(
             METRIC_META_ROUTE_REQUEST,
-            &[("op", "route"), ("cluster_id", &cluster_id.to_string())]
+            &[
+                ("op", "route".to_string()),
+                ("cluster_id", cluster_id.to_string())
+            ]
         );
 
         let ctx = self.new_ctx();
@@ -88,7 +94,10 @@ impl router_server::Router for MetaSrv {
 
         let _timer = timer!(
             METRIC_META_ROUTE_REQUEST,
-            &[("op", "delete"), ("cluster_id", &cluster_id.to_string())]
+            &[
+                ("op", "delete".to_string()),
+                ("cluster_id", cluster_id.to_string())
+            ]
         );
 
         let ctx = self.new_ctx();

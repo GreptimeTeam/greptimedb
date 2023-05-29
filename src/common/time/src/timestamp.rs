@@ -81,7 +81,7 @@ impl Timestamp {
     }
 
     /// Subtracts current timestamp with another timestamp, yielding a duration.
-    pub fn sub(&self, rhs: Self) -> Option<chrono::Duration> {
+    pub fn sub(&self, rhs: &Self) -> Option<chrono::Duration> {
         let lhs = self.to_chrono_datetime()?;
         let rhs = rhs.to_chrono_datetime()?;
         Some(lhs - rhs)
@@ -943,12 +943,12 @@ mod tests {
     fn test_subtract_timestamp() {
         assert_eq!(
             Some(chrono::Duration::milliseconds(42)),
-            Timestamp::new_millisecond(100).sub(Timestamp::new_millisecond(58))
+            Timestamp::new_millisecond(100).sub(&Timestamp::new_millisecond(58))
         );
 
         assert_eq!(
             Some(chrono::Duration::milliseconds(-42)),
-            Timestamp::new_millisecond(58).sub(Timestamp::new_millisecond(100))
+            Timestamp::new_millisecond(58).sub(&Timestamp::new_millisecond(100))
         );
     }
 

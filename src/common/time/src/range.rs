@@ -221,6 +221,7 @@ impl TimestampRange {
     }
 
     /// Shortcut method to create a timestamp range with given start/end value and time unit.
+    /// Returns empty iff `start` > `end`.
     pub fn with_unit(start: i64, end: i64, unit: TimeUnit) -> Option<Self> {
         let start = Timestamp::new(start, unit);
         let end = Timestamp::new(end, unit);

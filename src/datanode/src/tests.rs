@@ -20,6 +20,10 @@ use api::v1::meta::HeartbeatResponse;
 use api::v1::query_request::Query;
 use api::v1::QueryRequest;
 use catalog::CatalogManagerRef;
+use common_meta::heartbeat::handler::{
+    HandlerGroupExecutor, HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutor,
+};
+use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MessageMeta};
 use common_meta::instruction::{Instruction, InstructionReply, RegionIdent, SimpleReply};
 use common_query::Output;
 use datatypes::prelude::ConcreteDataType;
@@ -31,10 +35,6 @@ use tokio::sync::mpsc::{self, Receiver};
 
 use crate::heartbeat::handler::close_region::CloseRegionHandler;
 use crate::heartbeat::handler::open_region::OpenRegionHandler;
-use crate::heartbeat::handler::{
-    HandlerGroupExecutor, HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutor,
-};
-use crate::heartbeat::mailbox::{HeartbeatMailbox, MessageMeta};
 use crate::instance::Instance;
 
 pub(crate) mod test_util;
@@ -56,13 +56,13 @@ async fn test_close_region_handler() {
         engine_manager_ref,
         catalog_manager_ref,
         ..
-    } = parepare_handler_test("test_close_region_handler").await;
+    } = prepare_handler_test("test_close_region_handler").await;
 
     let executor = Arc::new(HandlerGroupExecutor::new(vec![Arc::new(
         CloseRegionHandler::new(catalog_manager_ref.clone(), engine_manager_ref.clone()),
     )]));
 
-    parepare_table(instance.inner()).await;
+    prepare_table(instance.inner()).await;
 
     // Closes demo table
     handle_instruction(
@@ -121,7 +121,7 @@ async fn test_open_region_handler() {
         engine_manager_ref,
         catalog_manager_ref,
         ..
-    } = parepare_handler_test("test_open_region_handler").await;
+    } = prepare_handler_test("test_open_region_handler").await;
 
     let executor = Arc::new(HandlerGroupExecutor::new(vec![
         Arc::new(OpenRegionHandler::new(
@@ -134,7 +134,7 @@ async fn test_open_region_handler() {
         )),
     ]));
 
-    parepare_table(instance.inner()).await;
+    prepare_table(instance.inner()).await;
 
     // Opens a opened table
     handle_instruction(executor.clone(), mailbox.clone(), open_region_instruction());
@@ -188,7 +188,7 @@ async fn test_open_region_handler() {
     assert_test_table_found(instance.inner()).await;
 }
 
-async fn parepare_handler_test(name: &str) -> HandlerTestGuard {
+async fn prepare_handler_test(name: &str) -> HandlerTestGuard {
     let mock_instance = MockInstance::new(name).await;
     let instance = mock_instance.inner();
     let engine_manager = instance.sql_handler().table_engine_manager().clone();
@@ -205,6 +205,15 @@ async fn parepare_handler_test(name: &str) -> HandlerTestGuard {
     }
 }
 
+pub fn test_message_meta(id: u64, subject: &str, to: &str, from: &str) -> MessageMeta {
+    MessageMeta {
+        id,
+        subject: subject.to_string(),
+        to: to.to_string(),
+        from: from.to_string(),
+    }
+}
+
 fn handle_instruction(
     executor: Arc<dyn HeartbeatResponseHandlerExecutor>,
     mailbox: Arc<HeartbeatMailbox>,
@@ -213,7 +222,7 @@ fn handle_instruction(
     let response = HeartbeatResponse::default();
     let mut ctx: HeartbeatResponseHandlerContext =
         HeartbeatResponseHandlerContext::new(mailbox, response);
-    ctx.incoming_message = Some((MessageMeta::new_test(1, "hi", "foo", "bar"), instruction));
+    ctx.incoming_message = Some((test_message_meta(1, "hi", "foo", "bar"), instruction));
     executor.handle(ctx).unwrap();
 }
 
@@ -243,7 +252,7 @@ fn open_region_instruction() -> Instruction {
     })
 }
 
-async fn parepare_table(instance: &Instance) {
+async fn prepare_table(instance: &Instance) {
     test_util::create_test_table(instance, ConcreteDataType::timestamp_millisecond_datatype())
         .await
         .unwrap();

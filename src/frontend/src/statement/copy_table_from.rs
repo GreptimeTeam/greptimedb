@@ -32,7 +32,8 @@ use datafusion::datasource::object_store::ObjectStoreUrl;
 use datafusion::parquet::arrow::ParquetRecordBatchStreamBuilder;
 use datafusion::physical_plan::file_format::{FileOpener, FileScanConfig, FileStream};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
-use datatypes::arrow::datatypes::{DataType, Schema, SchemaRef};
+use datatypes::arrow::compute::can_cast_types;
+use datatypes::arrow::datatypes::{Schema, SchemaRef};
 use datatypes::vectors::Helper;
 use futures_util::StreamExt;
 use object_store::{Entry, EntryMode, Metakey, ObjectStore};
@@ -245,11 +246,7 @@ impl StatementExecutor {
                     .context(error::ProjectSchemaSnafu)?,
             );
 
-            ensure_schema_matches_ignore_timezone(
-                &projected_file_schema,
-                &projected_table_schema,
-                true,
-            )?;
+            ensure_schema_compatible(&projected_file_schema, &projected_table_schema)?;
 
             files.push((
                 Arc::new(compat_schema),
@@ -336,75 +333,24 @@ async fn batch_insert(
     Ok(res)
 }
 
-fn ensure_schema_matches_ignore_timezone(
-    left: &SchemaRef,
-    right: &SchemaRef,
-    ts_cast: bool,
-) -> Result<()> {
-    let not_match = left
+fn ensure_schema_compatible(from: &SchemaRef, to: &SchemaRef) -> Result<()> {
+    let not_match = from
         .fields
         .iter()
-        .zip(right.fields.iter())
+        .zip(to.fields.iter())
         .map(|(l, r)| (l.data_type(), r.data_type()))
         .enumerate()
-        .find(|(_, (l, r))| !data_type_equals_ignore_timezone_with_options(l, r, ts_cast));
+        .find(|(_, (l, r))| !can_cast_types(l, r));
 
     if let Some((index, _)) = not_match {
         error::InvalidSchemaSnafu {
             index,
-            table_schema: left.to_string(),
-            file_schema: right.to_string(),
+            table_schema: to.to_string(),
+            file_schema: from.to_string(),
         }
         .fail()
     } else {
         Ok(())
-    }
-}
-
-fn data_type_equals_ignore_timezone_with_options(
-    l: &DataType,
-    r: &DataType,
-    ts_cast: bool,
-) -> bool {
-    match (l, r) {
-        (DataType::List(a), DataType::List(b))
-        | (DataType::LargeList(a), DataType::LargeList(b)) => {
-            a.is_nullable() == b.is_nullable()
-                && data_type_equals_ignore_timezone_with_options(
-                    a.data_type(),
-                    b.data_type(),
-                    ts_cast,
-                )
-        }
-        (DataType::FixedSizeList(a, a_size), DataType::FixedSizeList(b, b_size)) => {
-            a_size == b_size
-                && a.is_nullable() == b.is_nullable()
-                && data_type_equals_ignore_timezone_with_options(
-                    a.data_type(),
-                    b.data_type(),
-                    ts_cast,
-                )
-        }
-        (DataType::Struct(a), DataType::Struct(b)) => {
-            a.len() == b.len()
-                && a.iter().zip(b).all(|(a, b)| {
-                    a.is_nullable() == b.is_nullable()
-                        && data_type_equals_ignore_timezone_with_options(
-                            a.data_type(),
-                            b.data_type(),
-                            ts_cast,
-                        )
-                })
-        }
-        (DataType::Map(a_field, a_is_sorted), DataType::Map(b_field, b_is_sorted)) => {
-            a_field == b_field && a_is_sorted == b_is_sorted
-        }
-        (DataType::Timestamp(l_unit, _), DataType::Timestamp(r_unit, _)) => {
-            l_unit == r_unit || ts_cast
-        }
-        (&DataType::Utf8, DataType::Timestamp(_, _))
-        | (DataType::Timestamp(_, _), &DataType::Utf8) => ts_cast,
-        _ => l == r,
     }
 }
 
@@ -437,24 +383,23 @@ fn generated_schema_projection_and_compatible_file_schema(
 mod tests {
     use std::sync::Arc;
 
-    use datatypes::arrow::datatypes::{Field, Schema};
+    use datatypes::arrow::datatypes::{DataType, Field, Schema};
 
     use super::*;
 
-    fn test_schema_matches(l: (DataType, bool), r: (DataType, bool), matches: bool) {
-        test_schema_matches_with_options(l, r, false, matches)
-    }
-
-    fn test_schema_matches_with_options(
-        l: (DataType, bool),
-        r: (DataType, bool),
-        ts_cast: bool,
-        matches: bool,
-    ) {
-        let s1 = Arc::new(Schema::new(vec![Field::new("col", l.0, l.1)]));
-        let s2 = Arc::new(Schema::new(vec![Field::new("col", r.0, r.1)]));
-        let res = ensure_schema_matches_ignore_timezone(&s1, &s2, ts_cast);
-        assert_eq!(matches, res.is_ok())
+    fn test_schema_matches(from: (DataType, bool), to: (DataType, bool), matches: bool) {
+        let s1 = Arc::new(Schema::new(vec![Field::new("col", from.0.clone(), from.1)]));
+        let s2 = Arc::new(Schema::new(vec![Field::new("col", to.0.clone(), to.1)]));
+        let res = ensure_schema_compatible(&s1, &s2);
+        assert_eq!(
+            matches,
+            res.is_ok(),
+            "from data type: {}, to data type: {}, expected: {}, but got: {}",
+            from.0,
+            to.0,
+            matches,
+            res.is_ok()
+        )
     }
 
     #[test]
@@ -519,17 +464,17 @@ mod tests {
                 ),
                 true,
             ),
-            false,
+            true,
         );
 
         test_schema_matches((DataType::Int8, true), (DataType::Int8, true), true);
 
-        test_schema_matches((DataType::Int8, true), (DataType::Int16, true), false);
+        test_schema_matches((DataType::Int8, true), (DataType::Int16, true), true);
     }
 
     #[test]
     fn test_data_type_equals_ignore_timezone_with_options() {
-        test_schema_matches_with_options(
+        test_schema_matches(
             (
                 DataType::Timestamp(
                     datatypes::arrow::datatypes::TimeUnit::Microsecond,
@@ -545,10 +490,9 @@ mod tests {
                 true,
             ),
             true,
-            true,
         );
 
-        test_schema_matches_with_options(
+        test_schema_matches(
             (DataType::Utf8, true),
             (
                 DataType::Timestamp(
@@ -558,10 +502,9 @@ mod tests {
                 true,
             ),
             true,
-            true,
         );
 
-        test_schema_matches_with_options(
+        test_schema_matches(
             (
                 DataType::Timestamp(
                     datatypes::arrow::datatypes::TimeUnit::Millisecond,
@@ -570,7 +513,6 @@ mod tests {
                 true,
             ),
             (DataType::Utf8, true),
-            true,
             true,
         );
     }

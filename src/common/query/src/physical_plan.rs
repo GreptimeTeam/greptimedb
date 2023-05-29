@@ -71,6 +71,7 @@ pub trait PhysicalPlan: Debug + Send + Sync {
     ) -> Result<SendableRecordBatchStream>;
 }
 
+/// Adapt DataFusion's [`ExecutionPlan`](DfPhysicalPlan) to GreptimeDB's [`PhysicalPlan`].
 #[derive(Debug)]
 pub struct PhysicalPlanAdapter {
     schema: SchemaRef,

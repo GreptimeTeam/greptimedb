@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use catalog::remote::MetaKvBackend;
+use catalog::remote::{CachedMetaKvBackend, MetaKvBackend};
 use client::client_manager::DatanodeClients;
 use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::ErrorExt;
@@ -253,9 +253,7 @@ async fn create_query_engine(meta_addr: &str) -> Result<DatafusionQueryEngine> {
         .context(StartMetaClientSnafu)?;
     let meta_client = Arc::new(meta_client);
 
-    let backend = Arc::new(MetaKvBackend {
-        client: meta_client.clone(),
-    });
+    let cached_meta_backend = Arc::new(CachedMetaKvBackend::new(meta_client.clone()));
 
     let table_routes = Arc::new(TableRoutes::new(meta_client));
     let partition_manager = Arc::new(PartitionRuleManager::new(table_routes));
@@ -263,7 +261,8 @@ async fn create_query_engine(meta_addr: &str) -> Result<DatafusionQueryEngine> {
     let datanode_clients = Arc::new(DatanodeClients::default());
 
     let catalog_list = Arc::new(FrontendCatalogManager::new(
-        backend,
+        cached_meta_backend.clone(),
+        cached_meta_backend,
         partition_manager,
         datanode_clients,
     ));

@@ -177,8 +177,8 @@ mod tests {
         min_ts: i64,
     ) {
         let iter = mem.iter(&IterContext::default()).unwrap();
-        assert_eq!(min_ts, mem.stats().min_timestamp);
-        assert_eq!(max_ts, mem.stats().max_timestamp);
+        assert_eq!(min_ts, mem.stats().min_timestamp.value());
+        assert_eq!(max_ts, mem.stats().max_timestamp.value());
 
         let mut index = 0;
         for batch in iter {

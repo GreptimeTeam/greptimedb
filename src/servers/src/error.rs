@@ -22,6 +22,7 @@ use axum::{http, Json};
 use base64::DecodeError;
 use catalog;
 use common_error::prelude::*;
+use common_telemetry::logging;
 use query::parser::PromQuery;
 use serde_json::json;
 use snafu::Location;
@@ -245,6 +246,14 @@ pub enum Error {
 
     #[snafu(display("{}", reason))]
     UnexpectedResult { reason: String, location: Location },
+
+    // this error is used for custom error mapping
+    // please do not delete it
+    #[snafu(display("Other error, source: {}", source))]
+    Other {
+        source: BoxedError,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -305,6 +314,7 @@ impl ErrorExt for Error {
             InvalidFlushArgument { .. } => StatusCode::InvalidArguments,
 
             ParsePromQL { source, .. } => source.status_code(),
+            Other { source, .. } => source.status_code(),
 
             UnexpectedResult { .. } => StatusCode::Unexpected,
         }
@@ -358,7 +368,11 @@ impl IntoResponse for Error {
             | Error::InvalidPromRemoteRequest { .. }
             | Error::InvalidQuery { .. }
             | Error::TimePrecision { .. } => (HttpStatusCode::BAD_REQUEST, self.to_string()),
-            _ => (HttpStatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
+            _ => {
+                logging::error!(self; "Failed to handle HTTP request");
+
+                (HttpStatusCode::INTERNAL_SERVER_ERROR, self.to_string())
+            }
         };
         let body = Json(json!({
             "error": error_message,

@@ -59,5 +59,6 @@ paste = "1.0"
 rand.workspace = true
 statrs = "0.16"
 stats-cli = "3.0"
+store-api = { path = "../store-api" }
 streaming-stats = "0.2"
 tokio-stream = "0.1"

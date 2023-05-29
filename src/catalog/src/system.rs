@@ -30,12 +30,13 @@ use datatypes::schema::{ColumnSchema, RawSchema, SchemaRef};
 use datatypes::vectors::{BinaryVector, TimestampMillisecondVector, UInt8Vector};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::storage::ScanRequest;
 use table::engine::{EngineContext, TableEngineRef};
 use table::metadata::{TableId, TableInfoRef};
 use table::requests::{
     CreateTableRequest, DeleteRequest, InsertRequest, OpenTableRequest, TableOptions,
 };
-use table::{Table, TableRef};
+use table::{Result as TableResult, Table, TableRef};
 
 use crate::error::{
     self, CreateSystemCatalogSnafu, EmptyValueSnafu, Error, InvalidEntryTypeSnafu, InvalidKeySnafu,
@@ -68,8 +69,12 @@ impl Table for SystemCatalogTable {
         self.0.scan(projection, filters, limit).await
     }
 
+    async fn scan_to_stream(&self, request: ScanRequest) -> TableResult<SendableRecordBatchStream> {
+        self.0.scan_to_stream(request).await
+    }
+
     /// Insert values into table.
-    async fn insert(&self, request: InsertRequest) -> table::error::Result<usize> {
+    async fn insert(&self, request: InsertRequest) -> TableResult<usize> {
         self.0.insert(request).await
     }
 
@@ -77,7 +82,7 @@ impl Table for SystemCatalogTable {
         self.0.table_info()
     }
 
-    async fn delete(&self, request: DeleteRequest) -> table::Result<usize> {
+    async fn delete(&self, request: DeleteRequest) -> TableResult<usize> {
         self.0.delete(request).await
     }
 
