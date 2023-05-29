@@ -5221,7 +5221,7 @@ dependencies = [
  "num_cpus",
  "once_cell",
  "parking_lot",
- "quanta 0.11.0",
+ "quanta 0.11.1",
  "rustc_version 0.4.0",
  "scheduled-thread-pool",
  "skeptic",
@@ -6700,9 +6700,9 @@ dependencies = [
 
 [[package]]
 name = "quanta"
-version = "0.11.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8cc73c42f9314c4bdce450c77e6f09ecbddefbeddb1b5979ded332a3913ded33"
+checksum = "a17e662a7a8291a865152364c20c7abc5e60486ab2001e8ec10b24862de0b9ab"
 dependencies = [
  "crossbeam-utils",
  "libc",

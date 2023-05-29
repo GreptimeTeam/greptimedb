@@ -67,7 +67,7 @@ impl InformationSchemaTables {
         let schema = self.schema().clone();
         let mut builder = self.builder();
         let stream = Box::pin(DfRecordBatchStreamAdapter::new(
-            schema.clone(),
+            schema,
             futures::stream::once(async move {
                 builder
                     .make_tables()
