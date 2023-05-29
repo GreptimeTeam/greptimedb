@@ -18,6 +18,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use client::client_manager::DatanodeClients;
+use common_base::bytes::Bytes;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_meta::peer::Peer;
 use common_meta::table_name::TableName;
 use datafusion::common::Result;
@@ -32,7 +34,7 @@ use snafu::ResultExt;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 
 use crate::dist_plan::merge_scan::{MergeScanExec, MergeScanLogicalPlan};
-use crate::error::{self, IncompleteTableIdentifierSnafu};
+use crate::error;
 
 pub struct DistExtensionPlanner {
     partition_manager: Arc<PartitionRuleManager>,
@@ -80,7 +82,7 @@ impl ExtensionPlanner for DistExtensionPlanner {
                         .map(Some);
                 };
                 let input_schema = input_plan.schema().clone();
-                let substrait_plan = DFLogicalSubstraitConvertor
+                let substrait_plan: Bytes = DFLogicalSubstraitConvertor
                     .encode(input_plan.clone())
                     .context(error::EncodeSubstraitLogicalPlanSnafu)?
                     .into();
@@ -131,23 +133,39 @@ impl TreeNodeVisitor for TableNameExtractor {
 
     fn pre_visit(&mut self, node: &Self::N) -> Result<VisitRecursion> {
         match node {
-            LogicalPlan::TableScan(scan) => match &scan.table_name {
-                TableReference::Full {
-                    catalog,
-                    schema,
-                    table,
-                } => {
-                    self.table_name = Some(TableName::new(
-                        catalog.clone(),
-                        schema.clone(),
-                        table.clone(),
-                    ));
-                    Ok(VisitRecursion::Stop)
+            LogicalPlan::TableScan(scan) => {
+                match &scan.table_name {
+                    TableReference::Full {
+                        catalog,
+                        schema,
+                        table,
+                    } => {
+                        self.table_name = Some(TableName::new(
+                            catalog.clone(),
+                            schema.clone(),
+                            table.clone(),
+                        ));
+                        Ok(VisitRecursion::Stop)
+                    }
+                    // TODO(ruihang): Maybe the following two cases should not be valid
+                    TableReference::Partial { schema, table } => {
+                        self.table_name = Some(TableName::new(
+                            DEFAULT_CATALOG_NAME.to_string(),
+                            schema.clone(),
+                            table.clone(),
+                        ));
+                        Ok(VisitRecursion::Stop)
+                    }
+                    TableReference::Bare { table } => {
+                        self.table_name = Some(TableName::new(
+                            DEFAULT_CATALOG_NAME.to_string(),
+                            DEFAULT_SCHEMA_NAME.to_string(),
+                            table.clone(),
+                        ));
+                        Ok(VisitRecursion::Stop)
+                    }
                 }
-                TableReference::Bare { .. } | TableReference::Partial { .. } => Err(
-                    DataFusionError::External(Box::new(IncompleteTableIdentifierSnafu {}.build())),
-                ),
-            },
+            }
             _ => Ok(VisitRecursion::Continue),
         }
     }

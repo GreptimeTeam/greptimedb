@@ -46,6 +46,9 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         let state = ExpandState::new();
         let plan = plan.transform_down(&|plan| Self::expand(plan, &visitor, &state))?;
 
+        // (3) remove placeholder merge scan
+        let plan = plan.transform(&Self::remove_placeholder_merge_scan)?;
+
         Ok(plan)
     }
 }
@@ -62,6 +65,31 @@ impl DistPlannerAnalyzer {
                     )),
                 });
                 Transformed::Yes(ext_plan)
+            }
+            _ => Transformed::No(plan),
+        })
+    }
+
+    /// Remove placeholder [MergeScanLogicalPlan]
+    fn remove_placeholder_merge_scan(
+        plan: LogicalPlan,
+    ) -> datafusion_common::Result<Transformed<LogicalPlan>> {
+        Ok(match &plan {
+            LogicalPlan::Extension(extension) => {
+                if extension.node.name() == MergeScanLogicalPlan::name() {
+                    let merge_scan = extension
+                        .node
+                        .as_any()
+                        .downcast_ref::<MergeScanLogicalPlan>()
+                        .unwrap();
+                    if merge_scan.is_placeholder() {
+                        Transformed::Yes(merge_scan.input().clone())
+                    } else {
+                        Transformed::No(plan)
+                    }
+                } else {
+                    Transformed::No(plan)
+                }
             }
             _ => Transformed::No(plan),
         })
