@@ -137,7 +137,7 @@ async fn handle_create(
         return Ok(RouteResponse {
             header: Some(ResponseHeader::failed(
                 cluster_id,
-                Error::not_enough_active_datanodes(0),
+                Error::not_enough_active_datanodes(peers.len() as u32),
             )),
             ..Default::default()
         });

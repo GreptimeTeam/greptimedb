@@ -202,6 +202,7 @@ mod tests {
 
             kind: Some(Kind::AddColumns(AddColumns {
                 add_columns: vec![AddColumn {
+                    location: None,
                     column_def: Some(ColumnDef {
                         name: "mem_usage".to_string(),
                         datatype: ColumnDataType::Float64 as i32,
