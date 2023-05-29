@@ -33,6 +33,11 @@ pub struct WindowedReader<R> {
 }
 
 impl<R> WindowedReader<R> {
+    /// Creates a new [WindowedReader] from given schema and a set of boxed readers.
+    ///
+    /// ### Note
+    /// [WindowedReader] always reads the readers in a reverse order. The last reader in `readers`
+    /// gets polled first.
     pub fn new(schema: ProjectedSchemaRef, readers: Vec<R>) -> Self {
         Self { schema, readers }
     }
