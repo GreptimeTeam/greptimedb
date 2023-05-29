@@ -71,19 +71,36 @@ impl State for InvalidateCache {
 #[cfg(test)]
 mod tests {
     use api::v1::meta::mailbox_message::Payload;
+    use api::v1::meta::RequestHeader;
 
-    use super::super::tests::{TestingEnv, TestingEnvBuilder};
+    use super::super::tests::TestingEnvBuilder;
     use super::*;
+    use crate::handler::Pusher;
+    use crate::procedure::region_failover::tests::TestingEnv;
+    use crate::service::mailbox::Channel;
 
     #[tokio::test]
     async fn test_invalidate_table_cache() {
         common_telemetry::init_default_ut_logging();
 
+        let env = TestingEnvBuilder::new().build().await;
+        let failed_region = env.failed_region(1).await;
+
         let TestingEnv {
-            context,
-            failed_region,
             mut heartbeat_receivers,
-        } = TestingEnvBuilder::new().build().await;
+            context,
+            pushers,
+        } = env;
+
+        for frontend_id in 4..=7 {
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+
+            let pusher_id = Channel::Frontend(frontend_id).pusher_id();
+            let pusher = Pusher::new(tx, &RequestHeader::default());
+            let _ = pushers.insert(pusher_id, pusher).await;
+
+            heartbeat_receivers.insert(frontend_id, rx);
+        }
 
         let state = InvalidateCache;
         let table_ident: TableIdent = failed_region.clone().into();

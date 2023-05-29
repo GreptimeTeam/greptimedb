@@ -20,7 +20,9 @@ use common_meta::error::Result as MetaResult;
 use common_meta::heartbeat::handler::{
     HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
 };
-use common_meta::instruction::{Instruction, InstructionReply, RegionIdent, SimpleReply};
+use common_meta::instruction::{
+    Instruction, InstructionReply, RegionIdent, SimpleReply, TableIdent,
+};
 use common_telemetry::{error, info, warn};
 use snafu::ResultExt;
 use store_api::storage::RegionNumber;
@@ -53,10 +55,14 @@ impl HeartbeatResponseHandler for CloseRegionHandler {
         let self_ref = Arc::new(self.clone());
 
         let RegionIdent {
-            engine,
-            catalog,
-            schema,
-            table,
+            table_ident:
+                TableIdent {
+                    engine,
+                    catalog,
+                    schema,
+                    table,
+                    ..
+                },
             region_number,
             ..
         } = region_ident;
