@@ -226,16 +226,13 @@ trait State: Sync + Send + Debug {
 ///                                 │ Updates the Region
 ///                                 │ placement metadata
 ///                                 │
-///                        ┌────────▼────────┐
-///                        │ InvalidateCache ◄─────────────────────┐
-///                        └────────┬────────┘                     │
-///                                 │                              │
-///                                 │ Sends "Invalidate Table      │
-///                                 │ Cache" to Frontend nodes     │
-///                                 │ and waits for 2 seconds      │
-///                                 │                              │
-///                         success ├──────────────────────────────┘
-///                                 │                       failed
+///                         ┌───────▼───────┐
+///                         │InvalidateCache│
+///                         └───────┬───────┘
+///                                 │
+///                                 │ Broadcast Invalidate Table
+///                                 │ Cache
+///                                 │
 ///                                 │
 ///                        ┌────────▼────────┐
 ///                        │RegionFailoverEnd│

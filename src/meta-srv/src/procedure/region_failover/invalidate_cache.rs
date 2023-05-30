@@ -113,11 +113,9 @@ mod tests {
             .unwrap();
         assert_eq!(format!("{next_state:?}"), "RegionFailoverEnd");
 
-        let frontend_id = |idx: usize| -> u64 { (idx + 4) as u64 };
-
-        for idx in 0..4 {
+        for i in 4..=7 {
             // frontend id starts from 4
-            let rx = heartbeat_receivers.get_mut(&frontend_id(idx)).unwrap();
+            let rx = heartbeat_receivers.get_mut(&i).unwrap();
             let resp = rx.recv().await.unwrap().unwrap();
             let received = &resp.mailbox_message.unwrap();
 
