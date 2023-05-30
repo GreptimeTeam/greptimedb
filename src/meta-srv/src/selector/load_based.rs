@@ -88,7 +88,7 @@ impl Selector for LoadBasedSelector {
     }
 }
 
-// Determine whether there is a table in dn according to the heartbeats.
+// Determine whether there is the table in datanode according to the heartbeats.
 //
 // Result:
 // None indicates no heartbeats in stat_val;

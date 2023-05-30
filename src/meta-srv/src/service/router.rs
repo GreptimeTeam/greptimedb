@@ -134,7 +134,7 @@ async fn handle_create(
     let mut peers = selector.select(cluster_id, &ctx).await?;
 
     if peers.len() < partitions.len() {
-        warn!("Create table failed due to no enough active datanodes, table: {table_name:?}, partition number: {}, datanode number: {}", partitions.len(), peers.len());
+        warn!("Create table failed due to no enough available datanodes, table: {table_name:?}, partition number: {}, datanode number: {}", partitions.len(), peers.len());
         return Ok(RouteResponse {
             header: Some(ResponseHeader::failed(
                 cluster_id,
