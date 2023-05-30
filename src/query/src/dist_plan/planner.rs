@@ -72,7 +72,7 @@ impl ExtensionPlanner for DistExtensionPlanner {
                     .await
                     .map(Some)
             } else {
-                // TODO(ruihang): generate different execution plans for different varient merge operation
+                // TODO(ruihang): generate different execution plans for different variant merge operation
                 let input_plan = merge_scan.input();
                 let Some(table_name) = self.get_table_name(input_plan)? else {
                     // no relation found in input plan, going to execute them locally 
