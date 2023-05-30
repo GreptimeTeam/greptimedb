@@ -182,6 +182,11 @@ pub fn region_id(table_id: TableId, n: u32) -> RegionId {
 }
 
 #[inline]
+pub fn table_id(region_id: RegionId) -> TableId {
+    (region_id >> 32) as u32
+}
+
+#[inline]
 pub fn table_dir(catalog_name: &str, schema_name: &str, table_id: TableId) -> String {
     format!("{DATA_DIR}{catalog_name}/{schema_name}/{table_id}/")
 }
@@ -199,5 +204,12 @@ mod tests {
         };
 
         assert_eq!("greptime.public.test", table_ref.to_string());
+    }
+
+    #[test]
+    fn test_table_id() {
+        let region_id = region_id(u32::MAX, 1);
+        let table_id = table_id(region_id);
+        assert_eq!(u32::MAX, table_id);
     }
 }

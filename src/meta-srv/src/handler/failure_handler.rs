@@ -21,6 +21,7 @@ use async_trait::async_trait;
 use common_catalog::consts::MITO_ENGINE;
 use common_meta::instruction::TableIdent;
 use common_meta::RegionIdent;
+use table::engine::table_id;
 
 use crate::error::Result;
 use crate::handler::failure_handler::runner::{FailureDetectControl, FailureDetectRunner};
@@ -90,9 +91,7 @@ impl HeartbeatHandler for RegionFailureHandler {
                         catalog: x.catalog.clone(),
                         schema: x.schema.clone(),
                         table: x.table.clone(),
-
-                        // TODO(#1566): Use the real table id.
-                        table_id: 0,
+                        table_id: table_id(x.id),
                         // TODO(#1583): Use the actual table engine.
                         engine: MITO_ENGINE.to_string(),
                     },
