@@ -60,6 +60,7 @@ impl router_server::Router for MetaSrv {
             kv_store: self.kv_store(),
             catalog: Some(table_name.catalog_name),
             schema: Some(table_name.schema_name),
+            table: Some(table_name.table_name),
         };
 
         let selector = self.selector();

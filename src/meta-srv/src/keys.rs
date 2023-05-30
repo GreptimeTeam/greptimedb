@@ -23,7 +23,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error;
 use crate::error::Result;
-use crate::handler::node_stat::Stat;
+use crate::handler::node_stat::{RegionStat, Stat};
 
 pub(crate) const REMOVED_PREFIX: &str = "__removed";
 pub(crate) const DN_LEASE_PREFIX: &str = "__meta_dnlease";
@@ -261,6 +261,33 @@ impl StatValue {
         }
         None
     }
+
+    pub fn contains_table(
+        &self,
+        catalog_name: &str,
+        schema_name: &str,
+        table_name: &str,
+    ) -> Option<bool> {
+        let may_latest = self.stats.last();
+
+        if let Some(latest) = may_latest {
+            for RegionStat {
+                catalog,
+                schema,
+                table,
+                ..
+            } in latest.region_stats.iter()
+            {
+                if catalog_name == catalog && schema_name == schema && table_name == table {
+                    return Some(true);
+                }
+            }
+        } else {
+            return None;
+        }
+
+        Some(false)
+    }
 }
 
 impl TryFrom<StatValue> for Vec<u8> {
@@ -403,6 +430,100 @@ mod tests {
         };
         let region_num = stat_val.region_num().unwrap();
         assert_eq!(2, region_num);
+    }
+
+    #[test]
+    fn test_contains_table_from_stat_val() {
+        let empty = StatValue { stats: vec![] };
+        assert!(empty
+            .contains_table("greptime_4", "public_4", "demo_5")
+            .is_none());
+
+        let stat_val = StatValue {
+            stats: vec![
+                Stat {
+                    region_stats: vec![
+                        RegionStat {
+                            catalog: "greptime_1".to_string(),
+                            schema: "public_1".to_string(),
+                            table: "demo_1".to_string(),
+                            ..Default::default()
+                        },
+                        RegionStat {
+                            catalog: "greptime_2".to_string(),
+                            schema: "public_2".to_string(),
+                            table: "demo_2".to_string(),
+                            ..Default::default()
+                        },
+                        RegionStat {
+                            catalog: "greptime_3".to_string(),
+                            schema: "public_3".to_string(),
+                            table: "demo_3".to_string(),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                },
+                Stat {
+                    region_stats: vec![
+                        RegionStat {
+                            catalog: "greptime_1".to_string(),
+                            schema: "public_1".to_string(),
+                            table: "demo_1".to_string(),
+                            ..Default::default()
+                        },
+                        RegionStat {
+                            catalog: "greptime_2".to_string(),
+                            schema: "public_2".to_string(),
+                            table: "demo_2".to_string(),
+                            ..Default::default()
+                        },
+                        RegionStat {
+                            catalog: "greptime_3".to_string(),
+                            schema: "public_3".to_string(),
+                            table: "demo_3".to_string(),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                },
+                Stat {
+                    region_stats: vec![
+                        RegionStat {
+                            catalog: "greptime_1".to_string(),
+                            schema: "public_1".to_string(),
+                            table: "demo_1".to_string(),
+                            ..Default::default()
+                        },
+                        RegionStat {
+                            catalog: "greptime_2".to_string(),
+                            schema: "public_2".to_string(),
+                            table: "demo_2".to_string(),
+                            ..Default::default()
+                        },
+                        RegionStat {
+                            catalog: "greptime_4".to_string(),
+                            schema: "public_4".to_string(),
+                            table: "demo_4".to_string(),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                },
+            ],
+        };
+        assert!(stat_val
+            .contains_table("greptime_1", "public_1", "demo_1")
+            .unwrap());
+        assert!(stat_val
+            .contains_table("greptime_2", "public_2", "demo_2")
+            .unwrap());
+        assert!(!stat_val
+            .contains_table("greptime_3", "public_3", "demo_3")
+            .unwrap());
+        assert!(stat_val
+            .contains_table("greptime_4", "public_4", "demo_4")
+            .unwrap());
     }
 
     #[test]

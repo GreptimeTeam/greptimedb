@@ -12,11 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-
 use api::v1::meta::Peer;
 use common_telemetry::warn;
-use common_time::util as time_util;
 
 use crate::cluster::MetaPeerClient;
 use crate::error::Result;
@@ -38,31 +35,26 @@ impl Selector for LoadBasedSelector {
 
     async fn select(&self, ns: Namespace, ctx: &Self::Context) -> Result<Self::Output> {
         // get alive datanodes
-        let lease_filter = |_: &LeaseKey, v: &LeaseValue| {
-            time_util::current_time_millis() - v.timestamp_millis < ctx.datanode_lease_secs * 1000
-        };
-        let lease_kvs: HashMap<LeaseKey, LeaseValue> =
-            lease::alive_datanodes(ns, &ctx.kv_store, lease_filter)
-                .await?
-                .into_iter()
-                .collect();
-
+        let lease_kvs = lease::alive_datanodes(ns, &ctx.kv_store, ctx.datanode_lease_secs).await?;
         if lease_kvs.is_empty() {
             return Ok(vec![]);
         }
 
-        // get stats of alive datanodes
-        let stat_keys: Vec<StatKey> = lease_kvs
-            .keys()
-            .map(|k| StatKey {
-                cluster_id: k.cluster_id,
-                node_id: k.node_id,
-            })
-            .collect();
+        let stat_keys: Vec<StatKey> = lease_kvs.keys().map(|k| k.into()).collect();
         let stat_kvs = self.meta_peer_client.get_dn_stat_kvs(stat_keys).await?;
 
         let mut tuples: Vec<(LeaseKey, LeaseValue, u64)> = lease_kvs
             .into_iter()
+            .filter(|(lease_k, _)| {
+                if let Some(stat_val) = stat_kvs.get(&lease_k.into()) {
+                    if let (Some(catalog), Some(schema), Some(table)) =
+                        (&ctx.catalog, &ctx.schema, &ctx.table)
+                    {
+                        return stat_val.contains_table(catalog, schema, table) != Some(true);
+                    }
+                }
+                true
+            })
             .map(|(lease_k, lease_v)| {
                 let stat_key: StatKey = (&lease_k).into();
 

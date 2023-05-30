@@ -301,6 +301,7 @@ async fn run_region_failover_procedure(cluster: &GreptimeDbCluster, failed_regio
                 kv_store: meta_srv.kv_store(),
                 catalog: None,
                 schema: None,
+                table: None,
             },
             dist_lock: meta_srv.lock().clone(),
         },
