@@ -16,17 +16,18 @@ mod columns;
 mod tables;
 
 use std::any::Any;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_error::prelude::BoxedError;
 use common_query::physical_plan::PhysicalPlanRef;
 use common_query::prelude::Expr;
 use common_recordbatch::{RecordBatchStreamAdaptor, SendableRecordBatchStream};
 use datatypes::schema::SchemaRef;
 use futures_util::StreamExt;
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use store_api::storage::ScanRequest;
-use table::error::{DuplicatedExecuteCallSnafu, SchemaConversionSnafu};
+use table::error::{SchemaConversionSnafu, TablesRecordBatchSnafu};
 use table::{Result as TableResult, Table, TableRef};
 
 use self::columns::InformationSchemaColumns;
@@ -64,23 +65,21 @@ impl SchemaProvider for InformationSchemaProvider {
     }
 
     async fn table(&self, name: &str) -> Result<Option<TableRef>> {
-        let stream = match name.to_ascii_lowercase().as_ref() {
-            TABLES => InformationSchemaTables::new(
+        let stream_builder = match name.to_ascii_lowercase().as_ref() {
+            TABLES => Arc::new(InformationSchemaTables::new(
                 self.catalog_name.clone(),
                 self.catalog_provider.clone(),
-            )
-            .to_stream()?,
-            COLUMNS => InformationSchemaColumns::new(
+            )) as _,
+            COLUMNS => Arc::new(InformationSchemaColumns::new(
                 self.catalog_name.clone(),
                 self.catalog_provider.clone(),
-            )
-            .to_stream()?,
+            )) as _,
             _ => {
                 return Ok(None);
             }
         };
 
-        Ok(Some(Arc::new(InformationTable::new(stream))))
+        Ok(Some(Arc::new(InformationTable::new(stream_builder))))
     }
 
     async fn table_exist(&self, name: &str) -> Result<bool> {
@@ -89,18 +88,23 @@ impl SchemaProvider for InformationSchemaProvider {
     }
 }
 
+// TODO(ruihang): make it a more generic trait:
+// https://github.com/GreptimeTeam/greptimedb/pull/1639#discussion_r1205001903
+pub trait InformationStreamBuilder: Send + Sync {
+    fn to_stream(&self) -> Result<SendableRecordBatchStream>;
+
+    fn schema(&self) -> SchemaRef;
+}
+
 pub struct InformationTable {
-    schema: SchemaRef,
-    stream: Arc<Mutex<Option<SendableRecordBatchStream>>>,
+    // schema: SchemaRef,
+    // stream: Arc<Mutex<Option<SendableRecordBatchStream>>>,
+    stream_builder: Arc<dyn InformationStreamBuilder>,
 }
 
 impl InformationTable {
-    pub fn new(stream: SendableRecordBatchStream) -> Self {
-        let schema = stream.schema();
-        Self {
-            schema,
-            stream: Arc::new(Mutex::new(Some(stream))),
-        }
+    pub fn new(stream_builder: Arc<dyn InformationStreamBuilder>) -> Self {
+        Self { stream_builder }
     }
 }
 
@@ -111,7 +115,7 @@ impl Table for InformationTable {
     }
 
     fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+        self.stream_builder.schema()
     }
 
     fn table_info(&self) -> table::metadata::TableInfoRef {
@@ -144,13 +148,10 @@ impl Table for InformationTable {
             self.schema()
         };
         let stream = self
-            .stream
-            .lock()
-            .unwrap()
-            .take()
-            .with_context(|| DuplicatedExecuteCallSnafu {
-                table: self.table_info().name.clone(),
-            })?
+            .stream_builder
+            .to_stream()
+            .map_err(BoxedError::new)
+            .context(TablesRecordBatchSnafu)?
             .map(move |batch| {
                 batch.and_then(|batch| {
                     if let Some(projection) = &projection {
