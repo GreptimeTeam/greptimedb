@@ -125,3 +125,34 @@ impl TreeNodeVisitor for OrderHintVisitor {
         Ok(VisitRecursion::Continue)
     }
 }
+
+#[cfg(test)]
+mod test {
+    use std::sync::Arc;
+
+    use datafusion_expr::{col, LogicalPlanBuilder};
+    use datafusion_optimizer::OptimizerContext;
+    use table::table::numbers::NumbersTable;
+
+    use super::*;
+
+    #[test]
+    fn set_order_hint() {
+        let numbers_table = Arc::new(NumbersTable::new(0)) as _;
+        let adapter = Arc::new(DfTableProviderAdapter::new(numbers_table));
+        let table_source = Arc::new(DefaultTableSource::new(adapter.clone()));
+
+        let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+            .unwrap()
+            .sort(vec![col("number").sort(true, false)])
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let context = OptimizerContext::default();
+        OrderHintRule.try_optimize(&plan, &context).unwrap();
+
+        let scan_req = adapter.get_scan_req();
+        assert_eq!(0, scan_req.output_ordering.unwrap()[0].index)
+    }
+}

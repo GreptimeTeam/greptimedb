@@ -53,6 +53,11 @@ impl DfTableProviderAdapter {
     pub fn with_ordering_hint(&self, order_opts: &[OrderOption]) {
         self.scan_req.lock().unwrap().output_ordering = Some(order_opts.to_vec());
     }
+
+    #[cfg(feature = "testing")]
+    pub fn get_scan_req(&self) -> ScanRequest {
+        self.scan_req.lock().unwrap().clone()
+    }
 }
 
 #[async_trait::async_trait]
