@@ -33,6 +33,10 @@ use datatypes::arrow::datatypes::DataType;
 pub struct TypeConversionRule;
 
 impl AnalyzerRule for TypeConversionRule {
+    fn name(&self) -> &str {
+        "TypeConversionRule"
+    }
+
     // TODO(ruihang): fix this warning
     #[allow(deprecated)]
     fn analyze(&self, plan: LogicalPlan, _config: &ConfigOptions) -> Result<LogicalPlan> {
@@ -115,10 +119,6 @@ impl AnalyzerRule for TypeConversionRule {
             | LogicalPlan::Unnest(_)
             | LogicalPlan::Statement(_) => Ok(Transformed::No(plan)),
         })
-    }
-
-    fn name(&self) -> &str {
-        "TypeConversionRule"
     }
 }
 
