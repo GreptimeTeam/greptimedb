@@ -159,8 +159,7 @@ pub async fn stream_to_json(
 
 impl DfRecordBatchEncoder for json::Writer<SharedBuffer, LineDelimited> {
     fn write(&mut self, batch: &RecordBatch) -> Result<()> {
-        self.write(batch.clone())
-            .context(error::WriteRecordBatchSnafu)
+        self.write(batch).context(error::WriteRecordBatchSnafu)
     }
 }
 

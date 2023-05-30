@@ -436,7 +436,7 @@ impl NullBufferBuilder {
         let buf = self.bitmap_builder.as_mut().map(|b| b.finish());
         self.bitmap_builder = None;
         self.len = 0;
-        buf
+        buf.map(|buf| buf.inner().clone())
     }
 
     #[inline]

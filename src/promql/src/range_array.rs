@@ -219,11 +219,6 @@ impl Array for RangeArray {
         self
     }
 
-    #[allow(deprecated)]
-    fn data(&self) -> &ArrayData {
-        self.array.data()
-    }
-
     fn into_data(self) -> ArrayData {
         self.array.into_data()
     }
@@ -238,6 +233,30 @@ impl Array for RangeArray {
 
     fn nulls(&self) -> Option<&NullBuffer> {
         self.array.nulls()
+    }
+
+    fn data_type(&self) -> &DataType {
+        self.array.data_type()
+    }
+
+    fn len(&self) -> usize {
+        self.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.is_empty()
+    }
+
+    fn offset(&self) -> usize {
+        self.array.offset()
+    }
+
+    fn get_buffer_memory_size(&self) -> usize {
+        self.array.get_buffer_memory_size()
+    }
+
+    fn get_array_memory_size(&self) -> usize {
+        self.array.get_array_memory_size()
     }
 }
 
