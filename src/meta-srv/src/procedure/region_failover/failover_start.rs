@@ -101,30 +101,27 @@ impl State for RegionFailoverStart {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{TestingEnv, TestingEnvBuilder};
+    use super::super::tests::TestingEnvBuilder;
     use super::*;
 
     #[tokio::test]
     async fn test_choose_failover_candidate() {
         common_telemetry::init_default_ut_logging();
 
-        let TestingEnv {
-            context,
-            failed_region,
-            heartbeat_receivers: _,
-        } = TestingEnvBuilder::new().build().await;
+        let env = TestingEnvBuilder::new().build().await;
+        let failed_region = env.failed_region(1).await;
 
         let mut state = RegionFailoverStart::new();
         assert!(state.failover_candidate.is_none());
 
         let candidate = state
-            .choose_candidate(&context, &failed_region)
+            .choose_candidate(&env.context, &failed_region)
             .await
             .unwrap();
         assert_ne!(candidate.id, failed_region.datanode_id);
 
         let candidate_again = state
-            .choose_candidate(&context, &failed_region)
+            .choose_candidate(&env.context, &failed_region)
             .await
             .unwrap();
         assert_eq!(candidate, candidate_again);

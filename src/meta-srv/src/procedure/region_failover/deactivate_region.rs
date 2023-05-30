@@ -136,29 +136,27 @@ mod tests {
     use api::v1::meta::mailbox_message::Payload;
     use common_meta::instruction::SimpleReply;
 
-    use super::super::tests::{TestingEnv, TestingEnvBuilder};
+    use super::super::tests::TestingEnvBuilder;
     use super::*;
 
     #[tokio::test]
     async fn test_deactivate_region_success() {
         common_telemetry::init_default_ut_logging();
 
-        let TestingEnv {
-            context,
-            failed_region,
-            mut heartbeat_receivers,
-        } = TestingEnvBuilder::new().build().await;
+        let mut env = TestingEnvBuilder::new().build().await;
+        let failed_region = env.failed_region(1).await;
 
         let state = DeactivateRegion::new(Peer::new(2, ""));
         let mailbox_receiver = state
-            .send_close_region_message(&context, &failed_region, Duration::from_millis(100))
+            .send_close_region_message(&env.context, &failed_region, Duration::from_millis(100))
             .await
             .unwrap();
 
         let message_id = mailbox_receiver.message_id();
 
         // verify that the close region message is sent
-        let rx = heartbeat_receivers
+        let rx = env
+            .heartbeat_receivers
             .get_mut(&failed_region.datanode_id)
             .unwrap();
         let resp = rx.recv().await.unwrap().unwrap();
@@ -175,7 +173,7 @@ mod tests {
         );
 
         // simulating response from Datanode
-        context
+        env.context
             .mailbox
             .on_recv(
                 message_id,
@@ -211,20 +209,18 @@ mod tests {
     async fn test_deactivate_region_timeout() {
         common_telemetry::init_default_ut_logging();
 
-        let TestingEnv {
-            context,
-            failed_region,
-            mut heartbeat_receivers,
-        } = TestingEnvBuilder::new().build().await;
+        let mut env = TestingEnvBuilder::new().build().await;
+        let failed_region = env.failed_region(1).await;
 
         let state = DeactivateRegion::new(Peer::new(2, ""));
         let mailbox_receiver = state
-            .send_close_region_message(&context, &failed_region, Duration::from_millis(100))
+            .send_close_region_message(&env.context, &failed_region, Duration::from_millis(100))
             .await
             .unwrap();
 
         // verify that the open region message is sent
-        let rx = heartbeat_receivers
+        let rx = env
+            .heartbeat_receivers
             .get_mut(&failed_region.datanode_id)
             .unwrap();
         let resp = rx.recv().await.unwrap().unwrap();
