@@ -123,7 +123,7 @@ impl DistExtensionPlanner {
         self.partition_manager
             .find_table_region_leaders(table_name)
             .await
-            .context(error::RoutePartitionSnafu {
+            .with_context(|_| error::RoutePartitionSnafu {
                 table: table_name.clone(),
             })
             .map_err(|e| DataFusionError::External(Box::new(e)))

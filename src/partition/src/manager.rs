@@ -114,7 +114,7 @@ impl PartitionRuleManager {
         let route = self.table_routes.get_route(table).await?;
         let mut peers = vec![];
         for peer in &route.region_routes {
-            peers.push(peer.leader_peer.clone().context(FindLeaderSnafu {
+            peers.push(peer.leader_peer.clone().with_context(|| FindLeaderSnafu {
                 region_id: peer.region.id,
                 table_name: table.to_string(),
             })?);

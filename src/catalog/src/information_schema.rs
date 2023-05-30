@@ -97,8 +97,6 @@ pub trait InformationStreamBuilder: Send + Sync {
 }
 
 pub struct InformationTable {
-    // schema: SchemaRef,
-    // stream: Arc<Mutex<Option<SendableRecordBatchStream>>>,
     stream_builder: Arc<dyn InformationStreamBuilder>,
 }
 
