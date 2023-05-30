@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 // use tokio::process::{Child, Command};
 use std::process::{Child, Command};
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -64,6 +64,8 @@ impl EnvController for Env {
     }
 }
 
+static DATANODE_ID: AtomicU32 = AtomicU32::new(1);
+
 #[allow(clippy::print_stdout)]
 impl Env {
     pub async fn start_standalone() -> GreptimeDB {
@@ -79,7 +81,7 @@ impl Env {
         let db = DB::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
 
         GreptimeDB {
-            server_process: Arc::new(Mutex::new(vec![server_process])),
+            server_processes: Arc::new(Mutex::new(vec![server_process])),
             metasrv_process: None,
             frontend_process: None,
             client: TokioMutex::new(db),
@@ -106,7 +108,7 @@ impl Env {
         let db = DB::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
 
         GreptimeDB {
-            server_process: Arc::new(Mutex::new(vec![datanode_1, datanode_2, datanode_3])),
+            server_processes: Arc::new(Mutex::new(vec![datanode_1, datanode_2, datanode_3])),
             metasrv_process: Some(meta_server),
             frontend_process: Some(frontend),
             client: TokioMutex::new(db),
@@ -191,9 +193,8 @@ impl Env {
     }
 
     fn datanode_start_args(db_ctx: &GreptimeDBContext) -> (Vec<String>, String) {
-        static NODE_ID: AtomicU32 = AtomicU32::new(1);
+        let id = DATANODE_ID.fetch_add(1, Ordering::Relaxed);
 
-        let id = NODE_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let subcommand = "datanode";
         let mut args = vec![
             "--log-level=debug".to_string(),
@@ -219,22 +220,28 @@ impl Env {
     /// stop and restart the server process
     async fn restart_server(db: &GreptimeDB) {
         {
-            let mut server_processes = db.server_process.lock().unwrap();
+            let mut server_processes = db.server_processes.lock().unwrap();
             for server_process in server_processes.iter_mut() {
                 Env::stop_server(server_process);
             }
         }
 
         // check if the server is distributed or standalone
-        let subcommand = if db.is_standalone {
-            "standalone"
+        let new_server_processes = if db.is_standalone {
+            let new_server_process = Env::start_server("standalone", &db.ctx, false).await;
+            vec![new_server_process]
         } else {
-            "datanode"
+            let mut processes = vec![];
+            DATANODE_ID.store(1, Ordering::Relaxed);
+            for _ in 0..3 {
+                let new_server_process = Env::start_server("datanode", &db.ctx, false).await;
+                processes.push(new_server_process);
+            }
+            processes
         };
-        let new_server_process = Env::start_server(subcommand, &db.ctx, false).await;
 
-        let mut server_process = db.server_process.lock().unwrap();
-        *server_process = vec![new_server_process];
+        let mut server_processes = db.server_processes.lock().unwrap();
+        *server_processes = new_server_processes;
     }
 
     /// Generate config file to `/tmp/{subcommand}-{current_time}.toml`
@@ -286,7 +293,7 @@ impl Env {
 }
 
 pub struct GreptimeDB {
-    server_process: Arc<Mutex<Vec<Child>>>,
+    server_processes: Arc<Mutex<Vec<Child>>>,
     metasrv_process: Option<Child>,
     frontend_process: Option<Child>,
     client: TokioMutex<DB>,
@@ -319,7 +326,7 @@ impl Database for GreptimeDB {
 impl GreptimeDB {
     #![allow(clippy::print_stdout)]
     fn stop(&mut self) {
-        let mut servers = self.server_process.lock().unwrap();
+        let mut servers = self.server_processes.lock().unwrap();
         for server in servers.iter_mut() {
             Env::stop_server(server);
         }
