@@ -110,12 +110,27 @@ impl DistPlannerAnalyzer {
             return Ok(Transformed::No(plan));
         }
 
-        // add merge scan
-        plan = MergeScanLogicalPlan::new(plan, false).into_logical_plan();
-
-        // add stages
-        for new_stage in &visitor.next_stage {
-            plan = new_stage.with_new_inputs(&[plan])?
+        if visitor.stop_node.is_some() {
+            // insert merge scan between the stop node and its child
+            let children = plan.inputs();
+            let mut new_children = Vec::with_capacity(children.len());
+            for child in children {
+                let mut new_child =
+                    MergeScanLogicalPlan::new(child.clone(), false).into_logical_plan();
+                // expand stages
+                for new_stage in &visitor.next_stage {
+                    new_child = new_stage.with_new_inputs(&[new_child])?
+                }
+                new_children.push(new_child);
+            }
+            plan = plan.with_new_inputs(&new_children)?;
+        } else {
+            // otherwise add merge scan as the new root
+            plan = MergeScanLogicalPlan::new(plan, false).into_logical_plan();
+            // expand stages
+            for new_stage in &visitor.next_stage {
+                plan = new_stage.with_new_inputs(&[plan])?
+            }
         }
 
         state.set_transformed();
@@ -212,14 +227,14 @@ impl CommutativeVisitor {
 #[cfg(test)]
 mod test {
     use datafusion::datasource::DefaultTableSource;
-    use datafusion_expr::{col, lit, LogicalPlanBuilder};
+    use datafusion_expr::{avg, col, lit, Expr, LogicalPlanBuilder};
     use table::table::adapter::DfTableProviderAdapter;
     use table::table::numbers::NumbersTable;
 
     use super::*;
 
     #[test]
-    fn see_how_analyzer_works() {
+    fn transform_simple_projection_filter() {
         let numbers_table = Arc::new(NumbersTable::new(0)) as _;
         let table_source = Arc::new(DefaultTableSource::new(Arc::new(
             DfTableProviderAdapter::new(numbers_table),
@@ -244,8 +259,59 @@ mod test {
             \n    Distinct:\
             \n      Projection: t.number\
             \n        Filter: t.number < Int32(10)\
-            \n          MergeScan [is_placeholder=true]\
-            \n            TableScan: t",
+            \n          TableScan: t",
+        );
+        assert_eq!(expected, format!("{:?}", result));
+    }
+
+    #[test]
+    fn transform_aggregator() {
+        let numbers_table = Arc::new(NumbersTable::new(0)) as _;
+        let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+            DfTableProviderAdapter::new(numbers_table),
+        )));
+
+        let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+            .unwrap()
+            .aggregate(Vec::<Expr>::new(), vec![avg(col("number"))])
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let config = ConfigOptions::default();
+        let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+        let expected = String::from(
+            "Aggregate: groupBy=[[]], aggr=[[AVG(t.number)]]\
+            \n  MergeScan [is_placeholder=false]\
+            \n    TableScan: t",
+        );
+        assert_eq!(expected, format!("{:?}", result));
+    }
+
+    #[test]
+    fn transform_distinct_order() {
+        let numbers_table = Arc::new(NumbersTable::new(0)) as _;
+        let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+            DfTableProviderAdapter::new(numbers_table),
+        )));
+
+        let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+            .unwrap()
+            .distinct()
+            .unwrap()
+            .sort(vec![col("number").sort(true, false)])
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let config = ConfigOptions::default();
+        let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+        let expected = String::from(
+            "Sort: t.number ASC NULLS LAST\
+            \n  Distinct:\
+            \n    MergeScan [is_placeholder=false]\
+            \n      Distinct:\
+            \n        TableScan: t",
         );
         assert_eq!(expected, format!("{:?}", result));
     }

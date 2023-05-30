@@ -30,7 +30,7 @@ use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{
     DfSendableRecordBatchStream, RecordBatchStreamAdaptor, SendableRecordBatchStream,
 };
-use datafusion::physical_plan::{ExecutionPlan, Partitioning};
+use datafusion::physical_plan::{DisplayFormatType, ExecutionPlan, Partitioning};
 use datafusion_common::{DataFusionError, Result, Statistics};
 use datafusion_expr::{Extension, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion_physical_expr::PhysicalSortExpr;
@@ -226,5 +226,13 @@ impl ExecutionPlan for MergeScanExec {
 
     fn statistics(&self) -> Statistics {
         Statistics::default()
+    }
+
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "MergeScanExec: peers=[")?;
+        for peer in self.peers.iter() {
+            write!(f, "{}, ", peer)?;
+        }
+        write!(f, "]")
     }
 }
