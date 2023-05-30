@@ -97,7 +97,7 @@ impl Instance {
             catalog_name: expr.catalog_name,
             schema_name: expr.schema_name,
             table_name,
-            region_number: expr.region_id,
+            region_number: expr.region_number,
             wait: None,
         };
         self.sql_handler()
@@ -239,7 +239,7 @@ mod tests {
             table_id: Some(TableId {
                 id: MIN_USER_TABLE_ID,
             }),
-            region_ids: vec![0],
+            region_numbers: vec![0],
             engine: MITO_ENGINE.to_string(),
         }
     }

@@ -364,7 +364,7 @@ fn create_table_expr() -> CreateTableExpr {
         primary_keys: vec!["VendorID".to_string()],
         create_if_not_exists: false,
         table_options: Default::default(),
-        region_ids: vec![0],
+        region_numbers: vec![0],
         table_id: None,
         engine: "mito".to_string(),
     }

@@ -163,10 +163,10 @@ pub fn create_expr_to_request(
         Some(expr.desc)
     };
 
-    let region_ids = if expr.region_ids.is_empty() {
+    let region_numbers = if expr.region_numbers.is_empty() {
         vec![0]
     } else {
-        expr.region_ids
+        expr.region_numbers
     };
 
     let table_options =
@@ -178,7 +178,7 @@ pub fn create_expr_to_request(
         table_name: expr.table_name,
         desc,
         schema,
-        region_numbers: region_ids,
+        region_numbers,
         primary_key_indices,
         create_if_not_exists: expr.create_if_not_exists,
         table_options,
@@ -209,6 +209,7 @@ mod tests {
                         default_constraint: vec![],
                     }),
                     is_key: false,
+                    location: None,
                 }],
             })),
         };
