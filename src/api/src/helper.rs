@@ -18,6 +18,10 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::types::TimestampType;
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
+use greptime_proto::v1::ddl_request::Expr;
+use greptime_proto::v1::greptime_request::Request;
+use greptime_proto::v1::query_request::Query;
+use greptime_proto::v1::{DdlRequest, QueryRequest};
 use snafu::prelude::*;
 
 use crate::error::{self, Result};
@@ -222,6 +226,38 @@ pub fn push_vals(column: &mut Column, origin_count: usize, vector: VectorRef) {
         Value::List(_) => unreachable!(),
     });
     column.null_mask = null_mask.into_vec();
+}
+
+/// Returns the type name of the [Request].
+pub fn request_type(request: &Request) -> &'static str {
+    match request {
+        Request::Insert(_) => "insert",
+        Request::Query(query_req) => query_request_type(query_req),
+        Request::Ddl(ddl_req) => ddl_request_type(ddl_req),
+        Request::Delete(_) => "delete",
+    }
+}
+
+/// Returns the type name of the [QueryRequest].
+fn query_request_type(request: &QueryRequest) -> &'static str {
+    match request.query {
+        Some(Query::Sql(_)) => "query.sql",
+        Some(Query::LogicalPlan(_)) => "query.logical_plan",
+        Some(Query::PromRangeQuery(_)) => "query.prom_range",
+        None => "query.empty",
+    }
+}
+
+/// Returns the type name of the [DdlRequest].
+fn ddl_request_type(request: &DdlRequest) -> &'static str {
+    match request.expr {
+        Some(Expr::CreateDatabase(_)) => "ddl.create_database",
+        Some(Expr::CreateTable(_)) => "ddl.create_table",
+        Some(Expr::Alter(_)) => "ddl.alter",
+        Some(Expr::DropTable(_)) => "ddl.drop_table",
+        Some(Expr::FlushTable(_)) => "ddl.flush_table",
+        None => "ddl.empty",
+    }
 }
 
 #[cfg(test)]
