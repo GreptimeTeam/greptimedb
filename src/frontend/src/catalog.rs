@@ -232,7 +232,7 @@ impl CatalogManager for FrontendCatalogManager {
                 create_if_not_exists: request.create_if_not_exists,
                 table_options: (&request.table_options).into(),
                 table_id: None, // Should and will be assigned by Meta.
-                region_ids: vec![0],
+                region_numbers: vec![0],
                 engine: request.engine,
             };
 

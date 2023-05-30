@@ -172,18 +172,26 @@ pub type TableEngineProcedureRef = Arc<dyn TableEngineProcedure>;
 
 /// Generate region name in the form of "{TABLE_ID}_{REGION_NUMBER}"
 #[inline]
-pub fn region_name(table_id: TableId, n: u32) -> String {
-    format!("{table_id}_{n:010}")
+pub fn region_name(table_id: TableId, region_number: RegionNumber) -> String {
+    format!("{table_id}_{region_number:010}")
 }
 
+/// Construct a [RegionId] from specific `table_id` and `region_number`.
 #[inline]
-pub fn region_id(table_id: TableId, n: u32) -> RegionId {
-    (u64::from(table_id) << 32) | u64::from(n)
+pub fn region_id(table_id: TableId, region_number: RegionNumber) -> RegionId {
+    (u64::from(table_id) << 32) | u64::from(region_number)
 }
 
+/// Retrieve the table id from specific `region_id`.
 #[inline]
 pub fn table_id(region_id: RegionId) -> TableId {
-    (region_id >> 32) as u32
+    (region_id >> 32) as RegionNumber
+}
+
+/// Retrieve the region_number from specific `region_id`.
+#[inline]
+pub fn region_number(region_id: RegionId) -> RegionNumber {
+    region_id as RegionNumber
 }
 
 #[inline]

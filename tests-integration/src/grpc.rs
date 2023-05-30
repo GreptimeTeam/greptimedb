@@ -34,6 +34,7 @@ mod test {
     use query::parser::QueryLanguageParser;
     use servers::query_handler::grpc::GrpcQueryHandler;
     use session::context::QueryContext;
+    use store_api::storage::RegionNumber;
     use tests::{has_parquet_file, test_region_dir};
 
     use crate::tests;
@@ -115,6 +116,7 @@ mod test {
                             default_constraint: vec![],
                         }),
                         is_key: false,
+                        location: None,
                     }],
                 })),
             })),
@@ -406,14 +408,14 @@ CREATE TABLE {table_name} (
         catalog_name: &str,
         schema_name: &str,
         table_name: &str,
-        region_id: Option<u32>,
+        region_number: Option<RegionNumber>,
     ) {
         let request = Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::FlushTable(FlushTableExpr {
                 catalog_name: catalog_name.to_string(),
                 schema_name: schema_name.to_string(),
                 table_name: table_name.to_string(),
-                region_id,
+                region_number,
             })),
         });
 

@@ -196,6 +196,7 @@ pub async fn test_insert_and_select(store_type: StorageType) {
         add_columns: vec![AddColumn {
             column_def: Some(add_column),
             is_key: false,
+            location: None,
         }],
     });
     let expr = AlterExpr {
@@ -308,7 +309,7 @@ fn testing_create_expr() -> CreateTableExpr {
         table_id: Some(TableId {
             id: MIN_USER_TABLE_ID,
         }),
-        region_ids: vec![0],
+        region_numbers: vec![0],
         engine: MITO_ENGINE.to_string(),
     }
 }

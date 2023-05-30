@@ -372,6 +372,7 @@ mod test {
                             default_constraint: vec![],
                         }),
                         is_key: true,
+                        location: None,
                     }],
                 })),
             })),

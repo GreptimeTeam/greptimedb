@@ -68,6 +68,7 @@ pub fn find_new_columns(schema: &SchemaRef, columns: &[Column]) -> Result<Option
             columns_to_add.push(AddColumn {
                 column_def,
                 is_key: *semantic_type == TAG_SEMANTIC_TYPE,
+                location: None,
             });
             new_columns.insert(column_name.to_string());
         }
@@ -257,7 +258,7 @@ pub fn build_create_expr_from_insertion(
         create_if_not_exists: true,
         table_options: Default::default(),
         table_id: table_id.map(|id| api::v1::TableId { id }),
-        region_ids: vec![0], // TODO:(hl): region id should be allocated by frontend
+        region_numbers: vec![0], // TODO:(hl): region number should be allocated by frontend
         engine: engine.to_string(),
     };
 
