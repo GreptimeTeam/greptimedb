@@ -201,6 +201,7 @@ impl GreptimeDbClusterBuilder {
         let mut meta_client = MetaClientBuilder::new(1000, 0, Role::Frontend)
             .enable_router()
             .enable_store()
+            .enable_heartbeat()
             .channel_manager(meta_srv.channel_manager)
             .build();
         meta_client.start(&[&meta_srv.server_addr]).await.unwrap();

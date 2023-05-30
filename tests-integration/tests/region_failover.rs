@@ -13,25 +13,32 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 
 use catalog::helper::TableGlobalKey;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
 use common_meta::instruction::TableIdent;
 use common_meta::RegionIdent;
 use common_procedure::{watcher, ProcedureWithId};
+use common_query::Output;
 use common_telemetry::info;
+use frontend::error::Result as FrontendResult;
+use frontend::instance::{FrontendInstance, Instance};
 use meta_srv::metasrv::SelectorContext;
 use meta_srv::procedure::region_failover::{RegionFailoverContext, RegionFailoverProcedure};
 use meta_srv::table_routes;
 use servers::query_handler::sql::SqlQueryHandler;
-use session::context::QueryContext;
+use session::context::{QueryContext, QueryContextRef};
 use tests_integration::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
 use tests_integration::test_util::{get_test_store_config, StorageType};
+use tokio::time;
 
-// TODO(LFC): wait for close regions in datanode, and read/write route in frontend ready
 #[tokio::test(flavor = "multi_thread")]
 async fn test_region_failover() {
     common_telemetry::init_default_ut_logging();
+
+    let mut logical_timer = 1685428902;
 
     let cluster_name = "test_region_failover";
 
@@ -45,6 +52,18 @@ async fn test_region_failover() {
 
     prepare_testing_table(&cluster).await;
 
+    // Inserts data to each datanode
+    let frontend = cluster.frontend.clone();
+    let result = frontend.start().await;
+
+    info!("start frontend heartbeat: {:?}", result);
+
+    let results = write_datas(&frontend, logical_timer).await;
+    logical_timer += 1;
+    for result in results {
+        assert!(matches!(result.unwrap(), Output::AffectedRows(1)));
+    }
+
     let distribution = find_region_distribution(&cluster).await;
     info!("Find region distribution: {distribution:?}");
 
@@ -56,6 +75,16 @@ async fn test_region_failover() {
     let mut distribution = find_region_distribution(&cluster).await;
     info!("Find region distribution again: {distribution:?}");
 
+    // Waits for invalidating table cache
+    time::sleep(Duration::from_millis(100)).await;
+
+    // Inserts data to each datanode after failover
+    let frontend = cluster.frontend.clone();
+    let results = write_datas(&frontend, logical_timer).await;
+    for result in results {
+        assert!(matches!(result.unwrap(), Output::AffectedRows(1)));
+    }
+
     assert!(!distribution
         .remove(&failed_region.datanode_id)
         .unwrap()
@@ -66,6 +95,31 @@ async fn test_region_failover() {
         .next()
         .unwrap()
         .contains(&failed_region.region_number));
+}
+
+async fn write_datas(instance: &Arc<Instance>, ts: u64) -> Vec<FrontendResult<Output>> {
+    let query_ctx = QueryContext::arc();
+
+    let mut results = Vec::new();
+    for range in [5, 15, 25, 55] {
+        let result = write_data(
+            instance,
+            &format!("INSERT INTO my_table VALUES ({},{})", range, ts),
+            query_ctx.clone(),
+        )
+        .await;
+        results.push(result);
+    }
+
+    results
+}
+
+async fn write_data(
+    instance: &Arc<Instance>,
+    sql: &str,
+    query_ctx: QueryContextRef,
+) -> FrontendResult<Output> {
+    instance.do_query(sql, query_ctx).await.remove(0)
 }
 
 async fn prepare_testing_table(cluster: &GreptimeDbCluster) {
