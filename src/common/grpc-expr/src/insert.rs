@@ -66,7 +66,6 @@ pub fn find_new_columns(schema: &SchemaRef, columns: &[Column]) -> Result<Option
         {
             let column_def = Some(build_column_def(column_name, *datatype, true));
             columns_to_add.push(AddColumn {
-                location: None,
                 column_def,
                 is_key: *semantic_type == TAG_SEMANTIC_TYPE,
                 location: None,

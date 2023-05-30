@@ -293,7 +293,6 @@ pub(crate) fn to_alter_expr(
         }
         AlterTableOperation::AddColumn { column_def } => Kind::AddColumns(AddColumns {
             add_columns: vec![AddColumn {
-                location: None,
                 column_def: Some(
                     sql_column_def_to_grpc_column_def(column_def)
                         .map_err(BoxedError::new)

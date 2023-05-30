@@ -365,7 +365,6 @@ mod test {
                 table_name: "my_table".to_string(),
                 kind: Some(alter_expr::Kind::AddColumns(AddColumns {
                     add_columns: vec![AddColumn {
-                        location: None,
                         column_def: Some(ColumnDef {
                             name: "b".to_string(),
                             datatype: ColumnDataType::Int32 as i32,

@@ -194,7 +194,6 @@ pub async fn test_insert_and_select(store_type: StorageType) {
     };
     let kind = Kind::AddColumns(AddColumns {
         add_columns: vec![AddColumn {
-            location: None,
             column_def: Some(add_column),
             is_key: false,
             location: None,
