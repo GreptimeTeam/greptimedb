@@ -16,6 +16,7 @@ use std::collections::HashMap;
 
 use catalog::helper::TableGlobalKey;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
+use common_meta::instruction::TableIdent;
 use common_meta::RegionIdent;
 use common_procedure::{watcher, ProcedureWithId};
 use common_telemetry::info;
@@ -110,11 +111,13 @@ fn choose_failed_region(distribution: HashMap<u64, Vec<u32>>) -> RegionIdent {
     RegionIdent {
         cluster_id: 1000,
         datanode_id: failed_datanode,
-        table_id: 1025,
-        engine: MITO_ENGINE.to_string(),
-        catalog: DEFAULT_CATALOG_NAME.to_string(),
-        schema: DEFAULT_SCHEMA_NAME.to_string(),
-        table: "my_table".to_string(),
+        table_ident: TableIdent {
+            table_id: 1025,
+            engine: MITO_ENGINE.to_string(),
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            table: "my_table".to_string(),
+        },
         region_number: failed_region,
     }
 }

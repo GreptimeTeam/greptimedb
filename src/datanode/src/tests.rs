@@ -24,7 +24,9 @@ use common_meta::heartbeat::handler::{
     HandlerGroupExecutor, HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutor,
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MessageMeta};
-use common_meta::instruction::{Instruction, InstructionReply, RegionIdent, SimpleReply};
+use common_meta::instruction::{
+    Instruction, InstructionReply, RegionIdent, SimpleReply, TableIdent,
+};
 use common_query::Output;
 use datatypes::prelude::ConcreteDataType;
 use servers::query_handler::grpc::GrpcQueryHandler;
@@ -95,11 +97,13 @@ async fn test_close_region_handler() {
         executor.clone(),
         mailbox.clone(),
         Instruction::CloseRegion(RegionIdent {
-            catalog: "greptime".to_string(),
-            schema: "public".to_string(),
-            table: "non-exist".to_string(),
-            table_id: 1025,
-            engine: "mito".to_string(),
+            table_ident: TableIdent {
+                catalog: "greptime".to_string(),
+                schema: "public".to_string(),
+                table: "non-exist".to_string(),
+                table_id: 1025,
+                engine: "mito".to_string(),
+            },
             region_number: 0,
             cluster_id: 1,
             datanode_id: 2,
@@ -149,11 +153,13 @@ async fn test_open_region_handler() {
         executor.clone(),
         mailbox.clone(),
         Instruction::OpenRegion(RegionIdent {
-            catalog: "greptime".to_string(),
-            schema: "public".to_string(),
-            table: "non-exist".to_string(),
-            table_id: 2024,
-            engine: "mito".to_string(),
+            table_ident: TableIdent {
+                catalog: "greptime".to_string(),
+                schema: "public".to_string(),
+                table: "non-exist".to_string(),
+                table_id: 2024,
+                engine: "mito".to_string(),
+            },
             region_number: 0,
             cluster_id: 1,
             datanode_id: 2,
@@ -228,11 +234,13 @@ fn handle_instruction(
 
 fn close_region_instruction() -> Instruction {
     Instruction::CloseRegion(RegionIdent {
-        catalog: "greptime".to_string(),
-        schema: "public".to_string(),
-        table: "demo".to_string(),
-        table_id: 1024,
-        engine: "mito".to_string(),
+        table_ident: TableIdent {
+            catalog: "greptime".to_string(),
+            schema: "public".to_string(),
+            table: "demo".to_string(),
+            table_id: 1024,
+            engine: "mito".to_string(),
+        },
         region_number: 0,
         cluster_id: 1,
         datanode_id: 2,
@@ -241,11 +249,13 @@ fn close_region_instruction() -> Instruction {
 
 fn open_region_instruction() -> Instruction {
     Instruction::OpenRegion(RegionIdent {
-        catalog: "greptime".to_string(),
-        schema: "public".to_string(),
-        table: "demo".to_string(),
-        table_id: 1024,
-        engine: "mito".to_string(),
+        table_ident: TableIdent {
+            catalog: "greptime".to_string(),
+            schema: "public".to_string(),
+            table: "demo".to_string(),
+            table_id: 1024,
+            engine: "mito".to_string(),
+        },
         region_number: 0,
         cluster_id: 1,
         datanode_id: 2,

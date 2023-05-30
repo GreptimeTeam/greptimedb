@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::{Display, Formatter};
 use std::ops::Range;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -28,9 +29,23 @@ pub type MailboxRef = Arc<dyn Mailbox>;
 
 pub type MessageId = u64;
 
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum Channel {
     Datanode(u64),
     Frontend(u64),
+}
+
+impl Display for Channel {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Channel::Datanode(id) => {
+                write!(f, "Datanode-{}", id)
+            }
+            Channel::Frontend(id) => {
+                write!(f, "Frontend-{}", id)
+            }
+        }
+    }
 }
 
 impl Channel {
@@ -41,7 +56,6 @@ impl Channel {
         }
     }
 }
-
 pub enum BroadcastChannel {
     Datanode,
     Frontend,
@@ -65,15 +79,24 @@ impl BroadcastChannel {
 pub struct MailboxReceiver {
     message_id: MessageId,
     rx: oneshot::Receiver<Result<MailboxMessage>>,
+    ch: Channel,
 }
 
 impl MailboxReceiver {
-    pub fn new(message_id: MessageId, rx: oneshot::Receiver<Result<MailboxMessage>>) -> Self {
-        Self { message_id, rx }
+    pub fn new(
+        message_id: MessageId,
+        rx: oneshot::Receiver<Result<MailboxMessage>>,
+        ch: Channel,
+    ) -> Self {
+        Self { message_id, rx, ch }
     }
 
     pub fn message_id(&self) -> MessageId {
         self.message_id
+    }
+
+    pub fn channel(&self) -> Channel {
+        self.ch
     }
 }
 
@@ -110,12 +133,6 @@ pub trait Mailbox: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_channel_pusher_id() {
-        assert_eq!(Channel::Datanode(42).pusher_id(), "0-42");
-        assert_eq!(Channel::Frontend(42).pusher_id(), "1-42");
-    }
 
     #[test]
     fn test_channel_pusher_range() {
