@@ -24,7 +24,8 @@ use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::response::ErrorResponse;
 use pgwire::messages::startup::Authentication;
 use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
-use session::context::QueryContextRef;
+use session::context::UserInfo;
+use session::Session;
 
 use super::PostgresServerHandler;
 use crate::auth::{Identity, Password, UserProviderRef};
@@ -112,15 +113,19 @@ impl PgLoginVerifier {
     }
 }
 
-fn set_query_context_from_client_info<C>(client: &C, query_context: QueryContextRef)
+fn set_client_info<C>(client: &C, session: &Session)
 where
     C: ClientInfo,
 {
+    let ctx = session.context();
     if let Some(current_catalog) = client.metadata().get(super::METADATA_CATALOG) {
-        query_context.set_current_catalog(current_catalog);
+        ctx.set_current_catalog(current_catalog);
     }
     if let Some(current_schema) = client.metadata().get(super::METADATA_SCHEMA) {
-        query_context.set_current_schema(current_schema);
+        ctx.set_current_schema(current_schema);
+    }
+    if let Some(username) = client.metadata().get(super::METADATA_USER) {
+        session.set_user_info(UserInfo::new(username));
     }
 }
 
@@ -170,7 +175,7 @@ impl StartupHandler for PostgresServerHandler {
                         ))
                         .await?;
                 } else {
-                    set_query_context_from_client_info(client, self.query_ctx.clone());
+                    set_client_info(client, &self.session);
                     auth::finish_authentication(client, self.param_provider.as_ref()).await;
                 }
             }
@@ -193,7 +198,7 @@ impl StartupHandler for PostgresServerHandler {
                     )
                     .await;
                 }
-                set_query_context_from_client_info(client, self.query_ctx.clone());
+                set_client_info(client, &self.session);
                 auth::finish_authentication(client, self.param_provider.as_ref()).await;
             }
             _ => {}

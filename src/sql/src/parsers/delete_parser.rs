@@ -46,14 +46,13 @@ impl<'a> ParserContext<'a> {
 mod tests {
     use std::assert_matches::assert_matches;
 
-    use sqlparser::dialect::GenericDialect;
-
     use super::*;
+    use crate::dialect::GreptimeDbDialect;
 
     #[test]
     pub fn test_parse_insert() {
         let sql = r"delete from my_table where k1 = xxx and k2 = xxx and timestamp = xxx;";
-        let result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
+        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
         assert_eq!(1, result.len());
         assert_matches!(result[0], Statement::Delete { .. })
     }
@@ -61,7 +60,7 @@ mod tests {
     #[test]
     pub fn test_parse_invalid_insert() {
         let sql = r"delete my_table where "; // intentionally a bad sql
-        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
         assert!(result.is_err(), "result is: {result:?}");
     }
 }

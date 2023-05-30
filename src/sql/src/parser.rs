@@ -393,16 +393,16 @@ mod tests {
     use sqlparser::ast::{
         Ident, ObjectName, Query as SpQuery, Statement as SpStatement, WildcardAdditionalOptions,
     };
-    use sqlparser::dialect::GenericDialect;
 
     use super::*;
+    use crate::dialect::GreptimeDbDialect;
     use crate::statements::create::CreateTable;
     use crate::statements::sql_data_type_to_concrete_data_type;
 
     #[test]
     pub fn test_show_database_all() {
         let sql = "SHOW DATABASES";
-        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
         let stmts = result.unwrap();
         assert_eq!(1, stmts.len());
 
@@ -417,7 +417,7 @@ mod tests {
     #[test]
     pub fn test_show_database_like() {
         let sql = "SHOW DATABASES LIKE test_database";
-        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
         let stmts = result.unwrap();
         assert_eq!(1, stmts.len());
 
@@ -435,7 +435,7 @@ mod tests {
     #[test]
     pub fn test_show_database_where() {
         let sql = "SHOW DATABASES WHERE Database LIKE '%whatever1%' OR Database LIKE '%whatever2%'";
-        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
         let stmts = result.unwrap();
         assert_eq!(1, stmts.len());
 
@@ -454,7 +454,7 @@ mod tests {
     #[test]
     pub fn test_show_tables_all() {
         let sql = "SHOW TABLES";
-        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
         let stmts = result.unwrap();
         assert_eq!(1, stmts.len());
 
@@ -470,7 +470,7 @@ mod tests {
     #[test]
     pub fn test_show_tables_like() {
         let sql = "SHOW TABLES LIKE test_table";
-        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
         let stmts = result.unwrap();
         assert_eq!(1, stmts.len());
 
@@ -486,7 +486,7 @@ mod tests {
         );
 
         let sql = "SHOW TABLES in test_db LIKE test_table";
-        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
         let stmts = result.unwrap();
         assert_eq!(1, stmts.len());
 
@@ -505,7 +505,7 @@ mod tests {
     #[test]
     pub fn test_show_tables_where() {
         let sql = "SHOW TABLES where name like test_table";
-        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
         let stmts = result.unwrap();
         assert_eq!(1, stmts.len());
 
@@ -518,7 +518,7 @@ mod tests {
         );
 
         let sql = "SHOW TABLES in test_db where name LIKE test_table";
-        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
         let stmts = result.unwrap();
         assert_eq!(1, stmts.len());
 
@@ -534,7 +534,7 @@ mod tests {
     #[test]
     pub fn test_explain() {
         let sql = "EXPLAIN select * from foo";
-        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
         let stmts = result.unwrap();
         assert_eq!(1, stmts.len());
 
@@ -589,7 +589,7 @@ mod tests {
     #[test]
     pub fn test_drop_table() {
         let sql = "DROP TABLE foo";
-        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
         let mut stmts = result.unwrap();
         assert_eq!(
             stmts.pop().unwrap(),
@@ -597,7 +597,7 @@ mod tests {
         );
 
         let sql = "DROP TABLE my_schema.foo";
-        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
         let mut stmts = result.unwrap();
         assert_eq!(
             stmts.pop().unwrap(),
@@ -608,7 +608,7 @@ mod tests {
         );
 
         let sql = "DROP TABLE my_catalog.my_schema.foo";
-        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
         let mut stmts = result.unwrap();
         assert_eq!(
             stmts.pop().unwrap(),
@@ -621,7 +621,7 @@ mod tests {
     }
 
     fn test_timestamp_precision(sql: &str, expected_type: ConcreteDataType) {
-        match ParserContext::create_with_dialect(sql, &GenericDialect {})
+        match ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
             .unwrap()
             .pop()
             .unwrap()
@@ -673,7 +673,7 @@ mod tests {
     #[test]
     fn test_parse_function() {
         let expr =
-            ParserContext::parse_function("current_timestamp()", &GenericDialect {}).unwrap();
+            ParserContext::parse_function("current_timestamp()", &GreptimeDbDialect {}).unwrap();
         assert!(matches!(expr, Expr::Function(_)));
     }
 }
