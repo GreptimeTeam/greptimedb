@@ -32,3 +32,9 @@ Test oss storage:
 ```
 cargo test oss
 ```
+
+Test azblob storage:
+
+```
+cargo test azblob
+```
