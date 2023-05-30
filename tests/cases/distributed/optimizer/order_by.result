@@ -1,0 +1,51 @@
+explain select * from numbers;
+
++--------------+------------------------------------------+
+| plan_type    | plan                                     |
++--------------+------------------------------------------+
+| logical_plan | MergeScan [is_placeholder=false]         |
+|              |   TableScan: numbers projection=[number] |
++--------------+------------------------------------------+
+
+explain select * from numbers order by number desc;
+
++--------------+--------------------------------------------+
+| plan_type    | plan                                       |
++--------------+--------------------------------------------+
+| logical_plan | Sort: numbers.number DESC NULLS FIRST      |
+|              |   MergeScan [is_placeholder=false]         |
+|              |     TableScan: numbers projection=[number] |
++--------------+--------------------------------------------+
+
+explain select * from numbers order by number asc;
+
++--------------+--------------------------------------------+
+| plan_type    | plan                                       |
++--------------+--------------------------------------------+
+| logical_plan | Sort: numbers.number ASC NULLS LAST        |
+|              |   MergeScan [is_placeholder=false]         |
+|              |     TableScan: numbers projection=[number] |
++--------------+--------------------------------------------+
+
+explain select * from numbers order by number desc limit 10;
+
++--------------+---------------------------------------------------+
+| plan_type    | plan                                              |
++--------------+---------------------------------------------------+
+| logical_plan | Limit: skip=0, fetch=10                           |
+|              |   Sort: numbers.number DESC NULLS FIRST, fetch=10 |
+|              |     MergeScan [is_placeholder=false]              |
+|              |       TableScan: numbers projection=[number]      |
++--------------+---------------------------------------------------+
+
+explain select * from numbers order by number asc limit 10;
+
++--------------+-------------------------------------------------+
+| plan_type    | plan                                            |
++--------------+-------------------------------------------------+
+| logical_plan | Limit: skip=0, fetch=10                         |
+|              |   Sort: numbers.number ASC NULLS LAST, fetch=10 |
+|              |     MergeScan [is_placeholder=false]            |
+|              |       TableScan: numbers projection=[number]    |
++--------------+-------------------------------------------------+
+
