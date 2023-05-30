@@ -86,16 +86,24 @@ impl ExtensionPlanner for DistExtensionPlanner {
                     .encode(input_plan.clone())
                     .context(error::EncodeSubstraitLogicalPlanSnafu)?
                     .into();
-                let peers = self.get_peers(&table_name).await?;
-                let exec = MergeScanExec::new(
-                    table_name,
-                    peers,
-                    substrait_plan,
-                    Arc::new(input_schema.as_ref().into()),
-                    self.clients.clone(),
-                );
+                let peers = self.get_peers(&table_name).await;
+                match peers {
+                    Ok(peers) => {
+                        let exec = MergeScanExec::new(
+                            table_name,
+                            peers,
+                            substrait_plan,
+                            Arc::new(input_schema.as_ref().into()),
+                            self.clients.clone(),
+                        );
 
-                Ok(Some(Arc::new(exec) as _))
+                        Ok(Some(Arc::new(exec) as _))
+                    }
+                    Err(_) => planner
+                        .create_physical_plan(input_plan, session_state)
+                        .await
+                        .map(Some),
+                }
             }
         } else {
             Ok(None)
