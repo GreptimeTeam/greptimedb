@@ -1,3 +1,4 @@
+#![feature(let_chains)]
 // Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");

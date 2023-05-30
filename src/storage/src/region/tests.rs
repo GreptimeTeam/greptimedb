@@ -16,12 +16,12 @@
 
 use std::collections::{HashMap, HashSet};
 
+use arrow::compute::SortOptions;
 use common_base::readable_size::ReadableSize;
 use common_datasource::compression::CompressionType;
+use common_recordbatch::OrderOption;
 use common_telemetry::logging;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
-use common_time::range::TimestampRange;
-use common_time::timestamp::TimeUnit;
 use datatypes::prelude::{LogicalTypeId, ScalarVector, WrapperType};
 use datatypes::timestamp::TimestampMillisecond;
 use datatypes::vectors::{
@@ -543,7 +543,6 @@ async fn create_store_config(region_name: &str, root: &str) -> StoreConfig<NoopL
 
 struct WindowedReaderTester {
     data_written: Vec<Vec<(i64, i64, String, bool)>>,
-    time_windows: Vec<(i64, i64)>,
     expected_ts: Vec<i64>,
     region: RegionImpl<NoopLogStore>,
     _temp_dir: TempDir,
@@ -553,7 +552,6 @@ impl WindowedReaderTester {
     async fn new(
         region_name: &'static str,
         data_written: Vec<Vec<(i64, i64, String, bool)>>,
-        time_windows: Vec<(i64, i64)>,
         expected_ts: Vec<i64>,
     ) -> Self {
         let temp_dir = create_temp_dir(&format!("write_and_read_windowed_{}", region_name));
@@ -564,7 +562,6 @@ impl WindowedReaderTester {
 
         let tester = Self {
             data_written,
-            time_windows,
             expected_ts,
             region,
             _temp_dir: temp_dir,
@@ -612,27 +609,24 @@ impl WindowedReaderTester {
     }
 
     async fn check(&self) {
-        let windows = self
-            .time_windows
-            .iter()
-            .map(|(start, end)| {
-                TimestampRange::with_unit(*start, *end, TimeUnit::Millisecond).unwrap()
-            })
-            .collect::<Vec<_>>();
-
         let read_context = ReadContext::default();
         let snapshot = self.region.snapshot(&read_context).unwrap();
         let response = snapshot
-            .windowed_scan(
+            .scan(
                 &read_context,
                 ScanRequest {
                     sequence: None,
                     projection: None,
                     filters: vec![],
                     limit: None,
-                    output_ordering: None,
+                    output_ordering: Some(vec![OrderOption {
+                        index: 0,
+                        options: SortOptions {
+                            descending: true,
+                            nulls_first: true,
+                        },
+                    }]),
                 },
-                windows,
             )
             .await
             .unwrap();
@@ -662,7 +656,6 @@ async fn test_read_by_chunk_reader() {
     WindowedReaderTester::new(
         "test_region",
         vec![vec![(1, 1, "1".to_string(), false)]],
-        vec![(1, 2)],
         vec![1],
     )
     .await
@@ -681,7 +674,6 @@ async fn test_read_by_chunk_reader() {
                 (4, 4, "4".to_string(), false),
             ],
         ],
-        vec![(1, 2), (2, 3), (3, 4), (4, 5)],
         vec![4, 3, 2, 1],
     )
     .await
@@ -694,14 +686,14 @@ async fn test_read_by_chunk_reader() {
             vec![
                 (1, 1, "1".to_string(), false),
                 (2, 2, "2".to_string(), false),
+                (60000, 60000, "60".to_string(), false),
             ],
             vec![
                 (3, 3, "3".to_string(), false),
-                (4, 4, "4".to_string(), false),
+                (61000, 61000, "61".to_string(), false),
             ],
         ],
-        vec![(1, 2), (2, 3), (4, 5), (3, 4)],
-        vec![3, 4, 2, 1],
+        vec![61000, 60000, 3, 2, 1],
     )
     .await
     .check()
