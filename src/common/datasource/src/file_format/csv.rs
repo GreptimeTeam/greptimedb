@@ -17,6 +17,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use arrow::csv;
+#[allow(deprecated)]
 use arrow::csv::reader::infer_reader_schema as infer_csv_schema;
 use arrow::record_batch::RecordBatch;
 use arrow_schema::{Schema, SchemaRef};
@@ -159,6 +160,7 @@ impl FileOpener for CsvOpener {
     }
 }
 
+#[allow(deprecated)]
 #[async_trait]
 impl FileFormat for CsvFormat {
     async fn infer_schema(&self, store: &ObjectStore, path: &str) -> Result<Schema> {

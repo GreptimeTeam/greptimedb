@@ -110,6 +110,7 @@ impl ArrowDecoder for arrow::csv::reader::Decoder {
     }
 }
 
+#[allow(deprecated)]
 impl ArrowDecoder for arrow::json::RawDecoder {
     fn decode(&mut self, buf: &[u8]) -> result::Result<usize, ArrowError> {
         self.decode(buf)
