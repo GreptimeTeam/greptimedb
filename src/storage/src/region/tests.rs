@@ -629,6 +629,8 @@ impl WindowedReaderTester {
                     sequence: None,
                     projection: None,
                     filters: vec![],
+                    limit: None,
+                    output_ordering: None,
                 },
                 windows,
             )
