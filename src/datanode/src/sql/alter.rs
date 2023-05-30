@@ -100,7 +100,7 @@ mod tests {
     use query::parser::{QueryLanguageParser, QueryStatement};
     use query::query_engine::SqlStatementExecutor;
     use session::context::QueryContext;
-    use sql::dialect::GenericDialect;
+    use sql::dialect::GreptimeDbDialect;
     use sql::parser::ParserContext;
     use sql::statements::statement::Statement;
 
@@ -108,7 +108,7 @@ mod tests {
     use crate::tests::test_util::MockInstance;
 
     fn parse_sql(sql: &str) -> AlterTable {
-        let mut stmt = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
+        let mut stmt = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
         assert_eq!(1, stmt.len());
         let stmt = stmt.remove(0);
         assert_matches!(stmt, Statement::Alter(_));

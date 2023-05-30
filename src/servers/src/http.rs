@@ -614,6 +614,7 @@ impl HttpServer {
 /// A middleware to record metrics for HTTP.
 // Based on https://github.com/tokio-rs/axum/blob/axum-v0.6.16/examples/prometheus-metrics/src/main.rs
 pub(crate) async fn track_metrics<B>(req: Request<B>, next: Next<B>) -> impl IntoResponse {
+    let _timer = common_telemetry::timer!("http_track_metrics", &[("tag", "value")]);
     let start = Instant::now();
     let path = if let Some(matched_path) = req.extensions().get::<MatchedPath>() {
         matched_path.as_str().to_owned()

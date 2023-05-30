@@ -6,7 +6,6 @@ license.workspace = true
 
 [dependencies]
 api = { path = "../api" }
-catalog = { path = "../catalog" }
 common-base = { path = "../common/base" }
 common-catalog = { path = "../common/catalog" }
 common-datasource = { path = "../common/datasource" }

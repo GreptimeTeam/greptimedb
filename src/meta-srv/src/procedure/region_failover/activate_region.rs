@@ -131,30 +131,27 @@ mod tests {
     use api::v1::meta::mailbox_message::Payload;
     use common_meta::instruction::SimpleReply;
 
-    use super::super::tests::{TestingEnv, TestingEnvBuilder};
+    use super::super::tests::TestingEnvBuilder;
     use super::*;
 
     #[tokio::test]
     async fn test_activate_region_success() {
         common_telemetry::init_default_ut_logging();
 
-        let TestingEnv {
-            context,
-            failed_region,
-            mut heartbeat_receivers,
-        } = TestingEnvBuilder::new().build().await;
+        let mut env = TestingEnvBuilder::new().build().await;
+        let failed_region = env.failed_region(1).await;
 
         let candidate = 2;
         let state = ActivateRegion::new(Peer::new(candidate, ""));
         let mailbox_receiver = state
-            .send_open_region_message(&context, &failed_region, Duration::from_millis(100))
+            .send_open_region_message(&env.context, &failed_region, Duration::from_millis(100))
             .await
             .unwrap();
 
         let message_id = mailbox_receiver.message_id();
 
         // verify that the open region message is sent
-        let rx = heartbeat_receivers.get_mut(&candidate).unwrap();
+        let rx = env.heartbeat_receivers.get_mut(&candidate).unwrap();
         let resp = rx.recv().await.unwrap().unwrap();
         let received = &resp.mailbox_message.unwrap();
         assert_eq!(received.id, message_id);
@@ -169,7 +166,7 @@ mod tests {
         );
 
         // simulating response from Datanode
-        context
+        env.context
             .mailbox
             .on_recv(
                 message_id,
@@ -205,21 +202,18 @@ mod tests {
     async fn test_activate_region_timeout() {
         common_telemetry::init_default_ut_logging();
 
-        let TestingEnv {
-            context,
-            failed_region,
-            mut heartbeat_receivers,
-        } = TestingEnvBuilder::new().build().await;
+        let mut env = TestingEnvBuilder::new().build().await;
+        let failed_region = env.failed_region(1).await;
 
         let candidate = 2;
         let state = ActivateRegion::new(Peer::new(candidate, ""));
         let mailbox_receiver = state
-            .send_open_region_message(&context, &failed_region, Duration::from_millis(100))
+            .send_open_region_message(&env.context, &failed_region, Duration::from_millis(100))
             .await
             .unwrap();
 
         // verify that the open region message is sent
-        let rx = heartbeat_receivers.get_mut(&candidate).unwrap();
+        let rx = env.heartbeat_receivers.get_mut(&candidate).unwrap();
         let resp = rx.recv().await.unwrap().unwrap();
         let received = &resp.mailbox_message.unwrap();
         assert_eq!(received.id, mailbox_receiver.message_id());

@@ -9,3 +9,4 @@ arc-swap = "1.5"
 common-catalog = { path = "../common/catalog" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
+sql = { path = "../sql" }

@@ -25,6 +25,7 @@ use crate::handler::{
     KeepLeaseHandler, OnLeaderStartHandler, PersistStatsHandler, Pushers, RegionFailureHandler,
     ResponseHeaderHandler,
 };
+use crate::lock::memory::MemLock;
 use crate::lock::DistLockRef;
 use crate::metadata_service::{DefaultMetadataService, MetadataServiceRef};
 use crate::metasrv::{
@@ -140,6 +141,8 @@ impl MetaSrvBuilder {
         let state_store = Arc::new(MetaStateStore::new(kv_store.clone()));
         let procedure_manager = Arc::new(LocalManager::new(ManagerConfig::default(), state_store));
 
+        let lock = lock.unwrap_or_else(|| Arc::new(MemLock::default()));
+
         let handler_group = match handler_group {
             Some(handler_group) => handler_group,
             None => {
@@ -154,6 +157,7 @@ impl MetaSrvBuilder {
                         catalog: None,
                         schema: None,
                     },
+                    lock.clone(),
                 ));
 
                 let region_failure_handler =

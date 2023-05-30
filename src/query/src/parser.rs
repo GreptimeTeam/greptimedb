@@ -26,7 +26,7 @@ use promql_parser::parser::ast::{Extension as NodeExtension, ExtensionExpr};
 use promql_parser::parser::Expr::Extension;
 use promql_parser::parser::{EvalStmt, Expr, ValueType};
 use snafu::ResultExt;
-use sql::dialect::GenericDialect;
+use sql::dialect::GreptimeDbDialect;
 use sql::parser::ParserContext;
 use sql::statements::statement::Statement;
 
@@ -108,7 +108,7 @@ pub struct QueryLanguageParser {}
 impl QueryLanguageParser {
     pub fn parse_sql(sql: &str) -> Result<QueryStatement> {
         let _timer = timer!(METRIC_PARSE_SQL_ELAPSED);
-        let mut statement = ParserContext::create_with_dialect(sql, &GenericDialect {})
+        let mut statement = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
             .map_err(BoxedError::new)
             .context(QueryParseSnafu {
                 query: sql.to_string(),

@@ -33,6 +33,8 @@ pub enum StatusCode {
     Internal = 1003,
     /// Invalid arguments.
     InvalidArguments = 1004,
+    /// The task is cancelled.
+    Cancelled = 1005,
     // ====== End of common status code ================
 
     // ====== Begin of SQL related status code =========
@@ -100,6 +102,7 @@ impl StatusCode {
             | StatusCode::Unsupported
             | StatusCode::Unexpected
             | StatusCode::InvalidArguments
+            | StatusCode::Cancelled
             | StatusCode::InvalidSyntax
             | StatusCode::PlanQuery
             | StatusCode::EngineExecuteQuery
@@ -125,6 +128,7 @@ impl StatusCode {
             | StatusCode::Unsupported
             | StatusCode::Unexpected
             | StatusCode::Internal
+            | StatusCode::Cancelled
             | StatusCode::PlanQuery
             | StatusCode::EngineExecuteQuery
             | StatusCode::StorageUnavailable

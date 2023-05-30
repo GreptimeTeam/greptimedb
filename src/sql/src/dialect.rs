@@ -12,6 +12,32 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// todo(hl) wrap sqlparser dialects
+pub use sqlparser::dialect::{Dialect, MySqlDialect, PostgreSqlDialect};
 
-pub use sqlparser::dialect::{Dialect, GenericDialect};
+/// GreptimeDb dialect
+#[derive(Debug, Clone)]
+pub struct GreptimeDbDialect {}
+
+impl Dialect for GreptimeDbDialect {
+    fn is_identifier_start(&self, ch: char) -> bool {
+        ch.is_alphabetic() || ch == '_' || ch == '#' || ch == '@'
+    }
+
+    fn is_identifier_part(&self, ch: char) -> bool {
+        ch.is_alphabetic()
+            || ch.is_ascii_digit()
+            || ch == '@'
+            || ch == '$'
+            || ch == '#'
+            || ch == '_'
+    }
+
+    // Accepts both `identifier` and "identifier".
+    fn is_delimited_identifier_start(&self, ch: char) -> bool {
+        ch == '`' || ch == '"'
+    }
+
+    fn supports_filter_during_aggregation(&self) -> bool {
+        true
+    }
+}
