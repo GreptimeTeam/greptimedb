@@ -110,17 +110,14 @@ impl TreeNodeVisitor for OrderHintVisitor {
     type N = LogicalPlan;
 
     fn pre_visit(&mut self, node: &Self::N) -> DataFusionResult<VisitRecursion> {
-        match node {
-            LogicalPlan::Sort(sort) => {
-                let mut exprs = vec![];
-                for expr in &sort.expr {
-                    if let Expr::Sort(sort_expr) = expr {
-                        exprs.push(sort_expr.clone());
-                    }
+        if let LogicalPlan::Sort(sort) = node {
+            let mut exprs = vec![];
+            for expr in &sort.expr {
+                if let Expr::Sort(sort_expr) = expr {
+                    exprs.push(sort_expr.clone());
                 }
-                self.order_expr = Some(exprs);
             }
-            _ => {}
+            self.order_expr = Some(exprs);
         }
         Ok(VisitRecursion::Continue)
     }
