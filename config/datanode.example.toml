@@ -36,6 +36,8 @@ sync_write = false
 [storage]
 type = "File"
 data_home = "/tmp/greptimedb/"
+# TTL for all tables. Disabled by default.
+# global_ttl = "7d"
 
 # Compaction options, see `standalone.example.toml`.
 [storage.compaction]
