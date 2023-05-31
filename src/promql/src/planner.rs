@@ -1669,12 +1669,12 @@ mod test {
 
     #[tokio::test]
     async fn aggregate_stddev() {
-        do_aggregate_expr_plan("stddev", "STDDEVPOP").await;
+        do_aggregate_expr_plan("stddev", "STDDEV_POP").await;
     }
 
     #[tokio::test]
     async fn aggregate_stdvar() {
-        do_aggregate_expr_plan("stdvar", "VARIANCEPOP").await;
+        do_aggregate_expr_plan("stdvar", "VARIANCE_POP").await;
     }
 
     #[tokio::test]

@@ -255,7 +255,7 @@ mod test {
         let expected = String::from("Sql(Query(Query { \
             inner: Query { \
                 with: None, body: Select(Select { \
-                    distinct: false, \
+                    distinct: None, \
                     top: None, \
                     projection: \
                     [Wildcard(WildcardAdditionalOptions { opt_exclude: None, opt_except: None, opt_rename: None, opt_replace: None })], \
@@ -274,6 +274,7 @@ mod test {
             distribute_by: [], \
             sort_by: [], \
             having: None, \
+            named_window: [], \
             qualify: None \
             }), order_by: [], limit: None, offset: None, fetch: None, locks: [] }, param_types: [] }))");
 
