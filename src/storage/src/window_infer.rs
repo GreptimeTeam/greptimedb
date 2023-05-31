@@ -43,8 +43,12 @@ pub(crate) trait WindowInfer {
     ///
     /// ### Note
     /// The order of returned vector defines how records are yielded.
-    fn infer_window(&self, files: &[FileMeta], mem_tables: &[MemtableStats])
-        -> Vec<TimestampRange>;
+    fn infer_window(
+        &self,
+        files: &[FileMeta],
+        mem_tables: &[MemtableStats],
+        ts_desc: bool,
+    ) -> Vec<TimestampRange>;
 }
 
 /// [PlainWindowInference] simply finds the minimum time span within all SST files in level 0 and
@@ -56,6 +60,7 @@ impl WindowInfer for PlainWindowInference {
         &self,
         files: &[FileMeta],
         mem_tables: &[MemtableStats],
+        ts_desc: bool,
     ) -> Vec<TimestampRange> {
         let mut min_duration_sec = i64::MAX;
         let mut durations = Vec::with_capacity(files.len() + mem_tables.len());
@@ -94,7 +99,13 @@ impl WindowInfer for PlainWindowInference {
         let window_size = min_duration_to_window_size(min_duration_sec);
         align_time_spans_to_windows(&durations, window_size)
             .into_iter()
-            .sorted_by(|(l_start, _), (r_start, _)| r_start.cmp(l_start)) // sort time windows in descending order
+            .sorted_by(|(l_start, _), (r_start, _)| {
+                if ts_desc {
+                    l_start.cmp(r_start)
+                } else {
+                    r_start.cmp(l_start)
+                }
+            }) // sort time windows in descending order
             // unwrap safety: we ensure that end>=start so that TimestampRange::with_unit won't return None
             .map(|(start, end)| TimestampRange::with_unit(start, end, TimeUnit::Second).unwrap())
             .collect()
@@ -230,6 +241,7 @@ mod tests {
                 min_timestamp: Timestamp::new(2001, TimeUnit::Millisecond),
                 ..Default::default()
             }],
+            true,
         );
         assert_eq!(
             vec![TimestampRange::with_unit(0, 60, TimeUnit::Second).unwrap()],
@@ -249,11 +261,12 @@ mod tests {
                 min_timestamp: Timestamp::new(2001, TimeUnit::Millisecond),
                 ..Default::default()
             }],
+            true,
         );
         assert_eq!(
             vec![
-                TimestampRange::with_unit(60, 120, TimeUnit::Second).unwrap(),
                 TimestampRange::with_unit(0, 60, TimeUnit::Second).unwrap(),
+                TimestampRange::with_unit(60, 120, TimeUnit::Second).unwrap(),
             ],
             res
         );
@@ -280,12 +293,13 @@ mod tests {
                 min_timestamp: Timestamp::new(2001, TimeUnit::Millisecond),
                 ..Default::default()
             }],
+            true,
         );
         assert_eq!(
             vec![
-                TimestampRange::with_unit(60 * 60, 61 * 60, TimeUnit::Second).unwrap(),
-                TimestampRange::with_unit(60, 120, TimeUnit::Second).unwrap(),
                 TimestampRange::with_unit(0, 60, TimeUnit::Second).unwrap(),
+                TimestampRange::with_unit(60, 120, TimeUnit::Second).unwrap(),
+                TimestampRange::with_unit(60 * 60, 61 * 60, TimeUnit::Second).unwrap(),
             ],
             res
         );
@@ -313,9 +327,47 @@ mod tests {
                 min_timestamp: Timestamp::new(0, TimeUnit::Millisecond),
                 ..Default::default()
             }],
+            true,
         );
 
         // inferred window size should be 600 sec
+        assert_eq!(
+            vec![
+                TimestampRange::with_unit(0, 600, TimeUnit::Second).unwrap(),
+                TimestampRange::with_unit(600, 1200, TimeUnit::Second).unwrap(),
+                TimestampRange::with_unit(1200, 1800, TimeUnit::Second).unwrap(),
+                TimestampRange::with_unit(1800, 2400, TimeUnit::Second).unwrap(),
+            ],
+            res
+        );
+
+        let res = window_inference.infer_window(
+            &[
+                FileMeta {
+                    time_range: Some((
+                        Timestamp::new(0, TimeUnit::Millisecond),
+                        Timestamp::new(60 * 1000, TimeUnit::Millisecond),
+                    )),
+                    level: 1, // this SST will be ignored
+                    ..Default::default()
+                },
+                FileMeta {
+                    time_range: Some((
+                        Timestamp::new(0, TimeUnit::Millisecond),
+                        Timestamp::new(10 * 60 * 1000, TimeUnit::Millisecond),
+                    )),
+                    ..Default::default()
+                },
+            ],
+            &[MemtableStats {
+                max_timestamp: Timestamp::new(60 * 30 * 1000 + 1, TimeUnit::Millisecond),
+                min_timestamp: Timestamp::new(0, TimeUnit::Millisecond),
+                ..Default::default()
+            }],
+            false,
+        );
+
+        // timestamp asc order
         assert_eq!(
             vec![
                 TimestampRange::with_unit(1800, 2400, TimeUnit::Second).unwrap(),

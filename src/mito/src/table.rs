@@ -236,6 +236,7 @@ impl<R: Region> Table for MitoTable<R> {
             let scan_request = ScanRequest {
                 projection,
                 filters,
+                output_ordering: request.output_ordering.clone(),
                 ..Default::default()
             };
 
