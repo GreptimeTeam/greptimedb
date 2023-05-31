@@ -14,8 +14,7 @@
 
 use std::str::FromStr;
 
-use api::v1::meta::TableName;
-use catalog::helper::TableGlobalKey;
+use common_meta::key::TABLE_ROUTE_PREFIX;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -28,7 +27,6 @@ use crate::handler::node_stat::Stat;
 pub(crate) const REMOVED_PREFIX: &str = "__removed";
 pub(crate) const DN_LEASE_PREFIX: &str = "__meta_dnlease";
 pub(crate) const SEQ_PREFIX: &str = "__meta_seq";
-pub(crate) const TABLE_ROUTE_PREFIX: &str = "__meta_table_route";
 
 pub const DN_STAT_PREFIX: &str = "__meta_dnstat";
 
@@ -126,51 +124,6 @@ impl TryFrom<LeaseValue> for Vec<u8> {
                 input: format!("{dn_value:?}"),
             })?
             .into_bytes())
-    }
-}
-
-pub struct TableRouteKey<'a> {
-    pub table_id: u64,
-    pub catalog_name: &'a str,
-    pub schema_name: &'a str,
-    pub table_name: &'a str,
-}
-
-impl<'a> TableRouteKey<'a> {
-    pub fn with_table_name(table_id: u64, t: &'a TableName) -> Self {
-        Self {
-            table_id,
-            catalog_name: &t.catalog_name,
-            schema_name: &t.schema_name,
-            table_name: &t.table_name,
-        }
-    }
-
-    pub fn with_table_global_key(table_id: u64, t: &'a TableGlobalKey) -> Self {
-        Self {
-            table_id,
-            catalog_name: &t.catalog_name,
-            schema_name: &t.schema_name,
-            table_name: &t.table_name,
-        }
-    }
-
-    #[inline]
-    pub fn prefix(&self) -> String {
-        format!(
-            "{}-{}-{}-{}",
-            TABLE_ROUTE_PREFIX, self.catalog_name, self.schema_name, self.table_name
-        )
-    }
-
-    #[inline]
-    pub fn key(&self) -> String {
-        format!("{}-{}", self.prefix(), self.table_id)
-    }
-
-    #[inline]
-    pub fn removed_key(&self) -> String {
-        to_removed_key(&self.key())
     }
 }
 

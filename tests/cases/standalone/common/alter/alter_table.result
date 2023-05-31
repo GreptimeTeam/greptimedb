@@ -1,8 +1,8 @@
-CREATE TABLE t(i INTEGER, j BIGINT TIME INDEX);
+CREATE TABLE test_alt_table(i INTEGER, j BIGINT TIME INDEX);
 
 Affected Rows: 0
 
-DESC TABLE t;
+DESC TABLE test_alt_table;
 
 +-------+-------+------+---------+---------------+
 | Field | Type  | Null | Default | Semantic Type |
@@ -11,11 +11,11 @@ DESC TABLE t;
 | j     | Int64 | NO   |         | TIME INDEX    |
 +-------+-------+------+---------+---------------+
 
-ALTER TABLE t ADD COLUMN k INTEGER;
+ALTER TABLE test_alt_table ADD COLUMN k INTEGER;
 
 Affected Rows: 0
 
-DESC TABLE t;
+DESC TABLE test_alt_table;
 
 +-------+-------+------+---------+---------------+
 | Field | Type  | Null | Default | Semantic Type |
@@ -26,11 +26,11 @@ DESC TABLE t;
 +-------+-------+------+---------+---------------+
 
 -- SQLNESS ARG restart=true
-ALTER TABLE t ADD COLUMN m INTEGER;
+ALTER TABLE test_alt_table ADD COLUMN m INTEGER;
 
 Affected Rows: 0
 
-DESC TABLE t;
+DESC TABLE test_alt_table;
 
 +-------+-------+------+---------+---------------+
 | Field | Type  | Null | Default | Semantic Type |
@@ -41,7 +41,7 @@ DESC TABLE t;
 | m     | Int32 | YES  |         | FIELD         |
 +-------+-------+------+---------+---------------+
 
-DROP TABLE t;
+DROP TABLE test_alt_table;
 
 Affected Rows: 1
 

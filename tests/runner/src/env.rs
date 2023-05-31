@@ -205,7 +205,7 @@ impl Env {
         args.push(format!("--mysql-addr=0.0.0.0:420{id}"));
         args.push(format!("--http-addr=0.0.0.0:430{id}"));
         args.push(format!(
-            "--data-home=/tmp/greptimedb_datanode_{}_{id}/data",
+            "--data-home=/tmp/greptimedb_datanode_{}",
             db_ctx.time
         ));
         args.push(format!(

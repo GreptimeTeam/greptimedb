@@ -20,6 +20,7 @@ use api::v1::meta::{
     RouteResponse, Table, TableRoute, TableRouteValue,
 };
 use catalog::helper::{TableGlobalKey, TableGlobalValue};
+use common_meta::key::TableRouteKey;
 use common_telemetry::{timer, warn};
 use snafu::{OptionExt, ResultExt};
 use table::metadata::RawTableInfo;
@@ -27,7 +28,6 @@ use tonic::{Request, Response};
 
 use crate::error;
 use crate::error::Result;
-use crate::keys::TableRouteKey;
 use crate::metasrv::{Context, MetaSrv, SelectorContext, SelectorRef};
 use crate::metrics::METRIC_META_ROUTE_REQUEST;
 use crate::sequence::SequenceRef;
@@ -307,7 +307,7 @@ async fn handle_delete(req: DeleteRequest, ctx: Context) -> Result<RouteResponse
 
     let _ = remove_table_global_value(&ctx.kv_store, &tgk).await?;
 
-    let trk = TableRouteKey::with_table_global_key(tgv.table_id() as u64, &tgk);
+    let trk = table_route_key(tgv.table_id() as u64, &tgk);
     let (_, trv) = remove_table_route_value(&ctx.kv_store, &trk).await?;
     let (peers, table_routes) = fill_table_routes(vec![(tgv, trv)])?;
 
@@ -368,13 +368,22 @@ async fn fetch_tables(
         }
         let tgv = tgv.unwrap();
 
-        let trk = TableRouteKey::with_table_global_key(tgv.table_id() as u64, &tgk);
+        let trk = table_route_key(tgv.table_id() as u64, &tgk);
         let trv = get_table_route_value(kv_store, &trk).await?;
 
         tables.push((tgv, trv));
     }
 
     Ok(tables)
+}
+
+fn table_route_key(table_id: u64, t: &TableGlobalKey) -> TableRouteKey<'_> {
+    TableRouteKey {
+        table_id,
+        catalog_name: &t.catalog_name,
+        schema_name: &t.schema_name,
+        table_name: &t.table_name,
+    }
 }
 
 async fn remove_table_route_value(
