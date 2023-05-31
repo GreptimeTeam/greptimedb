@@ -56,7 +56,8 @@ pub(crate) async fn new_object_store(store_config: &ObjectStoreConfig) -> Result
             LoggingLayer::default()
                 // Print the expected error only in DEBUG level.
                 // See https://docs.rs/opendal/latest/opendal/layers/struct.LoggingLayer.html#method.with_error_level
-                .with_error_level(Some(log::Level::Debug)),
+                .with_error_level(Some("debug"))
+                .expect("input error level must be valid"),
         )
         .layer(TracingLayer))
 }

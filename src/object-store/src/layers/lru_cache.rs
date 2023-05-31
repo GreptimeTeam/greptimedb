@@ -19,9 +19,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use lru::LruCache;
 use metrics::increment_counter;
-use opendal::ops::{OpDelete, OpList, OpRead, OpScan, OpWrite};
 use opendal::raw::oio::{Page, Read, Reader, Write};
-use opendal::raw::{Accessor, Layer, LayeredAccessor, RpDelete, RpList, RpRead, RpScan, RpWrite};
+use opendal::raw::{
+    Accessor, Layer, LayeredAccessor, OpAppend, OpDelete, OpList, OpRead, OpWrite, RpAppend,
+    RpDelete, RpList, RpRead, RpWrite,
+};
 use opendal::{ErrorKind, Result};
 use tokio::sync::Mutex;
 
@@ -108,6 +110,7 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
     type BlockingWriter = I::BlockingWriter;
     type Pager = I::Pager;
     type BlockingPager = I::BlockingPager;
+    type Appender = I::Appender;
 
     fn inner(&self) -> &Self::Inner {
         &self.inner
@@ -167,6 +170,10 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
         self.inner.write(path, args).await
     }
 
+    async fn append(&self, path: &str, args: OpAppend) -> Result<(RpAppend, Self::Appender)> {
+        self.inner.append(path, args).await
+    }
+
     async fn delete(&self, path: &str, args: OpDelete) -> Result<RpDelete> {
         let cache_path = md5::compute(path);
         let lru_cache = &self.lru_cache;
@@ -194,10 +201,6 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
         self.inner.list(path, args).await
     }
 
-    async fn scan(&self, path: &str, args: OpScan) -> Result<(RpScan, Self::Pager)> {
-        self.inner.scan(path, args).await
-    }
-
     fn blocking_read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::BlockingReader)> {
         self.inner.blocking_read(path, args)
     }
@@ -208,10 +211,6 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
 
     fn blocking_list(&self, path: &str, args: OpList) -> Result<(RpList, Self::BlockingPager)> {
         self.inner.blocking_list(path, args)
-    }
-
-    fn blocking_scan(&self, path: &str, args: OpScan) -> Result<(RpScan, Self::BlockingPager)> {
-        self.inner.blocking_scan(path, args)
     }
 }
 
