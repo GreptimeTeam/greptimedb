@@ -237,14 +237,7 @@ fn collect_fields(column_schemas: &[ColumnSchema]) -> Result<FieldsAndIndices> {
     let mut name_to_index = HashMap::with_capacity(column_schemas.len());
     let mut timestamp_index = None;
     for (index, column_schema) in column_schemas.iter().enumerate() {
-        if column_schema.is_time_index() {
-            ensure!(
-                timestamp_index.is_none(),
-                error::DuplicateTimestampIndexSnafu {
-                    exists: timestamp_index.unwrap(),
-                    new: index,
-                }
-            );
+        if column_schema.is_time_index() && timestamp_index.is_none() {
             timestamp_index = Some(index);
         }
         let field = Field::try_from(column_schema)?;
@@ -302,14 +295,8 @@ impl TryFrom<Arc<ArrowSchema>> for Schema {
         for (index, column_schema) in column_schemas.iter().enumerate() {
             if column_schema.is_time_index() {
                 validate_timestamp_index(&column_schemas, index)?;
-                ensure!(
-                    timestamp_index.is_none(),
-                    error::DuplicateTimestampIndexSnafu {
-                        exists: timestamp_index.unwrap(),
-                        new: index,
-                    }
-                );
                 timestamp_index = Some(index);
+                break;
             }
         }
 

@@ -15,6 +15,7 @@
 use arrow::compute::SortOptions;
 use arrow::row::{RowConverter, SortField};
 use arrow_array::{Array, ArrayRef};
+use common_recordbatch::OrderOption;
 use datatypes::data_type::DataType;
 use datatypes::vectors::Helper;
 use snafu::ResultExt;
@@ -30,6 +31,8 @@ pub struct WindowedReader<R> {
     pub schema: ProjectedSchemaRef,
     /// Each reader reads a slice of time window
     pub readers: Vec<R>,
+    /// `order_options` defines how records within windows are sorted.
+    pub order_options: Vec<OrderOption>,
 }
 
 impl<R> WindowedReader<R> {
@@ -38,8 +41,16 @@ impl<R> WindowedReader<R> {
     /// ### Note
     /// [WindowedReader] always reads the readers in a reverse order. The last reader in `readers`
     /// gets polled first.
-    pub fn new(schema: ProjectedSchemaRef, readers: Vec<R>) -> Self {
-        Self { schema, readers }
+    pub fn new(
+        schema: ProjectedSchemaRef,
+        readers: Vec<R>,
+        order_options: Vec<OrderOption>,
+    ) -> Self {
+        Self {
+            schema,
+            readers,
+            order_options,
+        }
     }
 }
 
@@ -74,7 +85,7 @@ where
             vectors_in_batch
                 .push(arrow::compute::concat(&columns).context(error::ConvertColumnsToRowsSnafu)?);
         }
-        let sorted = sort_by_rows(&self.schema, vectors_in_batch)?;
+        let sorted = sort_by_rows(&self.schema, vectors_in_batch, &self.order_options)?;
         let vectors = sorted
             .iter()
             .zip(store_schema.columns().iter().map(|c| &c.desc.name))
@@ -86,8 +97,12 @@ where
     }
 }
 
-fn sort_by_rows(schema: &ProjectedSchemaRef, arrays: Vec<ArrayRef>) -> Result<Vec<ArrayRef>> {
-    let sort_columns = build_sort_columns(schema);
+fn sort_by_rows(
+    schema: &ProjectedSchemaRef,
+    arrays: Vec<ArrayRef>,
+    order_options: &[OrderOption],
+) -> Result<Vec<ArrayRef>> {
+    let sort_columns = build_sorted_columns(order_options);
     let store_schema = schema.schema_to_read();
     // Convert columns to rows to speed lexicographic sort
     // TODO(hl): maybe optimize to lexsort_to_index when only timestamp column is involved.
@@ -133,13 +148,11 @@ fn sort_by_rows(schema: &ProjectedSchemaRef, arrays: Vec<ArrayRef>) -> Result<Ve
     Ok(sorted)
 }
 
-/// [<PK_1>, <PK_2>, TS] to [TS, <PK_1>, <PK_2>].
-/// Returns a vector of sort column indices and sort orders (true means descending order).
-fn build_sort_columns(schema: &ProjectedSchemaRef) -> Vec<(usize, bool)> {
-    let ts_col_index = schema.schema_to_read().timestamp_index();
-    let mut res = (0..(ts_col_index))
-        .map(|idx| (idx, false))
-        .collect::<Vec<_>>();
-    res.insert(0, (ts_col_index, true));
-    res
+/// Builds sorted columns from `order_options`.
+/// Returns a vector of columns indices to sort and sort orders (true means descending order).
+fn build_sorted_columns(order_options: &[OrderOption]) -> Vec<(usize, bool)> {
+    order_options
+        .iter()
+        .map(|o| (o.index, o.options.descending))
+        .collect()
 }
