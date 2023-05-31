@@ -539,7 +539,7 @@ mod tests {
         assert_eq!(1, stmts.len());
 
         let select = sqlparser::ast::Select {
-            distinct: false,
+            distinct: None,
             top: None,
             projection: vec![sqlparser::ast::SelectItem::Wildcard(
                 WildcardAdditionalOptions::default(),
@@ -562,6 +562,7 @@ mod tests {
             sort_by: vec![],
             having: None,
             qualify: None,
+            named_window: vec![],
         };
 
         let sp_statement = SpStatement::Query(Box::new(SpQuery {

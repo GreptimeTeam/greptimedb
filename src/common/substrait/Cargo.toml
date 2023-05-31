@@ -25,7 +25,7 @@ query = { path = "../../query" }
 
 [dependencies.substrait_proto]
 package = "substrait"
-version = "0.7"
+version = "0.10"
 
 [dev-dependencies]
 datatypes = { path = "../../datatypes" }
