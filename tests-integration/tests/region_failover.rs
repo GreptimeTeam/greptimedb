@@ -38,15 +38,50 @@ use tests_integration::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
 use tests_integration::test_util::{check_output_stream, get_test_store_config, StorageType};
 use tokio::time;
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_region_failover() {
+#[macro_export]
+macro_rules! region_failover_test {
+    ($service:ident, $($(#[$meta:meta])* $test:ident),*,) => {
+        paste::item! {
+            mod [<integration_region_failover_ $service:lower _test>] {
+                $(
+                    #[tokio::test(flavor = "multi_thread")]
+                    $(
+                        #[$meta]
+                    )*
+                    async fn [< $test >]() {
+                        let store_type = tests_integration::test_util::StorageType::$service;
+                        if store_type.test_on() {
+                            let _ = $crate::region_failover::$test(store_type).await;
+                        }
+
+                    }
+                )*
+            }
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! region_failover_tests {
+    ($($service:ident),*) => {
+        $(
+            region_failover_test!(
+                $service,
+
+                test_region_failover,
+            );
+        )*
+    };
+}
+
+pub async fn test_region_failover(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
 
     let mut logical_timer = 1685508715000;
 
     let cluster_name = "test_region_failover";
 
-    let (store_config, _guard) = get_test_store_config(&StorageType::File, cluster_name);
+    let (store_config, _guard) = get_test_store_config(&store_type, cluster_name);
 
     let cluster = GreptimeDbClusterBuilder::new(cluster_name)
         .with_datanodes(2)

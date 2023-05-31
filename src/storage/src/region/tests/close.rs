@@ -147,7 +147,12 @@ async fn test_close_wait_flush_done() {
     assert!(!has_parquet_file(&sst_dir));
 
     // Close should cancel the flush.
-    tester.base().region.close(&CloseContext::default()).await.unwrap();
+    tester
+        .base()
+        .region
+        .close(&CloseContext::default())
+        .await
+        .unwrap();
 
     assert!(!has_parquet_file(&sst_dir));
 }
