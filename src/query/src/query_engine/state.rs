@@ -30,9 +30,11 @@ use datafusion::physical_plan::planner::DefaultPhysicalPlanner;
 use datafusion::physical_plan::{ExecutionPlan, PhysicalPlanner};
 use datafusion_expr::LogicalPlan as DfLogicalPlan;
 use datafusion_optimizer::analyzer::Analyzer;
+use datafusion_optimizer::optimizer::Optimizer;
 use promql::extension_plan::PromExtensionPlanner;
 
 use crate::dist_plan::{DistExtensionPlanner, DistPlannerAnalyzer};
+use crate::optimizer::order_hint::OrderHintRule;
 use crate::optimizer::type_conversion::TypeConversionRule;
 use crate::query_engine::options::QueryOptions;
 
@@ -69,6 +71,8 @@ impl QueryEngineState {
             analyzer.rules.insert(0, Arc::new(DistPlannerAnalyzer));
         }
         analyzer.rules.insert(0, Arc::new(TypeConversionRule));
+        let mut optimizer = Optimizer::new();
+        optimizer.rules.push(Arc::new(OrderHintRule));
 
         let session_state = SessionState::with_config_rt_and_catalog_list(
             session_config,
@@ -76,6 +80,7 @@ impl QueryEngineState {
             Arc::new(MemoryCatalogList::default()), // pass a dummy catalog list
         )
         .with_analyzer_rules(analyzer.rules)
+        .with_optimizer_rules(optimizer.rules)
         .with_query_planner(Arc::new(DfQueryPlanner::new()));
 
         let df_context = SessionContext::with_state(session_state);

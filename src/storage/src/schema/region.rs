@@ -136,6 +136,11 @@ impl RegionSchema {
     }
 
     #[inline]
+    pub(crate) fn timestamp_column_name(&self) -> &str {
+        self.store_schema.column_name(self.timestamp_index())
+    }
+
+    #[inline]
     pub(crate) fn value_indices(&self) -> impl Iterator<Item = usize> {
         self.store_schema.value_indices()
     }

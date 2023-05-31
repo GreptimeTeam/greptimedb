@@ -163,6 +163,7 @@ impl Table for InformationTable {
         let stream = RecordBatchStreamAdaptor {
             schema: projected_schema,
             stream: Box::pin(stream),
+            output_ordering: None,
         };
         Ok(Box::pin(stream))
     }

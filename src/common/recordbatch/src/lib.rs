@@ -196,11 +196,16 @@ impl Stream for SimpleRecordBatchStream {
 pub struct RecordBatchStreamAdaptor {
     pub schema: SchemaRef,
     pub stream: Pin<Box<dyn Stream<Item = Result<RecordBatch>> + Send>>,
+    pub output_ordering: Option<Vec<OrderOption>>,
 }
 
 impl RecordBatchStream for RecordBatchStreamAdaptor {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
+    }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        self.output_ordering.as_ref().map(|x| x.as_slice())
     }
 }
 

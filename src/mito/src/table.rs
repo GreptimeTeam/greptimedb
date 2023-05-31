@@ -146,6 +146,7 @@ impl<R: Region> Table for MitoTable<R> {
         let mut first_schema: Option<Arc<Schema>> = None;
 
         let table_info = self.table_info.load();
+        let table_info_meta_schema = table_info.meta.schema.clone();
         // TODO(hl): Currently the API between frontend and datanode is under refactoring in
         // https://github.com/GreptimeTeam/greptimedb/issues/597 . Once it's finished, query plan
         // can carry filtered region info to avoid scanning all regions on datanode.
@@ -165,7 +166,7 @@ impl<R: Region> Table for MitoTable<R> {
                 ..Default::default()
             };
             let reader = snapshot
-                .scan(&read_ctx, scan_request)
+                .scan(&read_ctx, scan_request, table_info_meta_schema.clone())
                 .await
                 .map_err(BoxedError::new)
                 .context(table_error::TableOperationSnafu)?
@@ -207,7 +208,11 @@ impl<R: Region> Table for MitoTable<R> {
             }
         });
 
-        let stream = Box::pin(RecordBatchStreamAdaptor { schema, stream });
+        let stream = Box::pin(RecordBatchStreamAdaptor {
+            schema,
+            stream,
+            output_ordering: None,
+        });
         Ok(Arc::new(StreamScanAdapter::new(stream)))
     }
 
@@ -218,6 +223,7 @@ impl<R: Region> Table for MitoTable<R> {
         let mut first_schema: Option<Arc<Schema>> = None;
 
         let table_info = self.table_info.load();
+        let table_info_meta_schema = table_info.meta.schema.clone();
         // TODO(hl): Currently the API between frontend and datanode is under refactoring in
         // https://github.com/GreptimeTeam/greptimedb/issues/597 . Once it's finished, query plan
         // can carry filtered region info to avoid scanning all regions on datanode.
@@ -241,7 +247,7 @@ impl<R: Region> Table for MitoTable<R> {
             };
 
             let reader = snapshot
-                .scan(&read_ctx, scan_request)
+                .scan(&read_ctx, scan_request, table_info_meta_schema.clone())
                 .await
                 .map_err(BoxedError::new)
                 .context(table_error::TableOperationSnafu)?
@@ -274,6 +280,7 @@ impl<R: Region> Table for MitoTable<R> {
         })?;
 
         let schema = stream_schema.clone();
+        let output_ordering = readers.get(0).and_then(|reader| reader.output_ordering());
 
         let stream = Box::pin(async_stream::try_stream! {
             for mut reader in readers {
@@ -284,7 +291,11 @@ impl<R: Region> Table for MitoTable<R> {
             }
         });
 
-        Ok(Box::pin(RecordBatchStreamAdaptor { schema, stream }))
+        Ok(Box::pin(RecordBatchStreamAdaptor {
+            schema,
+            stream,
+            output_ordering,
+        }))
     }
 
     fn supports_filters_pushdown(&self, filters: &[&Expr]) -> TableResult<Vec<FilterPushDownType>> {

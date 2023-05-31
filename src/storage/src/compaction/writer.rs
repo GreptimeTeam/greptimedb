@@ -38,7 +38,7 @@ pub(crate) async fn build_sst_reader(
         .name
         .clone();
 
-    ChunkReaderBuilder::new(schema, sst_layer)
+    ChunkReaderBuilder::new(schema, sst_layer, None)
         .pick_ssts(files)
         .filters(vec![build_time_range_filter(
             lower_sec_inclusive,

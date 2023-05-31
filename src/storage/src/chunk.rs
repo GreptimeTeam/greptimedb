@@ -38,6 +38,7 @@ use crate::window_infer::{PlainWindowInference, WindowInfer};
 pub struct ChunkReaderImpl {
     schema: ProjectedSchemaRef,
     batch_reader: BoxedBatchReader,
+    output_ordering: Option<Vec<OrderOption>>,
 }
 
 #[async_trait]
@@ -62,13 +63,22 @@ impl ChunkReader for ChunkReaderImpl {
         };
         self.schema.batch_to_chunk(&batch)
     }
+
+    fn output_ordering(&self) -> Option<Vec<OrderOption>> {
+        self.output_ordering.clone()
+    }
 }
 
 impl ChunkReaderImpl {
-    pub fn new(schema: ProjectedSchemaRef, batch_reader: BoxedBatchReader) -> ChunkReaderImpl {
+    pub fn new(
+        schema: ProjectedSchemaRef,
+        batch_reader: BoxedBatchReader,
+        output_ordering: Option<Vec<OrderOption>>,
+    ) -> ChunkReaderImpl {
         ChunkReaderImpl {
             schema,
             batch_reader,
+            output_ordering,
         }
     }
 
@@ -81,6 +91,8 @@ impl ChunkReaderImpl {
 /// Builder to create a new [ChunkReaderImpl] from scan request.
 pub struct ChunkReaderBuilder {
     schema: RegionSchemaRef,
+    /// The schema created by user
+    user_schema: Option<SchemaRef>,
     projection: Option<Vec<usize>>,
     filters: Vec<Expr>,
     sst_layer: AccessLayerRef,
@@ -91,9 +103,14 @@ pub struct ChunkReaderBuilder {
 }
 
 impl ChunkReaderBuilder {
-    pub fn new(schema: RegionSchemaRef, sst_layer: AccessLayerRef) -> Self {
+    pub fn new(
+        schema: RegionSchemaRef,
+        sst_layer: AccessLayerRef,
+        user_schema: Option<SchemaRef>,
+    ) -> Self {
         ChunkReaderBuilder {
             schema,
+            user_schema,
             projection: None,
             filters: vec![],
             sst_layer,
@@ -161,13 +178,28 @@ impl ChunkReaderBuilder {
         self
     }
 
+    /// Try to infer time window from output ordering. If the result
+    /// is `None` means the output ordering is not obeyed, otherwise
+    /// means the output ordering is obeyed and is same with request.
     fn infer_time_windows(&self, output_ordering: &[OrderOption]) -> Option<Vec<TimestampRange>> {
         if output_ordering.is_empty() {
             return None;
         }
         let OrderOption { index, options } = &output_ordering[0];
-        if *index != self.schema.timestamp_index() {
-            return None;
+
+        // convert index in user schema to region schema
+        let first_name = self
+            .user_schema
+            .as_ref()
+            .map(|schema| schema.column_name_by_index(*index));
+
+        match first_name {
+            None => return None,
+            Some(first_name) => {
+                if first_name != self.schema.timestamp_column_name() {
+                    return None;
+                }
+            }
         }
         let memtable_stats = self.memtables.iter().map(|m| m.stats()).collect::<Vec<_>>();
         let files = self
@@ -238,15 +270,17 @@ impl ChunkReaderBuilder {
         );
         self.iter_ctx.projected_schema = Some(schema.clone());
 
+        let mut output_ordering = None;
         let reader = if let Some(ordering) = self.output_ordering.take() &&
             let Some(windows) = self.infer_time_windows(&ordering) {
-            self.build_windowed(&schema, &time_range_predicate, windows, ordering)
-                .await?
+                output_ordering = Some(ordering.clone());
+                self.build_windowed(&schema, &time_range_predicate, windows, ordering)
+                    .await?
         } else {
             self.build_reader(&schema, &time_range_predicate).await?
         };
 
-        Ok(ChunkReaderImpl::new(schema, reader))
+        Ok(ChunkReaderImpl::new(schema, reader, output_ordering))
     }
 
     /// Build time range predicate from schema and filters.
