@@ -1,0 +1,174 @@
+CREATE TABLE t(i INTEGER, j BIGINT TIME INDEX);
+
+Affected Rows: 0
+
+DESC TABLE t;
+
++-------+-------+------+---------+---------------+
+| Field | Type  | Null | Default | Semantic Type |
++-------+-------+------+---------+---------------+
+| i     | Int32 | YES  |         | FIELD         |
+| j     | Int64 | NO   |         | TIME INDEX    |
++-------+-------+------+---------+---------------+
+
+ALTER TABLE t ADD COLUMN k INTEGER;
+
+Affected Rows: 0
+
+DESC TABLE t;
+
++-------+-------+------+---------+---------------+
+| Field | Type  | Null | Default | Semantic Type |
++-------+-------+------+---------+---------------+
+| i     | Int32 | YES  |         | FIELD         |
+| j     | Int64 | NO   |         | TIME INDEX    |
+| k     | Int32 | YES  |         | FIELD         |
++-------+-------+------+---------+---------------+
+
+-- SQLNESS ARG restart=true
+DESC TABLE t;
+
++-------+-------+------+---------+---------------+
+| Field | Type  | Null | Default | Semantic Type |
++-------+-------+------+---------+---------------+
+| i     | Int32 | YES  |         | FIELD         |
+| j     | Int64 | NO   |         | TIME INDEX    |
+| k     | Int32 | YES  |         | FIELD         |
++-------+-------+------+---------+---------------+
+
+ALTER TABLE t ADD COLUMN m INTEGER;
+
+Affected Rows: 0
+
+DESC TABLE t;
+
++-------+-------+------+---------+---------------+
+| Field | Type  | Null | Default | Semantic Type |
++-------+-------+------+---------+---------------+
+| i     | Int32 | YES  |         | FIELD         |
+| j     | Int64 | NO   |         | TIME INDEX    |
+| k     | Int32 | YES  |         | FIELD         |
+| m     | Int32 | YES  |         | FIELD         |
++-------+-------+------+---------+---------------+
+
+INSERT INTO t VALUES (1, 2, 3, 4);
+
+Affected Rows: 1
+
+SELECT * FROM t;
+
++---+---+---+---+
+| i | j | k | m |
++---+---+---+---+
+| 1 | 2 | 3 | 4 |
++---+---+---+---+
+
+ALTER TABLE t ADD COLUMN n INTEGER FIRST;
+
+Affected Rows: 0
+
+DESC TABLE t;
+
++-------+-------+------+---------+---------------+
+| Field | Type  | Null | Default | Semantic Type |
++-------+-------+------+---------+---------------+
+| n     | Int32 | YES  |         | FIELD         |
+| i     | Int32 | YES  |         | FIELD         |
+| j     | Int64 | NO   |         | TIME INDEX    |
+| k     | Int32 | YES  |         | FIELD         |
+| m     | Int32 | YES  |         | FIELD         |
++-------+-------+------+---------+---------------+
+
+SELECT * FROM t;
+
++---+---+---+---+---+
+| n | i | j | k | m |
++---+---+---+---+---+
+|   | 1 | 2 | 3 | 4 |
++---+---+---+---+---+
+
+INSERT INTO t VALUES (2, 3, 4, 5, 6);
+
+Affected Rows: 1
+
+ALTER TABLE t ADD COLUMN y INTEGER AFTER j;
+
+Affected Rows: 0
+
+DESC TABLE t;
+
++-------+-------+------+---------+---------------+
+| Field | Type  | Null | Default | Semantic Type |
++-------+-------+------+---------+---------------+
+| n     | Int32 | YES  |         | FIELD         |
+| i     | Int32 | YES  |         | FIELD         |
+| j     | Int64 | NO   |         | TIME INDEX    |
+| y     | Int32 | YES  |         | FIELD         |
+| k     | Int32 | YES  |         | FIELD         |
+| m     | Int32 | YES  |         | FIELD         |
++-------+-------+------+---------+---------------+
+
+SELECT * FROM t;
+
++---+---+---+---+---+---+
+| n | i | j | y | k | m |
++---+---+---+---+---+---+
+|   | 1 | 2 |   | 3 | 4 |
+| 2 | 3 | 4 |   | 5 | 6 |
++---+---+---+---+---+---+
+
+-- SQLNESS ARG restart=true
+ALTER TABLE t ADD COLUMN a INTEGER FIRST;
+
+Affected Rows: 0
+
+DESC TABLE t;
+
++-------+-------+------+---------+---------------+
+| Field | Type  | Null | Default | Semantic Type |
++-------+-------+------+---------+---------------+
+| a     | Int32 | YES  |         | FIELD         |
+| n     | Int32 | YES  |         | FIELD         |
+| i     | Int32 | YES  |         | FIELD         |
+| j     | Int64 | NO   |         | TIME INDEX    |
+| y     | Int32 | YES  |         | FIELD         |
+| k     | Int32 | YES  |         | FIELD         |
+| m     | Int32 | YES  |         | FIELD         |
++-------+-------+------+---------+---------------+
+
+ALTER TABLE t ADD COLUMN b INTEGER AFTER j;
+
+Affected Rows: 0
+
+DESC TABLE t;
+
++-------+-------+------+---------+---------------+
+| Field | Type  | Null | Default | Semantic Type |
++-------+-------+------+---------+---------------+
+| a     | Int32 | YES  |         | FIELD         |
+| n     | Int32 | YES  |         | FIELD         |
+| i     | Int32 | YES  |         | FIELD         |
+| j     | Int64 | NO   |         | TIME INDEX    |
+| b     | Int32 | YES  |         | FIELD         |
+| y     | Int32 | YES  |         | FIELD         |
+| k     | Int32 | YES  |         | FIELD         |
+| m     | Int32 | YES  |         | FIELD         |
++-------+-------+------+---------+---------------+
+
+SELECT * FROM t;
+
++---+---+---+---+---+---+---+---+
+| a | n | i | j | b | y | k | m |
++---+---+---+---+---+---+---+---+
+|   |   | 1 | 2 |   |   | 3 | 4 |
+|   | 2 | 3 | 4 |   |   | 5 | 6 |
++---+---+---+---+---+---+---+---+
+
+ALTER TABLE t ADD COLUMN x int xxx;
+
+Error: 1001(Unsupported), SQL statement is not supported: ALTER TABLE t ADD COLUMN x int xxx;, keyword: xxx
+
+DROP TABLE t;
+
+Affected Rows: 1
+

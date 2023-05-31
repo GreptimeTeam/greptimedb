@@ -291,7 +291,10 @@ pub(crate) fn to_alter_expr(
             }
             .fail();
         }
-        AlterTableOperation::AddColumn { column_def } => Kind::AddColumns(AddColumns {
+        AlterTableOperation::AddColumn {
+            column_def,
+            location,
+        } => Kind::AddColumns(AddColumns {
             add_columns: vec![AddColumn {
                 column_def: Some(
                     sql_column_def_to_grpc_column_def(column_def)
@@ -299,7 +302,7 @@ pub(crate) fn to_alter_expr(
                         .context(ExternalSnafu)?,
                 ),
                 is_key: false,
-                location: None,
+                location: location.as_ref().map(From::from),
             }],
         }),
         AlterTableOperation::DropColumn { name } => Kind::DropColumns(DropColumns {

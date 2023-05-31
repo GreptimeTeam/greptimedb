@@ -14,7 +14,10 @@
 
 use std::fmt::{Debug, Formatter};
 
+use api::greptime_proto::v1::add_column::location::LocationType;
+use api::greptime_proto::v1::add_column::Location;
 use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
+use serde::{Deserialize, Serialize};
 
 pub mod columnar_value;
 pub mod error;
@@ -44,3 +47,24 @@ impl Debug for Output {
 }
 
 pub use datafusion::physical_plan::ExecutionPlan as DfPhysicalPlan;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AddColumnLocation {
+    First,
+    After { column_name: String },
+}
+
+impl From<&AddColumnLocation> for Location {
+    fn from(value: &AddColumnLocation) -> Self {
+        match value {
+            AddColumnLocation::First => Location {
+                location_type: LocationType::First.into(),
+                after_cloumn_name: "".to_string(),
+            },
+            AddColumnLocation::After { column_name } => Location {
+                location_type: LocationType::After.into(),
+                after_cloumn_name: column_name.to_string(),
+            },
+        }
+    }
+}

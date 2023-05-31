@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_query::AddColumnLocation;
 use datafusion_expr::TableProviderFilterPushDown;
 pub use datatypes::error::{Error as ConvertError, Result as ConvertResult};
 use datatypes::schema::{ColumnSchema, RawSchema, Schema, SchemaBuilder, SchemaRef};
@@ -140,6 +141,18 @@ impl TableMetaBuilder {
     }
 }
 
+/// The result after splitting requests by column location info.
+struct SplitResult<'a> {
+    /// column requests should be added at first place.
+    columns_at_first: Vec<&'a AddColumnRequest>,
+    /// column requests should be added after already exist columns.
+    columns_at_after: HashMap<String, Vec<&'a AddColumnRequest>>,
+    /// column requests should be added at last place.
+    columns_at_last: Vec<&'a AddColumnRequest>,
+    /// all column names should be added.
+    column_names: Vec<String>,
+}
+
 impl TableMeta {
     pub fn row_key_column_names(&self) -> impl Iterator<Item = &String> {
         let columns_schemas = &self.schema.column_schemas();
@@ -231,33 +244,49 @@ impl TableMeta {
     ) -> Result<TableMetaBuilder> {
         let table_schema = &self.schema;
         let mut meta_builder = self.new_meta_builder();
+        let original_primary_key_indices: HashSet<&usize> =
+            self.primary_key_indices.iter().collect();
 
-        // Check whether columns to add are already existing.
-        for request in requests {
-            let column_name = &request.column_schema.name;
-            ensure!(
-                table_schema.column_schema_by_name(column_name).is_none(),
-                error::ColumnExistsSnafu {
-                    column_name,
-                    table_name,
-                }
-            );
-        }
-
-        // Collect names of columns to add for error message.
-        let mut column_names = Vec::with_capacity(requests.len());
-        let mut primary_key_indices = self.primary_key_indices.clone();
+        let SplitResult {
+            columns_at_first,
+            columns_at_after,
+            columns_at_last,
+            column_names,
+        } = self.split_requests_by_column_location(table_name, requests)?;
+        let mut primary_key_indices = Vec::with_capacity(self.primary_key_indices.len());
         let mut columns = Vec::with_capacity(table_schema.num_columns() + requests.len());
-        columns.extend_from_slice(table_schema.column_schemas());
-        // Append new columns to the end of column list.
-        for request in requests {
-            column_names.push(request.column_schema.name.clone());
+        // add new columns with FIRST, and in reverse order of requests.
+        columns_at_first.iter().rev().for_each(|request| {
             if request.is_key {
                 // If a key column is added, we also need to store its index in primary_key_indices.
                 primary_key_indices.push(columns.len());
             }
             columns.push(request.column_schema.clone());
+        });
+        // add existed columns in original order and handle new columns with AFTER.
+        for (index, column_schema) in table_schema.column_schemas().iter().enumerate() {
+            if original_primary_key_indices.contains(&index) {
+                primary_key_indices.push(columns.len());
+            }
+            columns.push(column_schema.clone());
+            if let Some(requests) = columns_at_after.get(&column_schema.name) {
+                requests.iter().rev().for_each(|request| {
+                    if request.is_key {
+                        // If a key column is added, we also need to store its index in primary_key_indices.
+                        primary_key_indices.push(columns.len());
+                    }
+                    columns.push(request.column_schema.clone());
+                });
+            }
         }
+        // add new columns without location info to last.
+        columns_at_last.iter().for_each(|request| {
+            if request.is_key {
+                // If a key column is added, we also need to store its index in primary_key_indices.
+                primary_key_indices.push(columns.len());
+            }
+            columns.push(request.column_schema.clone());
+        });
 
         let mut builder = SchemaBuilder::try_from(columns)
             .with_context(|_| error::SchemaBuildSnafu {
@@ -357,6 +386,58 @@ impl TableMeta {
             .primary_key_indices(primary_key_indices);
 
         Ok(meta_builder)
+    }
+
+    /// Split requests into different groups using column location info.
+    fn split_requests_by_column_location<'a>(
+        &self,
+        table_name: &str,
+        requests: &'a [AddColumnRequest],
+    ) -> Result<SplitResult<'a>> {
+        let table_schema = &self.schema;
+        let mut columns_at_first = Vec::new();
+        let mut columns_at_after = HashMap::new();
+        let mut columns_at_last = Vec::new();
+        let mut column_names = Vec::with_capacity(requests.len());
+        for request in requests {
+            // Check whether columns to add are already existing.
+            let column_name = &request.column_schema.name;
+            column_names.push(column_name.clone());
+            ensure!(
+                table_schema.column_schema_by_name(column_name).is_none(),
+                error::ColumnExistsSnafu {
+                    column_name,
+                    table_name,
+                }
+            );
+            match request.location.as_ref() {
+                Some(AddColumnLocation::First) => {
+                    columns_at_first.push(request);
+                }
+                Some(AddColumnLocation::After { column_name }) => {
+                    ensure!(
+                        table_schema.column_schema_by_name(column_name).is_some(),
+                        error::ColumnNotExistsSnafu {
+                            column_name,
+                            table_name,
+                        }
+                    );
+                    columns_at_after
+                        .entry(column_name.clone())
+                        .or_insert(Vec::new())
+                        .push(request);
+                }
+                None => {
+                    columns_at_last.push(request);
+                }
+            }
+        }
+        Ok(SplitResult {
+            columns_at_first,
+            columns_at_after,
+            columns_at_last,
+            column_names,
+        })
     }
 }
 
@@ -568,10 +649,42 @@ mod tests {
                 AddColumnRequest {
                     column_schema: new_tag,
                     is_key: true,
+                    location: None,
                 },
                 AddColumnRequest {
                     column_schema: new_field,
                     is_key: false,
+                    location: None,
+                },
+            ],
+        };
+
+        let builder = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap();
+        builder.build().unwrap()
+    }
+
+    fn add_columns_to_meta_with_location(meta: &TableMeta) -> TableMeta {
+        let new_tag = ColumnSchema::new("my_tag_first", ConcreteDataType::string_datatype(), true);
+        let new_field = ColumnSchema::new(
+            "my_field_after_ts",
+            ConcreteDataType::string_datatype(),
+            true,
+        );
+        let alter_kind = AlterKind::AddColumns {
+            columns: vec![
+                AddColumnRequest {
+                    column_schema: new_tag,
+                    is_key: true,
+                    location: Some(AddColumnLocation::First),
+                },
+                AddColumnRequest {
+                    column_schema: new_field,
+                    is_key: false,
+                    location: Some(AddColumnLocation::After {
+                        column_name: "ts".to_string(),
+                    }),
                 },
             ],
         };
@@ -714,6 +827,7 @@ mod tests {
             columns: vec![AddColumnRequest {
                 column_schema: ColumnSchema::new("col1", ConcreteDataType::string_datatype(), true),
                 is_key: false,
+                location: None,
             }],
         };
 
@@ -797,5 +911,33 @@ mod tests {
 
         assert_eq!(4, meta.next_column_id);
         assert_eq!(column_schema.name, desc.name);
+    }
+
+    #[test]
+    fn test_add_columns_with_location() {
+        let schema = Arc::new(new_test_schema());
+        let meta = TableMetaBuilder::default()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        let new_meta = add_columns_to_meta_with_location(&meta);
+        assert_eq!(meta.region_numbers, new_meta.region_numbers);
+
+        let names: Vec<String> = new_meta
+            .schema
+            .column_schemas()
+            .iter()
+            .map(|column_schema| column_schema.name.clone())
+            .collect();
+        assert_eq!(
+            &["my_tag_first", "col1", "ts", "my_field_after_ts", "col2"],
+            &names[..]
+        );
+        assert_eq!(&[0, 1], &new_meta.primary_key_indices[..]);
+        assert_eq!(&[2, 3, 4], &new_meta.value_indices[..]);
     }
 }

@@ -12,9 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_query::AddColumnLocation;
 use snafu::ResultExt;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::ParserError;
+use sqlparser::tokenizer::Token;
 
 use crate::error::{self, Result};
 use crate::parser::ParserContext;
@@ -41,7 +43,25 @@ impl<'a> ParserContext<'a> {
             } else {
                 let _ = parser.parse_keyword(Keyword::COLUMN);
                 let column_def = parser.parse_column_def()?;
-                AlterTableOperation::AddColumn { column_def }
+                let location = if parser.parse_keyword(Keyword::FIRST) {
+                    Some(AddColumnLocation::First)
+                } else if let Token::Word(word) = parser.peek_token().token {
+                    if word.value.to_ascii_uppercase() == "AFTER" {
+                        parser.next_token();
+                        let name = parser.parse_identifier()?;
+                        Some(AddColumnLocation::After {
+                            column_name: name.value,
+                        })
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                AlterTableOperation::AddColumn {
+                    column_def,
+                    location,
+                }
             }
         } else if parser.parse_keyword(Keyword::DROP) {
             if parser.parse_keyword(Keyword::COLUMN) {
@@ -98,13 +118,90 @@ mod tests {
                 let alter_operation = alter_table.alter_operation();
                 assert_matches!(alter_operation, AlterTableOperation::AddColumn { .. });
                 match alter_operation {
-                    AlterTableOperation::AddColumn { column_def } => {
+                    AlterTableOperation::AddColumn {
+                        column_def,
+                        location,
+                    } => {
                         assert_eq!("tagk_i", column_def.name.value);
                         assert_eq!(DataType::String, column_def.data_type);
                         assert!(column_def
                             .options
                             .iter()
                             .any(|o| matches!(o.option, ColumnOption::Null)));
+                        assert_eq!(&None, location);
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_parse_alter_add_column_with_first() {
+        let sql = "ALTER TABLE my_metric_1 ADD tagk_i STRING Null FIRST;";
+        let mut result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        assert_eq!(1, result.len());
+
+        let statement = result.remove(0);
+        assert_matches!(statement, Statement::Alter { .. });
+        match statement {
+            Statement::Alter(alter_table) => {
+                assert_eq!("my_metric_1", alter_table.table_name().0[0].value);
+
+                let alter_operation = alter_table.alter_operation();
+                assert_matches!(alter_operation, AlterTableOperation::AddColumn { .. });
+                match alter_operation {
+                    AlterTableOperation::AddColumn {
+                        column_def,
+                        location,
+                    } => {
+                        assert_eq!("tagk_i", column_def.name.value);
+                        assert_eq!(DataType::String, column_def.data_type);
+                        assert!(column_def
+                            .options
+                            .iter()
+                            .any(|o| matches!(o.option, ColumnOption::Null)));
+                        assert_eq!(&Some(AddColumnLocation::First), location);
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_parse_alter_add_column_with_after() {
+        let sql = "ALTER TABLE my_metric_1 ADD tagk_i STRING Null AFTER ts;";
+        let mut result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        assert_eq!(1, result.len());
+
+        let statement = result.remove(0);
+        assert_matches!(statement, Statement::Alter { .. });
+        match statement {
+            Statement::Alter(alter_table) => {
+                assert_eq!("my_metric_1", alter_table.table_name().0[0].value);
+
+                let alter_operation = alter_table.alter_operation();
+                assert_matches!(alter_operation, AlterTableOperation::AddColumn { .. });
+                match alter_operation {
+                    AlterTableOperation::AddColumn {
+                        column_def,
+                        location,
+                    } => {
+                        assert_eq!("tagk_i", column_def.name.value);
+                        assert_eq!(DataType::String, column_def.data_type);
+                        assert!(column_def
+                            .options
+                            .iter()
+                            .any(|o| matches!(o.option, ColumnOption::Null)));
+                        assert_eq!(
+                            &Some(AddColumnLocation::After {
+                                column_name: "ts".to_string()
+                            }),
+                            location
+                        );
                     }
                     _ => unreachable!(),
                 }
