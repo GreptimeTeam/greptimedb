@@ -55,7 +55,7 @@ pub enum Error {
     #[snafu(display("Table {} not found", name))]
     TableNotFound { name: String },
 
-    #[snafu(display("Subprocedure {} failed", subprocedure_id))]
+    #[snafu(display("Subprocedure {} failed, source: {}", subprocedure_id, source))]
     SubprocedureFailed {
         subprocedure_id: ProcedureId,
         source: Arc<common_procedure::Error>,
