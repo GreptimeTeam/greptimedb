@@ -2574,7 +2574,6 @@ dependencies = [
  "humantime-serde",
  "hyper",
  "key-lock",
- "log",
  "log-store",
  "meta-client",
  "meta-srv",
