@@ -41,7 +41,12 @@ pub trait StorageEngine: Send + Sync + Clone + 'static {
     ) -> Result<Option<Self::Region>, Self::Error>;
 
     /// Closes given region.
-    async fn close_region(&self, ctx: &EngineContext, name: &str) -> Result<(), Self::Error>;
+    async fn close_region(
+        &self,
+        ctx: &EngineContext,
+        name: &str,
+        opts: &CloseOptions,
+    ) -> Result<(), Self::Error>;
 
     /// Creates and returns the created region.
     ///
@@ -100,4 +105,11 @@ pub struct OpenOptions {
     /// Region SST files TTL
     pub ttl: Option<Duration>,
     pub compaction_time_window: Option<i64>,
+}
+
+/// Options to close a region.
+#[derive(Debug, Clone, Default)]
+pub struct CloseOptions {
+    /// Flush region
+    pub flush: bool,
 }

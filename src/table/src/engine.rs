@@ -185,7 +185,7 @@ pub fn region_id(table_id: TableId, region_number: RegionNumber) -> RegionId {
 /// Retrieve the table id from specific `region_id`.
 #[inline]
 pub fn table_id(region_id: RegionId) -> TableId {
-    (region_id >> 32) as RegionNumber
+    (region_id >> 32) as TableId
 }
 
 /// Retrieve the region_number from specific `region_id`.

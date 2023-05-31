@@ -28,7 +28,7 @@ use common_test_util::temp_dir::create_temp_dir;
 use datanode::datanode::{DatanodeOptions, ObjectStoreConfig};
 use datanode::instance::Instance as DatanodeInstance;
 use frontend::datanode::DatanodeClients;
-use frontend::instance::Instance as FrontendInstance;
+use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use meta_client::client::MetaClientBuilder;
 use meta_srv::metasrv::{MetaSrv, MetaSrvOptions};
 use meta_srv::mocks::MockInfo;
@@ -51,7 +51,7 @@ pub struct GreptimeDbCluster {
     pub datanode_instances: HashMap<DatanodeId, Arc<DatanodeInstance>>,
     pub kv_store: KvStoreRef,
     pub meta_srv: MetaSrv,
-    pub frontend: Arc<FrontendInstance>,
+    pub frontend: Arc<FeInstance>,
 }
 
 pub struct GreptimeDbClusterBuilder {
@@ -96,6 +96,8 @@ impl GreptimeDbClusterBuilder {
         let frontend = self
             .build_frontend(meta_srv.clone(), datanode_clients)
             .await;
+
+        frontend.start().await.unwrap();
 
         GreptimeDbCluster {
             storage_guards,
@@ -197,17 +199,18 @@ impl GreptimeDbClusterBuilder {
         &self,
         meta_srv: MockInfo,
         datanode_clients: Arc<DatanodeClients>,
-    ) -> Arc<FrontendInstance> {
+    ) -> Arc<FeInstance> {
         let mut meta_client = MetaClientBuilder::new(1000, 0, Role::Frontend)
             .enable_router()
             .enable_store()
+            .enable_heartbeat()
             .channel_manager(meta_srv.channel_manager)
             .build();
         meta_client.start(&[&meta_srv.server_addr]).await.unwrap();
         let meta_client = Arc::new(meta_client);
 
         Arc::new(
-            FrontendInstance::try_new_distributed_with(
+            FeInstance::try_new_distributed_with(
                 meta_client,
                 datanode_clients,
                 Arc::new(Plugins::default()),

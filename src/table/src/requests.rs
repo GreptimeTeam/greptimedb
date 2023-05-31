@@ -242,6 +242,8 @@ pub struct CloseTableRequest {
     pub table_name: String,
     /// Do nothing if region_numbers is empty
     pub region_numbers: Vec<RegionNumber>,
+    /// flush regions
+    pub flush: bool,
 }
 
 impl CloseTableRequest {

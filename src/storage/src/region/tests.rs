@@ -602,6 +602,7 @@ impl WindowedReaderTester {
                 .flush(&FlushContext {
                     wait: true,
                     reason: FlushReason::Others,
+                    ..Default::default()
                 })
                 .await
                 .unwrap();

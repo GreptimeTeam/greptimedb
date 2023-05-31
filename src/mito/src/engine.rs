@@ -32,8 +32,8 @@ use object_store::ObjectStore;
 use snafu::{ensure, OptionExt, ResultExt};
 use storage::manifest::manifest_compress_type;
 use store_api::storage::{
-    ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyDescriptorBuilder, ColumnId,
-    EngineContext as StorageEngineContext, OpenOptions, RegionNumber, RowKeyDescriptor,
+    CloseOptions, ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyDescriptorBuilder,
+    ColumnId, EngineContext as StorageEngineContext, OpenOptions, RegionNumber, RowKeyDescriptor,
     RowKeyDescriptorBuilder, StorageEngine,
 };
 use table::engine::{
@@ -632,10 +632,11 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
             let ctx = StorageEngineContext::default();
 
+            let opts = CloseOptions::default();
             // Releases regions in storage engine
             for region_number in regions {
                 self.storage_engine
-                    .close_region(&ctx, &region_name(table_id, region_number))
+                    .close_region(&ctx, &region_name(table_id, region_number), &opts)
                     .await
                     .map_err(BoxedError::new)
                     .context(table_error::TableOperationSnafu)?;
@@ -681,7 +682,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         futures::future::try_join_all(
             self.tables
                 .iter()
-                .map(|item| self.close_table_inner(item.value().clone(), None)),
+                .map(|item| self.close_table_inner(item.value().clone(), None, false)),
         )
         .await
         .map_err(BoxedError::new)
@@ -700,7 +701,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         let table_ref = request.table_ref();
         if let Some(table) = self.get_mito_table(&table_ref) {
             return self
-                .close_table_inner(table, Some(&request.region_numbers))
+                .close_table_inner(table, Some(&request.region_numbers), request.flush)
                 .await;
         }
         // table doesn't exist
@@ -711,6 +712,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         &self,
         table: Arc<MitoTable<S::Region>>,
         regions: Option<&[RegionNumber]>,
+        flush: bool,
     ) -> TableResult<CloseTableResult> {
         let info = table.table_info();
         let table_ref = TableReference {
@@ -727,10 +729,11 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         let removed_regions = removed.keys().cloned().collect::<Vec<_>>();
         let ctx = StorageEngineContext::default();
 
+        let opts = CloseOptions { flush };
         // Releases regions in storage engine
         for region_number in regions {
             self.storage_engine
-                .close_region(&ctx, &region_name(table_id, *region_number))
+                .close_region(&ctx, &region_name(table_id, *region_number), &opts)
                 .await
                 .map_err(BoxedError::new)
                 .context(table_error::TableOperationSnafu)?;

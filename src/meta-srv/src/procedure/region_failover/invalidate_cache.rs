@@ -16,6 +16,7 @@ use api::v1::meta::MailboxMessage;
 use async_trait::async_trait;
 use common_meta::instruction::{Instruction, TableIdent};
 use common_meta::RegionIdent;
+use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
@@ -61,6 +62,10 @@ impl State for InvalidateCache {
         failed_region: &RegionIdent,
     ) -> Result<Box<dyn State>> {
         let table_ident = TableIdent::from(failed_region.clone());
+        info!(
+            "Broadcast invalidate table({}) cache message to frontend",
+            table_ident
+        );
         self.broadcast_invalidate_table_cache_messages(ctx, &table_ident)
             .await?;
 
