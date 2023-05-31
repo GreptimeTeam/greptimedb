@@ -33,7 +33,7 @@ pub trait Snapshot: Send + Sync {
         &self,
         ctx: &ReadContext,
         request: ScanRequest,
-        table_info_meta_schema: SchemaRef,
+        table_info_meta_schema: Option<SchemaRef>,
     ) -> Result<ScanResponse<Self::Reader>, Self::Error>;
 
     async fn get(&self, ctx: &ReadContext, request: GetRequest)

@@ -93,7 +93,7 @@ impl Snapshot for MockSnapshot {
         &self,
         _ctx: &ReadContext,
         request: ScanRequest,
-        _table_info_meta_schema: SchemaRef,
+        _table_info_meta_schema: Option<SchemaRef>,
     ) -> Result<ScanResponse<MockChunkReader>> {
         let memtable = {
             let memtable = self.region.memtable.read().unwrap();

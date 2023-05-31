@@ -166,7 +166,11 @@ impl<R: Region> Table for MitoTable<R> {
                 ..Default::default()
             };
             let reader = snapshot
-                .scan(&read_ctx, scan_request, table_info_meta_schema.clone())
+                .scan(
+                    &read_ctx,
+                    scan_request,
+                    Some(table_info_meta_schema.clone()),
+                )
                 .await
                 .map_err(BoxedError::new)
                 .context(table_error::TableOperationSnafu)?
@@ -247,7 +251,11 @@ impl<R: Region> Table for MitoTable<R> {
             };
 
             let reader = snapshot
-                .scan(&read_ctx, scan_request, table_info_meta_schema.clone())
+                .scan(
+                    &read_ctx,
+                    scan_request,
+                    Some(table_info_meta_schema.clone()),
+                )
                 .await
                 .map_err(BoxedError::new)
                 .context(table_error::TableOperationSnafu)?

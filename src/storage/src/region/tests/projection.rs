@@ -153,7 +153,7 @@ impl<S: LogStore> ProjectionTester<S> {
             projection,
             ..Default::default()
         };
-        let resp = snapshot.scan(&self.read_ctx, request).await.unwrap();
+        let resp = snapshot.scan(&self.read_ctx, request, None).await.unwrap();
         let mut reader = resp.reader;
 
         let mut dst = Vec::new();

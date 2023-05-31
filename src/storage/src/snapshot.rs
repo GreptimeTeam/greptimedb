@@ -46,7 +46,7 @@ impl Snapshot for SnapshotImpl {
         &self,
         ctx: &ReadContext,
         request: ScanRequest,
-        table_info_meta_schema: SchemaRef,
+        table_info_meta_schema: Option<SchemaRef>,
     ) -> Result<ScanResponse<ChunkReaderImpl>> {
         let visible_sequence = self.sequence_to_read(request.sequence);
         let memtable_version = self.version.memtables();
@@ -57,7 +57,7 @@ impl Snapshot for SnapshotImpl {
         let mut builder = ChunkReaderBuilder::new(
             self.version.schema().clone(),
             self.sst_layer.clone(),
-            Some(table_info_meta_schema),
+            table_info_meta_schema,
         )
         .reserve_num_memtables(memtable_version.num_memtables())
         .projection(request.projection)

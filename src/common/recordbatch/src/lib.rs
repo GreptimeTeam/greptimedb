@@ -205,7 +205,7 @@ impl RecordBatchStream for RecordBatchStreamAdaptor {
     }
 
     fn output_ordering(&self) -> Option<&[OrderOption]> {
-        self.output_ordering.as_ref().map(|x| x.as_slice())
+        self.output_ordering.as_deref()
     }
 }
 
