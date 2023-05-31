@@ -54,6 +54,13 @@ pub enum ObjectStoreConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct StorageConfig {
+    /// Retention period for all tables.
+    ///
+    /// Default value is `None`, which means no TTL.
+    ///
+    /// The precedence order is: ttl in table options > global ttl.
+    #[serde(with = "humantime_serde")]
+    pub global_ttl: Option<Duration>,
     #[serde(flatten)]
     pub store: ObjectStoreConfig,
     pub compaction: CompactionConfig,
@@ -300,6 +307,7 @@ impl From<&DatanodeOptions> for StorageEngineConfig {
             picker_schedule_interval: value.storage.flush.picker_schedule_interval,
             auto_flush_interval: value.storage.flush.auto_flush_interval,
             global_write_buffer_size: value.storage.flush.global_write_buffer_size,
+            global_ttl: value.storage.global_ttl,
         }
     }
 }

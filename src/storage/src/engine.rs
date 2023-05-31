@@ -465,7 +465,7 @@ impl<S: LogStore> EngineInner<S> {
         write_buffer_size: Option<usize>,
         region_name: &str,
         config: &EngineConfig,
-        ttl: Option<Duration>,
+        region_ttl: Option<Duration>,
         compaction_time_window: Option<i64>,
     ) -> Result<StoreConfig<S>> {
         let parent_dir = util::normalize_dir(parent_dir);
@@ -482,6 +482,9 @@ impl<S: LogStore> EngineInner<S> {
         );
         manifest.start().await?;
         let flush_strategy = self.flush_strategy.clone();
+
+        // If region_ttl is `None`, the global ttl takes effect.
+        let ttl = region_ttl.or(self.config.global_ttl);
 
         Ok(StoreConfig {
             log_store: self.log_store.clone(),

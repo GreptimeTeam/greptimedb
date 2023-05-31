@@ -97,6 +97,8 @@ sync_write = false
 type = "File"
 # Data directory, "/tmp/greptimedb/data" by default.
 data_home = "/tmp/greptimedb/"
+# TTL for all tables. Disabled by default.
+# global_ttl = "7d"
 
 # Compaction options.
 [storage.compaction]

@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use common_base::Plugins;
+use common_telemetry::logging;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use frontend::service_config::{InfluxdbOptions, PromOptions};
@@ -202,6 +203,9 @@ impl StartCommand {
     }
 
     async fn build(self, opts: FrontendOptions) -> Result<Instance> {
+        logging::info!("Frontend start command: {:#?}", self);
+        logging::info!("Frontend options: {:#?}", opts);
+
         let plugins = Arc::new(load_frontend_plugins(&self.user_provider)?);
 
         let mut instance = FeInstance::try_new_distributed(&opts, plugins.clone())
