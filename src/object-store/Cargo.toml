@@ -11,7 +11,7 @@ bytes = "1.4"
 futures = { version = "0.3" }
 md5 = "0.7"
 metrics.workspace = true
-opendal = { version = "0.33", features = ["layers-tracing", "layers-metrics"] }
+opendal = { version = "0.36", features = ["layers-tracing", "layers-metrics"] }
 pin-project = "1.0"
 tokio.workspace = true
 
