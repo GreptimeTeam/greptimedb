@@ -433,10 +433,9 @@ impl NullBufferBuilder {
     /// Builds the null buffer and resets the builder.
     /// Returns `None` if the builder only contains `true`s.
     fn finish(&mut self) -> Option<Buffer> {
-        let buf = self.bitmap_builder.as_mut().map(|b| b.finish());
-        self.bitmap_builder = None;
+        let buf = self.bitmap_builder.take().map(Into::into);
         self.len = 0;
-        buf.map(|buf| buf.inner().clone())
+        buf
     }
 
     #[inline]
