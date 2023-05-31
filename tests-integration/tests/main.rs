@@ -16,10 +16,12 @@
 mod grpc;
 #[macro_use]
 mod http;
-
+#[macro_use]
+mod sql;
 #[macro_use]
 mod region_failover;
 
 grpc_tests!(File, S3, S3WithCache, Oss);
 http_tests!(File, S3, S3WithCache, Oss);
 region_failover_tests!(File, S3, S3WithCache, Oss);
+sql_tests!(File);
