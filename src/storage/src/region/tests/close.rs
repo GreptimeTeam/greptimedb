@@ -18,7 +18,9 @@ use std::sync::Arc;
 
 use common_test_util::temp_dir::create_temp_dir;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
-use store_api::storage::{AlterOperation, AlterRequest, Region, RegionMeta, WriteResponse};
+use store_api::storage::{
+    AlterOperation, AlterRequest, CloseContext, Region, RegionMeta, WriteResponse,
+};
 
 use crate::engine;
 use crate::error::Error;
@@ -92,7 +94,12 @@ async fn test_close_basic() {
     let flush_switch = Arc::new(FlushSwitch::default());
     let tester = CloseTester::new(store_dir, flush_switch).await;
 
-    tester.base().region.close().await.unwrap();
+    tester
+        .base()
+        .region
+        .close(&CloseContext::default())
+        .await
+        .unwrap();
 
     let data = [(1000, Some(100))];
 
@@ -140,7 +147,7 @@ async fn test_close_wait_flush_done() {
     assert!(!has_parquet_file(&sst_dir));
 
     // Close should cancel the flush.
-    tester.base().region.close().await.unwrap();
+    tester.base().region.close(&CloseContext::default()).await.unwrap();
 
     assert!(!has_parquet_file(&sst_dir));
 }

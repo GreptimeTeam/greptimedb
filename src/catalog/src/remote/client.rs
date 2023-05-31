@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,9 +33,10 @@ const CACHE_MAX_CAPACITY: u64 = 10000;
 const CACHE_TTL_SECOND: u64 = 10 * 60;
 const CACHE_TTI_SECOND: u64 = 5 * 60;
 
+pub type CacheBackendRef = Arc<Cache<Vec<u8>, Option<Kv>>>;
 pub struct CachedMetaKvBackend {
     kv_backend: KvBackendRef,
-    cache: Arc<Cache<Vec<u8>, Option<Kv>>>,
+    cache: CacheBackendRef,
 }
 
 #[async_trait::async_trait]
@@ -98,6 +100,10 @@ impl KvBackend for CachedMetaKvBackend {
 
         ret
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 #[async_trait::async_trait]
@@ -129,6 +135,10 @@ impl CachedMetaKvBackend {
         );
 
         Self { kv_backend, cache }
+    }
+
+    pub fn cache(&self) -> &CacheBackendRef {
+        &self.cache
     }
 }
 
@@ -213,5 +223,9 @@ impl KvBackend for MetaKvBackend {
         } else {
             Ok(Err(response.take_prev_kv().map(|v| v.value().to_vec())))
         }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }

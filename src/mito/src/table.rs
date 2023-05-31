@@ -373,6 +373,7 @@ impl<R: Region> Table for MitoTable<R> {
             .map(|wait| FlushContext {
                 wait,
                 reason: FlushReason::Manually,
+                ..Default::default()
             })
             .unwrap_or_default();
         let regions = self.regions.load();

@@ -17,28 +17,32 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use catalog::helper::TableGlobalKey;
+use catalog::remote::{CachedMetaKvBackend, Kv};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
 use common_meta::instruction::TableIdent;
+use common_meta::rpc::router::TableRoute;
+use common_meta::table_name::TableName;
 use common_meta::RegionIdent;
 use common_procedure::{watcher, ProcedureWithId};
 use common_query::Output;
 use common_telemetry::info;
+use frontend::catalog::FrontendCatalogManager;
 use frontend::error::Result as FrontendResult;
-use frontend::instance::{FrontendInstance, Instance};
+use frontend::instance::Instance;
 use meta_srv::metasrv::SelectorContext;
 use meta_srv::procedure::region_failover::{RegionFailoverContext, RegionFailoverProcedure};
 use meta_srv::table_routes;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
 use tests_integration::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
-use tests_integration::test_util::{get_test_store_config, StorageType};
+use tests_integration::test_util::{check_output_stream, get_test_store_config, StorageType};
 use tokio::time;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_region_failover() {
     common_telemetry::init_default_ut_logging();
 
-    let mut logical_timer = 1685428902;
+    let mut logical_timer = 1685508715000;
 
     let cluster_name = "test_region_failover";
 
@@ -50,19 +54,33 @@ async fn test_region_failover() {
         .build()
         .await;
 
+    let frontend = cluster.frontend.clone();
+
     prepare_testing_table(&cluster).await;
 
-    // Inserts data to each datanode
-    let frontend = cluster.frontend.clone();
-    let result = frontend.start().await;
-
-    info!("start frontend heartbeat: {:?}", result);
-
     let results = write_datas(&frontend, logical_timer).await;
-    logical_timer += 1;
+    logical_timer += 1000;
     for result in results {
         assert!(matches!(result.unwrap(), Output::AffectedRows(1)));
     }
+
+    let cache_key = TableGlobalKey {
+        catalog_name: "greptime".to_string(),
+        schema_name: "public".to_string(),
+        table_name: "my_table".to_string(),
+    }
+    .to_string();
+
+    let table_name = TableName {
+        catalog_name: "greptime".to_string(),
+        schema_name: "public".to_string(),
+        table_name: "my_table".to_string(),
+    };
+
+    let cache = get_table_cache(&frontend, &cache_key).unwrap();
+    assert!(cache.is_some());
+    let route_cache = get_route_cache(&frontend, &table_name);
+    assert!(route_cache.is_some());
 
     let distribution = find_region_distribution(&cluster).await;
     info!("Find region distribution: {distribution:?}");
@@ -78,12 +96,19 @@ async fn test_region_failover() {
     // Waits for invalidating table cache
     time::sleep(Duration::from_millis(100)).await;
 
+    let cache = get_table_cache(&frontend, &cache_key);
+    assert!(cache.is_none());
+    let route_cache = get_route_cache(&frontend, &table_name);
+    assert!(route_cache.is_none());
+
     // Inserts data to each datanode after failover
     let frontend = cluster.frontend.clone();
     let results = write_datas(&frontend, logical_timer).await;
     for result in results {
         assert!(matches!(result.unwrap(), Output::AffectedRows(1)));
     }
+
+    assert_writes(&frontend).await;
 
     assert!(!distribution
         .remove(&failed_region.datanode_id)
@@ -95,6 +120,35 @@ async fn test_region_failover() {
         .next()
         .unwrap()
         .contains(&failed_region.region_number));
+}
+
+fn get_table_cache(instance: &Arc<Instance>, key: &str) -> Option<Option<Kv>> {
+    let catalog_manager = instance
+        .catalog_manager()
+        .as_any()
+        .downcast_ref::<FrontendCatalogManager>()
+        .unwrap();
+
+    let kvbackend = catalog_manager.backend();
+
+    let kvbackend = kvbackend
+        .as_any()
+        .downcast_ref::<CachedMetaKvBackend>()
+        .unwrap();
+    let cache = kvbackend.cache();
+
+    cache.get(key.as_bytes())
+}
+
+fn get_route_cache(instance: &Arc<Instance>, table_name: &TableName) -> Option<Arc<TableRoute>> {
+    let catalog_manager = instance
+        .catalog_manager()
+        .as_any()
+        .downcast_ref::<FrontendCatalogManager>()
+        .unwrap();
+    let pm = catalog_manager.partition_manager();
+    let cache = pm.table_routes().cache();
+    cache.get(table_name)
 }
 
 async fn write_datas(instance: &Arc<Instance>, ts: u64) -> Vec<FrontendResult<Output>> {
@@ -120,6 +174,30 @@ async fn write_data(
     query_ctx: QueryContextRef,
 ) -> FrontendResult<Output> {
     instance.do_query(sql, query_ctx).await.remove(0)
+}
+
+async fn assert_writes(instance: &Arc<Instance>) {
+    let query_ctx = QueryContext::arc();
+
+    let result = instance
+        .do_query("select * from my_table order by i, ts", query_ctx)
+        .await
+        .remove(0);
+
+    let expected = "\
++----+---------------------+
+| i  | ts                  |
++----+---------------------+
+| 5  | 2023-05-31T04:51:55 |
+| 5  | 2023-05-31T04:51:56 |
+| 15 | 2023-05-31T04:51:55 |
+| 15 | 2023-05-31T04:51:56 |
+| 25 | 2023-05-31T04:51:55 |
+| 25 | 2023-05-31T04:51:56 |
+| 55 | 2023-05-31T04:51:55 |
+| 55 | 2023-05-31T04:51:56 |
++----+---------------------+";
+    check_output_stream(result.unwrap(), expected).await;
 }
 
 async fn prepare_testing_table(cluster: &GreptimeDbCluster) {

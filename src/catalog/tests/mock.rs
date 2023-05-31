@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Display, Formatter};
@@ -150,6 +151,10 @@ impl KvBackend for MockKvBackend {
             map.retain(|k, _| !range.contains(k));
         }
         Ok(())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

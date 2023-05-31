@@ -27,9 +27,10 @@ use rstest_reuse::apply;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
 
+use crate::test_util::check_output_stream;
 use crate::tests::test_util::{
-    both_instances_cases, check_output_stream, check_unordered_output_stream, distributed,
-    get_data_dir, standalone, standalone_instance_case, MockInstance,
+    both_instances_cases, check_unordered_output_stream, distributed, get_data_dir, standalone,
+    standalone_instance_case, MockInstance,
 };
 
 #[apply(both_instances_cases)]

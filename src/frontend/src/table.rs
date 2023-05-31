@@ -592,6 +592,10 @@ mod test {
 
     #[async_trait]
     impl KvBackend for DummyKvBackend {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
         fn range<'a, 'b>(&'a self, _key: &[u8]) -> ValueIter<'b, catalog::error::Error>
         where
             'a: 'b,

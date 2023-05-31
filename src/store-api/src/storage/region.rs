@@ -104,6 +104,12 @@ impl From<&OpenOptions> for WriteContext {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct CloseContext {
+    /// If true, flush the closing region.
+    pub flush: bool,
+}
+
 /// Context for flush operations.
 #[derive(Debug, Clone)]
 pub struct FlushContext {
@@ -112,6 +118,8 @@ pub struct FlushContext {
     pub wait: bool,
     /// Flush reason.
     pub reason: FlushReason,
+    /// If true, allows to flush a closed region
+    pub force: bool,
 }
 
 impl Default for FlushContext {
@@ -119,6 +127,7 @@ impl Default for FlushContext {
         FlushContext {
             wait: true,
             reason: FlushReason::Others,
+            force: false,
         }
     }
 }

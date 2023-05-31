@@ -195,6 +195,7 @@ impl CompactionTester {
             .map(|wait| FlushContext {
                 wait,
                 reason: FlushReason::Manually,
+                ..Default::default()
             })
             .unwrap_or_default();
         self.base().region.flush(&ctx).await.unwrap();

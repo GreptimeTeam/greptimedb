@@ -22,6 +22,8 @@ use catalog::CatalogManagerRef;
 use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID, MITO_ENGINE,
 };
+use common_query::Output;
+use common_recordbatch::util;
 use common_runtime::Builder as RuntimeBuilder;
 use common_test_util::ports;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
@@ -441,4 +443,14 @@ pub async fn setup_grpc_server(
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     (fe_grpc_addr, guard, fe_grpc_server)
+}
+
+pub async fn check_output_stream(output: Output, expected: &str) {
+    let recordbatches = match output {
+        Output::Stream(stream) => util::collect_batches(stream).await.unwrap(),
+        Output::RecordBatches(recordbatches) => recordbatches,
+        _ => unreachable!(),
+    };
+    let pretty_print = recordbatches.pretty_print().unwrap();
+    assert_eq!(pretty_print, expected, "actual: \n{}", pretty_print);
 }

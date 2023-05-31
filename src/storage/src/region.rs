@@ -30,8 +30,8 @@ use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::manifest::{self, Manifest, ManifestVersion, MetaActionIterator};
 use store_api::storage::{
-    AlterRequest, FlushContext, OpenOptions, ReadContext, Region, RegionId, SequenceNumber,
-    WriteContext, WriteResponse,
+    AlterRequest, CloseContext, FlushContext, FlushReason, OpenOptions, ReadContext, Region,
+    RegionId, SequenceNumber, WriteContext, WriteResponse,
 };
 
 use crate::compaction::CompactionSchedulerRef;
@@ -536,9 +536,9 @@ impl<S: LogStore> RegionImpl<S> {
         self.inner.compact(ctx).await
     }
 
-    pub async fn close(&self) -> Result<()> {
+    pub async fn close(&self, ctx: &CloseContext) -> Result<()> {
         decrement_gauge!(crate::metrics::REGION_COUNT, 1.0);
-        self.inner.close().await
+        self.inner.close(ctx).await
     }
 }
 
@@ -689,8 +689,16 @@ impl<S: LogStore> RegionInner<S> {
         self.writer.alter(alter_ctx, request).await
     }
 
-    async fn close(&self) -> Result<()> {
+    async fn close(&self, ctx: &CloseContext) -> Result<()> {
         self.writer.close().await?;
+        if ctx.flush {
+            let ctx = FlushContext {
+                wait: true,
+                reason: FlushReason::Manually,
+                force: true,
+            };
+            self.flush(&ctx).await?;
+        }
         self.manifest.stop().await
     }
 

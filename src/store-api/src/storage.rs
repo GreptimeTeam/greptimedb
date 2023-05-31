@@ -32,9 +32,9 @@ pub use datatypes::schema::{
 
 pub use self::chunk::{Chunk, ChunkReader};
 pub use self::descriptors::*;
-pub use self::engine::{CreateOptions, EngineContext, OpenOptions, StorageEngine};
+pub use self::engine::{CloseOptions, CreateOptions, EngineContext, OpenOptions, StorageEngine};
 pub use self::metadata::RegionMeta;
-pub use self::region::{FlushContext, FlushReason, Region, RegionStat, WriteContext};
+pub use self::region::{CloseContext, FlushContext, FlushReason, Region, RegionStat, WriteContext};
 pub use self::requests::{
     AddColumn, AlterOperation, AlterRequest, GetRequest, ScanRequest, WriteRequest,
 };
