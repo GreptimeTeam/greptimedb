@@ -102,7 +102,7 @@ fn sort_by_rows(
     arrays: Vec<ArrayRef>,
     order_options: &[OrderOption],
 ) -> Result<Vec<ArrayRef>> {
-    let sort_columns = build_sort_columns(order_options);
+    let sort_columns = build_sorted_columns(order_options);
     let store_schema = schema.schema_to_read();
     // Convert columns to rows to speed lexicographic sort
     // TODO(hl): maybe optimize to lexsort_to_index when only timestamp column is involved.
@@ -148,9 +148,9 @@ fn sort_by_rows(
     Ok(sorted)
 }
 
-/// Builds sort columns from `order_options`.
-/// Returns a vector of sort column indices and sort orders (true means descending order).
-fn build_sort_columns(order_options: &[OrderOption]) -> Vec<(usize, bool)> {
+/// Builds sorted columns from `order_options`.
+/// Returns a vector of columns indices to sort and sort orders (true means descending order).
+fn build_sorted_columns(order_options: &[OrderOption]) -> Vec<(usize, bool)> {
     order_options
         .iter()
         .map(|o| (o.index, o.options.descending))
