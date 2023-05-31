@@ -448,7 +448,6 @@ pub async fn setup_grpc_server(
     (fe_grpc_addr, guard, fe_grpc_server)
 }
 
-
 pub async fn check_output_stream(output: Output, expected: &str) {
     let recordbatches = match output {
         Output::Stream(stream) => util::collect_batches(stream).await.unwrap(),
