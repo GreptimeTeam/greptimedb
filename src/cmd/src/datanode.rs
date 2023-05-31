@@ -280,6 +280,7 @@ mod tests {
             }
             ObjectStoreConfig::S3 { .. } => unreachable!(),
             ObjectStoreConfig::Oss { .. } => unreachable!(),
+            ObjectStoreConfig::Azblob { .. } => unreachable!(),
         };
 
         assert_eq!(

@@ -83,12 +83,12 @@ async fn resolve_tables(
             .context(CatalogSnafu)?;
 
         if let Entry::Vacant(v) = tables.entry(resolved_name.to_string()) {
-            let table = table_provider
-                .resolve_table(table_name)
-                .await
-                .context(CatalogSnafu)?;
-
-            v.insert(table);
+            // Try our best to resolve the tables here, but we don't return an error if table is not found,
+            // because the table name may be a temporary name of CTE or view, they can't be found until plan
+            // execution.
+            if let Ok(table) = table_provider.resolve_table(table_name).await {
+                v.insert(table);
+            }
         }
     }
     Ok(tables)
@@ -100,7 +100,7 @@ impl ContextProvider for DfContextProviderAdapter {
         self.tables
             .get(&table_ref.to_string())
             .cloned()
-            .ok_or_else(|| DataFusionError::Plan(format!("table '{}' not found", table_ref)))
+            .ok_or_else(|| DataFusionError::Plan(format!("Table not found: {}", table_ref)))
     }
 
     fn get_function_meta(&self, name: &str) -> Option<Arc<ScalarUDF>> {

@@ -26,8 +26,8 @@ use common_runtime::Builder as RuntimeBuilder;
 use common_test_util::ports;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datanode::datanode::{
-    DatanodeOptions, FileConfig, ObjectStoreConfig, OssConfig, ProcedureConfig, S3Config,
-    StorageConfig, WalConfig,
+    AzblobConfig, DatanodeOptions, FileConfig, ObjectStoreConfig, OssConfig, ProcedureConfig,
+    S3Config, StorageConfig, WalConfig,
 };
 use datanode::error::{CreateTableSnafu, Result};
 use datanode::instance::Instance;
@@ -35,7 +35,7 @@ use datanode::sql::SqlHandler;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema};
 use frontend::instance::Instance as FeInstance;
-use object_store::services::{Oss, S3};
+use object_store::services::{Azblob, Oss, S3};
 use object_store::test_util::TempFolder;
 use object_store::ObjectStore;
 use secrecy::ExposeSecret;
@@ -57,6 +57,7 @@ pub enum StorageType {
     S3WithCache,
     File,
     Oss,
+    Azblob,
 }
 
 impl StorageType {
@@ -74,6 +75,13 @@ impl StorageType {
             }
             StorageType::Oss => {
                 if let Ok(b) = env::var("GT_OSS_BUCKET") {
+                    !b.is_empty()
+                } else {
+                    false
+                }
+            }
+            StorageType::Azblob => {
+                if let Ok(b) = env::var("GT_AZBLOB_CONTAINER") {
                     !b.is_empty()
                 } else {
                     false
@@ -101,6 +109,34 @@ pub fn get_test_store_config(
     let _ = dotenv::dotenv();
 
     match store_type {
+        StorageType::Azblob => {
+            let azblob_config = AzblobConfig {
+                root: uuid::Uuid::new_v4().to_string(),
+                container: env::var("GT_AZBLOB_CONTAINER").unwrap(),
+                account_name: env::var("GT_AZBLOB_ACCOUNT_NAME").unwrap().into(),
+                account_key: env::var("GT_AZBLOB_ACCOUNT_KEY").unwrap().into(),
+                endpoint: env::var("GT_AZBLOB_ENDPOINT").unwrap(),
+                ..Default::default()
+            };
+
+            let mut builder = Azblob::default();
+            builder
+                .root(&azblob_config.root)
+                .endpoint(&azblob_config.endpoint)
+                .account_name(azblob_config.account_name.expose_secret())
+                .account_key(azblob_config.account_key.expose_secret())
+                .container(&azblob_config.container);
+
+            if let Ok(sas_token) = env::var("GT_AZBLOB_SAS_TOKEN") {
+                builder.sas_token(&sas_token);
+            }
+
+            let config = ObjectStoreConfig::Azblob(azblob_config);
+
+            let store = ObjectStore::new(builder).unwrap().finish();
+
+            (config, TempDirGuard::Azblob(TempFolder::new(&store, "/")))
+        }
         StorageType::Oss => {
             let oss_config = OssConfig {
                 root: uuid::Uuid::new_v4().to_string(),
@@ -169,6 +205,7 @@ pub enum TempDirGuard {
     File(TempDir),
     S3(TempFolder),
     Oss(TempFolder),
+    Azblob(TempFolder),
 }
 
 pub struct TestGuard {
@@ -182,7 +219,9 @@ pub struct StorageGuard(pub TempDirGuard);
 
 impl TestGuard {
     pub async fn remove_all(&mut self) {
-        if let TempDirGuard::S3(guard) | TempDirGuard::Oss(guard) = &mut self.storage_guard.0 {
+        if let TempDirGuard::S3(guard) | TempDirGuard::Oss(guard) | TempDirGuard::Azblob(guard) =
+            &mut self.storage_guard.0
+        {
             guard.remove_all().await.unwrap()
         }
     }
