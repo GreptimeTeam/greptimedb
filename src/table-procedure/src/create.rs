@@ -16,6 +16,7 @@
 
 use async_trait::async_trait;
 use catalog::{CatalogManagerRef, RegisterTableRequest};
+use common_procedure::error::SubprocedureFailedSnafu;
 use common_procedure::{
     Context, Error, LockKey, Procedure, ProcedureId, ProcedureManager, ProcedureState,
     ProcedureWithId, Result, Status,
@@ -28,7 +29,7 @@ use table::requests::{CreateTableRequest, OpenTableRequest};
 
 use crate::error::{
     AccessCatalogSnafu, CatalogNotFoundSnafu, DeserializeProcedureSnafu, SchemaNotFoundSnafu,
-    SerializeProcedureSnafu, SubprocedureFailedSnafu,
+    SerializeProcedureSnafu,
 };
 
 /// Procedure to create a table.

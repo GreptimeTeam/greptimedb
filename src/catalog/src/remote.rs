@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::fmt::Debug;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -70,6 +71,11 @@ pub trait KvBackend: Send + Sync {
         }
         return Ok(None);
     }
+
+    /// MoveValue atomically renames the key to the given updated key.
+    async fn move_value(&self, from_key: &[u8], to_key: &[u8]) -> Result<(), Error>;
+
+    fn as_any(&self) -> &dyn Any;
 }
 
 pub type KvBackendRef = Arc<dyn KvBackend>;
@@ -120,6 +126,14 @@ mod tests {
 
         async fn delete_range(&self, _key: &[u8], _end: &[u8]) -> Result<(), Error> {
             unimplemented!()
+        }
+
+        async fn move_value(&self, _from_key: &[u8], _to_key: &[u8]) -> Result<(), Error> {
+            unimplemented!()
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
         }
     }
 

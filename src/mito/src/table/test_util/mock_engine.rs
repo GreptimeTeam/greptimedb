@@ -26,9 +26,9 @@ use datatypes::schema::{ColumnSchema, Schema};
 use storage::metadata::{RegionMetaImpl, RegionMetadata};
 use storage::write_batch::WriteBatch;
 use store_api::storage::{
-    AlterRequest, Chunk, ChunkReader, CreateOptions, EngineContext, FlushContext, GetRequest,
-    GetResponse, OpenOptions, ReadContext, Region, RegionDescriptor, RegionId, ScanRequest,
-    ScanResponse, SchemaRef, Snapshot, StorageEngine, WriteContext, WriteResponse,
+    AlterRequest, Chunk, ChunkReader, CloseOptions, CreateOptions, EngineContext, FlushContext,
+    GetRequest, GetResponse, OpenOptions, ReadContext, Region, RegionDescriptor, RegionId,
+    ScanRequest, ScanResponse, SchemaRef, Snapshot, StorageEngine, WriteContext, WriteResponse,
 };
 
 pub type Result<T> = std::result::Result<T, MockError>;
@@ -292,7 +292,12 @@ impl StorageEngine for MockEngine {
         return Ok(None);
     }
 
-    async fn close_region(&self, _ctx: &EngineContext, name: &str) -> Result<()> {
+    async fn close_region(
+        &self,
+        _ctx: &EngineContext,
+        name: &str,
+        _opts: &CloseOptions,
+    ) -> Result<()> {
         let mut regions = self.regions.lock().unwrap();
 
         if let Some(region) = regions.opened_regions.remove(name) {

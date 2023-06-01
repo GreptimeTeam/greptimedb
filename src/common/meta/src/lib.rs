@@ -15,6 +15,7 @@
 pub mod error;
 pub mod heartbeat;
 pub mod instruction;
+pub mod key;
 pub mod peer;
 pub mod rpc;
 pub mod table_name;

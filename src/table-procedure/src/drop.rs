@@ -16,6 +16,7 @@
 
 use async_trait::async_trait;
 use catalog::{CatalogManagerRef, DeregisterTableRequest};
+use common_procedure::error::SubprocedureFailedSnafu;
 use common_procedure::{
     Context, Error, LockKey, Procedure, ProcedureId, ProcedureManager, ProcedureState,
     ProcedureWithId, Result, Status,
@@ -27,8 +28,7 @@ use table::engine::{EngineContext, TableEngineProcedureRef, TableReference};
 use table::requests::DropTableRequest;
 
 use crate::error::{
-    AccessCatalogSnafu, DeserializeProcedureSnafu, SerializeProcedureSnafu,
-    SubprocedureFailedSnafu, TableNotFoundSnafu,
+    AccessCatalogSnafu, DeserializeProcedureSnafu, SerializeProcedureSnafu, TableNotFoundSnafu,
 };
 
 /// Procedure to drop a table.

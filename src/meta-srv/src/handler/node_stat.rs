@@ -44,7 +44,7 @@ pub struct Stat {
     pub region_stats: Vec<RegionStat>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct RegionStat {
     pub id: u64,
     pub catalog: String,

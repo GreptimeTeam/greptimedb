@@ -13,37 +13,109 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 
 use catalog::helper::TableGlobalKey;
+use catalog::remote::{CachedMetaKvBackend, Kv};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
 use common_meta::instruction::TableIdent;
+use common_meta::rpc::router::TableRoute;
+use common_meta::table_name::TableName;
 use common_meta::RegionIdent;
 use common_procedure::{watcher, ProcedureWithId};
+use common_query::Output;
 use common_telemetry::info;
+use frontend::catalog::FrontendCatalogManager;
+use frontend::error::Result as FrontendResult;
+use frontend::instance::Instance;
 use meta_srv::metasrv::SelectorContext;
 use meta_srv::procedure::region_failover::{RegionFailoverContext, RegionFailoverProcedure};
 use meta_srv::table_routes;
 use servers::query_handler::sql::SqlQueryHandler;
-use session::context::QueryContext;
+use session::context::{QueryContext, QueryContextRef};
 use tests_integration::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
-use tests_integration::test_util::{get_test_store_config, StorageType};
+use tests_integration::test_util::{check_output_stream, get_test_store_config, StorageType};
+use tokio::time;
 
-// TODO(LFC): wait for close regions in datanode, and read/write route in frontend ready
-#[tokio::test(flavor = "multi_thread")]
-async fn test_region_failover() {
+#[macro_export]
+macro_rules! region_failover_test {
+    ($service:ident, $($(#[$meta:meta])* $test:ident),*,) => {
+        paste::item! {
+            mod [<integration_region_failover_ $service:lower _test>] {
+                $(
+                    #[tokio::test(flavor = "multi_thread")]
+                    $(
+                        #[$meta]
+                    )*
+                    async fn [< $test >]() {
+                        let store_type = tests_integration::test_util::StorageType::$service;
+                        if store_type.test_on() {
+                            let _ = $crate::region_failover::$test(store_type).await;
+                        }
+
+                    }
+                )*
+            }
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! region_failover_tests {
+    ($($service:ident),*) => {
+        $(
+            region_failover_test!(
+                $service,
+
+                test_region_failover,
+            );
+        )*
+    };
+}
+
+pub async fn test_region_failover(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
+
+    let mut logical_timer = 1685508715000;
 
     let cluster_name = "test_region_failover";
 
-    let (store_config, _guard) = get_test_store_config(&StorageType::File, cluster_name);
+    let (store_config, _guard) = get_test_store_config(&store_type, cluster_name);
 
     let cluster = GreptimeDbClusterBuilder::new(cluster_name)
-        .with_datanodes(2)
+        .with_datanodes(4)
         .with_store_config(store_config)
         .build()
         .await;
 
+    let frontend = cluster.frontend.clone();
+
     prepare_testing_table(&cluster).await;
+
+    let results = write_datas(&frontend, logical_timer).await;
+    logical_timer += 1000;
+    for result in results {
+        assert!(matches!(result.unwrap(), Output::AffectedRows(1)));
+    }
+
+    let cache_key = TableGlobalKey {
+        catalog_name: "greptime".to_string(),
+        schema_name: "public".to_string(),
+        table_name: "my_table".to_string(),
+    }
+    .to_string();
+
+    let table_name = TableName {
+        catalog_name: "greptime".to_string(),
+        schema_name: "public".to_string(),
+        table_name: "my_table".to_string(),
+    };
+
+    let cache = get_table_cache(&frontend, &cache_key).unwrap();
+    assert!(cache.is_some());
+    let route_cache = get_route_cache(&frontend, &table_name);
+    assert!(route_cache.is_some());
 
     let distribution = find_region_distribution(&cluster).await;
     info!("Find region distribution: {distribution:?}");
@@ -53,19 +125,112 @@ async fn test_region_failover() {
 
     run_region_failover_procedure(&cluster, failed_region.clone()).await;
 
-    let mut distribution = find_region_distribution(&cluster).await;
+    let distribution = find_region_distribution(&cluster).await;
     info!("Find region distribution again: {distribution:?}");
 
-    assert!(!distribution
-        .remove(&failed_region.datanode_id)
-        .unwrap()
-        .contains(&failed_region.region_number));
-    // Since there are only two datanodes, the other datanode is the candidate.
-    assert!(distribution
-        .values()
-        .next()
-        .unwrap()
-        .contains(&failed_region.region_number));
+    // Waits for invalidating table cache
+    time::sleep(Duration::from_millis(100)).await;
+
+    let cache = get_table_cache(&frontend, &cache_key);
+    assert!(cache.is_none());
+    let route_cache = get_route_cache(&frontend, &table_name);
+    assert!(route_cache.is_none());
+
+    // Inserts data to each datanode after failover
+    let frontend = cluster.frontend.clone();
+    let results = write_datas(&frontend, logical_timer).await;
+    for result in results {
+        assert!(matches!(result.unwrap(), Output::AffectedRows(1)));
+    }
+
+    assert_writes(&frontend).await;
+
+    assert!(!distribution.contains_key(&failed_region.datanode_id));
+
+    let mut success = false;
+    let values = distribution.values();
+    for val in values {
+        success = success || val.contains(&failed_region.region_number);
+    }
+    assert!(success)
+}
+
+fn get_table_cache(instance: &Arc<Instance>, key: &str) -> Option<Option<Kv>> {
+    let catalog_manager = instance
+        .catalog_manager()
+        .as_any()
+        .downcast_ref::<FrontendCatalogManager>()
+        .unwrap();
+
+    let kvbackend = catalog_manager.backend();
+
+    let kvbackend = kvbackend
+        .as_any()
+        .downcast_ref::<CachedMetaKvBackend>()
+        .unwrap();
+    let cache = kvbackend.cache();
+
+    cache.get(key.as_bytes())
+}
+
+fn get_route_cache(instance: &Arc<Instance>, table_name: &TableName) -> Option<Arc<TableRoute>> {
+    let catalog_manager = instance
+        .catalog_manager()
+        .as_any()
+        .downcast_ref::<FrontendCatalogManager>()
+        .unwrap();
+    let pm = catalog_manager.partition_manager();
+    let cache = pm.table_routes().cache();
+    cache.get(table_name)
+}
+
+async fn write_datas(instance: &Arc<Instance>, ts: u64) -> Vec<FrontendResult<Output>> {
+    let query_ctx = QueryContext::arc();
+
+    let mut results = Vec::new();
+    for range in [5, 15, 25, 55] {
+        let result = write_data(
+            instance,
+            &format!("INSERT INTO my_table VALUES ({},{})", range, ts),
+            query_ctx.clone(),
+        )
+        .await;
+        results.push(result);
+    }
+
+    results
+}
+
+async fn write_data(
+    instance: &Arc<Instance>,
+    sql: &str,
+    query_ctx: QueryContextRef,
+) -> FrontendResult<Output> {
+    instance.do_query(sql, query_ctx).await.remove(0)
+}
+
+async fn assert_writes(instance: &Arc<Instance>) {
+    let query_ctx = QueryContext::arc();
+
+    let result = instance
+        .do_query("select * from my_table order by i, ts", query_ctx)
+        .await
+        .remove(0);
+
+    let expected = "\
++----+---------------------+
+| i  | ts                  |
++----+---------------------+
+| 5  | 2023-05-31T04:51:55 |
+| 5  | 2023-05-31T04:51:56 |
+| 15 | 2023-05-31T04:51:55 |
+| 15 | 2023-05-31T04:51:56 |
+| 25 | 2023-05-31T04:51:55 |
+| 25 | 2023-05-31T04:51:56 |
+| 55 | 2023-05-31T04:51:55 |
+| 55 | 2023-05-31T04:51:56 |
++----+---------------------+";
+    check_output_stream(result.unwrap(), expected).await;
 }
 
 async fn prepare_testing_table(cluster: &GreptimeDbCluster) {
@@ -136,6 +301,7 @@ async fn run_region_failover_procedure(cluster: &GreptimeDbCluster, failed_regio
                 kv_store: meta_srv.kv_store(),
                 catalog: None,
                 schema: None,
+                table: None,
             },
             dist_lock: meta_srv.lock().clone(),
         },

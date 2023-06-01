@@ -352,13 +352,6 @@ async fn validate_query(query: &str) -> Result<Statement> {
 
     let statement = statement.remove(0);
 
-    ensure!(
-        matches!(statement, Statement::Query(_)),
-        InvalidPrepareStatementSnafu {
-            err_msg: "prepare statement only support SELECT for now".to_string(),
-        }
-    );
-
     Ok(statement)
 }
 

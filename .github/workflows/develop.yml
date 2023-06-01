@@ -141,6 +141,7 @@ jobs:
       - name: Run sqlness
         run: cargo sqlness && ls /tmp
       - name: Upload sqlness logs
+        if: always()
         uses: actions/upload-artifact@v3
         with:
           name: sqlness-logs

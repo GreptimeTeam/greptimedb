@@ -23,7 +23,8 @@ use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::manifest::Manifest;
 use store_api::storage::{
-    CreateOptions, EngineContext, OpenOptions, Region, RegionDescriptor, StorageEngine,
+    CloseContext, CloseOptions, CreateOptions, EngineContext, OpenOptions, Region,
+    RegionDescriptor, StorageEngine,
 };
 
 use crate::compaction::CompactionSchedulerRef;
@@ -68,8 +69,13 @@ impl<S: LogStore> StorageEngine for EngineImpl<S> {
         self.inner.open_region(name, opts).await
     }
 
-    async fn close_region(&self, _ctx: &EngineContext, name: &str) -> Result<()> {
-        self.inner.close_region(name).await
+    async fn close_region(
+        &self,
+        _ctx: &EngineContext,
+        name: &str,
+        opts: &CloseOptions,
+    ) -> Result<()> {
+        self.inner.close_region(name, opts).await
     }
 
     async fn create_region(
@@ -362,9 +368,10 @@ impl<S: LogStore> EngineInner<S> {
         })
     }
 
-    async fn close_region(&self, name: &str) -> Result<()> {
+    async fn close_region(&self, name: &str, opts: &CloseOptions) -> Result<()> {
         if let Some(region) = self.get_region(name) {
-            region.close().await?;
+            let ctx = CloseContext { flush: opts.flush };
+            region.close(&ctx).await?;
         }
 
         self.regions.remove(name);
@@ -465,7 +472,7 @@ impl<S: LogStore> EngineInner<S> {
         write_buffer_size: Option<usize>,
         region_name: &str,
         config: &EngineConfig,
-        ttl: Option<Duration>,
+        region_ttl: Option<Duration>,
         compaction_time_window: Option<i64>,
     ) -> Result<StoreConfig<S>> {
         let parent_dir = util::normalize_dir(parent_dir);
@@ -482,6 +489,9 @@ impl<S: LogStore> EngineInner<S> {
         );
         manifest.start().await?;
         let flush_strategy = self.flush_strategy.clone();
+
+        // If region_ttl is `None`, the global ttl takes effect.
+        let ttl = region_ttl.or(self.config.global_ttl);
 
         Ok(StoreConfig {
             log_store: self.log_store.clone(),
@@ -502,9 +512,10 @@ impl<S: LogStore> EngineInner<S> {
 
     async fn close(&self) -> Result<()> {
         let regions = self.regions.list_regions();
+        let ctx = CloseContext::default();
         for region in regions {
             // Tolerate failure during closing regions.
-            if let Err(e) = region.close().await {
+            if let Err(e) = region.close(&ctx).await {
                 logging::error!(e; "Failed to close region {}", region.id());
             }
         }
@@ -637,7 +648,10 @@ mod tests {
 
         // Flush memtable to sst.
         region.flush(&FlushContext::default()).await.unwrap();
-        engine.close_region(&ctx, region.name()).await.unwrap();
+        engine
+            .close_region(&ctx, region.name(), &CloseOptions::default())
+            .await
+            .unwrap();
 
         let dir_path = dir.path().join(region_name);
 

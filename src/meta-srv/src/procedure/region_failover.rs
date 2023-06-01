@@ -462,8 +462,9 @@ mod tests {
                 datanode_lease_secs: 10,
                 server_addr: "127.0.0.1:3002".to_string(),
                 kv_store,
-                catalog: None,
-                schema: None,
+                catalog: Some(DEFAULT_CATALOG_NAME.to_string()),
+                schema: Some(DEFAULT_SCHEMA_NAME.to_string()),
+                table: Some(table.to_string()),
             };
 
             TestingEnv {

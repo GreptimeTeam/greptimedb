@@ -102,6 +102,7 @@ pub struct SelectorContext {
     pub kv_store: KvStoreRef,
     pub catalog: Option<String>,
     pub schema: Option<String>,
+    pub table: Option<String>,
 }
 
 pub type SelectorRef = Arc<dyn Selector<Context = SelectorContext, Output = Vec<Peer>>>;

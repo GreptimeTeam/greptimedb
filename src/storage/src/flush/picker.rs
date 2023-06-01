@@ -137,6 +137,7 @@ impl<S: LogStore> FlushItem for RegionImpl<S> {
         let ctx = FlushContext {
             wait: false,
             reason,
+            ..Default::default()
         };
 
         if let Err(e) = self.flush(&ctx).await {

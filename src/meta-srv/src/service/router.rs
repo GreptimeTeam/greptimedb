@@ -20,6 +20,7 @@ use api::v1::meta::{
     RouteResponse, Table, TableRoute, TableRouteValue,
 };
 use catalog::helper::{TableGlobalKey, TableGlobalValue};
+use common_meta::key::TableRouteKey;
 use common_telemetry::{timer, warn};
 use snafu::{OptionExt, ResultExt};
 use table::metadata::RawTableInfo;
@@ -27,7 +28,6 @@ use tonic::{Request, Response};
 
 use crate::error;
 use crate::error::Result;
-use crate::keys::TableRouteKey;
 use crate::metasrv::{Context, MetaSrv, SelectorContext, SelectorRef};
 use crate::metrics::METRIC_META_ROUTE_REQUEST;
 use crate::sequence::SequenceRef;
@@ -60,6 +60,7 @@ impl router_server::Router for MetaSrv {
             kv_store: self.kv_store(),
             catalog: Some(table_name.catalog_name),
             schema: Some(table_name.schema_name),
+            table: Some(table_name.table_name),
         };
 
         let selector = self.selector();
@@ -131,16 +132,18 @@ async fn handle_create(
 
     let cluster_id = header.as_ref().map_or(0, |h| h.cluster_id);
     let mut peers = selector.select(cluster_id, &ctx).await?;
-    if peers.is_empty() {
-        warn!("Create table failed due to no active datanodes, table: {table_name:?}");
+
+    if peers.len() < partitions.len() {
+        warn!("Create table failed due to no enough available datanodes, table: {table_name:?}, partition number: {}, datanode number: {}", partitions.len(), peers.len());
         return Ok(RouteResponse {
             header: Some(ResponseHeader::failed(
                 cluster_id,
-                Error::not_enough_active_datanodes(0),
+                Error::not_enough_available_datanodes(partitions.len(), peers.len()),
             )),
             ..Default::default()
         });
     }
+
     // We don't need to keep all peers, just truncate it to the number of partitions.
     // If the peers are not enough, some peers will be used for multiple partitions.
     peers.truncate(partitions.len());
@@ -304,7 +307,7 @@ async fn handle_delete(req: DeleteRequest, ctx: Context) -> Result<RouteResponse
 
     let _ = remove_table_global_value(&ctx.kv_store, &tgk).await?;
 
-    let trk = TableRouteKey::with_table_global_key(tgv.table_id() as u64, &tgk);
+    let trk = table_route_key(tgv.table_id() as u64, &tgk);
     let (_, trv) = remove_table_route_value(&ctx.kv_store, &trk).await?;
     let (peers, table_routes) = fill_table_routes(vec![(tgv, trv)])?;
 
@@ -365,13 +368,22 @@ async fn fetch_tables(
         }
         let tgv = tgv.unwrap();
 
-        let trk = TableRouteKey::with_table_global_key(tgv.table_id() as u64, &tgk);
+        let trk = table_route_key(tgv.table_id() as u64, &tgk);
         let trv = get_table_route_value(kv_store, &trk).await?;
 
         tables.push((tgv, trv));
     }
 
     Ok(tables)
+}
+
+fn table_route_key(table_id: u64, t: &TableGlobalKey) -> TableRouteKey<'_> {
+    TableRouteKey {
+        table_id,
+        catalog_name: &t.catalog_name,
+        schema_name: &t.schema_name,
+        table_name: &t.table_name,
+    }
 }
 
 async fn remove_table_route_value(

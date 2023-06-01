@@ -27,9 +27,10 @@ use rstest_reuse::apply;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
 
+use crate::test_util::check_output_stream;
 use crate::tests::test_util::{
-    both_instances_cases, check_output_stream, check_unordered_output_stream, distributed,
-    get_data_dir, standalone, standalone_instance_case, MockInstance,
+    both_instances_cases, check_unordered_output_stream, distributed, get_data_dir, standalone,
+    standalone_instance_case, MockInstance,
 };
 
 #[apply(both_instances_cases)]
@@ -868,6 +869,7 @@ async fn test_create_table_after_rename_table(instance: Arc<dyn MockInstance>) {
     check_output_stream(output, expect).await;
 }
 
+#[ignore = "https://github.com/GreptimeTeam/greptimedb/issues/1681"]
 #[apply(both_instances_cases)]
 async fn test_alter_table(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();

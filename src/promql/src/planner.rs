@@ -21,11 +21,11 @@ use async_recursion::async_recursion;
 use catalog::table_source::DfTableSourceProvider;
 use datafusion::common::{DFSchemaRef, OwnedTableReference, Result as DfResult};
 use datafusion::datasource::DefaultTableSource;
-use datafusion::logical_expr::expr::AggregateFunction;
+use datafusion::logical_expr::expr::{AggregateFunction, ScalarFunction, ScalarUDF};
 use datafusion::logical_expr::expr_rewriter::normalize_cols;
 use datafusion::logical_expr::{
     AggregateFunction as AggregateFunctionEnum, BinaryExpr, BuiltinScalarFunction, Cast, Extension,
-    LogicalPlan, LogicalPlanBuilder, Operator, ScalarUDF,
+    LogicalPlan, LogicalPlanBuilder, Operator, ScalarUDF as ScalarUdfDef,
 };
 use datafusion::optimizer::utils;
 use datafusion::prelude as df_prelude;
@@ -140,9 +140,6 @@ impl PromPlanner {
 
                 // convert op and value columns to aggregate exprs
                 let aggr_exprs = self.create_aggregate_exprs(*op, &input)?;
-
-                // remove time index column from context
-                self.ctx.time_index_column = None;
 
                 // create plan
                 let group_sort_expr = group_exprs
@@ -927,10 +924,10 @@ impl PromPlanner {
             match scalar_func.clone() {
                 ScalarFunc::DataFusionBuiltin(fun) => {
                     other_input_exprs.insert(field_column_pos, col_expr);
-                    let fn_expr = DfExpr::ScalarFunction {
+                    let fn_expr = DfExpr::ScalarFunction(ScalarFunction {
                         fun,
                         args: other_input_exprs.clone(),
-                    };
+                    });
                     exprs.push(fn_expr);
                     other_input_exprs.remove(field_column_pos);
                 }
@@ -942,10 +939,10 @@ impl PromPlanner {
                     ));
                     other_input_exprs.insert(field_column_pos, ts_range_expr);
                     other_input_exprs.insert(field_column_pos + 1, col_expr);
-                    let fn_expr = DfExpr::ScalarUDF {
+                    let fn_expr = DfExpr::ScalarUDF(ScalarUDF {
                         fun: Arc::new(fun),
                         args: other_input_exprs.clone(),
-                    };
+                    });
                     exprs.push(fn_expr);
                     other_input_exprs.remove(field_column_pos + 1);
                     other_input_exprs.remove(field_column_pos);
@@ -960,10 +957,10 @@ impl PromPlanner {
                     other_input_exprs.insert(field_column_pos + 1, col_expr);
                     other_input_exprs
                         .insert(field_column_pos + 2, self.create_time_index_column_expr()?);
-                    let fn_expr = DfExpr::ScalarUDF {
+                    let fn_expr = DfExpr::ScalarUDF(ScalarUDF {
                         fun: Arc::new(fun),
                         args: other_input_exprs.clone(),
-                    };
+                    });
                     exprs.push(fn_expr);
                     other_input_exprs.remove(field_column_pos + 2);
                     other_input_exprs.remove(field_column_pos + 1);
@@ -1069,6 +1066,7 @@ impl PromPlanner {
                     args: vec![DfExpr::Column(Column::from_name(col))],
                     distinct: false,
                     filter: None,
+                    order_by: None,
                 })
             })
             .collect();
@@ -1281,10 +1279,10 @@ struct FunctionArgs {
 #[derive(Debug, Clone)]
 enum ScalarFunc {
     DataFusionBuiltin(BuiltinScalarFunction),
-    Udf(ScalarUDF),
+    Udf(ScalarUdfDef),
     // todo(ruihang): maybe merge with Udf later
     /// UDF that require extra information like range length to be evaluated.
-    ExtrapolateUdf(ScalarUDF),
+    ExtrapolateUdf(ScalarUdfDef),
 }
 
 #[cfg(test)]
@@ -1668,12 +1666,12 @@ mod test {
 
     #[tokio::test]
     async fn aggregate_stddev() {
-        do_aggregate_expr_plan("stddev", "STDDEVPOP").await;
+        do_aggregate_expr_plan("stddev", "STDDEV_POP").await;
     }
 
     #[tokio::test]
     async fn aggregate_stdvar() {
-        do_aggregate_expr_plan("stdvar", "VARIANCEPOP").await;
+        do_aggregate_expr_plan("stdvar", "VARIANCE_POP").await;
     }
 
     #[tokio::test]

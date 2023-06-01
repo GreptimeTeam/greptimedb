@@ -51,7 +51,7 @@ use crate::table::DistTable;
 #[derive(Clone)]
 pub struct FrontendCatalogManager {
     backend: KvBackendRef,
-    backend_cache_invalidtor: KvCacheInvalidatorRef,
+    backend_cache_invalidator: KvCacheInvalidatorRef,
     partition_manager: PartitionRuleManagerRef,
     datanode_clients: Arc<DatanodeClients>,
 
@@ -65,13 +65,13 @@ pub struct FrontendCatalogManager {
 impl FrontendCatalogManager {
     pub fn new(
         backend: KvBackendRef,
-        backend_cache_invalidtor: KvCacheInvalidatorRef,
+        backend_cache_invalidator: KvCacheInvalidatorRef,
         partition_manager: PartitionRuleManagerRef,
         datanode_clients: Arc<DatanodeClients>,
     ) -> Self {
         Self {
             backend,
-            backend_cache_invalidtor,
+            backend_cache_invalidator,
             partition_manager,
             datanode_clients,
             dist_instance: None,
@@ -103,7 +103,7 @@ impl FrontendCatalogManager {
 
         let key = schema_key.as_bytes();
 
-        self.backend_cache_invalidtor.invalidate_key(key).await;
+        self.backend_cache_invalidator.invalidate_key(key).await;
     }
 
     pub async fn invalidate_table(&self, catalog: &str, schema: &str, table: &str) {
@@ -116,7 +116,7 @@ impl FrontendCatalogManager {
 
         let tg_key = tg_key.as_bytes();
 
-        self.backend_cache_invalidtor.invalidate_key(tg_key).await;
+        self.backend_cache_invalidator.invalidate_key(tg_key).await;
     }
 }
 

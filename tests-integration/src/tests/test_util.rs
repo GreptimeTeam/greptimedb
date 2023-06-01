@@ -88,16 +88,6 @@ pub(crate) fn standalone_instance_case(
 ) {
 }
 
-pub(crate) async fn check_output_stream(output: Output, expected: &str) {
-    let recordbatches = match output {
-        Output::Stream(stream) => util::collect_batches(stream).await.unwrap(),
-        Output::RecordBatches(recordbatches) => recordbatches,
-        _ => unreachable!(),
-    };
-    let pretty_print = recordbatches.pretty_print().unwrap();
-    assert_eq!(pretty_print, expected, "actual: \n{}", pretty_print);
-}
-
 pub(crate) async fn check_unordered_output_stream(output: Output, expected: &str) {
     let sort_table = |table: &str| -> String {
         let replaced = table.replace("\\n", "\n");

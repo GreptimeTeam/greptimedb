@@ -19,6 +19,7 @@ use common_time::Timestamp;
 use datafusion::parquet::file::metadata::RowGroupMetaData;
 use datafusion::physical_optimizer::pruning::PruningPredicate;
 use datafusion_common::ToDFSchema;
+use datafusion_expr::expr::InList;
 use datafusion_expr::{Between, BinaryExpr, Operator};
 use datafusion_physical_expr::create_physical_expr;
 use datafusion_physical_expr::execution_props::ExecutionProps;
@@ -130,11 +131,11 @@ impl<'a> TimeRangePredicateBuilder<'a> {
                 low,
                 high,
             }) => self.extract_from_between_expr(expr, negated, low, high),
-            DfExpr::InList {
+            DfExpr::InList(InList {
                 expr,
                 list,
                 negated,
-            } => self.extract_from_in_list_expr(expr, *negated, list),
+            }) => self.extract_from_in_list_expr(expr, *negated, list),
             _ => None,
         }
     }

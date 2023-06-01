@@ -23,6 +23,7 @@ use catalog::helper::{TableGlobalKey, TableGlobalValue};
 use catalog::remote::KvBackendRef;
 use client::Database;
 use common_error::prelude::BoxedError;
+use common_meta::key::TableRouteKey;
 use common_meta::table_name::TableName;
 use common_query::error::Result as QueryResult;
 use common_query::logical_plan::Expr;
@@ -343,7 +344,44 @@ impl DistTable {
             .context(error::CatalogSnafu)
     }
 
+    async fn move_table_route_value(
+        &self,
+        catalog_name: &str,
+        schema_name: &str,
+        table_id: u32,
+        old_table_name: &str,
+        new_table_name: &str,
+    ) -> Result<()> {
+        let old_key = TableRouteKey {
+            table_id: table_id.into(),
+            catalog_name,
+            schema_name,
+            table_name: old_table_name,
+        }
+        .key();
+
+        let new_key = TableRouteKey {
+            table_id: table_id.into(),
+            catalog_name,
+            schema_name,
+            table_name: new_table_name,
+        }
+        .key();
+
+        self.backend
+            .move_value(old_key.as_bytes(), new_key.as_bytes())
+            .await
+            .context(error::CatalogSnafu)
+    }
+
     async fn handle_alter(&self, context: AlterContext, request: &AlterTableRequest) -> Result<()> {
+        let AlterTableRequest {
+            catalog_name,
+            schema_name,
+            table_name,
+            alter_kind,
+        } = request;
+
         let alter_expr = context
             .get::<AlterExpr>()
             .context(error::ContextValueNotFoundSnafu { key: "AlterExpr" })?;
@@ -351,7 +389,6 @@ impl DistTable {
         self.alter_by_expr(alter_expr).await?;
 
         let table_info = self.table_info();
-        let table_name = &table_info.name;
         let new_meta = table_info
             .meta
             .builder_with_alter_kind(table_name, &request.alter_kind)
@@ -366,27 +403,33 @@ impl DistTable {
         new_info.meta = new_meta;
 
         let key = TableGlobalKey {
-            catalog_name: alter_expr.catalog_name.clone(),
-            schema_name: alter_expr.schema_name.clone(),
-            table_name: alter_expr.table_name.clone(),
+            catalog_name: catalog_name.clone(),
+            schema_name: schema_name.clone(),
+            table_name: table_name.clone(),
         };
-        let mut value =
-            self.table_global_value(&key)
-                .await?
-                .context(error::TableNotFoundSnafu {
-                    table_name: alter_expr.table_name.clone(),
-                })?;
+        let mut value = self
+            .table_global_value(&key)
+            .await?
+            .context(error::TableNotFoundSnafu { table_name })?;
 
         value.table_info = new_info.into();
 
-        if let AlterKind::RenameTable { new_table_name } = &request.alter_kind {
+        if let AlterKind::RenameTable { new_table_name } = alter_kind {
             let new_key = TableGlobalKey {
-                catalog_name: alter_expr.catalog_name.clone(),
-                schema_name: alter_expr.schema_name.clone(),
+                catalog_name: catalog_name.clone(),
+                schema_name: schema_name.clone(),
                 table_name: new_table_name.clone(),
             };
             self.set_table_global_value(new_key, value).await?;
-            self.delete_table_global_value(key).await
+            self.delete_table_global_value(key).await?;
+            self.move_table_route_value(
+                catalog_name,
+                schema_name,
+                table_info.ident.table_id,
+                table_name,
+                new_table_name,
+            )
+            .await
         } else {
             self.set_table_global_value(key, value).await
         }
@@ -596,6 +639,10 @@ mod test {
 
     #[async_trait]
     impl KvBackend for DummyKvBackend {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
         fn range<'a, 'b>(&'a self, _key: &[u8]) -> ValueIter<'b, catalog::error::Error>
         where
             'a: 'b,
@@ -613,6 +660,10 @@ mod test {
             _expect: &[u8],
             _val: &[u8],
         ) -> Result<std::result::Result<(), Option<Vec<u8>>>> {
+            unimplemented!()
+        }
+
+        async fn move_value(&self, _from_key: &[u8], _to_key: &[u8]) -> Result<()> {
             unimplemented!()
         }
 

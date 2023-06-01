@@ -18,6 +18,7 @@ use common_time::timestamp::{TimeUnit, Timestamp};
 use datafusion::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_common::{DFSchemaRef, DataFusionError, Result, ScalarValue};
+use datafusion_expr::expr::InList;
 use datafusion_expr::{
     Between, BinaryExpr, Expr, ExprSchemable, Filter, LogicalPlan, Operator, TableScan,
 };
@@ -33,10 +34,6 @@ use datatypes::arrow::datatypes::DataType;
 pub struct TypeConversionRule;
 
 impl AnalyzerRule for TypeConversionRule {
-    fn name(&self) -> &str {
-        "TypeConversionRule"
-    }
-
     // TODO(ruihang): fix this warning
     #[allow(deprecated)]
     fn analyze(&self, plan: LogicalPlan, _config: &ConfigOptions) -> Result<LogicalPlan> {
@@ -80,7 +77,6 @@ impl AnalyzerRule for TypeConversionRule {
             | LogicalPlan::Window { .. }
             | LogicalPlan::Aggregate { .. }
             | LogicalPlan::Repartition { .. }
-            | LogicalPlan::CreateExternalTable { .. }
             | LogicalPlan::Extension { .. }
             | LogicalPlan::Sort { .. }
             | LogicalPlan::Explain { .. }
@@ -88,9 +84,6 @@ impl AnalyzerRule for TypeConversionRule {
             | LogicalPlan::Union { .. }
             | LogicalPlan::Join { .. }
             | LogicalPlan::CrossJoin { .. }
-            | LogicalPlan::CreateMemoryTable { .. }
-            | LogicalPlan::DropTable { .. }
-            | LogicalPlan::DropView { .. }
             | LogicalPlan::Distinct { .. }
             | LogicalPlan::Values { .. }
             | LogicalPlan::Analyze { .. } => {
@@ -109,16 +102,18 @@ impl AnalyzerRule for TypeConversionRule {
 
             LogicalPlan::Subquery { .. }
             | LogicalPlan::SubqueryAlias { .. }
-            | LogicalPlan::CreateView { .. }
-            | LogicalPlan::CreateCatalogSchema { .. }
-            | LogicalPlan::CreateCatalog { .. }
             | LogicalPlan::EmptyRelation(_)
             | LogicalPlan::Prepare(_)
             | LogicalPlan::Dml(_)
             | LogicalPlan::DescribeTable(_)
             | LogicalPlan::Unnest(_)
-            | LogicalPlan::Statement(_) => Ok(Transformed::No(plan)),
+            | LogicalPlan::Statement(_)
+            | LogicalPlan::Ddl(_) => Ok(Transformed::No(plan)),
         })
+    }
+
+    fn name(&self) -> &str {
+        "TypeConversionRule"
     }
 }
 
@@ -229,21 +224,21 @@ impl TreeNodeRewriter for TypeConverter {
                     high: Box::new(high),
                 })
             }
-            Expr::InList {
+            Expr::InList(InList {
                 expr,
                 list,
                 negated,
-            } => {
+            }) => {
                 let mut list_expr = Vec::with_capacity(list.len());
                 for e in list {
                     let (_, expr_conversion) = self.convert_type(&expr, &e)?;
                     list_expr.push(expr_conversion);
                 }
-                Expr::InList {
+                Expr::InList(InList {
                     expr,
                     list: list_expr,
                     negated,
-                }
+                })
             }
             Expr::Literal(value) => match value {
                 ScalarValue::TimestampSecond(Some(i), _) => {

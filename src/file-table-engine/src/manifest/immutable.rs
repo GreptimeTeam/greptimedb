@@ -108,7 +108,7 @@ mod tests {
 
         write_table_manifest(
             TEST_TABLE_NAME,
-            &table_manifest_dir(TEST_TABLE_NAME),
+            &table_manifest_dir(&format!("{TEST_TABLE_NAME}/")),
             &store,
             &metadata,
         )
@@ -118,7 +118,7 @@ mod tests {
         // try to overwrite immutable manifest
         let write_immutable = write_table_manifest(
             TEST_TABLE_NAME,
-            &table_manifest_dir(TEST_TABLE_NAME),
+            &table_manifest_dir(&format!("{TEST_TABLE_NAME}/")),
             &store,
             &metadata,
         )
@@ -135,7 +135,7 @@ mod tests {
 
         write_table_manifest(
             TEST_TABLE_NAME,
-            &table_manifest_dir(TEST_TABLE_NAME),
+            &table_manifest_dir(&format!("{TEST_TABLE_NAME}/")),
             &store,
             &metadata,
         )
@@ -144,7 +144,7 @@ mod tests {
 
         let read = read_table_manifest(
             TEST_TABLE_NAME,
-            &table_manifest_dir(TEST_TABLE_NAME),
+            &table_manifest_dir(&format!("{TEST_TABLE_NAME}/")),
             &store,
         )
         .await
@@ -158,7 +158,7 @@ mod tests {
         let (_dir, store) = new_test_object_store("test_read_non_exist_table_manifest");
         let not_fount = read_table_manifest(
             TEST_TABLE_NAME,
-            &table_manifest_dir(TEST_TABLE_NAME),
+            &table_manifest_dir(&format!("{TEST_TABLE_NAME}/")),
             &store,
         )
         .await
@@ -172,7 +172,7 @@ mod tests {
         let (_dir, store) = new_test_object_store("test_delete_table_manifest");
 
         let metadata = build_test_table_metadata();
-        let table_dir = &table_manifest_dir(TEST_TABLE_NAME);
+        let table_dir = &table_manifest_dir(&format!("{TEST_TABLE_NAME}/"));
         write_table_manifest(TEST_TABLE_NAME, table_dir, &store, &metadata)
             .await
             .unwrap();

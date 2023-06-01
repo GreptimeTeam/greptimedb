@@ -12,12 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_stream::stream;
-use common_meta::rpc::store::{CompareAndPutRequest, DeleteRangeRequest, PutRequest, RangeRequest};
+use common_meta::rpc::store::{
+    CompareAndPutRequest, DeleteRangeRequest, MoveValueRequest, PutRequest, RangeRequest,
+};
 use common_telemetry::{info, timer};
 use meta_client::client::MetaClient;
 use moka::future::{Cache, CacheBuilder};
@@ -32,9 +35,10 @@ const CACHE_MAX_CAPACITY: u64 = 10000;
 const CACHE_TTL_SECOND: u64 = 10 * 60;
 const CACHE_TTI_SECOND: u64 = 5 * 60;
 
+pub type CacheBackendRef = Arc<Cache<Vec<u8>, Option<Kv>>>;
 pub struct CachedMetaKvBackend {
     kv_backend: KvBackendRef,
-    cache: Arc<Cache<Vec<u8>, Option<Kv>>>,
+    cache: CacheBackendRef,
 }
 
 #[async_trait::async_trait]
@@ -98,6 +102,21 @@ impl KvBackend for CachedMetaKvBackend {
 
         ret
     }
+
+    async fn move_value(&self, from_key: &[u8], to_key: &[u8]) -> Result<()> {
+        let ret = self.kv_backend.move_value(from_key, to_key).await;
+
+        if ret.is_ok() {
+            self.invalidate_key(from_key).await;
+            self.invalidate_key(to_key).await;
+        }
+
+        ret
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 #[async_trait::async_trait]
@@ -129,6 +148,10 @@ impl CachedMetaKvBackend {
         );
 
         Self { kv_backend, cache }
+    }
+
+    pub fn cache(&self) -> &CacheBackendRef {
+        &self.cache
     }
 }
 
@@ -213,5 +236,15 @@ impl KvBackend for MetaKvBackend {
         } else {
             Ok(Err(response.take_prev_kv().map(|v| v.value().to_vec())))
         }
+    }
+
+    async fn move_value(&self, from_key: &[u8], to_key: &[u8]) -> Result<()> {
+        let req = MoveValueRequest::new(from_key, to_key);
+        self.client.move_value(req).await.context(MetaSrvSnafu)?;
+        Ok(())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
