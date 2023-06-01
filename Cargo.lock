@@ -1587,6 +1587,7 @@ dependencies = [
  "futures",
  "meta-client",
  "meta-srv",
+ "metrics",
  "nu-ansi-term",
  "partition",
  "query",
