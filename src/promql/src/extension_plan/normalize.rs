@@ -19,10 +19,10 @@ use std::task::{Context, Poll};
 
 use datafusion::arrow::array::{BooleanArray, Float64Array};
 use datafusion::arrow::compute;
-use datafusion::common::{DFSchemaRef, Result as DataFusionResult, Statistics};
+use datafusion::common::{DFSchema, DFSchemaRef, Result as DataFusionResult, Statistics};
 use datafusion::error::DataFusionError;
 use datafusion::execution::context::TaskContext;
-use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
+use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::PhysicalSortExpr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
@@ -33,7 +33,11 @@ use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::error::Result as ArrowResult;
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::{Stream, StreamExt};
+use greptime_proto::substrait_extension as pb;
+use prost::Message;
+use snafu::ResultExt;
 
+use crate::error::{DeserializeSnafu, Result};
 use crate::extension_plan::Millisecond;
 
 /// Normalize the input record batch. Notice that for simplicity, this method assumes
@@ -54,7 +58,7 @@ pub struct SeriesNormalize {
 
 impl UserDefinedLogicalNodeCore for SeriesNormalize {
     fn name(&self) -> &str {
-        "SeriesNormalize"
+        Self::name()
     }
 
     fn inputs(&self) -> Vec<&LogicalPlan> {
@@ -104,6 +108,10 @@ impl SeriesNormalize {
         }
     }
 
+    pub const fn name() -> &'static str {
+        "SeriesNormalize"
+    }
+
     pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
         Arc::new(SeriesNormalizeExec {
             offset: self.offset,
@@ -112,6 +120,29 @@ impl SeriesNormalize {
             input: exec_input,
             metric: ExecutionPlanMetricsSet::new(),
         })
+    }
+
+    pub fn serialize(&self) -> Vec<u8> {
+        pb::SeriesNormalize {
+            offset: self.offset,
+            time_index: self.time_index_column_name.clone(),
+            filter_nan: self.need_filter_out_nan,
+        }
+        .encode_to_vec()
+    }
+
+    pub fn deserialize(bytes: &[u8]) -> Result<Self> {
+        let pb_normalize = pb::SeriesNormalize::decode(bytes).context(DeserializeSnafu)?;
+        let placeholder_plan = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: Arc::new(DFSchema::empty()),
+        });
+        Ok(Self::new(
+            pb_normalize.offset,
+            pb_normalize.time_index,
+            pb_normalize.filter_nan,
+            placeholder_plan,
+        ))
     }
 }
 

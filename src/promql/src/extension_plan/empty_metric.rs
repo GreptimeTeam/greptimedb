@@ -35,6 +35,8 @@ use datatypes::arrow::array::TimestampMillisecondArray;
 use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::Stream;
+use greptime_proto::substrait_extension as pb;
+use prost::Message;
 
 use crate::extension_plan::Millisecond;
 
@@ -84,6 +86,10 @@ impl EmptyMetric {
         })
     }
 
+    pub const fn name() -> &'static str {
+        "EmptyMetric"
+    }
+
     pub fn to_execution_plan(
         &self,
         session_state: &SessionState,
@@ -110,7 +116,7 @@ impl EmptyMetric {
 
 impl UserDefinedLogicalNodeCore for EmptyMetric {
     fn name(&self) -> &str {
-        "EmptyMetric"
+        Self::name()
     }
 
     fn inputs(&self) -> Vec<&LogicalPlan> {

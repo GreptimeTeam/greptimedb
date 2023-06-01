@@ -29,6 +29,7 @@ datafusion-sql.workspace = true
 datatypes = { path = "../datatypes" }
 futures = "0.3"
 futures-util.workspace = true
+greptime-proto.workspace = true
 humantime = "2.1"
 metrics.workspace = true
 object-store = { path = "../object-store" }

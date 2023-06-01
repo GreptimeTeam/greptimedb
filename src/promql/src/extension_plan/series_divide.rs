@@ -20,10 +20,10 @@ use std::task::{Context, Poll};
 use datafusion::arrow::array::{Array, StringArray};
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::common::DFSchemaRef;
+use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::Result as DataFusionResult;
 use datafusion::execution::context::TaskContext;
-use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
+use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::PhysicalSortExpr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
@@ -32,6 +32,11 @@ use datafusion::physical_plan::{
 };
 use datatypes::arrow::compute;
 use futures::{ready, Stream, StreamExt};
+use greptime_proto::substrait_extension as pb;
+use prost::Message;
+use snafu::ResultExt;
+
+use crate::error::{DeserializeSnafu, Result};
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct SeriesDivide {
@@ -41,7 +46,7 @@ pub struct SeriesDivide {
 
 impl UserDefinedLogicalNodeCore for SeriesDivide {
     fn name(&self) -> &str {
-        "SeriesDivide"
+        Self::name()
     }
 
     fn inputs(&self) -> Vec<&LogicalPlan> {
@@ -75,11 +80,34 @@ impl SeriesDivide {
         Self { tag_columns, input }
     }
 
+    pub const fn name() -> &'static str {
+        "SeriesDivide"
+    }
+
     pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
         Arc::new(SeriesDivideExec {
             tag_columns: self.tag_columns.clone(),
             input: exec_input,
             metric: ExecutionPlanMetricsSet::new(),
+        })
+    }
+
+    pub fn serialize(&self) -> Vec<u8> {
+        pb::SeriesDivide {
+            tag_columns: self.tag_columns.clone(),
+        }
+        .encode_to_vec()
+    }
+
+    pub fn deserialize(bytes: &[u8]) -> Result<Self> {
+        let pb_series_divide = pb::SeriesDivide::decode(bytes).context(DeserializeSnafu)?;
+        let placeholder_plan = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: Arc::new(DFSchema::empty()),
+        });
+        Ok(Self {
+            tag_columns: pb_series_divide.tag_columns,
+            input: placeholder_plan,
         })
     }
 }

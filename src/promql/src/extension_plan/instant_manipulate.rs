@@ -21,10 +21,10 @@ use std::task::{Context, Poll};
 use datafusion::arrow::array::{Array, Float64Array, TimestampMillisecondArray, UInt64Array};
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::common::DFSchemaRef;
+use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
-use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
+use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::PhysicalSortExpr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
@@ -34,7 +34,11 @@ use datafusion::physical_plan::{
 use datatypes::arrow::compute;
 use datatypes::arrow::error::Result as ArrowResult;
 use futures::{Stream, StreamExt};
+use greptime_proto::substrait_extension as pb;
+use prost::Message;
+use snafu::ResultExt;
 
+use crate::error::{DeserializeSnafu, Result};
 use crate::extension_plan::Millisecond;
 
 /// Manipulate the input record batch to make it suitable for Instant Operator.
@@ -56,7 +60,7 @@ pub struct InstantManipulate {
 
 impl UserDefinedLogicalNodeCore for InstantManipulate {
     fn name(&self) -> &str {
-        "InstantManipulate"
+        Self::name()
     }
 
     fn inputs(&self) -> Vec<&LogicalPlan> {
@@ -115,6 +119,10 @@ impl InstantManipulate {
         }
     }
 
+    pub const fn name() -> &'static str {
+        "InstantManipulate"
+    }
+
     pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
         Arc::new(InstantManipulateExec {
             start: self.start,
@@ -126,6 +134,40 @@ impl InstantManipulate {
             input: exec_input,
             metric: ExecutionPlanMetricsSet::new(),
         })
+    }
+
+    pub fn serialize(&self) -> Vec<u8> {
+        pb::InstantManipulate {
+            start: self.start,
+            end: self.end,
+            interval: self.interval,
+            lookback_delta: self.lookback_delta,
+            time_index: self.time_index_column.clone(),
+            field_index: self.field_column.clone().unwrap_or_default(),
+        }
+        .encode_to_vec()
+    }
+
+    pub fn deserialize(bytes: &[u8]) -> Result<Self> {
+        let pb_instant_manipulate =
+            pb::InstantManipulate::decode(bytes).context(DeserializeSnafu)?;
+        let placeholder_plan = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: Arc::new(DFSchema::empty()),
+        });
+        Ok(Self::new(
+            pb_instant_manipulate.start,
+            pb_instant_manipulate.end,
+            pb_instant_manipulate.lookback_delta,
+            pb_instant_manipulate.interval,
+            pb_instant_manipulate.time_index,
+            if pb_instant_manipulate.field_index.is_empty() {
+                None
+            } else {
+                Some(pb_instant_manipulate.field_index)
+            },
+            placeholder_plan,
+        ))
     }
 }
 
