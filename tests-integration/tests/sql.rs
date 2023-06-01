@@ -67,7 +67,7 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         .await
         .unwrap();
     for i in 0..10 {
-        sqlx::query("insert table demo values(?, ?)")
+        sqlx::query("insert into demo values(?, ?)")
             .bind(i)
             .bind(i)
             .execute(&pool)
@@ -114,7 +114,7 @@ pub async fn test_postgres_crud(store_type: StorageType) {
         .await
         .unwrap();
     for i in 0..10 {
-        sqlx::query("insert table demo values($1, $2)")
+        sqlx::query("insert into demo values($1, $2)")
             .bind(i)
             .bind(i)
             .execute(&pool)
