@@ -70,7 +70,11 @@ impl Profiling {
 
     /// Profiles and returns a generated pprof report.
     pub async fn report(&self) -> Result<pprof::Report> {
-        let guard = pprof::ProfilerGuard::new(self.frequency).context(CreateGuardSnafu)?;
+        let guard = pprof::ProfilerGuardBuilder::default()
+            .frequency(self.frequency)
+            .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+            .build()
+            .context(CreateGuardSnafu)?;
         tokio::time::sleep(self.duration).await;
         guard.report().build().context(CreateReportSnafu)
     }
