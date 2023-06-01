@@ -17,6 +17,7 @@ members = [
     "src/common/meta",
     "src/common/procedure",
     "src/common/procedure-test",
+    "src/common/pprof",
     "src/common/query",
     "src/common/recordbatch",
     "src/common/runtime",
