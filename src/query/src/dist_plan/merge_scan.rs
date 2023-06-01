@@ -139,7 +139,7 @@ impl MergeScanExec {
         let table = self.table.clone();
 
         let stream = try_stream! {
-            for peer in peers{
+            for peer in peers {
                 let client = clients.get_client(&peer).await;
                 let database = Database::new(&table.catalog_name, &table.schema_name, client);
                 let output: Output = database
