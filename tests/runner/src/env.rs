@@ -41,7 +41,6 @@ const SERVER_ADDR: &str = "127.0.0.1:4001";
 const STANDALONE_LOG_FILE: &str = "/tmp/greptime-sqlness-standalone.log";
 const METASRV_LOG_FILE: &str = "/tmp/greptime-sqlness-metasrv.log";
 const FRONTEND_LOG_FILE: &str = "/tmp/greptime-sqlness-frontend.log";
-const DATANODE_LOG_FILE: &str = "/tmp/greptime-sqlness-datanode.log";
 
 const DEFAULT_LOG_LEVEL: &str = "--log-level=debug,hyper=warn,tower=warn,datafusion=warn,reqwest=warn,sqlparser=warn,h2=info,opendal=info";
 
@@ -65,8 +64,6 @@ impl EnvController for Env {
         database.stop();
     }
 }
-
-static DATANODE_ID: AtomicU32 = AtomicU32::new(1);
 
 #[allow(clippy::print_stdout)]
 impl Env {
@@ -130,10 +127,17 @@ impl Env {
         truncate_log: bool,
     ) -> Child {
         let log_file_name = match subcommand {
-            "datanode" => DATANODE_LOG_FILE,
-            "frontend" => FRONTEND_LOG_FILE,
-            "metasrv" => METASRV_LOG_FILE,
-            "standalone" => STANDALONE_LOG_FILE,
+            "datanode" => {
+                db_ctx.incr_datanode_id();
+
+                format!(
+                    "/tmp/greptime-sqlness-datanode-{}.log",
+                    db_ctx.datanode_id()
+                )
+            }
+            "frontend" => FRONTEND_LOG_FILE.to_string(),
+            "metasrv" => METASRV_LOG_FILE.to_string(),
+            "standalone" => STANDALONE_LOG_FILE.to_string(),
             _ => panic!("Unexpected subcommand: {subcommand}"),
         };
         let log_file = OpenOptions::new()
@@ -141,7 +145,7 @@ impl Env {
             .write(true)
             .truncate(truncate_log)
             .open(log_file_name)
-            .unwrap_or_else(|_| panic!("Cannot open log file at {log_file_name}"));
+            .unwrap();
 
         let (args, check_ip_addr) = match subcommand {
             "datanode" => Self::datanode_start_args(db_ctx),
@@ -195,7 +199,7 @@ impl Env {
     }
 
     fn datanode_start_args(db_ctx: &GreptimeDBContext) -> (Vec<String>, String) {
-        let id = DATANODE_ID.fetch_add(1, Ordering::Relaxed);
+        let id = db_ctx.datanode_id();
 
         let subcommand = "datanode";
         let mut args = vec![
@@ -233,8 +237,9 @@ impl Env {
             let new_server_process = Env::start_server("standalone", &db.ctx, false).await;
             vec![new_server_process]
         } else {
+            db.ctx.reset_datanode_id();
+
             let mut processes = vec![];
-            DATANODE_ID.store(1, Ordering::Relaxed);
             for _ in 0..3 {
                 let new_server_process = Env::start_server("datanode", &db.ctx, false).await;
                 processes.push(new_server_process);
@@ -351,13 +356,27 @@ impl Drop for GreptimeDB {
 struct GreptimeDBContext {
     /// Start time in millisecond
     time: i64,
+    datanode_id: AtomicU32,
 }
 
 impl GreptimeDBContext {
     pub fn new() -> Self {
         Self {
             time: common_time::util::current_time_millis(),
+            datanode_id: AtomicU32::new(0),
         }
+    }
+
+    fn incr_datanode_id(&self) {
+        self.datanode_id.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn datanode_id(&self) -> u32 {
+        self.datanode_id.load(Ordering::Relaxed)
+    }
+
+    fn reset_datanode_id(&self) {
+        self.datanode_id.store(0, Ordering::Relaxed);
     }
 }
 
