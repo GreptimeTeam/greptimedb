@@ -101,8 +101,9 @@ impl TableProvider for DfTableProviderAdapter {
             order_opts
                 .iter()
                 .map(|order_opt| {
-                    let col_name = schema.column_name_by_index(order_opt.index);
-                    let col_expr = Arc::new(Column::new(col_name, order_opt.index));
+                    // let col_name = schema.column_name_by_index(order_opt.index);
+                    let col_index = schema.column_index_by_name(&order_opt.name).unwrap();
+                    let col_expr = Arc::new(Column::new(&order_opt.name, col_index));
                     PhysicalSortExpr {
                         expr: col_expr,
                         options: order_opt.options,

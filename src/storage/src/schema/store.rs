@@ -177,6 +177,13 @@ impl StoreSchema {
         &self.schema.column_schemas()[idx].name
     }
 
+    /// # Panic
+    /// Panics if `name` is not a valid column name.
+    #[inline]
+    pub(crate) fn column_index(&self, name: &str) -> usize {
+        self.schema.column_index_by_name(name).unwrap()
+    }
+
     #[inline]
     pub(crate) fn num_columns(&self) -> usize {
         self.schema.num_columns()

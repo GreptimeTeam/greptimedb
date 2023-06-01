@@ -185,21 +185,10 @@ impl ChunkReaderBuilder {
         if output_ordering.is_empty() {
             return None;
         }
-        let OrderOption { index, options } = &output_ordering[0];
+        let OrderOption { name, options } = &output_ordering[0];
 
-        // convert index in user schema to region schema
-        let first_name = self
-            .user_schema
-            .as_ref()
-            .map(|schema| schema.column_name_by_index(*index));
-
-        match first_name {
-            None => return None,
-            Some(first_name) => {
-                if first_name != self.schema.timestamp_column_name() {
-                    return None;
-                }
-            }
+        if name != self.schema.timestamp_column_name() {
+            return None;
         }
         let memtable_stats = self.memtables.iter().map(|m| m.stats()).collect::<Vec<_>>();
         let files = self

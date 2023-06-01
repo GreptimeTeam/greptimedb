@@ -14,7 +14,7 @@
 
 use arrow_schema::SortOptions;
 use common_recordbatch::OrderOption;
-use datafusion::datasource::{DefaultTableSource, TableProvider};
+use datafusion::datasource::DefaultTableSource;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeVisitor, VisitRecursion};
 use datafusion_common::Result as DataFusionResult;
 use datafusion_expr::expr::Sort;
@@ -70,15 +70,14 @@ impl OrderHintRule {
                         .as_any()
                         .downcast_ref::<DfTableProviderAdapter>()
                     {
-                        let schema = adapter.schema();
                         let mut opts = vec![];
                         for sort in order_expr {
-                            let index = match &*sort.expr {
-                                Expr::Column(col) => schema.index_of(&col.name)?,
-                                _ => return Ok(Transformed::No(plan)),
+                            let name = match sort.expr.try_into_col() {
+                                Ok(col) => col.name,
+                                Err(_) => return Ok(Transformed::No(plan)),
                             };
                             opts.push(OrderOption {
-                                index,
+                                name,
                                 options: SortOptions {
                                     descending: !sort.asc,
                                     nulls_first: sort.nulls_first,
@@ -150,6 +149,6 @@ mod test {
         OrderHintRule.try_optimize(&plan, &context).unwrap();
 
         let scan_req = adapter.get_scan_req();
-        assert_eq!(0, scan_req.output_ordering.unwrap()[0].index)
+        assert_eq!("number", &scan_req.output_ordering.unwrap()[0].name)
     }
 }
