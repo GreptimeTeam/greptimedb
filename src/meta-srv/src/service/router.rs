@@ -21,19 +21,70 @@ use api::v1::meta::{
 };
 use catalog::helper::{TableGlobalKey, TableGlobalValue};
 use common_meta::key::TableRouteKey;
-use common_telemetry::{timer, warn};
-use snafu::{OptionExt, ResultExt};
+use common_meta::table_name::TableName;
+use common_telemetry::{error, timer, warn};
+use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::RawTableInfo;
 use tonic::{Request, Response};
 
 use crate::error;
 use crate::error::Result;
+use crate::keys::TableRouteKey;
+use crate::lock::{keys, DistLockRef, Key, Opts};
 use crate::metasrv::{Context, MetaSrv, SelectorContext, SelectorRef};
 use crate::metrics::METRIC_META_ROUTE_REQUEST;
 use crate::sequence::SequenceRef;
+use crate::service::store::ext::KvStoreExt;
 use crate::service::store::kv::KvStoreRef;
 use crate::service::GrpcResult;
 use crate::table_routes::{get_table_global_value, get_table_route_value};
+
+struct TableCreationLockGuard<'a> {
+    lock: &'a DistLockRef,
+    table_name: &'a TableName,
+    key: Option<Key>,
+}
+
+impl<'a> TableCreationLockGuard<'a> {
+    fn new(lock: &'a DistLockRef, table_name: &'a TableName) -> Self {
+        Self {
+            lock,
+            table_name,
+            key: None,
+        }
+    }
+
+    async fn lock(&mut self) -> Result<()> {
+        if self.key.is_some() {
+            return Ok(());
+        }
+        let key = self
+            .lock
+            .lock(
+                keys::table_creation_lock_key(self.table_name),
+                Opts {
+                    expire_secs: Some(2),
+                },
+            )
+            .await?;
+        self.key = Some(key);
+        Ok(())
+    }
+}
+
+impl Drop for TableCreationLockGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(key) = self.key.take() {
+            let table_name = self.table_name.clone();
+            let lock = self.lock.clone();
+            common_runtime::spawn_bg(async move {
+                if let Err(e) = lock.unlock(key).await {
+                    error!(e; "Failed to release creation lock for table: {table_name}");
+                }
+            });
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl router_server::Router for MetaSrv {
@@ -43,6 +94,30 @@ impl router_server::Router for MetaSrv {
         let CreateRequest {
             header, table_name, ..
         } = &req;
+        let table_name: TableName = table_name
+            .as_ref()
+            .context(error::EmptyTableNameSnafu)?
+            .clone()
+            .into();
+
+        // TODO(LFC): Use procedure to create table, and get rid of locks here.
+        let mut guard = TableCreationLockGuard::new(self.lock(), &table_name);
+        guard.lock().await?;
+
+        let table_global_key = TableGlobalKey {
+            catalog_name: table_name.catalog_name.clone(),
+            schema_name: table_name.schema_name.clone(),
+            table_name: table_name.table_name.clone(),
+        }
+        .to_string()
+        .into_bytes();
+        ensure!(
+            self.kv_store().get(table_global_key).await?.is_none(),
+            error::TableAlreadyExistsSnafu {
+                table_name: table_name.to_string(),
+            }
+        );
+
         let cluster_id = header.as_ref().map_or(0, |h| h.cluster_id);
 
         let _timer = timer!(
@@ -53,14 +128,13 @@ impl router_server::Router for MetaSrv {
             ]
         );
 
-        let table_name = table_name.clone().context(error::EmptyTableNameSnafu)?;
         let ctx = SelectorContext {
             datanode_lease_secs: self.options().datanode_lease_secs,
             server_addr: self.options().server_addr.clone(),
             kv_store: self.kv_store(),
-            catalog: Some(table_name.catalog_name),
-            schema: Some(table_name.schema_name),
-            table: Some(table_name.table_name),
+            catalog: Some(table_name.catalog_name.clone()),
+            schema: Some(table_name.schema_name.clone()),
+            table: Some(table_name.table_name.clone()),
         };
 
         let selector = self.selector();

@@ -283,6 +283,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Table already exists: {table_name}"))]
+    TableAlreadyExists {
+        table_name: String,
+        location: Location,
+    },
+
     #[snafu(display("Pusher not found: {pusher_id}"))]
     PusherNotFound {
         pusher_id: String,
@@ -394,6 +400,7 @@ impl ErrorExt for Error {
             | Error::SendShutdownSignal { .. }
             | Error::ParseAddr { .. }
             | Error::SchemaAlreadyExists { .. }
+            | Error::TableAlreadyExists { .. }
             | Error::PusherNotFound { .. }
             | Error::PushMessage { .. }
             | Error::MailboxClosed { .. }

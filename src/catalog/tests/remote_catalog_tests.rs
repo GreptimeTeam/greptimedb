@@ -14,8 +14,6 @@
 
 #![feature(assert_matches)]
 
-mod mock;
-
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
@@ -23,6 +21,7 @@ mod tests {
     use std::sync::Arc;
 
     use catalog::helper::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
+    use catalog::remote::mock::{MockKvBackend, MockTableEngine};
     use catalog::remote::{
         CachedMetaKvBackend, KvBackend, KvBackendRef, RemoteCatalogManager, RemoteCatalogProvider,
         RemoteSchemaProvider,
@@ -34,8 +33,6 @@ mod tests {
     use table::engine::manager::{MemoryTableEngineManager, TableEngineManagerRef};
     use table::engine::{EngineContext, TableEngineRef};
     use table::requests::CreateTableRequest;
-
-    use crate::mock::{MockKvBackend, MockTableEngine};
 
     #[tokio::test]
     async fn test_backend() {

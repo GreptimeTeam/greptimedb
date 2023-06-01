@@ -53,12 +53,13 @@ use table::error::TableOperationSnafu;
 use table::metadata::{FilterPushDownType, TableInfo, TableInfoRef};
 use table::requests::{AlterKind, AlterTableRequest, DeleteRequest, InsertRequest};
 use table::table::AlterContext;
-use table::{meter_insert_request, Table};
+use table::Table;
 use tokio::sync::RwLock;
 
+use crate::catalog::FrontendCatalogManager;
 use crate::error::{self, FindDatanodeSnafu, FindTableRouteSnafu, Result};
+use crate::instance::distributed::inserter::DistInserter;
 use crate::table::delete::to_grpc_delete_request;
-use crate::table::insert::to_grpc_insert_request;
 use crate::table::scan::{DatanodeInstance, TableScanPlan};
 
 mod delete;
@@ -69,10 +70,7 @@ pub(crate) mod scan;
 pub struct DistTable {
     table_name: TableName,
     table_info: TableInfoRef,
-    partition_manager: PartitionRuleManagerRef,
-    // TODO(ruihang): move this field into PartitionRuleManager
-    datanode_clients: Arc<DatanodeClients>,
-    backend: KvBackendRef,
+    catalog_manager: Arc<FrontendCatalogManager>,
 }
 
 #[async_trait]
@@ -90,29 +88,17 @@ impl Table for DistTable {
     }
 
     async fn insert(&self, request: InsertRequest) -> table::Result<usize> {
-        meter_insert_request!(request);
-
-        let splits = self
-            .partition_manager
-            .split_insert_request(&self.table_name, request, &self.schema())
+        let inserter = DistInserter::new(
+            request.catalog_name.clone(),
+            request.schema_name.clone(),
+            self.catalog_manager.clone(),
+        );
+        let affected_rows = inserter
+            .insert(vec![request])
             .await
             .map_err(BoxedError::new)
             .context(TableOperationSnafu)?;
-
-        let inserts = splits
-            .into_iter()
-            .map(|(region_number, insert)| to_grpc_insert_request(region_number, insert))
-            .collect::<Result<Vec<_>>>()
-            .map_err(BoxedError::new)
-            .context(TableOperationSnafu)?;
-
-        let output = self
-            .dist_insert(inserts)
-            .await
-            .map_err(BoxedError::new)
-            .context(TableOperationSnafu)?;
-        let Output::AffectedRows(rows) = output else { unreachable!() };
-        Ok(rows)
+        Ok(affected_rows as usize)
     }
 
     async fn scan(
@@ -121,20 +107,20 @@ impl Table for DistTable {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> table::Result<PhysicalPlanRef> {
-        let partition_rule = self
-            .partition_manager
+        let partition_manager = self.catalog_manager.partition_manager();
+        let datanode_clients = self.catalog_manager.datanode_clients();
+
+        let partition_rule = partition_manager
             .find_table_partition_rule(&self.table_name)
             .await
             .map_err(BoxedError::new)
             .context(TableOperationSnafu)?;
 
-        let regions = self
-            .partition_manager
+        let regions = partition_manager
             .find_regions_by_filters(partition_rule, filters)
             .map_err(BoxedError::new)
             .context(TableOperationSnafu)?;
-        let datanodes = self
-            .partition_manager
+        let datanodes = partition_manager
             .find_region_datanodes(&self.table_name, regions)
             .await
             .map_err(BoxedError::new)
@@ -143,7 +129,7 @@ impl Table for DistTable {
         let table_name = &self.table_name;
         let mut partition_execs = Vec::with_capacity(datanodes.len());
         for (datanode, _regions) in datanodes.iter() {
-            let client = self.datanode_clients.get_client(datanode).await;
+            let client = datanode_clients.get_client(datanode).await;
             let db = Database::new(&table_name.catalog_name, &table_name.schema_name, client);
             let datanode_instance = DatanodeInstance::new(Arc::new(self.clone()) as _, db);
 
@@ -169,20 +155,20 @@ impl Table for DistTable {
         &self,
         request: ScanRequest,
     ) -> table::Result<SendableRecordBatchStream> {
-        let partition_rule = self
-            .partition_manager
+        let partition_manager = self.catalog_manager.partition_manager();
+        let datanode_clients = self.catalog_manager.datanode_clients();
+
+        let partition_rule = partition_manager
             .find_table_partition_rule(&self.table_name)
             .await
             .map_err(BoxedError::new)
             .context(TableOperationSnafu)?;
 
-        let regions = self
-            .partition_manager
+        let regions = partition_manager
             .find_regions_by_filters(partition_rule, &request.filters)
             .map_err(BoxedError::new)
             .context(TableOperationSnafu)?;
-        let datanodes = self
-            .partition_manager
+        let datanodes = partition_manager
             .find_region_datanodes(&self.table_name, regions)
             .await
             .map_err(BoxedError::new)
@@ -191,7 +177,7 @@ impl Table for DistTable {
         let table_name = &self.table_name;
         let mut partition_execs = Vec::with_capacity(datanodes.len());
         for (datanode, _regions) in datanodes.iter() {
-            let client = self.datanode_clients.get_client(datanode).await;
+            let client = datanode_clients.get_client(datanode).await;
             let db = Database::new(&table_name.catalog_name, &table_name.schema_name, client);
             let datanode_instance = DatanodeInstance::new(Arc::new(self.clone()) as _, db);
 
@@ -247,8 +233,9 @@ impl Table for DistTable {
     }
 
     async fn delete(&self, request: DeleteRequest) -> table::Result<usize> {
-        let partition_rule = self
-            .partition_manager
+        let partition_manager = self.catalog_manager.partition_manager();
+
+        let partition_rule = partition_manager
             .find_table_partition_rule(&self.table_name)
             .await
             .map_err(BoxedError::new)
@@ -276,7 +263,12 @@ impl Table for DistTable {
                 requests
                     .into_iter()
                     .map(|(region_number, request)| {
-                        to_grpc_delete_request(&self.table_name, region_number, request)
+                        to_grpc_delete_request(
+                            &table_info.meta,
+                            &self.table_name,
+                            region_number,
+                            request,
+                        )
                     })
                     .collect::<Result<Vec<_>>>()
                     .map_err(BoxedError::new)
@@ -297,16 +289,12 @@ impl DistTable {
     pub fn new(
         table_name: TableName,
         table_info: TableInfoRef,
-        partition_manager: PartitionRuleManagerRef,
-        datanode_clients: Arc<DatanodeClients>,
-        backend: KvBackendRef,
+        catalog_manager: Arc<FrontendCatalogManager>,
     ) -> Self {
         Self {
             table_name,
             table_info,
-            partition_manager,
-            datanode_clients,
-            backend,
+            catalog_manager,
         }
     }
 
@@ -315,7 +303,8 @@ impl DistTable {
         key: &TableGlobalKey,
     ) -> Result<Option<TableGlobalValue>> {
         let raw = self
-            .backend
+            .catalog_manager
+            .backend()
             .get(key.to_string().as_bytes())
             .await
             .context(error::CatalogSnafu)?;
@@ -332,14 +321,16 @@ impl DistTable {
         value: TableGlobalValue,
     ) -> Result<()> {
         let value = value.as_bytes().context(error::CatalogEntrySerdeSnafu)?;
-        self.backend
+        self.catalog_manager
+            .backend()
             .set(key.to_string().as_bytes(), &value)
             .await
             .context(error::CatalogSnafu)
     }
 
     async fn delete_table_global_value(&self, key: TableGlobalKey) -> Result<()> {
-        self.backend
+        self.catalog_manager
+            .backend()
             .delete(key.to_string().as_bytes())
             .await
             .context(error::CatalogSnafu)
@@ -451,7 +442,8 @@ impl DistTable {
     /// [`table::requests::AlterTableRequest`] and [`AlterExpr`].
     async fn alter_by_expr(&self, expr: &AlterExpr) -> Result<()> {
         let table_routes = self
-            .partition_manager
+            .catalog_manager
+            .partition_manager()
             .find_table_route(&self.table_name)
             .await
             .with_context(|_| error::FindTableRouteSnafu {
@@ -467,8 +459,10 @@ impl DistTable {
                 )
             }
         );
+
+        let datanode_clients = self.catalog_manager.datanode_clients();
         for datanode in leaders {
-            let client = self.datanode_clients.get_client(&datanode).await;
+            let client = datanode_clients.get_client(&datanode).await;
             let db = Database::new(&expr.catalog_name, &expr.schema_name, client);
             debug!("Sending {:?} to {:?}", expr, db);
             let result = db
@@ -487,7 +481,8 @@ impl DistTable {
     ) -> Result<Vec<DatanodeInstance>> {
         let table_name = &self.table_name;
         let route = self
-            .partition_manager
+            .catalog_manager
+            .partition_manager()
             .find_table_route(table_name)
             .await
             .with_context(|_| FindTableRouteSnafu {
@@ -497,24 +492,16 @@ impl DistTable {
         let datanodes = regions
             .iter()
             .map(|&n| {
-                let region_id = n as u64;
                 route
-                    .region_routes
-                    .iter()
-                    .find_map(|x| {
-                        if x.region.id == region_id {
-                            x.leader_peer.clone()
-                        } else {
-                            None
-                        }
-                    })
-                    .context(FindDatanodeSnafu { region: region_id })
+                    .find_region_leader(n)
+                    .context(FindDatanodeSnafu { region: n })
             })
             .collect::<Result<Vec<_>>>()?;
 
+        let datanode_clients = self.catalog_manager.datanode_clients();
         let mut instances = Vec::with_capacity(datanodes.len());
         for datanode in datanodes {
-            let client = self.datanode_clients.get_client(&datanode).await;
+            let client = datanode_clients.get_client(&datanode).await;
             let db = Database::new(&table_name.catalog_name, &table_name.schema_name, client);
             instances.push(DatanodeInstance::new(Arc::new(self.clone()) as _, db));
         }
@@ -622,12 +609,12 @@ impl PartitionExec {
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    use catalog::error::Result;
-    use catalog::remote::{KvBackend, ValueIter};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute, Table, TableRoute};
     use datafusion_expr::expr_fn::{and, binary_expr, col, or};
     use datafusion_expr::{lit, Operator};
@@ -637,7 +624,7 @@ mod test {
     use meter_core::global::global_registry;
     use meter_core::write_calc::WriteCalculator;
     use partition::columns::RangeColumnsPartitionRule;
-    use partition::manager::PartitionRuleManager;
+    use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
     use partition::partition::{PartitionBound, PartitionDef};
     use partition::range::RangePartitionRule;
     use partition::route::TableRoutes;
@@ -647,49 +634,31 @@ mod test {
 
     use super::*;
 
-    struct DummyKvBackend;
-
-    #[async_trait]
-    impl KvBackend for DummyKvBackend {
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-
-        fn range<'a, 'b>(&'a self, _key: &[u8]) -> ValueIter<'b, catalog::error::Error>
-        where
-            'a: 'b,
-        {
-            unimplemented!()
-        }
-
-        async fn set(&self, _key: &[u8], _val: &[u8]) -> Result<()> {
-            unimplemented!()
-        }
-
-        async fn compare_and_set(
-            &self,
-            _key: &[u8],
-            _expect: &[u8],
-            _val: &[u8],
-        ) -> Result<std::result::Result<(), Option<Vec<u8>>>> {
-            unimplemented!()
-        }
-
-        async fn move_value(&self, _from_key: &[u8], _to_key: &[u8]) -> Result<()> {
-            unimplemented!()
-        }
-
-        async fn delete_range(&self, _key: &[u8], _end: &[u8]) -> Result<()> {
-            unimplemented!()
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_find_partition_rule() {
-        let table_name = TableName::new("greptime", "public", "foo");
+    /// Create a partition rule manager with two tables, one is partitioned by single column, and
+    /// the other one is two. The tables are under default catalog and schema.
+    ///
+    /// Table named "one_column_partitioning_table" is partitioned by column "a" like this:
+    /// PARTITION BY RANGE (a) (
+    ///   PARTITION r1 VALUES LESS THAN (10),
+    ///   PARTITION r2 VALUES LESS THAN (50),
+    ///   PARTITION r3 VALUES LESS THAN (MAXVALUE),
+    /// )
+    ///
+    /// Table named "two_column_partitioning_table" is partitioned by columns "a" and "b" like this:
+    /// PARTITION BY RANGE (a, b) (
+    ///   PARTITION r1 VALUES LESS THAN (10, 'hz'),
+    ///   PARTITION r2 VALUES LESS THAN (50, 'sh'),
+    ///   PARTITION r3 VALUES LESS THAN (MAXVALUE, MAXVALUE),
+    /// )
+    pub(crate) async fn create_partition_rule_manager() -> PartitionRuleManagerRef {
         let table_routes = Arc::new(TableRoutes::new(Arc::new(MetaClient::default())));
         let partition_manager = Arc::new(PartitionRuleManager::new(table_routes.clone()));
 
+        let table_name = TableName::new(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+            "one_column_partitioning_table",
+        );
         let table_route = TableRoute {
             table: Table {
                 id: 1,
@@ -711,7 +680,7 @@ mod test {
                         ),
                         attrs: HashMap::new(),
                     },
-                    leader_peer: None,
+                    leader_peer: Some(Peer::new(3, "")),
                     follower_peers: vec![],
                 },
                 RegionRoute {
@@ -728,7 +697,7 @@ mod test {
                         ),
                         attrs: HashMap::new(),
                     },
-                    leader_peer: None,
+                    leader_peer: Some(Peer::new(2, "")),
                     follower_peers: vec![],
                 },
                 RegionRoute {
@@ -745,7 +714,7 @@ mod test {
                         ),
                         attrs: HashMap::new(),
                     },
-                    leader_peer: None,
+                    leader_peer: Some(Peer::new(1, "")),
                     follower_peers: vec![],
                 },
             ],
@@ -754,18 +723,11 @@ mod test {
             .insert_table_route(table_name.clone(), Arc::new(table_route))
             .await;
 
-        let partition_rule = partition_manager
-            .find_table_partition_rule(&table_name)
-            .await
-            .unwrap();
-        let range_rule = partition_rule
-            .as_any()
-            .downcast_ref::<RangePartitionRule>()
-            .unwrap();
-        assert_eq!(range_rule.column_name(), "a");
-        assert_eq!(range_rule.all_regions(), &vec![3, 2, 1]);
-        assert_eq!(range_rule.bounds(), &vec![10_i32.into(), 50_i32.into()]);
-
+        let table_name = TableName::new(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+            "two_column_partitioning_table",
+        );
         let table_route = TableRoute {
             table: Table {
                 id: 1,
@@ -836,8 +798,35 @@ mod test {
             .insert_table_route(table_name.clone(), Arc::new(table_route))
             .await;
 
+        partition_manager
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_find_partition_rule() {
+        let partition_manager = create_partition_rule_manager().await;
+
         let partition_rule = partition_manager
-            .find_table_partition_rule(&table_name)
+            .find_table_partition_rule(&TableName::new(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+                "one_column_partitioning_table",
+            ))
+            .await
+            .unwrap();
+        let range_rule = partition_rule
+            .as_any()
+            .downcast_ref::<RangePartitionRule>()
+            .unwrap();
+        assert_eq!(range_rule.column_name(), "a");
+        assert_eq!(range_rule.all_regions(), &vec![3, 2, 1]);
+        assert_eq!(range_rule.bounds(), &vec![10_i32.into(), 50_i32.into()]);
+
+        let partition_rule = partition_manager
+            .find_table_partition_rule(&TableName::new(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+                "two_column_partitioning_table",
+            ))
             .await
             .unwrap();
         let range_columns_rule = partition_rule

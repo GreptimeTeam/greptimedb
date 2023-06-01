@@ -18,6 +18,7 @@ use common_query::Output;
 use futures::future;
 use snafu::ResultExt;
 use store_api::storage::RegionNumber;
+use table::metadata::TableMeta;
 use table::requests::DeleteRequest;
 
 use crate::error::{JoinTaskSnafu, RequestDatanodeSnafu, Result};
@@ -48,11 +49,12 @@ impl DistTable {
 }
 
 pub(super) fn to_grpc_delete_request(
+    table_meta: &TableMeta,
     table_name: &TableName,
     region_number: RegionNumber,
     request: DeleteRequest,
 ) -> Result<GrpcDeleteRequest> {
-    let (key_columns, row_count) = to_grpc_columns(&request.key_column_values)?;
+    let (key_columns, row_count) = to_grpc_columns(table_meta, &request.key_column_values)?;
     Ok(GrpcDeleteRequest {
         table_name: table_name.table_name.clone(),
         region_number,
@@ -68,13 +70,27 @@ mod tests {
 
     use api::v1::column::{SemanticType, Values};
     use api::v1::{Column, ColumnDataType};
-    use datatypes::prelude::VectorRef;
+    use datatypes::prelude::{ConcreteDataType, VectorRef};
+    use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::Int32Vector;
+    use table::metadata::TableMetaBuilder;
 
     use super::*;
 
     #[test]
     fn test_to_grpc_delete_request() {
+        let schema = Schema::new(vec![
+            ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), false)
+                .with_time_index(true),
+            ColumnSchema::new("id", ConcreteDataType::int32_datatype(), false),
+        ]);
+
+        let mut builder = TableMetaBuilder::default();
+        builder.schema(Arc::new(schema));
+        builder.primary_key_indices(vec![]);
+        builder.next_column_id(2);
+
+        let table_meta = builder.build().unwrap();
         let table_name = TableName {
             catalog_name: "greptime".to_string(),
             schema_name: "public".to_string(),
@@ -88,7 +104,8 @@ mod tests {
         )]);
         let request = DeleteRequest { key_column_values };
 
-        let result = to_grpc_delete_request(&table_name, region_number, request).unwrap();
+        let result =
+            to_grpc_delete_request(&table_meta, &table_name, region_number, request).unwrap();
 
         assert_eq!(result.table_name, "foo");
         assert_eq!(result.region_number, region_number);

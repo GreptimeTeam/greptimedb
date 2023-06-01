@@ -21,7 +21,7 @@ use std::hash::{Hash, Hasher};
 use api::prometheus::remote::label_matcher::Type as MatcherType;
 use api::prometheus::remote::{Label, Query, Sample, TimeSeries, WriteRequest};
 use api::v1::column::SemanticType;
-use api::v1::{column, Column, ColumnDataType, InsertRequest as GrpcInsertRequest};
+use api::v1::{column, Column, ColumnDataType, InsertRequest as GrpcInsertRequest, InsertRequests};
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_time::timestamp::TimeUnit;
 use datatypes::prelude::{ConcreteDataType, Value};
@@ -283,9 +283,13 @@ fn recordbatch_to_timeseries(table: &str, recordbatch: RecordBatch) -> Result<Ve
     Ok(timeseries_map.into_values().collect())
 }
 
-pub fn to_grpc_insert_requests(mut request: WriteRequest) -> Result<Vec<GrpcInsertRequest>> {
-    let timeseries = std::mem::take(&mut request.timeseries);
-    timeseries.into_iter().map(to_grpc_insert_request).collect()
+pub fn to_grpc_insert_requests(request: WriteRequest) -> Result<InsertRequests> {
+    let inserts = request
+        .timeseries
+        .into_iter()
+        .map(to_grpc_insert_request)
+        .collect::<Result<Vec<_>>>()?;
+    Ok(InsertRequests { inserts })
 }
 
 fn to_grpc_insert_request(mut timeseries: TimeSeries) -> Result<GrpcInsertRequest> {
@@ -507,7 +511,7 @@ mod tests {
             ..Default::default()
         };
 
-        let exprs = to_grpc_insert_requests(write_request).unwrap();
+        let exprs = to_grpc_insert_requests(write_request).unwrap().inserts;
         assert_eq!(3, exprs.len());
         assert_eq!("metric1", exprs[0].table_name);
         assert_eq!("metric2", exprs[1].table_name);

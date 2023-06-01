@@ -30,6 +30,7 @@ use tokio::sync::mpsc;
 
 use super::invalidate_table_cache::InvalidateTableCacheHandler;
 
+#[derive(Default)]
 pub struct MockKvCacheInvalidator {
     inner: Mutex<HashMap<Vec<u8>, i32>>,
 }

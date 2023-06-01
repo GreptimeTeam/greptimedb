@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use api::v1::InsertRequests;
 use async_trait::async_trait;
 use common_error::prelude::BoxedError;
 use servers::error as server_error;
@@ -25,8 +26,10 @@ use crate::instance::Instance;
 #[async_trait]
 impl OpentsdbProtocolHandler for Instance {
     async fn exec(&self, data_point: &DataPoint, ctx: QueryContextRef) -> server_error::Result<()> {
-        let request = data_point.as_grpc_insert();
-        self.handle_insert(request, ctx)
+        let requests = InsertRequests {
+            inserts: vec![data_point.as_grpc_insert()],
+        };
+        self.handle_inserts(requests, ctx)
             .await
             .map_err(BoxedError::new)
             .with_context(|_| server_error::ExecuteQuerySnafu {

@@ -27,6 +27,9 @@ use crate::error::Error;
 mod client;
 mod manager;
 
+#[cfg(feature = "testing")]
+pub mod mock;
+
 #[derive(Debug, Clone)]
 pub struct Kv(pub Vec<u8>, pub Vec<u8>);
 

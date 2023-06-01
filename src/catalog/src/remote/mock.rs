@@ -20,9 +20,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use async_stream::stream;
-use catalog::error::Error;
-use catalog::helper::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
-use catalog::remote::{Kv, KvBackend, ValueIter};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_recordbatch::RecordBatch;
 use common_telemetry::logging::info;
@@ -36,6 +33,10 @@ use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, O
 use table::test_util::MemTable;
 use table::TableRef;
 use tokio::sync::RwLock;
+
+use crate::error::Error;
+use crate::helper::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
+use crate::remote::{Kv, KvBackend, ValueIter};
 
 pub struct MockKvBackend {
     map: RwLock<BTreeMap<Vec<u8>, Vec<u8>>>,

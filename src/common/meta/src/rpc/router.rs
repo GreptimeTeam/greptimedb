@@ -22,6 +22,7 @@ use api::v1::meta::{
 };
 use serde::{Deserialize, Serialize, Serializer};
 use snafu::{OptionExt, ResultExt};
+use store_api::storage::RegionNumber;
 use store_api::storage::RegionId;
 use table::metadata::RawTableInfo;
 
@@ -266,6 +267,13 @@ impl TableRoute {
                 None
             })
             .collect()
+    }
+
+    pub fn find_region_leader(&self, region_number: RegionNumber) -> Option<Peer> {
+        self.region_routes
+            .iter()
+            .find(|x| x.region.id == region_number as u64)
+            .and_then(|x| x.leader_peer.clone())
     }
 }
 

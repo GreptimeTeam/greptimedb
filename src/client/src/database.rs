@@ -18,7 +18,7 @@ use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{
     greptime_response, AffectedRows, AlterExpr, AuthHeader, CreateTableExpr, DdlRequest,
-    DeleteRequest, DropTableExpr, FlushTableExpr, GreptimeRequest, InsertRequest, PromRangeQuery,
+    DeleteRequest, DropTableExpr, FlushTableExpr, GreptimeRequest, InsertRequests, PromRangeQuery,
     QueryRequest, RequestHeader,
 };
 use arrow_flight::{FlightData, Ticket};
@@ -109,9 +109,9 @@ impl Database {
         });
     }
 
-    pub async fn insert(&self, request: InsertRequest) -> Result<u32> {
+    pub async fn insert(&self, requests: InsertRequests) -> Result<u32> {
         let _timer = timer!(metrics::METRIC_GRPC_INSERT);
-        self.handle(Request::Insert(request)).await
+        self.handle(Request::Inserts(requests)).await
     }
 
     pub async fn delete(&self, request: DeleteRequest) -> Result<u32> {

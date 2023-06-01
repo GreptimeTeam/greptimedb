@@ -36,7 +36,7 @@ impl GrpcQueryHandler for Instance {
         interceptor.pre_execute(&request, ctx.clone())?;
 
         let output = match request {
-            Request::Insert(request) => self.handle_insert(request, ctx.clone()).await?,
+            Request::Inserts(requests) => self.handle_inserts(requests, ctx.clone()).await?,
             Request::Query(query_request) => {
                 let query = query_request.query.context(IncompleteGrpcResultSnafu {
                     err_msg: "Missing field 'QueryRequest.query'",

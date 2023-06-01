@@ -421,8 +421,6 @@ pub async fn setup_grpc_server(
             .unwrap(),
     );
 
-    let fe_grpc_addr = format!("127.0.0.1:{}", ports::get_port());
-
     let fe_instance = FeInstance::try_new_standalone(instance.clone())
         .await
         .unwrap();
@@ -434,13 +432,13 @@ pub async fn setup_grpc_server(
         None,
         runtime,
     ));
-    let grpc_server_clone = fe_grpc_server.clone();
 
-    let fe_grpc_addr_clone = fe_grpc_addr.clone();
-    tokio::spawn(async move {
-        let addr = fe_grpc_addr_clone.parse::<SocketAddr>().unwrap();
-        grpc_server_clone.start(addr).await.unwrap()
-    });
+    let fe_grpc_addr = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
+    let fe_grpc_addr = fe_grpc_server
+        .start(fe_grpc_addr)
+        .await
+        .unwrap()
+        .to_string();
 
     // wait for GRPC server to start
     tokio::time::sleep(Duration::from_secs(1)).await;

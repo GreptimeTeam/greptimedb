@@ -154,7 +154,7 @@ impl GrpcQueryHandler for DummyInstance {
         ctx: QueryContextRef,
     ) -> std::result::Result<Output, Self::Error> {
         let output = match request {
-            Request::Insert(_) | Request::Delete(_) => unimplemented!(),
+            Request::Inserts(_) | Request::Delete(_) => unimplemented!(),
             Request::Query(query_request) => {
                 let query = query_request.query.unwrap();
                 match query {
