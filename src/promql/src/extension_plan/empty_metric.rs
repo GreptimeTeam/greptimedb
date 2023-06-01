@@ -35,8 +35,6 @@ use datatypes::arrow::array::TimestampMillisecondArray;
 use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::Stream;
-use greptime_proto::substrait_extension as pb;
-use prost::Message;
 
 use crate::extension_plan::Millisecond;
 

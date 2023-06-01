@@ -155,19 +155,20 @@ impl InstantManipulate {
             produce_one_row: false,
             schema: Arc::new(DFSchema::empty()),
         });
-        Ok(Self::new(
-            pb_instant_manipulate.start,
-            pb_instant_manipulate.end,
-            pb_instant_manipulate.lookback_delta,
-            pb_instant_manipulate.interval,
-            pb_instant_manipulate.time_index,
-            if pb_instant_manipulate.field_index.is_empty() {
-                None
-            } else {
-                Some(pb_instant_manipulate.field_index)
-            },
-            placeholder_plan,
-        ))
+        let field_column = if pb_instant_manipulate.field_index.is_empty() {
+            None
+        } else {
+            Some(pb_instant_manipulate.field_index)
+        };
+        Ok(Self {
+            start: pb_instant_manipulate.start,
+            end: pb_instant_manipulate.end,
+            lookback_delta: pb_instant_manipulate.lookback_delta,
+            interval: pb_instant_manipulate.interval,
+            time_index_column: pb_instant_manipulate.time_index,
+            field_column,
+            input: placeholder_plan,
+        })
     }
 }
 
