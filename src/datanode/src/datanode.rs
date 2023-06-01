@@ -47,12 +47,20 @@ pub enum ObjectStoreConfig {
     File(FileConfig),
     S3(S3Config),
     Oss(OssConfig),
+    Azblob(AzblobConfig),
 }
 
 /// Storage engine config
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct StorageConfig {
+    /// Retention period for all tables.
+    ///
+    /// Default value is `None`, which means no TTL.
+    ///
+    /// The precedence order is: ttl in table options > global ttl.
+    #[serde(with = "humantime_serde")]
+    pub global_ttl: Option<Duration>,
     #[serde(flatten)]
     pub store: ObjectStoreConfig,
     pub compaction: CompactionConfig,
@@ -95,6 +103,21 @@ pub struct OssConfig {
     pub cache_capacity: Option<ReadableSize>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AzblobConfig {
+    pub container: String,
+    pub root: String,
+    #[serde(skip_serializing)]
+    pub account_name: SecretString,
+    #[serde(skip_serializing)]
+    pub account_key: SecretString,
+    pub endpoint: String,
+    pub sas_token: Option<String>,
+    pub cache_path: Option<String>,
+    pub cache_capacity: Option<ReadableSize>,
+}
+
 impl Default for S3Config {
     fn default() -> Self {
         Self {
@@ -120,6 +143,21 @@ impl Default for OssConfig {
             endpoint: String::default(),
             cache_path: Option::default(),
             cache_capacity: Option::default(),
+        }
+    }
+}
+
+impl Default for AzblobConfig {
+    fn default() -> Self {
+        Self {
+            container: String::default(),
+            root: String::default(),
+            account_name: SecretString::from(String::default()),
+            account_key: SecretString::from(String::default()),
+            endpoint: String::default(),
+            cache_path: Option::default(),
+            cache_capacity: Option::default(),
+            sas_token: Option::default(),
         }
     }
 }
@@ -269,6 +307,7 @@ impl From<&DatanodeOptions> for StorageEngineConfig {
             picker_schedule_interval: value.storage.flush.picker_schedule_interval,
             auto_flush_interval: value.storage.flush.auto_flush_interval,
             global_write_buffer_size: value.storage.flush.global_write_buffer_size,
+            global_ttl: value.storage.global_ttl,
         }
     }
 }

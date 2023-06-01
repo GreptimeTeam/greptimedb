@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::fmt::Debug;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -70,6 +71,8 @@ pub trait KvBackend: Send + Sync {
         }
         return Ok(None);
     }
+
+    fn as_any(&self) -> &dyn Any;
 }
 
 pub type KvBackendRef = Arc<dyn KvBackend>;
@@ -120,6 +123,10 @@ mod tests {
 
         async fn delete_range(&self, _key: &[u8], _end: &[u8]) -> Result<(), Error> {
             unimplemented!()
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
         }
     }
 

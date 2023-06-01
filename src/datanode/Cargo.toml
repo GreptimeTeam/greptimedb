@@ -37,7 +37,6 @@ futures-util.workspace = true
 key-lock = "0.1"
 hyper = { version = "0.14", features = ["full"] }
 humantime-serde = "1.1"
-log = "0.4"
 log-store = { path = "../log-store" }
 meta-client = { path = "../meta-client" }
 meta-srv = { path = "../meta-srv", features = ["mock"] }

@@ -59,19 +59,13 @@ impl Categorizer {
             LogicalPlan::Distinct(_) => Commutativity::PartialCommutative,
             LogicalPlan::Unnest(_) => Commutativity::Commutative,
             LogicalPlan::Statement(_) => Commutativity::Unsupported,
-            LogicalPlan::CreateExternalTable(_) => Commutativity::Unsupported,
-            LogicalPlan::CreateMemoryTable(_) => Commutativity::Unsupported,
-            LogicalPlan::CreateView(_) => Commutativity::Unsupported,
-            LogicalPlan::CreateCatalogSchema(_) => Commutativity::Unsupported,
-            LogicalPlan::CreateCatalog(_) => Commutativity::Unsupported,
-            LogicalPlan::DropTable(_) => Commutativity::Unsupported,
-            LogicalPlan::DropView(_) => Commutativity::Unsupported,
             LogicalPlan::Values(_) => Commutativity::Unsupported,
             LogicalPlan::Explain(_) => Commutativity::Unsupported,
             LogicalPlan::Analyze(_) => Commutativity::Unsupported,
             LogicalPlan::Prepare(_) => Commutativity::Unsupported,
             LogicalPlan::DescribeTable(_) => Commutativity::Unsupported,
             LogicalPlan::Dml(_) => Commutativity::Unsupported,
+            LogicalPlan::Ddl(_) => Commutativity::Unsupported,
         }
     }
 

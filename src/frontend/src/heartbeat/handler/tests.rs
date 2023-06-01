@@ -82,8 +82,6 @@ async fn test_invalidate_table_cache_handler() {
         executor.clone(),
         mailbox.clone(),
         Instruction::InvalidateTableCache(TableIdent {
-            cluster_id: 1,
-            datanode_id: 2,
             catalog: "test".to_string(),
             schema: "greptime".to_string(),
             table: "foo_table".to_string(),
@@ -120,8 +118,6 @@ async fn test_invalidate_table_cache_handler() {
         executor,
         mailbox,
         Instruction::InvalidateTableCache(TableIdent {
-            cluster_id: 1,
-            datanode_id: 2,
             catalog: "test".to_string(),
             schema: "greptime".to_string(),
             table: "not_found".to_string(),

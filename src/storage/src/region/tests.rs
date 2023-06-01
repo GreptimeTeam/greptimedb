@@ -16,12 +16,12 @@
 
 use std::collections::{HashMap, HashSet};
 
+use arrow::compute::SortOptions;
 use common_base::readable_size::ReadableSize;
 use common_datasource::compression::CompressionType;
+use common_recordbatch::OrderOption;
 use common_telemetry::logging;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
-use common_time::range::TimestampRange;
-use common_time::timestamp::TimeUnit;
 use datatypes::prelude::{LogicalTypeId, ScalarVector, WrapperType};
 use datatypes::timestamp::TimestampMillisecond;
 use datatypes::vectors::{
@@ -543,8 +543,7 @@ async fn create_store_config(region_name: &str, root: &str) -> StoreConfig<NoopL
 
 struct WindowedReaderTester {
     data_written: Vec<Vec<(i64, i64, String, bool)>>,
-    time_windows: Vec<(i64, i64)>,
-    expected_ts: Vec<i64>,
+    expected: Vec<(i64, i64, String, bool)>,
     region: RegionImpl<NoopLogStore>,
     _temp_dir: TempDir,
 }
@@ -553,8 +552,7 @@ impl WindowedReaderTester {
     async fn new(
         region_name: &'static str,
         data_written: Vec<Vec<(i64, i64, String, bool)>>,
-        time_windows: Vec<(i64, i64)>,
-        expected_ts: Vec<i64>,
+        expected: Vec<(i64, i64, String, bool)>,
     ) -> Self {
         let temp_dir = create_temp_dir(&format!("write_and_read_windowed_{}", region_name));
         let root = temp_dir.path().to_str().unwrap();
@@ -564,8 +562,7 @@ impl WindowedReaderTester {
 
         let tester = Self {
             data_written,
-            time_windows,
-            expected_ts,
+            expected,
             region,
             _temp_dir: temp_dir,
         };
@@ -605,39 +602,34 @@ impl WindowedReaderTester {
                 .flush(&FlushContext {
                     wait: true,
                     reason: FlushReason::Others,
+                    ..Default::default()
                 })
                 .await
                 .unwrap();
         }
     }
 
-    async fn check(&self) {
-        let windows = self
-            .time_windows
-            .iter()
-            .map(|(start, end)| {
-                TimestampRange::with_unit(*start, *end, TimeUnit::Millisecond).unwrap()
-            })
-            .collect::<Vec<_>>();
-
+    async fn check(&self, order_options: Vec<OrderOption>) {
         let read_context = ReadContext::default();
         let snapshot = self.region.snapshot(&read_context).unwrap();
         let response = snapshot
-            .windowed_scan(
+            .scan(
                 &read_context,
                 ScanRequest {
                     sequence: None,
                     projection: None,
                     filters: vec![],
                     limit: None,
-                    output_ordering: None,
+                    output_ordering: Some(order_options),
                 },
-                windows,
             )
             .await
             .unwrap();
 
-        let mut timestamps = Vec::with_capacity(self.expected_ts.len());
+        let mut timestamps = Vec::with_capacity(self.expected.len());
+        let mut col1 = Vec::with_capacity(self.expected.len());
+        let mut col2 = Vec::with_capacity(self.expected.len());
+        let mut col3 = Vec::with_capacity(self.expected.len());
 
         let mut reader = response.reader;
         let ts_index = reader.user_schema().timestamp_index().unwrap();
@@ -647,11 +639,61 @@ impl WindowedReaderTester {
                 .as_any()
                 .downcast_ref::<TimestampMillisecondVector>()
                 .unwrap();
+            let v1_col = chunk.columns[1]
+                .as_any()
+                .downcast_ref::<Int64Vector>()
+                .unwrap();
+            let v2_col = chunk.columns[2]
+                .as_any()
+                .downcast_ref::<StringVector>()
+                .unwrap();
+            let v3_col = chunk.columns[3]
+                .as_any()
+                .downcast_ref::<BooleanVector>()
+                .unwrap();
+
             for ts in ts_col.iter_data() {
                 timestamps.push(ts.unwrap().0.value());
             }
+            for v in v1_col.iter_data() {
+                col1.push(v.unwrap());
+            }
+            for v in v2_col.iter_data() {
+                col2.push(v.unwrap().to_string());
+            }
+            for v in v3_col.iter_data() {
+                col3.push(v.unwrap());
+            }
         }
-        assert_eq!(timestamps, self.expected_ts);
+
+        assert_eq!(
+            timestamps,
+            self.expected
+                .iter()
+                .map(|(v, _, _, _)| *v)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            col1,
+            self.expected
+                .iter()
+                .map(|(_, v, _, _)| *v)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            col2,
+            self.expected
+                .iter()
+                .map(|(_, _, v, _)| v.clone())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            col3,
+            self.expected
+                .iter()
+                .map(|(_, _, _, v)| *v)
+                .collect::<Vec<_>>()
+        );
     }
 }
 
@@ -662,11 +704,16 @@ async fn test_read_by_chunk_reader() {
     WindowedReaderTester::new(
         "test_region",
         vec![vec![(1, 1, "1".to_string(), false)]],
-        vec![(1, 2)],
-        vec![1],
+        vec![(1, 1, "1".to_string(), false)],
     )
     .await
-    .check()
+    .check(vec![OrderOption {
+        index: 0,
+        options: SortOptions {
+            descending: true,
+            nulls_first: true,
+        },
+    }])
     .await;
 
     WindowedReaderTester::new(
@@ -681,11 +728,21 @@ async fn test_read_by_chunk_reader() {
                 (4, 4, "4".to_string(), false),
             ],
         ],
-        vec![(1, 2), (2, 3), (3, 4), (4, 5)],
-        vec![4, 3, 2, 1],
+        vec![
+            (4, 4, "4".to_string(), false),
+            (3, 3, "3".to_string(), false),
+            (2, 2, "2".to_string(), false),
+            (1, 1, "1".to_string(), false),
+        ],
     )
     .await
-    .check()
+    .check(vec![OrderOption {
+        index: 0,
+        options: SortOptions {
+            descending: true,
+            nulls_first: true,
+        },
+    }])
     .await;
 
     WindowedReaderTester::new(
@@ -694,16 +751,59 @@ async fn test_read_by_chunk_reader() {
             vec![
                 (1, 1, "1".to_string(), false),
                 (2, 2, "2".to_string(), false),
+                (60000, 60000, "60".to_string(), false),
             ],
             vec![
                 (3, 3, "3".to_string(), false),
-                (4, 4, "4".to_string(), false),
+                (61000, 61000, "61".to_string(), false),
             ],
         ],
-        vec![(1, 2), (2, 3), (4, 5), (3, 4)],
-        vec![3, 4, 2, 1],
+        vec![
+            (61000, 61000, "61".to_string(), false),
+            (60000, 60000, "60".to_string(), false),
+            (3, 3, "3".to_string(), false),
+            (2, 2, "2".to_string(), false),
+            (1, 1, "1".to_string(), false),
+        ],
     )
     .await
-    .check()
+    .check(vec![OrderOption {
+        index: 0,
+        options: SortOptions {
+            descending: true,
+            nulls_first: true,
+        },
+    }])
+    .await;
+
+    WindowedReaderTester::new(
+        "test_region",
+        vec![
+            vec![
+                (1, 1, "1".to_string(), false),
+                (2, 2, "2".to_string(), false),
+                (60000, 60000, "60".to_string(), false),
+            ],
+            vec![
+                (3, 3, "3".to_string(), false),
+                (61000, 61000, "61".to_string(), false),
+            ],
+        ],
+        vec![
+            (1, 1, "1".to_string(), false),
+            (2, 2, "2".to_string(), false),
+            (3, 3, "3".to_string(), false),
+            (60000, 60000, "60".to_string(), false),
+            (61000, 61000, "61".to_string(), false),
+        ],
+    )
+    .await
+    .check(vec![OrderOption {
+        index: 0,
+        options: SortOptions {
+            descending: false,
+            nulls_first: true,
+        },
+    }])
     .await;
 }

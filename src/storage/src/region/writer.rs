@@ -348,7 +348,9 @@ impl RegionWriter {
     ) -> Result<()> {
         let mut inner = self.inner.lock().await;
 
-        ensure!(!inner.is_closed(), error::ClosedRegionSnafu);
+        if !ctx.force {
+            ensure!(!inner.is_closed(), error::ClosedRegionSnafu);
+        }
 
         inner.manual_flush(writer_ctx, ctx.reason).await?;
 

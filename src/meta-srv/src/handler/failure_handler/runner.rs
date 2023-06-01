@@ -243,6 +243,7 @@ impl FailureDetectorContainer {
 #[cfg(test)]
 mod tests {
     use common_catalog::consts::MITO_ENGINE;
+    use common_meta::instruction::TableIdent;
     use rand::Rng;
 
     use super::*;
@@ -252,13 +253,15 @@ mod tests {
     fn test_default_failure_detector_container() {
         let container = FailureDetectorContainer(DashMap::new());
         let ident = RegionIdent {
-            catalog: "a".to_string(),
-            schema: "b".to_string(),
-            table: "c".to_string(),
+            table_ident: TableIdent {
+                catalog: "a".to_string(),
+                schema: "b".to_string(),
+                table: "c".to_string(),
+                table_id: 1,
+                engine: MITO_ENGINE.to_string(),
+            },
             cluster_id: 3,
             datanode_id: 2,
-            table_id: 1,
-            engine: MITO_ENGINE.to_string(),
             region_number: 1,
         };
         let _ = container.get_failure_detector(ident.clone());
@@ -279,13 +282,15 @@ mod tests {
         let container = FailureDetectorContainer(DashMap::new());
 
         let ident = RegionIdent {
-            catalog: "a".to_string(),
-            schema: "b".to_string(),
-            table: "c".to_string(),
+            table_ident: TableIdent {
+                catalog: "a".to_string(),
+                schema: "b".to_string(),
+                table: "c".to_string(),
+                table_id: 1,
+                engine: MITO_ENGINE.to_string(),
+            },
             cluster_id: 3,
             datanode_id: 2,
-            table_id: 1,
-            engine: MITO_ENGINE.to_string(),
             region_number: 1,
         };
         container.get_failure_detector(ident.clone());
@@ -318,13 +323,15 @@ mod tests {
                     region_idents: region_ids
                         .iter()
                         .map(|&region_number| RegionIdent {
-                            catalog: "a".to_string(),
-                            schema: "b".to_string(),
-                            table: "c".to_string(),
+                            table_ident: TableIdent {
+                                catalog: "a".to_string(),
+                                schema: "b".to_string(),
+                                table: "c".to_string(),
+                                table_id: 0,
+                                engine: MITO_ENGINE.to_string(),
+                            },
                             cluster_id: 1,
                             datanode_id,
-                            table_id: 0,
-                            engine: MITO_ENGINE.to_string(),
                             region_number,
                         })
                         .collect(),

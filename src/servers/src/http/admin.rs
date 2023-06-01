@@ -46,7 +46,7 @@ pub async fn flush(
     // if table name is not present, flush all tables inside schema
     let table_name = params.get("table").cloned().unwrap_or_default();
 
-    let region_id: Option<u32> = params
+    let region_number: Option<u32> = params
         .get("region")
         .map(|v| v.parse())
         .transpose()
@@ -58,7 +58,7 @@ pub async fn flush(
             catalog_name: catalog_name.clone(),
             schema_name: schema_name.clone(),
             table_name: table_name.clone(),
-            region_id,
+            region_number,
         })),
     });
 

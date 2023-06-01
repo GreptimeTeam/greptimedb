@@ -19,6 +19,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
+use common_query::AddColumnLocation;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::{ColumnSchema, RawSchema};
 use serde::{Deserialize, Serialize};
@@ -207,6 +208,7 @@ impl AlterTableRequest {
 pub struct AddColumnRequest {
     pub column_schema: ColumnSchema,
     pub is_key: bool,
+    pub location: Option<AddColumnLocation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -242,6 +244,8 @@ pub struct CloseTableRequest {
     pub table_name: String,
     /// Do nothing if region_numbers is empty
     pub region_numbers: Vec<RegionNumber>,
+    /// flush regions
+    pub flush: bool,
 }
 
 impl CloseTableRequest {

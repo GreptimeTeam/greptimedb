@@ -97,6 +97,8 @@ sync_write = false
 type = "File"
 # Data directory, "/tmp/greptimedb/data" by default.
 data_home = "/tmp/greptimedb/"
+# TTL for all tables. Disabled by default.
+# global_ttl = "7d"
 
 # Compaction options.
 [storage.compaction]
@@ -138,8 +140,8 @@ max_retry_times = 3
 retry_delay = "500ms"
 
 # Log options
-[logging]
+# [logging]
 # Specify logs directory.
-dir = "/tmp/greptimedb/logs"
+# dir = "/tmp/greptimedb/logs"
 # Specify the log level [info | debug | error | warn]
-level = "debug"
+# level = "info"

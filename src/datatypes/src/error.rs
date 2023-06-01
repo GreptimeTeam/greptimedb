@@ -73,13 +73,6 @@ pub enum Error {
     #[snafu(display("Invalid timestamp index: {}", index))]
     InvalidTimestampIndex { index: usize, location: Location },
 
-    #[snafu(display("Duplicate timestamp index, exists: {}, new: {}", exists, new))]
-    DuplicateTimestampIndex {
-        exists: usize,
-        new: usize,
-        location: Location,
-    },
-
     #[snafu(display("{}", msg))]
     CastType { msg: String, location: Location },
 

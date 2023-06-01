@@ -29,7 +29,7 @@ pub(crate) async fn new_fs_object_store(file_config: &FileConfig) -> Result<Obje
         .context(error::CreateDirSnafu { dir: &data_home })?;
     info!("The file storage home is: {}", &data_home);
 
-    let atomic_write_dir = format!("{data_home}/.tmp/");
+    let atomic_write_dir = format!("{data_home}.tmp/");
     store::clean_temp_dir(&atomic_write_dir)?;
 
     let mut builder = FsBuilder::default();

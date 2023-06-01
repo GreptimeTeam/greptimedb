@@ -10,6 +10,7 @@ common-base = { path = "../common/base" }
 common-catalog = { path = "../common/catalog" }
 common-datasource = { path = "../common/datasource" }
 common-error = { path = "../common/error" }
+common-query = { path = "../common/query" }
 common-time = { path = "../common/time" }
 datafusion-sql.workspace = true
 datatypes = { path = "../datatypes" }

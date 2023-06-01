@@ -16,6 +16,7 @@ mod activate_region;
 mod deactivate_region;
 mod failover_end;
 mod failover_start;
+mod invalidate_cache;
 mod update_metadata;
 
 use std::collections::HashSet;
@@ -225,6 +226,14 @@ trait State: Sync + Send + Debug {
 ///                                 │ Updates the Region
 ///                                 │ placement metadata
 ///                                 │
+///                         ┌───────▼───────┐
+///                         │InvalidateCache│
+///                         └───────┬───────┘
+///                                 │
+///                                 │ Broadcast Invalidate Table
+///                                 │ Cache
+///                                 │
+///                                 │
 ///                        ┌────────▼────────┐
 ///                        │RegionFailoverEnd│
 ///                        └─────────────────┘
@@ -289,9 +298,9 @@ impl Procedure for RegionFailoverProcedure {
         let key = format!(
             "{}/region-{}",
             common_catalog::format_full_table_name(
-                &region_ident.catalog,
-                &region_ident.schema,
-                &region_ident.table
+                &region_ident.table_ident.catalog,
+                &region_ident.table_ident.schema,
+                &region_ident.table_ident.table
             ),
             region_ident.region_number
         );
@@ -307,7 +316,7 @@ mod tests {
     use api::v1::meta::{HeartbeatResponse, MailboxMessage, Peer, RequestHeader};
     use catalog::helper::TableGlobalKey;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
-    use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
+    use common_meta::instruction::{Instruction, InstructionReply, SimpleReply, TableIdent};
     use common_meta::DatanodeId;
     use common_procedure::BoxedProcedure;
     use rand::prelude::SliceRandom;
@@ -357,6 +366,7 @@ mod tests {
     pub struct TestingEnv {
         pub context: RegionFailoverContext,
         pub heartbeat_receivers: HashMap<DatanodeId, Receiver<tonic::Result<HeartbeatResponse>>>,
+        pub pushers: Pushers,
     }
 
     impl TestingEnv {
@@ -386,13 +396,15 @@ mod tests {
                 .unwrap();
             RegionIdent {
                 cluster_id: 0,
-                datanode_id: failed_datanode,
-                table_id: 1,
-                engine: MITO_ENGINE.to_string(),
                 region_number,
-                catalog: DEFAULT_CATALOG_NAME.to_string(),
-                schema: DEFAULT_SCHEMA_NAME.to_string(),
-                table: table.to_string(),
+                datanode_id: failed_datanode,
+                table_ident: TableIdent {
+                    table_id: 1,
+                    engine: MITO_ENGINE.to_string(),
+                    catalog: DEFAULT_CATALOG_NAME.to_string(),
+                    schema: DEFAULT_SCHEMA_NAME.to_string(),
+                    table: table.to_string(),
+                },
             }
         }
     }
@@ -435,7 +447,7 @@ mod tests {
 
             let mailbox_sequence =
                 Sequence::new("test_heartbeat_mailbox", 0, 100, kv_store.clone());
-            let mailbox = HeartbeatMailbox::create(pushers, mailbox_sequence);
+            let mailbox = HeartbeatMailbox::create(pushers.clone(), mailbox_sequence);
 
             let selector = self.selector.unwrap_or_else(|| {
                 let nodes = (1..=table_global_value.regions_id_map.len())
@@ -461,6 +473,7 @@ mod tests {
                     selector_ctx,
                     dist_lock: Arc::new(MemLock::default()),
                 },
+                pushers,
                 heartbeat_receivers,
             }
         }
@@ -569,14 +582,14 @@ mod tests {
 
         assert_eq!(
             procedure.dump().unwrap(),
-            r#"{"failed_region":{"cluster_id":0,"datanode_id":1,"catalog":"greptime","schema":"public","table":"my_table","table_id":1,"engine":"mito","region_number":1},"state":{"region_failover_state":"RegionFailoverEnd"}}"#
+            r#"{"failed_region":{"cluster_id":0,"datanode_id":1,"table_ident":{"catalog":"greptime","schema":"public","table":"my_table","table_id":1,"engine":"mito"},"region_number":1},"state":{"region_failover_state":"RegionFailoverEnd"}}"#
         );
 
         // Verifies that the failed region (region 1) is moved from failed datanode (datanode 1) to the candidate datanode.
         let key = TableGlobalKey {
-            catalog_name: failed_region.catalog.clone(),
-            schema_name: failed_region.schema.clone(),
-            table_name: failed_region.table.clone(),
+            catalog_name: failed_region.table_ident.catalog.clone(),
+            schema_name: failed_region.table_ident.schema.clone(),
+            table_name: failed_region.table_ident.table.clone(),
         };
         let value = table_routes::get_table_global_value(&env.context.selector_ctx.kv_store, &key)
             .await
@@ -614,12 +627,12 @@ mod tests {
         let s = procedure.dump().unwrap();
         assert_eq!(
             s,
-            r#"{"failed_region":{"cluster_id":0,"datanode_id":1,"catalog":"greptime","schema":"public","table":"my_table","table_id":1,"engine":"mito","region_number":1},"state":{"region_failover_state":"RegionFailoverStart","failover_candidate":null}}"#
+            r#"{"failed_region":{"cluster_id":0,"datanode_id":1,"table_ident":{"catalog":"greptime","schema":"public","table":"my_table","table_id":1,"engine":"mito"},"region_number":1},"state":{"region_failover_state":"RegionFailoverStart","failover_candidate":null}}"#
         );
         let n: Node = serde_json::from_str(&s).unwrap();
         assert_eq!(
             format!("{n:?}"),
-            r#"Node { failed_region: RegionIdent { cluster_id: 0, datanode_id: 1, catalog: "greptime", schema: "public", table: "my_table", table_id: 1, engine: "mito", region_number: 1 }, state: Some(RegionFailoverStart { failover_candidate: None }) }"#
+            r#"Node { failed_region: RegionIdent { cluster_id: 0, datanode_id: 1, table_ident: TableIdent { catalog: "greptime", schema: "public", table: "my_table", table_id: 1, engine: "mito" }, region_number: 1 }, state: Some(RegionFailoverStart { failover_candidate: None }) }"#
         );
     }
 }

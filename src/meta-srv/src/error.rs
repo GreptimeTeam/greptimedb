@@ -134,8 +134,8 @@ pub enum Error {
         source: common_catalog::error::Error,
     },
 
-    #[snafu(display("Unexcepted sequence value: {}", err_msg))]
-    UnexceptedSequenceValue { err_msg: String, location: Location },
+    #[snafu(display("Unexpected sequence value: {}", err_msg))]
+    UnexpectedSequenceValue { err_msg: String, location: Location },
 
     #[snafu(display("Failed to decode table route, source: {}", source))]
     DecodeTableRoute {
@@ -346,6 +346,9 @@ pub enum Error {
     #[snafu(display("Expected to retry later, reason: {}", reason))]
     RetryLater { reason: String, location: Location },
 
+    #[snafu(display("Combine error: {}", err_msg))]
+    Combine { err_msg: String, location: Location },
+
     #[snafu(display("Failed to convert table route, source: {}", source))]
     TableRouteConversion {
         #[snafu(backtrace)]
@@ -404,7 +407,8 @@ impl ErrorExt for Error {
             | Error::MailboxTimeout { .. }
             | Error::MailboxReceiver { .. }
             | Error::RetryLater { .. }
-            | Error::StartGrpc { .. } => StatusCode::Internal,
+            | Error::StartGrpc { .. }
+            | Error::Combine { .. } => StatusCode::Internal,
             Error::EmptyKey { .. }
             | Error::MissingRequiredParameter { .. }
             | Error::MissingRequestHeader { .. }
@@ -418,7 +422,7 @@ impl ErrorExt for Error {
             | Error::LeaseValueFromUtf8 { .. }
             | Error::StatKeyFromUtf8 { .. }
             | Error::StatValueFromUtf8 { .. }
-            | Error::UnexceptedSequenceValue { .. }
+            | Error::UnexpectedSequenceValue { .. }
             | Error::TableRouteNotFound { .. }
             | Error::CorruptedTableRoute { .. }
             | Error::NextSequence { .. }

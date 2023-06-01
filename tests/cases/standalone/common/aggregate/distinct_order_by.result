@@ -21,7 +21,7 @@ Error: 3000(PlanQuery), Error during planning: For SELECT DISTINCT, ORDER BY exp
 
 SELECT DISTINCT ON (1) i % 2, i FROM integers WHERE i<3 ORDER BY i;
 
-Error: 1001(Unsupported), SQL statement is not supported: SELECT DISTINCT ON (1) i % 2, i FROM integers WHERE i<3 ORDER BY i;, keyword: %
+Error: 3000(PlanQuery), This feature is not implemented: DISTINCT ON Exprs not supported
 
 SELECT DISTINCT integers.i FROM integers ORDER BY i DESC;
 

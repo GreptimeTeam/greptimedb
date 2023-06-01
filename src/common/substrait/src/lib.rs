@@ -15,14 +15,8 @@
 #![feature(let_chains)]
 #![feature(trait_upcasting)]
 
-mod context;
-mod df_expr;
-#[allow(unused)]
-mod df_logical;
 mod df_substrait;
 pub mod error;
-mod schema;
-mod types;
 
 use std::sync::Arc;
 

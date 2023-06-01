@@ -14,6 +14,8 @@
 
 //! Storage engine implementation.
 
+#![feature(let_chains)]
+
 mod chunk;
 pub mod codec;
 pub mod compaction;

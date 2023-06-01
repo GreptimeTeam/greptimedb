@@ -291,6 +291,8 @@ async fn new_dummy_catalog_list(
 
 #[cfg(test)]
 mod test {
+    use api::v1::add_column::location::LocationType;
+    use api::v1::add_column::Location;
     use api::v1::column::{SemanticType, Values};
     use api::v1::{
         alter_expr, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef,
@@ -364,15 +366,44 @@ mod test {
                 schema_name: "my_database".to_string(),
                 table_name: "my_table".to_string(),
                 kind: Some(alter_expr::Kind::AddColumns(AddColumns {
-                    add_columns: vec![AddColumn {
-                        column_def: Some(ColumnDef {
-                            name: "b".to_string(),
-                            datatype: ColumnDataType::Int32 as i32,
-                            is_nullable: true,
-                            default_constraint: vec![],
-                        }),
-                        is_key: true,
-                    }],
+                    add_columns: vec![
+                        AddColumn {
+                            column_def: Some(ColumnDef {
+                                name: "b".to_string(),
+                                datatype: ColumnDataType::Int32 as i32,
+                                is_nullable: true,
+                                default_constraint: vec![],
+                            }),
+                            is_key: true,
+                            location: None,
+                        },
+                        AddColumn {
+                            column_def: Some(ColumnDef {
+                                name: "c".to_string(),
+                                datatype: ColumnDataType::Int32 as i32,
+                                is_nullable: true,
+                                default_constraint: vec![],
+                            }),
+                            is_key: true,
+                            location: Some(Location {
+                                location_type: LocationType::First.into(),
+                                after_cloumn_name: "".to_string(),
+                            }),
+                        },
+                        AddColumn {
+                            column_def: Some(ColumnDef {
+                                name: "d".to_string(),
+                                datatype: ColumnDataType::Int32 as i32,
+                                is_nullable: true,
+                                default_constraint: vec![],
+                            }),
+                            is_key: true,
+                            location: Some(Location {
+                                location_type: LocationType::After.into(),
+                                after_cloumn_name: "a".to_string(),
+                            }),
+                        },
+                    ],
                 })),
             })),
         });
@@ -388,15 +419,15 @@ mod test {
             .unwrap();
         assert!(matches!(output, Output::AffectedRows(1)));
 
-        let output = exec_selection(instance, "SELECT ts, a, b FROM my_database.my_table").await;
+        let output = exec_selection(instance, "SELECT * FROM my_database.my_table").await;
         let Output::Stream(stream) = output else { unreachable!() };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
         let expected = "\
-+---------------------+---+---+
-| ts                  | a | b |
-+---------------------+---+---+
-| 2022-12-30T07:09:00 | s | 1 |
-+---------------------+---+---+";
++---+---+---+---------------------+---+
+| c | a | d | ts                  | b |
++---+---+---+---------------------+---+
+|   | s |   | 2022-12-30T07:09:00 | 1 |
++---+---+---+---------------------+---+";
         assert_eq!(recordbatches.pretty_print().unwrap(), expected);
     }
 

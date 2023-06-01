@@ -136,7 +136,7 @@ async fn handle_create(
         return Ok(RouteResponse {
             header: Some(ResponseHeader::failed(
                 cluster_id,
-                Error::no_active_datanodes(),
+                Error::not_enough_active_datanodes(0),
             )),
             ..Default::default()
         });

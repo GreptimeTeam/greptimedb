@@ -15,7 +15,6 @@
 use std::cmp;
 
 use async_trait::async_trait;
-use common_time::range::TimestampRange;
 use store_api::storage::{
     GetRequest, GetResponse, ReadContext, ScanRequest, ScanResponse, SchemaRef, SequenceNumber,
     Snapshot,
@@ -48,7 +47,29 @@ impl Snapshot for SnapshotImpl {
         ctx: &ReadContext,
         request: ScanRequest,
     ) -> Result<ScanResponse<ChunkReaderImpl>> {
-        self.scan_raw(ctx, request, None).await
+        let visible_sequence = self.sequence_to_read(request.sequence);
+        let memtable_version = self.version.memtables();
+
+        let mutables = memtable_version.mutable_memtable();
+        let immutables = memtable_version.immutable_memtables();
+
+        let mut builder =
+            ChunkReaderBuilder::new(self.version.schema().clone(), self.sst_layer.clone())
+                .reserve_num_memtables(memtable_version.num_memtables())
+                .projection(request.projection)
+                .filters(request.filters)
+                .batch_size(ctx.batch_size)
+                .output_ordering(request.output_ordering)
+                .visible_sequence(visible_sequence)
+                .pick_memtables(mutables.clone());
+
+        for memtable in immutables {
+            builder = builder.pick_memtables(memtable.clone());
+        }
+
+        let reader = builder.pick_all_ssts(self.version.ssts())?.build().await?;
+
+        Ok(ScanResponse { reader })
     }
 
     async fn get(&self, _ctx: &ReadContext, _request: GetRequest) -> Result<GetResponse> {
@@ -74,49 +95,5 @@ impl SnapshotImpl {
         request_sequence
             .map(|s| cmp::min(s, self.visible_sequence))
             .unwrap_or(self.visible_sequence)
-    }
-
-    #[allow(unused)]
-    pub(crate) async fn windowed_scan(
-        &self,
-        ctx: &ReadContext,
-        request: ScanRequest,
-        windows: Vec<TimestampRange>,
-    ) -> Result<ScanResponse<ChunkReaderImpl>> {
-        self.scan_raw(ctx, request, Some(windows)).await
-    }
-
-    async fn scan_raw(
-        &self,
-        ctx: &ReadContext,
-        request: ScanRequest,
-        windows: Option<Vec<TimestampRange>>,
-    ) -> Result<ScanResponse<ChunkReaderImpl>> {
-        let visible_sequence = self.sequence_to_read(request.sequence);
-        let memtable_version = self.version.memtables();
-
-        let mutables = memtable_version.mutable_memtable();
-        let immutables = memtable_version.immutable_memtables();
-
-        let mut builder =
-            ChunkReaderBuilder::new(self.version.schema().clone(), self.sst_layer.clone())
-                .reserve_num_memtables(memtable_version.num_memtables())
-                .projection(request.projection)
-                .filters(request.filters)
-                .batch_size(ctx.batch_size)
-                .visible_sequence(visible_sequence)
-                .pick_memtables(mutables.clone());
-
-        if let Some(windows) = windows {
-            builder = builder.time_windows(windows);
-        }
-
-        for memtable in immutables {
-            builder = builder.pick_memtables(memtable.clone());
-        }
-
-        let reader = builder.pick_all_ssts(self.version.ssts())?.build().await?;
-
-        Ok(ScanResponse { reader })
     }
 }

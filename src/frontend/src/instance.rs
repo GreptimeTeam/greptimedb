@@ -98,7 +98,7 @@ pub trait FrontendInstance:
     + Sync
     + 'static
 {
-    async fn start(&mut self) -> Result<()>;
+    async fn start(&self) -> Result<()>;
 }
 
 pub type FrontendInstanceRef = Arc<dyn FrontendInstance>;
@@ -438,7 +438,7 @@ impl Instance {
 
 #[async_trait]
 impl FrontendInstance for Instance {
-    async fn start(&mut self) -> Result<()> {
+    async fn start(&self) -> Result<()> {
         // TODO(hl): Frontend init should move to here
 
         if let Some(heartbeat_task) = &self.heartbeat_task {

@@ -16,5 +16,5 @@ pub mod immutable;
 
 #[inline]
 pub fn table_manifest_dir(table_dir: &str) -> String {
-    format!("{table_dir}/manifest/")
+    format!("{table_dir}manifest/")
 }

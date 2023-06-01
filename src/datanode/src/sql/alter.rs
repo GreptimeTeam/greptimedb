@@ -68,12 +68,16 @@ impl SqlHandler {
                 }
                 .fail()
             }
-            AlterTableOperation::AddColumn { column_def } => AlterKind::AddColumns {
+            AlterTableOperation::AddColumn {
+                column_def,
+                location,
+            } => AlterKind::AddColumns {
                 columns: vec![AddColumnRequest {
                     column_schema: column_def_to_schema(column_def, false)
                         .context(error::ParseSqlSnafu)?,
                     // FIXME(dennis): supports adding key column
                     is_key: false,
+                    location: location.clone(),
                 }],
             },
             AlterTableOperation::DropColumn { name } => AlterKind::DropColumns {

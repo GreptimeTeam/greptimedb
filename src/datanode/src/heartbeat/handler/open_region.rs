@@ -21,7 +21,9 @@ use common_meta::error::Result as MetaResult;
 use common_meta::heartbeat::handler::{
     HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
 };
-use common_meta::instruction::{Instruction, InstructionReply, RegionIdent, SimpleReply};
+use common_meta::instruction::{
+    Instruction, InstructionReply, RegionIdent, SimpleReply, TableIdent,
+};
 use common_telemetry::{error, warn};
 use snafu::ResultExt;
 use store_api::storage::RegionNumber;
@@ -97,12 +99,15 @@ impl OpenRegionHandler {
 
     fn prepare_request(ident: RegionIdent) -> (String, OpenTableRequest) {
         let RegionIdent {
-            catalog,
-            schema,
-            table,
-            table_id,
+            table_ident:
+                TableIdent {
+                    catalog,
+                    schema,
+                    table,
+                    table_id,
+                    engine,
+                },
             region_number,
-            engine,
             ..
         } = ident;
 

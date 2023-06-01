@@ -302,6 +302,7 @@ impl StartCommand {
     async fn build(self, fe_opts: FrontendOptions, dn_opts: DatanodeOptions) -> Result<Instance> {
         let plugins = Arc::new(load_frontend_plugins(&self.user_provider)?);
 
+        info!("Standalone start command: {:#?}", self);
         info!(
             "Standalone frontend options: {:#?}, datanode options: {:#?}",
             fe_opts, dn_opts

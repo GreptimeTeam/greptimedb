@@ -22,12 +22,14 @@ use catalog::CatalogManagerRef;
 use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID, MITO_ENGINE,
 };
+use common_query::Output;
+use common_recordbatch::util;
 use common_runtime::Builder as RuntimeBuilder;
 use common_test_util::ports;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datanode::datanode::{
-    DatanodeOptions, FileConfig, ObjectStoreConfig, OssConfig, ProcedureConfig, S3Config,
-    StorageConfig, WalConfig,
+    AzblobConfig, DatanodeOptions, FileConfig, ObjectStoreConfig, OssConfig, ProcedureConfig,
+    S3Config, StorageConfig, WalConfig,
 };
 use datanode::error::{CreateTableSnafu, Result};
 use datanode::instance::Instance;
@@ -35,13 +37,16 @@ use datanode::sql::SqlHandler;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema};
 use frontend::instance::Instance as FeInstance;
-use object_store::services::{Oss, S3};
+use frontend::service_config::{MysqlOptions, PostgresOptions};
+use object_store::services::{Azblob, Oss, S3};
 use object_store::test_util::TempFolder;
 use object_store::ObjectStore;
 use secrecy::ExposeSecret;
 use servers::grpc::GrpcServer;
 use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
+use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
+use servers::postgres::PostgresServer;
 use servers::prom::PromServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
 use servers::query_handler::sql::ServerSqlQueryHandlerAdaptor;
@@ -57,6 +62,7 @@ pub enum StorageType {
     S3WithCache,
     File,
     Oss,
+    Azblob,
 }
 
 impl StorageType {
@@ -74,6 +80,13 @@ impl StorageType {
             }
             StorageType::Oss => {
                 if let Ok(b) = env::var("GT_OSS_BUCKET") {
+                    !b.is_empty()
+                } else {
+                    false
+                }
+            }
+            StorageType::Azblob => {
+                if let Ok(b) = env::var("GT_AZBLOB_CONTAINER") {
                     !b.is_empty()
                 } else {
                     false
@@ -101,6 +114,34 @@ pub fn get_test_store_config(
     let _ = dotenv::dotenv();
 
     match store_type {
+        StorageType::Azblob => {
+            let azblob_config = AzblobConfig {
+                root: uuid::Uuid::new_v4().to_string(),
+                container: env::var("GT_AZBLOB_CONTAINER").unwrap(),
+                account_name: env::var("GT_AZBLOB_ACCOUNT_NAME").unwrap().into(),
+                account_key: env::var("GT_AZBLOB_ACCOUNT_KEY").unwrap().into(),
+                endpoint: env::var("GT_AZBLOB_ENDPOINT").unwrap(),
+                ..Default::default()
+            };
+
+            let mut builder = Azblob::default();
+            builder
+                .root(&azblob_config.root)
+                .endpoint(&azblob_config.endpoint)
+                .account_name(azblob_config.account_name.expose_secret())
+                .account_key(azblob_config.account_key.expose_secret())
+                .container(&azblob_config.container);
+
+            if let Ok(sas_token) = env::var("GT_AZBLOB_SAS_TOKEN") {
+                builder.sas_token(&sas_token);
+            }
+
+            let config = ObjectStoreConfig::Azblob(azblob_config);
+
+            let store = ObjectStore::new(builder).unwrap().finish();
+
+            (config, TempDirGuard::Azblob(TempFolder::new(&store, "/")))
+        }
         StorageType::Oss => {
             let oss_config = OssConfig {
                 root: uuid::Uuid::new_v4().to_string(),
@@ -169,6 +210,7 @@ pub enum TempDirGuard {
     File(TempDir),
     S3(TempFolder),
     Oss(TempFolder),
+    Azblob(TempFolder),
 }
 
 pub struct TestGuard {
@@ -182,7 +224,9 @@ pub struct StorageGuard(pub TempDirGuard);
 
 impl TestGuard {
     pub async fn remove_all(&mut self) {
-        if let TempDirGuard::S3(guard) | TempDirGuard::Oss(guard) = &mut self.storage_guard.0 {
+        if let TempDirGuard::S3(guard) | TempDirGuard::Oss(guard) | TempDirGuard::Azblob(guard) =
+            &mut self.storage_guard.0
+        {
             guard.remove_all().await.unwrap()
         }
     }
@@ -402,4 +446,115 @@ pub async fn setup_grpc_server(
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     (fe_grpc_addr, guard, fe_grpc_server)
+}
+
+pub async fn check_output_stream(output: Output, expected: &str) {
+    let recordbatches = match output {
+        Output::Stream(stream) => util::collect_batches(stream).await.unwrap(),
+        Output::RecordBatches(recordbatches) => recordbatches,
+        _ => unreachable!(),
+    };
+    let pretty_print = recordbatches.pretty_print().unwrap();
+    assert_eq!(pretty_print, expected, "actual: \n{}", pretty_print);
+}
+
+pub async fn setup_mysql_server(
+    store_type: StorageType,
+    name: &str,
+) -> (String, TestGuard, Arc<Box<dyn Server>>) {
+    common_telemetry::init_default_ut_logging();
+
+    let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
+    let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
+
+    let runtime = Arc::new(
+        RuntimeBuilder::default()
+            .worker_threads(2)
+            .thread_name("mysql-runtime")
+            .build()
+            .unwrap(),
+    );
+
+    let fe_mysql_addr = format!("127.0.0.1:{}", ports::get_port());
+
+    let fe_instance = FeInstance::try_new_standalone(instance.clone())
+        .await
+        .unwrap();
+    instance.start().await.unwrap();
+    let fe_instance_ref = Arc::new(fe_instance);
+    let opts = MysqlOptions {
+        addr: fe_mysql_addr.clone(),
+        ..Default::default()
+    };
+    let fe_mysql_server = Arc::new(MysqlServer::create_server(
+        runtime,
+        Arc::new(MysqlSpawnRef::new(
+            ServerSqlQueryHandlerAdaptor::arc(fe_instance_ref),
+            None,
+        )),
+        Arc::new(MysqlSpawnConfig::new(
+            false,
+            opts.tls.setup().unwrap().map(Arc::new),
+            opts.reject_no_database.unwrap_or(false),
+        )),
+    ));
+
+    let fe_mysql_addr_clone = fe_mysql_addr.clone();
+    let fe_mysql_server_clone = fe_mysql_server.clone();
+    tokio::spawn(async move {
+        let addr = fe_mysql_addr_clone.parse::<SocketAddr>().unwrap();
+        fe_mysql_server_clone.start(addr).await.unwrap()
+    });
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    (fe_mysql_addr, guard, fe_mysql_server)
+}
+
+#[allow(dead_code)]
+pub async fn setup_pg_server(
+    store_type: StorageType,
+    name: &str,
+) -> (String, TestGuard, Arc<Box<dyn Server>>) {
+    common_telemetry::init_default_ut_logging();
+
+    let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
+    let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
+
+    let runtime = Arc::new(
+        RuntimeBuilder::default()
+            .worker_threads(2)
+            .thread_name("pg-runtime")
+            .build()
+            .unwrap(),
+    );
+
+    let fe_pg_addr = format!("127.0.0.1:{}", ports::get_port());
+
+    let fe_instance = FeInstance::try_new_standalone(instance.clone())
+        .await
+        .unwrap();
+    instance.start().await.unwrap();
+    let fe_instance_ref = Arc::new(fe_instance);
+    let opts = PostgresOptions {
+        addr: fe_pg_addr.clone(),
+        ..Default::default()
+    };
+    let fe_pg_server = Arc::new(Box::new(PostgresServer::new(
+        ServerSqlQueryHandlerAdaptor::arc(fe_instance_ref),
+        opts.tls.clone(),
+        runtime,
+        None,
+    )) as Box<dyn Server>);
+
+    let fe_pg_addr_clone = fe_pg_addr.clone();
+    let fe_pg_server_clone = fe_pg_server.clone();
+    tokio::spawn(async move {
+        let addr = fe_pg_addr_clone.parse::<SocketAddr>().unwrap();
+        fe_pg_server_clone.start(addr).await.unwrap()
+    });
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    (fe_pg_addr, guard, fe_pg_server)
 }

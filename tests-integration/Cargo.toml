@@ -44,6 +44,11 @@ servers = { path = "../src/servers" }
 session = { path = "../src/session" }
 snafu.workspace = true
 sql = { path = "../src/sql" }
+sqlx = { version = "0.6", features = [
+    "runtime-tokio-rustls",
+    "mysql",
+    "postgres",
+] }
 table = { path = "../src/table" }
 tempfile.workspace = true
 tokio.workspace = true

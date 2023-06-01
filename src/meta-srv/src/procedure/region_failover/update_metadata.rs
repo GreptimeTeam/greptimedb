@@ -22,7 +22,7 @@ use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
-use super::failover_end::RegionFailoverEnd;
+use super::invalidate_cache::InvalidateCache;
 use super::{RegionFailoverContext, State};
 use crate::error::{
     CorruptedTableRouteSnafu, Result, RetryLaterSnafu, TableNotFoundSnafu,
@@ -75,9 +75,9 @@ impl UpdateRegionMetadata {
         failed_region: &RegionIdent,
     ) -> Result<()> {
         let key = TableGlobalKey {
-            catalog_name: failed_region.catalog.clone(),
-            schema_name: failed_region.schema.clone(),
-            table_name: failed_region.table.clone(),
+            catalog_name: failed_region.table_ident.catalog.clone(),
+            schema_name: failed_region.table_ident.schema.clone(),
+            table_name: failed_region.table_ident.table.clone(),
         };
         let mut value = table_routes::get_table_global_value(&ctx.selector_ctx.kv_store, &key)
             .await?
@@ -120,11 +120,12 @@ impl UpdateRegionMetadata {
         failed_region: &RegionIdent,
     ) -> Result<()> {
         let table_name = TableName {
-            catalog_name: failed_region.catalog.clone(),
-            schema_name: failed_region.schema.clone(),
-            table_name: failed_region.table.clone(),
+            catalog_name: failed_region.table_ident.catalog.clone(),
+            schema_name: failed_region.table_ident.schema.clone(),
+            table_name: failed_region.table_ident.table.clone(),
         };
-        let key = TableRouteKey::with_table_name(failed_region.table_id as _, &table_name);
+        let key =
+            TableRouteKey::with_table_name(failed_region.table_ident.table_id as _, &table_name);
         let value = table_routes::get_table_route_value(&ctx.selector_ctx.kv_store, &key).await?;
 
         let table_route = value
@@ -212,7 +213,7 @@ impl State for UpdateRegionMetadata {
                 }
                 .build()
             })?;
-        Ok(Box::new(RegionFailoverEnd))
+        Ok(Box::new(InvalidateCache))
     }
 }
 
@@ -222,8 +223,22 @@ mod tests {
     use catalog::helper::TableGlobalValue;
 
     use super::super::tests::{TestingEnv, TestingEnvBuilder};
-    use super::*;
+    use super::{State, *};
     use crate::table_routes::tests::new_region_route;
+
+    #[tokio::test]
+    async fn test_next_state() {
+        let env = TestingEnvBuilder::new().build().await;
+        let failed_region = env.failed_region(1).await;
+
+        let state = UpdateRegionMetadata::new(Peer::new(2, ""));
+
+        let next_state = Box::new(state)
+            .next(&env.context, &failed_region)
+            .await
+            .unwrap();
+        assert_eq!(format!("{next_state:?}"), "InvalidateCache");
+    }
 
     #[tokio::test]
     async fn test_update_table_global_value() {
@@ -233,9 +248,9 @@ mod tests {
             let failed_region = env.failed_region(failed_region).await;
 
             let key = TableGlobalKey {
-                catalog_name: failed_region.catalog.clone(),
-                schema_name: failed_region.schema.clone(),
-                table_name: failed_region.table.clone(),
+                catalog_name: failed_region.table_ident.catalog.clone(),
+                schema_name: failed_region.table_ident.schema.clone(),
+                table_name: failed_region.table_ident.table.clone(),
             };
 
             let original =
@@ -323,10 +338,10 @@ mod tests {
                 .unwrap();
 
             let key = TableRouteKey {
-                table_id: failed_region.table_id as u64,
-                catalog_name: &failed_region.catalog,
-                schema_name: &failed_region.schema,
-                table_name: &failed_region.table,
+                table_id: failed_region.table_ident.table_id as u64,
+                catalog_name: &failed_region.table_ident.catalog,
+                schema_name: &failed_region.table_ident.schema,
+                table_name: &failed_region.table_ident.table,
             };
             table_routes::get_table_route_value(&env.context.selector_ctx.kv_store, &key)
                 .await
@@ -456,10 +471,10 @@ mod tests {
             let failed_region_1 = env.failed_region(1).await;
             let failed_region_2 = env.failed_region(2).await;
 
-            let catalog_name = failed_region_1.catalog.clone();
-            let schema_name = failed_region_1.schema.clone();
-            let table_name = failed_region_1.table.clone();
-            let table_id = failed_region_1.table_id as u64;
+            let catalog_name = failed_region_1.table_ident.catalog.clone();
+            let schema_name = failed_region_1.table_ident.schema.clone();
+            let table_name = failed_region_1.table_ident.table.clone();
+            let table_id = failed_region_1.table_ident.table_id as u64;
 
             futures::future::join_all(vec![
                 tokio::spawn(async move {

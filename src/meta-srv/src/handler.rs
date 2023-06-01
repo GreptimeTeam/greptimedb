@@ -346,7 +346,7 @@ impl Mailbox for HeartbeatMailbox {
 
         self.pushers.push(&pusher_id, msg).await?;
 
-        Ok(MailboxReceiver::new(message_id, rx))
+        Ok(MailboxReceiver::new(message_id, rx, *ch))
     }
 
     async fn broadcast(&self, ch: &BroadcastChannel, msg: &MailboxMessage) -> Result<()> {
@@ -371,6 +371,7 @@ impl Mailbox for HeartbeatMailbox {
 
 #[cfg(test)]
 mod tests {
+
     use std::sync::Arc;
     use std::time::Duration;
 

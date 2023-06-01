@@ -25,10 +25,12 @@ use snafu::{ensure, ResultExt};
 use crate::error::{self, Result};
 use crate::metrics;
 
+type TableRouteCache = Cache<TableName, Arc<TableRoute>>;
+
 pub struct TableRoutes {
     meta_client: Arc<MetaClient>,
     // TODO(LFC): Use table id as cache key, then remove all the manually invoked cache invalidations.
-    cache: Cache<TableName, Arc<TableRoute>>,
+    cache: TableRouteCache,
 }
 
 // TODO(hl): maybe periodically refresh table route cache?
@@ -83,5 +85,9 @@ impl TableRoutes {
 
     pub async fn invalidate_table_route(&self, table_name: &TableName) {
         self.cache.invalidate(table_name).await
+    }
+
+    pub fn cache(&self) -> &TableRouteCache {
+        &self.cache
     }
 }

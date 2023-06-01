@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_query::AddColumnLocation;
 use sqlparser::ast::{ColumnDef, Ident, ObjectName, TableConstraint};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,8 +42,11 @@ impl AlterTable {
 pub enum AlterTableOperation {
     /// `ADD <table_constraint>`
     AddConstraint(TableConstraint),
-    /// `ADD [ COLUMN ] <column_def>`
-    AddColumn { column_def: ColumnDef },
+    /// `ADD [ COLUMN ] <column_def> [location]`
+    AddColumn {
+        column_def: ColumnDef,
+        location: Option<AddColumnLocation>,
+    },
     /// `DROP COLUMN <name>`
     DropColumn { name: Ident },
     /// `RENAME <new_table_name>`

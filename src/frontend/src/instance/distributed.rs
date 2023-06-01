@@ -55,7 +55,8 @@ use sql::ast::{Ident, Value as SqlValue};
 use sql::statements::create::{PartitionEntry, Partitions};
 use sql::statements::statement::Statement;
 use sql::statements::{self, sql_value_to_value};
-use table::engine::TableReference;
+use store_api::storage::RegionNumber;
+use table::engine::{self, TableReference};
 use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
 use table::requests::TableOptions;
 use table::table::AlterContext;
@@ -189,11 +190,11 @@ impl DistInstance {
 
             let regions = table_route.find_leader_regions(&datanode);
             let mut create_expr_for_region = create_table.clone();
-            create_expr_for_region.region_ids = regions;
+            create_expr_for_region.region_numbers = regions;
 
             debug!(
                 "Creating table {:?} on Datanode {:?} with regions {:?}",
-                create_table, datanode, create_expr_for_region.region_ids,
+                create_table, datanode, create_expr_for_region.region_numbers,
             );
 
             let _timer = common_telemetry::timer!(crate::metrics::DIST_CREATE_TABLE_IN_DATANODE);
@@ -288,7 +289,11 @@ impl DistInstance {
         Ok(Output::AffectedRows(1))
     }
 
-    async fn flush_table(&self, table_name: TableName, region_id: Option<u32>) -> Result<Output> {
+    async fn flush_table(
+        &self,
+        table_name: TableName,
+        region_number: Option<RegionNumber>,
+    ) -> Result<Output> {
         let _ = self
             .catalog_manager
             .table(
@@ -314,13 +319,13 @@ impl DistInstance {
             catalog_name: table_name.catalog_name.clone(),
             schema_name: table_name.schema_name.clone(),
             table_name: table_name.table_name.clone(),
-            region_id,
+            region_number,
         };
 
         for table_route in &route_response.table_routes {
             let should_send_rpc = table_route.region_routes.iter().any(|route| {
-                if let Some(region_id) = region_id {
-                    region_id == route.region.id as u32
+                if let Some(n) = region_number {
+                    n == engine::region_number(route.region.id)
                 } else {
                     true
                 }
@@ -671,7 +676,7 @@ impl GrpcQueryHandler for DistInstance {
                     DdlExpr::FlushTable(expr) => {
                         let table_name =
                             TableName::new(&expr.catalog_name, &expr.schema_name, &expr.table_name);
-                        self.flush_table(table_name, expr.region_id).await
+                        self.flush_table(table_name, expr.region_number).await
                     }
                 }
             }
