@@ -127,6 +127,13 @@ pub enum Error {
         source: common_runtime::error::Error,
         location: Location,
     },
+
+    #[snafu(display("Subprocedure {} failed, source: {}", subprocedure_id, source))]
+    SubprocedureFailed {
+        subprocedure_id: ProcedureId,
+        source: Arc<Error>,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -134,7 +141,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::External { source }
+            Error::External { source, .. }
             | Error::PutState { source, .. }
             | Error::DeleteStates { source, .. }
             | Error::ListState { source, .. } => source.status_code(),
@@ -152,6 +159,8 @@ impl ErrorExt for Error {
             Error::ProcedureExec { source, .. } => source.status_code(),
             Error::StartRemoveOutdatedMetaTask { source, .. }
             | Error::StopRemoveOutdatedMetaTask { source, .. } => source.status_code(),
+
+            Error::SubprocedureFailed { source, .. } => source.status_code(),
         }
     }
 
