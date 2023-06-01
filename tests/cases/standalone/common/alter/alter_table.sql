@@ -1,14 +1,14 @@
-CREATE TABLE t(i INTEGER, j BIGINT TIME INDEX);
+CREATE TABLE test_alt_table(i INTEGER, j BIGINT TIME INDEX);
 
-DESC TABLE t;
+DESC TABLE test_alt_table;
 
-ALTER TABLE t ADD COLUMN k INTEGER;
+ALTER TABLE test_alt_table ADD COLUMN k INTEGER;
 
-DESC TABLE t;
+DESC TABLE test_alt_table;
 
 -- SQLNESS ARG restart=true
-ALTER TABLE t ADD COLUMN m INTEGER;
+ALTER TABLE test_alt_table ADD COLUMN m INTEGER;
 
-DESC TABLE t;
+DESC TABLE test_alt_table;
 
-DROP TABLE t;
+DROP TABLE test_alt_table;

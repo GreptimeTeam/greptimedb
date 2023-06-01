@@ -156,6 +156,7 @@ impl MetaSrvBuilder {
                         kv_store: kv_store.clone(),
                         catalog: None,
                         schema: None,
+                        table: None,
                     },
                     lock.clone(),
                 ));
