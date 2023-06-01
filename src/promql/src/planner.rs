@@ -1200,8 +1200,6 @@ impl PromPlanner {
     where
         F: FnMut(&String) -> Result<DfExpr>,
     {
-        println!("input: {:?}", input);
-        println!("time index column: {:?}", self.ctx.time_index_column);
         let non_field_columns_iter = self
             .ctx
             .tag_columns
