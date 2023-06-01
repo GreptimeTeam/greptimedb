@@ -43,6 +43,8 @@ const METASRV_LOG_FILE: &str = "/tmp/greptime-sqlness-metasrv.log";
 const FRONTEND_LOG_FILE: &str = "/tmp/greptime-sqlness-frontend.log";
 const DATANODE_LOG_FILE: &str = "/tmp/greptime-sqlness-datanode.log";
 
+const DEFAULT_LOG_LEVEL: &str = "--log-level=debug,hyper=warn,tower=warn,datafusion=warn,reqwest=warn,sqlparser=warn,h2=info,opendal=info";
+
 pub struct Env {}
 
 #[allow(clippy::print_stdout)]
@@ -145,7 +147,7 @@ impl Env {
             "datanode" => Self::datanode_start_args(db_ctx),
             "standalone" => {
                 let args = vec![
-                    "--log-level=debug".to_string(),
+                    DEFAULT_LOG_LEVEL.to_string(),
                     subcommand.to_string(),
                     "start".to_string(),
                     "-c".to_string(),
@@ -156,7 +158,7 @@ impl Env {
             }
             "frontend" => {
                 let args = vec![
-                    "--log-level=debug".to_string(),
+                    DEFAULT_LOG_LEVEL.to_string(),
                     subcommand.to_string(),
                     "start".to_string(),
                     "--metasrv-addr=0.0.0.0:3002".to_string(),
@@ -166,7 +168,7 @@ impl Env {
             }
             "metasrv" => {
                 let args = vec![
-                    "--log-level=debug".to_string(),
+                    DEFAULT_LOG_LEVEL.to_string(),
                     subcommand.to_string(),
                     "start".to_string(),
                     "--use-memory-store".to_string(),
@@ -197,7 +199,7 @@ impl Env {
 
         let subcommand = "datanode";
         let mut args = vec![
-            "--log-level=debug".to_string(),
+            DEFAULT_LOG_LEVEL.to_string(),
             subcommand.to_string(),
             "start".to_string(),
         ];
