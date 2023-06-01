@@ -26,11 +26,24 @@ use snafu::ResultExt;
 
 use crate::error::{DumpPprofSnafu, Result};
 
+/// Output format.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Output {
+    /// google’s pprof format report in protobuf.
+    Proto,
+    /// Simple text format.
+    Text,
+    /// svg flamegraph.
+    Flamegraph,
+}
+
 #[derive(Serialize, Deserialize, Debug, JsonSchema)]
 #[serde(default)]
 pub struct PprofQuery {
     seconds: u64,
     frequency: NonZeroI32,
+    output: Output,
 }
 
 impl Default for PprofQuery {
@@ -39,6 +52,7 @@ impl Default for PprofQuery {
             seconds: 5,
             // Safety: 99 is non zero.
             frequency: NonZeroI32::new(99).unwrap(),
+            output: Output::Proto,
         }
     }
 }
@@ -48,7 +62,14 @@ pub async fn pprof_handler(Query(req): Query<PprofQuery>) -> Result<impl IntoRes
     logging::info!("start pprof, request: {:?}", req);
 
     let profiling = Profiling::new(Duration::from_secs(req.seconds), req.frequency.into());
-    let body = profiling.dump_proto().await.context(DumpPprofSnafu)?;
+    let body = match req.output {
+        Output::Proto => profiling.dump_proto().await.context(DumpPprofSnafu)?,
+        Output::Text => {
+            let report = profiling.report().await.context(DumpPprofSnafu)?;
+            format!("{:?}", report).into_bytes()
+        }
+        Output::Flamegraph => profiling.dump_flamegraph().await.context(DumpPprofSnafu)?,
+    };
 
     logging::info!("finish pprof");
 
