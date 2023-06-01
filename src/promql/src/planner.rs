@@ -141,9 +141,6 @@ impl PromPlanner {
                 // convert op and value columns to aggregate exprs
                 let aggr_exprs = self.create_aggregate_exprs(*op, &input)?;
 
-                // remove time index column from context
-                self.ctx.time_index_column = None;
-
                 // create plan
                 let group_sort_expr = group_exprs
                     .clone()
@@ -1203,6 +1200,8 @@ impl PromPlanner {
     where
         F: FnMut(&String) -> Result<DfExpr>,
     {
+        println!("input: {:?}", input);
+        println!("time index column: {:?}", self.ctx.time_index_column);
         let non_field_columns_iter = self
             .ctx
             .tag_columns
