@@ -29,7 +29,6 @@ use tonic::{Request, Response};
 
 use crate::error;
 use crate::error::Result;
-use crate::keys::TableRouteKey;
 use crate::lock::{keys, DistLockRef, Key, Opts};
 use crate::metasrv::{Context, MetaSrv, SelectorContext, SelectorRef};
 use crate::metrics::METRIC_META_ROUTE_REQUEST;

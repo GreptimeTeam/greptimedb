@@ -360,7 +360,8 @@ impl DistTable {
         }
         .key();
 
-        self.backend
+        self.catalog_manager
+            .backend()
             .move_value(old_key.as_bytes(), new_key.as_bytes())
             .await
             .context(error::CatalogSnafu)?;
