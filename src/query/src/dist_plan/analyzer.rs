@@ -75,18 +75,16 @@ impl DistPlannerAnalyzer {
         plan: LogicalPlan,
     ) -> datafusion_common::Result<Transformed<LogicalPlan>> {
         Ok(match &plan {
-            LogicalPlan::Extension(extension) => {
-                if extension.node.name() == MergeScanLogicalPlan::name() {
-                    let merge_scan = extension
-                        .node
-                        .as_any()
-                        .downcast_ref::<MergeScanLogicalPlan>()
-                        .unwrap();
-                    if merge_scan.is_placeholder() {
-                        Transformed::Yes(merge_scan.input().clone())
-                    } else {
-                        Transformed::No(plan)
-                    }
+            LogicalPlan::Extension(extension)
+                if extension.node.name() == MergeScanLogicalPlan::name() =>
+            {
+                let merge_scan = extension
+                    .node
+                    .as_any()
+                    .downcast_ref::<MergeScanLogicalPlan>()
+                    .unwrap();
+                if merge_scan.is_placeholder() {
+                    Transformed::Yes(merge_scan.input().clone())
                 } else {
                     Transformed::No(plan)
                 }

@@ -112,7 +112,7 @@ impl PartitionRuleManager {
     /// Find all leader peers of given table.
     pub async fn find_table_region_leaders(&self, table: &TableName) -> Result<Vec<Peer>> {
         let route = self.table_routes.get_route(table).await?;
-        let mut peers = vec![];
+        let mut peers = Vec::with_capacity(route.region_routes.len());
         for peer in &route.region_routes {
             peers.push(peer.leader_peer.clone().with_context(|| FindLeaderSnafu {
                 region_id: peer.region.id,

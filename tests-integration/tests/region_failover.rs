@@ -84,7 +84,7 @@ pub async fn test_region_failover(store_type: StorageType) {
     let (store_config, _guard) = get_test_store_config(&store_type, cluster_name);
 
     let cluster = GreptimeDbClusterBuilder::new(cluster_name)
-        .with_datanodes(2)
+        .with_datanodes(5)
         .with_store_config(store_config)
         .build()
         .await;

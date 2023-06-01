@@ -140,9 +140,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Table identifier is incomplete"))]
-    IncompleteTableIdentifier { location: Location },
-
     #[snafu(display("Failed to convert value to sql value: {}", value))]
     ConvertSqlValue {
         value: Value,
@@ -238,7 +235,6 @@ impl ErrorExt for Error {
             | ParseFloat { .. }
             | MissingRequiredField { .. }
             | BuildRegex { .. }
-            | IncompleteTableIdentifier { .. }
             | ConvertSchema { .. } => StatusCode::InvalidArguments,
 
             BuildBackend { .. } | ListObjects { .. } => StatusCode::StorageUnavailable,
