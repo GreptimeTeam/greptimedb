@@ -8,9 +8,9 @@ license.workspace = true
 common-error = { path = "../error" }
 pprof = { version = "0.11.1", features = [
     "flamegraph",
-    "protobuf-codec",
+    "prost-codec",
     "protobuf",
 ] }
-protobuf = "2"
+prost.workspace = true
 snafu.workspace = true
 tokio.workspace = true

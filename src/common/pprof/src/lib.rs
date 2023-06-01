@@ -16,7 +16,7 @@ use std::any::Any;
 use std::time::Duration;
 
 use common_error::prelude::{ErrorExt, StatusCode};
-use pprof::protos::Message;
+use prost::Message;
 use snafu::{ResultExt, Snafu};
 
 #[derive(Debug, Snafu)]
@@ -32,9 +32,6 @@ pub enum Error {
 
     #[snafu(display("Failed to create pprof report, source: {}", source))]
     ReportPprof { source: pprof::Error },
-
-    #[snafu(display("Failed to write report, source: {}", source))]
-    WriteReport { source: protobuf::ProtobufError },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -93,12 +90,10 @@ impl Profiling {
 
     /// Profiles and returns a generated proto.
     pub async fn dump_proto(&self) -> Result<Vec<u8>> {
-        let mut body: Vec<u8> = Vec::new();
-
         let report = self.report().await?;
         // Generate google’s pprof format report.
         let profile = report.pprof().context(ReportPprofSnafu)?;
-        profile.write_to_vec(&mut body).context(WriteReportSnafu)?;
+        let body = profile.encode_to_vec();
 
         Ok(body)
     }

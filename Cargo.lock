@@ -1823,7 +1823,7 @@ version = "0.2.0"
 dependencies = [
  "common-error",
  "pprof",
- "protobuf",
+ "prost",
  "snafu",
  "tokio",
 ]
@@ -6603,8 +6603,11 @@ dependencies = [
  "nix 0.26.2",
  "once_cell",
  "parking_lot 0.12.1",
+ "prost",
+ "prost-build",
+ "prost-derive",
  "protobuf",
- "protobuf-codegen-pure",
+ "sha2",
  "smallvec",
  "symbolic-demangle",
  "tempfile",
@@ -6886,16 +6889,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "033460afb75cf755fcfc16dfaed20b86468082a2ea24e05ac35ab4a099a017d6"
 dependencies = [
  "protobuf",
-]
-
-[[package]]
-name = "protobuf-codegen-pure"
-version = "2.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95a29399fc94bcd3eeaa951c715f7bea69409b2445356b00519740bcd6ddd865"
-dependencies = [
- "protobuf",
- "protobuf-codegen",
 ]
 
 [[package]]
