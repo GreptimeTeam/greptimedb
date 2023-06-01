@@ -173,7 +173,7 @@ fn short_version() -> &'static str {
 // version so the full version doesn't concat the short version explicitly.
 fn full_version() -> &'static str {
     concat!(
-        "greptime-",
+        "greptimedb-",
         env!("GIT_BRANCH"),
         "-",
         env!("GIT_COMMIT_SHORT")
