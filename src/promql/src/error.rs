@@ -32,7 +32,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Internal error during build DataFusion plan, error: {}, location: {}",
+        "Internal error during building DataFusion plan, error: {}, location: {}",
         source,
         location
     ))]
