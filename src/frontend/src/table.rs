@@ -44,7 +44,7 @@ use datafusion::physical_plan::{
 use datafusion_common::DataFusionError;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use futures_util::{Stream, StreamExt};
-use partition::manager::PartitionRuleManagerRef;
+use partition::manager::{PartitionRuleManagerRef, TableRouteCacheInvalidator};
 use partition::splitter::WriteSplitter;
 use snafu::prelude::*;
 use store_api::storage::{RegionNumber, ScanRequest};
@@ -403,10 +403,12 @@ impl DistTable {
             schema_name: schema_name.clone(),
             table_name: table_name.clone(),
         };
-        let mut value = self
-            .table_global_value(&key)
-            .await?
-            .context(error::TableNotFoundSnafu { table_name })?;
+        let mut value =
+            self.table_global_value(&key)
+                .await?
+                .context(error::TableNotFoundSnafu {
+                    table_name: table_name.clone(),
+                })?;
 
         value.table_info = new_info.into();
 
@@ -425,7 +427,15 @@ impl DistTable {
                 table_name,
                 new_table_name,
             )
-            .await
+            .await?;
+            self.partition_manager
+                .invalidate_table_route(&TableName {
+                    catalog_name: catalog_name.to_string(),
+                    schema_name: schema_name.to_string(),
+                    table_name: table_name.to_string(),
+                })
+                .await;
+            Ok(())
         } else {
             self.set_table_global_value(key, value).await
         }
