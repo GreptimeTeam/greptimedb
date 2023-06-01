@@ -12,18 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod admin;
 pub mod authorize;
 pub mod handler;
 pub mod influxdb;
+pub mod mem_prof;
 pub mod opentsdb;
+mod pprof;
 pub mod prometheus;
 pub mod script;
 
-mod admin;
 #[cfg(feature = "dashboard")]
 mod dashboard;
-#[cfg(feature = "mem-prof")]
-pub mod mem_prof;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -503,14 +503,19 @@ impl HttpServer {
             );
         }
 
-        // mem profiler
-        #[cfg(feature = "mem-prof")]
-        {
-            router = router.nest(
-                &format!("/{HTTP_API_VERSION}/prof"),
-                Router::new().route("/mem", routing::get(crate::http::mem_prof::mem_prof)),
-            );
-        }
+        // prof routers
+        router = router.nest(
+            &format!("/{HTTP_API_VERSION}/prof"),
+            Router::new()
+                .route(
+                    "/cpu",
+                    routing::get(pprof::pprof_handler).post(pprof::pprof_handler),
+                )
+                .route(
+                    "/mem",
+                    routing::get(mem_prof::mem_prof_handler).post(mem_prof::mem_prof_handler),
+                ),
+        );
 
         if let Some(metrics_handler) = self.metrics_handler {
             router = router.nest("", self.route_metrics(metrics_handler));
@@ -609,6 +614,21 @@ impl HttpServer {
             .route("/flush", routing::post(flush))
             .with_state(grpc_handler)
     }
+
+    // fn route_prof<S>(&self) -> Router<S> {
+    //     Router::new().route("/cpu", routing::get(crate::http::pprof::pprof))
+    //     // let mut router = Router::new();
+    //     // // cpu profiler
+    //     // router = router.route("/cpu", routing::get(crate::http::pprof::pprof));
+
+    //     // // mem profiler
+    //     // #[cfg(feature = "mem-prof")]
+    //     // {
+    //     //     router = router.route("/mem", routing::get(crate::http::mem_prof::mem_prof));
+    //     // }
+
+    //     // router
+    // }
 }
 
 /// A middleware to record metrics for HTTP.

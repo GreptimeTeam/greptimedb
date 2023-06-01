@@ -266,6 +266,12 @@ pub enum Error {
         source: tokio::task::JoinError,
         location: Location,
     },
+
+    #[snafu(display("Failed to dump pprof data, source: {}", source))]
+    DumpPprof {
+        #[snafu(backtrace)]
+        source: common_pprof::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -341,6 +347,8 @@ impl ErrorExt for Error {
                     StatusCode::Unknown
                 }
             }
+
+            DumpPprof { source, .. } => source.status_code(),
         }
     }
 

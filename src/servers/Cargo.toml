@@ -25,6 +25,7 @@ common-error = { path = "../common/error" }
 common-grpc = { path = "../common/grpc" }
 common-grpc-expr = { path = "../common/grpc-expr" }
 common-mem-prof = { path = "../common/mem-prof", optional = true }
+common-pprof = { path = "../common/pprof" }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-runtime = { path = "../common/runtime" }
