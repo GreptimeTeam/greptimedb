@@ -90,15 +90,15 @@ SELECT i1.i,i2.i FROM integers i1 LEFT OUTER JOIN integers i2 ON 1=1 WHERE i1.i=
 
 SELECT * FROM integers WHERE i IN ((SELECT i FROM integers)) ORDER BY i;
 
-Error: 1003(Internal), Schema contains duplicate qualified field name integers.i
+Error: 3001(EngineExecuteQuery), Error during planning: Subquery can only be used in Projection, Filter, Window functions, Aggregate, Sort and Join plan nodes
 
 SELECT * FROM integers WHERE i NOT IN ((SELECT i FROM integers WHERE i=1)) ORDER BY i;
 
-Error: 1003(Internal), Schema contains duplicate qualified field name integers.i
+Error: 3001(EngineExecuteQuery), Error during planning: Subquery can only be used in Projection, Filter, Window functions, Aggregate, Sort and Join plan nodes
 
 SELECT * FROM integers WHERE i IN ((SELECT i FROM integers)) AND i<3 ORDER BY i;
 
-Error: 1003(Internal), Schema contains duplicate qualified field name integers.i
+Error: 3001(EngineExecuteQuery), Error during planning: Subquery can only be used in Projection, Filter, Window functions, Aggregate, Sort and Join plan nodes
 
 SELECT i1.i,i2.i FROM integers i1, integers i2 WHERE i IN ((SELECT i FROM integers)) AND i1.i=i2.i ORDER BY 1;
 

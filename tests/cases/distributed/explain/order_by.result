@@ -10,18 +10,18 @@ EXPLAIN SELECT DISTINCT i%2 FROM integers ORDER BY 1;
 +---------------+---------------------------------------------------------------------------------------------------------------------------+
 | logical_plan  | Sort: integers.i % Int64(2) ASC NULLS LAST                                                                                |
 |               |   Aggregate: groupBy=[[integers.i % Int64(2)]], aggr=[[]]                                                                 |
-|               |     MergeScan [is_placeholder=false]                                                                                      |
-|               |       Aggregate: groupBy=[[integers.i % Int64(2)]], aggr=[[]]                                                             |
-|               |         Projection: integers.i % Int64(2)                                                                                 |
-|               |           TableScan: integers projection=[i]                                                                              |
+|               |     Projection: integers.i % Int64(2)                                                                                     |
+|               |       MergeScan [is_placeholder=false]                                                                                    |
+|               |         TableScan: integers projection=[i]                                                                                |
 | physical_plan | SortPreservingMergeExec: [integers.i % Int64(2)@0 ASC NULLS LAST]                                                         |
 |               |   SortExec: expr=[integers.i % Int64(2)@0 ASC NULLS LAST]                                                                 |
 |               |     AggregateExec: mode=FinalPartitioned, gby=[integers.i % Int64(2)@0 as integers.i % Int64(2)], aggr=[]                 |
 |               |       CoalesceBatchesExec: target_batch_size=8192                                                                         |
 |               |         RepartitionExec: partitioning=Hash([Column { name: "integers.i % Int64(2)", index: 0 }], 32), input_partitions=32 |
 |               |           AggregateExec: mode=Partial, gby=[integers.i % Int64(2)@0 as integers.i % Int64(2)], aggr=[]                    |
-|               |             RepartitionExec: partitioning=REDACTED
-|               |               MergeScanExec: peers=[peer-1(127.0.0.1:4100), ]                                                             |
+|               |             ProjectionExec: expr=[i@0 % 2 as integers.i % Int64(2)]                                                       |
+|               |               RepartitionExec: partitioning=REDACTED
+|               |                 MergeScanExec: peers=[peer-1(127.0.0.1:4100), ]                                                           |
 |               |                                                                                                                           |
 +---------------+---------------------------------------------------------------------------------------------------------------------------+
 
@@ -40,10 +40,12 @@ EXPLAIN SELECT a, b FROM test ORDER BY a, b;
 | plan_type     | plan                                                   |
 +---------------+--------------------------------------------------------+
 | logical_plan  | Sort: test.a ASC NULLS LAST, test.b ASC NULLS LAST     |
-|               |   MergeScan [is_placeholder=false]                     |
-|               |     TableScan: test projection=[a, b]                  |
+|               |   Projection: test.a, test.b                           |
+|               |     MergeScan [is_placeholder=false]                   |
+|               |       TableScan: test projection=[a, b, t]             |
 | physical_plan | SortExec: expr=[a@0 ASC NULLS LAST,b@1 ASC NULLS LAST] |
-|               |   MergeScanExec: peers=[peer-1(127.0.0.1:4100), ]      |
+|               |   ProjectionExec: expr=[a@0 as a, b@1 as b]            |
+|               |     MergeScanExec: peers=[peer-1(127.0.0.1:4100), ]    |
 |               |                                                        |
 +---------------+--------------------------------------------------------+
 
@@ -55,9 +57,9 @@ EXPLAIN SELECT DISTINCT a, b FROM test ORDER BY a, b;
 +---------------+---------------------------------------------------------------------------------------------------------------------------------------+
 | logical_plan  | Sort: test.a ASC NULLS LAST, test.b ASC NULLS LAST                                                                                    |
 |               |   Aggregate: groupBy=[[test.a, test.b]], aggr=[[]]                                                                                    |
-|               |     MergeScan [is_placeholder=false]                                                                                                  |
-|               |       Aggregate: groupBy=[[test.a, test.b]], aggr=[[]]                                                                                |
-|               |         TableScan: test projection=[a, b]                                                                                             |
+|               |     Projection: test.a, test.b                                                                                                        |
+|               |       MergeScan [is_placeholder=false]                                                                                                |
+|               |         TableScan: test projection=[a, b, t]                                                                                          |
 | physical_plan | SortPreservingMergeExec: [a@0 ASC NULLS LAST,b@1 ASC NULLS LAST]                                                                      |
 |               |   SortExec: expr=[a@0 ASC NULLS LAST,b@1 ASC NULLS LAST]                                                                              |
 |               |     AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b], aggr=[]                                                           |
@@ -65,7 +67,8 @@ EXPLAIN SELECT DISTINCT a, b FROM test ORDER BY a, b;
 |               |         RepartitionExec: partitioning=Hash([Column { name: "a", index: 0 }, Column { name: "b", index: 1 }], 32), input_partitions=32 |
 |               |           AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b], aggr=[]                                                              |
 |               |             RepartitionExec: partitioning=REDACTED
-|               |               MergeScanExec: peers=[peer-1(127.0.0.1:4100), ]                                                                         |
+|               |               ProjectionExec: expr=[a@0 as a, b@1 as b]                                                                               |
+|               |                 MergeScanExec: peers=[peer-1(127.0.0.1:4100), ]                                                                       |
 |               |                                                                                                                                       |
 +---------------+---------------------------------------------------------------------------------------------------------------------------------------+
 
