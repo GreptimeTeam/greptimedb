@@ -125,7 +125,7 @@ pub async fn test_region_failover(store_type: StorageType) {
 
     run_region_failover_procedure(&cluster, failed_region.clone()).await;
 
-    let mut distribution = find_region_distribution(&cluster).await;
+    let distribution = find_region_distribution(&cluster).await;
     info!("Find region distribution again: {distribution:?}");
 
     // Waits for invalidating table cache
@@ -145,16 +145,14 @@ pub async fn test_region_failover(store_type: StorageType) {
 
     assert_writes(&frontend).await;
 
-    assert!(!distribution
-        .remove(&failed_region.datanode_id)
-        .unwrap()
-        .contains(&failed_region.region_number));
-    // Since there are only two datanodes, the other datanode is the candidate.
-    assert!(distribution
-        .values()
-        .next()
-        .unwrap()
-        .contains(&failed_region.region_number));
+    assert!(!distribution.contains_key(&failed_region.datanode_id));
+
+    let mut success = false;
+    let values = distribution.values();
+    for val in values {
+        success = success || val.contains(&failed_region.region_number);
+    }
+    assert!(success)
 }
 
 fn get_table_cache(instance: &Arc<Instance>, key: &str) -> Option<Option<Kv>> {
@@ -303,6 +301,7 @@ async fn run_region_failover_procedure(cluster: &GreptimeDbCluster, failed_regio
                 kv_store: meta_srv.kv_store(),
                 catalog: None,
                 schema: None,
+                table: None,
             },
             dist_lock: meta_srv.lock().clone(),
         },

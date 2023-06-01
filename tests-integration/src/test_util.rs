@@ -511,7 +511,6 @@ pub async fn setup_mysql_server(
     (fe_mysql_addr, guard, fe_mysql_server)
 }
 
-#[allow(dead_code)]
 pub async fn setup_pg_server(
     store_type: StorageType,
     name: &str,

@@ -18,7 +18,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_stream::stream;
-use common_meta::rpc::store::{CompareAndPutRequest, DeleteRangeRequest, PutRequest, RangeRequest};
+use common_meta::rpc::store::{
+    CompareAndPutRequest, DeleteRangeRequest, MoveValueRequest, PutRequest, RangeRequest,
+};
 use common_telemetry::{info, timer};
 use meta_client::client::MetaClient;
 use moka::future::{Cache, CacheBuilder};
@@ -96,6 +98,17 @@ impl KvBackend for CachedMetaKvBackend {
 
         if ret.is_ok() {
             self.invalidate_key(key).await;
+        }
+
+        ret
+    }
+
+    async fn move_value(&self, from_key: &[u8], to_key: &[u8]) -> Result<()> {
+        let ret = self.kv_backend.move_value(from_key, to_key).await;
+
+        if ret.is_ok() {
+            self.invalidate_key(from_key).await;
+            self.invalidate_key(to_key).await;
         }
 
         ret
@@ -223,6 +236,12 @@ impl KvBackend for MetaKvBackend {
         } else {
             Ok(Err(response.take_prev_kv().map(|v| v.value().to_vec())))
         }
+    }
+
+    async fn move_value(&self, from_key: &[u8], to_key: &[u8]) -> Result<()> {
+        let req = MoveValueRequest::new(from_key, to_key);
+        self.client.move_value(req).await.context(MetaSrvSnafu)?;
+        Ok(())
     }
 
     fn as_any(&self) -> &dyn Any {

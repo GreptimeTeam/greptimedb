@@ -32,6 +32,7 @@ frontend = { path = "../frontend" }
 futures.workspace = true
 meta-client = { path = "../meta-client" }
 meta-srv = { path = "../meta-srv" }
+metrics.workspace = true
 nu-ansi-term = "0.46"
 partition = { path = "../partition" }
 query = { path = "../query" }

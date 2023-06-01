@@ -153,6 +153,10 @@ impl KvBackend for MockKvBackend {
         Ok(())
     }
 
+    async fn move_value(&self, _from_key: &[u8], _to_key: &[u8]) -> Result<(), Error> {
+        unimplemented!()
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

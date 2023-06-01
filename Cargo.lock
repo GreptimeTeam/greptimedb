@@ -1589,6 +1589,7 @@ dependencies = [
  "futures",
  "meta-client",
  "meta-srv",
+ "metrics",
  "nu-ansi-term",
  "partition",
  "query",
@@ -4052,7 +4053,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=ff0a47b6462bf196cbcd01b589c5dddfa6bfbc45#ff0a47b6462bf196cbcd01b589c5dddfa6bfbc45"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=44c5adf34938d0650c18a14db2a374bdee471ae7#44c5adf34938d0650c18a14db2a374bdee471ae7"
 dependencies = [
  "prost",
  "serde",
@@ -6250,9 +6251,9 @@ dependencies = [
 
 [[package]]
 name = "pgwire"
-version = "0.14.0"
+version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd66851a4b1d6631371c931810e453b0319eb260bbd5853ebe98e37b15105b80"
+checksum = "bd92c65406efd0d621cdece478a41a89e472a559e44a6f2b218df4c14e66a888"
 dependencies = [
  "async-trait",
  "base64 0.21.2",

@@ -12,15 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod error;
-pub mod heartbeat;
-pub mod instruction;
-pub mod key;
-pub mod peer;
-pub mod rpc;
-pub mod table_name;
+mod table_route;
 
-pub type ClusterId = u64;
-pub type DatanodeId = u64;
+pub use crate::key::table_route::{TableRouteKey, TABLE_ROUTE_PREFIX};
 
-pub use instruction::RegionIdent;
+pub const REMOVED_PREFIX: &str = "__removed";
+
+pub fn to_removed_key(key: &str) -> String {
+    format!("{REMOVED_PREFIX}-{key}")
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::key::to_removed_key;
+
+    #[test]
+    fn test_to_removed_key() {
+        let key = "test_key";
+        let removed = "__removed-test_key";
+        assert_eq!(removed, to_removed_key(key));
+    }
+}

@@ -159,7 +159,7 @@ impl GreptimeDbClusterBuilder {
     async fn wait_datanodes_alive(&self, expected_datanodes: u32) {
         let kv_store = self.kv_store();
         for _ in 0..10 {
-            let alive_datanodes = meta_srv::lease::alive_datanodes(1000, &kv_store, |_, _| true)
+            let alive_datanodes = meta_srv::lease::filter_datanodes(1000, &kv_store, |_, _| true)
                 .await
                 .unwrap()
                 .len() as u32;
