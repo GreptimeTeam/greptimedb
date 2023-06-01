@@ -27,16 +27,16 @@ use table::table::adapter::DfTableProviderAdapter;
 pub struct OrderHintRule;
 
 impl OptimizerRule for OrderHintRule {
-    fn name(&self) -> &str {
-        "OrderHintRule"
-    }
-
     fn try_optimize(
         &self,
         plan: &LogicalPlan,
         _config: &dyn OptimizerConfig,
     ) -> DataFusionResult<Option<LogicalPlan>> {
         Self::optimize(plan).map(Some)
+    }
+
+    fn name(&self) -> &str {
+        "OrderHintRule"
     }
 }
 
@@ -70,7 +70,7 @@ impl OrderHintRule {
                         .as_any()
                         .downcast_ref::<DfTableProviderAdapter>()
                     {
-                        let mut opts = vec![];
+                        let mut opts = Vec::with_capacity(order_expr.len());
                         for sort in order_expr {
                             let name = match sort.expr.try_into_col() {
                                 Ok(col) => col.name,
@@ -142,13 +142,26 @@ mod test {
             .unwrap()
             .sort(vec![col("number").sort(true, false)])
             .unwrap()
+            .sort(vec![col("number").sort(false, true)])
+            .unwrap()
             .build()
             .unwrap();
 
         let context = OptimizerContext::default();
         OrderHintRule.try_optimize(&plan, &context).unwrap();
 
+        // should read the first (with `.sort(true, false)`) sort option
         let scan_req = adapter.get_scan_req();
-        assert_eq!("number", &scan_req.output_ordering.unwrap()[0].name)
+        assert_eq!("number", &scan_req.output_ordering.clone().unwrap()[0].name);
+        assert_eq!(
+            true,
+            !scan_req.output_ordering.clone().unwrap()[0]
+                .options
+                .descending // the previous parameter is `asc`
+        );
+        assert_eq!(
+            false,
+            scan_req.output_ordering.unwrap()[0].options.nulls_first
+        );
     }
 }
