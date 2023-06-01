@@ -188,7 +188,7 @@ impl AlterTester {
         let snapshot = self.base().region.snapshot(read_ctx).unwrap();
 
         let resp = snapshot
-            .scan(read_ctx, ScanRequest::default(), None)
+            .scan(read_ctx, ScanRequest::default())
             .await
             .unwrap();
         let mut reader = resp.reader;

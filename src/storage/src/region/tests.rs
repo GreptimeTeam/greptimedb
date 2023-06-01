@@ -142,7 +142,7 @@ impl<S: LogStore> TesterBase<S> {
         let snapshot = self.region.snapshot(&self.read_ctx).unwrap();
 
         let resp = snapshot
-            .scan(&self.read_ctx, ScanRequest::default(), None)
+            .scan(&self.read_ctx, ScanRequest::default())
             .await
             .unwrap();
         let mut reader = resp.reader;
@@ -179,7 +179,7 @@ impl<S: LogStore> TesterBase<S> {
         let snapshot = self.region.snapshot(&self.read_ctx).unwrap();
 
         let resp = snapshot
-            .scan(&self.read_ctx, ScanRequest::default(), None)
+            .scan(&self.read_ctx, ScanRequest::default())
             .await
             .unwrap();
         resp.reader
@@ -622,7 +622,6 @@ impl WindowedReaderTester {
                     limit: None,
                     output_ordering: Some(order_options),
                 },
-                None,
             )
             .await
             .unwrap();

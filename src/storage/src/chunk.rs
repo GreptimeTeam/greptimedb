@@ -91,8 +91,6 @@ impl ChunkReaderImpl {
 /// Builder to create a new [ChunkReaderImpl] from scan request.
 pub struct ChunkReaderBuilder {
     schema: RegionSchemaRef,
-    /// The schema created by user
-    user_schema: Option<SchemaRef>,
     projection: Option<Vec<usize>>,
     filters: Vec<Expr>,
     sst_layer: AccessLayerRef,
@@ -103,14 +101,9 @@ pub struct ChunkReaderBuilder {
 }
 
 impl ChunkReaderBuilder {
-    pub fn new(
-        schema: RegionSchemaRef,
-        sst_layer: AccessLayerRef,
-        user_schema: Option<SchemaRef>,
-    ) -> Self {
+    pub fn new(schema: RegionSchemaRef, sst_layer: AccessLayerRef) -> Self {
         ChunkReaderBuilder {
             schema,
-            user_schema,
             projection: None,
             filters: vec![],
             sst_layer,

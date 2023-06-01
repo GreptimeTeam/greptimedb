@@ -147,7 +147,6 @@ impl<R: Region> Table for MitoTable<R> {
         let mut first_schema: Option<Arc<Schema>> = None;
 
         let table_info = self.table_info.load();
-        let table_info_meta_schema = table_info.meta.schema.clone();
         // TODO(hl): Currently the API between frontend and datanode is under refactoring in
         // https://github.com/GreptimeTeam/greptimedb/issues/597 . Once it's finished, query plan
         // can carry filtered region info to avoid scanning all regions on datanode.
@@ -167,11 +166,7 @@ impl<R: Region> Table for MitoTable<R> {
                 ..Default::default()
             };
             let reader = snapshot
-                .scan(
-                    &read_ctx,
-                    scan_request,
-                    Some(table_info_meta_schema.clone()),
-                )
+                .scan(&read_ctx, scan_request)
                 .await
                 .map_err(BoxedError::new)
                 .context(table_error::TableOperationSnafu)?
@@ -228,7 +223,6 @@ impl<R: Region> Table for MitoTable<R> {
         let mut first_schema: Option<Arc<Schema>> = None;
 
         let table_info = self.table_info.load();
-        let table_info_meta_schema = table_info.meta.schema.clone();
         // TODO(hl): Currently the API between frontend and datanode is under refactoring in
         // https://github.com/GreptimeTeam/greptimedb/issues/597 . Once it's finished, query plan
         // can carry filtered region info to avoid scanning all regions on datanode.
@@ -252,11 +246,7 @@ impl<R: Region> Table for MitoTable<R> {
             };
 
             let reader = snapshot
-                .scan(
-                    &read_ctx,
-                    scan_request,
-                    Some(table_info_meta_schema.clone()),
-                )
+                .scan(&read_ctx, scan_request)
                 .await
                 .map_err(BoxedError::new)
                 .context(table_error::TableOperationSnafu)?
