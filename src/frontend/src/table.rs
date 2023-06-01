@@ -340,7 +340,7 @@ impl DistTable {
             .context(error::CatalogSnafu)
     }
 
-    async fn move_table_router_value(
+    async fn move_table_route_value(
         &self,
         catalog_name: &str,
         schema_name: &str,
@@ -418,7 +418,7 @@ impl DistTable {
             };
             self.set_table_global_value(new_key, value).await?;
             self.delete_table_global_value(key).await?;
-            self.move_table_router_value(
+            self.move_table_route_value(
                 catalog_name,
                 schema_name,
                 table_info.ident.table_id,
