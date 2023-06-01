@@ -22,46 +22,60 @@ use snafu::Location;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Unsupported expr type: {}", name))]
+    #[snafu(display("Unsupported expr type: {}, location: {}", name, location))]
     UnsupportedExpr { name: String, location: Location },
 
-    #[snafu(display("Unexpected token: {:?}", token))]
+    #[snafu(display("Unexpected token: {:?}, location: {}", token, location))]
     UnexpectedToken {
         token: TokenType,
         location: Location,
     },
 
-    #[snafu(display("Internal error during build DataFusion plan, error: {}", source))]
+    #[snafu(display(
+        "Internal error during building DataFusion plan, error: {}, location: {}",
+        source,
+        location
+    ))]
     DataFusionPlanning {
         source: datafusion::error::DataFusionError,
         location: Location,
     },
 
-    #[snafu(display("Unexpected plan or expression: {}", desc))]
+    #[snafu(display("Unexpected plan or expression: {}, location: {}", desc, location))]
     UnexpectedPlanExpr { desc: String, location: Location },
 
-    #[snafu(display("Unknown table type, downcast failed"))]
+    #[snafu(display("Unknown table type, downcast failed, location: {}", location))]
     UnknownTable { location: Location },
 
-    #[snafu(display("Cannot find time index column in table {}", table))]
+    #[snafu(display(
+        "Cannot find time index column in table {}, location: {}",
+        table,
+        location
+    ))]
     TimeIndexNotFound { table: String, location: Location },
 
-    #[snafu(display("Cannot find value columns in table {}", table))]
+    #[snafu(display("Cannot find value columns in table {}, location: {}", table, location))]
     ValueNotFound { table: String, location: Location },
 
     #[snafu(display(
-        "Cannot accept multiple vector as function input, PromQL expr: {:?}",
-        expr
+        "Cannot accept multiple vector as function input, PromQL expr: {:?}, location: {}",
+        expr,
+        location
     ))]
     MultipleVector { expr: PromExpr, location: Location },
 
-    #[snafu(display("Expect a PromQL expr but not found, input expr: {:?}", expr))]
+    #[snafu(display(
+        "Expect a PromQL expr but not found, input expr: {:?}, location: {}",
+        expr,
+        location
+    ))]
     ExpectExpr { expr: PromExpr, location: Location },
     #[snafu(display(
-        "Illegal range: offset {}, length {}, array len {}",
+        "Illegal range: offset {}, length {}, array len {}, location: {}",
         offset,
         length,
-        len
+        len,
+        location
     ))]
     IllegalRange {
         offset: u32,
@@ -70,27 +84,27 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Empty range is not expected"))]
+    #[snafu(display("Empty range is not expected, location: {}", location))]
     EmptyRange { location: Location },
 
     #[snafu(display(
-        "Table (metric) name not found, this indicates a procedure error in PromQL planner"
+        "Table (metric) name not found, this indicates a procedure error in PromQL planner, location: {}", location
     ))]
     TableNameNotFound { location: Location },
 
-    #[snafu(display("General catalog error: {source}"))]
+    #[snafu(display("General catalog error: {source}, location: {}", location))]
     Catalog {
-        #[snafu(backtrace)]
+        location: Location,
         source: catalog::error::Error,
     },
 
-    #[snafu(display("Expect a range selector, but not found"))]
+    #[snafu(display("Expect a range selector, but not found, location: {}", location))]
     ExpectRangeSelector { location: Location },
 
-    #[snafu(display("Zero range in range selector"))]
+    #[snafu(display("Zero range in range selector, location: {}", location))]
     ZeroRangeSelector { location: Location },
 
-    #[snafu(display("Cannot find column {col}"))]
+    #[snafu(display("Cannot find column {col}, location: {}", location))]
     ColumnNotFound { col: String, location: Location },
 }
 
@@ -116,7 +130,7 @@ impl ErrorExt for Error {
 
             TableNameNotFound { .. } => StatusCode::TableNotFound,
 
-            Catalog { source } => source.status_code(),
+            Catalog { source, .. } => source.status_code(),
         }
     }
 
