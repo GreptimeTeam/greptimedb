@@ -28,7 +28,10 @@ pub mod tql;
 use std::str::FromStr;
 
 use api::helper::ColumnDataTypeWrapper;
+use api::v1::add_column::location::LocationType;
+use api::v1::add_column::Location;
 use common_base::bytes::Bytes;
+use common_query::AddColumnLocation;
 use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, COMMENT_KEY};
@@ -394,6 +397,22 @@ pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Resu
         ConcreteDataType::Null(_) | ConcreteDataType::List(_) | ConcreteDataType::Dictionary(_) => {
             unreachable!()
         }
+    }
+}
+
+pub fn sql_location_to_grpc_add_column_location(
+    location: &Option<AddColumnLocation>,
+) -> Option<api::v1::add_column::Location> {
+    match location {
+        Some(AddColumnLocation::First) => Some(Location {
+            location_type: LocationType::First.into(),
+            after_cloumn_name: "".to_string(),
+        }),
+        Some(AddColumnLocation::After { column_name }) => Some(Location {
+            location_type: LocationType::After.into(),
+            after_cloumn_name: column_name.to_string(),
+        }),
+        None => None,
     }
 }
 
