@@ -233,6 +233,7 @@ mod test {
 
     use super::*;
 
+    #[ignore = "Projection is disabled for https://github.com/apache/arrow-datafusion/issues/6489"]
     #[test]
     fn transform_simple_projection_filter() {
         let numbers_table = Arc::new(NumbersTable::new(0)) as _;
