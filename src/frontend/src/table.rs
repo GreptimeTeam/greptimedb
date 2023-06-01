@@ -403,12 +403,10 @@ impl DistTable {
             schema_name: schema_name.clone(),
             table_name: table_name.clone(),
         };
-        let mut value =
-            self.table_global_value(&key)
-                .await?
-                .context(error::TableNotFoundSnafu {
-                    table_name: table_name.clone(),
-                })?;
+        let mut value = self
+            .table_global_value(&key)
+            .await?
+            .context(error::TableNotFoundSnafu { table_name })?;
 
         value.table_info = new_info.into();
 
