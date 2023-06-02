@@ -31,8 +31,8 @@ use datafusion::physical_plan::planner::{DefaultPhysicalPlanner, ExtensionPlanne
 use datafusion::physical_plan::{ExecutionPlan, PhysicalPlanner};
 use datafusion_expr::LogicalPlan as DfLogicalPlan;
 use datafusion_optimizer::analyzer::Analyzer;
-use partition::manager::PartitionRuleManager;
 use datafusion_optimizer::optimizer::Optimizer;
+use partition::manager::PartitionRuleManager;
 use promql::extension_plan::PromExtensionPlanner;
 
 use crate::dist_plan::{DistExtensionPlanner, DistPlannerAnalyzer};
@@ -87,7 +87,7 @@ impl QueryEngineState {
         .with_query_planner(Arc::new(DfQueryPlanner::new(
             partition_manager,
             datanode_clients,
-        )));
+        )))
         .with_optimizer_rules(optimizer.rules);
 
         let df_context = SessionContext::with_state(session_state);

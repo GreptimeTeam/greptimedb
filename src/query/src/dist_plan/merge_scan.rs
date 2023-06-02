@@ -182,6 +182,7 @@ impl MergeScanExec {
                     .context(ConvertSchemaSnafu)?,
             ),
             stream: Box::pin(stream),
+            output_ordering: None,
         }))
     }
 }
