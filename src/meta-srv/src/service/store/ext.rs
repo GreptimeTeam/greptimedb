@@ -112,6 +112,7 @@ mod tests {
             .exists("test_key3".as_bytes().to_vec())
             .await
             .unwrap());
+        assert!(!in_mem.exists("test_key".as_bytes().to_vec()).await.unwrap());
     }
 
     async fn put_stats_to_store(store: &mut KvStoreRef) {
