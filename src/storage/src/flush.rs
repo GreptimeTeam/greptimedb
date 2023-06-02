@@ -239,6 +239,10 @@ impl<S: LogStore> FlushJob<S> {
         let _timer = timer!(FLUSH_ELAPSED);
 
         let file_metas = self.write_memtables_to_layer().await?;
+        if file_metas.is_empty() {
+            // skip writing manifest and wal if no files are flushed.
+            return Ok(());
+        }
         self.write_manifest_and_apply(&file_metas).await?;
 
         Ok(())
@@ -293,7 +297,7 @@ impl<S: LogStore> FlushJob<S> {
             .flatten()
             .collect();
 
-        logging::info!("Successfully flush memtables to files: {:?}", metas);
+        logging::info!("Successfully flush memtables, region:{region_id}, files: {metas:?}");
         Ok(metas)
     }
 

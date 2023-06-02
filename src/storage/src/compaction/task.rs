@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 
 use common_base::readable_size::ReadableSize;
-use common_telemetry::{debug, error, timer};
+use common_telemetry::{debug, error, info, timer};
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
@@ -148,6 +148,7 @@ impl<S: LogStore> CompactionTask for CompactionTaskImpl<S> {
             e
         })?;
         compacted.extend(self.expired_ssts.iter().map(FileHandle::meta));
+        info!("Compacting SST files, input: {compacted:?}, output: {output:?}");
         self.write_manifest_and_apply(output, compacted)
             .await
             .map_err(|e| {
