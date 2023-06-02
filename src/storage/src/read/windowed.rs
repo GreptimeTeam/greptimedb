@@ -22,7 +22,7 @@ use snafu::ResultExt;
 
 use crate::error::{self, Result};
 use crate::read::{Batch, BatchReader};
-use crate::schema::ProjectedSchemaRef;
+use crate::schema::{ProjectedSchemaRef, StoreSchema};
 
 /// [WindowedReader] provides a windowed record batch reader that scans all rows within a window
 /// at a time and sort these rows ordered in `[<timestamp>, <PK>]` order.
@@ -102,8 +102,8 @@ fn sort_by_rows(
     arrays: Vec<ArrayRef>,
     order_options: &[OrderOption],
 ) -> Result<Vec<ArrayRef>> {
-    let sort_columns = build_sorted_columns(order_options);
     let store_schema = schema.schema_to_read();
+    let sort_columns = build_sorted_columns(store_schema, order_options);
     // Convert columns to rows to speed lexicographic sort
     // TODO(hl): maybe optimize to lexsort_to_index when only timestamp column is involved.
     let mut row_converter = RowConverter::new(
@@ -150,9 +150,9 @@ fn sort_by_rows(
 
 /// Builds sorted columns from `order_options`.
 /// Returns a vector of columns indices to sort and sort orders (true means descending order).
-fn build_sorted_columns(order_options: &[OrderOption]) -> Vec<(usize, bool)> {
+fn build_sorted_columns(schema: &StoreSchema, order_options: &[OrderOption]) -> Vec<(usize, bool)> {
     order_options
         .iter()
-        .map(|o| (o.index, o.options.descending))
+        .map(|o| (schema.column_index(&o.name), o.options.descending))
         .collect()
 }

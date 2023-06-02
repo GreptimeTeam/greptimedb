@@ -208,7 +208,11 @@ impl<R: Region> Table for MitoTable<R> {
             }
         });
 
-        let stream = Box::pin(RecordBatchStreamAdaptor { schema, stream });
+        let stream = Box::pin(RecordBatchStreamAdaptor {
+            schema,
+            stream,
+            output_ordering: None,
+        });
         Ok(Arc::new(StreamScanAdapter::new(stream)))
     }
 
@@ -275,6 +279,7 @@ impl<R: Region> Table for MitoTable<R> {
         })?;
 
         let schema = stream_schema.clone();
+        let output_ordering = readers.get(0).and_then(|reader| reader.output_ordering());
 
         let stream = Box::pin(async_stream::try_stream! {
             for mut reader in readers {
@@ -285,7 +290,11 @@ impl<R: Region> Table for MitoTable<R> {
             }
         });
 
-        Ok(Box::pin(RecordBatchStreamAdaptor { schema, stream }))
+        Ok(Box::pin(RecordBatchStreamAdaptor {
+            schema,
+            stream,
+            output_ordering,
+        }))
     }
 
     fn supports_filters_pushdown(&self, filters: &[&Expr]) -> TableResult<Vec<FilterPushDownType>> {

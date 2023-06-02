@@ -222,7 +222,11 @@ impl Table for DistTable {
                 }
             },
         );
-        let record_batch_stream = RecordBatchStreamAdaptor { schema, stream };
+        let record_batch_stream = RecordBatchStreamAdaptor {
+            schema,
+            stream,
+            output_ordering: None,
+        };
 
         Ok(Box::pin(record_batch_stream))
     }
