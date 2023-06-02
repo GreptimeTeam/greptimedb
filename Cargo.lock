@@ -4054,7 +4054,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=44c5adf34938d0650c18a14db2a374bdee471ae7#44c5adf34938d0650c18a14db2a374bdee471ae7"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=ff0a47b6462bf196cbcd01b589c5dddfa6bfbc45#ff0a47b6462bf196cbcd01b589c5dddfa6bfbc45"
 dependencies = [
  "prost",
  "serde",
@@ -6686,7 +6686,9 @@ dependencies = [
  "datafusion",
  "datatypes",
  "futures",
+ "greptime-proto",
  "promql-parser",
+ "prost",
  "query",
  "session",
  "snafu",
@@ -6954,6 +6956,7 @@ dependencies = [
  "format_num",
  "futures",
  "futures-util",
+ "greptime-proto",
  "humantime",
  "metrics",
  "num",

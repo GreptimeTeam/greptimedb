@@ -15,7 +15,9 @@ common-function-macro = { path = "../common/function-macro" }
 datafusion.workspace = true
 datatypes = { path = "../datatypes" }
 futures = "0.3"
+greptime-proto.workspace = true
 promql-parser = "0.1.1"
+prost.workspace = true
 session = { path = "../session" }
 snafu = { version = "0.7", features = ["backtraces"] }
 table = { path = "../table" }

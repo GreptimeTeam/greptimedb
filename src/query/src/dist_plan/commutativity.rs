@@ -15,6 +15,9 @@
 use std::sync::Arc;
 
 use datafusion_expr::{LogicalPlan, UserDefinedLogicalNode};
+use promql::extension_plan::{
+    EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
+};
 
 #[allow(dead_code)]
 pub enum Commutativity {
@@ -69,8 +72,18 @@ impl Categorizer {
         }
     }
 
-    pub fn check_extension_plan(_plan: &dyn UserDefinedLogicalNode) -> Commutativity {
-        todo!("enumerate all the extension plans here")
+    pub fn check_extension_plan(plan: &dyn UserDefinedLogicalNode) -> Commutativity {
+        match plan.name() {
+            name if name == EmptyMetric::name()
+                || name == InstantManipulate::name()
+                || name == SeriesNormalize::name()
+                || name == RangeManipulate::name()
+                || name == SeriesDivide::name() =>
+            {
+                Commutativity::Commutative
+            }
+            _ => Commutativity::Unsupported,
+        }
     }
 }
 

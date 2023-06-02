@@ -84,6 +84,10 @@ impl EmptyMetric {
         })
     }
 
+    pub const fn name() -> &'static str {
+        "EmptyMetric"
+    }
+
     pub fn to_execution_plan(
         &self,
         session_state: &SessionState,
@@ -110,7 +114,7 @@ impl EmptyMetric {
 
 impl UserDefinedLogicalNodeCore for EmptyMetric {
     fn name(&self) -> &str {
-        "EmptyMetric"
+        Self::name()
     }
 
     fn inputs(&self) -> Vec<&LogicalPlan> {

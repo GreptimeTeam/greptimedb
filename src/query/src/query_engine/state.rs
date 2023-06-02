@@ -36,6 +36,7 @@ use partition::manager::PartitionRuleManager;
 use promql::extension_plan::PromExtensionPlanner;
 
 use crate::dist_plan::{DistExtensionPlanner, DistPlannerAnalyzer};
+use crate::extension_serializer::ExtensionSerializer;
 use crate::optimizer::order_hint::OrderHintRule;
 use crate::optimizer::type_conversion::TypeConversionRule;
 use crate::query_engine::options::QueryOptions;
@@ -83,6 +84,7 @@ impl QueryEngineState {
             runtime_env,
             Arc::new(MemoryCatalogList::default()), // pass a dummy catalog list
         )
+        .with_serializer_registry(Arc::new(ExtensionSerializer))
         .with_analyzer_rules(analyzer.rules)
         .with_query_planner(Arc::new(DfQueryPlanner::new(
             partition_manager,

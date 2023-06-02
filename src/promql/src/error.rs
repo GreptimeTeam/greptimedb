@@ -84,6 +84,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to deserialize: {}", source))]
+    Deserialize {
+        source: prost::DecodeError,
+        location: Location,
+    },
+
     #[snafu(display("Empty range is not expected, location: {}", location))]
     EmptyRange { location: Location },
 
@@ -120,7 +126,8 @@ impl ErrorExt for Error {
             | ExpectExpr { .. }
             | ExpectRangeSelector { .. }
             | ZeroRangeSelector { .. }
-            | ColumnNotFound { .. } => StatusCode::InvalidArguments,
+            | ColumnNotFound { .. }
+            | Deserialize { .. } => StatusCode::InvalidArguments,
 
             UnknownTable { .. }
             | DataFusionPlanning { .. }
