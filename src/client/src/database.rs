@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use api::v1::auth_header::AuthScheme;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
@@ -29,6 +31,9 @@ use common_telemetry::{logging, timer};
 use futures_util::{TryFutureExt, TryStreamExt};
 use prost::Message;
 use snafu::{ensure, ResultExt};
+use tokio::sync::mpsc::Sender;
+use tokio::sync::{mpsc, Mutex};
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::error::{
     ConvertFlightDataSnafu, IllegalDatabaseResponseSnafu, IllegalFlightMessagesSnafu,
@@ -47,6 +52,7 @@ pub struct Database {
     dbname: String,
 
     client: Client,
+    streaming_client: Arc<Mutex<Option<Sender<GreptimeRequest>>>>,
     ctx: FlightContext,
 }
 
@@ -58,6 +64,7 @@ impl Database {
             schema: schema.into(),
             dbname: "".to_string(),
             client,
+            streaming_client: Arc::new(Mutex::new(None)),
             ctx: FlightContext::default(),
         }
     }
@@ -75,6 +82,7 @@ impl Database {
             schema: "".to_string(),
             dbname: dbname.into(),
             client,
+            streaming_client: Arc::new(Mutex::new(None)),
             ctx: FlightContext::default(),
         }
     }
@@ -114,6 +122,25 @@ impl Database {
         self.handle(Request::Inserts(requests)).await
     }
 
+    pub async fn insert_to_stream(&self, requests: InsertRequests) -> Result<()> {
+        let streaming_client = {
+            let mut streaming_client = self.streaming_client.lock().await;
+            if streaming_client.is_none() {
+                *streaming_client = Some(self.client_stream().await?);
+            }
+            streaming_client.as_ref().unwrap().clone()
+        };
+
+        let request = self.to_rpc_request(Request::Inserts(requests));
+
+        streaming_client.send(request).await.map_err(|e| {
+            error::ClientStreamingSnafu {
+                err_msg: e.to_string(),
+            }
+            .build()
+        })
+    }
+
     pub async fn delete(&self, request: DeleteRequest) -> Result<u32> {
         let _timer = timer!(metrics::METRIC_GRPC_DELETE);
         self.handle(Request::Delete(request)).await
@@ -121,15 +148,7 @@ impl Database {
 
     async fn handle(&self, request: Request) -> Result<u32> {
         let mut client = self.client.make_database_client()?.inner;
-        let request = GreptimeRequest {
-            header: Some(RequestHeader {
-                catalog: self.catalog.clone(),
-                schema: self.schema.clone(),
-                authorization: self.ctx.auth_header.clone(),
-                dbname: self.dbname.clone(),
-            }),
-            request: Some(request),
-        };
+        let request = self.to_rpc_request(request);
         let response = client
             .handle(request)
             .await?
@@ -140,6 +159,27 @@ impl Database {
             })?;
         let greptime_response::Response::AffectedRows(AffectedRows { value }) = response;
         Ok(value)
+    }
+
+    #[inline]
+    fn to_rpc_request(&self, request: Request) -> GreptimeRequest {
+        GreptimeRequest {
+            header: Some(RequestHeader {
+                catalog: self.catalog.clone(),
+                schema: self.schema.clone(),
+                authorization: self.ctx.auth_header.clone(),
+                dbname: self.dbname.clone(),
+            }),
+            request: Some(request),
+        }
+    }
+
+    async fn client_stream(&self) -> Result<Sender<GreptimeRequest>> {
+        let mut client = self.client.make_database_client()?.inner;
+        let (sender, receiver) = mpsc::channel::<GreptimeRequest>(65536);
+        let receiver = ReceiverStream::new(receiver);
+        client.handle_requests(receiver).await?;
+        Ok(sender)
     }
 
     pub async fn sql(&self, sql: &str) -> Result<Output> {
@@ -212,15 +252,7 @@ impl Database {
     async fn do_get(&self, request: Request) -> Result<Output> {
         // FIXME(paomian): should be added some labels for metrics
         let _timer = timer!(metrics::METRIC_GRPC_DO_GET);
-        let request = GreptimeRequest {
-            header: Some(RequestHeader {
-                catalog: self.catalog.clone(),
-                schema: self.schema.clone(),
-                authorization: self.ctx.auth_header.clone(),
-                dbname: self.dbname.clone(),
-            }),
-            request: Some(request),
-        };
+        let request = self.to_rpc_request(request);
         let request = Ticket {
             ticket: request.encode_to_vec().into(),
         };
