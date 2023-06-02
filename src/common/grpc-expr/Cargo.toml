@@ -15,5 +15,6 @@ common-query = { path = "../query" }
 common-telemetry = { path = "../telemetry" }
 common-time = { path = "../time" }
 datatypes = { path = "../../datatypes" }
+paste = "1.0"
 snafu = { version = "0.7", features = ["backtraces"] }
 table = { path = "../../table" }
