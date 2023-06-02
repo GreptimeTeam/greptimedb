@@ -39,6 +39,7 @@ http-body = "0.4"
 humantime-serde = "1.1"
 hyper = { version = "0.14", features = ["full"] }
 influxdb_line_protocol = { git = "https://github.com/evenyag/influxdb_iox", branch = "feat/line-protocol" }
+itertools.workspace = true
 metrics.workspace = true
 # metrics-process 1.0.10 depends on metrics-0.21 but opendal depends on metrics-0.20.1
 metrics-process = "<1.0.10"

@@ -8426,6 +8426,7 @@ dependencies = [
  "humantime-serde",
  "hyper",
  "influxdb_line_protocol",
+ "itertools",
  "metrics",
  "metrics-process",
  "mime_guess",

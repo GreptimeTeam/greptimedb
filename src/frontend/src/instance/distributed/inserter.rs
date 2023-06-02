@@ -23,15 +23,15 @@ use common_meta::peer::Peer;
 use common_meta::table_name::TableName;
 use futures::future;
 use metrics::counter;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt};
 use table::metadata::TableInfoRef;
 use table::meter_insert_request;
 use table::requests::InsertRequest;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::error::{
-    CatalogSnafu, FindDatanodeSnafu, FindTableRouteSnafu, JoinTaskSnafu, NotSupportedSnafu,
-    RequestDatanodeSnafu, Result, SplitInsertSnafu, TableNotFoundSnafu, ToTableInsertRequestSnafu,
+    CatalogSnafu, FindDatanodeSnafu, FindTableRouteSnafu, JoinTaskSnafu, RequestDatanodeSnafu,
+    Result, SplitInsertSnafu, TableNotFoundSnafu, ToTableInsertRequestSnafu,
 };
 use crate::table::insert::to_grpc_insert_request;
 
@@ -76,14 +76,9 @@ impl DistInserter {
     }
 
     pub(crate) async fn insert(&self, requests: Vec<InsertRequest>) -> Result<u32> {
-        ensure!(
-            requests
-                .iter()
-                .all(|x| x.catalog_name == self.catalog && x.schema_name == self.schema),
-            NotSupportedSnafu {
-                feat: "insert requests with different catalog or schema",
-            }
-        );
+        debug_assert!(requests
+            .iter()
+            .all(|x| x.catalog_name == self.catalog && x.schema_name == self.schema));
 
         let inserts = self.split_inserts(requests).await?;
 

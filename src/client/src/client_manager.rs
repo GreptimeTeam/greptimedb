@@ -16,7 +16,8 @@ use std::fmt::{Debug, Formatter};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common_grpc::channel_manager::ChannelManager;
+use client::Client;
+use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::peer::Peer;
 use common_telemetry::info;
 use moka::future::{Cache, CacheBuilder};
@@ -31,8 +32,11 @@ pub struct DatanodeClients {
 
 impl Default for DatanodeClients {
     fn default() -> Self {
+        // TODO(LFC): Make this channel config configurable.
+        let config = ChannelConfig::new().timeout(Duration::from_secs(8));
+
         Self {
-            channel_manager: ChannelManager::new(),
+            channel_manager: ChannelManager::with_config(config),
             clients: CacheBuilder::new(1024)
                 .time_to_live(Duration::from_secs(30 * 60))
                 .time_to_idle(Duration::from_secs(5 * 60))

@@ -45,7 +45,7 @@ use datafusion::physical_plan::{
 use datafusion_common::DataFusionError;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use futures_util::{Stream, StreamExt};
-use partition::manager::{PartitionRuleManagerRef, TableRouteCacheInvalidator};
+use partition::manager::TableRouteCacheInvalidator;
 use partition::splitter::WriteSplitter;
 use snafu::prelude::*;
 use store_api::storage::{RegionNumber, ScanRequest};
@@ -366,7 +366,8 @@ impl DistTable {
             .await
             .context(error::CatalogSnafu)?;
 
-        self.partition_manager
+        self.catalog_manager
+            .partition_manager()
             .invalidate_table_route(&TableName {
                 catalog_name: catalog_name.to_string(),
                 schema_name: schema_name.to_string(),
