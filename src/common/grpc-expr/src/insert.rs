@@ -696,28 +696,6 @@ mod tests {
         };
     }
 
-    // macro_rules! test_convert_values {
-    //     ($grpc_data_type: ident, $concrete_data_type: ident, $values: expr, $expected: expr) => {
-    //         paste! {
-    //             #[test]
-    //             fn [<test_convert_ $grpc_data_type _values>]() {
-    //                 let values = Values {
-    //                     [<$grpc_data_type _values>]: $values,
-    //                     ..Default::default()
-    //                 };
-    //
-    //                 let data_type = ConcreteDataType::[<$concrete_data_type _datatype>]();
-    //                 let result = convert_values(&data_type, values);
-    //
-    //                 assert_eq!(
-    //                     $expected,
-    //                     result
-    //                 );
-    //             }
-    //         }
-    //     };
-    // }
-
     test_convert_values!(
         i8,
         vec![1, 2, 3],
