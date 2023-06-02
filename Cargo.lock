@@ -9381,6 +9381,7 @@ name = "tests-integration"
 version = "0.2.0"
 dependencies = [
  "api",
+ "async-trait",
  "axum",
  "axum-test-helper",
  "catalog",

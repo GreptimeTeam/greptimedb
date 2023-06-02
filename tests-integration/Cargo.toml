@@ -11,6 +11,7 @@ dashboard = []
 api = { path = "../src/api" }
 axum = "0.6"
 axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", branch = "patch-1" }
+async-trait = "0.1"
 catalog = { path = "../src/catalog" }
 client = { path = "../src/client" }
 common-base = { path = "../src/common/base" }
