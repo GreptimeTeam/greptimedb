@@ -239,6 +239,10 @@ impl<S: LogStore> FlushJob<S> {
         let _timer = timer!(FLUSH_ELAPSED);
 
         let file_metas = self.write_memtables_to_layer().await?;
+        if file_metas.is_empty() {
+            // skip writing manifest and wal if no files are flushed.
+            return Ok(());
+        }
         self.write_manifest_and_apply(&file_metas).await?;
 
         Ok(())
@@ -287,13 +291,14 @@ impl<S: LogStore> FlushJob<S> {
             });
         }
 
-        let metas = futures_util::future::try_join_all(futures)
+        let metas: Vec<_> = futures_util::future::try_join_all(futures)
             .await?
             .into_iter()
             .flatten()
             .collect();
 
-        logging::info!("Successfully flush memtables to files: {:?}", metas);
+        let file_ids = metas.iter().map(|f| f.file_id).collect::<Vec<_>>();
+        logging::info!("Successfully flush memtables, region:{region_id}, files: {file_ids:?}");
         Ok(metas)
     }
 

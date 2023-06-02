@@ -30,6 +30,7 @@ use snafu::ResultExt;
 use table::metadata::TableType;
 
 use crate::error::{CreateRecordBatchSnafu, InternalSnafu, Result};
+use crate::information_schema::InformationStreamBuilder;
 use crate::CatalogProviderRef;
 
 pub(super) struct InformationSchemaTables {
@@ -62,9 +63,15 @@ impl InformationSchemaTables {
             self.catalog_provider.clone(),
         )
     }
+}
 
-    pub fn to_stream(&self) -> Result<SendableRecordBatchStream> {
-        let schema = self.schema().clone();
+impl InformationStreamBuilder for InformationSchemaTables {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
+    fn to_stream(&self) -> Result<SendableRecordBatchStream> {
+        let schema = self.schema.arrow_schema().clone();
         let mut builder = self.builder();
         let stream = Box::pin(DfRecordBatchStreamAdapter::new(
             schema,
@@ -182,7 +189,7 @@ impl DfPartitionStream for InformationSchemaTables {
     }
 
     fn execute(&self, _: Arc<TaskContext>) -> DfSendableRecordBatchStream {
-        let schema = self.schema().clone();
+        let schema = self.schema.arrow_schema().clone();
         let mut builder = self.builder();
         Box::pin(DfRecordBatchStreamAdapter::new(
             schema,

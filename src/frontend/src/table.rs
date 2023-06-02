@@ -21,6 +21,7 @@ use api::v1::AlterExpr;
 use async_trait::async_trait;
 use catalog::helper::{TableGlobalKey, TableGlobalValue};
 use catalog::remote::KvBackendRef;
+use client::client_manager::DatanodeClients;
 use client::Database;
 use common_error::prelude::BoxedError;
 use common_meta::key::TableRouteKey;
@@ -55,7 +56,6 @@ use table::table::AlterContext;
 use table::{meter_insert_request, Table};
 use tokio::sync::RwLock;
 
-use crate::datanode::DatanodeClients;
 use crate::error::{self, FindDatanodeSnafu, FindTableRouteSnafu, Result};
 use crate::table::delete::to_grpc_delete_request;
 use crate::table::insert::to_grpc_insert_request;
@@ -70,6 +70,7 @@ pub struct DistTable {
     table_name: TableName,
     table_info: TableInfoRef,
     partition_manager: PartitionRuleManagerRef,
+    // TODO(ruihang): move this field into PartitionRuleManager
     datanode_clients: Arc<DatanodeClients>,
     backend: KvBackendRef,
 }
@@ -222,7 +223,11 @@ impl Table for DistTable {
                 }
             },
         );
-        let record_batch_stream = RecordBatchStreamAdaptor { schema, stream };
+        let record_batch_stream = RecordBatchStreamAdaptor {
+            schema,
+            stream,
+            output_ordering: None,
+        };
 
         Ok(Box::pin(record_batch_stream))
     }
@@ -595,7 +600,7 @@ impl PartitionExec {
             return Ok(());
         }
 
-        let plan = TableScanPlan {
+        let plan: TableScanPlan = TableScanPlan {
             table_name: self.table_name.clone(),
             projection: self.projection.clone(),
             filters: self.filters.clone(),

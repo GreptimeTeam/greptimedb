@@ -18,6 +18,7 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
+use client::client_manager::DatanodeClients;
 use common_base::Plugins;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::physical_plan::SessionContext;
@@ -26,15 +27,18 @@ use datafusion::catalog::catalog::MemoryCatalogList;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::{QueryPlanner, SessionConfig, SessionState};
 use datafusion::execution::runtime_env::RuntimeEnv;
-use datafusion::physical_plan::planner::DefaultPhysicalPlanner;
+use datafusion::physical_plan::planner::{DefaultPhysicalPlanner, ExtensionPlanner};
 use datafusion::physical_plan::{ExecutionPlan, PhysicalPlanner};
 use datafusion_expr::LogicalPlan as DfLogicalPlan;
 use datafusion_optimizer::analyzer::Analyzer;
+use datafusion_optimizer::optimizer::Optimizer;
+use partition::manager::PartitionRuleManager;
 use promql::extension_plan::PromExtensionPlanner;
 
 use crate::dist_plan::{DistExtensionPlanner, DistPlannerAnalyzer};
 use crate::extension_serializer::ExtensionSerializer;
-use crate::optimizer::TypeConversionRule;
+use crate::optimizer::order_hint::OrderHintRule;
+use crate::optimizer::type_conversion::TypeConversionRule;
 use crate::query_engine::options::QueryOptions;
 
 /// Query engine global state
@@ -60,6 +64,8 @@ impl QueryEngineState {
     pub fn new(
         catalog_list: CatalogManagerRef,
         with_dist_planner: bool,
+        partition_manager: Option<Arc<PartitionRuleManager>>,
+        datanode_clients: Option<Arc<DatanodeClients>>,
         plugins: Arc<Plugins>,
     ) -> Self {
         let runtime_env = Arc::new(RuntimeEnv::default());
@@ -70,6 +76,8 @@ impl QueryEngineState {
             analyzer.rules.insert(0, Arc::new(DistPlannerAnalyzer));
         }
         analyzer.rules.insert(0, Arc::new(TypeConversionRule));
+        let mut optimizer = Optimizer::new();
+        optimizer.rules.push(Arc::new(OrderHintRule));
 
         let session_state = SessionState::with_config_rt_and_catalog_list(
             session_config,
@@ -78,7 +86,11 @@ impl QueryEngineState {
         )
         .with_serializer_registry(Arc::new(ExtensionSerializer))
         .with_analyzer_rules(analyzer.rules)
-        .with_query_planner(Arc::new(DfQueryPlanner::new()));
+        .with_query_planner(Arc::new(DfQueryPlanner::new(
+            partition_manager,
+            datanode_clients,
+        )))
+        .with_optimizer_rules(optimizer.rules);
 
         let df_context = SessionContext::with_state(session_state);
 
@@ -147,12 +159,18 @@ impl QueryPlanner for DfQueryPlanner {
 }
 
 impl DfQueryPlanner {
-    fn new() -> Self {
+    fn new(
+        partition_manager: Option<Arc<PartitionRuleManager>>,
+        datanode_clients: Option<Arc<DatanodeClients>>,
+    ) -> Self {
+        let mut planners: Vec<Arc<dyn ExtensionPlanner + Send + Sync>> =
+            vec![Arc::new(PromExtensionPlanner)];
+        if let Some(partition_manager) = partition_manager
+         && let Some(datanode_clients) = datanode_clients {
+            planners.push(Arc::new(DistExtensionPlanner::new(partition_manager, datanode_clients)));
+        }
         Self {
-            physical_planner: DefaultPhysicalPlanner::with_extension_planners(vec![
-                Arc::new(PromExtensionPlanner),
-                Arc::new(DistExtensionPlanner),
-            ]),
+            physical_planner: DefaultPhysicalPlanner::with_extension_planners(planners),
         }
     }
 }

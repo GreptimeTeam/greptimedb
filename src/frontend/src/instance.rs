@@ -32,6 +32,7 @@ use api::v1::{AddColumns, AlterExpr, Column, DdlRequest, InsertRequest};
 use async_trait::async_trait;
 use catalog::remote::CachedMetaKvBackend;
 use catalog::CatalogManagerRef;
+use client::client_manager::DatanodeClients;
 use common_base::Plugins;
 use common_catalog::consts::MITO_ENGINE;
 use common_error::ext::BoxedError;
@@ -70,7 +71,6 @@ use sql::statements::copy::CopyTable;
 use sql::statements::statement::Statement;
 
 use crate::catalog::FrontendCatalogManager;
-use crate::datanode::DatanodeClients;
 use crate::error::{
     self, Error, ExecutePromqlSnafu, ExternalSnafu, InvalidInsertRequestSnafu,
     MissingMetasrvOptsSnafu, ParseSqlSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
@@ -154,16 +154,21 @@ impl Instance {
         let dist_instance = DistInstance::new(
             meta_client.clone(),
             Arc::new(catalog_manager.clone()),
-            datanode_clients,
+            datanode_clients.clone(),
         );
         let dist_instance = Arc::new(dist_instance);
 
         catalog_manager.set_dist_instance(dist_instance.clone());
         let catalog_manager = Arc::new(catalog_manager);
 
-        let query_engine =
-            QueryEngineFactory::new_with_plugins(catalog_manager.clone(), false, plugins.clone())
-                .query_engine();
+        let query_engine = QueryEngineFactory::new_with_plugins(
+            catalog_manager.clone(),
+            true,
+            Some(partition_manager.clone()),
+            Some(datanode_clients),
+            plugins.clone(),
+        )
+        .query_engine();
 
         let script_executor =
             Arc::new(ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?);

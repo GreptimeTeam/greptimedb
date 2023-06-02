@@ -708,7 +708,7 @@ async fn test_read_by_chunk_reader() {
     )
     .await
     .check(vec![OrderOption {
-        index: 0,
+        name: "timestamp".to_string(),
         options: SortOptions {
             descending: true,
             nulls_first: true,
@@ -737,7 +737,7 @@ async fn test_read_by_chunk_reader() {
     )
     .await
     .check(vec![OrderOption {
-        index: 0,
+        name: "timestamp".to_string(),
         options: SortOptions {
             descending: true,
             nulls_first: true,
@@ -768,7 +768,7 @@ async fn test_read_by_chunk_reader() {
     )
     .await
     .check(vec![OrderOption {
-        index: 0,
+        name: "timestamp".to_string(),
         options: SortOptions {
             descending: true,
             nulls_first: true,
@@ -799,7 +799,7 @@ async fn test_read_by_chunk_reader() {
     )
     .await
     .check(vec![OrderOption {
-        index: 0,
+        name: "timestamp".to_string(),
         options: SortOptions {
             descending: false,
             nulls_first: true,

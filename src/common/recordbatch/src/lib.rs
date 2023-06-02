@@ -43,9 +43,9 @@ pub trait RecordBatchStream: Stream<Item = Result<RecordBatch>> {
 
 pub type SendableRecordBatchStream = Pin<Box<dyn RecordBatchStream + Send>>;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct OrderOption {
-    pub index: usize,
+    pub name: String,
     pub options: SortOptions,
 }
 
@@ -167,6 +167,15 @@ impl RecordBatches {
     }
 }
 
+impl IntoIterator for RecordBatches {
+    type Item = RecordBatch;
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.batches.into_iter()
+    }
+}
+
 pub struct SimpleRecordBatchStream {
     inner: RecordBatches,
     index: usize,
@@ -196,11 +205,16 @@ impl Stream for SimpleRecordBatchStream {
 pub struct RecordBatchStreamAdaptor {
     pub schema: SchemaRef,
     pub stream: Pin<Box<dyn Stream<Item = Result<RecordBatch>> + Send>>,
+    pub output_ordering: Option<Vec<OrderOption>>,
 }
 
 impl RecordBatchStream for RecordBatchStreamAdaptor {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
+    }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        self.output_ordering.as_deref()
     }
 }
 

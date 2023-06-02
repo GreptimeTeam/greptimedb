@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::{Display, Formatter};
+
 use api::v1::meta::Peer as PbPeer;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Peer {
+    /// Node identifier. Unique in a cluster.
     pub id: u64,
     pub addr: String,
 }
@@ -45,5 +48,11 @@ impl Peer {
             id,
             addr: addr.into(),
         }
+    }
+}
+
+impl Display for Peer {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "peer-{}({})", self.id, self.addr)
     }
 }

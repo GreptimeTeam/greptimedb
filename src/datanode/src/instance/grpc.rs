@@ -31,7 +31,7 @@ use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::plan::LogicalPlan;
 use query::query_engine::SqlStatementExecutor;
 use servers::query_handler::grpc::GrpcQueryHandler;
-use session::context::{QueryContext, QueryContextRef};
+use session::context::QueryContextRef;
 use snafu::prelude::*;
 use sql::statements::statement::Statement;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
@@ -77,7 +77,7 @@ impl Instance {
             .context(DecodeLogicalPlanSnafu)?;
 
         self.query_engine
-            .execute(LogicalPlan::DfPlan(logical_plan), QueryContext::arc())
+            .execute(LogicalPlan::DfPlan(logical_plan), ctx.clone())
             .await
             .context(ExecuteLogicalPlanSnafu)
     }

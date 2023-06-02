@@ -46,6 +46,9 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         let state = ExpandState::new();
         let plan = plan.transform_down(&|plan| Self::expand(plan, &visitor, &state))?;
 
+        // (3) remove placeholder merge scan
+        let plan = plan.transform(&Self::remove_placeholder_merge_scan)?;
+
         Ok(plan)
     }
 }
@@ -67,6 +70,29 @@ impl DistPlannerAnalyzer {
         })
     }
 
+    /// Remove placeholder [MergeScanLogicalPlan]
+    fn remove_placeholder_merge_scan(
+        plan: LogicalPlan,
+    ) -> datafusion_common::Result<Transformed<LogicalPlan>> {
+        Ok(match &plan {
+            LogicalPlan::Extension(extension)
+                if extension.node.name() == MergeScanLogicalPlan::name() =>
+            {
+                let merge_scan = extension
+                    .node
+                    .as_any()
+                    .downcast_ref::<MergeScanLogicalPlan>()
+                    .unwrap();
+                if merge_scan.is_placeholder() {
+                    Transformed::Yes(merge_scan.input().clone())
+                } else {
+                    Transformed::No(plan)
+                }
+            }
+            _ => Transformed::No(plan),
+        })
+    }
+
     /// Expand stages on the stop node
     fn expand(
         mut plan: LogicalPlan,
@@ -82,12 +108,27 @@ impl DistPlannerAnalyzer {
             return Ok(Transformed::No(plan));
         }
 
-        // add merge scan
-        plan = MergeScanLogicalPlan::new(plan, false).into_logical_plan();
-
-        // add stages
-        for new_stage in &visitor.next_stage {
-            plan = new_stage.with_new_inputs(&[plan])?
+        if visitor.stop_node.is_some() {
+            // insert merge scan between the stop node and its child
+            let children = plan.inputs();
+            let mut new_children = Vec::with_capacity(children.len());
+            for child in children {
+                let mut new_child =
+                    MergeScanLogicalPlan::new(child.clone(), false).into_logical_plan();
+                // expand stages
+                for new_stage in &visitor.next_stage {
+                    new_child = new_stage.with_new_inputs(&[new_child])?
+                }
+                new_children.push(new_child);
+            }
+            plan = plan.with_new_inputs(&new_children)?;
+        } else {
+            // otherwise add merge scan as the new root
+            plan = MergeScanLogicalPlan::new(plan, false).into_logical_plan();
+            // expand stages
+            for new_stage in &visitor.next_stage {
+                plan = new_stage.with_new_inputs(&[plan])?
+            }
         }
 
         state.set_transformed();
@@ -184,14 +225,15 @@ impl CommutativeVisitor {
 #[cfg(test)]
 mod test {
     use datafusion::datasource::DefaultTableSource;
-    use datafusion_expr::{col, lit, LogicalPlanBuilder};
+    use datafusion_expr::{avg, col, lit, Expr, LogicalPlanBuilder};
     use table::table::adapter::DfTableProviderAdapter;
     use table::table::numbers::NumbersTable;
 
     use super::*;
 
+    #[ignore = "Projection is disabled for https://github.com/apache/arrow-datafusion/issues/6489"]
     #[test]
-    fn see_how_analyzer_works() {
+    fn transform_simple_projection_filter() {
         let numbers_table = Arc::new(NumbersTable::new(0)) as _;
         let table_source = Arc::new(DefaultTableSource::new(Arc::new(
             DfTableProviderAdapter::new(numbers_table),
@@ -216,8 +258,59 @@ mod test {
             \n    Distinct:\
             \n      Projection: t.number\
             \n        Filter: t.number < Int32(10)\
-            \n          MergeScan [is_placeholder=true]\
-            \n            TableScan: t",
+            \n          TableScan: t",
+        );
+        assert_eq!(expected, format!("{:?}", result));
+    }
+
+    #[test]
+    fn transform_aggregator() {
+        let numbers_table = Arc::new(NumbersTable::new(0)) as _;
+        let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+            DfTableProviderAdapter::new(numbers_table),
+        )));
+
+        let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+            .unwrap()
+            .aggregate(Vec::<Expr>::new(), vec![avg(col("number"))])
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let config = ConfigOptions::default();
+        let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+        let expected = String::from(
+            "Aggregate: groupBy=[[]], aggr=[[AVG(t.number)]]\
+            \n  MergeScan [is_placeholder=false]\
+            \n    TableScan: t",
+        );
+        assert_eq!(expected, format!("{:?}", result));
+    }
+
+    #[test]
+    fn transform_distinct_order() {
+        let numbers_table = Arc::new(NumbersTable::new(0)) as _;
+        let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+            DfTableProviderAdapter::new(numbers_table),
+        )));
+
+        let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+            .unwrap()
+            .distinct()
+            .unwrap()
+            .sort(vec![col("number").sort(true, false)])
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let config = ConfigOptions::default();
+        let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+        let expected = String::from(
+            "Sort: t.number ASC NULLS LAST\
+            \n  Distinct:\
+            \n    MergeScan [is_placeholder=false]\
+            \n      Distinct:\
+            \n        TableScan: t",
         );
         assert_eq!(expected, format!("{:?}", result));
     }

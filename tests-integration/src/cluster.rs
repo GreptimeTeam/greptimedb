@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use api::v1::meta::Role;
 use catalog::remote::RemoteCatalogManager;
+use client::client_manager::DatanodeClients;
 use client::Client;
 use common_base::Plugins;
 use common_grpc::channel_manager::ChannelManager;
@@ -27,7 +28,6 @@ use common_runtime::Builder as RuntimeBuilder;
 use common_test_util::temp_dir::create_temp_dir;
 use datanode::datanode::{DatanodeOptions, ObjectStoreConfig};
 use datanode::instance::Instance as DatanodeInstance;
-use frontend::datanode::DatanodeClients;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use meta_client::client::MetaClientBuilder;
 use meta_srv::metasrv::{MetaSrv, MetaSrvOptions};

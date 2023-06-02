@@ -381,22 +381,34 @@ fn convert_values(data_type: &ConcreteDataType, values: Values) -> Vec<Value> {
             .into_iter()
             .map(|val| val.into())
             .collect(),
-        ConcreteDataType::Int8(_) => values.i8_values.into_iter().map(|val| val.into()).collect(),
+        ConcreteDataType::Int8(_) => values
+            .i8_values
+            .into_iter()
+            // Safety: Since i32 only stores i8 data here, so i32 as i8 is safe.
+            .map(|val| (val as i8).into())
+            .collect(),
         ConcreteDataType::Int16(_) => values
             .i16_values
             .into_iter()
-            .map(|val| val.into())
+            // Safety: Since i32 only stores i16 data here, so i32 as i16 is safe.
+            .map(|val| (val as i16).into())
             .collect(),
         ConcreteDataType::Int32(_) => values
             .i32_values
             .into_iter()
             .map(|val| val.into())
             .collect(),
-        ConcreteDataType::UInt8(_) => values.u8_values.into_iter().map(|val| val.into()).collect(),
+        ConcreteDataType::UInt8(_) => values
+            .u8_values
+            .into_iter()
+            // Safety: Since i32 only stores u8 data here, so i32 as u8 is safe.
+            .map(|val| (val as u8).into())
+            .collect(),
         ConcreteDataType::UInt16(_) => values
             .u16_values
             .into_iter()
-            .map(|val| val.into())
+            // Safety: Since i32 only stores u16 data here, so i32 as u16 is safe.
+            .map(|val| (val as u16).into())
             .collect(),
         ConcreteDataType::UInt32(_) => values
             .u32_values
@@ -419,12 +431,12 @@ fn convert_values(data_type: &ConcreteDataType, values: Values) -> Vec<Value> {
             .map(|val| val.into())
             .collect(),
         ConcreteDataType::DateTime(_) => values
-            .i64_values
+            .datetime_values
             .into_iter()
             .map(|v| Value::DateTime(v.into()))
             .collect(),
         ConcreteDataType::Date(_) => values
-            .i32_values
+            .date_values
             .into_iter()
             .map(|v| Value::Date(v.into()))
             .collect(),
@@ -473,6 +485,7 @@ mod tests {
     use datatypes::schema::{ColumnSchema, SchemaBuilder};
     use datatypes::types::{TimestampMillisecondType, TimestampSecondType, TimestampType};
     use datatypes::value::Value;
+    use paste::paste;
     use snafu::ResultExt;
 
     use super::*;
@@ -661,25 +674,149 @@ mod tests {
         assert_eq!(Value::Timestamp(Timestamp::new_millisecond(101)), ts.get(1));
     }
 
-    #[test]
-    fn test_convert_values() {
-        let data_type = ConcreteDataType::float64_datatype();
-        let values = Values {
-            f64_values: vec![0.1, 0.2, 0.3],
-            ..Default::default()
+    macro_rules! test_convert_values {
+        ($grpc_data_type: ident, $values: expr,  $concrete_data_type: ident, $expected_ret: expr) => {
+            paste! {
+                #[test]
+                fn [<test_convert_ $grpc_data_type _values>]() {
+                    let values = Values {
+                        [<$grpc_data_type _values>]: $values,
+                        ..Default::default()
+                    };
+
+                    let data_type = ConcreteDataType::[<$concrete_data_type _datatype>]();
+                    let result = convert_values(&data_type, values);
+
+                    assert_eq!(
+                        $expected_ret,
+                        result
+                    );
+                }
+            }
         };
-
-        let result = convert_values(&data_type, values);
-
-        assert_eq!(
-            vec![
-                Value::Float64(0.1.into()),
-                Value::Float64(0.2.into()),
-                Value::Float64(0.3.into())
-            ],
-            result
-        );
     }
+
+    test_convert_values!(
+        i8,
+        vec![1_i32, 2, 3],
+        int8,
+        vec![Value::Int8(1), Value::Int8(2), Value::Int8(3)]
+    );
+
+    test_convert_values!(
+        u8,
+        vec![1_u32, 2, 3],
+        uint8,
+        vec![Value::UInt8(1), Value::UInt8(2), Value::UInt8(3)]
+    );
+
+    test_convert_values!(
+        i16,
+        vec![1_i32, 2, 3],
+        int16,
+        vec![Value::Int16(1), Value::Int16(2), Value::Int16(3)]
+    );
+
+    test_convert_values!(
+        u16,
+        vec![1_u32, 2, 3],
+        uint16,
+        vec![Value::UInt16(1), Value::UInt16(2), Value::UInt16(3)]
+    );
+
+    test_convert_values!(
+        i32,
+        vec![1, 2, 3],
+        int32,
+        vec![Value::Int32(1), Value::Int32(2), Value::Int32(3)]
+    );
+
+    test_convert_values!(
+        u32,
+        vec![1, 2, 3],
+        uint32,
+        vec![Value::UInt32(1), Value::UInt32(2), Value::UInt32(3)]
+    );
+
+    test_convert_values!(
+        i64,
+        vec![1, 2, 3],
+        int64,
+        vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)]
+    );
+
+    test_convert_values!(
+        u64,
+        vec![1, 2, 3],
+        uint64,
+        vec![Value::UInt64(1), Value::UInt64(2), Value::UInt64(3)]
+    );
+
+    test_convert_values!(
+        f32,
+        vec![1.0, 2.0, 3.0],
+        float32,
+        vec![
+            Value::Float32(1.0.into()),
+            Value::Float32(2.0.into()),
+            Value::Float32(3.0.into())
+        ]
+    );
+
+    test_convert_values!(
+        f64,
+        vec![1.0, 2.0, 3.0],
+        float64,
+        vec![
+            Value::Float64(1.0.into()),
+            Value::Float64(2.0.into()),
+            Value::Float64(3.0.into())
+        ]
+    );
+
+    test_convert_values!(
+        string,
+        vec!["1".to_string(), "2".to_string(), "3".to_string()],
+        string,
+        vec![
+            Value::String("1".into()),
+            Value::String("2".into()),
+            Value::String("3".into())
+        ]
+    );
+
+    test_convert_values!(
+        binary,
+        vec!["1".into(), "2".into(), "3".into()],
+        binary,
+        vec![
+            Value::Binary(b"1".to_vec().into()),
+            Value::Binary(b"2".to_vec().into()),
+            Value::Binary(b"3".to_vec().into())
+        ]
+    );
+
+    test_convert_values!(
+        date,
+        vec![1, 2, 3],
+        date,
+        vec![
+            Value::Date(1.into()),
+            Value::Date(2.into()),
+            Value::Date(3.into())
+        ]
+    );
+
+    test_convert_values!(
+        datetime,
+        vec![1.into(), 2.into(), 3.into()],
+        datetime,
+        vec![
+            Value::DateTime(1.into()),
+            Value::DateTime(2.into()),
+            Value::DateTime(3.into())
+        ]
+    );
 
     #[test]
     fn test_convert_timestamp_values() {
