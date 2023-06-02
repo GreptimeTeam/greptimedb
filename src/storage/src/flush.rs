@@ -291,13 +291,14 @@ impl<S: LogStore> FlushJob<S> {
             });
         }
 
-        let metas = futures_util::future::try_join_all(futures)
+        let metas: Vec<_> = futures_util::future::try_join_all(futures)
             .await?
             .into_iter()
             .flatten()
             .collect();
 
-        logging::info!("Successfully flush memtables, region:{region_id}, files: {metas:?}");
+        let file_ids = metas.iter().map(|f| f.file_id).collect::<Vec<_>>();
+        logging::info!("Successfully flush memtables, region:{region_id}, files: {file_ids:?}");
         Ok(metas)
     }
 

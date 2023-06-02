@@ -148,7 +148,10 @@ impl<S: LogStore> CompactionTask for CompactionTaskImpl<S> {
             e
         })?;
         compacted.extend(self.expired_ssts.iter().map(FileHandle::meta));
-        info!("Compacting SST files, input: {compacted:?}, output: {output:?}");
+
+        let input_ids = compacted.iter().map(|f| f.file_id).collect::<Vec<_>>();
+        let output_ids = output.iter().map(|f| f.file_id).collect::<Vec<_>>();
+        info!("Compacting SST files, input: {input_ids:?}, output: {output_ids:?}");
         self.write_manifest_and_apply(output, compacted)
             .await
             .map_err(|e| {
