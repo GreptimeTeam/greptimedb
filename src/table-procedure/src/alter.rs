@@ -16,6 +16,7 @@
 
 use async_trait::async_trait;
 use catalog::{CatalogManagerRef, RenameTableRequest};
+use common_procedure::error::SubprocedureFailedSnafu;
 use common_procedure::{
     Context, Error, LockKey, Procedure, ProcedureId, ProcedureManager, ProcedureState,
     ProcedureWithId, Result, Status,
@@ -29,7 +30,7 @@ use table::requests::{AlterKind, AlterTableRequest};
 
 use crate::error::{
     AccessCatalogSnafu, CatalogNotFoundSnafu, DeserializeProcedureSnafu, SchemaNotFoundSnafu,
-    SerializeProcedureSnafu, SubprocedureFailedSnafu, TableExistsSnafu, TableNotFoundSnafu,
+    SerializeProcedureSnafu, TableExistsSnafu, TableNotFoundSnafu,
 };
 
 /// Procedure to alter a table.

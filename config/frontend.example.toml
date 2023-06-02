@@ -58,6 +58,6 @@ connect_timeout_millis = 5000
 tcp_nodelay = true
 
 # Log options, see `standalone.example.toml`
-[logging]
-dir = "/tmp/greptimedb/logs"
-level = "info"
+# [logging]
+# dir = "/tmp/greptimedb/logs"
+# level = "info"

@@ -72,6 +72,9 @@ pub trait KvBackend: Send + Sync {
         return Ok(None);
     }
 
+    /// MoveValue atomically renames the key to the given updated key.
+    async fn move_value(&self, from_key: &[u8], to_key: &[u8]) -> Result<(), Error>;
+
     fn as_any(&self) -> &dyn Any;
 }
 
@@ -122,6 +125,10 @@ mod tests {
         }
 
         async fn delete_range(&self, _key: &[u8], _end: &[u8]) -> Result<(), Error> {
+            unimplemented!()
+        }
+
+        async fn move_value(&self, _from_key: &[u8], _to_key: &[u8]) -> Result<(), Error> {
             unimplemented!()
         }
 

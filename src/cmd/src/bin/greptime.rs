@@ -21,6 +21,7 @@ use cmd::error::Result;
 use cmd::options::{Options, TopLevelOptions};
 use cmd::{cli, datanode, frontend, metasrv, standalone};
 use common_telemetry::logging::{error, info, TracingOptions};
+use metrics::gauge;
 
 #[derive(Parser)]
 #[clap(name = "greptimedb", version = print_version())]
@@ -163,6 +164,22 @@ fn print_version() -> &'static str {
     )
 }
 
+fn short_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+// {app_name}-{branch_name}-{commit_short}
+// The branch name (tag) of a release build should already contain the short
+// version so the full version doesn't concat the short version explicitly.
+fn full_version() -> &'static str {
+    concat!(
+        "greptimedb-",
+        env!("GIT_BRANCH"),
+        "-",
+        env!("GIT_COMMIT_SHORT")
+    )
+}
+
 #[cfg(feature = "mem-prof")]
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -184,6 +201,9 @@ async fn main() -> Result<()> {
     common_telemetry::set_panic_hook();
     common_telemetry::init_default_metrics_recorder();
     let _guard = common_telemetry::init_global_logging(app_name, logging_opts, tracing_opts);
+
+    // Report app version as gauge.
+    gauge!("app_version", 1.0, "short_version" => short_version(), "version" => full_version());
 
     let mut app = cmd.build(opts).await?;
 

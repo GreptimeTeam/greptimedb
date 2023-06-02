@@ -26,7 +26,7 @@ use common_base::readable_size::ReadableSize;
 use common_telemetry::logging::info;
 use object_store::layers::{LoggingLayer, LruCacheLayer, MetricsLayer, RetryLayer, TracingLayer};
 use object_store::services::Fs as FsBuilder;
-use object_store::{ObjectStore, ObjectStoreBuilder};
+use object_store::{util, ObjectStore, ObjectStoreBuilder};
 use snafu::prelude::*;
 
 use crate::datanode::{ObjectStoreConfig, DEFAULT_OBJECT_STORE_CACHE_SIZE};
@@ -92,10 +92,11 @@ async fn create_object_store_with_cache(
     };
 
     if let Some(path) = cache_path {
-        let atomic_temp_dir = format!("{path}/.tmp/");
+        let path = util::normalize_dir(path);
+        let atomic_temp_dir = format!("{path}.tmp/");
         clean_temp_dir(&atomic_temp_dir)?;
         let cache_store = FsBuilder::default()
-            .root(path)
+            .root(&path)
             .atomic_write_dir(&atomic_temp_dir)
             .build()
             .context(error::InitBackendSnafu)?;

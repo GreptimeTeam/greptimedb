@@ -25,6 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use catalog::helper::TableGlobalKey;
 use common_meta::RegionIdent;
 use common_procedure::error::{
     Error as ProcedureError, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
@@ -42,6 +43,7 @@ use crate::error::{Error, RegisterProcedureLoaderSnafu, Result};
 use crate::lock::DistLockRef;
 use crate::metasrv::{SelectorContext, SelectorRef};
 use crate::service::mailbox::MailboxRef;
+use crate::service::store::ext::KvStoreExt;
 
 const OPEN_REGION_MESSAGE_TIMEOUT: Duration = Duration::from_secs(30);
 const CLOSE_REGION_MESSAGE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -119,10 +121,18 @@ impl RegionFailoverManager {
         procedures.insert(failed_region.clone())
     }
 
-    pub(crate) fn fire_region_failover(&self, failed_region: RegionIdent) {
-        if !self.insert_running_procedures(&failed_region) {
+    pub(crate) async fn do_region_failover(&self, failed_region: &RegionIdent) -> Result<()> {
+        if !self.insert_running_procedures(failed_region) {
             warn!("Region failover procedure for region {failed_region} is already running!");
-            return;
+            return Ok(());
+        }
+
+        if !self.table_exists(failed_region).await? {
+            // The table could be dropped before the failure detector knows it. Then the region
+            // failover is not needed.
+            // Or the table could be renamed. But we will have a new region ident to detect failure.
+            // So the region failover here is not needed either.
+            return Ok(());
         }
 
         let context = self.create_context();
@@ -133,6 +143,7 @@ impl RegionFailoverManager {
 
         let procedure_manager = self.procedure_manager.clone();
         let running_procedures = self.running_procedures.clone();
+        let failed_region = failed_region.clone();
         common_runtime::spawn_bg(async move {
             let _guard = FailoverProcedureGuard {
                 running_procedures,
@@ -154,6 +165,22 @@ impl RegionFailoverManager {
 
             info!("Region failover procedure {procedure_id} for region {failed_region} is finished successfully!");
         });
+        Ok(())
+    }
+
+    async fn table_exists(&self, failed_region: &RegionIdent) -> Result<bool> {
+        let table_ident = &failed_region.table_ident;
+        let table_global_key = TableGlobalKey {
+            catalog_name: table_ident.catalog.clone(),
+            schema_name: table_ident.schema.clone(),
+            table_name: table_ident.table.clone(),
+        };
+        let table_global_value = self
+            .selector_ctx
+            .kv_store
+            .get(table_global_key.to_string().into_bytes())
+            .await?;
+        Ok(table_global_value.is_some())
     }
 }
 
@@ -462,8 +489,9 @@ mod tests {
                 datanode_lease_secs: 10,
                 server_addr: "127.0.0.1:3002".to_string(),
                 kv_store,
-                catalog: None,
-                schema: None,
+                catalog: Some(DEFAULT_CATALOG_NAME.to_string()),
+                schema: Some(DEFAULT_SCHEMA_NAME.to_string()),
+                table: Some(table.to_string()),
             };
 
             TestingEnv {

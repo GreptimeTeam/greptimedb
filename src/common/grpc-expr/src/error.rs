@@ -83,6 +83,12 @@ pub enum Error {
 
     #[snafu(display("The column name already exists, column: {}", column))]
     ColumnAlreadyExists { column: String, location: Location },
+
+    #[snafu(display("Unknown location type: {}", location_type))]
+    UnknownLocationType {
+        location_type: i32,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -103,9 +109,9 @@ impl ErrorExt for Error {
             Error::MissingField { .. } => StatusCode::InvalidArguments,
             Error::InvalidColumnDef { source, .. } => source.status_code(),
             Error::UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
-            Error::UnexpectedValuesLength { .. } | Error::ColumnAlreadyExists { .. } => {
-                StatusCode::InvalidArguments
-            }
+            Error::UnexpectedValuesLength { .. }
+            | Error::ColumnAlreadyExists { .. }
+            | Error::UnknownLocationType { .. } => StatusCode::InvalidArguments,
         }
     }
 

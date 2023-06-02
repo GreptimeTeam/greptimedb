@@ -59,7 +59,8 @@ use crate::manifest::action::*;
 use crate::manifest::TableManifest;
 #[inline]
 fn table_manifest_dir(table_dir: &str) -> String {
-    format!("{table_dir}/manifest/")
+    assert!(table_dir.ends_with('/'));
+    format!("{table_dir}manifest/")
 }
 
 /// [Table] implementation.
@@ -770,7 +771,7 @@ mod tests {
 
     #[test]
     fn test_table_manifest_dir() {
-        assert_eq!("demo/manifest/", table_manifest_dir("demo"));
-        assert_eq!("numbers/manifest/", table_manifest_dir("numbers"));
+        assert_eq!("demo/manifest/", table_manifest_dir("demo/"));
+        assert_eq!("numbers/manifest/", table_manifest_dir("numbers/"));
     }
 }

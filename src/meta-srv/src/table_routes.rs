@@ -14,12 +14,12 @@
 
 use api::v1::meta::{PutRequest, TableRouteValue};
 use catalog::helper::{TableGlobalKey, TableGlobalValue};
+use common_meta::key::TableRouteKey;
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
     DecodeTableRouteSnafu, InvalidCatalogValueSnafu, Result, TableRouteNotFoundSnafu,
 };
-use crate::keys::TableRouteKey;
 use crate::service::store::ext::KvStoreExt;
 use crate::service::store::kv::KvStoreRef;
 

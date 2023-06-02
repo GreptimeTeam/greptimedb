@@ -140,8 +140,8 @@ max_retry_times = 3
 retry_delay = "500ms"
 
 # Log options
-[logging]
+# [logging]
 # Specify logs directory.
-dir = "/tmp/greptimedb/logs"
+# dir = "/tmp/greptimedb/logs"
 # Specify the log level [info | debug | error | warn]
-level = "debug"
+# level = "info"

@@ -42,6 +42,7 @@ pub(crate) fn create_region_failover_manager() -> Arc<RegionFailoverManager> {
         kv_store,
         catalog: None,
         schema: None,
+        table: None,
     };
 
     Arc::new(RegionFailoverManager::new(

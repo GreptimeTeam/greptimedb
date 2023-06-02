@@ -321,6 +321,7 @@ mod tests {
 
     use super::*;
     use crate::engine::procedure::procedure_test_util::{self, TestEnv};
+    use crate::engine::tests::new_add_columns_req_with_location;
     use crate::table::test_util;
 
     fn new_add_columns_req() -> AlterTableRequest {
@@ -331,10 +332,12 @@ mod tests {
                 AddColumnRequest {
                     column_schema: new_tag,
                     is_key: true,
+                    location: None,
                 },
                 AddColumnRequest {
                     column_schema: new_field,
                     is_key: false,
+                    location: None,
                 },
             ],
         };
@@ -394,6 +397,44 @@ mod tests {
         assert!(new_schema.column_schema_by_name("my_field").is_some());
         assert_eq!(new_schema.version(), schema.version() + 1);
         assert_eq!(new_meta.next_column_id, old_meta.next_column_id + 2);
+
+        // Alter the table.
+        let new_tag = ColumnSchema::new("my_tag_first", ConcreteDataType::string_datatype(), true);
+        let new_field = ColumnSchema::new(
+            "my_field_after_ts",
+            ConcreteDataType::string_datatype(),
+            true,
+        );
+        let request = new_add_columns_req_with_location(&new_tag, &new_field);
+        let mut procedure = table_engine
+            .alter_table_procedure(&engine_ctx, request.clone())
+            .unwrap();
+        procedure_test_util::execute_procedure_until_done(&mut procedure).await;
+
+        // Validate.
+        let table = table_engine
+            .get_table(&engine_ctx, &table_ref)
+            .unwrap()
+            .unwrap();
+        let new_info = table.table_info();
+        let new_meta = &new_info.meta;
+        let new_schema = &new_meta.schema;
+
+        assert_eq!(&[0, 1, 6], &new_meta.primary_key_indices[..]);
+        assert_eq!(&[2, 3, 4, 5, 7], &new_meta.value_indices[..]);
+        assert!(new_schema.column_schema_by_name("my_tag_first").is_some());
+        assert!(new_schema
+            .column_schema_by_name("my_field_after_ts")
+            .is_some());
+        assert_eq!(new_schema.version(), schema.version() + 2);
+        assert_eq!(new_meta.next_column_id, old_meta.next_column_id + 4);
+        assert_eq!(new_schema.column_index_by_name("my_tag_first").unwrap(), 0);
+        assert_eq!(
+            new_schema
+                .column_index_by_name("my_field_after_ts")
+                .unwrap(),
+            new_schema.column_index_by_name("ts").unwrap() + 1
+        );
     }
 
     #[tokio::test]
