@@ -698,28 +698,28 @@ mod tests {
 
     test_convert_values!(
         i8,
-        vec![1, 2, 3],
+        vec![1_i32, 2, 3],
         int8,
         vec![Value::Int8(1), Value::Int8(2), Value::Int8(3)]
     );
 
     test_convert_values!(
         u8,
-        vec![1, 2, 3],
+        vec![1_u32, 2, 3],
         uint8,
         vec![Value::UInt8(1), Value::UInt8(2), Value::UInt8(3)]
     );
 
     test_convert_values!(
         i16,
-        vec![1, 2, 3],
+        vec![1_i32, 2, 3],
         int16,
         vec![Value::Int16(1), Value::Int16(2), Value::Int16(3)]
     );
 
     test_convert_values!(
         u16,
-        vec![1, 2, 3],
+        vec![1_u32, 2, 3],
         uint16,
         vec![Value::UInt16(1), Value::UInt16(2), Value::UInt16(3)]
     );
