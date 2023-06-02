@@ -33,6 +33,7 @@ use datafusion_optimizer::analyzer::Analyzer;
 use promql::extension_plan::PromExtensionPlanner;
 
 use crate::dist_plan::{DistExtensionPlanner, DistPlannerAnalyzer};
+use crate::extension_serializer::ExtensionSerializer;
 use crate::optimizer::TypeConversionRule;
 use crate::query_engine::options::QueryOptions;
 
@@ -75,6 +76,7 @@ impl QueryEngineState {
             runtime_env,
             Arc::new(MemoryCatalogList::default()), // pass a dummy catalog list
         )
+        .with_serializer_registry(Arc::new(ExtensionSerializer))
         .with_analyzer_rules(analyzer.rules)
         .with_query_planner(Arc::new(DfQueryPlanner::new()));
 
