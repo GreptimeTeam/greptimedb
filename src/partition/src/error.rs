@@ -131,12 +131,19 @@ pub enum Error {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
+
+    #[snafu(display("Failed to find leader of table {} region {}", table_name, region_id))]
+    FindLeader {
+        table_name: String,
+        region_id: RegionId,
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::GetCache { .. } => StatusCode::StorageUnavailable,
+            Error::GetCache { .. } | Error::FindLeader { .. } => StatusCode::StorageUnavailable,
             Error::FindRegionRoutes { .. } => StatusCode::InvalidArguments,
             Error::FindTableRoutes { .. } => StatusCode::InvalidArguments,
             Error::RequestMeta { source, .. } => source.status_code(),

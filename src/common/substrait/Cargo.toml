@@ -21,7 +21,6 @@ prost.workspace = true
 session = { path = "../../session" }
 snafu.workspace = true
 table = { path = "../../table" }
-query = { path = "../../query" }
 
 [dependencies.substrait_proto]
 package = "substrait"

@@ -33,7 +33,7 @@ pub struct Categorizer {}
 impl Categorizer {
     pub fn check_plan(plan: &LogicalPlan) -> Commutativity {
         match plan {
-            LogicalPlan::Projection(_) => Commutativity::Commutative,
+            LogicalPlan::Projection(_) => Commutativity::Unimplemented,
             LogicalPlan::Filter(_) => Commutativity::Commutative,
             LogicalPlan::Window(_) => Commutativity::Unimplemented,
             LogicalPlan::Aggregate(_) => {

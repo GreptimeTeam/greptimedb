@@ -31,6 +31,7 @@ use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{StringVectorBuilder, VectorRef};
 use snafu::ResultExt;
 
+use super::InformationStreamBuilder;
 use crate::error::{CreateRecordBatchSnafu, InternalSnafu, Result};
 use crate::CatalogProviderRef;
 
@@ -71,9 +72,15 @@ impl InformationSchemaColumns {
             self.catalog_provider.clone(),
         )
     }
+}
 
-    pub fn to_stream(&self) -> Result<SendableRecordBatchStream> {
-        let schema = self.schema().clone();
+impl InformationStreamBuilder for InformationSchemaColumns {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
+    fn to_stream(&self) -> Result<SendableRecordBatchStream> {
+        let schema = self.schema.arrow_schema().clone();
         let mut builder = self.builder();
         let stream = Box::pin(DfRecordBatchStreamAdapter::new(
             schema,
@@ -190,7 +197,7 @@ impl DfPartitionStream for InformationSchemaColumns {
     }
 
     fn execute(&self, _: Arc<TaskContext>) -> DfSendableRecordBatchStream {
-        let schema = self.schema().clone();
+        let schema = self.schema.arrow_schema().clone();
         let mut builder = self.builder();
         Box::pin(DfRecordBatchStreamAdapter::new(
             schema,

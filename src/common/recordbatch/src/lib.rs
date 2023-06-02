@@ -167,6 +167,15 @@ impl RecordBatches {
     }
 }
 
+impl IntoIterator for RecordBatches {
+    type Item = RecordBatch;
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.batches.into_iter()
+    }
+}
+
 pub struct SimpleRecordBatchStream {
     inner: RecordBatches,
     index: usize,
