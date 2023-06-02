@@ -188,13 +188,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid KVs length, expected: {}, actual: {}", expected, actual))]
-    InvalidKvsLength {
-        expected: usize,
-        actual: usize,
-        location: Location,
-    },
-
     #[snafu(display("Failed to create gRPC channel, source: {}", source))]
     CreateChannel {
         #[snafu(backtrace)]
@@ -428,7 +421,6 @@ impl ErrorExt for Error {
             | Error::NextSequence { .. }
             | Error::SequenceOutOfRange { .. }
             | Error::MoveValue { .. }
-            | Error::InvalidKvsLength { .. }
             | Error::InvalidTxnResult { .. }
             | Error::InvalidUtf8Value { .. }
             | Error::UnexpectedInstructionReply { .. }
