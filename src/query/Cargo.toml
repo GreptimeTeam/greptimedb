@@ -61,4 +61,5 @@ statrs = "0.16"
 stats-cli = "3.0"
 store-api = { path = "../store-api" }
 streaming-stats = "0.2"
+table = { path = "../table", features = ["testing"] }
 tokio-stream = "0.1"

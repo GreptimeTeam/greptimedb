@@ -13,14 +13,17 @@
 // limitations under the License.
 
 use api::v1::meta::{KeyValue, RangeRequest};
-use snafu::ensure;
 
-use crate::error::{self, Result};
+use crate::error::Result;
 use crate::service::store::kv::KvStore;
 
 #[async_trait::async_trait]
 pub trait KvStoreExt {
+    /// Get the value by the given key.
     async fn get(&self, key: Vec<u8>) -> Result<Option<KeyValue>>;
+
+    /// Check if a key exists, it does not return the value.
+    async fn exists(&self, key: Vec<u8>) -> Result<bool>;
 }
 
 #[async_trait::async_trait]
@@ -36,20 +39,19 @@ where
 
         let mut kvs = self.range(req).await?.kvs;
 
-        if kvs.is_empty() {
-            return Ok(None);
-        }
+        Ok(kvs.pop())
+    }
 
-        ensure!(
-            kvs.len() == 1,
-            error::InvalidKvsLengthSnafu {
-                expected: 1_usize,
-                actual: kvs.len(),
-            }
-        );
+    async fn exists(&self, key: Vec<u8>) -> Result<bool> {
+        let req = RangeRequest {
+            key,
+            keys_only: true,
+            ..Default::default()
+        };
 
-        // Safety: the length check has been performed before using unwrap()
-        Ok(Some(kvs.pop().unwrap()))
+        let kvs = self.range(req).await?.kvs;
+
+        Ok(!kvs.is_empty())
     }
 }
 
@@ -90,6 +92,27 @@ mod tests {
         let may_kv = in_mem.get("test_key3".as_bytes().to_vec()).await.unwrap();
 
         assert!(may_kv.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_exists() {
+        let mut in_mem = Arc::new(MemStore::new()) as KvStoreRef;
+
+        put_stats_to_store(&mut in_mem).await;
+
+        assert!(in_mem
+            .exists("test_key1".as_bytes().to_vec())
+            .await
+            .unwrap());
+        assert!(in_mem
+            .exists("test_key2".as_bytes().to_vec())
+            .await
+            .unwrap());
+        assert!(!in_mem
+            .exists("test_key3".as_bytes().to_vec())
+            .await
+            .unwrap());
+        assert!(!in_mem.exists("test_key".as_bytes().to_vec()).await.unwrap());
     }
 
     async fn put_stats_to_store(store: &mut KvStoreRef) {

@@ -375,21 +375,6 @@ mod tests {
         }
     }
 
-    // The "foreign" means the Datanode is not containing any regions to the table before.
-    pub struct ForeignNodeSelector {
-        pub foreign: Peer,
-    }
-
-    #[async_trait]
-    impl Selector for ForeignNodeSelector {
-        type Context = SelectorContext;
-        type Output = Vec<Peer>;
-
-        async fn select(&self, _ns: Namespace, _ctx: &Self::Context) -> Result<Self::Output> {
-            Ok(vec![self.foreign.clone()])
-        }
-    }
-
     pub struct TestingEnv {
         pub context: RegionFailoverContext,
         pub heartbeat_receivers: HashMap<DatanodeId, Receiver<tonic::Result<HeartbeatResponse>>>,

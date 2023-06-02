@@ -14,6 +14,7 @@
 
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
+use common_recordbatch::OrderOption;
 use datatypes::vectors::VectorRef;
 
 use crate::storage::SchemaRef;
@@ -45,4 +46,8 @@ pub trait ChunkReader: Send {
 
     // project the chunk according to required projection.
     fn project_chunk(&self, chunk: Chunk) -> Chunk;
+
+    fn output_ordering(&self) -> Option<Vec<OrderOption>> {
+        None
+    }
 }

@@ -32,10 +32,12 @@ use datafusion::physical_plan::{ExecutionPlan, PhysicalPlanner};
 use datafusion_expr::LogicalPlan as DfLogicalPlan;
 use datafusion_optimizer::analyzer::Analyzer;
 use partition::manager::PartitionRuleManager;
+use datafusion_optimizer::optimizer::Optimizer;
 use promql::extension_plan::PromExtensionPlanner;
 
 use crate::dist_plan::{DistExtensionPlanner, DistPlannerAnalyzer};
-use crate::optimizer::TypeConversionRule;
+use crate::optimizer::order_hint::OrderHintRule;
+use crate::optimizer::type_conversion::TypeConversionRule;
 use crate::query_engine::options::QueryOptions;
 
 /// Query engine global state
@@ -73,6 +75,8 @@ impl QueryEngineState {
             analyzer.rules.insert(0, Arc::new(DistPlannerAnalyzer));
         }
         analyzer.rules.insert(0, Arc::new(TypeConversionRule));
+        let mut optimizer = Optimizer::new();
+        optimizer.rules.push(Arc::new(OrderHintRule));
 
         let session_state = SessionState::with_config_rt_and_catalog_list(
             session_config,
@@ -84,6 +88,7 @@ impl QueryEngineState {
             partition_manager,
             datanode_clients,
         )));
+        .with_optimizer_rules(optimizer.rules);
 
         let df_context = SessionContext::with_state(session_state);
 
