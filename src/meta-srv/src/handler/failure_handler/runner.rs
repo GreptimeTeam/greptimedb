@@ -153,13 +153,16 @@ impl FailureDetectRunner {
                         .collect::<Vec<RegionIdent>>();
 
                     for r in failed_regions {
-                        // Now that we know the region is failed, remove it from the failure
-                        // detectors, avoiding the failover procedure to be triggered again.
-                        // If the region is back alive (the failover procedure runs successfully),
-                        // it will be added back to the failure detectors again.
-                        failure_detectors.remove(&r);
-
-                        region_failover_manager.fire_region_failover(r)
+                        if let Err(e) = region_failover_manager.do_region_failover(&r).await {
+                            error!(e; "Failed to do region failover for {r}");
+                        } else {
+                            // Now that we know the region is starting to do failover, remove it
+                            // from the failure detectors, avoiding the failover procedure to be
+                            // triggered again.
+                            // If the region is back alive (the failover procedure runs successfully),
+                            // it will be added back to the failure detectors again.
+                            failure_detectors.remove(&r);
+                        }
                     }
                 }
 

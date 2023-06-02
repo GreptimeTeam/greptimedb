@@ -44,7 +44,7 @@ use datafusion::physical_plan::{
 use datafusion_common::DataFusionError;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use futures_util::{Stream, StreamExt};
-use partition::manager::PartitionRuleManagerRef;
+use partition::manager::{PartitionRuleManagerRef, TableRouteCacheInvalidator};
 use partition::splitter::WriteSplitter;
 use snafu::prelude::*;
 use store_api::storage::{RegionNumber, ScanRequest};
@@ -371,7 +371,17 @@ impl DistTable {
         self.backend
             .move_value(old_key.as_bytes(), new_key.as_bytes())
             .await
-            .context(error::CatalogSnafu)
+            .context(error::CatalogSnafu)?;
+
+        self.partition_manager
+            .invalidate_table_route(&TableName {
+                catalog_name: catalog_name.to_string(),
+                schema_name: schema_name.to_string(),
+                table_name: old_table_name.to_string(),
+            })
+            .await;
+
+        Ok(())
     }
 
     async fn handle_alter(&self, context: AlterContext, request: &AlterTableRequest) -> Result<()> {
@@ -429,7 +439,8 @@ impl DistTable {
                 table_name,
                 new_table_name,
             )
-            .await
+            .await?;
+            Ok(())
         } else {
             self.set_table_global_value(key, value).await
         }
