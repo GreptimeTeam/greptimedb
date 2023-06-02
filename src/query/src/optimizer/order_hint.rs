@@ -133,6 +133,7 @@ mod test {
     use super::*;
 
     #[test]
+    #[allow(clippy::bool_assert_comparison)]
     fn set_order_hint() {
         let numbers_table = Arc::new(NumbersTable::new(0)) as _;
         let adapter = Arc::new(DfTableProviderAdapter::new(numbers_table));
