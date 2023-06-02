@@ -6,6 +6,7 @@ Affected Rows: 0
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peer-.*) REDACTED
 EXPLAIN SELECT DISTINCT i%2 FROM integers ORDER BY 1;
 
 +-+-+
@@ -24,7 +25,7 @@ EXPLAIN SELECT DISTINCT i%2 FROM integers ORDER BY 1;
 |_|_AggregateExec: mode=Partial, gby=[integers.i % Int64(2)@0 as integers.i % Int64(2)], aggr=[]_|
 |_|_ProjectionExec: expr=[i@0 % 2 as integers.i % Int64(2)]_|
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_MergeScanExec: peers=[peer-1(127.0.0.1:4100), ]_|
+|_|_MergeScanExec: peers=[REDACTED
 |_|_|
 +-+-+
 
@@ -40,6 +41,7 @@ Affected Rows: 0
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peer-.*) REDACTED
 EXPLAIN SELECT a, b FROM test ORDER BY a, b;
 
 +-+-+
@@ -51,7 +53,7 @@ EXPLAIN SELECT a, b FROM test ORDER BY a, b;
 |_|_TableScan: test projection=[a, b, t]_|
 | physical_plan | SortExec: expr=[a@0 ASC NULLS LAST,b@1 ASC NULLS LAST] |
 |_|_ProjectionExec: expr=[a@0 as a, b@1 as b]_|
-|_|_MergeScanExec: peers=[peer-1(127.0.0.1:4100), ]_|
+|_|_MergeScanExec: peers=[REDACTED
 |_|_|
 +-+-+
 
@@ -59,6 +61,7 @@ EXPLAIN SELECT a, b FROM test ORDER BY a, b;
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peer-.*) REDACTED
 EXPLAIN SELECT DISTINCT a, b FROM test ORDER BY a, b;
 
 +-+-+
@@ -77,7 +80,7 @@ EXPLAIN SELECT DISTINCT a, b FROM test ORDER BY a, b;
 |_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b], aggr=[]_|
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_ProjectionExec: expr=[a@0 as a, b@1 as b]_|
-|_|_MergeScanExec: peers=[peer-1(127.0.0.1:4100), ]_|
+|_|_MergeScanExec: peers=[REDACTED
 |_|_|
 +-+-+
 

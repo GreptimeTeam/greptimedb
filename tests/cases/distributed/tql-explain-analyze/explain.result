@@ -7,6 +7,7 @@ INSERT INTO test VALUES (1, 1, "a"), (1, 1, "b"), (2, 2, "a");
 Affected Rows: 3
 
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peer-.*) REDACTED
 TQL EXPLAIN (0, 10, '5s') test;
 
 +---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------+
@@ -22,7 +23,7 @@ TQL EXPLAIN (0, 10, '5s') test;
 |               |   PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [false]                                                                          |
 |               |     PromSeriesDivideExec: tags=["k"]                                                                                                                |
 |               |       RepartitionExec: partitioning=REDACTED
-|               |         MergeScanExec: peers=[peer-1(127.0.0.1:4100), ]                                                                                             |
+|               |         MergeScanExec: peers=[REDACTED
 |               |                                                                                                                                                     |
 +---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------+
 
