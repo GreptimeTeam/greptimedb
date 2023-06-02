@@ -15,49 +15,18 @@
 use std::collections::HashMap;
 
 use api::helper::{push_vals, ColumnDataTypeWrapper};
-use api::v1::column::SemanticType;
+use api::v1::column::{SemanticType, Values};
 use api::v1::{Column, InsertRequest as GrpcInsertRequest};
-use common_query::Output;
-use datatypes::prelude::{ConcreteDataType, VectorRef};
-use futures::future;
-use metrics::counter;
-use snafu::{ensure, ResultExt};
+use datatypes::prelude::*;
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionNumber;
+use table::metadata::TableMeta;
 use table::requests::InsertRequest;
 
-use super::DistTable;
-use crate::error;
-use crate::error::{JoinTaskSnafu, RequestDatanodeSnafu, Result};
-
-impl DistTable {
-    pub async fn dist_insert(&self, inserts: Vec<GrpcInsertRequest>) -> Result<Output> {
-        let regions = inserts.iter().map(|x| x.region_number).collect::<Vec<_>>();
-        let instances = self.find_datanode_instances(&regions).await?;
-
-        let results = future::try_join_all(instances.into_iter().zip(inserts.into_iter()).map(
-            |(instance, request)| {
-                common_runtime::spawn_write(async move {
-                    instance
-                        .grpc_insert(request)
-                        .await
-                        .context(RequestDatanodeSnafu)
-                })
-            },
-        ))
-        .await
-        .context(JoinTaskSnafu)?;
-
-        let affected_rows = results.into_iter().sum::<Result<u32>>()?;
-        counter!(crate::metrics::DIST_INGEST_ROW_COUNT, affected_rows as u64);
-        Ok(Output::AffectedRows(affected_rows as _))
-    }
-}
-
-pub fn insert_request_to_insert_batch(insert: &InsertRequest) -> Result<(Vec<Column>, u32)> {
-    to_grpc_columns(&insert.columns_values)
-}
+use crate::error::{self, ColumnDataTypeSnafu, NotSupportedSnafu, Result, VectorToGrpcColumnSnafu};
 
 pub(crate) fn to_grpc_columns(
+    table_meta: &TableMeta,
     columns_values: &HashMap<String, VectorRef>,
 ) -> Result<(Vec<Column>, u32)> {
     let mut row_count = None;
@@ -76,27 +45,7 @@ pub(crate) fn to_grpc_columns(
                 None => row_count = Some(vector.len()),
             }
 
-            let datatype: ColumnDataTypeWrapper = vector
-                .data_type()
-                .try_into()
-                .context(error::ColumnDataTypeSnafu)?;
-
-            // TODO(hl): need refactor
-            let semantic_type =
-                if vector.data_type() == ConcreteDataType::timestamp_millisecond_datatype() {
-                    SemanticType::Timestamp
-                } else {
-                    SemanticType::Field
-                };
-
-            let mut column = Column {
-                column_name: column_name.clone(),
-                semantic_type: semantic_type.into(),
-                datatype: datatype.datatype() as i32,
-                ..Default::default()
-            };
-
-            push_vals(&mut column, 0, vector.clone());
+            let column = vector_to_grpc_column(table_meta, column_name, vector.clone())?;
             Ok(column)
         })
         .collect::<Result<Vec<_>>>()?;
@@ -107,11 +56,12 @@ pub(crate) fn to_grpc_columns(
 }
 
 pub(crate) fn to_grpc_insert_request(
+    table_meta: &TableMeta,
     region_number: RegionNumber,
     insert: InsertRequest,
 ) -> Result<GrpcInsertRequest> {
     let table_name = insert.table_name.clone();
-    let (columns, row_count) = insert_request_to_insert_batch(&insert)?;
+    let (columns, row_count) = to_grpc_columns(table_meta, &insert.columns_values)?;
     Ok(GrpcInsertRequest {
         table_name,
         region_number,
@@ -120,23 +70,142 @@ pub(crate) fn to_grpc_insert_request(
     })
 }
 
+fn vector_to_grpc_column(
+    table_meta: &TableMeta,
+    column_name: &str,
+    vector: VectorRef,
+) -> Result<Column> {
+    let time_index_column = &table_meta
+        .schema
+        .timestamp_column()
+        .context(NotSupportedSnafu {
+            feat: "Table without time index.",
+        })?
+        .name;
+    let semantic_type = if column_name == time_index_column {
+        SemanticType::Timestamp
+    } else {
+        let column_index = table_meta
+            .schema
+            .column_index_by_name(column_name)
+            .context(VectorToGrpcColumnSnafu {
+                reason: format!("unable to find column {column_name} in table schema"),
+            })?;
+        if table_meta.primary_key_indices.contains(&column_index) {
+            SemanticType::Tag
+        } else {
+            SemanticType::Field
+        }
+    };
+
+    let datatype: ColumnDataTypeWrapper =
+        vector.data_type().try_into().context(ColumnDataTypeSnafu)?;
+
+    let mut column = Column {
+        column_name: column_name.to_string(),
+        semantic_type: semantic_type as i32,
+        null_mask: vec![],
+        datatype: datatype.datatype() as i32,
+        values: Some(Values::default()), // vector values will be pushed into it below
+    };
+    push_vals(&mut column, 0, vector);
+    Ok(column)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     use api::v1::ColumnDataType;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datatypes::prelude::ScalarVectorBuilder;
-    use datatypes::vectors::{Int16VectorBuilder, MutableVector, StringVectorBuilder};
+    use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::vectors::{
+        Int16VectorBuilder, Int32Vector, Int64Vector, MutableVector, StringVector,
+        StringVectorBuilder,
+    };
+    use table::metadata::TableMetaBuilder;
     use table::requests::InsertRequest;
 
     use super::*;
 
     #[test]
-    fn test_to_grpc_insert_request() {
-        let insert_request = mock_insert_request();
+    fn test_vector_to_grpc_column() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), false)
+                .with_time_index(true),
+            ColumnSchema::new("k", ConcreteDataType::int32_datatype(), false),
+            ColumnSchema::new("v", ConcreteDataType::string_datatype(), true),
+        ]));
 
-        let request = to_grpc_insert_request(12, insert_request).unwrap();
+        let mut builder = TableMetaBuilder::default();
+        builder.schema(schema);
+        builder.primary_key_indices(vec![1]);
+        builder.next_column_id(3);
+        let table_meta = builder.build().unwrap();
+
+        let column = vector_to_grpc_column(
+            &table_meta,
+            "ts",
+            Arc::new(Int64Vector::from_slice([1, 2, 3])),
+        )
+        .unwrap();
+        assert_eq!(column.column_name, "ts");
+        assert_eq!(column.semantic_type, SemanticType::Timestamp as i32);
+        assert_eq!(column.values.unwrap().i64_values, vec![1, 2, 3]);
+        assert_eq!(column.null_mask, vec![0]);
+        assert_eq!(column.datatype, ColumnDataType::Int64 as i32);
+
+        let column = vector_to_grpc_column(
+            &table_meta,
+            "k",
+            Arc::new(Int32Vector::from_slice([3, 2, 1])),
+        )
+        .unwrap();
+        assert_eq!(column.column_name, "k");
+        assert_eq!(column.semantic_type, SemanticType::Tag as i32);
+        assert_eq!(column.values.unwrap().i32_values, vec![3, 2, 1]);
+        assert_eq!(column.null_mask, vec![0]);
+        assert_eq!(column.datatype, ColumnDataType::Int32 as i32);
+
+        let column = vector_to_grpc_column(
+            &table_meta,
+            "v",
+            Arc::new(StringVector::from(vec![
+                Some("hello"),
+                None,
+                Some("greptime"),
+            ])),
+        )
+        .unwrap();
+        assert_eq!(column.column_name, "v");
+        assert_eq!(column.semantic_type, SemanticType::Field as i32);
+        assert_eq!(
+            column.values.unwrap().string_values,
+            vec!["hello", "greptime"]
+        );
+        assert_eq!(column.null_mask, vec![2]);
+        assert_eq!(column.datatype, ColumnDataType::String as i32);
+    }
+
+    #[test]
+    fn test_to_grpc_insert_request() {
+        let schema = Schema::new(vec![
+            ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), false)
+                .with_time_index(true),
+            ColumnSchema::new("id", ConcreteDataType::int16_datatype(), false),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+        ]);
+
+        let mut builder = TableMetaBuilder::default();
+        builder.schema(Arc::new(schema));
+        builder.primary_key_indices(vec![]);
+        builder.next_column_id(3);
+
+        let table_meta = builder.build().unwrap();
+        let insert_request = mock_insert_request();
+        let request = to_grpc_insert_request(&table_meta, 12, insert_request).unwrap();
 
         verify_grpc_insert_request(request);
     }

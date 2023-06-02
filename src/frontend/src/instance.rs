@@ -28,7 +28,7 @@ use api::v1::alter_expr::Kind;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
 use api::v1::meta::Role;
-use api::v1::{AddColumns, AlterExpr, Column, DdlRequest, InsertRequest};
+use api::v1::{AddColumns, AlterExpr, Column, DdlRequest, InsertRequest, InsertRequests};
 use async_trait::async_trait;
 use catalog::remote::CachedMetaKvBackend;
 use catalog::CatalogManagerRef;
@@ -47,6 +47,7 @@ use datanode::instance::sql::table_idents_to_full_name;
 use datanode::instance::InstanceRef as DnInstanceRef;
 use datatypes::schema::Schema;
 use distributed::DistInstance;
+use futures::future;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOptions;
 use partition::manager::PartitionRuleManager;
@@ -281,24 +282,21 @@ impl Instance {
     /// Handle batch inserts
     pub async fn handle_inserts(
         &self,
-        requests: Vec<InsertRequest>,
+        requests: InsertRequests,
         ctx: QueryContextRef,
     ) -> Result<Output> {
-        let mut success = 0;
-        for request in requests {
-            match self.handle_insert(request, ctx.clone()).await? {
-                Output::AffectedRows(rows) => success += rows,
-                _ => unreachable!("Insert should not yield output other than AffectedRows"),
-            }
-        }
-        Ok(Output::AffectedRows(success))
-    }
+        // TODO(LFC): Optimize concurrent table creation and table alteration.
+        // Currently table creation is guarded by a distributed lock in Metasrv. However, table
+        // alteration is not. We should all switch to procedures in Metasrv.
+        let _ = future::join_all(
+            requests
+                .inserts
+                .iter()
+                .map(|x| self.create_or_alter_table_on_demand(ctx.clone(), x)),
+        )
+        .await;
 
-    async fn handle_insert(&self, request: InsertRequest, ctx: QueryContextRef) -> Result<Output> {
-        self.create_or_alter_table_on_demand(ctx.clone(), &request)
-            .await?;
-
-        let query = Request::Insert(request);
+        let query = Request::Inserts(requests);
         GrpcQueryHandler::do_query(&*self.grpc_query_handler, query, ctx).await
     }
 

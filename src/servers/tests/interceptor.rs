@@ -16,7 +16,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use api::v1::greptime_request::Request;
-use api::v1::InsertRequest;
+use api::v1::{InsertRequest, InsertRequests};
 use servers::error::{self, NotSupportedSnafu, Result};
 use servers::interceptor::{GrpcQueryInterceptor, SqlQueryInterceptor};
 use session::context::{QueryContext, QueryContextRef};
@@ -51,9 +51,9 @@ impl GrpcQueryInterceptor for NoopInterceptor {
         _query_ctx: QueryContextRef,
     ) -> std::result::Result<(), Self::Error> {
         match req {
-            Request::Insert(insert) => {
+            Request::Inserts(insert) => {
                 ensure!(
-                    insert.region_number == 0,
+                    insert.inserts.iter().all(|x| x.region_number == 0),
                     NotSupportedSnafu {
                         feat: "region not 0"
                     }
@@ -72,15 +72,17 @@ fn test_grpc_interceptor() {
     let di = NoopInterceptor;
     let ctx = Arc::new(QueryContext::new());
 
-    let req = Request::Insert(InsertRequest {
-        region_number: 1,
-        ..Default::default()
+    let req = Request::Inserts(InsertRequests {
+        inserts: vec![InsertRequest {
+            region_number: 1,
+            ..Default::default()
+        }],
     });
 
     let fail = GrpcQueryInterceptor::pre_execute(&di, &req, ctx.clone());
     assert!(fail.is_err());
 
-    let req = Request::Insert(InsertRequest::default());
+    let req = Request::Inserts(InsertRequests::default());
     let success = GrpcQueryInterceptor::pre_execute(&di, &req, ctx);
     assert!(success.is_ok());
 }

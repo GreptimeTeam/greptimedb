@@ -21,6 +21,7 @@ use common_error::prelude::BoxedError;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::logging;
+use metrics::counter;
 use prost::Message;
 use servers::error::{self, Result as ServerResult};
 use servers::prometheus::{self, Metrics};
@@ -30,6 +31,7 @@ use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 
 use crate::instance::Instance;
+use crate::metrics::PROMETHEUS_REMOTE_WRITE_SAMPLES;
 
 const SAMPLES_RESPONSE_TYPE: i32 = ResponseType::Samples as i32;
 
@@ -106,11 +108,13 @@ impl Instance {
 #[async_trait]
 impl PrometheusProtocolHandler for Instance {
     async fn write(&self, request: WriteRequest, ctx: QueryContextRef) -> ServerResult<()> {
-        let requests = prometheus::to_grpc_insert_requests(request.clone())?;
+        let (requests, samples) = prometheus::to_grpc_insert_requests(request)?;
         self.handle_inserts(requests, ctx)
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)?;
+
+        counter!(PROMETHEUS_REMOTE_WRITE_SAMPLES, samples as u64);
         Ok(())
     }
 

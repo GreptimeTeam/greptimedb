@@ -21,7 +21,7 @@ use std::hash::{Hash, Hasher};
 use api::prometheus::remote::label_matcher::Type as MatcherType;
 use api::prometheus::remote::{Label, Query, Sample, TimeSeries, WriteRequest};
 use api::v1::column::SemanticType;
-use api::v1::{column, Column, ColumnDataType, InsertRequest as GrpcInsertRequest};
+use api::v1::{column, Column, ColumnDataType, InsertRequest as GrpcInsertRequest, InsertRequests};
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_time::timestamp::TimeUnit;
 use datatypes::prelude::{ConcreteDataType, Value};
@@ -283,15 +283,23 @@ fn recordbatch_to_timeseries(table: &str, recordbatch: RecordBatch) -> Result<Ve
     Ok(timeseries_map.into_values().collect())
 }
 
-pub fn to_grpc_insert_requests(mut request: WriteRequest) -> Result<Vec<GrpcInsertRequest>> {
-    let timeseries = std::mem::take(&mut request.timeseries);
-    timeseries.into_iter().map(to_grpc_insert_request).collect()
+pub fn to_grpc_insert_requests(request: WriteRequest) -> Result<(InsertRequests, usize)> {
+    let (inserts, samples_counts) = itertools::process_results(
+        request.timeseries.into_iter().map(to_grpc_insert_request),
+        |x| x.unzip::<_, _, Vec<_>, Vec<_>>(),
+    )?;
+    Ok((
+        InsertRequests { inserts },
+        samples_counts.into_iter().sum::<usize>(),
+    ))
 }
 
-fn to_grpc_insert_request(mut timeseries: TimeSeries) -> Result<GrpcInsertRequest> {
+fn to_grpc_insert_request(timeseries: TimeSeries) -> Result<(GrpcInsertRequest, usize)> {
+    let samples_count = timeseries.samples.len();
+
     // TODO(dennis): save exemplars into a column
-    let labels = std::mem::take(&mut timeseries.labels);
-    let samples = std::mem::take(&mut timeseries.samples);
+    let labels = timeseries.labels;
+    let samples = timeseries.samples;
 
     let row_count = samples.len();
     let mut columns = Vec::with_capacity(2 + labels.len());
@@ -344,14 +352,15 @@ fn to_grpc_insert_request(mut timeseries: TimeSeries) -> Result<GrpcInsertReques
         });
     }
 
-    Ok(GrpcInsertRequest {
+    let request = GrpcInsertRequest {
         table_name: table_name.context(error::InvalidPromRemoteRequestSnafu {
             msg: "missing '__name__' label in timeseries",
         })?,
         region_number: 0,
         columns,
         row_count: row_count as u32,
-    })
+    };
+    Ok((request, samples_count))
 }
 
 #[inline]
@@ -507,7 +516,7 @@ mod tests {
             ..Default::default()
         };
 
-        let exprs = to_grpc_insert_requests(write_request).unwrap();
+        let exprs = to_grpc_insert_requests(write_request).unwrap().0.inserts;
         assert_eq!(3, exprs.len());
         assert_eq!("metric1", exprs[0].table_name);
         assert_eq!("metric2", exprs[1].table_name);

@@ -9,6 +9,6 @@ arrow.workspace = true
 clap = { version = "4.0", features = ["derive"] }
 client = { path = "../src/client" }
 indicatif = "0.17.1"
-itertools = "0.10.5"
+itertools.workspace = true
 parquet.workspace = true
 tokio.workspace = true

@@ -17,7 +17,8 @@ use api::v1::column::SemanticType;
 use api::v1::promql_request::Promql;
 use api::v1::{
     column, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef, CreateTableExpr,
-    InsertRequest, PromInstantQuery, PromRangeQuery, PromqlRequest, RequestHeader, TableId,
+    InsertRequest, InsertRequests, PromInstantQuery, PromRangeQuery, PromqlRequest, RequestHeader,
+    TableId,
 };
 use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::consts::{MIN_USER_TABLE_ID, MITO_ENGINE};
@@ -86,7 +87,11 @@ pub async fn test_invalid_dbname(store_type: StorageType) {
         ],
         row_count: 4,
     };
-    let result = db.insert(request).await;
+    let result = db
+        .insert(InsertRequests {
+            inserts: vec![request],
+        })
+        .await;
     assert!(result.is_err());
 
     let _ = fe_grpc_server.shutdown().await;
@@ -230,7 +235,11 @@ async fn insert_and_assert(db: &Database) {
         ],
         row_count: 4,
     };
-    let result = db.insert(request).await;
+    let result = db
+        .insert(InsertRequests {
+            inserts: vec![request],
+        })
+        .await;
     assert_eq!(result.unwrap(), 4);
 
     let result = db

@@ -18,6 +18,8 @@ pub(crate) mod memory;
 
 use std::sync::Arc;
 
+use common_telemetry::error;
+
 use crate::error::Result;
 
 pub type Key = Vec<u8>;
@@ -49,3 +51,50 @@ pub trait DistLock: Send + Sync {
 }
 
 pub type DistLockRef = Arc<dyn DistLock>;
+
+pub(crate) struct DistLockGuard<'a> {
+    lock: &'a DistLockRef,
+    name: Vec<u8>,
+    key: Option<Key>,
+}
+
+impl<'a> DistLockGuard<'a> {
+    pub(crate) fn new(lock: &'a DistLockRef, name: Vec<u8>) -> Self {
+        Self {
+            lock,
+            name,
+            key: None,
+        }
+    }
+
+    pub(crate) async fn lock(&mut self) -> Result<()> {
+        if self.key.is_some() {
+            return Ok(());
+        }
+        let key = self
+            .lock
+            .lock(
+                self.name.clone(),
+                Opts {
+                    expire_secs: Some(2),
+                },
+            )
+            .await?;
+        self.key = Some(key);
+        Ok(())
+    }
+}
+
+impl Drop for DistLockGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(key) = self.key.take() {
+            let lock = self.lock.clone();
+            let name = self.name.clone();
+            common_runtime::spawn_bg(async move {
+                if let Err(e) = lock.unlock(key).await {
+                    error!(e; "Failed to unlock '{}'", String::from_utf8_lossy(&name));
+                }
+            });
+        }
+    }
+}

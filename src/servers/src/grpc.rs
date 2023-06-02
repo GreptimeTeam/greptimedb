@@ -28,10 +28,11 @@ use arrow_flight::flight_service_server::{FlightService, FlightServiceServer};
 use async_trait::async_trait;
 use common_runtime::Runtime;
 use common_telemetry::logging::info;
+use common_telemetry::{error, warn};
 use futures::FutureExt;
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use tokio::net::TcpListener;
-use tokio::sync::oneshot::{self, Sender};
+use tokio::sync::oneshot::{self, Receiver, Sender};
 use tokio::sync::Mutex;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
@@ -39,7 +40,8 @@ use tonic::{Request, Response, Status};
 use self::prom_query_gateway::PrometheusGatewayService;
 use crate::auth::UserProviderRef;
 use crate::error::{
-    AlreadyStartedSnafu, GrpcReflectionServiceSnafu, Result, StartGrpcSnafu, TcpBindSnafu,
+    AlreadyStartedSnafu, GrpcReflectionServiceSnafu, InternalSnafu, Result, StartGrpcSnafu,
+    TcpBindSnafu,
 };
 use crate::grpc::database::DatabaseService;
 use crate::grpc::flight::FlightHandler;
@@ -55,6 +57,10 @@ pub struct GrpcServer {
     request_handler: Arc<GreptimeRequestHandler>,
     /// Handler for Prometheus-compatible PromQL queries. Only present for frontend server.
     promql_handler: Option<PromHandlerRef>,
+
+    /// gRPC serving state receiver. Only present if the gRPC server is started.
+    /// Used to wait for the server to stop, performing the old blocking fashion.
+    serve_state: Mutex<Option<Receiver<Result<()>>>>,
 }
 
 impl GrpcServer {
@@ -73,6 +79,7 @@ impl GrpcServer {
             shutdown_tx: Mutex::new(None),
             request_handler,
             promql_handler,
+            serve_state: Mutex::new(None),
         }
     }
 
@@ -93,6 +100,22 @@ impl GrpcServer {
         handler: PromHandlerRef,
     ) -> PrometheusGatewayServer<impl PrometheusGateway> {
         PrometheusGatewayServer::new(PrometheusGatewayService::new(handler))
+    }
+
+    pub async fn wait_for_serve(&self) -> Result<()> {
+        let mut serve_state = self.serve_state.lock().await;
+        let rx = serve_state.take().context(InternalSnafu {
+            err_msg: "gRPC serving state is unknown, maybe the server is not started, \
+                      or we have already waited for the serve result before.",
+        })?;
+        let Ok(result) = rx.await else {
+            warn!("Background gRPC serving task is quited before we can receive the serve result.");
+            return Ok(());
+        };
+        if let Err(e) = result {
+            error!(e; "GRPC serve error");
+        }
+        Ok(())
     }
 }
 
@@ -151,7 +174,6 @@ impl Server for GrpcServer {
             .build()
             .context(GrpcReflectionServiceSnafu)?;
 
-        // Would block to serve requests.
         let mut builder = tonic::transport::Server::builder()
             .add_service(self.create_flight_service())
             .add_service(self.create_database_service())
@@ -160,12 +182,19 @@ impl Server for GrpcServer {
             builder =
                 builder.add_service(self.create_prom_query_gateway_service(promql_handler.clone()))
         }
-        builder
-            .add_service(reflection_service)
-            .serve_with_incoming_shutdown(TcpListenerStream::new(listener), rx.map(drop))
-            .await
-            .context(StartGrpcSnafu)?;
+        let builder = builder.add_service(reflection_service);
 
+        let (serve_state_tx, serve_state_rx) = oneshot::channel();
+        let mut serve_state = self.serve_state.lock().await;
+        *serve_state = Some(serve_state_rx);
+
+        common_runtime::spawn_bg(async move {
+            let result = builder
+                .serve_with_incoming_shutdown(TcpListenerStream::new(listener), rx.map(drop))
+                .await
+                .context(StartGrpcSnafu);
+            serve_state_tx.send(result)
+        });
         Ok(addr)
     }
 

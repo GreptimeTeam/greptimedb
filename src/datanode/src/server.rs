@@ -17,17 +17,18 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use common_runtime::Builder as RuntimeBuilder;
+use futures::future;
 use servers::grpc::GrpcServer;
 use servers::http::{HttpServer, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
 use servers::server::Server;
 use snafu::ResultExt;
-use tokio::select;
 
 use crate::datanode::DatanodeOptions;
 use crate::error::{
     ParseAddrSnafu, Result, RuntimeResourceSnafu, ShutdownServerSnafu, StartServerSnafu,
+    WaitForGrpcServingSnafu,
 };
 use crate::instance::InstanceRef;
 
@@ -71,10 +72,14 @@ impl Services {
         })?;
         let grpc = self.grpc_server.start(grpc_addr);
         let http = self.http_server.start(http_addr);
-        select!(
-            v = grpc => v.context(StartServerSnafu)?,
-            v = http => v.context(StartServerSnafu)?,
-        );
+        future::try_join_all(vec![grpc, http])
+            .await
+            .context(StartServerSnafu)?;
+
+        self.grpc_server
+            .wait_for_serve()
+            .await
+            .context(WaitForGrpcServingSnafu)?;
         Ok(())
     }
 

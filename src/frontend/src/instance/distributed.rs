@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod inserter;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -20,7 +22,7 @@ use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
 use api::v1::{
     column_def, AlterExpr, CreateDatabaseExpr, CreateTableExpr, DeleteRequest, DropTableExpr,
-    FlushTableExpr, InsertRequest, TableId,
+    FlushTableExpr, InsertRequests, TableId,
 };
 use async_trait::async_trait;
 use catalog::helper::{SchemaKey, SchemaValue};
@@ -38,7 +40,7 @@ use common_meta::rpc::router::{
 use common_meta::rpc::store::CompareAndPutRequest;
 use common_meta::table_name::TableName;
 use common_query::Output;
-use common_telemetry::debug;
+use common_telemetry::{debug, info, warn};
 use datanode::instance::sql::table_idents_to_full_name;
 use datanode::sql::SqlHandler;
 use datatypes::prelude::ConcreteDataType;
@@ -68,9 +70,10 @@ use crate::error::{
     DeserializePartitionSnafu, InvokeDatanodeSnafu, ParseSqlSnafu, PrimaryKeyNotFoundSnafu,
     RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaExistsSnafu, StartMetaClientSnafu,
     TableAlreadyExistSnafu, TableNotFoundSnafu, TableSnafu, ToTableDeleteRequestSnafu,
-    ToTableInsertRequestSnafu, UnrecognizedTableOptionSnafu,
+    UnrecognizedTableOptionSnafu,
 };
 use crate::expr_factory;
+use crate::instance::distributed::inserter::DistInserter;
 use crate::table::DistTable;
 
 const MAX_VALUE: &str = "MAXVALUE";
@@ -95,6 +98,17 @@ impl DistInstance {
         }
     }
 
+    async fn find_table(&self, table_name: &TableName) -> Result<Option<TableRef>> {
+        self.catalog_manager
+            .table(
+                &table_name.catalog_name,
+                &table_name.schema_name,
+                &table_name.table_name,
+            )
+            .await
+            .context(CatalogSnafu)
+    }
+
     pub async fn create_table(
         &self,
         create_table: &mut CreateTableExpr,
@@ -107,16 +121,7 @@ impl DistInstance {
             &create_table.table_name,
         );
 
-        if let Some(table) = self
-            .catalog_manager
-            .table(
-                &table_name.catalog_name,
-                &table_name.schema_name,
-                &table_name.table_name,
-            )
-            .await
-            .context(CatalogSnafu)?
-        {
+        if let Some(table) = self.find_table(&table_name).await? {
             return if create_table.create_if_not_exists {
                 Ok(table)
             } else {
@@ -131,7 +136,19 @@ impl DistInstance {
 
         let response = self
             .create_table_in_meta(create_table, partitions, &table_info)
-            .await?;
+            .await;
+        let response = match response {
+            Ok(response) => response,
+            Err(e) => {
+                return if let Some(table) = self.find_table(&table_name).await? {
+                    warn!("Table '{table_name}' is created concurrently by other Frontend nodes!");
+                    Ok(table)
+                } else {
+                    Err(e)
+                }
+            }
+        };
+
         let table_routes = response.table_routes;
         ensure!(
             table_routes.len() == 1,
@@ -140,7 +157,7 @@ impl DistInstance {
             }
         );
         let table_route = table_routes.first().unwrap();
-        debug!(
+        info!(
             "Creating distributed table {table_name} with table routes: {}",
             serde_json::to_string_pretty(table_route)
                 .unwrap_or_else(|_| format!("{table_route:#?}"))
@@ -162,9 +179,7 @@ impl DistInstance {
         let table = Arc::new(DistTable::new(
             table_name.clone(),
             table_info,
-            self.catalog_manager.partition_manager(),
-            self.catalog_manager.datanode_clients(),
-            self.catalog_manager.backend(),
+            self.catalog_manager.clone(),
         ));
 
         let request = RegisterTableRequest {
@@ -569,36 +584,21 @@ impl DistInstance {
             .context(RequestMetaSnafu)
     }
 
-    // TODO(LFC): Refactor GRPC insertion and deletion implementation here,
-    // Take insertion as an example. GRPC insertion is converted to Table InsertRequest here,
-    // than split the Table InsertRequest in DistTable, than assemble each GRPC InsertRequest there.
-    // Rather inefficient, should operate on GRPC InsertRequest directly.
     async fn handle_dist_insert(
         &self,
-        request: InsertRequest,
+        requests: InsertRequests,
         ctx: QueryContextRef,
     ) -> Result<Output> {
-        let catalog = &ctx.current_catalog();
-        let schema = &ctx.current_schema();
-        let table_name = &request.table_name;
-        let table_ref = TableReference::full(catalog, schema, table_name);
-
-        let table = self
-            .catalog_manager
-            .table(catalog, schema, table_name)
-            .await
-            .context(CatalogSnafu)?
-            .with_context(|| TableNotFoundSnafu {
-                table_name: table_ref.to_string(),
-            })?;
-
-        let request = common_grpc_expr::insert::to_table_insert_request(catalog, schema, request)
-            .context(ToTableInsertRequestSnafu)?;
-
-        let affected_rows = table.insert(request).await.context(TableSnafu)?;
-        Ok(Output::AffectedRows(affected_rows))
+        let inserter = DistInserter::new(
+            ctx.current_catalog(),
+            ctx.current_schema(),
+            self.catalog_manager.clone(),
+        );
+        let affected_rows = inserter.grpc_insert(requests).await?;
+        Ok(Output::AffectedRows(affected_rows as usize))
     }
 
+    // TODO(LFC): Like insertions above, refactor GRPC deletion impl here.
     async fn handle_dist_delete(
         &self,
         request: DeleteRequest,
@@ -650,7 +650,7 @@ impl GrpcQueryHandler for DistInstance {
 
     async fn do_query(&self, request: Request, ctx: QueryContextRef) -> Result<Output> {
         match request {
-            Request::Insert(request) => self.handle_dist_insert(request, ctx).await,
+            Request::Inserts(requests) => self.handle_dist_insert(requests, ctx).await,
             Request::Delete(request) => self.handle_dist_delete(request, ctx).await,
             Request::Query(_) => {
                 unreachable!("Query should have been handled directly in Frontend Instance!")

@@ -88,21 +88,13 @@ impl PartitionRuleManager {
         let mut datanodes = HashMap::with_capacity(regions.len());
         for region in regions.iter() {
             let datanode = route
-                .region_routes
-                .iter()
-                .find_map(|x| {
-                    if x.region.id == *region as RegionId {
-                        x.leader_peer.clone()
-                    } else {
-                        None
-                    }
-                })
+                .find_region_leader(*region)
                 .context(error::FindDatanodeSnafu {
                     table: table.to_string(),
                     region: *region,
                 })?;
             datanodes
-                .entry(datanode)
+                .entry(datanode.clone())
                 .or_insert_with(Vec::new)
                 .push(*region);
         }

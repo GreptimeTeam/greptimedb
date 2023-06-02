@@ -231,7 +231,7 @@ pub fn push_vals(column: &mut Column, origin_count: usize, vector: VectorRef) {
 /// Returns the type name of the [Request].
 pub fn request_type(request: &Request) -> &'static str {
     match request {
-        Request::Insert(_) => "insert",
+        Request::Inserts(_) => "inserts",
         Request::Query(query_req) => query_request_type(query_req),
         Request::Ddl(ddl_req) => ddl_request_type(ddl_req),
         Request::Delete(_) => "delete",

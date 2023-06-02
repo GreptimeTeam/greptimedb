@@ -23,7 +23,7 @@ mod test {
     use api::v1::{
         alter_expr, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef,
         CreateDatabaseExpr, CreateTableExpr, DdlRequest, DeleteRequest, DropTableExpr,
-        FlushTableExpr, InsertRequest, QueryRequest,
+        FlushTableExpr, InsertRequest, InsertRequests, QueryRequest,
     };
     use catalog::helper::{TableGlobalKey, TableGlobalValue};
     use common_catalog::consts::MITO_ENGINE;
@@ -482,7 +482,13 @@ CREATE TABLE {table_name} (
             row_count: 16,
             ..Default::default()
         };
-        let output = query(instance, Request::Insert(insert)).await;
+        let output = query(
+            instance,
+            Request::Inserts(InsertRequests {
+                inserts: vec![insert],
+            }),
+        )
+        .await;
         assert!(matches!(output, Output::AffectedRows(16)));
 
         let request = Request::Query(QueryRequest {
@@ -670,7 +676,9 @@ CREATE TABLE {table_name} (
         };
 
         // Test auto create not existed table upon insertion.
-        let request = Request::Insert(insert);
+        let request = Request::Inserts(InsertRequests {
+            inserts: vec![insert],
+        });
         let output = query(instance, request).await;
         assert!(matches!(output, Output::AffectedRows(3)));
 
@@ -703,7 +711,9 @@ CREATE TABLE {table_name} (
         };
 
         // Test auto add not existed column upon insertion.
-        let request = Request::Insert(insert);
+        let request = Request::Inserts(InsertRequests {
+            inserts: vec![insert],
+        });
         let output = query(instance, request).await;
         assert!(matches!(output, Output::AffectedRows(3)));
 
@@ -829,7 +839,9 @@ CREATE TABLE {table_name} (
             ..Default::default()
         };
 
-        let request = Request::Insert(insert);
+        let request = Request::Inserts(InsertRequests {
+            inserts: vec![insert],
+        });
         let output = query(instance, request).await;
         assert!(matches!(output, Output::AffectedRows(8)));
 

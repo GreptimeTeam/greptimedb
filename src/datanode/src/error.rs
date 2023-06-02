@@ -230,6 +230,12 @@ pub enum Error {
         source: servers::error::Error,
     },
 
+    #[snafu(display("Failed to wait for GRPC serving, source: {}", source))]
+    WaitForGrpcServing {
+        source: servers::error::Error,
+        location: Location,
+    },
+
     #[snafu(display("Failed to parse address {}, source: {}", addr, source))]
     ParseAddr {
         addr: String,
@@ -467,6 +473,12 @@ pub enum Error {
 
     #[snafu(display("Missing WAL dir config"))]
     MissingWalDirConfig { location: Location },
+
+    #[snafu(display("Failed to join task, source: {}", source))]
+    JoinTask {
+        source: common_runtime::JoinError,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -537,16 +549,19 @@ impl ErrorExt for Error {
             | GetTable { source, .. } => source.status_code(),
 
             // TODO(yingwen): Further categorize http error.
-            StartServer { .. }
-            | ParseAddr { .. }
+            ParseAddr { .. }
             | CreateDir { .. }
             | RemoveDir { .. }
             | Catalog { .. }
             | MissingRequiredField { .. }
             | IncorrectInternalState { .. }
-            | ShutdownServer { .. }
             | ShutdownInstance { .. }
-            | CloseTableEngine { .. } => StatusCode::Internal,
+            | CloseTableEngine { .. }
+            | JoinTask { .. } => StatusCode::Internal,
+
+            StartServer { source }
+            | ShutdownServer { source }
+            | WaitForGrpcServing { source, .. } => source.status_code(),
 
             InitBackend { .. } => StatusCode::StorageUnavailable,
 

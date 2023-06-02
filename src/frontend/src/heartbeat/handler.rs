@@ -13,5 +13,6 @@
 // limitations under the License.
 
 pub mod invalidate_table_cache;
+
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

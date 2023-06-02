@@ -37,7 +37,7 @@ datatypes = { path = "../datatypes" }
 file-table-engine = { path = "../file-table-engine" }
 futures = "0.3"
 futures-util.workspace = true
-itertools = "0.10"
+itertools.workspace = true
 meta-client = { path = "../meta-client" }
 meter-core.workspace = true
 meter-macros.workspace = true
@@ -65,6 +65,7 @@ tokio.workspace = true
 tonic.workspace = true
 
 [dev-dependencies]
+catalog = { path = "../catalog", features = ["testing"] }
 common-test-util = { path = "../common/test-util" }
 datanode = { path = "../datanode" }
 futures = "0.3"

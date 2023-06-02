@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use api::v1::InsertRequest as GrpcInsertRequest;
+use api::v1::{InsertRequest as GrpcInsertRequest, InsertRequests};
 use common_grpc::writer::{LinesWriter, Precision};
 use influxdb_line_protocol::{parse_lines, FieldValue};
 use snafu::ResultExt;
@@ -32,7 +32,7 @@ pub struct InfluxdbRequest {
 
 type TableName = String;
 
-impl TryFrom<&InfluxdbRequest> for Vec<GrpcInsertRequest> {
+impl TryFrom<&InfluxdbRequest> for InsertRequests {
     type Error = Error;
 
     fn try_from(value: &InfluxdbRequest) -> Result<Self, Self::Error> {
@@ -103,7 +103,7 @@ impl TryFrom<&InfluxdbRequest> for Vec<GrpcInsertRequest> {
             writer.commit();
         }
 
-        Ok(writers
+        let inserts = writers
             .into_iter()
             .map(|(table_name, writer)| {
                 let (columns, row_count) = writer.finish();
@@ -114,7 +114,8 @@ impl TryFrom<&InfluxdbRequest> for Vec<GrpcInsertRequest> {
                     row_count,
                 }
             })
-            .collect())
+            .collect();
+        Ok(InsertRequests { inserts })
     }
 }
 
@@ -140,10 +141,10 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
             lines: lines.to_string(),
         };
 
-        let requests: Vec<GrpcInsertRequest> = influxdb_req.try_into().unwrap();
-        assert_eq!(2, requests.len());
+        let requests: InsertRequests = influxdb_req.try_into().unwrap();
+        assert_eq!(2, requests.inserts.len());
 
-        for request in requests {
+        for request in requests.inserts {
             match &request.table_name[..] {
                 "monitor1" => assert_monitor_1(&request.columns),
                 "monitor2" => assert_monitor_2(&request.columns),

@@ -18,7 +18,9 @@ mod test {
     use std::sync::Arc;
 
     use api::v1::column::SemanticType;
-    use api::v1::{column, Column, ColumnDataType, InsertRequest as GrpcInsertRequest};
+    use api::v1::{
+        column, Column, ColumnDataType, InsertRequest as GrpcInsertRequest, InsertRequests,
+    };
     use common_meta::table_name::TableName;
     use common_query::logical_plan::Expr;
     use common_query::physical_plan::DfPhysicalPlanAdapter;
@@ -46,7 +48,6 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_dist_table_scan() {
-        common_telemetry::init_default_ut_logging();
         let table = Arc::new(new_dist_table("test_dist_table_scan").await);
         // should scan all regions
         // select a, row_id from numbers
@@ -220,7 +221,6 @@ mod test {
             .downcast_ref::<FrontendCatalogManager>()
             .unwrap();
         let partition_manager = catalog_manager.partition_manager();
-        let datanode_clients = catalog_manager.datanode_clients();
 
         let table_name = TableName::new("greptime", "public", "dist_numbers");
 
@@ -295,9 +295,7 @@ mod test {
         DistTable::new(
             table_name,
             Arc::new(table_info),
-            partition_manager,
-            datanode_clients,
-            catalog_manager.backend(),
+            Arc::new(catalog_manager.clone()),
         )
     }
 
@@ -345,8 +343,11 @@ mod test {
             row_count,
             region_number,
         };
+        let requests = InsertRequests {
+            inserts: vec![request],
+        };
         dn_instance
-            .handle_insert(request, QueryContext::arc())
+            .handle_inserts(requests, &QueryContext::arc())
             .await
             .unwrap();
     }

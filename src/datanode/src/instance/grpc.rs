@@ -18,15 +18,17 @@ use std::sync::Arc;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request as GrpcRequest;
 use api::v1::query_request::Query;
-use api::v1::{CreateDatabaseExpr, DdlRequest, DeleteRequest, InsertRequest};
+use api::v1::{CreateDatabaseExpr, DdlRequest, DeleteRequest, InsertRequests};
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
+use common_grpc_expr::insert::to_table_insert_request;
 use common_query::Output;
 use datafusion::catalog::catalog::{
     CatalogList, CatalogProvider, MemoryCatalogList, MemoryCatalogProvider,
 };
 use datafusion::catalog::schema::SchemaProvider;
 use datafusion::datasource::TableProvider;
+use futures::future;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::plan::LogicalPlan;
 use query::query_engine::SqlStatementExecutor;
@@ -41,8 +43,8 @@ use table::table::adapter::DfTableProviderAdapter;
 
 use crate::error::{
     self, CatalogNotFoundSnafu, CatalogSnafu, DecodeLogicalPlanSnafu, DeleteExprToRequestSnafu,
-    DeleteSnafu, ExecuteLogicalPlanSnafu, ExecuteSqlSnafu, InsertSnafu, PlanStatementSnafu, Result,
-    SchemaNotFoundSnafu, TableNotFoundSnafu,
+    DeleteSnafu, ExecuteLogicalPlanSnafu, ExecuteSqlSnafu, InsertDataSnafu, InsertSnafu,
+    JoinTaskSnafu, PlanStatementSnafu, Result, SchemaNotFoundSnafu, TableNotFoundSnafu,
 };
 use crate::instance::Instance;
 
@@ -119,31 +121,41 @@ impl Instance {
         }
     }
 
-    pub async fn handle_insert(
+    pub async fn handle_inserts(
         &self,
-        request: InsertRequest,
-        ctx: QueryContextRef,
+        requests: InsertRequests,
+        ctx: &QueryContextRef,
     ) -> Result<Output> {
-        let catalog = &ctx.current_catalog();
-        let schema = &ctx.current_schema();
-        let table_name = &request.table_name.clone();
-        let table_ref = TableReference::full(catalog, schema, table_name);
+        let results = future::try_join_all(requests.inserts.into_iter().map(|insert| {
+            let catalog_manager = self.catalog_manager.clone();
+            let catalog = ctx.current_catalog();
+            let schema = ctx.current_schema();
 
-        let table = self
-            .catalog_manager
-            .table(catalog, schema, table_name)
-            .await
-            .context(CatalogSnafu)?
-            .with_context(|| TableNotFoundSnafu {
-                table_name: table_ref.to_string(),
-            })?;
+            common_runtime::spawn_write(async move {
+                let table_name = &insert.table_name.clone();
+                let table = catalog_manager
+                    .table(&catalog, &schema, table_name)
+                    .await
+                    .context(CatalogSnafu)?
+                    .with_context(|| TableNotFoundSnafu {
+                        table_name: common_catalog::format_full_table_name(
+                            &catalog, &schema, table_name,
+                        ),
+                    })?;
 
-        let request = common_grpc_expr::insert::to_table_insert_request(catalog, schema, request)
-            .context(error::InsertDataSnafu)?;
+                let request =
+                    to_table_insert_request(&catalog, &schema, insert).context(InsertDataSnafu)?;
 
-        let affected_rows = table.insert(request).await.with_context(|_| InsertSnafu {
-            table_name: table_ref.to_string(),
-        })?;
+                table.insert(request).await.with_context(|_| InsertSnafu {
+                    table_name: common_catalog::format_full_table_name(
+                        &catalog, &schema, table_name,
+                    ),
+                })
+            })
+        }))
+        .await
+        .context(JoinTaskSnafu)?;
+        let affected_rows = results.into_iter().sum::<Result<usize>>()?;
         Ok(Output::AffectedRows(affected_rows))
     }
 
@@ -191,7 +203,7 @@ impl GrpcQueryHandler for Instance {
 
     async fn do_query(&self, request: GrpcRequest, ctx: QueryContextRef) -> Result<Output> {
         match request {
-            GrpcRequest::Insert(request) => self.handle_insert(request, ctx).await,
+            GrpcRequest::Inserts(requests) => self.handle_inserts(requests, &ctx).await,
             GrpcRequest::Delete(request) => self.handle_delete(request, ctx).await,
             GrpcRequest::Query(query_request) => {
                 let query = query_request
@@ -296,7 +308,7 @@ mod test {
     use api::v1::column::{SemanticType, Values};
     use api::v1::{
         alter_expr, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef,
-        CreateDatabaseExpr, CreateTableExpr, QueryRequest,
+        CreateDatabaseExpr, CreateTableExpr, InsertRequest, InsertRequests, QueryRequest,
     };
     use common_catalog::consts::MITO_ENGINE;
     use common_recordbatch::RecordBatches;
@@ -481,7 +493,9 @@ mod test {
             ..Default::default()
         };
 
-        let query = GrpcRequest::Insert(insert);
+        let query = GrpcRequest::Inserts(InsertRequests {
+            inserts: vec![insert],
+        });
         let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
         assert!(matches!(output, Output::AffectedRows(3)));
 

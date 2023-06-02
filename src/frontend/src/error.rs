@@ -19,7 +19,7 @@ use datafusion::parquet;
 use datatypes::arrow::error::ArrowError;
 use datatypes::value::Value;
 use snafu::Location;
-use store_api::storage::RegionId;
+use store_api::storage::RegionNumber;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -96,6 +96,9 @@ pub enum Error {
         source: api::error::Error,
     },
 
+    #[snafu(display("Failed to convert vector to GRPC column, reason: {}", reason))]
+    VectorToGrpcColumn { reason: String, location: Location },
+
     #[snafu(display(
         "Failed to convert column default constraint, column: {}, source: {}",
         column_name,
@@ -115,7 +118,7 @@ pub enum Error {
 
     #[snafu(display("Failed to find Datanode by region: {:?}", region))]
     FindDatanode {
-        region: RegionId,
+        region: RegionNumber,
         location: Location,
     },
 
@@ -190,6 +193,12 @@ pub enum Error {
         table_name: String,
         #[snafu(backtrace)]
         source: partition::error::Error,
+    },
+
+    #[snafu(display("Failed to split insert request, source: {}", source))]
+    SplitInsert {
+        source: partition::error::Error,
+        location: Location,
     },
 
     #[snafu(display("Failed to create table info, source: {}", source))]
@@ -582,7 +591,8 @@ impl ErrorExt for Error {
             | Error::CreateTableRoute { .. }
             | Error::FindRegionRoute { .. }
             | Error::BuildDfLogicalPlan { .. }
-            | Error::BuildTableMeta { .. } => StatusCode::Internal,
+            | Error::BuildTableMeta { .. }
+            | Error::VectorToGrpcColumn { .. } => StatusCode::Internal,
 
             Error::IncompleteGrpcResult { .. }
             | Error::ContextValueNotFound { .. }
@@ -623,7 +633,9 @@ impl ErrorExt for Error {
             Error::External { source } => source.status_code(),
             Error::DeserializePartition { source, .. }
             | Error::FindTablePartitionRule { source, .. }
-            | Error::FindTableRoute { source, .. } => source.status_code(),
+            | Error::FindTableRoute { source, .. }
+            | Error::SplitInsert { source, .. } => source.status_code(),
+
             Error::UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
 
             Error::StartScriptManager { source } => source.status_code(),

@@ -61,7 +61,7 @@ uuid.workspace = true
 common-procedure = { path = "../src/common/procedure" }
 datafusion.workspace = true
 datafusion-expr.workspace = true
-itertools = "0.10"
+itertools.workspace = true
 partition = { path = "../src/partition" }
 paste.workspace = true
 prost.workspace = true

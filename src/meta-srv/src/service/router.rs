@@ -21,16 +21,19 @@ use api::v1::meta::{
 };
 use catalog::helper::{TableGlobalKey, TableGlobalValue};
 use common_meta::key::TableRouteKey;
+use common_meta::table_name::TableName;
 use common_telemetry::{timer, warn};
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::RawTableInfo;
 use tonic::{Request, Response};
 
 use crate::error;
 use crate::error::Result;
+use crate::lock::{keys, DistLockGuard};
 use crate::metasrv::{Context, MetaSrv, SelectorContext, SelectorRef};
 use crate::metrics::METRIC_META_ROUTE_REQUEST;
 use crate::sequence::SequenceRef;
+use crate::service::store::ext::KvStoreExt;
 use crate::service::store::kv::KvStoreRef;
 use crate::service::GrpcResult;
 use crate::table_routes::{get_table_global_value, get_table_route_value};
@@ -43,6 +46,30 @@ impl router_server::Router for MetaSrv {
         let CreateRequest {
             header, table_name, ..
         } = &req;
+        let table_name: TableName = table_name
+            .as_ref()
+            .context(error::EmptyTableNameSnafu)?
+            .clone()
+            .into();
+
+        // TODO(LFC): Use procedure to create table, and get rid of locks here.
+        let mut guard = DistLockGuard::new(self.lock(), keys::table_creation_lock_key(&table_name));
+        guard.lock().await?;
+
+        let table_global_key = TableGlobalKey {
+            catalog_name: table_name.catalog_name.clone(),
+            schema_name: table_name.schema_name.clone(),
+            table_name: table_name.table_name.clone(),
+        }
+        .to_string()
+        .into_bytes();
+        ensure!(
+            self.kv_store().get(table_global_key).await?.is_none(),
+            error::TableAlreadyExistsSnafu {
+                table_name: table_name.to_string(),
+            }
+        );
+
         let cluster_id = header.as_ref().map_or(0, |h| h.cluster_id);
 
         let _timer = timer!(
@@ -53,14 +80,13 @@ impl router_server::Router for MetaSrv {
             ]
         );
 
-        let table_name = table_name.clone().context(error::EmptyTableNameSnafu)?;
         let ctx = SelectorContext {
             datanode_lease_secs: self.options().datanode_lease_secs,
             server_addr: self.options().server_addr.clone(),
             kv_store: self.kv_store(),
-            catalog: Some(table_name.catalog_name),
-            schema: Some(table_name.schema_name),
-            table: Some(table_name.table_name),
+            catalog: Some(table_name.catalog_name.clone()),
+            schema: Some(table_name.schema_name.clone()),
+            table: Some(table_name.table_name.clone()),
         };
 
         let selector = self.selector();
@@ -138,7 +164,7 @@ async fn handle_create(
         return Ok(RouteResponse {
             header: Some(ResponseHeader::failed(
                 cluster_id,
-                Error::not_enough_active_datanodes(peers.len() as _),
+                Error::not_enough_available_datanodes(partitions.len(), peers.len()),
             )),
             ..Default::default()
         });
