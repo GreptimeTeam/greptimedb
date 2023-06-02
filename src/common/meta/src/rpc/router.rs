@@ -22,8 +22,7 @@ use api::v1::meta::{
 };
 use serde::{Deserialize, Serialize, Serializer};
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::RegionNumber;
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::RawTableInfo;
 
 use crate::error::{self, Result};
@@ -142,9 +141,23 @@ impl TryFrom<PbRouteResponse> for RouteResponse {
 pub struct TableRoute {
     pub table: Table,
     pub region_routes: Vec<RegionRoute>,
+    region_leaders: HashMap<RegionNumber, Option<Peer>>,
 }
 
 impl TableRoute {
+    pub fn new(table: Table, region_routes: Vec<RegionRoute>) -> Self {
+        let region_leaders = region_routes
+            .iter()
+            .map(|x| (x.region.id as RegionNumber, x.leader_peer.clone()))
+            .collect::<HashMap<_, _>>();
+
+        Self {
+            table,
+            region_routes,
+            region_leaders,
+        }
+    }
+
     pub fn try_from_raw(peers: &[PbPeer], table_route: PbTableRoute) -> Result<Self> {
         let table = table_route
             .table
@@ -180,10 +193,7 @@ impl TableRoute {
             });
         }
 
-        Ok(Self {
-            table,
-            region_routes,
-        })
+        Ok(Self::new(table, region_routes))
     }
 
     pub fn try_into_raw(self) -> Result<(Vec<PbPeer>, PbTableRoute)> {
@@ -269,11 +279,10 @@ impl TableRoute {
             .collect()
     }
 
-    pub fn find_region_leader(&self, region_number: RegionNumber) -> Option<Peer> {
-        self.region_routes
-            .iter()
-            .find(|x| x.region.id == region_number as u64)
-            .and_then(|x| x.leader_peer.clone())
+    pub fn find_region_leader(&self, region_number: RegionNumber) -> Option<&Peer> {
+        self.region_leaders
+            .get(&region_number)
+            .and_then(|x| x.as_ref())
     }
 }
 
@@ -678,6 +687,10 @@ mod tests {
                     follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
                 },
             ],
+            region_leaders: HashMap::from([
+                (2, Some(Peer::new(1, "a1"))),
+                (1, Some(Peer::new(2, "a2"))),
+            ]),
         };
 
         let from_raw = TableRoute::try_from_raw(&raw_peers, raw_table_route.clone()).unwrap();

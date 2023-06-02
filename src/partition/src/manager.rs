@@ -94,7 +94,7 @@ impl PartitionRuleManager {
                     region: *region,
                 })?;
             datanodes
-                .entry(datanode)
+                .entry(datanode.clone())
                 .or_insert_with(Vec::new)
                 .push(*region);
         }

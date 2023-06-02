@@ -16,7 +16,6 @@ use std::fmt::{Debug, Formatter};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use client::Client;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::peer::Peer;
 use common_telemetry::info;

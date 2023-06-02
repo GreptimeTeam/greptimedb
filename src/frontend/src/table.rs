@@ -20,8 +20,6 @@ use std::sync::Arc;
 use api::v1::AlterExpr;
 use async_trait::async_trait;
 use catalog::helper::{TableGlobalKey, TableGlobalValue};
-use catalog::remote::KvBackendRef;
-use client::client_manager::DatanodeClients;
 use client::Database;
 use common_error::prelude::BoxedError;
 use common_meta::key::TableRouteKey;
@@ -503,7 +501,7 @@ impl DistTable {
         let datanode_clients = self.catalog_manager.datanode_clients();
         let mut instances = Vec::with_capacity(datanodes.len());
         for datanode in datanodes {
-            let client = datanode_clients.get_client(&datanode).await;
+            let client = datanode_clients.get_client(datanode).await;
             let db = Database::new(&table_name.catalog_name, &table_name.schema_name, client);
             instances.push(DatanodeInstance::new(Arc::new(self.clone()) as _, db));
         }
@@ -661,13 +659,13 @@ pub(crate) mod test {
             DEFAULT_SCHEMA_NAME,
             "one_column_partitioning_table",
         );
-        let table_route = TableRoute {
-            table: Table {
+        let table_route = TableRoute::new(
+            Table {
                 id: 1,
                 table_name: table_name.clone(),
                 table_schema: vec![],
             },
-            region_routes: vec![
+            vec![
                 RegionRoute {
                     region: Region {
                         id: 3,
@@ -720,7 +718,7 @@ pub(crate) mod test {
                     follower_peers: vec![],
                 },
             ],
-        };
+        );
         table_routes
             .insert_table_route(table_name.clone(), Arc::new(table_route))
             .await;
@@ -730,13 +728,13 @@ pub(crate) mod test {
             DEFAULT_SCHEMA_NAME,
             "two_column_partitioning_table",
         );
-        let table_route = TableRoute {
-            table: Table {
+        let table_route = TableRoute::new(
+            Table {
                 id: 1,
                 table_name: table_name.clone(),
                 table_schema: vec![],
             },
-            region_routes: vec![
+            vec![
                 RegionRoute {
                     region: Region {
                         id: 1,
@@ -795,7 +793,7 @@ pub(crate) mod test {
                     follower_peers: vec![],
                 },
             ],
-        };
+        );
         table_routes
             .insert_table_route(table_name.clone(), Arc::new(table_route))
             .await;

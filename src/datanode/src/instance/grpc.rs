@@ -126,41 +126,35 @@ impl Instance {
         requests: InsertRequests,
         ctx: &QueryContextRef,
     ) -> Result<Output> {
-        let catalog = &ctx.current_catalog();
-        let schema = &ctx.current_schema();
+        let results = future::try_join_all(requests.inserts.into_iter().map(|insert| {
+            let catalog_manager = self.catalog_manager.clone();
+            let catalog = ctx.current_catalog();
+            let schema = ctx.current_schema();
 
-        let mut inserts = Vec::with_capacity(requests.inserts.len());
-        for insert in requests.inserts {
-            let table_name = &insert.table_name;
-            let table = self
-                .catalog_manager
-                .table(catalog, schema, table_name)
-                .await
-                .context(CatalogSnafu)?
-                .with_context(|| TableNotFoundSnafu {
-                    table_name: common_catalog::format_full_table_name(catalog, schema, table_name),
-                })?;
+            common_runtime::spawn_write(async move {
+                let table_name = &insert.table_name.clone();
+                let table = catalog_manager
+                    .table(&catalog, &schema, table_name)
+                    .await
+                    .context(CatalogSnafu)?
+                    .with_context(|| TableNotFoundSnafu {
+                        table_name: common_catalog::format_full_table_name(
+                            &catalog, &schema, table_name,
+                        ),
+                    })?;
 
-            let catalog_name = catalog.clone();
-            let schema_name = schema.clone();
-            let table_name = table_name.clone();
-            inserts.push(async move {
-                let request = to_table_insert_request(&catalog_name, &schema_name, insert)
-                    .context(InsertDataSnafu)?;
+                let request =
+                    to_table_insert_request(&catalog, &schema, insert).context(InsertDataSnafu)?;
 
                 table.insert(request).await.with_context(|_| InsertSnafu {
                     table_name: common_catalog::format_full_table_name(
-                        &catalog_name,
-                        &schema_name,
-                        &table_name,
+                        &catalog, &schema, table_name,
                     ),
                 })
-            });
-        }
-
-        let results = future::try_join_all(inserts.into_iter().map(common_runtime::spawn_write))
-            .await
-            .context(JoinTaskSnafu)?;
+            })
+        }))
+        .await
+        .context(JoinTaskSnafu)?;
         let affected_rows = results.into_iter().sum::<Result<usize>>()?;
         Ok(Output::AffectedRows(affected_rows))
     }

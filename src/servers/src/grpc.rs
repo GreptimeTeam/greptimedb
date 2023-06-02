@@ -109,7 +109,7 @@ impl GrpcServer {
                       or we have already waited for the serve result before.",
         })?;
         let Ok(result) = rx.await else {
-            warn!("Background gRPC serving task is quit before we can receive the serve result.");
+            warn!("Background gRPC serving task is quited before we can receive the serve result.");
             return Ok(());
         };
         if let Err(e) = result {

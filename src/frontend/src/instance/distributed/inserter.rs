@@ -181,6 +181,7 @@ mod tests {
     };
     use catalog::remote::mock::MockKvBackend;
     use catalog::remote::{KvBackend, KvBackendRef};
+    use client::client_manager::DatanodeClients;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, Schema};
@@ -188,7 +189,6 @@ mod tests {
     use table::metadata::{TableInfoBuilder, TableMetaBuilder};
 
     use super::*;
-    use crate::datanode::DatanodeClients;
     use crate::heartbeat::handler::tests::MockKvCacheInvalidator;
     use crate::table::test::create_partition_rule_manager;
 

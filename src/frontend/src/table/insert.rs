@@ -23,7 +23,7 @@ use store_api::storage::RegionNumber;
 use table::metadata::TableMeta;
 use table::requests::InsertRequest;
 
-use crate::error::{self, ColumnDataTypeSnafu, Result, VectorToGrpcColumnSnafu};
+use crate::error::{self, ColumnDataTypeSnafu, NotSupportedSnafu, Result, VectorToGrpcColumnSnafu};
 
 pub(crate) fn to_grpc_columns(
     table_meta: &TableMeta,
@@ -75,8 +75,14 @@ fn vector_to_grpc_column(
     column_name: &str,
     vector: VectorRef,
 ) -> Result<Column> {
-    // Safety: timestamp column has to be existed in a table.
-    let semantic_type = if column_name == table_meta.schema.timestamp_column().unwrap().name {
+    let time_index_column = &table_meta
+        .schema
+        .timestamp_column()
+        .context(NotSupportedSnafu {
+            feat: "Table without time index.",
+        })?
+        .name;
+    let semantic_type = if column_name == time_index_column {
         SemanticType::Timestamp
     } else {
         let column_index = table_meta
