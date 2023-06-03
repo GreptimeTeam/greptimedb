@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use api::v1::auth_header::AuthScheme;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
@@ -32,7 +30,7 @@ use futures_util::{TryFutureExt, TryStreamExt};
 use prost::Message;
 use snafu::{ensure, ResultExt};
 use tokio::sync::mpsc::Sender;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, OnceCell};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::error::{
@@ -52,7 +50,7 @@ pub struct Database {
     dbname: String,
 
     client: Client,
-    streaming_client: Arc<Mutex<Option<Sender<GreptimeRequest>>>>,
+    streaming_client: OnceCell<Sender<GreptimeRequest>>,
     ctx: FlightContext,
 }
 
@@ -64,7 +62,7 @@ impl Database {
             schema: schema.into(),
             dbname: "".to_string(),
             client,
-            streaming_client: Arc::new(Mutex::new(None)),
+            streaming_client: OnceCell::new(),
             ctx: FlightContext::default(),
         }
     }
@@ -82,7 +80,7 @@ impl Database {
             schema: "".to_string(),
             dbname: dbname.into(),
             client,
-            streaming_client: Arc::new(Mutex::new(None)),
+            streaming_client: OnceCell::new(),
             ctx: FlightContext::default(),
         }
     }
@@ -123,13 +121,10 @@ impl Database {
     }
 
     pub async fn insert_to_stream(&self, requests: InsertRequests) -> Result<()> {
-        let streaming_client = {
-            let mut streaming_client = self.streaming_client.lock().await;
-            if streaming_client.is_none() {
-                *streaming_client = Some(self.client_stream().await?);
-            }
-            streaming_client.as_ref().unwrap().clone()
-        };
+        let streaming_client = self
+            .streaming_client
+            .get_or_try_init(|| self.client_stream())
+            .await?;
 
         let request = self.to_rpc_request(Request::Inserts(requests));
 
