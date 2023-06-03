@@ -30,12 +30,13 @@ parking_lot = "0.12"
 prost.workspace = true
 rand.workspace = true
 snafu.workspace = true
+tokio-stream = { version = "0.1", features = ["net"] }
+tokio.workspace = true
 tonic.workspace = true
 
 [dev-dependencies]
 datanode = { path = "../datanode" }
 substrait = { path = "../common/substrait" }
-tokio.workspace = true
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 prost.workspace = true
