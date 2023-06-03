@@ -16,7 +16,6 @@ use std::collections::HashMap;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::{Column, DeleteRequest as GrpcDeleteRequest};
-use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use snafu::{ensure, ResultExt};
 use table::requests::DeleteRequest;
@@ -41,14 +40,11 @@ pub fn to_table_delete_request(request: GrpcDeleteRequest) -> Result<DeleteReque
         let datatype: ConcreteDataType = ColumnDataTypeWrapper::try_new(datatype)
             .context(ColumnDataTypeSnafu)?
             .into();
-
-        let vector_builder = &mut datatype.create_mutable_vector(row_count);
-
-        add_values_to_builder(vector_builder, values, row_count, null_mask)?;
+        let vector = add_values_to_builder(datatype, values, row_count, null_mask)?;
 
         ensure!(
             key_column_values
-                .insert(column_name.clone(), vector_builder.to_vector())
+                .insert(column_name.clone(), vector)
                 .is_none(),
             IllegalDeleteRequestSnafu {
                 reason: format!("Duplicated column '{column_name}' in delete request.")

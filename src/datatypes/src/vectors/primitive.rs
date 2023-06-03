@@ -130,6 +130,12 @@ impl<T: LogicalPrimitiveType> PrimitiveVector<T> {
         }
     }
 
+    pub fn from_iter_values<I: IntoIterator<Item = T::Native>>(iter: I) -> Self {
+        Self {
+            array: PrimitiveArray::from_iter_values(iter),
+        }
+    }
+
     pub fn from_values<I: IntoIterator<Item = T::Native>>(iter: I) -> Self {
         Self {
             array: PrimitiveArray::from_iter_values(iter),
