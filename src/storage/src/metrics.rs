@@ -36,3 +36,5 @@ pub const COMPACT_ELAPSED: &str = "storage.compact.elapsed";
 pub const WRITE_BUFFER_BYTES: &str = "storage.write_buffer_bytes";
 /// Elapsed time of inserting memtable.
 pub const MEMTABLE_WRITE_ELAPSED: &str = "storage.memtable.write.elapsed";
+/// Elapsed time of preprocessing write batch.
+pub const PREPROCESS_ELAPSED: &str = "storage.write.preprocess";
