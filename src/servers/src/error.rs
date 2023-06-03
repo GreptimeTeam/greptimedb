@@ -122,6 +122,12 @@ pub enum Error {
         source: common_grpc::error::Error,
     },
 
+    #[snafu(display("Failed to write prometheus series, source: {}", source))]
+    PromSeriesWrite {
+        #[snafu(backtrace)]
+        source: common_grpc::error::Error,
+    },
+
     #[snafu(display("Failed to convert time precision, name: {}", name))]
     TimePrecision { name: String, location: Location },
 
@@ -300,7 +306,9 @@ impl ErrorExt for Error {
             | InvalidPrepareStatement { .. }
             | TimePrecision { .. } => StatusCode::InvalidArguments,
 
-            InfluxdbLinesWrite { source, .. } => source.status_code(),
+            InfluxdbLinesWrite { source, .. } | PromSeriesWrite { source, .. } => {
+                source.status_code()
+            }
 
             Hyper { .. } => StatusCode::Unknown,
             TlsRequired { .. } => StatusCode::Unknown,
@@ -405,6 +413,7 @@ impl IntoResponse for Error {
         let (status, error_message) = match self {
             Error::InfluxdbLineProtocol { .. }
             | Error::InfluxdbLinesWrite { .. }
+            | Error::PromSeriesWrite { .. }
             | Error::InvalidOpentsdbLine { .. }
             | Error::InvalidOpentsdbJsonRequest { .. }
             | Error::DecodePromRemoteRequest { .. }
