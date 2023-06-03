@@ -105,11 +105,14 @@ mod tests {
         assert_eq!(resp.content_encoding, "snappy");
         let body = prometheus::snappy_decompress(&resp.body).unwrap();
         let read_response = ReadResponse::decode(&body[..]).unwrap();
-        let query_results = read_response.results;
+        let mut query_results = read_response.results;
         assert_eq!(2, query_results.len());
 
         assert_eq!(1, query_results[0].timeseries.len());
-        let timeseries = &query_results[0].timeseries[0];
+        let timeseries = &mut query_results[0].timeseries[0];
+        timeseries
+            .labels
+            .sort_unstable_by(|lhs, rhs| lhs.name.cmp(&rhs.name));
 
         assert_eq!(
             vec![
@@ -140,7 +143,10 @@ mod tests {
         );
 
         assert_eq!(1, query_results[1].timeseries.len());
-        let timeseries = &query_results[1].timeseries[0];
+        let timeseries = &mut query_results[1].timeseries[0];
+        timeseries
+            .labels
+            .sort_unstable_by(|lhs, rhs| lhs.name.cmp(&rhs.name));
 
         assert_eq!(
             vec![
@@ -149,12 +155,12 @@ mod tests {
                     value: "metric3".to_string(),
                 },
                 Label {
-                    name: "idc".to_string(),
-                    value: "z002".to_string(),
-                },
-                Label {
                     name: "app".to_string(),
                     value: "biz".to_string(),
+                },
+                Label {
+                    name: "idc".to_string(),
+                    value: "z002".to_string(),
                 },
             ],
             timeseries.labels

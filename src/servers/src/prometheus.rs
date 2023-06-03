@@ -384,7 +384,28 @@ impl SeriesCompositor {
         for (name, null_mask) in self.label_null_masks.into_iter() {
             columns.get_mut(&name).unwrap().null_mask = null_mask.into_vec();
         }
-        let columns = columns.into_values().collect();
+        let mut columns = columns.into_values().collect::<Vec<_>>();
+        columns.reserve(2);
+        columns.push(Column {
+            column_name: TIMESTAMP_COLUMN_NAME.to_string(),
+            values: Some(column::Values {
+                ts_millisecond_values: self.ts_column,
+                ..Default::default()
+            }),
+            semantic_type: SemanticType::Timestamp as i32,
+            datatype: ColumnDataType::TimestampMillisecond as i32,
+            ..Default::default()
+        });
+        columns.push(Column {
+            column_name: FIELD_COLUMN_NAME.to_string(),
+            values: Some(column::Values {
+                f64_values: self.field_column,
+                ..Default::default()
+            }),
+            semantic_type: SemanticType::Field as i32,
+            datatype: ColumnDataType::Float64 as i32,
+            ..Default::default()
+        });
 
         let request = GrpcInsertRequest {
             table_name: self.metric_name,
@@ -586,15 +607,17 @@ mod tests {
             ..Default::default()
         };
 
-        let exprs = to_grpc_insert_requests(write_request).unwrap().0.inserts;
+        let mut exprs = to_grpc_insert_requests(write_request).unwrap().0.inserts;
+        exprs.sort_unstable_by(|lhs, rhs| lhs.table_name.cmp(&rhs.table_name));
         assert_eq!(3, exprs.len());
         assert_eq!("metric1", exprs[0].table_name);
         assert_eq!("metric2", exprs[1].table_name);
         assert_eq!("metric3", exprs[2].table_name);
 
-        let expr = exprs.get(0).unwrap();
+        let expr = exprs.get_mut(0).unwrap();
 
-        let columns = &expr.columns;
+        let columns = &mut expr.columns;
+        columns.sort_unstable_by(|lhs, rhs| lhs.column_name.cmp(&rhs.column_name));
         let row_count = expr.row_count;
 
         assert_eq!(2, row_count);
@@ -618,9 +641,10 @@ mod tests {
             vec!["spark", "spark"]
         );
 
-        let expr = exprs.get(1).unwrap();
+        let expr = exprs.get_mut(1).unwrap();
 
-        let columns = &expr.columns;
+        let columns = &mut expr.columns;
+        columns.sort_unstable_by(|lhs, rhs| lhs.column_name.cmp(&rhs.column_name));
         let row_count = expr.row_count;
 
         assert_eq!(2, row_count);
@@ -638,46 +662,45 @@ mod tests {
             vec![3.0, 4.0]
         );
 
-        assert_eq!(columns[2].column_name, "instance");
+        assert_eq!(columns[2].column_name, "idc");
         assert_eq!(
             columns[2].values.as_ref().unwrap().string_values,
-            vec!["test_host1", "test_host1"]
-        );
-        assert_eq!(columns[3].column_name, "idc");
-        assert_eq!(
-            columns[3].values.as_ref().unwrap().string_values,
             vec!["z001", "z001"]
         );
+        assert_eq!(columns[3].column_name, "instance");
+        assert_eq!(
+            columns[3].values.as_ref().unwrap().string_values,
+            vec!["test_host1", "test_host1"]
+        );
 
-        let expr = exprs.get(2).unwrap();
+        let expr = exprs.get_mut(2).unwrap();
 
-        let columns = &expr.columns;
+        let columns = &mut expr.columns;
+        columns.sort_unstable_by(|lhs, rhs| lhs.column_name.cmp(&rhs.column_name));
         let row_count = expr.row_count;
 
         assert_eq!(3, row_count);
         assert_eq!(columns.len(), 4);
 
-        assert_eq!(columns[0].column_name, TIMESTAMP_COLUMN_NAME);
+        assert_eq!(columns[0].column_name, "app");
         assert_eq!(
-            columns[0].values.as_ref().unwrap().ts_millisecond_values,
+            columns[0].values.as_ref().unwrap().string_values,
+            vec!["biz", "biz", "biz"]
+        );
+        assert_eq!(columns[1].column_name, TIMESTAMP_COLUMN_NAME);
+        assert_eq!(
+            columns[1].values.as_ref().unwrap().ts_millisecond_values,
             vec![1000, 2000, 3000]
         );
-
-        assert_eq!(columns[1].column_name, FIELD_COLUMN_NAME);
+        assert_eq!(columns[2].column_name, FIELD_COLUMN_NAME);
         assert_eq!(
-            columns[1].values.as_ref().unwrap().f64_values,
+            columns[2].values.as_ref().unwrap().f64_values,
             vec![5.0, 6.0, 7.0]
         );
-
-        assert_eq!(columns[2].column_name, "idc");
-        assert_eq!(
-            columns[2].values.as_ref().unwrap().string_values,
-            vec!["z002", "z002", "z002"]
-        );
-        assert_eq!(columns[3].column_name, "app");
+        assert_eq!(columns[3].column_name, "idc");
         assert_eq!(
             columns[3].values.as_ref().unwrap().string_values,
-            vec!["biz", "biz", "biz"]
+            vec!["z002", "z002", "z002"]
         );
     }
 
