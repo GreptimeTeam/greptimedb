@@ -15,13 +15,14 @@
 //! prometheus protocol supportings
 //! handles prometheus remote_write, remote_read logic
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 use api::prometheus::remote::label_matcher::Type as MatcherType;
 use api::prometheus::remote::{Label, Query, Sample, TimeSeries, WriteRequest};
 use api::v1::column::SemanticType;
 use api::v1::{column, Column, ColumnDataType, InsertRequest as GrpcInsertRequest, InsertRequests};
+use common_base::BitVec;
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_time::timestamp::TimeUnit;
 use datatypes::prelude::{ConcreteDataType, Value};
@@ -283,84 +284,153 @@ fn recordbatch_to_timeseries(table: &str, recordbatch: RecordBatch) -> Result<Ve
     Ok(timeseries_map.into_values().collect())
 }
 
-pub fn to_grpc_insert_requests(request: WriteRequest) -> Result<(InsertRequests, usize)> {
-    let (inserts, samples_counts) = itertools::process_results(
-        request.timeseries.into_iter().map(to_grpc_insert_request),
-        |x| x.unzip::<_, _, Vec<_>, Vec<_>>(),
-    )?;
-    Ok((
-        InsertRequests { inserts },
-        samples_counts.into_iter().sum::<usize>(),
-    ))
+/// Composite multiple time-series from the same metric into one [GrpcInsertRequest].
+struct SeriesCompositor {
+    metric_name: String,
+    label_columns: HashMap<String, Vec<String>>,
+    label_null_masks: HashMap<String, BitVec>,
+    ts_column: Vec<i64>,
+    field_column: Vec<f64>,
+    row_count: usize,
 }
 
-fn to_grpc_insert_request(timeseries: TimeSeries) -> Result<(GrpcInsertRequest, usize)> {
-    let samples_count = timeseries.samples.len();
-
-    // TODO(dennis): save exemplars into a column
-    let labels = timeseries.labels;
-    let samples = timeseries.samples;
-
-    let row_count = samples.len();
-    let mut columns = Vec::with_capacity(2 + labels.len());
-
-    let ts_column = Column {
-        column_name: TIMESTAMP_COLUMN_NAME.to_string(),
-        values: Some(column::Values {
-            ts_millisecond_values: samples.iter().map(|x| x.timestamp).collect(),
-            ..Default::default()
-        }),
-        semantic_type: SemanticType::Timestamp as i32,
-        datatype: ColumnDataType::TimestampMillisecond as i32,
-        ..Default::default()
-    };
-    columns.push(ts_column);
-
-    let field_column = Column {
-        column_name: FIELD_COLUMN_NAME.to_string(),
-        values: Some(column::Values {
-            f64_values: samples.iter().map(|x| x.value).collect(),
-            ..Default::default()
-        }),
-        semantic_type: SemanticType::Field as i32,
-        datatype: ColumnDataType::Float64 as i32,
-        ..Default::default()
-    };
-    columns.push(field_column);
-
-    let mut table_name = None;
-
-    for label in labels {
-        let tagk = label.name;
-        let tagv = label.value;
-
-        // The metric name is a special label
-        if tagk == METRIC_NAME_LABEL {
-            table_name = Some(tagv);
-            continue;
+impl SeriesCompositor {
+    pub fn new(metric_name: String) -> Self {
+        Self {
+            metric_name,
+            label_columns: HashMap::new(),
+            label_null_masks: HashMap::new(),
+            ts_column: Vec::new(),
+            field_column: Vec::new(),
+            row_count: 0,
         }
-
-        columns.push(Column {
-            column_name: tagk.to_string(),
-            values: Some(column::Values {
-                string_values: std::iter::repeat(tagv).take(row_count).collect(),
-                ..Default::default()
-            }),
-            semantic_type: SemanticType::Tag as i32,
-            datatype: ColumnDataType::String as i32,
-            ..Default::default()
-        });
     }
 
-    let request = GrpcInsertRequest {
-        table_name: table_name.context(error::InvalidPromRemoteRequestSnafu {
+    /// Add a group of labels from one time-series. This method will auto fill NULL
+    /// values for labels that are not present in the time-series. [METRIC_NAME_LABEL]
+    /// will be ignored.
+    pub fn add_series(&mut self, labels: Vec<Label>, samples: Vec<Sample>) {
+        // Collect all observed labels
+        let mut marks = self
+            .label_null_masks
+            .keys()
+            .cloned()
+            .collect::<HashSet<_>>();
+
+        // Fill NULLs for new labels
+        for label in &labels {
+            if label.name == METRIC_NAME_LABEL {
+                continue;
+            }
+            if !marks.contains(&label.name) {
+                self.label_columns.insert(label.name.clone(), vec![]);
+                self.label_null_masks.insert(
+                    label.name.clone(),
+                    std::iter::repeat(true).take(self.row_count).collect(),
+                );
+            }
+        }
+
+        // Insert labels
+        for label in labels {
+            if label.name == METRIC_NAME_LABEL {
+                continue;
+            }
+            marks.remove(&label.name);
+
+            // safety: all label name are created previously
+            self.label_columns
+                .get_mut(&label.name)
+                .unwrap()
+                .extend(std::iter::repeat(label.value).take(samples.len()));
+            self.label_null_masks
+                .get_mut(&label.name)
+                .unwrap()
+                .extend(std::iter::repeat(false).take(samples.len()));
+        }
+
+        // Fill NULLs for labels that are not present in this time-series
+        for label in marks {
+            self.label_null_masks
+                .get_mut(&label)
+                .unwrap()
+                .extend(std::iter::repeat(true).take(samples.len()));
+        }
+
+        self.ts_column.extend(samples.iter().map(|x| x.timestamp));
+        self.field_column.extend(samples.iter().map(|x| x.value));
+
+        self.row_count += samples.len();
+    }
+
+    fn into_request(self) -> (GrpcInsertRequest, usize) {
+        let mut columns = self
+            .label_columns
+            .into_iter()
+            .map(|(name, values)| {
+                let column = Column {
+                    column_name: name.clone(),
+                    values: Some(column::Values {
+                        string_values: values,
+                        ..Default::default()
+                    }),
+                    semantic_type: SemanticType::Tag as i32,
+                    datatype: ColumnDataType::String as i32,
+                    ..Default::default()
+                };
+                (name, column)
+            })
+            .collect::<HashMap<_, _>>();
+        for (name, null_mask) in self.label_null_masks.into_iter() {
+            columns.get_mut(&name).unwrap().null_mask = null_mask.into_vec();
+        }
+        let columns = columns.into_values().collect();
+
+        let request = GrpcInsertRequest {
+            table_name: self.metric_name,
+            // Table created in this path (auto create table on prometheus remote write) only have one region
+            region_number: 0,
+            columns,
+            row_count: self.row_count as u32,
+        };
+
+        (request, self.row_count)
+    }
+}
+
+pub fn to_grpc_insert_requests(request: WriteRequest) -> Result<(InsertRequests, usize)> {
+    let mut metrics_buf = HashMap::new();
+
+    for series in request.timeseries {
+        let mut table_name = None;
+
+        for label in &series.labels {
+            if label.name == METRIC_NAME_LABEL {
+                table_name = Some(label.value.clone());
+                break;
+            }
+        }
+        let table_name = table_name.context(error::InvalidPromRemoteRequestSnafu {
             msg: "missing '__name__' label in timeseries",
-        })?,
-        region_number: 0,
-        columns,
-        row_count: row_count as u32,
-    };
-    Ok((request, samples_count))
+        })?;
+        metrics_buf
+            .entry(table_name)
+            .or_insert_with_key(|t| SeriesCompositor::new(t.clone()))
+            .add_series(series.labels, series.samples);
+    }
+
+    let mut total_row_count = 0;
+    let inserts = metrics_buf
+        .into_values()
+        .map(|compositor| {
+            let (request, row_count) = compositor.into_request();
+            total_row_count += row_count;
+            request
+        })
+        .collect();
+    let inserts = InsertRequests { inserts };
+
+    Ok((inserts, total_row_count))
 }
 
 #[inline]
