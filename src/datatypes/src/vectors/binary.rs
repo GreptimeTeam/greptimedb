@@ -113,6 +113,14 @@ impl Vector for BinaryVector {
     }
 }
 
+impl From<Vec<Vec<u8>>> for BinaryVector {
+    fn from(data: Vec<Vec<u8>>) -> Self {
+        Self {
+            array: BinaryArray::from_iter_values(data),
+        }
+    }
+}
+
 impl ScalarVector for BinaryVector {
     type OwnedItem = Vec<u8>;
     type RefItem<'a> = &'a [u8];
