@@ -1,0 +1,20 @@
+[package]
+name = "chaos-master"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "May the Chaos be with you"
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+async-trait = "0.1"
+common-error = { path = "../../src/common/error" }
+datanode = { path = "../../src/datanode" }
+frontend = { path = "../../src/frontend" }
+lazy_static = "1.4"
+meta-srv = { path = "../../src/meta-srv" }
+procfs = { version="0.15.1" }
+servers = { path = "../../src/servers" }
+regex = "1.6"
+serde.workspace = true
+snafu.workspace = true

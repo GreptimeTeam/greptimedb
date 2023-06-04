@@ -46,6 +46,7 @@ members = [
     "src/table-procedure",
     "tests-integration",
     "tests/runner",
+    "tests/chaos",
 ]
 
 [workspace.package]
