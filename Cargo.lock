@@ -5307,6 +5307,7 @@ dependencies = [
  "futures",
  "key-lock",
  "log-store",
+ "metrics",
  "object-store",
  "serde",
  "serde_json",

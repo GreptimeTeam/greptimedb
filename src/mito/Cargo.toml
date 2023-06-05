@@ -21,6 +21,7 @@ common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-datasource = { path = "../common/datasource" }
 common-telemetry = { path = "../common/telemetry" }
+common-test-util = { path = "../common/test-util", optional = true }
 common-time = { path = "../common/time" }
 dashmap = "5.4"
 datafusion.workspace = true
@@ -29,6 +30,7 @@ datatypes = { path = "../datatypes" }
 futures.workspace = true
 key-lock = "0.1"
 log-store = { path = "../log-store" }
+metrics.workspace = true
 object-store = { path = "../object-store" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -36,7 +38,6 @@ snafu.workspace = true
 storage = { path = "../storage" }
 store-api = { path = "../store-api" }
 table = { path = "../table" }
-common-test-util = { path = "../common/test-util", optional = true }
 tokio.workspace = true
 
 [dev-dependencies]

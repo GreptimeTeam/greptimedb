@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use common_telemetry::{logging, timer};
+use metrics::counter;
 pub use picker::{FlushPicker, PickerConfig};
 pub use scheduler::{
     FlushHandle, FlushRegionRequest, FlushRequest, FlushScheduler, FlushSchedulerRef,
@@ -32,7 +33,7 @@ use crate::error::Result;
 use crate::manifest::action::*;
 use crate::manifest::region::RegionManifest;
 use crate::memtable::{IterContext, MemtableId, MemtableRef};
-use crate::metrics::FLUSH_ELAPSED;
+use crate::metrics::{FLUSH_BYTES_TOTAL, FLUSH_ELAPSED};
 use crate::region::{RegionWriterRef, SharedDataRef};
 use crate::sst::{AccessLayerRef, FileId, FileMeta, Source, SstInfo, WriteOptions};
 use crate::wal::Wal;
@@ -296,6 +297,9 @@ impl<S: LogStore> FlushJob<S> {
             .into_iter()
             .flatten()
             .collect();
+
+        let flush_bytes = metas.iter().map(|f| f.file_size).sum();
+        counter!(FLUSH_BYTES_TOTAL, flush_bytes);
 
         let file_ids = metas.iter().map(|f| f.file_id).collect::<Vec<_>>();
         logging::info!("Successfully flush memtables, region:{region_id}, files: {file_ids:?}");
