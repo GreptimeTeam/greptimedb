@@ -254,7 +254,6 @@ impl Database {
 
         let mut client = self.client.make_flight_client()?;
 
-        // TODO(LFC): Streaming get flight data.
         let flight_data: Vec<FlightData> = client
             .mut_inner()
             .do_get(request)

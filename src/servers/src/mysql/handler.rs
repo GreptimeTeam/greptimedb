@@ -88,9 +88,6 @@ impl MysqlInstanceShim {
         trace!("Start executing query: '{}'", query);
         let start = Instant::now();
 
-        // TODO(LFC): Find a better way to deal with these special federated queries:
-        // `check` uses regex to filter out unsupported statements emitted by MySQL's federated
-        // components, this is quick and dirty, there must be a better way to do it.
         let output =
             if let Some(output) = crate::mysql::federated::check(query, self.session.context()) {
                 vec![Ok(output)]

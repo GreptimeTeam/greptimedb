@@ -31,7 +31,6 @@ pub struct DatanodeClients {
 
 impl Default for DatanodeClients {
     fn default() -> Self {
-        // TODO(LFC): Make this channel config configurable.
         let config = ChannelConfig::new().timeout(Duration::from_secs(8));
 
         Self {

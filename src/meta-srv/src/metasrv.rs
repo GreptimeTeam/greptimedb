@@ -154,7 +154,6 @@ impl MetaSrv {
                                     }
                                 }
                                 LeaderChangeMessage::StepDown(leader) => {
-                                    // TODO(LFC): TBC
                                     error!("Leader :{:?} step down", leader);
                                 }
                             }
@@ -164,7 +163,6 @@ impl MetaSrv {
                             break;
                         }
                         Err(RecvError::Lagged(_)) => {
-                            // TODO(LFC): TBC
                             break;
                         }
                     }

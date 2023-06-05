@@ -194,7 +194,6 @@ impl DfPhysicalPlan for DfPhysicalPlanAdapter {
     }
 
     fn statistics(&self) -> Statistics {
-        // TODO(LFC): impl statistics
         Statistics::default()
     }
 }

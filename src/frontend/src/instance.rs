@@ -285,9 +285,6 @@ impl Instance {
         requests: InsertRequests,
         ctx: QueryContextRef,
     ) -> Result<Output> {
-        // TODO(LFC): Optimize concurrent table creation and table alteration.
-        // Currently table creation is guarded by a distributed lock in Metasrv. However, table
-        // alteration is not. We should all switch to procedures in Metasrv.
         let _ = future::join_all(
             requests
                 .inserts

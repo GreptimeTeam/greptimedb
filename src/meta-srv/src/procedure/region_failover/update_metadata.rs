@@ -43,16 +43,6 @@ impl UpdateRegionMetadata {
         Self { candidate }
     }
 
-    // TODO(LFC): Update the two table metadata values in a batch atomically.
-    //
-    // Though the updating of the two metadata values is guarded by a distributed lock,
-    // it does not robust enough. For example, the lock lease could be expired in the middle of
-    // one's updating, letting others to start updating concurrently. For now, we set the lease of
-    // the distributed lock to 10 seconds, which is long enough here to get the job done.
-    //
-    // Maybe we should introduce "version" companion values to these two metadata values, and
-    // use ETCD transaction request to update them?
-
     /// Updates the metadata of the table. Specifically, the [TableGlobalValue] and [TableRouteValue].
     async fn update_metadata(
         &self,

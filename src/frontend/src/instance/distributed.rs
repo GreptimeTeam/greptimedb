@@ -598,7 +598,6 @@ impl DistInstance {
         Ok(Output::AffectedRows(affected_rows as usize))
     }
 
-    // TODO(LFC): Like insertions above, refactor GRPC deletion impl here.
     async fn handle_dist_delete(
         &self,
         request: DeleteRequest,
@@ -662,8 +661,6 @@ impl GrpcQueryHandler for DistInstance {
                 match expr {
                     DdlExpr::CreateDatabase(expr) => self.handle_create_database(expr, ctx).await,
                     DdlExpr::CreateTable(mut expr) => {
-                        // TODO(LFC): Support creating distributed table through GRPC interface.
-                        // Currently only SQL supports it; how to design the fields in CreateTableExpr?
                         let _ = self.create_table(&mut expr, None).await;
                         Ok(Output::AffectedRows(0))
                     }
