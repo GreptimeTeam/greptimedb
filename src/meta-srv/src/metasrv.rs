@@ -146,18 +146,16 @@ impl MetaSrv {
             common_runtime::spawn_bg(async move {
                 loop {
                     match rx.recv().await {
-                        Ok(msg) => {
-                            match msg {
-                                LeaderChangeMessage::Elected(_) => {
-                                    if let Err(e) = procedure_manager.recover().await {
-                                        error!("Failed to recover procedures, error: {e}");
-                                    }
-                                }
-                                LeaderChangeMessage::StepDown(leader) => {
-                                    error!("Leader :{:?} step down", leader);
+                        Ok(msg) => match msg {
+                            LeaderChangeMessage::Elected(_) => {
+                                if let Err(e) = procedure_manager.recover().await {
+                                    error!("Failed to recover procedures, error: {e}");
                                 }
                             }
-                        }
+                            LeaderChangeMessage::StepDown(leader) => {
+                                error!("Leader :{:?} step down", leader);
+                            }
+                        },
                         Err(RecvError::Closed) => {
                             error!("Not expected, is leader election loop still running?");
                             break;
