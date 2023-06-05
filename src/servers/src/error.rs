@@ -267,6 +267,7 @@ pub enum Error {
         location: Location,
     },
 
+    #[cfg(feature = "pprof")]
     #[snafu(display("Failed to dump pprof data, source: {}", source))]
     DumpPprof {
         #[snafu(backtrace)]
@@ -348,6 +349,7 @@ impl ErrorExt for Error {
                 }
             }
 
+            #[cfg(feature = "pprof")]
             DumpPprof { source, .. } => source.status_code(),
         }
     }

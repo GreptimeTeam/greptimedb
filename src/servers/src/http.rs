@@ -503,20 +503,6 @@ impl HttpServer {
             );
         }
 
-        // prof routers
-        // router = router.nest(
-        //     &format!("/{HTTP_API_VERSION}/prof"),
-        //     Router::new()
-        //         .route(
-        //             "/cpu",
-        //             routing::get(pprof::pprof_handler).post(pprof::pprof_handler),
-        //         )
-        //         .route(
-        //             "/mem",
-        //             routing::get(mem_prof::mem_prof_handler).post(mem_prof::mem_prof_handler),
-        //         ),
-        // );
-
         if let Some(metrics_handler) = self.metrics_handler {
             router = router.nest("", self.route_metrics(metrics_handler));
         }
