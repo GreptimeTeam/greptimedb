@@ -341,12 +341,13 @@ mod tests {
         builder.root(&tmp_dir.path().to_string_lossy());
         let object_store = ObjectStore::new(builder).unwrap().finish();
 
+        let test_gc_duration = Duration::from_millis(50);
         let manifest = RegionManifest::with_checkpointer(
             "/manifest/",
             object_store,
             manifest_compress_type(compress),
             None,
-            Some(Duration::from_millis(50)),
+            Some(test_gc_duration),
         );
         manifest.start().await.unwrap();
 
@@ -492,7 +493,7 @@ mod tests {
         );
 
         // wait for gc
-        tokio::time::sleep(Duration::from_millis(60)).await;
+        tokio::time::sleep(test_gc_duration * 3).await;
 
         for v in checkpoint_versions {
             if v < 4 {

@@ -139,7 +139,7 @@ impl Default for HttpOptions {
     fn default() -> Self {
         Self {
             addr: "127.0.0.1:4000".to_string(),
-            timeout: Duration::from_secs(3),
+            timeout: Duration::from_secs(30),
             disable_dashboard: false,
         }
     }
