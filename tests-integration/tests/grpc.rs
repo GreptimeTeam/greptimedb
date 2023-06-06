@@ -415,7 +415,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         step: "5s".to_string(),
     };
     let range_query_request: PromqlRequest = PromqlRequest {
-        header: Some(header),
+        header: Some(header.clone()),
         promql: Some(Promql::RangeQuery(range_query)),
     };
     let json_bytes = gateway_client
@@ -451,6 +451,36 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                     ..Default::default()
                 },
             ],
+        }),
+        error: None,
+        error_type: None,
+        warnings: None,
+    };
+    assert_eq!(range_query_result, expected);
+
+    // query nonexistent data
+    let range_query = PromRangeQuery {
+        query: "test".to_string(),
+        start: "1000000000".to_string(),
+        end: "1000001000".to_string(),
+        step: "5s".to_string(),
+    };
+    let range_query_request: PromqlRequest = PromqlRequest {
+        header: Some(header),
+        promql: Some(Promql::RangeQuery(range_query)),
+    };
+    let json_bytes = gateway_client
+        .handle(range_query_request)
+        .await
+        .unwrap()
+        .into_inner()
+        .body;
+    let range_query_result = serde_json::from_slice::<PromJsonResponse>(&json_bytes).unwrap();
+    let expected = PromJsonResponse {
+        status: "success".to_string(),
+        data: PromResponse::PromData(PromData {
+            result_type: "matrix".to_string(),
+            result: vec![],
         }),
         error: None,
         error_type: None,
