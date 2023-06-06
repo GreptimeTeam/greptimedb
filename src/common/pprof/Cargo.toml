@@ -6,7 +6,7 @@ license.workspace = true
 
 [dependencies]
 common-error = { path = "../error" }
-pprof = { version = "0.11.1", features = [
+pprof = { version = "0.11", features = [
     "flamegraph",
     "prost-codec",
     "protobuf",
