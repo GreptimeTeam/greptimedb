@@ -41,7 +41,7 @@ servers = { path = "../servers" }
 session = { path = "../session" }
 snafu.workspace = true
 substrait = { path = "../common/substrait" }
-tikv-jemallocator = { version = "0.5" }
+tikv-jemallocator = "0.5"
 tokio.workspace = true
 
 [dev-dependencies]
