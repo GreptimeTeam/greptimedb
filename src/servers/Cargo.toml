@@ -71,6 +71,7 @@ snap = "1"
 sql = { path = "../sql" }
 strum = { version = "0.24", features = ["derive"] }
 table = { path = "../table" }
+tikv-jemalloc-ctl = "0.5"
 tokio-rustls = "0.24"
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio.workspace = true
