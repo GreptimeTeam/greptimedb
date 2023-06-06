@@ -266,6 +266,14 @@ pub enum Error {
         source: tokio::task::JoinError,
         location: Location,
     },
+
+    #[snafu(display(
+        "Failed to update jemalloc metrics, source: {source:?}, location: {location:?}"
+    ))]
+    UpdateJemallocMetrics {
+        source: tikv_jemalloc_ctl::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -341,6 +349,7 @@ impl ErrorExt for Error {
                     StatusCode::Unknown
                 }
             }
+            UpdateJemallocMetrics { .. } => StatusCode::Internal,
         }
     }
 

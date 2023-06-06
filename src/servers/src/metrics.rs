@@ -15,11 +15,19 @@
 use std::task::{Context, Poll};
 use std::time::Instant;
 
+use common_telemetry::error;
 use hyper::Body;
+use metrics::gauge;
 use metrics_process::Collector;
 use once_cell::sync::Lazy;
+use snafu::ResultExt;
+use tikv_jemalloc_ctl::stats::{allocated_mib, resident_mib};
+use tikv_jemalloc_ctl::{epoch, epoch_mib, stats};
 use tonic::body::BoxBody;
 use tower::{Layer, Service};
+
+use crate::error;
+use crate::error::UpdateJemallocMetricsSnafu;
 
 pub(crate) const METRIC_DB_LABEL: &str = "db";
 pub(crate) const METRIC_CODE_LABEL: &str = "code";
@@ -67,6 +75,51 @@ pub(crate) static PROCESS_COLLECTOR: Lazy<Collector> = Lazy::new(|| {
     collector.describe();
     collector
 });
+
+pub(crate) static JEMALLOC_COLLECTOR: Lazy<Option<JemallocCollector>> = Lazy::new(|| {
+    let collector = JemallocCollector::try_new()
+        .map_err(|e| {
+            error!(e; "Failed to retrieve jemalloc metrics");
+            e
+        })
+        .ok();
+    collector.as_ref().map(|c| c.update());
+    collector
+});
+
+pub(crate) struct JemallocCollector {
+    epoch: epoch_mib,
+    allocated: allocated_mib,
+    resident: resident_mib,
+}
+
+impl JemallocCollector {
+    pub(crate) fn try_new() -> error::Result<Self> {
+        let e = epoch::mib().context(UpdateJemallocMetricsSnafu)?;
+        let allocated = stats::allocated::mib().context(UpdateJemallocMetricsSnafu)?;
+        let resident = stats::resident::mib().context(UpdateJemallocMetricsSnafu)?;
+        Ok(Self {
+            epoch: e,
+            allocated,
+            resident,
+        })
+    }
+
+    pub(crate) fn update(&self) -> error::Result<()> {
+        {
+            self.epoch.advance().context(UpdateJemallocMetricsSnafu)?;
+            let allocated = self.allocated.read().context(UpdateJemallocMetricsSnafu)?;
+            let resident = self.resident.read().context(UpdateJemallocMetricsSnafu)?;
+            gauge!("sys.jemalloc.allocated", allocated as f64);
+            gauge!("sys.jemalloc.resident", resident as f64);
+            Ok(())
+        }
+        .map_err(|e: error::Error| {
+            error!(e; "Failed to update jemalloc metrics");
+            e
+        })
+    }
+}
 
 // Based on https://github.com/hyperium/tonic/blob/master/examples/src/tower/server.rs
 // See https://github.com/hyperium/tonic/issues/242

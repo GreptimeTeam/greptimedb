@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use session::context::UserInfo;
 
 use crate::http::{ApiState, JsonResponse};
-use crate::metrics::PROCESS_COLLECTOR;
+use crate::metrics::{JEMALLOC_COLLECTOR, PROCESS_COLLECTOR};
 use crate::metrics_handler::MetricsHandler;
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
@@ -137,7 +137,7 @@ pub async fn metrics(
 ) -> String {
     // Collect process metrics.
     PROCESS_COLLECTOR.collect();
-
+    JEMALLOC_COLLECTOR.as_ref().map(|c| c.update());
     state.render()
 }
 
