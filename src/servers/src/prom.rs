@@ -52,7 +52,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::auth::UserProviderRef;
 use crate::error::{
-    AlreadyStartedSnafu, CollectRecordbatchSnafu, Error, InternalSnafu, NotSupportedSnafu, Result,
+    AlreadyStartedSnafu, CollectRecordbatchSnafu, Error, InternalSnafu, InvalidQuerySnafu, Result,
     StartHttpSnafu, UnexpectedResultSnafu,
 };
 use crate::http::authorize::HttpAuth;
@@ -244,7 +244,7 @@ impl PromJsonResponse {
     pub async fn from_query_result(
         result: Result<Output>,
         metric_name: String,
-        result_type: Option<ValueType>,
+        result_type: ValueType,
     ) -> Json<Self> {
         let response: Result<Json<Self>> = try {
             let json = match result? {
@@ -271,7 +271,7 @@ impl PromJsonResponse {
             json
         };
 
-        let result_type_string = result_type.map(|t| t.to_string()).unwrap_or_default();
+        let result_type_string = result_type.to_string();
 
         match response {
             Ok(resp) => resp,
@@ -295,7 +295,7 @@ impl PromJsonResponse {
     fn record_batches_to_data(
         batches: RecordBatches,
         metric_name: String,
-        result_type: Option<ValueType>,
+        result_type: ValueType,
     ) -> Result<PromResponse> {
         // infer semantic type of each column from schema.
         // TODO(ruihang): wish there is a better way to do this.
@@ -390,27 +390,21 @@ impl PromJsonResponse {
             .map(|(tags, mut values)| {
                 let metric = tags.into_iter().collect();
                 match result_type {
-                    Some(ValueType::Vector) | Some(ValueType::Scalar) | Some(ValueType::String) => {
-                        Ok(PromSeries {
-                            metric,
-                            value: values.pop(),
-                            ..Default::default()
-                        })
-                    }
-                    Some(ValueType::Matrix) => Ok(PromSeries {
+                    ValueType::Vector | ValueType::Scalar | ValueType::String => Ok(PromSeries {
+                        metric,
+                        value: values.pop(),
+                        ..Default::default()
+                    }),
+                    ValueType::Matrix => Ok(PromSeries {
                         metric,
                         values,
                         ..Default::default()
                     }),
-                    other => NotSupportedSnafu {
-                        feat: format!("PromQL result type {other:?}"),
-                    }
-                    .fail(),
                 }
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let result_type_string = result_type.map(|t| t.to_string()).unwrap_or_default();
+        let result_type_string = result_type.to_string();
         let data = PromResponse::PromData(PromData {
             result_type: result_type_string,
             result,
@@ -452,8 +446,10 @@ pub async fn instant_query(
     let query_ctx = QueryContext::with(catalog, schema);
 
     let result = handler.do_query(&prom_query, Arc::new(query_ctx)).await;
-    let (metric_name, result_type) =
-        retrieve_metric_name_and_result_type(&prom_query.query).unwrap_or_default();
+    let (metric_name, result_type) = match retrieve_metric_name_and_result_type(&prom_query.query) {
+        Ok((metric_name, result_type)) => (metric_name.unwrap_or_default(), result_type),
+        Err(err) => return PromJsonResponse::error(err.status_code().to_string(), err.to_string()),
+    };
     PromJsonResponse::from_query_result(result, metric_name, result_type).await
 }
 
@@ -486,9 +482,11 @@ pub async fn range_query(
     let query_ctx = QueryContext::with(catalog, schema);
 
     let result = handler.do_query(&prom_query, Arc::new(query_ctx)).await;
-    let (metric_name, _) =
-        retrieve_metric_name_and_result_type(&prom_query.query).unwrap_or_default();
-    PromJsonResponse::from_query_result(result, metric_name, Some(ValueType::Matrix)).await
+    let metric_name = match retrieve_metric_name_and_result_type(&prom_query.query) {
+        Err(err) => return PromJsonResponse::error(err.status_code().to_string(), err.to_string()),
+        Ok((metric_name, _)) => metric_name.unwrap_or_default(),
+    };
+    PromJsonResponse::from_query_result(result, metric_name, ValueType::Matrix).await
 }
 
 #[derive(Debug, Default, Serialize, JsonSchema)]
@@ -723,12 +721,13 @@ fn record_batches_to_labels_name(
 
 pub(crate) fn retrieve_metric_name_and_result_type(
     promql: &str,
-) -> Option<(String, Option<ValueType>)> {
-    let promql_expr = promql_parser::parser::parse(promql).ok()?;
-    let metric_name = promql_expr_to_metric_name(&promql_expr)?;
-    let result_type = Some(promql_expr.value_type());
+) -> Result<(Option<String>, ValueType)> {
+    let promql_expr = promql_parser::parser::parse(promql)
+        .map_err(|reason| InvalidQuerySnafu { reason }.build())?;
+    let metric_name = promql_expr_to_metric_name(&promql_expr);
+    let result_type = promql_expr.value_type();
 
-    Some((metric_name, result_type))
+    Ok((metric_name, result_type))
 }
 
 fn promql_expr_to_metric_name(expr: &PromqlExpr) -> Option<String> {
