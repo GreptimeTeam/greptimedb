@@ -12,28 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use cases::TestCase;
-use common_telemetry::info;
+pub mod example;
 
-use crate::cases::example::ExampleTest;
-
-pub mod cases;
-pub mod chaos;
-pub mod cluster;
-pub mod error;
-
-#[tokio::main]
-async fn main() {
-    common_telemetry::init_default_ut_logging();
-
-    let tests = [ExampleTest];
-
-    for test in tests {
-        let join = tokio::spawn(async move {
-            info!("running test: {}", test.name());
-            test.run().await;
-        });
-
-        join.await.unwrap();
-    }
+#[async_trait::async_trait]
+/// TestCase represents a test.
+pub trait TestCase {
+    async fn run(&self);
+    fn name(&self) -> &'static str;
 }

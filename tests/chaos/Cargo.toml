@@ -22,3 +22,4 @@ snafu.workspace = true
 servers = { path = "../../src/servers" }
 reqwest = { version = "0.11", features = ["json"] }
 regex = "1.6"
+tokio.workspace = true
