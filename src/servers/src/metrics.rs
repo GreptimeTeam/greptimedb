@@ -67,6 +67,8 @@ pub(crate) const METRIC_GRPC_REQUESTS_ELAPSED: &str = "servers.grpc_requests_ela
 pub(crate) const METRIC_METHOD_LABEL: &str = "method";
 pub(crate) const METRIC_PATH_LABEL: &str = "path";
 pub(crate) const METRIC_STATUS_LABEL: &str = "status";
+pub(crate) const METRIC_JEMALLOC_RESIDENT: &str = "sys.jemalloc.resident";
+pub(crate) const METRIC_JEMALLOC_ALLOCATED: &str = "sys.jemalloc.allocated";
 
 /// Prometheus style process metrics collector.
 pub(crate) static PROCESS_COLLECTOR: Lazy<Collector> = Lazy::new(|| {
@@ -113,8 +115,8 @@ impl JemallocCollector {
         self.epoch.advance().context(UpdateJemallocMetricsSnafu)?;
         let allocated = self.allocated.read().context(UpdateJemallocMetricsSnafu)?;
         let resident = self.resident.read().context(UpdateJemallocMetricsSnafu)?;
-        gauge!("sys.jemalloc.allocated", allocated as f64);
-        gauge!("sys.jemalloc.resident", resident as f64);
+        gauge!(METRIC_JEMALLOC_ALLOCATED, allocated as f64);
+        gauge!(METRIC_JEMALLOC_RESIDENT, resident as f64);
         Ok(())
     }
 }
