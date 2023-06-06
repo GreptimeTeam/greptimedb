@@ -563,6 +563,7 @@ impl PromHandler for Instance {
         let stmt = QueryLanguageParser::parse_promql(query).with_context(|_| ParsePromQLSnafu {
             query: query.clone(),
         })?;
+
         self.statement_executor
             .execute_stmt(stmt, query_ctx)
             .await

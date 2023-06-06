@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -35,7 +36,11 @@ use datanode::error::{CreateTableSnafu, Result};
 use datanode::instance::Instance;
 use datanode::sql::SqlHandler;
 use datatypes::data_type::ConcreteDataType;
+use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::schema::{ColumnSchema, RawSchema};
+use datatypes::vectors::{
+    Float64VectorBuilder, MutableVector, StringVectorBuilder, TimestampMillisecondVectorBuilder,
+};
 use frontend::instance::Instance as FeInstance;
 use frontend::service_config::{MysqlOptions, PostgresOptions};
 use object_store::services::{Azblob, Oss, S3};
@@ -54,7 +59,7 @@ use servers::server::Server;
 use servers::Mode;
 use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineRef};
-use table::requests::{CreateTableRequest, TableOptions};
+use table::requests::{CreateTableRequest, InsertRequest, TableOptions};
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum StorageType {
@@ -271,6 +276,7 @@ pub async fn create_test_table(
     catalog_manager: &CatalogManagerRef,
     sql_handler: &SqlHandler,
     ts_type: ConcreteDataType,
+    table_name: &str,
 ) -> Result<()> {
     let column_schemas = vec![
         ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
@@ -278,8 +284,6 @@ pub async fn create_test_table(
         ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
         ColumnSchema::new("ts", ts_type, true).with_time_index(true),
     ];
-
-    let table_name = "demo";
     let table_engine: TableEngineRef = sql_handler
         .table_engine_manager()
         .engine(MITO_ENGINE)
@@ -327,6 +331,7 @@ pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router
         instance.catalog_manager(),
         instance.sql_handler(),
         ConcreteDataType::timestamp_millisecond_datatype(),
+        "demo",
     )
     .await
     .unwrap();
@@ -363,6 +368,7 @@ pub async fn setup_test_http_app_with_frontend(
         frontend.catalog_manager(),
         instance.sql_handler(),
         ConcreteDataType::timestamp_millisecond_datatype(),
+        "demo",
     )
     .await
     .unwrap();
@@ -382,25 +388,83 @@ pub async fn setup_test_http_app_with_frontend(
     (app, guard)
 }
 
+fn mock_insert_request(host: &str, cpu: f64, memory: f64, ts: i64) -> InsertRequest {
+    let mut columns_values = HashMap::with_capacity(4);
+    let mut builder = StringVectorBuilder::with_capacity(1);
+    builder.push(Some(host));
+    columns_values.insert("host".to_string(), builder.to_vector());
+
+    let mut builder = Float64VectorBuilder::with_capacity(1);
+    builder.push(Some(cpu));
+    columns_values.insert("cpu".to_string(), builder.to_vector());
+
+    let mut builder = Float64VectorBuilder::with_capacity(1);
+    builder.push(Some(memory));
+    columns_values.insert("memory".to_string(), builder.to_vector());
+
+    let mut builder = TimestampMillisecondVectorBuilder::with_capacity(1);
+    builder.push(Some(ts.into()));
+    columns_values.insert("ts".to_string(), builder.to_vector());
+
+    InsertRequest {
+        catalog_name: common_catalog::consts::DEFAULT_CATALOG_NAME.to_string(),
+        schema_name: common_catalog::consts::DEFAULT_SCHEMA_NAME.to_string(),
+        table_name: "demo".to_string(),
+        columns_values,
+        region_number: 0,
+    }
+}
+
 pub async fn setup_test_prom_app_with_frontend(
     store_type: StorageType,
     name: &str,
 ) -> (Router, TestGuard) {
+    std::env::set_var("TZ", "UTC");
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
     let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
     let frontend = FeInstance::try_new_standalone(instance.clone())
         .await
         .unwrap();
     instance.start().await.unwrap();
+
     create_test_table(
         frontend.catalog_manager(),
         instance.sql_handler(),
         ConcreteDataType::timestamp_millisecond_datatype(),
+        "demo",
     )
     .await
     .unwrap();
-    let prom_server = PromServer::create_server(Arc::new(frontend) as _);
-    let app = prom_server.make_app();
+    let demo = frontend
+        .catalog_manager()
+        .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "demo")
+        .await
+        .unwrap()
+        .unwrap();
+
+    let _ = demo
+        .insert(mock_insert_request("host1", 1.1, 2.2, 0))
+        .await
+        .unwrap();
+    let _ = demo
+        .insert(mock_insert_request("host2", 2.1, 4.3, 600000))
+        .await
+        .unwrap();
+
+    let http_opts = HttpOptions {
+        addr: format!("127.0.0.1:{}", ports::get_port()),
+        ..Default::default()
+    };
+    let frontend_ref = Arc::new(frontend);
+    let http_server = HttpServerBuilder::new(http_opts)
+        .with_sql_handler(ServerSqlQueryHandlerAdaptor::arc(frontend_ref.clone()))
+        .with_grpc_handler(ServerGrpcQueryHandlerAdaptor::arc(frontend_ref.clone()))
+        .with_script_handler(frontend_ref.clone())
+        .with_prom_handler(frontend_ref.clone())
+        .build();
+    let prom_server = PromServer::create_server(frontend_ref);
+    let app = http_server.build(http_server.make_app());
+    let app = app.merge(prom_server.make_app());
     (app, guard)
 }
 

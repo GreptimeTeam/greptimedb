@@ -29,6 +29,7 @@ use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{RecordBatch, RecordBatchStreamAdaptor, SendableRecordBatchStream};
 use common_telemetry::{info, logging};
 use datatypes::schema::Schema;
+use metrics::histogram;
 use object_store::ObjectStore;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::manifest::{self, Manifest, ManifestVersion, MetaActionIterator};
@@ -57,6 +58,8 @@ use crate::error::{
 };
 use crate::manifest::action::*;
 use crate::manifest::TableManifest;
+use crate::metrics::{MITO_INSERT_BATCH_SIZE, MITO_INSERT_ELAPSED};
+
 #[inline]
 fn table_manifest_dir(table_dir: &str) -> String {
     assert!(table_dir.ends_with('/'));
@@ -83,6 +86,8 @@ impl<R: Region> Table for MitoTable<R> {
     }
 
     async fn insert(&self, request: InsertRequest) -> TableResult<usize> {
+        let _timer = common_telemetry::timer!(MITO_INSERT_ELAPSED);
+
         if request.columns_values.is_empty() {
             return Ok(0);
         }
@@ -104,6 +109,8 @@ impl<R: Region> Table for MitoTable<R> {
         let columns_values = request.columns_values;
         // columns_values is not empty, it's safe to unwrap
         let rows_num = columns_values.values().next().unwrap().len();
+
+        histogram!(MITO_INSERT_BATCH_SIZE, rows_num as f64);
 
         logging::trace!(
             "Insert into table {} region {} with data: {:?}",

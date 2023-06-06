@@ -39,7 +39,7 @@ use crate::manifest::action::{
 };
 use crate::memtable::{Inserter, MemtableBuilderRef, MemtableId, MemtableRef};
 use crate::metadata::RegionMetadataRef;
-use crate::metrics::{FLUSH_REASON, FLUSH_REQUESTS_TOTAL};
+use crate::metrics::{FLUSH_REASON, FLUSH_REQUESTS_TOTAL, PREPROCESS_ELAPSED};
 use crate::proto::wal::WalHeader;
 use crate::region::{
     CompactContext, RecoverdMetadata, RecoveredMetadataMap, RegionManifest, SharedDataRef,
@@ -670,6 +670,8 @@ impl WriterInner {
         &mut self,
         writer_ctx: &WriterContext<'_, S>,
     ) -> Result<()> {
+        let _timer = common_telemetry::timer!(PREPROCESS_ELAPSED);
+
         let version_control = writer_ctx.version_control();
         // Check whether memtable is full or flush should be triggered. We need to do this first since
         // switching memtables will clear all mutable memtables.

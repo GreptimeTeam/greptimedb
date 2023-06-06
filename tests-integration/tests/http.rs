@@ -18,7 +18,7 @@ use common_error::status_code::StatusCode as ErrorCode;
 use serde_json::json;
 use servers::http::handler::HealthResponse;
 use servers::http::{JsonOutput, JsonResponse};
-use servers::prom::PromJsonResponse;
+use servers::prom::{PromJsonResponse, PromResponse};
 use tests_integration::test_util::{
     setup_test_http_app, setup_test_http_app_with_frontend, setup_test_prom_app_with_frontend,
     StorageType,
@@ -315,7 +315,7 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK);
 
     // labels
-    let res = client.get("/api/v1/labels?match[]=up").send().await;
+    let res = client.get("/api/v1/labels?match[]=demo").send().await;
     assert_eq!(res.status(), StatusCode::OK);
     let res = client
         .post("/api/v1/labels?match[]=up")
@@ -323,6 +323,19 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
+    let res = client
+        .get("/api/v1/labels?match[]=demo&start=0")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<PromJsonResponse>(&res.text().await).unwrap();
+    assert_eq!(body.status, "success");
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PromResponse>(json!(["__name__", "cpu", "host", "memory", "ts"]))
+            .unwrap()
+    );
+
     // labels query with multiple match[] params
     let res = client
         .get("/api/v1/labels?match[]=up&match[]=down")
@@ -331,6 +344,29 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK);
     let res = client
         .post("/api/v1/labels?match[]=up&match[]=down")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // series
+    let res = client
+        .get("/api/v1/series?match[]=demo&start=0&end=0")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<PromJsonResponse>(&res.text().await).unwrap();
+    assert_eq!(body.status, "success");
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PromResponse>(json!(
+            [{"__name__" : "demo","ts":"1970-01-01 00:00:00+0000","cpu":"1.1","host":"host1","memory":"2.2"}]
+        ))
+        .unwrap()
+    );
+
+    let res = client
+        .post("/api/v1/series?match[]=up&match[]=down")
         .header("Content-Type", "application/x-www-form-urlencoded")
         .send()
         .await;
@@ -347,14 +383,16 @@ pub async fn test_prom_http_api(store_type: StorageType) {
 
     // single match[]
     let res = client
-        .get("/api/v1/label/instance/values?match[]=up")
+        .get("/api/v1/label/host/values?match[]=demo&start=0&end=600")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
-    let prom_resp = res.json::<PromJsonResponse>().await;
-    assert_eq!(prom_resp.status, "success");
-    assert!(prom_resp.error.is_none());
-    assert!(prom_resp.error_type.is_none());
+    let body = serde_json::from_str::<PromJsonResponse>(&res.text().await).unwrap();
+    assert_eq!(body.status, "success");
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PromResponse>(json!(["host1", "host2"])).unwrap()
+    );
 
     // multiple match[]
     let res = client

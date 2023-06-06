@@ -17,6 +17,7 @@ use store_api::storage::{OpType, SequenceNumber};
 use super::MemtableRef;
 use crate::error::Result;
 use crate::memtable::KeyValues;
+use crate::metrics::MEMTABLE_WRITE_ELAPSED;
 use crate::write_batch::{Mutation, Payload};
 
 /// Wraps logic of inserting key/values in [WriteBatch] to [Memtable].
@@ -40,6 +41,8 @@ impl Inserter {
     /// Won't do schema validation if not configured. Caller (mostly the [`RegionWriter`]) should ensure the
     /// schemas of `memtable` are consistent with `payload`'s.
     pub fn insert_memtable(&mut self, payload: &Payload, memtable: &MemtableRef) -> Result<()> {
+        let _timer = common_telemetry::timer!(MEMTABLE_WRITE_ELAPSED);
+
         if payload.is_empty() {
             return Ok(());
         }
