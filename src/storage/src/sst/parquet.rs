@@ -281,7 +281,9 @@ impl ParquetReader {
             .with_row_groups(pruned_row_groups);
 
         // if time range row filter is present, we can push down the filter to reduce rows to scan.
-        if let Some(row_filter) = self.build_time_range_row_filter(&parquet_schema_desc) {
+        if let Some(row_filter) =
+            build_time_range_row_filter(self.time_range, &store_schema, &parquet_schema_desc)
+        {
             builder = builder.with_row_filter(row_filter);
         }
 
@@ -297,59 +299,55 @@ impl ParquetReader {
 
         ChunkStream::new(self.file_handle.clone(), adapter, Box::pin(chunk_stream))
     }
+}
 
-    /// Builds time range row filter.
-    fn build_time_range_row_filter(&self, schema_desc: &SchemaDescriptor) -> Option<RowFilter> {
-        let ts_col_idx = self
-            .projected_schema
-            .schema_to_read()
-            .schema()
-            .timestamp_index()?;
-        let ts_col = self
-            .projected_schema
-            .schema_to_read()
-            .schema()
-            .timestamp_column()?;
+/// Builds time range row filter.
+fn build_time_range_row_filter(
+    time_range: TimestampRange,
+    store_schema: &Arc<StoreSchema>,
+    schema_desc: &SchemaDescriptor,
+) -> Option<RowFilter> {
+    let ts_col_idx = store_schema.timestamp_index();
 
-        let ts_col_unit = match &ts_col.data_type {
-            ConcreteDataType::Int64(_) => TimeUnit::Millisecond,
-            ConcreteDataType::Timestamp(ts_type) => ts_type.unit(),
-            _ => unreachable!(),
-        };
+    let ts_col = store_schema.columns().get(ts_col_idx)?;
 
-        let projection = ProjectionMask::roots(schema_desc, vec![ts_col_idx]);
+    let ts_col_unit = match &ts_col.desc.data_type {
+        ConcreteDataType::Int64(_) => TimeUnit::Millisecond,
+        ConcreteDataType::Timestamp(ts_type) => ts_type.unit(),
+        _ => unreachable!(),
+    };
 
-        // checks if converting time range unit into ts col unit will result into rounding error.
-        if time_unit_lossy(&self.time_range, ts_col_unit) {
-            let filter = RowFilter::new(vec![Box::new(PlainTimestampRowFilter::new(
-                self.time_range,
-                projection,
-            ))]);
-            return Some(filter);
-        }
+    let projection = ProjectionMask::roots(schema_desc, vec![ts_col_idx]);
 
-        // If any of the conversion overflows, we cannot use arrow's computation method, instead
-        // we resort to plain filter that compares timestamp with given range, less efficient,
-        // but simpler.
-        // TODO(hl): If the range is gt_eq/lt, we also use PlainTimestampRowFilter, but these cases
-        // can also use arrow's gt_eq_scalar/lt_scalar methods.
-        let row_filter = if let (Some(lower), Some(upper)) = (
-            self.time_range
-                .start()
-                .and_then(|s| s.convert_to(ts_col_unit))
-                .map(|t| t.value()),
-            self.time_range
-                .end()
-                .and_then(|s| s.convert_to(ts_col_unit))
-                .map(|t| t.value()),
-        ) {
-            Box::new(FastTimestampRowFilter::new(projection, lower, upper)) as _
-        } else {
-            Box::new(PlainTimestampRowFilter::new(self.time_range, projection)) as _
-        };
-        let filter = RowFilter::new(vec![row_filter]);
-        Some(filter)
+    // checks if converting time range unit into ts col unit will result into rounding error.
+    if time_unit_lossy(&time_range, ts_col_unit) {
+        let filter = RowFilter::new(vec![Box::new(PlainTimestampRowFilter::new(
+            time_range, projection,
+        ))]);
+        return Some(filter);
     }
+
+    // If any of the conversion overflows, we cannot use arrow's computation method, instead
+    // we resort to plain filter that compares timestamp with given range, less efficient,
+    // but simpler.
+    // TODO(hl): If the range is gt_eq/lt, we also use PlainTimestampRowFilter, but these cases
+    // can also use arrow's gt_eq_scalar/lt_scalar methods.
+    let row_filter = if let (Some(lower), Some(upper)) = (
+        time_range
+            .start()
+            .and_then(|s| s.convert_to(ts_col_unit))
+            .map(|t| t.value()),
+        time_range
+            .end()
+            .and_then(|s| s.convert_to(ts_col_unit))
+            .map(|t| t.value()),
+    ) {
+        Box::new(FastTimestampRowFilter::new(projection, lower, upper)) as _
+    } else {
+        Box::new(PlainTimestampRowFilter::new(time_range, projection)) as _
+    };
+    let filter = RowFilter::new(vec![row_filter]);
+    Some(filter)
 }
 
 fn time_unit_lossy(range: &TimestampRange, ts_col_unit: TimeUnit) -> bool {
