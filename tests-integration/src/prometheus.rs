@@ -23,7 +23,6 @@ mod tests {
     use common_catalog::consts::DEFAULT_CATALOG_NAME;
     use frontend::instance::Instance;
     use prost::Message;
-    use servers::prometheus;
     use servers::query_handler::sql::SqlQueryHandler;
     use servers::query_handler::PrometheusProtocolHandler;
     use session::context::QueryContext;

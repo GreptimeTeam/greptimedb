@@ -12,19 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod grpc;
-pub mod influxdb;
-pub mod mysql;
-pub mod opentsdb;
-pub mod postgres;
-pub mod prom;
-pub mod prometheus;
+//! Prometheus table routes
 
-pub use grpc::GrpcOptions;
-pub use influxdb::InfluxdbOptions;
-pub use mysql::MysqlOptions;
-pub use opentsdb::OpentsdbOptions;
-pub use postgres::PostgresOptions;
-pub use prom::PromOptions;
+/// The prometheus table name
+const TABLE_NAME: &str = "prometheus_metrics";
 
-pub use crate::service_config::prometheus::PrometheusOptions;
+/// Returns the table name by __name__ label.
+#[inline]
+pub fn find_table_by_name(_name: Option<&String>) -> String {
+    TABLE_NAME.to_string()
+}

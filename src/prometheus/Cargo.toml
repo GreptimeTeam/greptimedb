@@ -1,0 +1,17 @@
+[package]
+name = "prometheus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+api = { path = "../api" }
+common-error = { path = "../common/error" }
+common-grpc = { path = "../common/grpc" }
+common-recordbatch = { path = "../common/recordbatch" }
+common-time = { path = "../common/time" }
+datatypes = { path = "../datatypes" }
+openmetrics-parser = "0.4"
+prost.workspace = true
+snafu = { version = "0.7", features = ["backtraces"] }
+snap = "1"

@@ -31,12 +31,12 @@ use std::sync::Arc;
 use api::prometheus::remote::{ReadRequest, WriteRequest};
 use async_trait::async_trait;
 use common_query::Output;
+use prometheus::Metrics;
 use session::context::QueryContextRef;
 
 use crate::error::Result;
 use crate::influxdb::InfluxdbRequest;
 use crate::opentsdb::codec::DataPoint;
-use crate::prometheus::Metrics;
 
 pub type OpentsdbProtocolHandlerRef = Arc<dyn OpentsdbProtocolHandler + Send + Sync>;
 pub type InfluxdbLineProtocolHandlerRef = Arc<dyn InfluxdbLineProtocolHandler + Send + Sync>;

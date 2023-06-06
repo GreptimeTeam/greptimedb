@@ -21,6 +21,7 @@ use axum::response::IntoResponse;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_telemetry::timer;
 use hyper::Body;
+use prometheus::snappy_decompress;
 use prost::Message;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -29,7 +30,6 @@ use snafu::prelude::*;
 
 use crate::error::{self, Result};
 use crate::parse_catalog_and_schema_from_client_database_name;
-use crate::prometheus::snappy_decompress;
 use crate::query_handler::{PrometheusProtocolHandlerRef, PrometheusResponse};
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]

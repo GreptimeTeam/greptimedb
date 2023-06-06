@@ -122,12 +122,6 @@ pub enum Error {
         source: common_grpc::error::Error,
     },
 
-    #[snafu(display("Failed to write prometheus series, source: {}", source))]
-    PromSeriesWrite {
-        #[snafu(backtrace)]
-        source: common_grpc::error::Error,
-    },
-
     #[snafu(display("Failed to convert time precision, name: {}", name))]
     TimePrecision { name: String, location: Location },
 
@@ -155,17 +149,8 @@ pub enum Error {
         source: prost::DecodeError,
     },
 
-    #[snafu(display("Failed to decompress prometheus remote request, source: {}", source))]
-    DecompressPromRemoteRequest {
-        location: Location,
-        source: snap::Error,
-    },
-
-    #[snafu(display("Invalid prometheus remote request, msg: {}", msg))]
-    InvalidPromRemoteRequest { msg: String, location: Location },
-
-    #[snafu(display("Invalid prometheus remote read query result, msg: {}", msg))]
-    InvalidPromRemoteReadQueryResult { msg: String, location: Location },
+    #[snafu(display("Prometheus error, source: {}", source))]
+    Prometheus { source: prometheus::error::Error },
 
     #[snafu(display("Invalid Flight ticket, source: {}", source))]
     InvalidFlightTicket {
@@ -281,7 +266,6 @@ impl ErrorExt for Error {
             | StartHttp { .. }
             | StartGrpc { .. }
             | AlreadyStarted { .. }
-            | InvalidPromRemoteReadQueryResult { .. }
             | TcpBind { .. }
             | CatalogError { .. }
             | GrpcReflectionService { .. }
@@ -300,15 +284,13 @@ impl ErrorExt for Error {
             | InvalidOpentsdbLine { .. }
             | InvalidOpentsdbJsonRequest { .. }
             | DecodePromRemoteRequest { .. }
-            | DecompressPromRemoteRequest { .. }
-            | InvalidPromRemoteRequest { .. }
             | InvalidFlightTicket { .. }
             | InvalidPrepareStatement { .. }
             | TimePrecision { .. } => StatusCode::InvalidArguments,
 
-            InfluxdbLinesWrite { source, .. } | PromSeriesWrite { source, .. } => {
-                source.status_code()
-            }
+            InfluxdbLinesWrite { source, .. } => source.status_code(),
+
+            Prometheus { source, .. } => source.status_code(),
 
             Hyper { .. } => StatusCode::Unknown,
             TlsRequired { .. } => StatusCode::Unknown,
@@ -408,17 +390,21 @@ impl From<auth::Error> for Error {
     }
 }
 
+impl From<prometheus::error::Error> for Error {
+    fn from(e: prometheus::error::Error) -> Self {
+        Error::Prometheus { source: e }
+    }
+}
+
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let (status, error_message) = match self {
             Error::InfluxdbLineProtocol { .. }
             | Error::InfluxdbLinesWrite { .. }
-            | Error::PromSeriesWrite { .. }
             | Error::InvalidOpentsdbLine { .. }
             | Error::InvalidOpentsdbJsonRequest { .. }
             | Error::DecodePromRemoteRequest { .. }
-            | Error::DecompressPromRemoteRequest { .. }
-            | Error::InvalidPromRemoteRequest { .. }
+            | Error::Prometheus { .. }
             | Error::InvalidQuery { .. }
             | Error::TimePrecision { .. } => (HttpStatusCode::BAD_REQUEST, self.to_string()),
             _ => {

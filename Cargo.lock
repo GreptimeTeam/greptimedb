@@ -3200,6 +3200,7 @@ dependencies = [
  "object-store",
  "openmetrics-parser",
  "partition",
+ "prometheus 0.4.0",
  "prost",
  "query",
  "regex",
@@ -6650,6 +6651,22 @@ checksum = "9516b775656bc3e8985e19cd4b8c0c0de045095074e453d2c0a513b5f978392d"
 
 [[package]]
 name = "prometheus"
+version = "0.4.0"
+dependencies = [
+ "api",
+ "common-error",
+ "common-grpc",
+ "common-recordbatch",
+ "common-time",
+ "datatypes",
+ "openmetrics-parser",
+ "prost",
+ "snafu",
+ "snap",
+]
+
+[[package]]
+name = "prometheus"
 version = "0.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "449811d15fbdf5ceb5c1144416066429cf82316e2ec8ce0c1f6f8a02e7bbcf8c"
@@ -7054,7 +7071,7 @@ dependencies = [
  "num-derive",
  "num-traits",
  "parking_lot 0.12.1",
- "prometheus",
+ "prometheus 0.13.3",
  "prometheus-static-metric",
  "protobuf",
  "rayon",
@@ -8436,12 +8453,12 @@ dependencies = [
  "mysql_async",
  "num_cpus",
  "once_cell",
- "openmetrics-parser",
  "opensrv-mysql",
  "parking_lot 0.12.1",
  "pgwire",
  "pin-project",
  "postgres-types",
+ "prometheus 0.4.0",
  "promql-parser",
  "prost",
  "query",
@@ -9427,6 +9444,7 @@ dependencies = [
  "once_cell",
  "partition",
  "paste",
+ "prometheus 0.4.0",
  "prost",
  "query",
  "rand",

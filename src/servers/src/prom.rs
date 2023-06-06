@@ -32,6 +32,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVector;
 use datatypes::vectors::{Float64Vector, StringVector, TimestampMillisecondVector};
 use futures::FutureExt;
+use prometheus::{FIELD_COLUMN_NAME, TIMESTAMP_COLUMN_NAME};
 use promql_parser::label::METRIC_NAME;
 use promql_parser::parser::{
     AggregateExpr, BinaryExpr, Call, Expr as PromqlExpr, MatrixSelector, ParenExpr, SubqueryExpr,
@@ -57,7 +58,6 @@ use crate::error::{
 };
 use crate::http::authorize::HttpAuth;
 use crate::http::track_metrics;
-use crate::prometheus::{FIELD_COLUMN_NAME, TIMESTAMP_COLUMN_NAME};
 use crate::server::Server;
 
 pub const PROM_API_VERSION: &str = "v1";

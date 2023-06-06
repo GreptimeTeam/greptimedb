@@ -47,6 +47,7 @@ moka = { version = "0.9", features = ["future"] }
 object-store = { path = "../object-store" }
 openmetrics-parser = "0.4"
 partition = { path = "../partition" }
+prometheus = { path = "../prometheus" }
 prost.workspace = true
 query = { path = "../query" }
 regex = "1.6"
