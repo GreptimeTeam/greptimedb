@@ -12,10 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod chaos;
-pub mod cluster;
-pub mod error;
+use snafu::ResultExt;
 
-fn main() {
-    todo!()
+use crate::chaos::bare::client::Client;
+use crate::error::{self, Result};
+const RECOVER_ENDPOINT: &str = "/api/attack/";
+
+impl Client {
+    pub async fn recover(&self, uid: &str) -> Result<bool> {
+        let resp = self
+            .inner
+            .delete(self.url(&format!("{}/{}", RECOVER_ENDPOINT, uid)))
+            .send()
+            .await
+            .context(error::SendRequestSnafu)?;
+
+        Ok(resp.status().is_success())
+    }
 }

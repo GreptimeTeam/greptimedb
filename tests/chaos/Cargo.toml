@@ -9,12 +9,16 @@ description = "May the Chaos be with you"
 [dependencies]
 async-trait = "0.1"
 common-error = { path = "../../src/common/error" }
+common-telemetry = { path = "../../src/common/telemetry" }
 datanode = { path = "../../src/datanode" }
 frontend = { path = "../../src/frontend" }
 lazy_static = "1.4"
 meta-srv = { path = "../../src/meta-srv" }
-procfs = { version="0.15.1" }
-servers = { path = "../../src/servers" }
-regex = "1.6"
+procfs = { version = "0.15.1" }
 serde.workspace = true
+serde_json = "1.0"
+serde_repr = "0.1"
 snafu.workspace = true
+servers = { path = "../../src/servers" }
+reqwest = { version = "0.11", features = ["json"] }
+regex = "1.6"

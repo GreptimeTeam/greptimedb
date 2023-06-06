@@ -12,10 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod chaos;
-pub mod cluster;
-pub mod error;
+use crate::error::Result;
 
-fn main() {
-    todo!()
+/// Nemesis injects failure and disturbs the database.
+#[async_trait::async_trait]
+pub trait Nemesis<T> {
+    /// Invokes the nemesis.
+    async fn invoke(&mut self, node: &T) -> Result<()>;
+
+    /// Recovers the nemesis.
+    async fn recover(&mut self, node: &T) -> Result<()>;
+
+    fn name(&self) -> &'static str;
 }

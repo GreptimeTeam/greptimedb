@@ -14,19 +14,16 @@
 
 use crate::error::Result;
 
+#[cfg(target_os = "linux")]
 pub mod bare;
-
-/// A `Node` is a fundamental (logical) unit in a cluster.
-pub struct Node {}
 
 #[async_trait::async_trait]
 /// `Cluster` provides the ability to deploy/destroy a cluster
-trait Cluster<T> {
+pub trait Cluster<T> {
     /// Deploys the cluster
-    async fn apply() -> Result<()>;
+    async fn apply(&self) -> Result<()>;
     /// Deletes the cluster
-    async fn delete() -> Result<()>;
+    async fn delete(&self) -> Result<()>;
     /// Returns all node info
-    async fn nodes() -> Result<Vec<T>>;
+    async fn nodes(&self) -> Result<Vec<T>>;
 }
-

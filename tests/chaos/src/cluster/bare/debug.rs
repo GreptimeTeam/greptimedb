@@ -31,20 +31,20 @@ pub struct DebugCluster;
 const GREPTIME_DB_EXEC_FILENAME: &str = "greptime";
 
 lazy_static! {
-    static ref DATANODE_NODE_ID: Regex = Regex::new(&format!("^--node-id=([0-9]+)$")).unwrap();
+    static ref DATANODE_NODE_ID: Regex = Regex::new("^--node-id=([0-9]+)$").unwrap();
 }
 
 #[async_trait::async_trait]
 impl Cluster<Node> for DebugCluster {
-    async fn apply() -> Result<()> {
+    async fn apply(&self) -> Result<()> {
         Ok(())
     }
 
-    async fn delete() -> Result<()> {
+    async fn delete(&self) -> Result<()> {
         Ok(())
     }
 
-    async fn nodes() -> Result<Vec<Node>> {
+    async fn nodes(&self) -> Result<Vec<Node>> {
         let processes = list_processes_by_name(GREPTIME_DB_EXEC_FILENAME.to_string())?;
         // TODO(weny): add etcd nodes?
         let mut nodes = Vec::with_capacity(processes.len());
@@ -59,12 +59,11 @@ impl Cluster<Node> for DebugCluster {
 
 fn parse_node_id(val: &str) -> u64 {
     let node_id = DATANODE_NODE_ID.captures(val).unwrap()[1].to_string();
-    let node_id = node_id.parse().unwrap();
-    node_id
+    node_id.parse().unwrap()
 }
 
 fn new_debug_node(process: ProcessInfo) -> Node {
-    let info = match process.cmdline[2].as_str() {
+    let info = match process.cmdline[1].as_str() {
         "datanode" => {
             // ["greptime", "datanode", "start", "--node-id=0", "--metasrv-addr=0.0.0.0:3002", "--rpc-addr=0.0.0.0:14100", "--http-addr=0.0.0.0:14300"]
             let node_id = parse_node_id(&process.cmdline[3]);
@@ -96,7 +95,7 @@ fn new_debug_node(process: ProcessInfo) -> Node {
             let options = Box::<FrontendOptions>::default();
             NodeInfo::Frontend { options }
         }
-        _ => unreachable!(),
+        _ => unreachable!("unknown: {}", process.cmdline[1].as_str()),
     };
 
     Node {

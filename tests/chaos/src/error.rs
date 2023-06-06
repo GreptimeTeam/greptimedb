@@ -19,11 +19,35 @@ use snafu::Location;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("failed to get process info: {}", source))]
+    #[snafu(display("Failed to get process info: {}", source))]
     GetProcInfo {
         location: Location,
         source: ProcError,
     },
+
+    #[snafu(display("Failed to send request: {}", source))]
+    SendRequest {
+        location: Location,
+        source: reqwest::Error,
+    },
+
+    #[snafu(display("Failed to decode object from json, source: {}", source))]
+    DecodeResponse {
+        location: Location,
+        source: reqwest::Error,
+    },
+
+    #[snafu(display("Received known status: {}", msg))]
+    UnknownStatus { location: Location, msg: String },
+
+    #[snafu(display("Try to invoke a invoked nemesis: {}", msg))]
+    InvokedNemesis { location: Location, msg: String },
+
+    #[snafu(display("Unknown process"))]
+    UnknownProcess { location: Location },
+
+    #[snafu(display("Received error from server: {}", msg))]
+    ErrorResponse { location: Location, msg: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
