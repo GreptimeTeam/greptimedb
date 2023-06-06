@@ -19,7 +19,7 @@ use aide::transform::TransformOperation;
 use axum::extract::{Json, Query, State};
 use axum::{Extension, Form};
 use common_error::status_code::StatusCode;
-use common_telemetry::timer;
+use common_telemetry::{error, timer};
 use query::parser::PromQuery;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -137,7 +137,11 @@ pub async fn metrics(
 ) -> String {
     // Collect process metrics.
     PROCESS_COLLECTOR.collect();
-    JEMALLOC_COLLECTOR.as_ref().map(|c| c.update());
+    if let Some(c) = JEMALLOC_COLLECTOR.as_ref() {
+        if let Err(e) = c.update() {
+            error!(e; "Failed to update jemalloc metrics");
+        }
+    }
     state.render()
 }
 

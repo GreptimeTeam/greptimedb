@@ -83,8 +83,12 @@ pub(crate) static JEMALLOC_COLLECTOR: Lazy<Option<JemallocCollector>> = Lazy::ne
             e
         })
         .ok();
-    collector.as_ref().map(|c| c.update());
-    collector
+    collector.map(|c| {
+        if let Err(e) = c.update() {
+            error!(e; "Failed to update jemalloc metrics");
+        };
+        c
+    })
 });
 
 pub(crate) struct JemallocCollector {
@@ -106,18 +110,12 @@ impl JemallocCollector {
     }
 
     pub(crate) fn update(&self) -> error::Result<()> {
-        {
-            self.epoch.advance().context(UpdateJemallocMetricsSnafu)?;
-            let allocated = self.allocated.read().context(UpdateJemallocMetricsSnafu)?;
-            let resident = self.resident.read().context(UpdateJemallocMetricsSnafu)?;
-            gauge!("sys.jemalloc.allocated", allocated as f64);
-            gauge!("sys.jemalloc.resident", resident as f64);
-            Ok(())
-        }
-        .map_err(|e: error::Error| {
-            error!(e; "Failed to update jemalloc metrics");
-            e
-        })
+        self.epoch.advance().context(UpdateJemallocMetricsSnafu)?;
+        let allocated = self.allocated.read().context(UpdateJemallocMetricsSnafu)?;
+        let resident = self.resident.read().context(UpdateJemallocMetricsSnafu)?;
+        gauge!("sys.jemalloc.allocated", allocated as f64);
+        gauge!("sys.jemalloc.resident", resident as f64);
+        Ok(())
     }
 }
 
