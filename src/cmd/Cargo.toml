@@ -11,6 +11,7 @@ path = "src/bin/greptime.rs"
 
 [features]
 tokio-console = ["common-telemetry/tokio-console"]
+version-report = ["frontend/version-report", "meta-srv/version-report"]
 
 [dependencies]
 anymap = "1.0.0-beta.2"

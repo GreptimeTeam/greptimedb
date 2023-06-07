@@ -16,6 +16,10 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use common_procedure::local::{LocalManager, ManagerConfig};
+#[cfg(feature = "version-report")]
+use common_runtime::version_statistic::{
+    GreptimeVersionReport, Statistic, VersionReportTask, VERSION_REPORT_INTERVAL,
+};
 
 use crate::cluster::MetaPeerClient;
 use crate::error::Result;
@@ -196,11 +200,36 @@ impl MetaSrvBuilder {
             selector,
             handler_group,
             election,
-            meta_peer_client,
+            meta_peer_client: meta_peer_client.clone(),
             lock,
             procedure_manager,
             metadata_service,
             mailbox,
+            #[cfg(feature = "version-report")]
+            telemetry_task: {
+                struct MetaVersionReport {
+                    meta_peer_client: Option<MetaPeerClient>,
+                }
+                #[async_trait::async_trait]
+                impl Statistic for MetaVersionReport {
+                    async fn get_mode(&self) -> String {
+                        "distributed".to_string()
+                    }
+                    async fn get_nodes(&self) -> u8 {
+                        if let Some(meta_peer_client) = &self.meta_peer_client {
+                            meta_peer_client.get_node_cnt().await.unwrap_or(0)
+                        } else {
+                            0
+                        }
+                    }
+                }
+                Arc::new(VersionReportTask::new(
+                    *VERSION_REPORT_INTERVAL,
+                    Box::new(GreptimeVersionReport::new(Arc::new(MetaVersionReport {
+                        meta_peer_client: meta_peer_client,
+                    }))),
+                ))
+            },
         })
     }
 }

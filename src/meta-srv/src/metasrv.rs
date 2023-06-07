@@ -20,6 +20,8 @@ use std::sync::Arc;
 use api::v1::meta::Peer;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_procedure::ProcedureManagerRef;
+#[cfg(feature = "version-report")]
+use common_runtime::version_statistic::VersionReportTask;
 use common_telemetry::logging::LoggingOptions;
 use common_telemetry::{error, info, warn};
 use serde::{Deserialize, Serialize};
@@ -125,6 +127,8 @@ pub struct MetaSrv {
     procedure_manager: ProcedureManagerRef,
     metadata_service: MetadataServiceRef,
     mailbox: MailboxRef,
+    #[cfg(feature = "version-report")]
+    telemetry_task: Arc<VersionReportTask>,
 }
 
 impl MetaSrv {
@@ -184,6 +188,16 @@ impl MetaSrv {
                 .recover()
                 .await
                 .context(RecoverProcedureSnafu)?;
+        }
+
+        #[cfg(feature = "version-report")]
+        {
+            let _ = self
+                .telemetry_task
+                .start(common_runtime::bg_runtime())
+                .map_err(|_e| {
+                    warn!("start version report task error");
+                });
         }
 
         info!("MetaSrv started");

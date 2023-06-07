@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use api::v1::meta::cluster_client::ClusterClient;
@@ -51,6 +51,17 @@ impl MetaPeerClient {
         let kvs = self.range(key, range_end).await?;
 
         to_stat_kv_map(kvs)
+    }
+
+    pub async fn get_node_cnt(&self) -> Result<u8> {
+        let key = format!("{DN_STAT_PREFIX}-").into_bytes();
+        let range_end = util::get_prefix_end_key(&key);
+
+        let kvs = self.range(key, range_end).await?;
+        kvs.into_iter()
+            .map(|kv| kv.key.try_into())
+            .collect::<Result<HashSet<StatKey>>>()
+            .map(|hash_set| hash_set.len() as u8)
     }
 
     // Get datanode stat kvs from leader meta by input keys.

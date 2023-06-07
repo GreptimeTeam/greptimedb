@@ -40,8 +40,14 @@ use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_query::Output;
+#[cfg(feature = "version-report")]
+use common_runtime::version_statistic::{
+    GreptimeVersionReport, Statistic, VersionReportTask, VERSION_REPORT_INTERVAL,
+};
 use common_telemetry::logging::{debug, info};
 use common_telemetry::timer;
+#[cfg(feature = "version-report")]
+use common_telemetry::tracing::log::warn;
 use datafusion::sql::sqlparser::ast::ObjectName;
 use datanode::instance::sql::table_idents_to_full_name;
 use datanode::instance::InstanceRef as DnInstanceRef;
@@ -122,6 +128,8 @@ pub struct Instance {
     servers: Arc<ServerHandlers>,
 
     heartbeat_task: Option<HeartbeatTask>,
+    #[cfg(feature = "version-report")]
+    telemetry_task: Option<Arc<VersionReportTask>>,
 }
 
 impl Instance {
@@ -191,7 +199,7 @@ impl Instance {
         ]);
 
         let heartbeat_task = Some(HeartbeatTask::new(
-            meta_client,
+            meta_client.clone(),
             5,
             5,
             Arc::new(handlers_executor),
@@ -207,6 +215,8 @@ impl Instance {
             plugins: plugins.clone(),
             servers: Arc::new(HashMap::new()),
             heartbeat_task,
+            #[cfg(feature = "version-report")]
+            telemetry_task: None,
         })
     }
 
@@ -265,6 +275,23 @@ impl Instance {
             plugins: Default::default(),
             servers: Arc::new(HashMap::new()),
             heartbeat_task: None,
+            #[cfg(feature = "version-report")]
+            telemetry_task: {
+                struct FrontendVersionReport;
+                #[async_trait]
+                impl Statistic for FrontendVersionReport {
+                    async fn get_mode(&self) -> String {
+                        "standalone".to_string()
+                    }
+                    async fn get_nodes(&self) -> u8 {
+                        1
+                    }
+                }
+                Some(Arc::new(VersionReportTask::new(
+                    *VERSION_REPORT_INTERVAL,
+                    Box::new(GreptimeVersionReport::new(Arc::new(FrontendVersionReport))),
+                )))
+            },
         })
     }
 
@@ -435,6 +462,17 @@ impl Instance {
 impl FrontendInstance for Instance {
     async fn start(&self) -> Result<()> {
         // TODO(hl): Frontend init should move to here
+
+        #[cfg(feature = "version-report")]
+        {
+            if let Some(telemetry_task) = &self.telemetry_task {
+                let _ = telemetry_task
+                    .start(common_runtime::bg_runtime())
+                    .map_err(|_e| {
+                        warn!("start version report task error");
+                    });
+            }
+        }
 
         if let Some(heartbeat_task) = &self.heartbeat_task {
             heartbeat_task.start().await?;

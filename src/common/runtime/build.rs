@@ -12,19 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod error;
-mod global;
-mod metrics;
-mod repeated_task;
-pub mod runtime;
-
-pub use global::{
-    bg_runtime, block_on_bg, block_on_read, block_on_write, create_runtime, init_global_runtimes,
-    read_runtime, spawn_bg, spawn_blocking_bg, spawn_blocking_read, spawn_blocking_write,
-    spawn_read, spawn_write, write_runtime,
-};
-
-pub use crate::repeated_task::{BoxedTaskFunction, RepeatedTask, TaskFunction};
-pub use crate::runtime::{Builder, JoinError, JoinHandle, Runtime};
-#[cfg(feature = "version-report")]
-pub mod version_statistic;
+const DEFAULT_VALUE: &str = "unknown";
+fn main() {
+    println!(
+        "cargo:rustc-env=GIT_COMMIT={}",
+        build_data::get_git_commit().unwrap_or_else(|_| DEFAULT_VALUE.to_string())
+    );
+    println!(
+        "cargo:rustc-env=GIT_BRANCH={}",
+        build_data::get_git_branch().unwrap_or_else(|_| DEFAULT_VALUE.to_string())
+    );
+    println!(
+        "cargo:rustc-env=GIT_DIRTY={}",
+        build_data::get_git_dirty().map_or(DEFAULT_VALUE.to_string(), |v| v.to_string())
+    );
+}

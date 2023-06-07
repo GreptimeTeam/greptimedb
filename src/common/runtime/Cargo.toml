@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+version-report = []
+
 [dependencies]
 async-trait.workspace = true
 common-error = { path = "../error" }
@@ -14,6 +17,12 @@ paste.workspace = true
 snafu.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+reqwest = { version = "0.11", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
 
 [dev-dependencies]
 tokio-test = "0.4"
+hyper = { version = "0.14", features = ["full"] }
+
+[build-dependencies]
+build-data = "0.1.3"
