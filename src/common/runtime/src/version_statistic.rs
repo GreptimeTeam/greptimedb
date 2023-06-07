@@ -23,7 +23,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 use crate::repeated_task::{RepeatedTask, TaskFunction};
 
-pub const VERSION_REPORT_URL: &str = "https://api.greptime.com/opentelemetry/greptimedb-statistic";
+pub const VERSION_REPORT_URL: &str =
+    "https://api.greptime.cloud/opentelemetry/greptimedb-statistic";
 
 pub static VERSION_REPORT_INTERVAL: Lazy<Duration> = Lazy::new(|| Duration::from_secs(60 * 60));
 
@@ -103,19 +104,21 @@ impl GreptimeVersionReport {
 mod tests {
     use std::convert::Infallible;
     use std::sync::Arc;
+    use std::{env, u8};
 
     use hyper::service::{make_service_fn, service_fn};
     use hyper::Server;
     use tokio::spawn;
 
     use crate::version_statistic::{GreptimeVersionReport, ReportData, Statistic};
+
     async fn echo(req: hyper::Request<hyper::Body>) -> hyper::Result<hyper::Response<hyper::Body>> {
         Ok(hyper::Response::new(req.into_body()))
     }
-    use std::{env, u8};
 
     #[tokio::test]
     async fn test_version_report() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         spawn(async move {
             let make_svc = make_service_fn(|_conn| {
                 // This is the `Service` that will handle the connection.
@@ -127,7 +130,10 @@ mod tests {
             let addr = ([127, 0, 0, 1], 9527).into();
 
             let server = Server::bind(&addr).serve(make_svc);
-            let _ = server.await;
+            let graceful = server.with_graceful_shutdown(async {
+                rx.await.ok();
+            });
+            let _ = graceful.await;
             Ok::<_, Infallible>(())
         });
         struct TestStatistic {}
@@ -154,5 +160,6 @@ mod tests {
         assert_eq!(env!("GIT_COMMIT"), body.git_commit);
         assert_eq!("test", body.mode);
         assert_eq!(1, body.nodes.unwrap());
+        tx.send(()).unwrap();
     }
 }
