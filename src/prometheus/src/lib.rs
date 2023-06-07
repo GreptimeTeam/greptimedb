@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod error;
+pub mod labels_cache;
 mod prometheus;
 
 pub use crate::prometheus::*;

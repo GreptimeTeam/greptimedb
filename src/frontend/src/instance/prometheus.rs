@@ -108,7 +108,7 @@ impl Instance {
 #[async_trait]
 impl PrometheusProtocolHandler for Instance {
     async fn write(&self, request: WriteRequest, ctx: QueryContextRef) -> ServerResult<()> {
-        let (requests, samples) = prometheus::to_grpc_insert_requests(request)?;
+        let (requests, samples, _metrics_labels) = prometheus::to_grpc_insert_requests(request)?;
         self.handle_inserts(requests, ctx)
             .await
             .map_err(BoxedError::new)

@@ -13,22 +13,27 @@
 // limitations under the License.
 
 //! Prometheus remote write helper functions.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use api::prometheus::remote::WriteRequest;
 use api::v1::{InsertRequest as GrpcInsertRequest, InsertRequests};
 use common_grpc::writer::{LinesWriter, Precision};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
 use crate::error::{self, Result};
 use crate::prometheus::{
     find_table_by_name, FIELD_COLUMN_NAME, METRIC_NAME_LABEL, TIMESTAMP_COLUMN_NAME,
 };
 
-pub fn to_grpc_insert_requests(request: WriteRequest) -> Result<(InsertRequests, usize)> {
-    let mut writers: HashMap<String, LinesWriter> = HashMap::new();
+pub type MetricsLabelsMap = HashMap<String, HashSet<String>>;
 
-    for timeseries in &request.timeseries {
+pub fn to_grpc_insert_requests(
+    request: WriteRequest,
+) -> Result<(InsertRequests, usize, MetricsLabelsMap)> {
+    let mut writers: HashMap<String, LinesWriter> = HashMap::new();
+    let mut metrics_labels = MetricsLabelsMap::new();
+
+    for mut timeseries in request.timeseries {
         let name = timeseries.labels.iter().find_map(|label| {
             if label.name == METRIC_NAME_LABEL {
                 Some(&label.value)
@@ -41,6 +46,15 @@ pub fn to_grpc_insert_requests(request: WriteRequest) -> Result<(InsertRequests,
         let writer = writers
             .entry(table_name)
             .or_insert_with(|| LinesWriter::with_lines(16));
+        let labels = metrics_labels
+            .entry(
+                name.context(error::InvalidPromRemoteRequestSnafu {
+                    msg: "Missing __name__ label in timeseries",
+                })?
+                .to_string(),
+            )
+            .or_insert_with(HashSet::new);
+
         // For each sample
         for sample in &timeseries.samples {
             // Insert labels first.
@@ -63,6 +77,12 @@ pub fn to_grpc_insert_requests(request: WriteRequest) -> Result<(InsertRequests,
 
             writer.commit();
         }
+
+        for label in std::mem::take(&mut timeseries.labels) {
+            if label.name != METRIC_NAME_LABEL {
+                labels.insert(label.name);
+            }
+        }
     }
 
     let mut sample_counts = 0;
@@ -79,7 +99,7 @@ pub fn to_grpc_insert_requests(request: WriteRequest) -> Result<(InsertRequests,
             }
         })
         .collect();
-    Ok((InsertRequests { inserts }, sample_counts))
+    Ok((InsertRequests { inserts }, sample_counts, metrics_labels))
 }
 
 #[cfg(test)]

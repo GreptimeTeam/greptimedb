@@ -4103,6 +4103,15 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
+version = "0.11.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab5ef0d4909ef3724cc8cce6ccc8572c5c817592e9285f5464f8e86f8bd3726e"
+dependencies = [
+ "ahash 0.7.6",
+]
+
+[[package]]
+name = "hashbrown"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a9ee70c43aaf417c914396645a0fa852624801b24ebb7ae78fe8272889ac888"
@@ -4884,15 +4893,6 @@ dependencies = [
 
 [[package]]
 name = "lru"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71e7d46de488603ffdd5f30afbc64fbba2378214a2c3a2fb83abf3d33126df17"
-dependencies = [
- "hashbrown 0.13.2",
-]
-
-[[package]]
-name = "lru"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03f1160296536f10c833a82dca22267d5486734230d47bf00bf435885814ba1e"
@@ -5415,7 +5415,7 @@ dependencies = [
  "futures-sink",
  "futures-util",
  "lazy_static",
- "lru 0.10.0",
+ "lru",
  "mio",
  "mysql_common",
  "once_cell",
@@ -5752,7 +5752,7 @@ dependencies = [
  "common-telemetry",
  "common-test-util",
  "futures",
- "lru 0.9.0",
+ "lru",
  "md5",
  "metrics",
  "opendal",
@@ -6659,10 +6659,14 @@ dependencies = [
  "common-recordbatch",
  "common-time",
  "datatypes",
+ "lru",
+ "once_cell",
  "openmetrics-parser",
  "prost",
  "snafu",
  "snap",
+ "string-interner",
+ "uuid",
 ]
 
 [[package]]
@@ -9079,6 +9083,17 @@ name = "strfmt"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a8348af2d9fc3258c8733b8d9d8db2e56f54b2363a4b5b81585c7875ed65e65"
+
+[[package]]
+name = "string-interner"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91e2531d8525b29b514d25e275a43581320d587b86db302b9a7e464bac579648"
+dependencies = [
+ "cfg-if 1.0.0",
+ "hashbrown 0.11.2",
+ "serde",
+]
 
 [[package]]
 name = "string_cache"

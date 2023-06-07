@@ -11,7 +11,11 @@ common-grpc = { path = "../common/grpc" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-time = { path = "../common/time" }
 datatypes = { path = "../datatypes" }
+lru = "0.10"
+once_cell = "1.18"
 openmetrics-parser = "0.4"
 prost.workspace = true
 snafu = { version = "0.7", features = ["backtraces"] }
 snap = "1"
+string-interner = "0.14"
+uuid.workspace = true
