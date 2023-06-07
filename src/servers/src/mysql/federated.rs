@@ -30,7 +30,6 @@ use regex::bytes::RegexSet;
 use regex::Regex;
 use session::context::QueryContextRef;
 
-// TODO(LFC): Include GreptimeDB's version and git commit tag etc.
 const MYSQL_VERSION: &str = "8.0.26";
 
 static SELECT_VAR_PATTERN: Lazy<Regex> = Lazy::new(|| Regex::new("(?i)^(SELECT @@(.*))").unwrap());

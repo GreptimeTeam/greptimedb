@@ -94,10 +94,14 @@ impl FlushTester {
     }
 
     async fn put(&self, data: &[(i64, Option<i64>)]) -> WriteResponse {
-        self.base().put(data).await
+        let data = data
+            .iter()
+            .map(|(ts, v0)| (*ts, v0.map(|v| v.to_string())))
+            .collect::<Vec<_>>();
+        self.base().put(&data).await
     }
 
-    async fn full_scan(&self) -> Vec<(i64, Option<i64>)> {
+    async fn full_scan(&self) -> Vec<(i64, Option<String>)> {
         self.base().full_scan().await
     }
 
@@ -216,7 +220,7 @@ async fn test_flush_empty() {
     let sst_dir = format!("{}/{}", store_dir, engine::region_sst_dir("", REGION_NAME));
     assert!(!has_parquet_file(&sst_dir));
 
-    let expect = vec![(1000, Some(100)), (2000, Some(200))];
+    let expect = vec![(1000, Some(100.to_string())), (2000, Some(200.to_string()))];
 
     let output = tester.full_scan().await;
     assert_eq!(expect, output);
@@ -242,7 +246,11 @@ async fn test_read_after_flush() {
     // Put element again.
     tester.put(&[(3000, Some(300))]).await;
 
-    let expect = vec![(1000, Some(100)), (2000, Some(200)), (3000, Some(300))];
+    let expect = vec![
+        (1000, Some(100.to_string())),
+        (2000, Some(200.to_string())),
+        (3000, Some(300.to_string())),
+    ];
 
     let output = tester.full_scan().await;
     assert_eq!(expect, output);
@@ -284,7 +292,11 @@ async fn test_merge_read_after_flush() {
     // Overwrite row (In memtable).
     tester.put(&[(2000, Some(203))]).await;
 
-    let expect = vec![(1000, Some(100)), (2000, Some(203)), (3000, Some(300))];
+    let expect = vec![
+        (1000, Some(100.to_string())),
+        (2000, Some(203.to_string())),
+        (3000, Some(300.to_string())),
+    ];
 
     let output = tester.full_scan().await;
     assert_eq!(expect, output);

@@ -116,13 +116,25 @@ impl QueryEngineState {
             .cloned()
     }
 
+    /// Register an aggregate function.
+    ///
+    /// # Panics
+    /// Will panic if the function with same name is already registered.
+    ///
+    /// Panicking consideration: currently the aggregated functions are all statically registered,
+    /// user cannot define their own aggregate functions on the fly. So we can panic here. If that
+    /// invariant is broken in the future, we should return an error instead of panicking.
     pub fn register_aggregate_function(&self, func: AggregateFunctionMetaRef) {
-        // TODO(LFC): Return some error if there exists an aggregate function with the same name.
-        // Simply overwrite the old value for now.
-        self.aggregate_functions
+        let name = func.name();
+        let x = self
+            .aggregate_functions
             .write()
             .unwrap()
-            .insert(func.name(), func);
+            .insert(name.clone(), func);
+        assert!(
+            x.is_none(),
+            "Already registered aggregate function '{name}'"
+        );
     }
 
     #[inline]

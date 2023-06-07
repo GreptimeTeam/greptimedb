@@ -16,6 +16,7 @@ mod health;
 mod heartbeat;
 mod leader;
 mod meta;
+mod route;
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -70,6 +71,13 @@ pub fn make_admin_service(meta_srv: MetaSrv) -> Admin {
         "/leader",
         leader::LeaderHandler {
             election: meta_srv.election(),
+        },
+    );
+
+    let router = router.route(
+        "/route",
+        route::RouteHandler {
+            kv_store: meta_srv.kv_store(),
         },
     );
 

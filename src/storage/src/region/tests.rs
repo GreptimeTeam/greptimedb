@@ -66,7 +66,7 @@ mod projection;
 /// Create metadata of a region with schema: (timestamp, v0).
 pub fn new_metadata(region_name: &str) -> RegionMetadata {
     let desc = RegionDescBuilder::new(region_name)
-        .push_field_column(("v0", LogicalTypeId::Int64, true))
+        .push_field_column(("v0", LogicalTypeId::String, true))
         .build();
     desc.try_into().unwrap()
 }
@@ -101,16 +101,16 @@ impl<S: LogStore> TesterBase<S> {
     /// Put without version specified.
     ///
     /// Format of data: (timestamp, v0), timestamp is key, v0 is value.
-    pub async fn put(&self, data: &[(i64, Option<i64>)]) -> WriteResponse {
+    pub async fn put(&self, data: &[(i64, Option<String>)]) -> WriteResponse {
         self.try_put(data).await.unwrap()
     }
 
     /// Put without version specified, returns [`Result<WriteResponse>`]
     ///
     /// Format of data: (timestamp, v0), timestamp is key, v0 is value.
-    pub async fn try_put(&self, data: &[(i64, Option<i64>)]) -> Result<WriteResponse> {
-        let data: Vec<(TimestampMillisecond, Option<i64>)> =
-            data.iter().map(|(l, r)| ((*l).into(), *r)).collect();
+    pub async fn try_put(&self, data: &[(i64, Option<String>)]) -> Result<WriteResponse> {
+        let data: Vec<(TimestampMillisecond, Option<String>)> =
+            data.iter().map(|(l, r)| ((*l).into(), r.clone())).collect();
         // Build a batch without version.
         let mut batch = new_write_batch_for_test(false);
         let put_data = new_put_data(&data);
@@ -120,9 +120,9 @@ impl<S: LogStore> TesterBase<S> {
     }
 
     /// Put without version specified directly to inner writer.
-    pub async fn put_inner(&self, data: &[(i64, Option<i64>)]) -> WriteResponse {
-        let data: Vec<(TimestampMillisecond, Option<i64>)> =
-            data.iter().map(|(l, r)| ((*l).into(), *r)).collect();
+    pub async fn put_inner(&self, data: &[(i64, Option<String>)]) -> WriteResponse {
+        let data: Vec<(TimestampMillisecond, Option<String>)> =
+            data.iter().map(|(l, r)| ((*l).into(), r.clone())).collect();
         let mut batch = new_write_batch_for_test(false);
         let put_data = new_put_data(&data);
         batch.put(put_data).unwrap();
@@ -138,7 +138,7 @@ impl<S: LogStore> TesterBase<S> {
     }
 
     /// Scan all data.
-    pub async fn full_scan(&self) -> Vec<(i64, Option<i64>)> {
+    pub async fn full_scan(&self) -> Vec<(i64, Option<String>)> {
         logging::info!("Full scan with ctx {:?}", self.read_ctx);
         let snapshot = self.region.snapshot(&self.read_ctx).unwrap();
 
@@ -187,7 +187,7 @@ impl<S: LogStore> TesterBase<S> {
     }
 
     /// Collect data from the reader.
-    pub async fn collect_reader(&self, mut reader: ChunkReaderImpl) -> Vec<(i64, Option<i64>)> {
+    pub async fn collect_reader(&self, mut reader: ChunkReaderImpl) -> Vec<(i64, Option<String>)> {
         let mut dst = Vec::new();
         while let Some(chunk) = reader.next_chunk().await.unwrap() {
             let chunk = reader.project_chunk(chunk);
@@ -209,7 +209,7 @@ fn new_write_batch_for_test(enable_version_column: bool) -> WriteBatch {
                     LogicalTypeId::TimestampMillisecond,
                     false,
                 ),
-                ("v0", LogicalTypeId::Int64, true),
+                ("v0", LogicalTypeId::String, true),
             ],
             Some(0),
             2,
@@ -222,7 +222,7 @@ fn new_write_batch_for_test(enable_version_column: bool) -> WriteBatch {
                     LogicalTypeId::TimestampMillisecond,
                     false,
                 ),
-                ("v0", LogicalTypeId::Int64, true),
+                ("v0", LogicalTypeId::String, true),
             ],
             Some(0),
             1,
@@ -230,12 +230,12 @@ fn new_write_batch_for_test(enable_version_column: bool) -> WriteBatch {
     }
 }
 
-fn new_put_data(data: &[(TimestampMillisecond, Option<i64>)]) -> HashMap<String, VectorRef> {
+fn new_put_data(data: &[(TimestampMillisecond, Option<String>)]) -> HashMap<String, VectorRef> {
     let mut put_data = HashMap::with_capacity(2);
 
     let timestamps =
         TimestampMillisecondVector::from_vec(data.iter().map(|v| v.0.into()).collect());
-    let values = Int64Vector::from_owned_iterator(data.iter().map(|kv| kv.1));
+    let values = StringVector::from(data.iter().map(|kv| kv.1.clone()).collect::<Vec<_>>());
 
     put_data.insert(
         test_util::TIMESTAMP_NAME.to_string(),
@@ -260,7 +260,7 @@ fn new_delete_data(keys: &[TimestampMillisecond]) -> HashMap<String, VectorRef> 
     delete_data
 }
 
-fn append_chunk_to(chunk: &Chunk, dst: &mut Vec<(i64, Option<i64>)>) {
+fn append_chunk_to(chunk: &Chunk, dst: &mut Vec<(i64, Option<String>)>) {
     assert_eq!(2, chunk.columns.len());
 
     let timestamps = chunk.columns[0]
@@ -269,10 +269,10 @@ fn append_chunk_to(chunk: &Chunk, dst: &mut Vec<(i64, Option<i64>)>) {
         .unwrap();
     let values = chunk.columns[1]
         .as_any()
-        .downcast_ref::<Int64Vector>()
+        .downcast_ref::<StringVector>()
         .unwrap();
     for (ts, value) in timestamps.iter_data().zip(values.iter_data()) {
-        dst.push((ts.unwrap().into_native(), value));
+        dst.push((ts.unwrap().into_native(), value.map(|s| s.to_string())));
     }
 }
 

@@ -18,7 +18,7 @@ use std::sync::Arc;
 use common_test_util::temp_dir::create_temp_dir;
 use datatypes::prelude::*;
 use datatypes::timestamp::TimestampMillisecond;
-use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, VectorRef};
+use datatypes::vectors::{Int64Vector, StringVector, TimestampMillisecondVector, VectorRef};
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use store_api::storage::{
     AddColumn, AlterOperation, AlterRequest, Chunk, ChunkReader, ColumnDescriptor,
@@ -53,18 +53,22 @@ struct AlterTester {
 struct DataRow {
     key: Option<i64>,
     ts: TimestampMillisecond,
-    v0: Option<i64>,
+    v0: Option<String>,
     v1: Option<i64>,
 }
 
 impl DataRow {
-    fn new(key: Option<i64>, ts: i64, v0: Option<i64>, v1: Option<i64>) -> Self {
+    fn new_with_string(key: Option<i64>, ts: i64, v0: Option<String>, v1: Option<i64>) -> Self {
         DataRow {
             key,
             ts: ts.into(),
             v0,
             v1,
         }
+    }
+
+    fn new(key: Option<i64>, ts: i64, v0: Option<i64>, v1: Option<i64>) -> Self {
+        Self::new_with_string(key, ts, v0.map(|s| s.to_string()), v1)
     }
 }
 
@@ -76,7 +80,7 @@ fn new_put_data(data: &[DataRow]) -> HashMap<String, VectorRef> {
             .map(|v| Some(v.ts.into_native()))
             .collect::<Vec<_>>(),
     );
-    let values1 = Int64Vector::from(data.iter().map(|kv| kv.v0).collect::<Vec<_>>());
+    let values1 = StringVector::from(data.iter().map(|v| v.v0.clone()).collect::<Vec<_>>());
     let values2 = Int64Vector::from(data.iter().map(|kv| kv.v1).collect::<Vec<_>>());
 
     put_data.insert("k0".to_string(), Arc::new(keys) as VectorRef);
@@ -158,13 +162,21 @@ impl AlterTester {
     /// Put data with initial schema.
     async fn put_with_init_schema(&self, data: &[(i64, Option<i64>)]) {
         // put of FileTesterBase always use initial schema version.
-        self.base().put(data).await;
+        let data = data
+            .iter()
+            .map(|(ts, v0)| (*ts, v0.map(|v| v.to_string())))
+            .collect::<Vec<_>>();
+        self.base().put(&data).await;
     }
 
     /// Put data to inner writer with initial schema.
     async fn put_inner_with_init_schema(&self, data: &[(i64, Option<i64>)]) {
+        let data = data
+            .iter()
+            .map(|(ts, v0)| (*ts, v0.map(|v| v.to_string())))
+            .collect::<Vec<_>>();
         // put of FileTesterBase always use initial schema version.
-        self.base().put_inner(data).await;
+        self.base().put_inner(&data).await;
     }
 
     async fn alter(&self, mut req: AlterRequest) {
@@ -179,7 +191,7 @@ impl AlterTester {
         metadata.version()
     }
 
-    async fn full_scan_with_init_schema(&self) -> Vec<(i64, Option<i64>)> {
+    async fn full_scan_with_init_schema(&self) -> Vec<(i64, Option<String>)> {
         self.base().full_scan().await
     }
 
@@ -219,17 +231,17 @@ fn append_chunk_to(chunk: &Chunk, dst: &mut Vec<DataRow>) {
         .unwrap();
     let v0_vector = chunk.columns[2]
         .as_any()
-        .downcast_ref::<Int64Vector>()
+        .downcast_ref::<StringVector>()
         .unwrap();
     let v1_vector = chunk.columns[3]
         .as_any()
         .downcast_ref::<Int64Vector>()
         .unwrap();
     for i in 0..k0_vector.len() {
-        dst.push(DataRow::new(
+        dst.push(DataRow::new_with_string(
             k0_vector.get_data(i),
             ts_vector.get_data(i).unwrap().into(),
-            v0_vector.get_data(i),
+            v0_vector.get_data(i).map(|s| s.to_string()),
             v1_vector.get_data(i),
         ));
     }

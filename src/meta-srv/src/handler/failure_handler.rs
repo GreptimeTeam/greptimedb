@@ -74,12 +74,6 @@ impl HeartbeatHandler for RegionFailureHandler {
 
         let Some(stat) = acc.stat.as_ref() else { return Ok(()) };
 
-        // TODO(LFC): Filter out the stalled heartbeats:
-        // After the region failover is done, the distribution of region is changed.
-        // We can compare the heartbeat info here with the global region placement metadata,
-        // and remove the incorrect region ident keys in failure detect runner
-        // (by sending a control message).
-
         let heartbeat = DatanodeHeartbeat {
             region_idents: stat
                 .region_stats

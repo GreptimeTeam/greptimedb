@@ -96,7 +96,6 @@ pub async fn show_databases(
     stmt: ShowDatabases,
     catalog_manager: CatalogManagerRef,
 ) -> Result<Output> {
-    // TODO(LFC): supports WHERE
     ensure!(
         matches!(stmt.kind, ShowKind::All | ShowKind::Like(_)),
         error::UnsupportedExprSnafu {
@@ -136,7 +135,6 @@ pub async fn show_tables(
     catalog_manager: CatalogManagerRef,
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
-    // TODO(LFC): supports WHERE
     ensure!(
         matches!(stmt.kind, ShowKind::All | ShowKind::Like(_)),
         error::UnsupportedExprSnafu {
