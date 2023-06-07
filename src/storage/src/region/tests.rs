@@ -94,6 +94,7 @@ impl<S: LogStore> TesterBase<S> {
     }
 
     pub async fn close(&self) {
+        self.region.close(&CloseContext::default()).await.unwrap();
         self.region.inner.wal.close().await.unwrap();
     }
 

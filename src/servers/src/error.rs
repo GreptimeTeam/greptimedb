@@ -267,6 +267,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[cfg(feature = "pprof")]
+    #[snafu(display("Failed to dump pprof data, source: {}", source))]
+    DumpPprof {
+        #[snafu(backtrace)]
+        source: common_pprof::Error,
+    },
+
     #[snafu(display("Failed to update jemalloc metrics, source: {source}, location: {location}"))]
     UpdateJemallocMetrics {
         source: tikv_jemalloc_ctl::Error,
@@ -347,6 +354,10 @@ impl ErrorExt for Error {
                     StatusCode::Unknown
                 }
             }
+
+            #[cfg(feature = "pprof")]
+            DumpPprof { source, .. } => source.status_code(),
+
             UpdateJemallocMetrics { .. } => StatusCode::Internal,
         }
     }
