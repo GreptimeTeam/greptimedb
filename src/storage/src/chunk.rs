@@ -17,7 +17,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_query::logical_plan::Expr;
 use common_recordbatch::OrderOption;
-use common_telemetry::debug;
+use common_telemetry::{debug, info};
 use common_time::range::TimestampRange;
 use snafu::ResultExt;
 use store_api::storage::{Chunk, ChunkReader, SchemaRef, SequenceNumber};
@@ -255,6 +255,7 @@ impl ChunkReaderBuilder {
         let mut output_ordering = None;
         let reader = if let Some(ordering) = self.output_ordering.take() &&
             let Some(windows) = self.infer_time_windows(&ordering) {
+                info!("Building windowed reader: {:?}", windows);
                 output_ordering = Some(ordering.clone());
                 self.build_windowed(&schema, &time_range_predicate, windows, ordering)
                     .await?

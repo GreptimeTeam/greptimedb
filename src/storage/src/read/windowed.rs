@@ -16,8 +16,10 @@ use arrow::compute::SortOptions;
 use arrow::row::{RowConverter, SortField};
 use arrow_array::{Array, ArrayRef};
 use common_recordbatch::OrderOption;
+use common_telemetry::{info, timer};
 use datatypes::data_type::DataType;
 use datatypes::vectors::Helper;
+use metrics::histogram;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
@@ -60,6 +62,7 @@ where
     R: BatchReader,
 {
     async fn next_batch(&mut self) -> Result<Option<Batch>> {
+        let window_scan_elapsed = timer!("query.scan.window_scan.elapsed");
         let Some(mut reader) = self.readers.pop() else { return Ok(None); };
 
         let store_schema = self.schema.schema_to_read();
@@ -85,6 +88,10 @@ where
             vectors_in_batch
                 .push(arrow::compute::concat(&columns).context(error::ConvertColumnsToRowsSnafu)?);
         }
+        if let Some(v) = vectors_in_batch.get(0) {
+            info!("Window row size: {}", v.len());
+            histogram!("query.scan.window_scan.window_row_size", v.len() as f64);
+        }
         let sorted = sort_by_rows(&self.schema, vectors_in_batch, &self.order_options)?;
         let vectors = sorted
             .iter()
@@ -93,6 +100,8 @@ where
                 Helper::try_into_vector(arr).context(error::ConvertChunkSnafu { name })
             })
             .collect::<Result<_>>()?;
+        let elapsed = window_scan_elapsed.elapsed();
+        info!("Window scan elapsed per window: {:?}", elapsed);
         Ok(Some(Batch::new(vectors)))
     }
 }
