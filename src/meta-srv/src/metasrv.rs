@@ -192,6 +192,7 @@ impl MetaSrv {
 
         #[cfg(feature = "version-report")]
         {
+            info!("start version report task {:?}", self.telemetry_task);
             let _ = self
                 .telemetry_task
                 .start(common_runtime::bg_runtime())

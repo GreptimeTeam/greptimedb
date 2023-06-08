@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_telemetry::info;
+use common_telemetry::tracing::log::warn;
 use once_cell::sync::Lazy;
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
@@ -26,11 +27,11 @@ use crate::repeated_task::{RepeatedTask, TaskFunction};
 pub const VERSION_REPORT_URL: &str =
     "https://api.greptime.cloud/opentelemetry/greptimedb-statistic";
 
-pub static VERSION_REPORT_INTERVAL: Lazy<Duration> = Lazy::new(|| Duration::from_secs(60 * 60));
+pub static VERSION_REPORT_INTERVAL: Lazy<Duration> = Lazy::new(|| Duration::from_secs(60 * 30));
 
 pub type VersionReportTask = RepeatedTask<Error>;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 struct ReportData {
     pub os: String,
     pub version: String,
@@ -100,10 +101,12 @@ impl GreptimeVersionReport {
             mode: self.statistic.get_mode().await,
             nodes: Some(self.statistic.get_nodes().await),
         };
-        info!("report version: {:?}", data);
+
         if let Some(client) = self.client.as_ref() {
+            info!("report version: {:?}", data);
             client.post(self.report_url).json(&data).send().await.ok()
         } else {
+            warn!("report version failed: client init failed.");
             None
         }
     }

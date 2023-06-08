@@ -226,7 +226,7 @@ impl MetaSrvBuilder {
                 Arc::new(VersionReportTask::new(
                     *VERSION_REPORT_INTERVAL,
                     Box::new(GreptimeVersionReport::new(Arc::new(MetaVersionReport {
-                        meta_peer_client: meta_peer_client,
+                        meta_peer_client,
                     }))),
                 ))
             },
