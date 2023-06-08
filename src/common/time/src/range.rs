@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::{Debug, Display, Formatter};
+
 use crate::timestamp::TimeUnit;
 use crate::timestamp_millis::TimestampMillis;
 use crate::Timestamp;
@@ -192,6 +194,21 @@ impl<T: PartialOrd> GenericRange<T> {
 }
 
 pub type TimestampRange = GenericRange<Timestamp>;
+
+impl Display for TimestampRange {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let start = self
+            .start
+            .map(|t| format!("{}{}", t.value(), t.unit().short_name()))
+            .unwrap_or("#".to_string());
+
+        let end = self
+            .end
+            .map(|t| format!("{}{}", t.value(), t.unit().short_name()))
+            .unwrap_or("#".to_string());
+        write!(f, "TimestampRange{{[{},{})}}", start, end)
+    }
+}
 
 impl TimestampRange {
     /// Create a TimestampRange with optional inclusive end timestamp.

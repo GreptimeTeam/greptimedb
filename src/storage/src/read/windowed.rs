@@ -16,7 +16,7 @@ use arrow::compute::SortOptions;
 use arrow::row::{RowConverter, SortField};
 use arrow_array::{Array, ArrayRef};
 use common_recordbatch::OrderOption;
-use common_telemetry::{info, timer};
+use common_telemetry::timer;
 use datatypes::data_type::DataType;
 use datatypes::vectors::Helper;
 use metrics::histogram;
@@ -62,7 +62,7 @@ where
     R: BatchReader,
 {
     async fn next_batch(&mut self) -> Result<Option<Batch>> {
-        let window_scan_elapsed = timer!("query.scan.window_scan.elapsed");
+        let _window_scan_elapsed = timer!("query.scan.window_scan.elapsed");
         let Some(mut reader) = self.readers.pop() else { return Ok(None); };
 
         let store_schema = self.schema.schema_to_read();
@@ -78,7 +78,10 @@ where
         }
 
         let Some(num_columns) = batches.get(0).map(|b| b.len()) else {
-            return Ok(Some(Batch::new(vec![])));
+            let empty_columns = store_schema.columns().iter().map(|s| {
+                s.desc.data_type.create_mutable_vector(0).to_vector()
+            }).collect();
+            return Ok(Some(Batch::new(empty_columns)));
         };
         let mut vectors_in_batch = Vec::with_capacity(num_columns);
 
@@ -89,7 +92,6 @@ where
                 .push(arrow::compute::concat(&columns).context(error::ConvertColumnsToRowsSnafu)?);
         }
         if let Some(v) = vectors_in_batch.get(0) {
-            info!("Window row size: {}", v.len());
             histogram!("query.scan.window_scan.window_row_size", v.len() as f64);
         }
         let sorted = sort_by_rows(&self.schema, vectors_in_batch, &self.order_options)?;
@@ -100,8 +102,6 @@ where
                 Helper::try_into_vector(arr).context(error::ConvertChunkSnafu { name })
             })
             .collect::<Result<_>>()?;
-        let elapsed = window_scan_elapsed.elapsed();
-        info!("Window scan elapsed per window: {:?}", elapsed);
         Ok(Some(Batch::new(vectors)))
     }
 }

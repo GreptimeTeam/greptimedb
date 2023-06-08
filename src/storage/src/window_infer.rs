@@ -23,10 +23,11 @@ use crate::memtable::MemtableStats;
 use crate::sst::FileMeta;
 
 /// A set of predefined time windows.
-const TIME_WINDOW_SIZE: [i64; 9] = [
+const TIME_WINDOW_SIZE: [i64; 10] = [
+    1,                // 1 second
     60,               // 1 minute
-    60 * 10,          // 10 minute
-    60 * 30,          // 30 minute
+    60 * 10,          // 10 minutes
+    60 * 30,          // 30 minutes
     60 * 60,          // 1 hour
     2 * 60 * 60,      // 2 hours
     6 * 60 * 60,      // 6 hours
