@@ -31,9 +31,6 @@ use regex::bytes::RegexSet;
 use regex::Regex;
 use session::context::QueryContextRef;
 
-// TODO(LFC): Include GreptimeDB's version and git commit tag etc.
-// const MYSQL_VERSION: &str = "8.0.26";
-
 static SELECT_VAR_PATTERN: Lazy<Regex> = Lazy::new(|| Regex::new("(?i)^(SELECT @@(.*))").unwrap());
 static MYSQL_CONN_JAVA_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)^(/\\* mysql-connector-j(.*))").unwrap());
@@ -328,7 +325,6 @@ fn get_version() -> String {
 }
 #[cfg(test)]
 mod test {
-    use std::fmt::Write;
 
     use session::context::QueryContext;
 
@@ -355,20 +351,15 @@ mod test {
         }
 
         let query = "select version()";
-        let mut buffer = String::new();
-        write!(
-            &mut buffer,
-            "\
-+----------------+
+        let expected = format!(
+            r#"+----------------+
 | version()      |
 +----------------+
 | {}-greptime |
-+----------------+",
++----------------+"#,
             env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_string())
-        )
-        .expect("failed to write to buffer");
-        let expected = buffer.as_str();
-        test(query, expected);
+        );
+        test(query, &expected);
 
         let query = "SELECT @@version_comment LIMIT 1";
         let expected = "\
