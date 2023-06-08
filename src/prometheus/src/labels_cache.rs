@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashSet;
+use std::iter::IntoIterator;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
@@ -34,37 +35,47 @@ impl LabelsCache {
     }
 
     /// Put metric and labels into cache
-    pub fn put<T>(&self, metric: T, labels: &[T])
+    pub fn put<T>(&self, metric: &str, labels: T)
     where
-        T: AsRef<str>,
+        T: IntoIterator,
+        T::Item: AsRef<str>,
     {
         let mut inner = self.inner.lock().unwrap();
         inner.put(metric, labels);
     }
 
-    /// Returns true when the metric and labels are all in cache
-    pub fn contains_labels<T>(&self, metric: T, labels: &[T]) -> bool
+    /// Put metric and labels into cache
+    pub fn add<T>(&self, metric: &str, labels: T)
     where
-        T: AsRef<str>,
+        T: IntoIterator,
+        T::Item: AsRef<str>,
+    {
+        let mut inner = self.inner.lock().unwrap();
+        inner.add(metric, labels);
+    }
+
+    /// Returns true when the metric and labels are all in cache
+    pub fn contains_labels<T>(&self, metric: &str, labels: T) -> bool
+    where
+        T: IntoIterator,
+        T::Item: AsRef<str>,
     {
         let mut inner = self.inner.lock().unwrap();
         inner.contains_labels(metric, labels)
     }
 
     /// Returns the difference labels, i.e., the labels that are in argument but not in cache.
-    pub fn diff_labels<T>(&self, metric: T, labels: &[T]) -> Vec<String>
+    pub fn diff_labels<T>(&self, metric: &str, labels: T) -> HashSet<String>
     where
-        T: AsRef<str>,
+        T: IntoIterator,
+        T::Item: AsRef<str>,
     {
         let mut inner = self.inner.lock().unwrap();
         inner.diff_labels(metric, labels)
     }
 
     /// Return the metric's labels, return none if it's not cached.
-    pub fn labels<T>(&self, metric: T) -> Option<Vec<Option<String>>>
-    where
-        T: AsRef<str>,
-    {
+    pub fn labels(&self, metric: &str) -> Option<Vec<Option<String>>> {
         let mut inner = self.inner.lock().unwrap();
         inner.labels(metric)
     }
@@ -83,26 +94,44 @@ impl LabelsCacheInner {
         }
     }
 
-    fn put<T>(&mut self, metric: T, labels: &[T])
+    fn put<T>(&mut self, metric: &str, labels: T)
     where
-        T: AsRef<str>,
+        T: IntoIterator,
+        T::Item: AsRef<str>,
     {
         let sym = self.interner.get_or_intern(metric).to_usize();
         let labels = labels
-            .iter()
+            .into_iter()
             .map(|label| self.interner.get_or_intern(label).to_usize())
             .collect();
 
         self.cache.put(sym, labels);
     }
 
-    fn contains_labels<T>(&mut self, metric: T, labels: &[T]) -> bool
+    fn add<T>(&mut self, metric: &str, labels: T)
     where
-        T: AsRef<str>,
+        T: IntoIterator,
+        T::Item: AsRef<str>,
     {
         let sym = self.interner.get_or_intern(metric).to_usize();
         let labels: HashSet<_> = labels
-            .iter()
+            .into_iter()
+            .map(|label| self.interner.get_or_intern(label).to_usize())
+            .collect();
+
+        let exists_labels = self.cache.get_or_insert_mut(sym, HashSet::new);
+
+        exists_labels.extend(labels);
+    }
+
+    fn contains_labels<T>(&mut self, metric: &str, labels: T) -> bool
+    where
+        T: IntoIterator,
+        T::Item: AsRef<str>,
+    {
+        let sym = self.interner.get_or_intern(metric).to_usize();
+        let labels: HashSet<_> = labels
+            .into_iter()
             .map(|label| self.interner.get_or_intern(label).to_usize())
             .collect();
 
@@ -112,19 +141,21 @@ impl LabelsCacheInner {
         }
     }
 
-    fn diff_labels<T>(&mut self, metric: T, labels: &[T]) -> Vec<String>
+    fn diff_labels<T>(&mut self, metric: &str, labels: T) -> HashSet<String>
     where
-        T: AsRef<str>,
+        T: IntoIterator,
+        T::Item: AsRef<str>,
     {
         let sym = self.interner.get_or_intern(metric).to_usize();
-        let labels_syms: HashSet<_> = labels
-            .iter()
-            .map(|label| self.interner.get_or_intern(label).to_usize())
-            .collect();
 
         match self.cache.get(&sym) {
-            None => labels.iter().map(|s| s.as_ref().to_string()).collect(),
+            None => labels.into_iter().map(|s| s.as_ref().to_string()).collect(),
             Some(cached_labels) => {
+                let labels_syms: HashSet<_> = labels
+                    .into_iter()
+                    .map(|label| self.interner.get_or_intern(label).to_usize())
+                    .collect();
+
                 let diff = labels_syms.difference(cached_labels);
                 diff.into_iter()
                     .filter_map(|sym| Self::resolve_string(&self.interner, *sym))
@@ -133,10 +164,7 @@ impl LabelsCacheInner {
         }
     }
 
-    fn labels<T>(&mut self, metric: T) -> Option<Vec<Option<String>>>
-    where
-        T: AsRef<str>,
-    {
+    fn labels(&mut self, metric: &str) -> Option<Vec<Option<String>>> {
         let sym = self.interner.get_or_intern(metric).to_usize();
 
         self.cache.get(&sym).map(|syms| {
@@ -166,7 +194,7 @@ mod tests {
         cache.put("metric1", &["label1", "label3"]);
         cache.put("metric2", &["label2", "label3", "label4"]);
 
-        assert!(cache.contains_labels("metric1", &[]));
+        assert!(cache.contains_labels::<&[&str; 0]>("metric1", &[]));
         assert!(cache.contains_labels("metric1", &["label1"]));
         assert!(cache.contains_labels("metric1", &["label3"]));
         assert!(cache.contains_labels("metric1", &["label3", "label1"]));
@@ -181,19 +209,21 @@ mod tests {
         assert!(!cache.contains_labels("metric2", &["label1", "label2"]));
 
         assert_eq!(
-            vec!["label2"],
+            HashSet::from(["label2".to_string()]),
             cache.diff_labels("metric1", &["label1", "label2"])
         );
-        let mut diff = cache.diff_labels("metric1", &["label2", "label4"]);
-        diff.sort();
-        assert_eq!(vec!["label2", "label4"], diff);
         assert_eq!(
-            vec!["label1"],
+            HashSet::from(["label2".to_string(), "label4".to_string()]),
+            cache.diff_labels("metric1", &["label2", "label4"])
+        );
+        assert_eq!(
+            HashSet::from(["label1".to_string()]),
             cache.diff_labels("metric2", &["label1", "label2"])
         );
-        let mut diff = cache.diff_labels("metric2", &["label1", "label2", "label4", "label5"]);
-        diff.sort();
-        assert_eq!(vec!["label1", "label5"], diff);
+        assert_eq!(
+            HashSet::from(["label1".to_string(), "label5".to_string()]),
+            cache.diff_labels("metric2", &["label1", "label2", "label4", "label5"])
+        );
 
         let mut labels = cache.labels("metric1").unwrap();
         labels.sort();

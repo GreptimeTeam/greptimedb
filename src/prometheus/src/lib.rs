@@ -14,6 +14,7 @@
 
 pub mod error;
 pub mod labels_cache;
+pub mod labels_table;
 mod prometheus;
 
 pub use crate::prometheus::*;

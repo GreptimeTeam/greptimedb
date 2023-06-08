@@ -61,6 +61,8 @@ pub enum StatusCode {
     // ====== Begin of storage related status code =====
     /// Storage is temporarily unable to handle the request
     StorageUnavailable = 5000,
+    // Service is temporary unavailable, the user can try the request later
+    ServiceUnavailable = 5003,
     // ====== End of storage related status code =======
 
     // ====== Begin of server related status code =====
@@ -94,6 +96,7 @@ impl StatusCode {
     pub fn is_retryable(&self) -> bool {
         match self {
             StatusCode::StorageUnavailable
+            | StatusCode::ServiceUnavailable
             | StatusCode::RuntimeResourcesExhausted
             | StatusCode::Internal => true,
 
@@ -132,6 +135,7 @@ impl StatusCode {
             | StatusCode::PlanQuery
             | StatusCode::EngineExecuteQuery
             | StatusCode::StorageUnavailable
+            | StatusCode::ServiceUnavailable
             | StatusCode::RuntimeResourcesExhausted => true,
             StatusCode::Success
             | StatusCode::InvalidArguments

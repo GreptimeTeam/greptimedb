@@ -21,6 +21,7 @@ use common_grpc::writer::{LinesWriter, Precision};
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{self, Result};
+use crate::labels_table;
 use crate::prometheus::{
     find_table_by_name, FIELD_COLUMN_NAME, METRIC_NAME_LABEL, TIMESTAMP_COLUMN_NAME,
 };
@@ -100,6 +101,48 @@ pub fn to_grpc_insert_requests(
         })
         .collect();
     Ok((InsertRequests { inserts }, sample_counts, metrics_labels))
+}
+
+pub fn to_grpc_label_insert_requests(
+    metrics_labels: &MetricsLabelsMap,
+) -> Result<Option<InsertRequests>> {
+    let mut writer = LinesWriter::with_lines(16);
+
+    for (metric, labels) in metrics_labels {
+        if labels.is_empty() {
+            continue;
+        }
+        for label in labels {
+            writer
+                .write_tag(labels_table::METRIC_COLUMN, metric)
+                .context(error::PromSeriesWriteSnafu)?;
+            writer
+                .write_tag(labels_table::LABEL_COLUMN, label)
+                .context(error::PromSeriesWriteSnafu)?;
+            writer
+                .write_ts(
+                    labels_table::TS_COLUMN,
+                    //ALWAYS 0
+                    (0, Precision::Millisecond),
+                )
+                .context(error::PromSeriesWriteSnafu)?;
+            writer.commit();
+        }
+    }
+
+    let (columns, row_count) = writer.finish();
+    if row_count == 0 {
+        return Ok(None);
+    }
+
+    Ok(Some(InsertRequests {
+        inserts: vec![GrpcInsertRequest {
+            table_name: labels_table::TABLE_NAME.to_string(),
+            region_number: 0,
+            columns,
+            row_count,
+        }],
+    }))
 }
 
 #[cfg(test)]

@@ -251,6 +251,9 @@ pub enum Error {
         source: tokio::task::JoinError,
         location: Location,
     },
+
+    #[snafu(display("Please try the request later, reason: {}", reason))]
+    TryLater { reason: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -314,6 +317,8 @@ impl ErrorExt for Error {
 
             UnexpectedResult { .. } => StatusCode::Unexpected,
 
+            TryLater { .. } => StatusCode::ServiceUnavailable,
+
             JoinTask { source, .. } => {
                 if source.is_cancelled() {
                     StatusCode::Cancelled
@@ -348,7 +353,7 @@ fn status_to_tonic_code(status_code: StatusCode) -> Code {
         | StatusCode::TableColumnNotFound
         | StatusCode::DatabaseNotFound
         | StatusCode::UserNotFound => Code::NotFound,
-        StatusCode::StorageUnavailable => Code::Unavailable,
+        StatusCode::StorageUnavailable | StatusCode::ServiceUnavailable => Code::Unavailable,
         StatusCode::RuntimeResourcesExhausted => Code::ResourceExhausted,
         StatusCode::UnsupportedPasswordType
         | StatusCode::UserPasswordMismatch

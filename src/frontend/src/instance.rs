@@ -80,6 +80,7 @@ use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::FrontendOptions;
 use crate::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
 use crate::heartbeat::HeartbeatTask;
+use crate::instance::prometheus::PromMetricManager;
 use crate::instance::standalone::StandaloneGrpcQueryHandler;
 use crate::metrics;
 use crate::script::ScriptExecutor;
@@ -112,6 +113,7 @@ pub struct Instance {
     statement_executor: Arc<StatementExecutor>,
     query_engine: QueryEngineRef,
     grpc_query_handler: GrpcQueryHandlerRef<Error>,
+    prom_metric_manager: PromMetricManager,
 
     create_expr_factory: CreateExprFactoryRef,
 
@@ -197,12 +199,15 @@ impl Instance {
             Arc::new(handlers_executor),
         ));
 
+        let prom_metric_manager = PromMetricManager::new(dist_instance.clone());
+
         Ok(Instance {
             catalog_manager,
             script_executor,
             create_expr_factory: Arc::new(DefaultCreateExprFactory),
             statement_executor,
             query_engine,
+            prom_metric_manager,
             grpc_query_handler: dist_instance,
             plugins: plugins.clone(),
             servers: Arc::new(HashMap::new()),
@@ -254,6 +259,8 @@ impl Instance {
             query_engine.clone(),
             dn_instance.clone(),
         ));
+        let grpc_query_handler = StandaloneGrpcQueryHandler::arc(dn_instance.clone());
+        let prom_metric_manager = PromMetricManager::new(grpc_query_handler.clone());
 
         Ok(Instance {
             catalog_manager: catalog_manager.clone(),
@@ -261,7 +268,8 @@ impl Instance {
             create_expr_factory: Arc::new(DefaultCreateExprFactory),
             statement_executor,
             query_engine,
-            grpc_query_handler: StandaloneGrpcQueryHandler::arc(dn_instance.clone()),
+            prom_metric_manager,
+            grpc_query_handler,
             plugins: Default::default(),
             servers: Arc::new(HashMap::new()),
             heartbeat_task: None,
