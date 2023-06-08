@@ -11,11 +11,11 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-use std::result::Result as StdResult;
+use std::env;
 use std::sync::Arc;
 use std::time::Duration;
-use std::{env, u8};
 
+use common_telemetry::info;
 use once_cell::sync::Lazy;
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
@@ -37,7 +37,7 @@ struct ReportData {
     pub arch: String,
     pub mode: String,
     pub git_commit: String,
-    pub nodes: Option<u8>,
+    pub nodes: Option<i32>,
 }
 
 #[async_trait::async_trait]
@@ -56,19 +56,19 @@ pub trait Statistic {
         env::consts::ARCH.to_string()
     }
     async fn get_mode(&self) -> String;
-    async fn get_nodes(&self) -> u8;
+    async fn get_nodes(&self) -> i32;
 }
 
 pub struct GreptimeVersionReport {
     statistic: Arc<dyn Statistic + Send + Sync>,
-    client: Client,
+    client: Option<Client>,
     report_url: &'static str,
 }
 
 #[async_trait::async_trait]
 impl TaskFunction<Error> for GreptimeVersionReport {
     fn name(&self) -> &str {
-        "Greptime-vresion-report-task"
+        "Greptime-version-report-task"
     }
 
     async fn call(&mut self) -> Result<()> {
@@ -80,13 +80,18 @@ impl TaskFunction<Error> for GreptimeVersionReport {
 
 impl GreptimeVersionReport {
     pub fn new(statistic: Arc<dyn Statistic + Send + Sync>) -> Self {
+        let builder = Client::builder();
+        let client = builder
+            .connect_timeout(Duration::from_secs(3))
+            .timeout(Duration::from_secs(3))
+            .build();
         Self {
             statistic,
-            client: Client::new(),
+            client: client.ok(),
             report_url: VERSION_REPORT_URL,
         }
     }
-    pub async fn report_version(&self) -> StdResult<Response, reqwest::Error> {
+    pub async fn report_version(&self) -> Option<Response> {
         let data = ReportData {
             os: self.statistic.get_os().await,
             version: self.statistic.get_version().await,
@@ -95,16 +100,20 @@ impl GreptimeVersionReport {
             mode: self.statistic.get_mode().await,
             nodes: Some(self.statistic.get_nodes().await),
         };
-
-        self.client.post(self.report_url).json(&data).send().await
+        info!("report version: {:?}", data);
+        if let Some(client) = self.client.as_ref() {
+            client.post(self.report_url).json(&data).send().await.ok()
+        } else {
+            None
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::convert::Infallible;
+    use std::env;
     use std::sync::Arc;
-    use std::{env, u8};
 
     use hyper::service::{make_service_fn, service_fn};
     use hyper::Server;
@@ -144,7 +153,7 @@ mod tests {
                 "test".to_string()
             }
 
-            async fn get_nodes(&self) -> u8 {
+            async fn get_nodes(&self) -> i32 {
                 1
             }
         }

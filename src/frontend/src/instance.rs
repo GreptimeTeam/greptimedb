@@ -283,7 +283,7 @@ impl Instance {
                     async fn get_mode(&self) -> String {
                         "standalone".to_string()
                     }
-                    async fn get_nodes(&self) -> u8 {
+                    async fn get_nodes(&self) -> i32 {
                         1
                     }
                 }

@@ -53,7 +53,7 @@ impl MetaPeerClient {
         to_stat_kv_map(kvs)
     }
 
-    pub async fn get_node_cnt(&self) -> Result<u8> {
+    pub async fn get_node_cnt(&self) -> Result<i32> {
         let key = format!("{DN_STAT_PREFIX}-").into_bytes();
         let range_end = util::get_prefix_end_key(&key);
 
@@ -61,7 +61,7 @@ impl MetaPeerClient {
         kvs.into_iter()
             .map(|kv| kv.key.try_into())
             .collect::<Result<HashSet<StatKey>>>()
-            .map(|hash_set| hash_set.len() as u8)
+            .map(|hash_set| hash_set.len() as i32)
     }
 
     // Get datanode stat kvs from leader meta by input keys.

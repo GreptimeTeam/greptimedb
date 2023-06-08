@@ -215,11 +215,11 @@ impl MetaSrvBuilder {
                     async fn get_mode(&self) -> String {
                         "distributed".to_string()
                     }
-                    async fn get_nodes(&self) -> u8 {
+                    async fn get_nodes(&self) -> i32 {
                         if let Some(meta_peer_client) = &self.meta_peer_client {
-                            meta_peer_client.get_node_cnt().await.unwrap_or(0)
+                            meta_peer_client.get_node_cnt().await.unwrap_or(-1)
                         } else {
-                            0
+                            -2
                         }
                     }
                 }
