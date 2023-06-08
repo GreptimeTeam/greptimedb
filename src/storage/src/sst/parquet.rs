@@ -291,6 +291,7 @@ impl ParquetReader {
             .build()
             .context(ReadParquetSnafu { file: &file_path })?;
 
+        let time_range = self.time_range.clone();
         let chunk_stream = try_stream!({
             while let Some(res) = stream.next().await {
                 yield res.context(ReadParquetSnafu { file: &file_path })?
@@ -579,7 +580,7 @@ mod tests {
 
         let object_store = create_object_store(path);
         let sst_file_name = "test-flush.parquet";
-        let iter = memtable.iter(&IterContext::default()).unwrap();
+        let iter = memtable.iter(IterContext::default()).unwrap();
         let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
 
         writer
@@ -663,7 +664,7 @@ mod tests {
         let object_store = create_object_store(path);
         let sst_file_handle = new_file_handle(FileId::random());
         let sst_file_name = sst_file_handle.file_name();
-        let iter = memtable.iter(&IterContext::default()).unwrap();
+        let iter = memtable.iter(IterContext::default()).unwrap();
         let writer = ParquetWriter::new(&sst_file_name, Source::Iter(iter), object_store.clone());
 
         let SstInfo {
@@ -749,7 +750,7 @@ mod tests {
         let object_store = create_object_store(path);
         let file_handle = new_file_handle(FileId::random());
         let sst_file_name = file_handle.file_name();
-        let iter = memtable.iter(&IterContext::default()).unwrap();
+        let iter = memtable.iter(IterContext::default()).unwrap();
         let writer = ParquetWriter::new(&sst_file_name, Source::Iter(iter), object_store.clone());
 
         let SstInfo {
@@ -855,7 +856,7 @@ mod tests {
         let object_store = create_object_store(path);
         let sst_file_handle = new_file_handle(FileId::random());
         let sst_file_name = sst_file_handle.file_name();
-        let iter = memtable.iter(&IterContext::default()).unwrap();
+        let iter = memtable.iter(IterContext::default()).unwrap();
         let writer = ParquetWriter::new(&sst_file_name, Source::Iter(iter), object_store.clone());
 
         let SstInfo {
@@ -950,7 +951,7 @@ mod tests {
         builder.root(path);
         let object_store = ObjectStore::new(builder).unwrap().finish();
         let sst_file_name = "test-read.parquet";
-        let iter = memtable.iter(&IterContext::default()).unwrap();
+        let iter = memtable.iter(IterContext::default()).unwrap();
         let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
 
         let sst_info_opt = writer

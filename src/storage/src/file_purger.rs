@@ -143,7 +143,7 @@ mod tests {
             &[(Some(1), Some(1)), (Some(2), Some(2))],
         );
 
-        let iter = memtable.iter(&IterContext::default()).unwrap();
+        let iter = memtable.iter(IterContext::default()).unwrap();
         let sst_path = "table1";
         let layer = Arc::new(FsAccessLayer::new(sst_path, os.clone()));
         let sst_info = layer

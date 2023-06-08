@@ -220,7 +220,9 @@ impl ChunkReaderBuilder {
             .batch_size(self.iter_ctx.batch_size);
 
         for mem in &self.memtables {
-            let iter = mem.iter(&self.iter_ctx)?;
+            let mut iter_ctx = self.iter_ctx.clone();
+            iter_ctx.time_range = Some(*time_range);
+            let iter = mem.iter(iter_ctx)?;
             reader_builder = reader_builder.push_batch_iter(iter);
         }
 
