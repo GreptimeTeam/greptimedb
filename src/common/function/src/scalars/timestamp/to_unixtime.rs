@@ -51,7 +51,7 @@ impl Function for ToUnixtimeFunction {
     }
 
     fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::timestamp_second_datatype())
+        Ok(ConcreteDataType::int64_datatype())
     }
 
     fn signature(&self) -> Signature {
@@ -160,7 +160,7 @@ mod tests {
         let f = ToUnixtimeFunction::default();
         assert_eq!("to_unixtime", f.name());
         assert_eq!(
-            ConcreteDataType::timestamp_second_datatype(),
+            ConcreteDataType::int64_datatype(),
             f.return_type(&[]).unwrap()
         );
 
@@ -209,7 +209,7 @@ mod tests {
         let f = ToUnixtimeFunction::default();
         assert_eq!("to_unixtime", f.name());
         assert_eq!(
-            ConcreteDataType::timestamp_second_datatype(),
+            ConcreteDataType::int64_datatype(),
             f.return_type(&[]).unwrap()
         );
 
@@ -253,7 +253,7 @@ mod tests {
         let f = ToUnixtimeFunction::default();
         assert_eq!("to_unixtime", f.name());
         assert_eq!(
-            ConcreteDataType::timestamp_second_datatype(),
+            ConcreteDataType::int64_datatype(),
             f.return_type(&[]).unwrap()
         );
 

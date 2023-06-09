@@ -50,11 +50,11 @@ select TO_UNIXTIME(2);
 | 2                     |
 +-----------------------+
 
-create table test_a(a int, b timestamp time index);
+create table test_unixtime(a int, b timestamp time index);
 
 Affected Rows: 0
 
-DESC TABLE test_a;
+DESC TABLE test_unixtime;
 
 +-------+----------------------+------+---------+---------------+
 | Field | Type                 | Null | Default | Semantic Type |
@@ -63,11 +63,11 @@ DESC TABLE test_a;
 | b     | TimestampMillisecond | NO   |         | TIME INDEX    |
 +-------+----------------------+------+---------+---------------+
 
-insert into test_a values(27, 27);
+insert into test_unixtime values(27, 27);
 
 Affected Rows: 1
 
-select * from test_a;
+select * from test_unixtime;
 
 +----+-------------------------+
 | a  | b                       |
@@ -75,7 +75,7 @@ select * from test_a;
 | 27 | 1970-01-01T00:00:00.027 |
 +----+-------------------------+
 
-select a from test_a;
+select a from test_unixtime;
 
 +----+
 | a  |
@@ -83,7 +83,7 @@ select a from test_a;
 | 27 |
 +----+
 
-select b from test_a;
+select b from test_unixtime;
 
 +-------------------------+
 | b                       |
@@ -91,11 +91,15 @@ select b from test_a;
 | 1970-01-01T00:00:00.027 |
 +-------------------------+
 
-select TO_UNIXTIME(b) from test_a;
+select TO_UNIXTIME(b) from test_unixtime;
 
-Error: 1003(Internal), Invalid argument error: column types must match schema types, expected Timestamp(Second, None) but found Int64 at column index 0
++------------------------------+
+| to_unixtime(test_unixtime.b) |
++------------------------------+
+| 27                           |
++------------------------------+
 
-DROP TABLE test_a;
+DROP TABLE test_unixtime;
 
 Affected Rows: 1
 
