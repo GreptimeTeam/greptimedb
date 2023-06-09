@@ -295,7 +295,7 @@ fn build_row_key_desc(
 
     let column_schemas = &table_schema.column_schemas();
 
-    //TODO(boyan): enable version column by table option?
+    //TODO(dennis): enable version column by table option?
     let mut builder = RowKeyDescriptorBuilder::new(ts_column);
 
     for index in primary_key_indices {
