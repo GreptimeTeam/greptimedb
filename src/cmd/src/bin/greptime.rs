@@ -180,14 +180,19 @@ fn full_version() -> &'static str {
     )
 }
 
+fn log_env_flags() {
+    info!("command line arguments");
+    for argument in std::env::args() {
+        info!("argument: {}", argument);
+    }
+}
+
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cmd = Command::parse();
-    // TODO(dennis):
-    // 1. adds ip/port to app
     let app_name = &cmd.subcmd.to_string();
 
     let opts = cmd.load_options()?;
@@ -203,6 +208,14 @@ async fn main() -> Result<()> {
 
     // Report app version as gauge.
     gauge!("app_version", 1.0, "short_version" => short_version(), "version" => full_version());
+
+    // Log version and argument flags.
+    info!(
+        "short_version: {}, full_version: {}",
+        short_version(),
+        full_version()
+    );
+    log_env_flags();
 
     let mut app = cmd.build(opts).await?;
 
