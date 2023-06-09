@@ -62,7 +62,7 @@ where
     R: BatchReader,
 {
     async fn next_batch(&mut self) -> Result<Option<Batch>> {
-        let _window_scan_elapsed = timer!("query.scan.window_scan.elapsed");
+        let _window_scan_elapsed = timer!(crate::metrics::WINDOW_SCAN_ELAPSED);
         let Some(mut reader) = self.readers.pop() else { return Ok(None); };
 
         let store_schema = self.schema.schema_to_read();
@@ -94,7 +94,7 @@ where
                 .push(arrow::compute::concat(&columns).context(error::ConvertColumnsToRowsSnafu)?);
         }
         if let Some(v) = vectors_in_batch.get(0) {
-            histogram!("query.scan.window_scan.window_row_size", v.len() as f64);
+            histogram!(crate::metrics::WINDOW_SCAN_ROWS_PER_WINDOW, v.len() as f64);
         }
         let sorted = sort_by_rows(&self.schema, vectors_in_batch, &self.order_options)?;
         let vectors = sorted

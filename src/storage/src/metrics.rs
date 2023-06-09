@@ -38,3 +38,7 @@ pub const WRITE_BUFFER_BYTES: &str = "storage.write_buffer_bytes";
 pub const MEMTABLE_WRITE_ELAPSED: &str = "storage.memtable.write.elapsed";
 /// Elapsed time of preprocessing write batch.
 pub const PREPROCESS_ELAPSED: &str = "storage.write.preprocess.elapsed";
+/// Elapsed time for windowed scan
+pub const WINDOW_SCAN_ELAPSED: &str = "query.scan.window_scan.elapsed";
+/// Rows per window during window scan
+pub const WINDOW_SCAN_ROWS_PER_WINDOW: &str = "query.scan.window_scan.window_row_size";
