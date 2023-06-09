@@ -221,7 +221,7 @@ impl Default for RegionManifestConfig {
     fn default() -> Self {
         Self {
             checkpoint_margin: Some(10u16),
-            gc_duration: Some(Duration::from_secs(30)),
+            gc_duration: Some(Duration::from_secs(600)),
             checkpoint_on_startup: false,
             compress: false,
         }

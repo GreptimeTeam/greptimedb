@@ -120,7 +120,7 @@ async fn test_s3_backend() -> Result<()> {
 
             let store = ObjectStore::new(builder).unwrap().finish();
 
-            let mut guard = TempFolder::new(&store, "/");
+            let guard = TempFolder::new(&store, "/");
             test_object_crud(&store).await?;
             test_object_list(&store).await?;
             guard.remove_all().await?;
@@ -148,7 +148,7 @@ async fn test_oss_backend() -> Result<()> {
 
             let store = ObjectStore::new(builder).unwrap().finish();
 
-            let mut guard = TempFolder::new(&store, "/");
+            let guard = TempFolder::new(&store, "/");
             test_object_crud(&store).await?;
             test_object_list(&store).await?;
             guard.remove_all().await?;
@@ -176,7 +176,7 @@ async fn test_azblob_backend() -> Result<()> {
 
             let store = ObjectStore::new(builder).unwrap().finish();
 
-            let mut guard = TempFolder::new(&store, "/");
+            let guard = TempFolder::new(&store, "/");
             test_object_crud(&store).await?;
             test_object_list(&store).await?;
             guard.remove_all().await?;

@@ -14,9 +14,9 @@ metrics.workspace = true
 opendal = { version = "0.36", features = ["layers-tracing", "layers-metrics"] }
 pin-project = "1.0"
 tokio.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 anyhow = "1.0"
 common-telemetry = { path = "../common/telemetry" }
 common-test-util = { path = "../common/test-util" }
-uuid.workspace = true
