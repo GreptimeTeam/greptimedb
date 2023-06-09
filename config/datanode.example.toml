@@ -49,9 +49,9 @@ max_purge_tasks = 32
 [storage.manifest]
 # Region checkpoint actions margin.
 # Create a checkpoint every <checkpoint_margin> actions.
-checkpoint_margin = 10
+checkpoint_margin = 100
 # Region manifest logs and checkpoints gc execution duration
-gc_duration = '30s'
+gc_duration = '10m'
 # Whether to try creating a manifest checkpoint on region opening
 checkpoint_on_startup = false
 

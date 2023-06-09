@@ -35,8 +35,8 @@ use crate::manifest::action::RegionCheckpoint;
 use crate::manifest::checkpoint::Checkpointer;
 use crate::manifest::storage::{ManifestObjectStore, ObjectStoreLogIterator};
 
-const CHECKPOINT_ACTIONS_MARGIN: u16 = 10;
-const GC_DURATION_SECS: u64 = 30;
+const CHECKPOINT_ACTIONS_MARGIN: u16 = 100;
+const GC_DURATION_SECS: u64 = 600;
 
 #[derive(Clone, Debug)]
 pub struct ManifestImpl<S: Checkpoint<Error = Error>, M: MetaAction<Error = Error>> {
