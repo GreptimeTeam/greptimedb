@@ -27,6 +27,7 @@ use datafusion::catalog::catalog::MemoryCatalogList;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::{QueryPlanner, SessionConfig, SessionState};
 use datafusion::execution::runtime_env::RuntimeEnv;
+use datafusion::physical_optimizer::sort_enforcement::EnforceSorting;
 use datafusion::physical_plan::planner::{DefaultPhysicalPlanner, ExtensionPlanner};
 use datafusion::physical_plan::{ExecutionPlan, PhysicalPlanner};
 use datafusion_expr::LogicalPlan as DfLogicalPlan;
@@ -79,6 +80,13 @@ impl QueryEngineState {
         let mut optimizer = Optimizer::new();
         optimizer.rules.push(Arc::new(OrderHintRule));
 
+        let mut physical_optimizers = {
+            let state = SessionState::with_config_rt(session_config.clone(), runtime_env.clone());
+            state.physical_optimizers().to_vec()
+        };
+        // run the sort enforcement rule first
+        physical_optimizers.insert(0, Arc::new(EnforceSorting {}));
+
         let session_state = SessionState::with_config_rt_and_catalog_list(
             session_config,
             runtime_env,
@@ -90,7 +98,8 @@ impl QueryEngineState {
             partition_manager,
             datanode_clients,
         )))
-        .with_optimizer_rules(optimizer.rules);
+        .with_optimizer_rules(optimizer.rules)
+        .with_physical_optimizer_rules(physical_optimizers);
 
         let df_context = SessionContext::with_state(session_state);
 
