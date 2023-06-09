@@ -16,6 +16,7 @@
 //! Inspired by Databend's "[mysql_federated.rs](https://github.com/datafuselabs/databend/blob/ac706bf65845e6895141c96c0a10bad6fdc2d367/src/query/service/src/servers/mysql/mysql_federated.rs)".
 
 use std::collections::HashMap;
+use std::env;
 use std::sync::Arc;
 
 use common_query::Output;
@@ -29,8 +30,6 @@ use once_cell::sync::Lazy;
 use regex::bytes::RegexSet;
 use regex::Regex;
 use session::context::QueryContextRef;
-
-const MYSQL_VERSION: &str = "8.0.26";
 
 static SELECT_VAR_PATTERN: Lazy<Regex> = Lazy::new(|| Regex::new("(?i)^(SELECT @@(.*))").unwrap());
 static MYSQL_CONN_JAVA_PATTERN: Lazy<Regex> =
@@ -284,7 +283,7 @@ fn check_others(query: &str, query_ctx: QueryContextRef) -> Option<Output> {
     }
 
     let recordbatches = if SELECT_VERSION_PATTERN.is_match(query) {
-        Some(select_function("version()", MYSQL_VERSION))
+        Some(select_function("version()", &get_version()))
     } else if SELECT_DATABASE_PATTERN.is_match(query) {
         let schema = query_ctx.current_schema();
         Some(select_function("database()", &schema))
@@ -317,8 +316,16 @@ pub(crate) fn check(query: &str, query_ctx: QueryContextRef) -> Option<Output> {
         .or_else(|| check_others(query, query_ctx))
 }
 
+// get GreptimeDB's version.
+fn get_version() -> String {
+    format!(
+        "{}-greptime",
+        env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_string()),
+    )
+}
 #[cfg(test)]
 mod test {
+
     use session::context::QueryContext;
 
     use super::*;
@@ -344,13 +351,15 @@ mod test {
         }
 
         let query = "select version()";
-        let expected = "\
-+-----------+
-| version() |
-+-----------+
-| 8.0.26    |
-+-----------+";
-        test(query, expected);
+        let expected = format!(
+            r#"+----------------+
+| version()      |
++----------------+
+| {}-greptime |
++----------------+"#,
+            env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_string())
+        );
+        test(query, &expected);
 
         let query = "SELECT @@version_comment LIMIT 1";
         let expected = "\
