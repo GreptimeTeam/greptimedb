@@ -7,20 +7,31 @@ on:
     - cron: '0 0 * * 1'
   # Mannually trigger only builds binaries.
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Skip docker push and release steps'
+        type: boolean
+        default: true
+      skip_test:
+        description: 'Do not run tests during build'
+        type: boolean
+        default: false
 
 name: Release
 
 env:
   RUST_TOOLCHAIN: nightly-2023-05-03
 
-  SCHEDULED_BUILD_VERSION_PREFIX: v0.3.0
+  SCHEDULED_BUILD_VERSION_PREFIX: v0.4.0
 
   SCHEDULED_PERIOD: nightly
 
   CARGO_PROFILE: nightly
 
   # Controls whether to run tests, include unit-test, integration-test and sqlness.
-  DISABLE_RUN_TESTS: false
+  DISABLE_RUN_TESTS: ${{ github.event.inputs.skip_test || false }}
+
+  DRY_RUN: ${{ github.event.inputs.dry_run || false }}
 
 jobs:
   build-macos:
@@ -281,7 +292,7 @@ jobs:
     name: Build docker image
     needs: [build-linux, build-macos]
     runs-on: ubuntu-latest
-    if: github.repository == 'GreptimeTeam/greptimedb' && github.event_name != 'workflow_dispatch'
+    if: github.repository == 'GreptimeTeam/greptimedb' && !env.DRY_RUN
     steps:
       - name: Checkout sources
         uses: actions/checkout@v3
@@ -294,7 +305,7 @@ jobs:
 
       - name: Configure scheduled build image tag # the tag would be ${SCHEDULED_BUILD_VERSION_PREFIX}-YYYYMMDD-${SCHEDULED_PERIOD}
         shell: bash
-        if: github.event_name == 'schedule'
+        if: github.event_name != 'push'
         run: |
           buildTime=`date "+%Y%m%d"`
           SCHEDULED_BUILD_VERSION=${{ env.SCHEDULED_BUILD_VERSION_PREFIX }}-$buildTime-${{ env.SCHEDULED_PERIOD }}
@@ -302,7 +313,7 @@ jobs:
 
       - name: Configure tag # If the release tag is v0.1.0, then the image version tag will be 0.1.0.
         shell: bash
-        if: github.event_name != 'schedule'
+        if: github.event_name == 'push'
         run: |
           VERSION=${{ github.ref_name }}
           echo "IMAGE_TAG=${VERSION:1}" >> $GITHUB_ENV
@@ -367,7 +378,7 @@ jobs:
     # Release artifacts only when all the artifacts are built successfully.
     needs: [build-linux, build-macos, docker]
     runs-on: ubuntu-latest
-    if: github.repository == 'GreptimeTeam/greptimedb' && github.event_name != 'workflow_dispatch'
+    if: github.repository == 'GreptimeTeam/greptimedb' && !env.DRY_RUN
     steps:
       - name: Checkout sources
         uses: actions/checkout@v3
@@ -426,7 +437,7 @@ jobs:
     name: Push docker image to alibaba cloud container registry
     needs: [docker]
     runs-on: ubuntu-latest
-    if: github.repository == 'GreptimeTeam/greptimedb' && github.event_name != 'workflow_dispatch'
+    if: github.repository == 'GreptimeTeam/greptimedb' && !env.DRY_RUN
     continue-on-error: true
     steps:
       - name: Checkout sources
