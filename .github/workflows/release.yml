@@ -31,8 +31,6 @@ env:
   # Controls whether to run tests, include unit-test, integration-test and sqlness.
   DISABLE_RUN_TESTS: ${{ github.event.inputs.skip_test || false }}
 
-  DRY_RUN: ${{ github.event.inputs.dry_run || false }}
-
 jobs:
   build-macos:
     name: Build macOS binary
@@ -292,7 +290,7 @@ jobs:
     name: Build docker image
     needs: [build-linux, build-macos]
     runs-on: ubuntu-latest
-    if: github.repository == 'GreptimeTeam/greptimedb' && !env.DRY_RUN
+    if: github.repository == 'GreptimeTeam/greptimedb' && !(github.event.inputs.dry_run || false)
     steps:
       - name: Checkout sources
         uses: actions/checkout@v3
@@ -378,7 +376,7 @@ jobs:
     # Release artifacts only when all the artifacts are built successfully.
     needs: [build-linux, build-macos, docker]
     runs-on: ubuntu-latest
-    if: github.repository == 'GreptimeTeam/greptimedb' && !env.DRY_RUN
+    if: github.repository == 'GreptimeTeam/greptimedb' && !(github.event.inputs.dry_run || false)
     steps:
       - name: Checkout sources
         uses: actions/checkout@v3
@@ -437,7 +435,7 @@ jobs:
     name: Push docker image to alibaba cloud container registry
     needs: [docker]
     runs-on: ubuntu-latest
-    if: github.repository == 'GreptimeTeam/greptimedb' && !env.DRY_RUN
+    if: github.repository == 'GreptimeTeam/greptimedb' && !(github.event.inputs.dry_run || false)
     continue-on-error: true
     steps:
       - name: Checkout sources
