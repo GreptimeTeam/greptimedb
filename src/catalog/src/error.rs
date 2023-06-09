@@ -32,18 +32,18 @@ pub enum Error {
         source
     ))]
     CompileScriptInternal {
-        #[snafu(backtrace)]
+        location: Location,
         source: BoxedError,
     },
     #[snafu(display("Failed to open system catalog table, source: {}", source))]
     OpenSystemCatalog {
-        #[snafu(backtrace)]
+        location: Location,
         source: table::error::Error,
     },
 
     #[snafu(display("Failed to create system catalog table, source: {}", source))]
     CreateSystemCatalog {
-        #[snafu(backtrace)]
+        location: Location,
         source: table::error::Error,
     },
 
@@ -54,7 +54,7 @@ pub enum Error {
     ))]
     CreateTable {
         table_info: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: table::error::Error,
     },
 
@@ -94,7 +94,7 @@ pub enum Error {
     #[snafu(display("Table engine not found: {}, source: {}", engine_name, source))]
     TableEngineNotFound {
         engine_name: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: table::error::Error,
     },
 
@@ -132,7 +132,7 @@ pub enum Error {
     #[snafu(display("Failed to open table, table info: {}, source: {}", table_info, source))]
     OpenTable {
         table_info: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: table::error::Error,
     },
 
@@ -147,13 +147,13 @@ pub enum Error {
 
     #[snafu(display("Failed to read system catalog table records"))]
     ReadSystemCatalog {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_recordbatch::error::Error,
     },
 
     #[snafu(display("Failed to create recordbatch, source: {}", source))]
     CreateRecordBatch {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_recordbatch::error::Error,
     },
 
@@ -162,7 +162,7 @@ pub enum Error {
         source
     ))]
     InsertCatalogRecord {
-        #[snafu(backtrace)]
+        location: Location,
         source: table::error::Error,
     },
 
@@ -173,7 +173,7 @@ pub enum Error {
     ))]
     DeregisterTable {
         request: DeregisterTableRequest,
-        #[snafu(backtrace)]
+        location: Location,
         source: table::error::Error,
     },
 
@@ -182,36 +182,36 @@ pub enum Error {
 
     #[snafu(display("Failed to scan system catalog table, source: {}", source))]
     SystemCatalogTableScan {
-        #[snafu(backtrace)]
+        location: Location,
         source: table::error::Error,
     },
 
     #[snafu(display("{source}"))]
     Internal {
-        #[snafu(backtrace)]
+        location: Location,
         source: BoxedError,
     },
 
     #[snafu(display("Failed to execute system catalog table scan, source: {}", source))]
     SystemCatalogTableScanExec {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_query::error::Error,
     },
     #[snafu(display("Cannot parse catalog value, source: {}", source))]
     InvalidCatalogValue {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_catalog::error::Error,
     },
 
     #[snafu(display("Failed to perform metasrv operation, source: {}", source))]
     MetaSrv {
-        #[snafu(backtrace)]
+        location: Location,
         source: meta_client::error::Error,
     },
 
     #[snafu(display("Invalid table info in catalog, source: {}", source))]
     InvalidTableInfoInCatalog {
-        #[snafu(backtrace)]
+        location: Location,
         source: datatypes::error::Error,
     },
 
@@ -230,7 +230,7 @@ pub enum Error {
 
     #[snafu(display("Table schema mismatch, source: {}", source))]
     TableSchemaMismatch {
-        #[snafu(backtrace)]
+        location: Location,
         source: table::error::Error,
     },
 
@@ -258,7 +258,7 @@ impl ErrorExt for Error {
 
             Error::Generic { .. } | Error::SystemCatalogTypeMismatch { .. } => StatusCode::Internal,
 
-            Error::ReadSystemCatalog { source, .. } | Error::CreateRecordBatch { source } => {
+            Error::ReadSystemCatalog { source, .. } | Error::CreateRecordBatch { source, .. } => {
                 source.status_code()
             }
             Error::InvalidCatalogValue { source, .. } => source.status_code(),
@@ -275,14 +275,14 @@ impl ErrorExt for Error {
             | Error::OpenTable { source, .. }
             | Error::CreateTable { source, .. }
             | Error::DeregisterTable { source, .. }
-            | Error::TableSchemaMismatch { source } => source.status_code(),
+            | Error::TableSchemaMismatch { source, .. } => source.status_code(),
 
             Error::MetaSrv { source, .. } => source.status_code(),
-            Error::SystemCatalogTableScan { source } => source.status_code(),
-            Error::SystemCatalogTableScanExec { source } => source.status_code(),
-            Error::InvalidTableInfoInCatalog { source } => source.status_code(),
+            Error::SystemCatalogTableScan { source, .. } => source.status_code(),
+            Error::SystemCatalogTableScanExec { source, .. } => source.status_code(),
+            Error::InvalidTableInfoInCatalog { source, .. } => source.status_code(),
 
-            Error::CompileScriptInternal { source } | Error::Internal { source } => {
+            Error::CompileScriptInternal { source, .. } | Error::Internal { source, .. } => {
                 source.status_code()
             }
 

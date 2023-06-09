@@ -34,13 +34,13 @@ pub enum Error {
 
     #[snafu(display("Invalid raw schema, source: {}", source))]
     InvalidRawSchema {
-        #[snafu(backtrace)]
+        location: Location,
         source: datatypes::error::Error,
     },
 
     #[snafu(display("Failed to access catalog, source: {}", source))]
     AccessCatalog {
-        #[snafu(backtrace)]
+        location: Location,
         source: catalog::error::Error,
     },
 
@@ -66,7 +66,7 @@ impl ErrorExt for Error {
         match self {
             SerializeProcedure { .. } | DeserializeProcedure { .. } => StatusCode::Internal,
             InvalidRawSchema { source, .. } => source.status_code(),
-            AccessCatalog { source } => source.status_code(),
+            AccessCatalog { source, .. } => source.status_code(),
             CatalogNotFound { .. } | SchemaNotFound { .. } | TableExists { .. } => {
                 StatusCode::InvalidArguments
             }

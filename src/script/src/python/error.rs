@@ -35,13 +35,13 @@ pub(crate) fn ret_other_error_with(reason: String) -> OtherSnafu<String> {
 pub enum Error {
     #[snafu(display("Datatype error: {}", source))]
     TypeCast {
-        #[snafu(backtrace)]
+        location: SnafuLocation,
         source: DataTypeError,
     },
 
     #[snafu(display("Failed to query, source: {}", source))]
     DatabaseQuery {
-        #[snafu(backtrace)]
+        location: SnafuLocation,
         source: QueryError,
     },
 
@@ -105,24 +105,24 @@ pub enum Error {
 
     #[snafu(display("Failed to retrieve record batches, source: {}", source))]
     RecordBatch {
-        #[snafu(backtrace)]
+        location: SnafuLocation,
         source: common_recordbatch::error::Error,
     },
 
     #[snafu(display("Failed to create record batch, source: {}", source))]
     NewRecordBatch {
-        #[snafu(backtrace)]
+        location: SnafuLocation,
         source: common_recordbatch::error::Error,
     },
     #[snafu(display("Failed to create tokio task, source: {}", source))]
     TokioJoin { source: tokio::task::JoinError },
 }
 
-impl From<QueryError> for Error {
-    fn from(source: QueryError) -> Self {
-        Self::DatabaseQuery { source }
-    }
-}
+// impl From<QueryError> for Error {
+//     fn from(source: QueryError) -> Self {
+//         Self::DatabaseQuery { source }
+//     }
+// }
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
@@ -133,11 +133,11 @@ impl ErrorExt for Error {
             | Error::TokioJoin { .. }
             | Error::Other { .. } => StatusCode::Internal,
 
-            Error::RecordBatch { source } | Error::NewRecordBatch { source } => {
+            Error::RecordBatch { source, .. } | Error::NewRecordBatch { source, .. } => {
                 source.status_code()
             }
-            Error::DatabaseQuery { source } => source.status_code(),
-            Error::TypeCast { source } => source.status_code(),
+            Error::DatabaseQuery { source, .. } => source.status_code(),
+            Error::TypeCast { source, .. } => source.status_code(),
 
             Error::PyParse { .. }
             | Error::PyCompile { .. }
@@ -151,11 +151,11 @@ impl ErrorExt for Error {
     }
 }
 // impl from for those error so one can use question mark and implicitly cast into `CoprError`
-impl From<DataTypeError> for Error {
-    fn from(e: DataTypeError) -> Self {
-        Self::TypeCast { source: e }
-    }
-}
+// impl From<DataTypeError> for Error {
+//     fn from(e: DataTypeError) -> Self {
+//         Self::TypeCast { source: e }
+//     }
+// }
 
 /// pretty print [`Error`] in given script,
 /// basically print a arrow which point to where error occurs(if possible to get a location)

@@ -23,13 +23,13 @@ use snafu::Location;
 pub enum Error {
     #[snafu(display("Failed to start log store gc task, source: {}", source))]
     StartGcTask {
-        #[snafu(backtrace)]
+        location: Location,
         source: RuntimeError,
     },
 
     #[snafu(display("Failed to stop log store gc task, source: {}", source))]
     StopGcTask {
-        #[snafu(backtrace)]
+        location: Location,
         source: RuntimeError,
     },
 

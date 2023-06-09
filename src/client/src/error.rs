@@ -34,13 +34,13 @@ pub enum Error {
 
     #[snafu(display("Failed to convert FlightData, source: {}", source))]
     ConvertFlightData {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_grpc::Error,
     },
 
     #[snafu(display("Column datatype error, source: {}", source))]
     ColumnDataType {
-        #[snafu(backtrace)]
+        location: Location,
         source: api::error::Error,
     },
 
@@ -57,7 +57,7 @@ pub enum Error {
     ))]
     CreateChannel {
         addr: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: common_grpc::error::Error,
     },
 
@@ -85,7 +85,7 @@ impl ErrorExt for Error {
 
             Error::Server { code, .. } => *code,
             Error::FlightGet { source, .. } => source.status_code(),
-            Error::CreateChannel { source, .. } | Error::ConvertFlightData { source } => {
+            Error::CreateChannel { source, .. } | Error::ConvertFlightData { source, .. } => {
                 source.status_code()
             }
             Error::IllegalGrpcClientState { .. } => StatusCode::Unexpected,

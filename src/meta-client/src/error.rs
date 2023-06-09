@@ -35,7 +35,7 @@ pub enum Error {
 
     #[snafu(display("Failed to create gRPC channel, source: {}", source))]
     CreateChannel {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_grpc::error::Error,
     },
 
@@ -50,19 +50,19 @@ pub enum Error {
 
     #[snafu(display("Invalid response header, source: {}", source))]
     InvalidResponseHeader {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_meta::error::Error,
     },
 
     #[snafu(display("Failed to convert Metasrv request, source: {}", source))]
     ConvertMetaRequest {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_meta::error::Error,
     },
 
     #[snafu(display("Failed to convert Metasrv response, source: {}", source))]
     ConvertMetaResponse {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_meta::error::Error,
     },
 }
@@ -86,9 +86,9 @@ impl ErrorExt for Error {
             | Error::CreateHeartbeatStream { .. }
             | Error::CreateChannel { .. } => StatusCode::Internal,
 
-            Error::InvalidResponseHeader { source }
-            | Error::ConvertMetaRequest { source }
-            | Error::ConvertMetaResponse { source } => source.status_code(),
+            Error::InvalidResponseHeader { source, .. }
+            | Error::ConvertMetaRequest { source, .. }
+            | Error::ConvertMetaResponse { source, .. } => source.status_code(),
         }
     }
 }

@@ -51,7 +51,7 @@ pub enum Error {
 
     #[snafu(display("Failed to build schema, source: {}", source))]
     InvalidSchema {
-        #[snafu(backtrace)]
+        location: Location,
         source: datatypes::error::Error,
     },
 
@@ -86,7 +86,7 @@ pub enum Error {
     // End of variants for validating `AlterRequest`.
     #[snafu(display("Failed to convert to column schema, source: {}", source))]
     ToColumnSchema {
-        #[snafu(backtrace)]
+        location: Location,
         source: datatypes::error::Error,
     },
 
@@ -113,7 +113,7 @@ pub enum Error {
 
     #[snafu(display("Failed to convert from arrow schema, source: {}", source))]
     ConvertArrowSchema {
-        #[snafu(backtrace)]
+        location: Location,
         source: datatypes::error::Error,
     },
 
@@ -127,13 +127,13 @@ pub enum Error {
     ))]
     ConvertChunk {
         name: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: datatypes::error::Error,
     },
 
     #[snafu(display("Failed to convert schema, source: {}", source))]
     ConvertSchema {
-        #[snafu(backtrace)]
+        location: Location,
         source: datatypes::error::Error,
     },
 

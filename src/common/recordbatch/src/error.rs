@@ -33,13 +33,13 @@ pub enum Error {
 
     #[snafu(display("Data types error, source: {}", source))]
     DataTypes {
-        #[snafu(backtrace)]
+        location: Location,
         source: datatypes::error::Error,
     },
 
     #[snafu(display("External error, source: {}", source))]
     External {
-        #[snafu(backtrace)]
+        location: Location,
         source: BoxedError,
     },
 
@@ -99,7 +99,7 @@ pub enum Error {
     CastVector {
         from_type: ConcreteDataType,
         to_type: ConcreteDataType,
-        #[snafu(backtrace)]
+        location: Location,
         source: datatypes::error::Error,
     },
 }
@@ -117,7 +117,7 @@ impl ErrorExt for Error {
             | Error::ColumnNotExists { .. }
             | Error::ProjectArrowRecordBatch { .. } => StatusCode::Internal,
 
-            Error::External { source } => source.status_code(),
+            Error::External { source, .. } => source.status_code(),
 
             Error::SchemaConversion { source, .. } | Error::CastVector { source, .. } => {
                 source.status_code()

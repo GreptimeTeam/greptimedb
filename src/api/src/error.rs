@@ -41,7 +41,7 @@ pub enum Error {
     ))]
     ConvertColumnDefaultConstraint {
         column: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: datatypes::error::Error,
     },
 
@@ -52,7 +52,7 @@ pub enum Error {
     ))]
     InvalidColumnDefaultConstraint {
         column: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: datatypes::error::Error,
     },
 }
