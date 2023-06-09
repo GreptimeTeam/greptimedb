@@ -440,7 +440,7 @@ fn test_sequence_visibility() {
                 time_range: None,
             };
 
-            let mut iter = ctx.memtable.iter(iter_ctx.clone()).unwrap();
+            let mut iter = ctx.memtable.iter(iter_ctx).unwrap();
             check_iter_content(
                 &mut *iter,
                 &[], // keys

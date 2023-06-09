@@ -291,7 +291,6 @@ impl ParquetReader {
             .build()
             .context(ReadParquetSnafu { file: &file_path })?;
 
-        let time_range = self.time_range.clone();
         let chunk_stream = try_stream!({
             while let Some(res) = stream.next().await {
                 yield res.context(ReadParquetSnafu { file: &file_path })?

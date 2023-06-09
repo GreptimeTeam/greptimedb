@@ -78,6 +78,8 @@ where
         }
 
         let Some(num_columns) = batches.get(0).map(|b| b.len()) else {
+            // the reader does not yield data, a batch of empty vectors must be returned instead of 
+            // an empty batch without any column.
             let empty_columns = store_schema.columns().iter().map(|s| {
                 s.desc.data_type.create_mutable_vector(0).to_vector()
             }).collect();

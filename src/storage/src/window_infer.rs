@@ -299,7 +299,6 @@ mod tests {
         );
 
         let mut expect = (0..=61)
-            .into_iter()
             .map(|s| TimestampRange::with_unit(s, s + 1, TimeUnit::Second).unwrap())
             .collect::<Vec<_>>();
         expect.push(TimestampRange::with_unit(60 * 60, 60 * 60 + 1, TimeUnit::Second).unwrap());

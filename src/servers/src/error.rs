@@ -274,9 +274,7 @@ pub enum Error {
         source: common_pprof::Error,
     },
 
-    #[snafu(display(
-        "Failed to update jemalloc metrics, source: {source:?}, location: {location}"
-    ))]
+    #[snafu(display("Failed to update jemalloc metrics, source: {source}, location: {location}"))]
     UpdateJemallocMetrics {
         source: tikv_jemalloc_ctl::Error,
         location: Location,

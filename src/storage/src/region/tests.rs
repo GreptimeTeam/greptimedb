@@ -160,6 +160,24 @@ impl<S: LogStore> TesterBase<S> {
         dst
     }
 
+    pub async fn scan(&self, req: ScanRequest) -> Vec<(i64, Option<String>)> {
+        logging::info!("Full scan with ctx {:?}", self.read_ctx);
+        let snapshot = self.region.snapshot(&self.read_ctx).unwrap();
+
+        let resp = snapshot.scan(&self.read_ctx, req).await.unwrap();
+        let mut reader = resp.reader;
+
+        let metadata = self.region.in_memory_metadata();
+        assert_eq!(metadata.schema(), reader.user_schema());
+
+        let mut dst = Vec::new();
+        while let Some(chunk) = reader.next_chunk().await.unwrap() {
+            let chunk = reader.project_chunk(chunk);
+            append_chunk_to(&chunk, &mut dst);
+        }
+        dst
+    }
+
     pub fn committed_sequence(&self) -> SequenceNumber {
         self.region.committed_sequence()
     }
