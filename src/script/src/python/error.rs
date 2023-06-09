@@ -118,12 +118,6 @@ pub enum Error {
     TokioJoin { source: tokio::task::JoinError },
 }
 
-// impl From<QueryError> for Error {
-//     fn from(source: QueryError) -> Self {
-//         Self::DatabaseQuery { source }
-//     }
-// }
-
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
@@ -150,12 +144,6 @@ impl ErrorExt for Error {
         self
     }
 }
-// impl from for those error so one can use question mark and implicitly cast into `CoprError`
-// impl From<DataTypeError> for Error {
-//     fn from(e: DataTypeError) -> Self {
-//         Self::TypeCast { source: e }
-//     }
-// }
 
 /// pretty print [`Error`] in given script,
 /// basically print a arrow which point to where error occurs(if possible to get a location)

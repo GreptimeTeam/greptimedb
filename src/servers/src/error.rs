@@ -409,12 +409,6 @@ impl From<std::io::Error> for Error {
     }
 }
 
-// impl From<auth::Error> for Error {
-//     fn from(e: auth::Error) -> Self {
-//         Error::Auth { source: e }
-//     }
-// }
-
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let (status, error_message) = match self {
