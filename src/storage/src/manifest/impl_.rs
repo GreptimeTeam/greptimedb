@@ -35,7 +35,7 @@ use crate::manifest::action::RegionCheckpoint;
 use crate::manifest::checkpoint::Checkpointer;
 use crate::manifest::storage::{ManifestObjectStore, ObjectStoreLogIterator};
 
-const CHECKPOINT_ACTIONS_MARGIN: u16 = 100;
+const CHECKPOINT_ACTIONS_MARGIN: u16 = 10;
 const GC_DURATION_SECS: u64 = 600;
 
 #[derive(Clone, Debug)]
