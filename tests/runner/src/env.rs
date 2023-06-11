@@ -208,7 +208,6 @@ impl Env {
             "start".to_string(),
         ];
         args.push(format!("--rpc-addr=0.0.0.0:410{id}"));
-        args.push(format!("--mysql-addr=0.0.0.0:420{id}"));
         args.push(format!("--http-addr=0.0.0.0:430{id}"));
         args.push(format!(
             "--data-home=/tmp/greptimedb_datanode_{}",
