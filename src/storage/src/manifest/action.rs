@@ -78,6 +78,7 @@ pub struct RegionEdit {
     pub flushed_sequence: Option<SequenceNumber>,
     pub files_to_add: Vec<FileMeta>,
     pub files_to_remove: Vec<FileMeta>,
+    pub compaction_time_window: Option<i64>,
 }
 
 /// The region version checkpoint
@@ -382,6 +383,7 @@ mod tests {
                 flushed_sequence: Some(99),
                 files_to_add: files.clone(),
                 files_to_remove: vec![],
+                compaction_time_window: None,
             },
         );
         builder.apply_edit(
@@ -391,6 +393,7 @@ mod tests {
                 flushed_sequence: Some(100),
                 files_to_add: vec![],
                 files_to_remove: vec![files[0].clone()],
+                compaction_time_window: None,
             },
         );
 

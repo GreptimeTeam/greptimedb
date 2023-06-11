@@ -116,6 +116,7 @@ impl<S: LogStore> CompactionTaskImpl<S> {
             flushed_sequence: None,
             files_to_add: Vec::from_iter(output.into_iter()),
             files_to_remove: Vec::from_iter(input.into_iter()),
+            compaction_time_window: self.compaction_time_window,
         };
         debug!(
             "Compacted region: {}, region edit: {:?}",

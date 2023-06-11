@@ -312,6 +312,7 @@ impl<S: LogStore> FlushJob<S> {
             flushed_sequence: Some(self.flush_sequence),
             files_to_add: file_metas.to_vec(),
             files_to_remove: Vec::default(),
+            compaction_time_window: None,
         };
 
         self.writer

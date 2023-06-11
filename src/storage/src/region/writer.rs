@@ -141,7 +141,7 @@ impl RegionWriter {
         let files_to_add = edit.files_to_add.clone();
         let files_to_remove = edit.files_to_remove.clone();
         let flushed_sequence = edit.flushed_sequence;
-
+        let compaction_time_window = edit.compaction_time_window;
         // Persist the meta action.
         let mut action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
         action_list.set_prev_version(prev_version);
@@ -158,6 +158,7 @@ impl RegionWriter {
             flushed_sequence,
             manifest_version,
             max_memtable_id,
+            compaction_time_window,
         };
 
         // We could tolerate failure during persisting manifest version to the WAL, since it won't

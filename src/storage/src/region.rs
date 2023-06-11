@@ -521,6 +521,7 @@ impl<S: LogStore> RegionImpl<S> {
                 flushed_sequence: e.flushed_sequence,
                 manifest_version,
                 max_memtable_id: None,
+                compaction_time_window: e.compaction_time_window,
             };
             version.map(|mut v| {
                 v.apply_edit(edit);
