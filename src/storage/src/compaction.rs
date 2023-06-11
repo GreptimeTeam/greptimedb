@@ -15,7 +15,7 @@
 pub mod noop;
 mod picker;
 mod scheduler;
-mod strategy;
+pub mod strategy;
 mod task;
 mod writer;
 

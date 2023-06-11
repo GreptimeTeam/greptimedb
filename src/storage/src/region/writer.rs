@@ -42,7 +42,7 @@ use crate::metadata::RegionMetadataRef;
 use crate::metrics::{FLUSH_REASON, FLUSH_REQUESTS_TOTAL, PREPROCESS_ELAPSED};
 use crate::proto::wal::WalHeader;
 use crate::region::{
-    CompactContext, RecoverdMetadata, RecoveredMetadataMap, RegionManifest, SharedDataRef,
+    CompactContext, RecoveredMetadata, RecoveredMetadataMap, RegionManifest, SharedDataRef,
 };
 use crate::schema::compat::CompatWrite;
 use crate::sst::AccessLayerRef;
@@ -72,7 +72,6 @@ impl RegionWriter {
         memtable_builder: MemtableBuilderRef,
         config: Arc<EngineConfig>,
         ttl: Option<Duration>,
-        compaction_time_window: Option<i64>,
         write_buffer_size: usize,
     ) -> RegionWriter {
         RegionWriter {
@@ -80,7 +79,6 @@ impl RegionWriter {
                 memtable_builder,
                 config,
                 ttl,
-                compaction_time_window,
                 write_buffer_size,
             )),
             version_mutex: Mutex::new(()),
@@ -449,7 +447,6 @@ struct WriterInner {
     closed: bool,
     engine_config: Arc<EngineConfig>,
     ttl: Option<Duration>,
-    compaction_time_window: Option<i64>,
     /// Size in bytes to freeze the mutable memtable.
     write_buffer_size: usize,
 }
@@ -459,7 +456,6 @@ impl WriterInner {
         memtable_builder: MemtableBuilderRef,
         engine_config: Arc<EngineConfig>,
         ttl: Option<Duration>,
-        compaction_time_window: Option<i64>,
         write_buffer_size: usize,
     ) -> WriterInner {
         WriterInner {
@@ -468,7 +464,6 @@ impl WriterInner {
             engine_config,
             closed: false,
             ttl,
-            compaction_time_window,
             write_buffer_size,
         }
     }
@@ -634,7 +629,7 @@ impl WriterInner {
         &self,
         writer_ctx: &WriterContext<'_, S>,
         sequence: SequenceNumber,
-        mut metadata: Option<RecoverdMetadata>,
+        mut metadata: Option<RecoveredMetadata>,
         version_control: &VersionControl,
     ) -> Result<()> {
         // It's safe to unwrap here, it's checked outside.
@@ -769,7 +764,7 @@ impl WriterInner {
             manifest: ctx.manifest.clone(),
             engine_config: self.engine_config.clone(),
             ttl: self.ttl,
-            compaction_time_window: self.compaction_time_window,
+            compaction_time_window: current_version.ssts().compaction_time_window(),
         };
 
         let flush_handle = ctx
@@ -791,6 +786,12 @@ impl WriterInner {
         sst_write_buffer_size: ReadableSize,
     ) -> Result<()> {
         let region_id = writer_ctx.shared.id();
+        let compaction_time_window = writer_ctx
+            .shared
+            .version_control
+            .current()
+            .ssts()
+            .compaction_time_window();
         let mut compaction_request = CompactionRequestImpl {
             region_id,
             sst_layer: writer_ctx.sst_layer.clone(),
@@ -799,7 +800,7 @@ impl WriterInner {
             manifest: writer_ctx.manifest.clone(),
             wal: writer_ctx.wal.clone(),
             ttl: self.ttl,
-            compaction_time_window: self.compaction_time_window,
+            compaction_time_window,
             sender: None,
             sst_write_buffer_size,
         };

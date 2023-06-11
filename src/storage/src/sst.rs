@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use common_base::readable_size::ReadableSize;
@@ -65,6 +65,7 @@ pub struct LevelMetas {
     levels: LevelMetaVec,
     sst_layer: AccessLayerRef,
     file_purger: FilePurgerRef,
+    compaction_window: Arc<RwLock<Option<i64>>>,
 }
 
 impl std::fmt::Debug for LevelMetas {
@@ -82,6 +83,7 @@ impl LevelMetas {
             levels: new_level_meta_vec(),
             sst_layer,
             file_purger,
+            compaction_window: Default::default(),
         }
     }
 
@@ -89,6 +91,15 @@ impl LevelMetas {
     #[inline]
     pub fn level_num(&self) -> usize {
         self.levels.len()
+    }
+
+    pub fn set_compaction_time_window(&self, window: i64) {
+        let mut compaction_window = self.compaction_window.write().unwrap();
+        compaction_window.get_or_insert(window);
+    }
+
+    pub fn compaction_time_window(&self) -> Option<i64> {
+        *self.compaction_window.read().unwrap()
     }
 
     #[inline]

@@ -21,7 +21,8 @@ use object_store::services::Fs;
 use object_store::ObjectStore;
 use store_api::manifest::Manifest;
 
-use crate::compaction::noop::NoopCompactionScheduler;
+use crate::compaction::strategy::SimpleTimeWindowStrategy;
+use crate::compaction::{CompactionHandler, SimplePicker};
 use crate::config::DEFAULT_REGION_WRITE_BUFFER_SIZE;
 use crate::engine::{self, RegionMap};
 use crate::file_purger::noop::NoopFilePurgeHandler;
@@ -92,7 +93,13 @@ pub async fn new_store_config_with_object_store(
         ..Default::default()
     };
     let log_store = Arc::new(RaftEngineLogStore::try_new(log_config).await.unwrap());
-    let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
+
+    let compaction_scheduler = Arc::new(LocalScheduler::new(
+        SchedulerConfig::default(),
+        CompactionHandler::new(SimplePicker::new(
+            Arc::new(SimpleTimeWindowStrategy {}) as Arc<_>
+        )),
+    ));
     // We use an empty region map so actually the background worker of the picker is disabled.
     let regions = Arc::new(RegionMap::new());
     let flush_scheduler = Arc::new(
@@ -120,7 +127,6 @@ pub async fn new_store_config_with_object_store(
             engine_config: Default::default(),
             file_purger,
             ttl: None,
-            compaction_time_window: None,
             write_buffer_size: DEFAULT_REGION_WRITE_BUFFER_SIZE.as_bytes() as usize,
         },
         regions,

@@ -537,7 +537,6 @@ async fn create_store_config(region_name: &str, root: &str) -> StoreConfig<NoopL
         engine_config: Default::default(),
         file_purger,
         ttl: None,
-        compaction_time_window: None,
         write_buffer_size: ReadableSize::mb(32).0 as usize,
     }
 }

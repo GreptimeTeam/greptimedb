@@ -102,7 +102,6 @@ impl<S: LogStore> CompactionTaskImpl<S> {
     }
 
     /// Writes updated SST info into manifest.
-    // TODO(etolbakov): we are not persisting inferred compaction_time_window (#1083)[https://github.com/GreptimeTeam/greptimedb/pull/1083]
     async fn write_manifest_and_apply(
         &self,
         output: HashSet<FileMeta>,
@@ -152,7 +151,10 @@ impl<S: LogStore> CompactionTask for CompactionTaskImpl<S> {
 
         let input_ids = compacted.iter().map(|f| f.file_id).collect::<Vec<_>>();
         let output_ids = output.iter().map(|f| f.file_id).collect::<Vec<_>>();
-        info!("Compacting SST files, input: {input_ids:?}, output: {output_ids:?}");
+        info!(
+            "Compacting SST files, input: {input_ids:?}, output: {output_ids:?}, window: {:?}",
+            self.compaction_time_window
+        );
         self.write_manifest_and_apply(output, compacted)
             .await
             .map_err(|e| {

@@ -452,7 +452,6 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 .write_buffer_size
                 .map(|s| s.0 as usize),
             ttl: table_info.meta.options.ttl,
-            compaction_time_window: table_info.meta.options.compaction_time_window,
         };
 
         debug!(
@@ -532,7 +531,6 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 .write_buffer_size
                 .map(|s| s.0 as usize),
             ttl: table_info.meta.options.ttl,
-            compaction_time_window: table_info.meta.options.compaction_time_window,
         };
 
         // TODO(weny): Returns an error earlier if the target region does not exist in the meta.

@@ -160,10 +160,6 @@ pub struct Version {
     flushed_sequence: SequenceNumber,
     /// Current version of manifest.
     manifest_version: ManifestVersion,
-    /// Compaction window for region that has been inferred during
-    /// previous compaction.
-    // TODO(hl): we may need to support per-level compaction time window.
-    compaction_time_window: Option<i64>,
     // TODO(yingwen): Maybe also store last sequence to this version when switching
     // version, so we can know the newest data can read from this version.
 }
@@ -194,7 +190,6 @@ impl Version {
             ssts: Arc::new(LevelMetas::new(sst_layer, file_purger)),
             flushed_sequence: 0,
             manifest_version,
-            compaction_time_window: None,
         }
     }
 
@@ -277,15 +272,15 @@ impl Version {
         // we only update region's compaction time window iff region's window is not set and VersionEdit's
         // compaction time window is present.
         if let Some(updated_window) = edit.compaction_time_window {
-            self.compaction_time_window.get_or_insert(updated_window);
+            self.ssts.set_compaction_time_window(updated_window);
         }
-        self.compaction_time_window = edit.compaction_time_window;
+
         debug!(
             "After applying edit, region: {}, id: {}, SST files: {:?}, compaction time window: {:?}",
             self.metadata.name(),
             self.metadata.id(),
             merged_ssts,
-            self.compaction_time_window,
+            self.ssts.compaction_time_window()
         );
         self.ssts = Arc::new(merged_ssts);
     }
