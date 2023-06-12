@@ -45,6 +45,14 @@ fn convert_to_seconds(arg: &str) -> Option<i64> {
     }
 }
 
+fn process_vector(vector: &dyn Vector) -> Vec<Option<i64>> {
+    (0..vector.len())
+        .map(|i| {
+            paste::expr!((vector.get(i)).as_timestamp().map(|ts| ts.value()))
+        })
+        .collect::<Vec<Option<i64>>>()
+}
+
 impl Function for ToUnixtimeFunction {
     fn name(&self) -> &str {
         NAME
@@ -99,31 +107,30 @@ impl Function for ToUnixtimeFunction {
                 let array = columns[0].to_arrow_array();
                 let value = match ts {
                     TimestampType::Second(_) => {
-                        let vector = TimestampSecondVector::try_from_arrow_array(array).unwrap();
-                        (0..vector.len())
-                            .map(|i| (vector.get(i)).as_timestamp().map(|ts| ts.value()))
-                            .collect::<Vec<_>>()
+                        let vector = paste::expr!(TimestampSecondVector::try_from_arrow_array(
+                            array
+                        )
+                        .unwrap());
+                        process_vector(&vector)
                     }
                     TimestampType::Millisecond(_) => {
-                        let vector =
-                            TimestampMillisecondVector::try_from_arrow_array(array).unwrap();
-                        (0..vector.len())
-                            .map(|i| (vector.get(i)).as_timestamp().map(|ts| ts.value()))
-                            .collect::<Vec<_>>()
+                        let vector = paste::expr!(
+                            TimestampMillisecondVector::try_from_arrow_array(array).unwrap()
+                        );
+                        process_vector(&vector)
                     }
                     TimestampType::Microsecond(_) => {
-                        let vector =
-                            TimestampMicrosecondVector::try_from_arrow_array(array).unwrap();
-                        (0..vector.len())
-                            .map(|i| (vector.get(i)).as_timestamp().map(|ts| ts.value()))
-                            .collect::<Vec<_>>()
+                        let vector = paste::expr!(
+                            TimestampMicrosecondVector::try_from_arrow_array(array).unwrap()
+                        );
+                        process_vector(&vector)
                     }
                     TimestampType::Nanosecond(_) => {
-                        let vector =
-                            TimestampNanosecondVector::try_from_arrow_array(array).unwrap();
-                        (0..vector.len())
-                            .map(|i| (vector.get(i)).as_timestamp().map(|ts| ts.value()))
-                            .collect::<Vec<_>>()
+                        let vector = paste::expr!(TimestampNanosecondVector::try_from_arrow_array(
+                            array
+                        )
+                        .unwrap());
+                        process_vector(&vector)
                     }
                 };
                 Ok(Arc::new(Int64Vector::from(value)))
