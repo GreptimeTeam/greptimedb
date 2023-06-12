@@ -84,8 +84,6 @@ struct StartCommand {
     rpc_addr: Option<String>,
     #[clap(long)]
     rpc_hostname: Option<String>,
-    #[clap(long)]
-    mysql_addr: Option<String>,
     #[clap(long, multiple = true, value_delimiter = ',')]
     metasrv_addr: Option<Vec<String>>,
     #[clap(short, long)]
@@ -124,10 +122,6 @@ impl StartCommand {
 
         if self.rpc_hostname.is_some() {
             opts.rpc_hostname = self.rpc_hostname.clone();
-        }
-
-        if let Some(addr) = &self.mysql_addr {
-            opts.mysql_addr = addr.clone();
         }
 
         if let Some(node_id) = self.node_id {
@@ -205,8 +199,6 @@ mod tests {
             rpc_addr = "127.0.0.1:3001"
             rpc_hostname = "127.0.0.1"
             rpc_runtime_size = 8
-            mysql_addr = "127.0.0.1:4406"
-            mysql_runtime_size = 2
 
             [meta_client_options]
             metasrv_addrs = ["127.0.0.1:3002"]
@@ -252,8 +244,6 @@ mod tests {
             cmd.load_options(TopLevelOptions::default()).unwrap() else { unreachable!() };
 
         assert_eq!("127.0.0.1:3001".to_string(), options.rpc_addr);
-        assert_eq!("127.0.0.1:4406".to_string(), options.mysql_addr);
-        assert_eq!(2, options.mysql_runtime_size);
         assert_eq!(Some(42), options.node_id);
 
         assert_eq!("/other/wal", options.wal.dir.unwrap());
@@ -368,8 +358,6 @@ mod tests {
             rpc_addr = "127.0.0.1:3001"
             rpc_hostname = "127.0.0.1"
             rpc_runtime_size = 8
-            mysql_addr = "127.0.0.1:4406"
-            mysql_runtime_size = 2
 
             [meta_client_options]
             timeout_millis = 3000
