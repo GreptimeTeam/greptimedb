@@ -382,7 +382,7 @@ pub struct Datanode {
 
 impl Datanode {
     pub async fn new(opts: DatanodeOptions) -> Result<Datanode> {
-        let instance = Arc::new(Instance::with_opts(&opts).await?);
+        let instance = Arc::new(Instance::with_opts(&opts, Default::default()).await?);
         let services = match opts.mode {
             Mode::Distributed => Some(Services::try_new(instance.clone(), &opts).await?),
             Mode::Standalone => None,

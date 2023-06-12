@@ -65,7 +65,11 @@ impl MockStandaloneInstance {
 
 pub(crate) async fn create_standalone_instance(test_name: &str) -> MockStandaloneInstance {
     let (opts, guard) = create_tmp_dir_and_datanode_opts(StorageType::File, test_name);
-    let dn_instance = Arc::new(DatanodeInstance::with_opts(&opts).await.unwrap());
+    let dn_instance = Arc::new(
+        DatanodeInstance::with_opts(&opts, Default::default())
+            .await
+            .unwrap(),
+    );
 
     let frontend_instance = Instance::try_new_standalone(dn_instance.clone())
         .await
