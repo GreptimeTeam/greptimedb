@@ -99,9 +99,9 @@ impl QueryEngineFactory {
             with_dist_planner,
             partition_manager,
             clients,
-            plugins,
+            plugins.clone(),
         ));
-        let query_engine = Arc::new(DatafusionQueryEngine::new(state));
+        let query_engine = Arc::new(DatafusionQueryEngine::new(state, plugins));
         register_functions(&query_engine);
         Self { query_engine }
     }
