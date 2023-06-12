@@ -38,7 +38,7 @@ async fn create_region_for_alter(store_dir: &str) -> RegionImpl<RaftEngineLogSto
     // Always disable version column in this test.
     let metadata = tests::new_metadata(REGION_NAME);
 
-    let store_config = config_util::new_store_config(REGION_NAME, store_dir).await;
+    let store_config = config_util::new_store_config(REGION_NAME, store_dir, None).await;
 
     RegionImpl::create(metadata, store_config).await.unwrap()
 }
@@ -112,7 +112,7 @@ impl AlterTester {
         }
         self.base = None;
         // Reopen the region.
-        let store_config = config_util::new_store_config(REGION_NAME, &self.store_dir).await;
+        let store_config = config_util::new_store_config(REGION_NAME, &self.store_dir, None).await;
         let opts = OpenOptions::default();
         let region = RegionImpl::open(REGION_NAME.to_string(), store_config, &opts)
             .await

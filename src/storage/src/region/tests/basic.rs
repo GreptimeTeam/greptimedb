@@ -32,7 +32,7 @@ async fn create_region_for_basic(
     store_dir: &str,
 ) -> RegionImpl<RaftEngineLogStore> {
     let metadata = tests::new_metadata(region_name);
-    let store_config = config_util::new_store_config(region_name, store_dir).await;
+    let store_config = config_util::new_store_config(region_name, store_dir, None).await;
     RegionImpl::create(metadata, store_config).await.unwrap()
 }
 
@@ -75,7 +75,8 @@ impl Tester {
 
         self.base = None;
         // Reopen the region.
-        let store_config = config_util::new_store_config(&self.region_name, &self.store_dir).await;
+        let store_config =
+            config_util::new_store_config(&self.region_name, &self.store_dir, None).await;
         let opts = OpenOptions::default();
         let region = RegionImpl::open(self.region_name.clone(), store_config, &opts).await?;
         match region {

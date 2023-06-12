@@ -41,7 +41,8 @@ async fn create_region_for_flush(
     let metadata = tests::new_metadata(REGION_NAME);
 
     let (mut store_config, regions) =
-        config_util::new_store_config_and_region_map(REGION_NAME, store_dir).await;
+        config_util::new_store_config_and_region_map(REGION_NAME, store_dir, Some(usize::MAX))
+            .await;
     store_config.flush_strategy = flush_strategy;
 
     (
@@ -78,7 +79,8 @@ impl FlushTester {
         }
         self.base = None;
         // Reopen the region.
-        let mut store_config = config_util::new_store_config(REGION_NAME, &self.store_dir).await;
+        let mut store_config =
+            config_util::new_store_config(REGION_NAME, &self.store_dir, Some(usize::MAX)).await;
         store_config.flush_strategy = self.flush_strategy.clone();
         let opts = OpenOptions::default();
         let region = RegionImpl::open(REGION_NAME.to_string(), store_config, &opts)

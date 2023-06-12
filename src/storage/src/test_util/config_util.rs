@@ -22,7 +22,7 @@ use object_store::ObjectStore;
 use store_api::manifest::Manifest;
 
 use crate::compaction::noop::NoopCompactionScheduler;
-use crate::config::DEFAULT_REGION_WRITE_BUFFER_SIZE;
+use crate::config::{EngineConfig, DEFAULT_REGION_WRITE_BUFFER_SIZE};
 use crate::engine::{self, RegionMap};
 use crate::file_purger::noop::NoopFilePurgeHandler;
 use crate::flush::{FlushScheduler, PickerConfig, SizeBasedStrategy};
@@ -40,12 +40,13 @@ fn log_store_dir(store_dir: &str) -> String {
 pub async fn new_store_config(
     region_name: &str,
     store_dir: &str,
+    max_files_in_level_0: Option<usize>,
 ) -> StoreConfig<RaftEngineLogStore> {
     let mut builder = Fs::default();
     builder.root(store_dir);
     let object_store = ObjectStore::new(builder).unwrap().finish();
 
-    new_store_config_with_object_store(region_name, store_dir, object_store)
+    new_store_config_with_object_store(region_name, store_dir, object_store, max_files_in_level_0)
         .await
         .0
 }
@@ -54,6 +55,7 @@ pub async fn new_store_config(
 pub async fn new_store_config_and_region_map(
     region_name: &str,
     store_dir: &str,
+    max_files_in_level_0: Option<usize>,
 ) -> (
     StoreConfig<RaftEngineLogStore>,
     Arc<RegionMap<RaftEngineLogStore>>,
@@ -62,7 +64,8 @@ pub async fn new_store_config_and_region_map(
     builder.root(store_dir);
     let object_store = ObjectStore::new(builder).unwrap().finish();
 
-    new_store_config_with_object_store(region_name, store_dir, object_store).await
+    new_store_config_with_object_store(region_name, store_dir, object_store, max_files_in_level_0)
+        .await
 }
 
 /// Create a new StoreConfig with given object store.
@@ -70,6 +73,7 @@ pub async fn new_store_config_with_object_store(
     region_name: &str,
     store_dir: &str,
     object_store: ObjectStore,
+    max_file_in_l0: Option<usize>,
 ) -> (
     StoreConfig<RaftEngineLogStore>,
     Arc<RegionMap<RaftEngineLogStore>>,
@@ -117,7 +121,10 @@ pub async fn new_store_config_with_object_store(
             flush_scheduler,
             flush_strategy: Arc::new(SizeBasedStrategy::default()),
             compaction_scheduler,
-            engine_config: Default::default(),
+            engine_config: Arc::new(EngineConfig {
+                max_files_in_l0: max_file_in_l0.unwrap_or(8),
+                ..Default::default()
+            }),
             file_purger,
             ttl: None,
             compaction_time_window: None,

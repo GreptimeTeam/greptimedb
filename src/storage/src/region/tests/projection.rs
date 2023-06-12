@@ -171,7 +171,7 @@ const REGION_NAME: &str = "region-projection-0";
 async fn new_tester(store_dir: &str) -> ProjectionTester<RaftEngineLogStore> {
     let metadata = new_metadata(REGION_NAME);
 
-    let store_config = config_util::new_store_config(REGION_NAME, store_dir).await;
+    let store_config = config_util::new_store_config(REGION_NAME, store_dir, None).await;
     let region = RegionImpl::create(metadata, store_config).await.unwrap();
 
     ProjectionTester::with_region(region)
