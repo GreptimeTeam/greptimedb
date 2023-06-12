@@ -390,6 +390,14 @@ impl RegionWriter {
     }
 }
 
+// Methods for tests.
+#[cfg(test)]
+impl RegionWriter {
+    pub(crate) async fn write_buffer_size(&self) -> usize {
+        self.inner.lock().await.write_buffer_size
+    }
+}
+
 pub struct WriterContext<'a, S: LogStore> {
     pub shared: &'a SharedDataRef,
     pub flush_strategy: &'a FlushStrategyRef,
