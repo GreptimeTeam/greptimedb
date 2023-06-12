@@ -94,6 +94,13 @@ impl<S: LogStore> TesterBase<S> {
     }
 
     pub async fn close(&self) {
+        self.region.inner.flush_scheduler.stop().await.unwrap();
+        self.region
+            .inner
+            .compaction_scheduler
+            .stop(true)
+            .await
+            .unwrap();
         self.region.close(&CloseContext::default()).await.unwrap();
         self.region.inner.wal.close().await.unwrap();
     }
