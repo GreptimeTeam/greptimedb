@@ -29,6 +29,7 @@ use datafusion::execution::context::{QueryPlanner, SessionConfig, SessionState};
 use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::physical_optimizer::repartition::Repartition;
 use datafusion::physical_optimizer::sort_enforcement::EnforceSorting;
+use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::planner::{DefaultPhysicalPlanner, ExtensionPlanner};
 use datafusion::physical_plan::{ExecutionPlan, PhysicalPlanner};
 use datafusion_expr::LogicalPlan as DfLogicalPlan;
@@ -86,12 +87,10 @@ impl QueryEngineState {
             state.physical_optimizers().to_vec()
         };
         // run the repartition and sort enforcement rules first
+        Self::remove_physical_optimize_rule(&mut physical_optimizers, EnforceSorting {}.name());
+        Self::remove_physical_optimize_rule(&mut physical_optimizers, Repartition {}.name());
         physical_optimizers.insert(0, Arc::new(EnforceSorting {}));
         physical_optimizers.insert(0, Arc::new(Repartition {}));
-        // 8th is the original `EnforceSorting` rule
-        physical_optimizers.remove(8);
-        // 5th is the original `Repartition` rule
-        physical_optimizers.remove(5);
 
         let session_state = SessionState::with_config_rt_and_catalog_list(
             session_config,
@@ -114,6 +113,22 @@ impl QueryEngineState {
             catalog_manager: catalog_list,
             aggregate_functions: Arc::new(RwLock::new(HashMap::new())),
             plugins,
+        }
+    }
+
+    fn remove_physical_optimize_rule(
+        rules: &mut Vec<Arc<dyn PhysicalOptimizerRule + Send + Sync>>,
+        name: &str,
+    ) {
+        let mut index_to_move = None;
+        for (i, rule) in rules.iter().enumerate() {
+            if rule.name() == name {
+                index_to_move = Some(i);
+                break;
+            }
+        }
+        if let Some(index) = index_to_move {
+            rules.remove(index);
         }
     }
 
