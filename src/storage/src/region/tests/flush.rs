@@ -27,6 +27,7 @@ use store_api::storage::{
     FlushContext, FlushReason, OpenOptions, Region, ScanRequest, WriteResponse,
 };
 
+use crate::config::EngineConfig;
 use crate::engine::{self, RegionMap};
 use crate::flush::{FlushStrategyRef, FlushType};
 use crate::region::tests::{self, FileTesterBase};
@@ -46,8 +47,15 @@ async fn create_region_for_flush(
 ) {
     let metadata = tests::new_metadata(REGION_NAME);
 
-    let (mut store_config, regions) =
-        config_util::new_store_config_and_region_map(REGION_NAME, store_dir).await;
+    let (mut store_config, regions) = config_util::new_store_config_and_region_map(
+        REGION_NAME,
+        store_dir,
+        EngineConfig {
+            max_files_in_l0: usize::MAX,
+            ..Default::default()
+        },
+    )
+    .await;
     store_config.flush_strategy = flush_strategy;
 
     (
@@ -84,7 +92,15 @@ impl FlushTester {
         }
         self.base = None;
         // Reopen the region.
-        let mut store_config = config_util::new_store_config(REGION_NAME, &self.store_dir).await;
+        let mut store_config = config_util::new_store_config(
+            REGION_NAME,
+            &self.store_dir,
+            EngineConfig {
+                max_files_in_l0: usize::MAX,
+                ..Default::default()
+            },
+        )
+        .await;
         store_config.flush_strategy = self.flush_strategy.clone();
         let opts = OpenOptions::default();
         let region = RegionImpl::open(REGION_NAME.to_string(), store_config, &opts)

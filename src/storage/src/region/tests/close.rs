@@ -22,6 +22,7 @@ use store_api::storage::{
     AlterOperation, AlterRequest, CloseContext, Region, RegionMeta, WriteResponse,
 };
 
+use crate::config::EngineConfig;
 use crate::engine;
 use crate::error::Error;
 use crate::flush::FlushStrategyRef;
@@ -44,7 +45,8 @@ async fn create_region_for_close(
 ) -> RegionImpl<RaftEngineLogStore> {
     let metadata = tests::new_metadata(REGION_NAME);
 
-    let mut store_config = config_util::new_store_config(REGION_NAME, store_dir).await;
+    let mut store_config =
+        config_util::new_store_config(REGION_NAME, store_dir, EngineConfig::default()).await;
     store_config.flush_strategy = flush_strategy;
 
     RegionImpl::create(metadata, store_config).await.unwrap()

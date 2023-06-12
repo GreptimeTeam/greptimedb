@@ -83,6 +83,7 @@ async fn create_region_for_compaction<
         REGION_NAME,
         store_dir,
         object_store.clone(),
+        EngineConfig::default(),
     )
     .await;
     store_config.engine_config = Arc::new(engine_config);

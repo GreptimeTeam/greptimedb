@@ -306,7 +306,8 @@ async fn test_new_region() {
     let dir = create_temp_dir("test_new_region");
     let store_dir = dir.path().to_str().unwrap();
 
-    let store_config = config_util::new_store_config(region_name, store_dir).await;
+    let store_config =
+        config_util::new_store_config(region_name, store_dir, EngineConfig::default()).await;
     let placeholder_memtable = store_config
         .memtable_builder
         .build(metadata.schema().clone());
