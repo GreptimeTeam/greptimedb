@@ -197,16 +197,33 @@ pub type TimestampRange = GenericRange<Timestamp>;
 
 impl Display for TimestampRange {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let start = self
-            .start
-            .map(|t| format!("{}{}", t.value(), t.unit().short_name()))
-            .unwrap_or("#".to_string());
-
-        let end = self
-            .end
-            .map(|t| format!("{}{}", t.value(), t.unit().short_name()))
-            .unwrap_or("#".to_string());
-        write!(f, "TimestampRange{{[{},{})}}", start, end)
+        let s = match (&self.start, &self.end) {
+            (Some(start), Some(end)) => {
+                format!(
+                    "TimestampRange{{[{}{},{}{})}}",
+                    start.value(),
+                    start.unit().short_name(),
+                    end.value(),
+                    end.unit().short_name()
+                )
+            }
+            (Some(start), None) => {
+                format!(
+                    "TimestampRange{{[{}{},#)}}",
+                    start.value(),
+                    start.unit().short_name()
+                )
+            }
+            (None, Some(end)) => {
+                format!(
+                    "TimestampRange{{[#,{}{})}}",
+                    end.value(),
+                    end.unit().short_name()
+                )
+            }
+            (None, None) => "TimestampRange{{[#,#)}}".to_string(),
+        };
+        f.write_str(&s)
     }
 }
 
