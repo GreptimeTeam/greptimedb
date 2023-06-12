@@ -47,9 +47,7 @@ fn convert_to_seconds(arg: &str) -> Option<i64> {
 
 fn process_vector(vector: &dyn Vector) -> Vec<Option<i64>> {
     (0..vector.len())
-        .map(|i| {
-            paste::expr!((vector.get(i)).as_timestamp().map(|ts| ts.value()))
-        })
+        .map(|i| paste::expr!((vector.get(i)).as_timestamp().map(|ts| ts.value())))
         .collect::<Vec<Option<i64>>>()
 }
 
