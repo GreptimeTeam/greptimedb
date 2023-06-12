@@ -19,6 +19,7 @@ use common_test_util::temp_dir::create_temp_dir;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use store_api::storage::{OpenOptions, SequenceNumber, WriteResponse};
 
+use crate::config::EngineConfig;
 use crate::error::Result;
 use crate::region::tests::{self, FileTesterBase};
 use crate::region::RegionImpl;
@@ -32,7 +33,8 @@ async fn create_region_for_basic(
     store_dir: &str,
 ) -> RegionImpl<RaftEngineLogStore> {
     let metadata = tests::new_metadata(region_name);
-    let store_config = config_util::new_store_config(region_name, store_dir, None).await;
+    let store_config =
+        config_util::new_store_config(region_name, store_dir, EngineConfig::default()).await;
     RegionImpl::create(metadata, store_config).await.unwrap()
 }
 
@@ -75,8 +77,12 @@ impl Tester {
 
         self.base = None;
         // Reopen the region.
-        let store_config =
-            config_util::new_store_config(&self.region_name, &self.store_dir, None).await;
+        let store_config = config_util::new_store_config(
+            &self.region_name,
+            &self.store_dir,
+            EngineConfig::default(),
+        )
+        .await;
         let opts = OpenOptions::default();
         let region = RegionImpl::open(self.region_name.clone(), store_config, &opts).await?;
         match region {
