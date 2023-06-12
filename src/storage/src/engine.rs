@@ -28,7 +28,7 @@ use store_api::storage::{
 };
 
 use crate::compaction::CompactionSchedulerRef;
-use crate::config::{EngineConfig, DEFAULT_REGION_WRITE_BUFFER_SIZE};
+use crate::config::EngineConfig;
 use crate::error::{self, Error, Result};
 use crate::file_purger::{FilePurgeHandler, FilePurgerRef};
 use crate::flush::{
@@ -506,7 +506,7 @@ impl<S: LogStore> EngineInner<S> {
             ttl,
             compaction_time_window,
             write_buffer_size: write_buffer_size
-                .unwrap_or(DEFAULT_REGION_WRITE_BUFFER_SIZE.as_bytes() as usize),
+                .unwrap_or(self.config.region_write_buffer_size.as_bytes() as usize),
         })
     }
 
@@ -553,7 +553,7 @@ mod tests {
         log_file_dir: &TempDir,
         region_name: &str,
         region_id: u64,
-        ctx: &EngineContext,
+        config: EngineConfig,
     ) -> (TestEngine, TestRegion) {
         let log_file_dir_path = log_file_dir.path().to_str().unwrap();
         let log_store = log_store_util::create_tmp_local_file_log_store(log_file_dir_path).await;
@@ -563,8 +563,6 @@ mod tests {
         let mut builder = Fs::default();
         builder.root(&store_dir);
         let object_store = ObjectStore::new(builder).unwrap().finish();
-
-        let config = EngineConfig::default();
 
         let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
 
@@ -584,7 +582,7 @@ mod tests {
             .build();
 
         let region = engine
-            .create_region(ctx, desc, &CreateOptions::default())
+            .create_region(&EngineContext::default(), desc, &CreateOptions::default())
             .await
             .unwrap();
 
@@ -606,16 +604,36 @@ mod tests {
 
         let region_name = "region-0";
         let region_id = 123456;
-        let ctx = EngineContext::default();
+        let config = EngineConfig::default();
 
         let (engine, region) =
-            create_engine_and_region(&dir, &log_file_dir, region_name, region_id, &ctx).await;
+            create_engine_and_region(&dir, &log_file_dir, region_name, region_id, config).await;
         assert_eq!(region_name, region.name());
 
+        let ctx = EngineContext::default();
         let region2 = engine.get_region(&ctx, region_name).unwrap().unwrap();
         assert_eq!(region_name, region2.name());
 
         assert!(engine.get_region(&ctx, "no such region").unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_create_region_with_buffer_size() {
+        let dir = create_temp_dir("test_buffer_size");
+        let log_file_dir = create_temp_dir("test_buffer_wal");
+
+        let region_name = "region-0";
+        let region_id = 123456;
+        let mut config = EngineConfig::default();
+        let expect_buffer_size = config.region_write_buffer_size / 2;
+        config.region_write_buffer_size = expect_buffer_size;
+
+        let (_engine, region) =
+            create_engine_and_region(&dir, &log_file_dir, region_name, region_id, config).await;
+        assert_eq!(
+            expect_buffer_size.as_bytes() as usize,
+            region.write_buffer_size().await
+        );
     }
 
     #[tokio::test]
@@ -626,10 +644,10 @@ mod tests {
 
         let region_name = "test_region";
         let region_id = 123456;
-        let ctx = EngineContext::default();
+        let config = EngineConfig::default();
 
         let (engine, region) =
-            create_engine_and_region(&dir, &log_file_dir, region_name, region_id, &ctx).await;
+            create_engine_and_region(&dir, &log_file_dir, region_name, region_id, config).await;
 
         assert_eq!(region_name, region.name());
 
@@ -648,6 +666,7 @@ mod tests {
 
         // Flush memtable to sst.
         region.flush(&FlushContext::default()).await.unwrap();
+        let ctx = EngineContext::default();
         engine
             .close_region(&ctx, region.name(), &CloseOptions::default())
             .await

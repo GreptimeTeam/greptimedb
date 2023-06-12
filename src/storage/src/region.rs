@@ -575,6 +575,10 @@ impl<S: LogStore> RegionImpl<S> {
 
         inner.writer.replay(recovered_metadata, writer_ctx).await
     }
+
+    pub(crate) async fn write_buffer_size(&self) -> usize {
+        self.inner.writer.write_buffer_size().await
+    }
 }
 
 /// Shared data of region.
