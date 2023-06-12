@@ -308,7 +308,7 @@ impl StartCommand {
             fe_opts, dn_opts
         );
 
-        let datanode = Datanode::new(dn_opts.clone())
+        let datanode = Datanode::new(dn_opts.clone(), Default::default())
             .await
             .context(StartDatanodeSnafu)?;
 
