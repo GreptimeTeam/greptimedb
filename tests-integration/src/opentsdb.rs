@@ -35,12 +35,11 @@ mod tests {
         test_exec(instance).await;
     }
 
+    #[ignore = "https://github.com/GreptimeTeam/greptimedb/issues/1681"]
     #[tokio::test(flavor = "multi_thread")]
     async fn test_distributed_exec() {
         let distributed = tests::create_distributed_instance("test_distributed_exec").await;
-        let instance = &distributed.frontend;
-
-        test_exec(instance).await;
+        test_exec(&distributed.frontend()).await;
     }
 
     async fn test_exec(instance: &Arc<Instance>) {

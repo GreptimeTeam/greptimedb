@@ -206,8 +206,7 @@ pub struct CreateExternalTable {
 
 #[cfg(test)]
 mod tests {
-    use sqlparser::dialect::GenericDialect;
-
+    use crate::dialect::GreptimeDbDialect;
     use crate::parser::ParserContext;
     use crate::statements::statement::Statement;
 
@@ -229,7 +228,7 @@ mod tests {
                        engine=mito
                        with(regions=1, ttl='7d');
          ";
-        let result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
+        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
         assert_eq!(1, result.len());
 
         match &result[0] {
@@ -259,7 +258,7 @@ WITH(
                 );
 
                 let new_result =
-                    ParserContext::create_with_dialect(&new_sql, &GenericDialect {}).unwrap();
+                    ParserContext::create_with_dialect(&new_sql, &GreptimeDbDialect {}).unwrap();
                 assert_eq!(result, new_result);
             }
             _ => unreachable!(),

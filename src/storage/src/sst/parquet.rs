@@ -43,8 +43,9 @@ use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 use parquet::format::FileMetaData;
-use parquet::schema::types::SchemaDescriptor;
+use parquet::schema::types::{ColumnPath, SchemaDescriptor};
 use snafu::{OptionExt, ResultExt};
+use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
 use table::predicate::Predicate;
 use tokio::io::BufReader;
 
@@ -87,7 +88,8 @@ impl<'a> ParquetWriter<'a> {
         opts: &sst::WriteOptions,
     ) -> Result<Option<SstInfo>> {
         let schema = self.source.schema();
-        let writer_props = WriterProperties::builder()
+
+        let mut props_builder = WriterProperties::builder()
             .set_compression(Compression::ZSTD(ZstdLevel::default()))
             .set_encoding(Encoding::PLAIN)
             .set_max_row_group_size(self.max_row_group_size)
@@ -96,7 +98,23 @@ impl<'a> ParquetWriter<'a> {
                     .map(|(k, v)| KeyValue::new(k.clone(), v.clone()))
                     .collect::<Vec<_>>()
             }))
-            .build();
+            .set_column_encoding(
+                ColumnPath::new(vec![SEQUENCE_COLUMN_NAME.to_string()]),
+                Encoding::DELTA_BINARY_PACKED,
+            )
+            .set_column_dictionary_enabled(
+                ColumnPath::new(vec![SEQUENCE_COLUMN_NAME.to_string()]),
+                false,
+            );
+
+        if let Some(ts_col) = schema.timestamp_column() {
+            props_builder = props_builder.set_column_encoding(
+                ColumnPath::new(vec![ts_col.name.clone()]),
+                Encoding::DELTA_BINARY_PACKED,
+            );
+        }
+
+        let writer_props = props_builder.build();
 
         let mut buffered_writer = BufferedWriter::try_new(
             self.file_path.to_string(),
@@ -281,7 +299,9 @@ impl ParquetReader {
             .with_row_groups(pruned_row_groups);
 
         // if time range row filter is present, we can push down the filter to reduce rows to scan.
-        if let Some(row_filter) = self.build_time_range_row_filter(&parquet_schema_desc) {
+        if let Some(row_filter) =
+            build_time_range_row_filter(self.time_range, &store_schema, &parquet_schema_desc)
+        {
             builder = builder.with_row_filter(row_filter);
         }
 
@@ -297,59 +317,55 @@ impl ParquetReader {
 
         ChunkStream::new(self.file_handle.clone(), adapter, Box::pin(chunk_stream))
     }
+}
 
-    /// Builds time range row filter.
-    fn build_time_range_row_filter(&self, schema_desc: &SchemaDescriptor) -> Option<RowFilter> {
-        let ts_col_idx = self
-            .projected_schema
-            .schema_to_read()
-            .schema()
-            .timestamp_index()?;
-        let ts_col = self
-            .projected_schema
-            .schema_to_read()
-            .schema()
-            .timestamp_column()?;
+/// Builds time range row filter.
+fn build_time_range_row_filter(
+    time_range: TimestampRange,
+    store_schema: &Arc<StoreSchema>,
+    schema_desc: &SchemaDescriptor,
+) -> Option<RowFilter> {
+    let ts_col_idx = store_schema.timestamp_index();
 
-        let ts_col_unit = match &ts_col.data_type {
-            ConcreteDataType::Int64(_) => TimeUnit::Millisecond,
-            ConcreteDataType::Timestamp(ts_type) => ts_type.unit(),
-            _ => unreachable!(),
-        };
+    let ts_col = store_schema.columns().get(ts_col_idx)?;
 
-        let projection = ProjectionMask::roots(schema_desc, vec![ts_col_idx]);
+    let ts_col_unit = match &ts_col.desc.data_type {
+        ConcreteDataType::Int64(_) => TimeUnit::Millisecond,
+        ConcreteDataType::Timestamp(ts_type) => ts_type.unit(),
+        _ => unreachable!(),
+    };
 
-        // checks if converting time range unit into ts col unit will result into rounding error.
-        if time_unit_lossy(&self.time_range, ts_col_unit) {
-            let filter = RowFilter::new(vec![Box::new(PlainTimestampRowFilter::new(
-                self.time_range,
-                projection,
-            ))]);
-            return Some(filter);
-        }
+    let projection = ProjectionMask::roots(schema_desc, vec![ts_col_idx]);
 
-        // If any of the conversion overflows, we cannot use arrow's computation method, instead
-        // we resort to plain filter that compares timestamp with given range, less efficient,
-        // but simpler.
-        // TODO(hl): If the range is gt_eq/lt, we also use PlainTimestampRowFilter, but these cases
-        // can also use arrow's gt_eq_scalar/lt_scalar methods.
-        let row_filter = if let (Some(lower), Some(upper)) = (
-            self.time_range
-                .start()
-                .and_then(|s| s.convert_to(ts_col_unit))
-                .map(|t| t.value()),
-            self.time_range
-                .end()
-                .and_then(|s| s.convert_to(ts_col_unit))
-                .map(|t| t.value()),
-        ) {
-            Box::new(FastTimestampRowFilter::new(projection, lower, upper)) as _
-        } else {
-            Box::new(PlainTimestampRowFilter::new(self.time_range, projection)) as _
-        };
-        let filter = RowFilter::new(vec![row_filter]);
-        Some(filter)
+    // checks if converting time range unit into ts col unit will result into rounding error.
+    if time_unit_lossy(&time_range, ts_col_unit) {
+        let filter = RowFilter::new(vec![Box::new(PlainTimestampRowFilter::new(
+            time_range, projection,
+        ))]);
+        return Some(filter);
     }
+
+    // If any of the conversion overflows, we cannot use arrow's computation method, instead
+    // we resort to plain filter that compares timestamp with given range, less efficient,
+    // but simpler.
+    // TODO(hl): If the range is gt_eq/lt, we also use PlainTimestampRowFilter, but these cases
+    // can also use arrow's gt_eq_scalar/lt_scalar methods.
+    let row_filter = if let (Some(lower), Some(upper)) = (
+        time_range
+            .start()
+            .and_then(|s| s.convert_to(ts_col_unit))
+            .map(|t| t.value()),
+        time_range
+            .end()
+            .and_then(|s| s.convert_to(ts_col_unit))
+            .map(|t| t.value()),
+    ) {
+        Box::new(FastTimestampRowFilter::new(projection, lower, upper)) as _
+    } else {
+        Box::new(PlainTimestampRowFilter::new(time_range, projection)) as _
+    };
+    let filter = RowFilter::new(vec![row_filter]);
+    Some(filter)
 }
 
 fn time_unit_lossy(range: &TimestampRange, ts_col_unit: TimeUnit) -> bool {
@@ -581,7 +597,7 @@ mod tests {
 
         let object_store = create_object_store(path);
         let sst_file_name = "test-flush.parquet";
-        let iter = memtable.iter(&IterContext::default()).unwrap();
+        let iter = memtable.iter(IterContext::default()).unwrap();
         let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
 
         writer
@@ -665,7 +681,7 @@ mod tests {
         let object_store = create_object_store(path);
         let sst_file_handle = new_file_handle(FileId::random());
         let sst_file_name = sst_file_handle.file_name();
-        let iter = memtable.iter(&IterContext::default()).unwrap();
+        let iter = memtable.iter(IterContext::default()).unwrap();
         let writer = ParquetWriter::new(&sst_file_name, Source::Iter(iter), object_store.clone());
 
         let SstInfo {
@@ -751,7 +767,7 @@ mod tests {
         let object_store = create_object_store(path);
         let file_handle = new_file_handle(FileId::random());
         let sst_file_name = file_handle.file_name();
-        let iter = memtable.iter(&IterContext::default()).unwrap();
+        let iter = memtable.iter(IterContext::default()).unwrap();
         let writer = ParquetWriter::new(&sst_file_name, Source::Iter(iter), object_store.clone());
 
         let SstInfo {
@@ -857,7 +873,7 @@ mod tests {
         let object_store = create_object_store(path);
         let sst_file_handle = new_file_handle(FileId::random());
         let sst_file_name = sst_file_handle.file_name();
-        let iter = memtable.iter(&IterContext::default()).unwrap();
+        let iter = memtable.iter(IterContext::default()).unwrap();
         let writer = ParquetWriter::new(&sst_file_name, Source::Iter(iter), object_store.clone());
 
         let SstInfo {
@@ -952,7 +968,7 @@ mod tests {
         builder.root(path);
         let object_store = ObjectStore::new(builder).unwrap().finish();
         let sst_file_name = "test-read.parquet";
-        let iter = memtable.iter(&IterContext::default()).unwrap();
+        let iter = memtable.iter(IterContext::default()).unwrap();
         let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
 
         let sst_info_opt = writer

@@ -12,9 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use api::v1::add_column::location::LocationType;
+use api::v1::add_column::Location;
 use api::v1::alter_expr::Kind;
 use api::v1::{column_def, AlterExpr, CreateTableExpr, DropColumns, RenameTable};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_query::AddColumnLocation;
 use datatypes::schema::{ColumnSchema, RawSchema};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::TableId;
@@ -24,8 +27,11 @@ use table::requests::{
 
 use crate::error::{
     ColumnNotFoundSnafu, InvalidColumnDefSnafu, MissingFieldSnafu, MissingTimestampColumnSnafu,
-    Result, UnrecognizedTableOptionSnafu,
+    Result, UnknownLocationTypeSnafu, UnrecognizedTableOptionSnafu,
 };
+
+const LOCATION_TYPE_FIRST: i32 = LocationType::First as i32;
+const LOCATION_TYPE_AFTER: i32 = LocationType::After as i32;
 
 /// Convert an [`AlterExpr`] to an [`AlterTableRequest`]
 pub fn alter_expr_to_request(expr: AlterExpr) -> Result<AlterTableRequest> {
@@ -50,6 +56,7 @@ pub fn alter_expr_to_request(expr: AlterExpr) -> Result<AlterTableRequest> {
                     Ok(AddColumnRequest {
                         column_schema: schema,
                         is_key: ac.is_key,
+                        location: parse_location(ac.location)?,
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -163,10 +170,10 @@ pub fn create_expr_to_request(
         Some(expr.desc)
     };
 
-    let region_ids = if expr.region_ids.is_empty() {
+    let region_numbers = if expr.region_numbers.is_empty() {
         vec![0]
     } else {
-        expr.region_ids
+        expr.region_numbers
     };
 
     let table_options =
@@ -178,7 +185,7 @@ pub fn create_expr_to_request(
         table_name: expr.table_name,
         desc,
         schema,
-        region_numbers: region_ids,
+        region_numbers,
         primary_key_indices,
         create_if_not_exists: expr.create_if_not_exists,
         table_options,
@@ -186,8 +193,26 @@ pub fn create_expr_to_request(
     })
 }
 
+fn parse_location(location: Option<Location>) -> Result<Option<AddColumnLocation>> {
+    match location {
+        Some(Location {
+            location_type: LOCATION_TYPE_FIRST,
+            ..
+        }) => Ok(Some(AddColumnLocation::First)),
+        Some(Location {
+            location_type: LOCATION_TYPE_AFTER,
+            after_cloumn_name,
+        }) => Ok(Some(AddColumnLocation::After {
+            column_name: after_cloumn_name,
+        })),
+        Some(Location { location_type, .. }) => UnknownLocationTypeSnafu { location_type }.fail(),
+        None => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use api::v1::add_column::location::LocationType;
     use api::v1::{AddColumn, AddColumns, ColumnDataType, ColumnDef, DropColumn};
     use datatypes::prelude::ConcreteDataType;
 
@@ -209,6 +234,7 @@ mod tests {
                         default_constraint: vec![],
                     }),
                     is_key: false,
+                    location: None,
                 }],
             })),
         };
@@ -228,6 +254,80 @@ mod tests {
             ConcreteDataType::float64_datatype(),
             add_column.column_schema.data_type
         );
+        assert_eq!(None, add_column.location);
+    }
+
+    #[test]
+    fn test_alter_expr_with_location_to_request() {
+        let expr = AlterExpr {
+            catalog_name: "".to_string(),
+            schema_name: "".to_string(),
+            table_name: "monitor".to_string(),
+
+            kind: Some(Kind::AddColumns(AddColumns {
+                add_columns: vec![
+                    AddColumn {
+                        column_def: Some(ColumnDef {
+                            name: "mem_usage".to_string(),
+                            datatype: ColumnDataType::Float64 as i32,
+                            is_nullable: false,
+                            default_constraint: vec![],
+                        }),
+                        is_key: false,
+                        location: Some(Location {
+                            location_type: LocationType::First.into(),
+                            after_cloumn_name: "".to_string(),
+                        }),
+                    },
+                    AddColumn {
+                        column_def: Some(ColumnDef {
+                            name: "cpu_usage".to_string(),
+                            datatype: ColumnDataType::Float64 as i32,
+                            is_nullable: false,
+                            default_constraint: vec![],
+                        }),
+                        is_key: false,
+                        location: Some(Location {
+                            location_type: LocationType::After.into(),
+                            after_cloumn_name: "ts".to_string(),
+                        }),
+                    },
+                ],
+            })),
+        };
+
+        let alter_request = alter_expr_to_request(expr).unwrap();
+        assert_eq!(alter_request.catalog_name, "");
+        assert_eq!(alter_request.schema_name, "");
+        assert_eq!("monitor".to_string(), alter_request.table_name);
+
+        let mut add_columns = match alter_request.alter_kind {
+            AlterKind::AddColumns { columns } => columns,
+            _ => unreachable!(),
+        };
+
+        let add_column = add_columns.pop().unwrap();
+        assert!(!add_column.is_key);
+        assert_eq!("cpu_usage", add_column.column_schema.name);
+        assert_eq!(
+            ConcreteDataType::float64_datatype(),
+            add_column.column_schema.data_type
+        );
+        assert_eq!(
+            Some(AddColumnLocation::After {
+                column_name: "ts".to_string()
+            }),
+            add_column.location
+        );
+
+        let add_column = add_columns.pop().unwrap();
+        assert!(!add_column.is_key);
+        assert_eq!("mem_usage", add_column.column_schema.name);
+        assert_eq!(
+            ConcreteDataType::float64_datatype(),
+            add_column.column_schema.data_type
+        );
+        assert_eq!(Some(AddColumnLocation::First), add_column.location);
     }
 
     #[test]

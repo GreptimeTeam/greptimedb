@@ -11,3 +11,21 @@ select "A";
 select * where "a" = "A";
 
 select TO_UNIXTIME('2023-03-01T06:35:02Z');
+
+select TO_UNIXTIME(2);
+
+create table test_unixtime(a int, b timestamp time index);
+
+DESC TABLE test_unixtime;
+
+insert into test_unixtime values(27, 27);
+
+select * from test_unixtime;
+
+select a from test_unixtime;
+
+select b from test_unixtime;
+
+select TO_UNIXTIME(b) from test_unixtime;
+
+DROP TABLE test_unixtime;

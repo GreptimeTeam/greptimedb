@@ -28,7 +28,7 @@ pub struct Instance {
 }
 
 impl Instance {
-    pub async fn run(&mut self) -> Result<()> {
+    pub async fn start(&mut self) -> Result<()> {
         self.repl.run().await
     }
 
@@ -53,8 +53,8 @@ impl Command {
         if let Some(dir) = top_level_opts.log_dir {
             logging_opts.dir = dir;
         }
-        if let Some(level) = top_level_opts.log_level {
-            logging_opts.level = level;
+        if top_level_opts.log_level.is_some() {
+            logging_opts.level = top_level_opts.log_level;
         }
         Ok(Options::Cli(Box::new(logging_opts)))
     }
@@ -107,7 +107,7 @@ mod tests {
         let opts = cmd.load_options(TopLevelOptions::default()).unwrap();
         let logging_opts = opts.logging_options();
         assert_eq!("/tmp/greptimedb/logs", logging_opts.dir);
-        assert_eq!("info", logging_opts.level);
+        assert!(logging_opts.level.is_none());
         assert!(!logging_opts.enable_jaeger_tracing);
     }
 
@@ -129,6 +129,6 @@ mod tests {
             .unwrap();
         let logging_opts = opts.logging_options();
         assert_eq!("/tmp/greptimedb/test/logs", logging_opts.dir);
-        assert_eq!("debug", logging_opts.level);
+        assert_eq!("debug", logging_opts.level.as_ref().unwrap());
     }
 }

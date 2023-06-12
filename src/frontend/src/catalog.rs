@@ -26,24 +26,24 @@ use catalog::helper::{
     build_catalog_prefix, build_schema_prefix, build_table_global_prefix, CatalogKey, SchemaKey,
     TableGlobalKey, TableGlobalValue,
 };
-use catalog::remote::{Kv, KvBackendRef};
+use catalog::remote::{Kv, KvBackendRef, KvCacheInvalidatorRef};
 use catalog::{
     CatalogManager, CatalogProvider, CatalogProviderRef, DeregisterTableRequest,
     RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest,
     SchemaProvider, SchemaProviderRef,
 };
+use client::client_manager::DatanodeClients;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::BoxedError;
+use common_meta::table_name::TableName;
 use common_telemetry::warn;
 use futures::StreamExt;
 use futures_util::TryStreamExt;
-use meta_client::rpc::TableName;
 use partition::manager::PartitionRuleManagerRef;
 use snafu::prelude::*;
 use table::table::numbers::NumbersTable;
 use table::TableRef;
 
-use crate::datanode::DatanodeClients;
 use crate::expr_factory;
 use crate::instance::distributed::DistInstance;
 use crate::table::DistTable;
@@ -51,6 +51,7 @@ use crate::table::DistTable;
 #[derive(Clone)]
 pub struct FrontendCatalogManager {
     backend: KvBackendRef,
+    backend_cache_invalidator: KvCacheInvalidatorRef,
     partition_manager: PartitionRuleManagerRef,
     datanode_clients: Arc<DatanodeClients>,
 
@@ -64,11 +65,13 @@ pub struct FrontendCatalogManager {
 impl FrontendCatalogManager {
     pub fn new(
         backend: KvBackendRef,
+        backend_cache_invalidator: KvCacheInvalidatorRef,
         partition_manager: PartitionRuleManagerRef,
         datanode_clients: Arc<DatanodeClients>,
     ) -> Self {
         Self {
             backend,
+            backend_cache_invalidator,
             partition_manager,
             datanode_clients,
             dist_instance: None,
@@ -90,6 +93,31 @@ impl FrontendCatalogManager {
     pub fn datanode_clients(&self) -> Arc<DatanodeClients> {
         self.datanode_clients.clone()
     }
+
+    pub async fn invalidate_schema(&self, catalog: &str, schema: &str) {
+        let schema_key = SchemaKey {
+            catalog_name: catalog.into(),
+            schema_name: schema.into(),
+        }
+        .to_string();
+
+        let key = schema_key.as_bytes();
+
+        self.backend_cache_invalidator.invalidate_key(key).await;
+    }
+
+    pub async fn invalidate_table(&self, catalog: &str, schema: &str, table: &str) {
+        let tg_key = TableGlobalKey {
+            catalog_name: catalog.into(),
+            schema_name: schema.into(),
+            table_name: table.into(),
+        }
+        .to_string();
+
+        let tg_key = tg_key.as_bytes();
+
+        self.backend_cache_invalidator.invalidate_key(tg_key).await;
+    }
 }
 
 // FIXME(hl): Frontend only needs a CatalogList, should replace with trait upcasting
@@ -97,6 +125,7 @@ impl FrontendCatalogManager {
 #[async_trait::async_trait]
 impl CatalogManager for FrontendCatalogManager {
     async fn start(&self) -> catalog::error::Result<()> {
+        self.datanode_clients.start();
         Ok(())
     }
 
@@ -203,7 +232,7 @@ impl CatalogManager for FrontendCatalogManager {
                 create_if_not_exists: request.create_if_not_exists,
                 table_options: (&request.table_options).into(),
                 table_id: None, // Should and will be assigned by Meta.
-                region_ids: vec![0],
+                region_numbers: vec![0],
                 engine: request.engine,
             };
 
@@ -246,12 +275,11 @@ impl CatalogManager for FrontendCatalogManager {
             catalog_name: catalog.to_string(),
         }
         .to_string();
+
         Ok(self.backend.get(key.as_bytes()).await?.map(|_| {
             Arc::new(FrontendCatalogProvider {
                 catalog_name: catalog.to_string(),
-                backend: self.backend.clone(),
-                partition_manager: self.partition_manager.clone(),
-                datanode_clients: self.datanode_clients.clone(),
+                catalog_manager: Arc::new(self.clone()),
             }) as Arc<_>
         }))
     }
@@ -290,9 +318,7 @@ impl CatalogManager for FrontendCatalogManager {
 
 pub struct FrontendCatalogProvider {
     catalog_name: String,
-    backend: KvBackendRef,
-    partition_manager: PartitionRuleManagerRef,
-    datanode_clients: Arc<DatanodeClients>,
+    catalog_manager: Arc<FrontendCatalogManager>,
 }
 
 #[async_trait::async_trait]
@@ -303,7 +329,8 @@ impl CatalogProvider for FrontendCatalogProvider {
 
     async fn schema_names(&self) -> catalog::error::Result<Vec<String>> {
         let key = build_schema_prefix(&self.catalog_name);
-        let mut iter = self.backend.range(key.as_bytes());
+        let backend = self.catalog_manager.backend();
+        let mut iter = backend.range(key.as_bytes());
         let mut res = HashSet::new();
         while let Some(r) = iter.next().await {
             let Kv(k, _) = r?;
@@ -323,27 +350,36 @@ impl CatalogProvider for FrontendCatalogProvider {
     }
 
     async fn schema(&self, name: &str) -> catalog::error::Result<Option<SchemaProviderRef>> {
-        let all_schemas = self.schema_names().await?;
-        if all_schemas.contains(&name.to_string()) {
-            Ok(Some(Arc::new(FrontendSchemaProvider {
-                catalog_name: self.catalog_name.clone(),
-                schema_name: name.to_string(),
-                backend: self.backend.clone(),
-                partition_manager: self.partition_manager.clone(),
-                datanode_clients: self.datanode_clients.clone(),
-            })))
-        } else {
-            Ok(None)
+        let catalog = &self.catalog_name;
+
+        let schema_key = SchemaKey {
+            catalog_name: catalog.clone(),
+            schema_name: name.to_string(),
         }
+        .to_string();
+
+        let val = self
+            .catalog_manager
+            .backend()
+            .get(schema_key.as_bytes())
+            .await?;
+
+        let provider = val.map(|_| {
+            Arc::new(FrontendSchemaProvider {
+                catalog_name: catalog.clone(),
+                schema_name: name.to_string(),
+                catalog_manager: self.catalog_manager.clone(),
+            }) as Arc<dyn SchemaProvider>
+        });
+
+        Ok(provider)
     }
 }
 
 pub struct FrontendSchemaProvider {
     catalog_name: String,
     schema_name: String,
-    backend: KvBackendRef,
-    partition_manager: PartitionRuleManagerRef,
-    datanode_clients: Arc<DatanodeClients>,
+    catalog_manager: Arc<FrontendCatalogManager>,
 }
 
 #[async_trait]
@@ -358,7 +394,8 @@ impl SchemaProvider for FrontendSchemaProvider {
             tables.push("numbers".to_string());
         }
         let key = build_table_global_prefix(&self.catalog_name, &self.schema_name);
-        let iter = self.backend.range(key.as_bytes());
+        let backend = self.catalog_manager.backend();
+        let iter = backend.range(key.as_bytes());
         let result = iter
             .map(|r| {
                 let Kv(k, _) = r?;
@@ -385,7 +422,9 @@ impl SchemaProvider for FrontendSchemaProvider {
             schema_name: self.schema_name.clone(),
             table_name: name.to_string(),
         };
-        let Some(kv) = self.backend.get(table_global_key.to_string().as_bytes()).await? else { return Ok(None) };
+        let Some(kv) = self.catalog_manager.backend().get(table_global_key.to_string().as_bytes()).await? else {
+            return Ok(None);
+        };
         let v = TableGlobalValue::from_bytes(kv.1).context(InvalidCatalogValueSnafu)?;
         let table_info = Arc::new(
             v.table_info
@@ -395,9 +434,7 @@ impl SchemaProvider for FrontendSchemaProvider {
         let table = Arc::new(DistTable::new(
             TableName::new(&self.catalog_name, &self.schema_name, name),
             table_info,
-            self.partition_manager.clone(),
-            self.datanode_clients.clone(),
-            self.backend.clone(),
+            self.catalog_manager.clone(),
         ));
         Ok(Some(table))
     }

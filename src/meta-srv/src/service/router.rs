@@ -17,23 +17,26 @@ use std::collections::HashMap;
 use api::v1::meta::{
     router_server, BatchPutRequest, CreateRequest, DeleteRequest, Error, KeyValue,
     MoveValueRequest, Peer, PeerDict, Region, RegionRoute, ResponseHeader, RouteRequest,
-    RouteResponse, Table, TableName, TableRoute, TableRouteValue,
+    RouteResponse, Table, TableRoute, TableRouteValue,
 };
 use catalog::helper::{TableGlobalKey, TableGlobalValue};
+use common_meta::key::TableRouteKey;
+use common_meta::table_name::TableName;
 use common_telemetry::{timer, warn};
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::RawTableInfo;
 use tonic::{Request, Response};
 
 use crate::error;
 use crate::error::Result;
-use crate::keys::TableRouteKey;
-use crate::metasrv::{Context, MetaSrv, SelectorRef};
+use crate::lock::{keys, DistLockGuard};
+use crate::metasrv::{Context, MetaSrv, SelectorContext, SelectorRef};
 use crate::metrics::METRIC_META_ROUTE_REQUEST;
 use crate::sequence::SequenceRef;
 use crate::service::store::ext::KvStoreExt;
 use crate::service::store::kv::KvStoreRef;
 use crate::service::GrpcResult;
+use crate::table_routes::{get_table_global_value, get_table_route_value};
 
 #[async_trait::async_trait]
 impl router_server::Router for MetaSrv {
@@ -43,15 +46,48 @@ impl router_server::Router for MetaSrv {
         let CreateRequest {
             header, table_name, ..
         } = &req;
+        let table_name: TableName = table_name
+            .as_ref()
+            .context(error::EmptyTableNameSnafu)?
+            .clone()
+            .into();
+
+        // TODO(LFC): Use procedure to create table, and get rid of locks here.
+        let mut guard = DistLockGuard::new(self.lock(), keys::table_creation_lock_key(&table_name));
+        guard.lock().await?;
+
+        let table_global_key = TableGlobalKey {
+            catalog_name: table_name.catalog_name.clone(),
+            schema_name: table_name.schema_name.clone(),
+            table_name: table_name.table_name.clone(),
+        }
+        .to_string()
+        .into_bytes();
+        ensure!(
+            self.kv_store().get(table_global_key).await?.is_none(),
+            error::TableAlreadyExistsSnafu {
+                table_name: table_name.to_string(),
+            }
+        );
+
         let cluster_id = header.as_ref().map_or(0, |h| h.cluster_id);
 
         let _timer = timer!(
             METRIC_META_ROUTE_REQUEST,
-            &[("op", "create"), ("cluster_id", &cluster_id.to_string())]
+            &[
+                ("op", "create".to_string()),
+                ("cluster_id", cluster_id.to_string())
+            ]
         );
 
-        let table_name = table_name.clone().context(error::EmptyTableNameSnafu)?;
-        let ctx = self.create_ctx(table_name);
+        let ctx = SelectorContext {
+            datanode_lease_secs: self.options().datanode_lease_secs,
+            server_addr: self.options().server_addr.clone(),
+            kv_store: self.kv_store(),
+            catalog: Some(table_name.catalog_name.clone()),
+            schema: Some(table_name.schema_name.clone()),
+            table: Some(table_name.table_name.clone()),
+        };
 
         let selector = self.selector();
         let table_id_sequence = self.table_id_sequence();
@@ -67,7 +103,10 @@ impl router_server::Router for MetaSrv {
 
         let _timer = timer!(
             METRIC_META_ROUTE_REQUEST,
-            &[("op", "route"), ("cluster_id", &cluster_id.to_string())]
+            &[
+                ("op", "route".to_string()),
+                ("cluster_id", cluster_id.to_string())
+            ]
         );
 
         let ctx = self.new_ctx();
@@ -82,7 +121,10 @@ impl router_server::Router for MetaSrv {
 
         let _timer = timer!(
             METRIC_META_ROUTE_REQUEST,
-            &[("op", "delete"), ("cluster_id", &cluster_id.to_string())]
+            &[
+                ("op", "delete".to_string()),
+                ("cluster_id", cluster_id.to_string())
+            ]
         );
 
         let ctx = self.new_ctx();
@@ -92,24 +134,9 @@ impl router_server::Router for MetaSrv {
     }
 }
 
-impl MetaSrv {
-    fn create_ctx(&self, table_name: TableName) -> Context {
-        let mut ctx = self.new_ctx();
-        let TableName {
-            catalog_name,
-            schema_name,
-            table_name,
-        } = table_name;
-        ctx.catalog = Some(catalog_name);
-        ctx.schema = Some(schema_name);
-        ctx.table = Some(table_name);
-        ctx
-    }
-}
-
 async fn handle_create(
     req: CreateRequest,
-    ctx: Context,
+    ctx: SelectorContext,
     selector: SelectorRef,
     table_id_sequence: SequenceRef,
 ) -> Result<RouteResponse> {
@@ -130,17 +157,23 @@ async fn handle_create(
         })?;
 
     let cluster_id = header.as_ref().map_or(0, |h| h.cluster_id);
-    let peers = selector.select(cluster_id, &ctx).await?;
-    if peers.is_empty() {
-        let header = Some(ResponseHeader::failed(
-            cluster_id,
-            Error::no_active_datanodes(),
-        ));
+    let mut peers = selector.select(cluster_id, &ctx).await?;
+
+    if peers.len() < partitions.len() {
+        warn!("Create table failed due to no enough available datanodes, table: {table_name:?}, partition number: {}, datanode number: {}", partitions.len(), peers.len());
         return Ok(RouteResponse {
-            header,
+            header: Some(ResponseHeader::failed(
+                cluster_id,
+                Error::not_enough_available_datanodes(partitions.len(), peers.len()),
+            )),
             ..Default::default()
         });
     }
+
+    // We don't need to keep all peers, just truncate it to the number of partitions.
+    // If the peers are not enough, some peers will be used for multiple partitions.
+    peers.truncate(partitions.len());
+
     let id = table_id_sequence.next().await?;
     table_info.ident.table_id = id as u32;
 
@@ -300,7 +333,7 @@ async fn handle_delete(req: DeleteRequest, ctx: Context) -> Result<RouteResponse
 
     let _ = remove_table_global_value(&ctx.kv_store, &tgk).await?;
 
-    let trk = TableRouteKey::with_table_global_key(tgv.table_id() as u64, &tgk);
+    let trk = table_route_key(tgv.table_id() as u64, &tgk);
     let (_, trv) = remove_table_route_value(&ctx.kv_store, &trk).await?;
     let (peers, table_routes) = fill_table_routes(vec![(tgv, trv)])?;
 
@@ -361,7 +394,7 @@ async fn fetch_tables(
         }
         let tgv = tgv.unwrap();
 
-        let trk = TableRouteKey::with_table_global_key(tgv.table_id() as u64, &tgk);
+        let trk = table_route_key(tgv.table_id() as u64, &tgk);
         let trv = get_table_route_value(kv_store, &trk).await?;
 
         tables.push((tgv, trv));
@@ -370,21 +403,13 @@ async fn fetch_tables(
     Ok(tables)
 }
 
-async fn get_table_route_value(
-    kv_store: &KvStoreRef,
-    key: &TableRouteKey<'_>,
-) -> Result<TableRouteValue> {
-    let trkv = kv_store
-        .get(key.key().into_bytes())
-        .await?
-        .context(error::TableRouteNotFoundSnafu { key: key.key() })?;
-    let trv: TableRouteValue = trkv
-        .value
-        .as_slice()
-        .try_into()
-        .context(error::DecodeTableRouteSnafu)?;
-
-    Ok(trv)
+fn table_route_key(table_id: u64, t: &TableGlobalKey) -> TableRouteKey<'_> {
+    TableRouteKey {
+        table_id,
+        catalog_name: &t.catalog_name,
+        schema_name: &t.schema_name,
+        table_name: &t.table_name,
+    }
 }
 
 async fn remove_table_route_value(
@@ -416,22 +441,6 @@ async fn remove_table_global_value(
     let value: TableGlobalValue =
         TableGlobalValue::from_bytes(&kv.1).context(error::InvalidCatalogValueSnafu)?;
     Ok((kv.0, value))
-}
-
-async fn get_table_global_value(
-    kv_store: &KvStoreRef,
-    key: &TableGlobalKey,
-) -> Result<Option<TableGlobalValue>> {
-    let tg_key = format!("{key}").into_bytes();
-    let tkv = kv_store.get(tg_key).await?;
-    match tkv {
-        Some(tkv) => {
-            let tv =
-                TableGlobalValue::from_bytes(tkv.value).context(error::InvalidCatalogValueSnafu)?;
-            Ok(Some(tv))
-        }
-        None => Ok(None),
-    }
 }
 
 async fn move_value(

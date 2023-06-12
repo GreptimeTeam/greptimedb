@@ -60,7 +60,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_distributed_exec_sql() {
         let distributed = tests::create_distributed_instance("test_distributed_exec_sql").await;
-        let instance = distributed.frontend.as_ref();
+        let frontend = distributed.frontend();
+        let instance = frontend.as_ref();
 
         let sql = r#"
             CREATE TABLE demo(
@@ -177,7 +178,7 @@ mod tests {
         expected_distribution: HashMap<u32, &str>,
     ) {
         let table = instance
-            .frontend
+            .frontend()
             .catalog_manager()
             .table("greptime", "public", "demo")
             .await
@@ -202,7 +203,7 @@ mod tests {
 
         let stmt = QueryLanguageParser::parse_sql("SELECT ts, host FROM demo ORDER BY ts").unwrap();
         for (region, dn) in region_to_dn_map.iter() {
-            let dn = instance.datanodes.get(dn).unwrap();
+            let dn = instance.datanodes().get(dn).unwrap();
             let engine = dn.query_engine();
             let plan = engine
                 .planner()
@@ -227,7 +228,7 @@ mod tests {
     }
 
     async fn verify_table_is_dropped(instance: &MockDistributedInstance) {
-        for (_, dn) in instance.datanodes.iter() {
+        for (_, dn) in instance.datanodes().iter() {
             assert!(dn
                 .catalog_manager()
                 .table("greptime", "public", "demo")

@@ -14,28 +14,22 @@
 
 mod runner;
 
+use std::sync::Arc;
+
 use api::v1::meta::{HeartbeatRequest, Role};
 use async_trait::async_trait;
+use common_catalog::consts::MITO_ENGINE;
+use common_meta::instruction::TableIdent;
+use common_meta::RegionIdent;
+use table::engine::table_id;
 
 use crate::error::Result;
 use crate::handler::failure_handler::runner::{FailureDetectControl, FailureDetectRunner};
 use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::{Context, ElectionRef};
+use crate::procedure::region_failover::RegionFailoverManager;
 
-#[derive(Eq, Hash, PartialEq, Clone)]
-pub(crate) struct RegionIdent {
-    catalog: String,
-    schema: String,
-    table: String,
-    region_id: u64,
-}
-
-// TODO(LFC): TBC
 pub(crate) struct DatanodeHeartbeat {
-    #[allow(dead_code)]
-    cluster_id: u64,
-    #[allow(dead_code)]
-    node_id: u64,
     region_idents: Vec<RegionIdent>,
     heartbeat_time: i64,
 }
@@ -45,14 +39,18 @@ pub struct RegionFailureHandler {
 }
 
 impl RegionFailureHandler {
-    pub fn new(election: Option<ElectionRef>) -> Self {
-        Self {
-            failure_detect_runner: FailureDetectRunner::new(election),
-        }
-    }
+    pub(crate) async fn try_new(
+        election: Option<ElectionRef>,
+        region_failover_manager: Arc<RegionFailoverManager>,
+    ) -> Result<Self> {
+        region_failover_manager.try_start()?;
 
-    pub async fn start(&mut self) {
-        self.failure_detect_runner.start().await;
+        let mut failure_detect_runner = FailureDetectRunner::new(election, region_failover_manager);
+        failure_detect_runner.start().await;
+
+        Ok(Self {
+            failure_detect_runner,
+        })
     }
 }
 
@@ -77,16 +75,21 @@ impl HeartbeatHandler for RegionFailureHandler {
         let Some(stat) = acc.stat.as_ref() else { return Ok(()) };
 
         let heartbeat = DatanodeHeartbeat {
-            cluster_id: stat.cluster_id,
-            node_id: stat.id,
             region_idents: stat
                 .region_stats
                 .iter()
                 .map(|x| RegionIdent {
-                    catalog: x.catalog.clone(),
-                    schema: x.schema.clone(),
-                    table: x.table.clone(),
-                    region_id: x.id,
+                    cluster_id: stat.cluster_id,
+                    datanode_id: stat.id,
+                    table_ident: TableIdent {
+                        catalog: x.catalog.clone(),
+                        schema: x.schema.clone(),
+                        table: x.table.clone(),
+                        table_id: table_id(x.id),
+                        // TODO(#1583): Use the actual table engine.
+                        engine: MITO_ENGINE.to_string(),
+                    },
+                    region_number: x.id as u32,
                 })
                 .collect(),
             heartbeat_time: stat.timestamp_millis,
@@ -102,16 +105,19 @@ mod tests {
     use super::*;
     use crate::handler::node_stat::{RegionStat, Stat};
     use crate::metasrv::builder::MetaSrvBuilder;
+    use crate::test_util::create_region_failover_manager;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_handle_heartbeat() {
-        let mut handler = RegionFailureHandler::new(None);
-        handler.start().await;
+        let region_failover_manager = create_region_failover_manager();
+        let handler = RegionFailureHandler::try_new(None, region_failover_manager)
+            .await
+            .unwrap();
 
         let req = &HeartbeatRequest::default();
 
         let builder = MetaSrvBuilder::new();
-        let metasrv = builder.build().await;
+        let metasrv = builder.build().await.unwrap();
         let mut ctx = metasrv.new_ctx();
         ctx.is_infancy = false;
 

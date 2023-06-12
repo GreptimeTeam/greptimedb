@@ -29,10 +29,7 @@ pub enum Error {
         "Failed to execute procedure due to external error, source: {}",
         source
     ))]
-    External {
-        #[snafu(backtrace)]
-        source: BoxedError,
-    },
+    External { source: BoxedError },
 
     #[snafu(display("Loader {} is already registered", name))]
     LoaderConflict { name: String, location: Location },
@@ -52,7 +49,7 @@ pub enum Error {
     #[snafu(display("Failed to put state, key: '{key}', source: {source}"))]
     PutState {
         key: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: BoxedError,
     },
 
@@ -65,21 +62,15 @@ pub enum Error {
     #[snafu(display("Failed to delete keys: '{keys}', source: {source}"))]
     DeleteStates {
         keys: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: BoxedError,
     },
 
     #[snafu(display("Failed to list state, path: '{path}', source: {source}"))]
     ListState {
         path: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: BoxedError,
-    },
-
-    #[snafu(display("Failed to read {}, source: {}", key, source))]
-    ReadState {
-        key: String,
-        source: object_store::Error,
     },
 
     #[snafu(display("Failed to deserialize from json, source: {}", source))]
@@ -89,10 +80,7 @@ pub enum Error {
     },
 
     #[snafu(display("Procedure exec failed, source: {}", source))]
-    RetryLater {
-        #[snafu(backtrace)]
-        source: BoxedError,
-    },
+    RetryLater { source: BoxedError },
 
     #[snafu(display("Procedure panics, procedure_id: {}", procedure_id))]
     ProcedurePanic { procedure_id: ProcedureId },
@@ -133,6 +121,13 @@ pub enum Error {
         source: common_runtime::error::Error,
         location: Location,
     },
+
+    #[snafu(display("Subprocedure {} failed, source: {}", subprocedure_id, source))]
+    SubprocedureFailed {
+        subprocedure_id: ProcedureId,
+        source: Arc<Error>,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -140,14 +135,13 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::External { source }
+            Error::External { source, .. }
             | Error::PutState { source, .. }
             | Error::DeleteStates { source, .. }
             | Error::ListState { source, .. } => source.status_code(),
 
             Error::ToJson { .. }
             | Error::DeleteState { .. }
-            | Error::ReadState { .. }
             | Error::FromJson { .. }
             | Error::RetryTimesExceeded { .. }
             | Error::RetryLater { .. }
@@ -159,6 +153,8 @@ impl ErrorExt for Error {
             Error::ProcedureExec { source, .. } => source.status_code(),
             Error::StartRemoveOutdatedMetaTask { source, .. }
             | Error::StopRemoveOutdatedMetaTask { source, .. } => source.status_code(),
+
+            Error::SubprocedureFailed { source, .. } => source.status_code(),
         }
     }
 

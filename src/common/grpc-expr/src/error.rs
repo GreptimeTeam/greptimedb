@@ -14,7 +14,6 @@
 
 use std::any::Any;
 
-use api::DecodeError;
 use common_error::ext::ErrorExt;
 use common_error::prelude::{Snafu, StatusCode};
 use snafu::Location;
@@ -28,15 +27,12 @@ pub enum Error {
         table_name: String,
     },
 
-    #[snafu(display("Failed to convert bytes to insert batch, source: {}", source))]
-    DecodeInsert { source: DecodeError },
-
     #[snafu(display("Illegal delete request, reason: {reason}"))]
     IllegalDeleteRequest { reason: String, location: Location },
 
     #[snafu(display("Column datatype error, source: {}", source))]
     ColumnDataType {
-        #[snafu(backtrace)]
+        location: Location,
         source: api::error::Error,
     },
 
@@ -58,18 +54,12 @@ pub enum Error {
     InvalidColumnProto { err_msg: String, location: Location },
     #[snafu(display("Failed to create vector, source: {}", source))]
     CreateVector {
-        #[snafu(backtrace)]
+        location: Location,
         source: datatypes::error::Error,
     },
 
     #[snafu(display("Missing required field in protobuf, field: {}", field))]
     MissingField { field: String, location: Location },
-
-    #[snafu(display("Invalid column default constraint, source: {}", source))]
-    ColumnDefaultConstraint {
-        #[snafu(backtrace)]
-        source: datatypes::error::Error,
-    },
 
     #[snafu(display(
         "Invalid column proto definition, column: {}, source: {}",
@@ -78,13 +68,13 @@ pub enum Error {
     ))]
     InvalidColumnDef {
         column: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: api::error::Error,
     },
 
     #[snafu(display("Unrecognized table option: {}", source))]
     UnrecognizedTableOption {
-        #[snafu(backtrace)]
+        location: Location,
         source: table::error::Error,
     },
 
@@ -93,6 +83,12 @@ pub enum Error {
 
     #[snafu(display("The column name already exists, column: {}", column))]
     ColumnAlreadyExists { column: String, location: Location },
+
+    #[snafu(display("Unknown location type: {}", location_type))]
+    UnknownLocationType {
+        location_type: i32,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -102,9 +98,7 @@ impl ErrorExt for Error {
         match self {
             Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
 
-            Error::DecodeInsert { .. } | Error::IllegalDeleteRequest { .. } => {
-                StatusCode::InvalidArguments
-            }
+            Error::IllegalDeleteRequest { .. } => StatusCode::InvalidArguments,
 
             Error::ColumnDataType { .. } => StatusCode::Internal,
             Error::DuplicatedTimestampColumn { .. } | Error::MissingTimestampColumn { .. } => {
@@ -113,12 +107,11 @@ impl ErrorExt for Error {
             Error::InvalidColumnProto { .. } => StatusCode::InvalidArguments,
             Error::CreateVector { .. } => StatusCode::InvalidArguments,
             Error::MissingField { .. } => StatusCode::InvalidArguments,
-            Error::ColumnDefaultConstraint { source, .. } => source.status_code(),
             Error::InvalidColumnDef { source, .. } => source.status_code(),
             Error::UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
-            Error::UnexpectedValuesLength { .. } | Error::ColumnAlreadyExists { .. } => {
-                StatusCode::InvalidArguments
-            }
+            Error::UnexpectedValuesLength { .. }
+            | Error::ColumnAlreadyExists { .. }
+            | Error::UnknownLocationType { .. } => StatusCode::InvalidArguments,
         }
     }
 

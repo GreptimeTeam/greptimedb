@@ -20,6 +20,9 @@ pub(crate) const METRIC_CATALOG_MANAGER_CATALOG_COUNT: &str = "catalog.catalog_c
 pub(crate) const METRIC_CATALOG_MANAGER_SCHEMA_COUNT: &str = "catalog.schema_count";
 pub(crate) const METRIC_CATALOG_MANAGER_TABLE_COUNT: &str = "catalog.table_count";
 
+pub(crate) const METRIC_CATALOG_KV_REMOTE_GET: &str = "catalog.kv.get.remote";
+pub(crate) const METRIC_CATALOG_KV_GET: &str = "catalog.kv.get";
+
 #[inline]
 pub(crate) fn db_label(catalog: &str, schema: &str) -> (&'static str, String) {
     (METRIC_DB_LABEL, build_db_string(catalog, schema))

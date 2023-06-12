@@ -13,10 +13,8 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::sync::Arc;
 
 use common_error::prelude::*;
-use common_procedure::ProcedureId;
 use snafu::Location;
 
 #[derive(Debug, Snafu)]
@@ -36,13 +34,13 @@ pub enum Error {
 
     #[snafu(display("Invalid raw schema, source: {}", source))]
     InvalidRawSchema {
-        #[snafu(backtrace)]
+        location: Location,
         source: datatypes::error::Error,
     },
 
     #[snafu(display("Failed to access catalog, source: {}", source))]
     AccessCatalog {
-        #[snafu(backtrace)]
+        location: Location,
         source: catalog::error::Error,
     },
 
@@ -54,13 +52,6 @@ pub enum Error {
 
     #[snafu(display("Table {} not found", name))]
     TableNotFound { name: String },
-
-    #[snafu(display("Subprocedure {} failed", subprocedure_id))]
-    SubprocedureFailed {
-        subprocedure_id: ProcedureId,
-        source: Arc<common_procedure::Error>,
-        location: Location,
-    },
 
     #[snafu(display("Table already exists: {}", name))]
     TableExists { name: String },
@@ -74,9 +65,8 @@ impl ErrorExt for Error {
 
         match self {
             SerializeProcedure { .. } | DeserializeProcedure { .. } => StatusCode::Internal,
-            SubprocedureFailed { source, .. } => source.status_code(),
             InvalidRawSchema { source, .. } => source.status_code(),
-            AccessCatalog { source } => source.status_code(),
+            AccessCatalog { source, .. } => source.status_code(),
             CatalogNotFound { .. } | SchemaNotFound { .. } | TableExists { .. } => {
                 StatusCode::InvalidArguments
             }

@@ -136,9 +136,8 @@ impl TryFrom<Statement> for Insert {
 
 #[cfg(test)]
 mod tests {
-    use sqlparser::dialect::GenericDialect;
-
     use super::*;
+    use crate::dialect::GreptimeDbDialect;
     use crate::parser::ParserContext;
     use crate::statements::statement::Statement;
 
@@ -146,7 +145,7 @@ mod tests {
     fn test_insert_value_with_unary_op() {
         // insert "-1"
         let sql = "INSERT INTO my_table VALUES(-1)";
-        let stmt = ParserContext::create_with_dialect(sql, &GenericDialect {})
+        let stmt = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
             .unwrap()
             .remove(0);
         match stmt {
@@ -159,7 +158,7 @@ mod tests {
 
         // insert "+1"
         let sql = "INSERT INTO my_table VALUES(+1)";
-        let stmt = ParserContext::create_with_dialect(sql, &GenericDialect {})
+        let stmt = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
             .unwrap()
             .remove(0);
         match stmt {
@@ -175,7 +174,7 @@ mod tests {
     fn test_insert_value_with_default() {
         // insert "default"
         let sql = "INSERT INTO my_table VALUES(default)";
-        let stmt = ParserContext::create_with_dialect(sql, &GenericDialect {})
+        let stmt = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
             .unwrap()
             .remove(0);
         match stmt {
@@ -191,7 +190,7 @@ mod tests {
     fn test_insert_value_with_default_uppercase() {
         // insert "DEFAULT"
         let sql = "INSERT INTO my_table VALUES(DEFAULT)";
-        let stmt = ParserContext::create_with_dialect(sql, &GenericDialect {})
+        let stmt = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
             .unwrap()
             .remove(0);
         match stmt {
@@ -207,7 +206,7 @@ mod tests {
     fn test_insert_value_with_quoted_string() {
         // insert "'default'"
         let sql = "INSERT INTO my_table VALUES('default')";
-        let stmt = ParserContext::create_with_dialect(sql, &GenericDialect {})
+        let stmt = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
             .unwrap()
             .remove(0);
         match stmt {
@@ -225,7 +224,7 @@ mod tests {
     #[test]
     fn test_insert_select() {
         let sql = "INSERT INTO my_table select * from other_table";
-        let stmt = ParserContext::create_with_dialect(sql, &GenericDialect {})
+        let stmt = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
             .unwrap()
             .remove(0);
         match stmt {

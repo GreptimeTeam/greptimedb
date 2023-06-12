@@ -152,7 +152,7 @@ pub struct Instance {
 }
 
 impl Instance {
-    pub async fn run(&mut self) -> Result<()> {
+    pub async fn start(&mut self) -> Result<()> {
         // Start datanode instance before starting services, to avoid requests come in before internal components are started.
         self.datanode
             .start_instance()
@@ -227,8 +227,9 @@ impl StartCommand {
         if let Some(dir) = top_level_options.log_dir {
             opts.logging.dir = dir;
         }
-        if let Some(level) = top_level_options.log_level {
-            opts.logging.level = level;
+
+        if top_level_options.log_level.is_some() {
+            opts.logging.level = top_level_options.log_level;
         }
 
         let tls_opts = TlsOption::new(
@@ -301,6 +302,7 @@ impl StartCommand {
     async fn build(self, fe_opts: FrontendOptions, dn_opts: DatanodeOptions) -> Result<Instance> {
         let plugins = Arc::new(load_frontend_plugins(&self.user_provider)?);
 
+        info!("Standalone start command: {:#?}", self);
         info!(
             "Standalone frontend options: {:#?}, datanode options: {:#?}",
             fe_opts, dn_opts
@@ -449,7 +451,7 @@ mod tests {
         );
         assert!(fe_opts.influxdb_options.as_ref().unwrap().enable);
 
-        assert_eq!("/tmp/greptimedb/test/wal", dn_opts.wal.dir);
+        assert_eq!("/tmp/greptimedb/test/wal", dn_opts.wal.dir.unwrap());
         match &dn_opts.storage.store {
             datanode::datanode::ObjectStoreConfig::S3(s3_config) => {
                 assert_eq!(
@@ -462,7 +464,7 @@ mod tests {
             }
         }
 
-        assert_eq!("debug".to_string(), logging_opts.level);
+        assert_eq!("debug", logging_opts.level.as_ref().unwrap());
         assert_eq!("/tmp/greptimedb/test/logs".to_string(), logging_opts.dir);
     }
 
@@ -483,7 +485,7 @@ mod tests {
         };
 
         assert_eq!("/tmp/greptimedb/test/logs", opts.logging.dir);
-        assert_eq!("debug", opts.logging.level);
+        assert_eq!("debug", opts.logging.level.unwrap());
     }
 
     #[test]
@@ -553,7 +555,7 @@ mod tests {
                 assert_eq!(opts.logging.dir, "/other/log/dir");
 
                 // Should be read from config file, config file > env > default values.
-                assert_eq!(opts.logging.level, "debug");
+                assert_eq!(opts.logging.level.as_ref().unwrap(), "debug");
 
                 // Should be read from cli, cli > config file > env > default values.
                 assert_eq!(

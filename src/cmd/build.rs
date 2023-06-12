@@ -19,6 +19,10 @@ fn main() {
         build_data::get_git_commit().unwrap_or_else(|_| DEFAULT_VALUE.to_string())
     );
     println!(
+        "cargo:rustc-env=GIT_COMMIT_SHORT={}",
+        build_data::get_git_commit_short().unwrap_or_else(|_| DEFAULT_VALUE.to_string())
+    );
+    println!(
         "cargo:rustc-env=GIT_BRANCH={}",
         build_data::get_git_branch().unwrap_or_else(|_| DEFAULT_VALUE.to_string())
     );

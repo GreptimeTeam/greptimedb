@@ -18,12 +18,12 @@ use std::sync::Arc;
 use anyhow::Result;
 use common_telemetry::{logging, metric};
 use common_test_util::temp_dir::create_temp_dir;
-use object_store::cache_policy::LruCacheLayer;
+use object_store::layers::LruCacheLayer;
 use object_store::services::{Fs, S3};
 use object_store::test_util::TempFolder;
 use object_store::{util, ObjectStore, ObjectStoreBuilder};
 use opendal::raw::Accessor;
-use opendal::services::Oss;
+use opendal::services::{Azblob, Oss};
 use opendal::{EntryMode, Operator, OperatorBuilder};
 
 async fn test_object_crud(store: &ObjectStore) -> Result<()> {
@@ -120,7 +120,7 @@ async fn test_s3_backend() -> Result<()> {
 
             let store = ObjectStore::new(builder).unwrap().finish();
 
-            let mut guard = TempFolder::new(&store, "/");
+            let guard = TempFolder::new(&store, "/");
             test_object_crud(&store).await?;
             test_object_list(&store).await?;
             guard.remove_all().await?;
@@ -148,13 +148,40 @@ async fn test_oss_backend() -> Result<()> {
 
             let store = ObjectStore::new(builder).unwrap().finish();
 
-            let mut guard = TempFolder::new(&store, "/");
+            let guard = TempFolder::new(&store, "/");
             test_object_crud(&store).await?;
             test_object_list(&store).await?;
             guard.remove_all().await?;
         }
     }
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_azblob_backend() -> Result<()> {
+    logging::init_default_ut_logging();
+    if let Ok(container) = env::var("GT_AZBLOB_CONTAINER") {
+        if !container.is_empty() {
+            logging::info!("Running azblob test.");
+
+            let root = uuid::Uuid::new_v4().to_string();
+
+            let mut builder = Azblob::default();
+            builder
+                .root(&root)
+                .account_name(&env::var("GT_AZBLOB_ACCOUNT_NAME")?)
+                .account_key(&env::var("GT_AZBLOB_ACCOUNT_KEY")?)
+                .container(&container);
+
+            let store = ObjectStore::new(builder).unwrap().finish();
+
+            let guard = TempFolder::new(&store, "/");
+            test_object_crud(&store).await?;
+            test_object_list(&store).await?;
+            guard.remove_all().await?;
+        }
+    }
     Ok(())
 }
 

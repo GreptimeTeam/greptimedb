@@ -20,6 +20,8 @@ use arc_swap::ArcSwap;
 use common_catalog::build_db_string;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_telemetry::debug;
+use common_time::TimeZone;
+use sql::dialect::{Dialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
 
 pub type QueryContextRef = Arc<QueryContext>;
 pub type ConnInfoRef = Arc<ConnInfo>;
@@ -28,6 +30,8 @@ pub type ConnInfoRef = Arc<ConnInfo>;
 pub struct QueryContext {
     current_catalog: ArcSwap<String>,
     current_schema: ArcSwap<String>,
+    time_zone: ArcSwap<Option<TimeZone>>,
+    sql_dialect: Box<dyn Dialect + Send + Sync>,
 }
 
 impl Default for QueryContext {
@@ -56,22 +60,41 @@ impl QueryContext {
         Self {
             current_catalog: ArcSwap::new(Arc::new(DEFAULT_CATALOG_NAME.to_string())),
             current_schema: ArcSwap::new(Arc::new(DEFAULT_SCHEMA_NAME.to_string())),
+            time_zone: ArcSwap::new(Arc::new(None)),
+            sql_dialect: Box::new(GreptimeDbDialect {}),
         }
     }
 
     pub fn with(catalog: &str, schema: &str) -> Self {
+        Self::with_sql_dialect(catalog, schema, Box::new(GreptimeDbDialect {}))
+    }
+
+    pub fn with_sql_dialect(
+        catalog: &str,
+        schema: &str,
+        sql_dialect: Box<dyn Dialect + Send + Sync>,
+    ) -> Self {
         Self {
             current_catalog: ArcSwap::new(Arc::new(catalog.to_string())),
             current_schema: ArcSwap::new(Arc::new(schema.to_string())),
+            time_zone: ArcSwap::new(Arc::new(None)),
+            sql_dialect,
         }
     }
 
+    #[inline]
     pub fn current_schema(&self) -> String {
         self.current_schema.load().as_ref().clone()
     }
 
+    #[inline]
     pub fn current_catalog(&self) -> String {
         self.current_catalog.load().as_ref().clone()
+    }
+
+    #[inline]
+    pub fn sql_dialect(&self) -> &(dyn Dialect + Send + Sync) {
+        &*self.sql_dialect
     }
 
     pub fn set_current_schema(&self, schema: &str) {
@@ -98,6 +121,16 @@ impl QueryContext {
         let catalog = self.current_catalog();
         let schema = self.current_schema();
         build_db_string(&catalog, &schema)
+    }
+
+    #[inline]
+    pub fn time_zone(&self) -> Option<TimeZone> {
+        self.time_zone.load().as_ref().clone()
+    }
+
+    #[inline]
+    pub fn set_time_zone(&self, tz: Option<TimeZone>) {
+        self.time_zone.swap(Arc::new(tz));
     }
 }
 
@@ -128,15 +161,30 @@ impl UserInfo {
     }
 }
 
+#[derive(Debug)]
 pub struct ConnInfo {
-    pub client_host: SocketAddr,
+    pub client_addr: Option<SocketAddr>,
     pub channel: Channel,
 }
 
+impl std::fmt::Display for ConnInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "{}[{}]",
+            self.channel,
+            self.client_addr
+                .map(|addr| addr.to_string())
+                .as_deref()
+                .unwrap_or("unknown client addr")
+        )
+    }
+}
+
 impl ConnInfo {
-    pub fn new(client_host: SocketAddr, channel: Channel) -> Self {
+    pub fn new(client_addr: Option<SocketAddr>, channel: Channel) -> Self {
         Self {
-            client_host,
+            client_addr,
             channel,
         }
     }
@@ -144,13 +192,26 @@ impl ConnInfo {
 
 #[derive(Debug, PartialEq)]
 pub enum Channel {
-    Grpc,
-    Http,
     Mysql,
     Postgres,
-    Opentsdb,
-    Influxdb,
-    Prometheus,
+}
+
+impl Channel {
+    pub fn dialect(&self) -> Box<dyn Dialect + Send + Sync> {
+        match self {
+            Channel::Mysql => Box::new(MySqlDialect {}),
+            Channel::Postgres => Box::new(PostgreSqlDialect {}),
+        }
+    }
+}
+
+impl std::fmt::Display for Channel {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Channel::Mysql => write!(f, "mysql"),
+            Channel::Postgres => write!(f, "postgres"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -161,7 +222,7 @@ mod test {
 
     #[test]
     fn test_session() {
-        let session = Session::new("127.0.0.1:9000".parse().unwrap(), Channel::Mysql);
+        let session = Session::new(Some("127.0.0.1:9000".parse().unwrap()), Channel::Mysql);
         // test user_info
         assert_eq!(session.user_info().username(), "greptime");
         session.set_user_info(UserInfo::new("root"));
@@ -169,11 +230,11 @@ mod test {
 
         // test channel
         assert_eq!(session.conn_info().channel, Channel::Mysql);
-        assert_eq!(
-            session.conn_info().client_host.ip().to_string(),
-            "127.0.0.1"
-        );
-        assert_eq!(session.conn_info().client_host.port(), 9000);
+        let client_addr = session.conn_info().client_addr.as_ref().unwrap();
+        assert_eq!(client_addr.ip().to_string(), "127.0.0.1");
+        assert_eq!(client_addr.port(), 9000);
+
+        assert_eq!("mysql[127.0.0.1:9000]", session.conn_info().to_string());
     }
 
     #[test]

@@ -29,7 +29,7 @@ pub struct Instance {
 }
 
 impl Instance {
-    pub async fn run(&mut self) -> Result<()> {
+    pub async fn start(&mut self) -> Result<()> {
         self.datanode.start().await.context(StartDatanodeSnafu)
     }
 
@@ -84,14 +84,12 @@ struct StartCommand {
     rpc_addr: Option<String>,
     #[clap(long)]
     rpc_hostname: Option<String>,
-    #[clap(long)]
-    mysql_addr: Option<String>,
     #[clap(long, multiple = true, value_delimiter = ',')]
     metasrv_addr: Option<Vec<String>>,
     #[clap(short, long)]
     config_file: Option<String>,
     #[clap(long)]
-    data_dir: Option<String>,
+    data_home: Option<String>,
     #[clap(long)]
     wal_dir: Option<String>,
     #[clap(long)]
@@ -113,8 +111,9 @@ impl StartCommand {
         if let Some(dir) = top_level_opts.log_dir {
             opts.logging.dir = dir;
         }
-        if let Some(level) = top_level_opts.log_level {
-            opts.logging.level = level;
+
+        if top_level_opts.log_level.is_some() {
+            opts.logging.level = top_level_opts.log_level;
         }
 
         if let Some(addr) = &self.rpc_addr {
@@ -123,10 +122,6 @@ impl StartCommand {
 
         if self.rpc_hostname.is_some() {
             opts.rpc_hostname = self.rpc_hostname.clone();
-        }
-
-        if let Some(addr) = &self.mysql_addr {
-            opts.mysql_addr = addr.clone();
         }
 
         if let Some(node_id) = self.node_id {
@@ -147,14 +142,14 @@ impl StartCommand {
             .fail();
         }
 
-        if let Some(data_dir) = &self.data_dir {
+        if let Some(data_home) = &self.data_home {
             opts.storage.store = ObjectStoreConfig::File(FileConfig {
-                data_dir: data_dir.clone(),
+                data_home: data_home.clone(),
             });
         }
 
         if let Some(wal_dir) = &self.wal_dir {
-            opts.wal.dir = wal_dir.clone();
+            opts.wal.dir = Some(wal_dir.clone());
         }
 
         if let Some(http_addr) = &self.http_addr {
@@ -204,8 +199,6 @@ mod tests {
             rpc_addr = "127.0.0.1:3001"
             rpc_hostname = "127.0.0.1"
             rpc_runtime_size = 8
-            mysql_addr = "127.0.0.1:4406"
-            mysql_runtime_size = 2
 
             [meta_client_options]
             metasrv_addrs = ["127.0.0.1:3002"]
@@ -214,7 +207,7 @@ mod tests {
             tcp_nodelay = true
 
             [wal]
-            dir = "/tmp/greptimedb/wal"
+            dir = "/other/wal"
             file_size = "1GB"
             purge_threshold = "50GB"
             purge_interval = "10m"
@@ -223,7 +216,7 @@ mod tests {
 
             [storage]
             type = "File"
-            data_dir = "/tmp/greptimedb/data/"
+            data_home = "/tmp/greptimedb/"
 
             [storage.compaction]
             max_inflight_tasks = 3
@@ -251,10 +244,9 @@ mod tests {
             cmd.load_options(TopLevelOptions::default()).unwrap() else { unreachable!() };
 
         assert_eq!("127.0.0.1:3001".to_string(), options.rpc_addr);
-        assert_eq!("127.0.0.1:4406".to_string(), options.mysql_addr);
-        assert_eq!(2, options.mysql_runtime_size);
         assert_eq!(Some(42), options.node_id);
 
+        assert_eq!("/other/wal", options.wal.dir.unwrap());
         assert_eq!(Duration::from_secs(600), options.wal.purge_interval);
         assert_eq!(1024 * 1024 * 1024, options.wal.file_size.0);
         assert_eq!(1024 * 1024 * 1024 * 50, options.wal.purge_threshold.0);
@@ -273,11 +265,12 @@ mod tests {
         assert!(tcp_nodelay);
 
         match &options.storage.store {
-            ObjectStoreConfig::File(FileConfig { data_dir, .. }) => {
-                assert_eq!("/tmp/greptimedb/data/", data_dir)
+            ObjectStoreConfig::File(FileConfig { data_home, .. }) => {
+                assert_eq!("/tmp/greptimedb/", data_home)
             }
             ObjectStoreConfig::S3 { .. } => unreachable!(),
             ObjectStoreConfig::Oss { .. } => unreachable!(),
+            ObjectStoreConfig::Azblob { .. } => unreachable!(),
         };
 
         assert_eq!(
@@ -299,7 +292,7 @@ mod tests {
             options.storage.manifest,
         );
 
-        assert_eq!("debug".to_string(), options.logging.level);
+        assert_eq!("debug", options.logging.level.unwrap());
         assert_eq!("/tmp/greptimedb/test/logs".to_string(), options.logging.dir);
     }
 
@@ -352,7 +345,7 @@ mod tests {
 
         let logging_opt = options.logging_options();
         assert_eq!("/tmp/greptimedb/test/logs", logging_opt.dir);
-        assert_eq!("debug", logging_opt.level);
+        assert_eq!("debug", logging_opt.level.as_ref().unwrap());
     }
 
     #[test]
@@ -365,8 +358,6 @@ mod tests {
             rpc_addr = "127.0.0.1:3001"
             rpc_hostname = "127.0.0.1"
             rpc_runtime_size = 8
-            mysql_addr = "127.0.0.1:4406"
-            mysql_runtime_size = 2
 
             [meta_client_options]
             timeout_millis = 3000
@@ -374,7 +365,6 @@ mod tests {
             tcp_nodelay = true
 
             [wal]
-            dir = "/tmp/greptimedb/wal"
             file_size = "1GB"
             purge_threshold = "50GB"
             purge_interval = "10m"
@@ -383,7 +373,7 @@ mod tests {
 
             [storage]
             type = "File"
-            data_dir = "/tmp/greptimedb/data/"
+            data_home = "/tmp/greptimedb/"
 
             [storage.compaction]
             max_inflight_tasks = 3
@@ -464,7 +454,7 @@ mod tests {
                 assert_eq!(opts.storage.compaction.max_purge_tasks, 32);
 
                 // Should be read from cli, cli > config file > env > default values.
-                assert_eq!(opts.wal.dir, "/other/wal/dir");
+                assert_eq!(opts.wal.dir.unwrap(), "/other/wal/dir");
 
                 // Should be default value.
                 assert_eq!(

@@ -13,11 +13,9 @@
 // limitations under the License.
 
 use api::v1::meta::{lock_server, LockRequest, LockResponse, UnlockRequest, UnlockResponse};
-use snafu::OptionExt;
 use tonic::{Request, Response};
 
 use super::GrpcResult;
-use crate::error;
 use crate::lock::Opts;
 use crate::metasrv::MetaSrv;
 
@@ -29,8 +27,7 @@ impl lock_server::Lock for MetaSrv {
         } = request.into_inner();
         let expire_secs = Some(expire_secs as u64);
 
-        let lock = self.lock().context(error::LockNotConfigSnafu)?;
-        let key = lock.lock(name, Opts { expire_secs }).await?;
+        let key = self.lock().lock(name, Opts { expire_secs }).await?;
 
         let resp = LockResponse {
             key,
@@ -43,8 +40,7 @@ impl lock_server::Lock for MetaSrv {
     async fn unlock(&self, request: Request<UnlockRequest>) -> GrpcResult<UnlockResponse> {
         let UnlockRequest { key, .. } = request.into_inner();
 
-        let lock = self.lock().context(error::LockNotConfigSnafu)?;
-        let _ = lock.unlock(key).await?;
+        let _ = self.lock().unlock(key).await?;
 
         let resp = UnlockResponse {
             ..Default::default()

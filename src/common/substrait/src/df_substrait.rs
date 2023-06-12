@@ -16,8 +16,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::{Buf, Bytes, BytesMut};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use datafusion::catalog::catalog::CatalogList;
-use datafusion::prelude::SessionContext;
+use datafusion::execution::context::SessionState;
+use datafusion::execution::runtime_env::RuntimeEnv;
+use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_expr::LogicalPlan;
 use datafusion_substrait::logical_plan::consumer::from_substrait_plan;
 use datafusion_substrait::logical_plan::producer::to_substrait_plan;
@@ -41,9 +44,12 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
         message: B,
         catalog_list: Arc<dyn CatalogList>,
     ) -> Result<Self::Plan, Self::Error> {
-        let mut context = SessionContext::new();
-        let plan = Plan::decode(message).context(DecodeRelSnafu)?;
+        let state_config = SessionConfig::new()
+            .with_default_catalog_and_schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        let state = SessionState::with_config_rt(state_config, Arc::new(RuntimeEnv::default()));
+        let mut context = SessionContext::with_state(state);
         context.register_catalog_list(catalog_list);
+        let plan = Plan::decode(message).context(DecodeRelSnafu)?;
         let df_plan = from_substrait_plan(&mut context, &plan)
             .await
             .context(DecodeDfPlanSnafu)?;
@@ -52,8 +58,9 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
 
     fn encode(&self, plan: Self::Plan) -> Result<Bytes, Self::Error> {
         let mut buf = BytesMut::new();
+        let context = SessionContext::new();
 
-        let substrait_plan = to_substrait_plan(&plan).context(EncodeDfPlanSnafu)?;
+        let substrait_plan = to_substrait_plan(&plan, &context).context(EncodeDfPlanSnafu)?;
         substrait_plan.encode(&mut buf).context(EncodeRelSnafu)?;
 
         Ok(buf.freeze())

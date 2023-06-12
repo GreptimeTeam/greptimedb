@@ -23,4 +23,5 @@ pub mod prometheus {
 
 pub mod v1;
 
+pub use greptime_proto;
 pub use prost::DecodeError;

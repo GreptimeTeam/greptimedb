@@ -16,11 +16,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_query::physical_plan::PhysicalPlanRef;
-use common_recordbatch::EmptyRecordBatchStream;
+use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
+use store_api::storage::ScanRequest;
 
 use crate::metadata::{TableInfo, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType};
 use crate::requests::{CreateTableRequest, InsertRequest};
-use crate::table::scan::SimpleTableScan;
+use crate::table::scan::StreamScanAdapter;
 use crate::{Result, Table};
 
 pub struct EmptyTable {
@@ -82,7 +83,11 @@ impl Table for EmptyTable {
         _filters: &[common_query::prelude::Expr],
         _limit: Option<usize>,
     ) -> Result<PhysicalPlanRef> {
-        let scan = SimpleTableScan::new(Box::pin(EmptyRecordBatchStream::new(self.schema())));
+        let scan = StreamScanAdapter::new(Box::pin(EmptyRecordBatchStream::new(self.schema())));
         Ok(Arc::new(scan))
+    }
+
+    async fn scan_to_stream(&self, _: ScanRequest) -> Result<SendableRecordBatchStream> {
+        Ok(Box::pin(EmptyRecordBatchStream::new(self.schema())))
     }
 }

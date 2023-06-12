@@ -6,16 +6,16 @@ license.workspace = true
 
 [dependencies]
 api = { path = "../api" }
-catalog = { path = "../catalog" }
 common-base = { path = "../common/base" }
 common-catalog = { path = "../common/catalog" }
 common-datasource = { path = "../common/datasource" }
 common-error = { path = "../common/error" }
+common-query = { path = "../common/query" }
 common-time = { path = "../common/time" }
 datafusion-sql.workspace = true
 datatypes = { path = "../datatypes" }
 hex = "0.4"
-itertools = "0.10"
+itertools.workspace = true
 mito = { path = "../mito" }
 once_cell = "1.10"
 snafu = { version = "0.7", features = ["backtraces"] }

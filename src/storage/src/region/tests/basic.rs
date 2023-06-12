@@ -19,6 +19,7 @@ use common_test_util::temp_dir::create_temp_dir;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use store_api::storage::{OpenOptions, SequenceNumber, WriteResponse};
 
+use crate::config::EngineConfig;
 use crate::error::Result;
 use crate::region::tests::{self, FileTesterBase};
 use crate::region::RegionImpl;
@@ -32,7 +33,8 @@ async fn create_region_for_basic(
     store_dir: &str,
 ) -> RegionImpl<RaftEngineLogStore> {
     let metadata = tests::new_metadata(region_name);
-    let store_config = config_util::new_store_config(region_name, store_dir).await;
+    let store_config =
+        config_util::new_store_config(region_name, store_dir, EngineConfig::default()).await;
     RegionImpl::create(metadata, store_config).await.unwrap()
 }
 
@@ -75,7 +77,12 @@ impl Tester {
 
         self.base = None;
         // Reopen the region.
-        let store_config = config_util::new_store_config(&self.region_name, &self.store_dir).await;
+        let store_config = config_util::new_store_config(
+            &self.region_name,
+            &self.store_dir,
+            EngineConfig::default(),
+        )
+        .await;
         let opts = OpenOptions::default();
         let region = RegionImpl::open(self.region_name.clone(), store_config, &opts).await?;
         match region {
@@ -98,11 +105,11 @@ impl Tester {
         self.base.as_mut().unwrap().read_ctx.batch_size = batch_size;
     }
 
-    async fn put(&self, data: &[(i64, Option<i64>)]) -> WriteResponse {
+    async fn put(&self, data: &[(i64, Option<String>)]) -> WriteResponse {
         self.base().put(data).await
     }
 
-    async fn full_scan(&self) -> Vec<(i64, Option<i64>)> {
+    async fn full_scan(&self) -> Vec<(i64, Option<String>)> {
         self.base().full_scan().await
     }
 
@@ -122,11 +129,11 @@ async fn test_simple_put_scan() {
     let tester = Tester::new(REGION_NAME, store_dir).await;
 
     let data = vec![
-        (1000, Some(100)),
-        (1001, Some(101)),
+        (1000, Some(100.to_string())),
+        (1001, Some(101.to_string())),
         (1002, None),
-        (1003, Some(103)),
-        (1004, Some(104)),
+        (1003, Some(103.to_string())),
+        (1004, Some(104.to_string())),
     ];
 
     tester.put(&data).await;
@@ -143,7 +150,7 @@ async fn test_sequence_increase() {
 
     let mut committed_sequence = tester.committed_sequence();
     for i in 0..100 {
-        tester.put(&[(i, Some(1234))]).await;
+        tester.put(&[(i, Some(1234.to_string()))]).await;
         committed_sequence += 1;
 
         assert_eq!(committed_sequence, tester.committed_sequence());
@@ -161,9 +168,9 @@ async fn test_reopen() {
     let mut all_data = Vec::new();
     // Reopen region multiple times.
     for i in 0..5 {
-        let data = (i, Some(i));
-        tester.put(&[data]).await;
-        all_data.push(data);
+        let data = (i, Some(i.to_string()));
+        tester.put(&[data.clone()]).await;
+        all_data.push(data.clone());
 
         let output = tester.full_scan().await;
         assert_eq!(all_data, output);
@@ -195,7 +202,7 @@ async fn test_scan_different_batch() {
     let store_dir = dir.path().to_str().unwrap();
     let mut tester = Tester::new(REGION_NAME, store_dir).await;
 
-    let data: Vec<_> = (0..=2000).map(|i| (i, Some(i))).collect();
+    let data: Vec<_> = (0..=2000).map(|i| (i, Some(i.to_string()))).collect();
 
     for chunk in data.chunks(100) {
         tester.put(chunk).await;
@@ -218,11 +225,11 @@ async fn test_put_delete_scan() {
     let mut tester = Tester::new(REGION_NAME, store_dir).await;
 
     let data = vec![
-        (1000, Some(100)),
-        (1001, Some(101)),
+        (1000, Some(100.to_string())),
+        (1001, Some(101.to_string())),
         (1002, None),
         (1003, None),
-        (1004, Some(104)),
+        (1004, Some(104.to_string())),
     ];
 
     tester.put(&data).await;
@@ -232,7 +239,11 @@ async fn test_put_delete_scan() {
     tester.delete(&keys).await;
 
     let output = tester.full_scan().await;
-    let expect = vec![(1000, Some(100)), (1002, None), (1004, Some(104))];
+    let expect = vec![
+        (1000, Some(100.to_string())),
+        (1002, None),
+        (1004, Some(104.to_string())),
+    ];
     assert_eq!(expect, output);
 
     // Deletion is also persistent.
@@ -248,11 +259,11 @@ async fn test_put_delete_absent_key() {
     let mut tester = Tester::new(REGION_NAME, store_dir).await;
 
     let data = vec![
-        (1000, Some(100)),
-        (1001, Some(101)),
+        (1000, Some(100.to_string())),
+        (1001, Some(101.to_string())),
         (1002, None),
         (1003, None),
-        (1004, Some(104)),
+        (1004, Some(104.to_string())),
     ];
 
     tester.put(&data).await;
@@ -263,7 +274,11 @@ async fn test_put_delete_absent_key() {
     tester.delete(&keys).await;
 
     let output = tester.full_scan().await;
-    let expect = vec![(1000, Some(100)), (1001, Some(101)), (1003, None)];
+    let expect = vec![
+        (1000, Some(100.to_string())),
+        (1001, Some(101.to_string())),
+        (1003, None),
+    ];
     assert_eq!(expect, output);
 
     // Deletion is also persistent.

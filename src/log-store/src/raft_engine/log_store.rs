@@ -26,6 +26,7 @@ use store_api::logstore::namespace::Namespace as NamespaceTrait;
 use store_api::logstore::{AppendResponse, LogStore};
 
 use crate::config::LogConfig;
+use crate::error;
 use crate::error::{
     AddEntryLogBatchSnafu, Error, FetchEntrySnafu, IllegalNamespaceSnafu, IllegalStateSnafu,
     RaftEngineSnafu, StartGcTaskSnafu, StopGcTaskSnafu,
@@ -107,6 +108,13 @@ impl RaftEngineLogStore {
             .start(common_runtime::bg_runtime())
             .context(StartGcTaskSnafu)
     }
+
+    fn span(&self, namespace: &<Self as LogStore>::Namespace) -> (Option<u64>, Option<u64>) {
+        (
+            self.engine.first_index(namespace.id()),
+            self.engine.last_index(namespace.id()),
+        )
+    }
 }
 
 impl Debug for RaftEngineLogStore {
@@ -132,10 +140,22 @@ impl LogStore for RaftEngineLogStore {
     async fn append(&self, e: Self::Entry) -> Result<AppendResponse, Self::Error> {
         ensure!(self.started(), IllegalStateSnafu);
         let entry_id = e.id;
+        let namespace_id = e.namespace_id;
         let mut batch = LogBatch::with_capacity(1);
         batch
-            .add_entries::<MessageType>(e.namespace_id, &[e])
+            .add_entries::<MessageType>(namespace_id, &[e])
             .context(AddEntryLogBatchSnafu)?;
+
+        if let Some(first_index) = self.engine.first_index(namespace_id) {
+            ensure!(
+                entry_id >= first_index,
+                error::OverrideCompactedEntrySnafu {
+                    namespace: namespace_id,
+                    first_index,
+                    attempt_index: entry_id,
+                }
+            );
+        }
 
         self.engine
             .write(&mut batch, self.config.sync_write)
@@ -151,11 +171,38 @@ impl LogStore for RaftEngineLogStore {
         entries: Vec<Self::Entry>,
     ) -> Result<Vec<Id>, Self::Error> {
         ensure!(self.started(), IllegalStateSnafu);
-        let entry_ids = entries.iter().map(Entry::get_id).collect::<Vec<_>>();
+        if entries.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut min_entry_id = u64::MAX;
+        let entry_ids = entries
+            .iter()
+            .map(|e| {
+                let id = e.get_id();
+                if id < min_entry_id {
+                    min_entry_id = id;
+                }
+                id
+            })
+            .collect::<Vec<_>>();
+
         let mut batch = LogBatch::with_capacity(entries.len());
         batch
             .add_entries::<MessageType>(ns.id, &entries)
             .context(AddEntryLogBatchSnafu)?;
+
+        if let Some(first_index) = self.engine.first_index(ns.id) {
+            ensure!(
+                min_entry_id >= first_index,
+                error::OverrideCompactedEntrySnafu {
+                    namespace: ns.id,
+                    first_index,
+                    attempt_index: min_entry_id,
+                }
+            );
+        }
+
         self.engine
             .write(&mut batch, self.config.sync_write)
             .context(RaftEngineSnafu)?;
@@ -175,6 +222,12 @@ impl LogStore for RaftEngineLogStore {
         let last_index = engine.last_index(ns.id).unwrap_or(0);
         let mut start_index = id.max(engine.first_index(ns.id).unwrap_or(last_index + 1));
 
+        info!(
+            "Read logstore, namespace: {}, start: {}, span: {:?}",
+            ns.id(),
+            id,
+            self.span(ns)
+        );
         let max_batch_size = self.config.read_batch_size;
         let (tx, mut rx) = tokio::sync::mpsc::channel(max_batch_size);
         let ns = ns.clone();
@@ -290,9 +343,11 @@ impl LogStore for RaftEngineLogStore {
         ensure!(self.started(), IllegalStateSnafu);
         let obsoleted = self.engine.compact_to(namespace.id(), id + 1);
         info!(
-            "Namespace {} obsoleted {} entries",
+            "Namespace {} obsoleted {} entries, compacted index: {}, span: {:?}",
             namespace.id(),
-            obsoleted
+            obsoleted,
+            id,
+            self.span(&namespace)
         );
         Ok(())
     }

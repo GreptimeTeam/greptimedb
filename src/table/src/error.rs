@@ -15,11 +15,9 @@
 use std::any::Any;
 
 use common_error::prelude::*;
-use common_recordbatch::error::Error as RecordBatchError;
 use datafusion::error::DataFusionError;
 use datatypes::arrow::error::ArrowError;
 use snafu::Location;
-use store_api::storage::RegionNumber;
 
 use crate::metadata::TableId;
 
@@ -29,18 +27,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Failed to downcast mito table"))]
-    DowncastMitoTable { location: Location },
-
     #[snafu(display("Datafusion error: {}", source))]
     Datafusion {
         source: DataFusionError,
-        location: Location,
-    },
-
-    #[snafu(display("Poll stream failed, source: {}", source))]
-    PollStream {
-        source: ArrowError,
         location: Location,
     },
 
@@ -64,7 +53,7 @@ pub enum Error {
 
     #[snafu(display("Failed to create record batch for Tables, source: {}", source))]
     TablesRecordBatch {
-        #[snafu(backtrace)]
+        location: Location,
         source: BoxedError,
     },
 
@@ -77,7 +66,7 @@ pub enum Error {
 
     #[snafu(display("Failed to build schema, msg: {}, source: {}", msg, source))]
     SchemaBuild {
-        #[snafu(backtrace)]
+        location: Location,
         source: datatypes::error::Error,
         msg: String,
     },
@@ -88,6 +77,9 @@ pub enum Error {
         table_name: String,
         location: Location,
     },
+
+    #[snafu(display("Duplicated call to plan execute method. table: {}", table))]
+    DuplicatedExecuteCall { location: Location, table: String },
 
     #[snafu(display(
         "Not allowed to remove index column {} from table {}",
@@ -119,13 +111,6 @@ pub enum Error {
     #[snafu(display("Failed to operate table, source: {}", source))]
     TableOperation { source: BoxedError },
 
-    #[snafu(display("Cannot find region, table: {}, region: {}", table, region))]
-    RegionNotFound {
-        table: String,
-        region: RegionNumber,
-        location: Location,
-    },
-
     #[snafu(display("Unsupported operation: {}", operation))]
     Unsupported { operation: String },
 
@@ -153,13 +138,14 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::Datafusion { .. }
-            | Error::PollStream { .. }
             | Error::SchemaConversion { .. }
             | Error::TableProjection { .. } => StatusCode::EngineExecuteQuery,
             Error::RemoveColumnInIndex { .. } | Error::BuildColumnDescriptor { .. } => {
                 StatusCode::InvalidArguments
             }
-            Error::TablesRecordBatch { .. } => StatusCode::Unexpected,
+            Error::TablesRecordBatch { .. } | Error::DuplicatedExecuteCall { .. } => {
+                StatusCode::Unexpected
+            }
             Error::ColumnExists { .. } => StatusCode::TableColumnExists,
             Error::SchemaBuild { source, .. } => source.status_code(),
             Error::TableOperation { source } => source.status_code(),
@@ -170,10 +156,9 @@ impl ErrorExt for Error {
             | Error::EngineNotFound { .. }
             | Error::EngineExist { .. } => StatusCode::InvalidArguments,
 
-            Error::InvalidTable { .. }
-            | Error::MissingTimeIndexColumn { .. }
-            | Error::RegionNotFound { .. }
-            | Error::DowncastMitoTable { .. } => StatusCode::Internal,
+            Error::InvalidTable { .. } | Error::MissingTimeIndexColumn { .. } => {
+                StatusCode::Internal
+            }
         }
     }
 
@@ -185,13 +170,5 @@ impl ErrorExt for Error {
 impl From<Error> for DataFusionError {
     fn from(e: Error) -> DataFusionError {
         DataFusionError::External(Box::new(e))
-    }
-}
-
-impl From<Error> for RecordBatchError {
-    fn from(e: Error) -> RecordBatchError {
-        RecordBatchError::External {
-            source: BoxedError::new(e),
-        }
     }
 }

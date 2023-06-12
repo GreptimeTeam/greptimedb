@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Datanode configurations
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,6 +37,9 @@ use crate::server::Services;
 
 pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize(1024);
 
+/// Default data home in file storage
+const DEFAULT_DATA_HOME: &str = "/tmp/greptimedb";
+
 /// Object storage config
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -42,12 +47,20 @@ pub enum ObjectStoreConfig {
     File(FileConfig),
     S3(S3Config),
     Oss(OssConfig),
+    Azblob(AzblobConfig),
 }
 
 /// Storage engine config
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct StorageConfig {
+    /// Retention period for all tables.
+    ///
+    /// Default value is `None`, which means no TTL.
+    ///
+    /// The precedence order is: ttl in table options > global ttl.
+    #[serde(with = "humantime_serde")]
+    pub global_ttl: Option<Duration>,
     #[serde(flatten)]
     pub store: ObjectStoreConfig,
     pub compaction: CompactionConfig,
@@ -58,7 +71,7 @@ pub struct StorageConfig {
 #[derive(Debug, Clone, Serialize, Default, Deserialize)]
 #[serde(default)]
 pub struct FileConfig {
-    pub data_dir: String,
+    pub data_home: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +99,21 @@ pub struct OssConfig {
     #[serde(skip_serializing)]
     pub access_key_secret: SecretString,
     pub endpoint: String,
+    pub cache_path: Option<String>,
+    pub cache_capacity: Option<ReadableSize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AzblobConfig {
+    pub container: String,
+    pub root: String,
+    #[serde(skip_serializing)]
+    pub account_name: SecretString,
+    #[serde(skip_serializing)]
+    pub account_key: SecretString,
+    pub endpoint: String,
+    pub sas_token: Option<String>,
     pub cache_path: Option<String>,
     pub cache_capacity: Option<ReadableSize>,
 }
@@ -119,10 +147,25 @@ impl Default for OssConfig {
     }
 }
 
+impl Default for AzblobConfig {
+    fn default() -> Self {
+        Self {
+            container: String::default(),
+            root: String::default(),
+            account_name: SecretString::from(String::default()),
+            account_key: SecretString::from(String::default()),
+            endpoint: String::default(),
+            cache_path: Option::default(),
+            cache_capacity: Option::default(),
+            sas_token: Option::default(),
+        }
+    }
+}
+
 impl Default for ObjectStoreConfig {
     fn default() -> Self {
         ObjectStoreConfig::File(FileConfig {
-            data_dir: "/tmp/greptimedb/data/".to_string(),
+            data_home: DEFAULT_DATA_HOME.to_string(),
         })
     }
 }
@@ -131,7 +174,7 @@ impl Default for ObjectStoreConfig {
 #[serde(default)]
 pub struct WalConfig {
     // wal directory
-    pub dir: String,
+    pub dir: Option<String>,
     // wal file size in bytes
     pub file_size: ReadableSize,
     // wal purge threshold in bytes
@@ -148,7 +191,7 @@ pub struct WalConfig {
 impl Default for WalConfig {
     fn default() -> Self {
         Self {
-            dir: "/tmp/greptimedb/wal".to_string(),
+            dir: None,
             file_size: ReadableSize::gb(1),        // log file size 1G
             purge_threshold: ReadableSize::gb(50), // purge threshold 50G
             purge_interval: Duration::from_secs(600),
@@ -178,7 +221,7 @@ impl Default for RegionManifestConfig {
     fn default() -> Self {
         Self {
             checkpoint_margin: Some(10u16),
-            gc_duration: Some(Duration::from_secs(30)),
+            gc_duration: Some(Duration::from_secs(600)),
             checkpoint_on_startup: false,
             compress: false,
         }
@@ -223,6 +266,8 @@ pub struct FlushConfig {
     /// Interval to auto flush a region if it has not flushed yet.
     #[serde(with = "humantime_serde")]
     pub auto_flush_interval: Duration,
+    /// Global write buffer size for all regions.
+    pub global_write_buffer_size: Option<ReadableSize>,
 }
 
 impl Default for FlushConfig {
@@ -234,6 +279,7 @@ impl Default for FlushConfig {
                 DEFAULT_PICKER_SCHEDULE_INTERVAL.into(),
             ),
             auto_flush_interval: Duration::from_millis(DEFAULT_AUTO_FLUSH_INTERVAL.into()),
+            global_write_buffer_size: None,
         }
     }
 }
@@ -260,6 +306,8 @@ impl From<&DatanodeOptions> for StorageEngineConfig {
             region_write_buffer_size: value.storage.flush.region_write_buffer_size,
             picker_schedule_interval: value.storage.flush.picker_schedule_interval,
             auto_flush_interval: value.storage.flush.auto_flush_interval,
+            global_write_buffer_size: value.storage.flush.global_write_buffer_size,
+            global_ttl: value.storage.global_ttl,
         }
     }
 }
@@ -292,8 +340,6 @@ pub struct DatanodeOptions {
     pub rpc_addr: String,
     pub rpc_hostname: Option<String>,
     pub rpc_runtime_size: usize,
-    pub mysql_addr: String,
-    pub mysql_runtime_size: usize,
     pub http_opts: HttpOptions,
     pub meta_client_options: Option<MetaClientOptions>,
     pub wal: WalConfig,
@@ -311,8 +357,6 @@ impl Default for DatanodeOptions {
             rpc_addr: "127.0.0.1:3001".to_string(),
             rpc_hostname: None,
             rpc_runtime_size: 8,
-            mysql_addr: "127.0.0.1:4406".to_string(),
-            mysql_runtime_size: 2,
             http_opts: HttpOptions::default(),
             meta_client_options: None,
             wal: WalConfig::default(),
@@ -338,7 +382,7 @@ pub struct Datanode {
 
 impl Datanode {
     pub async fn new(opts: DatanodeOptions) -> Result<Datanode> {
-        let instance = Arc::new(Instance::new(&opts).await?);
+        let instance = Arc::new(Instance::with_opts(&opts).await?);
         let services = match opts.mode {
             Mode::Distributed => Some(Services::try_new(instance.clone(), &opts).await?),
             Mode::Standalone => None,

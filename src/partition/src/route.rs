@@ -15,17 +15,22 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use common_meta::rpc::router::{RouteRequest, TableRoute};
+use common_meta::table_name::TableName;
+use common_telemetry::timer;
 use meta_client::client::MetaClient;
-use meta_client::rpc::{RouteRequest, TableName, TableRoute};
 use moka::future::{Cache, CacheBuilder};
 use snafu::{ensure, ResultExt};
 
 use crate::error::{self, Result};
+use crate::metrics;
+
+type TableRouteCache = Cache<TableName, Arc<TableRoute>>;
 
 pub struct TableRoutes {
     meta_client: Arc<MetaClient>,
     // TODO(LFC): Use table id as cache key, then remove all the manually invoked cache invalidations.
-    cache: Cache<TableName, Arc<TableRoute>>,
+    cache: TableRouteCache,
 }
 
 // TODO(hl): maybe periodically refresh table route cache?
@@ -41,6 +46,8 @@ impl TableRoutes {
     }
 
     pub async fn get_route(&self, table_name: &TableName) -> Result<Arc<TableRoute>> {
+        let _timer = timer!(metrics::METRIC_TABLE_ROUTE_GET);
+
         self.cache
             .try_get_with_by_ref(table_name, self.get_from_meta(table_name))
             .await
@@ -53,6 +60,8 @@ impl TableRoutes {
     }
 
     async fn get_from_meta(&self, table_name: &TableName) -> Result<Arc<TableRoute>> {
+        let _timer = timer!(metrics::METRIC_TABLE_ROUTE_GET_REMOTE);
+
         let mut resp = self
             .meta_client
             .route(RouteRequest {
@@ -76,5 +85,9 @@ impl TableRoutes {
 
     pub async fn invalidate_table_route(&self, table_name: &TableName) {
         self.cache.invalidate(table_name).await
+    }
+
+    pub fn cache(&self) -> &TableRouteCache {
+        &self.cache
     }
 }

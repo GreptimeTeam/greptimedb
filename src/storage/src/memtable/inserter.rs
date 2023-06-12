@@ -17,6 +17,7 @@ use store_api::storage::{OpType, SequenceNumber};
 use super::MemtableRef;
 use crate::error::Result;
 use crate::memtable::KeyValues;
+use crate::metrics::MEMTABLE_WRITE_ELAPSED;
 use crate::write_batch::{Mutation, Payload};
 
 /// Wraps logic of inserting key/values in [WriteBatch] to [Memtable].
@@ -40,6 +41,8 @@ impl Inserter {
     /// Won't do schema validation if not configured. Caller (mostly the [`RegionWriter`]) should ensure the
     /// schemas of `memtable` are consistent with `payload`'s.
     pub fn insert_memtable(&mut self, payload: &Payload, memtable: &MemtableRef) -> Result<()> {
+        let _timer = common_telemetry::timer!(MEMTABLE_WRITE_ELAPSED);
+
         if payload.is_empty() {
             return Ok(());
         }
@@ -122,7 +125,6 @@ struct SliceIndex {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::atomic::Ordering;
     use std::sync::Arc;
 
     use common_time::timestamp::Timestamp;
@@ -177,9 +179,9 @@ mod tests {
         max_ts: i64,
         min_ts: i64,
     ) {
-        let iter = mem.iter(&IterContext::default()).unwrap();
-        assert_eq!(min_ts, mem.stats().min_timestamp.load(Ordering::Relaxed));
-        assert_eq!(max_ts, mem.stats().max_timestamp.load(Ordering::Relaxed));
+        let iter = mem.iter(IterContext::default()).unwrap();
+        assert_eq!(min_ts, mem.stats().min_timestamp.value());
+        assert_eq!(max_ts, mem.stats().max_timestamp.value());
 
         let mut index = 0;
         for batch in iter {

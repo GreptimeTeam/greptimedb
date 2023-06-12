@@ -14,7 +14,6 @@
 
 use std::any::Any;
 
-use common_error::ext::BoxedError;
 use common_error::prelude::*;
 use snafu::Location;
 use store_api::storage::RegionNumber;
@@ -23,12 +22,6 @@ use table::metadata::{TableInfoBuilderError, TableMetaBuilderError, TableVersion
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Failed to create region, source: {}", source))]
-    CreateRegion {
-        #[snafu(backtrace)]
-        source: BoxedError,
-    },
-
     #[snafu(display(
         "Failed to build table meta for table: {}, source: {}",
         table_name,
@@ -114,7 +107,7 @@ pub enum Error {
         source,
     ))]
     UpdateTableManifest {
-        #[snafu(backtrace)]
+        location: Location,
         source: storage::error::Error,
         table_name: String,
     },
@@ -125,14 +118,8 @@ pub enum Error {
         source,
     ))]
     ScanTableManifest {
-        #[snafu(backtrace)]
-        source: storage::error::Error,
-        table_name: String,
-    },
-
-    #[snafu(display("Table info not found in manifest, table: {}", table_name))]
-    TableInfoNotFound {
         location: Location,
+        source: storage::error::Error,
         table_name: String,
     },
 
@@ -146,13 +133,6 @@ pub enum Error {
     TableNotFound {
         location: Location,
         table_name: String,
-    },
-
-    #[snafu(display("Failed to alter table {}, source: {}", table_name, source))]
-    AlterTable {
-        table_name: String,
-        #[snafu(backtrace)]
-        source: table::error::Error,
     },
 
     #[snafu(display(
@@ -169,7 +149,7 @@ pub enum Error {
         source
     ))]
     ConvertRaw {
-        #[snafu(backtrace)]
+        location: Location,
         source: table::metadata::ConvertError,
     },
 
@@ -177,12 +157,6 @@ pub enum Error {
     RegionNotFound {
         table: String,
         region: RegionNumber,
-        location: Location,
-    },
-
-    #[snafu(display("Invalid region name: {}", region_name))]
-    InvalidRegionName {
-        region_name: String,
         location: Location,
     },
 
@@ -203,10 +177,6 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            CreateRegion { source, .. } => source.status_code(),
-
-            AlterTable { source, .. } => source.status_code(),
-
             BuildRowKeyDescriptor { .. }
             | BuildColumnDescriptor { .. }
             | BuildColumnFamilyDescriptor { .. }
@@ -221,11 +191,10 @@ impl ErrorExt for Error {
             | InvalidRawSchema { .. }
             | VersionChanged { .. } => StatusCode::InvalidArguments,
 
-            TableInfoNotFound { .. } | ConvertRaw { .. } => StatusCode::Unexpected,
+            ConvertRaw { .. } => StatusCode::Unexpected,
 
             ScanTableManifest { .. } | UpdateTableManifest { .. } => StatusCode::StorageUnavailable,
             RegionNotFound { .. } => StatusCode::Internal,
-            InvalidRegionName { .. } => StatusCode::Internal,
         }
     }
 

@@ -14,13 +14,19 @@
 
 use axum::Router;
 use axum_test_helper::TestClient;
+use common_test_util::ports;
 use servers::http::{HttpOptions, HttpServerBuilder};
 use table::test_util::MemTable;
 
 use crate::{create_testing_grpc_query_handler, create_testing_sql_query_handler};
 
 fn make_test_app() -> Router {
-    let server = HttpServerBuilder::new(HttpOptions::default())
+    let http_opts = HttpOptions {
+        addr: format!("127.0.0.1:{}", ports::get_port()),
+        ..Default::default()
+    };
+
+    let server = HttpServerBuilder::new(http_opts)
         .with_sql_handler(create_testing_sql_query_handler(
             MemTable::default_numbers_table(),
         ))

@@ -17,3 +17,6 @@ common-time = { path = "../time" }
 datatypes = { path = "../../datatypes" }
 snafu = { version = "0.7", features = ["backtraces"] }
 table = { path = "../../table" }
+
+[dev-dependencies]
+paste = "1.0"

@@ -30,14 +30,16 @@ use tokio::sync::{oneshot, Mutex};
 use crate::compaction::{CompactionRequestImpl, CompactionSchedulerRef};
 use crate::config::EngineConfig;
 use crate::error::{self, Result};
-use crate::flush::{FlushHandle, FlushRequest, FlushSchedulerRef, FlushStrategyRef};
+use crate::flush::{
+    FlushHandle, FlushRegionRequest, FlushSchedulerRef, FlushStrategyRef, FlushType, RegionStatus,
+};
 use crate::manifest::action::{
     RawRegionMetadata, RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList,
     RegionRemove,
 };
 use crate::memtable::{Inserter, MemtableBuilderRef, MemtableId, MemtableRef};
 use crate::metadata::RegionMetadataRef;
-use crate::metrics::{FLUSH_REASON, FLUSH_REQUESTS_TOTAL};
+use crate::metrics::{FLUSH_REASON, FLUSH_REQUESTS_TOTAL, PREPROCESS_ELAPSED};
 use crate::proto::wal::WalHeader;
 use crate::region::{
     CompactContext, RecoverdMetadata, RecoveredMetadataMap, RegionManifest, SharedDataRef,
@@ -71,6 +73,7 @@ impl RegionWriter {
         config: Arc<EngineConfig>,
         ttl: Option<Duration>,
         compaction_time_window: Option<i64>,
+        write_buffer_size: usize,
     ) -> RegionWriter {
         RegionWriter {
             inner: Mutex::new(WriterInner::new(
@@ -78,6 +81,7 @@ impl RegionWriter {
                 config,
                 ttl,
                 compaction_time_window,
+                write_buffer_size,
             )),
             version_mutex: Mutex::new(()),
         }
@@ -308,9 +312,9 @@ impl RegionWriter {
         let prev_version = version_control.current_manifest_version();
         action_list.set_prev_version(prev_version);
 
-        logging::debug!(
+        logging::info!(
             "Try to remove region {}, action_list: {:?}",
-            drop_ctx.shared.name(),
+            drop_ctx.shared.id(),
             action_list
         );
 
@@ -319,10 +323,19 @@ impl RegionWriter {
         // Mark all data obsolete and delete the namespace in the WAL
         drop_ctx.wal.obsolete(committed_sequence).await?;
         drop_ctx.wal.delete_namespace().await?;
+        logging::info!(
+            "Remove WAL entries in region: {}, committed sequence: {}",
+            drop_ctx.shared.id(),
+            committed_sequence
+        );
 
         // Mark all SSTs deleted
         let files = current_version.ssts().mark_all_files_deleted();
-        logging::debug!("Try to remove all SSTs {:?}", files);
+        logging::info!(
+            "Try to remove all SSTs, region: {}, files: {:?}",
+            drop_ctx.shared.id(),
+            files
+        );
 
         Ok(())
     }
@@ -335,7 +348,9 @@ impl RegionWriter {
     ) -> Result<()> {
         let mut inner = self.inner.lock().await;
 
-        ensure!(!inner.is_closed(), error::ClosedRegionSnafu);
+        if !ctx.force {
+            ensure!(!inner.is_closed(), error::ClosedRegionSnafu);
+        }
 
         inner.manual_flush(writer_ctx, ctx.reason).await?;
 
@@ -372,6 +387,14 @@ impl RegionWriter {
         }
 
         Ok(())
+    }
+}
+
+// Methods for tests.
+#[cfg(test)]
+impl RegionWriter {
+    pub(crate) async fn write_buffer_size(&self) -> usize {
+        self.inner.lock().await.write_buffer_size
     }
 }
 
@@ -434,6 +457,8 @@ struct WriterInner {
     engine_config: Arc<EngineConfig>,
     ttl: Option<Duration>,
     compaction_time_window: Option<i64>,
+    /// Size in bytes to freeze the mutable memtable.
+    write_buffer_size: usize,
 }
 
 impl WriterInner {
@@ -442,6 +467,7 @@ impl WriterInner {
         engine_config: Arc<EngineConfig>,
         ttl: Option<Duration>,
         compaction_time_window: Option<i64>,
+        write_buffer_size: usize,
     ) -> WriterInner {
         WriterInner {
             memtable_builder,
@@ -450,6 +476,7 @@ impl WriterInner {
             closed: false,
             ttl,
             compaction_time_window,
+            write_buffer_size,
         }
     }
 
@@ -539,15 +566,10 @@ impl WriterInner {
                     }
                 }
 
-                if let Some(payload) = payload {
-                    num_requests += 1;
-                    // Note that memtables of `Version` may be updated during replay.
-                    let version = version_control.current();
-
-                    if req_sequence > last_sequence {
-                        last_sequence = req_sequence;
-                    } else {
-                        logging::error!(
+                if req_sequence > last_sequence {
+                    last_sequence = req_sequence;
+                } else {
+                    logging::error!(
                             "Sequence should not decrease during replay, found {} <= {}, \
                              region_id: {}, region_name: {}, flushed_sequence: {}, num_requests: {}",
                             req_sequence,
@@ -558,12 +580,17 @@ impl WriterInner {
                             num_requests,
                         );
 
-                        error::SequenceNotMonotonicSnafu {
-                            prev: last_sequence,
-                            given: req_sequence,
-                        }
-                        .fail()?;
+                    error::SequenceNotMonotonicSnafu {
+                        prev: last_sequence,
+                        given: req_sequence,
                     }
+                    .fail()?;
+                }
+
+                if let Some(payload) = payload {
+                    num_requests += 1;
+                    // Note that memtables of `Version` may be updated during replay.
+                    let version = version_control.current();
                     // TODO(yingwen): Trigger flush if the size of memtables reach the flush threshold to avoid
                     // out of memory during replay, but we need to do it carefully to avoid dead lock.
                     let mut inserter = Inserter::new(last_sequence);
@@ -651,16 +678,29 @@ impl WriterInner {
         &mut self,
         writer_ctx: &WriterContext<'_, S>,
     ) -> Result<()> {
+        let _timer = common_telemetry::timer!(PREPROCESS_ELAPSED);
+
         let version_control = writer_ctx.version_control();
         // Check whether memtable is full or flush should be triggered. We need to do this first since
         // switching memtables will clear all mutable memtables.
-        if self.should_flush(
+        if let Some(flush_type) = self.should_flush(
             writer_ctx.shared,
             version_control,
             writer_ctx.flush_strategy,
         ) {
-            self.trigger_flush(writer_ctx, FlushReason::MemtableFull)
-                .await?;
+            // Trigger flush according to the flush type.
+            match flush_type {
+                FlushType::Region => {
+                    // Trigger flush for current region.
+                    self.trigger_flush(writer_ctx, FlushReason::MemtableFull)
+                        .await?;
+                }
+                FlushType::Engine => {
+                    // Trigger engine level flush. This wakeup the flush handler
+                    // to pick region to flush.
+                    writer_ctx.flush_scheduler.schedule_engine_flush()?;
+                }
+            }
         }
 
         Ok(())
@@ -677,12 +717,15 @@ impl WriterInner {
         shared: &SharedDataRef,
         version_control: &VersionControlRef,
         flush_strategy: &FlushStrategyRef,
-    ) -> bool {
+    ) -> Option<FlushType> {
         let current = version_control.current();
         let memtables = current.memtables();
-        let mutable_bytes_allocated = memtables.mutable_bytes_allocated();
-        let total_bytes_allocated = memtables.total_bytes_allocated();
-        flush_strategy.should_flush(shared, mutable_bytes_allocated, total_bytes_allocated)
+        let status = RegionStatus {
+            region_id: shared.id(),
+            bytes_mutable: memtables.mutable_bytes_allocated(),
+            write_buffer_size: self.write_buffer_size,
+        };
+        flush_strategy.should_flush(status)
     }
 
     async fn trigger_flush<S: LogStore>(
@@ -714,11 +757,14 @@ impl WriterInner {
         let (max_memtable_id, mem_to_flush) = current_version.memtables().memtables_to_flush();
 
         if max_memtable_id.is_none() {
+            // We still update the flush time to avoid the picker picks this region again.
+            ctx.shared.update_flush_millis();
+
             logging::info!("No memtables to flush in region: {}", ctx.shared.name);
             return Ok(());
         }
 
-        let flush_req = FlushRequest {
+        let flush_req = FlushRegionRequest {
             max_memtable_id: max_memtable_id.unwrap(),
             memtables: mem_to_flush,
             // In write thread, safe to use current committed sequence.
@@ -729,15 +775,17 @@ impl WriterInner {
             wal: ctx.wal.clone(),
             manifest: ctx.manifest.clone(),
             engine_config: self.engine_config.clone(),
-            sender: None,
             ttl: self.ttl,
             compaction_time_window: self.compaction_time_window,
         };
 
-        let flush_handle = ctx.flush_scheduler.schedule_flush(flush_req).map_err(|e| {
-            logging::error!(e; "Failed to schedule flush request");
-            e
-        })?;
+        let flush_handle = ctx
+            .flush_scheduler
+            .schedule_region_flush(flush_req)
+            .map_err(|e| {
+                logging::error!(e; "Failed to schedule flush request");
+                e
+            })?;
         self.flush_handle = Some(flush_handle);
 
         Ok(())

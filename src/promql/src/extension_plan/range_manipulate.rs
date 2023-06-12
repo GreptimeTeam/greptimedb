@@ -26,7 +26,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DFField, DFSchema, DFSchemaRef};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
-use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
+use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::PhysicalSortExpr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
@@ -35,7 +35,11 @@ use datafusion::physical_plan::{
 };
 use datafusion::sql::TableReference;
 use futures::{Stream, StreamExt};
+use greptime_proto::substrait_extension as pb;
+use prost::Message;
+use snafu::ResultExt;
 
+use crate::error::{DataFusionPlanningSnafu, DeserializeSnafu, Result};
 use crate::extension_plan::Millisecond;
 use crate::range_array::RangeArray;
 
@@ -83,6 +87,10 @@ impl RangeManipulate {
             input,
             output_schema,
         })
+    }
+
+    pub const fn name() -> &'static str {
+        "RangeManipulate"
     }
 
     pub fn build_timestamp_range_name(time_index: &str) -> String {
@@ -145,11 +153,41 @@ impl RangeManipulate {
             metric: ExecutionPlanMetricsSet::new(),
         })
     }
+
+    pub fn serialize(&self) -> Vec<u8> {
+        pb::RangeManipulate {
+            start: self.start,
+            end: self.end,
+            interval: self.interval,
+            range: self.range,
+            time_index: self.time_index.clone(),
+            tag_columns: self.field_columns.clone(),
+        }
+        .encode_to_vec()
+    }
+
+    pub fn deserialize(bytes: &[u8]) -> Result<Self> {
+        let pb_range_manipulate = pb::RangeManipulate::decode(bytes).context(DeserializeSnafu)?;
+        let placeholder_plan = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: Arc::new(DFSchema::empty()),
+        });
+        Self::new(
+            pb_range_manipulate.start,
+            pb_range_manipulate.end,
+            pb_range_manipulate.interval,
+            pb_range_manipulate.range,
+            pb_range_manipulate.time_index,
+            pb_range_manipulate.tag_columns,
+            placeholder_plan,
+        )
+        .context(DataFusionPlanningSnafu)
+    }
 }
 
 impl UserDefinedLogicalNodeCore for RangeManipulate {
     fn name(&self) -> &str {
-        "RangeManipulate"
+        Self::name()
     }
 
     fn inputs(&self) -> Vec<&LogicalPlan> {

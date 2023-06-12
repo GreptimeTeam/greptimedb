@@ -15,14 +15,18 @@
 //! PrometheusGateway provides a gRPC interface to query Prometheus metrics
 //! by PromQL. The behavior is similar to the Prometheus HTTP API.
 
+use std::sync::Arc;
+
 use api::v1::prometheus_gateway_server::PrometheusGateway;
 use api::v1::promql_request::Promql;
 use api::v1::{PromqlRequest, PromqlResponse, ResponseHeader};
 use async_trait::async_trait;
+use common_error::prelude::ErrorExt;
 use common_telemetry::timer;
 use common_time::util::current_time_rfc3339;
 use promql_parser::parser::ValueType;
 use query::parser::PromQuery;
+use session::context::QueryContext;
 use snafu::OptionExt;
 use tonic::{Request, Response};
 
@@ -68,23 +72,9 @@ impl PrometheusGateway for PrometheusGatewayService {
         };
 
         let query_context = create_query_context(inner.header.as_ref());
-        let _timer = timer!(
-            crate::metrics::METRIC_SERVER_GRPC_PROM_REQUEST_TIMER,
-            &[(
-                crate::metrics::METRIC_DB_LABEL,
-                &query_context.get_db_string()
-            )]
-        );
-        let result = self.handler.do_query(&prom_query, query_context).await;
-        let (metric_name, mut result_type) =
-            retrieve_metric_name_and_result_type(&prom_query.query).unwrap_or_default();
-        // range query only returns matrix
-        if is_range_query {
-            result_type = Some(ValueType::Matrix)
-        };
-        let json_response = PromJsonResponse::from_query_result(result, metric_name, result_type)
-            .await
-            .0;
+        let json_response = self
+            .handle_inner(prom_query, query_context, is_range_query)
+            .await;
         let json_bytes = serde_json::to_string(&json_response).unwrap().into_bytes();
 
         let response = Response::new(PromqlResponse {
@@ -98,5 +88,35 @@ impl PrometheusGateway for PrometheusGatewayService {
 impl PrometheusGatewayService {
     pub fn new(handler: PromHandlerRef) -> Self {
         Self { handler }
+    }
+
+    async fn handle_inner(
+        &self,
+        query: PromQuery,
+        ctx: Arc<QueryContext>,
+        is_range_query: bool,
+    ) -> PromJsonResponse {
+        let _timer = timer!(
+            crate::metrics::METRIC_SERVER_GRPC_PROM_REQUEST_TIMER,
+            &[(crate::metrics::METRIC_DB_LABEL, ctx.get_db_string())]
+        );
+
+        let result = self.handler.do_query(&query, ctx).await;
+        let (metric_name, mut result_type) =
+            match retrieve_metric_name_and_result_type(&query.query) {
+                Ok((metric_name, result_type)) => (metric_name.unwrap_or_default(), result_type),
+                Err(err) => {
+                    return PromJsonResponse::error(err.status_code().to_string(), err.to_string())
+                        .0
+                }
+            };
+        // range query only returns matrix
+        if is_range_query {
+            result_type = ValueType::Matrix;
+        };
+
+        PromJsonResponse::from_query_result(result, metric_name, result_type)
+            .await
+            .0
     }
 }

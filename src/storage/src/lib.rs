@@ -14,6 +14,8 @@
 
 //! Storage engine implementation.
 
+#![feature(let_chains)]
+
 mod chunk;
 pub mod codec;
 pub mod compaction;
@@ -41,6 +43,7 @@ pub mod write_batch;
 pub use engine::EngineImpl;
 mod file_purger;
 mod metrics;
+mod window_infer;
 
 pub use sst::parquet::ParquetWriter;
 pub use sst::Source;

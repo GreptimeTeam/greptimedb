@@ -139,16 +139,15 @@ mod tests {
     use std::assert_matches::assert_matches;
     use std::collections::HashMap;
 
-    use sqlparser::dialect::GenericDialect;
-
     use super::*;
+    use crate::dialect::GreptimeDbDialect;
 
     #[test]
     fn test_parse_copy_table() {
         let sql0 = "COPY catalog0.schema0.tbl TO 'tbl_file.parquet'";
         let sql1 = "COPY catalog0.schema0.tbl TO 'tbl_file.parquet' WITH (FORMAT = 'parquet')";
-        let result0 = ParserContext::create_with_dialect(sql0, &GenericDialect {}).unwrap();
-        let result1 = ParserContext::create_with_dialect(sql1, &GenericDialect {}).unwrap();
+        let result0 = ParserContext::create_with_dialect(sql0, &GreptimeDbDialect {}).unwrap();
+        let result1 = ParserContext::create_with_dialect(sql1, &GreptimeDbDialect {}).unwrap();
 
         for mut result in vec![result0, result1] {
             assert_eq!(1, result.len());
@@ -190,7 +189,7 @@ mod tests {
             "COPY catalog0.schema0.tbl FROM 'tbl_file.parquet' WITH (FORMAT = 'parquet')",
         ]
         .iter()
-        .map(|sql| ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap())
+        .map(|sql| ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap())
         .collect::<Vec<_>>();
 
         for mut result in results {
@@ -249,7 +248,7 @@ mod tests {
 
         for test in tests {
             let mut result =
-                ParserContext::create_with_dialect(test.sql, &GenericDialect {}).unwrap();
+                ParserContext::create_with_dialect(test.sql, &GreptimeDbDialect {}).unwrap();
             assert_eq!(1, result.len());
 
             let statement = result.remove(0);
@@ -290,7 +289,7 @@ mod tests {
 
         for test in tests {
             let mut result =
-                ParserContext::create_with_dialect(test.sql, &GenericDialect {}).unwrap();
+                ParserContext::create_with_dialect(test.sql, &GreptimeDbDialect {}).unwrap();
             assert_eq!(1, result.len());
 
             let statement = result.remove(0);

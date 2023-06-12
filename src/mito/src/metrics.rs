@@ -25,3 +25,7 @@ pub const MITO_CREATE_TABLE_UPDATE_MANIFEST_ELAPSED: &str =
 pub const MITO_OPEN_TABLE_ELAPSED: &str = "datanode.mito.open_table";
 /// Elapsed time of altering tables
 pub const MITO_ALTER_TABLE_ELAPSED: &str = "datanode.mito.alter_table";
+/// Elapsed time of insertion
+pub const MITO_INSERT_ELAPSED: &str = "datanode.mito.insert";
+/// Insert batch size.
+pub const MITO_INSERT_BATCH_SIZE: &str = "datanode.mito.insert_batch_size";

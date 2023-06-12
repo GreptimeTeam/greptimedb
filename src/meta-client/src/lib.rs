@@ -16,9 +16,6 @@ use serde::{Deserialize, Serialize};
 
 pub mod client;
 pub mod error;
-#[cfg(test)]
-mod mocks;
-pub mod rpc;
 
 // Options for meta client in datanode instance.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -39,3 +36,6 @@ impl Default for MetaClientOptions {
         }
     }
 }
+
+#[cfg(test)]
+mod mocks;

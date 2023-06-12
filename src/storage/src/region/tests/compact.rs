@@ -79,10 +79,11 @@ async fn create_region_for_compaction<
 
     let object_store = new_object_store(store_dir, s3_bucket);
 
-    let mut store_config = config_util::new_store_config_with_object_store(
+    let (mut store_config, _) = config_util::new_store_config_with_object_store(
         REGION_NAME,
         store_dir,
         object_store.clone(),
+        EngineConfig::default(),
     )
     .await;
     store_config.engine_config = Arc::new(engine_config);
@@ -187,7 +188,11 @@ impl CompactionTester {
     }
 
     async fn put(&self, data: &[(i64, Option<i64>)]) -> WriteResponse {
-        self.base().put(data).await
+        let data = data
+            .iter()
+            .map(|(ts, v0)| (*ts, v0.map(|v| v.to_string())))
+            .collect::<Vec<_>>();
+        self.base().put(&data).await
     }
 
     async fn flush(&self, wait: Option<bool>) {
@@ -195,6 +200,7 @@ impl CompactionTester {
             .map(|wait| FlushContext {
                 wait,
                 reason: FlushReason::Manually,
+                ..Default::default()
             })
             .unwrap_or_default();
         self.base().region.flush(&ctx).await.unwrap();

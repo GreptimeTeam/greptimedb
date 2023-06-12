@@ -24,7 +24,8 @@ tcp_nodelay = true
 
 # WAL options, see `standalone.example.toml`.
 [wal]
-dir = "/tmp/greptimedb/wal"
+# WAL data directory
+# dir = "/tmp/greptimedb/wal"
 file_size = "1GB"
 purge_threshold = "50GB"
 purge_interval = "10m"
@@ -34,7 +35,9 @@ sync_write = false
 # Storage options, see `standalone.example.toml`.
 [storage]
 type = "File"
-data_dir = "/tmp/greptimedb/data/"
+data_home = "/tmp/greptimedb/"
+# TTL for all tables. Disabled by default.
+# global_ttl = "7d"
 
 # Compaction options, see `standalone.example.toml`.
 [storage.compaction]
@@ -48,7 +51,7 @@ max_purge_tasks = 32
 # Create a checkpoint every <checkpoint_margin> actions.
 checkpoint_margin = 10
 # Region manifest logs and checkpoints gc execution duration
-gc_duration = '30s'
+gc_duration = '10m'
 # Whether to try creating a manifest checkpoint on region opening
 checkpoint_on_startup = false
 
@@ -58,15 +61,21 @@ checkpoint_on_startup = false
 max_flush_tasks = 8
 # Default write buffer size for a region.
 region_write_buffer_size = "32MB"
+# Interval to check whether a region needs flush.
+picker_schedule_interval = "5m"
 # Interval to auto flush a region if it has not flushed yet.
 auto_flush_interval = "1h"
+# Global write buffer size for all regions.
+global_write_buffer_size = "1GB"
 
 # Procedure storage options, see `standalone.example.toml`.
 [procedure]
 max_retry_times = 3
 retry_delay = "500ms"
 
-# Log options, see `standalone.example.toml`
-[logging]
-dir = "/tmp/greptimedb/logs"
-level = "info"
+# Log options
+# [logging]
+# Specify logs directory.
+# dir = "/tmp/greptimedb/logs"
+# Specify the log level [info | debug | error | warn]
+# level = "info"

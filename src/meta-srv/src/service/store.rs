@@ -104,13 +104,20 @@ mod tests {
     use tonic::IntoRequest;
 
     use crate::metasrv::builder::MetaSrvBuilder;
+    use crate::metasrv::MetaSrv;
     use crate::service::store::memory::MemStore;
+
+    async fn new_meta_srv() -> MetaSrv {
+        MetaSrvBuilder::new()
+            .kv_store(Arc::new(MemStore::new()))
+            .build()
+            .await
+            .unwrap()
+    }
 
     #[tokio::test]
     async fn test_range() {
-        let kv_store = Arc::new(MemStore::new());
-
-        let meta_srv = MetaSrvBuilder::new().kv_store(kv_store).build().await;
+        let meta_srv = new_meta_srv().await;
 
         let req = RangeRequest::default();
         let res = meta_srv.range(req.into_request()).await;
@@ -120,9 +127,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_put() {
-        let kv_store = Arc::new(MemStore::new());
-
-        let meta_srv = MetaSrvBuilder::new().kv_store(kv_store).build().await;
+        let meta_srv = new_meta_srv().await;
 
         let req = PutRequest::default();
         let res = meta_srv.put(req.into_request()).await;
@@ -132,9 +137,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_get() {
-        let kv_store = Arc::new(MemStore::new());
-
-        let meta_srv = MetaSrvBuilder::new().kv_store(kv_store).build().await;
+        let meta_srv = new_meta_srv().await;
 
         let req = BatchGetRequest::default();
         let res = meta_srv.batch_get(req.into_request()).await;
@@ -144,9 +147,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_put() {
-        let kv_store = Arc::new(MemStore::new());
-
-        let meta_srv = MetaSrvBuilder::new().kv_store(kv_store).build().await;
+        let meta_srv = new_meta_srv().await;
 
         let req = BatchPutRequest::default();
         let res = meta_srv.batch_put(req.into_request()).await;
@@ -156,9 +157,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_delete() {
-        let kv_store = Arc::new(MemStore::new());
-
-        let meta_srv = MetaSrvBuilder::new().kv_store(kv_store).build().await;
+        let meta_srv = new_meta_srv().await;
 
         let req = BatchDeleteRequest::default();
         let res = meta_srv.batch_delete(req.into_request()).await;
@@ -168,9 +167,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_compare_and_put() {
-        let kv_store = Arc::new(MemStore::new());
-
-        let meta_srv = MetaSrvBuilder::new().kv_store(kv_store).build().await;
+        let meta_srv = new_meta_srv().await;
 
         let req = CompareAndPutRequest::default();
         let res = meta_srv.compare_and_put(req.into_request()).await;
@@ -180,9 +177,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_range() {
-        let kv_store = Arc::new(MemStore::new());
-
-        let meta_srv = MetaSrvBuilder::new().kv_store(kv_store).build().await;
+        let meta_srv = new_meta_srv().await;
 
         let req = DeleteRangeRequest::default();
         let res = meta_srv.delete_range(req.into_request()).await;
@@ -192,9 +187,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_move_value() {
-        let kv_store = Arc::new(MemStore::new());
-
-        let meta_srv = MetaSrvBuilder::new().kv_store(kv_store).build().await;
+        let meta_srv = new_meta_srv().await;
 
         let req = MoveValueRequest::default();
         let res = meta_srv.move_value(req.into_request()).await;

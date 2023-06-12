@@ -22,6 +22,7 @@ use async_trait::async_trait;
 use axum::Router;
 use axum_test_helper::TestClient;
 use common_query::Output;
+use common_test_util::ports;
 use datatypes::schema::Schema;
 use prost::Message;
 use query::parser::PromQuery;
@@ -116,8 +117,13 @@ impl SqlQueryHandler for DummyInstance {
 }
 
 fn make_test_app(tx: mpsc::Sender<(String, Vec<u8>)>) -> Router {
+    let http_opts = HttpOptions {
+        addr: format!("127.0.0.1:{}", ports::get_port()),
+        ..Default::default()
+    };
+
     let instance = Arc::new(DummyInstance { tx });
-    let server = HttpServerBuilder::new(HttpOptions::default())
+    let server = HttpServerBuilder::new(http_opts)
         .with_grpc_handler(instance.clone())
         .with_sql_handler(instance.clone())
         .with_prom_handler(instance)

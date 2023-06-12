@@ -12,4 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod error;
+pub mod heartbeat;
 pub mod instruction;
+pub mod key;
+pub mod peer;
+pub mod rpc;
+pub mod table_name;
+
+pub type ClusterId = u64;
+pub type DatanodeId = u64;
+
+pub use instruction::RegionIdent;

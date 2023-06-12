@@ -39,9 +39,7 @@ mod test {
     async fn test_distributed_put_influxdb_lines() {
         let instance =
             tests::create_distributed_instance("test_distributed_put_influxdb_lines").await;
-        let instance = &instance.frontend;
-
-        test_put_influxdb_lines(instance).await;
+        test_put_influxdb_lines(&instance.frontend()).await;
     }
 
     async fn test_put_influxdb_lines(instance: &Arc<Instance>) {

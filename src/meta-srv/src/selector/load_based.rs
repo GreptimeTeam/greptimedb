@@ -12,17 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-
 use api::v1::meta::Peer;
 use common_telemetry::warn;
-use common_time::util as time_util;
 
 use crate::cluster::MetaPeerClient;
 use crate::error::Result;
-use crate::keys::{LeaseKey, LeaseValue, StatKey};
+use crate::handler::node_stat::RegionStat;
+use crate::keys::{LeaseKey, LeaseValue, StatKey, StatValue};
 use crate::lease;
-use crate::metasrv::Context;
+use crate::metasrv::SelectorContext;
 use crate::selector::{Namespace, Selector};
 
 const MAX_REGION_NUMBER: u64 = u64::MAX;
@@ -33,36 +31,32 @@ pub struct LoadBasedSelector {
 
 #[async_trait::async_trait]
 impl Selector for LoadBasedSelector {
-    type Context = Context;
+    type Context = SelectorContext;
     type Output = Vec<Peer>;
 
     async fn select(&self, ns: Namespace, ctx: &Self::Context) -> Result<Self::Output> {
         // get alive datanodes
-        let lease_filter = |_: &LeaseKey, v: &LeaseValue| {
-            time_util::current_time_millis() - v.timestamp_millis < ctx.datanode_lease_secs * 1000
-        };
-        let lease_kvs: HashMap<LeaseKey, LeaseValue> =
-            lease::alive_datanodes(ns, &ctx.kv_store, lease_filter)
-                .await?
-                .into_iter()
-                .collect();
-
+        let lease_kvs = lease::alive_datanodes(ns, &ctx.kv_store, ctx.datanode_lease_secs).await?;
         if lease_kvs.is_empty() {
             return Ok(vec![]);
         }
 
-        // get stats of alive datanodes
-        let stat_keys: Vec<StatKey> = lease_kvs
-            .keys()
-            .map(|k| StatKey {
-                cluster_id: k.cluster_id,
-                node_id: k.node_id,
-            })
-            .collect();
+        let stat_keys: Vec<StatKey> = lease_kvs.keys().map(|k| k.into()).collect();
         let stat_kvs = self.meta_peer_client.get_dn_stat_kvs(stat_keys).await?;
 
         let mut tuples: Vec<(LeaseKey, LeaseValue, u64)> = lease_kvs
             .into_iter()
+            // The regions of a table need to be distributed on different datanode.
+            .filter(|(lease_k, _)| {
+                if let Some(stat_val) = stat_kvs.get(&lease_k.into()) {
+                    if let (Some(catalog), Some(schema), Some(table)) =
+                        (&ctx.catalog, &ctx.schema, &ctx.table)
+                    {
+                        return contains_table(stat_val, catalog, schema, table) != Some(true);
+                    }
+                }
+                true
+            })
             .map(|(lease_k, lease_v)| {
                 let stat_key: StatKey = (&lease_k).into();
 
@@ -91,5 +85,129 @@ impl Selector for LoadBasedSelector {
                 addr: lease_val.node_addr,
             })
             .collect())
+    }
+}
+
+// Determine whether there is the table in datanode according to the heartbeats.
+//
+// Result:
+// None indicates no heartbeats in stat_val;
+// Some(true) indicates table exists in the datanode;
+// Some(false) indicates that table not exists in datanode.
+fn contains_table(
+    stat_val: &StatValue,
+    catalog_name: &str,
+    schema_name: &str,
+    table_name: &str,
+) -> Option<bool> {
+    let may_latest = stat_val.stats.last();
+
+    if let Some(latest) = may_latest {
+        for RegionStat {
+            catalog,
+            schema,
+            table,
+            ..
+        } in latest.region_stats.iter()
+        {
+            if catalog_name == catalog && schema_name == schema && table_name == table {
+                return Some(true);
+            }
+        }
+    } else {
+        return None;
+    }
+
+    Some(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::handler::node_stat::{RegionStat, Stat};
+    use crate::keys::StatValue;
+    use crate::selector::load_based::contains_table;
+
+    #[test]
+    fn test_contains_table_from_stat_val() {
+        let empty = StatValue { stats: vec![] };
+        assert!(contains_table(&empty, "greptime_4", "public_4", "demo_5").is_none());
+
+        let stat_val = StatValue {
+            stats: vec![
+                Stat {
+                    region_stats: vec![
+                        RegionStat {
+                            catalog: "greptime_1".to_string(),
+                            schema: "public_1".to_string(),
+                            table: "demo_1".to_string(),
+                            ..Default::default()
+                        },
+                        RegionStat {
+                            catalog: "greptime_2".to_string(),
+                            schema: "public_2".to_string(),
+                            table: "demo_2".to_string(),
+                            ..Default::default()
+                        },
+                        RegionStat {
+                            catalog: "greptime_3".to_string(),
+                            schema: "public_3".to_string(),
+                            table: "demo_3".to_string(),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                },
+                Stat {
+                    region_stats: vec![
+                        RegionStat {
+                            catalog: "greptime_1".to_string(),
+                            schema: "public_1".to_string(),
+                            table: "demo_1".to_string(),
+                            ..Default::default()
+                        },
+                        RegionStat {
+                            catalog: "greptime_2".to_string(),
+                            schema: "public_2".to_string(),
+                            table: "demo_2".to_string(),
+                            ..Default::default()
+                        },
+                        RegionStat {
+                            catalog: "greptime_3".to_string(),
+                            schema: "public_3".to_string(),
+                            table: "demo_3".to_string(),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                },
+                Stat {
+                    region_stats: vec![
+                        RegionStat {
+                            catalog: "greptime_1".to_string(),
+                            schema: "public_1".to_string(),
+                            table: "demo_1".to_string(),
+                            ..Default::default()
+                        },
+                        RegionStat {
+                            catalog: "greptime_2".to_string(),
+                            schema: "public_2".to_string(),
+                            table: "demo_2".to_string(),
+                            ..Default::default()
+                        },
+                        RegionStat {
+                            catalog: "greptime_4".to_string(),
+                            schema: "public_4".to_string(),
+                            table: "demo_4".to_string(),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                },
+            ],
+        };
+        assert!(contains_table(&stat_val, "greptime_1", "public_1", "demo_1").unwrap());
+        assert!(contains_table(&stat_val, "greptime_2", "public_2", "demo_2").unwrap());
+        assert!(!contains_table(&stat_val, "greptime_3", "public_3", "demo_3").unwrap());
+        assert!(contains_table(&stat_val, "greptime_4", "public_4", "demo_4").unwrap());
     }
 }

@@ -5,7 +5,6 @@ rpc_hostname = '127.0.0.1'
 rpc_runtime_size = 8
 
 [wal]
-dir = '{wal_dir}'
 file_size = '1GB'
 purge_interval = '10m'
 purge_threshold = '50GB'
@@ -14,7 +13,7 @@ sync_write = false
 
 [storage]
 type = 'File'
-data_dir = '{data_dir}'
+data_home = '{data_home}'
 
 [meta_client_options]
 metasrv_addrs = ['127.0.0.1:3002']
@@ -22,8 +21,6 @@ timeout_millis = 3000
 connect_timeout_millis = 5000
 tcp_nodelay = false
 
-[procedure.store]
-type = "File"
-data_dir = "{procedure_dir}"
+[procedure]
 max_retry_times = 3
 retry_delay = "500ms"

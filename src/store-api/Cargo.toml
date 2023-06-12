@@ -10,6 +10,7 @@ bytes = "1.1"
 common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
 common-query = { path = "../common/query" }
+common-recordbatch = { path = "../common/recordbatch" }
 common-time = { path = "../common/time" }
 datatypes = { path = "../datatypes" }
 derive_builder = "0.11"

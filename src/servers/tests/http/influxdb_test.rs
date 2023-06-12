@@ -15,11 +15,12 @@
 use std::sync::Arc;
 
 use api::v1::greptime_request::Request;
-use api::v1::InsertRequest;
+use api::v1::InsertRequests;
 use async_trait::async_trait;
 use axum::{http, Router};
 use axum_test_helper::TestClient;
 use common_query::Output;
+use common_test_util::ports;
 use datatypes::schema::Schema;
 use query::parser::PromQuery;
 use servers::error::{Error, Result};
@@ -53,9 +54,8 @@ impl GrpcQueryHandler for DummyInstance {
 #[async_trait]
 impl InfluxdbLineProtocolHandler for DummyInstance {
     async fn exec(&self, request: &InfluxdbRequest, ctx: QueryContextRef) -> Result<()> {
-        let requests: Vec<InsertRequest> = request.try_into()?;
-
-        for expr in requests {
+        let requests: InsertRequests = request.try_into()?;
+        for expr in requests.inserts {
             let _ = self.tx.send((ctx.current_schema(), expr.table_name)).await;
         }
 
@@ -93,8 +93,13 @@ impl SqlQueryHandler for DummyInstance {
 }
 
 fn make_test_app(tx: Arc<mpsc::Sender<(String, String)>>, db_name: Option<&str>) -> Router {
+    let http_opts = HttpOptions {
+        addr: format!("127.0.0.1:{}", ports::get_port()),
+        ..Default::default()
+    };
+
     let instance = Arc::new(DummyInstance { tx });
-    let mut server_builder = HttpServerBuilder::new(HttpOptions::default());
+    let mut server_builder = HttpServerBuilder::new(http_opts);
     server_builder.with_sql_handler(instance.clone());
     server_builder.with_grpc_handler(instance.clone());
     let mut user_provider = MockUserProvider::default();

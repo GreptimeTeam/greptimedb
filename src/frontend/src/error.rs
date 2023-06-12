@@ -19,11 +19,17 @@ use datafusion::parquet;
 use datatypes::arrow::error::ArrowError;
 use datatypes::value::Value;
 use snafu::Location;
-use store_api::storage::RegionId;
+use store_api::storage::RegionNumber;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Failed to handle heartbeat response, source: {}", source))]
+    HandleHeartbeatResponse {
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("{source}"))]
     External {
         #[snafu(backtrace)]
@@ -73,9 +79,6 @@ pub enum Error {
         source: sql::error::Error,
     },
 
-    #[snafu(display("Missing insert values"))]
-    MissingInsertValues { location: Location },
-
     #[snafu(display("Column datatype error, source: {}", source))]
     ColumnDataType {
         #[snafu(backtrace)]
@@ -93,6 +96,9 @@ pub enum Error {
         source: api::error::Error,
     },
 
+    #[snafu(display("Failed to convert vector to GRPC column, reason: {}", reason))]
+    VectorToGrpcColumn { reason: String, location: Location },
+
     #[snafu(display(
         "Failed to convert column default constraint, column: {}, source: {}",
         column_name,
@@ -107,15 +113,12 @@ pub enum Error {
     #[snafu(display("Invalid SQL, error: {}", err_msg))]
     InvalidSql { err_msg: String, location: Location },
 
-    #[snafu(display("Illegal Frontend state: {}", err_msg))]
-    IllegalFrontendState { err_msg: String, location: Location },
-
     #[snafu(display("Incomplete GRPC result: {}", err_msg))]
     IncompleteGrpcResult { err_msg: String, location: Location },
 
     #[snafu(display("Failed to find Datanode by region: {:?}", region))]
     FindDatanode {
-        region: RegionId,
+        region: RegionNumber,
         location: Location,
     },
 
@@ -125,24 +128,6 @@ pub enum Error {
     #[snafu(display("Table not found: {}", table_name))]
     TableNotFound {
         table_name: String,
-        location: Location,
-    },
-
-    #[snafu(display("Column {} not found in table {}", column_name, table_name))]
-    ColumnNotFound {
-        column_name: String,
-        table_name: String,
-        location: Location,
-    },
-
-    #[snafu(display(
-        "Columns and values number mismatch, columns: {}, values: {}",
-        columns,
-        values,
-    ))]
-    ColumnValuesNumberMismatch {
-        columns: usize,
-        values: usize,
         location: Location,
     },
 
@@ -208,6 +193,12 @@ pub enum Error {
         table_name: String,
         #[snafu(backtrace)]
         source: partition::error::Error,
+    },
+
+    #[snafu(display("Failed to split insert request, source: {}", source))]
+    SplitInsert {
+        source: partition::error::Error,
+        location: Location,
     },
 
     #[snafu(display("Failed to create table info, source: {}", source))]
@@ -355,12 +346,6 @@ pub enum Error {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
-
-    #[snafu(display(
-        "No valid default value can be built automatically, column: {}",
-        column,
-    ))]
-    ColumnNoneDefaultValue { column: String, location: Location },
 
     #[snafu(display("SQL execution intercepted, source: {}", source))]
     SqlExecIntercepted {
@@ -557,15 +542,12 @@ impl ErrorExt for Error {
             Error::ParseAddr { .. }
             | Error::InvalidSql { .. }
             | Error::InvalidInsertRequest { .. }
-            | Error::ColumnValuesNumberMismatch { .. }
             | Error::IllegalPrimaryKeysDef { .. }
             | Error::CatalogNotFound { .. }
             | Error::SchemaNotFound { .. }
             | Error::SchemaExists { .. }
-            | Error::MissingInsertValues { .. }
             | Error::PrimaryKeyNotFound { .. }
             | Error::MissingMetasrvOpts { .. }
-            | Error::ColumnNoneDefaultValue { .. }
             | Error::BuildRegex { .. }
             | Error::InvalidSchema { .. }
             | Error::PrepareImmutableTable { .. }
@@ -573,6 +555,8 @@ impl ErrorExt for Error {
             | Error::ProjectSchema { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
+
+            Error::HandleHeartbeatResponse { source, .. } => source.status_code(),
 
             Error::RuntimeResource { source, .. } => source.status_code(),
             Error::ExecutePromql { source, .. } => source.status_code(),
@@ -607,15 +591,14 @@ impl ErrorExt for Error {
             | Error::CreateTableRoute { .. }
             | Error::FindRegionRoute { .. }
             | Error::BuildDfLogicalPlan { .. }
-            | Error::BuildTableMeta { .. } => StatusCode::Internal,
+            | Error::BuildTableMeta { .. }
+            | Error::VectorToGrpcColumn { .. } => StatusCode::Internal,
 
-            Error::IllegalFrontendState { .. }
-            | Error::IncompleteGrpcResult { .. }
+            Error::IncompleteGrpcResult { .. }
             | Error::ContextValueNotFound { .. }
             | Error::EncodeJson { .. } => StatusCode::Unexpected,
 
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
-            Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
 
             Error::JoinTask { .. }
             | Error::BuildParquetRecordBatchStream { .. }
@@ -650,7 +633,9 @@ impl ErrorExt for Error {
             Error::External { source } => source.status_code(),
             Error::DeserializePartition { source, .. }
             | Error::FindTablePartitionRule { source, .. }
-            | Error::FindTableRoute { source, .. } => source.status_code(),
+            | Error::FindTableRoute { source, .. }
+            | Error::SplitInsert { source, .. } => source.status_code(),
+
             Error::UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
 
             Error::StartScriptManager { source } => source.status_code(),

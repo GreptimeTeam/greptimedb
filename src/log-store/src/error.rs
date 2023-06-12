@@ -23,13 +23,13 @@ use snafu::Location;
 pub enum Error {
     #[snafu(display("Failed to start log store gc task, source: {}", source))]
     StartGcTask {
-        #[snafu(backtrace)]
+        location: Location,
         source: RuntimeError,
     },
 
     #[snafu(display("Failed to stop log store gc task, source: {}", source))]
     StopGcTask {
-        #[snafu(backtrace)]
+        location: Location,
         source: RuntimeError,
     },
 
@@ -65,6 +65,19 @@ pub enum Error {
         end: u64,
         max_size: usize,
         source: raft_engine::Error,
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Cannot override compacted entry, namespace: {}, first index: {}, attempt index: {}",
+        namespace,
+        first_index,
+        attempt_index
+    ))]
+    OverrideCompactedEntry {
+        namespace: u64,
+        first_index: u64,
+        attempt_index: u64,
         location: Location,
     },
 }

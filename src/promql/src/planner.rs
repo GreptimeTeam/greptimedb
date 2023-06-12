@@ -21,13 +21,14 @@ use async_recursion::async_recursion;
 use catalog::table_source::DfTableSourceProvider;
 use datafusion::common::{DFSchemaRef, OwnedTableReference, Result as DfResult};
 use datafusion::datasource::DefaultTableSource;
-use datafusion::logical_expr::expr::AggregateFunction;
+use datafusion::logical_expr::expr::{AggregateFunction, ScalarFunction, ScalarUDF};
 use datafusion::logical_expr::expr_rewriter::normalize_cols;
 use datafusion::logical_expr::{
     AggregateFunction as AggregateFunctionEnum, BinaryExpr, BuiltinScalarFunction, Cast, Extension,
-    LogicalPlan, LogicalPlanBuilder, Operator, ScalarUDF,
+    LogicalPlan, LogicalPlanBuilder, Operator, ScalarUDF as ScalarUdfDef,
 };
 use datafusion::optimizer::utils;
+use datafusion::prelude as df_prelude;
 use datafusion::prelude::{Column, Expr as DfExpr, JoinType};
 use datafusion::scalar::ScalarValue;
 use datafusion::sql::TableReference;
@@ -48,7 +49,8 @@ use crate::error::{
     UnsupportedExprSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
 };
 use crate::extension_plan::{
-    EmptyMetric, InstantManipulate, Millisecond, RangeManipulate, SeriesDivide, SeriesNormalize,
+    build_special_time_expr, EmptyMetric, InstantManipulate, Millisecond, RangeManipulate,
+    SeriesDivide, SeriesNormalize,
 };
 use crate::functions::{
     AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, HoltWinters, IDelta,
@@ -56,10 +58,10 @@ use crate::functions::{
     QuantileOverTime, Rate, Resets, StddevOverTime, StdvarOverTime, SumOverTime,
 };
 
-const LEFT_PLAN_JOIN_ALIAS: &str = "lhs";
-
 /// `time()` function in PromQL.
 const SPECIAL_TIME_FUNCTION: &str = "time";
+
+const DEFAULT_TIME_INDEX_COLUMN: &str = "time";
 
 /// default value column name for empty metric
 const DEFAULT_FIELD_COLUMN: &str = "value";
@@ -137,9 +139,6 @@ impl PromPlanner {
                 // convert op and value columns to aggregate exprs
                 let aggr_exprs = self.create_aggregate_exprs(*op, &input)?;
 
-                // remove time index column from context
-                self.ctx.time_index_column = None;
-
                 // create plan
                 let group_sort_expr = group_exprs
                     .clone()
@@ -181,11 +180,30 @@ impl PromPlanner {
                     Self::try_build_literal_expr(lhs),
                     Self::try_build_literal_expr(rhs),
                 ) {
-                    // TODO(ruihang): handle literal-only expressions
-                    (Some(_lhs), Some(_rhs)) => UnsupportedExprSnafu {
-                        name: "Literal-only expression",
+                    (Some(lhs), Some(rhs)) => {
+                        self.ctx.time_index_column = Some(DEFAULT_TIME_INDEX_COLUMN.to_string());
+                        self.ctx.field_columns = vec![DEFAULT_FIELD_COLUMN.to_string()];
+                        self.ctx.table_name = Some(String::new());
+                        let field_expr = DfExpr::BinaryExpr(BinaryExpr {
+                            left: Box::new(lhs),
+                            op: Self::prom_token_to_binary_op(*op)?,
+                            right: Box::new(rhs),
+                        });
+
+                        LogicalPlan::Extension(Extension {
+                            node: Arc::new(
+                                EmptyMetric::new(
+                                    self.ctx.start,
+                                    self.ctx.end,
+                                    self.ctx.interval,
+                                    SPECIAL_TIME_FUNCTION.to_string(),
+                                    DEFAULT_FIELD_COLUMN.to_string(),
+                                    field_expr,
+                                )
+                                .context(DataFusionPlanningSnafu)?,
+                            ),
+                        })
                     }
-                    .fail()?,
                     // lhs is a literal, rhs is a column
                     (Some(expr), None) => {
                         let input = self.prom_expr_to_plan(*rhs.clone()).await?;
@@ -283,14 +301,46 @@ impl PromPlanner {
                 name: "Prom Subquery",
             }
             .fail()?,
-            PromExpr::NumberLiteral(NumberLiteral { .. }) => UnsupportedExprSnafu {
-                name: "Prom Number Literal",
+            PromExpr::NumberLiteral(NumberLiteral { val }) => {
+                self.ctx.time_index_column = Some(DEFAULT_TIME_INDEX_COLUMN.to_string());
+                self.ctx.field_columns = vec![DEFAULT_FIELD_COLUMN.to_string()];
+                self.ctx.table_name = Some(String::new());
+                let literal_expr = df_prelude::lit(*val);
+
+                LogicalPlan::Extension(Extension {
+                    node: Arc::new(
+                        EmptyMetric::new(
+                            self.ctx.start,
+                            self.ctx.end,
+                            self.ctx.interval,
+                            SPECIAL_TIME_FUNCTION.to_string(),
+                            DEFAULT_FIELD_COLUMN.to_string(),
+                            literal_expr,
+                        )
+                        .context(DataFusionPlanningSnafu)?,
+                    ),
+                })
             }
-            .fail()?,
-            PromExpr::StringLiteral(StringLiteral { .. }) => UnsupportedExprSnafu {
-                name: "Prom String Literal",
+            PromExpr::StringLiteral(StringLiteral { val }) => {
+                self.ctx.time_index_column = Some(DEFAULT_TIME_INDEX_COLUMN.to_string());
+                self.ctx.field_columns = vec![DEFAULT_FIELD_COLUMN.to_string()];
+                self.ctx.table_name = Some(String::new());
+                let literal_expr = df_prelude::lit(val.to_string());
+
+                LogicalPlan::Extension(Extension {
+                    node: Arc::new(
+                        EmptyMetric::new(
+                            self.ctx.start,
+                            self.ctx.end,
+                            self.ctx.interval,
+                            SPECIAL_TIME_FUNCTION.to_string(),
+                            DEFAULT_FIELD_COLUMN.to_string(),
+                            literal_expr,
+                        )
+                        .context(DataFusionPlanningSnafu)?,
+                    ),
+                })
             }
-            .fail()?,
             PromExpr::VectorSelector(VectorSelector {
                 name: _,
                 offset,
@@ -360,6 +410,7 @@ impl PromPlanner {
                     self.ctx.time_index_column = Some(SPECIAL_TIME_FUNCTION.to_string());
                     self.ctx.field_columns = vec![DEFAULT_FIELD_COLUMN.to_string()];
                     self.ctx.table_name = Some(String::new());
+                    let time_expr = build_special_time_expr(SPECIAL_TIME_FUNCTION);
 
                     return Ok(LogicalPlan::Extension(Extension {
                         node: Arc::new(
@@ -369,6 +420,7 @@ impl PromPlanner {
                                 self.ctx.interval,
                                 SPECIAL_TIME_FUNCTION.to_string(),
                                 DEFAULT_FIELD_COLUMN.to_string(),
+                                time_expr,
                             )
                             .context(DataFusionPlanningSnafu)?,
                         ),
@@ -870,10 +922,10 @@ impl PromPlanner {
             match scalar_func.clone() {
                 ScalarFunc::DataFusionBuiltin(fun) => {
                     other_input_exprs.insert(field_column_pos, col_expr);
-                    let fn_expr = DfExpr::ScalarFunction {
+                    let fn_expr = DfExpr::ScalarFunction(ScalarFunction {
                         fun,
                         args: other_input_exprs.clone(),
-                    };
+                    });
                     exprs.push(fn_expr);
                     other_input_exprs.remove(field_column_pos);
                 }
@@ -885,10 +937,10 @@ impl PromPlanner {
                     ));
                     other_input_exprs.insert(field_column_pos, ts_range_expr);
                     other_input_exprs.insert(field_column_pos + 1, col_expr);
-                    let fn_expr = DfExpr::ScalarUDF {
+                    let fn_expr = DfExpr::ScalarUDF(ScalarUDF {
                         fun: Arc::new(fun),
                         args: other_input_exprs.clone(),
-                    };
+                    });
                     exprs.push(fn_expr);
                     other_input_exprs.remove(field_column_pos + 1);
                     other_input_exprs.remove(field_column_pos);
@@ -903,10 +955,10 @@ impl PromPlanner {
                     other_input_exprs.insert(field_column_pos + 1, col_expr);
                     other_input_exprs
                         .insert(field_column_pos + 2, self.create_time_index_column_expr()?);
-                    let fn_expr = DfExpr::ScalarUDF {
+                    let fn_expr = DfExpr::ScalarUDF(ScalarUDF {
                         fun: Arc::new(fun),
                         args: other_input_exprs.clone(),
-                    };
+                    });
                     exprs.push(fn_expr);
                     other_input_exprs.remove(field_column_pos + 2);
                     other_input_exprs.remove(field_column_pos + 1);
@@ -1012,6 +1064,7 @@ impl PromPlanner {
                     args: vec![DfExpr::Column(Column::from_name(col))],
                     distinct: false,
                     filter: None,
+                    order_by: None,
                 })
             })
             .collect();
@@ -1096,7 +1149,6 @@ impl PromPlanner {
     }
 
     /// Build a inner join on time index column and tag columns to concat two logical plans.
-    /// The left plan will be alised as [`LEFT_PLAN_JOIN_ALIAS`].
     fn join_on_non_field_columns(
         &self,
         left: LogicalPlan,
@@ -1116,12 +1168,9 @@ impl PromPlanner {
 
         // Inner Join on time index column to concat two operator
         LogicalPlanBuilder::from(left)
-            .alias(LEFT_PLAN_JOIN_ALIAS)
-            .context(DataFusionPlanningSnafu)?
             .join(
                 right,
                 JoinType::Inner,
-                // (vec![time_index_column.clone()], vec![time_index_column]),
                 (tag_columns.clone(), tag_columns),
                 None,
             )
@@ -1224,10 +1273,10 @@ struct FunctionArgs {
 #[derive(Debug, Clone)]
 enum ScalarFunc {
     DataFusionBuiltin(BuiltinScalarFunction),
-    Udf(ScalarUDF),
+    Udf(ScalarUdfDef),
     // todo(ruihang): maybe merge with Udf later
     /// UDF that require extra information like range length to be evaluated.
-    ExtrapolateUdf(ScalarUDF),
+    ExtrapolateUdf(ScalarUdfDef),
 }
 
 #[cfg(test)]
@@ -1611,12 +1660,12 @@ mod test {
 
     #[tokio::test]
     async fn aggregate_stddev() {
-        do_aggregate_expr_plan("stddev", "STDDEVPOP").await;
+        do_aggregate_expr_plan("stddev", "STDDEV_POP").await;
     }
 
     #[tokio::test]
     async fn aggregate_stdvar() {
-        do_aggregate_expr_plan("stdvar", "VARIANCEPOP").await;
+        do_aggregate_expr_plan("stdvar", "VARIANCE_POP").await;
     }
 
     #[tokio::test]
@@ -1687,14 +1736,13 @@ mod test {
 
         let  expected = String::from(
             "Projection: some_metric.tag_0, some_metric.timestamp, some_metric.field_0 + some_metric.field_0 AS some_metric.field_0 + some_metric.field_0 [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), some_metric.field_0 + some_metric.field_0:Float64;N]\
-            \n  Inner Join: lhs.tag_0 = some_metric.tag_0, lhs.timestamp = some_metric.timestamp [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-            \n    SubqueryAlias: lhs [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-            \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-            \n        PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [false] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-            \n          PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-            \n            Sort: some_metric.tag_0 DESC NULLS LAST, some_metric.timestamp DESC NULLS LAST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-            \n              Filter: some_metric.tag_0 = Utf8(\"foo\") [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-            \n                TableScan: some_metric, unsupported_filters=[tag_0 = Utf8(\"foo\"), timestamp >= TimestampMillisecond(-1000, None), timestamp <= TimestampMillisecond(100001000, None)] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n  Inner Join: some_metric.tag_0 = some_metric.tag_0, some_metric.timestamp = some_metric.timestamp [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n    PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n      PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [false] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n        PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n          Sort: some_metric.tag_0 DESC NULLS LAST, some_metric.timestamp DESC NULLS LAST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n            Filter: some_metric.tag_0 = Utf8(\"foo\") [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n              TableScan: some_metric, unsupported_filters=[tag_0 = Utf8(\"foo\"), timestamp >= TimestampMillisecond(-1000, None), timestamp <= TimestampMillisecond(100001000, None)] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n    PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n      PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [false] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n        PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\

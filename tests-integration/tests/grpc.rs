@@ -17,7 +17,8 @@ use api::v1::column::SemanticType;
 use api::v1::promql_request::Promql;
 use api::v1::{
     column, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef, CreateTableExpr,
-    InsertRequest, PromInstantQuery, PromRangeQuery, PromqlRequest, RequestHeader, TableId,
+    InsertRequest, InsertRequests, PromInstantQuery, PromRangeQuery, PromqlRequest, RequestHeader,
+    TableId,
 };
 use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::consts::{MIN_USER_TABLE_ID, MITO_ENGINE};
@@ -86,7 +87,11 @@ pub async fn test_invalid_dbname(store_type: StorageType) {
         ],
         row_count: 4,
     };
-    let result = db.insert(request).await;
+    let result = db
+        .insert(InsertRequests {
+            inserts: vec![request],
+        })
+        .await;
     assert!(result.is_err());
 
     let _ = fe_grpc_server.shutdown().await;
@@ -196,6 +201,7 @@ pub async fn test_insert_and_select(store_type: StorageType) {
         add_columns: vec![AddColumn {
             column_def: Some(add_column),
             is_key: false,
+            location: None,
         }],
     });
     let expr = AlterExpr {
@@ -229,7 +235,11 @@ async fn insert_and_assert(db: &Database) {
         ],
         row_count: 4,
     };
-    let result = db.insert(request).await;
+    let result = db
+        .insert(InsertRequests {
+            inserts: vec![request],
+        })
+        .await;
     assert_eq!(result.unwrap(), 4);
 
     let result = db
@@ -308,7 +318,7 @@ fn testing_create_expr() -> CreateTableExpr {
         table_id: Some(TableId {
             id: MIN_USER_TABLE_ID,
         }),
-        region_ids: vec![0],
+        region_numbers: vec![0],
         engine: MITO_ENGINE.to_string(),
     }
 }
@@ -405,7 +415,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         step: "5s".to_string(),
     };
     let range_query_request: PromqlRequest = PromqlRequest {
-        header: Some(header),
+        header: Some(header.clone()),
         promql: Some(Promql::RangeQuery(range_query)),
     };
     let json_bytes = gateway_client
@@ -441,6 +451,36 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                     ..Default::default()
                 },
             ],
+        }),
+        error: None,
+        error_type: None,
+        warnings: None,
+    };
+    assert_eq!(range_query_result, expected);
+
+    // query nonexistent data
+    let range_query = PromRangeQuery {
+        query: "test".to_string(),
+        start: "1000000000".to_string(),
+        end: "1000001000".to_string(),
+        step: "5s".to_string(),
+    };
+    let range_query_request: PromqlRequest = PromqlRequest {
+        header: Some(header),
+        promql: Some(Promql::RangeQuery(range_query)),
+    };
+    let json_bytes = gateway_client
+        .handle(range_query_request)
+        .await
+        .unwrap()
+        .into_inner()
+        .body;
+    let range_query_result = serde_json::from_slice::<PromJsonResponse>(&json_bytes).unwrap();
+    let expected = PromJsonResponse {
+        status: "success".to_string(),
+        data: PromResponse::PromData(PromData {
+            result_type: "matrix".to_string(),
+            result: vec![],
         }),
         error: None,
         error_type: None,

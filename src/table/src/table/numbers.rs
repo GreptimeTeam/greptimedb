@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use common_query::physical_plan::PhysicalPlanRef;
 use common_recordbatch::error::Result as RecordBatchResult;
-use common_recordbatch::{RecordBatch, RecordBatchStream};
+use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use datafusion::arrow::compute::SortOptions;
 use datafusion::arrow::record_batch::RecordBatch as DfRecordBatch;
 use datafusion_common::from_slice::FromSlice;
@@ -29,11 +29,11 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use futures::task::{Context, Poll};
 use futures::Stream;
-use store_api::storage::RegionNumber;
+use store_api::storage::{RegionNumber, ScanRequest};
 
 use crate::error::Result;
 use crate::metadata::{TableId, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType};
-use crate::table::scan::SimpleTableScan;
+use crate::table::scan::StreamScanAdapter;
 use crate::table::{Expr, Table};
 
 const NUMBER_COLUMN: &str = "number";
@@ -132,8 +132,16 @@ impl Table for NumbersTable {
         )
         .into()];
         Ok(Arc::new(
-            SimpleTableScan::new(stream).with_output_ordering(output_ordering),
+            StreamScanAdapter::new(stream).with_output_ordering(output_ordering),
         ))
+    }
+
+    async fn scan_to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
+        Ok(Box::pin(NumbersStream {
+            limit: request.limit.unwrap_or(100) as u32,
+            schema: self.schema.clone(),
+            already_run: false,
+        }))
     }
 
     async fn flush(&self, _region_number: Option<RegionNumber>, _wait: Option<bool>) -> Result<()> {

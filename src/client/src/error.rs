@@ -34,13 +34,13 @@ pub enum Error {
 
     #[snafu(display("Failed to convert FlightData, source: {}", source))]
     ConvertFlightData {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_grpc::Error,
     },
 
     #[snafu(display("Column datatype error, source: {}", source))]
     ColumnDataType {
-        #[snafu(backtrace)]
+        location: Location,
         source: api::error::Error,
     },
 
@@ -57,7 +57,7 @@ pub enum Error {
     ))]
     CreateChannel {
         addr: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: common_grpc::error::Error,
     },
 
@@ -67,6 +67,9 @@ pub enum Error {
 
     #[snafu(display("Illegal Database response: {err_msg}"))]
     IllegalDatabaseResponse { err_msg: String },
+
+    #[snafu(display("Failed to send request with streaming: {}", err_msg))]
+    ClientStreaming { err_msg: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -77,11 +80,12 @@ impl ErrorExt for Error {
             Error::IllegalFlightMessages { .. }
             | Error::ColumnDataType { .. }
             | Error::MissingField { .. }
-            | Error::IllegalDatabaseResponse { .. } => StatusCode::Internal,
+            | Error::IllegalDatabaseResponse { .. }
+            | Error::ClientStreaming { .. } => StatusCode::Internal,
 
             Error::Server { code, .. } => *code,
             Error::FlightGet { source, .. } => source.status_code(),
-            Error::CreateChannel { source, .. } | Error::ConvertFlightData { source } => {
+            Error::CreateChannel { source, .. } | Error::ConvertFlightData { source, .. } => {
                 source.status_code()
             }
             Error::IllegalGrpcClientState { .. } => StatusCode::Unexpected,

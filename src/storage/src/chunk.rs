@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_query::logical_plan::Expr;
+use common_recordbatch::OrderOption;
 use common_telemetry::debug;
 use common_time::range::TimestampRange;
 use snafu::ResultExt;
@@ -28,6 +29,7 @@ use crate::read::windowed::WindowedReader;
 use crate::read::{Batch, BoxedBatchReader, DedupReader, MergeReaderBuilder};
 use crate::schema::{ProjectedSchema, ProjectedSchemaRef, RegionSchemaRef};
 use crate::sst::{AccessLayerRef, FileHandle, LevelMetas, ReadOptions};
+use crate::window_infer::{PlainWindowInference, WindowInfer};
 
 /// Chunk reader implementation.
 // Now we use async-trait to implement the chunk reader, which is easier to implement than
@@ -36,6 +38,7 @@ use crate::sst::{AccessLayerRef, FileHandle, LevelMetas, ReadOptions};
 pub struct ChunkReaderImpl {
     schema: ProjectedSchemaRef,
     batch_reader: BoxedBatchReader,
+    output_ordering: Option<Vec<OrderOption>>,
 }
 
 #[async_trait]
@@ -60,13 +63,22 @@ impl ChunkReader for ChunkReaderImpl {
         };
         self.schema.batch_to_chunk(&batch)
     }
+
+    fn output_ordering(&self) -> Option<Vec<OrderOption>> {
+        self.output_ordering.clone()
+    }
 }
 
 impl ChunkReaderImpl {
-    pub fn new(schema: ProjectedSchemaRef, batch_reader: BoxedBatchReader) -> ChunkReaderImpl {
+    pub fn new(
+        schema: ProjectedSchemaRef,
+        batch_reader: BoxedBatchReader,
+        output_ordering: Option<Vec<OrderOption>>,
+    ) -> ChunkReaderImpl {
         ChunkReaderImpl {
             schema,
             batch_reader,
+            output_ordering,
         }
     }
 
@@ -85,7 +97,7 @@ pub struct ChunkReaderBuilder {
     iter_ctx: IterContext,
     memtables: Vec<MemtableRef>,
     files_to_read: Vec<FileHandle>,
-    time_windows: Option<Vec<TimestampRange>>,
+    output_ordering: Option<Vec<OrderOption>>,
 }
 
 impl ChunkReaderBuilder {
@@ -98,7 +110,7 @@ impl ChunkReaderBuilder {
             iter_ctx: IterContext::default(),
             memtables: Vec::new(),
             files_to_read: Vec::new(),
-            time_windows: None,
+            output_ordering: None,
         }
     }
 
@@ -115,6 +127,11 @@ impl ChunkReaderBuilder {
 
     pub fn filters(mut self, filters: Vec<Expr>) -> Self {
         self.filters = filters;
+        self
+    }
+
+    pub fn output_ordering(mut self, ordering: Option<Vec<OrderOption>>) -> Self {
+        self.output_ordering = ordering;
         self
     }
 
@@ -154,10 +171,26 @@ impl ChunkReaderBuilder {
         self
     }
 
-    /// Set time windows for scan.
-    pub fn time_windows(mut self, windows: Vec<TimestampRange>) -> Self {
-        self.time_windows = Some(windows);
-        self
+    /// Try to infer time window from output ordering. If the result
+    /// is `None` means the output ordering is not obeyed, otherwise
+    /// means the output ordering is obeyed and is same with request.
+    fn infer_time_windows(&self, output_ordering: &[OrderOption]) -> Option<Vec<TimestampRange>> {
+        if output_ordering.is_empty() {
+            return None;
+        }
+        let OrderOption { name, options } = &output_ordering[0];
+
+        if name != self.schema.timestamp_column_name() {
+            return None;
+        }
+        let memtable_stats = self.memtables.iter().map(|m| m.stats()).collect::<Vec<_>>();
+        let files = self
+            .files_to_read
+            .iter()
+            .map(FileHandle::meta)
+            .collect::<Vec<_>>();
+
+        Some(PlainWindowInference {}.infer_window(&files, &memtable_stats, options.descending))
     }
 
     async fn build_windowed(
@@ -165,6 +198,7 @@ impl ChunkReaderBuilder {
         schema: &ProjectedSchemaRef,
         time_range_predicate: &TimestampRange,
         windows: Vec<TimestampRange>,
+        order_options: Vec<OrderOption>,
     ) -> Result<BoxedBatchReader> {
         let mut readers = Vec::with_capacity(windows.len());
         for window in windows {
@@ -172,7 +206,7 @@ impl ChunkReaderBuilder {
             let reader = self.build_reader(schema, &time_range_predicate).await?;
             readers.push(reader);
         }
-        let windowed_reader = WindowedReader::new(schema.clone(), readers);
+        let windowed_reader = WindowedReader::new(schema.clone(), readers, order_options);
         Ok(Box::new(windowed_reader) as Box<_>)
     }
 
@@ -186,7 +220,9 @@ impl ChunkReaderBuilder {
             .batch_size(self.iter_ctx.batch_size);
 
         for mem in &self.memtables {
-            let iter = mem.iter(&self.iter_ctx)?;
+            let mut iter_ctx = self.iter_ctx.clone();
+            iter_ctx.time_range = Some(*time_range);
+            let iter = mem.iter(iter_ctx)?;
             reader_builder = reader_builder.push_batch_iter(iter);
         }
 
@@ -218,14 +254,17 @@ impl ChunkReaderBuilder {
         );
         self.iter_ctx.projected_schema = Some(schema.clone());
 
-        let reader = if let Some(windows) = self.time_windows.take() {
-            self.build_windowed(&schema, &time_range_predicate, windows)
-                .await?
+        let mut output_ordering = None;
+        let reader = if let Some(ordering) = self.output_ordering.take() &&
+            let Some(windows) = self.infer_time_windows(&ordering) {
+                output_ordering = Some(ordering.clone());
+                self.build_windowed(&schema, &time_range_predicate, windows, ordering)
+                    .await?
         } else {
             self.build_reader(&schema, &time_range_predicate).await?
         };
 
-        Ok(ChunkReaderImpl::new(schema, reader))
+        Ok(ChunkReaderImpl::new(schema, reader, output_ordering))
     }
 
     /// Build time range predicate from schema and filters.

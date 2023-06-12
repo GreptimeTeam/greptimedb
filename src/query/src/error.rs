@@ -15,6 +15,7 @@
 use std::any::Any;
 
 use common_error::prelude::*;
+use common_meta::table_name::TableName;
 use datafusion::error::DataFusionError;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
@@ -34,8 +35,8 @@ pub enum Error {
 
     #[snafu(display("General catalog error: {}", source))]
     Catalog {
-        #[snafu(backtrace)]
         source: catalog::error::Error,
+        location: Location,
     },
 
     #[snafu(display("Catalog not found: {}", catalog))]
@@ -49,35 +50,49 @@ pub enum Error {
 
     #[snafu(display("Failed to do vector computation, source: {}", source))]
     VectorComputation {
-        #[snafu(backtrace)]
         source: datatypes::error::Error,
+        location: Location,
     },
 
     #[snafu(display("Failed to create RecordBatch, source: {}", source))]
     CreateRecordBatch {
-        #[snafu(backtrace)]
         source: common_recordbatch::error::Error,
+        location: Location,
     },
 
     #[snafu(display("Failure during query execution, source: {}", source))]
-    QueryExecution { source: BoxedError },
+    QueryExecution {
+        source: BoxedError,
+        location: Location,
+    },
 
     #[snafu(display("Failure during query planning, source: {}", source))]
-    QueryPlan { source: BoxedError },
+    QueryPlan {
+        source: BoxedError,
+        location: Location,
+    },
 
     #[snafu(display("Failure during query parsing, query: {}, source: {}", query, source))]
-    QueryParse { query: String, source: BoxedError },
+    QueryParse {
+        query: String,
+        source: BoxedError,
+        location: Location,
+    },
 
     #[snafu(display("Illegal access to catalog: {} and schema: {}", catalog, schema))]
-    QueryAccessDenied { catalog: String, schema: String },
+    QueryAccessDenied {
+        catalog: String,
+        schema: String,
+        location: Location,
+    },
 
     #[snafu(display("The SQL string has multiple statements, query: {}", query))]
     MultipleStatements { query: String, location: Location },
 
     #[snafu(display("Failed to convert Datafusion schema: {}", source))]
     ConvertDatafusionSchema {
-        #[snafu(backtrace)]
         source: datatypes::error::Error,
+        location: Location,
     },
 
     #[snafu(display("Failed to parse timestamp `{}`: {}", raw, source))]
@@ -100,9 +115,15 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to encode Substrait logical plan, source: {}", source))]
+    EncodeSubstraitLogicalPlan {
+        source: substrait::error::Error,
+        location: Location,
+    },
+
     #[snafu(display("General SQL error: {}", source))]
     Sql {
-        #[snafu(backtrace)]
+        location: Location,
         source: sql::error::Error,
     },
 
@@ -122,21 +143,41 @@ pub enum Error {
     #[snafu(display("Failed to convert value to sql value: {}", value))]
     ConvertSqlValue {
         value: Value,
-        #[snafu(backtrace)]
         source: sql::error::Error,
+        location: Location,
     },
 
     #[snafu(display("Failed to convert concrete type to sql type: {:?}", datatype))]
     ConvertSqlType {
         datatype: ConcreteDataType,
-        #[snafu(backtrace)]
         source: sql::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to route partition of table {}, source: {}", table, source))]
+    RoutePartition {
+        table: TableName,
+        source: partition::error::Error,
+        location: Location,
     },
 
     #[snafu(display("Failed to parse SQL, source: {}", source))]
     ParseSql {
-        #[snafu(backtrace)]
         source: sql::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to request remote peer, source: {}", source))]
+    RemoteRequest {
+        source: client::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Unexpected query output. Expected: {}, Got: {}", expected, got))]
+    UnexpectedOutputKind {
+        expected: String,
+        got: String,
+        location: Location,
     },
 
     #[snafu(display("Missing required field: {}", name))]
@@ -150,35 +191,32 @@ pub enum Error {
 
     #[snafu(display("Failed to build data source backend, source: {}", source))]
     BuildBackend {
-        #[snafu(backtrace)]
         source: common_datasource::error::Error,
+        location: Location,
     },
 
     #[snafu(display("Failed to list objects, source: {}", source))]
     ListObjects {
-        #[snafu(backtrace)]
         source: common_datasource::error::Error,
+        location: Location,
     },
-
-    #[snafu(display("Unsupported file format: {}", format))]
-    UnsupportedFileFormat { format: String, location: Location },
 
     #[snafu(display("Failed to parse file format: {}", source))]
     ParseFileFormat {
-        #[snafu(backtrace)]
         source: common_datasource::error::Error,
+        location: Location,
     },
 
     #[snafu(display("Failed to infer schema: {}", source))]
     InferSchema {
-        #[snafu(backtrace)]
         source: common_datasource::error::Error,
+        location: Location,
     },
 
     #[snafu(display("Failed to convert datafusion schema, source: {}", source))]
     ConvertSchema {
-        #[snafu(backtrace)]
         source: datatypes::error::Error,
+        location: Location,
     },
 }
 
@@ -197,25 +235,29 @@ impl ErrorExt for Error {
             | ParseFloat { .. }
             | MissingRequiredField { .. }
             | BuildRegex { .. }
-            | UnsupportedFileFormat { .. }
             | ConvertSchema { .. } => StatusCode::InvalidArguments,
 
             BuildBackend { .. } | ListObjects { .. } => StatusCode::StorageUnavailable,
+            EncodeSubstraitLogicalPlan { source, .. } => source.status_code(),
 
             ParseFileFormat { source, .. } | InferSchema { source, .. } => source.status_code(),
 
             QueryAccessDenied { .. } => StatusCode::AccessDenied,
-            Catalog { source } => source.status_code(),
-            VectorComputation { source } | ConvertDatafusionSchema { source } => {
+            Catalog { source, .. } => source.status_code(),
+            VectorComputation { source, .. } | ConvertDatafusionSchema { source, .. } => {
                 source.status_code()
             }
-            ParseSql { source } => source.status_code(),
-            CreateRecordBatch { source } => source.status_code(),
-            QueryExecution { source } | QueryPlan { source } => source.status_code(),
-            DataFusion { .. } | MissingTimestampColumn { .. } => StatusCode::Internal,
-            Sql { source } => source.status_code(),
+            ParseSql { source, .. } => source.status_code(),
+            CreateRecordBatch { source, .. } => source.status_code(),
+            QueryExecution { source, .. } | QueryPlan { source, .. } => source.status_code(),
+            DataFusion { .. } | MissingTimestampColumn { .. } | RoutePartition { .. } => {
+                StatusCode::Internal
+            }
+            Sql { source, .. } => source.status_code(),
             PlanSql { .. } => StatusCode::PlanQuery,
             ConvertSqlType { source, .. } | ConvertSqlValue { source, .. } => source.status_code(),
+            RemoteRequest { source, .. } => source.status_code(),
+            UnexpectedOutputKind { .. } => StatusCode::Unexpected,
         }
     }
 

@@ -73,8 +73,6 @@ pub trait Region: Send + Sync + Clone + std::fmt::Debug + 'static {
 
     async fn alter(&self, request: AlterRequest) -> Result<(), Self::Error>;
 
-    async fn close(&self) -> Result<(), Self::Error>;
-
     async fn drop_region(&self) -> Result<(), Self::Error>;
 
     fn disk_usage_bytes(&self) -> u64;
@@ -106,6 +104,12 @@ impl From<&OpenOptions> for WriteContext {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct CloseContext {
+    /// If true, flush the closing region.
+    pub flush: bool,
+}
+
 /// Context for flush operations.
 #[derive(Debug, Clone)]
 pub struct FlushContext {
@@ -114,6 +118,8 @@ pub struct FlushContext {
     pub wait: bool,
     /// Flush reason.
     pub reason: FlushReason,
+    /// If true, allows to flush a closed region
+    pub force: bool,
 }
 
 impl Default for FlushContext {
@@ -121,6 +127,7 @@ impl Default for FlushContext {
         FlushContext {
             wait: true,
             reason: FlushReason::Others,
+            force: false,
         }
     }
 }
@@ -136,6 +143,8 @@ pub enum FlushReason {
     Manually,
     /// Auto flush periodically.
     Periodically,
+    /// Global write buffer is full.
+    GlobalBufferFull,
 }
 
 impl FlushReason {
@@ -146,6 +155,7 @@ impl FlushReason {
             FlushReason::MemtableFull => "memtable_full",
             FlushReason::Manually => "manually",
             FlushReason::Periodically => "periodically",
+            FlushReason::GlobalBufferFull => "global_buffer_full",
         }
     }
 }

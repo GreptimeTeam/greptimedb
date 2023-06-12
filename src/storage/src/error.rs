@@ -38,7 +38,7 @@ pub enum Error {
     #[snafu(display("Invalid region descriptor, region: {}, source: {}", region, source))]
     InvalidRegionDesc {
         region: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: MetadataError,
     },
 
@@ -53,7 +53,7 @@ pub enum Error {
 
     #[snafu(display("Failed to write to buffer, source: {}", source))]
     WriteBuffer {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_datasource::error::Error,
     },
 
@@ -147,7 +147,7 @@ pub enum Error {
     ))]
     WriteWal {
         region_id: RegionId,
-        #[snafu(backtrace)]
+        location: Location,
         source: BoxedError,
     },
 
@@ -218,7 +218,7 @@ pub enum Error {
     #[snafu(display("Failed to read WAL, region_id: {}, source: {}", region_id, source))]
     ReadWal {
         region_id: RegionId,
-        #[snafu(backtrace)]
+        location: Location,
         source: BoxedError,
     },
 
@@ -229,7 +229,7 @@ pub enum Error {
     ))]
     MarkWalObsolete {
         region_id: u64,
-        #[snafu(backtrace)]
+        location: Location,
         source: BoxedError,
     },
 
@@ -265,14 +265,14 @@ pub enum Error {
     #[snafu(display("Failed to convert store schema, file: {}, source: {}", file, source))]
     ConvertStoreSchema {
         file: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: MetadataError,
     },
 
     #[snafu(display("Invalid raw region metadata, region: {}, source: {}", region, source))]
     InvalidRawRegion {
         region: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: MetadataError,
     },
 
@@ -281,13 +281,13 @@ pub enum Error {
 
     #[snafu(display("Invalid projection, source: {}", source))]
     InvalidProjection {
-        #[snafu(backtrace)]
+        location: Location,
         source: MetadataError,
     },
 
     #[snafu(display("Failed to push data to batch builder, source: {}", source))]
     PushBatch {
-        #[snafu(backtrace)]
+        location: Location,
         source: datatypes::error::Error,
     },
 
@@ -297,19 +297,19 @@ pub enum Error {
     #[snafu(display("Failed to filter column {}, source: {}", name, source))]
     FilterColumn {
         name: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: datatypes::error::Error,
     },
 
     #[snafu(display("Invalid alter request, source: {}", source))]
     InvalidAlterRequest {
-        #[snafu(backtrace)]
+        location: Location,
         source: MetadataError,
     },
 
     #[snafu(display("Failed to alter metadata, source: {}", source))]
     AlterMetadata {
-        #[snafu(backtrace)]
+        location: Location,
         source: MetadataError,
     },
 
@@ -320,7 +320,7 @@ pub enum Error {
     ))]
     CreateDefault {
         name: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: datatypes::error::Error,
     },
 
@@ -353,7 +353,7 @@ pub enum Error {
     ))]
     CreateDefaultToRead {
         column: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: datatypes::error::Error,
     },
 
@@ -367,7 +367,7 @@ pub enum Error {
     ))]
     ConvertChunk {
         name: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: datatypes::error::Error,
     },
 
@@ -376,7 +376,7 @@ pub enum Error {
 
     #[snafu(display("Failed to create record batch for write batch, source:{}", source))]
     CreateRecordBatch {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_recordbatch::error::Error,
     },
 
@@ -451,13 +451,13 @@ pub enum Error {
 
     #[snafu(display("Failed to start manifest gc task: {}", source))]
     StartManifestGcTask {
-        #[snafu(backtrace)]
+        location: Location,
         source: RuntimeError,
     },
 
     #[snafu(display("Failed to stop manifest gc task: {}", source))]
     StopManifestGcTask {
-        #[snafu(backtrace)]
+        location: Location,
         source: RuntimeError,
     },
 
@@ -475,7 +475,7 @@ pub enum Error {
 
     #[snafu(display("Failed to calculate SST expire time, source: {}", source))]
     TtlCalculation {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_time::error::Error,
     },
 
@@ -501,13 +501,13 @@ pub enum Error {
 
     #[snafu(display("Failed to start picking task for flush: {}", source))]
     StartPickTask {
-        #[snafu(backtrace)]
+        location: Location,
         source: RuntimeError,
     },
 
     #[snafu(display("Failed to stop picking task for flush: {}", source))]
     StopPickTask {
-        #[snafu(backtrace)]
+        location: Location,
         source: RuntimeError,
     },
 
@@ -519,12 +519,6 @@ pub enum Error {
 
     #[snafu(display("Failed to sort arrays, source: {}", source))]
     SortArrays {
-        source: ArrowError,
-        location: Location,
-    },
-
-    #[snafu(display("Failed to sort arrays, source: {}", source))]
-    SelectRows {
         source: ArrowError,
         location: Location,
     },
@@ -627,7 +621,6 @@ impl ErrorExt for Error {
 
             TtlCalculation { source, .. } => source.status_code(),
             ConvertColumnsToRows { .. } | SortArrays { .. } => StatusCode::Unexpected,
-            SelectRows { .. } => StatusCode::Unexpected,
         }
     }
 

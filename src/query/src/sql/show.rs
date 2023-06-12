@@ -20,7 +20,7 @@ use sql::ast::{
     ColumnDef, ColumnOption, ColumnOptionDef, Expr, ObjectName, SqlOption, TableConstraint,
     Value as SqlValue,
 };
-use sql::dialect::GenericDialect;
+use sql::dialect::GreptimeDbDialect;
 use sql::parser::ParserContext;
 use sql::statements::create::{CreateTable, TIME_INDEX};
 use sql::statements::{self};
@@ -108,7 +108,7 @@ fn create_column_def(column_schema: &ColumnSchema) -> Result<ColumnDef> {
                     .with_context(|_| ConvertSqlValueSnafu { value: v.clone() })?,
             ),
             ColumnDefaultConstraint::Function(expr) => {
-                ParserContext::parse_function(expr, &GenericDialect {}).context(SqlSnafu)?
+                ParserContext::parse_function(expr, &GreptimeDbDialect {}).context(SqlSnafu)?
             }
         };
 

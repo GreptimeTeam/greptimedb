@@ -157,7 +157,6 @@ impl MysqlServer {
         info!("MySQL connection coming from: {}", stream.peer_addr()?);
         io_runtime.spawn(async move {
             increment_gauge!(crate::metrics::METRIC_MYSQL_CONNECTIONS, 1.0);
-            // TODO(LFC): Use `output_stream` to write large MySQL ResultSet to client.
             if let Err(e)  = Self::do_handle(stream, spawn_ref, spawn_config).await {
                 // TODO(LFC): Write this error to client as well, in MySQL text protocol.
                 // Looks like we have to expose opensrv-mysql's `PacketWriter`?

@@ -17,7 +17,7 @@
 use std::sync::{Arc, Once, RwLock};
 use std::time::{Duration, Instant};
 
-use metrics::histogram;
+use metrics::{register_histogram, Histogram, IntoLabels};
 use metrics_exporter_prometheus::PrometheusBuilder;
 pub use metrics_exporter_prometheus::PrometheusHandle;
 use metrics_util::layers::{Layer, PrefixLayer};
@@ -58,38 +58,45 @@ pub fn try_handle() -> Option<PrometheusHandle> {
     PROMETHEUS_HANDLE.as_ref().read().unwrap().clone()
 }
 
+/// A Histogram timer that emits the elapsed time to the histogram on drop.
 #[must_use = "Timer should be kept in a variable otherwise it cannot observe duration"]
-#[derive(Debug)]
 pub struct Timer {
     start: Instant,
-    name: &'static str,
-    labels: Vec<(String, String)>,
+    histogram: Histogram,
+}
+
+impl From<Histogram> for Timer {
+    fn from(histogram: Histogram) -> Timer {
+        Timer::from_histogram(histogram)
+    }
 }
 
 impl Timer {
+    /// Creates a timer from given histogram.
+    pub fn from_histogram(histogram: Histogram) -> Self {
+        Self {
+            start: Instant::now(),
+            histogram,
+        }
+    }
+
+    /// Creates a timer from given `name`.
     pub fn new(name: &'static str) -> Self {
         Self {
             start: Instant::now(),
-            name,
-            labels: Vec::new(),
+            histogram: register_histogram!(name),
         }
     }
 
-    pub fn new_with_labels<S: Into<String> + Clone>(name: &'static str, labels: &[(S, S)]) -> Self {
+    /// Creates a timer from given `name`.
+    pub fn new_with_labels<L: IntoLabels>(name: &'static str, labels: L) -> Self {
         Self {
             start: Instant::now(),
-            name,
-            labels: labels
-                .iter()
-                .map(|(k, v)| (k.clone().into(), v.clone().into()))
-                .collect::<Vec<_>>(),
+            histogram: register_histogram!(name, labels),
         }
     }
 
-    pub fn labels_mut(&mut self) -> &mut Vec<(String, String)> {
-        self.labels.as_mut()
-    }
-
+    /// Returns the elapsed duration from the time this timer created.
     pub fn elapsed(&self) -> Duration {
         self.start.elapsed()
     }
@@ -97,11 +104,7 @@ impl Timer {
 
 impl Drop for Timer {
     fn drop(&mut self) {
-        if !self.labels.is_empty() {
-            histogram!(self.name, self.start.elapsed(), &self.labels);
-        } else {
-            histogram!(self.name, self.start.elapsed());
-        }
+        self.histogram.record(self.elapsed())
     }
 }
 
@@ -110,7 +113,7 @@ macro_rules! timer {
     ($name: expr) => {
         $crate::metric::Timer::new($name)
     };
-    ($name:expr,$labels:expr) => {
+    ($name:expr, $labels:expr) => {
         $crate::metric::Timer::new_with_labels($name, $labels)
     };
 }
@@ -123,8 +126,7 @@ mod tests {
     fn test_elapsed_timer() {
         init_default_metrics_recorder();
         {
-            let t = Timer::new("test_elapsed_timer_a");
-            drop(t);
+            let _t = timer!("test_elapsed_timer_a");
         }
         let handle = try_handle().unwrap();
         let text = handle.render();
@@ -141,8 +143,7 @@ mod tests {
     fn test_elapsed_timer_with_label() {
         init_default_metrics_recorder();
         {
-            let t = Timer::new("test_elapsed_timer_a");
-            drop(t);
+            let _t = timer!("test_elapsed_timer_a");
         }
         let handle = try_handle().unwrap();
         let text = handle.render();
@@ -150,34 +151,16 @@ mod tests {
         assert!(!text.contains("test_elapsed_timer_b"));
         let label_a = "label_a";
         let label_b = "label_b";
-        let label_c = "label_c";
-        let label_d = "label_d";
-        let label_e = "label_e";
         assert!(!text.contains(label_a));
         assert!(!text.contains(label_b));
 
         {
-            let mut timer_b = timer!("test_elapsed_timer_b", &[(label_a, "a"), (label_b, "b")]);
-            let labels = timer_b.labels_mut();
-            labels.push((label_c.to_owned(), "d".to_owned()));
+            let _t = timer!("test_elapsed_timer_b", &[(label_a, "a"), (label_b, "b")]);
         }
         let text = handle.render();
         assert!(text.contains("test_elapsed_timer_a"));
         assert!(text.contains("test_elapsed_timer_b"));
         assert!(text.contains(label_a));
         assert!(text.contains(label_b));
-        assert!(text.contains(label_c));
-
-        {
-            let mut timer_c = timer!("test_elapsed_timer_c");
-            let labels = timer_c.labels_mut();
-            labels.push((label_d.to_owned(), "d".to_owned()));
-            labels.push((label_e.to_owned(), "e".to_owned()));
-        }
-
-        let text = handle.render();
-        assert!(text.contains("test_elapsed_timer_c"));
-        assert!(text.contains(label_d));
-        assert!(text.contains(label_e));
     }
 }

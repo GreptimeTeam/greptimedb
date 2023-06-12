@@ -217,7 +217,7 @@ mod tests {
             seq.fetch_add(1, Ordering::Relaxed);
         }
 
-        let iter = memtable.iter(&IterContext::default()).unwrap();
+        let iter = memtable.iter(IterContext::default()).unwrap();
         let file_path = sst_file_id.as_parquet();
         let writer = ParquetWriter::new(&file_path, Source::Iter(iter), object_store.clone());
 

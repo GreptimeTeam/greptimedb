@@ -5,7 +5,19 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+api = { path = "../../api" }
+common-catalog = { path = "../catalog" }
 common-error = { path = "../error" }
+common-runtime = { path = "../runtime" }
+common-telemetry = { path = "../telemetry" }
+common-time = { path = "../time" }
 serde.workspace = true
-snafu.workspace = true
 serde_json.workspace = true
+snafu.workspace = true
+store-api = { path = "../../store-api" }
+table = { path = "../../table" }
+tokio.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true
+datatypes = { path = "../../datatypes" }

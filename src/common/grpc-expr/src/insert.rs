@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::column::{SemanticType, Values};
@@ -25,10 +26,16 @@ use common_time::timestamp::Timestamp;
 use common_time::{Date, DateTime};
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::prelude::{ValueRef, VectorRef};
+use datatypes::scalars::ScalarVector;
 use datatypes::schema::SchemaRef;
-use datatypes::types::TimestampType;
+use datatypes::types::{Int16Type, Int8Type, TimestampType, UInt16Type, UInt8Type};
 use datatypes::value::Value;
-use datatypes::vectors::MutableVector;
+use datatypes::vectors::{
+    BinaryVector, BooleanVector, DateTimeVector, DateVector, Float32Vector, Float64Vector,
+    Int32Vector, Int64Vector, PrimitiveVector, StringVector, TimestampMicrosecondVector,
+    TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector, UInt32Vector,
+    UInt64Vector,
+};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::TableId;
 use table::requests::InsertRequest;
@@ -68,6 +75,7 @@ pub fn find_new_columns(schema: &SchemaRef, columns: &[Column]) -> Result<Option
             columns_to_add.push(AddColumn {
                 column_def,
                 is_key: *semantic_type == TAG_SEMANTIC_TYPE,
+                location: None,
             });
             new_columns.insert(column_name.to_string());
         }
@@ -257,7 +265,7 @@ pub fn build_create_expr_from_insertion(
         create_if_not_exists: true,
         table_options: Default::default(),
         table_id: table_id.map(|id| api::v1::TableId { id }),
-        region_ids: vec![0], // TODO:(hl): region id should be allocated by frontend
+        region_numbers: vec![0], // TODO:(hl): region number should be allocated by frontend
         engine: engine.to_string(),
     };
 
@@ -286,15 +294,10 @@ pub fn to_table_insert_request(
         let datatype: ConcreteDataType = ColumnDataTypeWrapper::try_new(datatype)
             .context(ColumnDataTypeSnafu)?
             .into();
-
-        let vector_builder = &mut datatype.create_mutable_vector(row_count);
-
-        add_values_to_builder(vector_builder, values, row_count, null_mask)?;
+        let vector = add_values_to_builder(datatype, values, row_count, null_mask)?;
 
         ensure!(
-            columns_values
-                .insert(column_name.clone(), vector_builder.to_vector())
-                .is_none(),
+            columns_values.insert(column_name.clone(), vector).is_none(),
             ColumnAlreadyExistsSnafu {
                 column: column_name
             }
@@ -311,28 +314,16 @@ pub fn to_table_insert_request(
 }
 
 pub(crate) fn add_values_to_builder(
-    builder: &mut Box<dyn MutableVector>,
+    data_type: ConcreteDataType,
     values: Values,
     row_count: usize,
     null_mask: Vec<u8>,
-) -> Result<()> {
-    let data_type = builder.data_type();
-    let values = convert_values(&data_type, values);
-
+) -> Result<VectorRef> {
     if null_mask.is_empty() {
-        ensure!(
-            values.len() == row_count,
-            UnexpectedValuesLengthSnafu {
-                reason: "If null_mask is empty, the length of values must be equal to row_count."
-            }
-        );
-
-        values.iter().try_for_each(|value| {
-            builder
-                .try_push_value_ref(value.as_value_ref())
-                .context(CreateVectorSnafu)
-        })?;
+        Ok(values_to_vector(&data_type, values))
     } else {
+        let builder = &mut data_type.create_mutable_vector(row_count);
+        let values = convert_values(&data_type, values);
         let null_mask = BitVec::from_vec(null_mask);
         ensure!(
             null_mask.count_ones() + values.len() == row_count,
@@ -353,8 +344,53 @@ pub(crate) fn add_values_to_builder(
                 }
             }
         }
+        Ok(builder.to_vector())
     }
-    Ok(())
+}
+
+fn values_to_vector(data_type: &ConcreteDataType, values: Values) -> VectorRef {
+    match data_type {
+        ConcreteDataType::Boolean(_) => Arc::new(BooleanVector::from(values.bool_values)),
+        ConcreteDataType::Int8(_) => Arc::new(PrimitiveVector::<Int8Type>::from_iter_values(
+            values.i8_values.into_iter().map(|x| x as i8),
+        )),
+        ConcreteDataType::Int16(_) => Arc::new(PrimitiveVector::<Int16Type>::from_iter_values(
+            values.i16_values.into_iter().map(|x| x as i16),
+        )),
+        ConcreteDataType::Int32(_) => Arc::new(Int32Vector::from_vec(values.i32_values)),
+        ConcreteDataType::Int64(_) => Arc::new(Int64Vector::from_vec(values.i64_values)),
+        ConcreteDataType::UInt8(_) => Arc::new(PrimitiveVector::<UInt8Type>::from_iter_values(
+            values.u8_values.into_iter().map(|x| x as u8),
+        )),
+        ConcreteDataType::UInt16(_) => Arc::new(PrimitiveVector::<UInt16Type>::from_iter_values(
+            values.u16_values.into_iter().map(|x| x as u16),
+        )),
+        ConcreteDataType::UInt32(_) => Arc::new(UInt32Vector::from_vec(values.u32_values)),
+        ConcreteDataType::UInt64(_) => Arc::new(UInt64Vector::from_vec(values.u64_values)),
+        ConcreteDataType::Float32(_) => Arc::new(Float32Vector::from_vec(values.f32_values)),
+        ConcreteDataType::Float64(_) => Arc::new(Float64Vector::from_vec(values.f64_values)),
+        ConcreteDataType::Binary(_) => Arc::new(BinaryVector::from(values.binary_values)),
+        ConcreteDataType::String(_) => Arc::new(StringVector::from_vec(values.string_values)),
+        ConcreteDataType::Date(_) => Arc::new(DateVector::from_vec(values.date_values)),
+        ConcreteDataType::DateTime(_) => Arc::new(DateTimeVector::from_vec(values.datetime_values)),
+        ConcreteDataType::Timestamp(unit) => match unit {
+            TimestampType::Second(_) => {
+                Arc::new(TimestampSecondVector::from_vec(values.ts_second_values))
+            }
+            TimestampType::Millisecond(_) => Arc::new(TimestampMillisecondVector::from_vec(
+                values.ts_millisecond_values,
+            )),
+            TimestampType::Microsecond(_) => Arc::new(TimestampMicrosecondVector::from_vec(
+                values.ts_microsecond_values,
+            )),
+            TimestampType::Nanosecond(_) => Arc::new(TimestampNanosecondVector::from_vec(
+                values.ts_nanosecond_values,
+            )),
+        },
+        ConcreteDataType::Null(_) | ConcreteDataType::List(_) | ConcreteDataType::Dictionary(_) => {
+            unreachable!()
+        }
+    }
 }
 
 fn convert_values(data_type: &ConcreteDataType, values: Values) -> Vec<Value> {
@@ -380,22 +416,34 @@ fn convert_values(data_type: &ConcreteDataType, values: Values) -> Vec<Value> {
             .into_iter()
             .map(|val| val.into())
             .collect(),
-        ConcreteDataType::Int8(_) => values.i8_values.into_iter().map(|val| val.into()).collect(),
+        ConcreteDataType::Int8(_) => values
+            .i8_values
+            .into_iter()
+            // Safety: Since i32 only stores i8 data here, so i32 as i8 is safe.
+            .map(|val| (val as i8).into())
+            .collect(),
         ConcreteDataType::Int16(_) => values
             .i16_values
             .into_iter()
-            .map(|val| val.into())
+            // Safety: Since i32 only stores i16 data here, so i32 as i16 is safe.
+            .map(|val| (val as i16).into())
             .collect(),
         ConcreteDataType::Int32(_) => values
             .i32_values
             .into_iter()
             .map(|val| val.into())
             .collect(),
-        ConcreteDataType::UInt8(_) => values.u8_values.into_iter().map(|val| val.into()).collect(),
+        ConcreteDataType::UInt8(_) => values
+            .u8_values
+            .into_iter()
+            // Safety: Since i32 only stores u8 data here, so i32 as u8 is safe.
+            .map(|val| (val as u8).into())
+            .collect(),
         ConcreteDataType::UInt16(_) => values
             .u16_values
             .into_iter()
-            .map(|val| val.into())
+            // Safety: Since i32 only stores u16 data here, so i32 as u16 is safe.
+            .map(|val| (val as u16).into())
             .collect(),
         ConcreteDataType::UInt32(_) => values
             .u32_values
@@ -418,12 +466,12 @@ fn convert_values(data_type: &ConcreteDataType, values: Values) -> Vec<Value> {
             .map(|val| val.into())
             .collect(),
         ConcreteDataType::DateTime(_) => values
-            .i64_values
+            .datetime_values
             .into_iter()
             .map(|v| Value::DateTime(v.into()))
             .collect(),
         ConcreteDataType::Date(_) => values
-            .i32_values
+            .date_values
             .into_iter()
             .map(|v| Value::Date(v.into()))
             .collect(),
@@ -459,26 +507,21 @@ fn is_null(null_mask: &BitVec, idx: usize) -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
-    use std::any::Any;
     use std::sync::Arc;
-    use std::{assert_eq, unimplemented, vec};
+    use std::{assert_eq, vec};
 
     use api::helper::ColumnDataTypeWrapper;
     use api::v1::column::{self, SemanticType, Values};
     use api::v1::{Column, ColumnDataType};
     use common_base::BitVec;
     use common_catalog::consts::MITO_ENGINE;
-    use common_query::physical_plan::PhysicalPlanRef;
-    use common_query::prelude::Expr;
     use common_time::timestamp::Timestamp;
     use datatypes::data_type::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
+    use datatypes::schema::{ColumnSchema, SchemaBuilder};
     use datatypes::types::{TimestampMillisecondType, TimestampSecondType, TimestampType};
     use datatypes::value::Value;
+    use paste::paste;
     use snafu::ResultExt;
-    use table::error::Result as TableResult;
-    use table::metadata::TableInfoRef;
-    use table::Table;
 
     use super::*;
     use crate::error;
@@ -666,25 +709,149 @@ mod tests {
         assert_eq!(Value::Timestamp(Timestamp::new_millisecond(101)), ts.get(1));
     }
 
-    #[test]
-    fn test_convert_values() {
-        let data_type = ConcreteDataType::float64_datatype();
-        let values = Values {
-            f64_values: vec![0.1, 0.2, 0.3],
-            ..Default::default()
+    macro_rules! test_convert_values {
+        ($grpc_data_type: ident, $values: expr,  $concrete_data_type: ident, $expected_ret: expr) => {
+            paste! {
+                #[test]
+                fn [<test_convert_ $grpc_data_type _values>]() {
+                    let values = Values {
+                        [<$grpc_data_type _values>]: $values,
+                        ..Default::default()
+                    };
+
+                    let data_type = ConcreteDataType::[<$concrete_data_type _datatype>]();
+                    let result = convert_values(&data_type, values);
+
+                    assert_eq!(
+                        $expected_ret,
+                        result
+                    );
+                }
+            }
         };
-
-        let result = convert_values(&data_type, values);
-
-        assert_eq!(
-            vec![
-                Value::Float64(0.1.into()),
-                Value::Float64(0.2.into()),
-                Value::Float64(0.3.into())
-            ],
-            result
-        );
     }
+
+    test_convert_values!(
+        i8,
+        vec![1_i32, 2, 3],
+        int8,
+        vec![Value::Int8(1), Value::Int8(2), Value::Int8(3)]
+    );
+
+    test_convert_values!(
+        u8,
+        vec![1_u32, 2, 3],
+        uint8,
+        vec![Value::UInt8(1), Value::UInt8(2), Value::UInt8(3)]
+    );
+
+    test_convert_values!(
+        i16,
+        vec![1_i32, 2, 3],
+        int16,
+        vec![Value::Int16(1), Value::Int16(2), Value::Int16(3)]
+    );
+
+    test_convert_values!(
+        u16,
+        vec![1_u32, 2, 3],
+        uint16,
+        vec![Value::UInt16(1), Value::UInt16(2), Value::UInt16(3)]
+    );
+
+    test_convert_values!(
+        i32,
+        vec![1, 2, 3],
+        int32,
+        vec![Value::Int32(1), Value::Int32(2), Value::Int32(3)]
+    );
+
+    test_convert_values!(
+        u32,
+        vec![1, 2, 3],
+        uint32,
+        vec![Value::UInt32(1), Value::UInt32(2), Value::UInt32(3)]
+    );
+
+    test_convert_values!(
+        i64,
+        vec![1, 2, 3],
+        int64,
+        vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)]
+    );
+
+    test_convert_values!(
+        u64,
+        vec![1, 2, 3],
+        uint64,
+        vec![Value::UInt64(1), Value::UInt64(2), Value::UInt64(3)]
+    );
+
+    test_convert_values!(
+        f32,
+        vec![1.0, 2.0, 3.0],
+        float32,
+        vec![
+            Value::Float32(1.0.into()),
+            Value::Float32(2.0.into()),
+            Value::Float32(3.0.into())
+        ]
+    );
+
+    test_convert_values!(
+        f64,
+        vec![1.0, 2.0, 3.0],
+        float64,
+        vec![
+            Value::Float64(1.0.into()),
+            Value::Float64(2.0.into()),
+            Value::Float64(3.0.into())
+        ]
+    );
+
+    test_convert_values!(
+        string,
+        vec!["1".to_string(), "2".to_string(), "3".to_string()],
+        string,
+        vec![
+            Value::String("1".into()),
+            Value::String("2".into()),
+            Value::String("3".into())
+        ]
+    );
+
+    test_convert_values!(
+        binary,
+        vec!["1".into(), "2".into(), "3".into()],
+        binary,
+        vec![
+            Value::Binary(b"1".to_vec().into()),
+            Value::Binary(b"2".to_vec().into()),
+            Value::Binary(b"3".to_vec().into())
+        ]
+    );
+
+    test_convert_values!(
+        date,
+        vec![1, 2, 3],
+        date,
+        vec![
+            Value::Date(1.into()),
+            Value::Date(2.into()),
+            Value::Date(3.into())
+        ]
+    );
+
+    test_convert_values!(
+        datetime,
+        vec![1.into(), 2.into(), 3.into()],
+        datetime,
+        vec![
+            Value::DateTime(1.into()),
+            Value::DateTime(2.into()),
+            Value::DateTime(3.into())
+        ]
+    );
 
     #[test]
     fn test_convert_timestamp_values() {
@@ -731,49 +898,6 @@ mod tests {
 
         assert_eq!(None, is_null(&null_mask, 16));
         assert_eq!(None, is_null(&null_mask, 99));
-    }
-
-    struct DemoTable;
-
-    #[async_trait::async_trait]
-    impl Table for DemoTable {
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-
-        fn schema(&self) -> SchemaRef {
-            let column_schemas = vec![
-                ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
-                ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
-                ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
-                ColumnSchema::new(
-                    "ts",
-                    ConcreteDataType::timestamp_millisecond_datatype(),
-                    true,
-                )
-                .with_time_index(true),
-            ];
-
-            Arc::new(
-                SchemaBuilder::try_from(column_schemas)
-                    .unwrap()
-                    .build()
-                    .unwrap(),
-            )
-        }
-
-        fn table_info(&self) -> TableInfoRef {
-            unimplemented!()
-        }
-
-        async fn scan(
-            &self,
-            _projection: Option<&Vec<usize>>,
-            _filters: &[Expr],
-            _limit: Option<usize>,
-        ) -> TableResult<PhysicalPlanRef> {
-            unimplemented!();
-        }
     }
 
     fn mock_insert_batch() -> (Vec<Column>, u32) {

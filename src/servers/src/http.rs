@@ -12,35 +12,38 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod admin;
 pub mod authorize;
 pub mod handler;
 pub mod influxdb;
+pub mod mem_prof;
 pub mod opentsdb;
+mod pprof;
 pub mod prometheus;
 pub mod script;
 
-mod admin;
 #[cfg(feature = "dashboard")]
 mod dashboard;
-#[cfg(feature = "mem-prof")]
-pub mod mem_prof;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aide::axum::{routing as apirouting, ApiRouter, IntoApiResponse};
 use aide::openapi::{Info, OpenApi, Server as OpenAPIServer};
 use async_trait::async_trait;
 use axum::body::BoxBody;
 use axum::error_handling::HandleErrorLayer;
-use axum::response::{Html, Json};
+use axum::extract::MatchedPath;
+use axum::http::Request;
+use axum::middleware::{self, Next};
+use axum::response::{Html, IntoResponse, Json};
 use axum::{routing, BoxError, Extension, Router};
 use common_error::prelude::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
-use common_telemetry::logging::info;
+use common_telemetry::logging::{self, info};
 use datatypes::data_type::DataType;
 use futures::FutureExt;
 use schemars::JsonSchema;
@@ -61,6 +64,10 @@ use crate::auth::UserProviderRef;
 use crate::configurator::ConfiguratorRef;
 use crate::error::{AlreadyStartedSnafu, Result, StartHttpSnafu};
 use crate::http::admin::flush;
+use crate::metrics::{
+    METRIC_HTTP_REQUESTS_ELAPSED, METRIC_HTTP_REQUESTS_TOTAL, METRIC_METHOD_LABEL,
+    METRIC_PATH_LABEL, METRIC_STATUS_LABEL,
+};
 use crate::metrics_handler::MetricsHandler;
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
@@ -496,15 +503,6 @@ impl HttpServer {
             );
         }
 
-        // mem profiler
-        #[cfg(feature = "mem-prof")]
-        {
-            router = router.nest(
-                &format!("/{HTTP_API_VERSION}/prof"),
-                Router::new().route("/mem", routing::get(crate::http::mem_prof::mem_prof)),
-            );
-        }
-
         if let Some(metrics_handler) = self.metrics_handler {
             router = router.nest("", self.route_metrics(metrics_handler));
         }
@@ -529,6 +527,10 @@ impl HttpServer {
                 );
             }
         }
+
+        // Add a layer to collect HTTP metrics for axum.
+        router = router.route_layer(middleware::from_fn(track_metrics));
+
         router
     }
 
@@ -544,6 +546,19 @@ impl HttpServer {
                     .layer(AsyncRequireAuthorizationLayer::new(
                         HttpAuth::<BoxBody>::new(self.user_provider.clone()),
                     )),
+            )
+            // Handlers for debug, we don't expect a timeout.
+            .nest(
+                &format!("/{HTTP_API_VERSION}/prof"),
+                Router::new()
+                    .route(
+                        "/cpu",
+                        routing::get(pprof::pprof_handler).post(pprof::pprof_handler),
+                    )
+                    .route(
+                        "/mem",
+                        routing::get(mem_prof::mem_prof_handler).post(mem_prof::mem_prof_handler),
+                    ),
             )
     }
 
@@ -600,6 +615,35 @@ impl HttpServer {
     }
 }
 
+/// A middleware to record metrics for HTTP.
+// Based on https://github.com/tokio-rs/axum/blob/axum-v0.6.16/examples/prometheus-metrics/src/main.rs
+pub(crate) async fn track_metrics<B>(req: Request<B>, next: Next<B>) -> impl IntoResponse {
+    let _timer = common_telemetry::timer!("http_track_metrics", &[("tag", "value")]);
+    let start = Instant::now();
+    let path = if let Some(matched_path) = req.extensions().get::<MatchedPath>() {
+        matched_path.as_str().to_owned()
+    } else {
+        req.uri().path().to_owned()
+    };
+    let method = req.method().clone();
+
+    let response = next.run(req).await;
+
+    let latency = start.elapsed().as_secs_f64();
+    let status = response.status().as_u16().to_string();
+
+    let labels = [
+        (METRIC_METHOD_LABEL, method.to_string()),
+        (METRIC_PATH_LABEL, path),
+        (METRIC_STATUS_LABEL, status),
+    ];
+
+    metrics::increment_counter!(METRIC_HTTP_REQUESTS_TOTAL, &labels);
+    metrics::histogram!(METRIC_HTTP_REQUESTS_ELAPSED, latency, &labels);
+
+    response
+}
+
 pub const HTTP_SERVER: &str = "HTTP_SERVER";
 
 #[async_trait]
@@ -652,6 +696,8 @@ impl Server for HttpServer {
 
 /// handle error middleware
 async fn handle_error(err: BoxError) -> Json<JsonResponse> {
+    logging::error!("Unhandled internal error: {}", err);
+
     Json(JsonResponse::with_error(
         format!("Unhandled internal error: {err}"),
         StatusCode::Unexpected,

@@ -13,17 +13,19 @@
 // limitations under the License.
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
+use api::v1::meta::mailbox_message::Payload;
 use api::v1::meta::{
     HeartbeatRequest, HeartbeatResponse, MailboxMessage, RequestHeader, ResponseHeader, Role,
     PROTOCOL_VERSION,
 };
 pub use check_leader_handler::CheckLeaderHandler;
 pub use collect_stats_handler::CollectStatsHandler;
-use common_meta::instruction::Instruction;
-use common_telemetry::{info, warn};
+use common_meta::instruction::{Instruction, InstructionReply};
+use common_telemetry::{debug, info, warn};
 use dashmap::DashMap;
 pub use failure_handler::RegionFailureHandler;
 pub use keep_lease_handler::KeepLeaseHandler;
@@ -31,19 +33,22 @@ use metrics::{decrement_gauge, increment_gauge};
 pub use on_leader_start::OnLeaderStartHandler;
 pub use persist_stats_handler::PersistStatsHandler;
 pub use response_header_handler::ResponseHeaderHandler;
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 use tokio::sync::mpsc::Sender;
 use tokio::sync::{oneshot, Notify, RwLock};
 
 use self::node_stat::Stat;
-use crate::error::{self, Result};
+use crate::error::{self, DeserializeFromJsonSnafu, Result, UnexpectedInstructionReplySnafu};
 use crate::metasrv::Context;
 use crate::metrics::METRIC_META_HEARTBEAT_CONNECTION_NUM;
 use crate::sequence::Sequence;
-use crate::service::mailbox::{Channel, Mailbox, MailboxReceiver, MailboxRef, MessageId};
+use crate::service::mailbox::{
+    BroadcastChannel, Channel, Mailbox, MailboxReceiver, MailboxRef, MessageId,
+};
+
 mod check_leader_handler;
 mod collect_stats_handler;
-mod failure_handler;
+pub(crate) mod failure_handler;
 mod keep_lease_handler;
 pub mod mailbox_handler;
 pub mod node_stat;
@@ -113,34 +118,89 @@ impl Pusher {
 }
 
 #[derive(Clone, Default)]
+pub struct Pushers(Arc<RwLock<BTreeMap<String, Pusher>>>);
+
+impl Pushers {
+    async fn push(&self, pusher_id: &str, mailbox_message: MailboxMessage) -> Result<()> {
+        let pushers = self.0.read().await;
+        let pusher = pushers
+            .get(pusher_id)
+            .context(error::PusherNotFoundSnafu { pusher_id })?;
+        pusher
+            .push(HeartbeatResponse {
+                header: Some(pusher.header()),
+                mailbox_message: Some(mailbox_message),
+            })
+            .await
+    }
+
+    async fn broadcast(
+        &self,
+        range: Range<String>,
+        mailbox_message: &MailboxMessage,
+    ) -> Result<()> {
+        let pushers = self.0.read().await;
+        let pushers = pushers
+            .range(range)
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>();
+        for pusher in pushers {
+            let mut mailbox_message = mailbox_message.clone();
+            mailbox_message.id = 0; // one-way message
+            pusher
+                .push(HeartbeatResponse {
+                    header: Some(pusher.header()),
+                    mailbox_message: Some(mailbox_message),
+                })
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    pub(crate) async fn insert(&self, pusher_id: String, pusher: Pusher) -> Option<Pusher> {
+        self.0.write().await.insert(pusher_id, pusher)
+    }
+
+    async fn remove(&self, pusher_id: &str) -> Option<Pusher> {
+        self.0.write().await.remove(pusher_id)
+    }
+}
+
+#[derive(Clone, Default)]
 pub struct HeartbeatHandlerGroup {
     handlers: Arc<RwLock<Vec<Box<dyn HeartbeatHandler>>>>,
-    pushers: Arc<RwLock<BTreeMap<String, Pusher>>>,
+    pushers: Pushers,
 }
 
 impl HeartbeatHandlerGroup {
+    pub(crate) fn new(pushers: Pushers) -> Self {
+        Self {
+            handlers: Arc::new(RwLock::new(vec![])),
+            pushers,
+        }
+    }
+
     pub async fn add_handler(&self, handler: impl HeartbeatHandler + 'static) {
         let mut handlers = self.handlers.write().await;
         handlers.push(Box::new(handler));
     }
 
     pub async fn register(&self, key: impl AsRef<str>, pusher: Pusher) {
-        let mut pushers = self.pushers.write().await;
         let key = key.as_ref();
         increment_gauge!(METRIC_META_HEARTBEAT_CONNECTION_NUM, 1.0);
         info!("Pusher register: {}", key);
-        pushers.insert(key.into(), pusher);
+        let _ = self.pushers.insert(key.to_string(), pusher).await;
     }
 
     pub async fn unregister(&self, key: impl AsRef<str>) -> Option<Pusher> {
-        let mut pushers = self.pushers.write().await;
         let key = key.as_ref();
         decrement_gauge!(METRIC_META_HEARTBEAT_CONNECTION_NUM, 1.0);
         info!("Pusher unregister: {}", key);
-        pushers.remove(key)
+        self.pushers.remove(key).await
     }
 
-    pub fn pushers(&self) -> Arc<RwLock<BTreeMap<String, Pusher>>> {
+    pub fn pushers(&self) -> Pushers {
         self.pushers.clone()
     }
 
@@ -151,18 +211,18 @@ impl HeartbeatHandlerGroup {
     ) -> Result<HeartbeatResponse> {
         let mut acc = HeartbeatAccumulator::default();
         let handlers = self.handlers.read().await;
+        let role = req
+            .header
+            .as_ref()
+            .and_then(|h| Role::from_i32(h.role))
+            .context(error::InvalidArgumentsSnafu {
+                err_msg: format!("invalid role: {:?}", req.header),
+            })?;
+
         for h in handlers.iter() {
             if ctx.is_skip_all() {
                 break;
             }
-
-            let role = req
-                .header
-                .as_ref()
-                .and_then(|h| Role::from_i32(h.role))
-                .context(error::InvalidArgumentsSnafu {
-                    err_msg: format!("invalid role: {:?}", req.header),
-                })?;
 
             if h.is_acceptable(role) {
                 h.handle(&req, &mut ctx, &mut acc).await?;
@@ -178,7 +238,7 @@ impl HeartbeatHandlerGroup {
 }
 
 pub struct HeartbeatMailbox {
-    pushers: Arc<RwLock<BTreeMap<String, Pusher>>>,
+    pushers: Pushers,
     sequence: Sequence,
     senders: DashMap<MessageId, oneshot::Sender<Result<MailboxMessage>>>,
     timeouts: DashMap<MessageId, Duration>,
@@ -186,10 +246,18 @@ pub struct HeartbeatMailbox {
 }
 
 impl HeartbeatMailbox {
-    pub fn create(
-        pushers: Arc<RwLock<BTreeMap<String, Pusher>>>,
-        sequence: Sequence,
-    ) -> MailboxRef {
+    pub(crate) fn json_reply(msg: &MailboxMessage) -> Result<InstructionReply> {
+        let Payload::Json(payload) =
+            msg.payload
+                .as_ref()
+                .with_context(|| UnexpectedInstructionReplySnafu {
+                    mailbox_message: msg.to_string(),
+                    reason: format!("empty payload, msg: {msg:?}"),
+                })?;
+        serde_json::from_str(payload).context(DeserializeFromJsonSnafu { input: payload })
+    }
+
+    pub fn create(pushers: Pushers, sequence: Sequence) -> MailboxRef {
         let mailbox = Arc::new(Self::new(pushers, sequence));
 
         let timeout_checker = mailbox.clone();
@@ -200,7 +268,7 @@ impl HeartbeatMailbox {
         mailbox
     }
 
-    fn new(pushers: Arc<RwLock<BTreeMap<String, Pusher>>>, sequence: Sequence) -> Self {
+    fn new(pushers: Pushers, sequence: Sequence) -> Self {
         Self {
             pushers,
             sequence,
@@ -264,15 +332,10 @@ impl Mailbox for HeartbeatMailbox {
         timeout: Duration,
     ) -> Result<MailboxReceiver> {
         let message_id = self.next_message_id().await?;
+        msg.id = message_id;
 
-        let pusher_id = match ch {
-            Channel::Datanode(id) => format!("{}-{}", Role::Datanode as i32, id),
-            Channel::Frontend(id) => format!("{}-{}", Role::Frontend as i32, id),
-        };
-        let pushers = self.pushers.read().await;
-        let pusher = pushers
-            .get(&pusher_id)
-            .context(error::PusherNotFoundSnafu { pusher_id })?;
+        let pusher_id = ch.pusher_id();
+        debug!("Sending mailbox message {msg:?} to {pusher_id}");
 
         let (tx, rx) = oneshot::channel();
         self.senders.insert(message_id, tx);
@@ -281,19 +344,18 @@ impl Mailbox for HeartbeatMailbox {
         self.timeouts.insert(message_id, deadline);
         self.timeout_notify.notify_one();
 
-        let header = pusher.header();
-        msg.id = message_id;
-        let res = HeartbeatResponse {
-            header: Some(header),
-            mailbox_message: Some(msg),
-        };
+        self.pushers.push(&pusher_id, msg).await?;
 
-        pusher.push(res).await?;
+        Ok(MailboxReceiver::new(message_id, rx, *ch))
+    }
 
-        Ok(MailboxReceiver::new(message_id, rx))
+    async fn broadcast(&self, ch: &BroadcastChannel, msg: &MailboxMessage) -> Result<()> {
+        self.pushers.broadcast(ch.pusher_range(), msg).await
     }
 
     async fn on_recv(&self, id: MessageId, maybe_msg: Result<MailboxMessage>) -> Result<()> {
+        debug!("Received mailbox message {maybe_msg:?}");
+
         self.timeouts.remove(&id);
 
         if let Some((_, tx)) = self.senders.remove(&id) {
@@ -309,6 +371,7 @@ impl Mailbox for HeartbeatMailbox {
 
 #[cfg(test)]
 mod tests {
+
     use std::sync::Arc;
     use std::time::Duration;
 

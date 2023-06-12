@@ -25,6 +25,7 @@ common-function = { path = "../common/function" }
 common-grpc = { path = "../common/grpc" }
 common-grpc-expr = { path = "../common/grpc-expr" }
 common-query = { path = "../common/query" }
+common-meta = { path = "../common/meta" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
@@ -36,10 +37,11 @@ datatypes = { path = "../datatypes" }
 file-table-engine = { path = "../file-table-engine" }
 futures = "0.3"
 futures-util.workspace = true
-itertools = "0.10"
+itertools.workspace = true
 meta-client = { path = "../meta-client" }
 meter-core.workspace = true
 meter-macros.workspace = true
+metrics.workspace = true
 mito = { path = "../mito", features = ["test"] }
 moka = { version = "0.9", features = ["future"] }
 object-store = { path = "../object-store" }
@@ -63,6 +65,7 @@ tokio.workspace = true
 tonic.workspace = true
 
 [dev-dependencies]
+catalog = { path = "../catalog", features = ["testing"] }
 common-test-util = { path = "../common/test-util" }
 datanode = { path = "../datanode" }
 futures = "0.3"

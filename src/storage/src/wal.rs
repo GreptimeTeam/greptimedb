@@ -19,7 +19,7 @@ use common_error::prelude::BoxedError;
 use common_telemetry::timer;
 use futures::{stream, Stream, TryStreamExt};
 use prost::Message;
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, Location, ResultExt};
 use store_api::logstore::entry::{Entry, Id};
 use store_api::logstore::LogStore;
 use store_api::storage::{RegionId, SequenceNumber};
@@ -157,6 +157,7 @@ impl<S: LogStore> Wal<S> {
             .map_err(|e| Error::ReadWal {
                 region_id: self.region_id(),
                 source: BoxedError::new(e),
+                location: Location::default(),
             })
             .and_then(|entries| async {
                 let iter = entries.into_iter().map(|x| self.decode_entry(x));

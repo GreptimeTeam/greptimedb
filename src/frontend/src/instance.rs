@@ -28,14 +28,17 @@ use api::v1::alter_expr::Kind;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
 use api::v1::meta::Role;
-use api::v1::{AddColumns, AlterExpr, Column, DdlRequest, InsertRequest};
+use api::v1::{AddColumns, AlterExpr, Column, DdlRequest, InsertRequest, InsertRequests};
 use async_trait::async_trait;
-use catalog::remote::MetaKvBackend;
+use catalog::remote::CachedMetaKvBackend;
 use catalog::CatalogManagerRef;
+use client::client_manager::DatanodeClients;
 use common_base::Plugins;
 use common_catalog::consts::MITO_ENGINE;
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
+use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_query::Output;
 use common_telemetry::logging::{debug, info};
 use common_telemetry::timer;
@@ -44,6 +47,7 @@ use datanode::instance::sql::table_idents_to_full_name;
 use datanode::instance::InstanceRef as DnInstanceRef;
 use datatypes::schema::Schema;
 use distributed::DistInstance;
+use futures::future;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOptions;
 use partition::manager::PartitionRuleManager;
@@ -62,19 +66,19 @@ use servers::query_handler::{
 };
 use session::context::QueryContextRef;
 use snafu::prelude::*;
-use sql::dialect::GenericDialect;
+use sql::dialect::Dialect;
 use sql::parser::ParserContext;
 use sql::statements::copy::CopyTable;
 use sql::statements::statement::Statement;
 
 use crate::catalog::FrontendCatalogManager;
-use crate::datanode::DatanodeClients;
 use crate::error::{
     self, Error, ExecutePromqlSnafu, ExternalSnafu, InvalidInsertRequestSnafu,
     MissingMetasrvOptsSnafu, ParseSqlSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
 };
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::FrontendOptions;
+use crate::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
 use crate::heartbeat::HeartbeatTask;
 use crate::instance::standalone::StandaloneGrpcQueryHandler;
 use crate::metrics;
@@ -95,7 +99,7 @@ pub trait FrontendInstance:
     + Sync
     + 'static
 {
-    async fn start(&mut self) -> Result<()>;
+    async fn start(&self) -> Result<()>;
 }
 
 pub type FrontendInstanceRef = Arc<dyn FrontendInstance>;
@@ -127,32 +131,45 @@ impl Instance {
     ) -> Result<Self> {
         let meta_client = Self::create_meta_client(opts).await?;
 
-        let meta_backend = Arc::new(MetaKvBackend {
-            client: meta_client.clone(),
-        });
+        let datanode_clients = Arc::new(DatanodeClients::default());
+
+        Self::try_new_distributed_with(meta_client, datanode_clients, plugins).await
+    }
+
+    pub async fn try_new_distributed_with(
+        meta_client: Arc<MetaClient>,
+        datanode_clients: Arc<DatanodeClients>,
+        plugins: Arc<Plugins>,
+    ) -> Result<Self> {
+        let meta_backend = Arc::new(CachedMetaKvBackend::new(meta_client.clone()));
         let table_routes = Arc::new(TableRoutes::new(meta_client.clone()));
         let partition_manager = Arc::new(PartitionRuleManager::new(table_routes));
 
-        let mut datanode_clients = DatanodeClients::default();
-        datanode_clients.start();
-        let datanode_clients = Arc::new(datanode_clients);
-
-        let mut catalog_manager =
-            FrontendCatalogManager::new(meta_backend, partition_manager, datanode_clients.clone());
+        let mut catalog_manager = FrontendCatalogManager::new(
+            meta_backend.clone(),
+            meta_backend.clone(),
+            partition_manager.clone(),
+            datanode_clients.clone(),
+        );
 
         let dist_instance = DistInstance::new(
             meta_client.clone(),
             Arc::new(catalog_manager.clone()),
-            datanode_clients,
+            datanode_clients.clone(),
         );
         let dist_instance = Arc::new(dist_instance);
 
         catalog_manager.set_dist_instance(dist_instance.clone());
         let catalog_manager = Arc::new(catalog_manager);
 
-        let query_engine =
-            QueryEngineFactory::new_with_plugins(catalog_manager.clone(), plugins.clone())
-                .query_engine();
+        let query_engine = QueryEngineFactory::new_with_plugins(
+            catalog_manager.clone(),
+            true,
+            Some(partition_manager.clone()),
+            Some(datanode_clients),
+            plugins.clone(),
+        )
+        .query_engine();
 
         let script_executor =
             Arc::new(ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?);
@@ -165,7 +182,20 @@ impl Instance {
 
         plugins.insert::<StatementExecutorRef>(statement_executor.clone());
 
-        let heartbeat_task = Some(HeartbeatTask::new(meta_client, 5, 5));
+        let handlers_executor = HandlerGroupExecutor::new(vec![
+            Arc::new(ParseMailboxMessageHandler::default()),
+            Arc::new(InvalidateTableCacheHandler::new(
+                meta_backend,
+                partition_manager,
+            )),
+        ]);
+
+        let heartbeat_task = Some(HeartbeatTask::new(
+            meta_client,
+            5,
+            5,
+            Arc::new(handlers_executor),
+        ));
 
         Ok(Instance {
             catalog_manager,
@@ -197,7 +227,7 @@ impl Instance {
             .connect_timeout(Duration::from_millis(meta_config.connect_timeout_millis))
             .tcp_nodelay(meta_config.tcp_nodelay);
 
-        let mut channel_manager = ChannelManager::with_config(channel_config);
+        let channel_manager = ChannelManager::with_config(channel_config);
         channel_manager.start_channel_recycle();
 
         let mut meta_client = MetaClientBuilder::new(0, 0, Role::Frontend)
@@ -245,36 +275,6 @@ impl Instance {
         Ok(())
     }
 
-    pub async fn new_distributed(
-        catalog_manager: CatalogManagerRef,
-        dist_instance: Arc<DistInstance>,
-    ) -> Self {
-        let query_engine = QueryEngineFactory::new(catalog_manager.clone()).query_engine();
-        let script_executor = Arc::new(
-            ScriptExecutor::new(catalog_manager.clone(), query_engine.clone())
-                .await
-                .unwrap(),
-        );
-
-        let statement_executor = Arc::new(StatementExecutor::new(
-            catalog_manager.clone(),
-            query_engine.clone(),
-            dist_instance.clone(),
-        ));
-
-        Instance {
-            catalog_manager,
-            script_executor,
-            statement_executor,
-            query_engine,
-            create_expr_factory: Arc::new(DefaultCreateExprFactory),
-            grpc_query_handler: dist_instance,
-            plugins: Default::default(),
-            servers: Arc::new(HashMap::new()),
-            heartbeat_task: None,
-        }
-    }
-
     pub fn catalog_manager(&self) -> &CatalogManagerRef {
         &self.catalog_manager
     }
@@ -282,24 +282,18 @@ impl Instance {
     /// Handle batch inserts
     pub async fn handle_inserts(
         &self,
-        requests: Vec<InsertRequest>,
+        requests: InsertRequests,
         ctx: QueryContextRef,
     ) -> Result<Output> {
-        let mut success = 0;
-        for request in requests {
-            match self.handle_insert(request, ctx.clone()).await? {
-                Output::AffectedRows(rows) => success += rows,
-                _ => unreachable!("Insert should not yield output other than AffectedRows"),
-            }
-        }
-        Ok(Output::AffectedRows(success))
-    }
+        let _ = future::join_all(
+            requests
+                .inserts
+                .iter()
+                .map(|x| self.create_or_alter_table_on_demand(ctx.clone(), x)),
+        )
+        .await;
 
-    async fn handle_insert(&self, request: InsertRequest, ctx: QueryContextRef) -> Result<Output> {
-        self.create_or_alter_table_on_demand(ctx.clone(), &request)
-            .await?;
-
-        let query = Request::Insert(request);
+        let query = Request::Inserts(requests);
         GrpcQueryHandler::do_query(&*self.grpc_query_handler, query, ctx).await
     }
 
@@ -439,7 +433,7 @@ impl Instance {
 
 #[async_trait]
 impl FrontendInstance for Instance {
-    async fn start(&mut self) -> Result<()> {
+    async fn start(&self) -> Result<()> {
         // TODO(hl): Frontend init should move to here
 
         if let Some(heartbeat_task) = &self.heartbeat_task {
@@ -453,8 +447,8 @@ impl FrontendInstance for Instance {
     }
 }
 
-fn parse_stmt(sql: &str) -> Result<Vec<Statement>> {
-    ParserContext::create_with_dialect(sql, &GenericDialect {}).context(ParseSqlSnafu)
+fn parse_stmt(sql: &str, dialect: &(dyn Dialect + Send + Sync)) -> Result<Vec<Statement>> {
+    ParserContext::create_with_dialect(sql, dialect).context(ParseSqlSnafu)
 }
 
 impl Instance {
@@ -479,7 +473,7 @@ impl SqlQueryHandler for Instance {
             Err(e) => return vec![Err(e)],
         };
 
-        match parse_stmt(query.as_ref())
+        match parse_stmt(query.as_ref(), query_ctx.sql_dialect())
             .and_then(|stmts| query_interceptor.post_parsing(stmts, query_ctx.clone()))
         {
             Ok(stmts) => {
@@ -566,6 +560,7 @@ impl PromHandler for Instance {
         let stmt = QueryLanguageParser::parse_promql(query).with_context(|_| ParsePromQLSnafu {
             query: query.clone(),
         })?;
+
         self.statement_executor
             .execute_stmt(stmt, query_ctx)
             .await
@@ -670,6 +665,7 @@ mod tests {
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
     use query::query_engine::options::QueryOptions;
     use session::context::QueryContext;
+    use sql::dialect::GreptimeDbDialect;
     use strfmt::Format;
 
     use super::*;
@@ -754,7 +750,7 @@ mod tests {
         CREATE DATABASE test_database;
         SHOW DATABASES;
         "#;
-        let stmts = parse_stmt(sql).unwrap();
+        let stmts = parse_stmt(sql, &GreptimeDbDialect {}).unwrap();
         assert_eq!(stmts.len(), 4);
         for stmt in stmts {
             let re = check_permission(plugins.clone(), &stmt, &query_ctx);
@@ -765,7 +761,7 @@ mod tests {
         SHOW CREATE TABLE demo;
         ALTER TABLE demo ADD COLUMN new_col INT;
         "#;
-        let stmts = parse_stmt(sql).unwrap();
+        let stmts = parse_stmt(sql, &GreptimeDbDialect {}).unwrap();
         assert_eq!(stmts.len(), 2);
         for stmt in stmts {
             let re = check_permission(plugins.clone(), &stmt, &query_ctx);
@@ -773,7 +769,7 @@ mod tests {
         }
 
         let sql = "USE randomschema";
-        let stmts = parse_stmt(sql).unwrap();
+        let stmts = parse_stmt(sql, &GreptimeDbDialect {}).unwrap();
         let re = check_permission(plugins.clone(), &stmts[0], &query_ctx);
         assert!(re.is_ok());
 
@@ -806,7 +802,7 @@ mod tests {
         }
 
         fn do_test(sql: &str, plugins: Arc<Plugins>, query_ctx: &QueryContextRef, is_ok: bool) {
-            let stmt = &parse_stmt(sql).unwrap()[0];
+            let stmt = &parse_stmt(sql, &GreptimeDbDialect {}).unwrap()[0];
             let re = check_permission(plugins, stmt, query_ctx);
             if is_ok {
                 assert!(re.is_ok());
@@ -834,12 +830,12 @@ mod tests {
 
         // test show tables
         let sql = "SHOW TABLES FROM public";
-        let stmt = parse_stmt(sql).unwrap();
+        let stmt = parse_stmt(sql, &GreptimeDbDialect {}).unwrap();
         let re = check_permission(plugins.clone(), &stmt[0], &query_ctx);
         assert!(re.is_ok());
 
         let sql = "SHOW TABLES FROM wrongschema";
-        let stmt = parse_stmt(sql).unwrap();
+        let stmt = parse_stmt(sql, &GreptimeDbDialect {}).unwrap();
         let re = check_permission(plugins.clone(), &stmt[0], &query_ctx);
         assert!(re.is_err());
 

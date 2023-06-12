@@ -18,13 +18,14 @@ use std::sync::Arc;
 use catalog::local::{new_memory_catalog_list, MemoryCatalogProvider, MemorySchemaProvider};
 use common_query::physical_plan::PhysicalPlanRef;
 use common_query::prelude::Expr;
-use common_recordbatch::RecordBatch;
+use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{Int64Vector, TimestampMillisecondVector};
+use store_api::storage::ScanRequest;
 use table::metadata::{FilterPushDownType, TableInfoRef};
 use table::predicate::TimeRangePredicateBuilder;
 use table::test_util::MemTable;
@@ -67,6 +68,14 @@ impl Table for MemTableWrapper {
     ) -> table::Result<PhysicalPlanRef> {
         *self.filter.write().await = filters.to_vec();
         self.inner.scan(projection, filters, limit).await
+    }
+
+    async fn scan_to_stream(
+        &self,
+        request: ScanRequest,
+    ) -> table::Result<SendableRecordBatchStream> {
+        *self.filter.write().await = request.filters.clone();
+        self.inner.scan_to_stream(request).await
     }
 
     fn supports_filters_pushdown(
@@ -119,7 +128,7 @@ fn create_test_engine() -> TimeRangeTester {
         .register_catalog_sync("greptime".to_string(), default_catalog)
         .unwrap();
 
-    let engine = QueryEngineFactory::new(catalog_list).query_engine();
+    let engine = QueryEngineFactory::new(catalog_list, false).query_engine();
     TimeRangeTester { engine, table }
 }
 

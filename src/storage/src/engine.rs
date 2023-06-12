@@ -23,7 +23,8 @@ use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::manifest::Manifest;
 use store_api::storage::{
-    CreateOptions, EngineContext, OpenOptions, Region, RegionDescriptor, StorageEngine,
+    CloseContext, CloseOptions, CreateOptions, EngineContext, OpenOptions, Region,
+    RegionDescriptor, StorageEngine,
 };
 
 use crate::compaction::CompactionSchedulerRef;
@@ -68,8 +69,13 @@ impl<S: LogStore> StorageEngine for EngineImpl<S> {
         self.inner.open_region(name, opts).await
     }
 
-    async fn close_region(&self, _ctx: &EngineContext, region: Self::Region) -> Result<()> {
-        region.close().await
+    async fn close_region(
+        &self,
+        _ctx: &EngineContext,
+        name: &str,
+        opts: &CloseOptions,
+    ) -> Result<()> {
+        self.inner.close_region(name, opts).await
     }
 
     async fn create_region(
@@ -288,7 +294,7 @@ impl<S: LogStore> RegionMap<S> {
     }
 
     /// Clear the region map.
-    fn clear(&self) {
+    pub(crate) fn clear(&self) {
         self.0.write().unwrap().clear();
     }
 }
@@ -337,19 +343,40 @@ impl<S: LogStore> EngineInner<S> {
             },
             FilePurgeHandler,
         ));
+        let flush_strategy = Arc::new(SizeBasedStrategy::new(
+            config
+                .global_write_buffer_size
+                .map(|size| size.as_bytes() as usize),
+        ));
+        let memtable_builder = if config.global_write_buffer_size.is_some() {
+            // If global write buffer size is provided, we set the flush strategy
+            // to the memtable to track global memtable usage.
+            DefaultMemtableBuilder::with_flush_strategy(Some(flush_strategy.clone()))
+        } else {
+            DefaultMemtableBuilder::default()
+        };
         Ok(Self {
             object_store,
             log_store,
             regions,
-            memtable_builder: Arc::new(DefaultMemtableBuilder::default()),
+            memtable_builder: Arc::new(memtable_builder),
             flush_scheduler,
-            flush_strategy: Arc::new(SizeBasedStrategy::new(
-                config.region_write_buffer_size.as_bytes() as usize,
-            )),
+            flush_strategy,
             compaction_scheduler,
             file_purger,
             config: Arc::new(config),
         })
+    }
+
+    async fn close_region(&self, name: &str, opts: &CloseOptions) -> Result<()> {
+        if let Some(region) = self.get_region(name) {
+            let ctx = CloseContext { flush: opts.flush };
+            region.close(&ctx).await?;
+        }
+
+        self.regions.remove(name);
+
+        Ok(())
     }
 
     async fn open_region(&self, name: &str, opts: &OpenOptions) -> Result<Option<RegionImpl<S>>> {
@@ -445,7 +472,7 @@ impl<S: LogStore> EngineInner<S> {
         write_buffer_size: Option<usize>,
         region_name: &str,
         config: &EngineConfig,
-        ttl: Option<Duration>,
+        region_ttl: Option<Duration>,
         compaction_time_window: Option<i64>,
     ) -> Result<StoreConfig<S>> {
         let parent_dir = util::normalize_dir(parent_dir);
@@ -461,10 +488,10 @@ impl<S: LogStore> EngineInner<S> {
             config.manifest_gc_duration,
         );
         manifest.start().await?;
+        let flush_strategy = self.flush_strategy.clone();
 
-        let flush_strategy = write_buffer_size
-            .map(|size| Arc::new(SizeBasedStrategy::new(size)) as Arc<_>)
-            .unwrap_or_else(|| self.flush_strategy.clone());
+        // If region_ttl is `None`, the global ttl takes effect.
+        let ttl = region_ttl.or(self.config.global_ttl);
 
         Ok(StoreConfig {
             log_store: self.log_store.clone(),
@@ -478,14 +505,17 @@ impl<S: LogStore> EngineInner<S> {
             file_purger: self.file_purger.clone(),
             ttl,
             compaction_time_window,
+            write_buffer_size: write_buffer_size
+                .unwrap_or(self.config.region_write_buffer_size.as_bytes() as usize),
         })
     }
 
     async fn close(&self) -> Result<()> {
         let regions = self.regions.list_regions();
+        let ctx = CloseContext::default();
         for region in regions {
             // Tolerate failure during closing regions.
-            if let Err(e) = region.close().await {
+            if let Err(e) = region.close(&ctx).await {
                 logging::error!(e; "Failed to close region {}", region.id());
             }
         }
@@ -523,7 +553,7 @@ mod tests {
         log_file_dir: &TempDir,
         region_name: &str,
         region_id: u64,
-        ctx: &EngineContext,
+        config: EngineConfig,
     ) -> (TestEngine, TestRegion) {
         let log_file_dir_path = log_file_dir.path().to_str().unwrap();
         let log_store = log_store_util::create_tmp_local_file_log_store(log_file_dir_path).await;
@@ -533,8 +563,6 @@ mod tests {
         let mut builder = Fs::default();
         builder.root(&store_dir);
         let object_store = ObjectStore::new(builder).unwrap().finish();
-
-        let config = EngineConfig::default();
 
         let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
 
@@ -554,7 +582,7 @@ mod tests {
             .build();
 
         let region = engine
-            .create_region(ctx, desc, &CreateOptions::default())
+            .create_region(&EngineContext::default(), desc, &CreateOptions::default())
             .await
             .unwrap();
 
@@ -576,16 +604,36 @@ mod tests {
 
         let region_name = "region-0";
         let region_id = 123456;
-        let ctx = EngineContext::default();
+        let config = EngineConfig::default();
 
         let (engine, region) =
-            create_engine_and_region(&dir, &log_file_dir, region_name, region_id, &ctx).await;
+            create_engine_and_region(&dir, &log_file_dir, region_name, region_id, config).await;
         assert_eq!(region_name, region.name());
 
+        let ctx = EngineContext::default();
         let region2 = engine.get_region(&ctx, region_name).unwrap().unwrap();
         assert_eq!(region_name, region2.name());
 
         assert!(engine.get_region(&ctx, "no such region").unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_create_region_with_buffer_size() {
+        let dir = create_temp_dir("test_buffer_size");
+        let log_file_dir = create_temp_dir("test_buffer_wal");
+
+        let region_name = "region-0";
+        let region_id = 123456;
+        let mut config = EngineConfig::default();
+        let expect_buffer_size = config.region_write_buffer_size / 2;
+        config.region_write_buffer_size = expect_buffer_size;
+
+        let (_engine, region) =
+            create_engine_and_region(&dir, &log_file_dir, region_name, region_id, config).await;
+        assert_eq!(
+            expect_buffer_size.as_bytes() as usize,
+            region.write_buffer_size().await
+        );
     }
 
     #[tokio::test]
@@ -596,10 +644,10 @@ mod tests {
 
         let region_name = "test_region";
         let region_id = 123456;
-        let ctx = EngineContext::default();
+        let config = EngineConfig::default();
 
         let (engine, region) =
-            create_engine_and_region(&dir, &log_file_dir, region_name, region_id, &ctx).await;
+            create_engine_and_region(&dir, &log_file_dir, region_name, region_id, config).await;
 
         assert_eq!(region_name, region.name());
 
@@ -618,7 +666,11 @@ mod tests {
 
         // Flush memtable to sst.
         region.flush(&FlushContext::default()).await.unwrap();
-        engine.close_region(&ctx, region).await.unwrap();
+        let ctx = EngineContext::default();
+        engine
+            .close_region(&ctx, region.name(), &CloseOptions::default())
+            .await
+            .unwrap();
 
         let dir_path = dir.path().join(region_name);
 

@@ -18,8 +18,11 @@ use std::sync::Arc;
 
 use common_test_util::temp_dir::create_temp_dir;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
-use store_api::storage::{AlterOperation, AlterRequest, Region, RegionMeta, WriteResponse};
+use store_api::storage::{
+    AlterOperation, AlterRequest, CloseContext, Region, RegionMeta, WriteResponse,
+};
 
+use crate::config::EngineConfig;
 use crate::engine;
 use crate::error::Error;
 use crate::flush::FlushStrategyRef;
@@ -42,7 +45,8 @@ async fn create_region_for_close(
 ) -> RegionImpl<RaftEngineLogStore> {
     let metadata = tests::new_metadata(REGION_NAME);
 
-    let mut store_config = config_util::new_store_config(REGION_NAME, store_dir).await;
+    let mut store_config =
+        config_util::new_store_config(REGION_NAME, store_dir, EngineConfig::default()).await;
     store_config.flush_strategy = flush_strategy;
 
     RegionImpl::create(metadata, store_config).await.unwrap()
@@ -63,11 +67,19 @@ impl CloseTester {
     }
 
     async fn put(&self, data: &[(i64, Option<i64>)]) -> WriteResponse {
-        self.base().put(data).await
+        let data = data
+            .iter()
+            .map(|(ts, v0)| (*ts, v0.map(|v| v.to_string())))
+            .collect::<Vec<_>>();
+        self.base().put(&data).await
     }
 
     async fn try_put(&self, data: &[(i64, Option<i64>)]) -> Result<WriteResponse, Error> {
-        self.base().try_put(data).await
+        let data = data
+            .iter()
+            .map(|(ts, v0)| (*ts, v0.map(|v| v.to_string())))
+            .collect::<Vec<_>>();
+        self.base().try_put(&data).await
     }
 
     async fn try_alter(&self, mut req: AlterRequest) -> Result<(), Error> {
@@ -92,7 +104,12 @@ async fn test_close_basic() {
     let flush_switch = Arc::new(FlushSwitch::default());
     let tester = CloseTester::new(store_dir, flush_switch).await;
 
-    tester.base().region.close().await.unwrap();
+    tester
+        .base()
+        .region
+        .close(&CloseContext::default())
+        .await
+        .unwrap();
 
     let data = [(1000, Some(100))];
 
@@ -140,7 +157,12 @@ async fn test_close_wait_flush_done() {
     assert!(!has_parquet_file(&sst_dir));
 
     // Close should cancel the flush.
-    tester.base().region.close().await.unwrap();
+    tester
+        .base()
+        .region
+        .close(&CloseContext::default())
+        .await
+        .unwrap();
 
     assert!(!has_parquet_file(&sst_dir));
 }

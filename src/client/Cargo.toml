@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+testing = []
+
 [dependencies]
 api = { path = "../api" }
 arrow-flight.workspace = true
@@ -16,21 +19,24 @@ common-grpc-expr = { path = "../common/grpc-expr" }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-time = { path = "../common/time" }
+common-meta = { path = "../common/meta" }
 common-telemetry = { path = "../common/telemetry" }
 datafusion.workspace = true
 datatypes = { path = "../datatypes" }
 enum_dispatch = "0.3"
 futures-util.workspace = true
+moka = { version = "0.9", features = ["future"] }
 parking_lot = "0.12"
 prost.workspace = true
 rand.workspace = true
 snafu.workspace = true
+tokio-stream = { version = "0.1", features = ["net"] }
+tokio.workspace = true
 tonic.workspace = true
 
 [dev-dependencies]
 datanode = { path = "../datanode" }
 substrait = { path = "../common/substrait" }
-tokio.workspace = true
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 prost.workspace = true

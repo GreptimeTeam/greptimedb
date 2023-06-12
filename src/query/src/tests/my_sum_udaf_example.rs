@@ -243,5 +243,5 @@ fn new_query_engine_factory(table: MemTable) -> QueryEngineFactory {
         .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string(), catalog_provider)
         .unwrap();
 
-    QueryEngineFactory::new(catalog_list)
+    QueryEngineFactory::new(catalog_list, false)
 }

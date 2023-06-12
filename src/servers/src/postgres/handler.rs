@@ -33,7 +33,7 @@ use pgwire::api::stmt::QueryParser;
 use pgwire::api::store::MemPortalStore;
 use pgwire::api::{ClientInfo, Type};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
-use sql::dialect::GenericDialect;
+use sql::dialect::PostgreSqlDialect;
 use sql::parser::ParserContext;
 use sql::statements::statement::Statement;
 
@@ -51,17 +51,17 @@ impl SimpleQueryHandler for PostgresServerHandler {
             &[
                 (
                     crate::metrics::METRIC_POSTGRES_SUBPROTOCOL_LABEL,
-                    crate::metrics::METRIC_POSTGRES_SIMPLE_QUERY
+                    crate::metrics::METRIC_POSTGRES_SIMPLE_QUERY.to_string()
                 ),
                 (
                     crate::metrics::METRIC_DB_LABEL,
-                    &self.query_ctx.get_db_string()
+                    self.session.context().get_db_string()
                 )
             ]
         );
         let outputs = self
             .query_handler
-            .do_query(query, self.query_ctx.clone())
+            .do_query(query, self.session.context())
             .await;
 
         let mut results = Vec::with_capacity(outputs.len());
@@ -260,7 +260,7 @@ impl QueryParser for POCQueryParser {
 
     fn parse_sql(&self, sql: &str, types: &[Type]) -> PgWireResult<Self::Statement> {
         increment_counter!(crate::metrics::METRIC_POSTGRES_PREPARED_COUNT);
-        let mut stmts = ParserContext::create_with_dialect(sql, &GenericDialect {})
+        let mut stmts = ParserContext::create_with_dialect(sql, &PostgreSqlDialect {})
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         if stmts.len() != 1 {
             Err(PgWireError::UserError(Box::new(ErrorInfo::new(
@@ -357,11 +357,11 @@ impl ExtendedQueryHandler for PostgresServerHandler {
             &[
                 (
                     crate::metrics::METRIC_POSTGRES_SUBPROTOCOL_LABEL,
-                    crate::metrics::METRIC_POSTGRES_EXTENDED_QUERY
+                    crate::metrics::METRIC_POSTGRES_EXTENDED_QUERY.to_string()
                 ),
                 (
                     crate::metrics::METRIC_DB_LABEL,
-                    &self.query_ctx.get_db_string()
+                    self.session.context().get_db_string()
                 )
             ]
         );
@@ -376,7 +376,7 @@ impl ExtendedQueryHandler for PostgresServerHandler {
 
         let output = self
             .query_handler
-            .do_query(&sql, self.query_ctx.clone())
+            .do_query(&sql, self.session.context())
             .await
             .remove(0);
 
@@ -407,7 +407,7 @@ impl ExtendedQueryHandler for PostgresServerHandler {
 
         if let Some(schema) = self
             .query_handler
-            .do_describe(stmt.clone(), self.query_ctx.clone())
+            .do_describe(stmt.clone(), self.session.context())
             .await
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?
         {

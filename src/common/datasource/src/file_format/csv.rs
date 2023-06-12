@@ -17,6 +17,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use arrow::csv;
+#[allow(deprecated)]
 use arrow::csv::reader::infer_reader_schema as infer_csv_schema;
 use arrow::record_batch::RecordBatch;
 use arrow_schema::{Schema, SchemaRef};
@@ -113,8 +114,7 @@ pub struct CsvConfig {
 
 impl CsvConfig {
     fn builder(&self) -> csv::ReaderBuilder {
-        let mut builder = csv::ReaderBuilder::new()
-            .with_schema(self.file_schema.clone())
+        let mut builder = csv::ReaderBuilder::new(self.file_schema.clone())
             .with_delimiter(self.delimiter)
             .with_batch_size(self.batch_size)
             .has_header(self.has_header);
@@ -160,6 +160,7 @@ impl FileOpener for CsvOpener {
     }
 }
 
+#[allow(deprecated)]
 #[async_trait]
 impl FileFormat for CsvFormat {
     async fn infer_schema(&self, store: &ObjectStore, path: &str) -> Result<Schema> {

@@ -22,8 +22,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_query::logical_plan::Expr;
 use common_query::physical_plan::PhysicalPlanRef;
+use common_recordbatch::SendableRecordBatchStream;
 use datatypes::schema::SchemaRef;
-use store_api::storage::RegionNumber;
+use store_api::storage::{RegionNumber, ScanRequest};
 
 use crate::error::{Result, UnsupportedSnafu};
 use crate::metadata::{FilterPushDownType, TableId, TableInfoRef, TableType};
@@ -73,6 +74,8 @@ pub trait Table: Send + Sync {
         limit: Option<usize>,
     ) -> Result<PhysicalPlanRef>;
 
+    async fn scan_to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream>;
+
     /// Tests whether the table provider can make use of any or all filter expressions
     /// to optimise data retrieval.
     fn supports_filters_pushdown(&self, filters: &[&Expr]) -> Result<Vec<FilterPushDownType>> {
@@ -108,12 +111,7 @@ pub trait Table: Send + Sync {
     }
 
     /// Close the table.
-    async fn close(&self) -> Result<()> {
-        Ok(())
-    }
-
-    /// Drop regions
-    async fn drop_regions(&self) -> Result<()> {
+    async fn close(&self, _regions: &[RegionNumber]) -> Result<()> {
         Ok(())
     }
 
@@ -126,7 +124,7 @@ pub trait Table: Send + Sync {
     }
 
     /// Return true if contains the region
-    fn contain_regions(&self, _region: RegionNumber) -> Result<bool> {
+    fn contains_region(&self, _region: RegionNumber) -> Result<bool> {
         UnsupportedSnafu {
             operation: "contain_region",
         }

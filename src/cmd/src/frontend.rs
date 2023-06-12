@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use common_base::Plugins;
+use common_telemetry::logging;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use frontend::service_config::{InfluxdbOptions, PromOptions};
@@ -25,7 +26,7 @@ use servers::tls::{TlsMode, TlsOption};
 use servers::{auth, Mode};
 use snafu::ResultExt;
 
-use crate::error::{self, IllegalAuthConfigSnafu, Result};
+use crate::error::{self, IllegalAuthConfigSnafu, Result, StartCatalogManagerSnafu};
 use crate::options::{Options, TopLevelOptions};
 
 pub struct Instance {
@@ -33,7 +34,13 @@ pub struct Instance {
 }
 
 impl Instance {
-    pub async fn run(&mut self) -> Result<()> {
+    pub async fn start(&mut self) -> Result<()> {
+        self.frontend
+            .catalog_manager()
+            .start()
+            .await
+            .context(StartCatalogManagerSnafu)?;
+
         self.frontend
             .start()
             .await
@@ -128,8 +135,9 @@ impl StartCommand {
         if let Some(dir) = top_level_opts.log_dir {
             opts.logging.dir = dir;
         }
-        if let Some(level) = top_level_opts.log_level {
-            opts.logging.level = level;
+
+        if top_level_opts.log_level.is_some() {
+            opts.logging.level = top_level_opts.log_level;
         }
 
         let tls_opts = TlsOption::new(
@@ -195,6 +203,9 @@ impl StartCommand {
     }
 
     async fn build(self, opts: FrontendOptions) -> Result<Instance> {
+        logging::info!("Frontend start command: {:#?}", self);
+        logging::info!("Frontend options: {:#?}", opts);
+
         let plugins = Arc::new(load_frontend_plugins(&self.user_provider)?);
 
         let mut instance = FeInstance::try_new_distributed(&opts, plugins.clone())
@@ -290,7 +301,7 @@ mod tests {
             [http_options]
             addr = "127.0.0.1:4000"
             timeout = "30s"
-            
+
             [logging]
             level = "debug"
             dir = "/tmp/greptimedb/test/logs"
@@ -315,7 +326,7 @@ mod tests {
             fe_opts.http_options.as_ref().unwrap().timeout
         );
 
-        assert_eq!("debug".to_string(), fe_opts.logging.level);
+        assert_eq!("debug", fe_opts.logging.level.as_ref().unwrap());
         assert_eq!("/tmp/greptimedb/test/logs".to_string(), fe_opts.logging.dir);
     }
 
@@ -359,7 +370,7 @@ mod tests {
 
         let logging_opt = options.logging_options();
         assert_eq!("/tmp/greptimedb/test/logs", logging_opt.dir);
-        assert_eq!("debug", logging_opt.level);
+        assert_eq!("debug", logging_opt.level.as_ref().unwrap());
     }
 
     #[test]
@@ -370,7 +381,7 @@ mod tests {
 
             [http_options]
             addr = "127.0.0.1:4000"
-            
+
             [meta_client_options]
             timeout_millis = 3000
             connect_timeout_millis = 5000

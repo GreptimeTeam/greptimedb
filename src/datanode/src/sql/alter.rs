@@ -68,12 +68,16 @@ impl SqlHandler {
                 }
                 .fail()
             }
-            AlterTableOperation::AddColumn { column_def } => AlterKind::AddColumns {
+            AlterTableOperation::AddColumn {
+                column_def,
+                location,
+            } => AlterKind::AddColumns {
                 columns: vec![AddColumnRequest {
                     column_schema: column_def_to_schema(column_def, false)
                         .context(error::ParseSqlSnafu)?,
                     // FIXME(dennis): supports adding key column
                     is_key: false,
+                    location: location.clone(),
                 }],
             },
             AlterTableOperation::DropColumn { name } => AlterKind::DropColumns {
@@ -100,7 +104,7 @@ mod tests {
     use query::parser::{QueryLanguageParser, QueryStatement};
     use query::query_engine::SqlStatementExecutor;
     use session::context::QueryContext;
-    use sql::dialect::GenericDialect;
+    use sql::dialect::GreptimeDbDialect;
     use sql::parser::ParserContext;
     use sql::statements::statement::Statement;
 
@@ -108,7 +112,7 @@ mod tests {
     use crate::tests::test_util::MockInstance;
 
     fn parse_sql(sql: &str) -> AlterTable {
-        let mut stmt = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
+        let mut stmt = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
         assert_eq!(1, stmt.len());
         let stmt = stmt.remove(0);
         assert_matches!(stmt, Statement::Alter(_));

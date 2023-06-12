@@ -111,7 +111,7 @@ pub enum Error {
 
     #[snafu(display("Auth failed, source: {}", source))]
     AuthBackend {
-        #[snafu(backtrace)]
+        location: Location,
         source: BoxedError,
     },
 

@@ -24,51 +24,44 @@ use snafu::Location;
 pub enum Error {
     #[snafu(display("Failed to start datanode, source: {}", source))]
     StartDatanode {
-        #[snafu(backtrace)]
+        location: Location,
         source: datanode::error::Error,
     },
 
     #[snafu(display("Failed to shutdown datanode, source: {}", source))]
     ShutdownDatanode {
-        #[snafu(backtrace)]
+        location: Location,
         source: datanode::error::Error,
     },
 
     #[snafu(display("Failed to start frontend, source: {}", source))]
     StartFrontend {
-        #[snafu(backtrace)]
+        location: Location,
         source: frontend::error::Error,
     },
 
     #[snafu(display("Failed to shutdown frontend, source: {}", source))]
     ShutdownFrontend {
-        #[snafu(backtrace)]
+        location: Location,
         source: frontend::error::Error,
     },
 
     #[snafu(display("Failed to build meta server, source: {}", source))]
     BuildMetaServer {
-        #[snafu(backtrace)]
+        location: Location,
         source: meta_srv::error::Error,
     },
 
     #[snafu(display("Failed to start meta server, source: {}", source))]
     StartMetaServer {
-        #[snafu(backtrace)]
+        location: Location,
         source: meta_srv::error::Error,
     },
 
     #[snafu(display("Failed to shutdown meta server, source: {}", source))]
     ShutdownMetaServer {
-        #[snafu(backtrace)]
-        source: meta_srv::error::Error,
-    },
-
-    #[snafu(display("Failed to read config file: {}, source: {}", path, source))]
-    ReadConfig {
-        path: String,
-        source: std::io::Error,
         location: Location,
+        source: meta_srv::error::Error,
     },
 
     #[snafu(display("Missing config, msg: {}", msg))]
@@ -79,14 +72,14 @@ pub enum Error {
 
     #[snafu(display("Illegal auth config: {}", source))]
     IllegalAuthConfig {
-        #[snafu(backtrace)]
+        location: Location,
         source: servers::auth::Error,
     },
 
     #[snafu(display("Unsupported selector type, {} source: {}", selector_type, source))]
     UnsupportedSelectorType {
         selector_type: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: meta_srv::error::Error,
     },
 
@@ -108,44 +101,44 @@ pub enum Error {
     #[snafu(display("Failed to request database, sql: {sql}, source: {source}"))]
     RequestDatabase {
         sql: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: client::Error,
     },
 
     #[snafu(display("Failed to collect RecordBatches, source: {source}"))]
     CollectRecordBatches {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_recordbatch::error::Error,
     },
 
     #[snafu(display("Failed to pretty print Recordbatches, source: {source}"))]
     PrettyPrintRecordBatches {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_recordbatch::error::Error,
     },
 
     #[snafu(display("Failed to start Meta client, source: {}", source))]
     StartMetaClient {
-        #[snafu(backtrace)]
+        location: Location,
         source: meta_client::error::Error,
     },
 
     #[snafu(display("Failed to parse SQL: {}, source: {}", sql, source))]
     ParseSql {
         sql: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: query::error::Error,
     },
 
     #[snafu(display("Failed to plan statement, source: {}", source))]
     PlanStatement {
-        #[snafu(backtrace)]
+        location: Location,
         source: query::error::Error,
     },
 
     #[snafu(display("Failed to encode logical plan in substrait, source: {}", source))]
     SubstraitEncodeLogicalPlan {
-        #[snafu(backtrace)]
+        location: Location,
         source: substrait::error::Error,
     },
 
@@ -154,6 +147,12 @@ pub enum Error {
         source: ConfigError,
         location: Location,
     },
+
+    #[snafu(display("Failed to start catalog manager, source: {}", source))]
+    StartCatalogManager {
+        location: Location,
+        source: catalog::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -161,30 +160,29 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::StartDatanode { source } => source.status_code(),
-            Error::StartFrontend { source } => source.status_code(),
-            Error::ShutdownDatanode { source } => source.status_code(),
-            Error::ShutdownFrontend { source } => source.status_code(),
-            Error::StartMetaServer { source } => source.status_code(),
-            Error::ShutdownMetaServer { source } => source.status_code(),
-            Error::BuildMetaServer { source } => source.status_code(),
+            Error::StartDatanode { source, .. } => source.status_code(),
+            Error::StartFrontend { source, .. } => source.status_code(),
+            Error::ShutdownDatanode { source, .. } => source.status_code(),
+            Error::ShutdownFrontend { source, .. } => source.status_code(),
+            Error::StartMetaServer { source, .. } => source.status_code(),
+            Error::ShutdownMetaServer { source, .. } => source.status_code(),
+            Error::BuildMetaServer { source, .. } => source.status_code(),
             Error::UnsupportedSelectorType { source, .. } => source.status_code(),
-            Error::ReadConfig { .. }
-            | Error::MissingConfig { .. }
+            Error::MissingConfig { .. }
             | Error::LoadLayeredConfig { .. }
             | Error::IllegalConfig { .. }
             | Error::InvalidReplCommand { .. }
             | Error::IllegalAuthConfig { .. } => StatusCode::InvalidArguments,
             Error::ReplCreation { .. } | Error::Readline { .. } => StatusCode::Internal,
             Error::RequestDatabase { source, .. } => source.status_code(),
-            Error::CollectRecordBatches { source } | Error::PrettyPrintRecordBatches { source } => {
+            Error::CollectRecordBatches { source, .. }
+            | Error::PrettyPrintRecordBatches { source, .. } => source.status_code(),
+            Error::StartMetaClient { source, .. } => source.status_code(),
+            Error::ParseSql { source, .. } | Error::PlanStatement { source, .. } => {
                 source.status_code()
             }
-            Error::StartMetaClient { source } => source.status_code(),
-            Error::ParseSql { source, .. } | Error::PlanStatement { source } => {
-                source.status_code()
-            }
-            Error::SubstraitEncodeLogicalPlan { source } => source.status_code(),
+            Error::SubstraitEncodeLogicalPlan { source, .. } => source.status_code(),
+            Error::StartCatalogManager { source, .. } => source.status_code(),
         }
     }
 

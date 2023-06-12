@@ -63,7 +63,7 @@ async fn run() {
         create_if_not_exists: false,
         table_options: Default::default(),
         table_id: Some(TableId { id: 1024 }),
-        region_ids: vec![0],
+        region_numbers: vec![0],
         engine: MITO_ENGINE.to_string(),
     };
 

@@ -16,7 +16,6 @@
 #![feature(trait_upcasting)]
 
 pub mod catalog;
-pub mod datanode;
 pub mod error;
 pub mod expr_factory;
 pub mod frontend;

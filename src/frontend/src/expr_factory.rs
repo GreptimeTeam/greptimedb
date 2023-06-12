@@ -115,7 +115,7 @@ pub(crate) async fn create_external_expr(
         create_if_not_exists: create.if_not_exists,
         table_options: options,
         table_id: None,
-        region_ids: vec![],
+        region_numbers: vec![],
         engine: create.engine.to_string(),
     };
     Ok(expr)
@@ -144,7 +144,7 @@ pub fn create_to_expr(create: &CreateTable, query_ctx: QueryContextRef) -> Resul
         create_if_not_exists: create.if_not_exists,
         table_options,
         table_id: None,
-        region_ids: vec![],
+        region_numbers: vec![],
         engine: create.engine.to_string(),
     };
     Ok(expr)
@@ -291,7 +291,10 @@ pub(crate) fn to_alter_expr(
             }
             .fail();
         }
-        AlterTableOperation::AddColumn { column_def } => Kind::AddColumns(AddColumns {
+        AlterTableOperation::AddColumn {
+            column_def,
+            location,
+        } => Kind::AddColumns(AddColumns {
             add_columns: vec![AddColumn {
                 column_def: Some(
                     sql_column_def_to_grpc_column_def(column_def)
@@ -299,6 +302,7 @@ pub(crate) fn to_alter_expr(
                         .context(ExternalSnafu)?,
                 ),
                 is_key: false,
+                location: location.as_ref().map(From::from),
             }],
         }),
         AlterTableOperation::DropColumn { name } => Kind::DropColumns(DropColumns {
@@ -322,7 +326,7 @@ pub(crate) fn to_alter_expr(
 #[cfg(test)]
 mod tests {
     use session::context::QueryContext;
-    use sql::dialect::GenericDialect;
+    use sql::dialect::GreptimeDbDialect;
     use sql::parser::ParserContext;
     use sql::statements::statement::Statement;
 
@@ -331,7 +335,7 @@ mod tests {
     #[test]
     fn test_create_to_expr() {
         let sql = "CREATE TABLE monitor (host STRING,ts TIMESTAMP,TIME INDEX (ts),PRIMARY KEY(host)) ENGINE=mito WITH(regions=1, ttl='3days', write_buffer_size='1024KB');";
-        let stmt = ParserContext::create_with_dialect(sql, &GenericDialect {})
+        let stmt = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
             .unwrap()
             .pop()
             .unwrap();

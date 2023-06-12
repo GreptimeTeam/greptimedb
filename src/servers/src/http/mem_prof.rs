@@ -14,17 +14,27 @@
 
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use snafu::ResultExt;
-
-use crate::error::DumpProfileDataSnafu;
 
 #[cfg(feature = "mem-prof")]
 #[axum_macros::debug_handler]
-pub async fn mem_prof() -> crate::error::Result<impl IntoResponse> {
+pub async fn mem_prof_handler() -> crate::error::Result<impl IntoResponse> {
+    use snafu::ResultExt;
+
+    use crate::error::DumpProfileDataSnafu;
+
     Ok((
         StatusCode::OK,
         common_mem_prof::dump_profile()
             .await
             .context(DumpProfileDataSnafu)?,
+    ))
+}
+
+#[cfg(not(feature = "mem-prof"))]
+#[axum_macros::debug_handler]
+pub async fn mem_prof_handler() -> crate::error::Result<impl IntoResponse> {
+    Ok((
+        StatusCode::NOT_IMPLEMENTED,
+        "The 'mem-prof' feature is disabled",
     ))
 }

@@ -181,11 +181,11 @@ fn test_region_name() {
 #[test]
 fn test_table_dir() {
     assert_eq!(
-        "greptime/public/1024/",
+        "data/greptime/public/1024/",
         table_dir("greptime", "public", 1024)
     );
     assert_eq!(
-        "0x4354a1/prometheus/1024/",
+        "data/0x4354a1/prometheus/1024/",
         table_dir("0x4354a1", "prometheus", 1024)
     );
 }
@@ -547,10 +547,39 @@ fn new_add_columns_req(new_tag: &ColumnSchema, new_field: &ColumnSchema) -> Alte
                 AddColumnRequest {
                     column_schema: new_tag.clone(),
                     is_key: true,
+                    location: None,
                 },
                 AddColumnRequest {
                     column_schema: new_field.clone(),
                     is_key: false,
+                    location: None,
+                },
+            ],
+        },
+    }
+}
+
+pub(crate) fn new_add_columns_req_with_location(
+    new_tag: &ColumnSchema,
+    new_field: &ColumnSchema,
+) -> AlterTableRequest {
+    AlterTableRequest {
+        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+        schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+        table_name: TABLE_NAME.to_string(),
+        alter_kind: AlterKind::AddColumns {
+            columns: vec![
+                AddColumnRequest {
+                    column_schema: new_tag.clone(),
+                    is_key: true,
+                    location: Some(common_query::AddColumnLocation::First),
+                },
+                AddColumnRequest {
+                    column_schema: new_field.clone(),
+                    is_key: false,
+                    location: Some(common_query::AddColumnLocation::After {
+                        column_name: "ts".to_string(),
+                    }),
                 },
             ],
         },
@@ -596,6 +625,29 @@ async fn test_alter_table_add_column() {
     assert_eq!(new_schema.timestamp_column(), old_schema.timestamp_column());
     assert_eq!(new_schema.version(), old_schema.version() + 1);
     assert_eq!(new_meta.next_column_id, old_meta.next_column_id + 2);
+    assert_eq!(new_meta.region_numbers, old_meta.region_numbers);
+
+    let new_tag = ColumnSchema::new("my_tag_first", ConcreteDataType::string_datatype(), true);
+    let new_field = ColumnSchema::new(
+        "my_field_after_ts",
+        ConcreteDataType::string_datatype(),
+        true,
+    );
+    let req = new_add_columns_req_with_location(&new_tag, &new_field);
+    let table = table_engine
+        .alter_table(&EngineContext::default(), req)
+        .await
+        .unwrap();
+
+    let new_info = table.table_info();
+    let new_meta = &new_info.meta;
+    let new_schema = &new_meta.schema;
+
+    assert_eq!(&[0, 1, 6], &new_meta.primary_key_indices[..]);
+    assert_eq!(&[2, 3, 4, 5, 7], &new_meta.value_indices[..]);
+    assert_eq!(new_schema.timestamp_column(), old_schema.timestamp_column());
+    assert_eq!(new_schema.version(), old_schema.version() + 2);
+    assert_eq!(new_meta.next_column_id, old_meta.next_column_id + 4);
     assert_eq!(new_meta.region_numbers, old_meta.region_numbers);
 }
 

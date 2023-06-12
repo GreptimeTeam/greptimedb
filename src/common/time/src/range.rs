@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::{Debug, Display, Formatter};
+
 use crate::timestamp::TimeUnit;
 use crate::timestamp_millis::TimestampMillis;
 use crate::Timestamp;
@@ -193,6 +195,38 @@ impl<T: PartialOrd> GenericRange<T> {
 
 pub type TimestampRange = GenericRange<Timestamp>;
 
+impl Display for TimestampRange {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let s = match (&self.start, &self.end) {
+            (Some(start), Some(end)) => {
+                format!(
+                    "TimestampRange{{[{}{},{}{})}}",
+                    start.value(),
+                    start.unit().short_name(),
+                    end.value(),
+                    end.unit().short_name()
+                )
+            }
+            (Some(start), None) => {
+                format!(
+                    "TimestampRange{{[{}{},#)}}",
+                    start.value(),
+                    start.unit().short_name()
+                )
+            }
+            (None, Some(end)) => {
+                format!(
+                    "TimestampRange{{[#,{}{})}}",
+                    end.value(),
+                    end.unit().short_name()
+                )
+            }
+            (None, None) => "TimestampRange{{[#,#)}}".to_string(),
+        };
+        f.write_str(&s)
+    }
+}
+
 impl TimestampRange {
     /// Create a TimestampRange with optional inclusive end timestamp.
     /// If end timestamp is present and is less than start timestamp, this method will return
@@ -221,6 +255,7 @@ impl TimestampRange {
     }
 
     /// Shortcut method to create a timestamp range with given start/end value and time unit.
+    /// Returns empty iff `start` > `end`.
     pub fn with_unit(start: i64, end: i64, unit: TimeUnit) -> Option<Self> {
         let start = Timestamp::new(start, unit);
         let end = Timestamp::new(end, unit);

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod inserter;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -20,28 +22,30 @@ use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
 use api::v1::{
     column_def, AlterExpr, CreateDatabaseExpr, CreateTableExpr, DeleteRequest, DropTableExpr,
-    FlushTableExpr, InsertRequest, TableId,
+    FlushTableExpr, InsertRequests, TableId,
 };
 use async_trait::async_trait;
 use catalog::helper::{SchemaKey, SchemaValue};
 use catalog::{CatalogManager, DeregisterTableRequest, RegisterTableRequest};
 use chrono::DateTime;
+use client::client_manager::DatanodeClients;
 use client::Database;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::format_full_table_name;
 use common_error::prelude::BoxedError;
+use common_meta::rpc::router::{
+    CreateRequest as MetaCreateRequest, DeleteRequest as MetaDeleteRequest,
+    Partition as MetaPartition, RouteRequest, RouteResponse,
+};
+use common_meta::rpc::store::CompareAndPutRequest;
+use common_meta::table_name::TableName;
 use common_query::Output;
-use common_telemetry::debug;
+use common_telemetry::{debug, info, warn};
 use datanode::instance::sql::table_idents_to_full_name;
 use datanode::sql::SqlHandler;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::RawSchema;
 use meta_client::client::MetaClient;
-use meta_client::rpc::router::DeleteRequest as MetaDeleteRequest;
-use meta_client::rpc::{
-    CompareAndPutRequest, CreateRequest as MetaCreateRequest, Partition as MetaPartition,
-    RouteRequest, RouteResponse, TableName,
-};
 use partition::manager::PartitionInfo;
 use partition::partition::{PartitionBound, PartitionDef};
 use query::error::QueryExecutionSnafu;
@@ -53,22 +57,23 @@ use sql::ast::{Ident, Value as SqlValue};
 use sql::statements::create::{PartitionEntry, Partitions};
 use sql::statements::statement::Statement;
 use sql::statements::{self, sql_value_to_value};
-use table::engine::TableReference;
+use store_api::storage::RegionNumber;
+use table::engine::{self, TableReference};
 use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
 use table::requests::TableOptions;
 use table::table::AlterContext;
 use table::TableRef;
 
 use crate::catalog::FrontendCatalogManager;
-use crate::datanode::DatanodeClients;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogEntrySerdeSnafu, CatalogSnafu, ColumnDataTypeSnafu,
     DeserializePartitionSnafu, InvokeDatanodeSnafu, ParseSqlSnafu, PrimaryKeyNotFoundSnafu,
     RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaExistsSnafu, StartMetaClientSnafu,
     TableAlreadyExistSnafu, TableNotFoundSnafu, TableSnafu, ToTableDeleteRequestSnafu,
-    ToTableInsertRequestSnafu, UnrecognizedTableOptionSnafu,
+    UnrecognizedTableOptionSnafu,
 };
 use crate::expr_factory;
+use crate::instance::distributed::inserter::DistInserter;
 use crate::table::DistTable;
 
 const MAX_VALUE: &str = "MAXVALUE";
@@ -93,6 +98,17 @@ impl DistInstance {
         }
     }
 
+    async fn find_table(&self, table_name: &TableName) -> Result<Option<TableRef>> {
+        self.catalog_manager
+            .table(
+                &table_name.catalog_name,
+                &table_name.schema_name,
+                &table_name.table_name,
+            )
+            .await
+            .context(CatalogSnafu)
+    }
+
     pub async fn create_table(
         &self,
         create_table: &mut CreateTableExpr,
@@ -105,16 +121,7 @@ impl DistInstance {
             &create_table.table_name,
         );
 
-        if let Some(table) = self
-            .catalog_manager
-            .table(
-                &table_name.catalog_name,
-                &table_name.schema_name,
-                &table_name.table_name,
-            )
-            .await
-            .context(CatalogSnafu)?
-        {
+        if let Some(table) = self.find_table(&table_name).await? {
             return if create_table.create_if_not_exists {
                 Ok(table)
             } else {
@@ -129,7 +136,19 @@ impl DistInstance {
 
         let response = self
             .create_table_in_meta(create_table, partitions, &table_info)
-            .await?;
+            .await;
+        let response = match response {
+            Ok(response) => response,
+            Err(e) => {
+                return if let Some(table) = self.find_table(&table_name).await? {
+                    warn!("Table '{table_name}' is created concurrently by other Frontend nodes!");
+                    Ok(table)
+                } else {
+                    Err(e)
+                }
+            }
+        };
+
         let table_routes = response.table_routes;
         ensure!(
             table_routes.len() == 1,
@@ -138,7 +157,7 @@ impl DistInstance {
             }
         );
         let table_route = table_routes.first().unwrap();
-        debug!(
+        info!(
             "Creating distributed table {table_name} with table routes: {}",
             serde_json::to_string_pretty(table_route)
                 .unwrap_or_else(|_| format!("{table_route:#?}"))
@@ -160,9 +179,7 @@ impl DistInstance {
         let table = Arc::new(DistTable::new(
             table_name.clone(),
             table_info,
-            self.catalog_manager.partition_manager(),
-            self.catalog_manager.datanode_clients(),
-            self.catalog_manager.backend(),
+            self.catalog_manager.clone(),
         ));
 
         let request = RegisterTableRequest {
@@ -188,11 +205,11 @@ impl DistInstance {
 
             let regions = table_route.find_leader_regions(&datanode);
             let mut create_expr_for_region = create_table.clone();
-            create_expr_for_region.region_ids = regions;
+            create_expr_for_region.region_numbers = regions;
 
             debug!(
                 "Creating table {:?} on Datanode {:?} with regions {:?}",
-                create_table, datanode, create_expr_for_region.region_ids,
+                create_table, datanode, create_expr_for_region.region_numbers,
             );
 
             let _timer = common_telemetry::timer!(crate::metrics::DIST_CREATE_TABLE_IN_DATANODE);
@@ -201,6 +218,19 @@ impl DistInstance {
                 .await
                 .context(RequestDatanodeSnafu)?;
         }
+
+        // Since the table information created on meta does not go through KvBackend, so we
+        // manually invalidate the cache here.
+        //
+        // TODO(fys): when the meta invalidation cache mechanism is established, remove it.
+        self.catalog_manager
+            .invalidate_table(
+                &table_name.catalog_name,
+                &table_name.schema_name,
+                &table_name.table_name,
+            )
+            .await;
+
         Ok(table)
     }
 
@@ -259,10 +289,26 @@ impl DistInstance {
             }
         }
 
+        // Since the table information dropped on meta does not go through KvBackend, so we
+        // manually invalidate the cache here.
+        //
+        // TODO(fys): when the meta invalidation cache mechanism is established, remove it.
+        self.catalog_manager()
+            .invalidate_table(
+                &table_name.catalog_name,
+                &table_name.schema_name,
+                &table_name.table_name,
+            )
+            .await;
+
         Ok(Output::AffectedRows(1))
     }
 
-    async fn flush_table(&self, table_name: TableName, region_id: Option<u32>) -> Result<Output> {
+    async fn flush_table(
+        &self,
+        table_name: TableName,
+        region_number: Option<RegionNumber>,
+    ) -> Result<Output> {
         let _ = self
             .catalog_manager
             .table(
@@ -288,13 +334,13 @@ impl DistInstance {
             catalog_name: table_name.catalog_name.clone(),
             schema_name: table_name.schema_name.clone(),
             table_name: table_name.table_name.clone(),
-            region_id,
+            region_number,
         };
 
         for table_route in &route_response.table_routes {
             let should_send_rpc = table_route.region_routes.iter().any(|route| {
-                if let Some(region_id) = region_id {
-                    region_id == route.region.id as u32
+                if let Some(n) = region_number {
+                    n == engine::region_number(route.region.id)
                 } else {
                     true
                 }
@@ -437,8 +483,8 @@ impl DistInstance {
         }
 
         let key = SchemaKey {
-            catalog_name: catalog,
-            schema_name: expr.database_name,
+            catalog_name: catalog.clone(),
+            schema_name: expr.database_name.clone(),
         };
         let value = SchemaValue {};
         let client = self
@@ -449,16 +495,26 @@ impl DistInstance {
         let request = CompareAndPutRequest::new()
             .with_key(key.to_string())
             .with_value(value.as_bytes().context(CatalogEntrySerdeSnafu)?);
+
         let response = client
             .compare_and_put(request.into())
             .await
             .context(RequestMetaSnafu)?;
+
         ensure!(
             response.success,
             SchemaExistsSnafu {
                 name: key.schema_name
             }
         );
+
+        // Since the database created on meta does not go through KvBackend, so we manually
+        // invalidate the cache here.
+        //
+        // TODO(fys): when the meta invalidation cache mechanism is established, remove it.
+        self.catalog_manager()
+            .invalidate_schema(&catalog, &expr.database_name)
+            .await;
 
         Ok(Output::AffectedRows(1))
     }
@@ -469,12 +525,15 @@ impl DistInstance {
         } else {
             expr.catalog_name.as_str()
         };
+
         let schema_name = if expr.schema_name.is_empty() {
             DEFAULT_SCHEMA_NAME
         } else {
             expr.schema_name.as_str()
         };
+
         let table_name = expr.table_name.as_str();
+
         let table = self
             .catalog_manager
             .table(catalog_name, schema_name, table_name)
@@ -488,6 +547,7 @@ impl DistInstance {
             .context(AlterExprToRequestSnafu)?;
 
         let mut context = AlterContext::with_capacity(1);
+
         context.insert(expr);
 
         table.alter(context, &request).await.context(TableSnafu)?;
@@ -524,34 +584,18 @@ impl DistInstance {
             .context(RequestMetaSnafu)
     }
 
-    // TODO(LFC): Refactor GRPC insertion and deletion implementation here,
-    // Take insertion as an example. GRPC insertion is converted to Table InsertRequest here,
-    // than split the Table InsertRequest in DistTable, than assemble each GRPC InsertRequest there.
-    // Rather inefficient, should operate on GRPC InsertRequest directly.
     async fn handle_dist_insert(
         &self,
-        request: InsertRequest,
+        requests: InsertRequests,
         ctx: QueryContextRef,
     ) -> Result<Output> {
-        let catalog = &ctx.current_catalog();
-        let schema = &ctx.current_schema();
-        let table_name = &request.table_name;
-        let table_ref = TableReference::full(catalog, schema, table_name);
-
-        let table = self
-            .catalog_manager
-            .table(catalog, schema, table_name)
-            .await
-            .context(CatalogSnafu)?
-            .with_context(|| TableNotFoundSnafu {
-                table_name: table_ref.to_string(),
-            })?;
-
-        let request = common_grpc_expr::insert::to_table_insert_request(catalog, schema, request)
-            .context(ToTableInsertRequestSnafu)?;
-
-        let affected_rows = table.insert(request).await.context(TableSnafu)?;
-        Ok(Output::AffectedRows(affected_rows))
+        let inserter = DistInserter::new(
+            ctx.current_catalog(),
+            ctx.current_schema(),
+            self.catalog_manager.clone(),
+        );
+        let affected_rows = inserter.grpc_insert(requests).await?;
+        Ok(Output::AffectedRows(affected_rows as usize))
     }
 
     async fn handle_dist_delete(
@@ -605,7 +649,7 @@ impl GrpcQueryHandler for DistInstance {
 
     async fn do_query(&self, request: Request, ctx: QueryContextRef) -> Result<Output> {
         match request {
-            Request::Insert(request) => self.handle_dist_insert(request, ctx).await,
+            Request::Inserts(requests) => self.handle_dist_insert(requests, ctx).await,
             Request::Delete(request) => self.handle_dist_delete(request, ctx).await,
             Request::Query(_) => {
                 unreachable!("Query should have been handled directly in Frontend Instance!")
@@ -617,8 +661,6 @@ impl GrpcQueryHandler for DistInstance {
                 match expr {
                     DdlExpr::CreateDatabase(expr) => self.handle_create_database(expr, ctx).await,
                     DdlExpr::CreateTable(mut expr) => {
-                        // TODO(LFC): Support creating distributed table through GRPC interface.
-                        // Currently only SQL supports it; how to design the fields in CreateTableExpr?
                         let _ = self.create_table(&mut expr, None).await;
                         Ok(Output::AffectedRows(0))
                     }
@@ -631,7 +673,7 @@ impl GrpcQueryHandler for DistInstance {
                     DdlExpr::FlushTable(expr) => {
                         let table_name =
                             TableName::new(&expr.catalog_name, &expr.schema_name, &expr.table_name);
-                        self.flush_table(table_name, expr.region_id).await
+                        self.flush_table(table_name, expr.region_number).await
                     }
                 }
             }
@@ -834,7 +876,7 @@ fn find_partition_columns(
 #[cfg(test)]
 mod test {
     use session::context::QueryContext;
-    use sql::dialect::GenericDialect;
+    use sql::dialect::GreptimeDbDialect;
     use sql::parser::ParserContext;
     use sql::statements::statement::Statement;
 
@@ -868,7 +910,7 @@ ENGINE=mito",
             ),
         ];
         for (sql, expected) in cases {
-            let result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
+            let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
             match &result[0] {
                 Statement::CreateTable(c) => {
                     let expr = expr_factory::create_to_expr(c, QueryContext::arc()).unwrap();

@@ -12,7 +12,9 @@ RUN apt-get update && apt-get install -y \
     pkg-config \
     python3 \
     python3-dev \
-    && pip install pyarrow
+    python3-pip \
+    && pip3 install --upgrade pip \
+    && pip3 install pyarrow
 
 # Install Rust.
 SHELL ["/bin/bash", "-c"]

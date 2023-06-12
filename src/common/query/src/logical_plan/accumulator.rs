@@ -172,7 +172,6 @@ impl DfAccumulator for DfAccumulatorAdaptor {
     }
 
     fn size(&self) -> usize {
-        // TODO(LFC): Implement new "size" method for Accumulator.
         0
     }
 }

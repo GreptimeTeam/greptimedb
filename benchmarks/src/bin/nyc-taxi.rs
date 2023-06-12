@@ -26,7 +26,9 @@ use arrow::datatypes::{DataType, Float64Type, Int64Type};
 use arrow::record_batch::RecordBatch;
 use clap::Parser;
 use client::api::v1::column::Values;
-use client::api::v1::{Column, ColumnDataType, ColumnDef, CreateTableExpr, InsertRequest};
+use client::api::v1::{
+    Column, ColumnDataType, ColumnDef, CreateTableExpr, InsertRequest, InsertRequests,
+};
 use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -107,8 +109,12 @@ async fn write_data(
             columns,
             row_count,
         };
+        let requests = InsertRequests {
+            inserts: vec![request],
+        };
+
         let now = Instant::now();
-        db.insert(request).await.unwrap();
+        db.insert(requests).await.unwrap();
         let elapsed = now.elapsed();
         total_rpc_elapsed_ms += elapsed.as_millis();
         progress_bar.inc(row_count as _);
@@ -364,7 +370,7 @@ fn create_table_expr() -> CreateTableExpr {
         primary_keys: vec!["VendorID".to_string()],
         create_if_not_exists: false,
         table_options: Default::default(),
-        region_ids: vec![0],
+        region_numbers: vec![0],
         table_id: None,
         engine: "mito".to_string(),
     }

@@ -21,15 +21,17 @@ use common_datasource::object_store::build_backend;
 use common_error::prelude::BoxedError;
 use common_query::physical_plan::PhysicalPlanRef;
 use common_query::prelude::Expr;
+use common_recordbatch::SendableRecordBatchStream;
 use datatypes::schema::SchemaRef;
 use object_store::ObjectStore;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::RegionNumber;
+use store_api::storage::{RegionNumber, ScanRequest};
 use table::error::{self as table_error, Result as TableResult};
 use table::metadata::{RawTableInfo, TableInfo, TableInfoRef, TableType};
 use table::{requests, Table};
 
+use super::format::create_stream;
 use crate::error::{self, ConvertRawSnafu, Result};
 use crate::manifest::immutable::{
     read_table_manifest, write_table_manifest, ImmutableMetadata, INIT_META_VERSION,
@@ -96,16 +98,29 @@ impl Table for ImmutableFileTable {
         .context(table_error::TableOperationSnafu)
     }
 
+    async fn scan_to_stream(&self, request: ScanRequest) -> TableResult<SendableRecordBatchStream> {
+        create_stream(
+            &self.format,
+            &CreateScanPlanContext::default(),
+            &ScanPlanConfig {
+                file_schema: self.schema(),
+                files: &self.files,
+                projection: request.projection.as_ref(),
+                filters: &request.filters,
+                limit: request.limit,
+                store: self.object_store.clone(),
+            },
+        )
+        .map_err(BoxedError::new)
+        .context(table_error::TableOperationSnafu)
+    }
+
     async fn flush(
         &self,
         _region_number: Option<RegionNumber>,
         _wait: Option<bool>,
     ) -> TableResult<()> {
         // nothing to flush
-        Ok(())
-    }
-
-    async fn close(&self) -> TableResult<()> {
         Ok(())
     }
 }

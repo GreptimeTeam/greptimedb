@@ -10,7 +10,6 @@ name = "greptime"
 path = "src/bin/greptime.rs"
 
 [features]
-mem-prof = ["tikv-jemallocator", "tikv-jemalloc-ctl"]
 tokio-console = ["common-telemetry/tokio-console"]
 
 [dependencies]
@@ -32,6 +31,7 @@ frontend = { path = "../frontend" }
 futures.workspace = true
 meta-client = { path = "../meta-client" }
 meta-srv = { path = "../meta-srv" }
+metrics.workspace = true
 nu-ansi-term = "0.46"
 partition = { path = "../partition" }
 query = { path = "../query" }
@@ -41,8 +41,7 @@ servers = { path = "../servers" }
 session = { path = "../session" }
 snafu.workspace = true
 substrait = { path = "../common/substrait" }
-tikv-jemalloc-ctl = { version = "0.5", optional = true }
-tikv-jemallocator = { version = "0.5", optional = true }
+tikv-jemallocator = "0.5"
 tokio.workspace = true
 
 [dev-dependencies]

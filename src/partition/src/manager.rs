@@ -15,22 +15,31 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use common_meta::peer::Peer;
+use common_meta::rpc::router::TableRoute;
+use common_meta::table_name::TableName;
 use common_query::prelude::Expr;
 use datafusion_expr::{BinaryExpr, Expr as DfExpr, Operator};
 use datatypes::prelude::Value;
 use datatypes::schema::Schema;
-use meta_client::rpc::{Peer, TableName, TableRoute};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{RegionId, RegionNumber};
 use table::requests::InsertRequest;
 
 use crate::columns::RangeColumnsPartitionRule;
-use crate::error::Result;
+use crate::error::{FindLeaderSnafu, Result};
 use crate::partition::{PartitionBound, PartitionDef, PartitionExpr};
 use crate::range::RangePartitionRule;
 use crate::route::TableRoutes;
 use crate::splitter::{InsertRequestSplit, WriteSplitter};
 use crate::{error, PartitionRuleRef};
+
+#[async_trait::async_trait]
+pub trait TableRouteCacheInvalidator: Send + Sync {
+    async fn invalidate_table_route(&self, table: &TableName);
+}
+
+pub type TableRouteCacheInvalidatorRef = Arc<dyn TableRouteCacheInvalidator>;
 
 pub type PartitionRuleManagerRef = Arc<PartitionRuleManager>;
 
@@ -46,6 +55,13 @@ pub struct PartitionRuleManager {
 pub struct PartitionInfo {
     pub id: RegionId,
     pub partition: PartitionDef,
+}
+
+#[async_trait::async_trait]
+impl TableRouteCacheInvalidator for PartitionRuleManager {
+    async fn invalidate_table_route(&self, table: &TableName) {
+        self.table_routes.invalidate_table_route(table).await
+    }
 }
 
 impl PartitionRuleManager {
@@ -72,25 +88,31 @@ impl PartitionRuleManager {
         let mut datanodes = HashMap::with_capacity(regions.len());
         for region in regions.iter() {
             let datanode = route
-                .region_routes
-                .iter()
-                .find_map(|x| {
-                    if x.region.id == *region as RegionId {
-                        x.leader_peer.clone()
-                    } else {
-                        None
-                    }
-                })
+                .find_region_leader(*region)
                 .context(error::FindDatanodeSnafu {
                     table: table.to_string(),
                     region: *region,
                 })?;
             datanodes
-                .entry(datanode)
+                .entry(datanode.clone())
                 .or_insert_with(Vec::new)
                 .push(*region);
         }
         Ok(datanodes)
+    }
+
+    /// Find all leader peers of given table.
+    pub async fn find_table_region_leaders(&self, table: &TableName) -> Result<Vec<Peer>> {
+        let route = self.table_routes.get_route(table).await?;
+        let mut peers = Vec::with_capacity(route.region_routes.len());
+        for peer in &route.region_routes {
+            peers.push(peer.leader_peer.clone().with_context(|| FindLeaderSnafu {
+                region_id: peer.region.id,
+                table_name: table.to_string(),
+            })?);
+        }
+
+        Ok(peers)
     }
 
     pub async fn find_table_partitions(&self, table: &TableName) -> Result<Vec<PartitionInfo>> {

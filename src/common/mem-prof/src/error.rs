@@ -23,7 +23,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Failed to read OPT_PROF"))]
+    #[snafu(display("Failed to read OPT_PROF, source: {}", source))]
     ReadOptProf { source: tikv_jemalloc_ctl::Error },
 
     #[snafu(display("Memory profiling is not enabled"))]
@@ -32,13 +32,17 @@ pub enum Error {
     #[snafu(display("Failed to build temp file from given path: {:?}", path))]
     BuildTempPath { path: PathBuf, location: Location },
 
-    #[snafu(display("Failed to open temp file: {}", path))]
+    #[snafu(display("Failed to open temp file: {}, source: {}", path, source))]
     OpenTempFile {
         path: String,
         source: std::io::Error,
     },
 
-    #[snafu(display("Failed to dump profiling data to temp file: {:?}", path))]
+    #[snafu(display(
+        "Failed to dump profiling data to temp file: {:?}, source: {}",
+        path,
+        source
+    ))]
     DumpProfileData {
         path: PathBuf,
         source: tikv_jemalloc_ctl::Error,

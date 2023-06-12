@@ -16,7 +16,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use catalog::remote::MetaKvBackend;
+use catalog::remote::CachedMetaKvBackend;
+use client::client_manager::DatanodeClients;
 use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::ErrorExt;
 use common_query::Output;
@@ -24,7 +25,6 @@ use common_recordbatch::RecordBatches;
 use common_telemetry::logging;
 use either::Either;
 use frontend::catalog::FrontendCatalogManager;
-use frontend::datanode::DatanodeClients;
 use meta_client::client::MetaClientBuilder;
 use partition::manager::PartitionRuleManager;
 use partition::route::TableRoutes;
@@ -253,9 +253,7 @@ async fn create_query_engine(meta_addr: &str) -> Result<DatafusionQueryEngine> {
         .context(StartMetaClientSnafu)?;
     let meta_client = Arc::new(meta_client);
 
-    let backend = Arc::new(MetaKvBackend {
-        client: meta_client.clone(),
-    });
+    let cached_meta_backend = Arc::new(CachedMetaKvBackend::new(meta_client.clone()));
 
     let table_routes = Arc::new(TableRoutes::new(meta_client));
     let partition_manager = Arc::new(PartitionRuleManager::new(table_routes));
@@ -263,11 +261,18 @@ async fn create_query_engine(meta_addr: &str) -> Result<DatafusionQueryEngine> {
     let datanode_clients = Arc::new(DatanodeClients::default());
 
     let catalog_list = Arc::new(FrontendCatalogManager::new(
-        backend,
+        cached_meta_backend.clone(),
+        cached_meta_backend,
         partition_manager,
         datanode_clients,
     ));
-    let state = Arc::new(QueryEngineState::new(catalog_list, Default::default()));
+    let state = Arc::new(QueryEngineState::new(
+        catalog_list,
+        false,
+        None,
+        None,
+        Default::default(),
+    ));
 
     Ok(DatafusionQueryEngine::new(state))
 }

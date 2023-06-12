@@ -74,14 +74,13 @@ impl fmt::Display for Query {
 #[cfg(test)]
 mod test {
 
-    use sqlparser::dialect::GenericDialect;
-
     use super::Query;
+    use crate::dialect::GreptimeDbDialect;
     use crate::parser::ParserContext;
     use crate::statements::statement::Statement;
 
     fn create_query(sql: &str) -> Option<Box<Query>> {
-        match ParserContext::create_with_dialect(sql, &GenericDialect {})
+        match ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
             .unwrap()
             .remove(0)
         {

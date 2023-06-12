@@ -21,6 +21,7 @@ use cmd::error::Result;
 use cmd::options::{Options, TopLevelOptions};
 use cmd::{cli, datanode, frontend, metasrv, standalone};
 use common_telemetry::logging::{error, info, TracingOptions};
+use metrics::gauge;
 
 #[derive(Parser)]
 #[clap(name = "greptimedb", version = print_version())]
@@ -46,13 +47,13 @@ pub enum Application {
 }
 
 impl Application {
-    async fn run(&mut self) -> Result<()> {
+    async fn start(&mut self) -> Result<()> {
         match self {
-            Application::Datanode(instance) => instance.run().await,
-            Application::Frontend(instance) => instance.run().await,
-            Application::Metasrv(instance) => instance.run().await,
-            Application::Standalone(instance) => instance.run().await,
-            Application::Cli(instance) => instance.run().await,
+            Application::Datanode(instance) => instance.start().await,
+            Application::Frontend(instance) => instance.start().await,
+            Application::Metasrv(instance) => instance.start().await,
+            Application::Standalone(instance) => instance.start().await,
+            Application::Cli(instance) => instance.start().await,
         }
     }
 
@@ -163,15 +164,35 @@ fn print_version() -> &'static str {
     )
 }
 
-#[cfg(feature = "mem-prof")]
+fn short_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+// {app_name}-{branch_name}-{commit_short}
+// The branch name (tag) of a release build should already contain the short
+// version so the full version doesn't concat the short version explicitly.
+fn full_version() -> &'static str {
+    concat!(
+        "greptimedb-",
+        env!("GIT_BRANCH"),
+        "-",
+        env!("GIT_COMMIT_SHORT")
+    )
+}
+
+fn log_env_flags() {
+    info!("command line arguments");
+    for argument in std::env::args() {
+        info!("argument: {}", argument);
+    }
+}
+
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cmd = Command::parse();
-    // TODO(dennis):
-    // 1. adds ip/port to app
     let app_name = &cmd.subcmd.to_string();
 
     let opts = cmd.load_options()?;
@@ -185,10 +206,21 @@ async fn main() -> Result<()> {
     common_telemetry::init_default_metrics_recorder();
     let _guard = common_telemetry::init_global_logging(app_name, logging_opts, tracing_opts);
 
+    // Report app version as gauge.
+    gauge!("app_version", 1.0, "short_version" => short_version(), "version" => full_version());
+
+    // Log version and argument flags.
+    info!(
+        "short_version: {}, full_version: {}",
+        short_version(),
+        full_version()
+    );
+    log_env_flags();
+
     let mut app = cmd.build(opts).await?;
 
     tokio::select! {
-        result = app.run() => {
+        result = app.start() => {
             if let Err(err) = result {
                 error!(err; "Fatal error occurs!");
             }

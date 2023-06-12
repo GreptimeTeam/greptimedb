@@ -18,6 +18,7 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
+use client::client_manager::DatanodeClients;
 use common_base::Plugins;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::physical_plan::SessionContext;
@@ -26,13 +27,22 @@ use datafusion::catalog::catalog::MemoryCatalogList;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::{QueryPlanner, SessionConfig, SessionState};
 use datafusion::execution::runtime_env::RuntimeEnv;
-use datafusion::physical_plan::planner::DefaultPhysicalPlanner;
+use datafusion::physical_optimizer::dist_enforcement::EnforceDistribution;
+use datafusion::physical_optimizer::repartition::Repartition;
+use datafusion::physical_optimizer::sort_enforcement::EnforceSorting;
+use datafusion::physical_optimizer::PhysicalOptimizerRule;
+use datafusion::physical_plan::planner::{DefaultPhysicalPlanner, ExtensionPlanner};
 use datafusion::physical_plan::{ExecutionPlan, PhysicalPlanner};
 use datafusion_expr::LogicalPlan as DfLogicalPlan;
 use datafusion_optimizer::analyzer::Analyzer;
+use datafusion_optimizer::optimizer::Optimizer;
+use partition::manager::PartitionRuleManager;
 use promql::extension_plan::PromExtensionPlanner;
 
-use crate::optimizer::TypeConversionRule;
+use crate::dist_plan::{DistExtensionPlanner, DistPlannerAnalyzer};
+use crate::extension_serializer::ExtensionSerializer;
+use crate::optimizer::order_hint::OrderHintRule;
+use crate::optimizer::type_conversion::TypeConversionRule;
 use crate::query_engine::options::QueryOptions;
 
 /// Query engine global state
@@ -55,20 +65,53 @@ impl fmt::Debug for QueryEngineState {
 }
 
 impl QueryEngineState {
-    pub fn new(catalog_list: CatalogManagerRef, plugins: Arc<Plugins>) -> Self {
+    pub fn new(
+        catalog_list: CatalogManagerRef,
+        with_dist_planner: bool,
+        partition_manager: Option<Arc<PartitionRuleManager>>,
+        datanode_clients: Option<Arc<DatanodeClients>>,
+        plugins: Arc<Plugins>,
+    ) -> Self {
         let runtime_env = Arc::new(RuntimeEnv::default());
         let session_config = SessionConfig::new().with_create_default_catalog_and_schema(false);
         // Apply the type conversion rule first.
         let mut analyzer = Analyzer::new();
+        if with_dist_planner {
+            analyzer.rules.insert(0, Arc::new(DistPlannerAnalyzer));
+        }
         analyzer.rules.insert(0, Arc::new(TypeConversionRule));
+        let mut optimizer = Optimizer::new();
+        optimizer.rules.push(Arc::new(OrderHintRule));
+
+        let mut physical_optimizers = {
+            let state = SessionState::with_config_rt(session_config.clone(), runtime_env.clone());
+            state.physical_optimizers().to_vec()
+        };
+        // run the repartition and sort enforcement rules first.
+        // And `EnforceSorting` is required to run after `EnforceDistribution`.
+        Self::remove_physical_optimize_rule(&mut physical_optimizers, EnforceSorting {}.name());
+        Self::remove_physical_optimize_rule(
+            &mut physical_optimizers,
+            EnforceDistribution {}.name(),
+        );
+        Self::remove_physical_optimize_rule(&mut physical_optimizers, Repartition {}.name());
+        physical_optimizers.insert(0, Arc::new(EnforceSorting {}));
+        physical_optimizers.insert(0, Arc::new(EnforceDistribution {}));
+        physical_optimizers.insert(0, Arc::new(Repartition {}));
 
         let session_state = SessionState::with_config_rt_and_catalog_list(
             session_config,
             runtime_env,
             Arc::new(MemoryCatalogList::default()), // pass a dummy catalog list
         )
+        .with_serializer_registry(Arc::new(ExtensionSerializer))
         .with_analyzer_rules(analyzer.rules)
-        .with_query_planner(Arc::new(DfQueryPlanner::new()));
+        .with_query_planner(Arc::new(DfQueryPlanner::new(
+            partition_manager,
+            datanode_clients,
+        )))
+        .with_optimizer_rules(optimizer.rules)
+        .with_physical_optimizer_rules(physical_optimizers);
 
         let df_context = SessionContext::with_state(session_state);
 
@@ -77,6 +120,22 @@ impl QueryEngineState {
             catalog_manager: catalog_list,
             aggregate_functions: Arc::new(RwLock::new(HashMap::new())),
             plugins,
+        }
+    }
+
+    fn remove_physical_optimize_rule(
+        rules: &mut Vec<Arc<dyn PhysicalOptimizerRule + Send + Sync>>,
+        name: &str,
+    ) {
+        let mut index_to_move = None;
+        for (i, rule) in rules.iter().enumerate() {
+            if rule.name() == name {
+                index_to_move = Some(i);
+                break;
+            }
+        }
+        if let Some(index) = index_to_move {
+            rules.remove(index);
         }
     }
 
@@ -94,13 +153,25 @@ impl QueryEngineState {
             .cloned()
     }
 
+    /// Register an aggregate function.
+    ///
+    /// # Panics
+    /// Will panic if the function with same name is already registered.
+    ///
+    /// Panicking consideration: currently the aggregated functions are all statically registered,
+    /// user cannot define their own aggregate functions on the fly. So we can panic here. If that
+    /// invariant is broken in the future, we should return an error instead of panicking.
     pub fn register_aggregate_function(&self, func: AggregateFunctionMetaRef) {
-        // TODO(LFC): Return some error if there exists an aggregate function with the same name.
-        // Simply overwrite the old value for now.
-        self.aggregate_functions
+        let name = func.name();
+        let x = self
+            .aggregate_functions
             .write()
             .unwrap()
-            .insert(func.name(), func);
+            .insert(name.clone(), func);
+        assert!(
+            x.is_none(),
+            "Already registered aggregate function '{name}'"
+        );
     }
 
     #[inline]
@@ -137,11 +208,18 @@ impl QueryPlanner for DfQueryPlanner {
 }
 
 impl DfQueryPlanner {
-    fn new() -> Self {
+    fn new(
+        partition_manager: Option<Arc<PartitionRuleManager>>,
+        datanode_clients: Option<Arc<DatanodeClients>>,
+    ) -> Self {
+        let mut planners: Vec<Arc<dyn ExtensionPlanner + Send + Sync>> =
+            vec![Arc::new(PromExtensionPlanner)];
+        if let Some(partition_manager) = partition_manager
+         && let Some(datanode_clients) = datanode_clients {
+            planners.push(Arc::new(DistExtensionPlanner::new(partition_manager, datanode_clients)));
+        }
         Self {
-            physical_planner: DefaultPhysicalPlanner::with_extension_planners(vec![Arc::new(
-                PromExtensionPlanner {},
-            )]),
+            physical_planner: DefaultPhysicalPlanner::with_extension_planners(planners),
         }
     }
 }

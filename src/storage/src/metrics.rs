@@ -22,6 +22,8 @@ pub const FLUSH_REQUESTS_TOTAL: &str = "storage.flush.requests_total";
 pub const FLUSH_ERRORS_TOTAL: &str = "storage.flush.errors_total";
 /// Elapsed time of a flush job.
 pub const FLUSH_ELAPSED: &str = "storage.flush.elapsed";
+/// Counter of flushed bytes.
+pub const FLUSH_BYTES_TOTAL: &str = "storage.flush.bytes_total";
 /// Reason to flush.
 pub const FLUSH_REASON: &str = "reason";
 /// Gauge for open regions
@@ -30,3 +32,13 @@ pub const REGION_COUNT: &str = "storage.region_count";
 pub const LOG_STORE_WRITE_ELAPSED: &str = "storage.logstore.write.elapsed";
 /// Elapsed time of a compact job.
 pub const COMPACT_ELAPSED: &str = "storage.compact.elapsed";
+/// Global write buffer size in bytes.
+pub const WRITE_BUFFER_BYTES: &str = "storage.write_buffer_bytes";
+/// Elapsed time of inserting memtable.
+pub const MEMTABLE_WRITE_ELAPSED: &str = "storage.memtable.write.elapsed";
+/// Elapsed time of preprocessing write batch.
+pub const PREPROCESS_ELAPSED: &str = "storage.write.preprocess.elapsed";
+/// Elapsed time for windowed scan
+pub const WINDOW_SCAN_ELAPSED: &str = "query.scan.window_scan.elapsed";
+/// Rows per window during window scan
+pub const WINDOW_SCAN_ROWS_PER_WINDOW: &str = "query.scan.window_scan.window_row_size";

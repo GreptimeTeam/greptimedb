@@ -22,6 +22,7 @@ use axum::{http, Json};
 use base64::DecodeError;
 use catalog;
 use common_error::prelude::*;
+use common_telemetry::logging;
 use query::parser::PromQuery;
 use serde_json::json;
 use snafu::Location;
@@ -48,7 +49,7 @@ pub enum Error {
 
     #[snafu(display("Failed to collect recordbatch, source: {}", source))]
     CollectRecordbatch {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_recordbatch::error::Error,
     },
 
@@ -70,49 +71,36 @@ pub enum Error {
     #[snafu(display("Failed to execute query: {}, source: {}", query, source))]
     ExecuteQuery {
         query: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: BoxedError,
     },
 
     #[snafu(display("{source}"))]
     ExecuteGrpcQuery {
-        #[snafu(backtrace)]
-        source: BoxedError,
-    },
-
-    #[snafu(display("Failed to execute sql statement, source: {}", source))]
-    ExecuteStatement {
-        #[snafu(backtrace)]
+        location: Location,
         source: BoxedError,
     },
 
     #[snafu(display("Failed to check database validity, source: {}", source))]
     CheckDatabaseValidity {
-        #[snafu(backtrace)]
+        location: Location,
         source: BoxedError,
     },
 
     #[snafu(display("Failed to describe statement, source: {}", source))]
     DescribeStatement { source: BoxedError },
 
-    #[snafu(display("Failed to execute alter: {}, source: {}", query, source))]
-    ExecuteAlter {
-        query: String,
-        #[snafu(backtrace)]
-        source: BoxedError,
-    },
-
     #[snafu(display("Failed to insert script with name: {}, source: {}", name, source))]
     InsertScript {
         name: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: BoxedError,
     },
 
     #[snafu(display("Failed to execute script by name: {}, source: {}", name, source))]
     ExecuteScript {
         name: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: BoxedError,
     },
 
@@ -124,13 +112,19 @@ pub enum Error {
 
     #[snafu(display("Failed to parse InfluxDB line protocol, source: {}", source))]
     InfluxdbLineProtocol {
-        #[snafu(backtrace)]
+        location: Location,
         source: influxdb_line_protocol::Error,
     },
 
     #[snafu(display("Failed to write InfluxDB line protocol, source: {}", source))]
     InfluxdbLinesWrite {
-        #[snafu(backtrace)]
+        location: Location,
+        source: common_grpc::error::Error,
+    },
+
+    #[snafu(display("Failed to write prometheus series, source: {}", source))]
+    PromSeriesWrite {
+        location: Location,
         source: common_grpc::error::Error,
     },
 
@@ -153,17 +147,6 @@ pub enum Error {
     InvalidOpentsdbJsonRequest {
         source: serde_json::error::Error,
         location: Location,
-    },
-
-    #[snafu(display(
-        "Failed to put OpenTSDB data point: {:?}, source: {}",
-        data_point,
-        source
-    ))]
-    PutOpentsdbDataPoint {
-        data_point: String,
-        #[snafu(backtrace)]
-        source: BoxedError,
     },
 
     #[snafu(display("Failed to decode prometheus remote request, source: {}", source))]
@@ -190,21 +173,12 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to start frontend service, source: {}", source))]
-    StartFrontend {
-        #[snafu(backtrace)]
-        source: BoxedError,
-    },
-
-    #[snafu(display("Failed to build context, msg: {}", err_msg))]
-    BuildingContext { err_msg: String, location: Location },
-
     #[snafu(display("Tls is required for {}, plain connection is rejected", server))]
     TlsRequired { server: String },
 
     #[snafu(display("Failed to get user info, source: {}", source))]
     Auth {
-        #[snafu(backtrace)]
+        location: Location,
         source: auth::Error,
     },
 
@@ -241,19 +215,13 @@ pub enum Error {
     #[snafu(display("Error accessing catalog: {}", source))]
     CatalogError { source: catalog::error::Error },
 
-    #[snafu(display("Failed to convert Flight Message, source: {}", source))]
-    ConvertFlightMessage {
-        #[snafu(backtrace)]
-        source: common_grpc::error::Error,
-    },
-
     #[snafu(display("Cannot find requested database: {}-{}", catalog, schema))]
     DatabaseNotFound { catalog: String, schema: String },
 
     #[cfg(feature = "mem-prof")]
     #[snafu(display("Failed to dump profile data, source: {}", source))]
     DumpProfileData {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_mem_prof::error::Error,
     },
 
@@ -278,12 +246,39 @@ pub enum Error {
     #[snafu(display("Failed to parse PromQL: {query:?}, source: {source}"))]
     ParsePromQL {
         query: PromQuery,
-        #[snafu(backtrace)]
+        location: Location,
         source: query::error::Error,
     },
 
     #[snafu(display("{}", reason))]
     UnexpectedResult { reason: String, location: Location },
+
+    // this error is used for custom error mapping
+    // please do not delete it
+    #[snafu(display("Other error, source: {}", source))]
+    Other {
+        source: BoxedError,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to join task, source: {}", source))]
+    JoinTask {
+        source: tokio::task::JoinError,
+        location: Location,
+    },
+
+    #[cfg(feature = "pprof")]
+    #[snafu(display("Failed to dump pprof data, source: {}", source))]
+    DumpPprof {
+        #[snafu(backtrace)]
+        source: common_pprof::Error,
+    },
+
+    #[snafu(display("Failed to update jemalloc metrics, source: {source}, location: {location}"))]
+    UpdateJemallocMetrics {
+        source: tikv_jemalloc_ctl::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -303,17 +298,13 @@ impl ErrorExt for Error {
             | TcpBind { .. }
             | CatalogError { .. }
             | GrpcReflectionService { .. }
-            | BuildingContext { .. }
             | BuildHttpResponse { .. } => StatusCode::Internal,
 
             InsertScript { source, .. }
             | ExecuteScript { source, .. }
             | ExecuteQuery { source, .. }
             | ExecuteGrpcQuery { source, .. }
-            | ExecuteStatement { source, .. }
-            | CheckDatabaseValidity { source, .. }
-            | ExecuteAlter { source, .. }
-            | PutOpentsdbDataPoint { source, .. } => source.status_code(),
+            | CheckDatabaseValidity { source, .. } => source.status_code(),
 
             NotSupported { .. }
             | InvalidQuery { .. }
@@ -328,13 +319,12 @@ impl ErrorExt for Error {
             | InvalidPrepareStatement { .. }
             | TimePrecision { .. } => StatusCode::InvalidArguments,
 
-            InfluxdbLinesWrite { source, .. } | ConvertFlightMessage { source } => {
+            InfluxdbLinesWrite { source, .. } | PromSeriesWrite { source, .. } => {
                 source.status_code()
             }
 
             Hyper { .. } => StatusCode::Unknown,
             TlsRequired { .. } => StatusCode::Unknown,
-            StartFrontend { source, .. } => source.status_code(),
             Auth { source, .. } => source.status_code(),
             DescribeStatement { source } => source.status_code(),
 
@@ -351,13 +341,56 @@ impl ErrorExt for Error {
             InvalidFlushArgument { .. } => StatusCode::InvalidArguments,
 
             ParsePromQL { source, .. } => source.status_code(),
+            Other { source, .. } => source.status_code(),
 
             UnexpectedResult { .. } => StatusCode::Unexpected,
+
+            JoinTask { source, .. } => {
+                if source.is_cancelled() {
+                    StatusCode::Cancelled
+                } else if source.is_panic() {
+                    StatusCode::Unexpected
+                } else {
+                    StatusCode::Unknown
+                }
+            }
+
+            #[cfg(feature = "pprof")]
+            DumpPprof { source, .. } => source.status_code(),
+
+            UpdateJemallocMetrics { .. } => StatusCode::Internal,
         }
     }
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+/// Returns the tonic [Code] of a [StatusCode].
+fn status_to_tonic_code(status_code: StatusCode) -> Code {
+    match status_code {
+        StatusCode::Success => Code::Ok,
+        StatusCode::Unknown => Code::Unknown,
+        StatusCode::Unsupported => Code::Unimplemented,
+        StatusCode::Unexpected
+        | StatusCode::Internal
+        | StatusCode::PlanQuery
+        | StatusCode::EngineExecuteQuery => Code::Internal,
+        StatusCode::InvalidArguments | StatusCode::InvalidSyntax => Code::InvalidArgument,
+        StatusCode::Cancelled => Code::Cancelled,
+        StatusCode::TableAlreadyExists | StatusCode::TableColumnExists => Code::AlreadyExists,
+        StatusCode::TableNotFound
+        | StatusCode::TableColumnNotFound
+        | StatusCode::DatabaseNotFound
+        | StatusCode::UserNotFound => Code::NotFound,
+        StatusCode::StorageUnavailable => Code::Unavailable,
+        StatusCode::RuntimeResourcesExhausted => Code::ResourceExhausted,
+        StatusCode::UnsupportedPasswordType
+        | StatusCode::UserPasswordMismatch
+        | StatusCode::AuthHeaderNotFound
+        | StatusCode::InvalidAuthHeader => Code::Unauthenticated,
+        StatusCode::AccessDenied => Code::PermissionDenied,
     }
 }
 
@@ -367,7 +400,8 @@ impl From<Error> for tonic::Status {
 
         // If either of the status_code or error msg cannot convert to valid HTTP header value
         // (which is a very rare case), just ignore. Client will use Tonic status code and message.
-        if let Ok(code) = HeaderValue::from_bytes(err.status_code().to_string().as_bytes()) {
+        let status_code = err.status_code();
+        if let Ok(code) = HeaderValue::from_bytes(status_code.to_string().as_bytes()) {
             headers.insert(INNER_ERROR_CODE, code);
         }
         let root_error = err.iter_chain().last().unwrap();
@@ -376,7 +410,7 @@ impl From<Error> for tonic::Status {
         }
 
         let metadata = MetadataMap::from_headers(headers);
-        tonic::Status::with_metadata(Code::Internal, err.to_string(), metadata)
+        tonic::Status::with_metadata(status_to_tonic_code(status_code), err.to_string(), metadata)
     }
 }
 
@@ -386,17 +420,12 @@ impl From<std::io::Error> for Error {
     }
 }
 
-impl From<auth::Error> for Error {
-    fn from(e: auth::Error) -> Self {
-        Error::Auth { source: e }
-    }
-}
-
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let (status, error_message) = match self {
             Error::InfluxdbLineProtocol { .. }
             | Error::InfluxdbLinesWrite { .. }
+            | Error::PromSeriesWrite { .. }
             | Error::InvalidOpentsdbLine { .. }
             | Error::InvalidOpentsdbJsonRequest { .. }
             | Error::DecodePromRemoteRequest { .. }
@@ -404,7 +433,11 @@ impl IntoResponse for Error {
             | Error::InvalidPromRemoteRequest { .. }
             | Error::InvalidQuery { .. }
             | Error::TimePrecision { .. } => (HttpStatusCode::BAD_REQUEST, self.to_string()),
-            _ => (HttpStatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
+            _ => {
+                logging::error!(self; "Failed to handle HTTP request");
+
+                (HttpStatusCode::INTERNAL_SERVER_ERROR, self.to_string())
+            }
         };
         let body = Json(json!({
             "error": error_message,

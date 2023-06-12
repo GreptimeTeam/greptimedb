@@ -59,9 +59,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Timestamp column {} not found", name,))]
-    TimestampNotFound { name: String, location: Location },
-
     #[snafu(display(
         "Failed to parse version in schema meta, value: {}, source: {}",
         value,
@@ -76,18 +73,17 @@ pub enum Error {
     #[snafu(display("Invalid timestamp index: {}", index))]
     InvalidTimestampIndex { index: usize, location: Location },
 
-    #[snafu(display("Duplicate timestamp index, exists: {}, new: {}", exists, new))]
-    DuplicateTimestampIndex {
-        exists: usize,
-        new: usize,
-        location: Location,
-    },
-
     #[snafu(display("{}", msg))]
     CastType { msg: String, location: Location },
 
     #[snafu(display("Arrow failed to compute, source: {}", source))]
     ArrowCompute {
+        source: arrow::error::ArrowError,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to project arrow schema, source: {}", source))]
+    ProjectArrowSchema {
         source: arrow::error::ArrowError,
         location: Location,
     },

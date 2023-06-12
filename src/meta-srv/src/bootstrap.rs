@@ -33,6 +33,7 @@ use tonic::transport::server::Router;
 use crate::cluster::MetaPeerClientBuilder;
 use crate::election::etcd::EtcdElection;
 use crate::lock::etcd::EtcdLock;
+use crate::lock::memory::MemLock;
 use crate::metasrv::builder::MetaSrvBuilder;
 use crate::metasrv::{MetaSrv, MetaSrvOptions, SelectorRef};
 use crate::selector::lease_based::LeaseBasedSelector;
@@ -152,7 +153,11 @@ pub fn router(meta_srv: MetaSrv) -> Router {
 
 pub async fn build_meta_srv(opts: &MetaSrvOptions) -> Result<MetaSrv> {
     let (kv_store, election, lock) = if opts.use_memory_store {
-        (Arc::new(MemStore::new()) as _, None, None)
+        (
+            Arc::new(MemStore::new()) as _,
+            None,
+            Some(Arc::new(MemLock::default()) as _),
+        )
     } else {
         let etcd_endpoints = [&opts.store_addr];
         let etcd_client = Client::connect(etcd_endpoints, None)
@@ -181,7 +186,7 @@ pub async fn build_meta_srv(opts: &MetaSrvOptions) -> Result<MetaSrv> {
         SelectorType::LeaseBased => Arc::new(LeaseBasedSelector) as SelectorRef,
     };
 
-    let meta_srv = MetaSrvBuilder::new()
+    MetaSrvBuilder::new()
         .options(opts.clone())
         .kv_store(kv_store)
         .in_memory(in_memory)
@@ -190,9 +195,7 @@ pub async fn build_meta_srv(opts: &MetaSrvOptions) -> Result<MetaSrv> {
         .meta_peer_client(meta_peer_client)
         .lock(lock)
         .build()
-        .await;
-
-    Ok(meta_srv)
+        .await
 }
 
 pub async fn make_meta_srv(opts: &MetaSrvOptions) -> Result<MetaSrv> {

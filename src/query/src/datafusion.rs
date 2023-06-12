@@ -407,7 +407,7 @@ mod tests {
             .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
             .unwrap();
 
-        QueryEngineFactory::new(catalog_list).query_engine()
+        QueryEngineFactory::new(catalog_list, false).query_engine()
     }
 
     #[tokio::test]

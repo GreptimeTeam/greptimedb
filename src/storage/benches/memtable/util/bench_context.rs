@@ -41,7 +41,7 @@ impl BenchContext {
             batch_size,
             ..Default::default()
         };
-        let iter = self.memtable.iter(&iter_ctx).unwrap();
+        let iter = self.memtable.iter(iter_ctx).unwrap();
         for batch in iter {
             batch.unwrap();
             read_count += batch_size;

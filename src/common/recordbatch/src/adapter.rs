@@ -111,7 +111,7 @@ impl Stream for DfRecordBatchStreamAdapter {
     }
 }
 
-/// DataFusion SendableRecordBatchStream -> Greptime RecordBatchStream
+/// DataFusion [SendableRecordBatchStream](DfSendableRecordBatchStream) -> Greptime [RecordBatchStream]
 pub struct RecordBatchStreamAdapter {
     schema: SchemaRef,
     stream: DfSendableRecordBatchStream,
@@ -225,6 +225,7 @@ mod test {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use datatypes::vectors::Int32Vector;
+    use snafu::IntoError;
 
     use super::*;
     use crate::RecordBatches;
@@ -296,9 +297,8 @@ mod test {
 
         let poll_err_stream = new_future_stream(Ok(vec![
             Ok(batch1.clone()),
-            Err(error::Error::External {
-                source: BoxedError::new(MockError::new(StatusCode::Unknown)),
-            }),
+            Err(error::ExternalSnafu
+                .into_error(BoxedError::new(MockError::new(StatusCode::Unknown)))),
         ]));
         let adapter = AsyncRecordBatchStreamAdapter::new(schema.clone(), poll_err_stream);
         let result = RecordBatches::try_collect(Box::pin(adapter)).await;
@@ -307,9 +307,9 @@ mod test {
             "Failed to poll stream, source: External error: External error, source: Unknown"
         );
 
-        let failed_to_init_stream = new_future_stream(Err(error::Error::External {
-            source: BoxedError::new(MockError::new(StatusCode::Internal)),
-        }));
+        let failed_to_init_stream =
+            new_future_stream(Err(error::ExternalSnafu
+                .into_error(BoxedError::new(MockError::new(StatusCode::Internal)))));
         let adapter = AsyncRecordBatchStreamAdapter::new(schema.clone(), failed_to_init_stream);
         let result = RecordBatches::try_collect(Box::pin(adapter)).await;
         assert_eq!(
