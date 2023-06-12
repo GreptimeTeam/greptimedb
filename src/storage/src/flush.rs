@@ -267,7 +267,7 @@ impl<S: LogStore> FlushJob<S> {
 
             let file_id = FileId::random();
             // TODO(hl): Check if random file name already exists in meta.
-            let iter = m.iter(&iter_ctx)?;
+            let iter = m.iter(iter_ctx.clone())?;
             let sst_layer = self.sst_layer.clone();
             let write_options = WriteOptions {
                 sst_write_buffer_size: self.engine_config.sst_write_buffer_size,

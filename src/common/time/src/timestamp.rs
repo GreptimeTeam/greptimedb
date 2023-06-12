@@ -336,6 +336,15 @@ impl TimeUnit {
             TimeUnit::Nanosecond => 1,
         }
     }
+
+    pub(crate) fn short_name(&self) -> &'static str {
+        match self {
+            TimeUnit::Second => "s",
+            TimeUnit::Millisecond => "ms",
+            TimeUnit::Microsecond => "us",
+            TimeUnit::Nanosecond => "ns",
+        }
+    }
 }
 
 impl PartialOrd for Timestamp {

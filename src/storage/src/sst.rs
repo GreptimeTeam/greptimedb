@@ -41,10 +41,10 @@ use crate::error;
 use crate::error::{DeleteSstSnafu, Result};
 use crate::file_purger::{FilePurgeRequest, FilePurgerRef};
 use crate::memtable::BoxedBatchIterator;
-use crate::read::{Batch, BoxedBatchReader};
+use crate::read::{Batch, BatchReader, BoxedBatchReader};
 use crate::scheduler::Scheduler;
 use crate::schema::ProjectedSchemaRef;
-use crate::sst::parquet::{ParquetReader, ParquetWriter};
+use crate::sst::parquet::{ChunkStream, ParquetReader, ParquetWriter};
 
 /// Maximum level of SSTs.
 pub const MAX_LEVEL: u8 = 2;
@@ -574,8 +574,7 @@ impl AccessLayer for FsAccessLayer {
             opts.time_range,
         );
 
-        let stream = reader.chunk_stream().await?;
-        Ok(Box::new(stream))
+        Ok(Box::new(LazyParquetBatchReader::new(reader)))
     }
 
     /// Deletes a SST file with given file id.
@@ -585,6 +584,34 @@ impl AccessLayer for FsAccessLayer {
             .delete(&path)
             .await
             .context(DeleteSstSnafu)
+    }
+}
+
+struct LazyParquetBatchReader {
+    inner: ParquetReader,
+    stream: Option<ChunkStream>,
+}
+
+impl LazyParquetBatchReader {
+    fn new(inner: ParquetReader) -> Self {
+        Self {
+            inner,
+            stream: None,
+        }
+    }
+}
+
+#[async_trait]
+impl BatchReader for LazyParquetBatchReader {
+    async fn next_batch(&mut self) -> Result<Option<Batch>> {
+        if let Some(s) = &mut self.stream {
+            s.next_batch().await
+        } else {
+            let mut stream = self.inner.chunk_stream().await?;
+            let res = stream.next_batch().await;
+            self.stream = Some(stream);
+            res
+        }
     }
 }
 

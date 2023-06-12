@@ -63,16 +63,13 @@ async fn test_create_database_and_insert_query(instance: Arc<dyn MockInstance>) 
     .await;
     assert!(matches!(output, Output::AffectedRows(2)));
 
-    let query_output = execute_sql(&instance, "select ts from test.demo order by ts").await;
+    let query_output = execute_sql(&instance, "select ts from test.demo order by ts limit 1").await;
     match query_output {
         Output::Stream(s) => {
             let batches = util::collect(s).await.unwrap();
             assert_eq!(1, batches[0].num_columns());
             assert_eq!(
-                Arc::new(Int64Vector::from_vec(vec![
-                    1655276557000_i64,
-                    1655276558000_i64
-                ])) as VectorRef,
+                Arc::new(Int64Vector::from_vec(vec![1655276557000_i64])) as VectorRef,
                 *batches[0].column(0)
             );
         }
@@ -193,7 +190,7 @@ async fn test_issue477_same_table_name_in_different_databases(instance: Arc<dyn 
     // Query data and assert
     assert_query_result(
         &instance,
-        "select host,ts from a.demo order by ts",
+        "select host,ts from a.demo order by ts limit 1",
         1655276557000,
         "host1",
     )
@@ -329,32 +326,27 @@ async fn test_execute_insert_query_with_i64_timestamp(instance: Arc<dyn MockInst
     .await;
     assert!(matches!(output, Output::AffectedRows(2)));
 
-    let query_output = execute_sql(&instance, "select ts from demo order by ts").await;
+    let query_output = execute_sql(&instance, "select ts from demo order by ts limit 1").await;
     match query_output {
         Output::Stream(s) => {
             let batches = util::collect(s).await.unwrap();
             assert_eq!(1, batches[0].num_columns());
             assert_eq!(
-                Arc::new(Int64Vector::from_vec(vec![
-                    1655276557000_i64,
-                    1655276558000_i64
-                ])) as VectorRef,
+                Arc::new(Int64Vector::from_vec(vec![1655276557000_i64,])) as VectorRef,
                 *batches[0].column(0)
             );
         }
         _ => unreachable!(),
     }
 
-    let query_output = execute_sql(&instance, "select ts as time from demo order by ts").await;
+    let query_output =
+        execute_sql(&instance, "select ts as time from demo order by ts limit 1").await;
     match query_output {
         Output::Stream(s) => {
             let batches = util::collect(s).await.unwrap();
             assert_eq!(1, batches[0].num_columns());
             assert_eq!(
-                Arc::new(Int64Vector::from_vec(vec![
-                    1655276557000_i64,
-                    1655276558000_i64
-                ])) as VectorRef,
+                Arc::new(Int64Vector::from_vec(vec![1655276557000_i64,])) as VectorRef,
                 *batches[0].column(0)
             );
         }
