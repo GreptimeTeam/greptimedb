@@ -152,8 +152,8 @@ impl<S: LogStore> CompactionTask for CompactionTaskImpl<S> {
         let input_ids = compacted.iter().map(|f| f.file_id).collect::<Vec<_>>();
         let output_ids = output.iter().map(|f| f.file_id).collect::<Vec<_>>();
         info!(
-            "Compacting SST files, input: {input_ids:?}, output: {output_ids:?}, window: {:?}",
-            self.compaction_time_window
+            "Compacting SST files, input: {:?}, output: {:?}, window: {:?}",
+            input_ids, output_ids, self.compaction_time_window
         );
         self.write_manifest_and_apply(output, compacted)
             .await
