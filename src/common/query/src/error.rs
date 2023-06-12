@@ -40,7 +40,7 @@ pub enum Error {
         source
     ))]
     UdfTempRecordBatch {
-        #[snafu(backtrace)]
+        location: Location,
         source: RecordbatchError,
     },
 
@@ -65,19 +65,19 @@ pub enum Error {
 
     #[snafu(display("Fail to cast scalar value into vector: {}", source))]
     FromScalarValue {
-        #[snafu(backtrace)]
+        location: Location,
         source: DataTypeError,
     },
 
     #[snafu(display("Fail to cast arrow array into vector: {}", source))]
     FromArrowArray {
-        #[snafu(backtrace)]
+        location: Location,
         source: DataTypeError,
     },
 
     #[snafu(display("Fail to cast arrow array into vector: {:?}, {}", data_type, source))]
     IntoVector {
-        #[snafu(backtrace)]
+        location: Location,
         source: DataTypeError,
         data_type: ArrowDatatype,
     },
@@ -93,7 +93,7 @@ pub enum Error {
 
     #[snafu(display("Invalid input type: {}", err_msg))]
     InvalidInputType {
-        #[snafu(backtrace)]
+        location: Location,
         source: DataTypeError,
         err_msg: String,
     },
@@ -120,19 +120,19 @@ pub enum Error {
         source
     ))]
     ConvertDfRecordBatchStream {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_recordbatch::error::Error,
     },
 
     #[snafu(display("Failed to convert arrow schema, source: {}", source))]
     ConvertArrowSchema {
-        #[snafu(backtrace)]
+        location: Location,
         source: DataTypeError,
     },
 
     #[snafu(display("Failed to execute physical plan, source: {}", source))]
     ExecutePhysicalPlan {
-        #[snafu(backtrace)]
+        location: Location,
         source: BoxedError,
     },
 
@@ -154,13 +154,13 @@ pub enum Error {
 
     #[snafu(display("Query engine fail to cast value: {}", source))]
     ToScalarValue {
-        #[snafu(backtrace)]
+        location: Location,
         source: DataTypeError,
     },
 
     #[snafu(display("Failed to get scalar vector, {}", source))]
     GetScalarVector {
-        #[snafu(backtrace)]
+        location: Location,
         source: DataTypeError,
     },
 
@@ -188,9 +188,9 @@ impl ErrorExt for Error {
 
             Error::InvalidInputType { source, .. }
             | Error::IntoVector { source, .. }
-            | Error::FromScalarValue { source }
-            | Error::ConvertArrowSchema { source }
-            | Error::FromArrowArray { source } => source.status_code(),
+            | Error::FromScalarValue { source, .. }
+            | Error::ConvertArrowSchema { source, .. }
+            | Error::FromArrowArray { source, .. } => source.status_code(),
 
             Error::ExecuteRepeatedly { .. } | Error::GeneralDataFusion { .. } => {
                 StatusCode::Unexpected
@@ -201,7 +201,7 @@ impl ErrorExt for Error {
             | Error::InvalidFuncArgs { .. } => StatusCode::InvalidArguments,
 
             Error::ConvertDfRecordBatchStream { source, .. } => source.status_code(),
-            Error::ExecutePhysicalPlan { source } => source.status_code(),
+            Error::ExecutePhysicalPlan { source, .. } => source.status_code(),
         }
     }
 
@@ -213,11 +213,5 @@ impl ErrorExt for Error {
 impl From<Error> for DataFusionError {
     fn from(e: Error) -> DataFusionError {
         DataFusionError::External(Box::new(e))
-    }
-}
-
-impl From<BoxedError> for Error {
-    fn from(source: BoxedError) -> Self {
-        Error::ExecutePhysicalPlan { source }
     }
 }

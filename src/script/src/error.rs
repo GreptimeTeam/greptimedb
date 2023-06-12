@@ -23,7 +23,7 @@ use snafu::Location;
 pub enum Error {
     #[snafu(display("Failed to find scripts table, source: {}", source))]
     FindScriptsTable {
-        #[snafu(backtrace)]
+        location: Location,
         source: catalog::error::Error,
     },
 
@@ -32,7 +32,7 @@ pub enum Error {
 
     #[snafu(display("Failed to register scripts table, source: {}", source))]
     RegisterScriptsTable {
-        #[snafu(backtrace)]
+        location: Location,
         source: catalog::error::Error,
     },
 
@@ -46,21 +46,21 @@ pub enum Error {
     ))]
     InsertScript {
         name: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: table::error::Error,
     },
 
     #[snafu(display("Failed to compile python script, name: {}, source: {}", name, source))]
     CompilePython {
         name: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: crate::python::error::Error,
     },
 
     #[snafu(display("Failed to execute python script {}, source: {}", name, source))]
     ExecutePython {
         name: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: crate::python::error::Error,
     },
 
@@ -70,13 +70,13 @@ pub enum Error {
     #[snafu(display("Failed to find script by name: {}", name))]
     FindScript {
         name: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: query::error::Error,
     },
 
     #[snafu(display("Failed to collect record batch, source: {}", source))]
     CollectRecords {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_recordbatch::error::Error,
     },
 
@@ -92,11 +92,13 @@ impl ErrorExt for Error {
         match self {
             FindColumnInScriptsTable { .. } | CastType { .. } => StatusCode::Unexpected,
             ScriptsTableNotFound { .. } => StatusCode::TableNotFound,
-            RegisterScriptsTable { source } | FindScriptsTable { source } => source.status_code(),
+            RegisterScriptsTable { source, .. } | FindScriptsTable { source, .. } => {
+                source.status_code()
+            }
             InsertScript { source, .. } => source.status_code(),
             CompilePython { source, .. } | ExecutePython { source, .. } => source.status_code(),
             FindScript { source, .. } => source.status_code(),
-            CollectRecords { source } => source.status_code(),
+            CollectRecords { source, .. } => source.status_code(),
             ScriptNotFound { .. } => StatusCode::InvalidArguments,
         }
     }

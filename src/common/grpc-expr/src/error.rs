@@ -32,7 +32,7 @@ pub enum Error {
 
     #[snafu(display("Column datatype error, source: {}", source))]
     ColumnDataType {
-        #[snafu(backtrace)]
+        location: Location,
         source: api::error::Error,
     },
 
@@ -54,7 +54,7 @@ pub enum Error {
     InvalidColumnProto { err_msg: String, location: Location },
     #[snafu(display("Failed to create vector, source: {}", source))]
     CreateVector {
-        #[snafu(backtrace)]
+        location: Location,
         source: datatypes::error::Error,
     },
 
@@ -68,13 +68,13 @@ pub enum Error {
     ))]
     InvalidColumnDef {
         column: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: api::error::Error,
     },
 
     #[snafu(display("Unrecognized table option: {}", source))]
     UnrecognizedTableOption {
-        #[snafu(backtrace)]
+        location: Location,
         source: table::error::Error,
     },
 

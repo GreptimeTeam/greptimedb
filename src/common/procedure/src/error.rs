@@ -29,10 +29,7 @@ pub enum Error {
         "Failed to execute procedure due to external error, source: {}",
         source
     ))]
-    External {
-        #[snafu(backtrace)]
-        source: BoxedError,
-    },
+    External { source: BoxedError },
 
     #[snafu(display("Loader {} is already registered", name))]
     LoaderConflict { name: String, location: Location },
@@ -52,7 +49,7 @@ pub enum Error {
     #[snafu(display("Failed to put state, key: '{key}', source: {source}"))]
     PutState {
         key: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: BoxedError,
     },
 
@@ -65,14 +62,14 @@ pub enum Error {
     #[snafu(display("Failed to delete keys: '{keys}', source: {source}"))]
     DeleteStates {
         keys: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: BoxedError,
     },
 
     #[snafu(display("Failed to list state, path: '{path}', source: {source}"))]
     ListState {
         path: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: BoxedError,
     },
 
@@ -83,10 +80,7 @@ pub enum Error {
     },
 
     #[snafu(display("Procedure exec failed, source: {}", source))]
-    RetryLater {
-        #[snafu(backtrace)]
-        source: BoxedError,
-    },
+    RetryLater { source: BoxedError },
 
     #[snafu(display("Procedure panics, procedure_id: {}", procedure_id))]
     ProcedurePanic { procedure_id: ProcedureId },

@@ -26,10 +26,11 @@ use pgwire::messages::startup::Authentication;
 use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
 use session::context::UserInfo;
 use session::Session;
+use snafu::IntoError;
 
 use super::PostgresServerHandler;
 use crate::auth::{Identity, Password, UserProviderRef};
-use crate::error::Result;
+use crate::error::{AuthSnafu, Result};
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
 pub(crate) struct PgLoginVerifier {
@@ -106,7 +107,7 @@ impl PgLoginVerifier {
                     format!("{}", e.status_code())
                 )]
             );
-            Err(e.into())
+            Err(AuthSnafu.into_error(e))
         } else {
             Ok(true)
         }

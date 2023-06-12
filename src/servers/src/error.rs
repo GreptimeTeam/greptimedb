@@ -49,7 +49,7 @@ pub enum Error {
 
     #[snafu(display("Failed to collect recordbatch, source: {}", source))]
     CollectRecordbatch {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_recordbatch::error::Error,
     },
 
@@ -71,19 +71,19 @@ pub enum Error {
     #[snafu(display("Failed to execute query: {}, source: {}", query, source))]
     ExecuteQuery {
         query: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: BoxedError,
     },
 
     #[snafu(display("{source}"))]
     ExecuteGrpcQuery {
-        #[snafu(backtrace)]
+        location: Location,
         source: BoxedError,
     },
 
     #[snafu(display("Failed to check database validity, source: {}", source))]
     CheckDatabaseValidity {
-        #[snafu(backtrace)]
+        location: Location,
         source: BoxedError,
     },
 
@@ -93,14 +93,14 @@ pub enum Error {
     #[snafu(display("Failed to insert script with name: {}, source: {}", name, source))]
     InsertScript {
         name: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: BoxedError,
     },
 
     #[snafu(display("Failed to execute script by name: {}, source: {}", name, source))]
     ExecuteScript {
         name: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: BoxedError,
     },
 
@@ -112,19 +112,19 @@ pub enum Error {
 
     #[snafu(display("Failed to parse InfluxDB line protocol, source: {}", source))]
     InfluxdbLineProtocol {
-        #[snafu(backtrace)]
+        location: Location,
         source: influxdb_line_protocol::Error,
     },
 
     #[snafu(display("Failed to write InfluxDB line protocol, source: {}", source))]
     InfluxdbLinesWrite {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_grpc::error::Error,
     },
 
     #[snafu(display("Failed to write prometheus series, source: {}", source))]
     PromSeriesWrite {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_grpc::error::Error,
     },
 
@@ -178,7 +178,7 @@ pub enum Error {
 
     #[snafu(display("Failed to get user info, source: {}", source))]
     Auth {
-        #[snafu(backtrace)]
+        location: Location,
         source: auth::Error,
     },
 
@@ -221,7 +221,7 @@ pub enum Error {
     #[cfg(feature = "mem-prof")]
     #[snafu(display("Failed to dump profile data, source: {}", source))]
     DumpProfileData {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_mem_prof::error::Error,
     },
 
@@ -246,7 +246,7 @@ pub enum Error {
     #[snafu(display("Failed to parse PromQL: {query:?}, source: {source}"))]
     ParsePromQL {
         query: PromQuery,
-        #[snafu(backtrace)]
+        location: Location,
         source: query::error::Error,
     },
 
@@ -417,12 +417,6 @@ impl From<Error> for tonic::Status {
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
         Error::InternalIo { source: e }
-    }
-}
-
-impl From<auth::Error> for Error {
-    fn from(e: auth::Error) -> Self {
-        Error::Auth { source: e }
     }
 }
 

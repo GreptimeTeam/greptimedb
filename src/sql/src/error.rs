@@ -98,13 +98,13 @@ pub enum Error {
     #[snafu(display("Invalid default constraint, column: {}, source: {}", column, source))]
     InvalidDefault {
         column: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: datatypes::error::Error,
     },
 
     #[snafu(display("Failed to serialize column default constraint, source: {}", source))]
     SerializeColumnDefaultConstraint {
-        #[snafu(backtrace)]
+        location: Location,
         source: datatypes::error::Error,
     },
 
@@ -113,7 +113,7 @@ pub enum Error {
         source
     ))]
     ConvertToGrpcDataType {
-        #[snafu(backtrace)]
+        location: Location,
         source: api::error::Error,
     },
 

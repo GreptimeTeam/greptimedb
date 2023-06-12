@@ -421,6 +421,7 @@ pub(crate) async fn create_log_store(
 
     let logstore = RaftEngineLogStore::try_new(log_config)
         .await
+        .map_err(Box::new)
         .context(OpenLogStoreSnafu)?;
     Ok(logstore)
 }

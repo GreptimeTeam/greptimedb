@@ -15,7 +15,6 @@
 use std::any::Any;
 
 use common_error::prelude::*;
-use common_recordbatch::error::Error as RecordBatchError;
 use datafusion::error::DataFusionError;
 use datatypes::arrow::error::ArrowError;
 use snafu::Location;
@@ -54,7 +53,7 @@ pub enum Error {
 
     #[snafu(display("Failed to create record batch for Tables, source: {}", source))]
     TablesRecordBatch {
-        #[snafu(backtrace)]
+        location: Location,
         source: BoxedError,
     },
 
@@ -67,7 +66,7 @@ pub enum Error {
 
     #[snafu(display("Failed to build schema, msg: {}, source: {}", msg, source))]
     SchemaBuild {
-        #[snafu(backtrace)]
+        location: Location,
         source: datatypes::error::Error,
         msg: String,
     },
@@ -171,13 +170,5 @@ impl ErrorExt for Error {
 impl From<Error> for DataFusionError {
     fn from(e: Error) -> DataFusionError {
         DataFusionError::External(Box::new(e))
-    }
-}
-
-impl From<Error> for RecordBatchError {
-    fn from(e: Error) -> RecordBatchError {
-        RecordBatchError::External {
-            source: BoxedError::new(e),
-        }
     }
 }
