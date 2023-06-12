@@ -281,6 +281,7 @@ mod tests {
             ObjectStoreConfig::S3 { .. } => unreachable!(),
             ObjectStoreConfig::Oss { .. } => unreachable!(),
             ObjectStoreConfig::Azblob { .. } => unreachable!(),
+            ObjectStoreConfig::Gcs { .. } => unreachable!(),
         };
 
         assert_eq!(
