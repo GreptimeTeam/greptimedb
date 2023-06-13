@@ -199,7 +199,7 @@ impl HeartbeatTask {
                     }
                 };
                 if let Some(req) = req {
-                    debug!("Sending Heartbeat Request: {:?}", req);
+                    debug!("Sending heartbeat request: {:?}", req);
                     if let Err(e) = tx.send(req).await {
                         error!("Failed to send heartbeat to metasrv, error: {:?}", e);
                         match Self::create_streams(
