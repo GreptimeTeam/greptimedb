@@ -22,6 +22,7 @@ use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::error::Result as DfResult;
 pub use datafusion::execution::context::{SessionContext, TaskContext};
 use datafusion::physical_plan::expressions::PhysicalSortExpr;
+use datafusion::physical_plan::metrics::MetricsSet;
 pub use datafusion::physical_plan::Partitioning;
 use datafusion::physical_plan::Statistics;
 use datatypes::schema::SchemaRef;
@@ -69,6 +70,11 @@ pub trait PhysicalPlan: Debug + Send + Sync {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream>;
+
+    /// Returns metrics of this plan during execution
+    fn metrics(&self) -> Option<MetricsSet> {
+        None
+    }
 }
 
 /// Adapt DataFusion's [`ExecutionPlan`](DfPhysicalPlan) to GreptimeDB's [`PhysicalPlan`].
@@ -136,6 +142,10 @@ impl PhysicalPlan for PhysicalPlanAdapter {
 
         Ok(Box::pin(adapter))
     }
+
+    fn metrics(&self) -> Option<MetricsSet> {
+        self.df_plan.metrics()
+    }
 }
 
 #[derive(Debug)]
@@ -191,6 +201,10 @@ impl DfPhysicalPlan for DfPhysicalPlanAdapter {
     ) -> DfResult<DfSendableRecordBatchStream> {
         let stream = self.0.execute(partition, context)?;
         Ok(Box::pin(DfRecordBatchStreamAdapter::new(stream)))
+    }
+
+    fn metrics(&self) -> Option<MetricsSet> {
+        self.0.metrics()
     }
 
     fn statistics(&self) -> Statistics {
