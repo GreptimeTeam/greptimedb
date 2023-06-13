@@ -21,7 +21,7 @@ mod sql;
 #[macro_use]
 mod region_failover;
 
-grpc_tests!(File, S3, S3WithCache, Oss);
-http_tests!(File, S3, S3WithCache, Oss);
-region_failover_tests!(File, S3, S3WithCache, Oss);
+grpc_tests!(File, S3, S3WithCache, Oss, Azblob);
+http_tests!(File, S3, S3WithCache, Oss, Azblob);
+region_failover_tests!(File, S3, S3WithCache, Oss, Azblob);
 sql_tests!(File);
