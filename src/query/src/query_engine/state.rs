@@ -59,8 +59,9 @@ pub struct QueryEngineState {
 
 impl fmt::Debug for QueryEngineState {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        // TODO(dennis) better debug info
-        write!(f, "QueryEngineState: <datafusion context>")
+        f.debug_struct("QueryEngineState")
+            .field("state", &self.df_context.state())
+            .finish()
     }
 }
 
