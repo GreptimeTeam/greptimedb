@@ -23,7 +23,7 @@ use common_meta::heartbeat::handler::{
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef};
 use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
-use common_telemetry::{error, info, trace, warn};
+use common_telemetry::{debug, error, info, trace, warn};
 use meta_client::client::{HeartbeatSender, MetaClient};
 use snafu::ResultExt;
 use tokio::sync::mpsc;
@@ -199,6 +199,7 @@ impl HeartbeatTask {
                     }
                 };
                 if let Some(req) = req {
+                    debug!("Sending Heartbeat Request: {:?}", req);
                     if let Err(e) = tx.send(req).await {
                         error!("Failed to send heartbeat to metasrv, error: {:?}", e);
                         match Self::create_streams(
