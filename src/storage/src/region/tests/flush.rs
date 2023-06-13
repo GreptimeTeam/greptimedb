@@ -87,10 +87,9 @@ impl FlushTester {
     async fn reopen(&mut self) {
         self.regions.clear();
         // Close the old region.
-        if let Some(base) = self.base.as_ref() {
+        if let Some(base) = self.base.take() {
             base.close().await;
         }
-        self.base = None;
         // Reopen the region.
         let mut store_config = config_util::new_store_config(
             REGION_NAME,
@@ -102,8 +101,6 @@ impl FlushTester {
         )
         .await;
         store_config.flush_strategy = self.flush_strategy.clone();
-        // FIXME(hl): find out which component prevents logstore from being dropped.
-        tokio::time::sleep(Duration::from_millis(100)).await;
         let opts = OpenOptions::default();
         let region = RegionImpl::open(REGION_NAME.to_string(), store_config, &opts)
             .await
