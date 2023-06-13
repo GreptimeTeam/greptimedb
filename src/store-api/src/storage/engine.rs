@@ -92,7 +92,6 @@ pub struct CreateOptions {
     pub write_buffer_size: Option<usize>,
     /// Region SST files TTL
     pub ttl: Option<Duration>,
-    pub compaction_time_window: Option<i64>,
 }
 
 /// Options to open a region.
@@ -104,7 +103,6 @@ pub struct OpenOptions {
     pub write_buffer_size: Option<usize>,
     /// Region SST files TTL
     pub ttl: Option<Duration>,
-    pub compaction_time_window: Option<i64>,
 }
 
 /// Options to close a region.

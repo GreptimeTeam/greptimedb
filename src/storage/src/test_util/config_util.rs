@@ -95,6 +95,7 @@ pub async fn new_store_config_with_object_store(
         ..Default::default()
     };
     let log_store = Arc::new(RaftEngineLogStore::try_new(log_config).await.unwrap());
+
     let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
     // We use an empty region map so actually the background worker of the picker is disabled.
     let regions = Arc::new(RegionMap::new());
@@ -123,7 +124,6 @@ pub async fn new_store_config_with_object_store(
             engine_config: Arc::new(engine_config),
             file_purger,
             ttl: None,
-            compaction_time_window: None,
             write_buffer_size: DEFAULT_REGION_WRITE_BUFFER_SIZE.as_bytes() as usize,
         },
         regions,

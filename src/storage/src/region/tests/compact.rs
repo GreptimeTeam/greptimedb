@@ -23,7 +23,7 @@ use common_test_util::temp_dir::create_temp_dir;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use object_store::services::{Fs, S3};
 use object_store::ObjectStore;
-use store_api::storage::{FlushContext, FlushReason, Region, WriteResponse};
+use store_api::storage::{FlushContext, FlushReason, OpenOptions, Region, WriteResponse};
 use tokio::sync::Notify;
 
 use crate::compaction::{CompactionHandler, SimplePicker};
@@ -151,6 +151,9 @@ struct CompactionTester {
     base: Option<FileTesterBase>,
     purge_handler: MockFilePurgeHandler,
     object_store: ObjectStore,
+    store_dir: String,
+    engine_config: EngineConfig,
+    flush_strategy: FlushStrategyRef,
 }
 
 impl CompactionTester {
@@ -165,7 +168,7 @@ impl CompactionTester {
             store_dir,
             engine_config.clone(),
             purge_handler.clone(),
-            flush_strategy,
+            flush_strategy.clone(),
             s3_bucket,
         )
         .await;
@@ -174,6 +177,9 @@ impl CompactionTester {
             base: Some(FileTesterBase::with_region(region)),
             purge_handler,
             object_store,
+            store_dir: store_dir.to_string(),
+            engine_config,
+            flush_strategy,
         }
     }
 
@@ -220,6 +226,42 @@ impl CompactionTester {
         self.base = None;
 
         self.object_store.remove_all("/").await.unwrap();
+    }
+
+    async fn reopen(&mut self) -> Result<bool> {
+        // Close the old region.
+        if let Some(base) = self.base.take() {
+            base.close().await;
+        }
+
+        // Reopen the region.
+        let object_store = new_object_store(&self.store_dir, None);
+        let (mut store_config, _) = config_util::new_store_config_with_object_store(
+            REGION_NAME,
+            &self.store_dir,
+            object_store.clone(),
+        )
+        .await;
+        store_config.engine_config = Arc::new(self.engine_config.clone());
+        store_config.flush_strategy = self.flush_strategy.clone();
+
+        let picker = SimplePicker::default();
+        let handler = CompactionHandler::new(picker);
+        let config = SchedulerConfig::default();
+        // Overwrite test compaction scheduler and file purger.
+        store_config.compaction_scheduler = Arc::new(LocalScheduler::new(config, handler));
+        store_config.file_purger = Arc::new(LocalScheduler::new(
+            SchedulerConfig {
+                max_inflight_tasks: store_config.engine_config.max_purge_tasks,
+            },
+            MockFilePurgeHandler::default(),
+        ));
+
+        let Some(region) = RegionImpl::open(REGION_NAME.to_string(), store_config, &OpenOptions::default()).await? else {
+            return Ok(false);
+        };
+        self.base = Some(FileTesterBase::with_region(region));
+        Ok(true)
     }
 }
 
@@ -289,4 +331,111 @@ async fn test_compact_during_read_on_s3() {
             compact_during_read(Some(bucket)).await;
         }
     }
+}
+
+#[tokio::test]
+async fn test_persist_region_compaction_time_window() {
+    common_telemetry::init_default_ut_logging();
+    let dir = create_temp_dir("put-delete-scan");
+    let store_dir = dir.path().to_str().unwrap();
+    let mut tester = CompactionTester::new(
+        store_dir,
+        EngineConfig {
+            max_files_in_l0: 100,
+            ..Default::default()
+        },
+        // Disable auto-flush.
+        Arc::new(FlushSwitch::default()),
+        None,
+    )
+    .await;
+
+    // initially the time window is not present since no compaction ever happened.
+    assert_eq!(
+        None,
+        tester
+            .base
+            .as_ref()
+            .unwrap()
+            .region
+            .inner
+            .shared
+            .version_control
+            .current()
+            .ssts()
+            .compaction_time_window()
+    );
+
+    // write some data with one hour span
+    for idx in 0..10 {
+        tester
+            .put(&[(idx * 1000, Some(idx)), ((idx + 360) * 1000, Some(idx))])
+            .await;
+        tester.flush(Some(true)).await;
+    }
+
+    tester.compact().await;
+    // the inferred and persisted compaction time window should be 3600 seconds.
+    assert_eq!(
+        3600,
+        tester
+            .base
+            .as_ref()
+            .unwrap()
+            .region
+            .inner
+            .shared
+            .version_control
+            .current()
+            .ssts()
+            .compaction_time_window()
+            .unwrap()
+    );
+
+    // try write data with a larger time window
+    for idx in 0..10 {
+        tester
+            .put(&[
+                (idx * 1000, Some(idx)),
+                ((idx + 2 * 60 * 60) * 1000, Some(idx)),
+            ])
+            .await;
+        tester.flush(Some(true)).await;
+    }
+    tester.compact().await;
+
+    // but we won't changed persisted compaction window for now, so it remains unchanged.
+    assert_eq!(
+        3600,
+        tester
+            .base
+            .as_ref()
+            .unwrap()
+            .region
+            .inner
+            .shared
+            .version_control
+            .current()
+            .ssts()
+            .compaction_time_window()
+            .unwrap()
+    );
+
+    let reopened = tester.reopen().await.unwrap();
+    assert!(reopened);
+    assert_eq!(
+        3600,
+        tester
+            .base
+            .as_ref()
+            .unwrap()
+            .region
+            .inner
+            .shared
+            .version_control
+            .current()
+            .ssts()
+            .compaction_time_window()
+            .unwrap()
+    );
 }
