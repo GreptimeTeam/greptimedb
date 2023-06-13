@@ -102,7 +102,7 @@ impl FlushTester {
         )
         .await;
         store_config.flush_strategy = self.flush_strategy.clone();
-        //FIXME(hl): find out which component prevents logstore from being dropped.
+        // FIXME(hl): find out which component prevents logstore from being dropped.
         tokio::time::sleep(Duration::from_millis(100)).await;
         let opts = OpenOptions::default();
         let region = RegionImpl::open(REGION_NAME.to_string(), store_config, &opts)
