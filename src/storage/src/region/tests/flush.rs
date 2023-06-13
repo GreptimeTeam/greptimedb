@@ -210,6 +210,7 @@ async fn test_flush_and_reopen() {
 
     tester.put(&[(1000, Some(100))]).await;
     tester.flush(Some(true)).await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
     tester.reopen().await;
     let i = tester
         .base()
