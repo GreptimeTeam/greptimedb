@@ -205,7 +205,7 @@ async fn test_manual_flush() {
 #[tokio::test]
 async fn test_flush_and_reopen() {
     common_telemetry::init_default_ut_logging();
-    let dir = create_temp_dir("manual_flush");
+    let dir = create_temp_dir("test_flush_and_reopen");
     let store_dir = dir.path().to_str().unwrap();
     let flush_switch = Arc::new(FlushSwitch::default());
     let mut tester = FlushTester::new(store_dir, flush_switch.clone()).await;
