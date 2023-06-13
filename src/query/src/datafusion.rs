@@ -508,9 +508,7 @@ mod tests {
             .await
             .unwrap();
 
-        let df = match engine.read_table(table).unwrap() {
-            DataFrame::DataFusion(df) => df,
-        };
+        let DataFrame::DataFusion(df) = engine.read_table(table).unwrap();
         let df = df
             .select_columns(&["number"])
             .unwrap()
