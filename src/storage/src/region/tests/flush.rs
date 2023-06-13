@@ -20,6 +20,7 @@ use std::time::Duration;
 use arrow::compute::SortOptions;
 use common_query::prelude::Expr;
 use common_recordbatch::OrderOption;
+use common_telemetry::debug;
 use common_test_util::temp_dir::create_temp_dir;
 use datafusion_common::Column;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
@@ -145,6 +146,7 @@ impl FlushTester {
 
 impl Drop for FlushTester {
     fn drop(&mut self) {
+        debug!("Dropping FlushTester");
         self.regions.clear();
     }
 }
@@ -210,7 +212,6 @@ async fn test_flush_and_reopen() {
 
     tester.put(&[(1000, Some(100))]).await;
     tester.flush(Some(true)).await;
-    tokio::time::sleep(Duration::from_millis(10)).await;
     tester.reopen().await;
     let i = tester
         .base()

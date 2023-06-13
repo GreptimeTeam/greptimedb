@@ -61,6 +61,7 @@ impl<S: LogStore> Debug for CompactionTaskImpl<S> {
 
 impl<S: LogStore> Drop for CompactionTaskImpl<S> {
     fn drop(&mut self) {
+        debug!("Dropping CompactionTaskImpl");
         self.mark_files_compacting(false);
     }
 }

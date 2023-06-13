@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use common_error::prelude::BoxedError;
 use common_telemetry::timer;
+use common_telemetry::tracing::log::debug;
 use futures::{stream, Stream, TryStreamExt};
 use prost::Message;
 use snafu::{ensure, Location, ResultExt};
@@ -38,6 +39,12 @@ pub struct Wal<S: LogStore> {
     region_id: RegionId,
     namespace: S::Namespace,
     store: Arc<S>,
+}
+
+impl<S: LogStore> Drop for Wal<S> {
+    fn drop(&mut self) {
+        debug!("Dropping Wal");
+    }
 }
 
 pub type PayloadStream<'a> =

@@ -18,6 +18,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use common_runtime::{RepeatedTask, TaskFunction};
 use common_telemetry::logging;
+use common_telemetry::tracing::debug;
 use metrics::increment_counter;
 use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
@@ -173,6 +174,12 @@ pub struct FlushScheduler<S: LogStore> {
     scheduler: LocalScheduler<FlushRequest<S>>,
     /// Auto flush task.
     auto_flush_task: RepeatedTask<Error>,
+}
+
+impl<S: LogStore> Drop for FlushScheduler<S> {
+    fn drop(&mut self) {
+        debug!("Dropping FlushScheduler");
+    }
 }
 
 pub type FlushSchedulerRef<S> = Arc<FlushScheduler<S>>;
@@ -332,6 +339,12 @@ struct AutoFlushFunction<S: LogStore> {
     /// Regions of the engine.
     regions: Arc<RegionMap<S>>,
     picker: FlushPicker,
+}
+
+impl<S: LogStore> Drop for AutoFlushFunction<S> {
+    fn drop(&mut self) {
+        debug!("Dropping AutoFlushFunction");
+    }
 }
 
 #[async_trait]

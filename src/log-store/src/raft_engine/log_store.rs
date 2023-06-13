@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use async_stream::stream;
 use common_runtime::{RepeatedTask, TaskFunction};
-use common_telemetry::{error, info};
+use common_telemetry::{debug, error, info};
 use raft_engine::{Config, Engine, LogBatch, MessageExt, ReadableSize, RecoveryMode};
 use snafu::{ensure, ResultExt};
 use store_api::logstore::entry::Id;
@@ -42,8 +42,20 @@ pub struct RaftEngineLogStore {
     gc_task: RepeatedTask<Error>,
 }
 
+impl Drop for RaftEngineLogStore {
+    fn drop(&mut self) {
+        debug!("Dropping RaftEngineLogStore");
+    }
+}
+
 pub struct PurgeExpiredFilesFunction {
     engine: Arc<Engine>,
+}
+
+impl Drop for PurgeExpiredFilesFunction {
+    fn drop(&mut self) {
+        debug!("Dropping PurgeExpiredFilesFunction");
+    }
 }
 
 #[async_trait::async_trait]

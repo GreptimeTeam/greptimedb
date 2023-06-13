@@ -43,6 +43,7 @@ impl<S: LogStore> Request for CompactionRequestImpl<S> {
     }
 
     fn complete(self, result: Result<()>) {
+        debug!("Dropping CompactionRequestImpl");
         if let Some(sender) = self.sender {
             // We don't care the send result as callers might not
             // wait the result.
@@ -81,6 +82,12 @@ impl<S: LogStore> CompactionRequestImpl<S> {
 
 pub struct CompactionHandler<P> {
     pub picker: P,
+}
+
+impl<P> Drop for CompactionHandler<P> {
+    fn drop(&mut self) {
+        debug!("Dropping CompactionHandler");
+    }
 }
 
 impl<P> CompactionHandler<P> {

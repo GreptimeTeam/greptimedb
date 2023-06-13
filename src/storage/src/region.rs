@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use common_telemetry::{info, logging};
+use common_telemetry::{debug, info, logging};
 use common_time::util;
 use metrics::{decrement_gauge, increment_gauge};
 use snafu::ResultExt;
@@ -60,6 +60,12 @@ use crate::write_batch::WriteBatch;
 /// [Region] implementation.
 pub struct RegionImpl<S: LogStore> {
     inner: Arc<RegionInner<S>>,
+}
+
+impl<S: LogStore> Drop for RegionImpl<S> {
+    fn drop(&mut self) {
+        debug!("Dropping RegionImpl");
+    }
 }
 
 impl<S: LogStore> Clone for RegionImpl<S> {
@@ -625,6 +631,12 @@ struct RegionInner<S: LogStore> {
     compaction_scheduler: CompactionSchedulerRef<S>,
     sst_layer: AccessLayerRef,
     manifest: RegionManifest,
+}
+
+impl<S: LogStore> Drop for RegionInner<S> {
+    fn drop(&mut self) {
+        debug!("Dropping RegionInner");
+    }
 }
 
 impl<S: LogStore> RegionInner<S> {

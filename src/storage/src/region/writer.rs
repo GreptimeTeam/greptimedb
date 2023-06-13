@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
 use common_telemetry::logging;
+use common_telemetry::tracing::log::debug;
 use futures::TryStreamExt;
 use metrics::increment_counter;
 use snafu::{ensure, ResultExt};
@@ -65,6 +66,12 @@ pub struct RegionWriter {
     ///
     /// Increasing committed sequence should be guarded by this lock.
     version_mutex: Mutex<()>,
+}
+
+impl Drop for RegionWriter {
+    fn drop(&mut self) {
+        debug!("Dropping RegionWriter");
+    }
 }
 
 impl RegionWriter {
