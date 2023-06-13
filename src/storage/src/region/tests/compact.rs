@@ -17,6 +17,7 @@
 use std::env;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use common_telemetry::logging;
 use common_test_util::temp_dir::create_temp_dir;
@@ -240,6 +241,10 @@ impl CompactionTester {
             REGION_NAME,
             &self.store_dir,
             object_store.clone(),
+            EngineConfig {
+                max_files_in_l0: usize::MAX,
+                ..Default::default()
+            },
         )
         .await;
         store_config.engine_config = Arc::new(self.engine_config.clone());
@@ -257,6 +262,8 @@ impl CompactionTester {
             MockFilePurgeHandler::default(),
         ));
 
+        //FIXME(hl): find out which component prevents logstore from being dropped.
+        tokio::time::sleep(Duration::from_millis(100)).await;
         let Some(region) = RegionImpl::open(REGION_NAME.to_string(), store_config, &OpenOptions::default()).await? else {
             return Ok(false);
         };
