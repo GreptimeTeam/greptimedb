@@ -16,6 +16,7 @@ mod context;
 pub mod options;
 mod state;
 
+use std::any::Any;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -30,7 +31,9 @@ use datatypes::schema::Schema;
 use partition::manager::PartitionRuleManager;
 use session::context::QueryContextRef;
 use sql::statements::statement::Statement;
+use table::TableRef;
 
+use crate::dataframe::DataFrame;
 use crate::datafusion::DatafusionQueryEngine;
 use crate::error::Result;
 use crate::plan::LogicalPlan;
@@ -47,6 +50,10 @@ pub trait SqlStatementExecutor: Send + Sync {
 
 #[async_trait]
 pub trait QueryEngine: Send + Sync {
+    /// Returns the query engine as Any
+    /// so that it can be downcast to a specific implementation.
+    fn as_any(&self) -> &dyn Any;
+
     fn planner(&self) -> Arc<dyn LogicalPlanner>;
 
     fn name(&self) -> &str;
@@ -60,6 +67,9 @@ pub trait QueryEngine: Send + Sync {
     fn register_aggregate_function(&self, func: AggregateFunctionMetaRef);
 
     fn register_function(&self, func: FunctionRef);
+
+    /// Create a DataFrame from a table.
+    fn read_table(&self, table: TableRef) -> Result<DataFrame>;
 }
 
 pub struct QueryEngineFactory {
