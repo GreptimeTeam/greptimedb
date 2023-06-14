@@ -54,6 +54,7 @@ use partition::manager::PartitionRuleManager;
 use partition::route::TableRoutes;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
+use query::query_engine::DescribeResult;
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error as server_error;
 use servers::error::{ExecuteQuerySnafu, ParsePromQLSnafu};
@@ -523,7 +524,7 @@ impl SqlQueryHandler for Instance {
         &self,
         stmt: Statement,
         query_ctx: QueryContextRef,
-    ) -> Result<Option<Schema>> {
+    ) -> Result<Option<DescribeResult>> {
         if let Statement::Query(_) = stmt {
             let plan = self
                 .query_engine

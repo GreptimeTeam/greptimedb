@@ -17,7 +17,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_error::prelude::*;
 use common_query::Output;
-use datatypes::schema::Schema;
 use query::parser::PromQuery;
 use session::context::QueryContextRef;
 use sql::statements::statement::Statement;
@@ -26,6 +25,7 @@ use crate::error::{self, Result};
 
 pub type SqlQueryHandlerRef<E> = Arc<dyn SqlQueryHandler<Error = E> + Send + Sync>;
 pub type ServerSqlQueryHandlerRef = SqlQueryHandlerRef<error::Error>;
+use query::query_engine::DescribeResult;
 
 #[async_trait]
 pub trait SqlQueryHandler {
@@ -47,7 +47,7 @@ pub trait SqlQueryHandler {
         &self,
         stmt: Statement,
         query_ctx: QueryContextRef,
-    ) -> std::result::Result<Option<Schema>, Self::Error>;
+    ) -> std::result::Result<Option<DescribeResult>, Self::Error>;
 
     async fn is_valid_schema(
         &self,
@@ -107,7 +107,7 @@ where
         &self,
         stmt: Statement,
         query_ctx: QueryContextRef,
-    ) -> Result<Option<Schema>> {
+    ) -> Result<Option<DescribeResult>> {
         self.0
             .do_describe(stmt, query_ctx)
             .await

@@ -218,6 +218,13 @@ pub enum Error {
         source: datatypes::error::Error,
         location: Location,
     },
+
+    #[snafu(display("Failed to convert datafusion scalar value, source: {}", source))]
+    ConvertScalarValue {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -235,6 +242,7 @@ impl ErrorExt for Error {
             | ParseFloat { .. }
             | MissingRequiredField { .. }
             | BuildRegex { .. }
+            | ConvertScalarValue { .. }
             | ConvertSchema { .. } => StatusCode::InvalidArguments,
 
             BuildBackend { .. } | ListObjects { .. } => StatusCode::StorageUnavailable,

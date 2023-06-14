@@ -43,6 +43,15 @@ pub use crate::query_engine::state::QueryEngineState;
 
 pub type SqlStatementExecutorRef = Arc<dyn SqlStatementExecutor>;
 
+/// Describe statement result
+#[derive(Debug)]
+pub struct DescribeResult {
+    /// The schema of statement
+    pub schema: Schema,
+    /// The logical plan for statement
+    pub logical_plan: LogicalPlan,
+}
+
 #[async_trait]
 pub trait SqlStatementExecutor: Send + Sync {
     async fn execute_sql(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output>;
@@ -58,7 +67,7 @@ pub trait QueryEngine: Send + Sync {
 
     fn name(&self) -> &str;
 
-    async fn describe(&self, plan: LogicalPlan) -> Result<Schema>;
+    async fn describe(&self, plan: LogicalPlan) -> Result<DescribeResult>;
 
     async fn execute(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output>;
 

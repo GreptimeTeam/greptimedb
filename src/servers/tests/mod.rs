@@ -21,8 +21,8 @@ use async_trait::async_trait;
 use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
-use datatypes::schema::Schema;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
+use query::query_engine::DescribeResult;
 use query::{QueryEngineFactory, QueryEngineRef};
 use script::engine::{CompileContext, EvalContext, Script, ScriptEngine};
 use script::python::{PyEngine, PyScript};
@@ -90,7 +90,7 @@ impl SqlQueryHandler for DummyInstance {
         &self,
         stmt: Statement,
         query_ctx: QueryContextRef,
-    ) -> Result<Option<Schema>> {
+    ) -> Result<Option<DescribeResult>> {
         if let Statement::Query(_) = stmt {
             let plan = self
                 .query_engine
