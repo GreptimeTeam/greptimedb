@@ -279,6 +279,12 @@ pub enum Error {
         source: tikv_jemalloc_ctl::Error,
         location: Location,
     },
+
+    #[snafu(display("DataFrame operation error, source: {source}, location: {location}"))]
+    DataFrame {
+        source: datafusion::error::DataFusionError,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -317,6 +323,7 @@ impl ErrorExt for Error {
             | InvalidPromRemoteRequest { .. }
             | InvalidFlightTicket { .. }
             | InvalidPrepareStatement { .. }
+            | DataFrame { .. }
             | TimePrecision { .. } => StatusCode::InvalidArguments,
 
             InfluxdbLinesWrite { source, .. } | PromSeriesWrite { source, .. } => {

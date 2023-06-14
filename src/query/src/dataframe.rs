@@ -12,29 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(let_chains)]
+use datafusion::dataframe::DataFrame as DfDataFrame;
 
-pub mod dataframe;
-pub mod datafusion;
-pub mod dist_plan;
-pub mod error;
-pub mod executor;
-pub mod extension_serializer;
-pub mod logical_optimizer;
-mod metrics;
-mod optimizer;
-pub mod parser;
-pub mod physical_optimizer;
-pub mod physical_planner;
-pub mod plan;
-pub mod planner;
-pub mod query_engine;
-pub mod sql;
-
-pub use crate::datafusion::DfContextProviderAdapter;
-pub use crate::query_engine::{
-    QueryEngine, QueryEngineContext, QueryEngineFactory, QueryEngineRef,
-};
-
-#[cfg(test)]
-mod tests;
+/// DataFrame represents a logical set of rows with the same named columns.
+/// Similar to a Pandas DataFrame or Spark DataFrame
+#[derive(Clone)]
+pub enum DataFrame {
+    DataFusion(DfDataFrame),
+}
