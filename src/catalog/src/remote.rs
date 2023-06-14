@@ -30,6 +30,10 @@ mod manager;
 #[cfg(feature = "testing")]
 pub mod mock;
 
+// FIXME(LFC): Used in next PR.
+#[allow(dead_code)]
+mod region_alive_keeper;
+
 #[derive(Debug, Clone)]
 pub struct Kv(pub Vec<u8>, pub Vec<u8>);
 
