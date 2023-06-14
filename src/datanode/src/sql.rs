@@ -32,8 +32,6 @@ use crate::instance::sql::table_idents_to_full_name;
 
 mod alter;
 mod backup_database;
-mod copy_table_from;
-mod copy_table_to;
 mod create;
 mod create_external;
 mod drop_table;

@@ -36,24 +36,26 @@ impl SqlHandler {
         let schema = self
             .catalog_manager
             .catalog(&req.catalog_name)
+            .await
             .context(CatalogSnafu)?
             .context(CatalogNotFoundSnafu {
                 name: &req.catalog_name,
             })?
             .schema(&req.schema_name)
+            .await
             .context(CatalogSnafu)?
             .context(SchemaNotFoundSnafu {
                 name: &req.schema_name,
             })?;
 
-        let table_names = schema.table_names().context(CatalogSnafu)?;
+        let table_names = schema.table_names().await.context(CatalogSnafu)?;
         for table_name in &table_names {
             let table_ref = TableReference {
                 catalog: &req.catalog_name,
                 schema: &req.schema_name,
                 table: table_name,
             };
-            let table = self.get_table(&table_ref)?;
+            let table = self.get_table(&table_ref).await?;
             let table_schema = table.schema();
             // TODO(hl): remove this unwrap
             let ts_col = table_schema.timestamp_column().unwrap();
