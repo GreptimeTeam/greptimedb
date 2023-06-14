@@ -14,9 +14,8 @@
 
 use api::prometheus::remote::read_request::ResponseType;
 use api::prometheus::remote::{Query, QueryResult, ReadRequest, ReadResponse, WriteRequest};
-use api::v1::greptime_request::Request;
-use api::v1::{query_request, QueryRequest};
 use async_trait::async_trait;
+use common_catalog::format_full_table_name;
 use common_error::prelude::BoxedError;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
@@ -25,11 +24,13 @@ use metrics::counter;
 use prost::Message;
 use servers::error::{self, Result as ServerResult};
 use servers::prometheus::{self, Metrics};
-use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::{PrometheusProtocolHandler, PrometheusResponse};
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 
+use crate::error::{
+    CatalogSnafu, ExecLogicalPlanSnafu, ReadTableSnafu, Result, TableNotFoundSnafu,
+};
 use crate::instance::Instance;
 use crate::metrics::PROMETHEUS_REMOTE_WRITE_SAMPLES;
 
@@ -75,6 +76,42 @@ async fn to_query_result(table_name: &str, output: Output) -> ServerResult<Query
 }
 
 impl Instance {
+    async fn handle_remote_query(
+        &self,
+        ctx: &QueryContextRef,
+        catalog_name: &str,
+        schema_name: &str,
+        table_name: &str,
+        query: &Query,
+    ) -> Result<Output> {
+        let table = self
+            .catalog_manager
+            .table(catalog_name, schema_name, table_name)
+            .await
+            .context(CatalogSnafu)?
+            .context(TableNotFoundSnafu {
+                table_name: format_full_table_name(catalog_name, schema_name, table_name),
+            })?;
+
+        let dataframe = self
+            .query_engine
+            .read_table(table)
+            .context(ReadTableSnafu)?;
+
+        let logical_plan = prometheus::query_to_plan(dataframe, query).unwrap();
+
+        logging::debug!(
+            "Prometheus remote read, table: {}, logical plan: {}",
+            table_name,
+            logical_plan.display_indent(),
+        );
+
+        self.query_engine
+            .execute(logical_plan, ctx.clone())
+            .await
+            .context(ExecLogicalPlanSnafu)
+    }
+
     async fn handle_remote_queries(
         &self,
         ctx: QueryContextRef,
@@ -82,22 +119,19 @@ impl Instance {
     ) -> ServerResult<Vec<(String, Output)>> {
         let mut results = Vec::with_capacity(queries.len());
 
-        for query in queries {
-            let (table_name, sql) = prometheus::query_to_sql(query)?;
-            logging::debug!(
-                "prometheus remote read, table: {}, sql: {}",
-                table_name,
-                sql
-            );
+        let catalog_name = ctx.current_catalog();
+        let schema_name = ctx.current_schema();
 
-            let query = Request::Query(QueryRequest {
-                query: Some(query_request::Query::Sql(sql.to_string())),
-            });
+        for query in queries {
+            let table_name = prometheus::table_name(query)?;
+
             let output = self
-                .do_query(query, ctx.clone())
+                .handle_remote_query(&ctx, &catalog_name, &schema_name, &table_name, query)
                 .await
                 .map_err(BoxedError::new)
-                .context(error::ExecuteGrpcQuerySnafu)?;
+                .context(error::ExecuteQuerySnafu {
+                    query: format!("{query:#?}"),
+                })?;
 
             results.push((table_name, output));
         }
