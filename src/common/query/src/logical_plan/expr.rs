@@ -12,7 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_time::range::TimestampRange;
+use common_time::timestamp::TimeUnit;
+use common_time::Timestamp;
+use datafusion_common::{Column, ScalarValue};
 pub use datafusion_expr::expr::Expr as DfExpr;
+use datafusion_expr::{and, binary_expr, Operator};
+
+use crate::error;
 
 /// Central struct of query API.
 /// Represent logical expressions such as `A + 1`, or `CAST(c1 AS int)`.
@@ -31,6 +38,59 @@ impl From<DfExpr> for Expr {
     fn from(df_expr: DfExpr) -> Self {
         Self { df_expr }
     }
+}
+
+/// Builds an `Expr` that filters timestamp column from given timestamp range.
+pub fn build_filter_from_timestamp(
+    ts_col_name: &str,
+    time_range: Option<&TimestampRange>,
+) -> error::Result<Option<Expr>> {
+    let Some(time_range) = time_range else { return Ok(None); };
+    if time_range.is_empty() {
+        // TODO(hl): don't panic here
+        panic!("Timestamp range cannot be empty");
+    }
+
+    let ts_col_expr = DfExpr::Column(Column {
+        relation: None,
+        name: ts_col_name.to_string(),
+    });
+
+    let df_expr = match (time_range.start(), time_range.end()) {
+        (None, None) => None,
+        (Some(start), None) => Some(binary_expr(
+            ts_col_expr,
+            Operator::GtEq,
+            timestamp_to_literal(start),
+        )),
+        (None, Some(end)) => Some(binary_expr(
+            ts_col_expr,
+            Operator::Lt,
+            timestamp_to_literal(end),
+        )),
+
+        (Some(start), Some(end)) => Some(and(
+            binary_expr(
+                ts_col_expr.clone(),
+                Operator::GtEq,
+                timestamp_to_literal(start),
+            ),
+            binary_expr(ts_col_expr, Operator::Lt, timestamp_to_literal(end)),
+        )),
+    };
+
+    Ok(df_expr.map(Expr::from))
+}
+
+/// Converts a [Timestamp] to datafusion literal value.
+fn timestamp_to_literal(timestamp: &Timestamp) -> DfExpr {
+    let scalar_value = match timestamp.unit() {
+        TimeUnit::Second => ScalarValue::TimestampSecond(Some(timestamp.value()), None),
+        TimeUnit::Millisecond => ScalarValue::TimestampMillisecond(Some(timestamp.value()), None),
+        TimeUnit::Microsecond => ScalarValue::TimestampMicrosecond(Some(timestamp.value()), None),
+        TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(Some(timestamp.value()), None),
+    };
+    DfExpr::Literal(scalar_value)
 }
 
 #[cfg(test)]

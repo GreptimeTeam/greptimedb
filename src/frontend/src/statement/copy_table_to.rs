@@ -82,12 +82,28 @@ impl StatementExecutor {
 
         let format = Format::try_from(&req.with).context(error::ParseFileFormatSnafu)?;
 
-        let stream = table
-            .scan(None, &[], None)
-            .await
-            .with_context(|_| error::CopyTableSnafu {
-                table_name: table_ref.to_string(),
-            })?;
+        let filters = table
+            .schema()
+            .timestamp_column()
+            .map(|c| {
+                common_query::logical_plan::build_filter_from_timestamp(
+                    &c.name,
+                    req.timestamp_range.as_ref(),
+                )
+            })
+            .transpose()
+            .unwrap() // TODO(hl): remove unwrap
+            .flatten()
+            .into_iter()
+            .collect::<Vec<_>>();
+
+        let stream =
+            table
+                .scan(None, &filters, None)
+                .await
+                .with_context(|_| error::CopyTableSnafu {
+                    table_name: table_ref.to_string(),
+                })?;
 
         let stream = stream
             .execute(0, SessionContext::default().task_ctx())

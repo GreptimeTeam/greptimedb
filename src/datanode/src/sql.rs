@@ -31,7 +31,6 @@ use crate::error::{
 use crate::instance::sql::table_idents_to_full_name;
 
 mod alter;
-mod backup_database;
 mod create;
 mod create_external;
 mod drop_table;

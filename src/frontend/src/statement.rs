@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod backup;
 mod copy_table_from;
 mod copy_table_to;
 mod describe;
@@ -191,5 +192,7 @@ fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<
         connection,
         pattern,
         direction,
+        // we copy the whole table by default.
+        timestamp_range: None,
     })
 }

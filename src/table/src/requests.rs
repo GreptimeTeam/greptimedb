@@ -269,6 +269,7 @@ pub struct CopyTableRequest {
     pub connection: HashMap<String, String>,
     pub pattern: Option<String>,
     pub direction: CopyDirection,
+    pub timestamp_range: Option<TimestampRange>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -299,6 +300,7 @@ pub struct BackupDatabaseRequest {
     pub catalog_name: String,
     pub schema_name: String,
     pub time_range: Option<TimestampRange>,
+    pub target_dir: String,
 }
 
 #[cfg(test)]
