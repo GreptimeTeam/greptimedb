@@ -279,8 +279,9 @@ pub enum Error {
         source: query::error::Error,
     },
 
-    #[snafu(display("Failed to read table, source: {}", source))]
+    #[snafu(display("Failed to read table: {table_name}, source: {source}"))]
     ReadTable {
+        table_name: String,
         #[snafu(backtrace)]
         source: query::error::Error,
     },
@@ -637,7 +638,7 @@ impl ErrorExt for Error {
             Error::ExecuteStatement { source, .. }
             | Error::PlanStatement { source }
             | Error::ParseQuery { source }
-            | Error::ReadTable { source }
+            | Error::ReadTable { source, .. }
             | Error::ExecLogicalPlan { source }
             | Error::DescribeStatement { source } => source.status_code(),
 

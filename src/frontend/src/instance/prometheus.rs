@@ -90,14 +90,16 @@ impl Instance {
             .table(catalog_name, schema_name, table_name)
             .await
             .context(CatalogSnafu)?
-            .context(TableNotFoundSnafu {
+            .with_context(|| TableNotFoundSnafu {
                 table_name: format_full_table_name(catalog_name, schema_name, table_name),
             })?;
 
         let dataframe = self
             .query_engine
             .read_table(table)
-            .context(ReadTableSnafu)?;
+            .with_context(|_| ReadTableSnafu {
+                table_name: format_full_table_name(catalog_name, schema_name, table_name),
+            })?;
 
         let logical_plan =
             prometheus::query_to_plan(dataframe, query).context(PrometheusRemoteQueryPlanSnafu)?;

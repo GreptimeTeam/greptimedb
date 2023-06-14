@@ -43,7 +43,7 @@ pub struct Metrics {
     pub exposition: MetricsExposition<PrometheusType, PrometheusValue>,
 }
 
-/// Get table name from remote Query
+/// Get table name from remote query
 pub fn table_name(q: &Query) -> Result<String> {
     let label_matches = &q.matchers;
 
@@ -70,7 +70,7 @@ pub fn query_to_plan(dataframe: DataFrame, q: &Query) -> Result<LogicalPlan> {
 
     let label_matches = &q.matchers;
 
-    let mut conditions: Vec<Expr> = Vec::with_capacity(label_matches.len() + 1);
+    let mut conditions = Vec::with_capacity(label_matches.len() + 1);
 
     conditions.push(col(TIMESTAMP_COLUMN_NAME).gt_eq(lit(start_timestamp_ms)));
     conditions.push(col(TIMESTAMP_COLUMN_NAME).lt_eq(lit(end_timestamp_ms)));
