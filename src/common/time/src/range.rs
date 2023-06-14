@@ -14,6 +14,8 @@
 
 use std::fmt::{Debug, Display, Formatter};
 
+use serde::{Deserialize, Serialize};
+
 use crate::timestamp::TimeUnit;
 use crate::timestamp_millis::TimestampMillis;
 use crate::Timestamp;
@@ -23,7 +25,7 @@ use crate::Timestamp;
 /// The range contains values that `value >= start` and `val < end`.
 ///
 /// The range is empty iff `start == end == "the default value of T"`
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct GenericRange<T> {
     start: Option<T>,
     end: Option<T>,
@@ -521,5 +523,26 @@ mod tests {
             Some(Timestamp::new_millisecond(1)),
         );
         assert!(range.is_empty());
+    }
+
+    #[test]
+    fn test_serialize_timestamp_range() {
+        macro_rules! test_serde_for_unit {
+            ($($unit: expr),*) => {
+                $(
+                let original_range = TimestampRange::with_unit(0, 10, $unit).unwrap();
+                let string = serde_json::to_string(&original_range).unwrap();
+                let deserialized: TimestampRange = serde_json::from_str(&string).unwrap();
+                assert_eq!(original_range, deserialized);
+                )*
+            };
+        }
+
+        test_serde_for_unit!(
+            TimeUnit::Second,
+            TimeUnit::Millisecond,
+            TimeUnit::Microsecond,
+            TimeUnit::Nanosecond
+        );
     }
 }

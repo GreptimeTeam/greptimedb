@@ -93,12 +93,16 @@ impl StatementExecutor {
 
             Statement::ShowTables(stmt) => self.show_tables(stmt, query_ctx).await,
 
-            Statement::Copy(stmt) => {
+            Statement::Copy(sql::statements::copy::Copy::CopyTable(stmt)) => {
                 let req = to_copy_table_request(stmt, query_ctx)?;
                 match req.direction {
                     CopyDirection::Export => self.copy_table_to(req).await,
                     CopyDirection::Import => self.copy_table_from(req).await,
                 }
+            }
+
+            Statement::Copy(sql::statements::copy::Copy::CopyDatabase(_)) => {
+                todo!()
             }
 
             Statement::CreateDatabase(_)

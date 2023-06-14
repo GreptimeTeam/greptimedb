@@ -295,12 +295,14 @@ macro_rules! meter_insert_request {
     };
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct BackupDatabaseRequest {
     pub catalog_name: String,
     pub schema_name: String,
+    pub location: String,
+    pub with: HashMap<String, String>,
+    pub connection: HashMap<String, String>,
     pub time_range: Option<TimestampRange>,
-    pub target_dir: String,
 }
 
 #[cfg(test)]
@@ -347,5 +349,19 @@ mod tests {
         let serialized_map = HashMap::from(&options);
         let serialized = TableOptions::try_from(&serialized_map).unwrap();
         assert_eq!(options, serialized);
+    }
+
+    #[test]
+    fn test_serialize() {
+        let request = BackupDatabaseRequest {
+            catalog_name: "greptime".to_string(),
+            schema_name: "public".to_string(),
+            location: "/Users/lei/test_backup".to_string(),
+            with: [("a".to_string(), "A".to_string())].into_iter().collect(),
+            connection: [("b".to_string(), "B".to_string())].into_iter().collect(),
+            time_range: None,
+        };
+        let string = serde_json::to_string(&request).unwrap();
+        println!("string: {}", string);
     }
 }
