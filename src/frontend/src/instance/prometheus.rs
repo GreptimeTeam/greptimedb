@@ -129,7 +129,7 @@ impl Instance {
                 .handle_remote_query(&ctx, &catalog_name, &schema_name, &table_name, query)
                 .await
                 .map_err(BoxedError::new)
-                .context(error::ExecuteQuerySnafu {
+                .with_context(|_| error::ExecuteQuerySnafu {
                     query: format!("{query:#?}"),
                 })?;
 
