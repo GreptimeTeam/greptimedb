@@ -29,7 +29,8 @@ use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
-    CatalogSnafu, ExecLogicalPlanSnafu, ReadTableSnafu, Result, TableNotFoundSnafu,
+    CatalogSnafu, ExecLogicalPlanSnafu, PrometheusRemoteQueryPlanSnafu, ReadTableSnafu, Result,
+    TableNotFoundSnafu,
 };
 use crate::instance::Instance;
 use crate::metrics::PROMETHEUS_REMOTE_WRITE_SAMPLES;
@@ -98,7 +99,8 @@ impl Instance {
             .read_table(table)
             .context(ReadTableSnafu)?;
 
-        let logical_plan = prometheus::query_to_plan(dataframe, query).unwrap();
+        let logical_plan =
+            prometheus::query_to_plan(dataframe, query).context(PrometheusRemoteQueryPlanSnafu)?;
 
         logging::debug!(
             "Prometheus remote read, table: {}, logical plan: {}",

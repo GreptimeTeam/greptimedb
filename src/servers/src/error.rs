@@ -280,9 +280,10 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("DataFrame operation error, source: {}", source))]
+    #[snafu(display("DataFrame operation error, source: {source}, location: {location}"))]
     DataFrame {
         source: datafusion::error::DataFusionError,
+        location: Location,
     },
 }
 

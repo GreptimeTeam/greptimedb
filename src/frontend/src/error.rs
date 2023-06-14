@@ -369,9 +369,18 @@ pub enum Error {
     },
 
     // TODO(ruihang): merge all query execution error kinds
-    #[snafu(display("failed to execute PromQL query {}, source: {}", query, source))]
+    #[snafu(display("Failed to execute PromQL query {}, source: {}", query, source))]
     ExecutePromql {
         query: String,
+        #[snafu(backtrace)]
+        source: servers::error::Error,
+    },
+
+    #[snafu(display(
+        "Failed to create logical plan for prometheus query, source: {}",
+        source
+    ))]
+    PrometheusRemoteQueryPlan {
         #[snafu(backtrace)]
         source: servers::error::Error,
     },
@@ -565,7 +574,8 @@ impl ErrorExt for Error {
             Error::HandleHeartbeatResponse { source, .. } => source.status_code(),
 
             Error::RuntimeResource { source, .. } => source.status_code(),
-            Error::ExecutePromql { source, .. } => source.status_code(),
+            Error::PrometheusRemoteQueryPlan { source, .. }
+            | Error::ExecutePromql { source, .. } => source.status_code(),
 
             Error::SqlExecIntercepted { source, .. } => source.status_code(),
             Error::StartServer { source, .. } => source.status_code(),
