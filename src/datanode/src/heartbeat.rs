@@ -131,6 +131,9 @@ impl HeartbeatTask {
         let addr = resolve_addr(&self.server_addr, &self.server_hostname);
         info!("Starting heartbeat to Metasrv with interval {interval}. My node id is {node_id}, address is {addr}.");
 
+        // TODO(LFC): Continued in next PR.
+        // self.region_alive_keepers.start(interval).await;
+
         let meta_client = self.meta_client.clone();
         let catalog_manager_clone = self.catalog_manager.clone();
 

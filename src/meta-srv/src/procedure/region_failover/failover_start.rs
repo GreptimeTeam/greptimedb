@@ -14,7 +14,7 @@
 
 use async_trait::async_trait;
 use common_error::prelude::{ErrorExt, StatusCode};
-use common_meta::instruction::TableIdent;
+use common_meta::ident::TableIdent;
 use common_meta::peer::Peer;
 use common_meta::RegionIdent;
 use common_telemetry::info;

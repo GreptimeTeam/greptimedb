@@ -14,7 +14,8 @@
 
 use api::v1::meta::MailboxMessage;
 use async_trait::async_trait;
-use common_meta::instruction::{Instruction, TableIdent};
+use common_meta::ident::TableIdent;
+use common_meta::instruction::Instruction;
 use common_meta::RegionIdent;
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};

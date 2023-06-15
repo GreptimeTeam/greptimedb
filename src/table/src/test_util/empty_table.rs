@@ -36,6 +36,7 @@ impl EmptyTable {
             .primary_key_indices(req.primary_key_indices)
             .next_column_id(0)
             .options(req.table_options)
+            .region_numbers(req.region_numbers)
             .build();
         let table_info = TableInfoBuilder::default()
             .catalog_name(req.catalog_name)

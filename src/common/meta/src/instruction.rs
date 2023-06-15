@@ -16,6 +16,7 @@ use std::fmt::{Display, Formatter};
 
 use serde::{Deserialize, Serialize};
 
+use crate::ident::TableIdent;
 use crate::{ClusterId, DatanodeId};
 
 #[derive(Eq, Hash, PartialEq, Clone, Debug, Serialize, Deserialize)]
@@ -46,25 +47,6 @@ impl Display for RegionIdent {
 impl From<RegionIdent> for TableIdent {
     fn from(region_ident: RegionIdent) -> Self {
         region_ident.table_ident
-    }
-}
-
-#[derive(Eq, Hash, PartialEq, Clone, Debug, Serialize, Deserialize)]
-pub struct TableIdent {
-    pub catalog: String,
-    pub schema: String,
-    pub table: String,
-    pub table_id: u32,
-    pub engine: String,
-}
-
-impl Display for TableIdent {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "TableIdent(table_id='{}', table_name='{}.{}.{}', table_engine='{}')",
-            self.table_id, self.catalog, self.schema, self.table, self.engine,
-        )
     }
 }
 

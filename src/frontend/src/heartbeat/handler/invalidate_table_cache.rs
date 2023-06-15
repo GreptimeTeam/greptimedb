@@ -18,7 +18,8 @@ use common_meta::error::Result as MetaResult;
 use common_meta::heartbeat::handler::{
     HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
 };
-use common_meta::instruction::{Instruction, InstructionReply, SimpleReply, TableIdent};
+use common_meta::ident::TableIdent;
+use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
 use common_meta::table_name::TableName;
 use common_telemetry::{error, info};
 use partition::manager::TableRouteCacheInvalidatorRef;

@@ -15,15 +15,14 @@
 use std::sync::Arc;
 
 use catalog::error::Error as CatalogError;
+use catalog::remote::region_alive_keeper::RegionAliveKeepers;
 use catalog::{CatalogManagerRef, RegisterTableRequest};
 use common_catalog::format_full_table_name;
 use common_meta::error::Result as MetaResult;
 use common_meta::heartbeat::handler::{
     HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
 };
-use common_meta::instruction::{
-    Instruction, InstructionReply, RegionIdent, SimpleReply, TableIdent,
-};
+use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
 use common_telemetry::{error, warn};
 use snafu::ResultExt;
 use store_api::storage::RegionNumber;
@@ -37,6 +36,7 @@ use crate::error::{self, Result};
 pub struct OpenRegionHandler {
     catalog_manager: CatalogManagerRef,
     table_engine_manager: TableEngineManagerRef,
+    region_alive_keepers: Arc<RegionAliveKeepers>,
 }
 
 impl HeartbeatResponseHandler for OpenRegionHandler {
@@ -55,9 +55,24 @@ impl HeartbeatResponseHandler for OpenRegionHandler {
         let mailbox = ctx.mailbox.clone();
         let self_ref = Arc::new(self.clone());
 
+        let region_alive_keepers = self.region_alive_keepers.clone();
         common_runtime::spawn_bg(async move {
-            let (engine, request) = OpenRegionHandler::prepare_request(region_ident);
-            let result = self_ref.open_region_inner(engine, request).await;
+            let table_ident = &region_ident.table_ident;
+            let request = OpenTableRequest {
+                catalog_name: table_ident.catalog.clone(),
+                schema_name: table_ident.schema.clone(),
+                table_name: table_ident.table.clone(),
+                table_id: table_ident.table_id,
+                region_numbers: vec![region_ident.region_number],
+            };
+            let result = self_ref
+                .open_region_inner(table_ident.engine.clone(), request)
+                .await;
+
+            if matches!(result, Ok(true)) {
+                region_alive_keepers.register_region(&region_ident).await;
+            }
+
             if let Err(e) = mailbox
                 .send((meta, OpenRegionHandler::map_result(result)))
                 .await
@@ -73,10 +88,12 @@ impl OpenRegionHandler {
     pub fn new(
         catalog_manager: CatalogManagerRef,
         table_engine_manager: TableEngineManagerRef,
+        region_alive_keepers: Arc<RegionAliveKeepers>,
     ) -> Self {
         Self {
             catalog_manager,
             table_engine_manager,
+            region_alive_keepers,
         }
     }
 
@@ -93,32 +110,6 @@ impl OpenRegionHandler {
                     result,
                     error: None,
                 })
-            },
-        )
-    }
-
-    fn prepare_request(ident: RegionIdent) -> (String, OpenTableRequest) {
-        let RegionIdent {
-            table_ident:
-                TableIdent {
-                    catalog,
-                    schema,
-                    table,
-                    table_id,
-                    engine,
-                },
-            region_number,
-            ..
-        } = ident;
-
-        (
-            engine,
-            OpenTableRequest {
-                catalog_name: catalog,
-                schema_name: schema,
-                table_name: table,
-                table_id,
-                region_numbers: vec![region_number],
             },
         )
     }

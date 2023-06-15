@@ -14,15 +14,14 @@
 
 use std::sync::Arc;
 
+use catalog::remote::region_alive_keeper::RegionAliveKeepers;
 use catalog::{CatalogManagerRef, DeregisterTableRequest};
 use common_catalog::format_full_table_name;
 use common_meta::error::Result as MetaResult;
 use common_meta::heartbeat::handler::{
     HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
 };
-use common_meta::instruction::{
-    Instruction, InstructionReply, RegionIdent, SimpleReply, TableIdent,
-};
+use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
 use common_telemetry::{error, info, warn};
 use snafu::ResultExt;
 use store_api::storage::RegionNumber;
@@ -36,6 +35,7 @@ use crate::error::{self, Result};
 pub struct CloseRegionHandler {
     catalog_manager: CatalogManagerRef,
     table_engine_manager: TableEngineManagerRef,
+    region_alive_keepers: Arc<RegionAliveKeepers>,
 }
 
 impl HeartbeatResponseHandler for CloseRegionHandler {
@@ -53,28 +53,25 @@ impl HeartbeatResponseHandler for CloseRegionHandler {
 
         let mailbox = ctx.mailbox.clone();
         let self_ref = Arc::new(self.clone());
-
-        let RegionIdent {
-            table_ident:
-                TableIdent {
-                    engine,
-                    catalog,
-                    schema,
-                    table,
-                    ..
-                },
-            region_number,
-            ..
-        } = region_ident;
-
+        let region_alive_keepers = self.region_alive_keepers.clone();
         common_runtime::spawn_bg(async move {
+            let table_ident = &region_ident.table_ident;
+            let table_ref = TableReference::full(
+                &table_ident.catalog,
+                &table_ident.schema,
+                &table_ident.table,
+            );
             let result = self_ref
                 .close_region_inner(
-                    engine,
-                    &TableReference::full(&catalog, &schema, &table),
-                    vec![region_number],
+                    table_ident.engine.clone(),
+                    &table_ref,
+                    vec![region_ident.region_number],
                 )
                 .await;
+
+            if matches!(result, Ok(true)) {
+                region_alive_keepers.deregister_region(&region_ident).await;
+            }
 
             if let Err(e) = mailbox
                 .send((meta, CloseRegionHandler::map_result(result)))
@@ -92,10 +89,12 @@ impl CloseRegionHandler {
     pub fn new(
         catalog_manager: CatalogManagerRef,
         table_engine_manager: TableEngineManagerRef,
+        region_alive_keepers: Arc<RegionAliveKeepers>,
     ) -> Self {
         Self {
             catalog_manager,
             table_engine_manager,
+            region_alive_keepers,
         }
     }
 

@@ -23,7 +23,8 @@ use common_meta::heartbeat::handler::{
     HandlerGroupExecutor, HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutor,
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MessageMeta};
-use common_meta::instruction::{Instruction, InstructionReply, SimpleReply, TableIdent};
+use common_meta::ident::TableIdent;
+use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
 use common_meta::table_name::TableName;
 use partition::manager::TableRouteCacheInvalidator;
 use tokio::sync::mpsc;

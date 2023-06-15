@@ -19,14 +19,14 @@ use api::v1::greptime_request::Request as GrpcRequest;
 use api::v1::meta::HeartbeatResponse;
 use api::v1::query_request::Query;
 use api::v1::QueryRequest;
+use catalog::remote::region_alive_keeper::RegionAliveKeepers;
 use catalog::CatalogManagerRef;
 use common_meta::heartbeat::handler::{
     HandlerGroupExecutor, HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutor,
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MessageMeta};
-use common_meta::instruction::{
-    Instruction, InstructionReply, RegionIdent, SimpleReply, TableIdent,
-};
+use common_meta::ident::TableIdent;
+use common_meta::instruction::{Instruction, InstructionReply, RegionIdent, SimpleReply};
 use common_query::Output;
 use datatypes::prelude::ConcreteDataType;
 use servers::query_handler::grpc::GrpcQueryHandler;
@@ -61,7 +61,11 @@ async fn test_close_region_handler() {
     } = prepare_handler_test("test_close_region_handler").await;
 
     let executor = Arc::new(HandlerGroupExecutor::new(vec![Arc::new(
-        CloseRegionHandler::new(catalog_manager_ref.clone(), engine_manager_ref.clone()),
+        CloseRegionHandler::new(
+            catalog_manager_ref.clone(),
+            engine_manager_ref.clone(),
+            Arc::new(RegionAliveKeepers::new(engine_manager_ref.clone())),
+        ),
     )]));
 
     prepare_table(instance.inner()).await;
@@ -127,14 +131,18 @@ async fn test_open_region_handler() {
         ..
     } = prepare_handler_test("test_open_region_handler").await;
 
+    let region_alive_keeper = Arc::new(RegionAliveKeepers::new(engine_manager_ref.clone()));
+
     let executor = Arc::new(HandlerGroupExecutor::new(vec![
         Arc::new(OpenRegionHandler::new(
             catalog_manager_ref.clone(),
             engine_manager_ref.clone(),
+            region_alive_keeper.clone(),
         )),
         Arc::new(CloseRegionHandler::new(
             catalog_manager_ref.clone(),
             engine_manager_ref.clone(),
+            region_alive_keeper,
         )),
     ]));
 
