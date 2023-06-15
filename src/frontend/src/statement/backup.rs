@@ -12,19 +12,36 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_datasource::file_format::Format;
 use common_query::Output;
-use snafu::{OptionExt, ResultExt};
-use table::requests::{BackupDatabaseRequest, CopyDirection, CopyTableRequest};
+use common_telemetry::info;
+use snafu::{ensure, OptionExt, ResultExt};
+use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest};
 
 use crate::error;
-use crate::error::{CatalogNotFoundSnafu, CatalogSnafu, SchemaNotFoundSnafu};
+use crate::error::{
+    CatalogNotFoundSnafu, CatalogSnafu, InvalidCopyParameterSnafu, SchemaNotFoundSnafu,
+};
 use crate::statement::StatementExecutor;
 
+pub(crate) const COPY_DATABASE_TIME_START_KEY: &str = "start_time";
+pub(crate) const COPY_DATABASE_TIME_END_KEY: &str = "end_time";
+
 impl StatementExecutor {
-    pub(crate) async fn backup_database(
-        &self,
-        req: BackupDatabaseRequest,
-    ) -> error::Result<Output> {
+    pub(crate) async fn copy_database(&self, req: CopyDatabaseRequest) -> error::Result<Output> {
+        // location must end with / so that every table is exported to a file.
+        ensure!(
+            req.location.ends_with('/'),
+            InvalidCopyParameterSnafu {
+                key: "location",
+                value: req.location,
+            }
+        );
+
+        info!(
+            "Copy database {}.{}, dir: {},. time: {:?}",
+            req.catalog_name, req.schema_name, req.location, req.time_range
+        );
         let schema = self
             .catalog_manager
             .catalog(&req.catalog_name)
@@ -40,24 +57,37 @@ impl StatementExecutor {
                 schema_info: &req.schema_name,
             })?;
 
+        let suffix = Format::try_from(&req.with)
+            .context(error::ParseFileFormatSnafu)?
+            .suffix();
+
         let table_names = schema.table_names().await.context(CatalogSnafu)?;
 
+        let mut exported_rows = 0;
         for table_name in table_names {
-            self.copy_table_to(CopyTableRequest {
-                catalog_name: req.catalog_name.clone(),
-                schema_name: req.schema_name.clone(),
-                table_name,
-                location: "".to_string(),
-                with: Default::default(),
-                connection: Default::default(),
-                pattern: None,
-                direction: CopyDirection::Export,
-                timestamp_range: req.time_range,
-            })
-            .await
-            .unwrap(); // TODO(hl): remove this unwrap
-        }
+            let mut table_file = req.location.clone();
+            table_file.push_str(&table_name);
+            table_file.push_str(suffix);
+            info!(
+                "Copy table: {}.{}.{} to {}",
+                req.catalog_name, req.schema_name, table_name, table_file
+            );
 
-        todo!()
+            let exported = self
+                .copy_table_to(CopyTableRequest {
+                    catalog_name: req.catalog_name.clone(),
+                    schema_name: req.schema_name.clone(),
+                    table_name,
+                    location: table_file,
+                    with: req.with.clone(),
+                    connection: req.connection.clone(),
+                    pattern: None,
+                    direction: CopyDirection::Export,
+                    timestamp_range: req.time_range,
+                })
+                .await?;
+            exported_rows += exported;
+        }
+        Ok(Output::AffectedRows(exported_rows))
     }
 }

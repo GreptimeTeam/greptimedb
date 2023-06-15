@@ -25,6 +25,9 @@ use crate::statements::copy::{CopyDatabaseArgument, CopyTable, CopyTableArgument
 use crate::statements::statement::Statement;
 use crate::util::parse_option_string;
 
+pub type With = HashMap<String, String>;
+pub type Connection = HashMap<String, String>;
+
 // COPY tbl TO 'output.parquet';
 impl<'a> ParserContext<'a> {
     pub(crate) fn parse_copy(&mut self) -> Result<Statement> {
@@ -132,9 +135,7 @@ impl<'a> ParserContext<'a> {
         })
     }
 
-    fn parse_copy_to(
-        &mut self,
-    ) -> Result<(HashMap<String, String>, HashMap<String, String>, String)> {
+    fn parse_copy_to(&mut self) -> Result<(With, Connection, String)> {
         let location =
             self.parser
                 .parse_literal_string()

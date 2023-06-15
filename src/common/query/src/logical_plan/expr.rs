@@ -19,8 +19,6 @@ use datafusion_common::{Column, ScalarValue};
 pub use datafusion_expr::expr::Expr as DfExpr;
 use datafusion_expr::{and, binary_expr, Operator};
 
-use crate::error;
-
 /// Central struct of query API.
 /// Represent logical expressions such as `A + 1`, or `CAST(c1 AS int)`.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -41,16 +39,12 @@ impl From<DfExpr> for Expr {
 }
 
 /// Builds an `Expr` that filters timestamp column from given timestamp range.
+/// Returns [None] is time range is [None] or full time range.
 pub fn build_filter_from_timestamp(
     ts_col_name: &str,
     time_range: Option<&TimestampRange>,
-) -> error::Result<Option<Expr>> {
-    let Some(time_range) = time_range else { return Ok(None); };
-    if time_range.is_empty() {
-        // TODO(hl): don't panic here
-        panic!("Timestamp range cannot be empty");
-    }
-
+) -> Option<Expr> {
+    let Some(time_range) = time_range else { return None; };
     let ts_col_expr = DfExpr::Column(Column {
         relation: None,
         name: ts_col_name.to_string(),
@@ -68,7 +62,6 @@ pub fn build_filter_from_timestamp(
             Operator::Lt,
             timestamp_to_literal(end),
         )),
-
         (Some(start), Some(end)) => Some(and(
             binary_expr(
                 ts_col_expr.clone(),
@@ -79,7 +72,7 @@ pub fn build_filter_from_timestamp(
         )),
     };
 
-    Ok(df_expr.map(Expr::from))
+    df_expr.map(Expr::from)
 }
 
 /// Converts a [Timestamp] to datafusion literal value.

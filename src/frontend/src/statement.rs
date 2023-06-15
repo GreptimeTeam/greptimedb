@@ -19,26 +19,33 @@ mod describe;
 mod show;
 mod tql;
 
+use std::collections::HashMap;
+use std::str::FromStr;
+
 use catalog::CatalogManagerRef;
 use common_error::prelude::BoxedError;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
-use datanode::instance::sql::table_idents_to_full_name;
+use common_time::range::TimestampRange;
+use common_time::Timestamp;
+use datanode::instance::sql::{idents_to_full_database_name, table_idents_to_full_name};
 use query::parser::QueryStatement;
 use query::query_engine::SqlStatementExecutorRef;
 use query::QueryEngineRef;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
-use sql::statements::copy::{CopyTable, CopyTableArgument};
+use sql::statements::copy::{CopyDatabaseArgument, CopyTable, CopyTableArgument};
 use sql::statements::statement::Statement;
 use table::engine::TableReference;
-use table::requests::{CopyDirection, CopyTableRequest};
+use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest};
 use table::TableRef;
 
+use crate::error;
 use crate::error::{
     CatalogSnafu, ExecLogicalPlanSnafu, ExecuteStatementSnafu, ExternalSnafu, PlanStatementSnafu,
     Result, SchemaNotFoundSnafu, TableNotFoundSnafu,
 };
+use crate::statement::backup::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
 
 #[derive(Clone)]
 pub struct StatementExecutor {
@@ -96,13 +103,18 @@ impl StatementExecutor {
             Statement::Copy(sql::statements::copy::Copy::CopyTable(stmt)) => {
                 let req = to_copy_table_request(stmt, query_ctx)?;
                 match req.direction {
-                    CopyDirection::Export => self.copy_table_to(req).await,
-                    CopyDirection::Import => self.copy_table_from(req).await,
+                    CopyDirection::Export => {
+                        self.copy_table_to(req).await.map(Output::AffectedRows)
+                    }
+                    CopyDirection::Import => {
+                        self.copy_table_from(req).await.map(Output::AffectedRows)
+                    }
                 }
             }
 
-            Statement::Copy(sql::statements::copy::Copy::CopyDatabase(_)) => {
-                todo!()
+            Statement::Copy(sql::statements::copy::Copy::CopyDatabase(arg)) => {
+                self.copy_database(to_copy_database_request(arg, &query_ctx)?)
+                    .await
             }
 
             Statement::CreateDatabase(_)
@@ -199,4 +211,45 @@ fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<
         // we copy the whole table by default.
         timestamp_range: None,
     })
+}
+
+/// Converts [CopyDatabaseArgument] to [CopyDatabaseRequest].
+/// This function extracts the necessary info including catalog/database name, time range, etc.  
+fn to_copy_database_request(
+    arg: CopyDatabaseArgument,
+    query_ctx: &QueryContextRef,
+) -> Result<CopyDatabaseRequest> {
+    let (catalog_name, database_name) = idents_to_full_database_name(&arg.database_name, query_ctx)
+        .map_err(BoxedError::new)
+        .context(ExternalSnafu)?;
+
+    let start_timestamp = extract_timestamp(&arg.with, COPY_DATABASE_TIME_START_KEY)?;
+    let end_timestamp = extract_timestamp(&arg.with, COPY_DATABASE_TIME_END_KEY)?;
+
+    let time_range = match (start_timestamp, end_timestamp) {
+        (Some(start), Some(end)) => TimestampRange::new(start, end),
+        (Some(start), None) => Some(TimestampRange::from_start(start)),
+        (None, Some(end)) => Some(TimestampRange::until_end(end, false)), // exclusive end
+        (None, None) => None,
+    };
+
+    Ok(CopyDatabaseRequest {
+        catalog_name,
+        schema_name: database_name,
+        location: arg.location,
+        with: arg.with,
+        connection: arg.connection,
+        time_range,
+    })
+}
+
+/// Extracts timestamp from a [HashMap<String, String>] with given key.
+fn extract_timestamp(map: &HashMap<String, String>, key: &str) -> Result<Option<Timestamp>> {
+    Ok(map
+        .get(key)
+        .map(|v| {
+            i64::from_str(v).map_err(|_| error::InvalidCopyParameterSnafu { key, value: v }.build())
+        })
+        .transpose()?
+        .map(Timestamp::new_second))
 }

@@ -18,7 +18,6 @@ use common_datasource::file_format::json::stream_to_json;
 use common_datasource::file_format::Format;
 use common_datasource::object_store::{build_backend, parse_url};
 use common_query::physical_plan::SessionContext;
-use common_query::Output;
 use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
 use common_recordbatch::SendableRecordBatchStream;
 use object_store::ObjectStore;
@@ -72,7 +71,7 @@ impl StatementExecutor {
         }
     }
 
-    pub(crate) async fn copy_table_to(&self, req: CopyTableRequest) -> Result<Output> {
+    pub(crate) async fn copy_table_to(&self, req: CopyTableRequest) -> Result<usize> {
         let table_ref = TableReference {
             catalog: &req.catalog_name,
             schema: &req.schema_name,
@@ -85,15 +84,12 @@ impl StatementExecutor {
         let filters = table
             .schema()
             .timestamp_column()
-            .map(|c| {
+            .and_then(|c| {
                 common_query::logical_plan::build_filter_from_timestamp(
                     &c.name,
                     req.timestamp_range.as_ref(),
                 )
             })
-            .transpose()
-            .unwrap() // TODO(hl): remove unwrap
-            .flatten()
             .into_iter()
             .collect::<Vec<_>>();
 
@@ -117,6 +113,6 @@ impl StatementExecutor {
             .stream_to_file(stream, &format, object_store, &path)
             .await?;
 
-        Ok(Output::AffectedRows(rows_copied))
+        Ok(rows_copied)
     }
 }
