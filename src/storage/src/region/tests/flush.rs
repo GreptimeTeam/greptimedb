@@ -17,10 +17,17 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use arrow::compute::SortOptions;
+use common_query::prelude::Expr;
+use common_recordbatch::OrderOption;
 use common_test_util::temp_dir::create_temp_dir;
+use datafusion_common::Column;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
-use store_api::storage::{FlushContext, FlushReason, OpenOptions, Region, WriteResponse};
+use store_api::storage::{
+    FlushContext, FlushReason, OpenOptions, Region, ScanRequest, WriteResponse,
+};
 
+use crate::config::EngineConfig;
 use crate::engine::{self, RegionMap};
 use crate::flush::{FlushStrategyRef, FlushType};
 use crate::region::tests::{self, FileTesterBase};
@@ -40,8 +47,15 @@ async fn create_region_for_flush(
 ) {
     let metadata = tests::new_metadata(REGION_NAME);
 
-    let (mut store_config, regions) =
-        config_util::new_store_config_and_region_map(REGION_NAME, store_dir).await;
+    let (mut store_config, regions) = config_util::new_store_config_and_region_map(
+        REGION_NAME,
+        store_dir,
+        EngineConfig {
+            max_files_in_l0: usize::MAX,
+            ..Default::default()
+        },
+    )
+    .await;
     store_config.flush_strategy = flush_strategy;
 
     (
@@ -73,12 +87,19 @@ impl FlushTester {
     async fn reopen(&mut self) {
         self.regions.clear();
         // Close the old region.
-        if let Some(base) = self.base.as_ref() {
+        if let Some(base) = self.base.take() {
             base.close().await;
         }
-        self.base = None;
         // Reopen the region.
-        let mut store_config = config_util::new_store_config(REGION_NAME, &self.store_dir).await;
+        let mut store_config = config_util::new_store_config(
+            REGION_NAME,
+            &self.store_dir,
+            EngineConfig {
+                max_files_in_l0: usize::MAX,
+                ..Default::default()
+            },
+        )
+        .await;
         store_config.flush_strategy = self.flush_strategy.clone();
         let opts = OpenOptions::default();
         let region = RegionImpl::open(REGION_NAME.to_string(), store_config, &opts)
@@ -103,6 +124,10 @@ impl FlushTester {
 
     async fn full_scan(&self) -> Vec<(i64, Option<String>)> {
         self.base().full_scan().await
+    }
+
+    async fn scan(&self, req: ScanRequest) -> Vec<(i64, Option<String>)> {
+        self.base().scan(req).await
     }
 
     async fn flush(&self, wait: Option<bool>) {
@@ -346,4 +371,51 @@ async fn test_schedule_engine_flush() {
     // Check parquet files.
     let sst_dir = format!("{}/{}", store_dir, engine::region_sst_dir("", REGION_NAME));
     assert!(has_parquet_file(&sst_dir));
+}
+
+#[tokio::test]
+async fn test_flush_and_query_empty() {
+    common_telemetry::init_default_ut_logging();
+    let dir = create_temp_dir("flush_and_query_empty_range");
+    let store_dir = dir.path().to_str().unwrap();
+    let flush_switch = Arc::new(FlushSwitch::default());
+    let tester = FlushTester::new(store_dir, flush_switch.clone()).await;
+
+    tester
+        .put(
+            &(20000..30000)
+                .map(|v| (v as i64, Some(v as i64)))
+                .collect::<Vec<_>>(),
+        )
+        .await;
+    tester.flush(Some(true)).await;
+
+    tester
+        .put(
+            &(20100..20200)
+                .map(|v| (v as i64, Some(v as i64)))
+                .collect::<Vec<_>>(),
+        )
+        .await;
+    tester.flush(Some(true)).await;
+
+    use datafusion_expr::Expr as DfExpr;
+    let req = ScanRequest {
+        sequence: None,
+        projection: None,
+        filters: vec![Expr::from(datafusion_expr::binary_expr(
+            DfExpr::Column(Column::from("timestamp")),
+            datafusion_expr::Operator::GtEq,
+            datafusion_expr::lit(20000),
+        ))],
+        output_ordering: Some(vec![OrderOption {
+            name: "timestamp".to_string(),
+            options: SortOptions {
+                descending: true,
+                nulls_first: true,
+            },
+        }]),
+        limit: Some(1),
+    };
+    let _ = tester.scan(req).await;
 }

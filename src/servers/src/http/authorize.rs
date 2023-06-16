@@ -23,16 +23,15 @@ use http_body::Body;
 use metrics::increment_counter;
 use secrecy::SecretString;
 use session::context::UserInfo;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{ensure, IntoError, OptionExt, ResultExt};
 use tower_http::auth::AsyncAuthorizeRequest;
 
 use super::PUBLIC_APIS;
 use crate::auth::Error::IllegalParam;
 use crate::auth::{Identity, IllegalParamSnafu, UserProviderRef};
-use crate::error::Error::Auth;
 use crate::error::{
-    self, InvalidAuthorizationHeaderSnafu, InvisibleASCIISnafu, NotFoundInfluxAuthSnafu, Result,
-    UnsupportedAuthSchemeSnafu,
+    self, AuthSnafu, InvalidAuthorizationHeaderSnafu, InvisibleASCIISnafu, NotFoundInfluxAuthSnafu,
+    Result, UnsupportedAuthSchemeSnafu,
 };
 use crate::http::HTTP_API_PREFIX;
 
@@ -183,12 +182,9 @@ fn get_influxdb_credentials<B: Send + Sync + 'static>(
             (Some(username), Some(password)) => {
                 Ok(Some((username.to_string(), password.to_string().into())))
             }
-            _ => Err(Auth {
-                source: IllegalParam {
-                    msg: "influxdb auth: username and password must be provided together"
-                        .to_string(),
-                },
-            }),
+            _ => Err(AuthSnafu.into_error(IllegalParam {
+                msg: "influxdb auth: username and password must be provided together".to_string(),
+            })),
         }
     }
 }

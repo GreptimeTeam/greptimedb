@@ -71,10 +71,6 @@ fn create_sql_options(table_meta: &TableMeta) -> Vec<SqlOption> {
         ));
     }
 
-    if let Some(w) = table_opts.compaction_time_window {
-        options.push(sql_option("compaction_time_window", number_value(w)));
-    }
-
     for (k, v) in table_opts
         .extra_options
         .iter()

@@ -43,8 +43,9 @@ use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 use parquet::format::FileMetaData;
-use parquet::schema::types::SchemaDescriptor;
+use parquet::schema::types::{ColumnPath, SchemaDescriptor};
 use snafu::{OptionExt, ResultExt};
+use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
 use table::predicate::Predicate;
 use tokio::io::BufReader;
 
@@ -87,7 +88,8 @@ impl<'a> ParquetWriter<'a> {
         opts: &sst::WriteOptions,
     ) -> Result<Option<SstInfo>> {
         let schema = self.source.schema();
-        let writer_props = WriterProperties::builder()
+
+        let mut props_builder = WriterProperties::builder()
             .set_compression(Compression::ZSTD(ZstdLevel::default()))
             .set_encoding(Encoding::PLAIN)
             .set_max_row_group_size(self.max_row_group_size)
@@ -96,7 +98,23 @@ impl<'a> ParquetWriter<'a> {
                     .map(|(k, v)| KeyValue::new(k.clone(), v.clone()))
                     .collect::<Vec<_>>()
             }))
-            .build();
+            .set_column_encoding(
+                ColumnPath::new(vec![SEQUENCE_COLUMN_NAME.to_string()]),
+                Encoding::DELTA_BINARY_PACKED,
+            )
+            .set_column_dictionary_enabled(
+                ColumnPath::new(vec![SEQUENCE_COLUMN_NAME.to_string()]),
+                false,
+            );
+
+        if let Some(ts_col) = schema.timestamp_column() {
+            props_builder = props_builder.set_column_encoding(
+                ColumnPath::new(vec![ts_col.name.clone()]),
+                Encoding::DELTA_BINARY_PACKED,
+            );
+        }
+
+        let writer_props = props_builder.build();
 
         let mut buffered_writer = BufferedWriter::try_new(
             self.file_path.to_string(),
@@ -579,7 +597,7 @@ mod tests {
 
         let object_store = create_object_store(path);
         let sst_file_name = "test-flush.parquet";
-        let iter = memtable.iter(&IterContext::default()).unwrap();
+        let iter = memtable.iter(IterContext::default()).unwrap();
         let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
 
         writer
@@ -663,7 +681,7 @@ mod tests {
         let object_store = create_object_store(path);
         let sst_file_handle = new_file_handle(FileId::random());
         let sst_file_name = sst_file_handle.file_name();
-        let iter = memtable.iter(&IterContext::default()).unwrap();
+        let iter = memtable.iter(IterContext::default()).unwrap();
         let writer = ParquetWriter::new(&sst_file_name, Source::Iter(iter), object_store.clone());
 
         let SstInfo {
@@ -749,7 +767,7 @@ mod tests {
         let object_store = create_object_store(path);
         let file_handle = new_file_handle(FileId::random());
         let sst_file_name = file_handle.file_name();
-        let iter = memtable.iter(&IterContext::default()).unwrap();
+        let iter = memtable.iter(IterContext::default()).unwrap();
         let writer = ParquetWriter::new(&sst_file_name, Source::Iter(iter), object_store.clone());
 
         let SstInfo {
@@ -855,7 +873,7 @@ mod tests {
         let object_store = create_object_store(path);
         let sst_file_handle = new_file_handle(FileId::random());
         let sst_file_name = sst_file_handle.file_name();
-        let iter = memtable.iter(&IterContext::default()).unwrap();
+        let iter = memtable.iter(IterContext::default()).unwrap();
         let writer = ParquetWriter::new(&sst_file_name, Source::Iter(iter), object_store.clone());
 
         let SstInfo {
@@ -950,7 +968,7 @@ mod tests {
         builder.root(path);
         let object_store = ObjectStore::new(builder).unwrap().finish();
         let sst_file_name = "test-read.parquet";
-        let iter = memtable.iter(&IterContext::default()).unwrap();
+        let iter = memtable.iter(IterContext::default()).unwrap();
         let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
 
         let sst_info_opt = writer

@@ -94,6 +94,13 @@ impl<S: LogStore> TesterBase<S> {
     }
 
     pub async fn close(&self) {
+        self.region.inner.flush_scheduler.stop().await.unwrap();
+        self.region
+            .inner
+            .compaction_scheduler
+            .stop(true)
+            .await
+            .unwrap();
         self.region.close(&CloseContext::default()).await.unwrap();
         self.region.inner.wal.close().await.unwrap();
     }
@@ -157,6 +164,24 @@ impl<S: LogStore> TesterBase<S> {
             append_chunk_to(&chunk, &mut dst);
         }
 
+        dst
+    }
+
+    pub async fn scan(&self, req: ScanRequest) -> Vec<(i64, Option<String>)> {
+        logging::info!("Full scan with ctx {:?}", self.read_ctx);
+        let snapshot = self.region.snapshot(&self.read_ctx).unwrap();
+
+        let resp = snapshot.scan(&self.read_ctx, req).await.unwrap();
+        let mut reader = resp.reader;
+
+        let metadata = self.region.in_memory_metadata();
+        assert_eq!(metadata.schema(), reader.user_schema());
+
+        let mut dst = Vec::new();
+        while let Some(chunk) = reader.next_chunk().await.unwrap() {
+            let chunk = reader.project_chunk(chunk);
+            append_chunk_to(&chunk, &mut dst);
+        }
         dst
     }
 
@@ -288,7 +313,8 @@ async fn test_new_region() {
     let dir = create_temp_dir("test_new_region");
     let store_dir = dir.path().to_str().unwrap();
 
-    let store_config = config_util::new_store_config(region_name, store_dir).await;
+    let store_config =
+        config_util::new_store_config(region_name, store_dir, EngineConfig::default()).await;
     let placeholder_memtable = store_config
         .memtable_builder
         .build(metadata.schema().clone());
@@ -537,7 +563,6 @@ async fn create_store_config(region_name: &str, root: &str) -> StoreConfig<NoopL
         engine_config: Default::default(),
         file_purger,
         ttl: None,
-        compaction_time_window: None,
         write_buffer_size: ReadableSize::mb(32).0 as usize,
     }
 }

@@ -93,6 +93,8 @@ struct StartCommand {
     #[clap(long)]
     use_memory_store: bool,
     #[clap(long)]
+    disable_region_failover: bool,
+    #[clap(long)]
     http_addr: Option<String>,
     #[clap(long)]
     http_timeout: Option<u64>,
@@ -134,9 +136,9 @@ impl StartCommand {
                 .context(error::UnsupportedSelectorTypeSnafu { selector_type })?;
         }
 
-        if self.use_memory_store {
-            opts.use_memory_store = true;
-        }
+        opts.use_memory_store = self.use_memory_store;
+
+        opts.disable_region_failover = self.disable_region_failover;
 
         if let Some(http_addr) = &self.http_addr {
             opts.http_opts.addr = http_addr.clone();

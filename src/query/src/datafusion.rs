@@ -17,6 +17,7 @@
 mod error;
 mod planner;
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -43,6 +44,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use table::requests::{DeleteRequest, InsertRequest};
 use table::TableRef;
 
+use crate::dataframe::DataFrame;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::error::{
     CatalogNotFoundSnafu, CatalogSnafu, CreateRecordBatchSnafu, DataFusionSnafu,
@@ -207,6 +209,10 @@ impl DatafusionQueryEngine {
 
 #[async_trait]
 impl QueryEngine for DatafusionQueryEngine {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     fn planner(&self) -> Arc<dyn LogicalPlanner> {
         Arc::new(DfLogicalPlanner::new(self.state.clone()))
     }
@@ -248,6 +254,18 @@ impl QueryEngine for DatafusionQueryEngine {
 
     fn register_function(&self, func: FunctionRef) {
         self.state.register_udf(create_udf(func));
+    }
+
+    fn read_table(&self, table: TableRef) -> Result<DataFrame> {
+        Ok(DataFrame::DataFusion(
+            self.state
+                .read_table(table)
+                .context(error::DatafusionSnafu {
+                    msg: "Fail to create dataframe for table",
+                })
+                .map_err(BoxedError::new)
+                .context(QueryExecutionSnafu)?,
+        ))
     }
 }
 
@@ -374,6 +392,7 @@ impl QueryExecutor for DatafusionQueryEngine {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow::Borrowed;
     use std::sync::Arc;
 
     use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
@@ -381,12 +400,14 @@ mod tests {
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_query::Output;
     use common_recordbatch::util;
+    use datafusion::prelude::{col, lit};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
-    use datatypes::vectors::{UInt64Vector, VectorRef};
+    use datatypes::vectors::{Helper, UInt32Vector, UInt64Vector, VectorRef};
     use session::context::QueryContext;
     use table::table::numbers::NumbersTable;
 
+    use super::*;
     use crate::parser::QueryLanguageParser;
     use crate::query_engine::{QueryEngineFactory, QueryEngineRef};
 
@@ -468,6 +489,42 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    #[tokio::test]
+    async fn test_read_table() {
+        let engine = create_test_engine().await;
+
+        let engine = engine
+            .as_any()
+            .downcast_ref::<DatafusionQueryEngine>()
+            .unwrap();
+        let table = engine
+            .find_table(&ResolvedTableReference {
+                catalog: Borrowed("greptime"),
+                schema: Borrowed("public"),
+                table: Borrowed("numbers"),
+            })
+            .await
+            .unwrap();
+
+        let DataFrame::DataFusion(df) = engine.read_table(table).unwrap();
+        let df = df
+            .select_columns(&["number"])
+            .unwrap()
+            .filter(col("number").lt(lit(10)))
+            .unwrap();
+        let batches = df.collect().await.unwrap();
+        assert_eq!(1, batches.len());
+        let batch = &batches[0];
+
+        assert_eq!(1, batch.num_columns());
+        assert_eq!(batch.column(0).len(), 10);
+
+        assert_eq!(
+            Helper::try_into_vector(batch.column(0)).unwrap(),
+            Arc::new(UInt32Vector::from_slice([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])) as VectorRef
+        );
     }
 
     #[tokio::test]

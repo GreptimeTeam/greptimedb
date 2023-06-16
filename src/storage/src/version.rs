@@ -134,6 +134,7 @@ pub struct VersionEdit {
     pub flushed_sequence: Option<SequenceNumber>,
     pub manifest_version: ManifestVersion,
     pub max_memtable_id: Option<MemtableId>,
+    pub compaction_time_window: Option<i64>,
 }
 
 pub type VersionControlRef = Arc<VersionControl>;
@@ -235,7 +236,7 @@ impl Version {
     ) {
         self.flushed_sequence = flushed_sequence.unwrap_or(self.flushed_sequence);
         self.manifest_version = manifest_version;
-        let ssts = self.ssts.merge(files, std::iter::empty());
+        let ssts = self.ssts.merge(files, std::iter::empty(), None);
         info!(
             "After applying checkpoint, region: {}, id: {}, flushed_sequence: {}, manifest_version: {}",
             self.metadata.name(),
@@ -264,15 +265,17 @@ impl Version {
         }
 
         let handles_to_add = edit.files_to_add.into_iter();
-        let merged_ssts = self
-            .ssts
-            .merge(handles_to_add, edit.files_to_remove.into_iter());
+        let merged_ssts = self.ssts.merge(
+            handles_to_add,
+            edit.files_to_remove.into_iter(),
+            edit.compaction_time_window,
+        );
 
         debug!(
             "After applying edit, region: {}, id: {}, SST files: {:?}",
             self.metadata.name(),
             self.metadata.id(),
-            merged_ssts
+            merged_ssts,
         );
         self.ssts = Arc::new(merged_ssts);
     }

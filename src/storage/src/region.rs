@@ -160,11 +160,10 @@ pub struct StoreConfig<S: LogStore> {
     pub engine_config: Arc<EngineConfig>,
     pub file_purger: FilePurgerRef,
     pub ttl: Option<Duration>,
-    pub compaction_time_window: Option<i64>,
     pub write_buffer_size: usize,
 }
 
-pub type RecoverdMetadata = (SequenceNumber, (ManifestVersion, RawRegionMetadata));
+pub type RecoveredMetadata = (SequenceNumber, (ManifestVersion, RawRegionMetadata));
 pub type RecoveredMetadataMap = BTreeMap<SequenceNumber, (ManifestVersion, RawRegionMetadata)>;
 
 #[derive(Debug)]
@@ -244,7 +243,6 @@ impl<S: LogStore> RegionImpl<S> {
                 store_config.memtable_builder,
                 store_config.engine_config.clone(),
                 store_config.ttl,
-                store_config.compaction_time_window,
                 store_config.write_buffer_size,
             )),
             wal,
@@ -264,7 +262,7 @@ impl<S: LogStore> RegionImpl<S> {
     pub async fn open(
         name: String,
         store_config: StoreConfig<S>,
-        opts: &OpenOptions,
+        _opts: &OpenOptions,
     ) -> Result<Option<RegionImpl<S>>> {
         // Load version meta data from manifest.
         let (version, mut recovered_metadata) = match Self::recover_from_manifest(
@@ -328,14 +326,11 @@ impl<S: LogStore> RegionImpl<S> {
             version_control,
             last_flush_millis: AtomicI64::new(0),
         });
-        let compaction_time_window = store_config
-            .compaction_time_window
-            .or(opts.compaction_time_window);
+
         let writer = Arc::new(RegionWriter::new(
             store_config.memtable_builder,
             store_config.engine_config.clone(),
             store_config.ttl,
-            compaction_time_window,
             store_config.write_buffer_size,
         ));
         let writer_ctx = WriterContext {
@@ -521,6 +516,7 @@ impl<S: LogStore> RegionImpl<S> {
                 flushed_sequence: e.flushed_sequence,
                 manifest_version,
                 max_memtable_id: None,
+                compaction_time_window: e.compaction_time_window,
             };
             version.map(|mut v| {
                 v.apply_edit(edit);
@@ -574,6 +570,10 @@ impl<S: LogStore> RegionImpl<S> {
         };
 
         inner.writer.replay(recovered_metadata, writer_ctx).await
+    }
+
+    pub(crate) async fn write_buffer_size(&self) -> usize {
+        self.inner.writer.write_buffer_size().await
     }
 }
 

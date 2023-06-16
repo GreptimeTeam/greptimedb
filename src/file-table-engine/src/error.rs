@@ -115,13 +115,13 @@ pub enum Error {
         source
     ))]
     ConvertRaw {
-        #[snafu(backtrace)]
+        location: Location,
         source: table::metadata::ConvertError,
     },
 
     #[snafu(display("Invalid schema, source: {}", source))]
     InvalidRawSchema {
-        #[snafu(backtrace)]
+        location: Location,
         source: datatypes::error::Error,
     },
 
@@ -130,7 +130,7 @@ pub enum Error {
 
     #[snafu(display("Failed to build backend, source: {}", source))]
     BuildBackend {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_datasource::error::Error,
     },
 
@@ -154,13 +154,13 @@ pub enum Error {
 
     #[snafu(display("Failed to build stream adapter: {}", source))]
     BuildStreamAdapter {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_recordbatch::error::Error,
     },
 
     #[snafu(display("Failed to parse file format: {}", source))]
     ParseFileFormat {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_datasource::error::Error,
     },
 

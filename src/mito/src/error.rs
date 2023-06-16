@@ -107,7 +107,7 @@ pub enum Error {
         source,
     ))]
     UpdateTableManifest {
-        #[snafu(backtrace)]
+        location: Location,
         source: storage::error::Error,
         table_name: String,
     },
@@ -118,7 +118,7 @@ pub enum Error {
         source,
     ))]
     ScanTableManifest {
-        #[snafu(backtrace)]
+        location: Location,
         source: storage::error::Error,
         table_name: String,
     },
@@ -149,7 +149,7 @@ pub enum Error {
         source
     ))]
     ConvertRaw {
-        #[snafu(backtrace)]
+        location: Location,
         source: table::metadata::ConvertError,
     },
 

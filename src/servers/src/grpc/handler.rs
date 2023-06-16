@@ -29,8 +29,8 @@ use snafu::{OptionExt, ResultExt};
 use tonic::Status;
 
 use crate::auth::{Identity, Password, UserProviderRef};
-use crate::error::Error::{Auth, UnsupportedAuthScheme};
-use crate::error::{InvalidQuerySnafu, JoinTaskSnafu, NotFoundAuthHeaderSnafu};
+use crate::error::Error::UnsupportedAuthScheme;
+use crate::error::{AuthSnafu, InvalidQuerySnafu, JoinTaskSnafu, NotFoundAuthHeaderSnafu};
 use crate::grpc::TonicResult;
 use crate::metrics::{
     METRIC_AUTH_FAILURE, METRIC_CODE_LABEL, METRIC_SERVER_GRPC_DB_REQUEST_TIMER,
@@ -123,7 +123,7 @@ impl GreptimeRequestHandler {
                     &query_ctx.current_schema(),
                 )
                 .await
-                .map_err(|e| Auth { source: e }),
+                .context(AuthSnafu),
             AuthScheme::Token(_) => Err(UnsupportedAuthScheme {
                 name: "Token AuthScheme".to_string(),
             }),

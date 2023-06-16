@@ -145,10 +145,10 @@ impl Memtable for BTreeMemtable {
         Ok(())
     }
 
-    fn iter(&self, ctx: &IterContext) -> Result<BoxedBatchIterator> {
+    fn iter(&self, ctx: IterContext) -> Result<BoxedBatchIterator> {
         assert!(ctx.batch_size > 0);
 
-        let iter = BTreeIterator::new(ctx.clone(), self.schema.clone(), self.map.clone())?;
+        let iter = BTreeIterator::new(ctx, self.schema.clone(), self.map.clone())?;
 
         Ok(Box::new(iter))
     }

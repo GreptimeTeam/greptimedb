@@ -47,19 +47,24 @@ impl Strategy for SimpleTimeWindowStrategy {
         if files.is_empty() {
             return (None, vec![]);
         }
-        let time_bucket = ctx
-            .compaction_time_window()
-            .unwrap_or_else(|| infer_time_bucket(&files));
-        let buckets = calculate_time_buckets(time_bucket, &files);
-        debug!("File bucket:{}, file groups: {:?}", time_bucket, buckets);
+        let time_window = ctx.compaction_time_window().unwrap_or_else(|| {
+            let inferred = infer_time_bucket(&files);
+            debug!(
+                "Compaction window is not present, inferring from files: {:?}",
+                inferred
+            );
+            inferred
+        });
+        let buckets = calculate_time_buckets(time_window, &files);
+        debug!("File bucket:{}, file groups: {:?}", time_window, buckets);
         (
-            Some(time_bucket),
+            Some(time_window),
             buckets
                 .into_iter()
                 .map(|(bound, files)| CompactionOutput {
                     output_level: 1,
                     bucket_bound: bound,
-                    bucket: time_bucket,
+                    bucket: time_window,
                     inputs: files,
                 })
                 .collect(),

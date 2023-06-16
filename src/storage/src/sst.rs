@@ -41,10 +41,10 @@ use crate::error;
 use crate::error::{DeleteSstSnafu, Result};
 use crate::file_purger::{FilePurgeRequest, FilePurgerRef};
 use crate::memtable::BoxedBatchIterator;
-use crate::read::{Batch, BoxedBatchReader};
+use crate::read::{Batch, BatchReader, BoxedBatchReader};
 use crate::scheduler::Scheduler;
 use crate::schema::ProjectedSchemaRef;
-use crate::sst::parquet::{ParquetReader, ParquetWriter};
+use crate::sst::parquet::{ChunkStream, ParquetReader, ParquetWriter};
 
 /// Maximum level of SSTs.
 pub const MAX_LEVEL: u8 = 2;
@@ -65,12 +65,15 @@ pub struct LevelMetas {
     levels: LevelMetaVec,
     sst_layer: AccessLayerRef,
     file_purger: FilePurgerRef,
+    /// Compaction time window in seconds
+    compaction_time_window: Option<i64>,
 }
 
 impl std::fmt::Debug for LevelMetas {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LevelMetas")
             .field("levels", &self.levels)
+            .field("compaction_time_window", &self.compaction_time_window)
             .finish()
     }
 }
@@ -82,6 +85,7 @@ impl LevelMetas {
             levels: new_level_meta_vec(),
             sst_layer,
             file_purger,
+            compaction_time_window: Default::default(),
         }
     }
 
@@ -89,6 +93,10 @@ impl LevelMetas {
     #[inline]
     pub fn level_num(&self) -> usize {
         self.levels.len()
+    }
+
+    pub fn compaction_time_window(&self) -> Option<i64> {
+        self.compaction_time_window
     }
 
     #[inline]
@@ -104,6 +112,7 @@ impl LevelMetas {
         &self,
         files_to_add: impl Iterator<Item = FileMeta>,
         files_to_remove: impl Iterator<Item = FileMeta>,
+        compaction_time_window: Option<i64>,
     ) -> LevelMetas {
         let mut merged = self.clone();
         for file in files_to_add {
@@ -117,6 +126,11 @@ impl LevelMetas {
             if let Some(removed_file) = merged.levels[level as usize].remove_file(file.file_id) {
                 removed_file.mark_deleted();
             }
+        }
+        // we only update region's compaction time window iff region's window is not set and VersionEdit's
+        // compaction time window is present.
+        if let Some(window) = compaction_time_window {
+            merged.compaction_time_window.get_or_insert(window);
         }
         merged
     }
@@ -574,8 +588,7 @@ impl AccessLayer for FsAccessLayer {
             opts.time_range,
         );
 
-        let stream = reader.chunk_stream().await?;
-        Ok(Box::new(stream))
+        Ok(Box::new(LazyParquetBatchReader::new(reader)))
     }
 
     /// Deletes a SST file with given file id.
@@ -585,6 +598,34 @@ impl AccessLayer for FsAccessLayer {
             .delete(&path)
             .await
             .context(DeleteSstSnafu)
+    }
+}
+
+struct LazyParquetBatchReader {
+    inner: ParquetReader,
+    stream: Option<ChunkStream>,
+}
+
+impl LazyParquetBatchReader {
+    fn new(inner: ParquetReader) -> Self {
+        Self {
+            inner,
+            stream: None,
+        }
+    }
+}
+
+#[async_trait]
+impl BatchReader for LazyParquetBatchReader {
+    async fn next_batch(&mut self) -> Result<Option<Batch>> {
+        if let Some(s) = &mut self.stream {
+            s.next_batch().await
+        } else {
+            let mut stream = self.inner.chunk_stream().await?;
+            let res = stream.next_batch().await;
+            self.stream = Some(stream);
+            res
+        }
     }
 }
 
@@ -699,6 +740,7 @@ mod tests {
             ]
             .into_iter(),
             vec![].into_iter(),
+            None,
         );
 
         assert_eq!(
@@ -713,6 +755,7 @@ mod tests {
             ]
             .into_iter(),
             vec![].into_iter(),
+            None,
         );
         assert_eq!(
             HashSet::from([file_ids[0], file_ids[1]]),
@@ -731,6 +774,7 @@ mod tests {
                 create_file_meta(file_ids[2], 0),
             ]
             .into_iter(),
+            None,
         );
         assert_eq!(
             HashSet::from([file_ids[1]]),
@@ -749,6 +793,7 @@ mod tests {
                 create_file_meta(file_ids[3], 1),
             ]
             .into_iter(),
+            None,
         );
         assert_eq!(
             HashSet::from([file_ids[1]]),

@@ -20,7 +20,7 @@ use api::v1::meta::{
     heartbeat_server, AskLeaderRequest, AskLeaderResponse, HeartbeatRequest, HeartbeatResponse,
     Peer, RequestHeader, ResponseHeader, Role,
 };
-use common_telemetry::{error, info, warn};
+use common_telemetry::{debug, error, info, warn};
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use tokio::sync::mpsc;
@@ -59,6 +59,7 @@ impl heartbeat_server::Heartbeat for MetaSrv {
                                 break;
                             }
                         };
+                        debug!("Receiving heartbeat request: {:?}", req);
 
                         if pusher_key.is_none() {
                             let node_id = get_node_id(header);
@@ -76,6 +77,7 @@ impl heartbeat_server::Heartbeat for MetaSrv {
 
                         is_not_leader = res.as_ref().map_or(false, |r| r.is_not_leader());
 
+                        debug!("Sending heartbeat response: {:?}", res);
                         tx.send(res).await.expect("working rx");
                     }
                     Err(err) => {

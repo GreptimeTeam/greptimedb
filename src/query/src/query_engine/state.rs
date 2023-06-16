@@ -24,9 +24,14 @@ use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::physical_plan::SessionContext;
 use common_query::prelude::ScalarUdf;
 use datafusion::catalog::catalog::MemoryCatalogList;
+use datafusion::dataframe::DataFrame;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::{QueryPlanner, SessionConfig, SessionState};
 use datafusion::execution::runtime_env::RuntimeEnv;
+use datafusion::physical_optimizer::dist_enforcement::EnforceDistribution;
+use datafusion::physical_optimizer::repartition::Repartition;
+use datafusion::physical_optimizer::sort_enforcement::EnforceSorting;
+use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::planner::{DefaultPhysicalPlanner, ExtensionPlanner};
 use datafusion::physical_plan::{ExecutionPlan, PhysicalPlanner};
 use datafusion_expr::LogicalPlan as DfLogicalPlan;
@@ -34,6 +39,8 @@ use datafusion_optimizer::analyzer::Analyzer;
 use datafusion_optimizer::optimizer::Optimizer;
 use partition::manager::PartitionRuleManager;
 use promql::extension_plan::PromExtensionPlanner;
+use table::table::adapter::DfTableProviderAdapter;
+use table::TableRef;
 
 use crate::dist_plan::{DistExtensionPlanner, DistPlannerAnalyzer};
 use crate::extension_serializer::ExtensionSerializer;
@@ -55,8 +62,9 @@ pub struct QueryEngineState {
 
 impl fmt::Debug for QueryEngineState {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        // TODO(dennis) better debug info
-        write!(f, "QueryEngineState: <datafusion context>")
+        f.debug_struct("QueryEngineState")
+            .field("state", &self.df_context.state())
+            .finish()
     }
 }
 
@@ -79,6 +87,22 @@ impl QueryEngineState {
         let mut optimizer = Optimizer::new();
         optimizer.rules.push(Arc::new(OrderHintRule));
 
+        let mut physical_optimizers = {
+            let state = SessionState::with_config_rt(session_config.clone(), runtime_env.clone());
+            state.physical_optimizers().to_vec()
+        };
+        // run the repartition and sort enforcement rules first.
+        // And `EnforceSorting` is required to run after `EnforceDistribution`.
+        Self::remove_physical_optimize_rule(&mut physical_optimizers, EnforceSorting {}.name());
+        Self::remove_physical_optimize_rule(
+            &mut physical_optimizers,
+            EnforceDistribution {}.name(),
+        );
+        Self::remove_physical_optimize_rule(&mut physical_optimizers, Repartition {}.name());
+        physical_optimizers.insert(0, Arc::new(EnforceSorting {}));
+        physical_optimizers.insert(0, Arc::new(EnforceDistribution {}));
+        physical_optimizers.insert(0, Arc::new(Repartition {}));
+
         let session_state = SessionState::with_config_rt_and_catalog_list(
             session_config,
             runtime_env,
@@ -90,7 +114,8 @@ impl QueryEngineState {
             partition_manager,
             datanode_clients,
         )))
-        .with_optimizer_rules(optimizer.rules);
+        .with_optimizer_rules(optimizer.rules)
+        .with_physical_optimizer_rules(physical_optimizers);
 
         let df_context = SessionContext::with_state(session_state);
 
@@ -99,6 +124,22 @@ impl QueryEngineState {
             catalog_manager: catalog_list,
             aggregate_functions: Arc::new(RwLock::new(HashMap::new())),
             plugins,
+        }
+    }
+
+    fn remove_physical_optimize_rule(
+        rules: &mut Vec<Arc<dyn PhysicalOptimizerRule + Send + Sync>>,
+        name: &str,
+    ) {
+        let mut index_to_move = None;
+        for (i, rule) in rules.iter().enumerate() {
+            if rule.name() == name {
+                index_to_move = Some(i);
+                break;
+            }
+        }
+        if let Some(index) = index_to_move {
+            rules.remove(index);
         }
     }
 
@@ -150,6 +191,12 @@ impl QueryEngineState {
 
     pub(crate) fn session_state(&self) -> SessionState {
         self.df_context.state()
+    }
+
+    /// Create a DataFrame for a table
+    pub fn read_table(&self, table: TableRef) -> DfResult<DataFrame> {
+        self.df_context
+            .read_table(Arc::new(DfTableProviderAdapter::new(table)))
     }
 }
 

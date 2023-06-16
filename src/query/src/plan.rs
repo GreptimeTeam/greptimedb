@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt::Debug;
+use std::fmt::{Debug, Display};
 
 use datafusion_expr::LogicalPlan as DfLogicalPlan;
 use datatypes::schema::Schema;
@@ -45,5 +45,18 @@ impl LogicalPlan {
                     .context(ConvertDatafusionSchemaSnafu)
             }
         }
+    }
+
+    /// Return a `format`able structure that produces a single line
+    /// per node. For example:
+    ///
+    /// ```text
+    /// Projection: employee.id
+    ///    Filter: employee.state Eq Utf8(\"CO\")\
+    ///       CsvScan: employee projection=Some([0, 3])
+    /// ```
+    pub fn display_indent(&self) -> impl Display + '_ {
+        let LogicalPlan::DfPlan(plan) = self;
+        plan.display_indent()
     }
 }

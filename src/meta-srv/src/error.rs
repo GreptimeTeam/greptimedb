@@ -26,7 +26,7 @@ pub enum Error {
 
     #[snafu(display("Failed to shutdown {} server, source: {}", server, source))]
     ShutdownServer {
-        #[snafu(backtrace)]
+        location: Location,
         source: servers::error::Error,
         server: String,
     },
@@ -60,7 +60,7 @@ pub enum Error {
     },
     #[snafu(display("Failed to start http server, source: {}", source))]
     StartHttp {
-        #[snafu(backtrace)]
+        location: Location,
         source: servers::error::Error,
     },
     #[snafu(display("Failed to parse address {}, source: {}", addr, source))]
@@ -130,7 +130,7 @@ pub enum Error {
 
     #[snafu(display("Cannot parse catalog value, source: {}", source))]
     InvalidCatalogValue {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_catalog::error::Error,
     },
 
@@ -190,7 +190,7 @@ pub enum Error {
 
     #[snafu(display("Failed to create gRPC channel, source: {}", source))]
     CreateChannel {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_grpc::error::Error,
     },
 
@@ -273,7 +273,7 @@ pub enum Error {
 
     #[snafu(display("Failed to recover procedure, source: {source}"))]
     RecoverProcedure {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_procedure::Error,
     },
 
@@ -321,7 +321,7 @@ pub enum Error {
     ))]
     RegisterProcedureLoader {
         type_name: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: common_procedure::error::Error,
     },
 
@@ -350,7 +350,7 @@ pub enum Error {
 
     #[snafu(display("Failed to convert table route, source: {}", source))]
     TableRouteConversion {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_meta::error::Error,
     },
 
@@ -434,15 +434,15 @@ impl ErrorExt for Error {
             | Error::Unexpected { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::InvalidCatalogValue { source, .. } => source.status_code(),
-            Error::RecoverProcedure { source } => source.status_code(),
-            Error::ShutdownServer { source, .. } | Error::StartHttp { source } => {
+            Error::RecoverProcedure { source, .. } => source.status_code(),
+            Error::ShutdownServer { source, .. } | Error::StartHttp { source, .. } => {
                 source.status_code()
             }
 
             Error::RegionFailoverCandidatesNotFound { .. } => StatusCode::RuntimeResourcesExhausted,
 
             Error::RegisterProcedureLoader { source, .. } => source.status_code(),
-            Error::TableRouteConversion { source } => source.status_code(),
+            Error::TableRouteConversion { source, .. } => source.status_code(),
             Error::Other { source, .. } => source.status_code(),
         }
     }

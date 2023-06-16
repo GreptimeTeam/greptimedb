@@ -74,7 +74,7 @@ pub enum Error {
 
     #[snafu(display("Internal error: {}", source))]
     Internal {
-        #[snafu(backtrace)]
+        location: Location,
         source: BoxedError,
     },
 
@@ -96,14 +96,14 @@ pub enum Error {
 
     #[snafu(display("Failed to convert DataFusion schema, source: {}", source))]
     ConvertDfSchema {
-        #[snafu(backtrace)]
+        location: Location,
         source: datatypes::error::Error,
     },
 
     #[snafu(display("Unable to resolve table: {table_name}, error: {source}"))]
     ResolveTable {
         table_name: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: catalog::error::Error,
     },
 
@@ -141,7 +141,7 @@ impl ErrorExt for Error {
             | Error::Internal { .. }
             | Error::EncodeDfPlan { .. }
             | Error::DecodeDfPlan { .. } => StatusCode::Internal,
-            Error::ConvertDfSchema { source } => source.status_code(),
+            Error::ConvertDfSchema { source, .. } => source.status_code(),
             Error::ResolveTable { source, .. } => source.status_code(),
         }
     }

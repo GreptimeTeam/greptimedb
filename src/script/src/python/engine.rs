@@ -40,7 +40,7 @@ use snafu::{ensure, ResultExt};
 use sql::statements::statement::Statement;
 
 use crate::engine::{CompileContext, EvalContext, Script, ScriptEngine};
-use crate::python::error::{self, PyRuntimeSnafu, Result, TokioJoinSnafu};
+use crate::python::error::{self, DatabaseQuerySnafu, PyRuntimeSnafu, Result, TokioJoinSnafu};
 use crate::python::ffi_types::copr::{exec_parsed, parse, AnnotationInfo, CoprocessorRef};
 use crate::python::utils::spawn_blocking_script;
 const PY_ENGINE: &str = "python";
@@ -290,8 +290,13 @@ impl Script for PyScript {
                 .query_engine
                 .planner()
                 .plan(stmt, QueryContext::arc())
-                .await?;
-            let res = self.query_engine.execute(plan, QueryContext::arc()).await?;
+                .await
+                .context(DatabaseQuerySnafu)?;
+            let res = self
+                .query_engine
+                .execute(plan, QueryContext::arc())
+                .await
+                .context(DatabaseQuerySnafu)?;
             let copr = self.copr.clone();
             match res {
                 Output::Stream(stream) => Ok(Output::Stream(Box::pin(CoprStream::try_new(
@@ -346,6 +351,7 @@ impl ScriptEngine for PyEngine {
         })
     }
 }
+
 #[cfg(test)]
 pub(crate) use tests::sample_script_engine;
 

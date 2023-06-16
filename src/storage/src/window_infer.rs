@@ -23,10 +23,11 @@ use crate::memtable::MemtableStats;
 use crate::sst::FileMeta;
 
 /// A set of predefined time windows.
-const TIME_WINDOW_SIZE: [i64; 9] = [
+const TIME_WINDOW_SIZE: [i64; 10] = [
+    1,                // 1 second
     60,               // 1 minute
-    60 * 10,          // 10 minute
-    60 * 30,          // 30 minute
+    60 * 10,          // 10 minutes
+    60 * 30,          // 30 minutes
     60 * 60,          // 1 hour
     2 * 60 * 60,      // 2 hours
     6 * 60 * 60,      // 6 hours
@@ -160,11 +161,12 @@ mod tests {
 
     #[test]
     fn test_get_time_window_size() {
-        assert_eq!(60, min_duration_to_window_size(0));
+        assert_eq!(1, min_duration_to_window_size(0));
         for window in TIME_WINDOW_SIZE {
             assert_eq!(window, min_duration_to_window_size(window));
         }
-        assert_eq!(60, min_duration_to_window_size(1));
+        assert_eq!(1, min_duration_to_window_size(1));
+        assert_eq!(60, min_duration_to_window_size(60));
         assert_eq!(60 * 10, min_duration_to_window_size(100));
         assert_eq!(60 * 30, min_duration_to_window_size(1800));
         assert_eq!(60 * 60, min_duration_to_window_size(3000));
@@ -244,7 +246,7 @@ mod tests {
             true,
         );
         assert_eq!(
-            vec![TimestampRange::with_unit(0, 60, TimeUnit::Second).unwrap()],
+            vec![TimestampRange::with_unit(0, 60, TimeUnit::Second).unwrap(),],
             res
         );
 
@@ -295,14 +297,14 @@ mod tests {
             }],
             true,
         );
-        assert_eq!(
-            vec![
-                TimestampRange::with_unit(0, 60, TimeUnit::Second).unwrap(),
-                TimestampRange::with_unit(60, 120, TimeUnit::Second).unwrap(),
-                TimestampRange::with_unit(60 * 60, 61 * 60, TimeUnit::Second).unwrap(),
-            ],
-            res
-        );
+
+        let mut expect = (0..=61)
+            .map(|s| TimestampRange::with_unit(s, s + 1, TimeUnit::Second).unwrap())
+            .collect::<Vec<_>>();
+        expect.push(TimestampRange::with_unit(60 * 60, 60 * 60 + 1, TimeUnit::Second).unwrap());
+        expect.push(TimestampRange::with_unit(60 * 60 + 1, 60 * 60 + 2, TimeUnit::Second).unwrap());
+
+        assert_eq!(expect, res);
 
         let res = window_inference.infer_window(
             &[
