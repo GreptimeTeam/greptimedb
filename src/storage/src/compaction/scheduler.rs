@@ -81,12 +81,8 @@ impl<S: LogStore> CompactionRequestImpl<S> {
 
 pub struct CompactionHandler<P> {
     pub picker: P,
-}
-
-impl<P> CompactionHandler<P> {
-    pub fn new(picker: P) -> Self {
-        Self { picker }
-    }
+    #[cfg(test)]
+    pub pending_tasks: Arc<tokio::sync::RwLock<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
 #[async_trait::async_trait]
@@ -111,7 +107,7 @@ where
 
         debug!("Compaction task, region: {:?}, task: {:?}", region_id, task);
         // TODO(hl): we need to keep a track of task handle here to allow task cancellation.
-        common_runtime::spawn_bg(async move {
+        let _handle = common_runtime::spawn_bg(async move {
             if let Err(e) = task.run().await {
                 // TODO(hl): maybe resubmit compaction task on failure?
                 error!(e; "Failed to compact region: {:?}", region_id);
@@ -127,6 +123,9 @@ where
             // notify scheduler to schedule next task when current task finishes.
             finish_notifier.notify_one();
         });
+
+        #[cfg(test)]
+        self.pending_tasks.write().await.push(_handle);
 
         Ok(())
     }
