@@ -36,6 +36,7 @@ pub(crate) struct DatanodeHeartbeat {
 
 pub struct RegionFailureHandler {
     failure_detect_runner: FailureDetectRunner,
+    region_failover_manager: Arc<RegionFailoverManager>,
 }
 
 impl RegionFailureHandler {
@@ -45,12 +46,18 @@ impl RegionFailureHandler {
     ) -> Result<Self> {
         region_failover_manager.try_start()?;
 
-        let mut failure_detect_runner = FailureDetectRunner::new(election, region_failover_manager);
+        let mut failure_detect_runner =
+            FailureDetectRunner::new(election, region_failover_manager.clone());
         failure_detect_runner.start().await;
 
         Ok(Self {
             failure_detect_runner,
+            region_failover_manager,
         })
+    }
+
+    pub(crate) fn region_failover_manager(&self) -> &Arc<RegionFailoverManager> {
+        &self.region_failover_manager
     }
 }
 

@@ -4096,7 +4096,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=aee86f4a68c59873961c9b99ee7ed6a4341bf773#aee86f4a68c59873961c9b99ee7ed6a4341bf773"
+source = "git+https://github.com/MichaelScofield/greptime-proto.git?rev=8ed621cbfe0dec2f1901a7e41f3800fda2683249#8ed621cbfe0dec2f1901a7e41f3800fda2683249"
 dependencies = [
  "prost",
  "serde",
@@ -5185,6 +5185,7 @@ dependencies = [
  "serde_json",
  "servers",
  "snafu",
+ "store-api",
  "table",
  "tokio",
  "tokio-stream",

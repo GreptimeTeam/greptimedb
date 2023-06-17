@@ -141,6 +141,10 @@ impl TableGlobalValue {
     pub fn table_id(&self) -> TableId {
         self.table_info.ident.table_id
     }
+
+    pub fn engine(&self) -> &str {
+        &self.table_info.meta.engine
+    }
 }
 
 /// Table regional info that varies between datanode, so it contains a `node_id` field.

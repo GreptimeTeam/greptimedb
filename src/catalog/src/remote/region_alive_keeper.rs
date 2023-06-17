@@ -16,10 +16,14 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 
+use common_meta::error::InvalidProtoMsgSnafu;
+use common_meta::heartbeat::handler::{
+    HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
+};
 use common_meta::ident::TableIdent;
 use common_meta::RegionIdent;
 use common_telemetry::{debug, error, info, warn};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionNumber;
 use table::engine::manager::TableEngineManagerRef;
 use table::engine::{CloseTableResult, EngineContext, TableEngineRef};
@@ -35,6 +39,12 @@ use crate::error::{Result, TableEngineNotFoundSnafu};
 pub struct RegionAliveKeepers {
     table_engine_manager: TableEngineManagerRef,
     keepers: Arc<Mutex<HashMap<TableIdent, Arc<RegionAliveKeeper>>>>,
+
+    /// The epoch when [RegionAliveKeepers] is created. It's used to get a monotonically non-decreasing
+    /// elapsed time when submitting heartbeats to Metasrv (because [Instant] is monotonically
+    /// non-decreasing). The heartbeat request will carry the duration since this epoch, and the
+    /// duration acts like an "invariant point" for region's keep alive lease.
+    epoch: Instant,
 }
 
 impl RegionAliveKeepers {
@@ -42,6 +52,7 @@ impl RegionAliveKeepers {
         Self {
             table_engine_manager,
             keepers: Arc::new(Mutex::new(HashMap::new())),
+            epoch: Instant::now(),
         }
     }
 
@@ -106,6 +117,53 @@ impl RegionAliveKeepers {
         for keeper in self.keepers.lock().await.values() {
             keeper.start(heartbeat_interval_millis).await;
         }
+    }
+
+    pub fn epoch(&self) -> Instant {
+        self.epoch
+    }
+}
+
+impl HeartbeatResponseHandler for RegionAliveKeepers {
+    fn is_acceptable(&self, ctx: &HeartbeatResponseHandlerContext) -> bool {
+        !ctx.response.region_leases.is_empty()
+    }
+
+    fn handle(
+        &self,
+        ctx: &mut HeartbeatResponseHandlerContext,
+    ) -> common_meta::error::Result<HandleControl> {
+        let leases = ctx.response.region_leases.drain(..).collect::<Vec<_>>();
+        let keepers = self.keepers.clone();
+        let epoch = self.epoch;
+        common_runtime::spawn_bg(async move {
+            for lease in leases {
+                let table_ident: TableIdent = match lease
+                    .table_ident
+                    .context(InvalidProtoMsgSnafu {
+                        err_msg: "'table_ident' is missing in RegionLease",
+                    })
+                    .and_then(|x| x.try_into())
+                {
+                    Ok(x) => x,
+                    Err(e) => {
+                        error!(e; "");
+                        continue;
+                    }
+                };
+
+                let Some(keeper) = keepers.lock().await.get(&table_ident).cloned() else {
+                    // Alive keeper could be affected by lagging msg, just warn and ignore.
+                    warn!("Alive keeper for table {table_ident} is not found!");
+                    continue;
+                };
+
+                let start_instant = epoch + Duration::from_millis(lease.duration_since_epoch);
+                let deadline = start_instant + Duration::from_secs(lease.lease_seconds);
+                keeper.keep_lived(lease.regions, deadline).await;
+            }
+        });
+        Ok(HandleControl::Continue)
     }
 }
 
@@ -309,8 +367,11 @@ impl CountdownTask {
                                 debug!("Reset deadline to region {region} of table {table_ident} to {deadline:?}");
                                 countdown.set(tokio::time::sleep_until(deadline));
                             }
-                            // Else the countdown could be not started yet, or during startup protection.
-                            // Can be safely ignored.
+                            // Else the countdown could be either:
+                            // - not started yet;
+                            // - during startup protection;
+                            // - received a lagging heartbeat message.
+                            // All can be safely ignored.
                         },
                         None => {
                             info!(
@@ -367,6 +428,8 @@ mod test {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
+    use api::v1::meta::{HeartbeatResponse, RegionLease};
+    use common_meta::heartbeat::mailbox::HeartbeatMailbox;
     use datatypes::schema::RawSchema;
     use table::engine::manager::MemoryTableEngineManager;
     use table::engine::{TableEngine, TableReference};
@@ -377,8 +440,7 @@ mod test {
     use super::*;
     use crate::remote::mock::MockTableEngine;
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_region_alive_keepers() {
+    async fn prepare_keepers() -> (TableIdent, RegionAliveKeepers) {
         let table_engine = Arc::new(MockTableEngine::default());
         let table_engine_manager = Arc::new(MemoryTableEngineManager::new(table_engine));
         let keepers = RegionAliveKeepers::new(table_engine_manager);
@@ -410,12 +472,81 @@ mod test {
             table_options: TableOptions::default(),
             engine: "MockTableEngine".to_string(),
         }));
-
         keepers
             .register_table(table_ident.clone(), table)
             .await
             .unwrap();
         assert!(keepers.keepers.lock().await.contains_key(&table_ident));
+
+        (table_ident, keepers)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_handle_heartbeat_response() {
+        let (table_ident, keepers) = prepare_keepers().await;
+
+        keepers.start(5000).await;
+        let startup_protection_until = Instant::now() + Duration::from_secs(21);
+
+        let duration_since_epoch = (Instant::now() - keepers.epoch).as_millis() as _;
+        let lease_seconds = 100;
+        let response = HeartbeatResponse {
+            region_leases: vec![RegionLease {
+                table_ident: Some(table_ident.clone().into()),
+                regions: vec![1, 3], // Not extending region 2's lease time.
+                duration_since_epoch,
+                lease_seconds,
+            }],
+            ..Default::default()
+        };
+        let keep_alive_until = keepers.epoch
+            + Duration::from_millis(duration_since_epoch)
+            + Duration::from_secs(lease_seconds);
+
+        let (tx, _) = mpsc::channel(8);
+        let mailbox = Arc::new(HeartbeatMailbox::new(tx));
+        let mut ctx = HeartbeatResponseHandlerContext::new(mailbox, response);
+
+        assert!(keepers.handle(&mut ctx).unwrap() == HandleControl::Continue);
+
+        // sleep to wait for background task spawned in `handle`
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        async fn test(
+            keeper: &Arc<RegionAliveKeeper>,
+            region_number: RegionNumber,
+            startup_protection_until: Instant,
+            keep_alive_until: Instant,
+            is_kept_live: bool,
+        ) {
+            let handles = keeper.countdown_task_handles.lock().await;
+            let deadline = deadline(&handles.get(&region_number).unwrap().tx).await;
+            if is_kept_live {
+                assert!(deadline > startup_protection_until && deadline == keep_alive_until);
+            } else {
+                assert!(deadline <= startup_protection_until);
+            }
+        }
+
+        let keeper = &keepers
+            .keepers
+            .lock()
+            .await
+            .get(&table_ident)
+            .cloned()
+            .unwrap();
+
+        // Test region 1 and 3 is kept lived. Their deadlines are updated to desired instant.
+        test(keeper, 1, startup_protection_until, keep_alive_until, true).await;
+        test(keeper, 3, startup_protection_until, keep_alive_until, true).await;
+
+        // Test region 2 is not kept lived. It's deadline is not updated: still during startup protection period.
+        test(keeper, 2, startup_protection_until, keep_alive_until, false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_region_alive_keepers() {
+        let (table_ident, keepers) = prepare_keepers().await;
 
         keepers
             .register_region(&RegionIdent {

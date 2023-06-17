@@ -19,8 +19,8 @@ use std::time::Duration;
 
 use api::v1::meta::mailbox_message::Payload;
 use api::v1::meta::{
-    HeartbeatRequest, HeartbeatResponse, MailboxMessage, RequestHeader, ResponseHeader, Role,
-    PROTOCOL_VERSION,
+    HeartbeatRequest, HeartbeatResponse, MailboxMessage, RegionLease, RequestHeader,
+    ResponseHeader, Role, PROTOCOL_VERSION,
 };
 pub use check_leader_handler::CheckLeaderHandler;
 pub use collect_stats_handler::CollectStatsHandler;
@@ -54,6 +54,7 @@ pub mod mailbox_handler;
 pub mod node_stat;
 mod on_leader_start;
 mod persist_stats_handler;
+pub(crate) mod region_lease_handler;
 mod response_header_handler;
 
 #[async_trait::async_trait]
@@ -73,6 +74,7 @@ pub struct HeartbeatAccumulator {
     pub header: Option<ResponseHeader>,
     pub instructions: Vec<Instruction>,
     pub stat: Option<Stat>,
+    pub region_leases: Vec<RegionLease>,
 }
 
 impl HeartbeatAccumulator {
@@ -233,7 +235,7 @@ impl HeartbeatHandlerGroup {
         let header = std::mem::take(&mut acc.header);
         let res = HeartbeatResponse {
             header,
-            mailbox_message: acc.into_mailbox_message(),
+            region_leases: acc.region_leases,
             ..Default::default()
         };
         Ok(res)

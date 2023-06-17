@@ -14,7 +14,7 @@
 
 use std::fmt::{Display, Formatter};
 
-use api::v1::meta::TableIdent as RawTableIdent;
+use api::v1::meta::{TableIdent as RawTableIdent, TableName};
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
@@ -53,5 +53,19 @@ impl TryFrom<RawTableIdent> for TableIdent {
             table_id: value.table_id,
             engine: value.engine,
         })
+    }
+}
+
+impl From<TableIdent> for RawTableIdent {
+    fn from(table_ident: TableIdent) -> Self {
+        Self {
+            table_id: table_ident.table_id,
+            engine: table_ident.engine,
+            table_name: Some(TableName {
+                catalog_name: table_ident.catalog,
+                schema_name: table_ident.schema,
+                table_name: table_ident.table,
+            }),
+        }
     }
 }
