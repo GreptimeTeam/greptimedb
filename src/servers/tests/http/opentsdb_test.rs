@@ -21,6 +21,7 @@ use axum_test_helper::TestClient;
 use common_query::Output;
 use common_test_util::ports;
 use query::parser::PromQuery;
+use query::plan::LogicalPlan;
 use query::query_engine::DescribeResult;
 use servers::error::{self, Result};
 use servers::http::{HttpOptions, HttpServerBuilder};
@@ -67,6 +68,15 @@ impl SqlQueryHandler for DummyInstance {
     type Error = error::Error;
 
     async fn do_query(&self, _: &str, _: QueryContextRef) -> Vec<Result<Output>> {
+        unimplemented!()
+    }
+
+    async fn execute_plan(
+        &self,
+        _query: &str,
+        _plan: LogicalPlan,
+        _query_ctx: QueryContextRef,
+    ) -> Vec<std::result::Result<Output, Self::Error>> {
         unimplemented!()
     }
 

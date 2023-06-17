@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -19,21 +18,26 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use chrono::{NaiveDate, NaiveDateTime};
+use chrono::{Datelike, NaiveDate, NaiveDateTime};
 use common_error::prelude::ErrorExt;
+use common_query::prelude::ScalarValue;
 use common_query::Output;
-use common_telemetry::tracing::log;
-use common_telemetry::{error, timer, trace, warn};
+use common_telemetry::{error, logging, timer, trace, warn};
+use datatypes::prelude::ConcreteDataType;
+use datatypes::value;
+use datatypes::value::Value;
 use metrics::increment_counter;
 use opensrv_mysql::{
-    AsyncMysqlShim, Column, ColumnFlags, ColumnType, ErrorKind, InitWriter, ParamParser,
-    ParamValue, QueryResultWriter, StatementMetaWriter, ValueInner,
+    AsyncMysqlShim, Column, ErrorKind, InitWriter, ParamParser, ParamValue, QueryResultWriter,
+    StatementMetaWriter, ValueInner,
 };
 use parking_lot::RwLock;
+use query::plan::LogicalPlan;
+use query::query_engine::DescribeResult;
 use rand::RngCore;
 use session::context::Channel;
 use session::{Session, SessionRef};
-use snafu::ensure;
+use snafu::{ensure, ResultExt};
 use sql::dialect::MySqlDialect;
 use sql::parser::ParserContext;
 use sql::statements::statement::Statement;
@@ -41,8 +45,17 @@ use tokio::io::AsyncWrite;
 
 use crate::auth::{Identity, Password, UserProviderRef};
 use crate::error::{self, InvalidPrepareStatementSnafu, Result};
+use crate::mysql::helper::{format_placeholder, replace_placeholder, transform_placeholders};
 use crate::mysql::writer;
+use crate::mysql::writer::create_mysql_column;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
+
+/// Cached SQL and logical plan
+#[derive(Clone)]
+struct SqlPlan {
+    query: String,
+    plan: Option<LogicalPlan>,
+}
 
 // An intermediate shim for executing MySQL queries.
 pub struct MysqlInstanceShim {
@@ -51,7 +64,8 @@ pub struct MysqlInstanceShim {
     session: SessionRef,
     user_provider: Option<UserProviderRef>,
     // TODO(SSebo): use something like moka to achieve TTL or LRU
-    prepared_stmts: Arc<RwLock<HashMap<u32, String>>>,
+    // Prepare statements logical plan cache
+    prepared_stmts: Arc<RwLock<HashMap<u32, SqlPlan>>>,
     prepared_stmts_counter: AtomicU32,
 }
 
@@ -105,14 +119,45 @@ impl MysqlInstanceShim {
         output
     }
 
-    fn set_query(&self, query: String) -> u32 {
-        let stmt_id = self.prepared_stmts_counter.fetch_add(1, Ordering::SeqCst);
-        let mut guard = self.prepared_stmts.write();
-        guard.insert(stmt_id, query);
+    /// Execute the logical plan and return the output
+    async fn execute_plan(&self, query: &str, plan: LogicalPlan) -> Vec<Result<Output>> {
+        trace!("Start executing query: '{}'", query);
+        let start = Instant::now();
+
+        let output =
+            if let Some(output) = crate::mysql::federated::check(query, self.session.context()) {
+                vec![Ok(output)]
+            } else {
+                self.query_handler
+                    .execute_plan(query, plan, self.session.context())
+                    .await
+            };
+
+        trace!(
+            "Finished executing query: '{}', total time costs in microseconds: {}",
+            query,
+            start.elapsed().as_micros()
+        );
+        output
+    }
+
+    /// Describe the statement
+    async fn do_describe(&self, statement: Statement) -> Result<Option<DescribeResult>> {
+        self.query_handler
+            .do_describe(statement, self.session.context())
+            .await
+    }
+
+    /// Save logical plan and return the id
+    fn save_plan(&self, plan: SqlPlan) -> u32 {
+        let stmt_id = self.prepared_stmts_counter.fetch_add(1, Ordering::Relaxed);
+        let mut prepared_stmts = self.prepared_stmts.write();
+        prepared_stmts.insert(stmt_id, plan);
         stmt_id
     }
 
-    fn query(&self, stmt_id: u32) -> Option<String> {
+    /// Retrieve the logical plan by id
+    fn plan(&self, stmt_id: u32) -> Option<SqlPlan> {
         let guard = self.prepared_stmts.read();
         guard.get(&stmt_id).cloned()
     }
@@ -175,15 +220,32 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         query: &'a str,
         w: StatementMetaWriter<'a, W>,
     ) -> Result<()> {
+        let raw_query = query.clone();
         let (query, param_num) = replace_placeholder(query);
-        if let Err(e) = validate_query(&query).await {
-            w.error(ErrorKind::ER_UNKNOWN_ERROR, e.to_string().as_bytes())
-                .await?;
-            return Ok(());
+
+        let statement = validate_query(raw_query).await?;
+
+        // We have to transform the placeholder, because DataFusion only parses placeholders
+        // in the form of "$1", "$2" etc., it can't "?" right now.
+        let statement = transform_placeholders(statement);
+
+        let plan = self
+            .do_describe(statement.clone())
+            .await?
+            .map(|DescribeResult { logical_plan, .. }| logical_plan);
+
+        let params = if let Some(plan) = &plan {
+            prepared_params(&plan.get_param_types().context(error::GetParamTypesSnafu)?)?
+        } else {
+            dummy_params(param_num)?
         };
 
-        let stmt_id = self.set_query(query);
-        let params = dummy_params(param_num);
+        debug_assert_eq!(params.len(), param_num - 1);
+
+        let stmt_id = self.save_plan(SqlPlan {
+            query: query.to_string(),
+            plan,
+        });
 
         w.reply(stmt_id, &params, &[]).await?;
         increment_counter!(
@@ -216,7 +278,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             ]
         );
         let params: Vec<ParamValue> = p.into_iter().collect();
-        let query = match self.query(stmt_id) {
+        let sql_plan = match self.plan(stmt_id) {
             None => {
                 w.error(
                     ErrorKind::ER_UNKNOWN_STMT_HANDLER,
@@ -225,13 +287,34 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                 .await?;
                 return Ok(());
             }
-            Some(query) => query,
+            Some(sql_plan) => sql_plan,
         };
 
-        let query = replace_params(params, query);
-        log::debug!("execute replaced query: {}", query);
+        let (query, outputs) = match sql_plan.plan {
+            Some(plan) => {
+                let param_types = plan.get_param_types().context(error::GetParamTypesSnafu)?;
 
-        let outputs = self.do_query(&query).await;
+                if params.len() != param_types.len() {
+                    return error::InternalSnafu {
+                        err_msg: "prepare statement params number mismatch".to_string(),
+                    }
+                    .fail();
+                }
+                let plan = prepare_params(&plan, param_types, params)?;
+                logging::debug!("execute prepared plan: {}", plan.display_indent());
+                let outputs = self.execute_plan(&sql_plan.query, plan).await;
+
+                (sql_plan.query, outputs)
+            }
+            None => {
+                let query = replace_params(params, sql_plan.query);
+                logging::debug!("execute replaced query: {}", query);
+                let outputs = self.do_query(&query).await;
+
+                (query, outputs)
+            }
+        };
+
         writer::write_output(w, &query, self.session.context(), outputs).await?;
 
         Ok(())
@@ -318,7 +401,7 @@ fn replace_params(params: Vec<ParamValue>, query: String) -> String {
             ValueInner::Datetime(_) => NaiveDateTime::from(param.value).to_string(),
             ValueInner::Time(_) => format_duration(Duration::from(param.value)),
         };
-        query = query.replace(&format!("${}", index), &s);
+        query = query.replace(&format_placeholder(index), &s);
         index += 1;
     }
     query
@@ -329,6 +412,70 @@ fn format_duration(duration: Duration) -> String {
     let minutes = (duration.as_secs() / 60) % 60;
     let hours = (duration.as_secs() / 60) / 60;
     format!("{}:{}:{}", hours, minutes, seconds)
+}
+
+fn prepare_params(
+    plan: &LogicalPlan,
+    param_types: HashMap<String, Option<ConcreteDataType>>,
+    params: Vec<ParamValue>,
+) -> Result<LogicalPlan> {
+    debug_assert_eq!(param_types.len(), params.len());
+
+    let mut values = Vec::with_capacity(params.len());
+
+    for i in 0..param_types.len() {
+        if let Some(Some(t)) = param_types.get(&format_placeholder(i + 1)) {
+            // SAFETY: length checked before
+            let param = params.get(i).unwrap();
+            let value = convert_value(param, t);
+
+            values.push(value);
+        }
+    }
+
+    Ok(plan.replace_params_with_values(&values).unwrap())
+}
+
+/// Convert [`ParamValue`] into [`Value`] according to param type.
+fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> ScalarValue {
+    match param.value.into_inner() {
+        ValueInner::Int(i) => match t {
+            ConcreteDataType::Int8(_) => ScalarValue::Int8(Some(i as i8)),
+            ConcreteDataType::Int16(_) => ScalarValue::Int16(Some(i as i16)),
+            ConcreteDataType::Int32(_) => ScalarValue::Int32(Some(i as i32)),
+            ConcreteDataType::Timestamp(ts_type) => Value::Timestamp(ts_type.create_timestamp(i))
+                .try_to_scalar_value(t)
+                .unwrap(),
+            _ => ScalarValue::Int64(Some(i)),
+        },
+        ValueInner::UInt(u) => match t {
+            ConcreteDataType::UInt8(_) => ScalarValue::UInt8(Some(u as u8)),
+            ConcreteDataType::UInt16(_) => ScalarValue::UInt16(Some(u as u16)),
+            ConcreteDataType::UInt32(_) => ScalarValue::UInt32(Some(u as u32)),
+            _ => ScalarValue::UInt64(Some(u)),
+        },
+        ValueInner::Double(f) => match t {
+            ConcreteDataType::Float32(_) => ScalarValue::Float32(Some(f as f32)),
+            _ => ScalarValue::Float64(Some(f)),
+        },
+        ValueInner::NULL => value::to_null_value(t),
+        ValueInner::Bytes(b) => match t {
+            ConcreteDataType::String(_) => {
+                ScalarValue::Utf8(Some(String::from_utf8_lossy(b).to_string()))
+            }
+            _ => ScalarValue::LargeBinary(Some(b.to_vec())),
+        },
+        ValueInner::Date(_) => {
+            ScalarValue::Date32(Some(NaiveDate::from(param.value).num_days_from_ce()))
+        }
+        ValueInner::Datetime(_) => {
+            ScalarValue::Date64(Some(NaiveDateTime::from(param.value).timestamp_millis()))
+        }
+        ValueInner::Time(_) => ScalarValue::TimestampMillisecond(
+            Some(Duration::from(param.value).as_millis() as i64),
+            None,
+        ),
+    }
 }
 
 async fn validate_query(query: &str) -> Result<Statement> {
@@ -352,29 +499,26 @@ async fn validate_query(query: &str) -> Result<Statement> {
     Ok(statement)
 }
 
-// dummy columns to satisfy opensrv_mysql, just the number of params is useful
-// TODO(SSebo): use parameter type inference to return actual types
-fn dummy_params(index: u32) -> Vec<Column> {
-    let mut params = vec![];
+fn dummy_params(index: usize) -> Result<Vec<Column>> {
+    let mut params = Vec::with_capacity(index - 1);
 
     for _ in 1..index {
-        params.push(opensrv_mysql::Column {
-            table: "".to_string(),
-            column: "".to_string(),
-            coltype: ColumnType::MYSQL_TYPE_LONG,
-            colflags: ColumnFlags::NOT_NULL_FLAG,
-        });
+        params.push(create_mysql_column(&ConcreteDataType::null_datatype(), "")?);
     }
-    params
+
+    Ok(params)
 }
 
-fn replace_placeholder(query: &str) -> (String, u32) {
-    let mut query = query.to_string();
-    let mut index = 1;
-    while let Some(position) = query.find('?') {
-        let place_holder = format!("${}", index);
-        query.replace_range(position..position + 1, &place_holder);
-        index += 1;
+/// Parameters that the client must provide when executing the prepared statement.
+fn prepared_params(param_types: &HashMap<String, Option<ConcreteDataType>>) -> Result<Vec<Column>> {
+    let mut params = vec![];
+
+    for index in 1..(param_types.len() + 1) {
+        if let Some(Some(t)) = param_types.get(&format_placeholder(index)) {
+            let column = create_mysql_column(t, "")?;
+            params.push(column);
+        }
     }
-    (query, index)
+
+    Ok(params)
 }

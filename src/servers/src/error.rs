@@ -250,6 +250,12 @@ pub enum Error {
         source: query::error::Error,
     },
 
+    #[snafu(display("Failed to get param types, source: {source}"))]
+    GetParamTypes {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
+
     #[snafu(display("{}", reason))]
     UnexpectedResult { reason: String, location: Location },
 
@@ -347,7 +353,7 @@ impl ErrorExt for Error {
             DumpProfileData { source, .. } => source.status_code(),
             InvalidFlushArgument { .. } => StatusCode::InvalidArguments,
 
-            ParsePromQL { source, .. } => source.status_code(),
+            GetParamTypes { source, .. } | ParsePromQL { source, .. } => source.status_code(),
             Other { source, .. } => source.status_code(),
 
             UnexpectedResult { .. } => StatusCode::Unexpected,

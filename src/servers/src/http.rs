@@ -719,6 +719,7 @@ mod test {
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{StringVector, UInt32Vector};
     use query::parser::PromQuery;
+    use query::plan::LogicalPlan;
     use query::query_engine::DescribeResult;
     use session::context::QueryContextRef;
     use tokio::sync::mpsc;
@@ -757,6 +758,15 @@ mod test {
             &self,
             _: &PromQuery,
             _: QueryContextRef,
+        ) -> Vec<std::result::Result<Output, Self::Error>> {
+            unimplemented!()
+        }
+
+        async fn execute_plan(
+            &self,
+            _query: &str,
+            _plan: LogicalPlan,
+            _query_ctx: QueryContextRef,
         ) -> Vec<std::result::Result<Output, Self::Error>> {
             unimplemented!()
         }

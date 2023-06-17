@@ -86,6 +86,18 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         assert_eq!(ret, i as i64);
     }
 
+    let rows = sqlx::query("select i from demo where i=?")
+        .bind(6)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+
+    for row in rows {
+        let ret: i64 = row.get(0);
+        assert_eq!(ret, 6);
+    }
+
     sqlx::query("delete from demo")
         .execute(&pool)
         .await
@@ -131,6 +143,18 @@ pub async fn test_postgres_crud(store_type: StorageType) {
     for (i, row) in rows.iter().enumerate() {
         let ret: i64 = row.get(0);
         assert_eq!(ret, i as i64);
+    }
+
+    let rows = sqlx::query("select i from demo where i=$1")
+        .bind(6)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+
+    for row in rows {
+        let ret: i64 = row.get(0);
+        assert_eq!(ret, 6);
     }
 
     sqlx::query("delete from demo")

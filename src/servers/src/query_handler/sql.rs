@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use common_error::prelude::*;
 use common_query::Output;
 use query::parser::PromQuery;
+use query::plan::LogicalPlan;
 use session::context::QueryContextRef;
 use sql::statements::statement::Statement;
 
@@ -34,6 +35,13 @@ pub trait SqlQueryHandler {
     async fn do_query(
         &self,
         query: &str,
+        query_ctx: QueryContextRef,
+    ) -> Vec<std::result::Result<Output, Self::Error>>;
+
+    async fn execute_plan(
+        &self,
+        query: &str,
+        plan: LogicalPlan,
         query_ctx: QueryContextRef,
     ) -> Vec<std::result::Result<Output, Self::Error>>;
 
@@ -74,6 +82,23 @@ where
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
         self.0
             .do_query(query, query_ctx)
+            .await
+            .into_iter()
+            .map(|x| {
+                x.map_err(BoxedError::new)
+                    .context(error::ExecuteQuerySnafu { query })
+            })
+            .collect()
+    }
+
+    async fn execute_plan(
+        &self,
+        query: &str,
+        plan: LogicalPlan,
+        query_ctx: QueryContextRef,
+    ) -> Vec<Result<Output>> {
+        self.0
+            .execute_plan(query, plan, query_ctx)
             .await
             .into_iter()
             .map(|x| {

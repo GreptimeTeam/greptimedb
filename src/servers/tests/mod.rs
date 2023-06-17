@@ -22,6 +22,7 @@ use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaPr
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
+use query::plan::LogicalPlan;
 use query::query_engine::DescribeResult;
 use query::{QueryEngineFactory, QueryEngineRef};
 use script::engine::{CompileContext, EvalContext, Script, ScriptEngine};
@@ -74,6 +75,16 @@ impl SqlQueryHandler for DummyInstance {
             .plan(stmt, query_ctx.clone())
             .await
             .unwrap();
+        let output = self.query_engine.execute(plan, query_ctx).await.unwrap();
+        vec![Ok(output)]
+    }
+
+    async fn execute_plan(
+        &self,
+        _query: &str,
+        plan: LogicalPlan,
+        query_ctx: QueryContextRef,
+    ) -> Vec<Result<Output>> {
         let output = self.query_engine.execute(plan, query_ctx).await.unwrap();
         vec![Ok(output)]
     }

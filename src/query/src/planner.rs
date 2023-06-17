@@ -77,6 +77,7 @@ impl DfLogicalPlanner {
             };
             PlanSqlSnafu { sql }
         })?;
+
         Ok(LogicalPlan::DfPlan(result))
     }
 

@@ -15,15 +15,13 @@
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 
+use common_query::prelude::ScalarValue;
 use datafusion_expr::LogicalPlan as DfLogicalPlan;
 use datatypes::data_type::ConcreteDataType;
-use datatypes::prelude::Value;
 use datatypes::schema::Schema;
 use snafu::ResultExt;
 
-use crate::error::{
-    ConvertDatafusionSchemaSnafu, ConvertScalarValueSnafu, DataFusionSnafu, Result,
-};
+use crate::error::{ConvertDatafusionSchemaSnafu, DataFusionSnafu, Result};
 
 /// A LogicalPlan represents the different types of relational
 /// operators (such as Projection, Filter, etc) and can be created by
@@ -80,20 +78,11 @@ impl LogicalPlan {
     /// Return a logical plan with all placeholders/params (e.g $1 $2,
     /// ...) replaced with corresponding values provided in the
     /// params_values
-    pub fn replace_params_with_values(
-        &self,
-        types: &[ConcreteDataType],
-        values: &[Value],
-    ) -> Result<LogicalPlan> {
+    pub fn replace_params_with_values(&self, values: &[ScalarValue]) -> Result<LogicalPlan> {
         let LogicalPlan::DfPlan(plan) = self;
-        let values: Result<Vec<_>> = types
-            .iter()
-            .zip(values.iter())
-            .map(|(ty, v)| v.try_to_scalar_value(ty).context(ConvertScalarValueSnafu))
-            .collect();
 
         plan.clone()
-            .replace_params_with_values(&values?)
+            .replace_params_with_values(values)
             .context(DataFusionSnafu)
             .map(LogicalPlan::DfPlan)
     }

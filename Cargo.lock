@@ -8535,6 +8535,8 @@ dependencies = [
  "common-test-util",
  "common-time",
  "datafusion",
+ "datafusion-common",
+ "datafusion-expr",
  "datatypes",
  "derive_builder 0.12.0",
  "digest",

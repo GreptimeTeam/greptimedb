@@ -261,7 +261,7 @@ impl Value {
     }
 }
 
-fn to_null_value(output_type: &ConcreteDataType) -> ScalarValue {
+pub fn to_null_value(output_type: &ConcreteDataType) -> ScalarValue {
     match output_type {
         ConcreteDataType::Null(_) => ScalarValue::Null,
         ConcreteDataType::Boolean(_) => ScalarValue::Boolean(None),
