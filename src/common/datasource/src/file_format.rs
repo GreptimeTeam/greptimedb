@@ -35,12 +35,11 @@ use datafusion::physical_plan::SendableRecordBatchStream;
 use futures::StreamExt;
 use object_store::ObjectStore;
 use snafu::ResultExt;
-use tokio_util::compat::FuturesAsyncWriteCompatExt;
 
 use self::csv::CsvFormat;
 use self::json::JsonFormat;
 use self::parquet::ParquetFormat;
-use crate::buffered_writer::{BufferedWriter, DfRecordBatchEncoder};
+use crate::buffered_writer::{DfRecordBatchEncoder, LazyBufferedWriter};
 use crate::compression::CompressionType;
 use crate::error::{self, Result};
 use crate::share_buffer::SharedBuffer;
@@ -181,15 +180,17 @@ pub async fn stream_to_file<T: DfRecordBatchEncoder, U: Fn(SharedBuffer) -> T>(
     threshold: usize,
     encoder_factory: U,
 ) -> Result<usize> {
-    let writer = store
-        .writer(path)
-        .await
-        .context(error::WriteObjectSnafu { path })?
-        .compat_write();
-
     let buffer = SharedBuffer::with_capacity(threshold);
     let encoder = encoder_factory(buffer.clone());
-    let mut writer = BufferedWriter::new(threshold, buffer, encoder, writer);
+    let mut writer = LazyBufferedWriter::new(threshold, buffer, encoder, path, |path| {
+        let path = path.to_string();
+        async {
+            store
+                .writer(&path)
+                .await
+                .context(error::WriteObjectSnafu { path })
+        }
+    });
 
     let mut rows = 0;
 

@@ -12,20 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::future::Future;
+
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use datafusion::parquet::format::FileMetaData;
-use object_store::Writer;
 use snafu::{OptionExt, ResultExt};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
-use tokio_util::compat::Compat;
 
 use crate::error::{self, Result};
 use crate::share_buffer::SharedBuffer;
 
-pub struct BufferedWriter<T, U> {
-    writer: T,
-    /// None stands for [`BufferedWriter`] closed.
+pub struct LazyBufferedWriter<T, U, F> {
+    path: String,
+    writer_factory: F,
+    writer: Option<T>,
+    /// None stands for [`LazyBufferedWriter`] closed.
     encoder: Option<U>,
     buffer: SharedBuffer,
     rows_written: usize,
@@ -42,10 +44,12 @@ pub trait ArrowWriterCloser {
     async fn close(mut self) -> Result<FileMetaData>;
 }
 
-pub type DefaultBufferedWriter<E> = BufferedWriter<Compat<Writer>, E>;
-
-impl<T: AsyncWrite + Send + Unpin, U: DfRecordBatchEncoder + ArrowWriterCloser>
-    BufferedWriter<T, U>
+impl<
+        T: AsyncWrite + Send + Unpin,
+        U: DfRecordBatchEncoder + ArrowWriterCloser,
+        F: FnMut(&str) -> Fut,
+        Fut: Future<Output = Result<T>>,
+    > LazyBufferedWriter<T, U, F>
 {
     pub async fn close_with_arrow_writer(mut self) -> Result<(FileMetaData, u64)> {
         let encoder = self
@@ -53,9 +57,12 @@ impl<T: AsyncWrite + Send + Unpin, U: DfRecordBatchEncoder + ArrowWriterCloser>
             .take()
             .context(error::BufferedWriterClosedSnafu)?;
         let metadata = encoder.close().await?;
+
+        // Use `rows_written` to keep a track of if any rows have been written.
+        // If no row's been written, then we can simply close the underlying
+        // writer without flush so that no file will be actually created.
         if self.rows_written != 0 {
             self.bytes_written += self.try_flush(true).await?;
-        } else {
         }
         // It's important to shut down! flushes all pending writes
         self.close().await?;
@@ -63,19 +70,36 @@ impl<T: AsyncWrite + Send + Unpin, U: DfRecordBatchEncoder + ArrowWriterCloser>
     }
 }
 
-impl<T: AsyncWrite + Send + Unpin, U: DfRecordBatchEncoder> BufferedWriter<T, U> {
+impl<
+        T: AsyncWrite + Send + Unpin,
+        U: DfRecordBatchEncoder,
+        F: FnMut(&str) -> Fut,
+        Fut: Future<Output = Result<T>>,
+    > LazyBufferedWriter<T, U, F>
+{
     pub async fn close(&mut self) -> Result<()> {
-        self.writer.shutdown().await.context(error::AsyncWriteSnafu)
+        if let Some(writer) = &mut self.writer {
+            writer.shutdown().await.context(error::AsyncWriteSnafu)?;
+        }
+        Ok(())
     }
 
-    pub fn new(threshold: usize, buffer: SharedBuffer, encoder: U, writer: T) -> Self {
+    pub fn new(
+        threshold: usize,
+        buffer: SharedBuffer,
+        encoder: U,
+        path: impl AsRef<str>,
+        writer_factory: F,
+    ) -> Self {
         Self {
+            path: path.as_ref().to_string(),
             threshold,
-            writer,
             encoder: Some(encoder),
             buffer,
             rows_written: 0,
             bytes_written: 0,
+            writer_factory,
+            writer: None,
         }
     }
 
@@ -102,7 +126,8 @@ impl<T: AsyncWrite + Send + Unpin, U: DfRecordBatchEncoder> BufferedWriter<T, U>
             };
             let size = chunk.len();
 
-            self.writer
+            self.maybe_init_writer()
+                .await?
                 .write_all(&chunk)
                 .await
                 .context(error::AsyncWriteSnafu)?;
@@ -116,15 +141,24 @@ impl<T: AsyncWrite + Send + Unpin, U: DfRecordBatchEncoder> BufferedWriter<T, U>
         Ok(bytes_written)
     }
 
+    /// Only initiates underlying file writer when rows have been written.
+    async fn maybe_init_writer(&mut self) -> Result<&mut T> {
+        if let Some(ref mut writer) = self.writer {
+            return Ok(writer);
+        } else {
+            let writer = (self.writer_factory)(&self.path).await?;
+            Ok(self.writer.insert(writer))
+        }
+    }
+
     async fn try_flush_all(&mut self) -> Result<u64> {
         let remain = self.buffer.buffer.lock().unwrap().split();
         let size = remain.len();
-
-        self.writer
+        self.maybe_init_writer()
+            .await?
             .write_all(&remain)
             .await
             .context(error::AsyncWriteSnafu)?;
-
         Ok(size as u64)
     }
 }

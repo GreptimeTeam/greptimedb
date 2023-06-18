@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::future::Future;
+use std::pin::Pin;
+
 use arrow_array::RecordBatch;
-use common_datasource::buffered_writer::{
-    BufferedWriter as DatasourceBufferedWriter, DefaultBufferedWriter,
-};
+use common_datasource::buffered_writer::LazyBufferedWriter as DatasourceBufferedWriter;
 use common_datasource::share_buffer::SharedBuffer;
 use datatypes::schema::SchemaRef;
 use object_store::ObjectStore;
@@ -23,10 +24,9 @@ use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 use parquet::format::FileMetaData;
 use snafu::ResultExt;
-use tokio_util::compat::FuturesAsyncWriteCompatExt;
 
 use crate::error;
-use crate::error::{NewRecordBatchSnafu, WriteObjectSnafu, WriteParquetSnafu};
+use crate::error::{NewRecordBatchSnafu, WriteParquetSnafu};
 use crate::read::Batch;
 /// Parquet writer that buffers row groups in memory and writes buffered data to an underlying
 /// storage by chunks to reduce memory consumption.
@@ -35,7 +35,20 @@ pub struct BufferedWriter {
     arrow_schema: arrow::datatypes::SchemaRef,
 }
 
-type InnerBufferedWriter = DefaultBufferedWriter<ArrowWriter<SharedBuffer>>;
+type InnerBufferedWriter = DatasourceBufferedWriter<
+    object_store::Writer,
+    ArrowWriter<SharedBuffer>,
+    Box<
+        dyn FnMut(
+                &str,
+            ) -> Pin<
+                Box<
+                    dyn Future<Output = common_datasource::error::Result<object_store::Writer>>
+                        + Send,
+                >,
+            > + Send,
+    >,
+>;
 
 impl BufferedWriter {
     pub async fn try_new(
@@ -47,22 +60,27 @@ impl BufferedWriter {
     ) -> error::Result<Self> {
         let arrow_schema = schema.arrow_schema();
         let buffer = SharedBuffer::with_capacity(buffer_threshold);
-        let writer = store
-            .writer(&path)
-            .await
-            .context(WriteObjectSnafu { path: &path })?;
 
         let arrow_writer = ArrowWriter::try_new(buffer.clone(), arrow_schema.clone(), props)
             .context(WriteParquetSnafu)?;
-
-        let writer = writer.compat_write();
+        let store = store.clone();
 
         Ok(Self {
             inner: DatasourceBufferedWriter::new(
                 buffer_threshold,
                 buffer.clone(),
                 arrow_writer,
-                writer,
+                &path,
+                Box::new(move |path: &str| {
+                    let path = path.to_string();
+                    let store = store.clone();
+                    Box::pin(async move {
+                        store
+                            .writer(&path)
+                            .await
+                            .context(common_datasource::error::WriteObjectSnafu { path })
+                    })
+                }),
             ),
             arrow_schema: arrow_schema.clone(),
         })
