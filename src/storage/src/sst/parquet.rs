@@ -674,11 +674,11 @@ mod tests {
             rows_written += keys.len();
         }
 
-        let dir = create_temp_dir("write_parquet");
+        let dir = create_temp_dir("write_large_parquet");
         let path = dir.path().to_str().unwrap();
 
         let object_store = create_object_store(path);
-        let sst_file_name = "test-flush.parquet";
+        let sst_file_name = "test-large.parquet";
         let iter = memtable.iter(IterContext::default()).unwrap();
         let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
 
@@ -1004,12 +1004,12 @@ mod tests {
         let schema = memtable_tests::schema_for_test();
         let memtable = DefaultMemtableBuilder::default().build(schema.clone());
 
-        let dir = create_temp_dir("read-parquet-by-range");
+        let dir = create_temp_dir("write-empty-file");
         let path = dir.path().to_str().unwrap();
         let mut builder = Fs::default();
         builder.root(path);
         let object_store = ObjectStore::new(builder).unwrap().finish();
-        let sst_file_name = "test-read.parquet";
+        let sst_file_name = "test-empty.parquet";
         let iter = memtable.iter(IterContext::default()).unwrap();
         let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
 
