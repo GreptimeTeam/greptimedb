@@ -245,11 +245,10 @@ fn to_copy_database_request(
 
 /// Extracts timestamp from a [HashMap<String, String>] with given key.
 fn extract_timestamp(map: &HashMap<String, String>, key: &str) -> Result<Option<Timestamp>> {
-    Ok(map
-        .get(key)
+    map.get(key)
         .map(|v| {
-            i64::from_str(v).map_err(|_| error::InvalidCopyParameterSnafu { key, value: v }.build())
+            Timestamp::from_str(v)
+                .map_err(|_| error::InvalidCopyParameterSnafu { key, value: v }.build())
         })
-        .transpose()?
-        .map(Timestamp::new_second))
+        .transpose()
 }

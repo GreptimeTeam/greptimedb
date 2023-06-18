@@ -65,6 +65,10 @@ impl StatementExecutor {
 
         let mut exported_rows = 0;
         for table_name in table_names {
+            // TODO(hl): remove this hardcode once we've removed numbers table.
+            if table_name == "numbers" {
+                continue;
+            }
             let mut table_file = req.location.clone();
             table_file.push_str(&table_name);
             table_file.push_str(suffix);
