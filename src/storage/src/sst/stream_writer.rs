@@ -92,13 +92,6 @@ impl BufferedWriter {
         Ok(())
     }
 
-    /// Abort writer.
-    pub async fn abort(self) -> bool {
-        // TODO(hl): Currently we can do nothing if file's parts have been uploaded to remote storage
-        // on abortion, we need to find a way to abort the upload. see https://help.aliyun.com/document_detail/31996.htm?spm=a2c4g.11186623.0.0.3eb42cb7b2mwUz#reference-txp-bvx-wdb
-        !self.inner.flushed()
-    }
-
     /// Close parquet writer and ensure all buffered data are written into underlying storage.
     pub async fn close(self) -> error::Result<(FileMetaData, u64)> {
         self.inner

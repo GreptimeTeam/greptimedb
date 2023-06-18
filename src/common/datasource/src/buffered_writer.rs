@@ -28,8 +28,8 @@ pub struct BufferedWriter<T, U> {
     /// None stands for [`BufferedWriter`] closed.
     encoder: Option<U>,
     buffer: SharedBuffer,
+    rows_written: usize,
     bytes_written: u64,
-    flushed: bool,
     threshold: usize,
 }
 
@@ -53,10 +53,13 @@ impl<T: AsyncWrite + Send + Unpin, U: DfRecordBatchEncoder + ArrowWriterCloser>
             .take()
             .context(error::BufferedWriterClosedSnafu)?;
         let metadata = encoder.close().await?;
-        let written = self.try_flush(true).await?;
+        if self.rows_written != 0 {
+            self.bytes_written += self.try_flush(true).await?;
+        } else {
+        }
         // It's important to shut down! flushes all pending writes
         self.close().await?;
-        Ok((metadata, written))
+        Ok((metadata, self.bytes_written))
     }
 }
 
@@ -71,13 +74,9 @@ impl<T: AsyncWrite + Send + Unpin, U: DfRecordBatchEncoder> BufferedWriter<T, U>
             writer,
             encoder: Some(encoder),
             buffer,
+            rows_written: 0,
             bytes_written: 0,
-            flushed: false,
         }
-    }
-
-    pub fn bytes_written(&self) -> u64 {
-        self.bytes_written
     }
 
     pub async fn write(&mut self, batch: &RecordBatch) -> Result<()> {
@@ -86,12 +85,9 @@ impl<T: AsyncWrite + Send + Unpin, U: DfRecordBatchEncoder> BufferedWriter<T, U>
             .as_mut()
             .context(error::BufferedWriterClosedSnafu)?;
         encoder.write(batch)?;
-        self.try_flush(false).await?;
+        self.rows_written += batch.num_rows();
+        self.bytes_written += self.try_flush(false).await?;
         Ok(())
-    }
-
-    pub fn flushed(&self) -> bool {
-        self.flushed
     }
 
     pub async fn try_flush(&mut self, all: bool) -> Result<u64> {
@@ -117,10 +113,6 @@ impl<T: AsyncWrite + Send + Unpin, U: DfRecordBatchEncoder> BufferedWriter<T, U>
         if all {
             bytes_written += self.try_flush_all().await?;
         }
-
-        self.flushed = bytes_written > 0;
-        self.bytes_written += bytes_written;
-
         Ok(bytes_written)
     }
 
