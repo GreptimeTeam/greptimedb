@@ -39,7 +39,7 @@ impl From<DfExpr> for Expr {
 }
 
 /// Builds an `Expr` that filters timestamp column from given timestamp range.
-/// Returns [None] is time range is [None] or full time range.
+/// Returns [None] if time range is [None] or full time range.
 pub fn build_filter_from_timestamp(
     ts_col_name: &str,
     time_range: Option<&TimestampRange>,
