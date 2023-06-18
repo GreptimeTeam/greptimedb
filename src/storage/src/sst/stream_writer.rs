@@ -40,7 +40,7 @@ type InnerBufferedWriter = DatasourceBufferedWriter<
     ArrowWriter<SharedBuffer>,
     Box<
         dyn FnMut(
-                &str,
+                String,
             ) -> Pin<
                 Box<
                     dyn Future<Output = common_datasource::error::Result<object_store::Writer>>
@@ -63,16 +63,14 @@ impl BufferedWriter {
 
         let arrow_writer = ArrowWriter::try_new(buffer.clone(), arrow_schema.clone(), props)
             .context(WriteParquetSnafu)?;
-        let store = store.clone();
 
         Ok(Self {
             inner: DatasourceBufferedWriter::new(
                 buffer_threshold,
-                buffer.clone(),
+                buffer,
                 arrow_writer,
                 &path,
-                Box::new(move |path: &str| {
-                    let path = path.to_string();
+                Box::new(move |path| {
                     let store = store.clone();
                     Box::pin(async move {
                         store

@@ -47,7 +47,7 @@ pub trait ArrowWriterCloser {
 impl<
         T: AsyncWrite + Send + Unpin,
         U: DfRecordBatchEncoder + ArrowWriterCloser,
-        F: FnMut(&str) -> Fut,
+        F: FnMut(String) -> Fut,
         Fut: Future<Output = Result<T>>,
     > LazyBufferedWriter<T, U, F>
 {
@@ -73,7 +73,7 @@ impl<
 impl<
         T: AsyncWrite + Send + Unpin,
         U: DfRecordBatchEncoder,
-        F: FnMut(&str) -> Fut,
+        F: FnMut(String) -> Fut,
         Fut: Future<Output = Result<T>>,
     > LazyBufferedWriter<T, U, F>
 {
@@ -144,9 +144,9 @@ impl<
     /// Only initiates underlying file writer when rows have been written.
     async fn maybe_init_writer(&mut self) -> Result<&mut T> {
         if let Some(ref mut writer) = self.writer {
-            return Ok(writer);
+            Ok(writer)
         } else {
-            let writer = (self.writer_factory)(&self.path).await?;
+            let writer = (self.writer_factory)(self.path.clone()).await?;
             Ok(self.writer.insert(writer))
         }
     }
