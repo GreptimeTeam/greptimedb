@@ -27,7 +27,7 @@ use arrow_array::{
 use async_compat::CompatExt;
 use async_stream::try_stream;
 use async_trait::async_trait;
-use common_telemetry::{error, info};
+use common_telemetry::{debug, error};
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
@@ -132,15 +132,8 @@ impl<'a> ParquetWriter<'a> {
         }
 
         if rows_written == 0 {
-            info!("No data written, try abort writer");
-            // if the source does not contain any batch, we skip writing an empty parquet file.
-            // if !buffered_writer.abort().await {
-            //     common_telemetry::warn!(
-            //         "Partial file {} has been uploaded to remote storage",
-            //         self.file_path
-            //     );
-            // }
-            buffered_writer.close().await.unwrap();
+            debug!("No data written, try abort writer: {}", self.file_path);
+            buffered_writer.close().await?;
             return Ok(None);
         }
 

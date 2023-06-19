@@ -51,6 +51,8 @@ impl<
         Fut: Future<Output = Result<T>>,
     > LazyBufferedWriter<T, U, F>
 {
+    /// Closes `LazyBufferedWriter` and optionally flushes all data to underlying storage
+    /// if any row's been written.
     pub async fn close_with_arrow_writer(mut self) -> Result<(FileMetaData, u64)> {
         let encoder = self
             .encoder
@@ -65,7 +67,7 @@ impl<
             self.bytes_written += self.try_flush(true).await?;
         }
         // It's important to shut down! flushes all pending writes
-        self.close().await?;
+        self.close_inner_writer().await?;
         Ok((metadata, self.bytes_written))
     }
 }
@@ -77,7 +79,8 @@ impl<
         Fut: Future<Output = Result<T>>,
     > LazyBufferedWriter<T, U, F>
 {
-    pub async fn close(&mut self) -> Result<()> {
+    /// Closes the writer without flushing the buffer data.
+    pub async fn close_inner_writer(&mut self) -> Result<()> {
         if let Some(writer) = &mut self.writer {
             writer.shutdown().await.context(error::AsyncWriteSnafu)?;
         }
