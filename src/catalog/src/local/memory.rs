@@ -300,6 +300,20 @@ impl MemoryCatalogManager {
 
         Ok(schema.insert(request.table_name, request.table).is_none())
     }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn new_with_table(table: TableRef) -> Self {
+        let manager = Self::default();
+        let request = RegisterTableRequest {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: table.table_info().name.clone(),
+            table_id: table.table_info().ident.table_id,
+            table,
+        };
+        manager.register_table_sync(request).unwrap();
+        manager
+    }
 }
 
 impl Default for MemoryCatalogProvider {
