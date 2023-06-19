@@ -34,10 +34,12 @@ use crate::{
     RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest,
 };
 
+type SchemaEntries = HashMap<String, HashMap<String, TableRef>>;
+
 /// Simple in-memory list of catalogs
 pub struct MemoryCatalogManager {
     /// Collection of catalogs containing schemas and ultimately Tables
-    pub catalogs: RwLock<HashMap<String, HashMap<String, HashMap<String, TableRef>>>>,
+    pub catalogs: RwLock<HashMap<String, SchemaEntries>>,
     pub table_id: AtomicU32,
 }
 
@@ -222,11 +224,32 @@ impl CatalogManager for MemoryCatalogManager {
     }
 
     async fn schema_names(&self, catalog_name: &str) -> Result<Vec<String>> {
-        todo!()
+        Ok(self
+            .catalogs
+            .read()
+            .unwrap()
+            .get(catalog_name)
+            .with_context(|| CatalogNotFoundSnafu { catalog_name })?
+            .keys()
+            .cloned()
+            .collect())
     }
 
     async fn table_names(&self, catalog_name: &str, schema_name: &str) -> Result<Vec<String>> {
-        todo!()
+        Ok(self
+            .catalogs
+            .read()
+            .unwrap()
+            .get(catalog_name)
+            .with_context(|| CatalogNotFoundSnafu { catalog_name })?
+            .get(schema_name)
+            .with_context(|| SchemaNotFoundSnafu {
+                catalog: catalog_name,
+                schema: schema_name,
+            })?
+            .keys()
+            .cloned()
+            .collect())
     }
 
     async fn register_catalog(&self, name: String) -> Result<bool> {
@@ -246,7 +269,7 @@ impl MemoryCatalogManager {
         let mut catalogs = self.catalogs.write().unwrap();
         let entry = catalogs.entry(name);
         match entry {
-            Entry::Occupied(v) => true,
+            Entry::Occupied(_) => true,
             Entry::Vacant(v) => {
                 v.insert(HashMap::new());
                 false
@@ -271,10 +294,6 @@ impl MemoryCatalogManager {
         }
         catalog.insert(request.schema, HashMap::new());
         Ok(true)
-    }
-
-    fn catalog_exist(&self, catalog_name: &str) -> bool {
-        self.catalogs.read().unwrap().contains_key(catalog_name)
     }
 }
 

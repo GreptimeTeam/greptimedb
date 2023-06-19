@@ -547,7 +547,7 @@ impl CatalogManager for LocalCatalogManager {
     }
 
     async fn table_exist(&self, catalog: &str, schema: &str, table: &str) -> Result<bool> {
-        todo!()
+        self.catalogs.table_exist(catalog, schema, table).await
     }
 
     async fn catalog_names(&self) -> Result<Vec<String>> {
@@ -555,11 +555,11 @@ impl CatalogManager for LocalCatalogManager {
     }
 
     async fn schema_names(&self, catalog_name: &str) -> Result<Vec<String>> {
-        todo!()
+        self.catalogs.schema_names(catalog_name).await
     }
 
     async fn table_names(&self, catalog_name: &str, schema_name: &str) -> Result<Vec<String>> {
-        todo!()
+        self.catalogs.table_names(catalog_name, schema_name).await
     }
 
     async fn register_catalog(&self, name: String) -> Result<bool> {

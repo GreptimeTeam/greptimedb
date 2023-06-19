@@ -22,10 +22,7 @@ mod tests {
 
     use catalog::helper::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
     use catalog::remote::mock::{MockKvBackend, MockTableEngine};
-    use catalog::remote::{
-        CachedMetaKvBackend, KvBackend, KvBackendRef, RemoteCatalogManager, RemoteCatalogProvider,
-        RemoteSchemaProvider,
-    };
+    use catalog::remote::{CachedMetaKvBackend, KvBackend, KvBackendRef, RemoteCatalogManager};
     use catalog::{CatalogManager, RegisterSchemaRequest, RegisterTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
     use datatypes::schema::RawSchema;
@@ -273,7 +270,7 @@ mod tests {
     #[tokio::test]
     async fn test_register_catalog_schema_table() {
         let node_id = 42;
-        let (backend, table_engine, catalog_manager, engine_manager) =
+        let (_backend, table_engine, catalog_manager, _engine_manager) =
             prepare_components(node_id).await;
 
         let catalog_name = "test_catalog".to_string();

@@ -24,10 +24,7 @@ use session::context::QueryContext;
 use snafu::{ensure, OptionExt};
 use table::table::adapter::DfTableProviderAdapter;
 
-use crate::error::{
-    CatalogNotFoundSnafu, QueryAccessDeniedSnafu, Result, SchemaNotFoundSnafu, TableNotExistSnafu,
-};
-// use crate::information_schema::InformationSchemaProvider;
+use crate::error::{QueryAccessDeniedSnafu, Result, TableNotExistSnafu};
 use crate::CatalogManagerRef;
 
 pub struct DfTableSourceProvider {

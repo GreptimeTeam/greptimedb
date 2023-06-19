@@ -29,8 +29,8 @@ use table::metadata::TableId;
 use table::requests::{AlterKind, AlterTableRequest};
 
 use crate::error::{
-    AccessCatalogSnafu, CatalogNotFoundSnafu, DeserializeProcedureSnafu, SchemaNotFoundSnafu,
-    SerializeProcedureSnafu, TableExistsSnafu, TableNotFoundSnafu,
+    AccessCatalogSnafu, DeserializeProcedureSnafu, SchemaNotFoundSnafu, SerializeProcedureSnafu,
+    TableExistsSnafu, TableNotFoundSnafu,
 };
 
 /// Procedure to alter a table.

@@ -38,15 +38,14 @@ use crate::error::{
     ParallelOpenTableSnafu, Result, SchemaNotFoundSnafu, TableEngineNotFoundSnafu,
 };
 use crate::helper::{
-    build_catalog_prefix, build_schema_prefix, build_table_global_prefix,
-    build_table_regional_prefix, CatalogKey, CatalogValue, SchemaKey, SchemaValue, TableGlobalKey,
-    TableGlobalValue, TableRegionalKey, TableRegionalValue, CATALOG_KEY_PREFIX,
+    build_catalog_prefix, build_schema_prefix, build_table_regional_prefix, CatalogKey,
+    CatalogValue, SchemaKey, SchemaValue, TableGlobalKey, TableGlobalValue, TableRegionalKey,
+    TableRegionalValue, CATALOG_KEY_PREFIX,
 };
 use crate::remote::{Kv, KvBackendRef};
 use crate::{
-    handle_system_table_request, CatalogManager, CatalogProvider, CatalogProviderRef,
-    DeregisterTableRequest, RegisterSchemaRequest, RegisterSystemTableRequest,
-    RegisterTableRequest, RenameTableRequest,
+    handle_system_table_request, CatalogManager, CatalogProviderRef, DeregisterTableRequest,
+    RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest,
 };
 
 /// Catalog manager based on metasrv.
@@ -67,15 +66,6 @@ impl RemoteCatalogManager {
             catalogs: Default::default(),
             system_table_requests: Default::default(),
         }
-    }
-
-    fn new_catalog_provider(&self, catalog_name: &str) -> CatalogProviderRef {
-        Arc::new(RemoteCatalogProvider {
-            node_id: self.node_id,
-            catalog_name: catalog_name.to_string(),
-            backend: self.backend.clone(),
-            engine_manager: self.engine_manager.clone(),
-        }) as _
     }
 
     async fn iter_remote_catalogs(
@@ -110,10 +100,6 @@ impl RemoteCatalogManager {
         while let Some(r) = catalogs.next().await {
             let CatalogKey { catalog_name, .. } = r?;
             info!("Fetch catalog from metasrv: {}", catalog_name);
-            let catalog = res
-                .entry(catalog_name.clone())
-                .or_insert_with(|| self.new_catalog_provider(&catalog_name))
-                .clone();
 
             let node_id = self.node_id;
             let backend = self.backend.clone();
@@ -125,9 +111,6 @@ impl RemoteCatalogManager {
         }
 
         futures::future::try_join_all(joins).await?;
-        // .context(ParallelOpenTableSnafu)?
-        // .into_iter()
-        // .collect::<Result<Vec<_>>>()?;
 
         Ok(res)
     }
@@ -894,93 +877,5 @@ impl CatalogManager for RemoteCatalogManager {
 
     fn as_any(&self) -> &dyn Any {
         self
-    }
-}
-
-pub struct RemoteCatalogProvider {
-    node_id: u64,
-    catalog_name: String,
-    backend: KvBackendRef,
-    engine_manager: TableEngineManagerRef,
-}
-
-impl RemoteCatalogProvider {
-    pub fn new(
-        catalog_name: String,
-        backend: KvBackendRef,
-        engine_manager: TableEngineManagerRef,
-        node_id: u64,
-    ) -> Self {
-        Self {
-            node_id,
-            catalog_name,
-            backend,
-            engine_manager,
-        }
-    }
-
-    fn build_schema_key(&self, schema_name: impl AsRef<str>) -> SchemaKey {
-        SchemaKey {
-            catalog_name: self.catalog_name.clone(),
-            schema_name: schema_name.as_ref().to_string(),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl CatalogProvider for RemoteCatalogProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    async fn schema_names(&self) -> Result<Vec<String>> {
-        let schema_prefix = build_schema_prefix(&self.catalog_name);
-
-        let remote_schemas = self.backend.range(schema_prefix.as_bytes());
-        let res = remote_schemas
-            .map(|kv| {
-                let Kv(k, _) = kv?;
-                let schema_key = SchemaKey::parse(String::from_utf8_lossy(&k))
-                    .context(InvalidCatalogValueSnafu)?;
-                Ok(schema_key.schema_name)
-            })
-            .try_collect()
-            .await?;
-        Ok(res)
-    }
-}
-
-pub struct RemoteSchemaProvider {
-    catalog_name: String,
-    schema_name: String,
-    node_id: u64,
-    backend: KvBackendRef,
-    engine_manager: TableEngineManagerRef,
-}
-
-impl RemoteSchemaProvider {
-    pub fn new(
-        catalog_name: String,
-        schema_name: String,
-        node_id: u64,
-        engine_manager: TableEngineManagerRef,
-        backend: KvBackendRef,
-    ) -> Self {
-        Self {
-            catalog_name,
-            schema_name,
-            node_id,
-            backend,
-            engine_manager,
-        }
-    }
-
-    fn build_regional_table_key(&self, table_name: impl AsRef<str>) -> TableRegionalKey {
-        TableRegionalKey {
-            catalog_name: self.catalog_name.clone(),
-            schema_name: self.schema_name.clone(),
-            table_name: table_name.as_ref().to_string(),
-            node_id: self.node_id,
-        }
     }
 }
