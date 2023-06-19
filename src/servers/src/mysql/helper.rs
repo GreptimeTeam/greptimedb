@@ -171,3 +171,43 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
         ))),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use sql::dialect::MySqlDialect;
+    use sql::parser::ParserContext;
+
+    use super::*;
+
+    #[test]
+    fn test_format_placeholder() {
+        assert_eq!("$1", format_placeholder(1));
+        assert_eq!("$3", format_placeholder(3));
+    }
+
+    fn parse_sql(sql: &str) -> Statement {
+        let mut stmts = ParserContext::create_with_dialect(sql, &MySqlDialect {}).unwrap();
+        stmts.remove(0)
+    }
+
+    #[test]
+    fn test_transform_placeholders() {
+        let insert = parse_sql("insert into demo values(?,?,?)");
+        let Statement::Insert(insert) = transform_placeholders(insert) else { unreachable!()};
+        assert_eq!(
+            "INSERT INTO demo VALUES ($1, $2, $3)",
+            insert.inner.to_string()
+        );
+
+        let delete = parse_sql("delete from demo where host=? and idc=?");
+        let Statement::Delete(delete) = transform_placeholders(delete) else { unreachable!()};
+        assert_eq!(
+            "DELETE FROM demo WHERE host = $1 AND idc = $2",
+            delete.inner.to_string()
+        );
+
+        let select = parse_sql("select from demo where host=? and idc in (select idc from idcs where name=?) and cpu>?");
+        let Statement::Query(select) = transform_placeholders(select) else { unreachable!()};
+        assert_eq!("SELECT from AS demo WHERE host = $1 AND idc IN (SELECT idc FROM idcs WHERE name = $2) AND cpu > $3", select.inner.to_string());
+    }
+}

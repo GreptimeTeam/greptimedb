@@ -13,6 +13,7 @@ axum = "0.6"
 axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", branch = "patch-1" }
 async-trait = "0.1"
 catalog = { path = "../src/catalog" }
+chrono.workspace = true
 client = { path = "../src/client", features = ["testing"] }
 common-base = { path = "../src/common/base" }
 common-catalog = { path = "../src/common/catalog" }
@@ -49,6 +50,7 @@ sqlx = { version = "0.6", features = [
     "runtime-tokio-rustls",
     "mysql",
     "postgres",
+    "chrono",
 ] }
 table = { path = "../src/table" }
 tempfile.workspace = true

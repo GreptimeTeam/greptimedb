@@ -176,8 +176,8 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                     Value::Float64(v) => row_writer.write_col(v.0)?,
                     Value::String(v) => row_writer.write_col(v.as_utf8())?,
                     Value::Binary(v) => row_writer.write_col(v.deref())?,
-                    Value::Date(v) => row_writer.write_col(v.val())?,
-                    Value::DateTime(v) => row_writer.write_col(v.val())?,
+                    Value::Date(v) => row_writer.write_col(v.to_chrono_date())?,
+                    Value::DateTime(v) => row_writer.write_col(v.to_chrono_datetime())?,
                     Value::Timestamp(v) => row_writer
                         .write_col(v.to_timezone_aware_string(query_context.time_zone()))?,
                     Value::List(_) => {
