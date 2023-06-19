@@ -203,6 +203,10 @@ impl DfPhysicalPlan for DfPhysicalPlanAdapter {
         Ok(Box::pin(DfRecordBatchStreamAdapter::new(stream)))
     }
 
+    fn metrics(&self) -> Option<MetricsSet> {
+        self.0.metrics()
+    }
+
     fn statistics(&self) -> Statistics {
         Statistics::default()
     }
