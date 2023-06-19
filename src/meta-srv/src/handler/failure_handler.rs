@@ -19,7 +19,7 @@ use std::sync::Arc;
 use api::v1::meta::{HeartbeatRequest, Role};
 use async_trait::async_trait;
 use common_catalog::consts::MITO_ENGINE;
-use common_meta::instruction::TableIdent;
+use common_meta::ident::TableIdent;
 use common_meta::RegionIdent;
 use table::engine::table_id;
 

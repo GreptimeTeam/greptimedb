@@ -77,7 +77,7 @@ impl MemTable {
             .schema(schema)
             .primary_key_indices(vec![])
             .value_indices(vec![])
-            .engine("mock".to_string())
+            .engine("mito".to_string())
             .next_column_id(0)
             .engine_options(Default::default())
             .options(Default::default())

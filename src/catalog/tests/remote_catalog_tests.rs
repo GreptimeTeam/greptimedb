@@ -22,6 +22,7 @@ mod tests {
 
     use catalog::helper::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
     use catalog::remote::mock::{MockKvBackend, MockTableEngine};
+    use catalog::remote::region_alive_keeper::RegionAliveKeepers;
     use catalog::remote::{
         CachedMetaKvBackend, KvBackend, KvBackendRef, RemoteCatalogManager, RemoteCatalogProvider,
         RemoteSchemaProvider,
@@ -138,8 +139,12 @@ mod tests {
             table_engine.clone(),
         ));
 
-        let catalog_manager =
-            RemoteCatalogManager::new(engine_manager.clone(), node_id, cached_backend.clone());
+        let catalog_manager = RemoteCatalogManager::new(
+            engine_manager.clone(),
+            node_id,
+            cached_backend.clone(),
+            Arc::new(RegionAliveKeepers::new(engine_manager.clone())),
+        );
         catalog_manager.start().await.unwrap();
 
         (

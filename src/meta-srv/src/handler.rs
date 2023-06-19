@@ -130,6 +130,7 @@ impl Pushers {
             .push(HeartbeatResponse {
                 header: Some(pusher.header()),
                 mailbox_message: Some(mailbox_message),
+                ..Default::default()
             })
             .await
     }
@@ -151,6 +152,7 @@ impl Pushers {
                 .push(HeartbeatResponse {
                     header: Some(pusher.header()),
                     mailbox_message: Some(mailbox_message),
+                    ..Default::default()
                 })
                 .await?;
         }
@@ -232,6 +234,7 @@ impl HeartbeatHandlerGroup {
         let res = HeartbeatResponse {
             header,
             mailbox_message: acc.into_mailbox_message(),
+            ..Default::default()
         };
         Ok(res)
     }

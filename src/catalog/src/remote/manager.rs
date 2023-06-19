@@ -20,13 +20,14 @@ use std::sync::Arc;
 use async_stream::stream;
 use async_trait::async_trait;
 use common_catalog::consts::{MAX_SYS_TABLE_ID, MITO_ENGINE};
+use common_meta::ident::TableIdent;
 use common_telemetry::{debug, error, info, warn};
 use dashmap::DashMap;
 use futures::Stream;
 use futures_util::{StreamExt, TryStreamExt};
 use metrics::{decrement_gauge, increment_gauge};
 use parking_lot::RwLock;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use table::engine::manager::TableEngineManagerRef;
 use table::engine::{EngineContext, TableReference};
 use table::requests::{CreateTableRequest, OpenTableRequest};
@@ -43,6 +44,7 @@ use crate::helper::{
     build_table_regional_prefix, CatalogKey, CatalogValue, SchemaKey, SchemaValue, TableGlobalKey,
     TableGlobalValue, TableRegionalKey, TableRegionalValue, CATALOG_KEY_PREFIX,
 };
+use crate::remote::region_alive_keeper::RegionAliveKeepers;
 use crate::remote::{Kv, KvBackendRef};
 use crate::{
     handle_system_table_request, CatalogManager, CatalogProvider, CatalogProviderRef,
@@ -57,16 +59,23 @@ pub struct RemoteCatalogManager {
     catalogs: Arc<RwLock<DashMap<String, CatalogProviderRef>>>,
     engine_manager: TableEngineManagerRef,
     system_table_requests: Mutex<Vec<RegisterSystemTableRequest>>,
+    region_alive_keepers: Arc<RegionAliveKeepers>,
 }
 
 impl RemoteCatalogManager {
-    pub fn new(engine_manager: TableEngineManagerRef, node_id: u64, backend: KvBackendRef) -> Self {
+    pub fn new(
+        engine_manager: TableEngineManagerRef,
+        node_id: u64,
+        backend: KvBackendRef,
+        region_alive_keepers: Arc<RegionAliveKeepers>,
+    ) -> Self {
         Self {
             engine_manager,
             node_id,
             backend,
             catalogs: Default::default(),
             system_table_requests: Default::default(),
+            region_alive_keepers,
         }
     }
 
@@ -576,34 +585,44 @@ impl CatalogManager for RemoteCatalogManager {
     }
 
     async fn register_table(&self, request: RegisterTableRequest) -> Result<bool> {
-        let catalog_name = request.catalog;
-        let schema_name = request.schema;
+        let catalog = &request.catalog;
+        let schema = &request.schema;
+        let table_name = &request.table_name;
+
         let schema_provider = self
-            .catalog(&catalog_name)
+            .catalog(catalog)
             .await?
             .context(CatalogNotFoundSnafu {
-                catalog_name: &catalog_name,
+                catalog_name: catalog,
             })?
-            .schema(&schema_name)
+            .schema(schema)
             .await?
-            .with_context(|| SchemaNotFoundSnafu {
-                catalog: &catalog_name,
-                schema: &schema_name,
-            })?;
-        if schema_provider.table_exist(&request.table_name).await? {
-            return TableExistsSnafu {
-                table: format!("{}.{}.{}", &catalog_name, &schema_name, &request.table_name),
+            .context(SchemaNotFoundSnafu { catalog, schema })?;
+        ensure!(
+            !schema_provider.table_exist(table_name).await?,
+            TableExistsSnafu {
+                table: common_catalog::format_full_table_name(catalog, schema, table_name),
             }
-            .fail();
-        }
+        );
 
         increment_gauge!(
             crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
             1.0,
-            &[crate::metrics::db_label(&catalog_name, &schema_name)],
+            &[crate::metrics::db_label(catalog, schema)],
         );
         schema_provider
-            .register_table(request.table_name, request.table)
+            .register_table(table_name.to_string(), request.table.clone())
+            .await?;
+
+        let table_ident = TableIdent {
+            catalog: request.catalog,
+            schema: request.schema,
+            table: request.table_name,
+            table_id: request.table_id,
+            engine: request.table.table_info().meta.engine.clone(),
+        };
+        self.region_alive_keepers
+            .register_table(table_ident, request.table)
             .await?;
 
         Ok(true)
@@ -626,6 +645,21 @@ impl CatalogManager for RemoteCatalogManager {
             1.0,
             &[crate::metrics::db_label(catalog_name, schema_name)],
         );
+
+        if let Some(table) = result.as_ref() {
+            let table_info = table.table_info();
+            let table_ident = TableIdent {
+                catalog: request.catalog,
+                schema: request.schema,
+                table: request.table_name,
+                table_id: table_info.ident.table_id,
+                engine: table_info.meta.engine.clone(),
+            };
+            self.region_alive_keepers
+                .deregister_table(&table_ident)
+                .await;
+        }
+
         Ok(result.is_none())
     }
 

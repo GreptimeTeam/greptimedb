@@ -343,7 +343,8 @@ mod tests {
     use api::v1::meta::{HeartbeatResponse, MailboxMessage, Peer, RequestHeader};
     use catalog::helper::TableGlobalKey;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
-    use common_meta::instruction::{Instruction, InstructionReply, SimpleReply, TableIdent};
+    use common_meta::ident::TableIdent;
+    use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
     use common_meta::DatanodeId;
     use common_procedure::BoxedProcedure;
     use rand::prelude::SliceRandom;

@@ -88,6 +88,7 @@ mod tests {
         let res = HeartbeatResponse {
             header,
             mailbox_message: acc.into_mailbox_message(),
+            ..Default::default()
         };
         assert_eq!(1, res.header.unwrap().cluster_id);
     }
