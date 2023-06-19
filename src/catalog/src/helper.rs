@@ -91,7 +91,7 @@ pub fn build_table_regional_prefix(
 }
 
 /// Table global info has only one key across all datanodes so it does not have `node_id` field.
-#[derive(Clone)]
+#[derive(Clone, Hash, Eq, PartialEq)]
 pub struct TableGlobalKey {
     pub catalog_name: String,
     pub schema_name: String,
@@ -124,6 +124,14 @@ impl TableGlobalKey {
             table_name: captures[3].to_string(),
         })
     }
+
+    pub fn to_raw_key(&self) -> Vec<u8> {
+        self.to_string().into_bytes()
+    }
+
+    pub fn try_from_raw_key(key: &[u8]) -> Result<Self, Error> {
+        Self::parse(String::from_utf8_lossy(key))
+    }
 }
 
 /// Table global info contains necessary info for a datanode to create table regions, including
@@ -140,6 +148,10 @@ pub struct TableGlobalValue {
 impl TableGlobalValue {
     pub fn table_id(&self) -> TableId {
         self.table_info.ident.table_id
+    }
+
+    pub fn engine(&self) -> &str {
+        &self.table_info.meta.engine
     }
 }
 

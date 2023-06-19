@@ -1801,6 +1801,7 @@ name = "common-meta"
 version = "0.4.0"
 dependencies = [
  "api",
+ "async-trait",
  "chrono",
  "common-catalog",
  "common-error",
@@ -4096,7 +4097,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=aee86f4a68c59873961c9b99ee7ed6a4341bf773#aee86f4a68c59873961c9b99ee7ed6a4341bf773"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=5d5eb65bb985ff47b3a417fb2505e315e2f5c319#5d5eb65bb985ff47b3a417fb2505e315e2f5c319"
 dependencies = [
  "prost",
  "serde",
@@ -5185,6 +5186,7 @@ dependencies = [
  "serde_json",
  "servers",
  "snafu",
+ "store-api",
  "table",
  "tokio",
  "tokio-stream",

@@ -354,6 +354,12 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display("Failed to convert proto data, source: {}", source))]
+    ConvertProtoData {
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
     // this error is used for custom error mapping
     // please do not delete it
     #[snafu(display("Other error, source: {}", source))]
@@ -442,7 +448,9 @@ impl ErrorExt for Error {
             Error::RegionFailoverCandidatesNotFound { .. } => StatusCode::RuntimeResourcesExhausted,
 
             Error::RegisterProcedureLoader { source, .. } => source.status_code(),
-            Error::TableRouteConversion { source, .. } => source.status_code(),
+            Error::TableRouteConversion { source, .. } | Error::ConvertProtoData { source, .. } => {
+                source.status_code()
+            }
             Error::Other { source, .. } => source.status_code(),
         }
     }

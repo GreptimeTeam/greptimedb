@@ -215,8 +215,9 @@ impl Instance {
                     Arc::new(CloseRegionHandler::new(
                         catalog_manager.clone(),
                         engine_manager.clone(),
-                        region_alive_keepers,
+                        region_alive_keepers.clone(),
                     )),
+                    region_alive_keepers.clone(),
                 ]);
 
                 let heartbeat_task = Some(HeartbeatTask::new(
@@ -226,6 +227,7 @@ impl Instance {
                     meta_client,
                     catalog_manager.clone(),
                     Arc::new(handlers_executor),
+                    region_alive_keepers,
                 ));
 
                 (catalog_manager as CatalogManagerRef, None, heartbeat_task)

@@ -28,6 +28,7 @@ use super::{RegionFailoverContext, State};
 use crate::error::{
     Error, Result, RetryLaterSnafu, SerializeToJsonSnafu, UnexpectedInstructionReplySnafu,
 };
+use crate::handler::region_lease_handler::REGION_LEASE_SECONDS;
 use crate::handler::HeartbeatMailbox;
 use crate::procedure::region_failover::CLOSE_REGION_MESSAGE_TIMEOUT;
 use crate::service::mailbox::{Channel, MailboxReceiver};
@@ -35,11 +36,15 @@ use crate::service::mailbox::{Channel, MailboxReceiver};
 #[derive(Serialize, Deserialize, Debug)]
 pub(super) struct DeactivateRegion {
     candidate: Peer,
+    region_lease_expiry_seconds: u64,
 }
 
 impl DeactivateRegion {
     pub(super) fn new(candidate: Peer) -> Self {
-        Self { candidate }
+        Self {
+            candidate,
+            region_lease_expiry_seconds: REGION_LEASE_SECONDS * 2,
+        }
     }
 
     async fn send_close_region_message(
@@ -95,14 +100,20 @@ impl DeactivateRegion {
             }
             Err(e) if matches!(e, Error::MailboxTimeout { .. }) => {
                 // Since we are in a region failover situation, the Datanode that the failed region
-                // resides might be unreachable. So region deactivation is happened in a "try our
-                // best" effort, do not retry if mailbox received timeout.
-                // However, if the region failover procedure is also used in a planned maintenance
-                // situation in the future, a proper retry is a must.
+                // resides might be unreachable. So we wait for the region lease to expire. The
+                // region would be closed by its own [RegionAliveKeeper].
+                self.wait_for_region_lease_expiry().await;
                 Ok(Box::new(ActivateRegion::new(self.candidate)))
             }
             Err(e) => Err(e),
         }
+    }
+
+    /// Sleep for `region_lease_expiry_seconds`, to make sure the region is closed (by its
+    /// region alive keeper). This is critical for region not being opened in multiple Datanodes
+    /// simultaneously.
+    async fn wait_for_region_lease_expiry(&self) {
+        tokio::time::sleep(Duration::from_secs(self.region_lease_expiry_seconds)).await;
     }
 }
 
@@ -120,8 +131,8 @@ impl State for DeactivateRegion {
         let mailbox_receiver = match result {
             Ok(mailbox_receiver) => mailbox_receiver,
             Err(e) if matches!(e, Error::PusherNotFound { .. }) => {
-                // The Datanode could be unreachable and deregistered from pushers,
-                // so simply advancing to the next state here.
+                // See the mailbox received timeout situation comments above.
+                self.wait_for_region_lease_expiry().await;
                 return Ok(Box::new(ActivateRegion::new(self.candidate)));
             }
             Err(e) => return Err(e),
@@ -212,7 +223,10 @@ mod tests {
         let mut env = TestingEnvBuilder::new().build().await;
         let failed_region = env.failed_region(1).await;
 
-        let state = DeactivateRegion::new(Peer::new(2, ""));
+        let state = DeactivateRegion {
+            candidate: Peer::new(2, ""),
+            region_lease_expiry_seconds: 2,
+        };
         let mailbox_receiver = state
             .send_close_region_message(&env.context, &failed_region, Duration::from_millis(100))
             .await

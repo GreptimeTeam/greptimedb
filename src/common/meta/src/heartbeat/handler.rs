@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use api::v1::meta::HeartbeatResponse;
+use async_trait::async_trait;
 use common_telemetry::error;
 
 use crate::error::Result;
@@ -57,14 +58,16 @@ impl HeartbeatResponseHandlerContext {
 /// [`HeartbeatResponseHandler::is_acceptable`] returns true if handler can handle incoming [`HeartbeatResponseHandlerContext`].
 ///
 /// [`HeartbeatResponseHandler::handle`] handles all or part of incoming [`HeartbeatResponseHandlerContext`].
+#[async_trait]
 pub trait HeartbeatResponseHandler: Send + Sync {
     fn is_acceptable(&self, ctx: &HeartbeatResponseHandlerContext) -> bool;
 
-    fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> Result<HandleControl>;
+    async fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> Result<HandleControl>;
 }
 
+#[async_trait]
 pub trait HeartbeatResponseHandlerExecutor: Send + Sync {
-    fn handle(&self, ctx: HeartbeatResponseHandlerContext) -> Result<()>;
+    async fn handle(&self, ctx: HeartbeatResponseHandlerContext) -> Result<()>;
 }
 
 pub struct HandlerGroupExecutor {
@@ -77,14 +80,15 @@ impl HandlerGroupExecutor {
     }
 }
 
+#[async_trait]
 impl HeartbeatResponseHandlerExecutor for HandlerGroupExecutor {
-    fn handle(&self, mut ctx: HeartbeatResponseHandlerContext) -> Result<()> {
+    async fn handle(&self, mut ctx: HeartbeatResponseHandlerContext) -> Result<()> {
         for handler in &self.handlers {
             if !handler.is_acceptable(&ctx) {
                 continue;
             }
 
-            match handler.handle(&mut ctx) {
+            match handler.handle(&mut ctx).await {
                 Ok(HandleControl::Done) => break,
                 Ok(HandleControl::Continue) => {}
                 Err(e) => {

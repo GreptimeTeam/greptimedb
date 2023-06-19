@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use async_trait::async_trait;
 use catalog::helper::TableGlobalKey;
 use catalog::remote::KvCacheInvalidatorRef;
 use common_meta::error::Result as MetaResult;
@@ -30,6 +31,7 @@ pub struct InvalidateTableCacheHandler {
     table_route_cache_invalidator: TableRouteCacheInvalidatorRef,
 }
 
+#[async_trait]
 impl HeartbeatResponseHandler for InvalidateTableCacheHandler {
     fn is_acceptable(&self, ctx: &HeartbeatResponseHandlerContext) -> bool {
         matches!(
@@ -38,7 +40,7 @@ impl HeartbeatResponseHandler for InvalidateTableCacheHandler {
         )
     }
 
-    fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> MetaResult<HandleControl> {
+    async fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> MetaResult<HandleControl> {
         // TODO(weny): considers introducing a macro
         let Some((meta, Instruction::InvalidateTableCache(table_ident))) = ctx.incoming_message.take() else {
             unreachable!("InvalidateTableCacheHandler: should be guarded by 'is_acceptable'");
