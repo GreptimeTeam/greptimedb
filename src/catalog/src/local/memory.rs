@@ -77,33 +77,15 @@ impl CatalogManager for MemoryCatalogManager {
     }
 
     async fn register_table(&self, request: RegisterTableRequest) -> Result<bool> {
-        let mut catalogs = self.catalogs.write().unwrap();
-        let schema = catalogs
-            .get_mut(&request.catalog)
-            .with_context(|| CatalogNotFoundSnafu {
-                catalog_name: &request.catalog,
-            })?
-            .get_mut(&request.schema)
-            .with_context(|| SchemaNotFoundSnafu {
-                catalog: &request.catalog,
-                schema: &request.schema,
-            })?;
-
-        if schema.contains_key(&request.table_name) {
-            return TableExistsSnafu {
-                table: &request.table_name,
-            }
-            .fail();
-        }
-
-        schema.insert(request.table_name, request.table);
+        let catalog = request.catalog.clone();
+        let schema = request.schema.clone();
+        let result = self.register_table_sync(request);
         increment_gauge!(
             crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
             1.0,
-            &[crate::metrics::db_label(&request.catalog, &request.schema)],
+            &[crate::metrics::db_label(&catalog, &schema)],
         );
-
-        Ok(true)
+        result
     }
 
     async fn rename_table(&self, request: RenameTableRequest) -> Result<bool> {
@@ -295,6 +277,29 @@ impl MemoryCatalogManager {
         catalog.insert(request.schema, HashMap::new());
         Ok(true)
     }
+
+    pub fn register_table_sync(&self, request: RegisterTableRequest) -> Result<bool> {
+        let mut catalogs = self.catalogs.write().unwrap();
+        let schema = catalogs
+            .get_mut(&request.catalog)
+            .with_context(|| CatalogNotFoundSnafu {
+                catalog_name: &request.catalog,
+            })?
+            .get_mut(&request.schema)
+            .with_context(|| SchemaNotFoundSnafu {
+                catalog: &request.catalog,
+                schema: &request.schema,
+            })?;
+
+        if schema.contains_key(&request.table_name) {
+            return TableExistsSnafu {
+                table: &request.table_name,
+            }
+            .fail();
+        }
+
+        Ok(schema.insert(request.table_name, request.table).is_none())
+    }
 }
 
 impl Default for MemoryCatalogProvider {
@@ -400,7 +405,7 @@ impl Default for MemorySchemaProvider {
 }
 
 /// Create a memory catalog list contains a numbers table for test
-pub fn new_memory_catalog_list() -> Result<Arc<MemoryCatalogManager>> {
+pub fn new_memory_catalog_manager() -> Result<Arc<MemoryCatalogManager>> {
     Ok(Arc::new(MemoryCatalogManager::default()))
 }
 
@@ -415,7 +420,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_new_memory_catalog_list() {
-        let catalog_list = new_memory_catalog_list().unwrap();
+        let catalog_list = new_memory_catalog_manager().unwrap();
         // let default_catalog = CatalogManager::catalog(&*catalog_list, DEFAULT_CATALOG_NAME)
         //     .await
         //     .unwrap()

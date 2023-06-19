@@ -74,7 +74,7 @@ impl LocalCatalogManager {
                 engine_name: MITO_ENGINE,
             })?;
         let table = SystemCatalogTable::new(engine.clone()).await?;
-        let memory_catalog_list = crate::local::memory::new_memory_catalog_list()?;
+        let memory_catalog_list = crate::local::memory::new_memory_catalog_manager()?;
         let system_catalog = Arc::new(SystemCatalog::new(table));
         Ok(Self {
             system: system_catalog,

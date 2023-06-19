@@ -15,7 +15,9 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use catalog::local::{new_memory_catalog_list, MemoryCatalogProvider, MemorySchemaProvider};
+use catalog::local::new_memory_catalog_manager;
+use catalog::RegisterTableRequest;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::physical_plan::PhysicalPlanRef;
 use common_query::prelude::Expr;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
@@ -114,21 +116,17 @@ fn create_test_engine() -> TimeRangeTester {
         filter: Default::default(),
     });
 
-    let catalog_list = new_memory_catalog_list().unwrap();
+    let catalog_manager = new_memory_catalog_manager().unwrap();
+    let req = RegisterTableRequest {
+        catalog: DEFAULT_CATALOG_NAME.to_string(),
+        schema: DEFAULT_SCHEMA_NAME.to_string(),
+        table_name: "m".to_string(),
+        table_id: table.table_info().ident.table_id,
+        table: table.clone(),
+    };
+    catalog_manager.register_table_sync(req).unwrap();
 
-    let default_schema = Arc::new(MemorySchemaProvider::new());
-    MemorySchemaProvider::register_table_sync(&default_schema, "m".to_string(), table.clone())
-        .unwrap();
-
-    let default_catalog = Arc::new(MemoryCatalogProvider::new());
-    default_catalog
-        .register_schema_sync("public".to_string(), default_schema)
-        .unwrap();
-    catalog_list
-        .register_catalog_sync("greptime".to_string(), default_catalog)
-        .unwrap();
-
-    let engine = QueryEngineFactory::new(catalog_list, false).query_engine();
+    let engine = QueryEngineFactory::new(catalog_manager, false).query_engine();
     TimeRangeTester { engine, table }
 }
 

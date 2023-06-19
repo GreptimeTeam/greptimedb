@@ -16,8 +16,6 @@ use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_function::scalars::aggregate::AggregateFunctionMeta;
 use common_function_macro::{as_aggr_func_creator, AggrFuncTypeStore};
 use common_query::error::{CreateAccumulatorSnafu, Result as QueryResult};
@@ -33,8 +31,7 @@ use num_traits::AsPrimitive;
 use table::test_util::MemTable;
 
 use crate::error::Result;
-use crate::tests::exec_selection;
-use crate::QueryEngineFactory;
+use crate::tests::{exec_selection, new_query_engine_with_table};
 
 #[derive(Debug, Default)]
 struct MySumAccumulator<T, SumT> {
@@ -207,8 +204,7 @@ where
     let recordbatch = RecordBatch::new(schema, vec![column]).unwrap();
     let testing_table = MemTable::new(&table_name, recordbatch);
 
-    let factory = new_query_engine_factory(testing_table);
-    let engine = factory.query_engine();
+    let engine = new_query_engine_with_table(testing_table);
 
     engine.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
         "my_sum",
@@ -223,25 +219,4 @@ where
     let pretty_print = batches.pretty_print().unwrap();
     assert_eq!(expected, pretty_print);
     Ok(())
-}
-
-fn new_query_engine_factory(table: MemTable) -> QueryEngineFactory {
-    let table_name = table.table_name().to_string();
-    let table = Arc::new(table);
-
-    let schema_provider = Arc::new(MemorySchemaProvider::new());
-    let catalog_provider = Arc::new(MemoryCatalogProvider::new());
-    let catalog_list = Arc::new(MemoryCatalogManager::default());
-
-    schema_provider
-        .register_table_sync(table_name, table)
-        .unwrap();
-    catalog_provider
-        .register_schema_sync(DEFAULT_SCHEMA_NAME.to_string(), schema_provider)
-        .unwrap();
-    catalog_list
-        .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string(), catalog_provider)
-        .unwrap();
-
-    QueryEngineFactory::new(catalog_list, false)
 }

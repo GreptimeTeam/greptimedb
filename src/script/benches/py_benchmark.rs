@@ -50,7 +50,7 @@ where
 }
 
 pub(crate) fn sample_script_engine() -> PyEngine {
-    let catalog_list = catalog::local::new_memory_catalog_list().unwrap();
+    let catalog_list = catalog::local::new_memory_catalog_manager().unwrap();
 
     let default_schema = Arc::new(MemorySchemaProvider::new());
     default_schema
