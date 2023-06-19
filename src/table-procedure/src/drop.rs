@@ -289,13 +289,11 @@ mod tests {
         let mut watcher = procedure_manager.submit(procedure_with_id).await.unwrap();
         watcher.changed().await.unwrap();
 
-        let catalog = catalog_manager
-            .catalog(DEFAULT_CATALOG_NAME)
+        assert!(!catalog_manager
+            .table_exist(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name)
             .await
-            .unwrap()
-            .unwrap();
-        let schema = catalog.schema(DEFAULT_SCHEMA_NAME).await.unwrap().unwrap();
-        assert!(schema.table(table_name).await.unwrap().is_none());
+            .unwrap());
+
         let ctx = EngineContext::default();
         assert!(!table_engine.table_exists(
             &ctx,

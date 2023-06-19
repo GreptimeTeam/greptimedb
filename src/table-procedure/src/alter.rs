@@ -29,8 +29,8 @@ use table::metadata::TableId;
 use table::requests::{AlterKind, AlterTableRequest};
 
 use crate::error::{
-    AccessCatalogSnafu, DeserializeProcedureSnafu, SchemaNotFoundSnafu, SerializeProcedureSnafu,
-    TableExistsSnafu, TableNotFoundSnafu,
+    AccessCatalogSnafu, DeserializeProcedureSnafu, SerializeProcedureSnafu, TableExistsSnafu,
+    TableNotFoundSnafu,
 };
 
 /// Procedure to alter a table.
@@ -330,16 +330,17 @@ mod tests {
         let mut watcher = procedure_manager.submit(procedure_with_id).await.unwrap();
         watcher.changed().await.unwrap();
 
-        let catalog = catalog_manager
-            .catalog(DEFAULT_CATALOG_NAME)
+        let table = catalog_manager
+            .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, new_table_name)
             .await
             .unwrap()
             .unwrap();
-        let schema = catalog.schema(DEFAULT_SCHEMA_NAME).await.unwrap().unwrap();
-        let table = schema.table(new_table_name).await.unwrap().unwrap();
         let table_info = table.table_info();
         assert_eq!(new_table_name, table_info.name);
 
-        assert!(schema.table(table_name).await.unwrap().is_none());
+        assert!(!catalog_manager
+            .table_exist(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name)
+            .await
+            .unwrap());
     }
 }
