@@ -158,3 +158,19 @@ pub struct HealthResponse {}
 pub async fn health(Query(_params): Query<HealthQuery>) -> Json<HealthResponse> {
     Json(HealthResponse {})
 }
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct StatusResponse {
+    pub id: i64,
+    pub msg: String,
+}
+
+/// Handler to expose information info about runtime, build, etc.
+#[axum_macros::debug_handler]
+pub async fn status() -> Json<StatusResponse> {
+    let get_version = get_version();
+    Json(StatusResponse {
+        id: 5,
+        msg: "test_message".to_string(),
+    })
+}
