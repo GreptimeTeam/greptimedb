@@ -18,6 +18,7 @@ use chrono::{NaiveDate, NaiveDateTime};
 use common_query::prelude::ScalarValue;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::{self, Value};
+use itertools::Itertools;
 use opensrv_mysql::{ParamValue, ValueInner};
 use snafu::ResultExt;
 use sql::ast::{visit_expressions_mut, Expr, Value as ValueExpr, VisitMut};
@@ -32,18 +33,24 @@ pub fn format_placeholder(i: usize) -> String {
 
 /// Replace all the "?" placeholder into "$i" in SQL,
 /// returns the new SQL and the last placeholder index.
-pub fn replace_placeholder(query: &str) -> (String, usize) {
-    let mut query = query.to_string();
-    let mut index = 1;
-    let mut offset = 0;
-    while let Some(position) = query[offset..].find('?') {
-        let place_holder = format!("${}", index);
-        let position = position + offset;
-        query.replace_range(position..position + 1, &place_holder);
-        index += 1;
-        offset = position + 1;
-    }
-    (query, index)
+pub fn replace_placeholders(query: &str) -> (String, usize) {
+    let query_parts = query.split('?').collect::<Vec<_>>();
+    let parts_len = query_parts.len();
+    let mut index = 0;
+    let query = query_parts
+        .into_iter()
+        .enumerate()
+        .map(|(i, part)| {
+            if i == parts_len - 1 {
+                return part.to_string();
+            }
+
+            index += 1;
+            format!("{part}{}", format_placeholder(index))
+        })
+        .join("");
+
+    (query, index + 1)
 }
 
 /// Transform all the "?" placeholder into "$i".
@@ -101,7 +108,7 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
 
             _ => error::PreparedStmtTypeMismatchSnafu {
                 expected: t,
-                actual: ConcreteDataType::int8_datatype(),
+                actual: param.coltype,
             }
             .fail(),
         },
@@ -124,7 +131,7 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
 
             _ => error::PreparedStmtTypeMismatchSnafu {
                 expected: t,
-                actual: ConcreteDataType::uint8_datatype(),
+                actual: param.coltype,
             }
             .fail(),
         },
@@ -142,7 +149,7 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
 
             _ => error::PreparedStmtTypeMismatchSnafu {
                 expected: t,
-                actual: ConcreteDataType::float64_datatype(),
+                actual: param.coltype,
             }
             .fail(),
         },
@@ -155,7 +162,7 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
 
             _ => error::PreparedStmtTypeMismatchSnafu {
                 expected: t,
-                actual: ConcreteDataType::binary_datatype(),
+                actual: param.coltype,
             }
             .fail(),
         },
@@ -183,6 +190,24 @@ mod tests {
     fn test_format_placeholder() {
         assert_eq!("$1", format_placeholder(1));
         assert_eq!("$3", format_placeholder(3));
+    }
+
+    #[test]
+    fn test_replace_placeholders() {
+        let create = "create table demo(host string, ts timestamp time index)";
+        let (sql, index) = replace_placeholders(create);
+        assert_eq!(create, sql);
+        assert_eq!(1, index);
+
+        let insert = "insert into demo values(?,?,?)";
+        let (sql, index) = replace_placeholders(insert);
+        assert_eq!("insert into demo values($1,$2,$3)", sql);
+        assert_eq!(4, index);
+
+        let query = "select from demo where host=? and idc in (select idc from idcs where name=?) and cpu>?";
+        let (sql, index) = replace_placeholders(query);
+        assert_eq!("select from demo where host=$1 and idc in (select idc from idcs where name=$2) and cpu>$3", sql);
+        assert_eq!(4, index);
     }
 
     fn parse_sql(sql: &str) -> Statement {

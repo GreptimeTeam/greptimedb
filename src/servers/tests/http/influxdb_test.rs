@@ -72,7 +72,7 @@ impl SqlQueryHandler for DummyInstance {
         unimplemented!()
     }
 
-    async fn execute_plan(
+    async fn do_exec_plan(
         &self,
         _query: &str,
         _plan: LogicalPlan,

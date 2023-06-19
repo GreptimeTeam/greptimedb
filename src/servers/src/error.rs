@@ -251,10 +251,7 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to get param types, source: {source}"))]
-    GetParamTypes {
-        #[snafu(backtrace)]
-        source: query::error::Error,
-    },
+    GetPreparedStmtParams { source: query::error::Error },
 
     #[snafu(display("{}", reason))]
     UnexpectedResult { reason: String, location: Location },
@@ -275,10 +272,7 @@ pub enum Error {
 
     #[cfg(feature = "pprof")]
     #[snafu(display("Failed to dump pprof data, source: {}", source))]
-    DumpPprof {
-        #[snafu(backtrace)]
-        source: common_pprof::Error,
-    },
+    DumpPprof { source: common_pprof::Error },
 
     #[snafu(display("Failed to update jemalloc metrics, source: {source}, location: {location}"))]
     UpdateJemallocMetrics {
@@ -293,17 +287,15 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to replace params with values, source: {source}, location: {location}"
+        "Failed to replace params with values in prepared statement, source: {source}, location: {location}"
     ))]
-    ReplaceParamsWithValues {
-        #[snafu(backtrace)]
+    ReplacePreparedStmtParams {
         source: query::error::Error,
         location: Location,
     },
 
     #[snafu(display("Failed to convert scalar value, source: {source}, location: {location}"))]
     ConvertScalarValue {
-        #[snafu(backtrace)]
         source: datatypes::error::Error,
         location: Location,
     },
@@ -315,7 +307,7 @@ pub enum Error {
     ))]
     PreparedStmtTypeMismatch {
         expected: ConcreteDataType,
-        actual: ConcreteDataType,
+        actual: opensrv_mysql::ColumnType,
         location: Location,
     },
 }
@@ -381,8 +373,8 @@ impl ErrorExt for Error {
             DumpProfileData { source, .. } => source.status_code(),
             InvalidFlushArgument { .. } => StatusCode::InvalidArguments,
 
-            ReplaceParamsWithValues { source, .. }
-            | GetParamTypes { source, .. }
+            ReplacePreparedStmtParams { source, .. }
+            | GetPreparedStmtParams { source, .. }
             | ParsePromQL { source, .. } => source.status_code(),
             Other { source, .. } => source.status_code(),
 

@@ -79,7 +79,7 @@ impl SqlQueryHandler for DummyInstance {
         vec![Ok(output)]
     }
 
-    async fn execute_plan(
+    async fn do_exec_plan(
         &self,
         _query: &str,
         plan: LogicalPlan,

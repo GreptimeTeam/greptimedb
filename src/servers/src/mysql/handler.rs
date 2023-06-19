@@ -42,7 +42,9 @@ use tokio::io::AsyncWrite;
 
 use crate::auth::{Identity, Password, UserProviderRef};
 use crate::error::{self, InvalidPrepareStatementSnafu, Result};
-use crate::mysql::helper::{self, format_placeholder, replace_placeholder, transform_placeholders};
+use crate::mysql::helper::{
+    self, format_placeholder, replace_placeholders, transform_placeholders,
+};
 use crate::mysql::writer;
 use crate::mysql::writer::create_mysql_column;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
@@ -60,8 +62,6 @@ pub struct MysqlInstanceShim {
     salt: [u8; 20],
     session: SessionRef,
     user_provider: Option<UserProviderRef>,
-    // TODO(SSebo): use something like moka to achieve TTL or LRU
-    // Prepare statements logical plan cache
     prepared_stmts: Arc<RwLock<HashMap<u32, SqlPlan>>>,
     prepared_stmts_counter: AtomicU32,
 }
@@ -117,7 +117,7 @@ impl MysqlInstanceShim {
     }
 
     /// Execute the logical plan and return the output
-    async fn execute_plan(&self, query: &str, plan: LogicalPlan) -> Vec<Result<Output>> {
+    async fn do_exec_plan(&self, query: &str, plan: LogicalPlan) -> Vec<Result<Output>> {
         trace!("Start executing query: '{}'", query);
         let start = Instant::now();
 
@@ -126,7 +126,7 @@ impl MysqlInstanceShim {
                 vec![Ok(output)]
             } else {
                 self.query_handler
-                    .execute_plan(query, plan, self.session.context())
+                    .do_exec_plan(query, plan, self.session.context())
                     .await
             };
 
@@ -218,7 +218,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         w: StatementMetaWriter<'a, W>,
     ) -> Result<()> {
         let raw_query = query.clone();
-        let (query, param_num) = replace_placeholder(query);
+        let (query, param_num) = replace_placeholders(query);
 
         let statement = validate_query(raw_query).await?;
 
@@ -232,7 +232,11 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             .map(|DescribeResult { logical_plan, .. }| logical_plan);
 
         let params = if let Some(plan) = &plan {
-            prepared_params(&plan.get_param_types().context(error::GetParamTypesSnafu)?)?
+            prepared_params(
+                &plan
+                    .get_param_types()
+                    .context(error::GetPreparedStmtParamsSnafu)?,
+            )?
         } else {
             dummy_params(param_num)?
         };
@@ -289,7 +293,9 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
 
         let (query, outputs) = match sql_plan.plan {
             Some(plan) => {
-                let param_types = plan.get_param_types().context(error::GetParamTypesSnafu)?;
+                let param_types = plan
+                    .get_param_types()
+                    .context(error::GetPreparedStmtParamsSnafu)?;
 
                 if params.len() != param_types.len() {
                     return error::InternalSnafu {
@@ -299,7 +305,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                 }
                 let plan = replace_params_with_values(&plan, param_types, params)?;
                 logging::debug!("Mysql execute prepared plan: {}", plan.display_indent());
-                let outputs = self.execute_plan(&sql_plan.query, plan).await;
+                let outputs = self.do_exec_plan(&sql_plan.query, plan).await;
 
                 (sql_plan.query, outputs)
             }
@@ -431,7 +437,7 @@ fn replace_params_with_values(
     }
 
     plan.replace_params_with_values(&values)
-        .context(error::ReplaceParamsWithValuesSnafu)
+        .context(error::ReplacePreparedStmtParamsSnafu)
 }
 
 async fn validate_query(query: &str) -> Result<Statement> {
@@ -470,7 +476,7 @@ fn prepared_params(param_types: &HashMap<String, Option<ConcreteDataType>>) -> R
     let mut params = Vec::with_capacity(param_types.len());
 
     // Placeholder index starts from 1
-    for index in 1..(param_types.len() + 1) {
+    for index in 1..=param_types.len() {
         if let Some(Some(t)) = param_types.get(&format_placeholder(index)) {
             let column = create_mysql_column(t, "")?;
             params.push(column);

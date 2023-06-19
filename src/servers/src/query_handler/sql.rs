@@ -38,7 +38,7 @@ pub trait SqlQueryHandler {
         query_ctx: QueryContextRef,
     ) -> Vec<std::result::Result<Output, Self::Error>>;
 
-    async fn execute_plan(
+    async fn do_exec_plan(
         &self,
         query: &str,
         plan: LogicalPlan,
@@ -91,14 +91,14 @@ where
             .collect()
     }
 
-    async fn execute_plan(
+    async fn do_exec_plan(
         &self,
         query: &str,
         plan: LogicalPlan,
         query_ctx: QueryContextRef,
     ) -> Vec<Result<Output>> {
         self.0
-            .execute_plan(query, plan, query_ctx)
+            .do_exec_plan(query, plan, query_ctx)
             .await
             .into_iter()
             .map(|x| {
