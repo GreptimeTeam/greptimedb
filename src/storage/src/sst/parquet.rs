@@ -27,7 +27,7 @@ use arrow_array::{
 use async_compat::CompatExt;
 use async_stream::try_stream;
 use async_trait::async_trait;
-use common_telemetry::{error, warn};
+use common_telemetry::{debug, error};
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
@@ -132,13 +132,8 @@ impl<'a> ParquetWriter<'a> {
         }
 
         if rows_written == 0 {
-            // if the source does not contain any batch, we skip writing an empty parquet file.
-            if !buffered_writer.abort().await {
-                warn!(
-                    "Partial file {} has been uploaded to remote storage",
-                    self.file_path
-                );
-            }
+            debug!("No data written, try abort writer: {}", self.file_path);
+            buffered_writer.close().await?;
             return Ok(None);
         }
 
@@ -547,8 +542,10 @@ impl BatchReader for ChunkStream {
 
 #[cfg(test)]
 mod tests {
+    use std::ops::Range;
     use std::sync::Arc;
 
+    use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_temp_dir;
     use datatypes::arrow::array::{Array, UInt64Array, UInt8Array};
     use datatypes::prelude::{ScalarVector, Vector};
@@ -651,6 +648,44 @@ mod tests {
             &(Arc::new(UInt8Array::from(vec![1; 5])) as Arc<dyn Array>),
             chunk.column(4)
         );
+    }
+
+    #[tokio::test]
+    async fn test_write_large_data() {
+        common_telemetry::init_default_ut_logging();
+        let schema = memtable_tests::schema_for_test();
+        let memtable = DefaultMemtableBuilder::default().build(schema);
+
+        let mut rows_written = 0;
+        for i in 0..16 {
+            let range: Range<i64> = i * 1024..(i + 1) * 1024;
+            let keys = range.clone().collect::<Vec<_>>();
+            let values = range
+                .map(|idx| (Some(idx as u64), Some(idx as u64)))
+                .collect::<Vec<_>>();
+            memtable_tests::write_kvs(&*memtable, i as u64, OpType::Put, &keys, &values);
+            rows_written += keys.len();
+        }
+
+        let dir = create_temp_dir("write_large_parquet");
+        let path = dir.path().to_str().unwrap();
+
+        let object_store = create_object_store(path);
+        let sst_file_name = "test-large.parquet";
+        let iter = memtable.iter(IterContext::default()).unwrap();
+        let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
+
+        let sst_info = writer
+            .write_sst(&sst::WriteOptions {
+                sst_write_buffer_size: ReadableSize::kb(4),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let file_meta = object_store.stat(sst_file_name).await.unwrap();
+        assert!(file_meta.is_file());
+        assert_eq!(sst_info.file_size, file_meta.content_length());
+        assert_eq!(rows_written, sst_info.num_rows);
     }
 
     #[tokio::test]
@@ -962,12 +997,12 @@ mod tests {
         let schema = memtable_tests::schema_for_test();
         let memtable = DefaultMemtableBuilder::default().build(schema.clone());
 
-        let dir = create_temp_dir("read-parquet-by-range");
+        let dir = create_temp_dir("write-empty-file");
         let path = dir.path().to_str().unwrap();
         let mut builder = Fs::default();
         builder.root(path);
         let object_store = ObjectStore::new(builder).unwrap().finish();
-        let sst_file_name = "test-read.parquet";
+        let sst_file_name = "test-empty.parquet";
         let iter = memtable.iter(IterContext::default()).unwrap();
         let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
 
@@ -975,8 +1010,9 @@ mod tests {
             .write_sst(&sst::WriteOptions::default())
             .await
             .unwrap();
-
         assert!(sst_info_opt.is_none());
+        // The file should not exist when no row has been written.
+        assert!(!object_store.is_exist(sst_file_name).await.unwrap());
     }
 
     #[test]
