@@ -24,6 +24,7 @@ use query::parser::PromQuery;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use session::context::UserInfo;
+use build_data;
 
 use crate::http::{ApiState, JsonResponse};
 use crate::metrics::{JEMALLOC_COLLECTOR, PROCESS_COLLECTOR};
@@ -161,16 +162,44 @@ pub async fn health(Query(_params): Query<HealthQuery>) -> Json<HealthResponse> 
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct StatusResponse {
-    pub id: i64,
-    pub msg: String,
+    pub source_time: i64,
+    pub commit: String,
+    pub branch: String,
+    pub rustc_version: String,
+    pub hostname: String,
 }
 
 /// Handler to expose information info about runtime, build, etc.
 #[axum_macros::debug_handler]
 pub async fn status() -> Json<StatusResponse> {
-    let get_version = get_version();
     Json(StatusResponse {
-        id: 5,
-        msg: "test_message".to_string(),
+        source_time: get_source_time(),
+        commit: get_git_commit(),
+        branch: get_git_branch(),
+        rustc_version: get_rustc_version(),
+        hostname: get_hostname(),
     })
 }
+
+const DEFAULT_VALUE: &str = "unknown";
+
+fn get_git_commit() -> String {
+    build_data::get_git_commit().unwrap_or_else(|_| DEFAULT_VALUE.to_string())
+}
+
+fn get_git_branch() -> String {
+    build_data::get_git_branch().unwrap_or_else(|_| DEFAULT_VALUE.to_string())
+}
+
+fn get_rustc_version() -> String {
+    build_data::get_rustc_version().unwrap_or_else(|_| DEFAULT_VALUE.to_string())
+}
+
+fn get_hostname() -> String {
+    build_data::get_hostname().unwrap_or_else(|_| DEFAULT_VALUE.to_string())
+}
+
+fn get_source_time() -> i64 {
+    build_data::get_source_time().unwrap_or_else(|_| 0)
+}
+    
