@@ -61,7 +61,9 @@ pub trait HeartbeatHandler: Send + Sync {
     fn is_acceptable(&self, role: Role) -> bool;
 
     fn name(&self) -> &'static str {
-        std::any::type_name::<Self>()
+        let type_name = std::any::type_name::<Self>();
+        // short name
+        type_name.split("::").last().unwrap_or(type_name)
     }
 
     async fn handle(
@@ -173,9 +175,22 @@ impl Pushers {
     }
 }
 
+struct NameCachedHandler {
+    name: &'static str,
+    handler: Box<dyn HeartbeatHandler>,
+}
+
+impl NameCachedHandler {
+    fn new(handler: impl HeartbeatHandler + 'static) -> Self {
+        let name = handler.name();
+        let handler = Box::new(handler);
+        Self { name, handler }
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct HeartbeatHandlerGroup {
-    handlers: Arc<RwLock<Vec<Box<dyn HeartbeatHandler>>>>,
+    handlers: Arc<RwLock<Vec<NameCachedHandler>>>,
     pushers: Pushers,
 }
 
@@ -189,7 +204,7 @@ impl HeartbeatHandlerGroup {
 
     pub async fn add_handler(&self, handler: impl HeartbeatHandler + 'static) {
         let mut handlers = self.handlers.write().await;
-        handlers.push(Box::new(handler));
+        handlers.push(NameCachedHandler::new(handler));
     }
 
     pub async fn register(&self, key: impl AsRef<str>, pusher: Pusher) {
@@ -225,14 +240,14 @@ impl HeartbeatHandlerGroup {
                 err_msg: format!("invalid role: {:?}", req.header),
             })?;
 
-        for h in handlers.iter() {
+        for NameCachedHandler { name, handler } in handlers.iter() {
             if ctx.is_skip_all() {
                 break;
             }
 
-            if h.is_acceptable(role) {
-                let _timer = timer!(METRIC_META_HANDLER_EXECUTE, &[("name", h.name())]);
-                h.handle(&req, &mut ctx, &mut acc).await?;
+            if handler.is_acceptable(role) {
+                let _timer = timer!(METRIC_META_HANDLER_EXECUTE, &[("name", *name)]);
+                handler.handle(&req, &mut ctx, &mut acc).await?;
             }
         }
         let header = std::mem::take(&mut acc.header);
@@ -473,29 +488,11 @@ mod tests {
         let handlers = group.handlers.read().await;
 
         assert_eq!(6, handlers.len());
-        assert_eq!(
-            "meta_srv::handler::response_header_handler::ResponseHeaderHandler",
-            handlers[0].name()
-        );
-        assert_eq!(
-            "meta_srv::handler::check_leader_handler::CheckLeaderHandler",
-            handlers[1].name()
-        );
-        assert_eq!(
-            "meta_srv::handler::on_leader_start_handler::OnLeaderStartHandler",
-            handlers[2].name()
-        );
-        assert_eq!(
-            "meta_srv::handler::collect_stats_handler::CollectStatsHandler",
-            handlers[3].name()
-        );
-        assert_eq!(
-            "meta_srv::handler::mailbox_handler::MailboxHandler",
-            handlers[4].name()
-        );
-        assert_eq!(
-            "meta_srv::handler::persist_stats_handler::PersistStatsHandler",
-            handlers[5].name()
-        );
+        assert_eq!("ResponseHeaderHandler", handlers[0].handler.name());
+        assert_eq!("CheckLeaderHandler", handlers[1].handler.name());
+        assert_eq!("OnLeaderStartHandler", handlers[2].handler.name());
+        assert_eq!("CollectStatsHandler", handlers[3].handler.name());
+        assert_eq!("MailboxHandler", handlers[4].handler.name());
+        assert_eq!("PersistStatsHandler", handlers[5].handler.name());
     }
 }
