@@ -30,7 +30,7 @@ pub fn format_placeholder(i: usize) -> String {
     format!("${}", i)
 }
 
-/// Relace all the "?" placeholder into "$i" in SQL,
+/// Replace all the "?" placeholder into "$i" in SQL,
 /// returns the new SQL and the last placeholder index.
 pub fn replace_placeholder(query: &str) -> (String, usize) {
     let mut query = query.to_string();
