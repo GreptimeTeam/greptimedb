@@ -25,12 +25,12 @@ use api::v1::meta::{
 pub use check_leader_handler::CheckLeaderHandler;
 pub use collect_stats_handler::CollectStatsHandler;
 use common_meta::instruction::{Instruction, InstructionReply};
-use common_telemetry::{debug, info, warn};
+use common_telemetry::{debug, info, timer, warn};
 use dashmap::DashMap;
 pub use failure_handler::RegionFailureHandler;
 pub use keep_lease_handler::KeepLeaseHandler;
 use metrics::{decrement_gauge, increment_gauge};
-pub use on_leader_start::OnLeaderStartHandler;
+pub use on_leader_start_handler::OnLeaderStartHandler;
 pub use persist_stats_handler::PersistStatsHandler;
 pub use response_header_handler::ResponseHeaderHandler;
 use snafu::{OptionExt, ResultExt};
@@ -40,7 +40,7 @@ use tokio::sync::{oneshot, Notify, RwLock};
 use self::node_stat::Stat;
 use crate::error::{self, DeserializeFromJsonSnafu, Result, UnexpectedInstructionReplySnafu};
 use crate::metasrv::Context;
-use crate::metrics::METRIC_META_HEARTBEAT_CONNECTION_NUM;
+use crate::metrics::{METRIC_META_HANDLER_EXECUTE, METRIC_META_HEARTBEAT_CONNECTION_NUM};
 use crate::sequence::Sequence;
 use crate::service::mailbox::{
     BroadcastChannel, Channel, Mailbox, MailboxReceiver, MailboxRef, MessageId,
@@ -52,13 +52,17 @@ pub(crate) mod failure_handler;
 mod keep_lease_handler;
 pub mod mailbox_handler;
 pub mod node_stat;
-mod on_leader_start;
+mod on_leader_start_handler;
 mod persist_stats_handler;
 mod response_header_handler;
 
 #[async_trait::async_trait]
 pub trait HeartbeatHandler: Send + Sync {
     fn is_acceptable(&self, role: Role) -> bool;
+
+    fn name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
 
     async fn handle(
         &self,
@@ -227,6 +231,7 @@ impl HeartbeatHandlerGroup {
             }
 
             if h.is_acceptable(role) {
+                let _timer = timer!(METRIC_META_HANDLER_EXECUTE, &[("name", h.name())]);
                 h.handle(&req, &mut ctx, &mut acc).await?;
             }
         }
@@ -381,7 +386,11 @@ mod tests {
     use api::v1::meta::{MailboxMessage, RequestHeader, Role, PROTOCOL_VERSION};
     use tokio::sync::mpsc;
 
-    use crate::handler::{HeartbeatHandlerGroup, HeartbeatMailbox, Pusher};
+    use crate::handler::mailbox_handler::MailboxHandler;
+    use crate::handler::{
+        CheckLeaderHandler, CollectStatsHandler, HeartbeatHandlerGroup, HeartbeatMailbox,
+        OnLeaderStartHandler, PersistStatsHandler, Pusher, ResponseHeaderHandler,
+    };
     use crate::sequence::Sequence;
     use crate::service::mailbox::{Channel, MailboxReceiver, MailboxRef};
     use crate::service::store::memory::MemStore;
@@ -449,5 +458,44 @@ mod tests {
         assert_eq!(message.subject, "req-test".to_string());
 
         (mailbox, receiver)
+    }
+
+    #[tokio::test]
+    async fn test_handler_name() {
+        let group = HeartbeatHandlerGroup::default();
+        group.add_handler(ResponseHeaderHandler::default()).await;
+        group.add_handler(CheckLeaderHandler::default()).await;
+        group.add_handler(OnLeaderStartHandler::default()).await;
+        group.add_handler(CollectStatsHandler::default()).await;
+        group.add_handler(MailboxHandler::default()).await;
+        group.add_handler(PersistStatsHandler::default()).await;
+
+        let handlers = group.handlers.read().await;
+
+        assert_eq!(6, handlers.len());
+        assert_eq!(
+            "meta_srv::handler::response_header_handler::ResponseHeaderHandler",
+            handlers[0].name()
+        );
+        assert_eq!(
+            "meta_srv::handler::check_leader_handler::CheckLeaderHandler",
+            handlers[1].name()
+        );
+        assert_eq!(
+            "meta_srv::handler::on_leader_start_handler::OnLeaderStartHandler",
+            handlers[2].name()
+        );
+        assert_eq!(
+            "meta_srv::handler::collect_stats_handler::CollectStatsHandler",
+            handlers[3].name()
+        );
+        assert_eq!(
+            "meta_srv::handler::mailbox_handler::MailboxHandler",
+            handlers[4].name()
+        );
+        assert_eq!(
+            "meta_srv::handler::persist_stats_handler::PersistStatsHandler",
+            handlers[5].name()
+        );
     }
 }
