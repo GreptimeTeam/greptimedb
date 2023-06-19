@@ -52,6 +52,12 @@ impl From<i32> for Date {
     }
 }
 
+impl From<NaiveDate> for Date {
+    fn from(date: NaiveDate) -> Self {
+        Self(date.num_days_from_ce() - UNIX_EPOCH_FROM_CE)
+    }
+}
+
 impl Display for Date {
     /// [Date] is formatted according to ISO-8601 standard.
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {

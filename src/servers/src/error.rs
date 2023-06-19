@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 use std::any::Any;
 use std::net::SocketAddr;
 use std::string::FromUtf8Error;
@@ -23,6 +22,7 @@ use base64::DecodeError;
 use catalog;
 use common_error::prelude::*;
 use common_telemetry::logging;
+use datatypes::prelude::ConcreteDataType;
 use query::parser::PromQuery;
 use serde_json::json;
 use snafu::Location;
@@ -291,6 +291,33 @@ pub enum Error {
         source: datafusion::error::DataFusionError,
         location: Location,
     },
+
+    #[snafu(display(
+        "Failed to replace params with values, source: {source}, location: {location}"
+    ))]
+    ReplaceParamsWithValues {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to convert scalar value, source: {source}, location: {location}"))]
+    ConvertScalarValue {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Expected type: {:?}, actual: {:?}, location: {location}",
+        expected,
+        actual
+    ))]
+    PreparedStmtTypeMismatch {
+        expected: ConcreteDataType,
+        actual: ConcreteDataType,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -330,6 +357,7 @@ impl ErrorExt for Error {
             | InvalidFlightTicket { .. }
             | InvalidPrepareStatement { .. }
             | DataFrame { .. }
+            | PreparedStmtTypeMismatch { .. }
             | TimePrecision { .. } => StatusCode::InvalidArguments,
 
             InfluxdbLinesWrite { source, .. } | PromSeriesWrite { source, .. } => {
@@ -353,7 +381,9 @@ impl ErrorExt for Error {
             DumpProfileData { source, .. } => source.status_code(),
             InvalidFlushArgument { .. } => StatusCode::InvalidArguments,
 
-            GetParamTypes { source, .. } | ParsePromQL { source, .. } => source.status_code(),
+            ReplaceParamsWithValues { source, .. }
+            | GetParamTypes { source, .. }
+            | ParsePromQL { source, .. } => source.status_code(),
             Other { source, .. } => source.status_code(),
 
             UnexpectedResult { .. } => StatusCode::Unexpected,
@@ -372,6 +402,8 @@ impl ErrorExt for Error {
             DumpPprof { source, .. } => source.status_code(),
 
             UpdateJemallocMetrics { .. } => StatusCode::Internal,
+
+            ConvertScalarValue { source, .. } => source.status_code(),
         }
     }
 

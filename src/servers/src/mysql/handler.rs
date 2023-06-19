@@ -18,14 +18,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use chrono::{Datelike, NaiveDate, NaiveDateTime};
+use chrono::{NaiveDate, NaiveDateTime};
 use common_error::prelude::ErrorExt;
-use common_query::prelude::ScalarValue;
 use common_query::Output;
 use common_telemetry::{error, logging, timer, trace, warn};
 use datatypes::prelude::ConcreteDataType;
-use datatypes::value;
-use datatypes::value::Value;
 use metrics::increment_counter;
 use opensrv_mysql::{
     AsyncMysqlShim, Column, ErrorKind, InitWriter, ParamParser, ParamValue, QueryResultWriter,
@@ -45,7 +42,7 @@ use tokio::io::AsyncWrite;
 
 use crate::auth::{Identity, Password, UserProviderRef};
 use crate::error::{self, InvalidPrepareStatementSnafu, Result};
-use crate::mysql::helper::{format_placeholder, replace_placeholder, transform_placeholders};
+use crate::mysql::helper::{self, format_placeholder, replace_placeholder, transform_placeholders};
 use crate::mysql::writer;
 use crate::mysql::writer::create_mysql_column;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
@@ -425,57 +422,16 @@ fn prepare_params(
 
     for i in 0..param_types.len() {
         if let Some(Some(t)) = param_types.get(&format_placeholder(i + 1)) {
-            // SAFETY: length checked before
+            // Safety: length checked before
             let param = params.get(i).unwrap();
-            let value = convert_value(param, t);
+            let value = helper::convert_value(param, t)?;
 
             values.push(value);
         }
     }
 
-    Ok(plan.replace_params_with_values(&values).unwrap())
-}
-
-/// Convert [`ParamValue`] into [`Value`] according to param type.
-fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> ScalarValue {
-    match param.value.into_inner() {
-        ValueInner::Int(i) => match t {
-            ConcreteDataType::Int8(_) => ScalarValue::Int8(Some(i as i8)),
-            ConcreteDataType::Int16(_) => ScalarValue::Int16(Some(i as i16)),
-            ConcreteDataType::Int32(_) => ScalarValue::Int32(Some(i as i32)),
-            ConcreteDataType::Timestamp(ts_type) => Value::Timestamp(ts_type.create_timestamp(i))
-                .try_to_scalar_value(t)
-                .unwrap(),
-            _ => ScalarValue::Int64(Some(i)),
-        },
-        ValueInner::UInt(u) => match t {
-            ConcreteDataType::UInt8(_) => ScalarValue::UInt8(Some(u as u8)),
-            ConcreteDataType::UInt16(_) => ScalarValue::UInt16(Some(u as u16)),
-            ConcreteDataType::UInt32(_) => ScalarValue::UInt32(Some(u as u32)),
-            _ => ScalarValue::UInt64(Some(u)),
-        },
-        ValueInner::Double(f) => match t {
-            ConcreteDataType::Float32(_) => ScalarValue::Float32(Some(f as f32)),
-            _ => ScalarValue::Float64(Some(f)),
-        },
-        ValueInner::NULL => value::to_null_value(t),
-        ValueInner::Bytes(b) => match t {
-            ConcreteDataType::String(_) => {
-                ScalarValue::Utf8(Some(String::from_utf8_lossy(b).to_string()))
-            }
-            _ => ScalarValue::LargeBinary(Some(b.to_vec())),
-        },
-        ValueInner::Date(_) => {
-            ScalarValue::Date32(Some(NaiveDate::from(param.value).num_days_from_ce()))
-        }
-        ValueInner::Datetime(_) => {
-            ScalarValue::Date64(Some(NaiveDateTime::from(param.value).timestamp_millis()))
-        }
-        ValueInner::Time(_) => ScalarValue::TimestampMillisecond(
-            Some(Duration::from(param.value).as_millis() as i64),
-            None,
-        ),
-    }
+    plan.replace_params_with_values(&values)
+        .context(error::ReplaceParamsWithValuesSnafu)
 }
 
 async fn validate_query(query: &str) -> Result<Statement> {

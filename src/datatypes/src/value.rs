@@ -248,7 +248,7 @@ impl Value {
             Value::Binary(v) => ScalarValue::LargeBinary(Some(v.to_vec())),
             Value::Date(v) => ScalarValue::Date32(Some(v.val())),
             Value::DateTime(v) => ScalarValue::Date64(Some(v.val())),
-            Value::Null => to_null_value(output_type),
+            Value::Null => to_null_scalar_value(output_type),
             Value::List(list) => {
                 // Safety: The logical type of the value and output_type are the same.
                 let list_type = output_type.as_list().unwrap();
@@ -261,7 +261,7 @@ impl Value {
     }
 }
 
-pub fn to_null_value(output_type: &ConcreteDataType) -> ScalarValue {
+pub fn to_null_scalar_value(output_type: &ConcreteDataType) -> ScalarValue {
     match output_type {
         ConcreteDataType::Null(_) => ScalarValue::Null,
         ConcreteDataType::Boolean(_) => ScalarValue::Boolean(None),
@@ -285,7 +285,7 @@ pub fn to_null_value(output_type: &ConcreteDataType) -> ScalarValue {
         }
         ConcreteDataType::Dictionary(dict) => ScalarValue::Dictionary(
             Box::new(dict.key_type().as_arrow_type()),
-            Box::new(to_null_value(dict.value_type())),
+            Box::new(to_null_scalar_value(dict.value_type())),
         ),
     }
 }
