@@ -12,33 +12,41 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use catalog::SchemaProviderRef;
+use catalog::CatalogManagerRef;
 use common_query::Output;
 use snafu::{OptionExt, ResultExt};
 use table::requests::FlushTableRequest;
 
-use crate::error::{self, CatalogSnafu, DatabaseNotFoundSnafu, Result};
+use crate::error::{self, CatalogSnafu, Result};
 use crate::sql::SqlHandler;
 
 impl SqlHandler {
     pub(crate) async fn flush_table(&self, req: FlushTableRequest) -> Result<Output> {
-        let schema = self
-            .catalog_manager
-            .schema(&req.catalog_name, &req.schema_name)
-            .await
-            .context(CatalogSnafu)?
-            .context(DatabaseNotFoundSnafu {
-                catalog: &req.catalog_name,
-                schema: &req.schema_name,
-            })?;
-
         if let Some(table) = &req.table_name {
-            self.flush_table_inner(schema, table, req.region_number, req.wait)
-                .await?;
+            self.flush_table_inner(
+                &self.catalog_manager,
+                &req.catalog_name,
+                &req.schema_name,
+                table,
+                req.region_number,
+                req.wait,
+            )
+            .await?;
         } else {
-            let all_table_names = schema.table_names().await.context(CatalogSnafu)?;
+            let all_table_names = self
+                .catalog_manager
+                .table_names(&req.catalog_name, &req.schema_name)
+                .await
+                .context(CatalogSnafu)?;
             futures::future::join_all(all_table_names.iter().map(|table| {
-                self.flush_table_inner(schema.clone(), table, req.region_number, req.wait)
+                self.flush_table_inner(
+                    &self.catalog_manager,
+                    &req.catalog_name,
+                    &req.schema_name,
+                    table,
+                    req.region_number,
+                    req.wait,
+                )
             }))
             .await
             .into_iter()
@@ -49,13 +57,15 @@ impl SqlHandler {
 
     async fn flush_table_inner(
         &self,
-        schema: SchemaProviderRef,
+        catalog_manager: &CatalogManagerRef,
+        catalog_name: &str,
+        schema_name: &str,
         table_name: &str,
         region: Option<u32>,
         wait: Option<bool>,
     ) -> Result<()> {
-        schema
-            .table(table_name)
+        catalog_manager
+            .table(catalog_name, schema_name, table_name)
             .await
             .context(error::FindTableSnafu { table_name })?
             .context(error::TableNotFoundSnafu { table_name })?

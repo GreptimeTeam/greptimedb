@@ -300,15 +300,10 @@ impl Instance {
     }
 
     pub async fn flush_tables(&self) -> Result<()> {
-        info!("going to flush all schemas");
+        info!("going to flush all schemas under {DEFAULT_CATALOG_NAME}");
         let schema_list = self
             .catalog_manager
-            .catalog(DEFAULT_CATALOG_NAME)
-            .await
-            .map_err(BoxedError::new)
-            .context(ShutdownInstanceSnafu)?
-            .expect("Default schema not found")
-            .schema_names()
+            .schema_names(DEFAULT_CATALOG_NAME)
             .await
             .map_err(BoxedError::new)
             .context(ShutdownInstanceSnafu)?;

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use catalog::RegisterTableRequest;
 use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID, MITO_ENGINE,
 };
@@ -118,15 +119,13 @@ pub(crate) async fn create_test_table(
         .await
         .context(CreateTableSnafu { table_name })?;
 
-    let schema_provider = instance
-        .catalog_manager
-        .schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
-        .await
-        .unwrap()
-        .unwrap();
-    schema_provider
-        .register_table(table_name.to_string(), table)
-        .await
-        .unwrap();
+    let req = RegisterTableRequest {
+        catalog: DEFAULT_CATALOG_NAME.to_string(),
+        schema: DEFAULT_SCHEMA_NAME.to_string(),
+        table_name: table_name.to_string(),
+        table_id: table.table_info().ident.table_id,
+        table,
+    };
+    instance.catalog_manager.register_table(req).await.unwrap();
     Ok(())
 }

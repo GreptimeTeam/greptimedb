@@ -93,6 +93,7 @@ impl RemoteCatalogManager {
 
     /// Fetch catalogs/schemas/tables from remote catalog manager along with max table id allocated.
     async fn initiate_catalogs(&self) -> Result<HashMap<String, CatalogProviderRef>> {
+        #[allow(unused_mut)]
         let mut res = HashMap::new();
 
         let mut catalogs = self.iter_remote_catalogs().await;

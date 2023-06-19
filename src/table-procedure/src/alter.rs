@@ -154,7 +154,7 @@ impl AlterTableProcedure {
         if let AlterKind::RenameTable { new_table_name } = &self.data.request.alter_kind {
             ensure!(
                 self.catalog_manager
-                    .table(&request.catalog_name, &request.schema_name, &new_table_name)
+                    .table(&request.catalog_name, &request.schema_name, new_table_name)
                     .await
                     .context(AccessCatalogSnafu)?
                     .is_none(),
