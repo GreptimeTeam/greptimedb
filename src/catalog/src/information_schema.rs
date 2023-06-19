@@ -33,14 +33,14 @@ use table::{Result as TableResult, Table, TableRef};
 use self::columns::InformationSchemaColumns;
 use crate::error::Result;
 use crate::information_schema::tables::InformationSchemaTables;
-use crate::{CatalogProviderRef, SchemaProvider};
+use crate::CatalogProviderRef;
 
 const TABLES: &str = "tables";
 const COLUMNS: &str = "columns";
 
 pub(crate) struct InformationSchemaProvider {
     catalog_name: String,
-    catalog_provider: CatalogProviderRef,
+    catalog_manager: CatalogManagerRef,
     tables: Vec<String>,
 }
 
@@ -54,8 +54,7 @@ impl InformationSchemaProvider {
     }
 }
 
-#[async_trait]
-impl SchemaProvider for InformationSchemaProvider {
+impl InformationSchemaProvider {
     fn as_any(&self) -> &dyn Any {
         self
     }

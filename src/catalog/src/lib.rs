@@ -14,6 +14,7 @@
 
 #![feature(trait_upcasting)]
 #![feature(assert_matches)]
+#![feature(try_blocks)]
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -29,15 +30,13 @@ use table::requests::CreateTableRequest;
 use table::TableRef;
 
 use crate::error::{CreateTableSnafu, Result};
-pub use crate::schema::{SchemaProvider, SchemaProviderRef};
 
 pub mod error;
 pub mod helper;
-pub(crate) mod information_schema;
+// pub(crate) mod information_schema;
 pub mod local;
 mod metrics;
 pub mod remote;
-pub mod schema;
 pub mod system;
 pub mod table_source;
 pub mod tables;
@@ -52,41 +51,44 @@ pub trait CatalogProvider: Sync + Send {
     /// Retrieves the list of available schema names in this catalog.
     async fn schema_names(&self) -> Result<Vec<String>>;
 
-    /// Registers schema to this catalog.
-    async fn register_schema(
-        &self,
-        name: String,
-        schema: SchemaProviderRef,
-    ) -> Result<Option<SchemaProviderRef>>;
-
-    /// Retrieves a specific schema from the catalog by name, provided it exists.
-    async fn schema(&self, name: &str) -> Result<Option<SchemaProviderRef>>;
+    // async fn register_schema(
+    //     &self,
+    //     name: String,
+    //     schema: SchemaProviderRef,
+    // ) -> Result<Option<SchemaProviderRef>>;
 }
 
 pub type CatalogProviderRef = Arc<dyn CatalogProvider>;
 
 #[async_trait::async_trait]
 pub trait CatalogManager: Send + Sync {
+    fn as_any(&self) -> &dyn Any;
+
     /// Starts a catalog manager.
     async fn start(&self) -> Result<()>;
 
-    async fn register_catalog(
-        &self,
-        name: String,
-        catalog: CatalogProviderRef,
-    ) -> Result<Option<CatalogProviderRef>>;
+    /// Registers a catalog to catalog manager, returns whether the catalog exist before.
+    async fn register_catalog(&self, name: String) -> Result<bool>;
+
+    /// Register a schema with catalog name and schema name. Retuens whether the
+    /// schema registered.
+    ///
+    /// # Errors
+    ///
+    /// This method will/should fail if catalog not exist
+    async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool>;
 
     /// Registers a table within given catalog/schema to catalog manager,
     /// returns whether the table registered.
+    ///
+    /// # Errors
+    ///
+    /// This method will/should fail if catalog or schema not exist
     async fn register_table(&self, request: RegisterTableRequest) -> Result<bool>;
 
     /// Deregisters a table within given catalog/schema to catalog manager,
     /// returns whether the table deregistered.
     async fn deregister_table(&self, request: DeregisterTableRequest) -> Result<bool>;
-
-    /// Register a schema with catalog name and schema name. Retuens whether the
-    /// schema registered.
-    async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool>;
 
     /// Rename a table to [RenameTableRequest::new_table_name], returns whether the table is renamed.
     async fn rename_table(&self, request: RenameTableRequest) -> Result<bool>;
@@ -97,9 +99,15 @@ pub trait CatalogManager: Send + Sync {
 
     async fn catalog_names(&self) -> Result<Vec<String>>;
 
-    async fn catalog(&self, catalog: &str) -> Result<Option<CatalogProviderRef>>;
+    async fn schema_names(&self, catalog: &str) -> Result<Vec<String>>;
 
-    async fn schema(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>>;
+    async fn table_names(&self, catalog: &str, schema: &str) -> Result<Vec<String>>;
+
+    async fn catalog_exist(&self, catalog: &str) -> Result<bool>;
+
+    async fn schema_exist(&self, catalog: &str, schema: &str) -> Result<bool>;
+
+    async fn table_exist(&self, catalog: &str, schema: &str, table: &str) -> Result<bool>;
 
     /// Returns the table by catalog, schema and table name.
     async fn table(
@@ -108,8 +116,6 @@ pub trait CatalogManager: Send + Sync {
         schema: &str,
         table_name: &str,
     ) -> Result<Option<TableRef>>;
-
-    fn as_any(&self) -> &dyn Any;
 }
 
 pub type CatalogManagerRef = Arc<dyn CatalogManager>;
@@ -173,10 +179,6 @@ pub trait CatalogProviderFactory {
     fn create(&self, catalog_name: String) -> CatalogProviderRef;
 }
 
-pub trait SchemaProviderFactory {
-    fn create(&self, catalog_name: String, schema_name: String) -> SchemaProviderRef;
-}
-
 pub(crate) async fn handle_system_table_request<'a, M: CatalogManager>(
     manager: &'a M,
     engine: TableEngineRef,
@@ -233,15 +235,11 @@ pub async fn datanode_stat(catalog_manager: &CatalogManagerRef) -> (u64, Vec<Reg
 
     let Ok(catalog_names) = catalog_manager.catalog_names().await else { return (region_number, region_stats) };
     for catalog_name in catalog_names {
-        let Ok(Some(catalog)) = catalog_manager.catalog(&catalog_name).await else { continue };
-
-        let Ok(schema_names) = catalog.schema_names().await else { continue };
+        let Ok(schema_names) = catalog_manager.schema_names(&catalog_name).await else { continue };
         for schema_name in schema_names {
-            let Ok(Some(schema)) = catalog.schema(&schema_name).await else { continue };
-
-            let Ok(table_names) = schema.table_names().await else { continue };
+            let Ok(table_names) = catalog_manager.table_names(&catalog_name,&schema_name).await else { continue };
             for table_name in table_names {
-                let Ok(Some(table)) = schema.table(&table_name).await else { continue };
+                let Ok(Some(table)) = catalog_manager.table(&catalog_name, &schema_name, &table_name).await else { continue };
 
                 let region_numbers = &table.table_info().meta.region_numbers;
                 region_number += region_numbers.len() as u64;

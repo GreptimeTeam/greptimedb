@@ -16,6 +16,7 @@ use std::any::Any;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
 use common_query::physical_plan::PhysicalPlanRef;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
@@ -38,6 +39,8 @@ use crate::table::{Expr, Table};
 
 const NUMBER_COLUMN: &str = "number";
 
+pub const NUMBERS_TABLE_NAME: &str = "numbers";
+
 /// numbers table for test
 #[derive(Debug, Clone)]
 pub struct NumbersTable {
@@ -49,7 +52,7 @@ pub struct NumbersTable {
 
 impl NumbersTable {
     pub fn new(table_id: TableId) -> Self {
-        NumbersTable::with_name(table_id, "numbers".to_string())
+        NumbersTable::with_name(table_id, NUMBERS_TABLE_NAME.to_string())
     }
 
     pub fn with_name(table_id: TableId, name: String) -> Self {
@@ -74,7 +77,7 @@ impl NumbersTable {
 
 impl Default for NumbersTable {
     fn default() -> Self {
-        NumbersTable::new(1)
+        NumbersTable::new(NUMBERS_TABLE_ID)
     }
 }
 
@@ -93,8 +96,8 @@ impl Table for NumbersTable {
             TableInfoBuilder::default()
                 .table_id(self.table_id)
                 .name(&self.name)
-                .catalog_name("greptime")
-                .schema_name("public")
+                .catalog_name(DEFAULT_CATALOG_NAME)
+                .schema_name(DEFAULT_SCHEMA_NAME)
                 .table_version(0)
                 .table_type(TableType::Base)
                 .meta(

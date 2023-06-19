@@ -28,34 +28,34 @@ use crate::system::{
     build_schema_insert_request, build_table_deletion_request, build_table_insert_request,
     SystemCatalogTable,
 };
-use crate::{CatalogProvider, DeregisterTableRequest, SchemaProvider, SchemaProviderRef};
+use crate::{CatalogProvider, DeregisterTableRequest};
 
 pub struct InformationSchema {
     pub system: Arc<SystemCatalogTable>,
 }
 
-#[async_trait]
-impl SchemaProvider for InformationSchema {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
+// #[async_trait]
+// impl SchemaProvider for InformationSchema {
+//     fn as_any(&self) -> &dyn Any {
+//         self
+//     }
 
-    async fn table_names(&self) -> Result<Vec<String>, Error> {
-        Ok(vec![SYSTEM_CATALOG_TABLE_NAME.to_string()])
-    }
+//     async fn table_names(&self) -> Result<Vec<String>, Error> {
+//         Ok(vec![SYSTEM_CATALOG_TABLE_NAME.to_string()])
+//     }
 
-    async fn table(&self, name: &str) -> Result<Option<TableRef>, Error> {
-        if name.eq_ignore_ascii_case(SYSTEM_CATALOG_TABLE_NAME) {
-            Ok(Some(self.system.clone()))
-        } else {
-            Ok(None)
-        }
-    }
+//     async fn table(&self, name: &str) -> Result<Option<TableRef>, Error> {
+//         if name.eq_ignore_ascii_case(SYSTEM_CATALOG_TABLE_NAME) {
+//             Ok(Some(self.system.clone()))
+//         } else {
+//             Ok(None)
+//         }
+//     }
 
-    async fn table_exist(&self, name: &str) -> Result<bool, Error> {
-        Ok(name.eq_ignore_ascii_case(SYSTEM_CATALOG_TABLE_NAME))
-    }
-}
+//     async fn table_exist(&self, name: &str) -> Result<bool, Error> {
+//         Ok(name.eq_ignore_ascii_case(SYSTEM_CATALOG_TABLE_NAME))
+//     }
+// }
 
 pub struct SystemCatalog {
     pub information_schema: Arc<InformationSchema>,
@@ -116,29 +116,29 @@ impl SystemCatalog {
     }
 }
 
-#[async_trait::async_trait]
-impl CatalogProvider for SystemCatalog {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
+// #[async_trait::async_trait]
+// impl CatalogProvider for SystemCatalog {
+//     fn as_any(&self) -> &dyn Any {
+//         self
+//     }
 
-    async fn schema_names(&self) -> Result<Vec<String>, Error> {
-        Ok(vec![INFORMATION_SCHEMA_NAME.to_string()])
-    }
+//     async fn schema_names(&self) -> Result<Vec<String>, Error> {
+//         Ok(vec![INFORMATION_SCHEMA_NAME.to_string()])
+//     }
 
-    async fn register_schema(
-        &self,
-        _name: String,
-        _schema: SchemaProviderRef,
-    ) -> Result<Option<SchemaProviderRef>, Error> {
-        panic!("System catalog does not support registering schema!")
-    }
+//     async fn register_schema(
+//         &self,
+//         _name: String,
+//         _schema: SchemaProviderRef,
+//     ) -> Result<Option<SchemaProviderRef>, Error> {
+//         panic!("System catalog does not support registering schema!")
+//     }
 
-    async fn schema(&self, name: &str) -> Result<Option<Arc<dyn SchemaProvider>>, Error> {
-        if name.eq_ignore_ascii_case(INFORMATION_SCHEMA_NAME) {
-            Ok(Some(self.information_schema.clone()))
-        } else {
-            Ok(None)
-        }
-    }
-}
+//     async fn schema(&self, name: &str) -> Result<Option<Arc<dyn SchemaProvider>>, Error> {
+//         if name.eq_ignore_ascii_case(INFORMATION_SCHEMA_NAME) {
+//             Ok(Some(self.information_schema.clone()))
+//         } else {
+//             Ok(None)
+//         }
+//     }
+// }

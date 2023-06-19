@@ -31,16 +31,16 @@ use table::metadata::TableType;
 
 use crate::error::{CreateRecordBatchSnafu, InternalSnafu, Result};
 use crate::information_schema::InformationStreamBuilder;
-use crate::CatalogProviderRef;
+use crate::CatalogManagerRef;
 
 pub(super) struct InformationSchemaTables {
     schema: SchemaRef,
     catalog_name: String,
-    catalog_provider: CatalogProviderRef,
+    catalog_manager: CatalogManagerRef,
 }
 
 impl InformationSchemaTables {
-    pub(super) fn new(catalog_name: String, catalog_provider: CatalogProviderRef) -> Self {
+    pub(super) fn new(catalog_name: String, catalog_manager: CatalogManagerRef) -> Self {
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new("table_catalog", ConcreteDataType::string_datatype(), false),
             ColumnSchema::new("table_schema", ConcreteDataType::string_datatype(), false),
@@ -52,7 +52,7 @@ impl InformationSchemaTables {
         Self {
             schema,
             catalog_name,
-            catalog_provider,
+            catalog_manager,
         }
     }
 
@@ -60,7 +60,7 @@ impl InformationSchemaTables {
         InformationSchemaTablesBuilder::new(
             self.schema.clone(),
             self.catalog_name.clone(),
-            self.catalog_provider.clone(),
+            self.catalog_manager.clone(),
         )
     }
 }
@@ -97,7 +97,7 @@ impl InformationStreamBuilder for InformationSchemaTables {
 struct InformationSchemaTablesBuilder {
     schema: SchemaRef,
     catalog_name: String,
-    catalog_provider: CatalogProviderRef,
+    catalog_manager: CatalogManagerRef,
 
     catalog_names: StringVectorBuilder,
     schema_names: StringVectorBuilder,
@@ -108,11 +108,11 @@ struct InformationSchemaTablesBuilder {
 }
 
 impl InformationSchemaTablesBuilder {
-    fn new(schema: SchemaRef, catalog_name: String, catalog_provider: CatalogProviderRef) -> Self {
+    fn new(schema: SchemaRef, catalog_name: String, catalog_manager: CatalogManagerRef) -> Self {
         Self {
             schema,
             catalog_name,
-            catalog_provider,
+            catalog_manager,
             catalog_names: StringVectorBuilder::with_capacity(42),
             schema_names: StringVectorBuilder::with_capacity(42),
             table_names: StringVectorBuilder::with_capacity(42),
@@ -126,14 +126,24 @@ impl InformationSchemaTablesBuilder {
     async fn make_tables(&mut self) -> Result<RecordBatch> {
         let catalog_name = self.catalog_name.clone();
 
-        for schema_name in self.catalog_provider.schema_names().await? {
+        for schema_name in self.catalog_manager.schema_names(&catalog_name).await? {
             if schema_name == INFORMATION_SCHEMA_NAME {
                 continue;
             }
+            if !self
+                .catalog_manager
+                .schema_exist(&catalog_name, &schema_name)
+                .await?
+            {
+                continue;
+            }
 
-            let Some(schema) = self.catalog_provider.schema(&schema_name).await? else { continue };
-            for table_name in schema.table_names().await? {
-                let Some(table) = schema.table(&table_name).await? else { continue };
+            for table_name in self
+                .catalog_manager
+                .table_names(&catalog_name, &schema_name)
+                .await?
+            {
+                let Some(table) = self.catalog_manager.table(&catalog_name, &schema_name, &table_name).await? else { continue };
                 let table_info = table.table_info();
                 self.add_table(
                     &catalog_name,
