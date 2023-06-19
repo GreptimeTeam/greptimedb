@@ -145,7 +145,7 @@ impl MysqlInstanceShim {
             .await
     }
 
-    /// Save logical plan and return the id
+    /// Save query and logical plan, return the unique id
     fn save_plan(&self, plan: SqlPlan) -> u32 {
         let stmt_id = self.prepared_stmts_counter.fetch_add(1, Ordering::Relaxed);
         let mut prepared_stmts = self.prepared_stmts.write();
@@ -153,7 +153,7 @@ impl MysqlInstanceShim {
         stmt_id
     }
 
-    /// Retrieve the logical plan by id
+    /// Retrieve the query and logical plan by id
     fn plan(&self, stmt_id: u32) -> Option<SqlPlan> {
         let guard = self.prepared_stmts.read();
         guard.get(&stmt_id).cloned()
@@ -223,7 +223,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         let statement = validate_query(raw_query).await?;
 
         // We have to transform the placeholder, because DataFusion only parses placeholders
-        // in the form of "$1", "$2" etc., it can't "?" right now.
+        // in the form of "$i", it can't process "?" right now.
         let statement = transform_placeholders(statement);
 
         let plan = self
@@ -297,15 +297,15 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                     }
                     .fail();
                 }
-                let plan = prepare_params(&plan, param_types, params)?;
-                logging::debug!("execute prepared plan: {}", plan.display_indent());
+                let plan = replace_params_with_values(&plan, param_types, params)?;
+                logging::debug!("Mysql execute prepared plan: {}", plan.display_indent());
                 let outputs = self.execute_plan(&sql_plan.query, plan).await;
 
                 (sql_plan.query, outputs)
             }
             None => {
                 let query = replace_params(params, sql_plan.query);
-                logging::debug!("execute replaced query: {}", query);
+                logging::debug!("Mysql execute replaced query: {}", query);
                 let outputs = self.do_query(&query).await;
 
                 (query, outputs)
@@ -411,7 +411,7 @@ fn format_duration(duration: Duration) -> String {
     format!("{}:{}:{}", hours, minutes, seconds)
 }
 
-fn prepare_params(
+fn replace_params_with_values(
     plan: &LogicalPlan,
     param_types: HashMap<String, Option<ConcreteDataType>>,
     params: Vec<ParamValue>,
@@ -467,8 +467,9 @@ fn dummy_params(index: usize) -> Result<Vec<Column>> {
 
 /// Parameters that the client must provide when executing the prepared statement.
 fn prepared_params(param_types: &HashMap<String, Option<ConcreteDataType>>) -> Result<Vec<Column>> {
-    let mut params = vec![];
+    let mut params = Vec::with_capacity(param_types.len());
 
+    // Placeholder index starts from 1
     for index in 1..(param_types.len() + 1) {
         if let Some(Some(t)) = param_types.get(&format_placeholder(index)) {
             let column = create_mysql_column(t, "")?;
