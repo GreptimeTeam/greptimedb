@@ -21,7 +21,6 @@ use catalog::helper::TableGlobalKey;
 use common_meta::ident::TableIdent;
 use common_meta::ClusterId;
 use store_api::storage::RegionNumber;
-use table::engine::TableReference;
 
 use crate::error::Result;
 use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
@@ -95,21 +94,27 @@ impl HeartbeatHandler for RegionLeaseHandler {
 
         let mut datanode_regions = HashMap::new();
         stat.region_stats.iter().for_each(|x| {
-            let table_ref = TableReference::full(&x.catalog, &x.schema, &x.table);
+            let key = TableGlobalKey {
+                catalog_name: x.catalog.to_string(),
+                schema_name: x.schema.to_string(),
+                table_name: x.table.to_string(),
+            };
             datanode_regions
-                .entry(table_ref)
+                .entry(key)
                 .or_insert_with(Vec::new)
                 .push(table::engine::region_number(x.id));
         });
 
+        // TODO(LFC): Retrieve table global values from some cache here.
+        let table_global_values = table_routes::batch_get_table_global_value(
+            &self.kv_store,
+            datanode_regions.keys().collect::<Vec<_>>(),
+        )
+        .await?;
+
         let mut region_leases = Vec::with_capacity(datanode_regions.len());
-        for (table_ref, local_regions) in datanode_regions {
-            let table_global_key = TableGlobalKey {
-                catalog_name: table_ref.catalog.to_string(),
-                schema_name: table_ref.schema.to_string(),
-                table_name: table_ref.table.to_string(),
-            };
-            let Some(table_global_value) = table_routes::get_table_global_value(&self.kv_store, &table_global_key).await? else { continue };
+        for (table_global_key, local_regions) in datanode_regions {
+            let Some(Some(table_global_value)) = table_global_values.get(&table_global_key) else { continue };
 
             let Some(global_regions) = table_global_value.regions_id_map.get(&stat.id) else { continue };
 
@@ -120,9 +125,9 @@ impl HeartbeatHandler for RegionLeaseHandler {
                 .collect::<Vec<_>>();
 
             let table_ident = TableIdent {
-                catalog: table_ref.catalog.to_string(),
-                schema: table_ref.schema.to_string(),
-                table: table_ref.table.to_string(),
+                catalog: table_global_key.catalog_name.to_string(),
+                schema: table_global_key.schema_name.to_string(),
+                table: table_global_key.table_name.to_string(),
                 table_id: table_global_value.table_id(),
                 engine: table_global_value.engine().to_string(),
             };

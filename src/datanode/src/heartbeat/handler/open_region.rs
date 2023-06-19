@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use catalog::error::Error as CatalogError;
 use catalog::remote::region_alive_keeper::RegionAliveKeepers;
 use catalog::{CatalogManagerRef, RegisterTableRequest};
@@ -39,6 +40,7 @@ pub struct OpenRegionHandler {
     region_alive_keepers: Arc<RegionAliveKeepers>,
 }
 
+#[async_trait]
 impl HeartbeatResponseHandler for OpenRegionHandler {
     fn is_acceptable(&self, ctx: &HeartbeatResponseHandlerContext) -> bool {
         matches!(
@@ -47,7 +49,7 @@ impl HeartbeatResponseHandler for OpenRegionHandler {
         )
     }
 
-    fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> MetaResult<HandleControl> {
+    async fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> MetaResult<HandleControl> {
         let Some((meta, Instruction::OpenRegion(region_ident))) = ctx.incoming_message.take() else {
             unreachable!("OpenRegionHandler: should be guarded by 'is_acceptable'");
         };

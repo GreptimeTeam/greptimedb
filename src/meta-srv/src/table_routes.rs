@@ -12,13 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use api::v1::meta::{PutRequest, TableRouteValue};
 use catalog::helper::{TableGlobalKey, TableGlobalValue};
 use common_meta::key::TableRouteKey;
+use common_meta::rpc::store::{BatchGetRequest, BatchGetResponse};
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
-    DecodeTableRouteSnafu, InvalidCatalogValueSnafu, Result, TableRouteNotFoundSnafu,
+    ConvertProtoDataSnafu, DecodeTableRouteSnafu, InvalidCatalogValueSnafu, Result,
+    TableRouteNotFoundSnafu,
 };
 use crate::service::store::ext::KvStoreExt;
 use crate::service::store::kv::KvStoreRef;
@@ -27,10 +31,38 @@ pub async fn get_table_global_value(
     kv_store: &KvStoreRef,
     key: &TableGlobalKey,
 ) -> Result<Option<TableGlobalValue>> {
-    let key = key.to_string().into_bytes();
-    let kv = kv_store.get(key).await?;
+    let kv = kv_store.get(key.to_raw_key()).await?;
     kv.map(|kv| TableGlobalValue::from_bytes(kv.value).context(InvalidCatalogValueSnafu))
         .transpose()
+}
+
+pub(crate) async fn batch_get_table_global_value(
+    kv_store: &KvStoreRef,
+    keys: Vec<&TableGlobalKey>,
+) -> Result<HashMap<TableGlobalKey, Option<TableGlobalValue>>> {
+    let req = BatchGetRequest {
+        keys: keys.iter().map(|x| x.to_raw_key()).collect::<Vec<_>>(),
+    };
+    let mut resp: BatchGetResponse = kv_store
+        .batch_get(req.into())
+        .await?
+        .try_into()
+        .context(ConvertProtoDataSnafu)?;
+
+    let kvs = resp.take_kvs();
+    let mut result = HashMap::with_capacity(kvs.len());
+    for kv in kvs {
+        let key = TableGlobalKey::try_from_raw_key(kv.key()).context(InvalidCatalogValueSnafu)?;
+        let value = TableGlobalValue::from_bytes(kv.value()).context(InvalidCatalogValueSnafu)?;
+        result.insert(key, Some(value));
+    }
+
+    for key in keys {
+        if !result.contains_key(key) {
+            result.insert(key.clone(), None);
+        }
+    }
+    Ok(result)
 }
 
 pub(crate) async fn put_table_global_value(
@@ -40,7 +72,7 @@ pub(crate) async fn put_table_global_value(
 ) -> Result<()> {
     let req = PutRequest {
         header: None,
-        key: key.to_string().into_bytes(),
+        key: key.to_raw_key(),
         value: value.as_bytes().context(InvalidCatalogValueSnafu)?,
         prev_kv: false,
     };
@@ -228,12 +260,12 @@ pub(crate) mod tests {
     async fn test_put_and_get_table_global_value() {
         let kv_store = Arc::new(MemStore::new()) as _;
 
-        let key = TableGlobalKey {
+        let not_exist_key = TableGlobalKey {
             catalog_name: "not_exist_catalog".to_string(),
             schema_name: "not_exist_schema".to_string(),
             table_name: "not_exist_table".to_string(),
         };
-        assert!(get_table_global_value(&kv_store, &key)
+        assert!(get_table_global_value(&kv_store, &not_exist_key)
             .await
             .unwrap()
             .is_none());
@@ -244,6 +276,12 @@ pub(crate) mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(actual, value);
+
+        let keys = vec![&not_exist_key, &key];
+        let result = batch_get_table_global_value(&kv_store, keys).await.unwrap();
+        assert_eq!(result.len(), 2);
+        assert!(result.get(&not_exist_key).unwrap().is_none());
+        assert_eq!(result.get(&key).unwrap().as_ref().unwrap(), &value);
     }
 
     #[tokio::test]

@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use common_meta::error::InvalidProtoMsgSnafu;
 use common_meta::heartbeat::handler::{
     HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
@@ -124,45 +125,42 @@ impl RegionAliveKeepers {
     }
 }
 
+#[async_trait]
 impl HeartbeatResponseHandler for RegionAliveKeepers {
     fn is_acceptable(&self, ctx: &HeartbeatResponseHandlerContext) -> bool {
         !ctx.response.region_leases.is_empty()
     }
 
-    fn handle(
+    async fn handle(
         &self,
         ctx: &mut HeartbeatResponseHandlerContext,
     ) -> common_meta::error::Result<HandleControl> {
         let leases = ctx.response.region_leases.drain(..).collect::<Vec<_>>();
-        let keepers = self.keepers.clone();
-        let epoch = self.epoch;
-        common_runtime::spawn_bg(async move {
-            for lease in leases {
-                let table_ident: TableIdent = match lease
-                    .table_ident
-                    .context(InvalidProtoMsgSnafu {
-                        err_msg: "'table_ident' is missing in RegionLease",
-                    })
-                    .and_then(|x| x.try_into())
-                {
-                    Ok(x) => x,
-                    Err(e) => {
-                        error!(e; "");
-                        continue;
-                    }
-                };
-
-                let Some(keeper) = keepers.lock().await.get(&table_ident).cloned() else {
-                    // Alive keeper could be affected by lagging msg, just warn and ignore.
-                    warn!("Alive keeper for table {table_ident} is not found!");
+        for lease in leases {
+            let table_ident: TableIdent = match lease
+                .table_ident
+                .context(InvalidProtoMsgSnafu {
+                    err_msg: "'table_ident' is missing in RegionLease",
+                })
+                .and_then(|x| x.try_into())
+            {
+                Ok(x) => x,
+                Err(e) => {
+                    error!(e; "");
                     continue;
-                };
+                }
+            };
 
-                let start_instant = epoch + Duration::from_millis(lease.duration_since_epoch);
-                let deadline = start_instant + Duration::from_secs(lease.lease_seconds);
-                keeper.keep_lived(lease.regions, deadline).await;
-            }
-        });
+            let Some(keeper) = self.keepers.lock().await.get(&table_ident).cloned() else {
+                // Alive keeper could be affected by lagging msg, just warn and ignore.
+                warn!("Alive keeper for table {table_ident} is not found!");
+                continue;
+            };
+
+            let start_instant = self.epoch + Duration::from_millis(lease.duration_since_epoch);
+            let deadline = start_instant + Duration::from_secs(lease.lease_seconds);
+            keeper.keep_lived(lease.regions, deadline).await;
+        }
         Ok(HandleControl::Continue)
     }
 }
@@ -507,7 +505,7 @@ mod test {
         let mailbox = Arc::new(HeartbeatMailbox::new(tx));
         let mut ctx = HeartbeatResponseHandlerContext::new(mailbox, response);
 
-        assert!(keepers.handle(&mut ctx).unwrap() == HandleControl::Continue);
+        assert!(keepers.handle(&mut ctx).await.unwrap() == HandleControl::Continue);
 
         // sleep to wait for background task spawned in `handle`
         tokio::time::sleep(Duration::from_secs(1)).await;

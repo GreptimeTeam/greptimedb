@@ -208,7 +208,7 @@ impl RegionFailoverManager {
         let table_global_value = self
             .selector_ctx
             .kv_store
-            .get(table_global_key.to_string().into_bytes())
+            .get(table_global_key.to_raw_key())
             .await?;
         Ok(table_global_value.is_some())
     }
@@ -262,7 +262,8 @@ trait State: Sync + Send + Debug {
 ///                  │         │    │
 ///                  └─────────┘    │ Sends "Close Region" request
 ///                                 │ to the failed Datanode, and
-///                  ┌─────────┐    │ wait for 2 seconds
+///                                 | wait for the Region lease expiry
+///                  ┌─────────┐    │ seconds
 ///                  │         │    │
 ///                  │      ┌──▼────▼──────┐
 /// Wait candidate   │      │ActivateRegion◄───────────────────────┐
@@ -289,7 +290,6 @@ trait State: Sync + Send + Debug {
 ///                                 │
 ///                                 │ Broadcast Invalidate Table
 ///                                 │ Cache
-///                                 │
 ///                                 │
 ///                        ┌────────▼────────┐
 ///                        │RegionFailoverEnd│

@@ -75,7 +75,8 @@ async fn test_close_region_handler() {
         executor.clone(),
         mailbox.clone(),
         close_region_instruction(),
-    );
+    )
+    .await;
     let (_, reply) = rx.recv().await.unwrap();
     assert_matches!(
         reply,
@@ -89,7 +90,8 @@ async fn test_close_region_handler() {
         executor.clone(),
         mailbox.clone(),
         close_region_instruction(),
-    );
+    )
+    .await;
     let (_, reply) = rx.recv().await.unwrap();
     assert_matches!(
         reply,
@@ -112,7 +114,8 @@ async fn test_close_region_handler() {
             cluster_id: 1,
             datanode_id: 2,
         }),
-    );
+    )
+    .await;
     let (_, reply) = rx.recv().await.unwrap();
     assert_matches!(
         reply,
@@ -149,7 +152,7 @@ async fn test_open_region_handler() {
     prepare_table(instance.inner()).await;
 
     // Opens a opened table
-    handle_instruction(executor.clone(), mailbox.clone(), open_region_instruction());
+    handle_instruction(executor.clone(), mailbox.clone(), open_region_instruction()).await;
     let (_, reply) = rx.recv().await.unwrap();
     assert_matches!(
         reply,
@@ -172,7 +175,8 @@ async fn test_open_region_handler() {
             cluster_id: 1,
             datanode_id: 2,
         }),
-    );
+    )
+    .await;
     let (_, reply) = rx.recv().await.unwrap();
     assert_matches!(
         reply,
@@ -184,7 +188,8 @@ async fn test_open_region_handler() {
         executor.clone(),
         mailbox.clone(),
         close_region_instruction(),
-    );
+    )
+    .await;
     let (_, reply) = rx.recv().await.unwrap();
     assert_matches!(
         reply,
@@ -193,7 +198,7 @@ async fn test_open_region_handler() {
     assert_test_table_not_found(instance.inner()).await;
 
     // Opens demo table
-    handle_instruction(executor.clone(), mailbox.clone(), open_region_instruction());
+    handle_instruction(executor.clone(), mailbox.clone(), open_region_instruction()).await;
     let (_, reply) = rx.recv().await.unwrap();
     assert_matches!(
         reply,
@@ -228,7 +233,7 @@ pub fn test_message_meta(id: u64, subject: &str, to: &str, from: &str) -> Messag
     }
 }
 
-fn handle_instruction(
+async fn handle_instruction(
     executor: Arc<dyn HeartbeatResponseHandlerExecutor>,
     mailbox: Arc<HeartbeatMailbox>,
     instruction: Instruction,
@@ -237,7 +242,7 @@ fn handle_instruction(
     let mut ctx: HeartbeatResponseHandlerContext =
         HeartbeatResponseHandlerContext::new(mailbox, response);
     ctx.incoming_message = Some((test_message_meta(1, "hi", "foo", "bar"), instruction));
-    executor.handle(ctx).unwrap();
+    executor.handle(ctx).await.unwrap();
 }
 
 fn close_region_instruction() -> Instruction {

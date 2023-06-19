@@ -1801,6 +1801,7 @@ name = "common-meta"
 version = "0.4.0"
 dependencies = [
  "api",
+ "async-trait",
  "chrono",
  "common-catalog",
  "common-error",
@@ -4096,7 +4097,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/MichaelScofield/greptime-proto.git?rev=8ed621cbfe0dec2f1901a7e41f3800fda2683249#8ed621cbfe0dec2f1901a7e41f3800fda2683249"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=5d5eb65bb985ff47b3a417fb2505e315e2f5c319#5d5eb65bb985ff47b3a417fb2505e315e2f5c319"
 dependencies = [
  "prost",
  "serde",

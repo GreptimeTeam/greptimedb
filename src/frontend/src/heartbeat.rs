@@ -84,7 +84,7 @@ impl HeartbeatTask {
                     Ok(Some(resp)) => {
                         debug!("Receiving heartbeat response: {:?}", resp);
                         let ctx = HeartbeatResponseHandlerContext::new(mailbox.clone(), resp);
-                        if let Err(e) = capture_self.handle_response(ctx) {
+                        if let Err(e) = capture_self.handle_response(ctx).await {
                             error!(e; "Error while handling heartbeat response");
                         }
                     }
@@ -153,9 +153,10 @@ impl HeartbeatTask {
         });
     }
 
-    fn handle_response(&self, ctx: HeartbeatResponseHandlerContext) -> Result<()> {
+    async fn handle_response(&self, ctx: HeartbeatResponseHandlerContext) -> Result<()> {
         self.resp_handler_executor
             .handle(ctx)
+            .await
             .context(error::HandleHeartbeatResponseSnafu)
     }
 
