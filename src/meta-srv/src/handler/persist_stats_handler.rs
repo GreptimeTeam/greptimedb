@@ -24,8 +24,46 @@ use crate::metasrv::Context;
 const MAX_CACHED_STATS_PER_KEY: usize = 10;
 
 #[derive(Default)]
+struct EpochStats {
+    stats: Vec<Stat>,
+    epoch: Option<u64>,
+}
+
+impl EpochStats {
+    #[inline]
+    fn drain_all(&mut self) -> Vec<Stat> {
+        self.stats.drain(..).collect()
+    }
+
+    #[inline]
+    fn clear(&mut self) {
+        self.stats.clear();
+    }
+
+    #[inline]
+    fn push(&mut self, stat: Stat) {
+        self.stats.push(stat);
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        self.stats.len()
+    }
+
+    #[inline]
+    fn epoch(&self) -> Option<u64> {
+        self.epoch
+    }
+
+    #[inline]
+    fn set_epoch(&mut self, epoch: u64) {
+        self.epoch = Some(epoch);
+    }
+}
+
+#[derive(Default)]
 pub struct PersistStatsHandler {
-    stats_cache: DashMap<StatKey, Vec<Stat>>,
+    stats_cache: DashMap<StatKey, EpochStats>,
 }
 
 #[async_trait::async_trait]
@@ -40,26 +78,47 @@ impl HeartbeatHandler for PersistStatsHandler {
         ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
     ) -> Result<()> {
-        let Some(stat) = acc.stat.take() else { return Ok(()) };
+        let Some(current_stat) = acc.stat.take() else { return Ok(()) };
 
-        let key = stat.stat_key();
+        let key = current_stat.stat_key();
         let mut entry = self
             .stats_cache
             .entry(key)
-            .or_insert_with(|| Vec::with_capacity(MAX_CACHED_STATS_PER_KEY));
-        let stats = entry.value_mut();
-        stats.push(stat);
+            .or_insert_with(EpochStats::default);
 
-        if stats.len() < MAX_CACHED_STATS_PER_KEY {
+        let key: Vec<u8> = key.into();
+        let epoch_stats = entry.value_mut();
+
+        let refresh = if let Some(epoch) = epoch_stats.epoch() {
+            // This node may have been redeployed.
+            if current_stat.node_epoch > epoch {
+                epoch_stats.set_epoch(current_stat.node_epoch);
+                epoch_stats.clear();
+                true
+            } else {
+                false
+            }
+        } else {
+            epoch_stats.set_epoch(current_stat.node_epoch);
+            // If the epoch is empty, it indicates that the current node sending the heartbeat
+            // for the first time to the current meta leader, so it is necessary to persist
+            // the data to the KV store as soon as possible.
+            true
+        };
+
+        epoch_stats.push(current_stat);
+
+        if !refresh && epoch_stats.len() < MAX_CACHED_STATS_PER_KEY {
             return Ok(());
         }
 
-        let stats = stats.drain(..).collect();
-        let val = StatValue { stats };
-
+        let value: Vec<u8> = StatValue {
+            stats: epoch_stats.drain_all(),
+        }
+        .try_into()?;
         let put = PutRequest {
-            key: key.into(),
-            value: val.try_into()?,
+            key,
+            value,
             ..Default::default()
         };
 
@@ -74,12 +133,11 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
 
-    use api::v1::meta::RangeRequest;
-
     use super::*;
     use crate::handler::{HeartbeatMailbox, Pushers};
     use crate::keys::StatKey;
     use crate::sequence::Sequence;
+    use crate::service::store::ext::KvStoreExt;
     use crate::service::store::memory::MemStore;
 
     #[tokio::test]
@@ -88,7 +146,7 @@ mod tests {
         let kv_store = Arc::new(MemStore::new());
         let seq = Sequence::new("test_seq", 0, 10, kv_store.clone());
         let mailbox = HeartbeatMailbox::create(Pushers::default(), seq);
-        let mut ctx = Context {
+        let ctx = Context {
             server_addr: "127.0.0.1:0000".to_string(),
             in_memory,
             kv_store,
@@ -98,9 +156,40 @@ mod tests {
             is_infancy: false,
         };
 
-        let req = HeartbeatRequest::default();
         let handler = PersistStatsHandler::default();
-        for i in 1..=MAX_CACHED_STATS_PER_KEY {
+        handle_request_many_times(ctx.clone(), &handler, 1).await;
+
+        let key = StatKey {
+            cluster_id: 3,
+            node_id: 101,
+        };
+        let res = ctx.in_memory.get(key.try_into().unwrap()).await.unwrap();
+        assert!(res.is_some());
+        let kv = res.unwrap();
+        let key: StatKey = kv.key.clone().try_into().unwrap();
+        assert_eq!(3, key.cluster_id);
+        assert_eq!(101, key.node_id);
+        let val: StatValue = kv.value.try_into().unwrap();
+        // first new stat must be set in kv store immediately
+        assert_eq!(1, val.stats.len());
+        assert_eq!(Some(1), val.stats[0].region_num);
+
+        handle_request_many_times(ctx.clone(), &handler, 10).await;
+        let res = ctx.in_memory.get(key.try_into().unwrap()).await.unwrap();
+        assert!(res.is_some());
+        let kv = res.unwrap();
+        let val: StatValue = kv.value.try_into().unwrap();
+        // refresh every 10 stats
+        assert_eq!(10, val.stats.len());
+    }
+
+    async fn handle_request_many_times(
+        mut ctx: Context,
+        handler: &PersistStatsHandler,
+        loop_times: i32,
+    ) {
+        let req = HeartbeatRequest::default();
+        for i in 1..=loop_times {
             let mut acc = HeartbeatAccumulator {
                 stat: Some(Stat {
                     cluster_id: 3,
@@ -112,30 +201,5 @@ mod tests {
             };
             handler.handle(&req, &mut ctx, &mut acc).await.unwrap();
         }
-
-        let key = StatKey {
-            cluster_id: 3,
-            node_id: 101,
-        };
-
-        let req = RangeRequest {
-            key: key.try_into().unwrap(),
-            ..Default::default()
-        };
-
-        let res = ctx.in_memory.range(req).await.unwrap();
-
-        assert_eq!(1, res.kvs.len());
-
-        let kv = &res.kvs[0];
-
-        let key: StatKey = kv.key.clone().try_into().unwrap();
-        assert_eq!(3, key.cluster_id);
-        assert_eq!(101, key.node_id);
-
-        let val: StatValue = kv.value.clone().try_into().unwrap();
-
-        assert_eq!(10, val.stats.len());
-        assert_eq!(Some(1), val.stats[0].region_num);
     }
 }

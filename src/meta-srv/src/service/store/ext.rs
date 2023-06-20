@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::meta::{KeyValue, RangeRequest};
+use api::v1::meta::{DeleteRangeRequest, KeyValue, RangeRequest};
 
 use crate::error::Result;
 use crate::service::store::kv::KvStore;
@@ -24,6 +24,10 @@ pub trait KvStoreExt {
 
     /// Check if a key exists, it does not return the value.
     async fn exists(&self, key: Vec<u8>) -> Result<bool>;
+
+    /// Delete the value by the given key. If prev_kv is true,
+    /// the previous key-value pairs will be returned.
+    async fn delete(&self, key: Vec<u8>, prev_kv: bool) -> Result<Option<KeyValue>>;
 }
 
 #[async_trait::async_trait]
@@ -52,6 +56,18 @@ where
         let kvs = self.range(req).await?.kvs;
 
         Ok(!kvs.is_empty())
+    }
+
+    async fn delete(&self, key: Vec<u8>, prev_kv: bool) -> Result<Option<KeyValue>> {
+        let req = DeleteRangeRequest {
+            key,
+            prev_kv,
+            ..Default::default()
+        };
+
+        let mut prev_kvs = self.delete_range(req).await?.prev_kvs;
+
+        Ok(prev_kvs.pop())
     }
 }
 
@@ -113,6 +129,31 @@ mod tests {
             .await
             .unwrap());
         assert!(!in_mem.exists("test_key".as_bytes().to_vec()).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_delete() {
+        let mut in_mem = Arc::new(MemStore::new()) as KvStoreRef;
+
+        let mut prev_kv = in_mem
+            .delete("test_key1".as_bytes().to_vec(), true)
+            .await
+            .unwrap();
+        assert!(prev_kv.is_none());
+
+        put_stats_to_store(&mut in_mem).await;
+
+        assert!(in_mem
+            .exists("test_key1".as_bytes().to_vec())
+            .await
+            .unwrap());
+
+        prev_kv = in_mem
+            .delete("test_key1".as_bytes().to_vec(), true)
+            .await
+            .unwrap();
+        assert!(prev_kv.is_some());
+        assert_eq!("test_key1".as_bytes(), prev_kv.unwrap().key);
     }
 
     async fn put_stats_to_store(store: &mut KvStoreRef) {

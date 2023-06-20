@@ -42,6 +42,8 @@ pub struct Stat {
     pub write_io_rate: f64,
     /// Region stats on this node
     pub region_stats: Vec<RegionStat>,
+    // The node epoch is used to check whether the node has restarted or redeployed.
+    pub node_epoch: u64,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -79,6 +81,7 @@ impl TryFrom<HeartbeatRequest> for Stat {
             is_leader,
             node_stat,
             region_stats,
+            node_epoch,
             ..
         } = value;
 
@@ -104,6 +107,7 @@ impl TryFrom<HeartbeatRequest> for Stat {
                     read_io_rate: node_stat.read_io_rate,
                     write_io_rate: node_stat.write_io_rate,
                     region_stats: region_stats.into_iter().map(RegionStat::from).collect(),
+                    node_epoch,
                 })
             }
             _ => Err(()),
