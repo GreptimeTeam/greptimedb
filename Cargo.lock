@@ -3222,6 +3222,7 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "common-test-util",
+ "common-time",
  "datafusion",
  "datafusion-common",
  "datafusion-expr",

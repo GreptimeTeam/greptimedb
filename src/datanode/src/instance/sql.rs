@@ -228,6 +228,22 @@ pub fn table_idents_to_full_name(
     }
 }
 
+pub fn idents_to_full_database_name(
+    obj_name: &ObjectName,
+    query_ctx: &QueryContextRef,
+) -> Result<(String, String)> {
+    match &obj_name.0[..] {
+        [database] => Ok((query_ctx.current_catalog(), database.value.clone())),
+        [catalog, database] => Ok((catalog.value.clone(), database.value.clone())),
+        _ => error::InvalidSqlSnafu {
+            msg: format!(
+                "expect database name to be <catalog>.<database>, <database>, found: {obj_name}",
+            ),
+        }
+        .fail(),
+    }
+}
+
 #[async_trait]
 impl SqlStatementExecutor for Instance {
     async fn execute_sql(

@@ -58,6 +58,16 @@ pub enum Format {
     Parquet(ParquetFormat),
 }
 
+impl Format {
+    pub fn suffix(&self) -> &'static str {
+        match self {
+            Format::Csv(_) => ".csv",
+            Format::Json(_) => ".json",
+            Format::Parquet(_) => ".parquet",
+        }
+    }
+}
+
 impl TryFrom<&HashMap<String, String>> for Format {
     type Error = error::Error;
 

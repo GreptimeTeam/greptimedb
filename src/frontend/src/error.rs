@@ -548,6 +548,13 @@ pub enum Error {
         #[snafu(backtrace)]
         source: query::error::Error,
     },
+
+    #[snafu(display("Invalid COPY parameter, key: {}, value: {}", key, value))]
+    InvalidCopyParameter {
+        key: String,
+        value: String,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -667,6 +674,7 @@ impl ErrorExt for Error {
             | Error::BuildBackend { source } => source.status_code(),
 
             Error::WriteParquet { source, .. } => source.status_code(),
+            Error::InvalidCopyParameter { .. } => StatusCode::InvalidArguments,
         }
     }
 

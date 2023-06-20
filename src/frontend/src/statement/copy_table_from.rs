@@ -24,7 +24,6 @@ use common_datasource::file_format::{FileFormat, Format};
 use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::{build_backend, parse_url};
 use common_datasource::util::find_dir_and_filename;
-use common_query::Output;
 use common_recordbatch::adapter::ParquetRecordBatchStreamAdapter;
 use common_recordbatch::DfSendableRecordBatchStream;
 use datafusion::datasource::listing::PartitionedFile;
@@ -205,7 +204,7 @@ impl StatementExecutor {
         }
     }
 
-    pub async fn copy_table_from(&self, req: CopyTableRequest) -> Result<Output> {
+    pub async fn copy_table_from(&self, req: CopyTableRequest) -> Result<usize> {
         let table_ref = TableReference {
             catalog: &req.catalog_name,
             schema: &req.schema_name,
@@ -313,7 +312,7 @@ impl StatementExecutor {
             }
         }
 
-        Ok(Output::AffectedRows(rows_inserted))
+        Ok(rows_inserted)
     }
 }
 
