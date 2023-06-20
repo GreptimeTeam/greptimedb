@@ -118,26 +118,15 @@ impl MysqlInstanceShim {
 
     /// Execute the logical plan and return the output
     async fn do_exec_plan(&self, query: &str, plan: LogicalPlan) -> Vec<Result<Output>> {
-        trace!("Start executing query: '{}'", query);
-        let start = Instant::now();
-
-        let output =
-            if let Some(output) = crate::mysql::federated::check(query, self.session.context()) {
-                vec![Ok(output)]
-            } else {
-                vec![
-                    self.query_handler
-                        .do_exec_plan(plan, self.session.context())
-                        .await,
-                ]
-            };
-
-        trace!(
-            "Finished executing query: '{}', total time costs in microseconds: {}",
-            query,
-            start.elapsed().as_micros()
-        );
-        output
+        if let Some(output) = crate::mysql::federated::check(query, self.session.context()) {
+            vec![Ok(output)]
+        } else {
+            vec![
+                self.query_handler
+                    .do_exec_plan(plan, self.session.context())
+                    .await,
+            ]
+        }
     }
 
     /// Describe the statement
