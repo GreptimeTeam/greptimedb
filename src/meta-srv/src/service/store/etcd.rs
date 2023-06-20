@@ -142,6 +142,9 @@ impl KvStore for EtcdStore {
             .into_iter()
             .map(|k| TxnOp::get(k, options.clone()))
             .collect();
+        if get_ops.len() > 128 {
+            warn!("batch_get too large, size: {}", get_ops.len());
+        }
         let txn = Txn::new().and_then(get_ops);
 
         let txn_res = self
@@ -185,6 +188,9 @@ impl KvStore for EtcdStore {
             .into_iter()
             .map(|kv| (TxnOp::put(kv.key, kv.value, options.clone())))
             .collect::<Vec<_>>();
+        if put_ops.len() > 128 {
+            warn!("batch_put too large, size: {}", put_ops.len());
+        }
         let txn = Txn::new().and_then(put_ops);
 
         let txn_res = self
@@ -232,6 +238,9 @@ impl KvStore for EtcdStore {
             .into_iter()
             .map(|k| TxnOp::delete(k, options.clone()))
             .collect::<Vec<_>>();
+        if delete_ops.len() > 128 {
+            warn!("batch_delete too large, size: {}", delete_ops.len());
+        }
         let txn = Txn::new().and_then(delete_ops);
 
         let txn_res = self
