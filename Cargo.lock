@@ -3204,6 +3204,7 @@ version = "0.4.0"
 dependencies = [
  "api",
  "async-compat",
+ "async-recursion",
  "async-stream",
  "async-trait",
  "catalog",

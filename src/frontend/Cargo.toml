@@ -12,6 +12,7 @@ testing = []
 [dependencies]
 api = { path = "../api" }
 async-compat = "0.2"
+async-recursion = "1.0"
 async-stream.workspace = true
 async-trait = "0.1"
 catalog = { path = "../catalog" }
