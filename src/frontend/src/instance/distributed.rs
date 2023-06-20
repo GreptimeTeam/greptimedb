@@ -16,6 +16,7 @@ pub(crate) mod inserter;
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::ddl_request::Expr as DdlExpr;
@@ -64,6 +65,7 @@ use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
 use table::requests::TableOptions;
 use table::table::AlterContext;
 use table::TableRef;
+use tokio::time::sleep;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::error::Error::RequestDatanode;
@@ -641,7 +643,8 @@ async fn create_table_to_datanode(
                 "fail to create table in database, current level: {:?}, err: {:?}",
                 level, e
             );
-            if level < 2 {
+            if level < 3 {
+                sleep(Duration::from_secs(level as u64)).await;
                 create_table_to_datanode(client, req_expr, level + 1).await
             } else {
                 Err(RequestDatanode { source: e })
