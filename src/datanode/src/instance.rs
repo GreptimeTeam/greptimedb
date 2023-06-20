@@ -236,7 +236,6 @@ impl Instance {
             }
         };
 
-        // let factory = QueryEngineFactory::new(catalog_manager.clone(), false);
         let factory = QueryEngineFactory::new_with_plugins(
             catalog_manager.clone(),
             false,
